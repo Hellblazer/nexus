@@ -1710,16 +1710,37 @@ def collection_verify(name: str) -> str:
 _OPERATOR_SCHEMA_VERSION = 1
 
 
-def _run_pool_dispatch(pool, prompt: str, timeout: float = 60.0) -> Any:
-    """Run ``pool.dispatch_with_rotation(prompt, timeout)`` on a fresh
-    event loop. The MCP tool surface is sync; the pool is async. We
-    isolate the loop here so each tool call is independent.
-    """
-    return asyncio.run(pool.dispatch_with_rotation(prompt=prompt, timeout=timeout))
+# RDR-079 P3 operator tools MUST be `async def` and `await` the pool
+# directly. FastMCP runs its stdio transport on anyio; sync tools are
+# called on the running event loop with no thread offload, so
+# asyncio.run() from a sync tool raises "cannot be called from a
+# running event loop". Converting to native async is the right fix —
+# FastMCP's Tool.run supports async callables natively. (Review C-1.)
+
+
+def _parse_inputs_json(operator: str, inputs: str) -> list:
+    """Parse the ``inputs`` argument as a JSON array. Raise
+    ``PlanRunOperatorOutputError`` with the operator name on failure
+    so callers see a clear contract violation instead of an opaque
+    model response to malformed prompts. (Review I-5.)"""
+    from nexus.plans.runner import PlanRunOperatorOutputError
+    try:
+        parsed = json.loads(inputs)
+    except json.JSONDecodeError as exc:
+        raise PlanRunOperatorOutputError(
+            operator=operator,
+            reason=f"`inputs` is not a valid JSON array: {exc}",
+        ) from exc
+    if not isinstance(parsed, list):
+        raise PlanRunOperatorOutputError(
+            operator=operator,
+            reason=f"`inputs` must decode to a JSON array, got {type(parsed).__name__}",
+        )
+    return parsed
 
 
 @_mcp_tool()
-def operator_extract(
+async def operator_extract(
     inputs: str,
     fields: str,
     schema_version: int = _OPERATOR_SCHEMA_VERSION,
@@ -1765,6 +1786,9 @@ def operator_extract(
             reason="`fields` is empty; at least one field name is required",
         )
 
+    # I-5: validate inputs is a JSON array before sending to the worker.
+    _parse_inputs_json("extract", inputs)
+
     # Per-operator pool. The pool's json_schema is the OUTER {extractions:
     # [dict]} shape — the model uses it as a structural constraint. The
     # per-call field list is encoded in the prompt so the model knows WHICH
@@ -1797,7 +1821,7 @@ def operator_extract(
         f"Extract the fields [{', '.join(field_list)}] from each input "
         f"below. Inputs (JSON array): {inputs}"
     )
-    payload = _run_pool_dispatch(pool, prompt=prompt, timeout=timeout)
+    payload = await pool.dispatch_with_rotation(prompt=prompt, timeout=timeout)
 
     # Validate contract.
     if not isinstance(payload, dict) or "extractions" not in payload:
@@ -1820,7 +1844,7 @@ def operator_extract(
 
 
 @_mcp_tool()
-def operator_rank(
+async def operator_rank(
     criterion: str,
     inputs: str,
     schema_version: int = _OPERATOR_SCHEMA_VERSION,
@@ -1855,6 +1879,11 @@ def operator_rank(
             received=schema_version,
             expected=_OPERATOR_SCHEMA_VERSION,
         )
+
+    # I-5: validate inputs is a JSON array, get the expected item count
+    # for the coverage check below (I-4).
+    input_list = _parse_inputs_json("rank", inputs)
+    expected_indices = set(range(len(input_list)))
 
     pool = get_operator_pool(
         "rank",
@@ -1894,12 +1923,12 @@ def operator_rank(
         f"Inputs (JSON array): {inputs}\n\n"
         f"Rank every input. Each input index must appear exactly once."
     )
-    payload = _run_pool_dispatch(pool, prompt=prompt, timeout=timeout)
+    payload = await pool.dispatch_with_rotation(prompt=prompt, timeout=timeout)
 
     if not isinstance(payload, dict) or "ranked" not in payload:
         raise PlanRunOperatorOutputError(
             operator="rank",
-            reason=f"missing `ranked` key in worker output",
+            reason="missing `ranked` key in worker output",
         )
     ranked = payload["ranked"]
     if not isinstance(ranked, list):
@@ -1907,11 +1936,39 @@ def operator_rank(
             operator="rank",
             reason=f"`ranked` must be a list, got {type(ranked).__name__}",
         )
+
+    # I-4: enforce the docstring's "every input index appears exactly once"
+    # guarantee. Silent dropped or duplicated entries are a correctness bug
+    # at the plan-runner level — surface it here with a clear error.
+    seen: set[int] = set()
+    for item in ranked:
+        if not isinstance(item, dict) or "input_index" not in item:
+            raise PlanRunOperatorOutputError(
+                operator="rank",
+                reason=f"ranked item missing `input_index`: {item!r}",
+            )
+        idx = item["input_index"]
+        if idx in seen:
+            raise PlanRunOperatorOutputError(
+                operator="rank",
+                reason=f"duplicate `input_index={idx}` in ranked output",
+            )
+        seen.add(idx)
+    if seen != expected_indices:
+        missing = expected_indices - seen
+        extra = seen - expected_indices
+        raise PlanRunOperatorOutputError(
+            operator="rank",
+            reason=(
+                f"ranked output does not cover all inputs: "
+                f"missing={sorted(missing)} extra={sorted(extra)}"
+            ),
+        )
     return {"ranked": ranked}
 
 
 @_mcp_tool()
-def operator_compare(
+async def operator_compare(
     inputs: str,
     criterion: str = "",
     schema_version: int = _OPERATOR_SCHEMA_VERSION,
@@ -1938,8 +1995,12 @@ def operator_compare(
 
     if schema_version != _OPERATOR_SCHEMA_VERSION:
         raise PlanRunOperatorSchemaVersionError(
-            operator="compare", received=schema_version,
+            operator="compare",
+            received=schema_version,
+            expected=_OPERATOR_SCHEMA_VERSION,
         )
+
+    _parse_inputs_json("compare", inputs)
 
     pool = get_operator_pool(
         "compare",
@@ -1967,7 +2028,7 @@ def operator_compare(
         f"{crit}Compare the inputs below. Identify agreements, conflicts, "
         f"and gaps.\n\nInputs (JSON array): {inputs}"
     )
-    payload = _run_pool_dispatch(pool, prompt=prompt, timeout=timeout)
+    payload = await pool.dispatch_with_rotation(prompt=prompt, timeout=timeout)
 
     if not isinstance(payload, dict):
         raise PlanRunOperatorOutputError(
@@ -1993,7 +2054,7 @@ def operator_compare(
 
 
 @_mcp_tool()
-def operator_summarize(
+async def operator_summarize(
     inputs: str,
     mode: str = "short",
     schema_version: int = _OPERATOR_SCHEMA_VERSION,
@@ -2019,8 +2080,12 @@ def operator_summarize(
 
     if schema_version != _OPERATOR_SCHEMA_VERSION:
         raise PlanRunOperatorSchemaVersionError(
-            operator="summarize", received=schema_version,
+            operator="summarize",
+            received=schema_version,
+            expected=_OPERATOR_SCHEMA_VERSION,
         )
+
+    _parse_inputs_json("summarize", inputs)
 
     pool = get_operator_pool(
         "summarize",
@@ -2058,7 +2123,7 @@ def operator_summarize(
         f"Summarize the inputs below.\n\n"
         f"Inputs (JSON array): {inputs}"
     )
-    payload = _run_pool_dispatch(pool, prompt=prompt, timeout=timeout)
+    payload = await pool.dispatch_with_rotation(prompt=prompt, timeout=timeout)
 
     if not isinstance(payload, dict):
         raise PlanRunOperatorOutputError(
@@ -2080,7 +2145,7 @@ def operator_summarize(
 
 
 @_mcp_tool()
-def operator_generate(
+async def operator_generate(
     outline: str,
     inputs: str,
     with_citations: bool = True,
@@ -2113,17 +2178,48 @@ def operator_generate(
 
     if schema_version != _OPERATOR_SCHEMA_VERSION:
         raise PlanRunOperatorSchemaVersionError(
-            operator="generate", received=schema_version,
+            operator="generate",
+            received=schema_version,
+            expected=_OPERATOR_SCHEMA_VERSION,
         )
+
+    _parse_inputs_json("generate", inputs)
 
     citation_req = (
         "Every non-trivial claim must be paired with an input_index "
         "citation (no citation → gap in the outline)."
         if with_citations
-        else "Citations are optional."
+        else "Citations are optional; omit `citations` or pass an empty list."
     )
+    # I-3: keep `citations` in `required` only when the caller actually
+    # wants them. The `with_citations=False` flag must relax both the
+    # prose instruction AND the structural schema, otherwise the CLI's
+    # StructuredOutput enforcement will always force citations regardless
+    # of caller intent.
+    generate_schema: dict = {
+        "type": "object",
+        "required": ["text"] + (["citations"] if with_citations else []),
+        "properties": {
+            "text": {"type": "string"},
+            "citations": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["input_index", "span"],
+                    "properties": {
+                        "input_index": {"type": "integer"},
+                        "span": {"type": "string"},
+                    },
+                },
+            },
+        },
+    }
+
+    # Per-operator pool must differentiate by with_citations because the
+    # schema differs. Cache key includes the flag.
+    pool_name = f"generate:{'with-cite' if with_citations else 'no-cite'}"
     pool = get_operator_pool(
-        "generate",
+        pool_name,
         operator_role=(
             "You are the `generate` analytical operator. For each user "
             "turn you receive an outline and a list of inputs. Produce "
@@ -2132,24 +2228,7 @@ def operator_generate(
             "tool_use whose input is {\"text\": str, \"citations\": "
             "[{\"input_index\": int, \"span\": str}]}. " + citation_req
         ),
-        json_schema={
-            "type": "object",
-            "required": ["text", "citations"],
-            "properties": {
-                "text": {"type": "string"},
-                "citations": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "required": ["input_index", "span"],
-                        "properties": {
-                            "input_index": {"type": "integer"},
-                            "span": {"type": "string"},
-                        },
-                    },
-                },
-            },
-        },
+        json_schema=generate_schema,
     )
 
     prompt = (
@@ -2158,7 +2237,7 @@ def operator_generate(
         f"below.\n\n"
         f"Inputs (JSON array): {inputs}"
     )
-    payload = _run_pool_dispatch(pool, prompt=prompt, timeout=timeout)
+    payload = await pool.dispatch_with_rotation(prompt=prompt, timeout=timeout)
 
     if not isinstance(payload, dict):
         raise PlanRunOperatorOutputError(

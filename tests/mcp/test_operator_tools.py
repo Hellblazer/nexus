@@ -43,7 +43,8 @@ def _install_fake_pool(monkeypatch, dispatch_result):
 # ── operator_rank (P3.2) ──────────────────────────────────────────────────
 
 
-def test_operator_rank_happy_path(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_operator_rank_happy_path(monkeypatch) -> None:
     fake = _install_fake_pool(monkeypatch, {
         "ranked": [
             {"rank": 1, "score": 0.9, "input_index": 2, "justification": "most relevant"},
@@ -53,7 +54,7 @@ def test_operator_rank_happy_path(monkeypatch) -> None:
     })
     from nexus.mcp.core import operator_rank
 
-    result = operator_rank(
+    result = await operator_rank(
         criterion="distributed consensus",
         inputs='["paxos", "raft", "zab"]',
     )
@@ -67,37 +68,41 @@ def test_operator_rank_happy_path(monkeypatch) -> None:
     assert fake.last_get["operator_name"] == "rank"
 
 
-def test_operator_rank_raises_on_missing_key(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_operator_rank_raises_on_missing_key(monkeypatch) -> None:
     _install_fake_pool(monkeypatch, {"wrong_key": []})
     from nexus.mcp.core import operator_rank
     from nexus.plans.runner import PlanRunOperatorOutputError
 
     with pytest.raises(PlanRunOperatorOutputError, match="ranked"):
-        operator_rank(criterion="x", inputs="[]")
+        await operator_rank(criterion="x", inputs="[]")
 
 
-def test_operator_rank_raises_on_non_list(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_operator_rank_raises_on_non_list(monkeypatch) -> None:
     _install_fake_pool(monkeypatch, {"ranked": "not a list"})
     from nexus.mcp.core import operator_rank
     from nexus.plans.runner import PlanRunOperatorOutputError
 
     with pytest.raises(PlanRunOperatorOutputError, match="list"):
-        operator_rank(criterion="x", inputs="[]")
+        await operator_rank(criterion="x", inputs="[]")
 
 
-def test_operator_rank_schema_version_guard(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_operator_rank_schema_version_guard(monkeypatch) -> None:
     _install_fake_pool(monkeypatch, {"ranked": []})
     from nexus.mcp.core import operator_rank
     from nexus.plans.runner import PlanRunOperatorSchemaVersionError
 
     with pytest.raises(PlanRunOperatorSchemaVersionError):
-        operator_rank(criterion="x", inputs="[]", schema_version=2)
+        await operator_rank(criterion="x", inputs="[]", schema_version=2)
 
 
 # ── operator_compare (P3.3) ───────────────────────────────────────────────
 
 
-def test_operator_compare_happy_path(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_operator_compare_happy_path(monkeypatch) -> None:
     fake = _install_fake_pool(monkeypatch, {
         "agreements": ["both discuss consensus"],
         "conflicts": ["paxos assumes stable leader; raft elects one"],
@@ -105,7 +110,7 @@ def test_operator_compare_happy_path(monkeypatch) -> None:
     })
     from nexus.mcp.core import operator_compare
 
-    result = operator_compare(
+    result = await operator_compare(
         inputs='["paxos paper summary", "raft paper summary"]',
         criterion="fault-tolerance assumptions",
     )
@@ -118,18 +123,20 @@ def test_operator_compare_happy_path(monkeypatch) -> None:
     assert "fault-tolerance assumptions" in fake.last_call["prompt"]
 
 
-def test_operator_compare_without_criterion(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_operator_compare_without_criterion(monkeypatch) -> None:
     """Criterion is optional; tool composes a generic comparison prompt."""
     fake = _install_fake_pool(monkeypatch, {
         "agreements": [], "conflicts": [], "gaps": [],
     })
     from nexus.mcp.core import operator_compare
 
-    operator_compare(inputs='["a", "b"]')  # no criterion
+    await operator_compare(inputs='["a", "b"]')  # no criterion
     assert "Criterion:" not in fake.last_call["prompt"]
 
 
-def test_operator_compare_raises_on_missing_any_key(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_operator_compare_raises_on_missing_any_key(monkeypatch) -> None:
     from nexus.mcp.core import operator_compare
     from nexus.plans.runner import PlanRunOperatorOutputError
 
@@ -141,10 +148,11 @@ def test_operator_compare_raises_on_missing_any_key(monkeypatch) -> None:
     ):
         _install_fake_pool(monkeypatch, incomplete)
         with pytest.raises(PlanRunOperatorOutputError):
-            operator_compare(inputs='["x"]')
+            await operator_compare(inputs='["x"]')
 
 
-def test_operator_compare_raises_on_non_list_value(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_operator_compare_raises_on_non_list_value(monkeypatch) -> None:
     _install_fake_pool(monkeypatch, {
         "agreements": "not a list", "conflicts": [], "gaps": [],
     })
@@ -152,20 +160,21 @@ def test_operator_compare_raises_on_non_list_value(monkeypatch) -> None:
     from nexus.plans.runner import PlanRunOperatorOutputError
 
     with pytest.raises(PlanRunOperatorOutputError, match="list"):
-        operator_compare(inputs='["x"]')
+        await operator_compare(inputs='["x"]')
 
 
 # ── operator_summarize (P3.4) ─────────────────────────────────────────────
 
 
-def test_operator_summarize_happy_path(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_operator_summarize_happy_path(monkeypatch) -> None:
     fake = _install_fake_pool(monkeypatch, {
         "text": "Consensus protocols ensure state-machine agreement.",
         "citations": [{"input_index": 0, "span": "Paxos section 2"}],
     })
     from nexus.mcp.core import operator_summarize
 
-    result = operator_summarize(
+    result = await operator_summarize(
         inputs='["paper summary"]',
         mode="evidence",
     )
@@ -175,39 +184,43 @@ def test_operator_summarize_happy_path(monkeypatch) -> None:
     assert "Mode: evidence" in fake.last_call["prompt"]
 
 
-def test_operator_summarize_default_mode_is_short(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_operator_summarize_default_mode_is_short(monkeypatch) -> None:
     fake = _install_fake_pool(monkeypatch, {"text": "t", "citations": []})
     from nexus.mcp.core import operator_summarize
 
-    operator_summarize(inputs="[]")
+    await operator_summarize(inputs="[]")
     assert "Mode: short" in fake.last_call["prompt"]
 
 
-def test_operator_summarize_raises_on_missing_text(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_operator_summarize_raises_on_missing_text(monkeypatch) -> None:
     _install_fake_pool(monkeypatch, {"citations": []})
     from nexus.mcp.core import operator_summarize
     from nexus.plans.runner import PlanRunOperatorOutputError
 
     with pytest.raises(PlanRunOperatorOutputError, match="text"):
-        operator_summarize(inputs="[]")
+        await operator_summarize(inputs="[]")
 
 
-def test_operator_summarize_raises_on_non_string_text(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_operator_summarize_raises_on_non_string_text(monkeypatch) -> None:
     _install_fake_pool(monkeypatch, {"text": 123, "citations": []})
     from nexus.mcp.core import operator_summarize
     from nexus.plans.runner import PlanRunOperatorOutputError
 
     with pytest.raises(PlanRunOperatorOutputError, match="non-string"):
-        operator_summarize(inputs="[]")
+        await operator_summarize(inputs="[]")
 
 
-def test_operator_summarize_accepts_missing_citations(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_operator_summarize_accepts_missing_citations(monkeypatch) -> None:
     """Citations default to empty list when absent — soft requirement,
     the text is the primary contract."""
     _install_fake_pool(monkeypatch, {"text": "hi"})
     from nexus.mcp.core import operator_summarize
 
-    result = operator_summarize(inputs="[]")
+    result = await operator_summarize(inputs="[]")
     assert result["text"] == "hi"
     assert result["citations"] == []
 
@@ -215,7 +228,8 @@ def test_operator_summarize_accepts_missing_citations(monkeypatch) -> None:
 # ── operator_generate (P3.5) ──────────────────────────────────────────────
 
 
-def test_operator_generate_happy_path(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_operator_generate_happy_path(monkeypatch) -> None:
     fake = _install_fake_pool(monkeypatch, {
         "text": "The Delos paper describes a virtualized consensus layer...",
         "citations": [
@@ -225,17 +239,20 @@ def test_operator_generate_happy_path(monkeypatch) -> None:
     })
     from nexus.mcp.core import operator_generate
 
-    result = operator_generate(
+    result = await operator_generate(
         outline="How Delos virtualizes consensus",
         inputs='["delos paper", "related work"]',
     )
     assert "Delos" in result["text"]
     assert len(result["citations"]) == 2
-    assert fake.last_get["operator_name"] == "generate"
+    # Pool name varies with with_citations flag (I-3): "generate:with-cite"
+    # when citations required (default), "generate:no-cite" when relaxed.
+    assert fake.last_get["operator_name"] == "generate:with-cite"
     assert "How Delos virtualizes consensus" in fake.last_call["prompt"]
 
 
-def test_operator_generate_with_citations_false_relaxes_requirement(
+@pytest.mark.asyncio
+async def test_operator_generate_with_citations_false_relaxes_requirement(
     monkeypatch,
 ) -> None:
     """The role prompt mentions citations as optional when with_citations=False.
@@ -243,27 +260,29 @@ def test_operator_generate_with_citations_false_relaxes_requirement(
     fake = _install_fake_pool(monkeypatch, {"text": "x", "citations": []})
     from nexus.mcp.core import operator_generate
 
-    operator_generate(outline="o", inputs="[]", with_citations=False)
+    await operator_generate(outline="o", inputs="[]", with_citations=False)
     role = fake.last_get["role"] or ""
     assert "optional" in role.lower()
 
 
-def test_operator_generate_raises_on_missing_text(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_operator_generate_raises_on_missing_text(monkeypatch) -> None:
     _install_fake_pool(monkeypatch, {"citations": []})
     from nexus.mcp.core import operator_generate
     from nexus.plans.runner import PlanRunOperatorOutputError
 
     with pytest.raises(PlanRunOperatorOutputError, match="text"):
-        operator_generate(outline="o", inputs="[]")
+        await operator_generate(outline="o", inputs="[]")
 
 
-def test_operator_generate_schema_version_guard(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_operator_generate_schema_version_guard(monkeypatch) -> None:
     from nexus.mcp.core import operator_generate
     from nexus.plans.runner import PlanRunOperatorSchemaVersionError
 
     _install_fake_pool(monkeypatch, {"text": "x", "citations": []})
     with pytest.raises(PlanRunOperatorSchemaVersionError):
-        operator_generate(outline="o", inputs="[]", schema_version=99)
+        await operator_generate(outline="o", inputs="[]", schema_version=99)
 
 
 # ── Registration (all 4 must be in default-mode tool list) ────────────────

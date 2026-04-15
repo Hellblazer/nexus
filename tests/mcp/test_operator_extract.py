@@ -83,7 +83,8 @@ def _install_fake_pool(monkeypatch, dispatch_result):
     return fake
 
 
-def test_operator_extract_returns_extractions_list(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_operator_extract_returns_extractions_list(monkeypatch) -> None:
     """Happy path: worker emits StructuredOutput → tool returns dict with
     the extractions list intact."""
     fake = _install_fake_pool(monkeypatch, {
@@ -95,7 +96,7 @@ def test_operator_extract_returns_extractions_list(monkeypatch) -> None:
 
     from nexus.mcp.core import operator_extract
 
-    result = operator_extract(
+    result = await operator_extract(
         inputs='["text one", "text two"]',
         fields="title,year,author",
     )
@@ -105,7 +106,8 @@ def test_operator_extract_returns_extractions_list(monkeypatch) -> None:
     assert result["extractions"][0]["title"] == "Foo"
 
 
-def test_operator_extract_raises_output_error_on_malformed_dispatch(
+@pytest.mark.asyncio
+async def test_operator_extract_raises_output_error_on_malformed_dispatch(
     monkeypatch,
 ) -> None:
     """If the pool returns something that doesn't match
@@ -116,10 +118,11 @@ def test_operator_extract_raises_output_error_on_malformed_dispatch(
     from nexus.plans.runner import PlanRunOperatorOutputError
 
     with pytest.raises(PlanRunOperatorOutputError, match="extractions"):
-        operator_extract(inputs='["hi"]', fields="x,y")
+        await operator_extract(inputs='["hi"]', fields="x,y")
 
 
-def test_operator_extract_raises_on_non_list_extractions(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_operator_extract_raises_on_non_list_extractions(monkeypatch) -> None:
     """extractions must be a list (RDR-079 operator contract)."""
     _install_fake_pool(monkeypatch, {"extractions": "not a list"})
 
@@ -127,10 +130,11 @@ def test_operator_extract_raises_on_non_list_extractions(monkeypatch) -> None:
     from nexus.plans.runner import PlanRunOperatorOutputError
 
     with pytest.raises(PlanRunOperatorOutputError):
-        operator_extract(inputs='["hi"]', fields="x")
+        await operator_extract(inputs='["hi"]', fields="x")
 
 
-def test_operator_extract_rejects_unknown_schema_version(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_operator_extract_rejects_unknown_schema_version(monkeypatch) -> None:
     """Caller passing $schema_version != 1 must be refused — tool pins v1."""
     _install_fake_pool(monkeypatch, {"extractions": []})
 
@@ -138,10 +142,11 @@ def test_operator_extract_rejects_unknown_schema_version(monkeypatch) -> None:
     from nexus.plans.runner import PlanRunOperatorSchemaVersionError
 
     with pytest.raises(PlanRunOperatorSchemaVersionError):
-        operator_extract(inputs='["x"]', fields="a", schema_version=2)
+        await operator_extract(inputs='["x"]', fields="a", schema_version=2)
 
 
-def test_operator_extract_passes_fields_to_prompt(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_operator_extract_passes_fields_to_prompt(monkeypatch) -> None:
     """The caller-supplied field list must reach the worker prompt so
     the model knows what to extract. Verified by inspecting the prompt
     the fake pool received."""
@@ -149,7 +154,7 @@ def test_operator_extract_passes_fields_to_prompt(monkeypatch) -> None:
 
     from nexus.mcp.core import operator_extract
 
-    operator_extract(
+    await operator_extract(
         inputs='["The Rise of Arcaneum by Hal Hildebrand, 2024"]',
         fields="title,year,author",
     )
@@ -162,14 +167,15 @@ def test_operator_extract_passes_fields_to_prompt(monkeypatch) -> None:
     assert "Arcaneum" in prompt
 
 
-def test_operator_extract_uses_correct_pool_name(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_operator_extract_uses_correct_pool_name(monkeypatch) -> None:
     """Must request the per-operator pool named 'extract' so its
     json_schema gets applied (not the default no-schema pool)."""
     fake = _install_fake_pool(monkeypatch, {"extractions": []})
 
     from nexus.mcp.core import operator_extract
 
-    operator_extract(inputs='["x"]', fields="a")
+    await operator_extract(inputs='["x"]', fields="a")
     assert fake.last_get["operator_name"] == "extract"
     # Schema passed through (caller's field list → json_schema)
     assert fake.last_get["schema"] is not None
@@ -179,7 +185,8 @@ def test_operator_extract_uses_correct_pool_name(monkeypatch) -> None:
 # ── Auth-failure propagation (SC-10) ───────────────────────────────────────
 
 
-def test_operator_extract_surfaces_auth_error(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_operator_extract_surfaces_auth_error(monkeypatch) -> None:
     """When the pool raises PoolAuthUnavailableError (no claude auth),
     the MCP tool must return a clear error string, not crash."""
     from nexus import mcp_infra
@@ -198,4 +205,4 @@ def test_operator_extract_surfaces_auth_error(monkeypatch) -> None:
     # MCP tools return strings for errors; structured=True hypothetical
     # not relevant for operator_* (always dict).
     with pytest.raises(PoolAuthUnavailableError):
-        operator_extract(inputs='["x"]', fields="a")
+        await operator_extract(inputs='["x"]', fields="a")
