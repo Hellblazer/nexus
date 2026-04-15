@@ -21,7 +21,7 @@ def test_catalog_module_importable():
 
 
 def test_core_registered_tools():
-    """18 core tools are registered with @mcp.tool() (15 legacy + 3 RDR-078 P1+P3)."""
+    """23 core tools (15 legacy + 3 RDR-078 P1+P3 + 5 RDR-079 P3 operators)."""
     from nexus.mcp.core import mcp
 
     tool_names = {t.name for t in mcp._tool_manager.list_tools()}
@@ -34,6 +34,9 @@ def test_core_registered_tools():
         "plan_match", "plan_run",
         # RDR-078 P3 (nexus-05i.5): typed-graph traversal of the catalog.
         "traverse",
+        # RDR-079 P3 (nexus-wc3.1): analytical operators backed by pool workers.
+        "operator_extract", "operator_rank", "operator_compare",
+        "operator_summarize", "operator_generate",
     }
     assert expected == tool_names, f"Missing: {expected - tool_names}, Extra: {tool_names - expected}"
 

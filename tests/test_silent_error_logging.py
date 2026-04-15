@@ -191,7 +191,7 @@ def test_session_end_own_record_corrupt_logs_debug(tmp_path):
     corrupt_file.write_text("not-valid-json{{{")
 
     with patch("nexus.hooks.SESSIONS_DIR", sessions_dir), \
-         patch("nexus.hooks.find_ancestor_session", return_value=None):
+         patch("nexus.hooks.resolve_t1_session", return_value=None):
         with capture_logs() as cap:
             session_end()
 
