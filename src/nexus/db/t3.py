@@ -20,12 +20,55 @@ import voyageai
 from nexus.config import get_credential
 from nexus.corpus import embedding_model_for_collection, index_model_for_collection
 from nexus.db.chroma_quotas import QUOTAS, QuotaValidator
+from nexus.metadata_schema import CONTENT_TYPES, normalize, validate
 
 _log = structlog.get_logger(__name__)
 
 
 class OldLayoutDetected(RuntimeError):
     """Raised when the old four-database ChromaDB layout is detected during init."""
+
+
+# Legacy store_type values accepted on input (nexus-40t). All map to a
+# :data:`nexus.metadata_schema.CONTENT_TYPES` value so the canonical
+# schema stays compact.
+_STORE_TYPE_TO_CONTENT_TYPE: dict[str, str] = {
+    "code": "code",
+    "pdf": "pdf",
+    "markdown": "markdown",
+    "prose": "prose",
+    "knowledge": "prose",
+    "rdr": "prose",
+    "docs": "prose",
+}
+
+
+def _infer_content_type(metadata: dict, collection_name: str) -> str:
+    """Pick a canonical ``content_type`` for a record (nexus-40t).
+
+    Priority:
+      1. Explicit ``content_type`` in the payload.
+      2. Legacy ``store_type`` → mapped via
+         :data:`_STORE_TYPE_TO_CONTENT_TYPE`.
+      3. Collection prefix (``code__`` → ``code``; anything else → ``prose``).
+    """
+    content_type = metadata.get("content_type")
+    if content_type in CONTENT_TYPES:
+        return content_type  # type: ignore[return-value]
+
+    store_type = metadata.get("store_type")
+    if store_type in _STORE_TYPE_TO_CONTENT_TYPE:
+        return _STORE_TYPE_TO_CONTENT_TYPE[store_type]
+
+    if collection_name.startswith("code__"):
+        return "code"
+    return "prose"
+
+
+def _normalize_for_write(metadata: dict, collection_name: str) -> dict:
+    """Normalise *metadata* before any T3 upsert/update (nexus-40t)."""
+    content_type = _infer_content_type(metadata, collection_name)
+    return normalize(metadata, content_type=content_type)
 
 
 # Deprecated: no internal callers remain after RDR-037. Kept for one release
@@ -261,28 +304,16 @@ class T3Database:
             if embeddings is not None:
                 embeddings = [embeddings[i] for i in valid]
 
-        # Trim metadata to stay under the 32-key limit.
-        # Strategy: (1) drop empty-string values from low-priority keys,
-        # (2) drop all remaining empty-string values except load-bearing ones,
-        # (3) hard truncate as last resort.
-        max_keys = QUOTAS.MAX_RECORD_METADATA_KEYS
-        # Keys where "" is load-bearing (TTL guard: expires_at="" = permanent)
-        _KEEP_EMPTY = {"expires_at"}
-        stripped = []
+        # Funnel every write through the canonical metadata schema
+        # (nexus-40t). ``normalize()`` drops cargo keys and packs
+        # ``git_*`` into ``git_meta``; ``validate()`` then fails loud if
+        # anything still violates the 30-key ceiling or schema rules —
+        # never silently drops fields by insertion order.
+        metadatas = [
+            _normalize_for_write(m, collection_name) for m in metadatas
+        ]
         for m in metadatas:
-            if len(m) <= max_keys:
-                stripped.append(m)
-                continue
-            # Drop all empty-string values except load-bearing ones
-            cleaned = {
-                k: v for k, v in m.items()
-                if v != "" or k in _KEEP_EMPTY
-            }
-            # Hard guard: if still over, truncate (preserves insertion order)
-            if len(cleaned) > max_keys:
-                cleaned = dict(list(cleaned.items())[:max_keys])
-            stripped.append(cleaned)
-        metadatas = stripped
+            validate(m)
 
         size = QUOTAS.MAX_RECORDS_PER_WRITE
         with self._write_sem(collection_name):
@@ -470,7 +501,14 @@ class T3Database:
         Preserves original document text and embedding vectors.
         Use for frecency-only reindex: update frecency_score without
         triggering expensive re-embedding.
+
+        Every record is funnelled through the canonical metadata schema
+        (nexus-40t) so enrichment post-passes can't overrun Chroma's
+        32-key cap by merging fields on top of an already-full row.
         """
+        metadatas = [_normalize_for_write(m, collection) for m in metadatas]
+        for m in metadatas:
+            validate(m)
         col = self.get_or_create_collection(collection)
         size = QUOTAS.MAX_RECORDS_PER_WRITE
         with self._write_sem(collection):

@@ -135,6 +135,10 @@ class TestIndexPdfFileE2E:
         assert results, "Expected search results after indexing"
         assert results[0].get("source_agent") == "nexus-indexer"
         assert results[0].get("tags") == "pdf"
-        # git_project_name survives now that empty metadata values are
-        # filtered before augmentation (staying under 32-key limit)
-        assert results[0].get("git_project_name") == pdf_git_repo_e2e.name
+        # Git provenance now rides in the consolidated ``git_meta`` JSON
+        # blob (nexus-40t) to keep top-level key count under Chroma's
+        # 32-key cap.
+        import json as _json
+        git_blob = results[0].get("git_meta")
+        assert git_blob, f"git_meta missing: {results[0]}"
+        assert _json.loads(git_blob)["project"] == pdf_git_repo_e2e.name
