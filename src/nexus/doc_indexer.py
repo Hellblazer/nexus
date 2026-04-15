@@ -541,11 +541,15 @@ def _pdf_chunks(
     is_image_pdf = (len(result.text) / _page_count) < 20
     has_formulas = result.metadata.get("formula_count", 0) > 0
 
-    # Compute source_title once before the loop so bib lookup uses the same value.
+    # Compute source_title once before the loop so bib lookup uses the same
+    # value. nexus-8l6 fallback: extractor metadata wins; otherwise derive
+    # from the filename via the shared normaliser so initialisms (PDF, NLP,
+    # ART, …) stay all-caps consistently with the markdown path.
+    from nexus.indexer_utils import derive_title
     source_title = (
-        result.metadata.get("docling_title", "")
-        or result.metadata.get("pdf_title", "")
-        or pdf_path.stem.replace("_", " ").replace("-", " ")
+        str(result.metadata.get("docling_title") or "").strip()
+        or str(result.metadata.get("pdf_title") or "").strip()
+        or derive_title(pdf_path, body=None)
     )
     bib: dict = {}
     if bib_enrich_enabled:
@@ -619,6 +623,15 @@ def _markdown_chunks(
     frontmatter, body = parse_frontmatter(raw_text)
     frontmatter_len = len(raw_text) - len(body)
 
+    # nexus-8l6: source_title fallback chain. Frontmatter ``title:``
+    # wins; otherwise derive from the first H1 or the normalised
+    # filename so ``nx store list`` never displays ``untitled``.
+    from nexus.indexer_utils import derive_title
+    source_title = (
+        str(frontmatter.get("title") or "").strip()
+        or derive_title(md_path, body)
+    )
+
     sp = make_relative(md_path, base_path) if base_path else str(md_path)
     base_meta: dict = {
         "source_path": sp,
@@ -633,7 +646,7 @@ def _markdown_chunks(
         chunk_id = f"{content_hash[:16]}_{chunk.chunk_index}"
         meta: dict = {
             "source_path": sp,
-            "source_title": str(frontmatter.get("title", "")),
+            "source_title": source_title,
             "source_author": str(frontmatter.get("author", "")),
             "source_date": str(frontmatter.get("date", "")),
             "corpus": corpus,
