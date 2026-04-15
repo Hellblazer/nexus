@@ -99,6 +99,70 @@ Driven via Python `asyncio.create_subprocess_exec`. Controller writes JSON-encod
 
 Pool sizing from config (`.nexus.yml: operators.pool_size`, default 2). Workers retired at cumulative `input_tokens + output_tokens` threshold (default 150k, well below the 200k window); draining in-flight requests before kill; replacement spawned before the retiree exits to keep the pool saturated.
 
+### Worker isolation — explicit session identity via `NEXUS_T1_SESSION_ID`
+
+Pool workers are `claude` subprocesses descended from the `nexus` MCP server, itself descended from the user's `claude` session. Without mitigation, nexus's PPID-walk session discovery (implemented in `src/nexus/session.py`) would make each worker a peer in the user's session — sharing T1 scratch, racing writes, receiving the plan-first preamble, firing auto-linker on any `store_put` against the user's catalog.
+
+**The load-bearing mitigation is explicit session identity.** Nexus's T1 session-discovery mechanism already has two layers: the SessionStart hook writes a session file at `~/.config/nexus/sessions/{ppid}.session`; child processes walk the OS PPID chain to find the nearest ancestor. This RDR adds a **third, higher-priority** layer: a `NEXUS_T1_SESSION_ID` environment variable that overrides PPID-walk entirely. The pool spawns workers with that variable set to a pool-scoped session UUID, not the user's PPID.
+
+#### Pool session lifecycle
+
+At first-operator-call the pool singleton:
+1. Generates a UUID (e.g. `pool-7f3a...`), writes `~/.config/nexus/sessions/pool-7f3a...session` containing the pool's own T1 endpoint (either a dedicated HTTP server OR a shared-EphemeralClient marker — implementation choice at P2).
+2. Retains the UUID as `pool.session_id` for the lifetime of the pool.
+3. On pool shutdown (MCP server stop): removes the session file, closes the T1 endpoint. Cleanup is critical — orphaned `pool-*.session` files would accumulate.
+
+Worker spawn:
+```
+claude -p \
+  ... (streaming flags) ...
+  # env:
+  NEXUS_T1_SESSION_ID=pool-7f3a...
+```
+
+#### T1 client change (`src/nexus/session.py`)
+
+~5-line addition at the top of the session-discovery function:
+
+```python
+explicit = os.environ.get("NEXUS_T1_SESSION_ID")
+if explicit:
+    session_file = Path.home() / ".config/nexus/sessions" / f"{explicit}.session"
+    if session_file.exists():
+        return _load_session(session_file)
+    # else fall through to PPID-walk as normal
+```
+
+SessionStart hook honors the same env: if `NEXUS_T1_SESSION_ID` is set and the session file exists, the hook does NOT spawn a new T1 server for this process — it just uses the pool's endpoint.
+
+#### Worker tool surface
+
+Workers retain MCP access — this is now safe because their scratch/store_put/catalog writes land in the pool's T1 (isolated from the user's), not the user's T1. This opens up legitimate uses (e.g. a `summarize` operator reading chunk text via `store_get`, or multi-step operator pipelines using pool-scoped scratch for coordination).
+
+**However**, workers must NOT be able to re-enter the pool recursively. Restrict the exposed tool set to exclude the dispatch surface:
+
+```
+--tools "Read,Grep,Glob"                                   # built-in Claude tools for limited file access
+--mcp-config <pool-worker-mcp.json>                        # custom MCP config
+--strict-mcp-config                                        # only the listed servers attach
+```
+
+`pool-worker-mcp.json` attaches the `nexus` and `nexus-catalog` MCP servers but hides the recursion-enabling tools. Achievable via MCP's allow-list mechanism, or via a worker-scoped `nexus` entry point that registers every tool EXCEPT `plan_match` / `plan_run` / `operator_extract` / `operator_rank` / `operator_compare` / `operator_summarize` / `operator_generate`. The simplest shape is a new `nx-mcp --worker-mode` flag that does the filtering at registration time.
+
+#### What the controller (not worker) still owns
+
+1. Plan execution: `plan_run` never runs inside a worker — only inside the controller process.
+2. Operator dispatch routing: deciding which pool worker to send a step to.
+3. Run metrics: `operator_runs` T2 writes happen in the controller, attributed to the user's session (intentional — user's session accumulates cost history).
+4. Hydration optimisation: when a step's input is a list of IDs, the controller MAY pre-hydrate by calling `store_get` before dispatch (avoids N round-trips). Workers CAN also fetch themselves; pre-hydration is an optimisation, not a requirement.
+
+#### Invariants
+
+- **I-1**: Worker writes (scratch, store_put, catalog links) never appear in the user's T1. Tested by writing from a worker, asserting absence from user-session scratch list.
+- **I-2**: A worker cannot call `plan_match`, `plan_run`, or any `operator_*` tool (no recursion). Tested by worker-scope tool listing assertion.
+- **I-3**: When the pool shuts down cleanly, no orphaned `pool-*.session` files remain. Tested by starting + stopping a pool and grepping the sessions directory.
+- **I-4**: If `NEXUS_T1_SESSION_ID` is unset (user runs `claude` normally), session discovery falls back to PPID-walk — no regression on RDR-078 behavior. Tested by running existing T1 tests with the env var clear.
+
 ### Auth inheritance
 
 On first operator call, the pool singleton runs `claude auth status --json`. If `loggedIn == true` (any `authMethod`), pool starts. Otherwise the operator tool returns a clear error: "Operator pool requires authenticated `claude` — run `claude auth login` or set `ANTHROPIC_API_KEY`." No new secret management. The `nexus` MCP server itself still starts without authentication — retrieval tools remain fully available in the unauthenticated path; only operator-requiring tools fail fast.
@@ -124,7 +188,11 @@ Each tool's input relay includes a `$schema_version: 1` marker; mismatched schem
 ## Phases
 
 - **P1** — Tool-output contract for core MCP tools. Add `_structured` flag to `search`, `query`, `store_put`, `memory_get`, `memory_search`, `memory_put`. Runner passes `_structured=True` on retrieval dispatches. Additive; no breaking change.
-- **P2** — Operator pool inside `nexus`. `src/nexus/operators/pool.py`: async worker pool, streaming stdin/stdout JSON parser, worker retirement on token threshold, health probe (periodic no-op turn, timeout → respawn). Singleton bound via `mcp_infra.py`, same pattern as T1/T3. No new MCP server.
+- **P2** — Operator pool inside `nexus`. Four deliverables:
+  1. `src/nexus/operators/pool.py`: async worker pool, streaming stdin/stdout JSON parser, worker retirement on token threshold, health probe (periodic no-op turn, timeout → respawn). Singleton bound via `mcp_infra.py`, same pattern as T1/T3.
+  2. Pool session lifecycle: generate pool UUID at first-operator-call, write `~/.config/nexus/sessions/pool-<uuid>.session` with pool's T1 endpoint, clean up on shutdown. Startup reconciliation removes stale `pool-*.session` files whose PID is dead.
+  3. Explicit session-identity support in `src/nexus/session.py`: if `NEXUS_T1_SESSION_ID` env is set, use that session file directly; else fall through to existing PPID-walk (zero regression on RDR-078 T1 behavior).
+  4. Worker-mode MCP entry point (`nx-mcp --worker-mode` or equivalent env-checked registration): exposes `nexus` and `nexus-catalog` tools EXCEPT `plan_match`, `plan_run`, and the five `operator_*` tools — prevents pool-recursion by construction. Workers spawn with `--mcp-config <worker-mode.json> --strict-mcp-config`.
 - **P3** — Operator implementations. Five tools (`operator_extract`, `operator_rank`, `operator_compare`, `operator_summarize`, `operator_generate`) registered in `src/nexus/mcp/core.py`. Each dispatches a user turn to a pool worker with `--json-schema` matching the operator's output shape, intercepts the `StructuredOutput` tool_use event per Finding 3, returns dict.
 - **P4** — Runner integration. `_default_dispatcher` routes operators through the new tools. No changes to `plan_run`, `plan_match`, or plan JSON schema.
 - **P5** — Empirical `min_confidence` calibration. 40+-intent paraphrase dataset spanning all five verbs, ROC curve, chosen value recorded in `docs/rdr/rdr-079-calibration.md`. Closes Gap C.
@@ -143,6 +211,10 @@ Each tool's input relay includes a `$schema_version: 1` marker; mismatched schem
 - **SC-8** — Median and p95 operator-dispatch latency documented per operator, with cold-pool and warm-pool baselines. Instrumented via `structlog` on the pool worker (per-turn `duration_ms`, `total_cost_usd`, `usage.*` already emitted by `claude`'s streaming protocol per Empirical Finding 1), aggregated by `nx doctor --operators`, committed as a baseline table in `docs/rdr/rdr-079-latency-baselines.md`. Measurement from Finding 5 is the seed; P3 confirms or updates.
 - **SC-9** — Plan promotion gate rejects sub-threshold plans; `nx plan promote --dry-run` reports the gate verdict without side effects.
 - **SC-10** — Graceful degradation without auth: when `claude auth status` reports `loggedIn: false`, the first operator-requiring MCP call returns a named `PlanRunOperatorUnavailableError` with guidance ("run `claude auth login` or set `ANTHROPIC_API_KEY`"); retrieval steps (`search`/`query`/`traverse` + all of `nexus-catalog`) continue working unchanged. Plans with no operator steps still execute end-to-end. Testable via a fixture that patches `claude auth status` output.
+- **SC-11** — Worker T1 isolation via explicit session identity. Behavioral test: (a) start a pool, spawn a worker with `NEXUS_T1_SESSION_ID=pool-<uuid>`; (b) from inside the worker, `scratch put` a sentinel tagged `sc11-isolation-probe`; (c) query user session scratch (PPID-walk discovery, no env) and assert the sentinel is absent; (d) query the pool session scratch (by session file path) and assert the sentinel is present. This validates invariants I-1 (worker writes not visible in user T1) and — indirectly — I-4 (PPID-walk still works for normal users by NOT setting the env).
+- **SC-12** — Worker tool-surface restriction. Test: invoke a worker's MCP `tools/list` endpoint (via its stdio channel). Assert the returned tool names include `search` / `query` / `store_get` / `catalog_show` (workers have legitimate MCP access) AND exclude `plan_match` / `plan_run` / `operator_extract` / `operator_rank` / `operator_compare` / `operator_summarize` / `operator_generate` (workers cannot recurse into the pool). This validates invariant I-2.
+- **SC-13** — Pool session cleanup. Test: start a pool, note the pool-session file at `~/.config/nexus/sessions/pool-*.session`; gracefully stop the pool; assert the file is removed. Also: after SIGTERM to the nexus MCP server, assert stale `pool-*.session` files from prior processes are cleaned up on next pool start (startup reconciliation). Validates invariant I-3.
+- **SC-14** — PPID-walk regression guard. Run the full RDR-078 T1 session test suite with `NEXUS_T1_SESSION_ID` NOT set in the environment. Assert no test failures — the new explicit-session mechanism must not regress the existing PPID-walk discovery path. Validates invariant I-4.
 
 ## Risks / Open Questions
 
@@ -153,6 +225,11 @@ Each tool's input relay includes a `$schema_version: 1` marker; mismatched schem
 - **Concurrent worker auth**: under OAuth, N concurrent `claude` workers share the subscription's rate limit. Under API key, they share the key's rate limit. `429` handling is per-worker with backoff.
 - **Final-turn thinking-only response**: Finding 3 showed the `result` text field can be empty when the model's final action is thinking after a tool_use. Controller must not block on the `result` field — wait for the `StructuredOutput` tool_use event or the `result` record with `subtype: success`, whichever comes first.
 - **`claude auth status --json` schema drift**: the auth guard at pool startup parses this command's output. A future `claude` CLI release could rename `loggedIn` → `isLoggedIn` or similar. Mitigation: defensive parse (check key presence before trusting value), pin a minimum tested `claude` CLI version in `pyproject.toml` docs, add a CI smoke test that runs `claude auth status --json` and asserts the `loggedIn` key is present.
+- **T1 isolation correctness is load-bearing**: the `NEXUS_T1_SESSION_ID` env var is the single mechanism that keeps worker writes out of the user's T1. If a worker is spawned WITHOUT the env var set, it falls back to PPID-walk and becomes a peer in the user's session. Mitigation: the pool's worker-spawn code MUST set the env var; an assertion in the spawn function (refuses to spawn without it) turns a silent correctness issue into a loud error. SC-11 tests the happy path; a negative test ("pool refuses to spawn worker without `NEXUS_T1_SESSION_ID`") would pin the invariant from the other side.
+- **Stale pool-session files on crash**: if the nexus MCP server crashes (SIGKILL, segfault, OS power-cut), the pool's on-shutdown cleanup never runs. `~/.config/nexus/sessions/pool-*.session` files leak. Mitigation: pool startup does reconciliation — scan for `pool-*` session files whose PID is no longer alive, remove them. SC-13's "after SIGTERM" sub-assertion covers this.
+- **Tool-surface restriction via worker-mode MCP config**: requires either a new `nx-mcp --worker-mode` flag OR per-tool allow-list support in FastMCP. The first is simpler (filter at tool registration time via an env var check). P2 must include this machinery.
+- **Controller `$stepN.*` hydration — optional optimisation, not a requirement**: workers in the new design CAN call `store_get` themselves. Pre-hydration in the controller is a latency optimisation (saves MCP boundary crossings on lists of IDs). If implemented as `store_get_many(doc_ids: list)`, it MUST batch at ≤ 300 IDs per ChromaDB call per the `MAX_QUERY_RESULTS` quota; explicit error on larger lists, not silent truncation. Baseline the non-batched cost in P4 first; add batching if measured cost warrants it.
+- **Pool session discoverable by name**: a curious user who runs `ls ~/.config/nexus/sessions/` will see `pool-*.session` files. Document this in `docs/architecture.md` so it's not mistaken for a leak when the pool is legitimately running.
 
 ## Research Findings
 
@@ -182,6 +259,26 @@ Analysis-derived findings (vs the live-test Empirical Findings above). Each reco
 3. **Contract integrity** — maintained per-tool. Tools that dispatch workers declare it explicitly in their signature and return type. The MCP server is no longer universally LLM-free, but each tool retains a clear contract and the non-LLM subset is preserved.
 
 **Impact on RDR-079**: unblocks P2–P3. Impact on RDR-080: provides the constraint-dissolution reasoning for folding the `query-planner` and `analytical-operator` agents into MCP tools.
+
+### RF-4 — Explicit session identity is the right mitigation for T1 isolation (pivot)
+
+**Source**: architectural review of worker-isolation risks + user feedback ("can't we pass the pid of the calling session in?"). T2 memory: `nexus_rdr/079-research-4-worker-isolation`.
+
+**Question investigated**: how do pool workers avoid polluting the user's T1 session (scratch tag collisions, auto-linker leakage, plan-first recursion)?
+
+**First attempt (rejected)**: lock workers down by denial — no MCP tools, no hooks, no skills, four independent guards. This was overfit to the risks. The post-isolation gate critic (agent `a50ab8f72b02a920b`) correctly identified three real problems with it: (i) SC-12 enumerated hypothetical `.sh` hook files that don't exist (real hooks are the 6 in `nx/hooks/scripts/*.sh`, most don't do T1 work at all); (ii) the PPID-walk logic lives in `src/nexus/session.py`, not shell scripts; (iii) SC-11's `lsof`/ChromaDB-client-count assertion was unverifiable.
+
+**Pivot**: make session identity **explicit** via `NEXUS_T1_SESSION_ID`. Nexus already has a session-discovery protocol (SessionStart writes `~/.config/nexus/sessions/{ppid}.session`, PPID-walk finds the nearest ancestor). Adding a higher-priority env-var override is a ~5-line change in `session.py`. Pool spawns workers with `NEXUS_T1_SESSION_ID=pool-<uuid>`; workers join the pool's T1, not the user's.
+
+**Why this is better than the four-guard lockout**:
+- **One mitigation (explicit session identity) replaces four** (spawn-flags, env var, hook short-circuits, empty tool surface).
+- **Workers retain MCP access** — legitimately useful for operators that need `store_get` or pool-scoped scratch, without polluting the user session.
+- **Aligns with existing mechanisms** — nexus already tracks session identity; we're making it explicit, not inventing new machinery.
+- **Cleaner regression story** — RDR-078 T1 tests keep passing unchanged; when `NEXUS_T1_SESSION_ID` is unset (the normal user case), PPID-walk still works exactly as before.
+
+**Remaining constraint**: workers must not be able to recurse into the pool. Solved by the tool-surface restriction (`--mcp-config` with a worker-mode nexus entry point that omits `plan_match` / `plan_run` / `operator_*`).
+
+**Implication**: the conceptual framing in the rejected version still holds (operators are pure-compute leaves; planner/coordinator live in the controller). But the ENFORCEMENT mechanism is a single load-bearing env var, not four overlapping guards. Simpler, cleaner, covered by SC-11..SC-14.
 
 ### RF-3 — Cost-model change is within existing acceptance tolerance
 
