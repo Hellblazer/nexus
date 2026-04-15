@@ -1483,6 +1483,125 @@ class Catalog:
         nodes = [n for n in nodes if n is not None]
         return {"nodes": nodes, "edges": all_edges}
 
+    def graph_many(
+        self,
+        seeds: list[Tumbler],
+        depth: int = 1,
+        link_types: list[str] | None = None,
+        direction: str = "both",
+    ) -> dict:
+        """Multi-seed, multi-link-type BFS — RDR-078 P3.
+
+        **Implementation strategy: fan-out per (seed, link_type)** —
+        :meth:`graph` takes a singular ``link_type``, so this method
+        runs a BFS for every cross-product of *seeds* × *link_types*
+        and merges the results. Documented in nexus-05i.5.
+
+        Returns a ``{"nodes": [...], "edges": [...]}`` dict where each
+        node is the entry's :meth:`CatalogEntry.to_dict` payload with a
+        ``seed_origin: list[str]`` field added — every seed string
+        whose BFS reached the node, in first-touch order. This differs
+        from :meth:`graph` which returns raw :class:`CatalogEntry`
+        instances; ``seed_origin`` requires the dict-shape attachment.
+
+        Edge dedup is by ``(from, to, link_type)`` triple. The
+        :data:`_MAX_GRAPH_NODES` cap applies to the **merged** node
+        count across every fan-out call (not per-type, not per-seed);
+        partial results are returned and a warning is logged when the
+        cap is hit mid-fan-out.
+        """
+        from collections import deque
+
+        depth = min(depth, self._MAX_GRAPH_DEPTH)
+        link_types = list(link_types or [])
+
+        node_origins: dict[str, list[str]] = {}
+        seen_edges: set[tuple[str, str, str]] = set()
+        all_edges: list[CatalogLink] = []
+        visited: set[str] = set()
+
+        def _record_origin(node_str: str, seed_str: str) -> None:
+            origins = node_origins.setdefault(node_str, [])
+            if seed_str not in origins:
+                origins.append(seed_str)
+
+        # Each seed always shows up in its own origin list.
+        for seed in seeds:
+            seed_str = str(seed)
+            visited.add(seed_str)
+            _record_origin(seed_str, seed_str)
+
+        cap_hit = False
+        for seed in seeds:
+            if cap_hit:
+                break
+            seed_str = str(seed)
+            for link_type in link_types:
+                if len(visited) >= self._MAX_GRAPH_NODES:
+                    cap_hit = True
+                    break
+
+                queue: deque[tuple[Tumbler, int]] = deque([(seed, 0)])
+                local_seen: set[str] = {seed_str}
+
+                while queue:
+                    if len(visited) >= self._MAX_GRAPH_NODES:
+                        cap_hit = True
+                        break
+                    current, d = queue.popleft()
+                    if d >= depth:
+                        continue
+
+                    neighbors: list[CatalogLink] = []
+                    if direction in ("out", "both"):
+                        neighbors.extend(self.links_from(current, link_type=link_type))
+                    if direction in ("in", "both"):
+                        neighbors.extend(self.links_to(current, link_type=link_type))
+
+                    for edge in neighbors:
+                        edge_key = (
+                            str(edge.from_tumbler),
+                            str(edge.to_tumbler),
+                            edge.link_type,
+                        )
+                        if edge_key not in seen_edges:
+                            seen_edges.add(edge_key)
+                            all_edges.append(edge)
+
+                        other = (
+                            edge.to_tumbler
+                            if edge.from_tumbler == current
+                            else edge.from_tumbler
+                        )
+                        other_str = str(other)
+                        _record_origin(other_str, seed_str)
+                        if other_str not in local_seen:
+                            local_seen.add(other_str)
+                            if other_str not in visited:
+                                if len(visited) >= self._MAX_GRAPH_NODES:
+                                    cap_hit = True
+                                    break
+                                visited.add(other_str)
+                            queue.append((other, d + 1))
+
+        if cap_hit:
+            _log.warning(
+                "graph_many_node_limit",
+                visited=len(visited),
+                seeds=len(list(seeds)),
+                link_types=link_types,
+            )
+
+        nodes: list[dict] = []
+        for tumbler_str in visited:
+            entry = self.resolve(Tumbler.parse(tumbler_str))
+            if entry is None:
+                continue
+            payload = entry.to_dict()
+            payload["seed_origin"] = list(node_origins.get(tumbler_str, []))
+            nodes.append(payload)
+        return {"nodes": nodes, "edges": all_edges}
+
     # ── Rebuild ───────────���──────────────────────────��─────────────────────
 
     def rebuild(self) -> None:
