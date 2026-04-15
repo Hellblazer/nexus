@@ -64,32 +64,6 @@ _RDR_SLUG_RE = re.compile(r"^rdr-(.+)\.md$")
 # ── Scope-path mismatch helper ─────────────────────────────────────────────
 
 
-def _scope_path_guard(
-    template_dir: Path,
-    expected_scope: str,
-    project_label: str,
-) -> None:
-    """Rewrite every YAML template in *template_dir* to declare the
-    path-implied scope.
-
-    If a template declares a different scope in ``dimensions.scope``
-    than *expected_scope*, we don't fail — we log
-    ``plan_scope_path_mismatch`` and override the in-memory copy so
-    the downstream validator + dedup use the path-implied identity.
-    Implementation: we can't safely mutate the file on disk (it lives
-    in a user's repo); we write a sibling ``.yml.normalised`` file
-    instead — but doing so pollutes the directory. Instead, we
-    pre-process in memory at load time.
-
-    This function is an empty stub — the real enforcement happens in
-    :func:`_load_tier` which normalises the YAML before handing to
-    :func:`load_seed_directory`.
-    """
-    # Left as documentation of the policy; the actual normalisation
-    # is inlined in ``_load_tier`` below because ``load_seed_directory``
-    # reads from disk.
-
-
 def _load_tier(
     *,
     directory: Path,
@@ -100,14 +74,12 @@ def _load_tier(
 ) -> SeedLoadResult:
     """Load one scope tier, normalising mismatched scope declarations.
 
-    Because :func:`load_seed_directory` reads YAML from disk, we can't
-    mutate the in-memory dict ahead of time; instead, we pre-scan the
-    directory, log scope-path mismatches, and rewrite the on-disk
-    ``dimensions.scope`` value to the path-implied scope. The loader
-    then handles upsert + dedup as usual.
-
-    The rewrite is idempotent — a second pass sees no mismatch and
-    makes no change.
+    When a template declares a scope different from the path-implied
+    *scope*, we log ``plan_scope_path_mismatch`` and pass the path
+    scope as an in-memory override to :func:`load_seed_directory`.
+    The user's YAML file is never mutated — path-wins is a load-time
+    policy, not a disk rewrite. A subsequent ``nx plan lint`` (RDR-079
+    scope) can offer to fix the declared scope interactively.
     """
     if not directory.exists():
         return SeedLoadResult()
@@ -116,7 +88,7 @@ def _load_tier(
         if not path.is_file() or path.suffix not in (".yml", ".yaml"):
             continue
         if file_filter is not None and not file_filter(path):
-            continue  # keep the pre-scan in sync with the load filter
+            continue
 
         try:
             template = yaml.safe_load(path.read_text()) or {}
@@ -129,16 +101,13 @@ def _load_tier(
         if declared and declared != scope:
             _log.warning(
                 "plan_scope_path_mismatch: file=%r declared=%r "
-                "stored=%r (path wins per RDR-078 P6)",
+                "stored=%r (path wins per RDR-078 P6; file not mutated)",
                 str(path), declared, scope,
             )
-            dims["scope"] = scope
-            template["dimensions"] = dims
-            path.write_text(yaml.safe_dump(template, sort_keys=False))
 
     return load_seed_directory(
         directory, library=library, outcome="success",
-        file_filter=file_filter,
+        file_filter=file_filter, scope_override=scope,
     )
 
 

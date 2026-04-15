@@ -76,6 +76,7 @@ def load_seed_directory(
     registered_dimensions: set[str] | None = None,
     outcome: str = "success",
     file_filter: Any = None,
+    scope_override: str | None = None,
 ) -> SeedLoadResult:
     """Load every ``*.yml`` / ``*.yaml`` plan template under *directory*.
 
@@ -116,6 +117,16 @@ def load_seed_directory(
                 raise PlanTemplateSchemaError(
                     f"YAML root is {type(template).__name__}, expected mapping"
                 )
+            # Scope normalisation happens in memory only — never write back
+            # to the user's YAML file. When scope_override is set, replace
+            # dimensions.scope (warning emitted by caller _load_tier).
+            if scope_override is not None:
+                dims = template.get("dimensions") or {}
+                if dims.get("scope") != scope_override:
+                    dims = dict(dims)
+                    dims["scope"] = scope_override
+                    template = dict(template)
+                    template["dimensions"] = dims
             # template_loader.add() calls validate_plan_template internally,
             # so we only canonicalize here (and let add() do the validation).
             canonical = canonical_dimensions_json(template["dimensions"])
