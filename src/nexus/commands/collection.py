@@ -358,3 +358,79 @@ def backfill_hash_cmd(name: str | None, all_collections: bool) -> None:
             click.echo(f"  [{i}/{len(targets)}] {col_name}: all {total_count} chunks already have hash")
 
     click.echo(f"Done: {grand_updated} chunks updated across {len(targets)} collection(s)")
+
+
+@collection.command("rewrite-metadata")
+@click.argument("name", required=False, default=None)
+@click.option("--all", "all_collections", is_flag=True,
+              help="Rewrite metadata in every T3 collection.")
+@click.option("--source-path", default=None,
+              help="Only rewrite chunks whose source_path equals this value.")
+@click.option("--dry-run", is_flag=True,
+              help="Report counts without issuing any writes.")
+def rewrite_metadata_cmd(
+    name: str | None,
+    all_collections: bool,
+    source_path: str | None,
+    dry_run: bool,
+) -> None:
+    """Rewrite each chunk's metadata to the canonical schema (nexus-2my).
+
+    Operationalises the nexus-40t metadata schema rationalisation on
+    already-indexed corpora. Chunks ingested before 4.3.1 keep their
+    pre-canonical metadata (cargo keys, flat git_*, oversized records)
+    until this command is run; ``nx index --force`` is a silent no-op
+    when the pipeline-state DB still has the content_hash on file.
+
+    \\b
+    Examples:
+      nx collection rewrite-metadata knowledge__delos
+      nx collection rewrite-metadata knowledge__delos --source-path paper.pdf
+      nx collection rewrite-metadata --all --dry-run
+    """
+    from nexus.db.t3 import _rewrite_collection_metadata
+
+    if not name and not all_collections:
+        raise click.ClickException("specify a collection name or use --all")
+    if name and all_collections:
+        raise click.ClickException("--all is mutually exclusive with NAME")
+
+    db = _t3()
+    targets = (
+        sorted(c["name"] for c in db.list_collections())
+        if all_collections else [name]
+    )
+
+    grand_updated = 0
+    grand_skipped = 0
+    grand_total = 0
+    for i, col_name in enumerate(targets, 1):
+        try:
+            updated, skipped, total = _rewrite_collection_metadata(
+                db, col_name,
+                source_path=source_path,
+                dry_run=dry_run,
+            )
+        except Exception as exc:
+            click.echo(
+                f"  [{i}/{len(targets)}] {col_name}: "
+                f"{type(exc).__name__}: {exc}",
+                err=True,
+            )
+            continue
+
+        grand_updated += updated
+        grand_skipped += skipped
+        grand_total += total
+        verb = "would rewrite" if dry_run else "rewrote"
+        click.echo(
+            f"  [{i}/{len(targets)}] {col_name}: {verb} {updated}, "
+            f"skipped {skipped} (already canonical), {total} scanned"
+        )
+
+    verb = "Would rewrite" if dry_run else "Rewrote"
+    click.echo(
+        f"Done: {verb} {grand_updated} chunks "
+        f"({grand_skipped} already canonical, {grand_total} scanned) "
+        f"across {len(targets)} collection(s)."
+    )
