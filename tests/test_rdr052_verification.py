@@ -140,10 +140,16 @@ class TestReferenceQuestions:
 
 
 class TestPlanTemplates:
-    def test_seed_creates_five_idempotent(self, tmp_path, monkeypatch):
+    # RDR-063 legacy templates + RDR-078 YAML seeds (5 scenario + 4 meta).
+    _EXPECTED_FIRST = 5 + 9
+    _EXPECTED_SECOND = 0  # idempotent
+
+    def test_seed_creates_legacy_plus_rdr078_idempotent(
+        self, tmp_path, monkeypatch,
+    ):
         db_path, seed_fn = _seed_templates(tmp_path, monkeypatch)
-        assert seed_fn() == 5
-        assert seed_fn() == 0  # idempotent
+        assert seed_fn() == self._EXPECTED_FIRST
+        assert seed_fn() == self._EXPECTED_SECOND
 
     @pytest.mark.parametrize("field,expected", [
         ("tags", lambda v: "builtin-template" in v),

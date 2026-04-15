@@ -529,6 +529,79 @@ standalone_skills:
     tools: [Bash, Read, Grep, Glob]
     dispatches_to: [general-purpose]
 
+  # RDR-078 P5: plan-centric retrieval skills (nexus-05i.9)
+  plan-first:
+    description: "Gate skill at the top of every retrieval task — tries plan_match first, executes via plan_run if a match clears the threshold, falls through to /nx:query otherwise"
+    triggers:
+      - "before any retrieval task"
+      - "before dispatching search/query"
+      - "before decomposing an agentic pipeline"
+    tools: [Read]
+
+  research:
+    description: "Verb skill for design / architecture / planning tasks — dispatches plan_match with dimensions={verb:research}, executes via plan_run with caller bindings"
+    triggers:
+      - "how does X work"
+      - "design context for Y"
+      - "trace Z from spec to code"
+    tools: [Read]
+
+  review:
+    description: "Verb skill for critique / audit / code-review against a change set — dispatches plan_match with dimensions={verb:review}"
+    triggers:
+      - "review this change set"
+      - "did the refactor drift from the RDR"
+      - "critique the new logic"
+    tools: [Read]
+
+  analyze:
+    description: "Verb skill for analysis / synthesis / cross-corpus tasks — dispatches plan_match with dimensions={verb:analyze}"
+    triggers:
+      - "compare approaches across corpora"
+      - "survey options"
+      - "rank candidates by criterion"
+    tools: [Read]
+
+  debug:
+    description: "Verb skill for dev / debug from a failing code path — dispatches plan_match with dimensions={verb:debug}; intentionally flat (no traverse — Serena handles symbol navigation)"
+    triggers:
+      - "debug this test failure"
+      - "why is this handler failing"
+      - "trace the stack of the panic"
+    tools: [Read]
+
+  document:
+    description: "Verb skill for documentation authoring or audit — dispatches plan_match with dimensions={verb:document}"
+    triggers:
+      - "audit doc coverage"
+      - "find doc-coverage gaps"
+      - "what RDRs should I cite when documenting X"
+    tools: [Read]
+
+  plan-author:
+    description: "Meta-seed skill for authoring new plan templates — dispatches plan_match with dimensions={verb:plan-author} and surveys prior art before drafting"
+    triggers:
+      - "author a new plan template"
+      - "how do I write a plan for X"
+      - "draft a plan for this verb"
+    tools: [Read]
+
+  plan-inspect:
+    description: "Meta-seed skill for inspecting plan metrics or the dimension registry — dispatches plan_match with dimensions={verb:plan-inspect}"
+    triggers:
+      - "inspect plan metrics"
+      - "show dimension registry usage"
+      - "what plans are earning their slot"
+    tools: [Read]
+
+  plan-promote:
+    description: "Meta-seed skill that surveys plan library metrics and ranks promotion candidates — dispatches plan_match with dimensions={verb:plan-promote, strategy:propose}"
+    triggers:
+      - "promote high-use plans"
+      - "rank promotion candidates"
+      - "surface plans ready for a higher scope"
+    tools: [Read]
+
 # =============================================================================
 # PIPELINES
 # =============================================================================

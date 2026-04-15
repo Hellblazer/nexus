@@ -33,6 +33,10 @@ _STANDALONE_SKILLS = {
     "sequential-thinking",
     "serena-code-nav", "catalog",
     "receiving-review", "git-worktrees", "finishing-branch",
+    # RDR-078 P5 (nexus-05i.9): plan-centric skills — no agent dispatch,
+    # the skill body is the full implementation.
+    "plan-first", "research", "review", "analyze", "debug", "document",
+    "plan-author", "plan-inspect", "plan-promote",
 }
 
 

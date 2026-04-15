@@ -236,16 +236,23 @@ class TestOwnersCommand:
 
 
 class TestSeedPlanTemplates:
-    def test_seed_creates_five_templates(self, tmp_path, monkeypatch):
+    """The setup now seeds two groups: RDR-063 legacy templates (5) and
+    RDR-078 YAML scenario + meta seeds (9). Tests keep the legacy
+    count=5 assertion plus a new RDR-078 count check."""
+
+    _LEGACY_COUNT = 5
+    _RDR078_COUNT = 9   # 5 scenario seeds + 4 meta-seeds (nexus-05i.6 + .7)
+
+    def test_seed_creates_legacy_plus_rdr078_templates(self, tmp_path, monkeypatch):
         from nexus.db.t2 import T2Database
         db_path = tmp_path / "t2.db"
         monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: db_path)
         from nexus.commands.catalog import _seed_plan_templates
         count = _seed_plan_templates()
-        assert count == 5
+        assert count == self._LEGACY_COUNT + self._RDR078_COUNT
         db = T2Database(db_path)
-        results = db.search_plans("builtin-template")
-        assert len(results) == 5
+        legacy = db.search_plans("builtin-template")
+        assert len(legacy) >= self._LEGACY_COUNT
         db.close()
 
     def test_seed_idempotent(self, tmp_path, monkeypatch):
@@ -255,7 +262,7 @@ class TestSeedPlanTemplates:
         from nexus.commands.catalog import _seed_plan_templates
         first = _seed_plan_templates()
         second = _seed_plan_templates()
-        assert first == 5
+        assert first == self._LEGACY_COUNT + self._RDR078_COUNT
         assert second == 0
 
     def test_seed_templates_have_builtin_tag(self, tmp_path, monkeypatch):

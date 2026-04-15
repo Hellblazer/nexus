@@ -22,6 +22,13 @@ SKIP_STORAGE_DOCS=0
 SKIP_T2_SCAN=0
 SKIP_OPERATORS=0
 
+# RDR-078 P5 (nexus-05i.9, SC-7): the eight retrieval-shaped agents
+# get the plan-match-first preamble injected below.
+RETRIEVAL_AGENT=0
+if echo "$TASK_TEXT" | grep -qiE "strategic.planner|architect.planner|code.review.expert|substantive.critic|deep.analyst|deep.research.synthesizer|debugger|plan.auditor"; then
+    RETRIEVAL_AGENT=1
+fi
+
 if echo "$TASK_TEXT" | grep -qiE "refactor|rename.*symbol|find.*method|type.hierarch|navigate.code"; then
     # Code-nav agents don't need storage docs or operators
     SKIP_STORAGE_DOCS=1
@@ -30,6 +37,26 @@ elif echo "$TASK_TEXT" | grep -qiE "code.review|review.code|lint|style.check"; t
     # Code review agents don't need storage docs or operators
     SKIP_STORAGE_DOCS=1
     SKIP_OPERATORS=1
+fi
+
+# RDR-078 plan-match-first preamble (SC-7). Injected first so the agent
+# sees the discipline before any storage / tool docs that follow.
+if [[ $RETRIEVAL_AGENT -eq 1 ]]; then
+cat <<'PLANFIRST'
+## RDR-078 Plan-match-first (retrieval-shaped agent)
+
+Before decomposing any retrieval task, call
+`mcp__plugin_nx_nexus__plan_match(intent=<caller's phrasing>,
+dimensions={verb:<v>}, min_confidence=0.85, n=1)`. If a match lands,
+execute via `plan_run(match, bindings=...)` and return its final step
+result. Fall through to `/nx:query` only on miss.
+
+Five scenario verbs: research / review / analyze / debug / document.
+Plan-mgmt: plan-author / plan-inspect / plan-promote. See
+`/nx:plan-first` for the gate flow and `docs/plan-authoring-guide.md`
+for vocabulary.
+
+PLANFIRST
 fi
 
 # T2 memory for active project

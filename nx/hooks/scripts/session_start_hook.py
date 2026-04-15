@@ -5,6 +5,7 @@ SessionStart hook: Load project context via nx CLI.
 Surfaces T2 memory, beads, and scratch into Claude's session context.
 Output goes to stdout and is injected into Claude's session context.
 """
+from __future__ import annotations
 
 import os
 import shutil
@@ -108,6 +109,22 @@ def main() -> None:
     output_lines.append("Pagination: search/store_list/memory_search return paged results. Footer shows `offset=N` for next page.")
     output_lines.append("")
     output_lines.append("MCP tool prefix: `mcp__plugin_nx_nexus__` (e.g. `mcp__plugin_nx_nexus__search`, `mcp__plugin_nx_nexus__query`)")
+    output_lines.append("")
+
+    # --- RDR-078 Plan Library (SC-7): try plans before decomposing queries ---
+    output_lines.append("## Plan Library (RDR-078)")
+    output_lines.append("")
+    output_lines.append("Before any retrieval task, call `plan_match(intent, dimensions={verb:<verb>}, min_confidence=0.85, n=1)` and if a match lands, execute via `plan_run(match, bindings=...)`. Five scenario verbs ship at `scope:global`:")
+    output_lines.append("")
+    output_lines.append("- **research** — design / architecture / planning (walk from prose to implementing code)")
+    output_lines.append("- **review** — critique / audit a change set (decision-evolution traversal)")
+    output_lines.append("- **analyze** — synthesis across prose + code (reference-chain + rank + generate)")
+    output_lines.append("- **debug** — dev / debug from a failing path (flat; Serena handles symbol-level)")
+    output_lines.append("- **document** — doc authoring or coverage audit")
+    output_lines.append("")
+    output_lines.append("Plan-mgmt: `plan-author`, `plan-inspect` (default | dimensions), `plan-promote/propose`.")
+    output_lines.append("Gate: `/nx:plan-first` before any retrieval. Fall through to `/nx:query` only on miss.")
+    output_lines.append("Tools: `plan_match`, `plan_run`, `plan_save`, `plan_search`, `traverse`.")
     output_lines.append("")
 
     # --- L1 Knowledge Map (RDR-072) — per-repo cached topic labels ---
