@@ -155,19 +155,19 @@ def test_run_resolves_step_ref_for_list_field() -> None:
 
 
 def test_default_dispatcher_wraps_str_return_as_text_dict() -> None:
-    """MCP tools return str (human-readable). The runner requires dict.
-    The default dispatcher must wrap str → {"text": ...} so plan_run
-    works end-to-end with real MCP tools, not only with test stubs.
+    """Non-retrieval MCP tools return str (human-readable). The runner
+    requires dict. The default dispatcher must wrap str → {"text": ...}
+    so plan_run works end-to-end with real MCP tools.
 
-    Regression for RDR-078 post-critique finding: before this fix,
-    every step using a non-traverse MCP tool raised PlanRunStepRefError
-    in production because MCP tools returned str and the runner asserted
-    dict at line 454."""
+    Note: as of RDR-079 P1, retrieval tools (search, query) are auto-
+    promoted to structured=True and return dict directly. This test
+    covers the OTHER path: non-retrieval tools that still return str
+    (e.g., `plan_search` when called without structured flag)."""
     from nexus.plans.runner import _default_dispatcher
 
-    # search() MCP tool — returns str regardless of hit/miss.
+    # plan_search — not in _RETRIEVAL_TOOLS, returns str by default.
     result = _default_dispatcher(
-        "search", {"query": "nothing-indexed-sentinel-xyz", "corpus": "knowledge", "limit": 1},
+        "plan_search", {"query": "no-such-plan-xyz", "project": "none"},
     )
     assert isinstance(result, dict), (
         "default dispatcher must normalize str return into dict form"
@@ -176,6 +176,23 @@ def test_default_dispatcher_wraps_str_return_as_text_dict() -> None:
         "str-returning MCP tools must be wrapped as {'text': ...}"
     )
     assert isinstance(result["text"], str)
+
+
+def test_default_dispatcher_auto_injects_structured_for_retrieval_tools() -> None:
+    """RDR-079 P1: search and query are auto-promoted to structured=True
+    by the dispatcher so plan steps receive the runner-contract dict."""
+    from nexus.plans.runner import _default_dispatcher
+
+    result = _default_dispatcher(
+        "search",
+        {"query": "nothing-indexed-sentinel-xyz", "corpus": "knowledge", "limit": 1},
+    )
+    assert isinstance(result, dict)
+    # Must be the runner-contract shape, not {"text": str}.
+    assert "ids" in result
+    assert "tumblers" in result
+    assert "distances" in result
+    assert "collections" in result
 
 
 def test_default_dispatcher_passes_through_dict_return() -> None:

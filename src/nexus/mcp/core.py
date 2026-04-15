@@ -63,7 +63,8 @@ def search(
     where: str = "",
     cluster_by: str = "",
     topic: str = "",
-) -> str:
+    structured: bool = False,
+) -> str | dict:
     """Semantic search across T3 collections. Paged results (``offset=N`` for next page).
 
     Args:
@@ -74,6 +75,11 @@ def search(
         where: Metadata filter (KEY=VALUE, comma-separated). Ops: = >= <= > < !=
         cluster_by: "semantic" for topic/Ward clustering (default), empty to disable
         topic: Pre-filter to documents in this topic label (from nx taxonomy discover)
+        structured: RDR-079 P1 runner-contract flag. When True, returns a
+            dict ``{ids, tumblers, distances, collections}`` matching the
+            RDR-078 §Phase 1 retrieval-step contract so plan steps can
+            resolve ``$stepN.ids`` / ``$stepN.tumblers`` / etc. When False
+            (default), returns the human-readable string (backward compat).
     """
     try:
         from nexus.config import load_config
@@ -101,6 +107,12 @@ def search(
                 target.extend(resolve_corpus(part, all_names))
 
         if not target:
+            if structured:
+                return {
+                    "ids": [], "tumblers": [], "distances": [],
+                    "collections": [],
+                    "error": f"No collections match corpus {corpus!r}",
+                }
             return f"No collections match corpus {corpus!r}"
 
         where_dict = _parse_where_str(where)
@@ -124,13 +136,48 @@ def search(
         if not clustered:
             results.sort(key=lambda r: r.distance)
         if not results:
+            if structured:
+                return {
+                    "ids": [], "tumblers": [], "distances": [],
+                    "collections": [],
+                }
             return "No results."
 
         # Apply pagination
         total = len(results)
         page = results[offset:offset + limit]
         if not page:
+            if structured:
+                return {
+                    "ids": [], "tumblers": [], "distances": [],
+                    "collections": [],
+                }
             return f"No results at offset {offset} (total {total})."
+
+        # RDR-079 P1 runner-contract structured return. Emits the shape
+        # plan_run expects for retrieval steps: {ids, tumblers, distances,
+        # collections}. Caller passes structured=True via the runner's
+        # _default_dispatcher when dispatching a retrieval step.
+        if structured:
+            ids: list[str] = []
+            tumblers: list[str] = []
+            distances: list[float] = []
+            cols: set[str] = set()
+            for r in page:
+                ids.append(r.id)
+                # Tumbler may live in metadata when the result was catalog-
+                # resolved; fall back to empty string so the list aligns 1:1
+                # with ids.
+                tumblers.append(str(r.metadata.get("tumbler", "")))
+                distances.append(float(r.distance))
+                if r.collection:
+                    cols.add(r.collection)
+            return {
+                "ids": ids,
+                "tumblers": tumblers,
+                "distances": distances,
+                "collections": sorted(cols),
+            }
 
         # Record search trace for RDR-061 E2 retrieval feedback correlation.
         # Non-fatal — session may be unavailable in test contexts.
@@ -176,6 +223,11 @@ def search(
 
         return "\n\n".join(lines)
     except Exception as e:
+        if structured:
+            return {
+                "ids": [], "tumblers": [], "distances": [],
+                "collections": [], "error": str(e),
+            }
         return f"Error: {e}"
 
 
@@ -190,7 +242,8 @@ def query(
     follow_links: str = "",
     depth: int = 1,
     subtree: str = "",
-) -> str:
+    structured: bool = False,
+) -> str | dict:
     """Document-level semantic search for analytical questions.
 
     Results are capped at ``limit``. When more documents match, a footer line shows
@@ -293,6 +346,11 @@ def query(
                 # else: no seeds found — catalog_collections stays None, broad search proceeds
 
             if catalog_collections is not None and not catalog_collections:
+                if structured:
+                    return {
+                        "ids": [], "tumblers": [], "distances": [],
+                        "collections": [],
+                    }
                 return f"No documents found matching catalog filters (author={author!r}, content_type={content_type!r}, subtree={subtree!r}, follow_links={follow_links!r})"
 
         routing_note = ""
@@ -325,6 +383,12 @@ def query(
                     target.extend(resolve_corpus(part, all_names))
 
         if not target:
+            if structured:
+                return {
+                    "ids": [], "tumblers": [], "distances": [],
+                    "collections": [],
+                    "error": f"No collections match corpus {corpus!r}",
+                }
             return f"No collections match corpus {corpus!r}"
 
         where_dict = _parse_where_str(where)
@@ -340,6 +404,11 @@ def query(
             )
         results.sort(key=lambda r: r.distance)
         if not results:
+            if structured:
+                return {
+                    "ids": [], "tumblers": [], "distances": [],
+                    "collections": [],
+                }
             return "No documents found."
 
         # Group by document: use content_hash or source_title as doc key
@@ -377,6 +446,39 @@ def query(
         all_docs = sorted(docs.values(), key=lambda d: d["distance"])
         sorted_docs = all_docs[:limit]
         total = len(all_docs)
+
+        # RDR-079 P1 runner-contract structured return. Document-level query
+        # maps to the retrieval-step shape by using chunk-level ids for the
+        # hydration path (best-matching chunk per document).
+        if structured:
+            ids_out: list[str] = []
+            tumblers_out: list[str] = []
+            distances_out: list[float] = []
+            cols_out: set[str] = set()
+            for r in results:
+                meta = r.metadata
+                doc_key = (
+                    meta.get("content_hash")
+                    or meta.get("source_title")
+                    or meta.get("source_path")
+                    or r.id
+                )
+                # Only surface the one best-distance chunk per document so
+                # downstream traverse gets distinct seeds, not N duplicates.
+                if doc_key in {k for k in docs if docs[k]["distance"] == r.distance}:
+                    ids_out.append(r.id)
+                    tumblers_out.append(str(meta.get("tumbler", "")))
+                    distances_out.append(float(r.distance))
+                    if r.collection:
+                        cols_out.add(r.collection)
+                    if len(ids_out) >= limit:
+                        break
+            return {
+                "ids": ids_out,
+                "tumblers": tumblers_out,
+                "distances": distances_out,
+                "collections": sorted(cols_out),
+            }
 
         header = f"Found {len(sorted_docs)} documents (from {len(results)} chunks across {len(target)} collections)"
         lines: list[str] = [f"{routing_note}\n{header}" if routing_note else header]
@@ -421,6 +523,11 @@ def query(
 
         return "\n".join(lines)
     except Exception as e:
+        if structured:
+            return {
+                "ids": [], "tumblers": [], "distances": [],
+                "collections": [], "error": str(e),
+            }
         return f"Error: {e}"
 
 
@@ -431,7 +538,8 @@ def store_put(
     title: str = "",
     tags: str = "",
     ttl: str = "permanent",
-) -> str:
+    structured: bool = False,
+) -> str | dict:
     """Store content in the T3 permanent knowledge store.
 
     Args:
@@ -440,9 +548,14 @@ def store_put(
         title: Document title (recommended for deduplication)
         tags: Comma-separated tags
         ttl: Time-to-live: Nd (days), Nw (weeks), or "permanent"
+        structured: RDR-079 P1. When True, returns a confirmation dict
+            ``{stored: bool, doc_id: str, collection: str}`` instead of a
+            human-readable string. Default False (backward compat).
     """
     try:
         if not content:
+            if structured:
+                return {"stored": False, "error": "content is required"}
             return "Error: content is required"
         days = parse_ttl(ttl)
         ttl_days = days if days is not None else 0
@@ -489,8 +602,12 @@ def store_put(
         except Exception:
             import structlog
             structlog.get_logger().debug("relevance_log_store_failed", exc_info=True)
+        if structured:
+            return {"stored": True, "doc_id": doc_id, "collection": col_name}
         return f"Stored: {doc_id} -> {col_name}"
     except Exception as e:
+        if structured:
+            return {"stored": False, "collection": "", "error": str(e)}
         return f"Error: {e}"
 
 
@@ -628,7 +745,8 @@ def memory_put(
     title: str,
     tags: str = "",
     ttl: int = 30,
-) -> str:
+    structured: bool = False,
+) -> str | dict:
     """Store a memory entry in T2 (SQLite). Upserts by (project, title).
 
     Args:
@@ -637,9 +755,13 @@ def memory_put(
         title: Entry title (unique within project)
         tags: Comma-separated tags
         ttl: Time-to-live in days (default 30, 0 for permanent)
+        structured: RDR-079 P1. When True, returns confirmation dict
+            ``{stored: bool, project: str, title: str, id: int}``.
     """
     try:
         if not content:
+            if structured:
+                return {"stored": False, "project": project, "title": title, "error": "content is required"}
             return "Error: content is required"
         with _t2_ctx() as db:
             row_id = db.put(
@@ -649,13 +771,17 @@ def memory_put(
                 tags=tags,
                 ttl=ttl if ttl > 0 else None,
             )
+        if structured:
+            return {"stored": True, "project": project, "title": title, "id": row_id}
         return f"Stored: [{row_id}] {project}/{title}"
     except Exception as e:
+        if structured:
+            return {"stored": False, "project": project, "title": title, "error": str(e)}
         return f"Error: {e}"
 
 
 @mcp.tool()
-def memory_get(project: str, title: str = "") -> str:
+def memory_get(project: str, title: str = "", structured: bool = False) -> str | dict:
     """Retrieve a memory entry by project and title.
 
     When title is empty, lists all entries for the project (titles only — use
@@ -664,13 +790,27 @@ def memory_get(project: str, title: str = "") -> str:
     Args:
         project: Project namespace
         title: Entry title. Leave empty to LIST all entries (titles only).
+        structured: RDR-079 P1. When True, returns a dict. Single-entry mode:
+            ``{project, title, content, tags, timestamp, id}``. List mode:
+            ``{project, entries: [{id, title, timestamp}]}``.
     """
     try:
         with _t2_ctx() as db:
             if title:
                 entry = db.get(project=project, title=title)
                 if entry is None:
+                    if structured:
+                        return {"project": project, "title": title, "error": "not found"}
                     return f"Not found: {project}/{title}"
+                if structured:
+                    return {
+                        "id": entry.get("id"),
+                        "project": entry.get("project", project),
+                        "title": entry.get("title", title),
+                        "content": entry.get("content", ""),
+                        "tags": entry.get("tags", ""),
+                        "timestamp": entry.get("timestamp", ""),
+                    }
                 return (
                     f"[{entry['id']}] {entry['project']}/{entry['title']}\n"
                     f"Tags: {entry.get('tags', '')}\n"
@@ -680,12 +820,28 @@ def memory_get(project: str, title: str = "") -> str:
             else:
                 entries = db.list_entries(project=project)
                 if not entries:
+                    if structured:
+                        return {"project": project, "entries": []}
                     return f"No entries for project {project!r}."
+                if structured:
+                    return {
+                        "project": project,
+                        "entries": [
+                            {
+                                "id": e.get("id"),
+                                "title": e.get("title", ""),
+                                "timestamp": e.get("timestamp", ""),
+                            }
+                            for e in entries
+                        ],
+                    }
                 lines: list[str] = [f"{project}  ({len(entries)} entries — titles only, call with title to get content)"]
                 for e in entries:
                     lines.append(f"  [{e['id']}] {e['title']}  ({e.get('timestamp', '')[:10]})")
                 return "\n".join(lines)
     except Exception as e:
+        if structured:
+            return {"project": project, "title": title, "error": str(e)}
         return f"Error: {e}"
 
 
@@ -710,7 +866,10 @@ def memory_delete(project: str, title: str) -> str:
 
 
 @mcp.tool()
-def memory_search(query: str, project: str = "", limit: int = 20, offset: int = 0) -> str:
+def memory_search(
+    query: str, project: str = "", limit: int = 20, offset: int = 0,
+    structured: bool = False,
+) -> str | dict:
     """Full-text search across T2 memory entries.
 
     Searches title, content, and tags fields via FTS5.
@@ -721,16 +880,38 @@ def memory_search(query: str, project: str = "", limit: int = 20, offset: int = 
         project: Optional project filter
         limit: Page size (default 20)
         offset: Skip this many results (default 0). Use for pagination.
+        structured: RDR-079 P1. When True, returns
+            ``{entries: [{id, project, title, snippet, timestamp}], has_more: bool, offset: int, total: int}``.
     """
     try:
         with _t2_ctx() as db:
             results = db.search(query, project=project or None)
         if not results:
+            if structured:
+                return {"entries": [], "has_more": False, "offset": offset, "total": 0}
             return "No results."
         total = len(results)
         page = results[offset:offset + limit]
         if not page:
+            if structured:
+                return {"entries": [], "has_more": False, "offset": offset, "total": total}
             return f"No results at offset {offset} (total {total})."
+        if structured:
+            return {
+                "entries": [
+                    {
+                        "id": r.get("id"),
+                        "project": r.get("project", ""),
+                        "title": r.get("title", ""),
+                        "snippet": r.get("content", "")[:200].replace("\n", " "),
+                        "timestamp": r.get("timestamp", ""),
+                    }
+                    for r in page
+                ],
+                "has_more": (offset + len(page)) < total,
+                "offset": offset,
+                "total": total,
+            }
         lines: list[str] = []
         for r in page:
             snippet = r["content"][:200].replace("\n", " ")
@@ -742,6 +923,8 @@ def memory_search(query: str, project: str = "", limit: int = 20, offset: int = 
             lines.append(f"\n--- showing {offset + 1}-{shown_end} of {total} (end)")
         return "\n\n".join(lines)
     except Exception as e:
+        if structured:
+            return {"entries": [], "has_more": False, "offset": offset, "total": 0, "error": str(e)}
         return f"Error: {e}"
 
 

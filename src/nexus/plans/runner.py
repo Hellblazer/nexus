@@ -168,6 +168,13 @@ _DOMAIN_TO_CORPUS: dict[str, str] = {
 #: corpus-injection helper (no embedding space to route into).
 _NON_EMBEDDING_TOOLS: frozenset[str] = frozenset({"traverse"})
 
+#: Tools that accept the ``structured=True`` kwarg to opt into the retrieval
+#: step-output contract (RDR-079 P1). ``traverse`` is deliberately excluded —
+#: it returns dict natively without needing the flag. The runner's
+#: ``_default_dispatcher`` auto-injects ``structured=True`` for the tools in
+#: this set so plan steps can reference ``$stepN.ids`` / ``$stepN.tumblers``.
+_RETRIEVAL_TOOLS: frozenset[str] = frozenset({"search", "query"})
+
 #: Args keys that may carry a collection name. The runner extracts
 #: candidates from these to validate the cross-embedding guard, and
 #: skips corpus injection when any of these are populated.
@@ -412,6 +419,13 @@ def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]:
                 f"(available sample: {', '.join(available[:10])}…)"
             ),
         )
+    # RDR-079 P1: inject structured=True for retrieval tools so plan steps
+    # receive the runner-contract dict {ids, tumblers, distances, collections}
+    # per RDR-078 §Phase 1, rather than a human-readable string wrapped as
+    # {"text": str}. Non-retrieval tools keep their default behavior; callers
+    # can still pass structured=True explicitly if they want.
+    if tool in _RETRIEVAL_TOOLS and "structured" not in args:
+        args = {**args, "structured": True}
     result = fn(**args)
     # Most MCP tools return str (human-readable summary); the runner
     # expects dict per RDR-078 §Phase 1. Normalize: wrap string returns
