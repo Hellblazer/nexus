@@ -6,6 +6,7 @@ Separated from tool definitions (mcp_server.py) to isolate concerns.
 """
 from __future__ import annotations
 
+import os
 import threading
 import time
 import warnings
@@ -515,18 +516,20 @@ def _load_config_for_pool() -> dict:
 def get_operator_pool():
     """Lazy-init singleton for the RDR-079 operator pool.
 
-    On first call: creates a dedicated pool T1 session (pool-<uuid>),
-    sets ``NEXUS_T1_SESSION_ID`` in this process's env so
-    ``spawn_worker()`` guards pass, and constructs the
-    :class:`OperatorPool` wired to the pool session.
+    On first call: creates a dedicated pool T1 session (``pool-<uuid>``
+    session file), sets ``NEXUS_T1_SESSION_ID`` in this process's env
+    so every subsequent ``spawn_worker()`` call satisfies its SC-15
+    guard, and constructs the :class:`OperatorPool` wired to the
+    pool session.
 
     Subsequent calls return the cached instance. Reset via
     :func:`reset_operator_pool` in tests.
 
-    Returns the OperatorPool on success. On auth failure, raises
-    :class:`~nexus.operators.pool.PoolAuthUnavailableError` from
-    the pool's first spawn (not here — this function does not touch
-    auth).
+    Returns the ``OperatorPool`` on success. Auth failure is deferred
+    to the pool's first ``spawn_worker`` call (raises
+    :class:`~nexus.operators.pool.PoolAuthUnavailableError`) so a
+    consumer can know the pool exists without incurring the auth
+    subprocess call up front.
     """
     global _operator_pool
     if _operator_pool is not None:
@@ -535,11 +538,23 @@ def get_operator_pool():
     with _operator_pool_lock:
         if _operator_pool is not None:
             return _operator_pool
-        from nexus.operators.pool import OperatorPool
+        from nexus.operators.pool import OperatorPool, create_pool_session
 
         cfg = _load_config_for_pool() or {}
         op_cfg = cfg.get("operators", {}) or {}
-        _operator_pool = OperatorPool(
+
+        # Create pool T1 session BEFORE constructing the pool so
+        # spawn_worker()'s env guard always passes. The session file
+        # lives at ~/.config/nexus/sessions/pool-<uuid>.session; its
+        # session_id is exported via NEXUS_T1_SESSION_ID so workers
+        # AND this process's own T1 client resolve to the pool's
+        # T1 server (RDR-079 Amendment 1: the pool IS the nexus MCP
+        # server; the user's T1 — if any — was already cached by the
+        # nexus MCP server before this lazy-init point).
+        pool_session = create_pool_session()
+        os.environ["NEXUS_T1_SESSION_ID"] = pool_session.session_id
+
+        pool = OperatorPool(
             size=int(op_cfg.get("pool_size", 2)),
             model=str(op_cfg.get("model", "haiku")),
             max_budget_usd=float(op_cfg.get("max_budget_usd", 1.0)),
@@ -548,6 +563,8 @@ def get_operator_pool():
                 op_cfg.get("retirement_token_threshold", 150_000),
             ),
         )
+        pool.pool_session = pool_session
+        _operator_pool = pool
         return _operator_pool
 
 
@@ -574,13 +591,18 @@ def reset_singletons():
     for the remainder of the test session.  Tests that need an empty hook
     list should clear ``_post_store_hooks`` explicitly in their own fixture.
     """
-    global _t1_instance, _t1_isolated, _t3_instance, _collections_cache, _catalog_instance, _catalog_mtime
+    global _t1_instance, _t1_isolated, _t3_instance, _collections_cache, _catalog_instance, _catalog_mtime, _operator_pool
     _t1_instance = None
     _t1_isolated = False
     _t3_instance = None
     _collections_cache = ([], 0.0)
     _catalog_instance = None
     _catalog_mtime = 0.0
+    # Clear the operator pool singleton too — test suites calling
+    # reset_singletons expect a clean MCP-infra slate. Live workers
+    # owned by a prior test are the test's responsibility to shut down;
+    # this just clears the cached reference.
+    _operator_pool = None
     clear_search_traces()
 
 

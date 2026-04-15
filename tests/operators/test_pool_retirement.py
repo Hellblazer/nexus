@@ -13,6 +13,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -206,3 +207,58 @@ def test_reset_operator_pool_for_testing(monkeypatch) -> None:
     mcp_infra.reset_operator_pool()
     p2 = mcp_infra.get_operator_pool()
     assert p1 is not p2
+
+
+def test_get_operator_pool_wires_session_and_env(monkeypatch, tmp_path) -> None:
+    """P3 critical: ``get_operator_pool()`` must call ``create_pool_session()``
+    AND set ``NEXUS_T1_SESSION_ID`` in os.environ — otherwise every
+    operator MCP tool's first call raises PoolConfigError because
+    ``spawn_worker()`` sees no env. (Review finding #7.)"""
+    from nexus import mcp_infra
+    from nexus.operators import pool as pool_mod
+
+    monkeypatch.delenv("NEXUS_T1_SESSION_ID", raising=False)
+    monkeypatch.setattr(mcp_infra, "_operator_pool", None, raising=False)
+
+    # Stub T1 server so we don't actually start ChromaDB.
+    fake_start = lambda: ("127.0.0.1", 65432, 11111, str(tmp_path))  # noqa: E731
+    monkeypatch.setattr(pool_mod, "_start_t1_server", fake_start)
+    # Route session files to tmp_path so the test doesn't touch the real dir.
+    monkeypatch.setattr(pool_mod, "SESSIONS_DIR", tmp_path)
+
+    pool = mcp_infra.get_operator_pool()
+    assert pool.pool_session is not None
+    assert pool.pool_session.session_id.startswith("pool-")
+    # Env var is set — subsequent spawn_worker() calls will pass the guard.
+    assert os.environ.get("NEXUS_T1_SESSION_ID") == pool.pool_session.session_id
+    # Session file was written under the test's SESSIONS_DIR.
+    assert (tmp_path / f"{pool.pool_session.session_id}.session").exists()
+
+
+def test_reset_singletons_also_clears_operator_pool(monkeypatch) -> None:
+    """Review finding #8: ``reset_singletons()`` must clear the pool too,
+    otherwise tests using the broader reset helper leak a live pool
+    across test boundaries."""
+    from nexus import mcp_infra
+
+    monkeypatch.setattr(mcp_infra, "_operator_pool", None, raising=False)
+    p1 = mcp_infra.get_operator_pool()
+    assert mcp_infra._operator_pool is p1
+    mcp_infra.reset_singletons()
+    assert mcp_infra._operator_pool is None
+
+
+def test_dispatch_raises_on_dead_worker(stub_pool) -> None:
+    """Review finding #4: dispatch must refuse a worker whose ``alive``
+    flag is False rather than queueing behind a dead subprocess.
+    Protects P3 callers holding stale worker references."""
+    import asyncio as _asyncio
+    from nexus.operators.pool import PoolSpawnError
+
+    async def scenario():
+        w = await stub_pool.spawn_worker()
+        w.alive = False  # simulate post-timeout state
+        with pytest.raises(PoolSpawnError, match="not alive"):
+            await stub_pool.dispatch(w, prompt="noop", timeout=5.0)
+
+    _asyncio.new_event_loop().run_until_complete(scenario())

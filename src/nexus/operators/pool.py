@@ -304,6 +304,12 @@ def teardown_pool_session(
 # ── Auth guard (SC-10) ─────────────────────────────────────────────────────
 
 
+import threading as _threading
+
+_auth_checked_flag: bool = False
+_auth_lock = _threading.Lock()
+
+
 def check_auth() -> None:
     """Verify ``claude auth status --json`` reports a logged-in session.
 
@@ -312,7 +318,31 @@ def check_auth() -> None:
     ``loggedIn=false``). RDR-079 risk mitigation: the JSON schema may
     drift across claude CLI versions, so we probe for key PRESENCE
     before trusting its value.
+
+    Idempotent across the process lifetime: once a successful check has
+    run, subsequent calls return immediately. Threadsafe via a
+    module-level lock (FastMCP can dispatch tools from multiple threads;
+    without this guard two concurrent operator calls would each spawn
+    ``claude auth status``). Tests can reset via :func:`_reset_auth_cache`.
     """
+    global _auth_checked_flag
+    if _auth_checked_flag:
+        return
+    with _auth_lock:
+        if _auth_checked_flag:
+            return
+        _perform_auth_check()
+        _auth_checked_flag = True
+
+
+def _reset_auth_cache() -> None:
+    """Clear the module-level auth-checked flag. Test-injection seam."""
+    global _auth_checked_flag
+    _auth_checked_flag = False
+
+
+def _perform_auth_check() -> None:
+    """Do the actual subprocess + JSON parse. Internal — always runs."""
     try:
         result = subprocess.run(
             ["claude", "auth", "status", "--json"],
@@ -464,6 +494,10 @@ class OperatorPool:
     workers: list[Worker] = field(default_factory=list)
     pool_session: PoolSession | None = None
     _auth_checked: bool = False
+    # Serializes the check-then-spawn sequence in dispatch_with_rotation so
+    # bursty parallel callers don't both observe "no live worker" and
+    # double-spawn. (Review finding #2.)
+    _spawn_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     async def spawn_worker(
         self,
@@ -553,6 +587,15 @@ class OperatorPool:
             within *timeout* seconds. Worker is killed; ``alive=False``.
           * ``PoolSpawnError`` — worker exited before producing a result.
         """
+        # Guard before acquiring the lock — callers who hold a stale
+        # reference to a retired/timed-out worker get a clear error
+        # rather than queueing behind a dead subprocess. (Review #4.)
+        if not worker.alive:
+            raise PoolSpawnError(
+                f"worker {worker.session_id!r} is not alive; acquire a "
+                f"fresh worker via dispatch_with_rotation()"
+            )
+
         async with worker._lock:
             if worker.process.returncode is not None:
                 worker.alive = False
@@ -565,7 +608,11 @@ class OperatorPool:
                 "type": "user",
                 "message": {"role": "user", "content": prompt},
             }) + "\n"
-            assert worker.process.stdin is not None
+            if worker.process.stdin is None:
+                raise PoolSpawnError(
+                    f"worker {worker.session_id!r} stdin is None — spawn "
+                    f"did not wire PIPE correctly"
+                )
             try:
                 worker.process.stdin.write(turn.encode())
                 await worker.process.stdin.drain()
@@ -613,9 +660,10 @@ class OperatorPool:
         Returns the newly spawned replacement worker.
         """
         worker.alive = False
-        deadline = asyncio.get_event_loop().time() + drain_timeout
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + drain_timeout
         while worker.in_flight > 0:
-            if asyncio.get_event_loop().time() > deadline:
+            if loop.time() > deadline:
                 _log.warning(
                     "pool_worker_retire_drain_timeout",
                     session_id=worker.session_id,
@@ -660,13 +708,17 @@ class OperatorPool:
         the chosen worker's cumulative tokens are over the threshold
         AFTER the dispatch, retires it for subsequent dispatches.
         """
-        worker = None
-        for candidate in list(self.workers):
-            if candidate.alive:
-                worker = candidate
-                break
-        if worker is None:
-            worker = await self.spawn_worker(operator_role=operator_role)
+        # Serialize the check-then-spawn to prevent concurrent callers
+        # from both observing "no live worker" and double-spawning.
+        # (Review finding #2.)
+        async with self._spawn_lock:
+            worker = None
+            for candidate in list(self.workers):
+                if candidate.alive:
+                    worker = candidate
+                    break
+            if worker is None:
+                worker = await self.spawn_worker(operator_role=operator_role)
 
         result = await self.dispatch(worker, prompt=prompt, timeout=timeout)
 
@@ -725,7 +777,11 @@ class OperatorPool:
         ``{"text": result.result}`` as a safety fallback so callers still
         get a dict.
         """
-        assert worker.process.stdout is not None
+        if worker.process.stdout is None:
+            raise PoolSpawnError(
+                f"worker {worker.session_id!r} stdout is None — spawn "
+                f"did not wire PIPE correctly"
+            )
         structured_payload: dict | None = None
 
         while True:
