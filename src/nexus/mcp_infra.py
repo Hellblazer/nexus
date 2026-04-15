@@ -120,6 +120,62 @@ def get_t3():
     return _t3_instance
 
 
+# ── T1 plan_session cache (RDR-078 P1) ────────────────────────────────────
+#
+# Singleton wrapper around :class:`~nexus.plans.session_cache.PlanSessionCache`.
+# Populated lazily on first use from T2. Subsequent calls reuse the same
+# cache instance; a ``plan_save`` hook (see below) keeps it current.
+
+_plan_cache_instance: Any = None
+_plan_cache_lock = threading.Lock()
+_plan_cache_populated: bool = False
+
+
+def get_t1_plan_cache(*, populate_from: Any = None) -> Any:
+    """Return the T1 ``plans__session`` cache, lazy-populated on first call.
+
+    When *populate_from* (a PlanLibrary) is supplied and the cache has
+    not yet been populated this process, the full active plan set is
+    loaded. Subsequent calls short-circuit — the ``plan_save`` MCP
+    hook keeps the cache fresh in-session.
+
+    Returns ``None`` when no T1 client is reachable — the matcher
+    treats that as "fall back to FTS5".
+    """
+    global _plan_cache_instance, _plan_cache_populated
+    if _plan_cache_instance is None:
+        with _plan_cache_lock:
+            if _plan_cache_instance is None:
+                try:
+                    t1, _ = get_t1()
+                    from nexus.plans.session_cache import PlanSessionCache
+                    _plan_cache_instance = PlanSessionCache(
+                        client=t1._client, session_id=t1.session_id,
+                    )
+                except Exception:
+                    _plan_cache_instance = None
+    if (
+        _plan_cache_instance is not None
+        and populate_from is not None
+        and not _plan_cache_populated
+    ):
+        with _plan_cache_lock:
+            if not _plan_cache_populated:
+                try:
+                    _plan_cache_instance.populate(populate_from)
+                finally:
+                    _plan_cache_populated = True
+    return _plan_cache_instance
+
+
+def reset_plan_cache_for_tests() -> None:
+    """Test helper: drop the cache singleton so the next call re-init."""
+    global _plan_cache_instance, _plan_cache_populated
+    with _plan_cache_lock:
+        _plan_cache_instance = None
+        _plan_cache_populated = False
+
+
 def get_collection_names() -> list[str]:
     """Return cached T3 collection names, refreshing every _COLLECTIONS_CACHE_TTL seconds."""
     global _collections_cache

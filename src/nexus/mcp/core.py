@@ -2,7 +2,9 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """MCP core tools: search, store, memory, scratch, collections, plans.
 
-14 registered tools + 3 demoted (plain functions, no @mcp.tool()).
+17 registered tools + 3 demoted (plain functions, no @mcp.tool()).
+RDR-078 P1 added ``plan_match`` + ``plan_run`` to the existing
+``plan_save`` / ``plan_search`` pair.
 """
 from __future__ import annotations
 
@@ -1011,6 +1013,19 @@ def plan_save(
                 project=project,
                 ttl=ttl,
             )
+            # RDR-078 P1 write-visibility: mirror the new plan into the
+            # T1 ``plans__session`` cache so in-session ``plan_match``
+            # sees it without waiting for the next SessionStart.
+            if outcome == "success":
+                try:
+                    from nexus.mcp_infra import get_t1_plan_cache
+                    cache = get_t1_plan_cache(populate_from=db.plans)
+                    if cache is not None and cache.is_available:
+                        row = db.plans.get_plan(row_id)
+                        if row is not None:
+                            cache.upsert(row)
+                except Exception:
+                    pass  # cache-unavailable is non-fatal — T2 is authoritative
         return f"Saved plan: [{row_id}] {query[:80]}"
     except Exception as e:
         return f"Error: {e}"
@@ -1050,6 +1065,134 @@ def plan_search(query: str, project: str = "", limit: int = 5, offset: int = 0) 
         if has_more:
             lines.append(f"\n--- showing {offset + 1}-{shown_end}. may have more: offset={shown_end}")
         return "\n\n".join(lines)
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def plan_match(
+    intent: str,
+    dimensions: str = "",
+    scope_preference: str = "",
+    min_confidence: float = 0.85,
+    n: int = 5,
+    project: str = "",
+) -> str:
+    """Match *intent* against the T2 plan library with cosine + FTS5 fallback.
+
+    RDR-078 P1. Returns ranked plans whose description best matches
+    *intent*. Semantic match (T1 ``plans__session`` cosine) is the
+    primary path; falls back to T2 FTS5 when the session cache is
+    unavailable (the fallback hits carry ``confidence=None`` and are
+    returned regardless of *min_confidence*).
+
+    Args:
+        intent: Caller's natural-language description of the task.
+        dimensions: Optional ``key=value`` filter (comma-separated,
+            e.g. ``"verb=research,scope=global"``). Only plans whose
+            stored ``dimensions ⊇ filter`` are returned.
+        scope_preference: Reserved for future scope-cascade weighting
+            (PQ-14). Accepted but unused at this version.
+        min_confidence: Cosine threshold (0.0–1.0). Default 0.85 per
+            PQ-2. FTS5 fallback matches ignore this gate.
+        n: Max results to return.
+        project: Restrict to plans tagged with this project.
+    """
+    from nexus.filters import parse_where
+    from nexus.mcp_infra import get_t1_plan_cache
+    from nexus.plans.matcher import plan_match as _plan_match
+
+    try:
+        dim_filter = (
+            {k: v for k, v in (parse_where(dimensions.split(",")) or {}).items()}
+            if dimensions else {}
+        )
+        with _t2_ctx() as db:
+            cache = get_t1_plan_cache(populate_from=db.plans)
+            matches = _plan_match(
+                intent,
+                library=db.plans,
+                cache=cache,
+                dimensions=dim_filter,
+                scope_preference=scope_preference,
+                min_confidence=min_confidence,
+                n=n,
+                project=project,
+            )
+        if not matches:
+            return "No matching plans."
+        lines: list[str] = []
+        for m in matches:
+            conf = "fts5" if m.confidence is None else f"{m.confidence:.3f}"
+            lines.append(
+                f"[{m.plan_id}] {m.description[:80]}\n"
+                f"  confidence={conf}  name={m.name or '-'}  "
+                f"dimensions={m.dimensions}  tags={m.tags or '-'}"
+            )
+        return "\n\n".join(lines)
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def plan_run(plan_id: int, bindings: str = "") -> str:
+    """Execute the plan identified by *plan_id* against the MCP tool surface.
+
+    RDR-078 P1. Pure substitution + tool dispatch. No agent spawning,
+    no LLM — every transformation is observable.
+
+    Args:
+        plan_id: The T2 plans.id to execute.
+        bindings: Optional ``key=value`` placeholder fills
+            (comma-separated, e.g. ``"intent=how X works,subtree=1.2"``).
+            Caller bindings override ``match.default_bindings`` on
+            conflict.
+    """
+    from nexus.filters import parse_where
+    from nexus.plans.match import Match
+    from nexus.plans.runner import (
+        PlanRunBindingError,
+        PlanRunEmbeddingDomainError,
+        PlanRunStepRefError,
+        plan_run as _plan_run,
+    )
+
+    try:
+        with _t2_ctx() as db:
+            row = db.plans.get_plan(int(plan_id))
+            if row is None:
+                return f"Error: no plan with id={plan_id}"
+            match = Match.from_plan_row(row)
+            db.plans.increment_run_started(match.plan_id)
+
+        caller_bindings = (
+            dict(parse_where(bindings.split(",")) or {}) if bindings else {}
+        )
+        try:
+            result = _plan_run(match, caller_bindings)
+            success = True
+        except (
+            PlanRunBindingError,
+            PlanRunStepRefError,
+            PlanRunEmbeddingDomainError,
+        ) as exc:
+            with _t2_ctx() as db:
+                db.plans.increment_run_outcome(match.plan_id, success=False)
+            return f"Error: {exc}"
+
+        with _t2_ctx() as db:
+            db.plans.increment_run_outcome(match.plan_id, success=success)
+
+        lines = [f"Plan {plan_id} ran {len(result.steps)} step(s)."]
+        for i, step_out in enumerate(result.steps, start=1):
+            text_key = next(
+                (k for k in ("text", "summary", "answer") if k in step_out), None,
+            )
+            preview = (
+                str(step_out.get(text_key, ""))[:100] if text_key else str(step_out)[:100]
+            )
+            lines.append(f"  step{i}: {preview}")
+        return "\n".join(lines)
     except Exception as e:
         return f"Error: {e}"
 

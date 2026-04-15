@@ -52,15 +52,36 @@ _migrated_lock = threading.Lock()
 
 _PLANS_SCHEMA_SQL = """\
 CREATE TABLE IF NOT EXISTS plans (
-    id         INTEGER PRIMARY KEY,
-    project    TEXT NOT NULL DEFAULT '',
-    query      TEXT NOT NULL,
-    plan_json  TEXT NOT NULL,
-    outcome    TEXT DEFAULT 'success',
-    tags       TEXT DEFAULT '',
-    created_at TEXT NOT NULL,
-    ttl        INTEGER
+    id              INTEGER PRIMARY KEY,
+    project         TEXT NOT NULL DEFAULT '',
+    query           TEXT NOT NULL,
+    plan_json       TEXT NOT NULL,
+    outcome         TEXT DEFAULT 'success',
+    tags            TEXT DEFAULT '',
+    created_at      TEXT NOT NULL,
+    ttl             INTEGER,
+    -- RDR-078 dimensional identity, currying, metrics columns. Present on
+    -- fresh installs; the ``_add_plan_dimensional_identity`` migration
+    -- (4.4.0) covers upgrade-in-place.
+    name            TEXT,
+    verb            TEXT,
+    scope           TEXT,
+    dimensions      TEXT,
+    default_bindings TEXT,
+    parent_dims     TEXT,
+    use_count       INTEGER NOT NULL DEFAULT 0,
+    last_used       TEXT,
+    match_count     INTEGER NOT NULL DEFAULT 0,
+    match_conf_sum  REAL NOT NULL DEFAULT 0.0,
+    success_count   INTEGER NOT NULL DEFAULT 0,
+    failure_count   INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE INDEX IF NOT EXISTS idx_plans_verb ON plans(verb);
+CREATE INDEX IF NOT EXISTS idx_plans_scope ON plans(scope);
+CREATE INDEX IF NOT EXISTS idx_plans_verb_scope ON plans(verb, scope);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_plans_project_dimensions
+    ON plans(project, dimensions) WHERE dimensions IS NOT NULL;
 
 CREATE VIRTUAL TABLE IF NOT EXISTS plans_fts USING fts5(
     query,
