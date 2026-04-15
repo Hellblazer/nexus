@@ -304,17 +304,29 @@ def test_smart_index_staleness_check(
         assert local_t3.get_or_create_collection(info[key]).count() == c
 
 
-@pytest.mark.parametrize("meta_key", ["git_commit_hash", "git_branch", "source_path"])
+@pytest.mark.parametrize("meta_key", ["commit", "branch", "source_path"])
 def test_smart_index_git_metadata(
     rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database,
     meta_key: str,
 ) -> None:
+    """Git provenance is consolidated into the ``git_meta`` JSON blob
+    (nexus-40t). ``source_path`` stays top-level."""
+    import json as _json
+
     _index(rich_repo, rich_registry, local_t3)
     info = rich_registry.get(rich_repo)
     for col_key in ("code_collection", "docs_collection"):
         col = local_t3.get_or_create_collection(info[col_key])
         sample = col.get(include=["metadatas"])["metadatas"][0]
-        assert sample.get(meta_key), f"{meta_key} missing in {col_key}: {sample}"
+        if meta_key == "source_path":
+            assert sample.get(meta_key), f"source_path missing in {col_key}"
+            continue
+        git_blob = sample.get("git_meta")
+        assert git_blob, f"git_meta missing in {col_key}: {sample}"
+        decoded = _json.loads(git_blob)
+        assert decoded.get(meta_key), (
+            f"git_meta.{meta_key} missing in {col_key}: {decoded}"
+        )
 
 
 # ── Migration ─────────────────────────────────────────────────────────────────

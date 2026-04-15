@@ -490,22 +490,46 @@ def test_upsert_chunks_calls_col_upsert(mock_db):
         documents=["chunk one", "chunk two"],
         metadatas=[{"title": "f.py:1-10"}, {"title": "f.py:11-20"}],
     )
+    # Metadata is funnelled through the canonical schema (nexus-40t),
+    # which injects ``content_type`` from the collection prefix.
     mock_col.upsert.assert_called_once_with(
         ids=["id-1", "id-2"], documents=["chunk one", "chunk two"],
-        metadatas=[{"title": "f.py:1-10"}, {"title": "f.py:11-20"}],
+        metadatas=[
+            {"title": "f.py:1-10", "content_type": "code"},
+            {"title": "f.py:11-20", "content_type": "code"},
+        ],
     )
 
 
 def test_upsert_chunks_passes_all_metadata_fields(mock_db):
+    """Canonical schema fields (nexus-40t) survive the normalize pass;
+    cargo (``indexed_at``) is dropped and ``content_type`` is injected
+    from the collection prefix."""
     db, mock_col, _ = mock_db
     rich_meta = {
         "title": "f.py:1-5", "tags": "py", "category": "code", "session_id": "",
         "source_agent": "nexus-indexer", "store_type": "code",
         "indexed_at": "2026-01-01T00:00:00+00:00", "expires_at": "", "ttl_days": 0,
-        "source_path": "src/foo.py", "start_line": 1, "end_line": 5, "frecency_score": 0.42,
+        "source_path": "src/foo.py", "line_start": 1, "line_end": 5, "frecency_score": 0.42,
     }
-    db.upsert_chunks(collection="code__myrepo", ids=["abc123"], documents=["def foo(): pass"], metadatas=[rich_meta])
-    assert mock_col.upsert.call_args.kwargs["metadatas"][0] == rich_meta
+    db.upsert_chunks(
+        collection="code__myrepo", ids=["abc123"],
+        documents=["def foo(): pass"], metadatas=[rich_meta],
+    )
+    written = mock_col.upsert.call_args.kwargs["metadatas"][0]
+    assert written["title"] == "f.py:1-5"
+    assert written["tags"] == "py"
+    assert written["category"] == "code"
+    assert written["source_agent"] == "nexus-indexer"
+    assert written["store_type"] == "code"
+    assert written["content_type"] == "code"  # injected
+    assert written["ttl_days"] == 0
+    assert written["expires_at"] == ""
+    assert written["line_start"] == 1
+    assert written["line_end"] == 5
+    assert written["source_path"] == "src/foo.py"
+    assert written["frecency_score"] == 0.42
+    assert "indexed_at" not in written  # cargo dropped
 
 
 def test_upsert_chunks_uses_correct_embedding_fn(mock_db_voyage):
@@ -655,9 +679,22 @@ def test_upsert_chunks_with_embeddings_stores(mock_db):
     embeddings = [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
     ids = ["chunk-1", "chunk-2"]
     docs = ["first chunk text", "second chunk text"]
-    metas = [{"source_path": "doc.pdf", "page": 1}, {"source_path": "doc.pdf", "page": 2}]
-    db.upsert_chunks_with_embeddings(collection_name="docs__corpus", ids=ids, documents=docs, embeddings=embeddings, metadatas=metas)
-    mock_col.upsert.assert_called_once_with(ids=ids, documents=docs, embeddings=embeddings, metadatas=metas)
+    metas = [
+        {"source_path": "doc.pdf", "page_number": 1},
+        {"source_path": "doc.pdf", "page_number": 2},
+    ]
+    db.upsert_chunks_with_embeddings(
+        collection_name="docs__corpus", ids=ids, documents=docs,
+        embeddings=embeddings, metadatas=metas,
+    )
+    # docs__ collections route to the prose content_type by default.
+    expected_metas = [
+        {"source_path": "doc.pdf", "page_number": 1, "content_type": "prose"},
+        {"source_path": "doc.pdf", "page_number": 2, "content_type": "prose"},
+    ]
+    mock_col.upsert.assert_called_once_with(
+        ids=ids, documents=docs, embeddings=embeddings, metadatas=expected_metas,
+    )
 
 
 def test_upsert_chunks_with_embeddings_uses_get_or_create(mock_db):
@@ -677,7 +714,14 @@ def test_update_chunks_calls_col_update_without_documents(mock_db):
     db, mock_col, _ = mock_db
     metas = [{"frecency_score": 0.9, "source_path": "src/foo.py"}] * 2
     db.update_chunks(collection="code__myrepo", ids=["id-1", "id-2"], metadatas=metas)
-    mock_col.update.assert_called_once_with(ids=["id-1", "id-2"], metadatas=metas)
+    # update_chunks funnels through canonical metadata (nexus-40t),
+    # injecting ``content_type`` for every record.
+    normalised = [
+        {"frecency_score": 0.9, "source_path": "src/foo.py", "content_type": "code"}
+    ] * 2
+    mock_col.update.assert_called_once_with(
+        ids=["id-1", "id-2"], metadatas=normalised,
+    )
     assert "documents" not in mock_col.update.call_args.kwargs
 
 
