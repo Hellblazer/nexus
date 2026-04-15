@@ -398,6 +398,9 @@ def build_worker_cmdline(
     model: str = "haiku",
     mcp_config: str | None = None,
     json_schema: dict | None = None,
+    *,
+    resume: bool = False,
+    persist_session: bool = False,
 ) -> list[str]:
     """Compose the ``claude -p`` streaming-RPC invocation for a pool worker.
 
@@ -425,8 +428,19 @@ def build_worker_cmdline(
         "--input-format", "stream-json",
         "--output-format", "stream-json",
         "--verbose",
-        "--no-session-persistence",
-        "--session-id", session_id,
+    ]
+    # RewindPool (persist_session=True) needs the session written to
+    # ``~/.claude/projects/<slug>/<uuid>.jsonl`` so ``--resume`` works
+    # and the pool can truncate-to-checkpoint between dispatches.
+    # OperatorPool (default) keeps ``--no-session-persistence`` — its
+    # workers live in memory only.
+    if not persist_session:
+        cmd.append("--no-session-persistence")
+    if resume:
+        cmd += ["--resume", session_id]
+    else:
+        cmd += ["--session-id", session_id]
+    cmd += [
         "--append-system-prompt", operator_role,
         "--max-budget-usd", str(max_budget_usd),
         "--max-turns", str(max_turns),
