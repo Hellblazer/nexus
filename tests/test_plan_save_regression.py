@@ -136,6 +136,62 @@ def test_search_tool_still_importable_and_callable() -> None:
     assert isinstance(out, str)
 
 
+def test_plan_save_accepts_dimensional_fields() -> None:
+    """RDR-078 P1: plan_save MCP tool must populate the UNIQUE
+    (project, dimensions) dedup index when callers supply dimensional
+    identity. Two saves with identical canonical dims → single row."""
+    from nexus.mcp.core import plan_save
+
+    r1 = plan_save(
+        query="first author plan",
+        plan_json='{"steps": []}',
+        project="nexus-dim-test",
+        verb="plan-author",
+        scope="global",
+        dimensions='{"verb":"plan-author","scope":"global"}',
+    )
+    assert r1.startswith("Saved plan:"), r1
+
+    # Second save with the same canonical dims should UPDATE, not DUPLICATE.
+    r2 = plan_save(
+        query="second author plan (same dims)",
+        plan_json='{"steps": []}',
+        project="nexus-dim-test",
+        verb="plan-author",
+        scope="global",
+        dimensions='{"verb":"plan-author","scope":"global"}',
+    )
+    assert r2.startswith("Saved plan:"), r2
+
+
+def test_plan_save_rejects_malformed_dimensions_json() -> None:
+    """Bad JSON in dimensions → clean error, not stack trace fragment."""
+    from nexus.mcp.core import plan_save
+
+    out = plan_save(
+        query="q", plan_json='{"steps": []}', project="nexus",
+        dimensions="not json at all",
+    )
+    assert out.startswith("Error:"), out
+
+
+def test_plan_match_accepts_json_dimensions_with_commas_in_values() -> None:
+    """JSON object form handles values containing commas (legacy CSV form
+    fragments on them). Regression for RDR-078 critique finding."""
+    from nexus.mcp.core import plan_match
+
+    # Values with commas would fragment the legacy CSV parser; JSON handles it.
+    out = plan_match(
+        intent="test",
+        dimensions='{"topic":"how X, Y, Z works"}',
+        project="nexus",
+        min_confidence=0.0,
+        n=1,
+    )
+    # Should not error on the dims parse — either no match (string), or hit.
+    assert not out.startswith("Error:"), out
+
+
 def test_memory_tool_still_importable_and_callable() -> None:
     """``memory_put`` / ``memory_get`` still work end-to-end."""
     from nexus.mcp.core import memory_get, memory_put

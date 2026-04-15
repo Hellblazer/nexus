@@ -8,6 +8,9 @@ RDR-078 P1 added ``plan_match`` + ``plan_run`` to the existing
 """
 from __future__ import annotations
 
+import json
+from typing import Any
+
 from mcp.server.fastmcp import FastMCP
 
 from nexus.corpus import (
@@ -979,6 +982,37 @@ def collection_list() -> str:
         return f"Error: {e}"
 
 
+def _parse_dim_filter(value: str) -> dict[str, Any]:
+    """Parse ``dimensions`` / ``bindings`` arguments for the plan MCP tools.
+
+    Prefers JSON-object form (unambiguous for values containing commas).
+    Falls back to legacy ``key=value,key=value`` CSV parsing when the
+    input is not JSON. Returns ``{}`` for empty input. Raises ``ValueError``
+    with a clear message on malformed input.
+    """
+    value = value.strip()
+    if not value:
+        return {}
+    if value.startswith("{"):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"malformed JSON object: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("JSON value must be an object")
+        return {str(k): v for k, v in parsed.items()}
+    # Legacy CSV — accept only if every segment parses as key=value
+    out: dict[str, Any] = {}
+    for segment in value.split(","):
+        if "=" not in segment:
+            raise ValueError(
+                f"{segment!r}: expected 'key=value' or a JSON object"
+            )
+        k, _, v = segment.partition("=")
+        out[k.strip()] = v.strip()
+    return out
+
+
 @mcp.tool()
 def plan_save(
     query: str,
@@ -987,6 +1021,12 @@ def plan_save(
     outcome: str = "success",
     tags: str = "",
     ttl: int | None = None,
+    name: str = "",
+    verb: str = "",
+    scope: str = "",
+    dimensions: str = "",
+    default_bindings: str = "",
+    parent_dims: str = "",
 ) -> str:
     """Save a query execution plan to the T2 plan library.
 
@@ -1000,11 +1040,53 @@ def plan_save(
         outcome: Plan outcome — "success" or "partial"
         tags: Comma-separated tags (e.g. operation types used)
         ttl: Time-to-live in days. None means permanent (no expiry).
+        name: Template name for RDR-078 dimensional plans (e.g. "research").
+        verb: Verb dimension (e.g. "research", "review"). Populates
+            dimensions["verb"] if dimensions is empty.
+        scope: Scope dimension ("global" | "rdr" | "project" | "repo").
+        dimensions: JSON object of dimensions (e.g. '{"verb":"research",
+            "scope":"global"}'). Canonicalized server-side for the UNIQUE
+            (project, dimensions) dedup index. If empty but verb/scope
+            supplied, they are folded in.
+        default_bindings: JSON object of default binding values.
+        parent_dims: JSON object naming the parent plan's dimensions
+            (for currying / per-RDR specialization).
     """
     try:
         if not query or not plan_json:
             return "Error: query and plan_json are required"
+        # Normalize dimensional fields through the canonicalizer so the
+        # UNIQUE (project, dimensions) index dedups byte-identical maps.
+        from nexus.plans.schema import canonical_dimensions_json
+        dims_dict: dict[str, Any] = {}
+        if dimensions:
+            try:
+                parsed = json.loads(dimensions)
+                if isinstance(parsed, dict):
+                    dims_dict.update(parsed)
+            except json.JSONDecodeError:
+                return "Error: dimensions must be a JSON object"
+        if verb and "verb" not in dims_dict:
+            dims_dict["verb"] = verb
+        if scope and "scope" not in dims_dict:
+            dims_dict["scope"] = scope
+        dims_json: str | None = (
+            canonical_dimensions_json(dims_dict) if dims_dict else None
+        )
         with _t2_ctx() as db:
+            # Idempotency: if this (project, dimensions) already has a row,
+            # return its id instead of hitting the UNIQUE constraint. The
+            # scoped loader uses the same check; honoring it at the MCP
+            # boundary closes the P1 write-visibility loop for agents.
+            if dims_json is not None:
+                existing = db.plans.get_plan_by_dimensions(
+                    project=project, dimensions=dims_json,
+                )
+                if existing is not None:
+                    return (
+                        f"Saved plan: [{existing['id']}] {query[:80]} "
+                        f"(existing row for canonical dims)"
+                    )
             row_id = db.save_plan(
                 query=query,
                 plan_json=plan_json,
@@ -1012,6 +1094,12 @@ def plan_save(
                 tags=tags,
                 project=project,
                 ttl=ttl,
+                name=name or None,
+                verb=verb or None,
+                scope=scope or None,
+                dimensions=dims_json,
+                default_bindings=default_bindings or None,
+                parent_dims=parent_dims or None,
             )
             # RDR-078 P1 write-visibility: mirror the new plan into the
             # T1 ``plans__session`` cache so in-session ``plan_match``
@@ -1088,9 +1176,11 @@ def plan_match(
 
     Args:
         intent: Caller's natural-language description of the task.
-        dimensions: Optional ``key=value`` filter (comma-separated,
-            e.g. ``"verb=research,scope=global"``). Only plans whose
-            stored ``dimensions ⊇ filter`` are returned.
+        dimensions: Optional JSON object of dimension filters
+            (e.g. ``'{"verb":"research","scope":"global"}'``). Only plans
+            whose stored ``dimensions ⊇ filter`` are returned. Also accepts
+            the legacy ``key=value,key=value`` CSV form for values that
+            contain no commas.
         scope_preference: Reserved for future scope-cascade weighting
             (PQ-14). Accepted but unused at this version.
         min_confidence: Cosine threshold (0.0–1.0). Default 0.85 per
@@ -1098,15 +1188,13 @@ def plan_match(
         n: Max results to return.
         project: Restrict to plans tagged with this project.
     """
-    from nexus.filters import parse_where
     from nexus.mcp_infra import get_t1_plan_cache
     from nexus.plans.matcher import plan_match as _plan_match
 
     try:
-        dim_filter = (
-            {k: v for k, v in (parse_where(dimensions.split(",")) or {}).items()}
-            if dimensions else {}
-        )
+        dim_filter: dict[str, Any] = {}
+        if dimensions:
+            dim_filter = _parse_dim_filter(dimensions)
         with _t2_ctx() as db:
             cache = get_t1_plan_cache(populate_from=db.plans)
             matches = _plan_match(
@@ -1143,17 +1231,18 @@ def plan_run(plan_id: int, bindings: str = "") -> str:
 
     Args:
         plan_id: The T2 plans.id to execute.
-        bindings: Optional ``key=value`` placeholder fills
-            (comma-separated, e.g. ``"intent=how X works,subtree=1.2"``).
-            Caller bindings override ``match.default_bindings`` on
-            conflict.
+        bindings: Optional JSON object of placeholder fills
+            (e.g. ``'{"intent":"how X works","subtree":"1.2"}'``). Also
+            accepts the legacy ``key=value,key=value`` CSV form for
+            values that contain no commas. Caller bindings override
+            ``match.default_bindings`` on conflict.
     """
-    from nexus.filters import parse_where
     from nexus.plans.match import Match
     from nexus.plans.runner import (
         PlanRunBindingError,
         PlanRunEmbeddingDomainError,
         PlanRunStepRefError,
+        PlanRunToolNotFoundError,
         plan_run as _plan_run,
     )
 
@@ -1165,9 +1254,7 @@ def plan_run(plan_id: int, bindings: str = "") -> str:
             match = Match.from_plan_row(row)
             db.plans.increment_run_started(match.plan_id)
 
-        caller_bindings = (
-            dict(parse_where(bindings.split(",")) or {}) if bindings else {}
-        )
+        caller_bindings = _parse_dim_filter(bindings) if bindings else {}
         try:
             result = _plan_run(match, caller_bindings)
             success = True
@@ -1175,6 +1262,7 @@ def plan_run(plan_id: int, bindings: str = "") -> str:
             PlanRunBindingError,
             PlanRunStepRefError,
             PlanRunEmbeddingDomainError,
+            PlanRunToolNotFoundError,
         ) as exc:
             with _t2_ctx() as db:
                 db.plans.increment_run_outcome(match.plan_id, success=False)

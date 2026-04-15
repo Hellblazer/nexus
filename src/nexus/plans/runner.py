@@ -78,8 +78,24 @@ class PlanRunStepRefError(ValueError):
         super().__init__(f"plan_run: bad step reference {ref!r}: {reason}")
 
 
+class PlanRunToolNotFoundError(ValueError):
+    """Raised when a step names a tool not present on the dispatcher."""
+
+    def __init__(self, tool: str, reason: str) -> None:
+        self.tool = tool
+        self.reason = reason
+        super().__init__(f"plan_run: unknown tool {tool!r}: {reason}")
+
+
 class PlanRunEmbeddingDomainError(ValueError):
-    """Raised when a step crosses the embedding-model boundary (SC-10)."""
+    """Raised when a step would cross the embedding-model boundary (SC-10).
+
+    Covers two failure modes:
+    * ``actual_model == "<unknown>"`` — the declared ``taxonomy_domain``
+      is not in the domain→model registry (refuse rather than guess).
+    * Otherwise — the declared domain's expected model does not match
+      the collection's actual model.
+    """
 
     def __init__(
         self,
@@ -92,12 +108,19 @@ class PlanRunEmbeddingDomainError(ValueError):
         self.declared_domain = declared_domain
         self.collection = collection
         self.actual_model = actual_model
-        super().__init__(
-            f"plan_run: step {step_index} declares "
-            f"taxonomy_domain={declared_domain!r} but dispatches to "
-            f"collection {collection!r} (embedding model "
-            f"{actual_model!r}); cross-embedding boundary not crossed"
-        )
+        if actual_model == "<unknown>":
+            super().__init__(
+                f"plan_run: step {step_index} declares unrecognized "
+                f"taxonomy_domain={declared_domain!r}; cross-embedding "
+                f"boundary guard refuses ambiguous dispatch"
+            )
+        else:
+            super().__init__(
+                f"plan_run: step {step_index} declares "
+                f"taxonomy_domain={declared_domain!r} but dispatches to "
+                f"collection {collection!r} (embedding model "
+                f"{actual_model!r}); cross-embedding boundary violation"
+            )
 
 
 # ── Tool dispatcher protocol ────────────────────────────────────────────────
@@ -377,9 +400,9 @@ def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]:
 
     fn = getattr(mcp_core, tool, None)
     if fn is None or not callable(fn):
-        raise PlanRunStepRefError(
-            ref=tool,
-            reason=f"no MCP tool named {tool!r} in nexus.mcp.core",
+        raise PlanRunToolNotFoundError(
+            tool=tool,
+            reason=f"not present in nexus.mcp.core",
         )
     return fn(**args)  # type: ignore[no-any-return]
 

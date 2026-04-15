@@ -154,6 +154,26 @@ def test_run_resolves_step_ref_for_list_field() -> None:
     assert disp.calls[1] == ("extract", {"ids": ["a", "b", "c"]})
 
 
+def test_default_dispatcher_raises_tool_not_found_for_unknown_tool() -> None:
+    """Unknown tool → PlanRunToolNotFoundError, not PlanRunStepRefError.
+
+    The two are distinct failure modes: step-ref errors mean a
+    ``$stepN.field`` pointer is wrong; tool-not-found means the plan
+    names a callable that the dispatcher doesn't have. Conflating them
+    hurts error-driven branching at the caller."""
+    from nexus.plans.runner import (
+        PlanRunStepRefError,
+        PlanRunToolNotFoundError,
+        _default_dispatcher,
+    )
+
+    with pytest.raises(PlanRunToolNotFoundError) as exc:
+        _default_dispatcher("definitely_not_a_real_tool_xyz", {})
+    # And it's NOT a PlanRunStepRefError (the previous conflated type).
+    assert not isinstance(exc.value, PlanRunStepRefError)
+    assert "definitely_not_a_real_tool_xyz" in str(exc.value)
+
+
 def test_run_resolves_list_of_step_refs_flattens() -> None:
     """``[$step1.ids, $step2.ids]`` resolves element-wise and flattens one
     level — callers combining outputs from multiple prior steps can use

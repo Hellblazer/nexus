@@ -84,8 +84,13 @@ def plan_match(
 
     # T1 cosine path when cache available + has hits.
     matches: list[Match] = []
+    # Over-fetch covers both (a) dimension post-filter attrition and (b)
+    # min_confidence threshold attrition. A fixed floor (n * 2) avoids the
+    # under-delivery case when filter_dims is empty — cost is bounded by the
+    # cache size, which is small (session-scoped plan descriptions).
+    _over = max(n * 2, n + len(filter_dims) * 2)
     if cache is not None and cache.is_available:
-        hits = cache.query(intent, n + len(filter_dims) * 2)  # over-fetch for post-filter
+        hits = cache.query(intent, _over)
         for plan_id, distance in hits:
             row = library.get_plan(plan_id)
             if row is None:
@@ -108,7 +113,8 @@ def plan_match(
 
     # FTS5 fallback: either cache unavailable or T1 returned no hits.
     # Over-fetch so the dimension post-filter doesn't starve the caller.
-    rows = library.search_plans(intent, limit=n + len(filter_dims) * 3, project=project)
+    _fts_over = max(n * 2, n + len(filter_dims) * 3)
+    rows = library.search_plans(intent, limit=_fts_over, project=project)
     for row in rows:
         m = Match.from_plan_row(row, confidence=None)
         if filter_dims and not _superset(m.dimensions, filter_dims):
