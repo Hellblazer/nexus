@@ -1197,6 +1197,91 @@ def plan_run(plan_id: int, bindings: str = "") -> str:
         return f"Error: {e}"
 
 
+@mcp.tool()
+def traverse(
+    seeds: list,
+    depth: int = 1,
+    direction: str = "both",
+    link_types: list | None = None,
+    purpose: str = "",
+) -> dict:
+    """Walk the catalog link graph from *seeds* (RDR-078 P3).
+
+    Returns a step-output dict ``{tumblers, ids, collections}``:
+
+      * ``tumblers`` — every reachable node's tumbler string.
+      * ``ids``     — chunk IDs for the reachable nodes (currently
+        empty; populated when chunk-id tracking lands).
+      * ``collections`` — the union of physical collection names
+        across reachable nodes; ``$step.collections`` feeds a
+        downstream ``search(subtree=...)`` call so the next retrieval
+        step is scoped to exactly the collections the traversal
+        surfaced (SC-5).
+
+    Either ``link_types`` (explicit list) or ``purpose`` (named alias
+    via :func:`nexus.plans.purposes.resolve_purpose`) selects which
+    edge labels to follow. Specifying both is a contract violation —
+    SC-16, mirrored from the schema validator. Returns
+    ``{"error": "..."}`` instead of raising so the MCP boundary stays
+    string-typed for callers.
+
+    ``depth`` is capped by ``Catalog._MAX_GRAPH_DEPTH``; traversal
+    stops at ``Catalog._MAX_GRAPH_NODES`` merged nodes.
+    """
+    from nexus.catalog.tumbler import Tumbler
+    from nexus.plans.purposes import resolve_purpose
+
+    if link_types and purpose:
+        return {
+            "error": (
+                "traverse: 'link_types' and 'purpose' are mutually exclusive "
+                "(SC-16); pass exactly one"
+            ),
+            "tumblers": [], "ids": [], "collections": [],
+        }
+
+    resolved_link_types: list[str] = (
+        list(link_types)
+        if link_types
+        else (resolve_purpose(purpose) if purpose else [])
+    )
+
+    catalog = _get_catalog()
+    if catalog is None:
+        return {
+            "error": "traverse: catalog not initialised",
+            "tumblers": [], "ids": [], "collections": [],
+        }
+
+    parsed_seeds: list[Tumbler] = []
+    for s in seeds or []:
+        try:
+            parsed_seeds.append(Tumbler.parse(str(s)))
+        except Exception as exc:
+            return {
+                "error": f"traverse: invalid seed {s!r}: {exc}",
+                "tumblers": [], "ids": [], "collections": [],
+            }
+
+    result = catalog.graph_many(
+        seeds=parsed_seeds,
+        depth=depth,
+        link_types=resolved_link_types,
+        direction=direction,
+    )
+
+    tumblers: list[str] = [n["tumbler"] for n in result["nodes"]]
+    collections: list[str] = sorted({
+        n.get("physical_collection") for n in result["nodes"]
+        if n.get("physical_collection")
+    })
+    return {
+        "tumblers": tumblers,
+        "ids": [],
+        "collections": collections,
+    }
+
+
 # ── Demoted tools (plain functions, no @mcp.tool()) ──────────────────────────
 
 

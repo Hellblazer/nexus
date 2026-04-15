@@ -21,7 +21,7 @@ def test_catalog_module_importable():
 
 
 def test_core_registered_tools():
-    """17 core tools are registered with @mcp.tool() (15 legacy + 2 RDR-078 P1)."""
+    """18 core tools are registered with @mcp.tool() (15 legacy + 3 RDR-078 P1+P3)."""
     from nexus.mcp.core import mcp
 
     tool_names = {t.name for t in mcp._tool_manager.list_tools()}
@@ -32,6 +32,8 @@ def test_core_registered_tools():
         "plan_save", "plan_search",
         # RDR-078 P1 (nexus-05i.2): semantic plan matching + deterministic runner.
         "plan_match", "plan_run",
+        # RDR-078 P3 (nexus-05i.5): typed-graph traversal of the catalog.
+        "traverse",
     }
     assert expected == tool_names, f"Missing: {expected - tool_names}, Extra: {tool_names - expected}"
 
