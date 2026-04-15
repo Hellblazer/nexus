@@ -430,7 +430,9 @@ class Worker:
     """A single pool worker subprocess.
 
     Fields are populated as the worker's lifetime progresses; a just-
-    spawned worker has ``process`` set and counters at zero.
+    spawned worker has ``process`` set and counters at zero. The
+    ``_lock`` serialises dispatches on this worker so two concurrent
+    callers don't interleave on stdin.
     """
     session_id: str
     process: asyncio.subprocess.Process
@@ -438,6 +440,7 @@ class Worker:
     cumulative_output_tokens: int = 0
     in_flight: int = 0
     alive: bool = True
+    _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     @property
     def cumulative_tokens(self) -> int:
@@ -522,3 +525,145 @@ class OperatorPool:
             pool_session=t1_sid,
         )
         return worker
+
+    async def dispatch(
+        self,
+        worker: Worker,
+        prompt: str,
+        *,
+        timeout: float = 60.0,
+    ) -> dict:
+        """Send one user turn to *worker*, await its response, return the
+        StructuredOutput tool_use payload.
+
+        Protocol (RDR-079 Empirical Finding 1 + 3):
+          * Write one JSON line ``{"type":"user","message":{"role":
+            "user","content":"<prompt>"}}`` to worker.stdin.
+          * Read worker.stdout JSON lines until a ``result`` record with
+            ``subtype: success`` appears.
+          * During that read, capture the ``StructuredOutput`` tool_use
+            input and accumulate token counters from the result record.
+
+        The returned dict is the tool_use ``input`` payload. The ``result``
+        record's ``result`` text field is often empty (model's last turn
+        may be pure thinking after the tool call) — do NOT depend on it.
+
+        Raises:
+          * ``asyncio.TimeoutError`` — worker did not reach ``result``
+            within *timeout* seconds. Worker is killed; ``alive=False``.
+          * ``PoolSpawnError`` — worker exited before producing a result.
+        """
+        async with worker._lock:
+            if worker.process.returncode is not None:
+                worker.alive = False
+                raise PoolSpawnError(
+                    f"worker {worker.session_id!r} exited "
+                    f"(rc={worker.process.returncode}) before dispatch"
+                )
+
+            turn = json.dumps({
+                "type": "user",
+                "message": {"role": "user", "content": prompt},
+            }) + "\n"
+            assert worker.process.stdin is not None
+            try:
+                worker.process.stdin.write(turn.encode())
+                await worker.process.stdin.drain()
+            except (BrokenPipeError, ConnectionResetError) as exc:
+                worker.alive = False
+                raise PoolSpawnError(
+                    f"worker {worker.session_id!r} stdin closed: {exc}"
+                ) from exc
+
+            worker.in_flight += 1
+            try:
+                payload = await asyncio.wait_for(
+                    self._read_until_result(worker),
+                    timeout=timeout,
+                )
+            except asyncio.TimeoutError:
+                # Kill the hung worker so it doesn't linger.
+                worker.alive = False
+                try:
+                    worker.process.kill()
+                except ProcessLookupError:
+                    pass
+                raise
+            finally:
+                worker.in_flight -= 1
+            return payload
+
+    async def _read_until_result(self, worker: Worker) -> dict:
+        """Consume worker.stdout JSON lines until the turn's final
+        ``result`` record. Captures the StructuredOutput tool_use payload
+        along the way and accumulates token counters from ``result.usage``.
+
+        Returns the StructuredOutput.input dict. If no StructuredOutput
+        event was seen (e.g. the model replied with plain text), returns
+        ``{"text": result.result}`` as a safety fallback so callers still
+        get a dict.
+        """
+        assert worker.process.stdout is not None
+        structured_payload: dict | None = None
+
+        while True:
+            line = await worker.process.stdout.readline()
+            if not line:
+                # EOF — worker exited
+                worker.alive = False
+                # Drain stderr for the error message.
+                stderr = b""
+                if worker.process.stderr is not None:
+                    try:
+                        stderr = await asyncio.wait_for(
+                            worker.process.stderr.read(2048), timeout=0.5,
+                        )
+                    except asyncio.TimeoutError:
+                        pass
+                raise PoolSpawnError(
+                    f"worker {worker.session_id!r} exited before result "
+                    f"(rc={worker.process.returncode}); stderr: "
+                    f"{stderr.decode(errors='replace')[:500]}"
+                )
+
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                # Skip malformed lines (e.g. log noise interleaved with
+                # the stream — shouldn't happen with --output-format
+                # stream-json, but be defensive).
+                continue
+
+            if not isinstance(event, dict):
+                continue
+
+            etype = event.get("type")
+
+            if etype == "assistant":
+                # Scan for StructuredOutput tool_use
+                msg = event.get("message", {}) or {}
+                for item in msg.get("content", []) or []:
+                    if (
+                        isinstance(item, dict)
+                        and item.get("type") == "tool_use"
+                        and item.get("name") == "StructuredOutput"
+                    ):
+                        input_val = item.get("input")
+                        if isinstance(input_val, dict):
+                            structured_payload = input_val
+
+            elif etype == "result":
+                # Per-turn final record; accumulate tokens + return.
+                usage = event.get("usage", {}) or {}
+                worker.cumulative_input_tokens += int(
+                    usage.get("input_tokens", 0) or 0
+                )
+                worker.cumulative_output_tokens += int(
+                    usage.get("output_tokens", 0) or 0
+                )
+                if structured_payload is not None:
+                    return structured_payload
+                # Fallback: no StructuredOutput event; return the result
+                # text wrapped. Keeps the contract "dispatch returns dict"
+                # honored even when the model skipped the schema.
+                return {"text": str(event.get("result", ""))}
