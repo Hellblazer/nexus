@@ -14,9 +14,15 @@ Pickup of the two explicit deferrals in RDR-042, plus the reasoning mechanism th
 
 The center of gravity is the **plan** — a saved query+DAG pair — composed of steps that each operate in one embedding space or walk explicit typed edges between documents. No cross-embedding bridging is attempted; the architecture never requires it. The quality lever is the typed-link traversal step, not the domain-scoped retrieval step.
 
-## Problem
+## Problem Statement
 
-### Problem 1: Plan library is write-only for semantic intent
+Nexus agents routinely reinvent retrieval DAGs, cannot reuse past plans semantically, cannot compose typed-graph traversal into plans, and cannot scope retrieval steps by domain taxonomy. The machinery to fix each exists in shipped RDRs (RDR-041 T1 HTTP server, RDR-042 plan library + `/nx:query`, RDR-070 HDBSCAN taxonomies, RDR-077 projection quality). What's missing is the architectural glue that binds them into a plan-centric retrieval layer.
+
+### Enumerated gaps to close
+
+*Four gaps, one per problem. Close-skill greps for `^#### Gap \d+:` in this section.*
+
+#### Gap 1: Plan library is write-only for semantic intent
 
 RDR-042's plan library stores `(query, plan_json, outcome, tags, project, ttl, created_at)` and exposes FTS5 search over the query text (`plan_search`). FTS5 matches *tokens*; it does not match *intent*. Two paraphrased queries that ought to resolve to the same plan typically miss — the agent re-decomposes, and the library grows with near-duplicate entries.
 
@@ -24,21 +30,43 @@ AgenticScholar's plan reuse mechanism is specifically semantic vector match over
 
 The reuse win is explicitly an **efficiency** story — AgenticScholar reports ~40% compute cost reduction at ≥90% match confidence (RF-1). It is not a quality story. That matters for framing: Phase 1 pays for itself in agent thrash avoidance, not in better answers.
 
-### Problem 2: Plan steps have no typed-graph traversal operator
+#### Gap 2: Plan steps have no typed-graph traversal operator
 
 Current plan JSON encodes retrieval and analytical operators (`search`, `extract`, `summarize`, `rank`, `compare`, `generate`). None of them walk the catalog link graph. Yet the catalog already holds ~16,500 typed edges across `cites`, `implements`, `implements-heuristic`, `supersedes`, `relates` — with BFS traversal already exposed via `query(follow_links=...)` and `nx catalog links`. The machinery exists; it is not composable into a plan DAG.
 
 This is the load-bearing gap for the user's intent. The verb list — **create / debate / collate / relate / integrate** — hinges on "relate" being a real plan operation. The paper's NDCG@3 = 0.606 vs RAG's 0.411 (+47%) gain is qualitatively attributed to multi-hop KG traversal (Tier-3 analytical reasoning), not to plan reuse or taxonomies alone (RF-1). A plan runner that cannot compose a `traverse` step cannot perform the cross-document reasoning that distinguishes analytical retrieval from flat retrieval.
 
-### Problem 3: Plan steps cannot scope by domain taxonomy
+#### Gap 3: Plan steps cannot scope by domain taxonomy
 
 The plan schema encodes tool arguments but has no *domain-scope* specifier. A plan for "find prior art on priming" cannot express "take the topic `vision-language priming` from the prose taxonomy and the topic `LanguagePrimingSignal` from the code taxonomy and return both, each scoped to its native embedding space." It can only express a flat `search` that either hits one corpus set or the other — losing the alignment that the two independently-discovered taxonomies naturally expose.
 
 This is a narrower problem than Problem 2. Taxonomies scope *individual* retrieval steps; typed-graph traversal is what composes *across* steps. Both gaps coexist; the paper leans on traversal for quality, taxonomies for scope coherence.
 
-### Problem 4: Scenario-shaped reuse is unimplemented
+#### Gap 4: Scenario-shaped reuse is unimplemented
 
 Five canonical scenarios recur across every nexus session: design/planning, critique/review, analysis/synthesis, dev/debug, documentation. Each has a stereotyped retrieval shape. Today each session reinvents the retrieval DAG ad-hoc, even when a prior session three days ago solved the same pattern. Infrastructure exists — `plan_save`, `plan_search`, `/nx:query` — but the library is empty of what scenario-matched queries would need. Agents don't reach for the library because the library does not yet answer to the scenarios.
+
+## Context
+
+### Background
+
+AgenticScholar ("Agentic Data Management with Pipeline Orchestration for Scholarly Corpora", arXiv 2603.13774, indexed in `knowledge__agentic-scholar`) describes a four-layer architecture: taxonomy-anchored knowledge graph, LLM-driven query planner, composable operator library, structured ingestion. Its benchmarks — NDCG@3 = 0.606 vs RAG's 0.411 (+47%) — are qualitatively attributed to the multi-hop KG Traverse operator (Tier-3 analytical reasoning), not to plan reuse or taxonomy construction alone. Plan reuse is explicitly an efficiency story (~40% compute cost reduction at ≥90% match confidence).
+
+RDR-042 ("AgenticScholar-Inspired Enhancements", closed) adopted the composable operator library, the plan library (FTS5-indexed `plans` table), the `/nx:query` skill, and the self-correction loop. It **explicitly deferred two layers**: (a) a T3 semantic layer over the plan library ("Can add T3 semantic layer later if FTS5 matching proves inadequate") and (b) taxonomy-driven planning ("may revisit via lightweight clustering in a future RDR"). RDR-070 shipped HDBSCAN-based lightweight clustering across all corpora; RDR-077 shipped similarity-aware projection quality signals (similarity, assigned_at, source_collection, ICF). The two blockers RDR-042 cited are now absent.
+
+The empirical corner-case of RDR-077 (recorded at 2026-04-14 during the ART backfill) rules out any cross-embedding-model cosine bridge: code uses `voyage-code-3`, prose uses `voyage-context-3`, and cosine between them is approximately noise. Plans must compose per-space steps; the typed-link catalog graph is the only bridge between code and prose and is already exposed via `query(follow_links=...)`.
+
+### Technical Environment
+
+- **Python 3.12+** CLI + MCP server stack. MCP server is LLM-free and deterministic by convention (RDR-042).
+- **T2** = SQLite WAL + FTS5 (RDR-042 `plans` table; RDR-063 T2 domain split).
+- **T1** = ChromaDB HTTP server per-session (RDR-041), with PPID-based inheritance for spawned subagents.
+- **T3** = ChromaDB Cloud or local persistent, with `voyage-code-3` / `voyage-context-3` embedding per-prefix (RDR-059).
+- **Catalog** = Git-backed JSONL source of truth + SQLite cache; ~16,500 typed edges across `cites`, `implements`, `implements-heuristic`, `supersedes`, `relates` (RDR-050, RDR-053, RDR-063).
+- **Plan library** = `plans` table with FTS5 triggers + 5 builtin template seeds at `nx catalog setup` (RDR-042).
+- **Analytical operator agent** = `nx/agents/analytical-operator.md` handles extract / summarize / rank / compare / generate (RDR-042).
+- **Query planner agent** = `nx/agents/query-planner.md` dispatched by `/nx:query` skill for novel analytical pipelines (RDR-042).
+- **Taxonomy** = HDBSCAN topic discovery + c-TF-IDF labels + centroid ANN (RDR-070), similarity + ICF + hub detection (RDR-077).
 
 ## Proposed Design
 
@@ -412,6 +440,68 @@ The catalog already treats YAML files as first-class documents with tumblers; pl
 
 Promotion operations (`nx plan promote`, lifecycle hooks on RDR close, `nx plan audit`) are deferred to RDR-079. Phase 6 delivers *loading* from git-tracked YAML, not mutation of git state. Humans who want to promote today use `git mv` + edit + commit; RDR-079 makes it a one-liner that wraps the same git calls.
 
+## Alternatives Considered
+
+### Alternative 1: Persistent T3 `plans__semantic` collection
+
+Embed plan queries into a permanent T3 ChromaDB collection; sync on every `plan_save`; TTL-coordinated deletion.
+
+**Rejected** because session-scoped T1 (RDR-041) rebuilds the cache from authoritative T2 at every SessionStart — no sync drift, no TTL coordination, no dual-write race. In-session upsert on `plan_save` gives immediate visibility within the calling session; next SessionStart makes it fully authoritative. Persistent T3 added coordination complexity for no semantic gain.
+
+### Alternative 2: Unified `retrieve()` tool replacing `search()` and `query()`
+
+Collapse both MCP tools into `retrieve(intent, mode="chunks"|"documents", ...)` with every feature available in one surface.
+
+**Rejected** as a breaking change with no corresponding clarity win. `search()` chunk-granular and `query()` document-granular distinction is real and usefully separate. RDR-078 keeps both; gaps in feature parity become follow-on tidy-up work. Option 1 (additive alignment) was provisionally proposed, then also rejected as not paper-grounded (research-2 audit) — filed to Out of Scope.
+
+### Alternative 3: Projection-rows as authoritative catalog edges
+
+Promote RDR-077's `topic_assignments` rows (chunk × topic projections with similarity + ICF) into catalog `semantic-implements` edges at every `nx catalog setup`.
+
+**Rejected** because (a) cross-embedding projection is noise between `code__*` and `docs__*`/`rdr__*`/`knowledge__*` corpora (empirical, research-3), and (b) the `--use-icf` bootstrap failure mode surfaces boilerplate hubs faster than domain topics at write time, poisoning the edge set. Same-embedding-space projection (code↔code, prose↔prose) remains a candidate for a future RDR, but is a sidequest to this one.
+
+### Alternative 4: Hand-picked `link_types: [...]` only, no purpose abstraction
+
+Keep plan `traverse` steps authored with literal link-type lists; ship no purpose registry.
+
+**Rejected** because plan authors (especially agents) need to reason in intent terms. Hand-picking `[implements, implements-heuristic]` every time a plan wants "find the code" is brittle, and when `semantic-implements` (or any future type) lands, every plan needs manual update. The `purpose` abstraction trades one layer of indirection for teachability, extension-safety, and readable templates. Both forms coexist in the schema; `purpose` is recommended.
+
+### Alternative 5: Flat (scope, verb, name) identity
+
+Keep the first-draft three-field plan identity with separate top-level fields.
+
+**Rejected** because naming kludges propagate (e.g. `research-plan` conflates verb and qualifier). Dimensional identity (pinned bag of dimensions, `name` as disambiguator) eliminates the kludge, enables organic specialisation via currying, and matches the functional framing of plans as typed templates. Migration is cheap: existing RDR-042 rows keep working with `verb=NULL, scope='personal'`.
+
+### Alternative 6: Automatic plan promotion based on counters
+
+Promote plans automatically once `use_count`, `match_conf_avg`, and `success_rate` clear thresholds.
+
+**Rejected for RDR-078**, deferred to RDR-079. The *signal* (metrics columns + `verb:plan-promote,strategy:propose` meta-seed) is in RDR-078 scope; the *action* (CLI + lifecycle hooks) is in RDR-079 after 4-6 weeks of usage data inform threshold calibration. Human-in-loop promotion via `git mv` + `commit` works today.
+
+## Trade-offs
+
+### Consequences
+
+- **Plan library growth is unbounded by default.** Every `plan_save` creates a row; T1 cache size scales with library size. Mitigation: T1 is ChromaDB cosine-indexed (sub-millisecond lookup at 10k entries); PQ-10 revisits scope (verbs-only vs all-plans) when library exceeds 10k.
+- **Dimensional identity means identity collisions are schema-enforceable.** Two plans with the same canonicalised dimension map at load time reject with a named error. This is a hard constraint — intentional.
+- **The `description` field becomes load-bearing.** A sloppy description degrades `plan_match` accuracy for that plan. Authoring guide (Phase 4e) and `verb:plan-author` meta-seed (Phase 4d) exist precisely to teach good-description habits. Sloppy descriptions fail silently (low match confidence) rather than loudly (crash), so authoring discipline matters.
+- **Git becomes a plan-deployment channel.** Team-scoped plans land via PR; the same review culture that gates code now gates plans. Teams that don't have that culture see the plan library diverge across clones.
+
+### Risks and Mitigations
+
+- **Risk: T1 server unavailable at SessionStart.** `plan_match` falls back to FTS5 over T2 — functional but token-matching, no semantic reuse. **Mitigation**: existing RDR-041 startup robustness; graceful degradation is a first-class contract.
+- **Risk: dimension sprawl.** Plans keep adding custom dimensions; registry becomes unwieldy. **Mitigation**: warn-on-unregistered-dimension at load; `verb:plan-inspect,strategy:dimensions` surfaces cold dimensions. RDR-079 can add retirement policy.
+- **Risk: scope cascade turns into confusion.** A team member expects their project-scope override but the global default wins due to higher cosine. **Mitigation**: specificity bonus (0.05/dim) reliably breaks ties in favour of specialised plans; `verb:plan-inspect` shows the matched plan's scope explicitly.
+- **Risk: plans embed stale assumptions about link types.** A plan authored with `link_types: [implements-heuristic]` hand-picked becomes stale when vocabulary extends. **Mitigation**: `purpose` abstraction auto-adapts; linter warns on literal link_types in new plans.
+- **Risk: the `$stepN.field` reference model has undefined behaviour across plan-runner versions.** A plan authored today references a step output shape that a future runner changes. **Mitigation**: plan_json schema version field (unused at v1, present for future migration). Out-of-scope implementation detail but worth reserving the column.
+
+### Failure Modes
+
+- **Plan with broken DAG ships to production.** CI schema validation (Phase 6 SC-15) catches obvious structure errors. Semantic errors (wrong `purpose`, bad binding shape) surface at first execution; `success_count/failure_count` counters expose repeat failures for promotion-candidate scoring.
+- **Plan match returns high-confidence but wrong plan.** Description was crisp but misleading. Agent executes it, user pushes back. `plan_run` failure or explicit rejection increments `failure_count`; over time the plan ranks lower or gets explicitly archived. No crash; slow quality degradation trajectory.
+- **Dimension registry diverges across forks.** Two teams add the same dimension name with different semantics. **Mitigation**: dimensions live in the plugin by default (`scope:global`); project overrides are additive; name collisions surface at load as duplicate-key warnings.
+- **`plan_save` during a long-running session never reaches T1 cache due to server crash mid-session.** Row exists in T2 but T1 upsert failed. Next SessionStart rebuild picks it up. Short-lived inconsistency, auto-recovered.
+
 ## Success Criteria
 
 - **SC-1** — `plan_match` MCP tool lands. Given a plan with query *"how does projection quality work"* saved to the library, `plan_match("what's the mechanism for projection quality hub suppression")` returns that plan with cosine confidence > 0.80. Exact-token variants return the plan from FTS5 (`plan_search`) with equivalent or higher confidence.
@@ -475,6 +565,53 @@ Promotion operations (`nx plan promote`, lifecycle hooks on RDR close, `nx plan 
 - **PQ-21** — Purpose composition. Can a plan reference `purpose: implementation-plus-tests` resolving to the union of `find-implementations` and a hypothetical `find-tests`? Useful but more complex than 1:1 resolution; leave until a scenario needs it.
 - **PQ-22** — Should `search(follow_links=...)` also accept `purpose=`? Same vocabulary applies; propagation is straightforward. Deferred to the follow-on RDR-079 to avoid Phase 4 scope creep.
 
+## Finalization Gate
+
+Checklist run at RDR acceptance time. Layer 1 is structural (run by `/nx:rdr-gate`); Layers 2-4 are author + reviewer responsibility.
+
+### Contradiction Check
+
+- [ ] No claim in Problem Statement is rebutted by a Research Finding.
+- [ ] No SC asserts behaviour that a Trade-off identifies as a known failure mode.
+- [ ] The "cross-embedding cosine is noise" invariant (RF-2) is consistent with every retrieval step in every Phase — no phase walks a cosine between code and prose embeddings.
+- [ ] `plan_match` / `plan_run` signatures in the Vocabulary section match the arguments referenced in Phase 4 and Phase 5.
+
+### Assumption Verification
+
+- [ ] RDR-042 plan library schema (`plans` table + FTS5) exists and is live at `nexus.db.t2.plan_library` — verified by SQL introspection.
+- [ ] RDR-041 T1 HTTP server is reachable and subagents inherit via PPID walking — verified by existing integration tests in `tests/test_t1_*.py`.
+- [ ] `Catalog.graph(tumbler, depth, link_type)` returns `{nodes, edges}` as assumed in Phase 3 — verified by `nx catalog links --help` source in `src/nexus/catalog/catalog.py`.
+- [ ] Five retrieval-shaped agents (Phase 5 list) exist in `nx/agents/` — verified by glob.
+- [ ] HDBSCAN topic discovery (RDR-070) is live and populates `topics` + `topic_assignments` tables — verified by `nx taxonomy status`.
+- [ ] Voyage AI embedding models are accessible at plan-save time — fallback to FTS5 if T1 cannot embed.
+
+#### API Verification
+
+- [ ] `ChromaDB.Collection.query(query_embeddings, n_results, where=...)` supports metadata filter with `tag_filter` glob emulation — confirmed.
+- [ ] SQLite FTS5 tokenizer on the `plans` FTS table matches on tags (convention `verb:*`) — confirmed via existing `plan_search` implementation.
+- [ ] `nx catalog setup` already seeds 5 builtin plans via `plan_save` — additive seed loop for the new scenarios + meta-seeds does not re-author the mechanism.
+
+### Scope Verification
+
+- [ ] RDR does not implement `nx plan promote` CLI, `nx plan audit` CLI, RDR lifecycle hooks, or `search(purpose=)` / `query(follow_links=purpose)` propagation. All four are explicitly deferred to RDR-079 in the Out of Scope section.
+- [ ] RDR does not modify RDR-042's shipped `plan_save` / `plan_search` / `/nx:query` behaviour for existing callers (SC-9).
+- [ ] RDR does not introduce a cross-embedding bridge mechanism (SC-10, RF-2).
+- [ ] Phases 1-6 count as one shippable unit; no phase is described as optional within this RDR (but individual phases are delivery-orderable as PRs).
+
+### Cross-Cutting Concerns
+
+- [ ] **Security**: plan_json is executed by the plan-runner with caller bindings. Caller bindings are not interpolated as shell/SQL — they parameterise tool args whose own contracts validate input. No new injection surface.
+- [ ] **Privacy**: `scope:personal` plans stay in T2; never committed to git. Scope tagging is enforced at load-from-YAML time (Phase 6 source-path check).
+- [ ] **Performance**: T1 plan cache size is bounded by `COUNT(plans WHERE outcome='success')` × 1024d float32 ≈ 4 MB at 1000 plans. SessionStart population is O(N) with one batched embed request. Acceptable.
+- [ ] **Observability**: metrics counters (SC-12) provide the promotion-candidate signal without new logging infrastructure.
+- [ ] **Reversibility**: every Phase is additive. Rollback = `git revert` + `nx catalog setup` + reseed. T2 schema additions (verb/scope indexed columns + metrics + currying fields) are nullable; existing rows continue working.
+
+### Proportionality
+
+- [ ] Scope fits one arc of implementation (2-4 weeks expected). Five phases' worth of work, each 1-5 days.
+- [ ] Deferred items (RDR-079) are named and bounded; this RDR does not promise lifecycle ops or surface alignment it cannot deliver.
+- [ ] Success is measurable: SC-1 (paraphrase-match > 0.80), SC-4 (traverse seed resolution), SC-8 (ART end-to-end demo) are concrete.
+
 ## Out of Scope (deferred, each may spawn its own RDR)
 
 - **Retrieval surface alignment** (`search()` ↔ `query()` parity) — plumbing debt, not paper-grounded. Plans compose tools as-is; agents call whichever tool fits each step. File as a separate tidy-up RDR if the duplication starts hurting.
@@ -484,3 +621,50 @@ Promotion operations (`nx plan promote`, lifecycle hooks on RDR close, `nx plan 
 - **Link graph UI.** Out of scope across all iterations.
 - **Per-project configuration of hub stopwords** (RDR-077 PQ-3). Orthogonal.
 - **New link types beyond the catalog's existing vocabulary.** `semantic-implements`, `documented-by`, `tests` were proposed in earlier drafts; Phase 3 works with the existing `implements` / `cites` / `relates` / `supersedes` / `implements-heuristic` set. Additional types can land later if scenario plans reveal concrete need.
+
+## References
+
+### RDRs
+
+- **RDR-042** — *AgenticScholar-Inspired Enhancements* (closed). Shipped the analytical-operator agent, plan library (T2 `plans` table + FTS5), `/nx:query` skill, self-correction loop. RDR-078 picks up its two explicit deferrals.
+- **RDR-041** — *T1 Cross-Process Session Sharing* (closed). T1 HTTP ChromaDB server with PPID-based inheritance. RDR-078 Phase 1 uses the T1 server as the plan semantic cache transport.
+- **RDR-050** — *Catalog-First Query Routing*. Establishes `query(follow_links=...)` + `author=` + `content_type=` + `subtree=` routing primitives. RDR-078 Phase 3 wraps the same `Catalog.graph()` BFS into a plan step.
+- **RDR-053** — *Xanadu Fidelity*. Link-graph design doctrine — typed edges, `chash:` spans, provenance via `created_by`. RDR-078 relies on the existing vocabulary.
+- **RDR-063** — *T2 Domain Split*. `CatalogTaxonomy` / `PlanLibrary` / `MemoryStore` / `Telemetry` stores. RDR-078's plan metrics migration extends `PlanLibrary`.
+- **RDR-070** — *HDBSCAN Topic Discovery*. Produces the per-corpus topic taxonomies that Phase 2 scope references.
+- **RDR-075** — *Cross-Collection Topic Projection*. The projection pipeline whose bootstrap failure mode (cited as RF-3/RF-4) rules out projection-as-cross-embedding-bridge.
+- **RDR-077** — *Projection Quality: Similarity + ICF Hub Detection*. The ICF write-time amplification finding informs the "plans must compose per-embedding-space steps" invariant (SC-10).
+- **RDR-079** (planned) — *Plan Lifecycle Operations*. Will carry `nx plan promote`, `nx plan audit`, RDR-accept/close hooks, `search(purpose=...)` propagation, and threshold calibration from live data.
+
+### External
+
+- AgenticScholar — *"Agentic Data Management with Pipeline Orchestration for Scholarly Corpora"*, arXiv 2603.13774. Indexed as nexus corpus `knowledge__agentic-scholar` (172 chunks, 54 pages). Qualitative claims on KG Traverse vs. plan reuse separation cite the research-2 audit (`nexus_rdr/078-research-2`).
+
+### Research Findings (stored in T2)
+
+- `nexus_rdr/078-research-1` — Per-workspace heuristic-linker recall measurement; cross-embedding projection empirical zero-match result.
+- `nexus_rdr/078-research-2` — AgenticScholar paper audit: paper's +47% NDCG delta attribution analysis; phase-to-paper mapping; verb-list gap analysis.
+- `nexus_rdr/078-research-3` — Verb-registry-as-tagged-plans insight; T1 session cache architecture (replaces the T3 proposal).
+- `nexus_rdr/078-research-4` — Templating + four-scope tier model + feedback-loop metrics design.
+- `nexus_rdr/078-research-5` — Dimensional plan identity, currying via `default_bindings` + `parent`, purpose abstraction over link types.
+
+### Code and schema anchors
+
+- `src/nexus/db/t2/plan_library.py` — existing RDR-042 plan library implementation.
+- `src/nexus/catalog/catalog.py` — existing `Catalog.graph()` BFS used by Phase 3.
+- `src/nexus/search_engine.py:152-163` — `search_cross_corpus()` kwargs.
+- `src/nexus/mcp/core.py:178` — `query()` MCP tool.
+- `src/nexus/mcp/core.py:53` — `search()` MCP tool.
+- `nx/agents/query-planner.md`, `nx/agents/analytical-operator.md` — existing RDR-042 agents.
+- `nx/hooks/scripts/session_start_hook.py`, `nx/hooks/scripts/subagent-start.sh` — priming integration points (Phase 5).
+- `nx/resources/rdr/TEMPLATE.md` — RDR template this document conforms to.
+
+## Revision History
+
+- **2026-04-14** — Initial draft (scope: projection → link promotion).
+- **2026-04-14** — Revision 2: scrapped projection-centric framing; reframed around plan-match + typed-graph traversal after the ART live demo surfaced RF-2 (cross-embedding cosine is noise) and RF-3 (--use-icf bootstrap amplification).
+- **2026-04-14** — Revision 3: applied paper-audit findings (research-2) — added Phase 3 catalog-Traverse as quality lever; cut Phase 4 (surface alignment); renamed Phase 2 to domain-scoped retrieval steps.
+- **2026-04-15** — Revision 4: T1 session cache replaces T3 plans__semantic collection (research-3). Added four scope tiers (personal/rdr/project/repo/global) with git as transport.
+- **2026-04-15** — Revision 5: templating vocabulary + `plan_run` named tool (research-4). Phase 4 rewritten into 4a-4e (schema + scenarios + metrics + meta-seeds + authoring guide). Phase 6 added.
+- **2026-04-15** — Revision 6: dimensional identity (research-5). Scope/verb/name collapse into pinned dimension map. Currying via `default_bindings` + `parent`. Purpose abstraction over link types. Skills collapse to pure verbs.
+- **2026-04-15** — Revision 7 (this): formal structure — Problem Statement with `#### Gap N:` enumeration, `## Context`, `## Alternatives Considered`, `## Trade-offs`, `## Finalization Gate`, `## References`, `## Revision History`. Content unchanged; structure conforms to `nx/resources/rdr/TEMPLATE.md`.
