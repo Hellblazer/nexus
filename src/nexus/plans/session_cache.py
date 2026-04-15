@@ -95,7 +95,11 @@ class PlanSessionCache:
             plan_id = meta.get("plan_id") if meta else None
             if plan_id is None:
                 continue
-            out.append((int(plan_id), float(distance)))
+            # Cosine distance is mathematically in [0.0, 2.0] but ChromaDB
+            # can return tiny negatives (~1e-7) from FP rounding on exact
+            # matches. Clamp so downstream consumers see the documented range.
+            clamped = max(0.0, min(2.0, float(distance)))
+            out.append((int(plan_id), clamped))
         return out
 
     # ── Population + mutation ─────────────────────────────────────────
