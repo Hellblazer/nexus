@@ -22,9 +22,12 @@ implemented at the pool-core layer in P2.1, not here).
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
-from dataclasses import dataclass
+import shutil
+import subprocess
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 from uuid import uuid4
@@ -44,12 +47,52 @@ from nexus.session import (
 _log = structlog.get_logger()
 
 __all__ = [
+    "OperatorPool",
+    "PoolAuthUnavailableError",
+    "PoolConfigError",
     "PoolSession",
+    "PoolSpawnError",
+    "Worker",
+    "build_worker_cmdline",
+    "check_auth",
     "create_pool_session",
     "probe_pid_alive",
     "reconcile_stale_pool_sessions",
     "teardown_pool_session",
+    "worker_env",
 ]
+
+
+# ── Errors ─────────────────────────────────────────────────────────────────
+
+
+class PoolConfigError(Exception):
+    """Raised when a pool operation is invoked without required configuration.
+
+    Most commonly: ``OperatorPool.spawn_worker()`` called without
+    ``NEXUS_T1_SESSION_ID`` in the environment. This is load-bearing for
+    worker T1 isolation (RDR-079 invariant I-4); silent spawn without it
+    would let the worker's session-discovery fall back to PPID-walk and
+    land on the user's T1, violating I-1. SC-15 pins this behaviour.
+    """
+
+
+class PoolAuthUnavailableError(Exception):
+    """Raised when ``claude auth status`` reports no active authentication.
+
+    The operator pool cannot dispatch work without a logged-in ``claude``
+    CLI. Surfaced by MCP operator tools so callers see a clear "run
+    `claude auth login` or set ANTHROPIC_API_KEY" message. SC-10
+    graceful-degradation mechanism.
+    """
+
+
+class PoolSpawnError(Exception):
+    """Raised when a worker subprocess cannot be started.
+
+    Covers: claude CLI not on PATH, permission denied, unexpected
+    subprocess exit during startup, etc.
+    """
 
 
 @dataclass(frozen=True)
@@ -256,3 +299,226 @@ def teardown_pool_session(
             server_pid=session.server_pid,
             error=str(exc),
         )
+
+
+# ── Auth guard (SC-10) ─────────────────────────────────────────────────────
+
+
+def check_auth() -> None:
+    """Verify ``claude auth status --json`` reports a logged-in session.
+
+    Raises :class:`PoolAuthUnavailableError` on any failure (command
+    missing, JSON unparseable, missing ``loggedIn`` key, or
+    ``loggedIn=false``). RDR-079 risk mitigation: the JSON schema may
+    drift across claude CLI versions, so we probe for key PRESENCE
+    before trusting its value.
+    """
+    try:
+        result = subprocess.run(
+            ["claude", "auth", "status", "--json"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except FileNotFoundError as exc:
+        raise PoolAuthUnavailableError(
+            "`claude` CLI not found on PATH. Install claude code and "
+            "run `claude auth login`, or set ANTHROPIC_API_KEY."
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise PoolAuthUnavailableError(
+            "`claude auth status` timed out after 15s"
+        ) from exc
+
+    if result.returncode != 0:
+        raise PoolAuthUnavailableError(
+            f"`claude auth status --json` exited with {result.returncode}: "
+            f"{(result.stderr or result.stdout)[:200]}"
+        )
+
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise PoolAuthUnavailableError(
+            f"`claude auth status --json` returned unparseable JSON "
+            f"(claude CLI schema drift?): {exc}"
+        ) from exc
+
+    if not isinstance(data, dict) or "loggedIn" not in data:
+        raise PoolAuthUnavailableError(
+            "`claude auth status --json` did not include a `loggedIn` key "
+            "(claude CLI schema drift?). Expected shape: "
+            "{\"loggedIn\": bool, \"authMethod\": str, ...}"
+        )
+
+    if not data["loggedIn"]:
+        raise PoolAuthUnavailableError(
+            "`claude auth status` reports loggedIn=false. "
+            "Run `claude auth login` or set ANTHROPIC_API_KEY to enable "
+            "operator-backed plan steps."
+        )
+
+
+# ── Worker command-line + env (RDR-079 §Worker pool) ───────────────────────
+
+
+def build_worker_cmdline(
+    session_id: str,
+    operator_role: str,
+    max_budget_usd: float,
+    max_turns: int,
+    model: str = "haiku",
+    mcp_config: str | None = None,
+) -> list[str]:
+    """Compose the ``claude -p`` streaming-RPC invocation for a pool worker.
+
+    Matches RDR-079 §Worker pool shape verbatim (Empirical Finding 1 +
+    3). Flags:
+      * ``--input-format stream-json --output-format stream-json
+        --verbose`` — the persistent RPC protocol.
+      * ``--no-session-persistence`` — workers are ephemeral; session
+        identity is carried via ``NEXUS_T1_SESSION_ID`` in env.
+      * ``--session-id`` — per-worker identity for tracing.
+      * ``--append-system-prompt`` — operator role prompt.
+      * ``--max-budget-usd`` / ``--max-turns`` — hard cost caps.
+      * ``--model`` — Haiku by default (fast structured-output work).
+
+    Notably does NOT use ``--bare``: bare mode forces API-key auth and
+    breaks OAuth inheritance (Empirical Finding 4). Paying the startup
+    cost of a full ``claude`` init is the RDR's deliberate trade-off.
+
+    ``mcp_config`` — optional path to a worker-mode ``.mcp.json`` used
+    with ``--strict-mcp-config`` for tool-surface restriction (P2.4).
+    """
+    claude = shutil.which("claude") or "claude"
+    cmd: list[str] = [
+        claude, "-p",
+        "--input-format", "stream-json",
+        "--output-format", "stream-json",
+        "--verbose",
+        "--no-session-persistence",
+        "--session-id", session_id,
+        "--append-system-prompt", operator_role,
+        "--max-budget-usd", str(max_budget_usd),
+        "--max-turns", str(max_turns),
+        "--model", model,
+    ]
+    if mcp_config:
+        cmd += ["--mcp-config", mcp_config, "--strict-mcp-config"]
+    return cmd
+
+
+def worker_env(pool_session_id: str) -> dict[str, str]:
+    """Build the environment passed to a worker subprocess.
+
+    Inherits the parent env (PATH, HOME, auth tokens, etc.) then overlays:
+      * ``NEXUS_T1_SESSION_ID=<pool_session_id>`` — worker attaches to the
+        pool's isolated T1 session (I-1).
+      * ``NEXUS_MCP_WORKER_MODE=1`` — any nested ``nx-mcp`` the worker
+        talks to drops plan_match/plan_run/operator_* from its surface
+        (I-2, P2.4).
+    """
+    env = os.environ.copy()
+    env["NEXUS_T1_SESSION_ID"] = pool_session_id
+    env["NEXUS_MCP_WORKER_MODE"] = "1"
+    return env
+
+
+# ── Worker + Pool (skeleton; commits B/C fill in dispatch/retirement) ──────
+
+
+@dataclass
+class Worker:
+    """A single pool worker subprocess.
+
+    Fields are populated as the worker's lifetime progresses; a just-
+    spawned worker has ``process`` set and counters at zero.
+    """
+    session_id: str
+    process: asyncio.subprocess.Process
+    cumulative_input_tokens: int = 0
+    cumulative_output_tokens: int = 0
+    in_flight: int = 0
+    alive: bool = True
+
+    @property
+    def cumulative_tokens(self) -> int:
+        return self.cumulative_input_tokens + self.cumulative_output_tokens
+
+
+@dataclass
+class OperatorPool:
+    """Asyncio-driven pool of long-running ``claude`` workers.
+
+    This is the commit-A skeleton: construction, spawn guard, worker
+    builder. Dispatch + streaming JSON parse lands in commit B.
+    Retirement + health probe in commit C. Singleton wiring via
+    ``mcp_infra.py`` ships alongside commit C.
+    """
+    size: int = 2
+    model: str = "haiku"
+    max_budget_usd: float = 1.0
+    max_turns: int = 6
+    retirement_token_threshold: int = 150_000
+    workers: list[Worker] = field(default_factory=list)
+    pool_session: PoolSession | None = None
+    _auth_checked: bool = False
+
+    async def spawn_worker(
+        self,
+        operator_role: str = "You are a pool worker.",
+    ) -> Worker:
+        """Launch one ``claude -p`` worker subprocess.
+
+        Pre-conditions:
+          * ``NEXUS_T1_SESSION_ID`` must be set in this process's env
+            (SC-15, invariant I-4). Raises :class:`PoolConfigError` if
+            missing or empty — fail loud, not silent.
+          * On first call in the pool's lifetime, :func:`check_auth` is
+            invoked (SC-10). Subsequent spawns skip it (cached).
+
+        Returns the live :class:`Worker` on success.
+        """
+        t1_sid = os.environ.get("NEXUS_T1_SESSION_ID", "").strip()
+        if not t1_sid:
+            raise PoolConfigError(
+                "NEXUS_T1_SESSION_ID must be set before spawning a pool "
+                "worker — the env var is the load-bearing mechanism for "
+                "worker T1 isolation (RDR-079 invariant I-4). Set it to "
+                "a pool-scoped session id (e.g. pool-<uuid>) or call "
+                "create_pool_session() first."
+            )
+
+        if not self._auth_checked:
+            check_auth()  # raises PoolAuthUnavailableError on failure
+            self._auth_checked = True
+
+        session_id = f"worker-{uuid4()}"
+        cmd = build_worker_cmdline(
+            session_id=session_id,
+            operator_role=operator_role,
+            max_budget_usd=self.max_budget_usd,
+            max_turns=self.max_turns,
+            model=self.model,
+        )
+        env = worker_env(pool_session_id=t1_sid)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+            )
+        except (FileNotFoundError, OSError) as exc:
+            raise PoolSpawnError(
+                f"failed to spawn claude worker: {exc}"
+            ) from exc
+
+        worker = Worker(session_id=session_id, process=proc)
+        self.workers.append(worker)
+        _log.info(
+            "pool_worker_spawned",
+            session_id=session_id,
+            pid=proc.pid,
+            pool_session=t1_sid,
+        )
+        return worker
