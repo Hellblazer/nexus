@@ -1,9 +1,10 @@
 ---
 title: "RDR-078: Plan-Centric Retrieval — Semantic Plan Matching, Typed-Graph Traversal, Scenario Plans"
-status: draft
+status: accepted
 type: feature
 priority: P2
 created: 2026-04-14
+accepted_date: 2026-04-15
 related: [RDR-042, RDR-050, RDR-053, RDR-070, RDR-077]
 reviewed-by: self
 ---
