@@ -130,12 +130,23 @@ _DOMAIN_TO_MODEL: dict[str, str] = {
     "prose": "voyage-context-3",
 }
 
+#: Maps the taxonomy domain to the comma-separated ``corpus`` prefix
+#: string accepted by the ``search`` / ``query`` MCP tools.
+#: Forwarded by :func:`_apply_scope_to_args` when the step doesn't
+#: pin a specific collection.
+_DOMAIN_TO_CORPUS: dict[str, str] = {
+    "code": "code",
+    "prose": "knowledge,docs,rdr,paper",
+}
+
 #: Tools that operate on tumblers/ids/link-types and never embeddings.
-#: They are exempt from the cross-embedding guard.
+#: They are exempt from the cross-embedding guard *and* from the
+#: corpus-injection helper (no embedding space to route into).
 _NON_EMBEDDING_TOOLS: frozenset[str] = frozenset({"traverse"})
 
 #: Args keys that may carry a collection name. The runner extracts
-#: candidates from these to validate the cross-embedding guard.
+#: candidates from these to validate the cross-embedding guard, and
+#: skips corpus injection when any of these are populated.
 _COLLECTION_ARG_KEYS: tuple[str, ...] = ("collection", "collections")
 
 
@@ -275,6 +286,57 @@ def _check_embedding_domain(
             )
 
 
+# ── Scope forwarding (RDR-078 P2) ──────────────────────────────────────────
+
+
+def _apply_scope_to_args(
+    tool: str,
+    scope: dict[str, Any] | None,
+    args: dict[str, Any],
+    *,
+    bindings: dict[str, Any],
+    step_outputs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Return *args* with ``scope.taxonomy_domain`` and ``scope.topic``
+    forwarded into the dispatched tool call (RDR-078 P2 / SC-3).
+
+    Behaviour:
+
+      * ``scope.taxonomy_domain`` populates ``args["corpus"]`` with the
+        prefix string for the domain — only when (a) the tool is an
+        embedding-domain tool (``traverse`` is exempt — operates on
+        tumblers) and (b) the caller hasn't already pinned a corpus
+        or specific collection. Caller-pinned values always win; the
+        SC-10 cross-embedding guard separately enforces consistency.
+      * ``scope.topic`` is var/stepref-resolved and forwarded as
+        ``args["topic"]`` when not already set by the caller.
+
+    Returns a new dict; ``args`` is not mutated.
+    """
+    out = dict(args)
+    if not scope:
+        return out
+
+    domain = scope.get("taxonomy_domain")
+    if (
+        domain
+        and tool not in _NON_EMBEDDING_TOOLS
+        and "corpus" not in out
+        and not _collections_in_args(out)
+    ):
+        corpus = _DOMAIN_TO_CORPUS.get(str(domain))
+        if corpus is not None:
+            out["corpus"] = corpus
+
+    topic = scope.get("topic")
+    if topic is not None and "topic" not in out:
+        out["topic"] = _resolve_value(
+            topic, bindings=bindings, step_outputs=step_outputs,
+        )
+
+    return out
+
+
 # ── Bindings ────────────────────────────────────────────────────────────────
 
 
@@ -341,6 +403,15 @@ def plan_run(
             raw_args, bindings=merged, step_outputs=step_outputs,
         )
         _check_embedding_domain(index, tool, scope, resolved)
+        # SC-3: forward scope.taxonomy_domain → corpus and scope.topic
+        # → topic into the dispatched call. Runs after the cross-
+        # embedding guard so guard-violating scopes still raise even
+        # when the scope-driven corpus injection would have masked
+        # the inconsistency.
+        resolved = _apply_scope_to_args(
+            tool, scope, resolved,
+            bindings=merged, step_outputs=step_outputs,
+        )
 
         result = dispatch(tool, resolved)
         if not isinstance(result, dict):
