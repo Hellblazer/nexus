@@ -42,6 +42,44 @@ mcp = FastMCP("nexus")
 
 _DEFAULT_PAGE_SIZE = 10
 
+# ── RDR-079 P2.4: worker-mode tool-surface restriction ────────────────────
+#
+# When NEXUS_MCP_WORKER_MODE=1 is set at module import, registration of
+# the dispatch-surface tools (plan_match, plan_run, operator_*) is
+# skipped. The Python functions stay defined and callable from same-
+# process code — only the MCP-over-stdio surface is filtered. This
+# prevents a pool worker from re-entering the pool via these tools
+# (invariant I-2). See RDR-079 §Worker isolation.
+
+import os as _os
+
+_WORKER_MODE: bool = _os.environ.get("NEXUS_MCP_WORKER_MODE", "").strip() == "1"
+
+_WORKER_FORBIDDEN_TOOLS: frozenset[str] = frozenset({
+    "plan_match",
+    "plan_run",
+    "operator_extract",
+    "operator_rank",
+    "operator_compare",
+    "operator_summarize",
+    "operator_generate",
+})
+
+
+def _mcp_tool():
+    """Decorator wrapping ``@mcp.tool()`` with worker-mode filtering.
+
+    In worker mode, functions whose name is in ``_WORKER_FORBIDDEN_TOOLS``
+    are returned unchanged — they stay importable/callable from Python
+    but do NOT land in FastMCP's registry, so MCP ``tools/list`` excludes
+    them. In normal mode, behaves exactly like ``@mcp.tool()``.
+    """
+    def deco(fn):
+        if _WORKER_MODE and fn.__name__ in _WORKER_FORBIDDEN_TOOLS:
+            return fn
+        return mcp.tool()(fn)
+    return deco
+
 # ── Post-store hooks (register once at import) ──────────────────────────────
 
 from nexus.mcp_infra import register_post_store_hook, taxonomy_assign_hook
@@ -1349,7 +1387,7 @@ def plan_search(query: str, project: str = "", limit: int = 5, offset: int = 0) 
         return f"Error: {e}"
 
 
-@mcp.tool()
+@_mcp_tool()
 def plan_match(
     intent: str,
     dimensions: str = "",
@@ -1414,7 +1452,7 @@ def plan_match(
         return f"Error: {e}"
 
 
-@mcp.tool()
+@_mcp_tool()
 def plan_run(plan_id: int, bindings: str = "") -> str:
     """Execute the plan identified by *plan_id* against the MCP tool surface.
 
