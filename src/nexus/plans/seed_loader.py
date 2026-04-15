@@ -75,8 +75,15 @@ def load_seed_directory(
     library: PlanLibrary,
     registered_dimensions: set[str] | None = None,
     outcome: str = "success",
+    file_filter: Any = None,
 ) -> SeedLoadResult:
     """Load every ``*.yml`` / ``*.yaml`` plan template under *directory*.
+
+    *file_filter* is an optional predicate ``Callable[[Path], bool]``
+    called for each candidate path; when supplied, only files for
+    which it returns True are loaded. The scoped loader uses this to
+    keep the umbrella ``_repo.yml`` out of the ``scope:project`` tier
+    without duplicating the whole walk.
 
     Returns a :class:`SeedLoadResult` naming each template by filename
     and bucketing by outcome (inserted, skipped_existing, errors).
@@ -98,6 +105,7 @@ def load_seed_directory(
     yaml_paths = sorted(
         p for p in directory.iterdir()
         if p.is_file() and p.suffix in (".yml", ".yaml")
+        and (file_filter is None or file_filter(p))
     )
 
     for path in yaml_paths:

@@ -103,7 +103,6 @@ def _seed_plan_templates() -> int:
 
     from nexus.commands._helpers import default_db_path
     from nexus.db.t2 import T2Database
-    from nexus.plans.seed_loader import load_seed_directory
 
     seeded = 0
     with T2Database(default_db_path()) as db:
@@ -122,21 +121,46 @@ def _seed_plan_templates() -> int:
             )
             seeded += 1
 
-        # RDR-078 scope:global YAML scenario templates (nexus-05i.6).
-        # Path walks up from this file: commands → nexus → src → repo
-        # root → ``nx/plans/builtin``.
-        builtin_dir = (
-            Path(__file__).resolve().parent.parent.parent.parent
-            / "nx" / "plans" / "builtin"
+        # RDR-078 scoped plan loader (nexus-05i.10). Walks four tiers:
+        # plugin builtin → per-RDR plans → project → repo umbrella.
+        # Replaces the direct P4b/P4d seed calls with the canonical
+        # four-tier loader so per-RDR and project-scope plans ship
+        # alongside the built-in scenario + meta seeds.
+        from nexus.plans.loader import load_all_tiers
+
+        repo_root_str = subprocess_git_toplevel() or str(Path.cwd())
+        plugin_root = (
+            Path(__file__).resolve().parent.parent.parent.parent / "nx"
         )
-        result = load_seed_directory(builtin_dir, library=db.plans)
-        for source, error in result.errors:
-            _log.warning(
-                "rdr078_seed_load_error", source=source, error=error,
-            )
-        seeded += len(result.inserted)
+        tier_results = load_all_tiers(
+            plugin_root=plugin_root,
+            repo_root=Path(repo_root_str),
+            library=db.plans,
+        )
+        for scope, result in tier_results.items():
+            for source, error in result.errors:
+                _log.warning(
+                    "rdr078_seed_load_error",
+                    scope=scope, source=source, error=error,
+                )
+            seeded += len(result.inserted)
 
     return seeded
+
+
+def subprocess_git_toplevel() -> str | None:
+    """Return the current repo's toplevel directory, or None."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip() or None
+    except Exception:
+        return None
+    return None
 
 
 def _get_catalog() -> Catalog:
