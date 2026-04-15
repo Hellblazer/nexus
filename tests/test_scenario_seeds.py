@@ -90,23 +90,31 @@ def test_debug_seed_is_flat() -> None:
 # ── SC-14: loader idempotency ──────────────────────────────────────────────
 
 
+_SCENARIO_FILES = {fn for fn, _ in REQUIRED_SEEDS}
+
+
 def test_seed_loader_writes_all_five(library) -> None:
+    """All five scenario seeds insert. Loader also picks up other
+    builtin seeds (meta-seeds etc.) from the same directory; we pin
+    the scenario subset explicitly."""
     from nexus.plans.seed_loader import load_seed_directory
 
     result = load_seed_directory(SEEDS_DIR, library=library)
     assert result.errors == [], f"unexpected errors: {result.errors}"
-    assert len(result.inserted) == 5
+    inserted_scenarios = set(result.inserted) & _SCENARIO_FILES
+    assert inserted_scenarios == _SCENARIO_FILES
 
 
 def test_seed_loader_idempotent(library) -> None:
     from nexus.plans.seed_loader import load_seed_directory
 
     first = load_seed_directory(SEEDS_DIR, library=library)
-    assert len(first.inserted) == 5
+    assert _SCENARIO_FILES <= set(first.inserted)
 
     second = load_seed_directory(SEEDS_DIR, library=library)
     assert second.inserted == []
-    assert len(second.skipped_existing) == 5
+    # Idempotency: every scenario seed skipped on the second pass.
+    assert _SCENARIO_FILES <= set(second.skipped_existing)
 
 
 def test_seed_loader_persists_dimensional_fields(library) -> None:

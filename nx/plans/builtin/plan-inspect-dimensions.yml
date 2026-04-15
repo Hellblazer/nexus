@@ -1,0 +1,33 @@
+name: dimensions
+description: >-
+  Enumerate the registered dimensions from nx/plans/dimensions.yml and count
+  how many plans pin each one. Surfaces the dimension registry so an
+  authoring agent can see which axes are canonical (verb, scope, strategy)
+  versus which are specialisation axes (object, domain) in active use.
+  Backing data for the plan-author meta-seed's dimension-choice step.
+dimensions:
+  verb: plan-inspect
+  scope: global
+  strategy: dimensions
+required_bindings: []
+optional_bindings:
+  - include_empty
+default_bindings:
+  include_empty: false
+tags: builtin-template,rdr-078,plan-inspect,meta-seed,registry
+plan_json:
+  steps:
+    - tool: plan_search
+      args:
+        query: "plan template dimension usage"
+        limit: 50
+    - tool: extract
+      args:
+        corpus: $step1.ids
+        target: dimension-usage
+        registry_path: "nx/plans/dimensions.yml"
+        include_empty: $include_empty
+    - tool: summarize
+      args:
+        corpus: $step2.text
+        mode: dimension-registry-report

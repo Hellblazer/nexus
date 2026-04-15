@@ -1,0 +1,39 @@
+name: propose
+description: >-
+  Survey the plan library's runtime metrics and rank promotion candidates.
+  Reads the plans table (use_count, match_count, match_conf_sum,
+  success/failure counts) and applies the default thresholds from RDR-078
+  Phase 4c to identify plans whose usage pattern suggests a higher scope
+  (personal → project, project → global, etc.). Emits a markdown shortlist
+  with the paraphrase range per candidate so a human operator can decide.
+  Primitive form of RDR-079's nx plan audit CLI — this seed is usable today
+  via plan_run without lifecycle-ops infrastructure.
+dimensions:
+  verb: plan-promote
+  scope: global
+  strategy: propose
+required_bindings:
+  - threshold
+optional_bindings:
+  - limit
+default_bindings:
+  threshold: 5
+  limit: 20
+tags: builtin-template,rdr-078,plan-promote,meta-seed
+plan_json:
+  steps:
+    - tool: plan_search
+      args:
+        query: "high-use plan promotion candidate"
+        limit: $limit
+    - tool: rank
+      args:
+        candidates: $step1.ids
+        by: match_count
+        threshold: $threshold
+    - tool: generate
+      args:
+        outline: promotion-shortlist
+        corpus: $step2.text
+        with_citations: true
+        audit_only: true

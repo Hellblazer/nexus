@@ -1,0 +1,42 @@
+name: default
+description: >-
+  Author a new plan template from scratch. Fetches the plan-authoring guide
+  and the dimension registry, surveys the existing library for prior art on
+  the target verb, and drafts a candidate plan_json which the caller saves
+  via plan_save. Self-referential bootstrap — the plan that teaches how to
+  write plans.
+dimensions:
+  verb: plan-author
+  scope: global
+  strategy: default
+required_bindings:
+  - concept
+optional_bindings:
+  - target_verb
+default_bindings:
+  target_verb: research
+tags: builtin-template,rdr-078,plan-author,meta-seed
+plan_json:
+  steps:
+    - tool: search
+      args:
+        query: "plan authoring guide template schema dimensions"
+        limit: 5
+      scope:
+        taxonomy_domain: prose
+    - tool: search
+      args:
+        query: "registered dimensions plan verb scope strategy"
+        limit: 3
+      scope:
+        taxonomy_domain: prose
+    - tool: plan_search
+      args:
+        query: $target_verb
+        limit: 5
+    - tool: summarize
+      args:
+        corpus: $step1.ids
+        mode: authoring-guide-extract
+        target_concept: $concept
+        prior_art: $step3.ids
