@@ -6,6 +6,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.3.2] - 2026-04-15
+
+### Added
+
+- **`nx collection rewrite-metadata <coll>`** (load-bearing): paginate a collection, normalise each chunk's metadata via the same `_normalize_for_write` that fronts every live write, write back via `T3Database.update_chunks`. Idempotent. `--source-path PATH` filter, `--dry-run`, `--all`. Operationalises the PR #164 schema rationalisation on already-indexed corpora — `nx index --force` is a silent no-op when the pipeline-state DB still has the content_hash on file, so this command was the only path to retroactively rewrite legacy chunks.
+- **`nexus.indexer_utils.detect_git_metadata(path)`** helper — walks up via `find_repo_root` and collects `git_project_name` / `git_branch` / `git_commit_hash` / `git_remote_url`. Returns `{}` outside a git repo so callers can `**`-merge unconditionally.
+
+### Fixed
+
+- **Empty `bib_*` placeholders no longer eat metadata budget** (nexus-2my): `normalize()` drops the four `bib_*` slots together when every value is the placeholder (`0` / `""`); a populated set rides through unchanged. Mirrors the `git_meta`-omitted-when-empty pattern from PR #164.
+- **`git_meta` is now populated for `nx index pdf` and `nx index md`**: `_pdf_chunks`, `_markdown_chunks`, `pipeline_stages._build_chunk_metadata` accept a `git_meta` kwarg with auto-detect fallback. Pre-fix, single-file ingest paths emitted no `git_*` keys (the augment lived only in the repo-walk path), so `git_meta` was simply absent on directly-indexed PDFs/markdown. Resolved once at the entrypoint for the streaming pipeline so per-chunk overhead is zero.
+
+### Notes
+
+- Pipeline-state staleness (where `--force` is a silent no-op when `pipeline_buffer` still tracks the content_hash) is tracked separately as a follow-up — not blocking this release because `nx collection rewrite-metadata` is the operator-facing answer.
+
 ## [4.3.1] - 2026-04-15
 
 ### Fixed
