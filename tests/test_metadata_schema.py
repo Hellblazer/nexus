@@ -263,6 +263,75 @@ def test_normalize_drops_empty_ttl_defaults() -> None:
     assert out["expires_at"] == ""
 
 
+def test_normalize_drops_empty_bib_placeholders() -> None:
+    """Bib_* slots with placeholder values (``0`` / ``""``) eat metadata
+    budget for no payload when ``--enrich`` is off (nexus-2my fix #2).
+
+    Mirrors the git_meta-omitted-when-empty behaviour: drop bib_* whose
+    values are zero/empty; keep them when populated.
+    """
+    from nexus.metadata_schema import normalize
+
+    raw = {
+        "source_path": "p.pdf",
+        "content_hash": "x",
+        "chunk_text_hash": "y",
+        "chunk_index": 0,
+        "chunk_count": 1,
+        "bib_year": 0,
+        "bib_authors": "",
+        "bib_venue": "",
+        "bib_citation_count": 0,
+    }
+    out = normalize(raw, content_type="pdf")
+    for key in ("bib_year", "bib_authors", "bib_venue", "bib_citation_count"):
+        assert key not in out, f"empty {key} should be dropped"
+
+
+def test_normalize_keeps_partial_bib_when_year_populated() -> None:
+    """If even one bib_* slot has a real value, keep all four for a
+    consistent search/display contract."""
+    from nexus.metadata_schema import normalize
+
+    raw = {
+        "source_path": "p.pdf",
+        "content_hash": "x",
+        "chunk_text_hash": "y",
+        "chunk_index": 0,
+        "chunk_count": 1,
+        "bib_year": 2024,
+        "bib_authors": "",
+        "bib_venue": "",
+        "bib_citation_count": 0,
+    }
+    out = normalize(raw, content_type="pdf")
+    assert out["bib_year"] == 2024
+    assert out["bib_authors"] == ""
+    assert out["bib_venue"] == ""
+    assert out["bib_citation_count"] == 0
+
+
+def test_normalize_keeps_fully_populated_bib() -> None:
+    from nexus.metadata_schema import normalize
+
+    raw = {
+        "source_path": "p.pdf",
+        "content_hash": "x",
+        "chunk_text_hash": "y",
+        "chunk_index": 0,
+        "chunk_count": 1,
+        "bib_year": 2024,
+        "bib_authors": "Smith",
+        "bib_venue": "ICML",
+        "bib_citation_count": 42,
+    }
+    out = normalize(raw, content_type="pdf")
+    assert out["bib_year"] == 2024
+    assert out["bib_authors"] == "Smith"
+    assert out["bib_venue"] == "ICML"
+    assert out["bib_citation_count"] == 42
+
+
 # ── validate() ──────────────────────────────────────────────────────────────
 
 

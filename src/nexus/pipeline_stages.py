@@ -125,14 +125,21 @@ def _build_chunk_metadata(
     embedding_model: str,
     chunk_count: int,
     now_iso: str,
+    git_meta: dict | None = None,
 ) -> dict:
     """Build chunk metadata with fields known at chunk time.
 
     Extraction-dependent fields (source_title, source_author, extraction_method,
     format, page_count, is_image_pdf, has_formulas) are set to defaults here
     and corrected by the metadata post-pass after extraction completes.
+
+    *git_meta* — flat ``git_*`` provenance dict (nexus-2my fix #3). Caller
+    resolves once via :func:`nexus.indexer_utils.detect_git_metadata` and
+    passes through to keep per-chunk overhead at zero. Empty dict when
+    *pdf_path* is not in a git repo.
     """
-    return {
+    base_git = {k: v for k, v in (git_meta or {}).items() if v}
+    return {**base_git,
         "source_path": pdf_path,
         "source_title": "",       # post-pass: from ExtractionResult
         "source_author": "",      # post-pass: from ExtractionResult
@@ -179,6 +186,7 @@ def _embed_and_write_batch(
     target_model: str,
     chunk_count: int,
     now_iso: str,
+    git_meta: dict | None = None,
 ) -> tuple[int, str]:
     """Embed and write a batch of chunks. Returns (count_written, actual_model)."""
     if not chunks_to_embed:
@@ -213,6 +221,7 @@ def _embed_and_write_batch(
             embedding_model=actual_model,
             chunk_count=chunk_count,
             now_iso=now_iso,
+            git_meta=git_meta,
         )
         db.write_chunk(content_hash, chunk.chunk_index, chunk.text, chunk_id,
                         metadata=meta, embedding=emb_bytes)
@@ -232,6 +241,7 @@ def chunker_loop(
     pdf_path: str = "",
     corpus: str = "",
     target_model: str = "voyage-context-3",
+    git_meta: dict | None = None,
 ) -> None:
     """Incrementally chunk pages as they arrive, overlapping with extraction.
 
@@ -320,7 +330,7 @@ def chunker_loop(
 
         batch_kwargs = dict(
             pdf_path=pdf_path, corpus=corpus, target_model=current_model,
-            now_iso=now_iso,
+            now_iso=now_iso, git_meta=git_meta,
         )
 
         if is_final:
@@ -502,6 +512,7 @@ def pipeline_index_pdf(
     extractor: str = "auto",
     corpus: str = "",
     target_model: str = "voyage-context-3",
+    git_meta: dict | None = None,
 ) -> int:
     """Three-stage streaming pipeline for PDFs.
 
@@ -520,6 +531,13 @@ def pipeline_index_pdf(
 
     # Normalize to absolute so staleness checks are path-form-independent.
     pdf_path = pdf_path.resolve()
+
+    # Resolve git provenance once at the entrypoint so chunker_loop and
+    # _build_chunk_metadata can stamp every chunk without re-detecting
+    # (nexus-2my fix #3).
+    if git_meta is None:
+        from nexus.indexer_utils import detect_git_metadata
+        git_meta = detect_git_metadata(pdf_path)
 
     # Pre-flight: check if pipeline should run before resolving credentials.
     result = db.create_pipeline(content_hash, str(pdf_path), collection)
@@ -553,6 +571,7 @@ def pipeline_index_pdf(
             chunker_loop, content_hash, db, cancel, embed_fn,
             extraction_done=extraction_done, chunking_done=chunking_done,
             pdf_path=str(pdf_path), corpus=corpus, target_model=target_model,
+            git_meta=git_meta,
         )
         upload_future = pool.submit(
             uploader_loop, content_hash, db, t3, collection, cancel,

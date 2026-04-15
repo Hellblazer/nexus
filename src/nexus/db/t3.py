@@ -71,6 +71,82 @@ def _normalize_for_write(metadata: dict, collection_name: str) -> dict:
     return normalize(metadata, content_type=content_type)
 
 
+def _rewrite_collection_metadata(
+    t3_db: T3Database,
+    collection_name: str,
+    *,
+    source_path: str | None = None,
+    dry_run: bool = False,
+) -> tuple[int, int, int]:
+    """Rewrite every chunk's metadata to the canonical schema (nexus-2my).
+
+    Paginates ``col.get(limit=300)`` over the collection, normalises each
+    record's metadata via :func:`_normalize_for_write`, and writes back via
+    :meth:`T3Database.update_chunks` (which validates the canonical
+    output a second time as defense-in-depth).
+
+    Returns ``(updated, skipped, total)``:
+
+      * ``updated`` — chunks whose canonicalised metadata differs from
+        the stored value (``dry_run`` reports what *would* be written).
+      * ``skipped`` — chunks already in canonical shape; no write issued.
+      * ``total`` — chunks scanned.
+
+    Required follow-up to nexus-40t (PR #164): the original fix only
+    constrains *new* writes. Already-indexed corpora keep their pre-4.3.1
+    metadata until this command is run. Unblocks ART by sidestepping the
+    pipeline-state staleness short-circuit on ``--force``.
+    """
+    page = QUOTAS.MAX_RECORDS_PER_WRITE  # 300, dual-purpose: read page + write batch
+
+    # ChromaDB's ``where=`` is the cleanest filter — falls back to a
+    # post-loop equality check when no source_path is requested.
+    where_clause: dict | None = (
+        {"source_path": source_path} if source_path else None
+    )
+
+    col = t3_db.get_or_create_collection(collection_name)
+    updated = skipped = total = 0
+    offset = 0
+
+    while True:
+        if where_clause is not None:
+            batch = _chroma_with_retry(
+                col.get, where=where_clause, include=["metadatas"],
+                limit=page, offset=offset,
+            )
+        else:
+            batch = _chroma_with_retry(
+                col.get, include=["metadatas"], limit=page, offset=offset,
+            )
+        ids = batch.get("ids") or []
+        metas = batch.get("metadatas") or []
+        if not ids:
+            break
+
+        rewrite_ids: list[str] = []
+        rewrite_metas: list[dict] = []
+        for chunk_id, meta in zip(ids, metas):
+            total += 1
+            current = dict(meta or {})
+            canonical = _normalize_for_write(current, collection_name)
+            if canonical == current:
+                skipped += 1
+                continue
+            updated += 1
+            rewrite_ids.append(chunk_id)
+            rewrite_metas.append(canonical)
+
+        if rewrite_ids and not dry_run:
+            t3_db.update_chunks(collection_name, rewrite_ids, rewrite_metas)
+
+        if len(ids) < page:
+            break
+        offset += len(ids)
+
+    return updated, skipped, total
+
+
 # Deprecated: no internal callers remain after RDR-037. Kept for one release
 # cycle in case external scripts import it. Will be removed in next major version.
 _STORE_TYPES: tuple[str, ...] = ("code", "docs", "rdr", "knowledge")
