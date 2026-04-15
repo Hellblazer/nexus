@@ -1819,6 +1819,366 @@ def operator_extract(
     return {"extractions": ext}
 
 
+@_mcp_tool()
+def operator_rank(
+    criterion: str,
+    inputs: str,
+    schema_version: int = _OPERATOR_SCHEMA_VERSION,
+    timeout: float = 60.0,
+) -> dict:
+    """Rank a list of text inputs by *criterion*. RDR-079 P3.2.
+
+    Args:
+        criterion: Natural-language ranking criterion
+            (e.g. ``"most relevant to distributed consensus"``).
+        inputs: JSON-array string of input texts.
+        schema_version: Pinned at 1.
+        timeout: Worker-dispatch timeout in seconds.
+
+    Returns:
+        ``{"ranked": [{"rank": int, "score": float, "input_index": int,
+        "justification": str}, ...]}`` — every input index appears exactly
+        once (no gaps, no duplicates). ``rank`` is 1-based, best first.
+
+    Raises:
+        ``PlanRunOperatorSchemaVersionError``, ``PlanRunOperatorOutputError``.
+    """
+    from nexus.mcp_infra import get_operator_pool
+    from nexus.plans.runner import (
+        PlanRunOperatorOutputError,
+        PlanRunOperatorSchemaVersionError,
+    )
+
+    if schema_version != _OPERATOR_SCHEMA_VERSION:
+        raise PlanRunOperatorSchemaVersionError(
+            operator="rank",
+            received=schema_version,
+            expected=_OPERATOR_SCHEMA_VERSION,
+        )
+
+    pool = get_operator_pool(
+        "rank",
+        operator_role=(
+            "You are the `rank` analytical operator. For each user turn "
+            "you receive a ranking criterion and a JSON array of inputs. "
+            "Emit a StructuredOutput tool_use whose input is "
+            "{\"ranked\": [<one object per input>]} where each object has "
+            "`rank` (1-based, best first), `score` (0.0-1.0), "
+            "`input_index` (0-based index into the input array), and "
+            "`justification` (1-2 sentences). Every input index must "
+            "appear exactly once. Return no prose."
+        ),
+        json_schema={
+            "type": "object",
+            "required": ["ranked"],
+            "properties": {
+                "ranked": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["rank", "score", "input_index", "justification"],
+                        "properties": {
+                            "rank": {"type": "integer"},
+                            "score": {"type": "number"},
+                            "input_index": {"type": "integer"},
+                            "justification": {"type": "string"},
+                        },
+                    },
+                },
+            },
+        },
+    )
+
+    prompt = (
+        f"Ranking criterion: {criterion}\n\n"
+        f"Inputs (JSON array): {inputs}\n\n"
+        f"Rank every input. Each input index must appear exactly once."
+    )
+    payload = _run_pool_dispatch(pool, prompt=prompt, timeout=timeout)
+
+    if not isinstance(payload, dict) or "ranked" not in payload:
+        raise PlanRunOperatorOutputError(
+            operator="rank",
+            reason=f"missing `ranked` key in worker output",
+        )
+    ranked = payload["ranked"]
+    if not isinstance(ranked, list):
+        raise PlanRunOperatorOutputError(
+            operator="rank",
+            reason=f"`ranked` must be a list, got {type(ranked).__name__}",
+        )
+    return {"ranked": ranked}
+
+
+@_mcp_tool()
+def operator_compare(
+    inputs: str,
+    criterion: str = "",
+    schema_version: int = _OPERATOR_SCHEMA_VERSION,
+    timeout: float = 60.0,
+) -> dict:
+    """Compare a list of text inputs. RDR-079 P3.3.
+
+    Args:
+        inputs: JSON-array string of input texts (typically 2+).
+        criterion: Optional comparison criterion (e.g.
+            ``"methodology"``); empty for general comparison.
+        schema_version: Pinned at 1.
+        timeout: Worker-dispatch timeout.
+
+    Returns:
+        ``{"agreements": [str, ...], "conflicts": [str, ...],
+        "gaps": [str, ...]}`` — lists of observations in each category.
+    """
+    from nexus.mcp_infra import get_operator_pool
+    from nexus.plans.runner import (
+        PlanRunOperatorOutputError,
+        PlanRunOperatorSchemaVersionError,
+    )
+
+    if schema_version != _OPERATOR_SCHEMA_VERSION:
+        raise PlanRunOperatorSchemaVersionError(
+            operator="compare", received=schema_version,
+        )
+
+    pool = get_operator_pool(
+        "compare",
+        operator_role=(
+            "You are the `compare` analytical operator. For each user "
+            "turn you receive a list of inputs (and optionally a "
+            "criterion). Emit a StructuredOutput tool_use whose input "
+            "is {\"agreements\": [str], \"conflicts\": [str], "
+            "\"gaps\": [str]}. Each list contains short string "
+            "observations. Return no prose."
+        ),
+        json_schema={
+            "type": "object",
+            "required": ["agreements", "conflicts", "gaps"],
+            "properties": {
+                "agreements": {"type": "array", "items": {"type": "string"}},
+                "conflicts": {"type": "array", "items": {"type": "string"}},
+                "gaps": {"type": "array", "items": {"type": "string"}},
+            },
+        },
+    )
+
+    crit = f"Criterion: {criterion}\n\n" if criterion else ""
+    prompt = (
+        f"{crit}Compare the inputs below. Identify agreements, conflicts, "
+        f"and gaps.\n\nInputs (JSON array): {inputs}"
+    )
+    payload = _run_pool_dispatch(pool, prompt=prompt, timeout=timeout)
+
+    if not isinstance(payload, dict):
+        raise PlanRunOperatorOutputError(
+            operator="compare",
+            reason=f"worker output is not a dict, got {type(payload).__name__}",
+        )
+    for key in ("agreements", "conflicts", "gaps"):
+        if key not in payload:
+            raise PlanRunOperatorOutputError(
+                operator="compare",
+                reason=f"missing `{key}` key in worker output",
+            )
+        if not isinstance(payload[key], list):
+            raise PlanRunOperatorOutputError(
+                operator="compare",
+                reason=f"`{key}` must be a list, got {type(payload[key]).__name__}",
+            )
+    return {
+        "agreements": payload["agreements"],
+        "conflicts": payload["conflicts"],
+        "gaps": payload["gaps"],
+    }
+
+
+@_mcp_tool()
+def operator_summarize(
+    inputs: str,
+    mode: str = "short",
+    schema_version: int = _OPERATOR_SCHEMA_VERSION,
+    timeout: float = 60.0,
+) -> dict:
+    """Summarize a list of text inputs. RDR-079 P3.4.
+
+    Args:
+        inputs: JSON-array string of input texts.
+        mode: ``"short"`` (one-paragraph) | ``"detailed"`` (multi-paragraph)
+            | ``"evidence"`` (claim → citation per input).
+        schema_version: Pinned at 1.
+        timeout: Worker-dispatch timeout.
+
+    Returns:
+        ``{"text": str, "citations": [{"input_index": int, "span": str}, ...]}``.
+    """
+    from nexus.mcp_infra import get_operator_pool
+    from nexus.plans.runner import (
+        PlanRunOperatorOutputError,
+        PlanRunOperatorSchemaVersionError,
+    )
+
+    if schema_version != _OPERATOR_SCHEMA_VERSION:
+        raise PlanRunOperatorSchemaVersionError(
+            operator="summarize", received=schema_version,
+        )
+
+    pool = get_operator_pool(
+        "summarize",
+        operator_role=(
+            "You are the `summarize` analytical operator. For each user "
+            "turn you receive a list of inputs and a mode. Emit a "
+            "StructuredOutput tool_use whose input is {\"text\": str, "
+            "\"citations\": [{\"input_index\": int, \"span\": str}]}. "
+            "Mode=short: one paragraph. Mode=detailed: multi-paragraph. "
+            "Mode=evidence: every claim paired with an input_index "
+            "citation. Return no prose outside the tool_use."
+        ),
+        json_schema={
+            "type": "object",
+            "required": ["text", "citations"],
+            "properties": {
+                "text": {"type": "string"},
+                "citations": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["input_index", "span"],
+                        "properties": {
+                            "input_index": {"type": "integer"},
+                            "span": {"type": "string"},
+                        },
+                    },
+                },
+            },
+        },
+    )
+
+    prompt = (
+        f"Mode: {mode}\n\n"
+        f"Summarize the inputs below.\n\n"
+        f"Inputs (JSON array): {inputs}"
+    )
+    payload = _run_pool_dispatch(pool, prompt=prompt, timeout=timeout)
+
+    if not isinstance(payload, dict):
+        raise PlanRunOperatorOutputError(
+            operator="summarize",
+            reason=f"worker output is not a dict, got {type(payload).__name__}",
+        )
+    if "text" not in payload or not isinstance(payload["text"], str):
+        raise PlanRunOperatorOutputError(
+            operator="summarize",
+            reason="missing or non-string `text` in worker output",
+        )
+    citations = payload.get("citations", [])
+    if not isinstance(citations, list):
+        raise PlanRunOperatorOutputError(
+            operator="summarize",
+            reason=f"`citations` must be a list, got {type(citations).__name__}",
+        )
+    return {"text": payload["text"], "citations": citations}
+
+
+@_mcp_tool()
+def operator_generate(
+    outline: str,
+    inputs: str,
+    with_citations: bool = True,
+    schema_version: int = _OPERATOR_SCHEMA_VERSION,
+    timeout: float = 90.0,
+) -> dict:
+    """Generate synthesis text from a list of inputs + an outline. RDR-079 P3.5.
+
+    Distinguished from ``summarize``: generate produces NEW synthesis
+    conditioned on a caller-supplied outline; summarize reduces inputs
+    to a tighter restatement.
+
+    Args:
+        outline: What the generated text should cover (e.g.
+            ``"mechanism of consensus in the Delos paper"``).
+        inputs: JSON-array string of source inputs.
+        with_citations: Whether to require per-claim citations.
+        schema_version: Pinned at 1.
+        timeout: Worker-dispatch timeout (longer default — generation
+            is typically the heaviest operator).
+
+    Returns:
+        ``{"text": str, "citations": [{"input_index": int, "span": str}, ...]}``.
+    """
+    from nexus.mcp_infra import get_operator_pool
+    from nexus.plans.runner import (
+        PlanRunOperatorOutputError,
+        PlanRunOperatorSchemaVersionError,
+    )
+
+    if schema_version != _OPERATOR_SCHEMA_VERSION:
+        raise PlanRunOperatorSchemaVersionError(
+            operator="generate", received=schema_version,
+        )
+
+    citation_req = (
+        "Every non-trivial claim must be paired with an input_index "
+        "citation (no citation → gap in the outline)."
+        if with_citations
+        else "Citations are optional."
+    )
+    pool = get_operator_pool(
+        "generate",
+        operator_role=(
+            "You are the `generate` analytical operator. For each user "
+            "turn you receive an outline and a list of inputs. Produce "
+            "NEW prose (not a summary of the inputs) that covers the "
+            "outline, grounded in the inputs. Emit a StructuredOutput "
+            "tool_use whose input is {\"text\": str, \"citations\": "
+            "[{\"input_index\": int, \"span\": str}]}. " + citation_req
+        ),
+        json_schema={
+            "type": "object",
+            "required": ["text", "citations"],
+            "properties": {
+                "text": {"type": "string"},
+                "citations": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["input_index", "span"],
+                        "properties": {
+                            "input_index": {"type": "integer"},
+                            "span": {"type": "string"},
+                        },
+                    },
+                },
+            },
+        },
+    )
+
+    prompt = (
+        f"Outline: {outline}\n\n"
+        f"Generate prose covering the outline, grounded in the inputs "
+        f"below.\n\n"
+        f"Inputs (JSON array): {inputs}"
+    )
+    payload = _run_pool_dispatch(pool, prompt=prompt, timeout=timeout)
+
+    if not isinstance(payload, dict):
+        raise PlanRunOperatorOutputError(
+            operator="generate",
+            reason=f"worker output is not a dict, got {type(payload).__name__}",
+        )
+    if "text" not in payload or not isinstance(payload["text"], str):
+        raise PlanRunOperatorOutputError(
+            operator="generate",
+            reason="missing or non-string `text` in worker output",
+        )
+    citations = payload.get("citations", [])
+    if not isinstance(citations, list):
+        raise PlanRunOperatorOutputError(
+            operator="generate",
+            reason=f"`citations` must be a list, got {type(citations).__name__}",
+        )
+    return {"text": payload["text"], "citations": citations}
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 
