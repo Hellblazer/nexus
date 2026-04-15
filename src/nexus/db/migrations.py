@@ -307,6 +307,74 @@ def _add_projection_quality_columns(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 
+def _add_plan_dimensional_identity(conn: sqlite3.Connection) -> None:
+    """Add RDR-078 dimensional identity + currying + metrics columns to plans.
+
+    Columns added (all nullable / zero-default so RDR-042 callers keep
+    working):
+
+    * Dimensional identity: ``verb``, ``scope``, ``dimensions``,
+      ``default_bindings``, ``parent_dims``, ``name``.
+    * Metrics: ``use_count``, ``last_used``, ``match_count``,
+      ``match_conf_sum``, ``success_count``, ``failure_count``.
+
+    Indexes added:
+
+    * ``idx_plans_verb``, ``idx_plans_scope``,
+      ``idx_plans_verb_scope`` — dimensional filter acceleration.
+    * ``idx_plans_project_dimensions`` — partial ``UNIQUE`` index on
+      ``(project, dimensions) WHERE dimensions IS NOT NULL``. Legacy
+      rows with ``dimensions=NULL`` are excluded so they never collide
+      with each other; new rows using :func:`nexus.plans.schema.
+      canonical_dimensions_json` dedupe at write time.
+
+    RDR-078 Phase 4c (nexus-05i.1). Idempotent via ``PRAGMA table_info``
+    column guard + ``CREATE INDEX IF NOT EXISTS``. No-op on a DB that
+    has no ``plans`` table.
+    """
+    has_table = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='plans'"
+    ).fetchone()
+    if not has_table:
+        return
+
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(plans)").fetchall()}
+
+    changed = False
+    additions: list[tuple[str, str]] = [
+        ("verb", "TEXT"),
+        ("scope", "TEXT"),
+        ("dimensions", "TEXT"),
+        ("default_bindings", "TEXT"),
+        ("parent_dims", "TEXT"),
+        ("name", "TEXT"),
+        ("use_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("last_used", "TEXT"),
+        ("match_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("match_conf_sum", "REAL NOT NULL DEFAULT 0.0"),
+        ("success_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("failure_count", "INTEGER NOT NULL DEFAULT 0"),
+    ]
+    for name, decl in additions:
+        if name not in cols:
+            _log.info("Adding plans column", column=name)
+            conn.execute(f"ALTER TABLE plans ADD COLUMN {name} {decl}")
+            changed = True
+
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_plans_verb ON plans(verb)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_plans_scope ON plans(scope)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_plans_verb_scope ON plans(verb, scope)"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_plans_project_dimensions "
+        "ON plans(project, dimensions) WHERE dimensions IS NOT NULL"
+    )
+
+    if changed:
+        conn.commit()
+
+
 def migrate_review_columns(conn: sqlite3.Connection) -> None:
     """Add ``review_status`` and ``terms`` columns to ``topics`` if missing."""
     cols = {
@@ -345,6 +413,11 @@ MIGRATIONS: list[Migration] = [
         "4.3.0",
         "Add projection-quality columns (similarity, assigned_at, source_collection)",
         _add_projection_quality_columns,
+    ),
+    Migration(
+        "4.4.0",
+        "Add plan dimensional identity + currying + metrics (RDR-078)",
+        _add_plan_dimensional_identity,
     ),
 ]
 
