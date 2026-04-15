@@ -106,6 +106,15 @@ _GIT_FIELD_MAP: dict[str, str] = {
     "git_remote_url": "remote",
 }
 
+#: Bibliographic slots. All four are dropped together when every value
+#: is the placeholder (``0`` or ``""``) — without ``--enrich`` they are
+#: pure cargo eating metadata budget (nexus-2my fix #2). When at least
+#: one slot is populated the full set rides along so the search/display
+#: contract stays uniform.
+_BIB_FIELDS: tuple[str, ...] = (
+    "bib_year", "bib_authors", "bib_venue", "bib_citation_count",
+)
+
 #: Primitive value types accepted by ChromaDB metadata.
 _PRIMITIVE_TYPES: tuple[type, ...] = (str, int, float, bool, type(None))
 
@@ -132,6 +141,9 @@ def normalize(raw: dict[str, Any], *, content_type: str) -> dict[str, Any]:
     3. Pack every populated ``git_*`` field into a single ``git_meta``
        JSON string (omit entirely when all four are empty, saving a slot).
     4. Drop cargo keys — anything outside :data:`ALLOWED_TOP_LEVEL`.
+       Then drop the four ``bib_*`` slots together when every value is
+       the placeholder (``0`` / ``""``) — consistent with the
+       git_meta-omitted-when-empty pattern.
     5. Inject ``content_type`` so routing code has a single canonical
        field to read.
 
@@ -168,6 +180,15 @@ def normalize(raw: dict[str, Any], *, content_type: str) -> dict[str, Any]:
 
     # Step 4: drop cargo.
     normalised = {k: v for k, v in working.items() if k in ALLOWED_TOP_LEVEL}
+
+    # Step 4b: drop the bib_* placeholder set when every slot is empty.
+    # When ``--enrich`` is off the indexer writes the four bib_* keys
+    # with ``0`` / ``""`` defaults; without this filter they consume four
+    # metadata slots for no payload (nexus-2my fix #2). Mirrors the
+    # git_meta-omitted-when-empty pattern.
+    if not any(normalised.get(field) for field in _BIB_FIELDS):
+        for field in _BIB_FIELDS:
+            normalised.pop(field, None)
 
     # Step 3 (cont.): write git_meta only when at least one field has
     # a truthy value.
