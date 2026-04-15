@@ -160,6 +160,34 @@ def test_schema_accepts_traverse_with_link_types_only() -> None:
     validate_plan_template(t)
 
 
+def test_schema_rejects_traverse_with_neither_link_types_nor_purpose() -> None:
+    """Traverse with neither routing signal is semantically meaningless.
+    Reject at schema time rather than let it fail at runtime. SC-16."""
+    from nexus.plans.schema import PlanTemplateSchemaError, validate_plan_template
+
+    t = _full_template()
+    t["plan_json"]["steps"] = [{
+        "tool": "traverse",
+        "args": {"seeds": ["1.1"], "depth": 2},
+    }]
+    with pytest.raises(PlanTemplateSchemaError, match="link_types.*purpose|SC-16"):
+        validate_plan_template(t)
+
+
+def test_schema_accepts_traverse_with_purpose_in_args() -> None:
+    """Real scenario seeds nest ``purpose`` under ``args:``. The SC-16
+    check must recognize either placement so the validator catches
+    real YAML shape, not only the top-level test shape."""
+    from nexus.plans.schema import validate_plan_template
+
+    t = _full_template()
+    t["plan_json"]["steps"] = [{
+        "tool": "traverse",
+        "args": {"seeds": ["1.1"], "purpose": "reference-chain", "depth": 2},
+    }]
+    validate_plan_template(t)
+
+
 # ── SC-19: lenient unknown-dimension warning ────────────────────────────────
 
 

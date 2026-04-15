@@ -178,12 +178,21 @@ def validate_plan_template(
                 f"plan_json.steps[{index}] requires a non-empty 'tool'"
             )
         if tool in _TRAVERSAL_TOOLS:
-            has_link_types = bool(step.get("link_types"))
-            has_purpose = bool(step.get("purpose"))
+            # SC-16: traverse steps carry 'link_types' or 'purpose' either at
+            # the step top-level (legacy test shape) or inside 'args' (current
+            # YAML convention). Check both so the invariant holds either way.
+            args = step.get("args") if isinstance(step.get("args"), dict) else {}
+            has_link_types = bool(step.get("link_types")) or bool(args.get("link_types"))
+            has_purpose = bool(step.get("purpose")) or bool(args.get("purpose"))
             if has_link_types and has_purpose:
                 raise PlanTemplateSchemaError(
                     f"plan_json.steps[{index}] (traverse) declares both "
                     f"'link_types' and 'purpose'; SC-16 requires exactly one"
+                )
+            if not has_link_types and not has_purpose:
+                raise PlanTemplateSchemaError(
+                    f"plan_json.steps[{index}] (traverse) must declare "
+                    f"either 'link_types' or 'purpose' (SC-16)"
                 )
 
 

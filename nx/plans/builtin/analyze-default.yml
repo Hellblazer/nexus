@@ -34,13 +34,13 @@ plan_json:
         topic: $area
     - tool: traverse
       args:
-        seeds: $step1.tumblers
+        seeds: [$step1.tumblers, $step2.tumblers]
         purpose: reference-chain
         depth: 2
         direction: both
     - tool: rank
       args:
-        candidates: $step3.ids
+        candidates: [$step2.ids, $step3.ids]
         by: $criterion
     - tool: generate
       args:

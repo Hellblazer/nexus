@@ -154,6 +154,29 @@ def test_run_resolves_step_ref_for_list_field() -> None:
     assert disp.calls[1] == ("extract", {"ids": ["a", "b", "c"]})
 
 
+def test_run_resolves_list_of_step_refs_flattens() -> None:
+    """``[$step1.ids, $step2.ids]`` resolves element-wise and flattens one
+    level — callers combining outputs from multiple prior steps can use
+    the list literal shape directly. Regression for RDR-078 critique finding
+    that analyze-default.yml had no way to combine prose + code corpora."""
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "search", "args": {"query": "p"}},
+            {"tool": "search", "args": {"query": "c"}},
+            {"tool": "rank", "args": {"candidates": ["$step1.ids", "$step2.ids"]}},
+        ],
+    }
+    disp = _FakeDispatcher([
+        {"ids": ["a", "b"], "tumblers": []},
+        {"ids": ["c", "d"], "tumblers": []},
+        {"text": "ranked"},
+    ])
+    plan_run(_match(plan), {}, dispatcher=disp)
+    assert disp.calls[2] == ("rank", {"candidates": ["a", "b", "c", "d"]})
+
+
 def test_run_step_ref_unknown_field_raises() -> None:
     from nexus.plans.runner import PlanRunStepRefError, plan_run
 

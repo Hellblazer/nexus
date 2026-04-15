@@ -194,8 +194,22 @@ def _resolve_value(
 
     ``$var`` and ``$stepN.field`` substitutions only fire on values
     that are exactly that single token — no inline interpolation.
-    Non-string values pass through unchanged.
+    Lists are resolved element-wise so callers can write e.g.
+    ``seeds: [$step1.tumblers, $step2.tumblers]`` — each element
+    resolves independently, list-valued elements are flattened one
+    level so the final ``seeds`` is a flat list of tumblers. Non-list,
+    non-string values pass through unchanged.
     """
+    if isinstance(value, list):
+        resolved: list[Any] = []
+        for item in value:
+            r = _resolve_value(item, bindings=bindings, step_outputs=step_outputs)
+            if isinstance(r, list):
+                resolved.extend(r)
+            else:
+                resolved.append(r)
+        return resolved
+
     if not isinstance(value, str):
         return value
 

@@ -116,9 +116,8 @@ def load_seed_directory(
                 raise PlanTemplateSchemaError(
                     f"YAML root is {type(template).__name__}, expected mapping"
                 )
-            validate_plan_template(
-                template, registered_dimensions=registered_dimensions,
-            )
+            # template_loader.add() calls validate_plan_template internally,
+            # so we only canonicalize here (and let add() do the validation).
             canonical = canonical_dimensions_json(template["dimensions"])
             template_loader.add(template, source=source)
         except PlanTemplateDuplicateError as exc:
