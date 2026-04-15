@@ -39,6 +39,8 @@ calls into :mod:`nexus.mcp.core`.
 """
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import re
 from dataclasses import dataclass, field
@@ -432,16 +434,66 @@ def _validate_bindings(match: Match, bindings: dict[str, Any]) -> None:
 # ── Default dispatcher (lazy MCP-tool wiring) ───────────────────────────────
 
 
+#: Plan-step operator names → their MCP-tool counterparts in nexus.mcp.core.
+#: Seed YAMLs use bare names (``tool: extract``, ``tool: rank``, etc.); the
+#: dispatcher maps those to the async ``operator_*`` MCP tools registered
+#: in RDR-079 P3. (Review flagged this as required for P4 to compose with
+#: the scenario seeds shipped by RDR-078 P4b.)
+_OPERATOR_TOOL_MAP: dict[str, str] = {
+    "extract": "operator_extract",
+    "rank": "operator_rank",
+    "compare": "operator_compare",
+    "summarize": "operator_summarize",
+    "generate": "operator_generate",
+}
+
+
+def _run_coro_in_thread(coro) -> Any:
+    """Run *coro* to completion on a dedicated thread with its own event loop.
+
+    RDR-079 P4: ``_default_dispatcher`` is sync and is ultimately called
+    from FastMCP's async event loop (when an agent invokes the sync
+    ``plan_run`` MCP tool). The operator_* MCP tools are async. Calling
+    ``asyncio.run()`` from within a running loop raises RuntimeError
+    (caught in review as C-1 in P3). This helper side-steps the conflict
+    by running the coroutine on a FRESH loop in a worker thread, joining
+    when done. Per-call overhead is a thread spawn + tear-down (~ms) —
+    negligible against the ~seconds of actual operator dispatch.
+    """
+    import threading
+    holder: dict[str, Any] = {"result": None, "exc": None}
+
+    def _target() -> None:
+        try:
+            holder["result"] = asyncio.run(coro)
+        except BaseException as exc:  # re-raised in caller thread below
+            holder["exc"] = exc
+
+    thread = threading.Thread(target=_target, name="operator-dispatch", daemon=True)
+    thread.start()
+    thread.join()
+    if holder["exc"] is not None:
+        raise holder["exc"]
+    return holder["result"]
+
+
 def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]:
     """Dispatch *tool* against the live MCP tool registry.
 
     Resolves the tool callable lazily from :mod:`nexus.mcp.core` so the
     runner module imports cheaply and tests can swap it out without
-    touching the MCP server.
+    touching the MCP server. Routes plan-step operator names
+    (``extract``, ``rank``, etc.) to their ``operator_*`` counterparts
+    per RDR-079 P4.
     """
     from nexus.mcp import core as mcp_core
 
-    fn = getattr(mcp_core, tool, None)
+    # RDR-079 P4: map plan-step operator names (bare) to their MCP-tool
+    # counterparts (operator_*).  Seed YAMLs use the bare name; the pool
+    # exposes operator_*.
+    resolved_tool = _OPERATOR_TOOL_MAP.get(tool, tool)
+
+    fn = getattr(mcp_core, resolved_tool, None)
     if fn is None or not callable(fn):
         available = sorted(
             name for name in dir(mcp_core)
@@ -461,7 +513,14 @@ def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]:
     # can still pass structured=True explicitly if they want.
     if tool in _RETRIEVAL_TOOLS and "structured" not in args:
         args = {**args, "structured": True}
-    result = fn(**args)
+
+    # RDR-079 P4: operator_* tools are async. Bridge to sync via a worker
+    # thread with a dedicated event loop. Detected by iscoroutinefunction
+    # rather than by name — new async tools automatically use the bridge.
+    if inspect.iscoroutinefunction(fn):
+        result = _run_coro_in_thread(fn(**args))
+    else:
+        result = fn(**args)
     # Most MCP tools return str (human-readable summary); the runner
     # expects dict per RDR-078 §Phase 1. Normalize: wrap string returns
     # as ``{"text": ...}`` so downstream ``$stepN.text`` references
