@@ -397,6 +397,7 @@ def build_worker_cmdline(
     max_turns: int,
     model: str = "haiku",
     mcp_config: str | None = None,
+    json_schema: dict | None = None,
 ) -> list[str]:
     """Compose the ``claude -p`` streaming-RPC invocation for a pool worker.
 
@@ -433,6 +434,14 @@ def build_worker_cmdline(
     ]
     if mcp_config:
         cmd += ["--mcp-config", mcp_config, "--strict-mcp-config"]
+    if json_schema is not None:
+        # Per RDR-079 Empirical Finding 3: --json-schema registers a
+        # synthetic StructuredOutput tool. The model emits a tool_use
+        # whose ``input`` is the validated payload. Schema is fixed for
+        # the worker's lifetime — per-operator pools is the design
+        # consequence (one pool per operator_name, all workers in that
+        # pool share the same schema).
+        cmd += ["--json-schema", json.dumps(json_schema)]
     return cmd
 
 
@@ -491,6 +500,8 @@ class OperatorPool:
     max_budget_usd: float = 1.0
     max_turns: int = 6
     retirement_token_threshold: int = 150_000
+    operator_role: str = "You are a pool worker."
+    json_schema: dict | None = None
     workers: list[Worker] = field(default_factory=list)
     pool_session: PoolSession | None = None
     _auth_checked: bool = False
@@ -501,7 +512,7 @@ class OperatorPool:
 
     async def spawn_worker(
         self,
-        operator_role: str = "You are a pool worker.",
+        operator_role: str | None = None,
     ) -> Worker:
         """Launch one ``claude -p`` worker subprocess.
 
@@ -531,10 +542,11 @@ class OperatorPool:
         session_id = f"worker-{uuid4()}"
         cmd = build_worker_cmdline(
             session_id=session_id,
-            operator_role=operator_role,
+            operator_role=operator_role if operator_role is not None else self.operator_role,
             max_budget_usd=self.max_budget_usd,
             max_turns=self.max_turns,
             model=self.model,
+            json_schema=self.json_schema,
         )
         env = worker_env(pool_session_id=t1_sid)
         try:

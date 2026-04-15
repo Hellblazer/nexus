@@ -49,9 +49,11 @@ from nexus.plans.match import Match
 __all__ = [
     "PlanResult",
     "PlanRunBindingError",
+    "PlanRunEmbeddingDomainError",
+    "PlanRunOperatorOutputError",
+    "PlanRunOperatorSchemaVersionError",
     "PlanRunStepRefError",
     "PlanRunToolNotFoundError",
-    "PlanRunEmbeddingDomainError",
     "ToolDispatcher",
     "plan_run",
 ]
@@ -86,6 +88,39 @@ class PlanRunToolNotFoundError(ValueError):
         self.tool = tool
         self.reason = reason
         super().__init__(f"plan_run: unknown tool {tool!r}: {reason}")
+
+
+class PlanRunOperatorOutputError(ValueError):
+    """Raised when an operator MCP tool receives malformed structured output.
+
+    Most commonly: the pool worker did not emit a ``StructuredOutput``
+    tool_use event (model ignored the schema), the emitted JSON does
+    not match the operator's contract shape, or a required field is
+    missing. RDR-079 P3.
+    """
+
+    def __init__(self, operator: str, reason: str) -> None:
+        self.operator = operator
+        self.reason = reason
+        super().__init__(f"operator_{operator}: {reason}")
+
+
+class PlanRunOperatorSchemaVersionError(ValueError):
+    """Raised when an operator dispatch uses an unsupported schema version.
+
+    Operator contracts pin ``$schema_version: 1``. If a caller passes a
+    different version (e.g. future v2 shape), the tool refuses rather
+    than silently mis-validating.
+    """
+
+    def __init__(self, operator: str, received: str | int, expected: str | int = 1) -> None:
+        self.operator = operator
+        self.received = received
+        self.expected = expected
+        super().__init__(
+            f"operator_{operator}: unsupported $schema_version "
+            f"{received!r} (expected {expected!r})"
+        )
 
 
 class PlanRunEmbeddingDomainError(ValueError):

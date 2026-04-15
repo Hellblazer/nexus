@@ -49,7 +49,7 @@ def stub_pool(monkeypatch, session_env):
     orig = pool_mod.build_worker_cmdline
 
     def fake_cmdline(session_id, operator_role, max_budget_usd, max_turns,
-                    model="haiku", mcp_config=None):
+                    model="haiku", mcp_config=None, json_schema=None):
         # Ignore claude-specific flags entirely; the stub doesn't parse them.
         return [sys.executable, str(STUB_PATH)]
 

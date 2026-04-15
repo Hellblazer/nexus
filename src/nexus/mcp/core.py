@@ -8,6 +8,7 @@ RDR-078 P1 added ``plan_match`` + ``plan_run`` to the existing
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -1691,6 +1692,131 @@ def collection_verify(name: str) -> str:
         return "\n".join(lines)
     except Exception as e:
         return f"Error: {e}"
+
+
+# ── RDR-079 P3: operator MCP tools ───────────────────────────────────────────
+#
+# Five operators (extract/rank/compare/summarize/generate) each dispatch a
+# structured turn to a per-operator pool worker. Per Empirical Finding 3,
+# workers are spawned with --json-schema set; the model emits a
+# StructuredOutput tool_use whose ``input`` is the validated payload. Tools
+# intercept the tool_use, validate shape, return dict.
+#
+# All operator tools are filtered out when NEXUS_MCP_WORKER_MODE=1 via the
+# _mcp_tool() decorator — this prevents a pool worker from re-entering the
+# pool (invariant I-2).
+
+
+_OPERATOR_SCHEMA_VERSION = 1
+
+
+def _run_pool_dispatch(pool, prompt: str, timeout: float = 60.0) -> Any:
+    """Run ``pool.dispatch_with_rotation(prompt, timeout)`` on a fresh
+    event loop. The MCP tool surface is sync; the pool is async. We
+    isolate the loop here so each tool call is independent.
+    """
+    return asyncio.run(pool.dispatch_with_rotation(prompt=prompt, timeout=timeout))
+
+
+@_mcp_tool()
+def operator_extract(
+    inputs: str,
+    fields: str,
+    schema_version: int = _OPERATOR_SCHEMA_VERSION,
+    timeout: float = 60.0,
+) -> dict:
+    """Extract structured fields from a list of text inputs. RDR-079 P3.1.
+
+    Args:
+        inputs: JSON-array string of input texts (e.g. ``'["text1", "text2"]'``).
+            Each element becomes one extraction.
+        fields: Comma-separated field names to extract (e.g. ``"title,year,author"``).
+            The model emits one object per input with these keys.
+        schema_version: Operator contract version (pinned at 1 for RDR-079).
+            Mismatched versions raise ``PlanRunOperatorSchemaVersionError``.
+        timeout: Worker-dispatch timeout in seconds.
+
+    Returns:
+        ``{"extractions": [{<field>: <value>, ...}, ...]}`` — one dict per
+        input, in the input's order. Missing fields are set to ``null`` by
+        the model.
+
+    Raises:
+        ``PlanRunOperatorSchemaVersionError``: schema_version != 1.
+        ``PlanRunOperatorOutputError``: worker output doesn't match contract.
+    """
+    from nexus.mcp_infra import get_operator_pool
+    from nexus.plans.runner import (
+        PlanRunOperatorOutputError,
+        PlanRunOperatorSchemaVersionError,
+    )
+
+    if schema_version != _OPERATOR_SCHEMA_VERSION:
+        raise PlanRunOperatorSchemaVersionError(
+            operator="extract",
+            received=schema_version,
+            expected=_OPERATOR_SCHEMA_VERSION,
+        )
+
+    field_list = [f.strip() for f in fields.split(",") if f.strip()]
+    if not field_list:
+        raise PlanRunOperatorOutputError(
+            operator="extract",
+            reason="`fields` is empty; at least one field name is required",
+        )
+
+    # Per-operator pool. The pool's json_schema is the OUTER {extractions:
+    # [dict]} shape — the model uses it as a structural constraint. The
+    # per-call field list is encoded in the prompt so the model knows WHICH
+    # keys to populate (RDR-079 Empirical Finding 3: CLI --json-schema is
+    # per-spawn, not per-turn; caller's field list varies call-to-call,
+    # so it lives in the prompt layer, not in the schema layer).
+    pool = get_operator_pool(
+        "extract",
+        operator_role=(
+            "You are the `extract` analytical operator. For each user "
+            "turn you receive, emit a StructuredOutput tool_use whose "
+            "input is {\"extractions\": [<object per input>, ...]}. Every "
+            "extraction object must include the caller-requested field "
+            "keys (null when the value is not present in the input). "
+            "Return no prose."
+        ),
+        json_schema={
+            "type": "object",
+            "required": ["extractions"],
+            "properties": {
+                "extractions": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                },
+            },
+        },
+    )
+
+    prompt = (
+        f"Extract the fields [{', '.join(field_list)}] from each input "
+        f"below. Inputs (JSON array): {inputs}"
+    )
+    payload = _run_pool_dispatch(pool, prompt=prompt, timeout=timeout)
+
+    # Validate contract.
+    if not isinstance(payload, dict) or "extractions" not in payload:
+        raise PlanRunOperatorOutputError(
+            operator="extract",
+            reason=(
+                f"missing `extractions` key in worker output; "
+                f"got keys={sorted((payload or {}).keys()) if isinstance(payload, dict) else type(payload).__name__}"
+            ),
+        )
+    ext = payload["extractions"]
+    if not isinstance(ext, list):
+        raise PlanRunOperatorOutputError(
+            operator="extract",
+            reason=(
+                f"`extractions` must be a list, got {type(ext).__name__}"
+            ),
+        )
+    return {"extractions": ext}
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
