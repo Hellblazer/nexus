@@ -54,6 +54,7 @@ __all__ = [
     "PlanRunEmbeddingDomainError",
     "PlanRunOperatorOutputError",
     "PlanRunOperatorSchemaVersionError",
+    "PlanRunOperatorUnavailableError",
     "PlanRunStepRefError",
     "PlanRunToolNotFoundError",
     "ToolDispatcher",
@@ -122,6 +123,29 @@ class PlanRunOperatorSchemaVersionError(ValueError):
         super().__init__(
             f"operator_{operator}: unsupported $schema_version "
             f"{received!r} (expected {expected!r})"
+        )
+
+
+class PlanRunOperatorUnavailableError(RuntimeError):
+    """Raised when operator steps cannot run because the pool has no auth.
+
+    SC-10 (graceful degradation): when ``claude auth status --json``
+    reports ``loggedIn: false`` (or the CLI is missing), operator-
+    requiring MCP tools convert the underlying ``PoolAuthUnavailableError``
+    into this named error. Callers (plan_run + downstream skills) can
+    branch on it without importing the pool's private exception type.
+
+    Retrieval-only plans continue to work — this error is exclusive to
+    steps that dispatch through the operator pool.
+    """
+
+    def __init__(self, operator: str, reason: str) -> None:
+        self.operator = operator
+        self.reason = reason
+        super().__init__(
+            f"operator_{operator}: unavailable — {reason}. "
+            "Run `claude auth login` or set ANTHROPIC_API_KEY to enable "
+            "operator-backed plan steps; retrieval-only plans still work."
         )
 
 

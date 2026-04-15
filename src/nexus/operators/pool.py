@@ -539,9 +539,13 @@ class OperatorPool:
             check_auth()  # raises PoolAuthUnavailableError on failure
             self._auth_checked = True
 
-        session_id = f"worker-{uuid4()}"
+        # ``claude --session-id`` expects a bare UUID; our internal
+        # ``session_id`` carries a ``worker-`` prefix for tracing, but
+        # the CLI only accepts the UUID form. Split the two.
+        claude_session_id = str(uuid4())
+        session_id = f"worker-{claude_session_id}"
         cmd = build_worker_cmdline(
-            session_id=session_id,
+            session_id=claude_session_id,
             operator_role=operator_role if operator_role is not None else self.operator_role,
             max_budget_usd=self.max_budget_usd,
             max_turns=self.max_turns,

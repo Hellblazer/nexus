@@ -187,10 +187,13 @@ async def test_operator_extract_uses_correct_pool_name(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_operator_extract_surfaces_auth_error(monkeypatch) -> None:
-    """When the pool raises PoolAuthUnavailableError (no claude auth),
-    the MCP tool must return a clear error string, not crash."""
+    """SC-10: when the pool raises ``PoolAuthUnavailableError`` (no claude
+    auth), the MCP tool converts it to a typed ``PlanRunOperatorUnavailableError``
+    so downstream plan_run / skills can branch on the named error
+    without importing the pool's private exception type."""
     from nexus import mcp_infra
     from nexus.operators.pool import PoolAuthUnavailableError
+    from nexus.plans.runner import PlanRunOperatorUnavailableError
 
     def fake_get(*a, **kw):
         class RaisingPool:
@@ -202,7 +205,8 @@ async def test_operator_extract_surfaces_auth_error(monkeypatch) -> None:
 
     from nexus.mcp.core import operator_extract
 
-    # MCP tools return strings for errors; structured=True hypothetical
-    # not relevant for operator_* (always dict).
-    with pytest.raises(PoolAuthUnavailableError):
+    with pytest.raises(PlanRunOperatorUnavailableError) as exc:
         await operator_extract(inputs='["x"]', fields="a")
+    # The underlying cause is preserved for debug-print traces.
+    assert isinstance(exc.value.__cause__, PoolAuthUnavailableError)
+    assert exc.value.operator == "extract"

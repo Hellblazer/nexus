@@ -1718,6 +1718,26 @@ _OPERATOR_SCHEMA_VERSION = 1
 # FastMCP's Tool.run supports async callables natively. (Review C-1.)
 
 
+async def _dispatch_with_auth_guard(
+    pool, operator: str, *, prompt: str, timeout: float,
+) -> dict:
+    """Dispatch via the operator pool, converting auth failures to
+    :class:`PlanRunOperatorUnavailableError` (SC-10).
+
+    Retrieval tools continue to work when auth is missing — only
+    operator-requiring calls surface this typed error so callers can
+    branch on it without importing the pool's private exception type.
+    """
+    from nexus.operators.pool import PoolAuthUnavailableError
+    from nexus.plans.runner import PlanRunOperatorUnavailableError
+    try:
+        return await pool.dispatch_with_rotation(prompt=prompt, timeout=timeout)
+    except PoolAuthUnavailableError as exc:
+        raise PlanRunOperatorUnavailableError(
+            operator=operator, reason=str(exc),
+        ) from exc
+
+
 def _parse_inputs_json(operator: str, inputs: str) -> list:
     """Parse the ``inputs`` argument as a JSON array. Raise
     ``PlanRunOperatorOutputError`` with the operator name on failure
@@ -1821,7 +1841,9 @@ async def operator_extract(
         f"Extract the fields [{', '.join(field_list)}] from each input "
         f"below. Inputs (JSON array): {inputs}"
     )
-    payload = await pool.dispatch_with_rotation(prompt=prompt, timeout=timeout)
+    payload = await _dispatch_with_auth_guard(
+        pool, "extract", prompt=prompt, timeout=timeout,
+    )
 
     # Validate contract.
     if not isinstance(payload, dict) or "extractions" not in payload:
@@ -1923,7 +1945,9 @@ async def operator_rank(
         f"Inputs (JSON array): {inputs}\n\n"
         f"Rank every input. Each input index must appear exactly once."
     )
-    payload = await pool.dispatch_with_rotation(prompt=prompt, timeout=timeout)
+    payload = await _dispatch_with_auth_guard(
+        pool, "rank", prompt=prompt, timeout=timeout,
+    )
 
     if not isinstance(payload, dict) or "ranked" not in payload:
         raise PlanRunOperatorOutputError(
@@ -2028,7 +2052,9 @@ async def operator_compare(
         f"{crit}Compare the inputs below. Identify agreements, conflicts, "
         f"and gaps.\n\nInputs (JSON array): {inputs}"
     )
-    payload = await pool.dispatch_with_rotation(prompt=prompt, timeout=timeout)
+    payload = await _dispatch_with_auth_guard(
+        pool, "compare", prompt=prompt, timeout=timeout,
+    )
 
     if not isinstance(payload, dict):
         raise PlanRunOperatorOutputError(
@@ -2123,7 +2149,9 @@ async def operator_summarize(
         f"Summarize the inputs below.\n\n"
         f"Inputs (JSON array): {inputs}"
     )
-    payload = await pool.dispatch_with_rotation(prompt=prompt, timeout=timeout)
+    payload = await _dispatch_with_auth_guard(
+        pool, "summarize", prompt=prompt, timeout=timeout,
+    )
 
     if not isinstance(payload, dict):
         raise PlanRunOperatorOutputError(
@@ -2237,7 +2265,9 @@ async def operator_generate(
         f"below.\n\n"
         f"Inputs (JSON array): {inputs}"
     )
-    payload = await pool.dispatch_with_rotation(prompt=prompt, timeout=timeout)
+    payload = await _dispatch_with_auth_guard(
+        pool, "generate", prompt=prompt, timeout=timeout,
+    )
 
     if not isinstance(payload, dict):
         raise PlanRunOperatorOutputError(
