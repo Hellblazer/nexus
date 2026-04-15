@@ -593,6 +593,128 @@ class OperatorPool:
                 worker.in_flight -= 1
             return payload
 
+    async def retire_worker(
+        self,
+        worker: Worker,
+        *,
+        drain_timeout: float = 30.0,
+    ) -> Worker:
+        """Gracefully retire *worker* and spawn its replacement.
+
+        Sequence (RDR-079 §Worker pool, SC-3):
+          1. Mark ``worker.alive=False`` so the dispatcher stops picking it.
+          2. Wait for ``worker.in_flight`` to drain to zero (bounded by
+             *drain_timeout*). This is the zero-downtime promise —
+             in-flight callers see their dispatch complete on the retiree.
+          3. Spawn a replacement (added to ``self.workers``).
+          4. Remove the retiree from ``self.workers`` and kill its
+             subprocess.
+
+        Returns the newly spawned replacement worker.
+        """
+        worker.alive = False
+        deadline = asyncio.get_event_loop().time() + drain_timeout
+        while worker.in_flight > 0:
+            if asyncio.get_event_loop().time() > deadline:
+                _log.warning(
+                    "pool_worker_retire_drain_timeout",
+                    session_id=worker.session_id,
+                    in_flight=worker.in_flight,
+                )
+                break
+            await asyncio.sleep(0.05)
+
+        replacement = await self.spawn_worker()
+
+        # Remove the retiree — then kill its subprocess.
+        if worker in self.workers:
+            self.workers.remove(worker)
+        try:
+            worker.process.kill()
+            # Reap to avoid zombie processes.
+            try:
+                await asyncio.wait_for(worker.process.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                pass
+        except ProcessLookupError:
+            pass
+        _log.info(
+            "pool_worker_retired",
+            retiree_session_id=worker.session_id,
+            replacement_session_id=replacement.session_id,
+        )
+        return replacement
+
+    async def dispatch_with_rotation(
+        self,
+        prompt: str,
+        *,
+        timeout: float = 60.0,
+        operator_role: str = "You are a pool worker.",
+    ) -> dict:
+        """Dispatch *prompt* to a pool worker, rotating any that exceed
+        the token threshold (SC-3).
+
+        If the pool has no live workers, spawns one lazily. Otherwise
+        picks the first live worker below the retirement threshold. If
+        the chosen worker's cumulative tokens are over the threshold
+        AFTER the dispatch, retires it for subsequent dispatches.
+        """
+        worker = None
+        for candidate in list(self.workers):
+            if candidate.alive:
+                worker = candidate
+                break
+        if worker is None:
+            worker = await self.spawn_worker(operator_role=operator_role)
+
+        result = await self.dispatch(worker, prompt=prompt, timeout=timeout)
+
+        if worker.cumulative_tokens >= self.retirement_token_threshold:
+            # Fire-and-forget retirement — the caller already has the
+            # result in hand; retirement is housekeeping for the next call.
+            try:
+                await self.retire_worker(worker)
+            except Exception as exc:
+                _log.warning(
+                    "pool_retirement_after_dispatch_failed",
+                    session_id=worker.session_id,
+                    error=str(exc),
+                )
+
+        return result
+
+    async def shutdown(self) -> None:
+        """Kill every worker subprocess and tear down the pool session.
+
+        Idempotent — a second call is a no-op. Safe to invoke from
+        multiple teardown paths (atexit, signal handler, explicit stop).
+        """
+        workers = list(self.workers)
+        self.workers.clear()
+        for w in workers:
+            w.alive = False
+            try:
+                w.process.kill()
+            except ProcessLookupError:
+                pass
+        # Reap the children to avoid zombies.
+        for w in workers:
+            try:
+                await asyncio.wait_for(w.process.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                pass
+
+        if self.pool_session is not None:
+            try:
+                teardown_pool_session(self.pool_session)
+            except Exception as exc:
+                _log.debug(
+                    "pool_shutdown_teardown_session_failed",
+                    error=str(exc),
+                )
+            self.pool_session = None
+
     async def _read_until_result(self, worker: Worker) -> dict:
         """Consume worker.stdout JSON lines until the turn's final
         ``result`` record. Captures the StructuredOutput tool_use payload

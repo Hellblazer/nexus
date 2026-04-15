@@ -26,6 +26,13 @@ _COLLECTIONS_CACHE_TTL = 60.0
 
 _catalog_instance = None
 _catalog_lock = threading.Lock()
+
+# RDR-079 P2: operator pool singleton. Lazy-init on first get_operator_pool()
+# call — creates a dedicated pool T1 session and wires NEXUS_T1_SESSION_ID
+# into this process's env so spawn_worker() guards pass. See
+# src/nexus/operators/pool.py for worker semantics.
+_operator_pool = None
+_operator_pool_lock = threading.Lock()
 _catalog_mtime: float = 0.0
 
 # ── Search trace cache (RDR-061 E2) ──────────────────────────────────────────
@@ -489,6 +496,69 @@ def check_version_compatibility() -> None:
             )
     except Exception:
         pass  # never block MCP startup
+
+
+# ── RDR-079 P2.1: operator-pool singleton ───────────────────────────────────
+
+
+def _load_config_for_pool() -> dict:
+    """Read ``operators.*`` settings from ``.nexus.yml``.
+
+    Overridable hook for tests — monkeypatch this to inject config
+    without touching the filesystem.
+    """
+    from nexus.config import load_config
+    cfg = load_config() or {}
+    return cfg
+
+
+def get_operator_pool():
+    """Lazy-init singleton for the RDR-079 operator pool.
+
+    On first call: creates a dedicated pool T1 session (pool-<uuid>),
+    sets ``NEXUS_T1_SESSION_ID`` in this process's env so
+    ``spawn_worker()`` guards pass, and constructs the
+    :class:`OperatorPool` wired to the pool session.
+
+    Subsequent calls return the cached instance. Reset via
+    :func:`reset_operator_pool` in tests.
+
+    Returns the OperatorPool on success. On auth failure, raises
+    :class:`~nexus.operators.pool.PoolAuthUnavailableError` from
+    the pool's first spawn (not here — this function does not touch
+    auth).
+    """
+    global _operator_pool
+    if _operator_pool is not None:
+        return _operator_pool
+
+    with _operator_pool_lock:
+        if _operator_pool is not None:
+            return _operator_pool
+        from nexus.operators.pool import OperatorPool
+
+        cfg = _load_config_for_pool() or {}
+        op_cfg = cfg.get("operators", {}) or {}
+        _operator_pool = OperatorPool(
+            size=int(op_cfg.get("pool_size", 2)),
+            model=str(op_cfg.get("model", "haiku")),
+            max_budget_usd=float(op_cfg.get("max_budget_usd", 1.0)),
+            max_turns=int(op_cfg.get("max_turns", 6)),
+            retirement_token_threshold=int(
+                op_cfg.get("retirement_token_threshold", 150_000),
+            ),
+        )
+        return _operator_pool
+
+
+def reset_operator_pool() -> None:
+    """Reset the operator-pool singleton. Test-only.
+
+    Does NOT call ``pool.shutdown()`` — tests that hold live workers
+    are responsible for their own teardown.
+    """
+    global _operator_pool
+    _operator_pool = None
 
 
 # ── Test injection ────────────────────────────────────────────────────────────
