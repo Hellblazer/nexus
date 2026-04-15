@@ -43,13 +43,16 @@ def _match(plan: dict, *, default_bindings: dict | None = None) -> "Match":  # n
 
 
 class _FakeDispatcher:
-    """Records every dispatch call and returns scripted outputs."""
+    """Records every dispatch call and returns scripted outputs.
+
+    Async since RDR-079 P4 — the runner awaits dispatchers.
+    """
 
     def __init__(self, outputs: list[dict] | None = None) -> None:
         self.calls: list[tuple[str, dict]] = []
         self._outputs = list(outputs or [])
 
-    def __call__(self, tool: str, args: dict) -> dict:
+    async def __call__(self, tool: str, args: dict) -> dict:
         self.calls.append((tool, args))
         if self._outputs:
             return self._outputs.pop(0)
@@ -59,7 +62,8 @@ class _FakeDispatcher:
 # ── Variable resolution ────────────────────────────────────────────────────
 
 
-def test_run_resolves_caller_var_in_args() -> None:
+@pytest.mark.asyncio
+async def test_run_resolves_caller_var_in_args() -> None:
     from nexus.plans.runner import plan_run
 
     plan = {
@@ -69,14 +73,15 @@ def test_run_resolves_caller_var_in_args() -> None:
         "required_bindings": ["intent"],
     }
     disp = _FakeDispatcher([{"text": "ok"}])
-    plan_run(_match(plan), {"intent": "how does X work"}, dispatcher=disp)
+    await plan_run(_match(plan), {"intent": "how does X work"}, dispatcher=disp)
 
     assert disp.calls[0] == (
         "search", {"query": "how does X work", "limit": 5},
     )
 
 
-def test_run_caller_binding_overrides_default() -> None:
+@pytest.mark.asyncio
+async def test_run_caller_binding_overrides_default() -> None:
     """default_bindings + caller_bindings: caller wins on conflict."""
     from nexus.plans.runner import plan_run
 
@@ -86,11 +91,12 @@ def test_run_caller_binding_overrides_default() -> None:
     }
     match = _match(plan, default_bindings={"intent": "default"})
     disp = _FakeDispatcher()
-    plan_run(match, {"intent": "caller"}, dispatcher=disp)
+    await plan_run(match, {"intent": "caller"}, dispatcher=disp)
     assert disp.calls[0][1] == {"query": "caller"}
 
 
-def test_run_falls_back_to_default_when_caller_omits() -> None:
+@pytest.mark.asyncio
+async def test_run_falls_back_to_default_when_caller_omits() -> None:
     from nexus.plans.runner import plan_run
 
     plan = {
@@ -99,11 +105,12 @@ def test_run_falls_back_to_default_when_caller_omits() -> None:
     }
     match = _match(plan, default_bindings={"intent": "from-default"})
     disp = _FakeDispatcher()
-    plan_run(match, {}, dispatcher=disp)
+    await plan_run(match, {}, dispatcher=disp)
     assert disp.calls[0][1] == {"query": "from-default"}
 
 
-def test_run_rejects_missing_required_binding() -> None:
+@pytest.mark.asyncio
+async def test_run_rejects_missing_required_binding() -> None:
     from nexus.plans.runner import PlanRunBindingError, plan_run
 
     plan = {
@@ -111,14 +118,15 @@ def test_run_rejects_missing_required_binding() -> None:
         "required_bindings": ["intent", "subtree"],
     }
     with pytest.raises(PlanRunBindingError) as exc:
-        plan_run(_match(plan), {"intent": "x"}, dispatcher=_FakeDispatcher())
+        await plan_run(_match(plan), {"intent": "x"}, dispatcher=_FakeDispatcher())
     assert sorted(exc.value.missing) == ["subtree"]
 
 
 # ── $stepN.<field> reference ───────────────────────────────────────────────
 
 
-def test_run_resolves_step_ref_to_prior_output_field() -> None:
+@pytest.mark.asyncio
+async def test_run_resolves_step_ref_to_prior_output_field() -> None:
     """``$stepN.field`` reads the field from the Nth step's stashed output."""
     from nexus.plans.runner import plan_run
 
@@ -132,11 +140,12 @@ def test_run_resolves_step_ref_to_prior_output_field() -> None:
         {"text": "first-result", "tumblers": ["1.1"]},
         {"text": "summary"},
     ])
-    plan_run(_match(plan), {}, dispatcher=disp)
+    await plan_run(_match(plan), {}, dispatcher=disp)
     assert disp.calls[1] == ("summarize", {"corpus": "first-result"})
 
 
-def test_run_resolves_step_ref_for_list_field() -> None:
+@pytest.mark.asyncio
+async def test_run_resolves_step_ref_for_list_field() -> None:
     """Lists pass through verbatim — caller may consume the list as-is."""
     from nexus.plans.runner import plan_run
 
@@ -150,11 +159,12 @@ def test_run_resolves_step_ref_for_list_field() -> None:
         {"ids": ["a", "b", "c"], "tumblers": ["1.1", "1.2", "1.3"]},
         {"text": "extracted"},
     ])
-    plan_run(_match(plan), {}, dispatcher=disp)
+    await plan_run(_match(plan), {}, dispatcher=disp)
     assert disp.calls[1] == ("extract", {"ids": ["a", "b", "c"]})
 
 
-def test_default_dispatcher_wraps_str_return_as_text_dict() -> None:
+@pytest.mark.asyncio
+async def test_default_dispatcher_wraps_str_return_as_text_dict() -> None:
     """Non-retrieval MCP tools return str (human-readable). The runner
     requires dict. The default dispatcher must wrap str → {"text": ...}
     so plan_run works end-to-end with real MCP tools.
@@ -166,7 +176,7 @@ def test_default_dispatcher_wraps_str_return_as_text_dict() -> None:
     from nexus.plans.runner import _default_dispatcher
 
     # plan_search — not in _RETRIEVAL_TOOLS, returns str by default.
-    result = _default_dispatcher(
+    result = await _default_dispatcher(
         "plan_search", {"query": "no-such-plan-xyz", "project": "none"},
     )
     assert isinstance(result, dict), (
@@ -178,12 +188,13 @@ def test_default_dispatcher_wraps_str_return_as_text_dict() -> None:
     assert isinstance(result["text"], str)
 
 
-def test_default_dispatcher_auto_injects_structured_for_retrieval_tools() -> None:
+@pytest.mark.asyncio
+async def test_default_dispatcher_auto_injects_structured_for_retrieval_tools() -> None:
     """RDR-079 P1: search and query are auto-promoted to structured=True
     by the dispatcher so plan steps receive the runner-contract dict."""
     from nexus.plans.runner import _default_dispatcher
 
-    result = _default_dispatcher(
+    result = await _default_dispatcher(
         "search",
         {"query": "nothing-indexed-sentinel-xyz", "corpus": "knowledge", "limit": 1},
     )
@@ -195,7 +206,8 @@ def test_default_dispatcher_auto_injects_structured_for_retrieval_tools() -> Non
     assert "collections" in result
 
 
-def test_default_dispatcher_passes_through_dict_return() -> None:
+@pytest.mark.asyncio
+async def test_default_dispatcher_passes_through_dict_return() -> None:
     """The `traverse` MCP tool returns dict directly — must not be
     re-wrapped. Verified by stub-calling a dict-returning function
     via the dispatcher."""
@@ -206,14 +218,15 @@ def test_default_dispatcher_passes_through_dict_return() -> None:
     # test this by inspecting that _default_dispatcher for a real dict-
     # returning tool (traverse) does NOT add an extra 'text' field.
     # Seed an empty traverse — returns {'error': ..., 'tumblers': [], ...}.
-    result = _default_dispatcher(
+    result = await _default_dispatcher(
         "traverse", {"seeds": [], "link_types": [], "depth": 1},
     )
     assert isinstance(result, dict)
     assert "tumblers" in result  # dict passed through unchanged
 
 
-def test_default_dispatcher_raises_tool_not_found_for_unknown_tool() -> None:
+@pytest.mark.asyncio
+async def test_default_dispatcher_raises_tool_not_found_for_unknown_tool() -> None:
     """Unknown tool → PlanRunToolNotFoundError, not PlanRunStepRefError.
 
     The two are distinct failure modes: step-ref errors mean a
@@ -227,13 +240,14 @@ def test_default_dispatcher_raises_tool_not_found_for_unknown_tool() -> None:
     )
 
     with pytest.raises(PlanRunToolNotFoundError) as exc:
-        _default_dispatcher("definitely_not_a_real_tool_xyz", {})
+        await _default_dispatcher("definitely_not_a_real_tool_xyz", {})
     # And it's NOT a PlanRunStepRefError (the previous conflated type).
     assert not isinstance(exc.value, PlanRunStepRefError)
     assert "definitely_not_a_real_tool_xyz" in str(exc.value)
 
 
-def test_run_resolves_list_of_step_refs_flattens() -> None:
+@pytest.mark.asyncio
+async def test_run_resolves_list_of_step_refs_flattens() -> None:
     """``[$step1.ids, $step2.ids]`` resolves element-wise and flattens one
     level — callers combining outputs from multiple prior steps can use
     the list literal shape directly. Regression for RDR-078 critique finding
@@ -252,11 +266,12 @@ def test_run_resolves_list_of_step_refs_flattens() -> None:
         {"ids": ["c", "d"], "tumblers": []},
         {"text": "ranked"},
     ])
-    plan_run(_match(plan), {}, dispatcher=disp)
+    await plan_run(_match(plan), {}, dispatcher=disp)
     assert disp.calls[2] == ("rank", {"candidates": ["a", "b", "c", "d"]})
 
 
-def test_run_step_ref_unknown_field_raises() -> None:
+@pytest.mark.asyncio
+async def test_run_step_ref_unknown_field_raises() -> None:
     from nexus.plans.runner import PlanRunStepRefError, plan_run
 
     plan = {
@@ -267,11 +282,12 @@ def test_run_step_ref_unknown_field_raises() -> None:
     }
     disp = _FakeDispatcher([{"text": "first", "tumblers": []}])
     with pytest.raises(PlanRunStepRefError) as exc:
-        plan_run(_match(plan), {}, dispatcher=disp)
+        await plan_run(_match(plan), {}, dispatcher=disp)
     assert "$step1.bogus_field" in str(exc.value)
 
 
-def test_run_step_ref_to_missing_step_raises() -> None:
+@pytest.mark.asyncio
+async def test_run_step_ref_to_missing_step_raises() -> None:
     from nexus.plans.runner import PlanRunStepRefError, plan_run
 
     plan = {
@@ -280,13 +296,14 @@ def test_run_step_ref_to_missing_step_raises() -> None:
         ],
     }
     with pytest.raises(PlanRunStepRefError):
-        plan_run(_match(plan), {}, dispatcher=_FakeDispatcher())
+        await plan_run(_match(plan), {}, dispatcher=_FakeDispatcher())
 
 
 # ── Cross-embedding guard (SC-10) ──────────────────────────────────────────
 
 
-def test_run_rejects_cross_embedding_dispatch() -> None:
+@pytest.mark.asyncio
+async def test_run_rejects_cross_embedding_dispatch() -> None:
     """``scope.taxonomy_domain=code`` cannot dispatch to a ``docs__``
     collection (whose embedding model is ``voyage-context-3``)."""
     from nexus.plans.runner import PlanRunEmbeddingDomainError, plan_run
@@ -301,13 +318,14 @@ def test_run_rejects_cross_embedding_dispatch() -> None:
         ],
     }
     with pytest.raises(PlanRunEmbeddingDomainError) as exc:
-        plan_run(_match(plan), {}, dispatcher=_FakeDispatcher())
+        await plan_run(_match(plan), {}, dispatcher=_FakeDispatcher())
     msg = str(exc.value)
     assert "code" in msg
     assert "docs__corpus" in msg
 
 
-def test_run_allows_matching_taxonomy_domain() -> None:
+@pytest.mark.asyncio
+async def test_run_allows_matching_taxonomy_domain() -> None:
     from nexus.plans.runner import plan_run
 
     plan = {
@@ -320,11 +338,12 @@ def test_run_allows_matching_taxonomy_domain() -> None:
         ],
     }
     disp = _FakeDispatcher([{"text": "ok", "ids": []}])
-    plan_run(_match(plan), {}, dispatcher=disp)
+    await plan_run(_match(plan), {}, dispatcher=disp)
     assert disp.calls[0][0] == "search"
 
 
-def test_run_allows_step_without_scope() -> None:
+@pytest.mark.asyncio
+async def test_run_allows_step_without_scope() -> None:
     """No ``scope`` declared → no embedding-domain check."""
     from nexus.plans.runner import plan_run
 
@@ -333,10 +352,11 @@ def test_run_allows_step_without_scope() -> None:
             {"tool": "search", "args": {"query": "x", "collection": "any__name"}},
         ],
     }
-    plan_run(_match(plan), {}, dispatcher=_FakeDispatcher([{"text": "ok"}]))
+    await plan_run(_match(plan), {}, dispatcher=_FakeDispatcher([{"text": "ok"}]))
 
 
-def test_run_traverse_step_skips_embedding_check() -> None:
+@pytest.mark.asyncio
+async def test_run_traverse_step_skips_embedding_check() -> None:
     """``traverse`` operates on tumblers — no embeddings involved."""
     from nexus.plans.runner import plan_run
 
@@ -350,13 +370,14 @@ def test_run_traverse_step_skips_embedding_check() -> None:
         ],
     }
     disp = _FakeDispatcher([{"tumblers": ["1.1.1"], "ids": []}])
-    plan_run(_match(plan), {}, dispatcher=disp)
+    await plan_run(_match(plan), {}, dispatcher=disp)
 
 
 # ── Result + step trace ────────────────────────────────────────────────────
 
 
-def test_run_returns_result_with_step_outputs() -> None:
+@pytest.mark.asyncio
+async def test_run_returns_result_with_step_outputs() -> None:
     from nexus.plans.runner import plan_run
 
     plan = {
@@ -369,27 +390,29 @@ def test_run_returns_result_with_step_outputs() -> None:
         {"text": "search-output", "ids": ["a"]},
         {"text": "summary-output"},
     ])
-    result = plan_run(_match(plan), {}, dispatcher=disp)
+    result = await plan_run(_match(plan), {}, dispatcher=disp)
     assert result.steps[0]["text"] == "search-output"
     assert result.steps[1]["text"] == "summary-output"
     assert result.final == result.steps[1]
 
 
-def test_run_with_empty_steps_returns_empty_result() -> None:
+@pytest.mark.asyncio
+async def test_run_with_empty_steps_returns_empty_result() -> None:
     from nexus.plans.runner import plan_run
 
-    result = plan_run(
+    result = await plan_run(
         _match({"steps": []}), {}, dispatcher=_FakeDispatcher(),
     )
     assert result.steps == []
     assert result.final is None
 
 
-def test_run_passes_through_static_args_unchanged() -> None:
+@pytest.mark.asyncio
+async def test_run_passes_through_static_args_unchanged() -> None:
     """Args without any ``$`` substitution pass through untouched."""
     from nexus.plans.runner import plan_run
 
     plan = {"steps": [{"tool": "x", "args": {"limit": 10, "flag": True}}]}
     disp = _FakeDispatcher()
-    plan_run(_match(plan), {}, dispatcher=disp)
+    await plan_run(_match(plan), {}, dispatcher=disp)
     assert disp.calls[0][1] == {"limit": 10, "flag": True}

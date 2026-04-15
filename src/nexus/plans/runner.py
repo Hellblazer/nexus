@@ -165,9 +165,15 @@ class PlanRunEmbeddingDomainError(ValueError):
 
 
 class ToolDispatcher(Protocol):
-    """Callable that invokes an MCP tool by name with a kwargs dict."""
+    """Awaitable callable that invokes an MCP tool by name with a kwargs dict.
 
-    def __call__(self, tool: str, args: dict[str, Any]) -> dict[str, Any]: ...
+    Async since RDR-079 P4 — the runner awaits dispatcher results so the
+    underlying async ``operator_*`` tools (subprocess-backed pool workers)
+    can run on the current event loop without thread-bridge loop-boundary
+    crashes. Test dispatchers may be plain ``async def`` functions.
+    """
+
+    async def __call__(self, tool: str, args: dict[str, Any]) -> dict[str, Any]: ...
 
 
 # ── Result ──────────────────────────────────────────────────────────────────
@@ -448,43 +454,21 @@ _OPERATOR_TOOL_MAP: dict[str, str] = {
 }
 
 
-def _run_coro_in_thread(coro) -> Any:
-    """Run *coro* to completion on a dedicated thread with its own event loop.
-
-    RDR-079 P4: ``_default_dispatcher`` is sync and is ultimately called
-    from FastMCP's async event loop (when an agent invokes the sync
-    ``plan_run`` MCP tool). The operator_* MCP tools are async. Calling
-    ``asyncio.run()`` from within a running loop raises RuntimeError
-    (caught in review as C-1 in P3). This helper side-steps the conflict
-    by running the coroutine on a FRESH loop in a worker thread, joining
-    when done. Per-call overhead is a thread spawn + tear-down (~ms) —
-    negligible against the ~seconds of actual operator dispatch.
-    """
-    import threading
-    holder: dict[str, Any] = {"result": None, "exc": None}
-
-    def _target() -> None:
-        try:
-            holder["result"] = asyncio.run(coro)
-        except BaseException as exc:  # re-raised in caller thread below
-            holder["exc"] = exc
-
-    thread = threading.Thread(target=_target, name="operator-dispatch", daemon=True)
-    thread.start()
-    thread.join()
-    if holder["exc"] is not None:
-        raise holder["exc"]
-    return holder["result"]
-
-
-def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]:
+async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]:
     """Dispatch *tool* against the live MCP tool registry.
 
-    Resolves the tool callable lazily from :mod:`nexus.mcp.core` so the
-    runner module imports cheaply and tests can swap it out without
-    touching the MCP server. Routes plan-step operator names
-    (``extract``, ``rank``, etc.) to their ``operator_*`` counterparts
-    per RDR-079 P4.
+    Async throughout — RDR-079 P4 review (critic adcddfaad25f760fd) C-1
+    established that a thread-bridged dispatcher breaks the persistent
+    operator pool: ``asyncio.subprocess`` StreamReader instances are
+    loop-bound, so the second bridge-dispatched step crashes on a
+    ``readline()`` against a subprocess pipe opened on a different loop.
+    Making the dispatcher native-async eliminates the problem. Callers
+    must ``await`` the result.
+
+    Resolves tool callables lazily from :mod:`nexus.mcp.core` so the
+    runner imports cheaply and tests can swap it out. Maps plan-step
+    operator names (bare ``extract``, ``rank``, etc.) to their
+    ``operator_*`` MCP-tool counterparts.
     """
     from nexus.mcp import core as mcp_core
 
@@ -514,11 +498,11 @@ def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]:
     if tool in _RETRIEVAL_TOOLS and "structured" not in args:
         args = {**args, "structured": True}
 
-    # RDR-079 P4: operator_* tools are async. Bridge to sync via a worker
-    # thread with a dedicated event loop. Detected by iscoroutinefunction
-    # rather than by name — new async tools automatically use the bridge.
+    # RDR-079 P4: await async tools directly, call sync tools inline.
+    # No thread bridge — the loop continuity matters for the pool's
+    # subprocess StreamReader objects, which are loop-bound.
     if inspect.iscoroutinefunction(fn):
-        result = _run_coro_in_thread(fn(**args))
+        result = await fn(**args)
     else:
         result = fn(**args)
     # Most MCP tools return str (human-readable summary); the runner
@@ -544,7 +528,7 @@ def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]:
 # ── Public API ──────────────────────────────────────────────────────────────
 
 
-def plan_run(
+async def plan_run(
     match: Match,
     bindings: dict[str, Any] | None = None,
     *,
@@ -554,6 +538,11 @@ def plan_run(
 
     ``bindings`` are the caller's substitutions. They are merged on top
     of ``match.default_bindings`` (caller wins on conflict).
+
+    Async since RDR-079 P4 — callers must ``await`` it. The MCP
+    ``plan_run`` tool also went async in the same change so FastMCP
+    runs it natively on its event loop without the sync-legacy
+    thread-bridge dance that broke loop continuity for pool workers.
     """
     caller = bindings or {}
     merged: dict[str, Any] = {**match.default_bindings, **caller}
@@ -584,7 +573,15 @@ def plan_run(
             bindings=merged, step_outputs=step_outputs,
         )
 
-        result = dispatch(tool, resolved)
+        # Dispatcher may be async (default path, RDR-079 P4) or sync
+        # (legacy test fixtures + any caller that prefers the simpler
+        # contract). Detect a returned coroutine and await it; treat a
+        # returned dict/mapping as the direct result.
+        raw = dispatch(tool, resolved)
+        if inspect.iscoroutine(raw):
+            result = await raw
+        else:
+            result = raw
         if not isinstance(result, dict):
             # Tool authors must follow the documented output contract;
             # surface non-dict returns explicitly rather than letting

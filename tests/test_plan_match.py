@@ -150,7 +150,8 @@ def test_plan_match_t1_empty_cache_falls_back_to_fts5(library) -> None:
     assert all(m.confidence is None for m in matches)
 
 
-def test_fts5_fallback_returns_match_objects_runnable(library) -> None:
+@pytest.mark.asyncio
+async def test_fts5_fallback_returns_match_objects_runnable(library) -> None:
     """FTS5 fallback Match must carry the same shape as the cosine path
     so plan_run accepts it without branching."""
     from nexus.plans.matcher import plan_match
@@ -164,7 +165,7 @@ def test_fts5_fallback_returns_match_objects_runnable(library) -> None:
 
     # plan_run on a 0-step plan never dispatches; just verifies the
     # shape contract holds.
-    result = plan_run(matches[0], {})
+    result = await plan_run(matches[0], {})
     assert result.steps == []
 
 

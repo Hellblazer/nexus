@@ -140,7 +140,8 @@ def test_meta_seed_descriptions_are_discriminative() -> None:
 # ── Execution invariants (audit finding O-6) ───────────────────────────────
 
 
-def test_plan_promote_propose_dag_runs(library) -> None:
+@pytest.mark.asyncio
+async def test_plan_promote_propose_dag_runs(library) -> None:
     """Execute plan-promote/propose against an empty metrics library;
     runner must complete without error and return a ``generate`` step
     result — lifecycle-ops deferral means no promote-record is written."""
@@ -164,14 +165,15 @@ def test_plan_promote_propose_dag_runs(library) -> None:
             return {"text": "promotion-shortlist: (empty)", "citations": []}
         raise AssertionError(f"unexpected tool: {tool}")
 
-    result = plan_run(
+    result = await plan_run(
         match, {"threshold": 5, "limit": 20}, dispatcher=dispatcher,
     )
     assert result.final is not None
     assert "promotion-shortlist" in result.final["text"]
 
 
-def test_plan_inspect_dimensions_executes(library) -> None:
+@pytest.mark.asyncio
+async def test_plan_inspect_dimensions_executes(library) -> None:
     """Pins SC-13's dimensions variant execution invariant (O-6).
 
     The seed must run to completion under a realistic dispatcher and
@@ -219,7 +221,7 @@ def test_plan_inspect_dimensions_executes(library) -> None:
             }
         raise AssertionError(f"unexpected tool: {tool}")
 
-    result = plan_run(match, {}, dispatcher=dispatcher)
+    result = await plan_run(match, {}, dispatcher=dispatcher)
     assert result.final is not None
     assert "Dimensions report" in result.final["text"]
 

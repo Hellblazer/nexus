@@ -212,7 +212,8 @@ def test_memory_search_structured_returns_entries_and_has_more() -> None:
 # ── Runner integration: _default_dispatcher passes structured=True ────────
 
 
-def test_default_dispatcher_passes_structured_true_to_retrieval_tools(
+@pytest.mark.asyncio
+async def test_default_dispatcher_passes_structured_true_to_retrieval_tools(
     monkeypatch,
 ) -> None:
     """SC-1 critical path: when the runner dispatches a retrieval step (search
@@ -236,7 +237,7 @@ def test_default_dispatcher_passes_structured_true_to_retrieval_tools(
     monkeypatch.setattr(mcp_core, "query", fake_query)
 
     # Dispatch search
-    runner._default_dispatcher("search", {"query": "x", "corpus": "knowledge"})
+    await runner._default_dispatcher("search", {"query": "x", "corpus": "knowledge"})
     assert captured, "dispatcher did not call search"
     name, kwargs = captured[-1]
     assert name == "search"
@@ -245,13 +246,14 @@ def test_default_dispatcher_passes_structured_true_to_retrieval_tools(
     )
 
     # Dispatch query
-    runner._default_dispatcher("query", {"question": "x"})
+    await runner._default_dispatcher("query", {"question": "x"})
     name, kwargs = captured[-1]
     assert name == "query"
     assert kwargs.get("structured") is True
 
 
-def test_default_dispatcher_does_not_add_structured_to_non_retrieval_tools(
+@pytest.mark.asyncio
+async def test_default_dispatcher_does_not_add_structured_to_non_retrieval_tools(
     monkeypatch,
 ) -> None:
     """Non-retrieval tools (e.g. memory_put) should NOT silently gain
@@ -269,7 +271,7 @@ def test_default_dispatcher_does_not_add_structured_to_non_retrieval_tools(
     from nexus.mcp import core as mcp_core
     monkeypatch.setattr(mcp_core, "memory_put", fake_memory_put)
 
-    runner._default_dispatcher(
+    await runner._default_dispatcher(
         "memory_put",
         {"content": "x", "project": "p", "title": "t"},
     )

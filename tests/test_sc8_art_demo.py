@@ -65,7 +65,8 @@ class _StubCache:
         return list(self._hits[:n])
 
 
-def test_sc8_warm_library_plan_match_clears_threshold_and_traverse_fires(
+@pytest.mark.asyncio
+async def test_sc8_warm_library_plan_match_clears_threshold_and_traverse_fires(
     library, catalog_with_rdr_to_code, monkeypatch,
 ) -> None:
     """SC-8 warm-library branch: plan_match returns a hit above
@@ -140,7 +141,7 @@ def test_sc8_warm_library_plan_match_clears_threshold_and_traverse_fires(
             }
         return {"text": f"{tool}(stub)"}
 
-    result = plan_run(m, {}, dispatcher=_dispatch)
+    result = await plan_run(m, {}, dispatcher=_dispatch)
     assert len(traverse_calls) == 1, (
         "SC-8: plan_run must dispatch at least one traverse step"
     )

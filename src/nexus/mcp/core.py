@@ -1454,7 +1454,7 @@ def plan_match(
 
 
 @_mcp_tool()
-def plan_run(plan_id: int, bindings: str = "") -> str:
+async def plan_run(plan_id: int, bindings: str = "") -> str:
     """Execute the plan identified by *plan_id* against the MCP tool surface.
 
     RDR-078 P1. Pure substitution + tool dispatch. No agent spawning,
@@ -1487,7 +1487,7 @@ def plan_run(plan_id: int, bindings: str = "") -> str:
 
         caller_bindings = _parse_dim_filter(bindings) if bindings else {}
         try:
-            result = _plan_run(match, caller_bindings)
+            result = await _plan_run(match, caller_bindings)
             success = True
         except (
             PlanRunBindingError,

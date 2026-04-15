@@ -34,7 +34,8 @@ def _match(plan: dict) -> "Match":  # noqa: F821
 # ── seeds resolution from $stepN.tumblers ──────────────────────────────────
 
 
-def test_traverse_seeds_resolve_from_step_ref() -> None:
+@pytest.mark.asyncio
+async def test_traverse_seeds_resolve_from_step_ref() -> None:
     """``seeds: $step1.tumblers`` resolves from the prior retrieval step."""
     from nexus.plans.runner import plan_run
 
@@ -65,11 +66,12 @@ def test_traverse_seeds_resolve_from_step_ref() -> None:
             return {"tumblers": ["1.1", "1.2", "1.1.1"], "ids": [], "collections": []}
         raise AssertionError(f"unexpected tool {tool}")
 
-    plan_run(_match(plan), {}, dispatcher=dispatcher)
+    await plan_run(_match(plan), {}, dispatcher=dispatcher)
     assert captured[1][0] == "traverse"
 
 
-def test_traverse_step_output_shape_drives_subtree_filter() -> None:
+@pytest.mark.asyncio
+async def test_traverse_step_output_shape_drives_subtree_filter() -> None:
     """SC-5: traverse output exposes ``collections`` so a downstream
     ``search(subtree=...)`` step can chain off it."""
     from nexus.plans.runner import plan_run
@@ -105,13 +107,14 @@ def test_traverse_step_output_shape_drives_subtree_filter() -> None:
             return {"text": "ok", "ids": []}
         raise AssertionError(f"unexpected tool {tool}")
 
-    plan_run(_match(plan), {}, dispatcher=dispatcher)
+    await plan_run(_match(plan), {}, dispatcher=dispatcher)
 
 
 # ── SC-16: link_types / purpose mutual exclusion at runner level ───────────
 
 
-def test_traverse_step_accepts_link_types_only() -> None:
+@pytest.mark.asyncio
+async def test_traverse_step_accepts_link_types_only() -> None:
     """``link_types`` alone → dispatcher gets the literal list."""
     from nexus.plans.runner import plan_run
 
@@ -134,11 +137,12 @@ def test_traverse_step_accepts_link_types_only() -> None:
         captured.append(args)
         return {"tumblers": [], "ids": [], "collections": []}
 
-    plan_run(_match(plan), {}, dispatcher=dispatcher)
+    await plan_run(_match(plan), {}, dispatcher=dispatcher)
     assert captured[0]["link_types"] == ["implements"]
 
 
-def test_traverse_step_accepts_purpose_only() -> None:
+@pytest.mark.asyncio
+async def test_traverse_step_accepts_purpose_only() -> None:
     from nexus.plans.runner import plan_run
 
     plan = {
@@ -160,7 +164,7 @@ def test_traverse_step_accepts_purpose_only() -> None:
         captured.append(args)
         return {"tumblers": [], "ids": [], "collections": []}
 
-    plan_run(_match(plan), {}, dispatcher=dispatcher)
+    await plan_run(_match(plan), {}, dispatcher=dispatcher)
     assert captured[0]["purpose"] == "decision-evolution"
 
 

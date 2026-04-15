@@ -43,7 +43,8 @@ class _FakeDispatcher:
 # ── SC-3: taxonomy_domain → corpus routing ──────────────────────────────────
 
 
-def test_scope_prose_routes_to_prose_corpora() -> None:
+@pytest.mark.asyncio
+async def test_scope_prose_routes_to_prose_corpora() -> None:
     """``scope.taxonomy_domain=prose`` injects a prose corpus prefix
     set when the step args don't already pin a collection."""
     from nexus.plans.runner import plan_run
@@ -58,7 +59,7 @@ def test_scope_prose_routes_to_prose_corpora() -> None:
         ],
     }
     disp = _FakeDispatcher()
-    plan_run(_match(plan), {}, dispatcher=disp)
+    await plan_run(_match(plan), {}, dispatcher=disp)
 
     sent = disp.calls[0][1]
     assert "corpus" in sent, "prose scope should populate corpus arg"
@@ -66,7 +67,8 @@ def test_scope_prose_routes_to_prose_corpora() -> None:
     assert parts == {"knowledge", "docs", "rdr", "paper"}
 
 
-def test_scope_code_routes_to_code_corpora() -> None:
+@pytest.mark.asyncio
+async def test_scope_code_routes_to_code_corpora() -> None:
     from nexus.plans.runner import plan_run
 
     plan = {
@@ -79,13 +81,14 @@ def test_scope_code_routes_to_code_corpora() -> None:
         ],
     }
     disp = _FakeDispatcher()
-    plan_run(_match(plan), {}, dispatcher=disp)
+    await plan_run(_match(plan), {}, dispatcher=disp)
 
     sent = disp.calls[0][1]
     assert sent["corpus"] == "code"
 
 
-def test_explicit_corpus_arg_wins_over_scope_default() -> None:
+@pytest.mark.asyncio
+async def test_explicit_corpus_arg_wins_over_scope_default() -> None:
     """A caller-pinned ``args.corpus`` is not overridden by scope
     domain; the SC-10 guard already ensures consistency."""
     from nexus.plans.runner import plan_run
@@ -100,11 +103,12 @@ def test_explicit_corpus_arg_wins_over_scope_default() -> None:
         ],
     }
     disp = _FakeDispatcher()
-    plan_run(_match(plan), {}, dispatcher=disp)
+    await plan_run(_match(plan), {}, dispatcher=disp)
     assert disp.calls[0][1]["corpus"] == "knowledge"
 
 
-def test_explicit_collection_arg_skips_corpus_injection() -> None:
+@pytest.mark.asyncio
+async def test_explicit_collection_arg_skips_corpus_injection() -> None:
     """When the args already pin ``collection`` or ``collections``,
     the scope domain doesn't add a redundant ``corpus`` field."""
     from nexus.plans.runner import plan_run
@@ -119,14 +123,15 @@ def test_explicit_collection_arg_skips_corpus_injection() -> None:
         ],
     }
     disp = _FakeDispatcher()
-    plan_run(_match(plan), {}, dispatcher=disp)
+    await plan_run(_match(plan), {}, dispatcher=disp)
 
     sent = disp.calls[0][1]
     assert sent["collection"] == "code__myrepo"
     assert "corpus" not in sent
 
 
-def test_scope_unknown_domain_raises() -> None:
+@pytest.mark.asyncio
+async def test_scope_unknown_domain_raises() -> None:
     """Unknown ``taxonomy_domain`` is rejected at the runtime guard
     (SC-10 from P1) — re-validated here as a regression pin."""
     from nexus.plans.runner import PlanRunEmbeddingDomainError, plan_run
@@ -141,13 +146,14 @@ def test_scope_unknown_domain_raises() -> None:
         ],
     }
     with pytest.raises(PlanRunEmbeddingDomainError):
-        plan_run(_match(plan), {}, dispatcher=_FakeDispatcher())
+        await plan_run(_match(plan), {}, dispatcher=_FakeDispatcher())
 
 
 # ── SC-3: topic forwarding ─────────────────────────────────────────────────
 
 
-def test_topic_filter_applied() -> None:
+@pytest.mark.asyncio
+async def test_topic_filter_applied() -> None:
     """``scope.topic`` is forwarded as ``args.topic`` to the dispatched tool."""
     from nexus.plans.runner import plan_run
 
@@ -161,11 +167,12 @@ def test_topic_filter_applied() -> None:
         ],
     }
     disp = _FakeDispatcher()
-    plan_run(_match(plan), {}, dispatcher=disp)
+    await plan_run(_match(plan), {}, dispatcher=disp)
     assert disp.calls[0][1]["topic"] == "Projection Quality"
 
 
-def test_topic_resolves_var_substitution() -> None:
+@pytest.mark.asyncio
+async def test_topic_resolves_var_substitution() -> None:
     """``scope.topic: $concept`` resolves via the binding map."""
     from nexus.plans.runner import plan_run
 
@@ -180,11 +187,12 @@ def test_topic_resolves_var_substitution() -> None:
         "required_bindings": ["concept"],
     }
     disp = _FakeDispatcher()
-    plan_run(_match(plan), {"concept": "Hub Suppression"}, dispatcher=disp)
+    await plan_run(_match(plan), {"concept": "Hub Suppression"}, dispatcher=disp)
     assert disp.calls[0][1]["topic"] == "Hub Suppression"
 
 
-def test_explicit_topic_arg_not_overridden() -> None:
+@pytest.mark.asyncio
+async def test_explicit_topic_arg_not_overridden() -> None:
     """Caller-supplied ``args.topic`` wins over ``scope.topic``."""
     from nexus.plans.runner import plan_run
 
@@ -198,14 +206,15 @@ def test_explicit_topic_arg_not_overridden() -> None:
         ],
     }
     disp = _FakeDispatcher()
-    plan_run(_match(plan), {}, dispatcher=disp)
+    await plan_run(_match(plan), {}, dispatcher=disp)
     assert disp.calls[0][1]["topic"] == "Caller Topic"
 
 
 # ── SC-10: cross-embedding boundary still enforced ─────────────────────────
 
 
-def test_no_cross_embedding_cosine_computed() -> None:
+@pytest.mark.asyncio
+async def test_no_cross_embedding_cosine_computed() -> None:
     """The SC-10 guard from P1 fires before any cross-embedding
     dispatch, regardless of whether scope was injecting corpus or not.
 
@@ -225,10 +234,11 @@ def test_no_cross_embedding_cosine_computed() -> None:
         ],
     }
     with pytest.raises(PlanRunEmbeddingDomainError):
-        plan_run(_match(plan), {}, dispatcher=_FakeDispatcher())
+        await plan_run(_match(plan), {}, dispatcher=_FakeDispatcher())
 
 
-def test_traverse_step_unaffected_by_scope_corpus_injection() -> None:
+@pytest.mark.asyncio
+async def test_traverse_step_unaffected_by_scope_corpus_injection() -> None:
     """``traverse`` operates on tumblers; scope.taxonomy_domain
     must not inject ``corpus`` into its args."""
     from nexus.plans.runner import plan_run
@@ -243,6 +253,6 @@ def test_traverse_step_unaffected_by_scope_corpus_injection() -> None:
         ],
     }
     disp = _FakeDispatcher([{"tumblers": ["1.1.1"], "ids": []}])
-    plan_run(_match(plan), {}, dispatcher=disp)
+    await plan_run(_match(plan), {}, dispatcher=disp)
     sent = disp.calls[0][1]
     assert "corpus" not in sent

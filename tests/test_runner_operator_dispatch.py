@@ -21,7 +21,8 @@ import pytest
 # ── Operator-name → operator_* MCP tool routing ────────────────────────────
 
 
-def test_dispatcher_routes_bare_extract_to_operator_extract(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_dispatcher_routes_bare_extract_to_operator_extract(monkeypatch) -> None:
     """A plan step with ``tool: extract`` must invoke ``operator_extract``
     on the MCP core, not look up a non-existent ``extract`` attribute
     and raise PlanRunToolNotFoundError."""
@@ -36,7 +37,7 @@ def test_dispatcher_routes_bare_extract_to_operator_extract(monkeypatch) -> None
 
     monkeypatch.setattr(mcp_core, "operator_extract", fake_operator_extract)
 
-    result = _default_dispatcher(
+    result = await _default_dispatcher(
         "extract",
         {"inputs": '["hello"]', "fields": "x,y"},
     )
@@ -45,7 +46,8 @@ def test_dispatcher_routes_bare_extract_to_operator_extract(monkeypatch) -> None
     assert calls[0]["inputs"] == '["hello"]'
 
 
-def test_dispatcher_routes_all_five_operator_names(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_dispatcher_routes_all_five_operator_names(monkeypatch) -> None:
     """All five RDR-079 P3 operator names map to their operator_*
     counterparts. Regression guard for the _OPERATOR_TOOL_MAP dict."""
     from nexus.plans.runner import _default_dispatcher
@@ -69,7 +71,7 @@ def test_dispatcher_routes_all_five_operator_names(monkeypatch) -> None:
         monkeypatch.setattr(mcp_core, full, make_stub(full))
 
     for bare in ("extract", "rank", "compare", "summarize", "generate"):
-        _default_dispatcher(bare, {})
+        await _default_dispatcher(bare, {})
 
     assert called_tools == [
         "operator_extract", "operator_rank", "operator_compare",
@@ -77,7 +79,8 @@ def test_dispatcher_routes_all_five_operator_names(monkeypatch) -> None:
     ]
 
 
-def test_dispatcher_async_tools_routed_via_thread_bridge(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_dispatcher_async_tools_routed_via_thread_bridge(monkeypatch) -> None:
     """The thread bridge is triggered for ANY async tool, not only by
     name. An async tool that is not in _OPERATOR_TOOL_MAP but is
     accessible by its own name (e.g. a future async MCP tool) also
@@ -92,11 +95,12 @@ def test_dispatcher_async_tools_routed_via_thread_bridge(monkeypatch) -> None:
 
     monkeypatch.setattr(mcp_core, "future_async_tool", future_async_tool, raising=False)
 
-    result = _default_dispatcher("future_async_tool", {})
+    result = await _default_dispatcher("future_async_tool", {})
     assert result == {"result": "async-ok"}
 
 
-def test_dispatcher_sync_tools_still_use_direct_call(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_dispatcher_sync_tools_still_use_direct_call(monkeypatch) -> None:
     """Non-async MCP tools (e.g. traverse, search without async-ification)
     must NOT go through the thread bridge — direct call preserves the
     existing zero-overhead path."""
@@ -111,12 +115,13 @@ def test_dispatcher_sync_tools_still_use_direct_call(monkeypatch) -> None:
 
     monkeypatch.setattr(mcp_core, "sync_tool", sync_tool, raising=False)
 
-    result = _default_dispatcher("sync_tool", {})
+    result = await _default_dispatcher("sync_tool", {})
     assert result == {"sync": True}
     assert call_count[0] == 1
 
 
-def test_dispatcher_propagates_async_exception(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_dispatcher_propagates_async_exception(monkeypatch) -> None:
     """When the async tool raises, the error must surface to the caller,
     not be swallowed by the thread bridge."""
     from nexus.plans.runner import _default_dispatcher
@@ -131,26 +136,28 @@ def test_dispatcher_propagates_async_exception(monkeypatch) -> None:
     monkeypatch.setattr(mcp_core, "operator_extract", failing_extract)
 
     with pytest.raises(PlanRunOperatorOutputError, match="induced failure"):
-        _default_dispatcher("extract", {"inputs": "[]", "fields": "x"})
+        await _default_dispatcher("extract", {"inputs": "[]", "fields": "x"})
 
 
 # ── Unknown tool name: existing behavior preserved ─────────────────────────
 
 
-def test_dispatcher_raises_tool_not_found_for_unknown_bare_name() -> None:
+@pytest.mark.asyncio
+async def test_dispatcher_raises_tool_not_found_for_unknown_bare_name() -> None:
     """A bare name that's neither an operator nor a known MCP tool must
     still raise PlanRunToolNotFoundError (not AttributeError, not
     silently succeed via mapping)."""
     from nexus.plans.runner import _default_dispatcher, PlanRunToolNotFoundError
 
     with pytest.raises(PlanRunToolNotFoundError):
-        _default_dispatcher("not_a_real_tool_xyz", {})
+        await _default_dispatcher("not_a_real_tool_xyz", {})
 
 
 # ── Retrieval tools unaffected by operator routing ─────────────────────────
 
 
-def test_dispatcher_still_passes_structured_true_for_retrieval_tools(
+@pytest.mark.asyncio
+async def test_dispatcher_still_passes_structured_true_for_retrieval_tools(
     monkeypatch,
 ) -> None:
     """P1 invariant: retrieval tools (search/query) auto-receive
@@ -166,14 +173,15 @@ def test_dispatcher_still_passes_structured_true_for_retrieval_tools(
 
     monkeypatch.setattr(mcp_core, "search", fake_search)
 
-    _default_dispatcher("search", {"query": "x"})
+    await _default_dispatcher("search", {"query": "x"})
     assert received.get("structured") is True
 
 
 # ── End-to-end composition: plan_run with an operator step ────────────────
 
 
-def test_plan_run_executes_operator_step_end_to_end(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_plan_run_executes_operator_step_end_to_end(monkeypatch) -> None:
     """End-to-end smoke: a plan with an ``extract`` step routes through
     the default dispatcher → operator_extract (stubbed async) → returns
     the dict to the step-outputs list.
@@ -207,7 +215,7 @@ def test_plan_run_executes_operator_step_end_to_end(monkeypatch) -> None:
         required_bindings=[], optional_bindings=[],
         default_bindings={}, parent_dims=None,
     )
-    result = plan_run(match, {})
+    result = await plan_run(match, {})
     assert len(result.steps) == 2
     assert "extractions" in result.steps[0]
     assert "ranked" in result.steps[1]
