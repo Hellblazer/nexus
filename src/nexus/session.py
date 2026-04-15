@@ -313,11 +313,31 @@ def write_session_record(
     port: int,
     server_pid: int,
     tmpdir: str = "",
+    *,
+    pool_session: bool = False,
+    pool_pid: int | None = None,
 ) -> Path:
-    """Write a JSON session record to *sessions_dir*/{ppid}.session (mode 0o600)."""
+    """Write a JSON session record to *sessions_dir*/{name}.session (mode 0o600).
+
+    ``name`` is ``{ppid}`` for user sessions (the RDR-078 default) or
+    ``{session_id}`` for pool sessions (RDR-079 P2.5). Pool sessions
+    additionally persist ``pool_pid`` (for P2.2 liveness reconciliation via
+    ``os.kill(pid, 0)``) and the marker ``pool_session: true``. User
+    sessions omit both fields entirely — backward compatible with any
+    existing consumer that reads the JSON.
+    """
+    if pool_session and pool_pid is None:
+        raise ValueError(
+            "pool_pid is required when pool_session=True — "
+            "reconciliation cannot probe liveness without a PID"
+        )
     sessions_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    path = sessions_dir / f"{ppid}.session"
-    record = {
+    # Pool sessions are named by their UUID so the session file is
+    # discoverable by session_id; user sessions stay PPID-named so the
+    # existing PPID-walk discovery path is unchanged.
+    filename = f"{session_id}.session" if pool_session else f"{ppid}.session"
+    path = sessions_dir / filename
+    record: dict[str, object] = {
         "session_id": session_id,
         "server_host": host,
         "server_port": port,
@@ -325,6 +345,9 @@ def write_session_record(
         "created_at": time.time(),
         "tmpdir": tmpdir,
     }
+    if pool_session:
+        record["pool_session"] = True
+        record["pool_pid"] = pool_pid
     fd = os.open(str(path), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
     try:
         os.write(fd, json.dumps(record).encode())
