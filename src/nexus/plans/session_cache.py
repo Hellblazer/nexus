@@ -95,10 +95,20 @@ class PlanSessionCache:
             plan_id = meta.get("plan_id") if meta else None
             if plan_id is None:
                 continue
+            d = float(distance)
             # Cosine distance is mathematically in [0.0, 2.0] but ChromaDB
             # can return tiny negatives (~1e-7) from FP rounding on exact
             # matches. Clamp so downstream consumers see the documented range.
-            clamped = max(0.0, min(2.0, float(distance)))
+            # Warn loudly on meaningful out-of-range values (> ~FP noise) so
+            # Chroma misconfiguration (e.g. wrong distance metric) becomes
+            # observable rather than silently zeroed.
+            if d > 2.0 + 1e-3 or d < -1e-3:
+                _log.warning(
+                    "plan_session_cache_distance_out_of_range",
+                    distance=d,
+                    plan_id=int(plan_id),
+                )
+            clamped = max(0.0, min(2.0, d))
             out.append((int(plan_id), clamped))
         return out
 

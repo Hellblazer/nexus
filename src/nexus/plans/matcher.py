@@ -79,6 +79,12 @@ def plan_match(
     Always returns matches sorted by confidence descending (cosine
     higher-is-better); FTS5-fallback matches preserve the rank order
     returned by ``PlanLibrary.search_plans``.
+
+    **Sentinel**: an FTS5-fallback match sets ``Match.confidence = None``.
+    The ``plan_match`` MCP tool renders this as ``confidence=fts5`` in
+    its string output. Callers MUST treat ``confidence=None`` (or the
+    rendered ``fts5`` string) as a match that clears the gate — the
+    ``min_confidence`` parameter does not apply to FTS5 hits.
     """
     filter_dims = dimensions or {}
 

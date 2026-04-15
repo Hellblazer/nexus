@@ -22,11 +22,14 @@ match clears `min_confidence`, execute the returned plan via
    — match the caller's intent against the T1 `plans__session`
    cache. Pin `verb` when known (via the caller's own verb skill),
    leave `dimensions={}` when unknown.
-2. **If match returned with `confidence >= 0.85`** (or if
-   `confidence is None` — the FTS5 fallback sentinel also passes):
+2. **If match returned with `confidence >= 0.85`** (or if the output
+   line shows `confidence=fts5` — the FTS5 fallback sentinel that
+   `plan_match` renders when the in-session cosine cache is
+   unavailable; internally this is `confidence=None` on the `Match`
+   object):
    - Present the plan's `description` and `dimensions` to the caller
      as a one-line summary.
-   - Invoke `plan_run(match, bindings=<the caller-supplied vars>)`.
+   - Invoke `plan_run(plan_id=<match.id>, bindings='{...}')`.
    - Return the final step's result to the caller.
 3. **If no match clears the threshold**:
    - Dispatch `/nx:query` with the original intent. The
@@ -77,8 +80,10 @@ the missing bindings to the user rather than guessing defaults.
 - **Passing an unnamed plan result to a downstream tool.** The
   `plan_run` result is a `PlanResult` with `steps` and `final`; read
   `final` into the user-facing summary, not the raw step list.
-- **Ignoring `confidence=None`.** The FTS5 fallback sentinel means
-  "no cosine but keyword match survived" — treat it as a pass, not
+- **Ignoring `confidence=fts5`.** The FTS5 fallback sentinel (rendered
+  as `confidence=fts5` in `plan_match` output; `confidence=None` on
+  the Python `Match` object) means "no cosine but keyword match
+  survived" — treat it as a pass, not
   a miss. Only `confidence < min_confidence` (numeric) is a miss.
 
 ## Companion docs

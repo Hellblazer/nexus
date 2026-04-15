@@ -1084,8 +1084,11 @@ def plan_save(
                 )
                 if existing is not None:
                     return (
-                        f"Saved plan: [{existing['id']}] {query[:80]} "
-                        f"(existing row for canonical dims)"
+                        f"Plan exists (no-op): [{existing['id']}] "
+                        f"{query[:80]} — canonical dims already registered; "
+                        f"the new plan_json was NOT saved. To replace the "
+                        f"plan body, update via plan_library directly or "
+                        f"rotate the dimensional identity."
                     )
             row_id = db.save_plan(
                 query=query,
@@ -1133,8 +1136,14 @@ def plan_search(query: str, project: str = "", limit: int = 5, offset: int = 0) 
     """
     try:
         with _t2_ctx() as db:
-            # Over-fetch by 1 to detect if there are more
-            results = db.search_plans(query, limit=limit + 1, project=project)
+            # Fetch (offset + limit + 1) rows then slice: the backing
+            # search_plans has no OFFSET, so slicing after an over-fetch
+            # is the only way to page without a schema change. +1 detects
+            # "may have more". Slicing the already-truncated result by
+            # offset would be wrong — we must over-fetch past the offset.
+            results = db.search_plans(
+                query, limit=offset + limit + 1, project=project,
+            )
         if offset:
             results = results[offset:]
         has_more = len(results) > limit

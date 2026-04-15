@@ -232,6 +232,25 @@ class _CIError:
     message: str
 
 
+def _load_registered_dimensions(plugin_root: Path) -> set[str] | None:
+    """Read the canonical dimensions registry from ``nx/plans/dimensions.yml``.
+
+    Returns the set of registered top-level dimension keys, or ``None`` if
+    the file is missing/unreadable (in which case the caller should fall
+    back to lenient validation).
+    """
+    path = plugin_root / "plans" / "dimensions.yml"
+    if not path.exists():
+        return None
+    try:
+        doc = yaml.safe_load(path.read_text()) or {}
+    except Exception:
+        return None
+    if not isinstance(doc, dict):
+        return None
+    return {k for k in doc.keys() if isinstance(k, str)}
+
+
 def ci_validate_plan_tree(
     *,
     plugin_root: Path,
@@ -242,10 +261,16 @@ def ci_validate_plan_tree(
     Returns 0 when every file validates; non-zero (and prints the
     offenders to stderr) when one or more files fail. Used by the
     GitHub Actions workflow ``plan-schema-check.yml`` (SC-15).
+
+    Runs the validator in strict mode with the dimensions registry
+    loaded from ``nx/plans/dimensions.yml`` so SC-19 (unknown dimension
+    rejected at CI) is actually enforced.
     """
     import sys
 
     errors: list[_CIError] = []
+    registered = _load_registered_dimensions(plugin_root)
+    strict = registered is not None
 
     directories: list[Path] = []
     directories.append(plugin_root / "plans" / "builtin")
@@ -275,7 +300,11 @@ def ci_validate_plan_tree(
                 errors.append(_CIError(str(path), f"YAML error: {exc}"))
                 continue
             try:
-                validate_plan_template(template)
+                validate_plan_template(
+                    template,
+                    registered_dimensions=registered,
+                    strict=strict,
+                )
             except PlanTemplateSchemaError as exc:
                 errors.append(_CIError(str(path), str(exc)))
 

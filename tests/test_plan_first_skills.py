@@ -9,8 +9,8 @@ Pins:
   * SC-7b: SessionStart hook injects the ``## Plan Library (RDR-078)``
     block listing all five scenario verb names.
   * SC-7c: SubagentStart hook injects the plan-match-first preamble
-    when the task text names any of the eight retrieval-shaped agents.
-  * SC-7d: Each of the eight retrieval-shaped agent .md files cites
+    when the task text names any of the retrieval-shaped agents.
+  * SC-7d: Each of the retrieval-shaped agent .md files cites
     ``plan_match`` independently (survives hook-context trimming).
 """
 from __future__ import annotations
@@ -143,7 +143,7 @@ def _run_subagent_start(task_text: str) -> str:
 def test_subagent_start_preamble_present_for_each_retrieval_agent(
     agent: str,
 ) -> None:
-    """Every one of the eight retrieval-shaped agents triggers the
+    """Every one of the retrieval-shaped agents triggers the
     plan-match-first preamble when its name appears in the task text."""
     out = _run_subagent_start(f"dispatching to {agent} for this task")
     assert "RDR-078 Plan-match-first" in out, (

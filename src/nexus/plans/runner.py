@@ -50,6 +50,7 @@ __all__ = [
     "PlanResult",
     "PlanRunBindingError",
     "PlanRunStepRefError",
+    "PlanRunToolNotFoundError",
     "PlanRunEmbeddingDomainError",
     "ToolDispatcher",
     "plan_run",
@@ -400,11 +401,36 @@ def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]:
 
     fn = getattr(mcp_core, tool, None)
     if fn is None or not callable(fn):
+        available = sorted(
+            name for name in dir(mcp_core)
+            if not name.startswith("_") and callable(getattr(mcp_core, name, None))
+        )[:20]
         raise PlanRunToolNotFoundError(
             tool=tool,
-            reason=f"not present in nexus.mcp.core",
+            reason=(
+                f"not present in nexus.mcp.core "
+                f"(available sample: {', '.join(available[:10])}…)"
+            ),
         )
-    return fn(**args)  # type: ignore[no-any-return]
+    result = fn(**args)
+    # Most MCP tools return str (human-readable summary); the runner
+    # expects dict per RDR-078 §Phase 1. Normalize: wrap string returns
+    # as ``{"text": ...}`` so downstream ``$stepN.text`` references
+    # resolve. The ``traverse`` tool already returns dict and passes
+    # through unchanged.
+    if isinstance(result, str):
+        return {"text": result}
+    if isinstance(result, dict):
+        return result
+    # Anything else (list, None, …) — surface explicitly rather than
+    # let downstream step-ref resolution silently fail.
+    raise PlanRunStepRefError(
+        ref=f"tool:{tool}",
+        reason=(
+            f"default dispatcher received unexpected return type "
+            f"{type(result).__name__} from {tool!r}"
+        ),
+    )
 
 
 # ── Public API ──────────────────────────────────────────────────────────────

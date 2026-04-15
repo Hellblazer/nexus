@@ -154,6 +154,48 @@ def test_run_resolves_step_ref_for_list_field() -> None:
     assert disp.calls[1] == ("extract", {"ids": ["a", "b", "c"]})
 
 
+def test_default_dispatcher_wraps_str_return_as_text_dict() -> None:
+    """MCP tools return str (human-readable). The runner requires dict.
+    The default dispatcher must wrap str → {"text": ...} so plan_run
+    works end-to-end with real MCP tools, not only with test stubs.
+
+    Regression for RDR-078 post-critique finding: before this fix,
+    every step using a non-traverse MCP tool raised PlanRunStepRefError
+    in production because MCP tools returned str and the runner asserted
+    dict at line 454."""
+    from nexus.plans.runner import _default_dispatcher
+
+    # search() MCP tool — returns str regardless of hit/miss.
+    result = _default_dispatcher(
+        "search", {"query": "nothing-indexed-sentinel-xyz", "corpus": "knowledge", "limit": 1},
+    )
+    assert isinstance(result, dict), (
+        "default dispatcher must normalize str return into dict form"
+    )
+    assert "text" in result, (
+        "str-returning MCP tools must be wrapped as {'text': ...}"
+    )
+    assert isinstance(result["text"], str)
+
+
+def test_default_dispatcher_passes_through_dict_return() -> None:
+    """The `traverse` MCP tool returns dict directly — must not be
+    re-wrapped. Verified by stub-calling a dict-returning function
+    via the dispatcher."""
+    from nexus.plans.runner import _default_dispatcher
+
+    # Use plan_search via _default_dispatcher is fine (returns str wrapped),
+    # but the contract pin is that dict returns pass through verbatim. We
+    # test this by inspecting that _default_dispatcher for a real dict-
+    # returning tool (traverse) does NOT add an extra 'text' field.
+    # Seed an empty traverse — returns {'error': ..., 'tumblers': [], ...}.
+    result = _default_dispatcher(
+        "traverse", {"seeds": [], "link_types": [], "depth": 1},
+    )
+    assert isinstance(result, dict)
+    assert "tumblers" in result  # dict passed through unchanged
+
+
 def test_default_dispatcher_raises_tool_not_found_for_unknown_tool() -> None:
     """Unknown tool → PlanRunToolNotFoundError, not PlanRunStepRefError.
 

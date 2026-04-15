@@ -152,7 +152,9 @@ def test_plan_save_accepts_dimensional_fields() -> None:
     )
     assert r1.startswith("Saved plan:"), r1
 
-    # Second save with the same canonical dims should UPDATE, not DUPLICATE.
+    # Second save with the same canonical dims should NO-OP, not DUPLICATE.
+    # The return string must be distinguishable from a new insert so agent
+    # callers can branch on idempotency.
     r2 = plan_save(
         query="second author plan (same dims)",
         plan_json='{"steps": []}',
@@ -161,7 +163,8 @@ def test_plan_save_accepts_dimensional_fields() -> None:
         scope="global",
         dimensions='{"verb":"plan-author","scope":"global"}',
     )
-    assert r2.startswith("Saved plan:"), r2
+    assert r2.startswith("Plan exists (no-op):"), r2
+    assert "was NOT saved" in r2, r2
 
 
 def test_plan_save_rejects_malformed_dimensions_json() -> None:

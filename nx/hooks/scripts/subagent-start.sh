@@ -26,13 +26,28 @@ SKIP_OPERATORS=0
 # plan-match-first preamble injected below. Canonical list lives in
 # nx/retrieval-agents.txt — SINGLE SOURCE OF TRUTH (hook + test read it).
 RETRIEVAL_AGENT=0
-RETRIEVAL_REGISTRY="$CLAUDE_PLUGIN_ROOT/retrieval-agents.txt"
-if [[ -f "$RETRIEVAL_REGISTRY" ]]; then
-    # Build a grep pattern by replacing '-' with '.' (any separator) per line,
-    # skipping comments and blanks.
-    RETRIEVAL_PATTERN=$(grep -vE '^\s*(#|$)' "$RETRIEVAL_REGISTRY" | sed 's/-/./g' | paste -sd'|' -)
-    if [[ -n "$RETRIEVAL_PATTERN" ]] && echo "$TASK_TEXT" | grep -qiE "$RETRIEVAL_PATTERN"; then
-        RETRIEVAL_AGENT=1
+if [[ -z "$CLAUDE_PLUGIN_ROOT" ]]; then
+    # Unset environment means we can't locate the registry. Fail loud to
+    # stderr (session logs) rather than silently skipping the preamble.
+    echo "nexus SubagentStart: CLAUDE_PLUGIN_ROOT unset; plan-match-first preamble will not be injected" >&2
+else
+    RETRIEVAL_REGISTRY="$CLAUDE_PLUGIN_ROOT/retrieval-agents.txt"
+    if [[ -f "$RETRIEVAL_REGISTRY" ]]; then
+        # Build a grep pattern that matches each agent name as a literal (dashes
+        # stay dashes; `.` in regex is escaped). Match accepts either the literal
+        # dash or an underscore as the separator so task phrasing variants still
+        # hit. Each name is anchored between word-boundary-class chars to avoid
+        # substring false-positives like 'uncodebase-deep-analyzer' matching.
+        RETRIEVAL_PATTERN=$(
+            grep -vE '^\s*(#|$)' "$RETRIEVAL_REGISTRY" \
+            | awk '{gsub(/-/,"[_-]"); print "(^|[^a-z0-9_-])"$0"([^a-z0-9_-]|$)"}' \
+            | paste -sd'|' -
+        )
+        if [[ -n "$RETRIEVAL_PATTERN" ]] && echo "$TASK_TEXT" | grep -qiE "$RETRIEVAL_PATTERN"; then
+            RETRIEVAL_AGENT=1
+        fi
+    else
+        echo "nexus SubagentStart: retrieval-agents.txt not found at $RETRIEVAL_REGISTRY" >&2
     fi
 fi
 

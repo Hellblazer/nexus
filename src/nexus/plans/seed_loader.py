@@ -127,10 +127,13 @@ def load_seed_directory(
                     dims["scope"] = scope_override
                     template = dict(template)
                     template["dimensions"] = dims
-            # template_loader.add() calls validate_plan_template internally,
-            # so we only canonicalize here (and let add() do the validation).
-            canonical = canonical_dimensions_json(template["dimensions"])
+            # template_loader.add() calls validate_plan_template first, which
+            # raises the named PlanTemplateSchemaError on a missing/invalid
+            # 'dimensions' key. We canonicalize AFTER validation so the
+            # schema error surfaces as-is rather than getting masked by a
+            # bare KeyError on template["dimensions"].
             template_loader.add(template, source=source)
+            canonical = canonical_dimensions_json(template["dimensions"])
         except PlanTemplateDuplicateError as exc:
             result.errors.append((source, str(exc)))
             continue
