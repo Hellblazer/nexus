@@ -140,7 +140,7 @@ Each tool's input relay includes a `$schema_version: 1` marker; mismatched schem
 - **SC-5** — RDR-078 test suite passes unchanged. No regression.
 - **SC-6** — Operator pool coexistence inside `nexus`: the two MCP servers (`nexus`, `nexus-catalog`) run with the in-process pool active for an 8-hour soak with no deadlock, no orphaned workers, and pool utilisation metrics logged. The pool's singleton lifecycle must not interfere with T1/T2/T3 singleton initialisation or teardown.
 - **SC-7** — `--json-schema` output validated per operator. Malformed structured output (`StructuredOutput.input` not matching schema) raises `PlanRunOperatorOutputError` with context, not silent corruption.
-- **SC-8** — Median and p95 operator-dispatch latency documented per operator, with cold-pool and warm-pool baselines. Measurement from Finding 5 is the baseline; P3 confirms or updates it.
+- **SC-8** — Median and p95 operator-dispatch latency documented per operator, with cold-pool and warm-pool baselines. Instrumented via `structlog` on the pool worker (per-turn `duration_ms`, `total_cost_usd`, `usage.*` already emitted by `claude`'s streaming protocol per Empirical Finding 1), aggregated by `nx doctor --operators`, committed as a baseline table in `docs/rdr/rdr-079-latency-baselines.md`. Measurement from Finding 5 is the seed; P3 confirms or updates.
 - **SC-9** — Plan promotion gate rejects sub-threshold plans; `nx plan promote --dry-run` reports the gate verdict without side effects.
 - **SC-10** — Graceful degradation without auth: when `claude auth status` reports `loggedIn: false`, the first operator-requiring MCP call returns a named `PlanRunOperatorUnavailableError` with guidance ("run `claude auth login` or set `ANTHROPIC_API_KEY`"); retrieval steps (`search`/`query`/`traverse` + all of `nexus-catalog`) continue working unchanged. Plans with no operator steps still execute end-to-end. Testable via a fixture that patches `claude auth status` output.
 
@@ -201,7 +201,7 @@ Analysis-derived findings (vs the live-test Empirical Findings above). Each reco
 - `claude` CLI v2.1+ on the host, `claude auth status` returns `loggedIn: true` under any `authMethod`.
 - `tmux` NOT required (streaming RPC supersedes it for this use case).
 - ChromaDB Cloud + Voyage AI unchanged from RDR-078.
-- RDR-078 infrastructure is frozen — no modifications to `plan_match` / `plan_run` / `traverse` / `plans` schema / YAML loader / skills. This RDR is purely additive.
+- RDR-078 infrastructure is frozen at its **external contracts** — no changes to the public signatures / return shapes of `plan_match`, `plan_run`, `traverse`, the `plans` schema, the YAML loader, or the plan-first skill family. P4's `_default_dispatcher` routing update is an internal implementation detail of `plan_run` (explicitly named as an integration point in Gap A and Design §Runner integration) and does not alter `plan_run`'s external contract. This RDR is additive from every caller's perspective.
 - MCP stdio transport is adequate for operator-pool IPC; no new HTTP bus introduced.
 - `ANTHROPIC_API_KEY` remains optional; OAuth sessions are the default path for interactive users.
 
