@@ -75,7 +75,7 @@ Measured per-call amortized: ~4s, ~$0.037. Schema 100% enforced (every output ma
 
 ## Design
 
-### `nexus-operators` MCP server
+### Pool home: the `nexus` MCP server
 
 Per Amendment 1: the pool is core infrastructure inside the existing `nexus` MCP server. Pool module at `src/nexus/operators/pool.py`; tool registrations via `@mcp.tool()` in `src/nexus/mcp/core.py`; singleton management in `src/nexus/mcp_infra.py` alongside the existing T1/T3 singletons. No new entry point. No new `.mcp.json` server block.
 
@@ -133,16 +133,16 @@ Each tool's input relay includes a `$schema_version: 1` marker; mismatched schem
 
 ## Success Criteria
 
-- **SC-1** — All 9 RDR-078 seed plans execute end-to-end via the default dispatcher with real MCP tools + live operator pool. Each step produces runner-contract-conformant output.
+- **SC-1** — All 9 RDR-078 seed plans execute end-to-end via the default dispatcher with real MCP tools + live operator pool. Each step produces runner-contract-conformant output. Verified by P7 integration tests in `tests/integration/test_rdr078_seeds_e2e.py` (one test per seed, `@pytest.mark.integration`).
 - **SC-2** — Pool survives hung worker: health probe detects within 10s, respawn within 30s, in-flight request re-queued to a healthy worker without caller-visible failure.
 - **SC-3** — Worker retirement at token threshold drains in-flight turns and spawns a replacement without dropping requests. Verified with a deterministic 150k-token fixture.
 - **SC-4** — `min_confidence` calibrated against the paraphrase set. ROC artefact committed.
 - **SC-5** — RDR-078 test suite passes unchanged. No regression.
-- **SC-6** — Cross-server coexistence: `nexus`, `nexus-catalog`, `nexus-operators` run concurrently through an 8-hour soak with no deadlock, no orphaned worker panes, and pool utilisation metrics logged.
+- **SC-6** — Operator pool coexistence inside `nexus`: the two MCP servers (`nexus`, `nexus-catalog`) run with the in-process pool active for an 8-hour soak with no deadlock, no orphaned workers, and pool utilisation metrics logged. The pool's singleton lifecycle must not interfere with T1/T2/T3 singleton initialisation or teardown.
 - **SC-7** — `--json-schema` output validated per operator. Malformed structured output (`StructuredOutput.input` not matching schema) raises `PlanRunOperatorOutputError` with context, not silent corruption.
 - **SC-8** — Median and p95 operator-dispatch latency documented per operator, with cold-pool and warm-pool baselines. Measurement from Finding 5 is the baseline; P3 confirms or updates it.
 - **SC-9** — Plan promotion gate rejects sub-threshold plans; `nx plan promote --dry-run` reports the gate verdict without side effects.
-- **SC-10** — Graceful degradation without auth: `nexus-operators` pool startup fails fast with a named error; retrieval steps (`search`/`query`/`traverse`) continue working. Plans with no operator steps still execute.
+- **SC-10** — Graceful degradation without auth: when `claude auth status` reports `loggedIn: false`, the first operator-requiring MCP call returns a named `PlanRunOperatorUnavailableError` with guidance ("run `claude auth login` or set `ANTHROPIC_API_KEY`"); retrieval steps (`search`/`query`/`traverse` + all of `nexus-catalog`) continue working unchanged. Plans with no operator steps still execute end-to-end. Testable via a fixture that patches `claude auth status` output.
 
 ## Risks / Open Questions
 
@@ -152,6 +152,7 @@ Each tool's input relay includes a `$schema_version: 1` marker; mismatched schem
 - **Operator output-schema evolution**: `schema_version: 1` pinned at ship. v2 requires compatibility shim or dual-schema support.
 - **Concurrent worker auth**: under OAuth, N concurrent `claude` workers share the subscription's rate limit. Under API key, they share the key's rate limit. `429` handling is per-worker with backoff.
 - **Final-turn thinking-only response**: Finding 3 showed the `result` text field can be empty when the model's final action is thinking after a tool_use. Controller must not block on the `result` field — wait for the `StructuredOutput` tool_use event or the `result` record with `subtype: success`, whichever comes first.
+- **`claude auth status --json` schema drift**: the auth guard at pool startup parses this command's output. A future `claude` CLI release could rename `loggedIn` → `isLoggedIn` or similar. Mitigation: defensive parse (check key presence before trusting value), pin a minimum tested `claude` CLI version in `pyproject.toml` docs, add a CI smoke test that runs `claude auth status --json` and asserts the `loggedIn` key is present.
 
 ## Research Findings
 
@@ -203,6 +204,15 @@ Analysis-derived findings (vs the live-test Empirical Findings above). Each reco
 - RDR-078 infrastructure is frozen — no modifications to `plan_match` / `plan_run` / `traverse` / `plans` schema / YAML loader / skills. This RDR is purely additive.
 - MCP stdio transport is adequate for operator-pool IPC; no new HTTP bus introduced.
 - `ANTHROPIC_API_KEY` remains optional; OAuth sessions are the default path for interactive users.
+
+## Out of Scope (may spawn follow-on RDRs)
+
+- **`nx_answer` MCP tool** — belongs to RDR-080 (Retrieval Layer Consolidation). RDR-079 delivers the operator pool that `nx_answer` will consume; RDR-079 does NOT build `nx_answer` itself.
+- **Streaming operator output back to MCP callers** — current design returns the full `StructuredOutput` payload after the worker finishes. Partial-output streaming is plausible but deferred.
+- **Multi-LLM operator routing** — all operators dispatch to the same `claude` pool (currently Haiku). Routing a specific operator type to Sonnet or to a different provider is a later extension.
+- **Auto-plan-promotion from pool runs** — P6 ships a manual `nx plan promote` CLI with gates. An automatic "learn-from-successful-runs" loop is out of scope.
+- **Worker affinity by operator type** — uniform dispatch at P2; affinity may follow measurement.
+- **Deleting the `analytical-operator` agent** — belongs to RDR-080 P1/P2. RDR-079 P3 ships the replacement MCP tools; the agent file stays until RDR-080 consolidates the consumers.
 
 ## Deviations Register
 
