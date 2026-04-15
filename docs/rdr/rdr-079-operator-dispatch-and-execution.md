@@ -322,6 +322,23 @@ Analysis-derived findings (vs the live-test Empirical Findings above). Each reco
 
 **Conclusion**: the cost tradeoff is acceptable. Document the per-tool dispatch-or-not classification in `docs/architecture.md` so future tool authors know which category their addition falls into.
 
+### RF-5 — JSONL-truncation rewind primitive (nexus-axu Phase A verified)
+
+**Source**: bead `nexus-axu` Phase A smoke test 2026-04-15, verified in stream-json context. T2 memory: `nexus_rdr/079-research-5-rewind-pool-primitive`.
+
+**Finding**: in-place `truncate(1)` of `~/.claude/projects/<slug>/<uuid>.jsonl` back to the byte offset after a chosen `{"type":"last-prompt",...}` sentinel, followed by `claude -p --resume <uuid>`, yields a **cleanly rewound** conversation: the model has zero recall of truncated turns, the prompt cache **survives the rewind** (verified `cache_read=68,533` tokens on a Haiku post-rewind turn), and per-call cost stays at ~$0.01–0.02. Critical implementation detail not in the original bead notes: the truncation MUST preserve the inode (use `truncate(1)` or Python `ftruncate()`) — shell redirect (`>`, `head > file`) replaces the inode and causes `--resume` to fail with `"No conversation found with session ID"`.
+
+**Compatibility with this RDR's P2.1**: rewind requires the worker to NOT be actively writing to the JSONL (a long-running `claude -p --input-format stream-json` subprocess holds the file open for append). Rewind therefore applies at the **per-dispatch spawn boundary**, not inside a persistent stream-json worker. This means rewind and the P2.1 persistent-pool model are orthogonal — they cover different workloads.
+
+**Architectural decision — Option C hybrid** (`nexus-ilm` tracks the sibling pool):
+
+- **P2.1 `OperatorPool` (shipped)** — long-running stream-json workers, retirement at 150k-token threshold. Right for interactive operators invoked during a live `plan_run` step where low latency matters and the ~68k-token cold-cache tax once-per-worker is acceptable.
+- **`RewindPool` (new, sibling)** — per-dispatch subprocess spawn (`claude -p --resume <uuid> ...`) with JSONL truncation between calls. One long-lived session UUID per worker slot; each dispatch rewinds to a post-setup checkpoint. Pays ~3–5s cold-start per dispatch; gets prompt-cache reuse; eliminates cross-dispatch contamination by construction. Right for batch-style operators where cross-call bleed-through is a correctness concern — RDR-081 RF-2's SSMF/label-order issue is the motivating example.
+
+Both pools share the same session-isolation mechanism (`NEXUS_T1_SESSION_ID` override) and the same MCP worker-mode config. Operator MCP tools choose which pool they consume based on their contamination tolerance.
+
+**Upstream ask**: file with Anthropic — a stream-json control message (`{type:"control","action":"rewind_to","checkpoint":"post-system"}`) OR a `--resume-at-turn N` flag. Either would eliminate the JSONL-surgery fragility and make the rewind primitive a supported API rather than file-format reverse-engineering.
+
 ## Assumptions
 
 - `claude` CLI v2.1+ on the host, `claude auth status` returns `loggedIn: true` under any `authMethod`.
@@ -343,6 +360,7 @@ Analysis-derived findings (vs the live-test Empirical Findings above). Each reco
 ## Deviations Register
 
 - **Amendment 1 (2026-04-15)** — Moved operator pool from a proposed third MCP server (`nexus-operators`) into the existing `nexus` server. See top of document. Motivation: every tool that will later use workers (including RDR-080's `nx_answer`) needs pool access; cross-process RPC to a sibling server is overhead with no benefit. Pool is core infrastructure, not an external surface.
+- **Amendment 2 (2026-04-15)** — Adopted Option C hybrid-pool architecture per RF-5 (nexus-axu Phase A verified). The shipped `OperatorPool` (long-running stream-json workers, retirement-based lifecycle) remains the default for interactive operators. A sibling `RewindPool` (per-dispatch subprocess + JSONL-truncation rewind) handles batch-style operators where cross-dispatch contamination is a correctness concern. Both pools share session isolation via `NEXUS_T1_SESSION_ID` and worker-mode MCP config; MCP operator tools pick which pool they consume. RewindPool implementation tracked by bead `nexus-ilm`. Upstream ask filed for a durable rewind primitive (stream-json control message OR `--resume-at-turn N`).
 
 ## References
 
