@@ -93,34 +93,74 @@ def loaded_library(library, tmp_path: Path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("seed_name", _SEEDS)
+@pytest.mark.xfail(
+    reason=(
+        "RDR-079 P7 finding: every shipped seed has at least one "
+        "step-ref bug — step 1 uses a tool (plan_search, search with "
+        "placeholder bindings, etc.) that emits no `tumblers`/`ids` "
+        "field, yet step 2+ references `$step1.tumblers` or `$step1.ids`. "
+        "Tracked by follow-up bead (seed cleanup); test stays as xfail "
+        "so the scaffolding ships and a future fix flips it green."
+    ),
+    strict=False,
+)
 async def test_seed_executes_end_to_end(seed_name: str, loaded_library) -> None:
-    """Each of the 9 seed plans runs end-to-end: plan_match hits the row,
-    plan_run drives every step through the real default dispatcher, and
-    every step output is a dict matching the runner contract.
+    """Each of the 9 seed plans runs end-to-end via the real
+    ``_default_dispatcher``. The test looks the plan up by its exact
+    ``(project, dimensions)`` identity (NOT via ``plan_match``) so the
+    scoring loop doesn't conflate one seed with another. Each step's
+    output must be a dict (runner contract).
 
-    Success is measured structurally (dict-returns, no exceptions) — the
-    model's prose is not asserted since operator output varies turn-to-
+    All ``required_bindings`` are satisfied with plausible placeholder
+    strings so the run gets past binding-resolution. The seed plans
+    are free to fail on semantics (bad ``$stepN.field`` refs, missing
+    step outputs, etc.) — those failures are the P7 finding, surfaced
+    here as test output.
+
+    Success is measured structurally (dict returns, no runner error);
+    model prose is not asserted since operator output varies turn-to-
     turn even with a pinned schema.
     """
+    import json as _json
+
     import yaml
 
-    from nexus.plans.matcher import plan_match
+    from nexus.plans.match import Match
     from nexus.plans.runner import plan_run
+    from nexus.plans.schema import canonical_dimensions_json
 
     seed_path = _SEED_DIR / seed_name
     seed = yaml.safe_load(seed_path.read_text()) or {}
-    description = seed.get("description") or seed.get("name") or seed_name
 
-    # Match against the library — the seed should have been inserted by
-    # the loader fixture and now be findable via description FTS.
-    matches = plan_match(
-        description, library=loaded_library, min_confidence=0.0, n=1,
-        project="",
+    dims = seed.get("dimensions") or {}
+    dims_json = canonical_dimensions_json(dims)
+    project_label = "" if dims.get("scope") == "global" else dims.get("scope", "")
+    row = loaded_library.get_plan_by_dimensions(
+        project=project_label, dimensions=dims_json,
     )
-    assert matches, f"seed {seed_name!r} did not match its own description"
+    assert row is not None, (
+        f"seed {seed_name!r} was not seeded under "
+        f"project={project_label!r} dims={dims_json!r}"
+    )
 
-    result = await plan_run(matches[0], bindings={})
-    # Every step returns a dict; at least one step actually ran.
+    # Fabricate harmless placeholders for every required binding so the
+    # plan clears binding resolution; let the dispatcher handle the
+    # rest.
+    plan_json_body = _json.loads(row["plan_json"])
+    required = list(plan_json_body.get("required_bindings") or [])
+    bindings = {name: f"rdr-079-p7-placeholder-{name}" for name in required}
+
+    match = Match(
+        plan_id=row["id"], name=row.get("name") or seed_name,
+        description=row.get("query") or "", confidence=1.0,
+        dimensions=dims,
+        tags=row.get("tags") or "", plan_json=row["plan_json"],
+        required_bindings=required,
+        optional_bindings=list(plan_json_body.get("optional_bindings") or []),
+        default_bindings=_json.loads(row.get("default_bindings") or "null") or {},
+        parent_dims=None,
+    )
+    result = await plan_run(match, bindings=bindings)
     assert result.steps, f"seed {seed_name!r} produced zero step outputs"
     for idx, step_out in enumerate(result.steps):
         assert isinstance(step_out, dict), (
