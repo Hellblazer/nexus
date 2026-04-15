@@ -42,7 +42,65 @@ Five canonical scenarios recur across every nexus session: design/planning, crit
 
 ## Proposed Design
 
-Five phases. Each builds on RDR-042's shipped substrate. Phase 3 is new to this revision and carries the paper's quality lever.
+Six phases. Each builds on RDR-042's shipped substrate. Phase 3 carries the paper's quality lever (typed-graph traversal); Phase 6 carries the shipping-velocity story (scoped plan loading).
+
+### Vocabulary: this is templating
+
+A plan is a **template** — a reusable DAG with named `$var` placeholders. The plan library is a **template registry** selected by semantic intent rather than exact name. Three distinct strings carry three distinct jobs:
+
+- **`name`** — stable identifier (e.g. `research-plan`). Used for exact lookup by key and for skill binding.
+- **`description`** — prose authored at plan-save time describing *when to use this plan*. Embedded at SessionStart and cosine-matched against caller intent. **This is what `plan_match` selects on.** The existing RDR-042 `plans.query` column holds this; the field is exposed as `description` in new MCP surfaces to stop conflating it with the caller's question.
+- **`intent`** — the caller's phrasing of what they're trying to do. Passed to `plan_match` at call time; never stored with the plan itself.
+
+The match is `cosine(embed(caller.intent), embed(plan.description))`. Tags and scope are pre-filters on the candidate pool; description cosine is the ranker; bindings are per-call parameterisation of the selected template. Three layers, never confused.
+
+**Plan template structure:**
+
+```yaml
+name: research-plan                             # stable identifier
+scope: global                                    # scope:* tag (see Phase 6)
+verb: research-plan                              # verb:* tag
+description: |
+  Research a concept by walking prior-art documents, then following
+  their typed links to implementing code, then summarising the union
+  with citations. Use when the user asks to "plan", "design", "extend",
+  or "research" a technical subsystem.
+required_bindings: [concept]
+optional_bindings: [module]
+plan_json:
+  steps:
+    - tool: search
+      args: {query: "$concept", corpus: "knowledge,rdr,docs"}
+      scope: {taxonomy_domain: prose, topic: "$concept"}
+    - tool: traverse
+      args: {seeds: "$step1.tumblers", link_types: [implements, cites], depth: 2}
+    - tool: search
+      args: {query: "$concept", corpus: "code", subtree: "$module"}
+      scope: {taxonomy_domain: code}
+    - tool: summarize
+      args: {inputs: [$step1, $step2, $step3], cited: true}
+```
+
+**Input contract — four axes:**
+
+```
+plan_match(
+    intent: str,                   # REQUIRED — caller's description of what they're doing
+    scope_preference: str = "",    # "rdr-078,project,repo,global" — specificity cascade
+    tag_filter: str = "",          # "verb:*" or exact "verb:relate"
+    context: dict = {},            # optional — {changed_paths, active_rdr, current_topic}
+                                   # blended into the match embedding when present
+    min_confidence: float = 0.85,
+    n: int = 5,
+) -> list[Match]
+
+plan_run(
+    match: Match,
+    bindings: dict = {},           # fills $vars declared in required/optional_bindings
+) -> PlanResult
+```
+
+The four axes cleanly separate semantic selection (`intent`), namespace narrowing (`scope_preference`, `tag_filter`), situational hints (`context`), and execution parameterisation (`bindings`). Prior drafts muddled these into a single `query` parameter; this RDR names them apart.
 
 ### Phase 1: Semantic plan matching (`plan_match` MCP tool, T1-cached)
 
@@ -50,7 +108,8 @@ Pickup of RDR-042 §Alternatives "T3 for plan storage (deferred)". The original 
 
 - **T2 remains authoritative.** `plans` table + FTS5 (existing, RDR-042) is the source of truth. All writes go to T2 via `plan_save`. No schema changes.
 - **T1 holds the session semantic cache.** New collection `plans__session` (via RDR-041's T1 HTTP server) populated at SessionStart: `SELECT id, query, plan_json, tags FROM plans WHERE outcome='success' AND (ttl_days = 0 OR expires_at > now)` → embed the query text → upsert one document per plan with `metadata={plan_id, verb_name, handler_kind, tags, project, ttl, last_used}`.
-- **`plan_match(query, project=None, n=5, min_confidence=0.0, tag_filter=None)` MCP tool** — T1 cosine query, returns `[(plan_id, plan_query, confidence, plan_json, metadata), ...]`. `tag_filter` accepts a glob like `"verb:*"` or a comma-separated list; filters on T1 metadata before ranking. Default excludes failed plans via the SessionStart populator (only `outcome='success'` rows are loaded).
+- **`plan_match`** — signature in the Vocabulary section above. T1 cosine over plan descriptions, returns ranked `Match` objects with `{plan_id, name, description, confidence, scope, verb, tags, plan_json, required_bindings, optional_bindings}`. Only `outcome='success'` plans are loaded, so no explicit failure filter needed at call time.
+- **`plan_run`** — new MCP tool (signature in Vocabulary section above). Takes a `Match` plus a `bindings` dict, resolves `$var` references in `plan_json`, executes the DAG via the analytical-operator + retrieval-tool stack. Unresolved required bindings abort with a named error; optional bindings default to empty/null. `$stepN.<field>` references resolve from prior step outputs via T1 scratch (the RDR-041 pattern RDR-042 already uses).
 - **Fallback path.** When T1 is unavailable (EphemeralClient in tests, or session server failed to start), `plan_match` degrades to `plan_search` FTS5 over T2. Tests get deterministic behavior; production gets the semantic path.
 - **Write visibility.** A new plan saved mid-session via `plan_save` is also upserted to T1 by the same commit hook — so the calling session sees it immediately without waiting for the next SessionStart. Subagents sharing the parent T1 (RDR-041 session inheritance) see it too.
 - The existing `plan_search` FTS5 tool is untouched — it remains the fast path for exact-token and tag-only lookups.
@@ -115,19 +174,89 @@ New plan tool `traverse` with args:
 
 **Expected benefit (RF-1):** this is where the paper's +47% NDCG quality delta is attributed. Honest estimate: transfer is *qualitative* — nexus's mixed corpus, non-scholarly taxonomy, and different link type vocabulary mean the magnitude will differ. What should transfer is the *kind* of result: plans that previously required ad-hoc multi-agent orchestration will run as deterministic DAGs, with the cross-document connections the user's verb list (especially "relate" and "integrate") requires.
 
-### Phase 4: Scenario plans seeded at setup
+### Phase 4: Plan templates, metrics, meta-seeds, authoring guide
 
-Five plans, seeded by `nx catalog setup` alongside the existing 5 builtin plan templates from RDR-042. Each plan is a 2-5 step DAG exercising Phase 2 scoping and Phase 3 traversal where the scenario calls for it.
+Four tightly-coupled pieces: the formal template schema, the scenario template seeds, the operational metrics that feed the future promotion pipeline, and the meta-seeds that teach agents (and humans) how to author more.
+
+#### 4a — Plan template schema
+
+Formal YAML/JSON schema for a plan template (loadable by `.nexus/plans/*.yml`, `docs/rdr/<slug>/plans.yml`, and the global plugin seeds):
+
+```yaml
+name: <stable-identifier>         # required; unique within (project, scope) pair
+scope: global|rdr-<slug>|project|repo|personal   # required; tag-encoded in T2
+verb: <optional-verb-name>        # optional; tag-encoded as verb:<name>
+tags: <comma-separated>           # optional; additional tags
+description: <prose>              # required; embedded for plan_match cosine
+required_bindings: [<name>, ...]  # optional; aborts if missing at plan_run
+optional_bindings: [<name>, ...]  # optional; defaults to null/empty
+plan_json:
+  steps:
+    - tool: <search|query|traverse|extract|summarize|rank|compare|generate>
+      args: {<tool-args, may contain $var and $stepN.field refs>}
+      scope: {<Phase 2 scope override, optional>}
+```
+
+Schema validation lives in a dedicated validator (`src/nexus/plans/schema.py`); loaders reject malformed entries with a named error. Name + scope together form the T2 dedup key.
+
+#### 4b — Five scenario templates (seeded `scope:global`)
+
+Each uses at least one `traverse` step (except `debug-context`, intentionally flat). Descriptions are written to be exemplary — good enough to learn from by reading.
 
 | Plan name | Scenario | DAG sketch |
 |---|---|---|
-| `research-plan` | Design / arch / planning | `search` prose (topic=concept) → `traverse` (link_types=[implements,cites], depth=2) → `search` code (topic=concept, subtree=returned_collections) → `summarize` with citations. |
-| `review-context` | Critique / audit / review | `catalog-links-for-file(changed_paths)` → `traverse` (link_types=[supersedes,relates], depth=1) → `extract` decisions → `compare` decisions vs. changed code. |
-| `analyze-corpus` | Analysis / synthesis / research | `search` prose (topic=area) → `search` code (topic=area) → `traverse` both (link_types=[implements,cites], depth=2) → `rank` by criterion → `generate` synthesis with citations. |
-| `debug-context` | Dev / debug | `catalog-links-for-file(failing_path)` → `traverse` (link_types=[supersedes], depth=1) for authoring-RDR history → `summarize` design context. Serena handles symbol-level separately. |
-| `doc-scope` | Documentation | `search` prose (follow_links=cites) for existing references → `search` code (topic=area) → `traverse` (link_types=[cites,documented-by], depth=1) → `compare` for doc-coverage gaps. |
+| `research-plan` | Design / arch / planning | `search` prose (topic=$concept) → `traverse` (link_types=[implements,cites], depth=2) → `search` code (topic=$concept, subtree=$module) → `summarize` with citations. |
+| `review-context` | Critique / audit / review | `catalog-links-for-file($changed_paths)` → `traverse` (link_types=[supersedes,relates], depth=1) → `extract` decisions → `compare` decisions vs. changed code. |
+| `analyze-corpus` | Analysis / synthesis / research | `search` prose (topic=$area) → `search` code (topic=$area) → `traverse` both (link_types=[implements,cites], depth=2) → `rank` by criterion → `generate` synthesis with citations. |
+| `debug-context` | Dev / debug | `catalog-links-for-file($failing_path)` → `traverse` (link_types=[supersedes], depth=1) for authoring-RDR history → `summarize` design context. Serena handles symbol-level separately. |
+| `doc-scope` | Documentation | `search` prose (follow_links=cites) for existing references → `search` code (topic=$area) → `traverse` (link_types=[cites,documented-by], depth=1) → `compare` for doc-coverage gaps. |
 
-Plan names match the skill names (Phase 5) so `plan_match("research this concept")` and the `nx:research-plan` skill both resolve to the same DAG. Seeding via `nx catalog setup` is idempotent (existing plans with the same `(project, name)` are updated, not duplicated).
+Plan names match the skill names (Phase 5); `plan_match` and the `nx:<name>` skills both resolve to the same template. Seeding via `nx catalog setup` is idempotent (existing plans with the same `(name, scope)` are updated, not duplicated).
+
+#### 4c — Operational metrics
+
+Extend the `plans` table (T2 migration at RDR-078 implementation time) with counters that observe the feedback loop without acting on it:
+
+```sql
+ALTER TABLE plans ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE plans ADD COLUMN last_used TEXT;
+ALTER TABLE plans ADD COLUMN match_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE plans ADD COLUMN match_conf_sum REAL NOT NULL DEFAULT 0.0;
+ALTER TABLE plans ADD COLUMN success_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE plans ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0;
+```
+
+Update points:
+
+- `plan_match` returns → increment `match_count`, add cosine to `match_conf_sum` for every returned plan (so `match_conf_avg = sum/count`).
+- `plan_run` starts → increment `use_count`, update `last_used`.
+- `plan_run` completes → increment `success_count` or `failure_count` based on outcome.
+
+Per-installation operational data; **not git-tracked**. When a plan graduates to YAML at a higher scope, counters reset in the new scope (the YAML is canonical; stats measure local experience).
+
+**Promotion signal** (derived, not stored): a plan is a reasonable promotion candidate when `use_count ≥ 3 AND match_count/use_count ≥ 0.7 AND success_count/(success_count+failure_count) ≥ 0.8 AND match_conf_sum/match_count ≥ 0.80`. Thresholds are PQs, not hardcoded. **The CLI that acts on this signal is deferred to RDR-079.**
+
+#### 4d — Meta-seeds (also `scope:global`)
+
+Three seed plans whose purpose is to teach agents and humans how the library works:
+
+- **`verb:plan-authoring`** — description: *"Author a new plan template from scratch."* DAG: fetches `docs/plan-authoring-guide.md` → fetches the schema from `src/nexus/plans/schema.py` → prompts the caller for name / scope / description / required_bindings → drafts a candidate `plan_json` with per-step scope guidance → calls `plan_save` with the result. Self-referential bootstrap.
+- **`verb:plan-propose-promotion`** — description: *"Survey T2 plan counters and rank promotion candidates."* DAG: reads `plans` metrics → applies candidate thresholds (default 4c values) → formats a ranked shortlist with the paraphrase range for each → emits a markdown report. Primitive form of RDR-079's `nx plan audit` CLI; usable today via `plan_run`.
+- **`verb:plan-inspect`** — description: *"Inspect a named plan template: what it does, what bindings it needs, when to use it."* DAG: loads plan by name → renders description + step-by-step with arg binding notes. Agent self-service introspection.
+
+#### 4e — `docs/plan-authoring-guide.md`
+
+Prose companion document shipped in the plugin. Covers:
+
+- The templating vocabulary (template / description / intent / bindings / scope).
+- Schema reference.
+- What makes a good `description` (keys: verb-action, typical nouns, scope hint).
+- Binding naming conventions (lowercase snake, no type suffixes).
+- The four-axis `plan_match` contract.
+- Lifecycle: personal → rdr → project → repo → global. Promotion path.
+- How to run `verb:plan-authoring` if unsure where to start.
+
+Linked from RDR-078's References. Catalog-indexed like any other doc in `docs/`, so `plan_match` can surface it when an agent asks *"how do I write a plan."*
 
 ### Phase 5: Plan-first priming (skills + hooks + agent prompts)
 
@@ -141,6 +270,46 @@ The ergonomic change. Agents must reach for `plan_match` **before** decomposing 
 - **SubagentStart hook** (`nx/hooks/scripts/subagent-start.sh`) — for the eight retrieval-shaped agents (strategic-planner, architect-planner, code-review-expert, substantive-critic, deep-analyst, deep-research-synthesizer, debugger, plan-auditor), inject a "plan-match-first" preamble: *before decomposing any retrieval task, call `plan_match(query, min_confidence=0.85)`; execute the returned plan if match confidence clears the threshold.*
 - **Per-agent `nx/agents/<name>.md`** — each target agent's opening instruction cites the `plan_match`-first pattern independently of the hook, so behavior survives hook-context trimming.
 
+### Phase 6: Scoped plan loader — git as the shipping transport
+
+Extends `nx catalog setup` to load plan templates from scoped locations beyond the plugin-shipped globals. **Every scope above `personal` is a git-tracked YAML path** — sharability, persistence, review, rollback, attribution, offline operation, and CI-gateability come from git for free. No new transport, no server, no auth layer. Five scope tiers coexist in T2 via the `scope:*` tag convention:
+
+| Scope tag | Lives in | Loaded by | Git-tracked |
+|---|---|---|---|
+| `scope:personal` | T2 only | `plan_save` at runtime | No |
+| `scope:rdr-<slug>` | `docs/rdr/<slug>/plans.yml` (peer to the RDR file) | `nx catalog setup` when RDR is `status: accepted` | Yes (with the RDR) |
+| `scope:project` | `.nexus/plans/*.yml` or `.nexus/plans.yml` (project root) | `nx catalog setup` | Yes |
+| `scope:repo` | umbrella path (e.g. `.nexus/plans/_repo.yml`) | `nx catalog setup` with umbrella detection | Yes |
+| `scope:global` | `nx/plans/builtin/*.yml` in the plugin | plugin load at catalog setup | Plugin release |
+
+**Loader contract:**
+
+- `nx catalog setup` scans the four YAML paths in addition to the plugin builtins.
+- Each loaded plan is schema-validated (Phase 4a); invalid plans log a named error and skip.
+- Each plan's `scope` field is cross-checked against its source path (e.g., a YAML in `.nexus/plans/` must declare `scope: project`); mismatches are logged and the file's path wins.
+- Idempotency via `(name, scope)` dedup: re-running `nx catalog setup` updates the existing T2 row rather than duplicating.
+- RDR-scoped plans are loaded only when the parent RDR's frontmatter `status` is in `{accepted, closed}` — drafts don't pollute the library. RDRs transitioning to `closed` with a post-mortem keep their plans discoverable for archival purposes; re-activation is manual.
+
+**Scope precedence at lookup time:**
+
+`plan_match(intent, scope_preference="rdr-078,project,global")` ranks candidates by `cosine × specificity_multiplier` where `personal > rdr > project > repo > global`. The multiplier is small (0.05 per step) — semantic match dominates; specificity is the tiebreaker when confidences are close.
+
+**Git is the transport — what that buys us:**
+
+- **Sharability.** Anyone who clones the repo gets every `scope:rdr-*`, `scope:project`, `scope:repo` plan. No server, no auth, no coordination.
+- **Persistence.** History is git history. Deleted plans are recoverable. Blame explains why a plan exists.
+- **Review.** PR-gated plan changes at the project and repo tiers; RFC-level scrutiny for plugin tier. Drafts live on branches until merged.
+- **Rollback.** `git revert` on a bad plan is instant. No DB migration, no data-layer surgery.
+- **Attribution.** Every plan has an author, a commit, a message, a PR. Promotion-candidate reasoning becomes auditable.
+- **Offline.** Plan library is populated without network. Catalog setup is deterministic from clone state.
+- **CI gating.** Plan schema validation runs in CI. Broken plans fail the build before they hit T2. The plugin's shipped scenario plans are smoke-tested the same way.
+
+The catalog already treats YAML files as first-class documents with tumblers; plans get catalog edges for free, participating in Phase 3 traversal without extra wiring.
+
+**What Phase 6 does NOT ship:**
+
+Promotion operations (`nx plan promote`, lifecycle hooks on RDR close, `nx plan audit`) are deferred to RDR-079. Phase 6 delivers *loading* from git-tracked YAML, not mutation of git state. Humans who want to promote today use `git mv` + edit + commit; RDR-079 makes it a one-liner that wraps the same git calls.
+
 ## Success Criteria
 
 - **SC-1** — `plan_match` MCP tool lands. Given a plan with query *"how does projection quality work"* saved to the library, `plan_match("what's the mechanism for projection quality hub suppression")` returns that plan with cosine confidence > 0.80. Exact-token variants return the plan from FTS5 (`plan_search`) with equivalent or higher confidence.
@@ -153,6 +322,11 @@ The ergonomic change. Agents must reach for `plan_match` **before** decomposing 
 - **SC-8** — End-to-end demo on ART repo: fresh session, user asks *"how does vision→language priming work in ART?"*, `nx:plan-first` skill fires, cold-library case runs `/nx:query` planner → plan saved; warm-library case resolves from `plan_match` with confidence ≥ 0.80 and executes the saved DAG. At least one step in the resulting plan is a `traverse` that walks from the RDR to its implementing code via typed links.
 - **SC-9** — Zero regressions. `plan_save` / `plan_search` / `/nx:query` unchanged in behavior for existing callers. `search()` / `query()` existing arg sets unchanged in behavior.
 - **SC-10** — Cross-embedding boundary is not crossed anywhere in the plan runner. Every retrieval step operates in exactly one embedding space. `traverse` operates on catalog tumblers (no embeddings involved). Verifiable by grep.
+- **SC-11** — Plan template contract. `plan_match` accepts the four-axis signature (`intent`, `scope_preference`, `tag_filter`, `context`, plus `min_confidence` / `n`). `plan_run` accepts `(match, bindings)` and resolves `$var` placeholders + `$stepN.<field>` references; unresolved required bindings abort with a named error. Documented in `docs/plan-authoring-guide.md` and round-trip-tested with a small paraphrase set (≥20 intent variants → correct plan match + execution).
+- **SC-12** — Metrics columns (`use_count`, `last_used`, `match_count`, `match_conf_sum`, `success_count`, `failure_count`) are added to `plans` via a T2 migration and updated atomically at the right call sites (match on `plan_match`, start/complete on `plan_run`). Counters do not persist across scope promotions.
+- **SC-13** — Three meta-seeds ship at `scope:global`: `verb:plan-authoring`, `verb:plan-propose-promotion`, `verb:plan-inspect`. Each is callable via `plan_match`+`plan_run` and produces its documented output on a freshly-set-up catalog. `docs/plan-authoring-guide.md` exists and is catalog-indexed.
+- **SC-14** — Scoped plan loader covers all four non-personal tiers: `nx/plans/builtin/*.yml` (global), `docs/rdr/<slug>/plans.yml` (rdr-scoped, only for accepted/closed RDRs), `.nexus/plans/*.yml` (project), and an optional umbrella path for `scope:repo`. Schema validation rejects malformed YAML with a named error. Source-path / declared-scope mismatches log a warning and prefer the path. Re-running `nx catalog setup` is idempotent per `(name, scope)`.
+- **SC-15** — Git-as-transport integrity. All four YAML paths are commit-indexed, plan schema CI check runs on PR, rollback via `git revert` restores prior plan state after a subsequent `nx catalog setup`. No hidden state lives outside T2 + git.
 
 ## Research Findings
 
@@ -183,6 +357,12 @@ The ergonomic change. Agents must reach for `plan_match` **before** decomposing 
 - **PQ-9** — Verbs as emergent taxonomy. Today the `verb:*` tag convention is human-curated. Future work: apply HDBSCAN-style clustering to the `plans.query` embeddings themselves, so recurrently-phrased intents surface as candidate verb clusters. Out of scope for this iteration; naming it so the first agent that asks doesn't rediscover the question.
 - **PQ-10** — Cache scope: all plans or just verbs. Starts with all `outcome='success'` plans in T1. Revisit if T1 memory footprint becomes an issue at 10k+ plans (unlikely — 1k plans × 1024d float32 embedding ≈ 4 MB).
 - **PQ-11** — Cross-subagent visibility. RDR-041's T1 HTTP server lets a spawned subagent inherit the parent's session via PPID walking. The T1 `plans__session` cache persists for the parent session's lifetime; subagents see the same cache without re-populating. Name it so the behaviour is documented before it surfaces as a live-debug confusion.
+- **PQ-12** — Promotion threshold calibration. Starting candidate thresholds (`use_count ≥ 3`, `match_count/use_count ≥ 0.7`, `success_count/(success+failure) ≥ 0.8`, `match_conf_avg ≥ 0.80`) are heuristic. Calibrate against 4-6 weeks of real plan usage and adjust in RDR-079 when the promotion CLI lands.
+- **PQ-13** — Paraphrase-range ring buffer. Storing the last N distinct intent strings that matched each plan would sharpen the promotion signal ("this plan has handled 8 distinct phrasings, not just 1"). Additional T2 column (JSON array, capped length) is cheap. Scope decision for RDR-079; RDR-078 proves the base signal works first.
+- **PQ-14** — Scope precedence specifics. Current model: `personal > rdr > project > repo > global` with a small multiplier (0.05 per step) so cosine dominates. Alternative: strict precedence — a confident match at a more-specific scope fully overrides a slightly-more-confident match at a broader scope. Calibrate with empirical paraphrase-set tests during implementation.
+- **PQ-15** — Umbrella / monorepo conventions for `scope:repo`. Monorepos often have nested `.nexus/plans/` at the project level plus a repo-wide location. Default proposal: `.nexus/plans/_repo.yml` or `<repo-root>/.nexus/plans.repo.yml`. Pick one during implementation; document.
+- **PQ-16** — RDR lifecycle plan bindings. What happens to `scope:rdr-<slug>` plans when the RDR closes as superseded or rejected? Proposed default: mark archived (soft); hide from `plan_match` unless `include_archived=true`. Still catalog-indexed for audit; promoted plans keep their higher-scope copies. The exact mechanism moves to RDR-079 (lifecycle hooks on RDR status changes); RDR-078 only loads plans for accepted/closed RDRs.
+- **PQ-17** — Conflict resolution when the same `name` appears at multiple scopes. Example: `research-plan` exists as `scope:global` (plugin) AND `scope:project` (overridden by team). Default: both coexist, scope precedence at lookup time settles which wins per-call. `plan_match` can return both if `n>1`. No implicit merge — the team's override is deliberately distinct from the global default.
 
 ## Out of Scope (deferred, each may spawn its own RDR)
 
