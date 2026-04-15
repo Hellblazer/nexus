@@ -2,8 +2,8 @@ name: default
 description: >-
   Analysis and synthesis of a research area across prose and code corpora.
   Gather from both sides, walk reference chains to find supporting work,
-  rank survivors against the caller's criterion, then generate a synthesis
-  with citations that names the strongest evidence.
+  rank survivors against the caller's criterion, then summarise the
+  ranked evidence so downstream agents start from the strongest matches.
 dimensions:
   verb: analyze
   scope: global
@@ -40,10 +40,8 @@ plan_json:
         direction: both
     - tool: rank
       args:
-        candidates: [$step2.ids, $step3.ids]
-        by: $criterion
-    - tool: generate
+        criterion: $criterion
+        inputs: [$step1.tumblers, $step2.tumblers, $step3.tumblers]
+    - tool: summarize
       args:
-        outline: synthesis
-        corpus: $step4.text
-        with_citations: true
+        inputs: $step4.ranked

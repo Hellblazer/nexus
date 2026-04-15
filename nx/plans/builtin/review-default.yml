@@ -30,10 +30,9 @@ plan_json:
         direction: in
     - tool: extract
       args:
-        corpus: $step2.ids
-        target: decisions
+        inputs: $step2.tumblers
+        fields: decision,rationale,rdr
     - tool: compare
       args:
-        left: $step3.text
-        right_paths: $changed_paths
         criterion: decision-drift
+        inputs: [$step3.extractions, $step1.tumblers]

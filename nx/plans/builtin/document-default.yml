@@ -18,9 +18,9 @@ default_bindings:
 tags: builtin-template,rdr-078,document
 plan_json:
   steps:
-    - tool: search
+    - tool: query
       args:
-        query: $area
+        question: $area
         follow_links: cites
         limit: $limit
       scope:
@@ -41,7 +41,5 @@ plan_json:
         direction: in
     - tool: compare
       args:
-        docs_inventory: $step1.ids
-        code_inventory: $step2.ids
-        doc_coverage_evidence: $step3.tumblers
         criterion: doc-coverage
+        inputs: [$step1.tumblers, $step2.tumblers, $step3.tumblers]

@@ -160,7 +160,8 @@ async def test_plan_promote_propose_dag_runs(library) -> None:
         if tool == "plan_search":
             return {"ids": [], "tumblers": [], "text": "no plans"}
         if tool == "rank":
-            return {"ids": [], "text": "empty ranking"}
+            # operator_rank contract — `ranked` is the runner-visible field.
+            return {"ranked": []}
         if tool == "generate":
             return {"text": "promotion-shortlist: (empty)", "citations": []}
         raise AssertionError(f"unexpected tool: {tool}")
@@ -200,8 +201,16 @@ async def test_plan_inspect_dimensions_executes(library) -> None:
                 "text": "three plans in library",
             }
         if tool == "extract":
-            # Stand-in for the real dimension-usage extractor.
+            # operator_extract contract: `extractions` is a list of objects,
+            # one per input, keyed by the caller's `fields` arg. The stub
+            # carries auxiliary keys (`dimensions`, `usage`) so the test's
+            # downstream pinning still exercises the SC-13 contract on the
+            # returned dict, not on a real model.
             return {
+                "extractions": [
+                    {"verb": 3, "scope": 3, "strategy": 2,
+                     "object": 0, "domain": 1},
+                ],
                 "text": "verb=3 scope=3 strategy=2 domain=1",
                 "dimensions": {
                     "verb": 3, "scope": 3, "strategy": 2, "domain": 1,

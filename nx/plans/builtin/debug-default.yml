@@ -25,6 +25,4 @@ plan_json:
         author: nexus
     - tool: summarize
       args:
-        corpus: $step1.ids
-        mode: design-context
-        symptom: $symptom
+        inputs: $step1.tumblers

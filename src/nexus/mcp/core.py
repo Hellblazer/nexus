@@ -1742,12 +1742,29 @@ async def _dispatch_with_auth_guard(
         ) from exc
 
 
-def _parse_inputs_json(operator: str, inputs: str) -> list:
+def _parse_inputs_json(operator: str, inputs: str | list) -> list:
     """Parse the ``inputs`` argument as a JSON array. Raise
     ``PlanRunOperatorOutputError`` with the operator name on failure
     so callers see a clear contract violation instead of an opaque
-    model response to malformed prompts. (Review I-5.)"""
+    model response to malformed prompts. (Review I-5.)
+
+    Accepts both a JSON-array string (from direct MCP callers) and a
+    Python list (from the plan runner, where ``$stepN.ids`` /
+    ``$stepN.tumblers`` resolves to a list). This lets plan YAML
+    reference retrieval fields directly without forcing every author
+    to think about JSON serialization at the boundary.
+    """
     from nexus.plans.runner import PlanRunOperatorOutputError
+
+    if isinstance(inputs, list):
+        return inputs
+
+    if not isinstance(inputs, str):
+        raise PlanRunOperatorOutputError(
+            operator=operator,
+            reason=f"`inputs` must be a JSON-array string or list, got {type(inputs).__name__}",
+        )
+
     try:
         parsed = json.loads(inputs)
     except json.JSONDecodeError as exc:
@@ -1811,7 +1828,8 @@ async def operator_extract(
         )
 
     # I-5: validate inputs is a JSON array before sending to the worker.
-    _parse_inputs_json("extract", inputs)
+    _parsed_inputs = _parse_inputs_json("extract", inputs)
+    inputs = json.dumps(_parsed_inputs)
 
     # Per-operator pool. The pool's json_schema is the OUTER {extractions:
     # [dict]} shape — the model uses it as a structural constraint. The
@@ -1909,6 +1927,7 @@ async def operator_rank(
     # I-5: validate inputs is a JSON array, get the expected item count
     # for the coverage check below (I-4).
     input_list = _parse_inputs_json("rank", inputs)
+    inputs = json.dumps(input_list)
     expected_indices = set(range(len(input_list)))
 
     pool = get_operator_pool(
@@ -2028,7 +2047,8 @@ async def operator_compare(
             expected=_OPERATOR_SCHEMA_VERSION,
         )
 
-    _parse_inputs_json("compare", inputs)
+    _parsed_inputs = _parse_inputs_json("compare", inputs)
+    inputs = json.dumps(_parsed_inputs)
 
     pool = get_operator_pool(
         "compare",
@@ -2115,7 +2135,8 @@ async def operator_summarize(
             expected=_OPERATOR_SCHEMA_VERSION,
         )
 
-    _parse_inputs_json("summarize", inputs)
+    _parsed_inputs = _parse_inputs_json("summarize", inputs)
+    inputs = json.dumps(_parsed_inputs)
 
     pool = get_operator_pool(
         "summarize",
@@ -2215,7 +2236,8 @@ async def operator_generate(
             expected=_OPERATOR_SCHEMA_VERSION,
         )
 
-    _parse_inputs_json("generate", inputs)
+    _parsed_inputs = _parse_inputs_json("generate", inputs)
+    inputs = json.dumps(_parsed_inputs)
 
     citation_req = (
         "Every non-trivial claim must be paired with an input_index "

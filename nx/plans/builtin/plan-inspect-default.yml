@@ -24,16 +24,8 @@ plan_json:
         limit: 1
     - tool: extract
       args:
-        corpus: $step1.ids
-        target: plan-metrics
-        fields:
-          - use_count
-          - last_used
-          - match_count
-          - match_conf_sum
-          - success_count
-          - failure_count
+        inputs: [$step1.text]
+        fields: use_count,last_used,match_count,match_conf_sum,success_count,failure_count
     - tool: summarize
       args:
-        corpus: $step2.text
-        mode: plan-inspection-report
+        inputs: $step2.extractions

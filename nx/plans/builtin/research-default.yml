@@ -33,12 +33,10 @@ plan_json:
     - tool: search
       args:
         query: $concept
-        subtree: $step2.collections
         limit: $limit
       scope:
         taxonomy_domain: code
         topic: $concept
     - tool: summarize
       args:
-        corpus: $step3.ids
-        mode: evidence
+        inputs: [$step1.tumblers, $step2.tumblers, $step3.tumblers]

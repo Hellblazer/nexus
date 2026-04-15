@@ -23,11 +23,8 @@ plan_json:
         limit: 50
     - tool: extract
       args:
-        corpus: $step1.ids
-        target: dimension-usage
-        registry_path: "nx/plans/dimensions.yml"
-        include_empty: $include_empty
+        inputs: [$step1.text]
+        fields: verb,scope,strategy,object,domain
     - tool: summarize
       args:
-        corpus: $step2.text
-        mode: dimension-registry-report
+        inputs: $step2.extractions

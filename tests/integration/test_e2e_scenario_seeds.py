@@ -29,6 +29,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
 
 pytestmark = pytest.mark.integration
 
@@ -66,6 +67,36 @@ def _skip_without_auth():
         )
 
 
+@pytest_asyncio.fixture(autouse=True)
+async def _reset_pool_between_tests():
+    """Every parametrized test runs in a fresh event loop (pytest-asyncio
+    default), and the operator pool's subprocess StreamReader is bound
+    to the loop that spawned it. Without this teardown the SECOND test
+    in the parametrized series hits
+    ``RuntimeError: got Future ... attached to a different loop``.
+
+    Shutdown every live pool (kill its workers, close its session)
+    BEFORE clearing the singletons so subprocesses don't leak across
+    tests.
+    """
+    yield
+    from nexus import mcp_infra
+    # Shutdown per-operator pools (where workers actually live).
+    for pool in list(mcp_infra._operator_pools.values()):
+        try:
+            await pool.shutdown()
+        except Exception:
+            pass
+    # Shutdown the default-bucket pool if any.
+    default_pool = mcp_infra._operator_pool
+    if default_pool is not None:
+        try:
+            await default_pool.shutdown()
+        except Exception:
+            pass
+    mcp_infra.reset_operator_pool()
+
+
 @pytest.fixture()
 def library(tmp_path: Path):
     from nexus.db.migrations import _add_plan_dimensional_identity
@@ -93,17 +124,6 @@ def loaded_library(library, tmp_path: Path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("seed_name", _SEEDS)
-@pytest.mark.xfail(
-    reason=(
-        "RDR-079 P7 finding: every shipped seed has at least one "
-        "step-ref bug — step 1 uses a tool (plan_search, search with "
-        "placeholder bindings, etc.) that emits no `tumblers`/`ids` "
-        "field, yet step 2+ references `$step1.tumblers` or `$step1.ids`. "
-        "Tracked by follow-up bead (seed cleanup); test stays as xfail "
-        "so the scaffolding ships and a future fix flips it green."
-    ),
-    strict=False,
-)
 async def test_seed_executes_end_to_end(seed_name: str, loaded_library) -> None:
     """Each of the 9 seed plans runs end-to-end via the real
     ``_default_dispatcher``. The test looks the plan up by its exact

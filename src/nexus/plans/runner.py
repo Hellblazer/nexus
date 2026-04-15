@@ -522,6 +522,27 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
     if tool in _RETRIEVAL_TOOLS and "structured" not in args:
         args = {**args, "structured": True}
 
+    # Drop kwargs the resolved tool doesn't accept. Plan YAML carries
+    # extra metadata (e.g. ``scope.topic`` forwarded as ``topic=…``,
+    # authoring-layer hints like ``mode``, ``target``) that an older
+    # tool signature may not implement yet. Silently dropping unknown
+    # kwargs keeps plans portable across tool-evolution without forcing
+    # every seed to track the current signature. ``**kwargs``-accepting
+    # tools keep every kwarg.
+    try:
+        sig = inspect.signature(fn)
+        accepts_any_kwarg = any(
+            p.kind is inspect.Parameter.VAR_KEYWORD
+            for p in sig.parameters.values()
+        )
+        if not accepts_any_kwarg:
+            known = set(sig.parameters.keys())
+            args = {k: v for k, v in args.items() if k in known}
+    except (TypeError, ValueError):
+        # Builtins / C-level callables can't always be inspected; leave
+        # args untouched and let the call site surface any TypeError.
+        pass
+
     # RDR-079 P4: await async tools directly, call sync tools inline.
     # No thread bridge — the loop continuity matters for the pool's
     # subprocess StreamReader objects, which are loop-bound.
@@ -534,7 +555,20 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
     # as ``{"text": ...}`` so downstream ``$stepN.text`` references
     # resolve. The ``traverse`` tool already returns dict and passes
     # through unchanged.
+    #
+    # Retrieval tools occasionally short-circuit on error paths
+    # (catalog not initialized, subtree too deep, …) with a bare
+    # ``"Error: …"`` string even when ``structured=True`` is passed.
+    # In that case synthesize the empty structured shape so the plan
+    # step still conforms to ``{ids, tumblers, distances, collections}``
+    # and downstream ``$stepN.tumblers`` refs don't crash; preserve the
+    # error text in an ``error`` key for visibility.
     if isinstance(result, str):
+        if tool in _RETRIEVAL_TOOLS:
+            return {
+                "ids": [], "tumblers": [], "distances": [], "collections": [],
+                "error": result,
+            }
         return {"text": result}
     if isinstance(result, dict):
         return result
