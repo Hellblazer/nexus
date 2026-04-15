@@ -1,10 +1,11 @@
 ---
 title: "RDR-079: Operator Dispatch + Plan Execution End-to-End"
-status: draft
+status: accepted
 type: feature
 priority: P1
 created: 2026-04-15
 revised: 2026-04-15
+accepted_date: 2026-04-15
 related: [RDR-042, RDR-067, RDR-078, RDR-080]
 reviewed-by: self
 ---
