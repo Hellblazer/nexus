@@ -1,0 +1,30 @@
+name: default
+description: >-
+  Dev / debug against a failing code path. Intentionally flat: dev work
+  starts from a concrete failure and the primary link walk is the catalog's
+  per-file lookup (not multi-hop graph traversal — Serena handles symbol-
+  level navigation separately). Surface the RDRs that authored or touched
+  the failing path, then summarise the design context so the debug loop
+  starts from "what did we decide about this code".
+dimensions:
+  verb: debug
+  scope: global
+  strategy: default
+required_bindings:
+  - failing_path
+  - symptom
+optional_bindings: []
+default_bindings: {}
+tags: builtin-template,rdr-078,debug
+plan_json:
+  steps:
+    - tool: query
+      args:
+        question: "design context and authoring RDRs for $failing_path"
+        subtree: $failing_path
+        author: nexus
+    - tool: summarize
+      args:
+        corpus: $step1.ids
+        mode: design-context
+        symptom: $symptom

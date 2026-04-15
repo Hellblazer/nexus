@@ -1,0 +1,39 @@
+name: default
+description: >-
+  Critique / audit / review of a change set. Resolve the changed files to
+  their catalog entries, walk decision-evolution history (which RDRs
+  superseded or cited what touches this code), extract the decisions those
+  RDRs recorded, and compare against the proposed change so any drift from
+  prior decisions surfaces explicitly.
+dimensions:
+  verb: review
+  scope: global
+  strategy: default
+required_bindings:
+  - changed_paths
+optional_bindings:
+  - depth
+default_bindings:
+  depth: 1
+tags: builtin-template,rdr-078,review
+plan_json:
+  steps:
+    - tool: query
+      args:
+        question: "catalog entries for paths $changed_paths"
+        subtree: $changed_paths
+    - tool: traverse
+      args:
+        seeds: $step1.tumblers
+        purpose: decision-evolution
+        depth: $depth
+        direction: in
+    - tool: extract
+      args:
+        corpus: $step2.ids
+        target: decisions
+    - tool: compare
+      args:
+        left: $step3.text
+        right_paths: $changed_paths
+        criterion: decision-drift

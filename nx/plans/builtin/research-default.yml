@@ -1,0 +1,44 @@
+name: default
+description: >-
+  Design / architecture / planning. Walk from a concept into the prose corpus
+  (RDRs, docs, knowledge), traverse to the modules that implement it, then
+  surface concrete code context. Summarise with citations so downstream agents
+  can verify the chain.
+dimensions:
+  verb: research
+  scope: global
+  strategy: default
+required_bindings:
+  - concept
+optional_bindings:
+  - limit
+default_bindings:
+  limit: 10
+tags: builtin-template,rdr-078,research
+plan_json:
+  steps:
+    - tool: search
+      args:
+        query: $concept
+        limit: $limit
+      scope:
+        taxonomy_domain: prose
+        topic: $concept
+    - tool: traverse
+      args:
+        seeds: $step1.tumblers
+        purpose: find-implementations
+        depth: 2
+        direction: out
+    - tool: search
+      args:
+        query: $concept
+        subtree: $step2.collections
+        limit: $limit
+      scope:
+        taxonomy_domain: code
+        topic: $concept
+    - tool: summarize
+      args:
+        corpus: $step3.ids
+        mode: evidence

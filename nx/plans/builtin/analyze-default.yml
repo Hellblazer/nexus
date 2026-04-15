@@ -1,0 +1,49 @@
+name: default
+description: >-
+  Analysis and synthesis of a research area across prose and code corpora.
+  Gather from both sides, walk reference chains to find supporting work,
+  rank survivors against the caller's criterion, then generate a synthesis
+  with citations that names the strongest evidence.
+dimensions:
+  verb: analyze
+  scope: global
+  strategy: default
+required_bindings:
+  - area
+  - criterion
+optional_bindings:
+  - limit
+default_bindings:
+  limit: 12
+tags: builtin-template,rdr-078,analyze
+plan_json:
+  steps:
+    - tool: search
+      args:
+        query: $area
+        limit: $limit
+      scope:
+        taxonomy_domain: prose
+        topic: $area
+    - tool: search
+      args:
+        query: $area
+        limit: $limit
+      scope:
+        taxonomy_domain: code
+        topic: $area
+    - tool: traverse
+      args:
+        seeds: $step1.tumblers
+        purpose: reference-chain
+        depth: 2
+        direction: both
+    - tool: rank
+      args:
+        candidates: $step3.ids
+        by: $criterion
+    - tool: generate
+      args:
+        outline: synthesis
+        corpus: $step4.text
+        with_citations: true

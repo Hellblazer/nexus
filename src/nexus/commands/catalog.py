@@ -83,12 +83,31 @@ _PLAN_TEMPLATES: list[dict[str, str]] = [
 
 
 def _seed_plan_templates() -> int:
-    """Seed pre-built plan templates into T2. Idempotent — skips existing."""
-    from nexus.db.t2 import T2Database
+    """Seed pre-built plan templates into T2. Idempotent — skips existing.
+
+    Two seed sources coexist:
+
+    * The RDR-063 :data:`_PLAN_TEMPLATES` list — legacy builtin plans
+      keyed by ``query + 'builtin-template'`` tag (idempotency via
+      :meth:`T2Database.plan_exists`). These rows carry
+      ``dimensions=NULL`` so they don't collide with the new RDR-078
+      scope:global seeds.
+    * The RDR-078 P4b scenario templates shipped as YAML files under
+      ``nx/plans/builtin/`` — loaded by :func:`load_seed_directory`
+      and deduplicated via the ``UNIQUE (project, dimensions)``
+      partial index (nexus-05i.6).
+
+    Returns the total number of newly-inserted rows across both.
+    """
+    from pathlib import Path
+
     from nexus.commands._helpers import default_db_path
+    from nexus.db.t2 import T2Database
+    from nexus.plans.seed_loader import load_seed_directory
 
     seeded = 0
     with T2Database(default_db_path()) as db:
+        # Legacy builtin plans (RDR-063).
         for tmpl in _PLAN_TEMPLATES:
             # RDR-063 Phase 1 step 3 (Landmine 1 / audit F2): use the
             # public plan_exists() method instead of reaching through
@@ -102,6 +121,21 @@ def _seed_plan_templates() -> int:
                 tags=tmpl["tags"],
             )
             seeded += 1
+
+        # RDR-078 scope:global YAML scenario templates (nexus-05i.6).
+        # Path walks up from this file: commands → nexus → src → repo
+        # root → ``nx/plans/builtin``.
+        builtin_dir = (
+            Path(__file__).resolve().parent.parent.parent.parent
+            / "nx" / "plans" / "builtin"
+        )
+        result = load_seed_directory(builtin_dir, library=db.plans)
+        for source, error in result.errors:
+            _log.warning(
+                "rdr078_seed_load_error", source=source, error=error,
+            )
+        seeded += len(result.inserted)
+
     return seeded
 
 
