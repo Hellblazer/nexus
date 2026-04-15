@@ -1434,7 +1434,7 @@ class Catalog:
             "stale_chash_count": len(stale_chash),
         }
 
-    _MAX_GRAPH_DEPTH = 10
+    _MAX_GRAPH_DEPTH = 3
     _MAX_GRAPH_NODES = 500
 
     def graph(
@@ -1519,6 +1519,12 @@ class Catalog:
         seen_edges: set[tuple[str, str, str]] = set()
         all_edges: list[CatalogLink] = []
         visited: set[str] = set()
+        # Per-link-type explored set — shared across seeds so a node already
+        # expanded via link_type L by any prior seed is not re-expanded for L.
+        # Critical for correctness + cost: without this, the BFS from seed N
+        # re-traverses subgraphs already walked by seeds 1..N-1, producing
+        # O(seeds × shared_subgraph) SQL calls. See RDR-078 critique.
+        explored_by_lt: dict[str, set[str]] = {lt: set() for lt in link_types}
 
         def _record_origin(node_str: str, seed_str: str) -> None:
             origins = node_origins.setdefault(node_str, [])
@@ -1541,8 +1547,11 @@ class Catalog:
                     cap_hit = True
                     break
 
-                queue: deque[tuple[Tumbler, int]] = deque([(seed, 0)])
-                local_seen: set[str] = {seed_str}
+                explored = explored_by_lt[link_type]
+                queue: deque[tuple[Tumbler, int]] = deque()
+                if seed_str not in explored:
+                    explored.add(seed_str)
+                    queue.append((seed, 0))
 
                 while queue:
                     if len(visited) >= self._MAX_GRAPH_NODES:
@@ -1575,8 +1584,8 @@ class Catalog:
                         )
                         other_str = str(other)
                         _record_origin(other_str, seed_str)
-                        if other_str not in local_seen:
-                            local_seen.add(other_str)
+                        if other_str not in explored:
+                            explored.add(other_str)
                             if other_str not in visited:
                                 if len(visited) >= self._MAX_GRAPH_NODES:
                                     cap_hit = True

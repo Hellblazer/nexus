@@ -170,3 +170,50 @@ def test_graph_many_empty_link_types_returns_seeds_only(catalog) -> None:
     titles = [n["title"] for n in result["nodes"]]
     assert titles == ["A"]
     assert result["edges"] == []
+
+
+def test_graph_many_no_redundant_expansion_across_seeds(catalog, monkeypatch) -> None:
+    """Two seeds sharing a subgraph must not re-execute BFS through that
+    subgraph once it has been expanded. Regression for RDR-078 critique
+    finding: ``explored`` set must be shared per-link-type across seeds.
+    """
+    # Chain graph: A → B → C → D   (all via 'implements')
+    # Seed from both A and B. B is reachable from A.  Once A's BFS expands
+    # B → C → D, seed B's BFS must NOT re-issue links_from(B) / links_from(C).
+    owner = catalog.register_owner("p", "chain")
+    a = catalog.register(owner, "A")
+    b = catalog.register(owner, "B")
+    c = catalog.register(owner, "C")
+    d = catalog.register(owner, "D")
+    catalog.link(a, b, "implements", created_by="t")
+    catalog.link(b, c, "implements", created_by="t")
+    catalog.link(c, d, "implements", created_by="t")
+
+    calls: list[tuple[str, str]] = []
+    orig_links_from = catalog.links_from
+    orig_links_to = catalog.links_to
+
+    def spy_from(t, link_type=""):
+        calls.append(("from", str(t)))
+        return orig_links_from(t, link_type=link_type)
+
+    def spy_to(t, link_type=""):
+        calls.append(("to", str(t)))
+        return orig_links_to(t, link_type=link_type)
+
+    monkeypatch.setattr(catalog, "links_from", spy_from)
+    monkeypatch.setattr(catalog, "links_to", spy_to)
+
+    result = catalog.graph_many(
+        seeds=[a, b], depth=3, link_types=["implements"], direction="out",
+    )
+
+    titles = sorted(n["title"] for n in result["nodes"])
+    assert titles == ["A", "B", "C", "D"]
+    # A, B, C should be expanded exactly once each (one links_from call each).
+    # D is at depth 3 from A / 2 from B — not expanded further.
+    from_calls = [t for (kind, t) in calls if kind == "from"]
+    # Each node expanded at most once for this link_type:
+    assert len(set(from_calls)) == len(from_calls), (
+        f"node expanded multiple times via links_from: {from_calls}"
+    )

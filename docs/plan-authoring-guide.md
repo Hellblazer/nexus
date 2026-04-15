@@ -171,7 +171,7 @@ Signature:
 - tool: traverse
   args:
     seeds: [<tumbler>] | $stepN.tumblers
-    depth: 1..3                    # capped at Catalog._MAX_GRAPH_DEPTH (10)
+    depth: 1..3                    # capped at Catalog._MAX_GRAPH_DEPTH (3) per SC-4
     direction: out | in | both     # default: both
     link_types: [...]              # OR purpose — exactly one
     purpose: <registered-name>
