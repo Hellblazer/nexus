@@ -33,7 +33,7 @@ import sqlite3
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
 import structlog
@@ -106,6 +106,89 @@ _TOPIC_COLUMNS = (
     "terms",
 )
 
+# ── Assignment result shape (RDR-077 nexus-uti) ─────────────────────────────
+
+
+class AssignResult(NamedTuple):
+    """Return shape for :meth:`CatalogTaxonomy.assign_single`.
+
+    Carries the nearest ``topic_id`` and the raw cosine ``similarity``
+    (``1.0 - distance``). ICF weighting is applied at query time, not here.
+    """
+
+    topic_id: int
+    similarity: float
+
+
+class HubRow(NamedTuple):
+    """One hub row emitted by :meth:`CatalogTaxonomy.detect_hubs`.
+
+    RDR-077 Phase 5 (nexus-84v).
+    """
+
+    topic_id: int
+    label: str
+    collection: str
+    distinct_source_collections: int
+    total_chunks: int
+    icf: float
+    score: float
+    matched_stopwords: tuple[str, ...]
+    source_collections: tuple[str, ...]
+    last_assigned_at: str | None
+    # --warn-stale output (populated only when requested; None otherwise)
+    max_last_discover_at: str | None
+    never_discovered_count: int
+    is_stale: bool
+
+
+class AuditReport(NamedTuple):
+    """Summary of projection quality for a single source collection.
+
+    Returned by :meth:`CatalogTaxonomy.audit_collection`. RDR-077 Phase 6
+    (nexus-w4k).
+    """
+
+    collection: str
+    total_assignments: int  # projection rows with source_collection = this
+    p10: float | None
+    p50: float | None
+    p90: float | None
+    below_threshold_count: int
+    threshold: float
+    top_receiving_hubs: list["AuditHub"]
+    pattern_pollution: list["AuditHub"]
+
+
+class AuditHub(NamedTuple):
+    """One receiving-topic row inside an :class:`AuditReport`."""
+
+    topic_id: int
+    label: str
+    chunk_count: int
+    icf: float
+    matched_stopwords: tuple[str, ...]
+
+
+# RDR-077 Phase 5 PQ-3: default stopword tokens for generic-pattern detection.
+# A hub's label that *contains* any of these (case-insensitive substring) is
+# flagged. Ops can surface these in `--explain` so operators can accept or
+# suppress. Extending this list is a future RDR (PQ-3 open).
+DEFAULT_HUB_STOPWORDS: tuple[str, ...] = (
+    "assert",
+    "junit",
+    "builder",
+    "class",
+    "import",
+    "exception",
+    "getter",
+    "setter",
+    "variable",
+    "declaration",
+    "operator",
+)
+
+
 # ── Centroid dimension guard (RDR-075 SC-10) ─────────────────────────────────
 
 
@@ -151,10 +234,25 @@ class CatalogTaxonomy:
     """
 
     def __init__(self, path: Path, memory: "MemoryStore") -> None:
+        import math
+
         self._memory = memory
         self._lock = threading.Lock()
         self.conn = sqlite3.connect(str(path), check_same_thread=False)
         self.conn.execute("PRAGMA busy_timeout=5000")
+        # RDR-077 Phase 3 (nexus-qab): register `log2` as a SQLite scalar
+        # function so the ICF aggregation query can use LOG2() inline.
+        # Null-safe: returns NULL when x is NULL, 0, or negative.
+        self.conn.create_function(
+            "log2",
+            1,
+            lambda x: math.log2(x) if x is not None and x > 0 else None,
+            deterministic=True,
+        )
+        # RDR-077 Phase 3: command-scoped ICF cache. Populated by callers
+        # that want per-command reuse (bulk projection, hubs, audit). The
+        # single-doc assignment hook path leaves this as None and recomputes.
+        self._icf_cache: dict[int, float] | None = None
         try:
             canonical_key = str(path.resolve())
         except OSError:
@@ -214,6 +312,331 @@ class CatalogTaxonomy:
 
     # ── Public API ────────────────────────────────────────────────────────
 
+    # RDR-077 Phase 3 (nexus-qab): Inverse Collection Frequency for hub
+    # suppression. Topics that appear across many source collections carry
+    # less specific signal (generic patterns, stopword labels) and should
+    # be down-weighted at query time. ICF never mutates the write path —
+    # the `similarity` column holds raw cosine; ICF is applied by callers
+    # that want weighted ranking.
+
+    def compute_icf_map(
+        self, *, use_cache: bool = False,
+    ) -> dict[int, float]:
+        """Return ``{topic_id: icf}`` where ``icf = log2(N_effective / DF)``.
+
+        - ``N_effective`` — count of distinct ``source_collection`` values
+          over projection rows (``assigned_by='projection'`` and
+          ``source_collection IS NOT NULL``).
+        - ``DF(topic)`` — count of distinct source collections that have
+          assigned any chunk to this topic via projection.
+
+        Guards:
+        - ``N_effective < 2`` → ICF cannot discriminate; returns ``{}``.
+          Callers should treat an empty map as "fall back to raw similarity".
+        - ``DF = N_effective`` → ``log2(1) = 0`` — ubiquitous topics are
+          suppressed to zero weight by design.
+        - Legacy rows (NULL ``source_collection``, pre-RDR-077) are
+          excluded from both numerator and denominator via ``IS NOT NULL``.
+
+        The SQL uses the ``log2`` scalar registered in ``__init__``
+        (SQLite has no native LOG/LOG2). ``log2`` returns NULL for
+        non-positive inputs, so no runtime math error can escape.
+
+        *use_cache*: when True, returns the cached map from
+        ``self._icf_cache`` if present, else computes and caches. Callers
+        driving a bulk command (``nx taxonomy project --persist``, hubs,
+        audit) set this; the single-doc assignment hook leaves it False
+        and recomputes per call.
+        """
+        if use_cache and self._icf_cache is not None:
+            return self._icf_cache
+
+        with self._lock:
+            n_row = self.conn.execute(
+                "SELECT COUNT(DISTINCT source_collection) "
+                "FROM topic_assignments "
+                "WHERE assigned_by = 'projection' "
+                "AND source_collection IS NOT NULL"
+            ).fetchone()
+            n_effective = int(n_row[0]) if n_row and n_row[0] else 0
+
+            if n_effective < 2:
+                result: dict[int, float] = {}
+                if use_cache:
+                    self._icf_cache = result
+                return result
+
+            rows = self.conn.execute(
+                """
+                SELECT
+                    ta.topic_id,
+                    log2(CAST(? AS REAL)
+                         / COUNT(DISTINCT ta.source_collection)) AS icf
+                FROM topic_assignments ta
+                WHERE ta.assigned_by = 'projection'
+                  AND ta.source_collection IS NOT NULL
+                GROUP BY ta.topic_id
+                HAVING COUNT(DISTINCT ta.source_collection) > 0
+                """,
+                (n_effective,),
+            ).fetchall()
+
+        result = {int(tid): float(icf) for tid, icf in rows if icf is not None}
+        if use_cache:
+            self._icf_cache = result
+        return result
+
+    def clear_icf_cache(self) -> None:
+        """Drop the cached ICF map so the next ``compute_icf_map(use_cache=True)``
+        recomputes from current ``topic_assignments`` state."""
+        self._icf_cache = None
+
+    # RDR-077 Phase 5 (nexus-84v): generic-pattern hub detection. Surfaces
+    # topics that span many source collections with low ICF and/or
+    # stopword-containing labels — the practical signal that a topic is a
+    # generic code/prose pattern rather than a specific domain concept.
+
+    def detect_hubs(
+        self,
+        *,
+        min_collections: int = 2,
+        max_icf: float | None = None,
+        stopwords: tuple[str, ...] = DEFAULT_HUB_STOPWORDS,
+        warn_stale: bool = False,
+    ) -> list[HubRow]:
+        """Return candidate hub topics, sorted by ``chunks × (1 - ICF)`` desc.
+
+        A hub is any projection topic that meets ALL configured filters:
+
+        - ``DF(topic) >= min_collections`` (distinct source_collections).
+        - ``ICF(topic) <= max_icf`` when ``max_icf`` is set.
+
+        ``stopwords`` is an advisory list: matching tokens are reported in
+        the row's ``matched_stopwords`` field for ``--explain`` output, but
+        they do NOT filter rows — a topic with a clean label can still be a
+        hub by DF/ICF alone.
+
+        When *warn_stale* is True, the row carries ``max_last_discover_at``
+        (the latest ``taxonomy_meta.last_discover_at`` across every source
+        collection contributing to the hub — RDR-077 C-2 correctness fix),
+        the count of never-discovered source collections, and
+        ``is_stale`` set when any source collection's last discover predates
+        the hub's latest assignment. NULL ``last_discover_at`` rows are
+        excluded from MAX per SQLite aggregation semantics (RDR-077 O-3);
+        never-discovered collections surface via ``never_discovered_count``.
+        """
+        icf_map = self.compute_icf_map()
+        lowered_stopwords = tuple(s.lower() for s in stopwords)
+
+        with self._lock:
+            # Per-topic DF, total chunk count, label/collection, source set,
+            # latest assigned_at — all from projection rows only.
+            rows = self.conn.execute(
+                """
+                SELECT
+                    t.id,
+                    t.label,
+                    t.collection,
+                    COUNT(DISTINCT ta.source_collection) AS df,
+                    COUNT(*)                              AS total,
+                    MAX(ta.assigned_at)                   AS last_assigned_at
+                FROM topic_assignments ta
+                JOIN topics t ON t.id = ta.topic_id
+                WHERE ta.assigned_by = 'projection'
+                  AND ta.source_collection IS NOT NULL
+                GROUP BY t.id, t.label, t.collection
+                HAVING df >= ?
+                ORDER BY total DESC
+                """,
+                (min_collections,),
+            ).fetchall()
+
+            hubs: list[HubRow] = []
+            for topic_id, label, collection, df, total, last_at in rows:
+                icf_value = float(icf_map.get(int(topic_id), 1.0))
+                if max_icf is not None and icf_value > max_icf:
+                    continue
+
+                sources = tuple(
+                    r[0] for r in self.conn.execute(
+                        "SELECT DISTINCT source_collection "
+                        "FROM topic_assignments "
+                        "WHERE topic_id = ? AND assigned_by = 'projection' "
+                        "AND source_collection IS NOT NULL "
+                        "ORDER BY source_collection",
+                        (int(topic_id),),
+                    ).fetchall()
+                )
+
+                lower_label = (label or "").lower()
+                matched = tuple(
+                    s for s in lowered_stopwords if s in lower_label
+                )
+
+                max_discover: str | None = None
+                never_count = 0
+                is_stale = False
+                if warn_stale and sources:
+                    placeholders = ",".join("?" * len(sources))
+                    stale_row = self.conn.execute(
+                        f"""
+                        SELECT
+                            MAX(last_discover_at),
+                            SUM(CASE WHEN last_discover_at IS NULL
+                                     THEN 1 ELSE 0 END),
+                            COUNT(*)
+                        FROM taxonomy_meta
+                        WHERE collection IN ({placeholders})
+                        """,
+                        sources,
+                    ).fetchone()
+                    max_discover = stale_row[0]
+                    seen = int(stale_row[2] or 0)
+                    nulls = int(stale_row[1] or 0)
+                    # Any contributing collection that has no taxonomy_meta
+                    # row at all is also "never discovered" from the
+                    # perspective of this command.
+                    never_count = nulls + (len(sources) - seen)
+                    # "Stale" when the hub has data newer than the latest
+                    # discover (lexicographic ISO-8601 comparison).
+                    if last_at and max_discover and last_at > max_discover:
+                        is_stale = True
+                    if never_count > 0:
+                        is_stale = True
+
+                score = float(total) * (1.0 - icf_value)
+                hubs.append(HubRow(
+                    topic_id=int(topic_id),
+                    label=label or "",
+                    collection=collection or "",
+                    distinct_source_collections=int(df),
+                    total_chunks=int(total),
+                    icf=icf_value,
+                    score=score,
+                    matched_stopwords=matched,
+                    source_collections=sources,
+                    last_assigned_at=last_at,
+                    max_last_discover_at=max_discover,
+                    never_discovered_count=never_count,
+                    is_stale=is_stale,
+                ))
+
+        hubs.sort(key=lambda h: h.score, reverse=True)
+        return hubs
+
+    # RDR-077 Phase 6 (nexus-w4k): per-collection projection-quality audit.
+    # Reports the similarity distribution, the count below threshold,
+    # receiving hubs (topics this collection's chunks project into), and
+    # pattern-pollution — hubs flagged by the Phase 5 stopword heuristic.
+
+    def audit_collection(
+        self,
+        collection: str,
+        *,
+        threshold: float | None = None,
+        top_n: int = 5,
+        stopwords: tuple[str, ...] = DEFAULT_HUB_STOPWORDS,
+    ) -> AuditReport:
+        """Summarise projection quality for *collection*.
+
+        - ``total_assignments``: projection rows where
+          ``source_collection = collection``.
+        - ``p10`` / ``p50`` / ``p90``: quantiles of ``similarity`` on those
+          rows (computed Python-side — SQLite has no
+          ``percentile_cont``). ``None`` when the collection has no
+          projection data.
+        - ``below_threshold_count``: rows with ``similarity < threshold``.
+          Defaults to the per-corpus-type threshold from
+          :func:`nexus.corpus.default_projection_threshold` when not
+          specified.
+        - ``top_receiving_hubs``: topics this collection's chunks project
+          into, sorted by chunk count descending, limited to *top_n*.
+        - ``pattern_pollution``: subset of receiving hubs whose labels
+          contain any of *stopwords* (case-insensitive substring match).
+
+        Raw ``similarity`` column values are used; ICF is applied only for
+        the receiving-hub ICF reporting, never to mutate stored rows.
+        """
+        from nexus.corpus import default_projection_threshold
+
+        resolved_threshold = (
+            threshold if threshold is not None
+            else default_projection_threshold(collection)
+        )
+        icf_map = self.compute_icf_map()
+        lowered_stopwords = tuple(s.lower() for s in stopwords)
+
+        with self._lock:
+            sims = [
+                float(r[0]) for r in self.conn.execute(
+                    "SELECT similarity FROM topic_assignments "
+                    "WHERE assigned_by = 'projection' "
+                    "AND source_collection = ? AND similarity IS NOT NULL "
+                    "ORDER BY similarity ASC",
+                    (collection,),
+                ).fetchall()
+            ]
+            below_threshold = self.conn.execute(
+                "SELECT COUNT(*) FROM topic_assignments "
+                "WHERE assigned_by = 'projection' "
+                "AND source_collection = ? "
+                "AND similarity IS NOT NULL AND similarity < ?",
+                (collection, resolved_threshold),
+            ).fetchone()[0]
+
+            hub_rows = self.conn.execute(
+                """
+                SELECT ta.topic_id, t.label, COUNT(*) AS chunks
+                FROM topic_assignments ta
+                JOIN topics t ON t.id = ta.topic_id
+                WHERE ta.assigned_by = 'projection'
+                  AND ta.source_collection = ?
+                GROUP BY ta.topic_id, t.label
+                ORDER BY chunks DESC
+                LIMIT ?
+                """,
+                (collection, top_n),
+            ).fetchall()
+
+        total = len(sims)
+        if total:
+            def _quantile(q: float) -> float:
+                # Nearest-rank index; matches numpy's `interpolation='nearest'`
+                # for small samples and is deterministic for fixtures.
+                idx = min(total - 1, max(0, int(round(q * (total - 1)))))
+                return sims[idx]
+
+            p10 = _quantile(0.10)
+            p50 = _quantile(0.50)
+            p90 = _quantile(0.90)
+        else:
+            p10 = p50 = p90 = None
+
+        top_hubs: list[AuditHub] = []
+        for topic_id, label, chunks in hub_rows:
+            lower_label = (label or "").lower()
+            matched = tuple(s for s in lowered_stopwords if s in lower_label)
+            top_hubs.append(AuditHub(
+                topic_id=int(topic_id),
+                label=label or "",
+                chunk_count=int(chunks),
+                icf=float(icf_map.get(int(topic_id), 1.0)),
+                matched_stopwords=matched,
+            ))
+        pattern_pollution = [h for h in top_hubs if h.matched_stopwords]
+
+        return AuditReport(
+            collection=collection,
+            total_assignments=total,
+            p10=p10,
+            p50=p50,
+            p90=p90,
+            below_threshold_count=int(below_threshold or 0),
+            threshold=resolved_threshold,
+            top_receiving_hubs=top_hubs,
+            pattern_pollution=pattern_pollution,
+        )
+
     def get_topics(
         self,
         *,
@@ -242,13 +665,74 @@ class CatalogTaxonomy:
         return [dict(zip(_TOPIC_COLUMNS, row)) for row in rows]
 
     def assign_topic(
-        self, doc_id: str, topic_id: int, *, assigned_by: str = "hdbscan",
+        self,
+        doc_id: str,
+        topic_id: int,
+        *,
+        assigned_by: str = "hdbscan",
+        similarity: float | None = None,
+        source_collection: str | None = None,
+        assigned_at: str | None = None,
     ) -> None:
-        """Assign a document to a topic (idempotent via INSERT OR IGNORE)."""
+        """Assign a document to a topic.
+
+        For ``assigned_by='projection'`` rows (RDR-077), emits a prefer-higher
+        UPSERT: if a row already exists, ``similarity`` is set to the max of
+        the stored and incoming values, and ``assigned_at`` /
+        ``source_collection`` are refreshed only when the incoming similarity
+        wins. ``COALESCE(-1.0)`` handles legacy NULL rows pre-migration.
+
+        HDBSCAN / centroid / manual rows keep ``INSERT OR IGNORE`` idempotency
+        — similarity is NULL for those paths (no ANN distance available).
+
+        Args:
+            doc_id: opaque per-collection document identifier.
+            topic_id: target topic row id.
+            assigned_by: provenance tag (``hdbscan`` / ``centroid`` /
+                ``projection`` / ``manual``).
+            similarity: raw cosine (``1.0 - distance``) when known;
+                stored only for ``assigned_by='projection'``.
+            source_collection: the collection the doc was fetched from
+                (required for projection ICF aggregation in Phase 3).
+            assigned_at: ISO-8601 timestamp; defaults to ``datetime.now(UTC)``
+                when ``assigned_by='projection'``.
+        """
+        if assigned_by == "projection":
+            ts = assigned_at or datetime.now(UTC).isoformat()
+            with self._lock:
+                self.conn.execute(
+                    """
+                    INSERT INTO topic_assignments
+                        (doc_id, topic_id, assigned_by,
+                         similarity, assigned_at, source_collection)
+                    VALUES (?, ?, 'projection', ?, ?, ?)
+                    ON CONFLICT(doc_id, topic_id) DO UPDATE SET
+                        similarity =
+                            MAX(COALESCE(topic_assignments.similarity, -1.0),
+                                excluded.similarity),
+                        assigned_at = CASE
+                            WHEN excluded.similarity
+                                 > COALESCE(topic_assignments.similarity, -1.0)
+                            THEN excluded.assigned_at
+                            ELSE topic_assignments.assigned_at
+                        END,
+                        source_collection = CASE
+                            WHEN excluded.similarity
+                                 > COALESCE(topic_assignments.similarity, -1.0)
+                            THEN excluded.source_collection
+                            ELSE topic_assignments.source_collection
+                        END,
+                        assigned_by = 'projection'
+                    """,
+                    (doc_id, topic_id, similarity, ts, source_collection),
+                )
+                self.conn.commit()
+            return
+
         with self._lock:
             self.conn.execute(
-                "INSERT OR IGNORE INTO topic_assignments (doc_id, topic_id, assigned_by) "
-                "VALUES (?, ?, ?)",
+                "INSERT OR IGNORE INTO topic_assignments "
+                "(doc_id, topic_id, assigned_by) VALUES (?, ?, ?)",
                 (doc_id, topic_id, assigned_by),
             )
             self.conn.commit()
@@ -1254,13 +1738,17 @@ class CatalogTaxonomy:
         chroma_client: Any,
         *,
         cross_collection: bool = False,
-    ) -> int | None:
-        """Return the nearest topic_id for a single embedding.
+    ) -> AssignResult | None:
+        """Return the nearest topic_id + raw cosine similarity for one embedding.
 
         When *cross_collection* is False (default), queries only centroids
         for *collection_name*.  When True, queries only FOREIGN centroids
         (``$ne collection_name``) — used for cross-collection projection
         (RDR-075 SC-6).
+
+        The returned :class:`AssignResult` carries the raw cosine similarity
+        (``1.0 - distance``) from ChromaDB. Callers apply ICF weighting at
+        query time; the write path stores the raw value only (RDR-077 RF-8).
 
         Returns ``None`` when the centroid collection does not exist, is
         empty, or dimensions mismatch (SC-10).
@@ -1296,7 +1784,11 @@ class CatalogTaxonomy:
         if not results["ids"] or not results["ids"][0]:
             return None
 
-        return int(results["metadatas"][0][0]["topic_id"])
+        topic_id = int(results["metadatas"][0][0]["topic_id"])
+        # ChromaDB returns cosine *distance* as a list-of-lists (one row per
+        # input embedding). We get a single row here (n_results=1).
+        distance = float(results["distances"][0][0])
+        return AssignResult(topic_id=topic_id, similarity=1.0 - distance)
 
     def assign_batch(
         self,
@@ -1355,12 +1847,24 @@ class CatalogTaxonomy:
             return 0
 
         by = "projection" if cross_collection else "centroid"
+        # RDR-077 C-1: capture per-row distance → similarity; source_collection
+        # is the caller's *collection_name* (that's where the doc lives).
         assigned = 0
         for i, doc_id in enumerate(doc_ids):
             if not results["ids"][i]:
                 continue
             topic_id = int(results["metadatas"][i][0]["topic_id"])
-            self.assign_topic(doc_id, topic_id, assigned_by=by)
+            if by == "projection":
+                distance = float(results["distances"][i][0])
+                self.assign_topic(
+                    doc_id,
+                    topic_id,
+                    assigned_by=by,
+                    similarity=1.0 - distance,
+                    source_collection=collection_name,
+                )
+            else:
+                self.assign_topic(doc_id, topic_id, assigned_by=by)
             assigned += 1
 
         return assigned
@@ -1375,6 +1879,8 @@ class CatalogTaxonomy:
         *,
         threshold: float = 0.85,
         top_k: int = 3,
+        icf_map: dict[int, float] | None = None,
+        progress: bool = False,
     ) -> dict[str, Any]:
         """Project source collection chunks against target collection centroids.
 
@@ -1384,8 +1890,33 @@ class CatalogTaxonomy:
         Returns a dict with ``matched_topics``, ``novel_chunks``,
         ``total_chunks``, and ``total_centroids``.
 
+        When *icf_map* is provided (RDR-077 Phase 4a), each raw cosine is
+        multiplied by ``icf_map[target_topic_id]`` (default 1.0 when the
+        topic is missing — e.g., a freshly created topic not yet in the
+        ICF map) before the threshold filter and top-K ranking. This
+        suppresses ubiquitous "hub" topics that carry generic signal.
+
+        **Raw-cosine-storage invariant**: the ``similarity`` component of
+        each ``chunk_assignments`` tuple is ALWAYS the raw cosine — ICF is
+        applied only for filtering and ranking, never stored. Callers may
+        recompute adjusted scores at query time from the raw value plus a
+        fresh ICF map.
+
         Raises ``ValueError`` on embedding dimension mismatch.
+
+        When *progress* is True, key stages emit one-line progress messages
+        to stderr (source fetch per page, centroid fetch, similarity
+        compute, per-row aggregation, final counts). The CLI
+        (``nx taxonomy project``) sets this to True by default so long-
+        running projections are observable; test callers leave it False.
         """
+        import sys
+        import time
+
+        def _emit(msg: str) -> None:
+            if progress:
+                print(f"  {msg}", file=sys.stderr, flush=True)
+
         # 1. Fetch source embeddings
         try:
             src_coll = chroma_client.get_collection(
@@ -1404,6 +1935,7 @@ class CatalogTaxonomy:
         src_ids: list[str] = []
         src_emb_pages: list[np.ndarray] = []
         offset = 0
+        t0 = time.monotonic()
         while True:
             page = src_coll.get(include=["embeddings"], limit=_PAGE, offset=offset)
             page_ids = page.get("ids", [])
@@ -1412,6 +1944,11 @@ class CatalogTaxonomy:
                 break
             src_ids.extend(page_ids)
             src_emb_pages.append(np.array(page_embs, dtype=np.float32))
+            if len(src_ids) % 3000 == 0 or len(page_ids) < _PAGE:
+                _emit(
+                    f"fetching source {source_collection}: "
+                    f"{len(src_ids)} chunks ({time.monotonic() - t0:.1f}s)"
+                )
             if len(page_ids) < _PAGE:
                 break
             offset += _PAGE
@@ -1424,6 +1961,10 @@ class CatalogTaxonomy:
                 "total_centroids": 0,
             }
         src_embs = np.concatenate(src_emb_pages)
+        _emit(
+            f"source fetch complete: {len(src_ids)} chunks, "
+            f"{src_embs.shape[1]}d ({time.monotonic() - t0:.1f}s)"
+        )
 
         # 2. Fetch target centroids
         try:
@@ -1460,6 +2001,10 @@ class CatalogTaxonomy:
                 "total_centroids": 0,
             }
         ctr_embs = np.array(ctr_raw, dtype=np.float32)
+        _emit(
+            f"centroids fetched: {len(ctr_metas)} topics across "
+            f"{len(target_collections)} target collection(s)"
+        )
 
         # 3. Dimension check
         if src_embs.shape[1] != ctr_embs.shape[1]:
@@ -1478,27 +2023,57 @@ class CatalogTaxonomy:
         ctr_norm = ctr_embs / ctr_norms
 
         # 5. Similarity matrix: (N, M) — values in [-1, 1]
+        t_sim = time.monotonic()
         sim = src_norm @ ctr_norm.T
+        _emit(
+            f"similarity matrix computed: ({len(src_ids)}x{len(ctr_metas)}) "
+            f"in {time.monotonic() - t_sim:.1f}s"
+        )
 
-        # 6. Aggregate matched topics and collect per-chunk assignments
+        # 5b. Adjusted matrix for filter + ranking (RDR-077 Phase 4a).
+        # Raw `sim` is preserved for storage; `filter_sim` is what we
+        # compare against *threshold* and use to pick top-K.
+        if icf_map:
+            # Build a (1, M) vector of per-centroid ICF weights, defaulting
+            # to 1.0 for topics not present in the map (new topics or
+            # N_effective<2 fallbacks).
+            icf_weights = np.array(
+                [icf_map.get(int(m["topic_id"]), 1.0) for m in ctr_metas],
+                dtype=np.float32,
+            )
+            filter_sim = sim * icf_weights  # broadcasts over rows
+        else:
+            filter_sim = sim
+
+        # 6. Aggregate matched topics and collect per-chunk assignments.
         topic_stats: dict[int, dict[str, Any]] = {}
         novel_chunks: list[str] = []
-        chunk_assignments: list[tuple[str, int]] = []
+        # RDR-077 RF-3 + Phase 4a: 3-tuple stores RAW cosine similarity.
+        chunk_assignments: list[tuple[str, int, float]] = []
 
+        t_agg = time.monotonic()
         for i, doc_id in enumerate(src_ids):
-            row_max = float(sim[i].max())
+            if progress and i and i % 5000 == 0:
+                _emit(
+                    f"aggregating: {i}/{len(src_ids)} chunks "
+                    f"({len(chunk_assignments)} matched so far, "
+                    f"{time.monotonic() - t_agg:.1f}s)"
+                )
+            row_max = float(filter_sim[i].max())
             if row_max < threshold:
                 novel_chunks.append(doc_id)
                 continue
 
-            # Top-k centroids above threshold
-            top_indices = np.argsort(-sim[i])[:top_k]
+            # Top-k centroids above threshold — ranked by adjusted score
+            # when ICF is active, else raw.
+            top_indices = np.argsort(-filter_sim[i])[:top_k]
             for idx in top_indices:
-                if float(sim[i, idx]) < threshold:
+                if float(filter_sim[i, idx]) < threshold:
                     break
                 meta = ctr_metas[idx]
                 tid = int(meta["topic_id"])
-                chunk_assignments.append((doc_id, tid))
+                raw_sim = float(sim[i, idx])
+                chunk_assignments.append((doc_id, tid, raw_sim))
                 if tid not in topic_stats:
                     topic_stats[tid] = {
                         "topic_id": tid,
@@ -1508,7 +2083,7 @@ class CatalogTaxonomy:
                         "total_similarity": 0.0,
                     }
                 topic_stats[tid]["chunk_count"] += 1
-                topic_stats[tid]["total_similarity"] += float(sim[i, idx])
+                topic_stats[tid]["total_similarity"] += raw_sim
 
         matched_topics = [
             {

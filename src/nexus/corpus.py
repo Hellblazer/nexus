@@ -58,6 +58,35 @@ def voyage_model_for_collection(collection_name: str) -> str:
     return "voyage-code-3"
 
 
+def default_projection_threshold(collection_name: str) -> float:
+    """Return the default projection cosine threshold for *collection_name*.
+
+    RDR-077 Phase 4a: per-corpus-type defaults calibrated for the rawness
+    of embedding cosine distributions in each corpus type. Explicit
+    ``--threshold`` on ``nx taxonomy project`` overrides this; the table
+    only kicks in when no explicit value is supplied.
+
+    =================  ======  ==============================================
+    Prefix             Value   Rationale
+    =================  ======  ==============================================
+    ``code__*``        0.70    Syntax inflates raw cosine; high bar
+    ``knowledge__*``   0.50    Dense prose, semantically rich
+    ``docs__*``        0.55    Mixed prose + code
+    ``rdr__*``         0.55    Same as docs
+    =================  ======  ==============================================
+
+    Unknown prefixes fall back to 0.70 (safer under-match bias).
+    See ``docs/taxonomy-projection-tuning.md`` for calibration methodology.
+    """
+    if collection_name.startswith("code__"):
+        return 0.70
+    if collection_name.startswith("knowledge__"):
+        return 0.50
+    if collection_name.startswith(("docs__", "rdr__")):
+        return 0.55
+    return 0.70
+
+
 # Backward-compatible aliases — callers don't need to distinguish index vs query.
 embedding_model_for_collection = voyage_model_for_collection
 index_model_for_collection = voyage_model_for_collection

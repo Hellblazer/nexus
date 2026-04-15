@@ -393,7 +393,9 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
                         )
                         assignments = result.get("chunk_assignments", [])
                         if assignments:
-                            _persist_assignments(db.taxonomy, assignments, quiet=True)
+                            _persist_assignments(
+                                db.taxonomy, assignments, col_name, quiet=True,
+                            )
                             proj_count += len(assignments)
                 if proj_count:
                     click.echo(f"  Projection: {proj_count} cross-collection assignments")
@@ -1012,19 +1014,32 @@ def label_cmd(collection: str, relabel_all: bool) -> None:
     help="Comma-separated target collections (omit for all other collections with topics)",
 )
 @click.option(
-    "--threshold", "-t", default=0.85, type=float, show_default=True,
-    help="Cosine similarity threshold. 0.85 is borrowed from centroid merge; calibrate empirically (SC-9).",
+    "--threshold", "-t", default=None, type=float,
+    help=(
+        "Cosine similarity threshold. When omitted, per-corpus-type "
+        "defaults apply: code__* → 0.70, knowledge__* → 0.50, "
+        "docs__*/rdr__* → 0.55. See docs/taxonomy-projection-tuning.md."
+    ),
 )
 @click.option("--top-k", default=3, type=int, show_default=True, help="Top-k centroids per chunk")
 @click.option("--persist", is_flag=True, help="Write projection assignments (assigned_by='projection')")
 @click.option("--backfill", is_flag=True, help="Project all collections against each other")
+@click.option(
+    "--use-icf", "use_icf", is_flag=True,
+    help=(
+        "Apply ICF (Inverse Collection Frequency) weighting — suppresses "
+        "ubiquitous hub topics before threshold + top-k ranking. Stored "
+        "similarity remains raw cosine (RDR-077 RF-8)."
+    ),
+)
 def project_cmd(
     source_collection: str,
     against: str,
-    threshold: float,
+    threshold: float | None,
     top_k: int,
     persist: bool,
     backfill: bool,
+    use_icf: bool,
 ) -> None:
     """Project source collection chunks against target collection centroids.
 
@@ -1033,19 +1048,34 @@ def project_cmd(
     projection assignments to topic_assignments.
 
     \b
+    Threshold resolution (RDR-077 Phase 4a):
+      explicit --threshold → fallback to prefix default → 0.70
+    \b
     Examples:
       nx taxonomy project docs__art-architecture --against knowledge__art
       nx taxonomy project code__nexus --threshold 0.80 --persist
+      nx taxonomy project code__nexus --use-icf --persist
       nx taxonomy project --backfill --persist
     """
+    from nexus.corpus import default_projection_threshold
     from nexus.db import make_t3
 
     db = _T2Database(_default_db_path())
     t3 = make_t3()
 
+    # Resolve threshold: explicit flag wins; otherwise per-corpus default
+    # (defaults applied at the per-source level inside _run_backfill).
+    resolved_threshold = threshold
+    if resolved_threshold is None and source_collection:
+        resolved_threshold = default_projection_threshold(source_collection)
+
     try:
         if backfill:
-            _run_backfill(db.taxonomy, t3._client, threshold=threshold, top_k=top_k, persist=persist)
+            _run_backfill(
+                db.taxonomy, t3._client,
+                threshold=threshold, top_k=top_k, persist=persist,
+                use_icf=use_icf,
+            )
             return
 
         if not source_collection:
@@ -1069,12 +1099,25 @@ def project_cmd(
                 click.echo("No other collections have topics. Run 'nx taxonomy discover' first.")
                 return
 
-        _progress(f"Projecting {source_collection} against {len(targets)} collection(s)...")
+        _progress(
+            f"Projecting {source_collection} against {len(targets)} "
+            f"collection(s) at threshold {resolved_threshold}"
+            + (" with ICF weighting" if use_icf else "")
+            + "..."
+        )
 
+        icf_map = (
+            db.taxonomy.compute_icf_map(use_cache=True) if use_icf else None
+        )
         result = db.taxonomy.project_against(
             source_collection, targets, t3._client,
-            threshold=threshold, top_k=top_k,
+            threshold=resolved_threshold, top_k=top_k,
+            icf_map=icf_map,
+            progress=True,
         )
+        # Fall through: display logic uses `threshold` local — rebind
+        # to the resolved value so messages reflect what was applied.
+        threshold = resolved_threshold
 
         # Display results
         matched = result["matched_topics"]
@@ -1096,7 +1139,9 @@ def project_cmd(
         click.echo(f"Total: {len(matched)} matched topics, {covered}/{total} chunks covered")
 
         if persist and result.get("chunk_assignments"):
-            _persist_assignments(db.taxonomy, result["chunk_assignments"])
+            _persist_assignments(
+                db.taxonomy, result["chunk_assignments"], source_collection,
+            )
         elif matched and not persist:
             click.echo("\nRun with --persist to write assignments to topic_assignments.")
 
@@ -1108,17 +1153,28 @@ def project_cmd(
 
 def _persist_assignments(
     taxonomy: "CatalogTaxonomy",
-    chunk_assignments: list[tuple[str, int]],
+    chunk_assignments: list[tuple[str, int, float]],
+    source_collection: str,
     *,
     quiet: bool = False,
 ) -> int:
-    """Write per-chunk projection assignments from project_against results.
+    """Write per-chunk projection assignments from ``project_against`` results.
 
-    Returns the number of assignments written.  Set *quiet* to suppress
-    CLI output (used when called from pipeline context).
+    Each tuple is ``(doc_id, topic_id, raw_cosine_similarity)`` per RDR-077
+    RF-3. *source_collection* identifies the origin of these chunks (used
+    later for ICF hub detection).
+
+    Returns the number of assignments written. Set *quiet* to suppress CLI
+    output (used when called from pipeline context).
     """
-    for doc_id, topic_id in chunk_assignments:
-        taxonomy.assign_topic(doc_id, topic_id, assigned_by="projection")
+    for doc_id, topic_id, similarity in chunk_assignments:
+        taxonomy.assign_topic(
+            doc_id,
+            topic_id,
+            assigned_by="projection",
+            similarity=similarity,
+            source_collection=source_collection,
+        )
     if not quiet:
         click.echo(f"Persisted {len(chunk_assignments)} projection assignment(s).")
     return len(chunk_assignments)
@@ -1128,11 +1184,19 @@ def _run_backfill(
     taxonomy: "CatalogTaxonomy",
     chroma_client: Any,
     *,
-    threshold: float = 0.85,
+    threshold: float | None = None,
     top_k: int = 3,
     persist: bool = False,
+    use_icf: bool = False,
 ) -> None:
-    """Project all collections against each other."""
+    """Project all collections against each other.
+
+    When *threshold* is None, applies the RDR-077 per-corpus-type default
+    for each source collection (``default_projection_threshold``). An
+    explicit *threshold* short-circuits that and applies uniformly.
+    """
+    from nexus.corpus import default_projection_threshold
+
     collections = taxonomy.get_distinct_collections()
 
     if not collections:
@@ -1141,17 +1205,29 @@ def _run_backfill(
 
     click.echo(f"Backfilling {len(collections)} collection(s)...")
 
+    # ICF map computed once per backfill invocation (per RDR-077 caching).
+    icf_map = taxonomy.compute_icf_map(use_cache=True) if use_icf else None
+
     total_assigned = 0
     total_novel = 0
     for i, src in enumerate(collections, 1):
         targets = [c for c in collections if c != src]
         if not targets:
             continue
-        _progress(f"  [{i}/{len(collections)}] {src} → {len(targets)} target(s)...")
+        per_src_threshold = (
+            threshold if threshold is not None
+            else default_projection_threshold(src)
+        )
+        _progress(
+            f"  [{i}/{len(collections)}] {src} → {len(targets)} target(s) "
+            f"@ threshold {per_src_threshold}..."
+        )
         try:
             result = taxonomy.project_against(
                 src, targets, chroma_client,
-                threshold=threshold, top_k=top_k,
+                threshold=per_src_threshold, top_k=top_k,
+                icf_map=icf_map,
+                progress=True,
             )
             matched = len(result["matched_topics"])
             novel = len(result["novel_chunks"])
@@ -1163,7 +1239,7 @@ def _run_backfill(
             total_novel += novel
 
             if persist and result.get("chunk_assignments"):
-                _persist_assignments(taxonomy, result["chunk_assignments"])
+                _persist_assignments(taxonomy, result["chunk_assignments"], src)
                 total_assigned += len(result["chunk_assignments"])
         except Exception as e:
             click.echo(f"    Skipped: {e}")
@@ -1172,3 +1248,185 @@ def _run_backfill(
         f"Backfill complete: {total_assigned} assignments, {total_novel} novel chunks "
         f"across {len(collections)} collections."
     )
+
+
+@taxonomy.command("hubs")
+@click.option(
+    "--min-collections", "-m", default=2, type=int, show_default=True,
+    help="Minimum distinct source collections (DF) required to flag a hub.",
+)
+@click.option(
+    "--max-icf", default=None, type=float,
+    help=(
+        "Only flag topics with ICF at or below this value. Lower ICF "
+        "= more ubiquitous = stronger hub signal. Omit to skip ICF filter."
+    ),
+)
+@click.option(
+    "--warn-stale", is_flag=True,
+    help=(
+        "Flag hubs whose latest projection assignment post-dates the newest "
+        "`last_discover_at` across contributing source collections (any hub "
+        "with a never-discovered source is treated as stale)."
+    ),
+)
+@click.option(
+    "--explain", is_flag=True,
+    help="Show why each row was flagged: DF, ICF, matched stopword tokens.",
+)
+def hubs_cmd(
+    min_collections: int,
+    max_icf: float | None,
+    warn_stale: bool,
+    explain: bool,
+) -> None:
+    """List topics that look like cross-collection hubs (RDR-077 Phase 5).
+
+    A hub is a topic whose projection assignments span many source
+    collections with low Inverse Collection Frequency — the
+    taxonomic analogue of an English stopword. Output sorted by
+    `chunks × (1 - ICF)` descending (worst offenders first).
+
+    \b
+    Examples:
+      nx taxonomy hubs --min-collections 5 --max-icf 1.2
+      nx taxonomy hubs --warn-stale --explain
+
+    See docs/taxonomy-projection-tuning.md for guidance on interpreting
+    the output and acting on flagged topics.
+    """
+    db = _T2Database(_default_db_path())
+    try:
+        rows = db.taxonomy.detect_hubs(
+            min_collections=min_collections,
+            max_icf=max_icf,
+            warn_stale=warn_stale,
+        )
+        if not rows:
+            click.echo("No hubs above the configured thresholds.")
+            return
+
+        click.echo(
+            "TOPIC                                       DF   CHUNKS   ICF   SCORE"
+        )
+        click.echo("-" * 76)
+        for row in rows:
+            label = (row.label or f"topic-{row.topic_id}")[:38]
+            click.echo(
+                f"[{row.topic_id:>5}] {label:<38}"
+                f"{row.distinct_source_collections:>4} {row.total_chunks:>7} "
+                f"{row.icf:>5.2f} {row.score:>7.2f}"
+            )
+            if explain:
+                parts: list[str] = [
+                    f"DF={row.distinct_source_collections}",
+                    f"ICF={row.icf:.3f}",
+                ]
+                if row.matched_stopwords:
+                    parts.append(
+                        "stopwords=" + ",".join(row.matched_stopwords)
+                    )
+                if row.source_collections:
+                    parts.append(
+                        "sources=" + ",".join(row.source_collections)
+                    )
+                click.echo("         " + " | ".join(parts))
+            if warn_stale and row.is_stale:
+                bits: list[str] = []
+                if row.max_last_discover_at and row.last_assigned_at and (
+                    row.last_assigned_at > row.max_last_discover_at
+                ):
+                    bits.append(
+                        f"last_assigned_at={row.last_assigned_at} > "
+                        f"max_last_discover_at={row.max_last_discover_at}"
+                    )
+                if row.never_discovered_count:
+                    bits.append(
+                        f"{row.never_discovered_count} never-discovered source(s)"
+                    )
+                click.echo(
+                    "         STALE: " + "; ".join(bits)
+                    if bits
+                    else "         STALE"
+                )
+    finally:
+        db.close()
+
+
+@taxonomy.command("audit")
+@click.option(
+    "--collection", "-c", required=True,
+    help="Source collection to audit (e.g. code__nexus).",
+)
+@click.option(
+    "--threshold", "-t", default=None, type=float,
+    help=(
+        "Count projections whose raw cosine similarity falls below this "
+        "value. Defaults to the per-corpus-type value "
+        "(code__* 0.70, knowledge__* 0.50, docs__*/rdr__* 0.55). See "
+        "docs/taxonomy-projection-tuning.md."
+    ),
+)
+@click.option(
+    "--top-n", "-n", default=5, type=int, show_default=True,
+    help="Number of receiving hub topics to display.",
+)
+def audit_cmd(collection: str, threshold: float | None, top_n: int) -> None:
+    """Report projection-quality diagnostics for one source collection.
+
+    Output:
+      * total projection assignments originating from this collection;
+      * p10 / p50 / p90 of raw cosine similarity;
+      * count of assignments below threshold (candidates for re-projection);
+      * top receiving topics (where this collection's chunks land);
+      * pattern-pollution: receiving topics whose labels contain generic
+        stopword tokens (`assert`, `class`, `exception`, ...).
+
+    See docs/taxonomy-projection-tuning.md for interpretation guidance.
+    """
+    db = _T2Database(_default_db_path())
+    try:
+        report = db.taxonomy.audit_collection(
+            collection, threshold=threshold, top_n=top_n,
+        )
+        click.echo(f"Audit — {report.collection}")
+        click.echo("-" * 60)
+        if report.total_assignments == 0:
+            click.echo("No projection data for this collection yet.")
+            click.echo(
+                "Run 'nx taxonomy project "
+                f"{report.collection} --persist' to populate."
+            )
+            return
+
+        click.echo(f"Projection assignments: {report.total_assignments}")
+        click.echo(
+            "Similarity quantiles (raw cosine): "
+            f"p10={report.p10:.3f}  p50={report.p50:.3f}  p90={report.p90:.3f}"
+        )
+        click.echo(
+            f"Below threshold {report.threshold}: "
+            f"{report.below_threshold_count} assignment(s) — re-projection candidates"
+        )
+
+        click.echo("")
+        click.echo("Top receiving topics:")
+        if not report.top_receiving_hubs:
+            click.echo("  (none)")
+        for h in report.top_receiving_hubs:
+            label = h.label or f"topic-{h.topic_id}"
+            click.echo(
+                f"  [{h.topic_id}] {label}  "
+                f"(chunks={h.chunk_count}, icf={h.icf:.3f})"
+            )
+
+        if report.pattern_pollution:
+            click.echo("")
+            click.echo("Pattern-pollution (hub stopword labels):")
+            for h in report.pattern_pollution:
+                click.echo(
+                    f"  [{h.topic_id}] {h.label} — matched: "
+                    + ",".join(h.matched_stopwords)
+                )
+    finally:
+        db.close()

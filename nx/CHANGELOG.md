@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.3.0] - 2026-04-14
+
+Release tracks the conexus CLI 4.3.0 RDR-077 projection-quality work. No new plugin skills, commands, or hooks; the version bump keeps `marketplace.json` aligned with the CLI so users on the matching CLI see the correct plugin version.
+
 ## [4.2.2] - 2026-04-14
 
 (v4.2.1 was tagged but never published due to a CLI test failure. v4.2.2 supersedes it.)

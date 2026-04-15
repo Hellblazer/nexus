@@ -6,6 +6,36 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.3.0] - 2026-04-14
+
+### Added
+
+- **Projection quality (RDR-077)**: cross-collection projection now records raw cosine similarity, timestamp, and source collection for every projection assignment. Three new nullable columns on `topic_assignments`: `similarity` (REAL), `assigned_at` (TEXT, ISO-8601), `source_collection` (TEXT). Composite index `idx_topic_assignments_source` supports ICF aggregation and Phase 5/6 hub / audit queries. Migration is idempotent and applied by `nx upgrade` under the existing RDR-076 registry.
+- **`nx taxonomy project --use-icf`**: Inverse Collection Frequency weighting. Suppresses hub topics (generic labels that span nearly every source corpus) before the threshold filter and top-K ranking. Stored similarity remains raw cosine — ICF is applied only at query time, never persisted (RDR-077 RF-8 invariant).
+- **Per-corpus-type default thresholds** on `nx taxonomy project`: omitting `--threshold` now applies `code__*` 0.70, `knowledge__*` 0.50, `docs__*`/`rdr__*` 0.55. Explicit `--threshold` always wins. Exposed as `nexus.corpus.default_projection_threshold`.
+- **`CatalogTaxonomy.compute_icf_map()`**: returns `{topic_id: icf}` where `icf = log2(N_effective / DF)`. Guards: `N_effective < 2` returns `{}`; `DF = N_effective` yields `0.0` (intentional hub suppression); legacy NULL-`source_collection` rows excluded from both numerator and denominator. Per-instance cache via `use_cache=True` + `clear_icf_cache()`. `log2` registered as a deterministic, null-safe SQLite scalar in `CatalogTaxonomy.__init__`.
+- **`AssignResult` NamedTuple**: `assign_single()` now returns `AssignResult(topic_id, similarity)` instead of a bare `int`. Callers that only need the topic id use `.topic_id`. Distance → similarity inversion (`1.0 - distance`) happens inside the method.
+- **Prefer-higher UPSERT for projection rows**: `assign_topic(assigned_by='projection', ...)` uses `INSERT … ON CONFLICT DO UPDATE SET similarity = MAX(COALESCE(-1.0), excluded)` so re-projection with a lower similarity never overwrites a higher one, and `assigned_at` / `source_collection` refresh only when the incoming match wins. HDBSCAN / centroid / manual rows keep `INSERT OR IGNORE`.
+- **`docs/taxonomy-projection-tuning.md`**: operator guide — similarity semantics, ICF rationale, per-corpus-type defaults, calibration loop for new corpora, upsert semantics, staleness detection, troubleshooting.
+- **`nx taxonomy hubs`**: generic-pattern hub detector. Flags topics whose projection assignments span `--min-collections N` or more source corpora with ICF `<= --max-icf` and/or labels containing bundled stopword tokens (`assert`, `junit`, `builder`, `class`, `import`, `exception`, `getter`, `setter`, `variable`, `declaration`, `operator`). Output sorted by `chunks × (1 - ICF)` descending. `--warn-stale` compares `MAX(taxonomy_meta.last_discover_at)` across contributing source collections against the hub's latest `assigned_at`; `--explain` shows DF / ICF / matched stopword tokens per row. Advisory — users decide.
+- **`detect_hubs()`** on `CatalogTaxonomy` returning `list[HubRow]` with per-row staleness fields (`max_last_discover_at`, `never_discovered_count`, `is_stale`). Never-discovered source collections count as stale (O-3). `DEFAULT_HUB_STOPWORDS` constant exposes the bundled token list.
+- **`nx taxonomy audit --collection NAME`**: projection-quality report per collection. Output: total projection assignments originating from the collection, p10 / p50 / p90 of raw cosine similarity (Python-side nearest-rank — SQLite has no `percentile_cont`), count below threshold (re-projection candidates), top receiving topics with ICF, pattern-pollution flags. `--threshold` defaults to the per-corpus-type value from `default_projection_threshold`; `--top-n` caps the receiving-topic list (default 5). Empty-projection case returns a clean "no projection data" message, no stack trace.
+- **`audit_collection()`** on `CatalogTaxonomy` returning `AuditReport(collection, total_assignments, p10, p50, p90, below_threshold_count, threshold, top_receiving_hubs, pattern_pollution)`. Helper NamedTuple `AuditHub` carries per-row chunk_count, icf, and matched_stopwords.
+
+### Changed
+
+- `nx taxonomy project --threshold` is now optional (was `0.85`). Omitting it triggers the per-corpus-type default cascade.
+- `project_against()` accepts optional `icf_map: dict[int, float] | None`. When supplied, adjusted scores (`sim * icf`) drive both the threshold filter and the top-K ranking; raw cosine is still what lands in `chunk_assignments`.
+- `assign_batch(cross_collection=True)` now propagates per-row similarity and `source_collection` into `topic_assignments` (previously the distance was discarded — RDR-077 C-1 audit finding).
+- `backfill_projection` (T3 upgrade step) unpacks the new 3-tuple `chunk_assignments` and passes `similarity` + `source_collection=src` through to `assign_topic`.
+
+### Documentation
+
+- `docs/taxonomy.md` — new cross-collection projection section, `project` subcommand added to command table, ICF summary, per-corpus threshold table.
+- `docs/cli-reference.md` — `--use-icf` example, `project` row updated with per-corpus defaults + tuning-doc link.
+- `docs/storage-tiers.md` — `topic_assignments` row now documents all post-RDR-077 columns and upsert semantics.
+- `docs/architecture.md` — Projection quality subsection under Taxonomy linking to the tuning guide; `project` subcommand listed in the `nx taxonomy` CLI table.
+
 ## [4.2.2] - 2026-04-14
 
 (Note: v4.2.1 was tagged but never published due to a test failure. v4.2.2 supersedes it and includes all 4.2.1 changes plus the ChromaDB Cloud quota audit and observability improvements found during a live shakeout.)

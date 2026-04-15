@@ -139,11 +139,12 @@ class TestSC3UpgradeFlags:
 
 class TestSC4DoctorSchema:
     def test_healthy_db_passes(self, runner: CliRunner, tmp_path: Path) -> None:
+        from nexus.commands.upgrade import _current_version
         from nexus.db.migrations import apply_pending
 
         db_path = tmp_path / "memory.db"
         conn = sqlite3.connect(str(db_path))
-        apply_pending(conn, "4.1.2")
+        apply_pending(conn, _current_version())
         conn.close()
 
         with patch("nexus.commands._helpers.default_db_path", return_value=db_path):

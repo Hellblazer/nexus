@@ -33,6 +33,34 @@ nx taxonomy label                 # batch re-label with Claude haiku
 | `nx taxonomy split LABEL --k N` | Split a topic into N sub-topics via KMeans |
 | `nx taxonomy links` | Show inter-topic relationships from catalog link graph |
 | `nx taxonomy rebuild -c NAME` | Full rebuild with merge strategy (preserves operator labels) |
+| `nx taxonomy project SRC` | Cross-collection projection — match chunks against other collections' topic centroids. Per-corpus-type default thresholds; `--use-icf` suppresses ubiquitous hubs. See [taxonomy-projection-tuning.md](taxonomy-projection-tuning.md). |
+| `nx taxonomy hubs` | Detect generic-pattern hub topics via DF + ICF. `--warn-stale` flags hubs older than the latest discover; `--explain` shows why each row fired. Advisory — users decide. |
+| `nx taxonomy audit --collection NAME` | Projection-quality report: p10/p50/p90 of raw cosine, count below threshold, top receiving hubs with ICF, pattern-pollution flags. |
+
+## Cross-collection projection (RDR-075, RDR-077)
+
+`nx taxonomy project` maps chunks from one collection against topic
+centroids in other collections, creating `assigned_by='projection'`
+rows that surface cross-domain connections (e.g., RDR docs matching
+the code that implements them).
+
+Each projection row stores the **raw cosine similarity** plus the
+`source_collection` the chunk came from and the `assigned_at`
+timestamp. `--use-icf` computes Inverse Collection Frequency per
+target topic and suppresses hubs (topics that show up in nearly every
+source corpus) before the threshold filter — stored similarity stays
+raw so other rankers remain correct.
+
+Thresholds default per source prefix when `--threshold` is omitted:
+
+| Prefix | Default |
+|--------|---------|
+| `code__*` | 0.70 |
+| `knowledge__*` | 0.50 |
+| `docs__*`, `rdr__*` | 0.55 |
+
+Operator guide, calibration loop, troubleshooting:
+[docs/taxonomy-projection-tuning.md](taxonomy-projection-tuning.md).
 
 ## Search integration
 

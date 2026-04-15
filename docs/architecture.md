@@ -169,6 +169,14 @@ Manual labels survive rebuild via `_merge_labels`.
 | `merge` | Merge two topics into one |
 | `split` | Split a topic on a keyword pivot |
 | `links` | Compute and persist inter-topic links from catalog |
+| `project` | Cross-collection projection with `--use-icf` hub suppression (RDR-077) |
+
+### Projection quality (RDR-077)
+
+`topic_assignments` also carries `similarity` (raw cosine), `assigned_at`,
+and `source_collection` for projection rows. Operator guide:
+[docs/taxonomy-projection-tuning.md](taxonomy-projection-tuning.md) —
+threshold calibration, ICF rationale, upsert semantics, troubleshooting.
 
 ### Config (`taxonomy` section in `.nexus.yml`)
 
