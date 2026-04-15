@@ -504,6 +504,7 @@ def _pdf_chunks(
     chunk_chars: int | None = None,
     bib_enrich_enabled: bool = False,
     extractor: str = "auto",
+    git_meta: dict | None = None,
 ) -> list[tuple[str, str, dict]]:
     """Chunk a PDF and return (id, text, metadata) tuples.
 
@@ -517,7 +518,17 @@ def _pdf_chunks(
 
     *extractor* selects the PDF extraction backend (``"auto"``, ``"docling"``,
     or ``"mineru"``).
+
+    *git_meta* — flat ``git_*`` provenance dict. When ``None`` the function
+    auto-detects via :func:`nexus.indexer_utils.detect_git_metadata` from
+    ``pdf_path``. Pass an explicit value when the caller has already
+    resolved it (the repo-walk path does this once per repo). Empty dict
+    when *pdf_path* is not in a git repository — :func:`normalize` then
+    omits ``git_meta`` per the empty-set rule (nexus-2my fix #3).
     """
+    if git_meta is None:
+        from nexus.indexer_utils import detect_git_metadata
+        git_meta = detect_git_metadata(pdf_path)
     result = PDFExtractor().extract(pdf_path, extractor=extractor)
     chunker = PDFChunker(chunk_chars=chunk_chars) if chunk_chars is not None else PDFChunker()
     chunks = chunker.chunk(result.text, result.metadata)
@@ -575,6 +586,7 @@ def _pdf_chunks(
             "bib_citation_count": bib.get("citation_count", 0),
             "bib_semantic_scholar_id": bib.get("semantic_scholar_id", ""),
             "chunk_text_hash": hashlib.sha256(chunk.text.encode()).hexdigest(),
+            **{k: v for k, v in git_meta.items() if v},
         }
         prepared.append((chunk_id, chunk.text, meta))
     return prepared
@@ -588,9 +600,20 @@ def _markdown_chunks(
     corpus: str,
     *,
     base_path: Path | None = None,
+    git_meta: dict | None = None,
 ) -> list[tuple[str, str, dict]]:
-    """Chunk a Markdown file and return (id, text, metadata) tuples."""
+    """Chunk a Markdown file and return (id, text, metadata) tuples.
+
+    *git_meta* — flat ``git_*`` provenance dict. ``None`` triggers
+    auto-detection from *md_path* via
+    :func:`nexus.indexer_utils.detect_git_metadata`. Empty dict outside
+    a git repo (nexus-2my fix #3).
+    """
     from nexus.catalog.catalog import make_relative
+
+    if git_meta is None:
+        from nexus.indexer_utils import detect_git_metadata
+        git_meta = detect_git_metadata(md_path)
 
     raw_text = md_path.read_text(encoding="utf-8")
     frontmatter, body = parse_frontmatter(raw_text)
@@ -629,6 +652,7 @@ def _markdown_chunks(
             "indexed_at": now_iso,
             "content_hash": content_hash,
             "chunk_text_hash": hashlib.sha256(chunk.text.encode()).hexdigest(),
+            **{k: v for k, v in git_meta.items() if v},
         }
         prepared.append((chunk_id, chunk.text, meta))
     return prepared

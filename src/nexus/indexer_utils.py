@@ -45,6 +45,43 @@ def find_repo_root(path: Path) -> Path | None:
     return None
 
 
+def detect_git_metadata(path: Path) -> dict[str, str]:
+    """Return git provenance metadata for the repo containing *path*.
+
+    Walks up via :func:`find_repo_root`, then collects:
+
+      * ``git_project_name`` — basename of the repo root
+      * ``git_branch`` — current branch name
+      * ``git_commit_hash`` — full SHA of HEAD
+      * ``git_remote_url`` — ``origin`` URL (empty when no remote)
+
+    Returns an empty dict when *path* is not inside a git repository
+    so callers can ``**``-merge the result without conditional logic.
+    Indexer-side code (PDF / markdown / pipeline) needs this so chunks
+    carry the same provenance the repo-walk path gets via
+    ``indexer._git_metadata`` (nexus-2my fix #3).
+    """
+    repo = find_repo_root(path)
+    if repo is None:
+        return {}
+
+    def _run(args: list[str]) -> str:
+        try:
+            r = subprocess.run(
+                args, cwd=repo, capture_output=True, text=True, timeout=10,
+            )
+        except Exception:
+            return ""
+        return r.stdout.strip() if r.returncode == 0 else ""
+
+    return {
+        "git_project_name": repo.name,
+        "git_branch": _run(["git", "rev-parse", "--abbrev-ref", "HEAD"]),
+        "git_commit_hash": _run(["git", "rev-parse", "HEAD"]),
+        "git_remote_url": _run(["git", "remote", "get-url", "origin"]),
+    }
+
+
 def should_ignore(rel_path: Path, patterns: list[str]) -> bool:
     """Return True if any component of *rel_path* matches any of *patterns*."""
     for part in rel_path.parts:
