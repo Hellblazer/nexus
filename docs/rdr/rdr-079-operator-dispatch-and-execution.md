@@ -134,9 +134,9 @@ claude -p \
   NEXUS_T1_SESSION_ID=pool-7f3a...
 ```
 
-#### T1 client change — three call sites, not one
+#### T1 client change — four call sites, not one
 
-The env-var guard must be applied at **every** point that resolves a T1 session. `find_ancestor_session` in `src/nexus/session.py` is called from three sites plus the SessionStart hook path:
+The env-var guard must be applied at **every** point that resolves a T1 session. `find_ancestor_session` in `src/nexus/session.py` is called from four sites across three files:
 
 | Site | File:Line | Role |
 |---|---|---|
