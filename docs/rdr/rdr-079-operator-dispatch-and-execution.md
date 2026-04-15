@@ -4,7 +4,8 @@ status: draft
 type: feature
 priority: P1
 created: 2026-04-15
-related: [RDR-042, RDR-067, RDR-078]
+revised: 2026-04-15
+related: [RDR-042, RDR-067, RDR-078, RDR-080]
 reviewed-by: self
 ---
 
@@ -12,7 +13,19 @@ reviewed-by: self
 
 RDR-078 shipped the plan-centric retrieval infrastructure — `plan_match`, `plan_run`, typed-graph `traverse`, nine YAML seed plans, the four-tier loader, the plan-first skill family, and the CI schema check. Post-ship critique established that the scenarios it was designed for **cannot execute end-to-end**. The infrastructure is real; the feature is not. This RDR closes the gap.
 
-The core move: a new MCP server, **`nexus-operators`**, owns a pool of **long-running `claude` workers** driven via the streaming stdin/stdout RPC protocol built into the `claude` CLI. Each operator (`extract`, `rank`, `compare`, `generate`, `summarize`) becomes a first-class MCP tool that dispatches a structured turn to a pool worker and returns the validated JSON response. The runner gains nothing new in shape — it already dispatches step operators by name — but every operator name now resolves to a pool-backed tool call. In parallel, core MCP tools gain additive structured returns so retrieval steps produce real `{tumblers, ids, distances}` output instead of the current `{"text": str}` wrapper.
+The core move: an **operator pool** — `src/nexus/operators/pool.py` — owning a set of long-running `claude` workers driven via the streaming stdin/stdout RPC protocol built into the `claude` CLI. Five operators (`extract`, `rank`, `compare`, `generate`, `summarize`) register as first-class tools on the **existing `nexus` MCP server** (no third MCP server — see Amendment 1 below). Each tool dispatches a structured turn to a pool worker with `--json-schema` enforcement and returns the validated JSON response. The runner gains nothing new in shape — it already dispatches step operators by name — but every operator name now resolves to a pool-backed tool call. In parallel, core MCP tools gain additive structured returns so retrieval steps produce real `{tumblers, ids, distances}` output instead of the current `{"text": str}` wrapper.
+
+## Amendment 1 — pool lives in the `nexus` MCP server, not a third server
+
+Original draft proposed a third FastMCP server (`nexus-operators`) for the operator pool. Design review established this as over-decomposition: every MCP tool that will later call a worker (RDR-080's `nx_answer`, `nx_tidy`, `nx_plan_audit`) needs pool access, and making them cross-server RPC clients to their own process is silly. **The pool is core infrastructure, same tier as T2/T3.**
+
+Concrete shape:
+- Pool implementation: `src/nexus/operators/pool.py` (new module).
+- Operator tools (`operator_extract`, `operator_rank`, `operator_compare`, `operator_summarize`, `operator_generate`) register via `@mcp.tool()` in `src/nexus/mcp/core.py`.
+- `nx/.mcp.json` remains two servers (`nexus`, `nexus-catalog`). No new entry point.
+- The pool is a module-level singleton, lazily initialised on first operator call, managed by `mcp_infra.py` (same pattern as T1/T3 singletons).
+
+This amendment is strictly additive to the phase plan — fewer files, less configuration, identical behaviour.
 
 ## Problem Statement
 
@@ -64,10 +77,7 @@ Measured per-call amortized: ~4s, ~$0.037. Schema 100% enforced (every output ma
 
 ### `nexus-operators` MCP server
 
-A third FastMCP server alongside `nexus` and `nexus-catalog`. Registration follows the existing pattern:
-- Entry point: `nx-mcp-operators = "nexus.mcp.operators:main"` in `pyproject.toml`.
-- `nx/.mcp.json` gains a third server block.
-- Module: `src/nexus/mcp/operators.py` instantiates `FastMCP("nexus-operators")` and registers five tools.
+Per Amendment 1: the pool is core infrastructure inside the existing `nexus` MCP server. Pool module at `src/nexus/operators/pool.py`; tool registrations via `@mcp.tool()` in `src/nexus/mcp/core.py`; singleton management in `src/nexus/mcp_infra.py` alongside the existing T1/T3 singletons. No new entry point. No new `.mcp.json` server block.
 
 ### Worker pool
 
@@ -91,7 +101,7 @@ Pool sizing from config (`.nexus.yml: operators.pool_size`, default 2). Workers 
 
 ### Auth inheritance
 
-Pool startup runs `claude auth status --json`. If `loggedIn == true` (any `authMethod`), pool starts. Otherwise `nexus-operators` fails fast with a clear error: "Operator pool requires authenticated `claude` — run `claude auth login` or set `ANTHROPIC_API_KEY`." No new secret management.
+On first operator call, the pool singleton runs `claude auth status --json`. If `loggedIn == true` (any `authMethod`), pool starts. Otherwise the operator tool returns a clear error: "Operator pool requires authenticated `claude` — run `claude auth login` or set `ANTHROPIC_API_KEY`." No new secret management. The `nexus` MCP server itself still starts without authentication — retrieval tools remain fully available in the unauthenticated path; only operator-requiring tools fail fast.
 
 ### Operator tool contract
 
@@ -109,14 +119,14 @@ Each tool's input relay includes a `$schema_version: 1` marker; mismatched schem
 
 ### Runner integration
 
-`_default_dispatcher` routes operator-named steps to the corresponding `nexus-operators` MCP tool; retrieval steps continue dispatching to `nexus` / `nexus-catalog`. Core MCP tools unchanged. Gap A is closed by P1: the same core tools gain an additive `_structured: bool = False` parameter; when True, they return the dict shape the runner expects. Existing callers unaffected.
+`_default_dispatcher` routes operator-named steps to the corresponding `operator_*` MCP tool on the `nexus` server; retrieval steps continue dispatching to `nexus` / `nexus-catalog`. Core MCP tools unchanged. Gap A is closed by P1: the same core tools gain an additive `_structured: bool = False` parameter; when True, they return the dict shape the runner expects. Existing callers unaffected.
 
 ## Phases
 
 - **P1** — Tool-output contract for core MCP tools. Add `_structured` flag to `search`, `query`, `store_put`, `memory_get`, `memory_search`, `memory_put`. Runner passes `_structured=True` on retrieval dispatches. Additive; no breaking change.
-- **P2** — `nexus-operators` MCP server scaffold. FastMCP registration, async worker pool (`src/nexus/operators/pool.py`), streaming stdin/stdout JSON parser, worker retirement on token threshold, health probe (periodic no-op turn, timeout → respawn).
-- **P3** — Operator implementations. Five MCP tools, each dispatches a user turn to a pool worker with `--json-schema` matching the operator's output shape, intercepts the `StructuredOutput` tool_use event per Finding 3, returns dict.
-- **P4** — Runner integration. `_default_dispatcher` routes operators through `nexus-operators`. No changes to `plan_run`, `plan_match`, or plan JSON schema.
+- **P2** — Operator pool inside `nexus`. `src/nexus/operators/pool.py`: async worker pool, streaming stdin/stdout JSON parser, worker retirement on token threshold, health probe (periodic no-op turn, timeout → respawn). Singleton bound via `mcp_infra.py`, same pattern as T1/T3. No new MCP server.
+- **P3** — Operator implementations. Five tools (`operator_extract`, `operator_rank`, `operator_compare`, `operator_summarize`, `operator_generate`) registered in `src/nexus/mcp/core.py`. Each dispatches a user turn to a pool worker with `--json-schema` matching the operator's output shape, intercepts the `StructuredOutput` tool_use event per Finding 3, returns dict.
+- **P4** — Runner integration. `_default_dispatcher` routes operators through the new tools. No changes to `plan_run`, `plan_match`, or plan JSON schema.
 - **P5** — Empirical `min_confidence` calibration. 40+-intent paraphrase dataset spanning all five verbs, ROC curve, chosen value recorded in `docs/rdr/rdr-079-calibration.md`. Closes Gap C.
 - **P6** — Plan promotion lifecycle. `nx plan promote <plan_id>` CLI with gates (min use count, success rate, description lint). Dry-run mandatory. Closes Gap D.
 - **P7** — End-to-end scenario-seed tests. One integration test per seed plan, asserting execution against the real default dispatcher + live operator pool (marked `@pytest.mark.integration` — opt-in, requires auth).
@@ -154,13 +164,13 @@ Each tool's input relay includes a `$schema_version: 1` marker; mismatched schem
 
 ## Deviations Register
 
-*(empty at draft time)*
+- **Amendment 1 (2026-04-15)** — Moved operator pool from a proposed third MCP server (`nexus-operators`) into the existing `nexus` server. See top of document. Motivation: every tool that will later use workers (including RDR-080's `nx_answer`) needs pool access; cross-process RPC to a sibling server is overhead with no benefit. Pool is core infrastructure, not an external surface.
 
 ## References
 
 - RDR-078 — Unified Context Graph and Retrieval. Infrastructure this RDR completes.
+- RDR-080 — Retrieval Layer Consolidation. Builds on RDR-079's operator pool to collapse the 3-layer skill→planner→operator relay into a single `nx_answer` MCP tool.
 - RDR-067 — Cross-Project RDR Audit Loop. Finding 4 established `claude -p` as the headless dispatch pattern; RDR-079 extends it to the streaming persistent-session variant.
-- RDR-042 — AgenticScholar-Inspired Enhancements. Origin of the analytical-operator subagent, whose output contract P3 preserves when porting to MCP tools.
+- RDR-042 — AgenticScholar-Inspired Enhancements. Origin of the analytical-operator subagent, whose output contract P3 preserves when porting to MCP tools. §Alternatives Considered rejected "MCP tools with direct LLM calls" on credential-coupling grounds; Finding 4 establishes that OAuth inheritance obsoletes that constraint.
 - `nx/agents/analytical-operator.md` — per-operator I/O shapes (canonical source for P3 tool schemas).
-- `scripts/batch-label-taxonomy.py` — prior-art evidence for programmatic `claude` dispatch in this repo.
-- `src/nexus/commands/taxonomy_cmd.py:862` — parallel-worker `claude -p` batch pattern (one-shot, not streaming — P3 is the streaming upgrade).
+- `scripts/batch-label-taxonomy.py`, `src/nexus/commands/taxonomy_cmd.py:862` — prior-art evidence for programmatic `claude` dispatch (one-shot, not streaming — P3 is the streaming upgrade).
