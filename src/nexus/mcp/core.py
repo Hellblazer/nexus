@@ -1298,8 +1298,10 @@ def traverse(
     Returns a step-output dict ``{tumblers, ids, collections}``:
 
       * ``tumblers`` — every reachable node's tumbler string.
-      * ``ids``     — chunk IDs for the reachable nodes (currently
-        empty; populated when chunk-id tracking lands).
+      * ``ids``     — chunk IDs for the reachable nodes. Always ``[]``
+        at this version: chunk-level scoping is tracked by bead
+        ``nexus-0m3``. Use ``$step.collections`` (below) for scoping
+        downstream retrieval; chunk-level precision arrives with 0m3.
       * ``collections`` — the union of physical collection names
         across reachable nodes; ``$step.collections`` feeds a
         downstream ``search(subtree=...)`` call so the next retrieval
