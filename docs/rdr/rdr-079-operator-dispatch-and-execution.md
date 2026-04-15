@@ -153,6 +153,48 @@ Each tool's input relay includes a `$schema_version: 1` marker; mismatched schem
 - **Concurrent worker auth**: under OAuth, N concurrent `claude` workers share the subscription's rate limit. Under API key, they share the key's rate limit. `429` handling is per-worker with backoff.
 - **Final-turn thinking-only response**: Finding 3 showed the `result` text field can be empty when the model's final action is thinking after a tool_use. Controller must not block on the `result` field — wait for the `StructuredOutput` tool_use event or the `result` record with `subtype: success`, whichever comes first.
 
+## Research Findings
+
+Analysis-derived findings (vs the live-test Empirical Findings above). Each records a T2 memory reference for cross-session recall.
+
+### RF-1 — Operator pool belongs inside `nexus`, not a third MCP server (validates Amendment 1)
+
+**Source**: `deep-analyst` architectural analysis 2026-04-15 (T3 store title `analysis-deep-rdr079-boundary-redesign-2026-04-15`). T2 memory: `nexus_rdr/079-research-1-mcp-boundary-analysis`.
+
+**Question investigated**: the initial draft proposed a third FastMCP server (`nexus-operators`) for the operator pool, following the pattern of `nexus` + `nexus-catalog`. Is that the right decomposition?
+
+**Finding**: no. Every downstream MCP tool that will later use worker dispatch (RDR-080's `nx_answer`, `nx_tidy`, `nx_enrich_beads`, `nx_plan_audit`, and any future LLM-backed tool) needs pool access. Making those tools into cross-server MCP clients pointing at their own sibling process is pure overhead — extra `.mcp.json` entry, extra process boundary, extra transport serialisation, identical behaviour. The pool is core infrastructure at the same architectural tier as T1/T2/T3 singletons, not an external tool surface.
+
+**Impact on RDR-079**: Amendment 1 at top of document. `src/nexus/operators/pool.py` (pool module), `src/nexus/mcp/core.py` (tool registrations), `src/nexus/mcp_infra.py` (singleton binding). No new entry point, no third `.mcp.json` block.
+
+**Counterfactual check**: the reasoning for keeping a separate server would be "operator workloads may need independent restart / isolation." This is a valid concern for a latency-critical pool running at production scale; at the current scale (2 workers, personal nexus usage), it's premature. Revisit if operational pain surfaces.
+
+### RF-2 — RDR-042's "MCP server stays LLM-free" constraint is obsolete at the blanket level
+
+**Source**: RDR-042 §Alternatives Considered (verbatim quote in RDR-080 §Key Insight). Empirical Finding 4 above. T2 memory: `nexus_rdr/079-research-2-rdr042-constraint-dissolution`.
+
+**Original constraint** (RDR-042, verbatim): *"MCP tools with direct LLM calls (rejected). Operators as MCP tools that call Anthropic/OpenAI APIs directly. Rejected: couples MCP server to LLM credentials, adds failure mode, breaks the deterministic tool contract."*
+
+**Three concerns and current status**:
+1. **Credential coupling** — eliminated. `claude auth status` reports existing host-user session (OAuth from `claude auth login`, `ANTHROPIC_API_KEY`, enterprise SSO, or `apiKeyHelper`). No new secret required, no new config surface.
+2. **Failure mode** — scoped, not eliminated. Retrieval tools (`search`, `query`, `store_put`, `memory_*`, `traverse`, catalog tools) remain deterministic and LLM-free. Only operator-requiring tools can fail due to pool unavailability, and they fail fast + gracefully per SC-10.
+3. **Contract integrity** — maintained per-tool. Tools that dispatch workers declare it explicitly in their signature and return type. The MCP server is no longer universally LLM-free, but each tool retains a clear contract and the non-LLM subset is preserved.
+
+**Impact on RDR-079**: unblocks P2–P3. Impact on RDR-080: provides the constraint-dissolution reasoning for folding the `query-planner` and `analytical-operator` agents into MCP tools.
+
+### RF-3 — Cost-model change is within existing acceptance tolerance
+
+**Source**: empirical operator prototype (Empirical Finding 5) + repository survey. T2 memory: `nexus_rdr/079-research-3-cost-model-survey`.
+
+**Observation**: RDR-042 assumed ~$0 incremental cost because every operator call happened in the user's own `claude` session. Post-RDR-079, operator calls spend ~$0.037/call on Haiku via the pool. This is a real cost increase per call, but:
+
+- **Baseline already exists**: `src/nexus/commands/taxonomy_cmd.py:862` already spends via parallel `claude -p --model haiku` batch labeling. Users tolerate this; it's in production today.
+- **Hot paths stay deterministic**: auto-linker on `store_put`, `taxonomy_assign_hook` post-store, `catalog_auto_link` scratch scanner — none spawn workers. Their determinism contract is preserved.
+- **Interactive cost is modest**: a 5-step `nx_answer` call with 1–2 operator steps costs ~$0.05–0.10, well below typical user expectation for a research-grade answer.
+- **Budget guard planned**: RDR-080 P5 surfaces daily spend via `.nexus.yml: operators.daily_budget_usd` with 80%/100% thresholds.
+
+**Conclusion**: the cost tradeoff is acceptable. Document the per-tool dispatch-or-not classification in `docs/architecture.md` so future tool authors know which category their addition falls into.
+
 ## Assumptions
 
 - `claude` CLI v2.1+ on the host, `claude auth status` returns `loggedIn: true` under any `authMethod`.
