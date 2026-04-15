@@ -64,7 +64,11 @@ def plan_match(
     dimensions: dict[str, Any] | None = None,
     scope_preference: str = "",
     context: dict[str, Any] | None = None,
-    min_confidence: float = 0.85,
+    # RDR-079 P5 calibration (docs/rdr/rdr-079-calibration.md) picked
+    # 0.40 as the F1-optimal threshold for the bundled MiniLM T1 cache.
+    # Callers that need precision-first behavior override explicitly
+    # (0.50 → precision 0.90 at the cost of recall 0.19).
+    min_confidence: float = 0.40,
     n: int = 5,
     project: str = "",
 ) -> list[Match]:

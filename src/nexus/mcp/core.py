@@ -1393,7 +1393,7 @@ def plan_match(
     intent: str,
     dimensions: str = "",
     scope_preference: str = "",
-    min_confidence: float = 0.85,
+    min_confidence: float = 0.40,
     n: int = 5,
     project: str = "",
 ) -> str:
@@ -1414,8 +1414,12 @@ def plan_match(
             contain no commas.
         scope_preference: Reserved for future scope-cascade weighting
             (PQ-14). Accepted but unused at this version.
-        min_confidence: Cosine threshold (0.0–1.0). Default 0.85 per
-            PQ-2. FTS5 fallback matches ignore this gate.
+        min_confidence: Cosine threshold (0.0–1.0). Default 0.40 per the
+            RDR-079 P5 calibration (`docs/rdr/rdr-079-calibration.md`)
+            — F1-optimal for the bundled MiniLM T1 embedder. Callers
+            that need precision-first behavior override to 0.50 (trades
+            recall for precision 0.90). FTS5 fallback matches ignore
+            this gate.
         n: Max results to return.
         project: Restrict to plans tagged with this project.
     """
