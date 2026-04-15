@@ -6,6 +6,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.3.1] - 2026-04-15
+
+### Fixed
+
+- **T3 metadata schema rationalised (nexus-40t)**: fresh `nx index pdf` ingests on ChromaDB Cloud no longer trip the 32-key `NumMetadataKeys` quota. New `src/nexus/metadata_schema.py` defines the 31 canonical top-level keys actually read by `where=` filters, scoring, and display; every T3 `upsert`/`update` now funnels through `normalize()` + `validate()` at the write boundary. The prior insertion-order-dependent silent-trim heuristic — which dropped newly-enriched `bib_*` fields when total key count crossed 32 — is gone. Violations now raise `MetadataSchemaError` with the full key set.
+- **Consolidated `git_*` provenance into a single `git_meta` JSON string** (4 slots → 1). Sub-keys: `project`, `branch`, `commit`, `remote`.
+- **Confirmed cargo keys dropped**: `bib_semantic_scholar_id`, `pdf_subject`, `pdf_keywords`, `source_date`, `is_image_pdf`, `has_formulas`, `format`, `extraction_method`, `chunk_type`, `filename`, `file_extension`, `programming_language`, `ast_chunked`, `page_count`, `indexed_at`. All were written by the indexing pipeline but read by no call site.
+- **New `content_type` field** (`code` / `pdf` / `markdown` / `prose`) injected by `normalize()` as the canonical routing signal; supersedes the overlapping legacy pair `(store_type, category)`, though both remain in the allowed schema for user-facing back-compat.
+
+### Notes
+
+- **No on-disk backfill** — existing records with >31 metadata keys remain readable. Only new writes are constrained. A dedicated `nx collection rewrite-metadata` command will land in a follow-up to rewrite historical ingests under the canonical schema.
+
 ## [4.3.0] - 2026-04-14
 
 ### Added
