@@ -167,6 +167,36 @@ RDR-079's operator prototype showed 3 extractions at ~$0.037/call amortised on H
 
 The ten agents this RDR keeps (`debugger`, `deep-analyst`, `developer`, etc.) all have a shared property: mid-execution, the user may redirect them ("actually, check this other file too" / "try a different hypothesis"). That's the definition of an agent vs. a tool. A `debugger_diagnose(bug_description)` MCP tool would be a much worse debugger than the current subagent, because you can't course-correct mid-run. The boundary rule captures this as "expected to interject mid-execution."
 
+### RF-5 — Session isolation composes correctly across the two-RDR stack
+
+**Source**: RDR-079 acceptance gate chain (5-gate history, final critic `a51d131a93ab9a870`). T2 memory: `nexus_rdr/080-research-5-session-isolation-composition`.
+
+`nx_answer` runs inside the `nexus` MCP server process, which is attached to the user's T1 session (discovered via PPID-walk — the default path when `NEXUS_T1_SESSION_ID` is unset). When `nx_answer` dispatches an operator step, the call goes through RDR-079's operator pool, which spawns a worker with `NEXUS_T1_SESSION_ID=pool-<uuid>` — the worker joins the pool's isolated session, not the user's. This composition is correct and requires no new design in RDR-080:
+
+- `nx_answer` controller reads/writes the user's T1 for legitimate purposes (plan_match cache, plan_save mid-session, run metrics).
+- Operator workers never touch the user's T1 — their writes land in the pool session per RDR-079 invariants I-1..I-4.
+- Plan-first enforcement inside `nx_answer` is authoritative; worker-mode MCP config strips the `plan_*` / `operator_*` tools from workers, so recursion is impossible by construction (RDR-079 SC-12).
+
+**Implication**: RDR-080 does NOT need its own T1/isolation design. The two RDRs compose correctly if RDR-079 ships first.
+
+### RF-6 — `store_get_many` batching is a hard constraint for `nx_answer`, not an optional optimisation
+
+**Source**: RDR-079 Risks ("Controller `$stepN.*` hydration — optional optimisation, not a requirement") + ChromaDB Cloud quota `MAX_QUERY_RESULTS = 300` (`src/nexus/db/chroma_quotas.py`). T2 memory: `nexus_rdr/080-research-6-hydration-batching`.
+
+RDR-079 framed `store_get_many` as an optional controller-side optimisation because workers could self-hydrate. RDR-080's `nx_answer`, however, runs plan steps in-process — there is no worker to offload hydration to. When a plan step references `$stepN.ids` with a list longer than 300 (realistic for broad-corpus research queries), `nx_answer` MUST batch the `store_get` calls at ≤ 300 IDs per ChromaDB query or get a silent quota truncation.
+
+**Implication**: P1 or P3 of this RDR's implementation must ship `store_get_many(doc_ids: list) -> list[dict]` with explicit batching, and the synthesis step of every scenario seed must consume it. Add to SC-8 (or new SC): assert no truncation on a 500-ID hydration test.
+
+### RF-7 — The pure-compute boundary is symmetric: operators AND coordinator earn their placement
+
+**Source**: architectural review of RDR-079's RF-4 (operators as pure-compute workers) + this RDR's boundary rule. T2 memory: `nexus_rdr/080-research-7-boundary-symmetry`.
+
+RDR-079 established that operators are pure compute (text → JSON) and therefore belong in MCP tools with `--json-schema` enforcement, not as agents. The symmetric argument validates `nx_answer`'s MCP placement: it is an orchestration capability whose I/O is a pure function of (question, scope, bindings, nx state) → answer string. It completes without user clarification mid-turn. It has deterministic step output (the final step's result). It fits the MCP side of the boundary rule cleanly.
+
+The same argument rules OUT the kept agents: `debugger`, `deep-analyst`, etc. have non-deterministic, mid-turn-interactive behaviour by nature. A user says "actually, check this other file too" — a tool cannot accept that mid-execution; an agent can.
+
+**Implication**: the boundary rule is not a one-direction heuristic ("push things to MCP when possible") but a symmetric fitness test. Some agents MUST stay agents; some MCP tools MUST stay MCP tools. RDR-080 doesn't just move things into MCP — it validates that each moved thing actually belongs there by the test in §Boundary rule.
+
 ## Proposed Questions
 
 - **PQ-1** — Should `nx_answer` emit a run trace as a first-class artifact (T2 row or T3 doc) so users can inspect what plan ran, which step produced what, and the cost? Proposed default: yes, persist to T2 `nx_answer_runs` table, TTL 7 days.
