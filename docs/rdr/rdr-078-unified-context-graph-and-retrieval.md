@@ -1,228 +1,153 @@
 ---
-title: "RDR-078: Unified Context Graph & Retrieval — Projection Link Promotion, Surface Alignment, Scenario Skills"
+title: "RDR-078: Plan-Centric Retrieval — Semantic Plan Matching, Dual-Taxonomy Planning, Scenario Plans"
 status: draft
 type: feature
 priority: P2
 created: 2026-04-14
-related: [RDR-063, RDR-070, RDR-075, RDR-077, RDR-053]
+related: [RDR-042, RDR-070, RDR-075, RDR-077]
 reviewed-by: self
 ---
 
-# RDR-078: Unified Context Graph & Retrieval
+# RDR-078: Plan-Centric Retrieval
 
-Follow-up to RDR-077 surfaced during the v4.3.0 live demo on the ART repo. Cross-corpus retrieval is currently a three-legged stool: the catalog link graph, the taxonomy topic graph, and the RDR-077 projection graph. Each is useful in isolation; each is walled off from the others. Agents working on planning, review, analysis, debugging, and documentation write the same composition glue repeatedly, and the glue always degrades at the same joint — the link graph is too sparse where semantic similarity is strong.
+Pickup of the two explicit deferrals in RDR-042. That RDR shipped the analytical-operator agent, plan library (`plans` table + FTS5), the `/nx:query` skill, and the self-correction loop. It explicitly deferred a semantic layer over the plan library ("Can add T3 semantic layer later if FTS5 matching proves inadequate") and skipped taxonomy-driven planning ("may revisit via lightweight clustering in a future RDR"). RDR-070 shipped HDBSCAN taxonomy discovery across both code and prose corpora; RDR-077 shipped similarity-aware projection quality signals. The blockers RDR-042 cited are now absent. RDR-078 closes both deferrals in one iteration.
 
-This RDR closes three gaps in one iteration: promote projection assignments into the catalog link graph so the existing `query(follow_links=...)` walks a dense graph, align the retrieval-tool surfaces so a single call can express topic-and-link constraints together, and add five thin scenario skills so agents reach for this machinery reflexively.
+The center of gravity is the **plan** — a saved query+DAG pair — not the link graph, not projection, not cross-embedding similarity. Plans compose steps over each domain's taxonomy independently in its native embedding space. No cross-embedding bridging is attempted; the architecture never requires it.
 
 ## Problem
 
-### Problem 1: Catalog link graph is sparse where it matters most
+### Problem 1: Plan library is write-only for semantic intent
 
-The catalog heuristic linker (`nexus.catalog.link_generator.generate_code_rdr_links`) matches code-file *stem* against RDR *title* tokens. It produces `implements-heuristic` edges with acceptable precision but poor recall:
+RDR-042's plan library stores `(query, plan_json, outcome, tags, project, ttl, created_at)` and exposes FTS5 search over the query text (`plan_search`). FTS5 matches *tokens*; it does not match *intent*. Two paraphrased queries that ought to resolve to the same plan typically miss — the agent re-decomposes, and the library grows with near-duplicate entries.
 
-- **Measured per-workspace heuristic recall** (2026-04-14, via `nexus_rdr/078-research-1`):
-  - ART workspace (`code__ART-8c2e74c0`): 4,180 code entries, 35 heuristic edges to sibling RDR/docs — **0.8% of code files have any link**.
-  - nexus workspace (`code__nexus-571b8edd`): 280 code entries, 22 heuristic edges — **7.9%**.
-- The earlier "25.9%" figure in the pre-gate draft came from `nx catalog coverage` aggregated across all 93 collections in the live DB — it counts any link of any type regardless of endpoint, which is not the recall we need here. Per-workspace, directed-to-authoring-RDRs recall is an order of magnitude worse.
-- Live ART demo (RDR-002 "Fix Vision→Language Priming in CrossModalIntegrationTest"): the linker produced exactly one edge — to `CrossModalIntegrationTest.java`. Semantic search surfaced three additional production classes (`LanguagePrimingSignal.java`, `LanguageToVisionPipeline.java`, `Phase4CrossModalPrimingTest.java`) that implement the RDR. None were linked because their filenames share no tokens with the RDR title.
+AgenticScholar's 40% cost reduction came specifically from **semantic plan reuse above a confidence threshold**. RDR-042 documented this as a known deferral (§Alternatives: "T3 for plan storage (deferred)"). Two conditions were set for pickup: (a) evidence that FTS5 underperforms, and (b) infrastructure to embed queries. Both are met — FTS5 is an exact-token index by design, and the RDR-070/077 taxonomy stack provides per-query embeddings on demand via the same ChromaDB client that indexes documents.
 
-The coverage gap is real, not theoretical — the filename heuristic cannot see through paraphrase. Every richer link generator we might build has to compute *something* that overlaps with raw semantic similarity. That compute already exists: RDR-077's `topic_assignments` table.
+### Problem 2: Plans have no taxonomy-scope primitive
 
-### Problem 2: Projection graph and link graph are disconnected
+The current `plan_json` schema encodes ordered operator steps (`search`, `extract`, `summarize`, `rank`, `compare`, `generate`). Each step carries tool arguments but has no *domain-scope* specifier. A plan for "find prior art on priming" can't express "take the topic `vision-language priming` from the prose taxonomy and the topic `LanguagePrimingSignal` from the code taxonomy and return both with their linked context" — it can only express a flat `search` that either hits one corpus set or the other.
 
-RDR-077 wired a full cross-collection projection pipeline. As of live state, `topic_assignments` holds projection rows with raw cosine `similarity`, `assigned_at`, and `source_collection`. The ICF-weighted threshold filter on write already gates out low-quality matches. `compute_icf_map()` exposes the hub-suppression signal at query time.
+This forces the query-planner agent to emit plans that are either (a) prose-only, (b) code-only, or (c) a sequence of two independent flat searches with no shared scope. Option (c) is what gets produced, and it loses the natural alignment that the taxonomies expose.
 
-But nothing promotes those rows to catalog edges. A code chunk that projects into an RDR topic with adjusted similarity 0.82 is semantic-implements-level evidence and it sits in a SQLite table that `query(follow_links=...)` will never traverse.
+### Problem 3: Scenario-shaped reuse is unimplemented
 
-The two graphs share the same node identifiers (tumblers, doc_ids, collection names). The bridge is mechanical.
+Five canonical scenarios recur across every nexus session: design/planning, critique/review, analysis/synthesis, dev/debug, documentation. Each has a stereotyped retrieval shape. Today each session reinvents the retrieval DAG ad-hoc, even when a prior session three days ago solved the same pattern. The infrastructure is in place — `plan_save`, `plan_search`, `/nx:query` — but there are no seed plans that match the five recurring scenarios. Agents don't reach for the library because the library is empty of what they'd need.
 
-### Problem 3: `search` and `query` MCP tools expose orthogonal subsets of the engine
+### Problem 4: Retrieval surfaces are bifurcated
 
-Both tools call `search_cross_corpus()`. Neither exposes all of its capability.
-
-| Capability | `search` (chunk-level) | `query` (document-level) |
-|---|---|---|
-| Corpus selection | yes | yes |
-| Metadata filter (`where=`) | yes | yes |
-| Topic pre-filter (`topic=`, RDR-070) | yes | no |
-| Cluster output (`cluster_by="semantic"`) | yes | no |
-| Pagination (`offset`) | yes | no |
-| Catalog author filter | no | yes |
-| Catalog content_type filter | no | yes |
-| Catalog subtree filter | no | yes |
-| Link traversal (`follow_links`, `depth`) | no | yes |
-
-An agent that wants "RDRs linked to the current module, containing chunks in topic Y" cannot express it in one call. They must: (a) `query(follow_links=..., subtree=...)` to get the linked set, (b) `search(topic=...)` across the result's collection set, (c) intersect client-side. The two-call pattern loses topic-boost ranking fusion because neither tool knows about both constraints.
-
-This is feature bifurcation, not feature redundancy. The tools differ in output granularity (chunks vs best-chunk-per-document); they should *not* differ in the retrieval constraints they accept.
-
-### Problem 4: Agents don't reach for the graph for design, review, or analysis
-
-`nx:query` exists and dispatches the query-planner agent — but by design only for *novel analytical pipelines* (multi-step extract / compare / generate). For the five everyday scenarios the user described — design/planning, critique/review, analysis/synthesis, dev/debug, documentation — there is no skill that tells the agent "call `query(follow_links=..., depth=2, topic=..., subtree=...)` before writing anything."
-
-The primitives are usable today; the *reach* is the gap.
+`search()` MCP tool accepts `topic=` (taxonomy pre-filter, RDR-070) but not `follow_links=`/`subtree=`/`author=` (catalog routing, RDR-050). `query()` accepts the reverse. A plan step that wants "topic=X within collections linked to RDR-Y" can't express it in one tool call. This is additive feature bifurcation over the same engine (`search_cross_corpus`), not intentional separation — and it forces plans into unnecessary multi-step shapes.
 
 ## Proposed Design
 
-Three phases. Each stands alone and each unlocks value independently, but they compose.
+Five phases. Each builds on RDR-042's shipped substrate.
 
-### Phase 1: Projection → Catalog link promotion
+### Phase 1: Semantic plan matching (`plan_match` MCP tool)
 
-New link generator `generate_semantic_implements_links(catalog, taxonomy)` in `src/nexus/catalog/link_generator.py`. Runs as part of `nx catalog link-generate`.
+Pickup of RDR-042 §Alternatives "T3 for plan storage (deferred)".
 
-**Input:** `topic_assignments` rows where `assigned_by = 'projection'` and `source_collection IS NOT NULL`.
+- New T3 collection `plans__semantic`: embed each plan's `query` field via the standard index-time embedding pipeline. One embedding per plan row. Plan metadata (`project`, `tags`, `ttl`) carried as ChromaDB metadata for filter.
+- Write path: `plan_save` gains a post-commit side effect — embed the query and upsert to `plans__semantic`. Failure is logged but not fatal (FTS5 remains the source of truth; semantic is a cache).
+- Read path: new MCP tool `plan_match(query, project=None, n=5, min_confidence=0.0)` returns `[(plan_id, plan_query, confidence, plan_json), ...]`. Confidence is cosine similarity. The T3 collection uses the default embedding model (`voyage-context-3` for mixed-intent queries — agents' phrasing is prose-like even for code queries).
+- Deletion path: `plans.close` TTL purge deletes the matching `plans__semantic` row. Idempotent.
+- The existing `plan_search` FTS5 tool is untouched — it remains the fast path for tag/project filters and exact token matches.
 
-**Filter:** ICF-weighted adjusted similarity above a per-corpus-type floor. Reuses `CatalogTaxonomy.compute_icf_map()` so gate values stay consistent with what the projection writer itself uses. Rows whose target topic has ICF below a minimum threshold (i.e., hubs) are excluded — generic topics should not produce bridging edges.
+### Phase 2: Dual-taxonomy plan DAG
 
-**Mapping:** each qualifying row `(doc_id, topic_id, similarity, source_collection)` becomes:
-- From: catalog entry whose `physical_collection == source_collection` and whose doc-level identity covers `doc_id` (the file the chunk belongs to).
-- To: catalog entry that represents the target topic — pick the RDR/doc entry with the highest `doc_count` in the topic's owning collection.
-- Link type: `semantic-implements` (new).
-- `created_by`: `projection`.
-- Metadata: `{raw_similarity, adjusted_similarity, source_chunk_id, topic_id}` — carried for later audit and recomputation.
+Extend the plan step schema (currently `{tool, args}`) with an optional `scope` field:
 
-**Idempotency:** prefer-higher UPSERT on `(from, to, link_type)`. Re-running the generator updates similarity without duplicating edges. Mirrors the RDR-077 Phase 2 write-path prefer-higher invariant.
+```json
+{
+  "tool": "search",
+  "args": {"query": "priming visual-to-language", "corpus": "knowledge,docs,rdr"},
+  "scope": {
+    "taxonomy_domain": "prose",
+    "topic": "vision-language priming",
+    "follow_links": "cites",
+    "depth": 2
+  }
+}
+```
 
-**Chunk→document aggregation:** many chunks of the same file may project into the same topic. The generator aggregates by `(source_file, target_entry)` and emits one edge carrying `max(adjusted_similarity)` across the chunk set. Raw per-chunk evidence stays in `topic_assignments`; the catalog layer holds the aggregated judgment.
+- `taxonomy_domain`: `prose` | `code`. Selects which HDBSCAN-discovered topic tree's labels are valid for `topic=`. Prose covers `knowledge__*` / `docs__*` / `rdr__*` / `paper__*`; code covers `code__*`. Each operates in its native embedding space; no cross-model arithmetic.
+- Steps with `scope.taxonomy_domain = code` forward `topic=` to `search()` / `query()` over code corpora only. Same for prose.
+- A plan expresses the dual-taxonomy operation as **two scoped steps** joined by a downstream step (e.g., `compare` or `summarize`), or by document-set intersection at the plan-runner level. No new cross-embedding primitive.
 
-**Why a new link type and not `implements`:** agents and humans judge evidence differently. `implements` is a hand-curated assertion. `implements-heuristic` is filename overlap — cheap signal, high precision, low recall. `semantic-implements` is projection-derived — medium precision, high recall. Keeping them distinct lets `query(follow_links=...)` scope by confidence.
+The query-planner agent learns the pattern through its few-shot plan priors (Phase 3 seed plans are the examples).
 
-### Phase 2: Retrieval surface alignment
+### Phase 3: Scenario plans seeded at setup
 
-Additive. No deprecation. No breakage.
+Five plans, seeded by `nx catalog setup` alongside the existing 5 builtin plan templates from RDR-042. Each plan is a 2-5 step DAG spanning both taxonomies where the scenario calls for it.
 
-**Add to `search()` MCP tool** (chunk-level):
-- `author: str = ""` — catalog author filter.
-- `content_type: str = ""` — catalog content-type filter.
-- `subtree: str = ""` — tumbler prefix scope.
-- `follow_links: str = ""` + `depth: int = 1` — link graph expansion before semantic search.
-
-**Add to `query()` MCP tool** (document-level):
-- `topic: str = ""` — topic label pre-filter / boost (mirrors `search()`).
-- `cluster_by: str = ""` — optional Ward/semantic grouping of documents.
-- `offset: int = 0` — proper pagination.
-
-**Default corpus alignment:** both tools default to `"knowledge,code,docs,rdr"`. (Currently `search` defaults to three, `query` to one — inconsistent.)
-
-**Shared sub-engine:** factor the catalog-routing logic in `query()` into `nexus.search_engine.resolve_catalog_collections()` so `search()` can reuse it verbatim. The topic pre-filter is already in `search_cross_corpus()`; exposing it on `query()` is a one-line passthrough.
-
-**Fusion ranking** (RDR-070 already has the machinery): when both topic filter and link traversal are set, the engine pre-filters to linked collections, applies topic boost during ranking, and returns results in fused distance order. No new math — the combinations are independent filters over the same chunk set.
-
-**The output-granularity distinction remains the one reason to pick one tool over the other:** `search` for "where are the matching pieces," `query` for "which documents match." Every other retrieval constraint works on both.
-
-### Phase 3: Scenario skills + session/subagent priming
-
-A skill that nobody invokes is dead markdown. Phase 3 has three surfaces: the skills themselves, the session-start hook that primes the main agent, and the subagent-start hook + per-agent system prompts that prime spawned agents for the five scenarios.
-
-#### 3a: Five scenario skills
-
-One markdown file each under `nx/skills/`. Each teaches the agent exactly which `search()` / `query()` shape fits one of the scenarios the user identified. Triggers + templates, not new code.
-
-| Skill | Scenario | Trigger | Core instruction |
-|---|---|---|---|
-| `nx:research-plan` | Design / arch / planning | User asks to build a plan, design a feature, write an RDR, extend a subsystem | Before writing: `query(question=..., follow_links="semantic-implements", depth=2, subtree=<module>)` to gather prior art + linked code. Then `search(topic=..., corpus="rdr")` for related decisions. |
-| `nx:review-context` | Critique / audit / review | User asks to review a PR, audit a design, critique a document | Before critique: `query(question=<summary>, follow_links="implements,semantic-implements,supersedes", depth=2)` to surface authoring decisions, prior art, related incidents. |
-| `nx:analyze-corpus` | Analysis / synthesis / research | User asks to analyze across a corpus, compare approaches, synthesize findings | `query(question=..., topic=..., follow_links="cites", depth=2)` with `subtree` scoping; consider dispatching `nx:query` planner for multi-step extract/compare. |
-| `nx:debug-context` | Dev / debug | User asks why code looks a certain way, what an error means, how a subsystem works | `catalog links-for-file <path>` → RDRs explaining *why*; Serena for symbol navigation covers *what*. |
-| `nx:doc-scope` | Documentation | User asks what code a doc should reference, what docs a code file needs | `query(question=..., follow_links="cites,documented-by", depth=1)` for existing references; `catalog suggest-links` for candidates. |
-
-Each skill is ~50 lines of markdown with triggering-condition block, invocation template, rationale. Query-planner stays for analytical pipelines; these cover the 80% workflow that doesn't need decomposition.
-
-#### 3b: Session-start priming (`nx/hooks/scripts/session_start_hook.py`)
-
-The current "## nx Capabilities" block injected at session start lists `search`, `query`, `/nx:query`, plan library, scratch, catalog, enrichment. Extend with a new **"## Scenario Retrieval"** block listing each scenario skill with a one-line trigger keyword set, so the main agent reaches for the skill reflexively when a request fits the pattern. Example line:
-
-> `nx:research-plan` — triggers on "plan", "design", "extend", "implement RDR". Invokes `query(follow_links="semantic-implements", depth=2)` before writing.
-
-No new tokens-per-session beyond ~6 lines. The point is to put the skill names into the session context so the `using-nx-skills` trigger gate can fire on them.
-
-#### 3c: Subagent priming (`nx/hooks/scripts/subagent-start.sh` + agent system prompts)
-
-Two touch points per scenario agent:
-
-- The grep-dispatched context-injection block in `subagent-start.sh` for the relevant agent gets a "Knowledge-graph-first preamble" — one paragraph telling the agent its first action on a new task is to walk the catalog/topic graph via `query(follow_links=..., depth=2, topic=..., subtree=...)` before reading files.
-- The agent's own `nx/agents/<name>.md` frontmatter + opening instruction are edited to cite the same pattern — so the behavior survives when the hook context is trimmed.
-
-Target agents (mapped to scenarios):
-
-| Agent | Scenario served | Edit |
+| Plan name | Scenario | DAG sketch |
 |---|---|---|
-| `strategic-planner` | Design / plan (3a: `research-plan`) | "Before decomposing, call `query(follow_links=semantic-implements, depth=2)` to surface prior art + linked code." |
-| `architect-planner` | Architecture | Same pattern, scoped to module-level `subtree`. |
-| `code-review-expert` | Review (3a: `review-context`) | "Before reviewing, call `catalog links-for-file` on changed paths to load authoring RDRs and prior related decisions." |
-| `substantive-critic` | Critique (3a: `review-context`) | Same as code-review-expert plus `follow_links=supersedes` to trace decision evolution. |
-| `deep-analyst` | Deep analysis | "Before analysis, walk the graph: `query(follow_links=cites,depth=2, topic=...)`." |
-| `deep-research-synthesizer` | Research (3a: `analyze-corpus`) | "First pass is graph-walk + topic pre-filter, not web search." |
-| `debugger` | Debug (3a: `debug-context`) | "Before hypothesizing, `catalog links-for-file` on the failing module to load the RDR that shaped its design." |
-| `plan-auditor` | Plan review | "Before auditing the plan, walk `follow_links=implements,supersedes` to confirm the plan respects existing decisions." |
+| `research-plan` | Design / arch / planning | `search` over prose (`topic=<concept>`, `follow_links="cites,implements"`) → `search` over code (`topic=<concept>`, `subtree=<module>`) → `summarize` the union with evidence citations. |
+| `review-context` | Critique / audit / review | `catalog links-for-file` on each changed path → `search` over prose (authoring RDRs, `follow_links="supersedes,relates"`) → `extract` key decisions per RDR → `compare` decisions vs. changed code. |
+| `analyze-corpus` | Analysis / synthesis / research | `search` over prose (`topic=<area>`) → `search` over code (`topic=<area>`) → `rank` both result sets by `criterion` → `generate` synthesis with citations. |
+| `debug-context` | Dev / debug | `catalog links-for-file <failing-path>` → `search` over prose (authoring RDRs) → Serena `jet_brains_find_symbol` over failing code → `summarize` the design context + related RDRs. |
+| `doc-scope` | Documentation | `search` over prose (`follow_links="cites"`) for existing references → `search` over code (`topic=<area>`) for candidate subjects → `compare` to find doc-coverage gaps. |
 
-Agents not listed (indexer-internal, pdf-processor, etc.) are out of scope — they're not retrieval-shaped.
+Plan names match the skill names (Phase 5) so `plan_match("research this concept")` and the `nx:research-plan` skill both resolve to the same DAG. Seeding via `nx catalog setup` is idempotent (existing plans with the same `(project, name)` are updated, not duplicated).
 
-#### 3d: Plan-library seeding (`plan_save` MCP tool)
+### Phase 4: Retrieval surface alignment
 
-Nexus already ships a plan library: `plan_save`/`plan_search` MCP tools over a T2 `plans` table, 5 builtin templates seeded at `nx catalog setup`. It's the right substrate for canonical `query()`/`search()`/`catalog` invocation patterns — tool-agnostic JSON describing retrieval steps, project-scoped, searchable by tags.
+Additive, no breakage.
 
-Seed one plan per scenario skill — **same names as the skills so `plan_search(scenario_key)` and the skill both resolve to the same pattern**. Each plan is a 2–4 step sequence:
+- **`search()`** gains: `author`, `content_type`, `subtree`, `follow_links`, `depth` (all catalog-routing knobs from `query()`).
+- **`query()`** gains: `topic`, `cluster_by`, `offset` (all taxonomy/pagination knobs from `search()`).
+- Both default corpus: `"knowledge,code,docs,rdr"` (currently inconsistent).
+- Factor catalog-routing logic from `mcp/core.py:240-291` into `nexus.search_engine.resolve_catalog_collections()` so both tools share one implementation.
+- `topic=` on `query()` requires forwarding the param plus doc-level dedup over the taxonomy's 500-ID cap boundary (RF-3 from prior analysis). Not a pure passthrough.
 
-| Plan name | Tags | Steps (abbreviated) |
-|---|---|---|
-| `research-plan` | `scenario,design,planning,rdr` | 1. `query(follow_links="semantic-implements", depth=2, subtree=<module>)` for prior art. 2. `search(topic=<topic>, corpus="rdr")` for related decisions. 3. `catalog suggest-links` for unlinked candidates. |
-| `review-context` | `scenario,review,critique,audit` | 1. `catalog links-for-file` on changed paths. 2. `query(follow_links="implements,semantic-implements,supersedes", depth=2)` on each authoring RDR. 3. `search(topic=<area>, corpus="rdr")` for related incidents. |
-| `analyze-corpus` | `scenario,analysis,synthesis,research` | 1. `query(topic=<topic>, follow_links="cites", depth=2, subtree=<scope>)` for the citation network. 2. If multi-step extract/compare needed, dispatch `nx:query` planner. |
-| `debug-context` | `scenario,debug,dev` | 1. `catalog links-for-file <failing-path>` for the RDR that shaped the design. 2. Serena `jet_brains_find_symbol` on the offending symbol. 3. `search(topic=<error-domain>, corpus="code")` for sibling implementations. |
-| `doc-scope` | `scenario,documentation` | 1. `query(follow_links="cites,documented-by", depth=1)` for existing references. 2. `catalog suggest-links` for unlinked candidates. |
+Output granularity (chunks vs. best-chunk-per-document) remains the reason to pick one tool over the other. Every other retrieval constraint is available on both.
 
-Each plan's steps are the canonical multi-tool sequence — including when to fall through to `nx:query` for decomposition or Serena for symbol-level navigation. Plans are **project-scoped** (`project="nexus"` defaults; overridden per-repo) so per-project overrides can refine the `subtree` or corpus scope.
+### Phase 5: Plan-first priming (skills + hooks + agent prompts)
 
-The `query-planner` agent already consumes `few_shot_plans` from the library (per its relay contract). Seeding these scenario plans makes them available as priors for the planner's decomposition, so even the "novel analytical pipeline" path benefits from the scenario patterns.
+The primary ergonomic change. Agents must reach for `plan_match` **before** decomposing any retrieval task.
 
-One seeding script under `src/nexus/mcp_infra.py` or a new `src/nexus/catalog/scenario_plans.py`, run by `nx catalog setup` alongside the existing 5 builtin seeds. Upgrade-safe — reseed is idempotent via `plan_save` prefer-latest semantics.
+- **`nx:plan-first` skill** — invoked at the top of every research/review/analyze/debug/doc task. Triggers on verbs like "plan", "design", "review", "analyze", "debug", "document". Instructs: call `plan_match(query, min_confidence=0.85)` first; if a match exists, present it and execute; if not, dispatch `/nx:query` (the query-planner) and save the result.
+- **Five scenario skills**: `nx:research-plan`, `nx:review-context`, `nx:analyze-corpus`, `nx:debug-context`, `nx:doc-scope`. Each is a thin wrapper that calls `plan_match("<scenario-name> <user-query>")` with a bias toward the matching scenario plan. Names intentionally match the seeded plan names.
+- **SessionStart hook** (`nx/hooks/scripts/session_start_hook.py`) — add a "## Plan Library" block to the injected context listing `plan_match` / `plan_save` / `plan_search` and the five scenario names. Extends the existing "## nx Capabilities" section.
+- **SubagentStart hook** (`nx/hooks/scripts/subagent-start.sh`) — for the eight retrieval-shaped agents (strategic-planner, architect-planner, code-review-expert, substantive-critic, deep-analyst, deep-research-synthesizer, debugger, plan-auditor), inject a "plan-match-first" preamble: *before decomposing any retrieval task, call `plan_match(query, min_confidence=0.85)`; execute the returned plan if match confidence clears the threshold.*
+- **Per-agent `nx/agents/<name>.md`** — each target agent's opening instruction cites the `plan_match`-first pattern independently of the hook, so behavior survives hook-context trimming.
 
 ## Success Criteria
 
-- **SC-1** — `generate_semantic_implements_links` generator lands in `link_generator.py` with per-corpus-type ICF-adjusted similarity thresholds (code__* 0.60, knowledge__* 0.45, docs__*/rdr__* 0.50; these are starting points — PQ-1).
-- **SC-2** — Running `nx catalog link-generate` on a workspace with established projection (run `nx taxonomy project --backfill --persist` first if absent) increases **per-workspace** code-entry→authoring-RDR coverage from the baseline measured in RF-1 (0.8% ART, 7.9% nexus) to ≥ 50% **where projection data exists**, without introducing more than 5% false-positive bridges (measured against a 50-pair hand-labeled audit set). For workspaces with no projection rows yet (ART at the time of this RDR) Phase 1 is a no-op — its precondition is RDR-077-style projection having run.
-- **SC-3** — `semantic-implements` edges carry metadata: `raw_similarity`, `adjusted_similarity`, `source_chunk_id`, `topic_id`. `nx catalog show <tumbler>` renders them distinctly from `implements-heuristic`.
-- **SC-4** — `search()` accepts `author`, `content_type`, `subtree`, `follow_links`, `depth` with the same semantics as `query()`. Same question against the same collection set with the same catalog filter returns overlapping results between the two tools (chunk subset ⊆ document's chunk pool).
-- **SC-5** — `query()` accepts `topic`, `cluster_by`, `offset`. A `topic=` pre-filter on `query()` produces the same document set that `search(topic=...)` followed by doc-level grouping would.
-- **SC-6** — Both tools default to `"knowledge,code,docs,rdr"`.
-- **SC-7** — Five scenario skills ship in the `nx` plugin. Each has a triggering-condition block, an invocation template, and a worked example. `plugin-dev:skill-reviewer` passes each one.
-- **SC-8** — RDR-002 ART live re-demo: `query(question="vision language priming", follow_links="semantic-implements", depth=2, subtree="1.11")` returns RDR-002 **plus** `LanguagePrimingSignal.java`, `LanguageToVisionPipeline.java`, and `Phase4CrossModalPrimingTest.java` in one call. Current live result: RDR-002 and one test file.
-- **SC-9** — Prefer-higher UPSERT on `semantic-implements` edges preserved across re-runs. Lowering the ICF gate threshold does not delete existing higher-confidence edges.
-- **SC-10** — Zero regressions: full test suite green before tagging v4.4.0.
-- **SC-11** — Session and subagent hooks prime the scenario skills. The `session_start_hook.py` "## Scenario Retrieval" block lists all five skills with triggers. The `subagent-start.sh` grep dispatch injects a knowledge-graph-first preamble for each of the 8 target agents (strategic-planner, architect-planner, code-review-expert, substantive-critic, deep-analyst, deep-research-synthesizer, debugger, plan-auditor). Each target agent's `nx/agents/<name>.md` opening instruction cites the pattern independently of the hook — verifiable by grep.
-- **SC-12** — Five scenario plans land in the plan library via a seeding script run by `nx catalog setup`. `plan_search(scenario_key)` resolves each of `research-plan`, `review-context`, `analyze-corpus`, `debug-context`, `doc-scope` to a canonical multi-tool invocation sequence. Plans are project-scoped (default `nexus`) and reseed is idempotent. The `query-planner` agent consumes them as `few_shot_plans` priors.
+- **SC-1** — `plan_match` MCP tool lands. Given a plan with query *"how does projection quality work"* saved to the library, `plan_match("what's the mechanism for projection quality hub suppression")` returns that plan with cosine confidence > 0.80. Exact-token variants return the plan from FTS5 (`plan_search`) with equivalent or higher confidence.
+- **SC-2** — Plan embedding is upserted on `plan_save` and deleted on TTL purge. T3 collection `plans__semantic` stays in sync with the T2 `plans` table (`COUNT(plans) == COUNT(plans__semantic)` after a reindex sweep).
+- **SC-3** — Plan step schema accepts the `scope` field with `taxonomy_domain` ∈ {`prose`, `code`} and per-domain `topic=` / `follow_links=` / `subtree=` / `author=`. The plan runner forwards domain scope to the correct retrieval tool and corpus set.
+- **SC-4** — Five scenario plans seed via `nx catalog setup`. `plan_search(name="research-plan")`, `plan_search(name="review-context")`, etc. all resolve. Reseeding is idempotent (no duplicates, updated metadata on re-run).
+- **SC-5** — `search()` accepts `author`, `content_type`, `subtree`, `follow_links`, `depth`. `query()` accepts `topic`, `cluster_by`, `offset`. Both default corpus to `"knowledge,code,docs,rdr"`. Shared `resolve_catalog_collections()` helper is the single source of routing logic.
+- **SC-6** — Session-start hook injects a "## Plan Library" block listing `plan_match` and the five scenario names.
+- **SC-7** — SubagentStart hook injects a "plan-match-first" preamble for the eight retrieval-shaped agents. Each agent's `nx/agents/<name>.md` cites the pattern independently (verifiable by grep).
+- **SC-8** — End-to-end demo: fresh session, user asks *"how does vision→language priming work in ART?"*, `nx:plan-first` skill fires, `plan_match` resolves (cold library hit) or `/nx:query` runs planner (cold library miss). In the miss case, the successful plan gets saved; the following session with a paraphrased query resolves from `plan_match` with confidence ≥ 0.80.
+- **SC-9** — Zero regressions. `plan_save` / `plan_search` / `/nx:query` unchanged in behavior for existing callers. `search()` / `query()` existing arg sets unchanged in behavior.
+- **SC-10** — Cross-embedding boundary is not crossed anywhere in the plan runner. Every retrieval step operates in exactly one embedding space. Verifiable: grep for any code that computes cosine between a code-model vector and a prose-model vector — should return zero hits.
 
 ## Research Findings
 
-- **RF-1** — Empirical per-workspace heuristic recall is an order of magnitude worse than the aggregate `nx catalog coverage` number suggested. Measurement at 2026-04-14 (stored as `nexus_rdr/078-research-1`): ART workspace 0.8% (35/4,180 code files with an RDR/docs link); nexus workspace 7.9% (22/280). Projection coverage where it exists is strong — nexus's 402 persisted projection rows from the RDR-077 shakeout cover ~134 unique source files (≈48%). **Precondition gap:** ART has zero projection rows because `nx taxonomy project` has never been run on it. Phase 1 has no effect on a workspace until projection has been populated; the plan-of-record must sequence projection-first-then-link-promote. A 50-pair hand-curated audit set for precision measurement remains Phase 1 pre-work.
-- **RF-2** — ICF gating already handles the hub-suppression problem. Topics with `ICF == 0` (DF == N_effective) contribute nothing to `semantic-implements` promotion because `adjusted_similarity = raw * ICF = 0 < threshold` for any `threshold > 0`. The hub problem that motivated RDR-077 is exactly the noise this generator must not amplify, and RDR-077's math does the right thing by construction.
-- **RF-3** — `search_cross_corpus()` (`src/nexus/search_engine.py:152-163`) accepts `topic`, `catalog`, `taxonomy`, `cluster_by`, `link_boost` kwargs — the underlying engine is capability-complete for both tool surfaces. However, the "passthrough" shorthand in the earlier draft over-simplified: `topic` carries non-trivial logic in the engine body (`search_engine.py:191-204`) — a `taxonomy.get_doc_ids_for_topic()` lookup, an ID-set build, and a 500-ID pre/post-filter cap. `search()` (`mcp/core.py:109-116`) already wires it; `query()` (`mcp/core.py:330-334`) does not pass `topic` at all. Phase 2 requires an explicit one-line addition in `query()` to forward `topic=topic or None` into `search_cross_corpus`, plus a doc-level result dedup pass over the 500-ID cap boundary. `catalog` and `taxonomy` are genuine passthroughs. `follow_links` on `search()` needs the catalog-collection-resolution logic from `mcp/core.py:240-291` factored into a shared helper; that code is not currently a library function.
-- **RF-4** — Link type disambiguation is supported by the existing catalog model. `link_generator.generate_citation_links` and `generate_code_rdr_links` write distinct `link_type` values. Adding `semantic-implements` is additive.
-- **RF-5** — The chunk→file aggregation step matters. 63,101 chunks projected in the live demo; a per-chunk link emission would produce thousands of edges per file pair. Per-`(source_file, target_entry)` aggregation with `MAX(adjusted_similarity)` keeps the graph navigable and preserves the evidence pointer to the top chunk.
-- **RF-6** — The user's own observation: "the query planner was supposed to be doing this with the knowledge graph." The primitive is already there (`query(follow_links=..., depth=N)`); what makes it feel absent is that the *graph being walked* is sparse. Phase 1 densifies the graph. Phase 2 widens the surface that reaches it. Phase 3 trains the agent layer.
-- **RF-7** — Catalog JSONL uses field names `from_t` / `to_t` for link endpoints (`from_tumbler` / `to_tumbler` are the SQLite cache column names only). Implementation note for Phase 1: the link-generator emits through the catalog API, which handles the translation — but any test fixture or audit tool reading `links.jsonl` directly must use the JSONL field names.
+- **RF-1** — RDR-042 §Alternatives explicitly deferred the T3 semantic layer for plan storage, citing "Can add T3 semantic layer later if FTS5 matching proves inadequate." FTS5 matches tokens, not intent; this is inadequate by construction for the plan-reuse use case. Phase 1 is the scheduled pickup.
+- **RF-2** — RDR-042 §Alternatives explicitly deferred taxonomy-driven planning, citing "4-stage LLM-based taxonomy construction. Rejected: expensive, tuned for homogeneous scholarly corpora, doesn't generalize to Nexus's mixed content. May revisit via lightweight clustering in a future RDR." RDR-070 (HDBSCAN topic discovery) shipped the lightweight clustering; it's now live on both code and prose corpora with c-TF-IDF labels and hub-detection (RDR-077). The RDR-042 condition for revisit is met.
+- **RF-3** — Cross-embedding-model cosine is noise (measured 2026-04-14). ART code projected against ART prose at threshold 0.7 produced zero matches in 63,101 × 736 centroid comparisons; all 12,328 ≥0.7 matches were code↔code. `voyage-code-3` and `voyage-context-3` live in disjoint vector spaces. This rules out any projection-as-cross-corpus-bridge mechanism. Plans must compose per-space steps; no attempt to bridge embeddings belongs in this RDR.
+- **RF-4** — `--use-icf` amplification bootstrap failure (measured 2026-04-14). ART backfill with `--use-icf` at threshold 0.7 wrote 189,303 assignments, all into 9 boilerplate Java/TypeScript topics; raw cosine avg 0.50, below the nominal threshold. Mechanism: `ICF = log2(N/DF) = log2(8/1) = 3.0` for DF=1 topics amplifies weak matches past threshold. This is an RDR-077 write-path finding that belongs in a separate post-mortem, but is cited here as part of the rationale for NOT using projection rows as a primary data source for plan-level retrieval.
+- **RF-5** — RDR-042 plan library is FTS5 on `plans.query` + `plans.tags` (triggers defined at schema setup). Adding a T3 semantic cache does not modify the FTS5 path; additive. Plan rows have a stable `id` column usable as a ChromaDB document id.
+- **RF-6** — `search_cross_corpus()` already accepts `topic`, `catalog`, `taxonomy`, `cluster_by`, `link_boost` kwargs at `src/nexus/search_engine.py:152-163`. `search()` MCP tool wires `topic=`; `query()` MCP tool does not. The underlying engine is capability-complete; only the tool surfaces are bifurcated. Phase 4 alignment is MCP-tool-level wiring plus one shared helper.
+- **RF-7** — Five retrieval-shaped agents in `nx/agents/` already have docstring instructions to call `search` or `query`; the edit is to prepend a `plan_match` step before the existing instructions. No structural rewrites needed. Target agents: strategic-planner, architect-planner, code-review-expert, substantive-critic, deep-analyst, deep-research-synthesizer, debugger, plan-auditor.
+- **RF-8** — Stale projection-table state was wiped clean at RDR draft time: 633,820 `assigned_by='projection'` rows deleted (633,356 NULL-`source_collection` legacy + 464 session-demo + upgrade-backfill rows). HDBSCAN (238,593) and centroid (748) assignments preserved. This establishes a clean baseline for any future write-path work; `plan_match` implementation never reads `topic_assignments`, so the wipe has no effect on Phase 1-5.
 
 ## Proposed Questions
 
-- **PQ-1** — Starting per-corpus-type ICF-adjusted similarity thresholds are chosen conservatively. Calibration against RF-1's hand-labeled set in implementation may move them. Threshold table becomes a tunable — possibly `.nexus.yml` exposure in a follow-on RDR (same PQ-2 open question that RDR-077 left unresolved).
-- **PQ-2** — Should `semantic-implements` edges decay? Centroid drift after re-discover can leave stale edges. Options: (a) re-run generator on `taxonomy-meta.last_discover_at` change, (b) TTL on the edge, (c) lazy recomputation during `nx catalog link-audit`. Defer to implementation review.
-- **PQ-3** — The chunk→file aggregation picks `MAX(adjusted_similarity)` as the edge weight. Alternative: `AVG` (more stable, less sensitive to outliers) or `weighted_sum` (bias toward file pairs with many corroborating chunks). MAX is simplest and easiest to explain; if query-time ranking suffers we revisit.
-- **PQ-4** — `documented-by` link type appears in the `nx:doc-scope` skill example but is not proposed here. Do we need it as a distinct type, or is `cites` sufficient? Split on clarity of agent guidance; leave for a follow-up RDR once the skill lands and tells us what shape the gap takes.
-- **PQ-5** — Scenario skills may overlap with the existing `nx:research-synthesis` skill. Audit that one during Phase 3 and either absorb or cross-reference. Don't duplicate.
-- **PQ-6** — Should the surface alignment deprecate `query()` or `search()` in the long run? This RDR says no; every call site that picks one over the other does so on output granularity, which is a real distinction. A future RDR may revisit if the duplication costs exceed the readability benefit. For now, alignment is cheaper than unification.
+- **PQ-1** — Plan embedding model. Default is `voyage-context-3` (CCE) for the query text. Alternative: use `voyage-3` (non-CCE, smaller cache footprint) for a purely intent-matching use case where the query is a single sentence. Calibrate during implementation; default stands unless measurably worse.
+- **PQ-2** — Plan-match confidence threshold. Default 0.85 cosine is the RDR-042-cited 90%-confidence reuse rule converted to cosine distance (0.85 cosine ≈ 90% semantic overlap for short queries). Calibrate against a 20-query paraphrase set during Phase 1 implementation.
+- **PQ-3** — Plan scope `taxonomy_domain` vocabulary. Starts with `prose` / `code`. Does `paper` merit its own domain (ChromaDB `paper__*` collections)? Or fold into `prose`? Defer to implementation; `prose` umbrella is probably fine since `paper__*` uses the same CCE model.
+- **PQ-4** — Plan reuse when saved plan has failed steps. `plan.outcome` field distinguishes success/failure. `plan_match` must filter on `outcome='success'` by default; implement as a required WHERE clause, not an optional flag.
+- **PQ-5** — Cross-project plan portability. Plans are project-scoped by default. A scenario plan written for `nexus` may not fit `ART` without parameter substitution. Phase 3 seed plans ship project-neutral (templates); agent customizes per-project before saving a project-scoped variant. Mechanism: plan runner accepts a `substitutions={name: value}` dict that resolves `$var` references in `plan_json`. Scope of substitution behavior to document.
+- **PQ-6** — Drift between T2 `plans` and T3 `plans__semantic`. If a plan row is edited in SQLite bypassing `plan_save`, the T3 cache goes stale. Mitigation: periodic reindex job triggered by `nx catalog setup --reindex-plans`, opt-in. Not required for first iteration.
+- **PQ-7** — Relationship to `nx:query` planner dispatch. `/nx:query` currently dispatches the query-planner agent for any novel analytical pipeline. After Phase 5, `nx:plan-first` runs before `/nx:query`. Does `/nx:query` become redundant, or does it remain as the "no match, decompose novel" path? Answer: it remains — `nx:plan-first` delegates to `/nx:query` on match miss. Explicit delegation chain documented in the skill.
 
-## Related
+## Out of Scope (deferred, may spawn separate RDRs)
 
-- **RDR-063** — Catalog domain split and link-graph origins.
-- **RDR-070** — HDBSCAN topic discovery; `topic` pre-filter and boost machinery this RDR extends to `query()`.
-- **RDR-075** — Cross-collection projection plumbing (what RDR-077 added similarity scores to).
-- **RDR-077** — Projection quality, similarity storage, ICF computation. This RDR's Phase 1 is the logical continuation — promoting RDR-077's signal into the graph `query()` walks.
-- **RDR-053** — Xanadu-in-Nexus link-graph design doctrine.
-
-## Out of Scope (deferred)
-
-- Unified `retrieve()` tool with `mode="chunks"|"documents"` (option 2 from the design discussion). Reviewed; rejected for this iteration because feature alignment (option 1) delivers the same agent capability without breakage.
-- `query`-planner agent changes. The existing analytical-pipeline agent stays unchanged; scenario skills cover the 80% workflow that doesn't need decomposition.
-- Link graph visualization / UI.
-- Per-project configuration of hub stopwords (PQ-3 from RDR-077).
+- **Projection → catalog link promotion.** Within-same-model code↔code projection bridges are a sidequest to the primary ask (code↔prose via explicit graph). Useful later; not load-bearing here. Cross-embedding projection is ruled out by RF-3 regardless.
+- **Heuristic linker strengthening** (module/symbol/path extraction from RDR body). Would address the 0.8%/7.9% per-workspace heuristic-linker recall measured in the prior draft. Valuable independently; not required for plan-centric retrieval since plans route via the link graph that exists.
+- **RDR-077 `--use-icf` bootstrap failure post-mortem.** RF-4 cites it; a separate document in `docs/rdr/post-mortem/077-use-icf-bootstrap-amplification.md` should capture the mechanism and the three-gate filter proposal.
+- **`context_graph` MCP tool.** The composed operation IS a saved plan, not a new tool. `plan_match` + plan runner is the composition layer.
+- **Link graph UI.** Out of scope across all iterations.
+- **Per-project configuration of hub stopwords** (RDR-077 PQ-3). Orthogonal.
