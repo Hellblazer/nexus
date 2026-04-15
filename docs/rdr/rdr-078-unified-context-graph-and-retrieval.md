@@ -44,27 +44,48 @@ Five canonical scenarios recur across every nexus session: design/planning, crit
 
 Six phases. Each builds on RDR-042's shipped substrate. Phase 3 carries the paper's quality lever (typed-graph traversal); Phase 6 carries the shipping-velocity story (scoped plan loading).
 
-### Vocabulary: this is templating
+### Vocabulary: plans are multi-dimensional templates
 
-A plan is a **template** — a reusable DAG with named `$var` placeholders. The plan library is a **template registry** selected by semantic intent rather than exact name. Three distinct strings carry three distinct jobs:
+A plan is a **template** — a reusable DAG of operator steps with named `$var` placeholders. The plan library is a **template registry** selected by semantic intent against a bag of pinned dimensions, with ranking by description cosine.
 
-- **`name`** — stable identifier (e.g. `research-plan`). Used for exact lookup by key and for skill binding.
-- **`description`** — prose authored at plan-save time describing *when to use this plan*. Embedded at SessionStart and cosine-matched against caller intent. **This is what `plan_match` selects on.** The existing RDR-042 `plans.query` column holds this; the field is exposed as `description` in new MCP surfaces to stop conflating it with the caller's question.
-- **`intent`** — the caller's phrasing of what they're trying to do. Passed to `plan_match` at call time; never stored with the plan itself.
+**Identity is a pinned dimension set, not a flat name.** A plan's identity is the map of dimension → value that it pins. Two plans with identical pinned sets collide; `name` is a human-facing disambiguator, not part of identity. Scope, verb, strategy, and others are just well-known dimensions — none is structurally privileged.
 
-The match is `cosine(embed(caller.intent), embed(plan.description))`. Tags and scope are pre-filters on the candidate pool; description cosine is the ranker; bindings are per-call parameterisation of the selected template. Three layers, never confused.
+**Three strings, three jobs:**
+
+- **`description`** — prose authored when the plan is saved, describing *when to use it*. Embedded at SessionStart; what `plan_match` ranks on via cosine.
+- **`intent`** — caller-side phrasing of what they're trying to do. Passed to `plan_match` at call time; never stored on the plan.
+- **`name`** — human disambiguator for otherwise-identical dimension sets. Not part of the match.
+
+The match is `cosine(embed(caller.intent), embed(plan.description))`, applied to candidates whose dimensions ⊇ the caller's filter. Dimensions narrow the pool; cosine ranks within it; scope cascade and specificity are tiebreakers; bindings parameterise the chosen template at run time.
+
+**v1 dimension set (extensible via registry):**
+
+| Dimension | Typical values | Required? |
+|---|---|---|
+| `verb` | research / review / analyze / debug / document / relate / trace / integrate / locate / verify / plan-author / plan-inspect / plan-promote | yes |
+| `scope` | personal / rdr-<slug> / project / repo / global | yes |
+| `strategy` | default / deep / quick / compliance / ... | no (defaults to `default`) |
+| `object` | concept / file / module / rdr / change-set / symbol / commit / ... | no |
+| `domain` | security / performance / correctness / documentation / onboarding / ... | no |
+
+Dimensions live in a git-tracked registry: `nx/plans/dimensions.yml` (global, plugin-shipped) with project/repo overrides via the Phase 6 scoped-loader mechanism. Unregistered dimensions on a plan warn at load ("unrecognised dimension `<name>` — register or remove"). Discipline: a dimension earns inclusion only when filtering by it is a *recurring* need — prematurely pinned dimensions retire on disuse.
 
 **Plan template structure:**
 
 ```yaml
-name: research-plan                             # stable identifier
-scope: global                                    # scope:* tag (see Phase 6)
-verb: research-plan                              # verb:* tag
+name: default                             # human disambiguator only
 description: |
   Research a concept by walking prior-art documents, then following
   their typed links to implementing code, then summarising the union
   with citations. Use when the user asks to "plan", "design", "extend",
   or "research" a technical subsystem.
+dimensions:                               # identity — the pinned set
+  verb: research
+  scope: global
+  strategy: default
+  object: concept
+parent: null                              # optional currying lineage (see below)
+default_bindings: {}                      # pre-filled placeholders (currying)
 required_bindings: [concept]
 optional_bindings: [module]
 plan_json:
@@ -73,7 +94,7 @@ plan_json:
       args: {query: "$concept", corpus: "knowledge,rdr,docs"}
       scope: {taxonomy_domain: prose, topic: "$concept"}
     - tool: traverse
-      args: {seeds: "$step1.tumblers", link_types: [implements, cites], depth: 2}
+      args: {seeds: "$step1.tumblers", purpose: find-implementations, depth: 2}
     - tool: search
       args: {query: "$concept", corpus: "code", subtree: "$module"}
       scope: {taxonomy_domain: code}
@@ -81,26 +102,56 @@ plan_json:
       args: {inputs: [$step1, $step2, $step3], cited: true}
 ```
 
-**Input contract — four axes:**
+**Currying via `default_bindings` + `parent`:**
+
+A curried plan is a more-specialised plan that pins more dimensions AND pre-fills some bindings. Lineage is optional but useful for introspection:
+
+```yaml
+name: security
+description: "Review a code change with a security lens. Walks the authoring
+  RDRs, applies security-review extraction, and compares against the
+  change."
+dimensions:
+  verb: review
+  scope: global
+  strategy: default
+  object: change-set
+  domain: security                        # NEW pinned dimension — specialisation
+parent:                                   # what this specialises
+  verb: review
+  scope: global
+  strategy: default
+  object: change-set
+default_bindings:                         # pre-filled; caller can still override
+  focus: security
+required_bindings: [changed_paths]
+plan_json: {...}
+```
+
+`plan_run(match, bindings)` resolves final bindings as `{**match.default_bindings, **caller.bindings}` — caller wins on conflict. No new mechanism; three lines in the runner.
+
+**Input contract — four axes, now dimensional:**
 
 ```
 plan_match(
-    intent: str,                   # REQUIRED — caller's description of what they're doing
-    scope_preference: str = "",    # "rdr-078,project,repo,global" — specificity cascade
-    tag_filter: str = "",          # "verb:*" or exact "verb:relate"
-    context: dict = {},            # optional — {changed_paths, active_rdr, current_topic}
-                                   # blended into the match embedding when present
+    intent: str,                       # REQUIRED — caller's description of what they're doing
+    dimensions: dict = {},             # pin any subset, e.g. {verb: "review", object: "change-set"}
+    scope_preference: str = "",        # "rdr-078,project,repo,global" — scope dimension cascade
+    context: dict = {},                # optional — {changed_paths, active_rdr, current_topic}
+                                       # blended into the match embedding when present
     min_confidence: float = 0.85,
     n: int = 5,
 ) -> list[Match]
 
 plan_run(
     match: Match,
-    bindings: dict = {},           # fills $vars declared in required/optional_bindings
+    bindings: dict = {},               # fills $vars; merged over match.default_bindings
 ) -> PlanResult
 ```
 
-The four axes cleanly separate semantic selection (`intent`), namespace narrowing (`scope_preference`, `tag_filter`), situational hints (`context`), and execution parameterisation (`bindings`). Prior drafts muddled these into a single `query` parameter; this RDR names them apart.
+Candidate selection: `plan.dimensions ⊇ filter.dimensions`. Ranking: cosine primary, specificity bonus (plans with more dimensions pinned beyond the filter rank slightly higher on ties), scope cascade last. Specificity tiebreak prefers more-specialised plans when confidences are close — the curried `security` variant wins over the general `default` when the caller pins `domain: security`, loses when they don't.
+
+The axes cleanly separate semantic selection (`intent`), multidimensional pool narrowing (`dimensions`, `scope_preference`), situational hints (`context`), and execution parameterisation (`bindings`). Naming kludges collapse: skills become pure verbs (`nx:research`, `nx:review`, `nx:debug`, ...) whose body is one parameterised template: `plan_match(intent, dimensions={verb: <skill_verb>}, n=1)` → `plan_run(match, bindings)`. Five scenario skills share one implementation.
 
 ### Phase 1: Semantic plan matching (`plan_match` MCP tool, T1-cached)
 
@@ -172,7 +223,29 @@ New plan tool `traverse` with args:
 - *Review a change* — `catalog-links-for-file($changed_paths)` → `traverse(seeds=$step1, link_types=[supersedes,relates], depth=1)` → `extract(template=decision_schema)` → `compare(baseline=$plan_baseline)`. Pulls authoring RDRs, walks decision evolution, extracts the effective decisions, compares to what the change does.
 - *Integrate findings* — `search(topic=prose-X)` + `search(topic=code-Y)` + `traverse(seeds=$step1_tumblers ∪ $step2_tumblers, link_types=[implements], depth=1)` → `generate(template=synthesis, cited=true)`. Dual-taxonomy retrieval stitched by typed-link traversal.
 
-**Expected benefit (RF-1):** this is where the paper's +47% NDCG quality delta is attributed. Honest estimate: transfer is *qualitative* — nexus's mixed corpus, non-scholarly taxonomy, and different link type vocabulary mean the magnitude will differ. What should transfer is the *kind* of result: plans that previously required ad-hoc multi-agent orchestration will run as deterministic DAGs, with the cross-document connections the user's verb list (especially "relate" and "integrate") requires.
+**Expected benefit (RF-1):** this is where the paper's +47% NDCG quality delta is attributed. Honest estimate: transfer is *qualitative* — nexus's mixed corpus, non-scholarly taxonomy, and different link type vocabulary mean the magnitude will differ. What should transfer is the *kind* of result: plans that previously required ad-hoc multi-agent orchestration will run as deterministic DAGs, with the cross-document connections the intent list (especially "relate" and "integrate") requires.
+
+#### Purpose abstraction over link types
+
+Hand-picking `link_types: [implements, cites, ...]` in every plan is brittle. Plan authors (human and agent) need to reason about *intent*, not the catalog's edge vocabulary. `traverse` accepts either:
+
+- **`link_types: [...]`** — literal list, pinned at authoring time. Explicit and inspection-friendly.
+- **`purpose: <name>`** — resolved via a registry to a link-types set. Preferred; more readable; auto-adapts when the vocabulary extends.
+
+Starter purpose set (shipped in `nx/plans/purposes.yml`, git-tracked; overridable per Phase 6 scope tiers via `.nexus/purposes.yml`):
+
+| Purpose | Resolves to | When |
+|---|---|---|
+| `find-implementations` | `implements, implements-heuristic` | Doc/RDR → code |
+| `decision-evolution` | `supersedes` | Walk decision chains |
+| `reference-chain` | `cites` | Evidence / paper citation graph |
+| `documentation-for` | `documented-by, cites` | Code → its docs |
+| `soft-relations` | `relates` | Sibling / tangential discovery |
+| `all-implementations` | `implements, implements-heuristic, semantic-implements` | When the semantic tier ships in a future RDR |
+
+Schema validator rejects `link_types` and `purpose` specified together. `purpose` is the recommended form for new plans and scenario seeds.
+
+Two companion docs ship with Phase 3: `docs/catalog-link-types.md` (semantic definition of each link type — directionality, source, typical traversal shape, when to use) and `docs/catalog-purposes.md` (purpose registry reference). Both are catalog-indexed so `plan_match("what's the right link type for walking decision history")` can surface them.
 
 ### Phase 4: Plan templates, metrics, meta-seeds, authoring guide
 
@@ -183,13 +256,24 @@ Four tightly-coupled pieces: the formal template schema, the scenario template s
 Formal YAML/JSON schema for a plan template (loadable by `.nexus/plans/*.yml`, `docs/rdr/<slug>/plans.yml`, and the global plugin seeds):
 
 ```yaml
-name: <stable-identifier>         # required; unique within (project, scope) pair
-scope: global|rdr-<slug>|project|repo|personal   # required; tag-encoded in T2
-verb: <optional-verb-name>        # optional; tag-encoded as verb:<name>
-tags: <comma-separated>           # optional; additional tags
+name: <human-disambiguator>       # optional; distinguishes otherwise-identical dimension sets
 description: <prose>              # required; embedded for plan_match cosine
-required_bindings: [<name>, ...]  # optional; aborts if missing at plan_run
+dimensions:                       # required; identity — the pinned set
+  verb: <registered-verb>         # required dimension
+  scope: <registered-scope>       # required dimension
+  strategy: default | ...         # optional (defaults to "default")
+  object: ...                     # optional
+  domain: ...                     # optional
+  # any registered dimension, pinned or omitted
+parent:                           # optional currying lineage
+  verb: ...
+  scope: ...
+  strategy: ...
+default_bindings:                 # optional pre-filled placeholders
+  <var-name>: <value>
+required_bindings: [<name>, ...]  # optional; plan_run aborts if missing
 optional_bindings: [<name>, ...]  # optional; defaults to null/empty
+tags: <comma-separated>           # optional; free-form non-dimensional tags
 plan_json:
   steps:
     - tool: <search|query|traverse|extract|summarize|rank|compare|generate>
@@ -197,34 +281,50 @@ plan_json:
       scope: {<Phase 2 scope override, optional>}
 ```
 
-Schema validation lives in a dedicated validator (`src/nexus/plans/schema.py`); loaders reject malformed entries with a named error. Name + scope together form the T2 dedup key.
+Schema validation lives in a dedicated validator (`src/nexus/plans/schema.py`); loaders reject malformed entries with a named error. **Identity dedup key** = the canonicalised dimension map (sorted, keys-lowercased). Two plans with identical dimension maps at load time are a conflict — loader rejects the later one with a named error that names both sources.
 
-#### 4b — Five scenario templates (seeded `scope:global`)
+#### 4b — Five scenario templates (seeded at `scope:global`)
 
-Each uses at least one `traverse` step (except `debug-context`, intentionally flat). Descriptions are written to be exemplary — good enough to learn from by reading.
+Each plan pins `{verb, scope:global, strategy:default}` at minimum. Descriptions are exemplary — good enough to learn from by reading. All but the last use at least one `traverse` step.
 
-| Plan name | Scenario | DAG sketch |
+| Dimensions | Scenario | DAG sketch |
 |---|---|---|
-| `research-plan` | Design / arch / planning | `search` prose (topic=$concept) → `traverse` (link_types=[implements,cites], depth=2) → `search` code (topic=$concept, subtree=$module) → `summarize` with citations. |
-| `review-context` | Critique / audit / review | `catalog-links-for-file($changed_paths)` → `traverse` (link_types=[supersedes,relates], depth=1) → `extract` decisions → `compare` decisions vs. changed code. |
-| `analyze-corpus` | Analysis / synthesis / research | `search` prose (topic=$area) → `search` code (topic=$area) → `traverse` both (link_types=[implements,cites], depth=2) → `rank` by criterion → `generate` synthesis with citations. |
-| `debug-context` | Dev / debug | `catalog-links-for-file($failing_path)` → `traverse` (link_types=[supersedes], depth=1) for authoring-RDR history → `summarize` design context. Serena handles symbol-level separately. |
-| `doc-scope` | Documentation | `search` prose (follow_links=cites) for existing references → `search` code (topic=$area) → `traverse` (link_types=[cites,documented-by], depth=1) → `compare` for doc-coverage gaps. |
+| `verb:research, scope:global, strategy:default` | Design / arch / planning | `search` prose (topic=$concept) → `traverse` (purpose=find-implementations, depth=2) → `search` code (topic=$concept, subtree=$module) → `summarize` with citations. |
+| `verb:review, scope:global, strategy:default` | Critique / audit / review | `catalog-links-for-file($changed_paths)` → `traverse` (purpose=decision-evolution, depth=1) → `extract` decisions → `compare` decisions vs. changed code. |
+| `verb:analyze, scope:global, strategy:default` | Analysis / synthesis / research | `search` prose (topic=$area) → `search` code (topic=$area) → `traverse` both (purpose=reference-chain, depth=2) → `rank` by criterion → `generate` synthesis with citations. |
+| `verb:debug, scope:global, strategy:default` | Dev / debug | `catalog-links-for-file($failing_path)` → `traverse` (purpose=decision-evolution, depth=1) for authoring-RDR history → `summarize` design context. Serena handles symbol-level separately. |
+| `verb:document, scope:global, strategy:default` | Documentation | `search` prose (follow_links=cites) for existing references → `search` code (topic=$area) → `traverse` (purpose=documentation-for, depth=1) → `compare` for doc-coverage gaps. |
 
-Plan names match the skill names (Phase 5); `plan_match` and the `nx:<name>` skills both resolve to the same template. Seeding via `nx catalog setup` is idempotent (existing plans with the same `(name, scope)` are updated, not duplicated).
+Each plan's `name` is `default` — the canonical strategy for that verb. Variants (e.g. `verb:review, strategy:security` with `domain:security` pinned) are added later via Tier-B YAML when specialisation need emerges. Skills in Phase 5 are pure verbs (`nx:research`, `nx:review`, `nx:analyze`, `nx:debug`, `nx:document`) and share one template body: `plan_match(intent, dimensions={verb: <skill_verb>}, n=1)` → `plan_run(match, bindings)`.
+
+Seeding via `nx catalog setup` is idempotent (existing plans with the same canonical dimension map are updated, not duplicated).
 
 #### 4c — Operational metrics
 
 Extend the `plans` table (T2 migration at RDR-078 implementation time) with counters that observe the feedback loop without acting on it:
 
 ```sql
+-- Metrics
 ALTER TABLE plans ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE plans ADD COLUMN last_used TEXT;
 ALTER TABLE plans ADD COLUMN match_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE plans ADD COLUMN match_conf_sum REAL NOT NULL DEFAULT 0.0;
 ALTER TABLE plans ADD COLUMN success_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE plans ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0;
+
+-- Dimensional identity (indexed axes — others live in `tags`)
+ALTER TABLE plans ADD COLUMN verb TEXT;
+ALTER TABLE plans ADD COLUMN scope TEXT;
+CREATE INDEX IF NOT EXISTS idx_plans_verb ON plans(verb);
+CREATE INDEX IF NOT EXISTS idx_plans_scope ON plans(scope);
+CREATE INDEX IF NOT EXISTS idx_plans_verb_scope ON plans(verb, scope);
+
+-- Currying
+ALTER TABLE plans ADD COLUMN default_bindings TEXT;   -- JSON object
+ALTER TABLE plans ADD COLUMN parent_dims TEXT;        -- JSON object (parent's dimension map)
 ```
+
+`verb` and `scope` get dedicated indexed columns because they are the high-frequency filters. All other dimensions serialize as `k:v` entries into the existing `tags TEXT` column. The canonical dimension map is reconstituted at query time from `(verb, scope, tags)`. Existing RDR-042 rows migrate with `verb=NULL, scope='personal'` and continue to work through the legacy `plan_search` FTS5 path until they're promoted or deprecated.
 
 Update points:
 
@@ -236,13 +336,14 @@ Per-installation operational data; **not git-tracked**. When a plan graduates to
 
 **Promotion signal** (derived, not stored): a plan is a reasonable promotion candidate when `use_count ≥ 3 AND match_count/use_count ≥ 0.7 AND success_count/(success_count+failure_count) ≥ 0.8 AND match_conf_sum/match_count ≥ 0.80`. Thresholds are PQs, not hardcoded. **The CLI that acts on this signal is deferred to RDR-079.**
 
-#### 4d — Meta-seeds (also `scope:global`)
+#### 4d — Meta-seeds (also seeded at `scope:global`)
 
-Three seed plans whose purpose is to teach agents and humans how the library works:
+Four seed plans whose purpose is to teach agents and humans how the library works. Each pins `verb`, `scope:global`, and `strategy:default` (or a named variant when multiple strategies exist).
 
-- **`verb:plan-authoring`** — description: *"Author a new plan template from scratch."* DAG: fetches `docs/plan-authoring-guide.md` → fetches the schema from `src/nexus/plans/schema.py` → prompts the caller for name / scope / description / required_bindings → drafts a candidate `plan_json` with per-step scope guidance → calls `plan_save` with the result. Self-referential bootstrap.
-- **`verb:plan-propose-promotion`** — description: *"Survey T2 plan counters and rank promotion candidates."* DAG: reads `plans` metrics → applies candidate thresholds (default 4c values) → formats a ranked shortlist with the paraphrase range for each → emits a markdown report. Primitive form of RDR-079's `nx plan audit` CLI; usable today via `plan_run`.
-- **`verb:plan-inspect`** — description: *"Inspect a named plan template: what it does, what bindings it needs, when to use it."* DAG: loads plan by name → renders description + step-by-step with arg binding notes. Agent self-service introspection.
+- **`verb:plan-author, strategy:default`** — description: *"Author a new plan template from scratch."* DAG: fetches `docs/plan-authoring-guide.md` → fetches the dimension registry and schema → prompts the caller for dimensions / description / required_bindings → drafts a candidate `plan_json` with per-step scope and `traverse` purpose guidance → calls `plan_save` with the result. Self-referential bootstrap.
+- **`verb:plan-promote, strategy:propose`** — description: *"Survey T2 plan counters and rank promotion candidates."* DAG: reads `plans` metrics → applies candidate thresholds (default 4c values) → formats a ranked shortlist with paraphrase-range per plan → emits a markdown report. Primitive form of RDR-079's `nx plan audit` CLI; usable today via `plan_run`.
+- **`verb:plan-inspect, strategy:default`** — description: *"Inspect a plan by its dimension map. Render description, dimensions, bindings, lineage, and DAG with annotation."* DAG: loads plan by canonical dimension map → renders fields + step-by-step with arg binding notes + currying parent if any. Agent self-service introspection.
+- **`verb:plan-inspect, strategy:dimensions`** — description: *"List registered dimensions with their value sets and usage counts."* DAG: reads `nx/plans/dimensions.yml` (+ scoped overrides) → cross-references T2 plan usage per dimension → emits a markdown catalogue. Vocabulary discovery for agents and humans.
 
 #### 4e — `docs/plan-authoring-guide.md`
 
@@ -262,8 +363,9 @@ Linked from RDR-078's References. Catalog-indexed like any other doc in `docs/`,
 
 The ergonomic change. Agents must reach for `plan_match` **before** decomposing any retrieval task.
 
-- **`nx:plan-first` skill** — invoked at the top of every research/review/analyze/debug/doc task. Triggers on verbs like "plan", "design", "review", "analyze", "debug", "document". Instructs: call `plan_match(query, min_confidence=0.85)` first; if a match exists, present it and execute; if not, dispatch `/nx:query` (the query-planner) and save the result.
-- **Five scenario skills**: `nx:research-plan`, `nx:review-context`, `nx:analyze-corpus`, `nx:debug-context`, `nx:doc-scope`. Each is a thin wrapper that calls `plan_match("<scenario-name> <user-query>")` with a bias toward the matching scenario plan. Names intentionally match the seeded plan names.
+- **`nx:plan-first` skill** — the gate skill. Invoked at the top of every retrieval-shaped task. Triggers on verbs like "plan", "design", "review", "analyze", "debug", "document". Instructs: call `plan_match(intent, min_confidence=0.85)` first; if a match exists, present it and execute via `plan_run`; if not, dispatch `/nx:query` (the query-planner) and save the result.
+- **Five verb skills**: `nx:research`, `nx:review`, `nx:analyze`, `nx:debug`, `nx:document`. All share one template body — `plan_match(intent, dimensions={verb: <skill_verb>}, n=1)` → if confidence ≥ threshold, `plan_run(match, bindings)`; else defer to `/nx:query`. Skill names are pure verbs; the dimension filter does the namespacing that old compound names (`nx:research-plan`) tried to do by embedding a qualifier.
+- **Three plan-management skills**: `nx:plan-author`, `nx:plan-inspect`, `nx:plan-promote`. Same template body pointed at the matching meta-seed verbs.
 - **SessionStart hook** (`nx/hooks/scripts/session_start_hook.py`) — two additions:
     1. **Populate T1 `plans__session` semantic cache.** Read `SELECT id, query, plan_json, tags FROM plans WHERE outcome='success' AND (ttl_days=0 OR expires_at>now)` → embed query text → upsert to T1 collection `plans__session` with metadata `{plan_id, verb_name, handler_kind, tags, project, ttl, last_used}`. Skipped gracefully if T1 server unavailable (fallback to FTS5 at match time). Log the populated count.
     2. **Inject a "## Plan Library" context block** listing `plan_match` / `plan_save` / `plan_search` and the five scenario/verb names. Extends the existing "## nx Capabilities" section.
@@ -327,6 +429,10 @@ Promotion operations (`nx plan promote`, lifecycle hooks on RDR close, `nx plan 
 - **SC-13** — Three meta-seeds ship at `scope:global`: `verb:plan-authoring`, `verb:plan-propose-promotion`, `verb:plan-inspect`. Each is callable via `plan_match`+`plan_run` and produces its documented output on a freshly-set-up catalog. `docs/plan-authoring-guide.md` exists and is catalog-indexed.
 - **SC-14** — Scoped plan loader covers all four non-personal tiers: `nx/plans/builtin/*.yml` (global), `docs/rdr/<slug>/plans.yml` (rdr-scoped, only for accepted/closed RDRs), `.nexus/plans/*.yml` (project), and an optional umbrella path for `scope:repo`. Schema validation rejects malformed YAML with a named error. Source-path / declared-scope mismatches log a warning and prefer the path. Re-running `nx catalog setup` is idempotent per `(name, scope)`.
 - **SC-15** — Git-as-transport integrity. All four YAML paths are commit-indexed, plan schema CI check runs on PR, rollback via `git revert` restores prior plan state after a subsequent `nx catalog setup`. No hidden state lives outside T2 + git.
+- **SC-16** — Purpose abstraction on `traverse`. Step schema accepts `purpose: <name>` resolving via registry, or `link_types: [...]` literal — specifying both is a validation error. `purposes_resolve(name, project, scope) → list[str]` is a pure function of registry state. Registry loads with the same scope cascade as Phase 6 plans.
+- **SC-17** — `docs/catalog-link-types.md` and `docs/catalog-purposes.md` ship in the plugin, are catalog-indexed, and a paraphrase-set test (e.g. *"when do I use supersedes"*, *"what does implements-heuristic mean"*, *"which link type for walking documentation"*) resolves to the correct reference via `plan_match` / `query` with confidence ≥ 0.80.
+- **SC-18** — Dimensional identity and currying. A plan's identity is the canonicalised dimension map (sorted, keys-lowercased); two plans with identical maps at load time reject with a named error citing both sources. `plan_run(match, bindings)` merges `match.default_bindings` under `caller.bindings` (caller wins). Currying lineage is inspectable via `verb:plan-inspect, strategy:default`.
+- **SC-19** — Dimension registry. `nx/plans/dimensions.yml` ships with at least `verb`, `scope`, `strategy`, `object`, `domain` registered. Unregistered dimensions on a loaded plan emit a warning naming the file and the offending key; load still succeeds (lenient by default, strict mode opt-in via `NX_PLAN_STRICT_DIMENSIONS=1`). `verb:plan-inspect, strategy:dimensions` enumerates registered dimensions with per-dimension usage counts drawn from live T2.
 
 ## Research Findings
 
@@ -362,7 +468,12 @@ Promotion operations (`nx plan promote`, lifecycle hooks on RDR close, `nx plan 
 - **PQ-14** — Scope precedence specifics. Current model: `personal > rdr > project > repo > global` with a small multiplier (0.05 per step) so cosine dominates. Alternative: strict precedence — a confident match at a more-specific scope fully overrides a slightly-more-confident match at a broader scope. Calibrate with empirical paraphrase-set tests during implementation.
 - **PQ-15** — Umbrella / monorepo conventions for `scope:repo`. Monorepos often have nested `.nexus/plans/` at the project level plus a repo-wide location. Default proposal: `.nexus/plans/_repo.yml` or `<repo-root>/.nexus/plans.repo.yml`. Pick one during implementation; document.
 - **PQ-16** — RDR lifecycle plan bindings. What happens to `scope:rdr-<slug>` plans when the RDR closes as superseded or rejected? Proposed default: mark archived (soft); hide from `plan_match` unless `include_archived=true`. Still catalog-indexed for audit; promoted plans keep their higher-scope copies. The exact mechanism moves to RDR-079 (lifecycle hooks on RDR status changes); RDR-078 only loads plans for accepted/closed RDRs.
-- **PQ-17** — Conflict resolution when the same `name` appears at multiple scopes. Example: `research-plan` exists as `scope:global` (plugin) AND `scope:project` (overridden by team). Default: both coexist, scope precedence at lookup time settles which wins per-call. `plan_match` can return both if `n>1`. No implicit merge — the team's override is deliberately distinct from the global default.
+- **PQ-17** — Conflict resolution when the same dimensional identity appears at multiple scopes (e.g. `verb:research, strategy:default, scope:global` AND `verb:research, strategy:default, scope:project`). Default: both coexist because `scope` differs, so their canonical identity maps differ — scope precedence at lookup time settles which wins per-call. `plan_match` can return both if `n>1`. No implicit merge — team override is deliberately distinct from the global default.
+- **PQ-18** — Dimension naming convention. Kebab-case vs snake_case (proposing kebab: `change-set`, `plan-author`). Singular vs plural for enum values. Convention should go in `docs/plan-authoring-guide.md`; code enforces only `[a-z0-9-]`.
+- **PQ-19** — Multi-verb intent hits. When `plan_match(intent)` with no `verb` pinned returns plans across multiple verbs with close confidence (e.g. *"look at the auth code"* could be `verb:review`, `verb:analyze`, or `verb:explain`), does the skill pick top-1, list candidates, or ask? Current plan: top-1 with specificity tiebreak; if the match presents both verbs within 0.02 cosine, surface both to the caller.
+- **PQ-20** — Specificity bonus weight. Proposed 0.05 per extra pinned dimension beyond the caller's filter. May need calibration against a paraphrase test set. Too-high weight overwhelms cosine; too-low weight makes specialised plans invisible.
+- **PQ-21** — Purpose composition. Can a plan reference `purpose: implementation-plus-tests` resolving to the union of `find-implementations` and a hypothetical `find-tests`? Useful but more complex than 1:1 resolution; leave until a scenario needs it.
+- **PQ-22** — Should `search(follow_links=...)` also accept `purpose=`? Same vocabulary applies; propagation is straightforward. Deferred to the follow-on RDR-079 to avoid Phase 4 scope creep.
 
 ## Out of Scope (deferred, each may spawn its own RDR)
 
