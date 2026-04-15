@@ -108,9 +108,23 @@ Pool workers are `claude` subprocesses descended from the `nexus` MCP server, it
 #### Pool session lifecycle
 
 At first-operator-call the pool singleton:
-1. Generates a UUID (e.g. `pool-7f3a...`), writes `~/.config/nexus/sessions/pool-7f3a...session` containing the pool's own T1 endpoint (either a dedicated HTTP server OR a shared-EphemeralClient marker — implementation choice at P2).
+1. Generates a UUID (e.g. `pool-7f3a...`), writes `~/.config/nexus/sessions/pool-7f3a...session` containing the pool's own T1 endpoint **and** `pool_pid: os.getpid()` (the pool-owner process's PID — required for liveness reconciliation, see step 4).
 2. Retains the UUID as `pool.session_id` for the lifetime of the pool.
-3. On pool shutdown (MCP server stop): removes the session file, closes the T1 endpoint. Cleanup is critical — orphaned `pool-*.session` files would accumulate.
+3. Writes the pool's own T1 endpoint (a dedicated ChromaDB HTTP server — required for SC-11's cross-process scratch-sentinel test, since an `EphemeralClient` cannot be queried from outside the owning process).
+4. **Startup reconciliation**: before writing its own session file, the pool scans `~/.config/nexus/sessions/pool-*.session`; for each one, reads the JSON, extracts `pool_pid`, and probes liveness with `os.kill(pool_pid, 0)` (`OSError` → dead). Dead-pool session files are removed. PID reuse is possible but unlikely at scale; the combination of UUID-in-filename + PID-in-record means a reused PID would have to match a different pool's stored PID exactly, which is vanishingly rare. If belt-and-suspenders is wanted, include `created_at` and age-check alongside the liveness probe.
+5. On pool shutdown (graceful — MCP server stop): removes its own session file, closes the T1 HTTP server.
+
+Session record schema extension (add to existing `write_session_record`):
+```python
+{
+  "session_id": "pool-<uuid>",         # existing field, new namespace
+  "server_pid": <chromadb-pid>,        # existing field — the T1 HTTP server
+  "pool_pid": <pool-owner-pid>,        # NEW: this pool's own process PID
+  "pool_session": true,                # NEW: marker that distinguishes pool from user
+  "created_at": "...",                 # existing
+  "endpoint": "http://127.0.0.1:..."   # existing
+}
+```
 
 Worker spawn:
 ```
@@ -120,20 +134,32 @@ claude -p \
   NEXUS_T1_SESSION_ID=pool-7f3a...
 ```
 
-#### T1 client change (`src/nexus/session.py`)
+#### T1 client change — three call sites, not one
 
-~5-line addition at the top of the session-discovery function:
+The env-var guard must be applied at **every** point that resolves a T1 session. `find_ancestor_session` in `src/nexus/session.py` is called from three sites plus the SessionStart hook path:
+
+| Site | File:Line | Role |
+|---|---|---|
+| T1 client init | `src/nexus/db/t1.py:140` | First T1 connection |
+| T1 client reconnect | `src/nexus/db/t1.py:175` | After server-side failure — CRITICAL, skipping here silently re-attaches worker to user session |
+| Hook `session_end` | `src/nexus/hooks.py:153` | Cleanup; needs to look up the right session |
+| Hook `session_start` | `src/nexus/hooks.py:91` | Inside lock-acquire path; must check env BEFORE spawning a new T1 server |
+
+Implementation shape is a new public function `resolve_t1_session()` that encapsulates the env-first logic and replaces all four call sites. ~15-20 lines across `session.py` + `t1.py` + `hooks.py`, not 5 in one place. Shape:
 
 ```python
-explicit = os.environ.get("NEXUS_T1_SESSION_ID")
-if explicit:
-    session_file = Path.home() / ".config/nexus/sessions" / f"{explicit}.session"
-    if session_file.exists():
-        return _load_session(session_file)
-    # else fall through to PPID-walk as normal
+def resolve_t1_session() -> SessionRecord | None:
+    explicit = os.environ.get("NEXUS_T1_SESSION_ID")
+    if explicit:
+        session_file = SESSIONS_DIR / f"{explicit}.session"
+        if session_file.exists():
+            return _load_session_record(session_file)
+        # explicit-but-missing: fall through to PPID-walk
+        # (documented behavior; tested by SC-14(b))
+    return find_ancestor_session()  # existing PPID-walk
 ```
 
-SessionStart hook honors the same env: if `NEXUS_T1_SESSION_ID` is set and the session file exists, the hook does NOT spawn a new T1 server for this process — it just uses the pool's endpoint.
+Every call site replaces `find_ancestor_session()` with `resolve_t1_session()`. The SessionStart hook's behavior becomes: "if `resolve_t1_session()` returns a live session, use its endpoint; only spawn a new T1 server if both env is unset AND no ancestor session is found." This was the existing semantics; the new function just adds the explicit-env-first layer.
 
 #### Worker tool surface
 
@@ -188,11 +214,12 @@ Each tool's input relay includes a `$schema_version: 1` marker; mismatched schem
 ## Phases
 
 - **P1** — Tool-output contract for core MCP tools. Add `_structured` flag to `search`, `query`, `store_put`, `memory_get`, `memory_search`, `memory_put`. Runner passes `_structured=True` on retrieval dispatches. Additive; no breaking change.
-- **P2** — Operator pool inside `nexus`. Four deliverables:
-  1. `src/nexus/operators/pool.py`: async worker pool, streaming stdin/stdout JSON parser, worker retirement on token threshold, health probe (periodic no-op turn, timeout → respawn). Singleton bound via `mcp_infra.py`, same pattern as T1/T3.
-  2. Pool session lifecycle: generate pool UUID at first-operator-call, write `~/.config/nexus/sessions/pool-<uuid>.session` with pool's T1 endpoint, clean up on shutdown. Startup reconciliation removes stale `pool-*.session` files whose PID is dead.
-  3. Explicit session-identity support in `src/nexus/session.py`: if `NEXUS_T1_SESSION_ID` env is set, use that session file directly; else fall through to existing PPID-walk (zero regression on RDR-078 T1 behavior).
+- **P2** — Operator pool inside `nexus`. Five deliverables:
+  1. `src/nexus/operators/pool.py`: async worker pool, streaming stdin/stdout JSON parser, worker retirement on token threshold, health probe (periodic no-op turn, timeout → respawn), `PoolConfigError`, `spawn_worker()` asserts `NEXUS_T1_SESSION_ID` is set before launching subprocess (SC-15). Singleton bound via `mcp_infra.py`, same pattern as T1/T3.
+  2. Pool session lifecycle: generate pool UUID at first-operator-call, write `~/.config/nexus/sessions/pool-<uuid>.session` with pool's dedicated T1 HTTP endpoint AND `pool_pid = os.getpid()` in the record JSON. Graceful shutdown removes the file. Startup reconciliation scans `pool-*.session` files, probes `pool_pid` liveness via `os.kill(pid, 0)`, removes dead entries.
+  3. Explicit session-identity support: new `resolve_t1_session()` function in `src/nexus/session.py` that checks `NEXUS_T1_SESSION_ID` first and falls through to `find_ancestor_session()` otherwise. Replaces `find_ancestor_session()` calls at **four sites**: `src/nexus/db/t1.py:140` (T1 client init), `src/nexus/db/t1.py:175` (T1 client reconnect — critical: skipping here silently re-attaches worker to user session), `src/nexus/hooks.py:91` (session_start lock-path), `src/nexus/hooks.py:153` (session_end cleanup). Total ~15-20 lines across three files.
   4. Worker-mode MCP entry point (`nx-mcp --worker-mode` or equivalent env-checked registration): exposes `nexus` and `nexus-catalog` tools EXCEPT `plan_match`, `plan_run`, and the five `operator_*` tools — prevents pool-recursion by construction. Workers spawn with `--mcp-config <worker-mode.json> --strict-mcp-config`.
+  5. Session-record schema extension: add `pool_pid: int` and `pool_session: bool` fields to `write_session_record` for pool-scoped sessions. User-scoped session records leave these absent (backward compatible).
 - **P3** — Operator implementations. Five tools (`operator_extract`, `operator_rank`, `operator_compare`, `operator_summarize`, `operator_generate`) registered in `src/nexus/mcp/core.py`. Each dispatches a user turn to a pool worker with `--json-schema` matching the operator's output shape, intercepts the `StructuredOutput` tool_use event per Finding 3, returns dict.
 - **P4** — Runner integration. `_default_dispatcher` routes operators through the new tools. No changes to `plan_run`, `plan_match`, or plan JSON schema.
 - **P5** — Empirical `min_confidence` calibration. 40+-intent paraphrase dataset spanning all five verbs, ROC curve, chosen value recorded in `docs/rdr/rdr-079-calibration.md`. Closes Gap C.
@@ -213,8 +240,9 @@ Each tool's input relay includes a `$schema_version: 1` marker; mismatched schem
 - **SC-10** — Graceful degradation without auth: when `claude auth status` reports `loggedIn: false`, the first operator-requiring MCP call returns a named `PlanRunOperatorUnavailableError` with guidance ("run `claude auth login` or set `ANTHROPIC_API_KEY`"); retrieval steps (`search`/`query`/`traverse` + all of `nexus-catalog`) continue working unchanged. Plans with no operator steps still execute end-to-end. Testable via a fixture that patches `claude auth status` output.
 - **SC-11** — Worker T1 isolation via explicit session identity. Behavioral test: (a) start a pool, spawn a worker with `NEXUS_T1_SESSION_ID=pool-<uuid>`; (b) from inside the worker, `scratch put` a sentinel tagged `sc11-isolation-probe`; (c) query user session scratch (PPID-walk discovery, no env) and assert the sentinel is absent; (d) query the pool session scratch (by session file path) and assert the sentinel is present. This validates invariants I-1 (worker writes not visible in user T1) and — indirectly — I-4 (PPID-walk still works for normal users by NOT setting the env).
 - **SC-12** — Worker tool-surface restriction. Test: invoke a worker's MCP `tools/list` endpoint (via its stdio channel). Assert the returned tool names include `search` / `query` / `store_get` / `catalog_show` (workers have legitimate MCP access) AND exclude `plan_match` / `plan_run` / `operator_extract` / `operator_rank` / `operator_compare` / `operator_summarize` / `operator_generate` (workers cannot recurse into the pool). This validates invariant I-2.
-- **SC-13** — Pool session cleanup. Test: start a pool, note the pool-session file at `~/.config/nexus/sessions/pool-*.session`; gracefully stop the pool; assert the file is removed. Also: after SIGTERM to the nexus MCP server, assert stale `pool-*.session` files from prior processes are cleaned up on next pool start (startup reconciliation). Validates invariant I-3.
-- **SC-14** — PPID-walk regression guard. Run the full RDR-078 T1 session test suite with `NEXUS_T1_SESSION_ID` NOT set in the environment. Assert no test failures — the new explicit-session mechanism must not regress the existing PPID-walk discovery path. Validates invariant I-4.
+- **SC-13** — Pool session cleanup + PID-liveness reconciliation. Three sub-assertions: (a) graceful stop — start a pool, capture the pool-session file path, gracefully stop the pool, assert the file no longer exists; (b) startup reconciliation — write a stale `pool-dead-uuid.session` file with `pool_pid` set to a dead PID (e.g., spawn + wait + reuse its PID), start a new pool, assert the stale file was removed by reconciliation; (c) startup preserves live peer — write a `pool-live-uuid.session` whose `pool_pid` IS alive (use the current test-process PID), start a new pool, assert the live-peer file is NOT removed. Validates invariant I-3.
+- **SC-14** — PPID-walk regression + fall-through guard. Two sub-assertions that together actually exercise both code paths: (a) unset branch — run the full RDR-078 T1 session test suite with `NEXUS_T1_SESSION_ID` NOT set, assert zero failures (regression guard against catastrophic deletion of PPID-walk); (b) fall-through branch — unit test: set `NEXUS_T1_SESSION_ID=nonexistent-uuid-xyz`, call `resolve_t1_session()`, assert it returns the same result as `find_ancestor_session()` (the env-specified file doesn't exist so the code must fall through to PPID-walk). Without (b), (a) alone is a tautology — exercise the else-branch explicitly. Validates invariant I-4.
+- **SC-15** — Pool refuses to spawn workers without an explicit session identity. Test: attempt to spawn a worker with `NEXUS_T1_SESSION_ID` missing from the env, assert the spawn function raises `PoolConfigError` (or equivalent named error) BEFORE launching the subprocess. This makes the single load-bearing safety mechanism a loud failure, not a silent one. The Risks section calls this "turning a silent correctness issue into a loud error" — this SC pins the loudness.
 
 ## Risks / Open Questions
 
