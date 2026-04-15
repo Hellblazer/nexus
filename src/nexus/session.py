@@ -127,6 +127,58 @@ def _ppid_of(pid: int) -> int | None:
         return None  # intentional: process gone or ps unavailable — expected during PPID walk
 
 
+def resolve_t1_session(
+    sessions_dir: Path | None = None,
+    start_pid: int | None = None,
+) -> dict | None:
+    """Resolve the T1 session record for this process.
+
+    RDR-079 P2.3 single entry point. Order:
+      1. If ``NEXUS_T1_SESSION_ID`` env is set and non-empty, look up
+         ``{SESSIONS_DIR}/{NEXUS_T1_SESSION_ID}.session``. Return it when
+         present and parseable.
+      2. Otherwise (unset, empty, missing file, or corrupt JSON), fall
+         through to the RDR-078 PPID-walk via
+         :func:`find_ancestor_session`.
+
+    This is the mechanism that isolates pool workers from the user's T1
+    session (I-1). When a worker is spawned with
+    ``NEXUS_T1_SESSION_ID=pool-<uuid>``, it joins the pool's session
+    instead of PPID-walking to the user's. When the env is absent (the
+    common case), behavior is identical to the pre-RDR-079 discovery
+    path — no regression on RDR-078 T1 tests (SC-14(a)).
+
+    Use this everywhere ``find_ancestor_session()`` used to be called.
+    """
+    if sessions_dir is None:
+        sessions_dir = SESSIONS_DIR
+
+    explicit = os.environ.get("NEXUS_T1_SESSION_ID", "").strip()
+    if explicit:
+        candidate = sessions_dir / f"{explicit}.session"
+        if candidate.exists():
+            try:
+                record = json.loads(candidate.read_text())
+                if isinstance(record, dict) and all(
+                    k in record for k in ("server_host", "server_port", "session_id")
+                ):
+                    return record
+            except (json.JSONDecodeError, OSError):
+                _log.debug(
+                    "resolve_t1_session: env-specified session file unreadable; "
+                    "falling through to PPID-walk",
+                    path=str(candidate),
+                )
+        # Missing/corrupt env-specified file falls through to PPID-walk —
+        # documented behavior (SC-14(b)). A stale NEXUS_T1_SESSION_ID in
+        # the environment (e.g. from a previous aborted pool) should not
+        # break session discovery for non-pool callers.
+
+    return find_ancestor_session(
+        sessions_dir=sessions_dir, start_pid=start_pid,
+    )
+
+
 def find_ancestor_session(
     sessions_dir: Path | None = None,
     start_pid: int | None = None,
