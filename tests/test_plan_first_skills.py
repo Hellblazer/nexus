@@ -34,16 +34,24 @@ NEW_SKILLS: tuple[str, ...] = (
     "plan-author", "plan-inspect", "plan-promote",
 )
 
-RETRIEVAL_AGENTS: tuple[str, ...] = (
-    "strategic-planner",
-    "architect-planner",
-    "code-review-expert",
-    "substantive-critic",
-    "deep-analyst",
-    "deep-research-synthesizer",
-    "debugger",
-    "plan-auditor",
-)
+def _load_retrieval_agents() -> tuple[str, ...]:
+    """Read the canonical retrieval-agent registry used by the hook.
+
+    Single source of truth: ``nx/retrieval-agents.txt``. Keeping the test
+    reading from the same file the hook sources prevents drift.
+    """
+    from pathlib import Path
+
+    registry = Path(__file__).parent.parent / "nx" / "retrieval-agents.txt"
+    names: list[str] = []
+    for raw in registry.read_text().splitlines():
+        line = raw.strip()
+        if line and not line.startswith("#"):
+            names.append(line)
+    return tuple(names)
+
+
+RETRIEVAL_AGENTS: tuple[str, ...] = _load_retrieval_agents()
 
 
 # ── SC-7a: skills present + frontmatter valid ──────────────────────────────

@@ -22,19 +22,28 @@ SKIP_STORAGE_DOCS=0
 SKIP_T2_SCAN=0
 SKIP_OPERATORS=0
 
-# RDR-078 P5 (nexus-05i.9, SC-7): the eight retrieval-shaped agents
-# get the plan-match-first preamble injected below.
+# RDR-078 P5 (nexus-05i.9, SC-7): retrieval-shaped agents get the
+# plan-match-first preamble injected below. Canonical list lives in
+# nx/retrieval-agents.txt — SINGLE SOURCE OF TRUTH (hook + test read it).
 RETRIEVAL_AGENT=0
-if echo "$TASK_TEXT" | grep -qiE "strategic.planner|architect.planner|code.review.expert|substantive.critic|deep.analyst|deep.research.synthesizer|debugger|plan.auditor"; then
-    RETRIEVAL_AGENT=1
+RETRIEVAL_REGISTRY="$CLAUDE_PLUGIN_ROOT/retrieval-agents.txt"
+if [[ -f "$RETRIEVAL_REGISTRY" ]]; then
+    # Build a grep pattern by replacing '-' with '.' (any separator) per line,
+    # skipping comments and blanks.
+    RETRIEVAL_PATTERN=$(grep -vE '^\s*(#|$)' "$RETRIEVAL_REGISTRY" | sed 's/-/./g' | paste -sd'|' -)
+    if [[ -n "$RETRIEVAL_PATTERN" ]] && echo "$TASK_TEXT" | grep -qiE "$RETRIEVAL_PATTERN"; then
+        RETRIEVAL_AGENT=1
+    fi
 fi
 
 if echo "$TASK_TEXT" | grep -qiE "refactor|rename.*symbol|find.*method|type.hierarch|navigate.code"; then
     # Code-nav agents don't need storage docs or operators
     SKIP_STORAGE_DOCS=1
     SKIP_OPERATORS=1
-elif echo "$TASK_TEXT" | grep -qiE "code.review|review.code|lint|style.check"; then
-    # Code review agents don't need storage docs or operators
+elif [[ $RETRIEVAL_AGENT -eq 0 ]] && echo "$TASK_TEXT" | grep -qiE "code.review|review.code|lint|style.check"; then
+    # Code review agents don't need storage docs or operators — but don't
+    # apply this skip to retrieval-shaped agents (e.g. code-review-expert)
+    # which need the plan tool signatures emitted by NXTOOLS below.
     SKIP_STORAGE_DOCS=1
     SKIP_OPERATORS=1
 fi
@@ -47,9 +56,23 @@ cat <<'PLANFIRST'
 
 Before decomposing any retrieval task, call
 `mcp__plugin_nx_nexus__plan_match(intent=<caller's phrasing>,
-dimensions={verb:<v>}, min_confidence=0.85, n=1)`. If a match lands,
-execute via `plan_run(match, bindings=...)` and return its final step
-result. Fall through to `/nx:query` only on miss.
+dimensions='{"verb":"<v>"}', min_confidence=0.85, n=1)`. If a match
+lands, execute via `plan_run(plan_id=<match.id>, bindings='{...}')`
+and return its final step result. Fall through to `/nx:query` only on
+miss.
+
+Match semantics:
+  * Numeric confidence ≥ min_confidence  → HIT — execute via plan_run.
+  * confidence=fts5  → FTS5-fallback HIT (T1 cache unavailable). Treat
+    as a match; DO NOT skip to /nx:query. min_confidence does not apply.
+  * "No matching plans." → MISS — fall through to /nx:query.
+
+Plan tool signatures (even if full storage docs are omitted below):
+  mcp__plugin_nx_nexus__plan_match(intent, dimensions='{}', scope_preference="", min_confidence=0.85, n=5, project="")
+  mcp__plugin_nx_nexus__plan_run(plan_id, bindings='{}')
+  mcp__plugin_nx_nexus__plan_save(query, plan_json, project="", tags="", ttl=None, name="", verb="", scope="", dimensions='{}', default_bindings='{}', parent_dims='{}')
+  mcp__plugin_nx_nexus__plan_search(query, project="", limit=5)
+  dimensions / bindings accept JSON objects (preferred) or legacy CSV.
 
 Five scenario verbs: research / review / analyze / debug / document.
 Plan-mgmt: plan-author / plan-inspect / plan-promote. See

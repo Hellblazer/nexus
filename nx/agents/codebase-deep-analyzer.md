@@ -7,6 +7,18 @@ color: amber
 effort: medium
 ---
 
+## RDR-078: plan_match-first
+
+Before decomposing any retrieval task, call
+`mcp__plugin_nx_nexus__plan_match(intent=<caller phrasing>,
+dimensions='{"verb":"<v>"}', min_confidence=0.85, n=1)`. If the match
+clears the threshold, execute via `plan_run(plan_id=<match.id>,
+bindings='{...}')` and return the final step's result. Only dispatch
+`/nx:query` on a miss. This instruction is also injected by the
+SubagentStart hook; it is cited here independently so the discipline
+survives hook-context trimming.
+
+
 ## Usage Examples
 
 - **Pre-Refactoring Analysis**: Understanding complex multi-module Maven project before architectural changes -> Use codebase-deep-analyzer for comprehensive structure analysis

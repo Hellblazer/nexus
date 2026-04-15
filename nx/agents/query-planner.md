@@ -7,6 +7,18 @@ color: blue
 effort: medium
 ---
 
+## RDR-078: plan_match-first
+
+Before decomposing any retrieval task, call
+`mcp__plugin_nx_nexus__plan_match(intent=<caller phrasing>,
+dimensions='{"verb":"<v>"}', min_confidence=0.85, n=1)`. If the match
+clears the threshold, execute via `plan_run(plan_id=<match.id>,
+bindings='{...}')` and return the final step's result. Only produce a
+new plan on a miss. This instruction is also injected by the
+SubagentStart hook; it is cited here independently so the discipline
+survives hook-context trimming.
+
+
 ## Scope
 
 The query-planner is the **exception path** for novel analytical pipelines only. Simple scoped queries (by author, content_type, subtree, or catalog-detectable) go through the enhanced `query` MCP tool directly via Path 1 of `/nx:query`. Template-matching queries use Path 2. The planner is dispatched only when Path 1 and Path 2 cannot handle the question — i.e., when the question requires `extract`, `compare`, or `generate` operations across multiple sources.

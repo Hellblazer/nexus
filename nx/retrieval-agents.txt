@@ -1,0 +1,20 @@
+# RDR-078 P5 — Canonical registry of retrieval-shaped agents.
+#
+# This is the SINGLE SOURCE OF TRUTH. Both `nx/hooks/scripts/subagent-start.sh`
+# and `tests/test_plan_first_skills.py` read from it. To add a new
+# retrieval-shaped agent to the plan-match-first injection, add the
+# canonical agent name below (dashes, no file extension). A matching
+# grep pattern is derived automatically.
+#
+# One agent name per line; # comments and blank lines ignored.
+
+strategic-planner
+architect-planner
+code-review-expert
+substantive-critic
+deep-analyst
+deep-research-synthesizer
+debugger
+plan-auditor
+codebase-deep-analyzer
+query-planner
