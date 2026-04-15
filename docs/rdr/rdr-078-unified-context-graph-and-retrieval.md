@@ -44,17 +44,20 @@ Five canonical scenarios recur across every nexus session: design/planning, crit
 
 Five phases. Each builds on RDR-042's shipped substrate. Phase 3 is new to this revision and carries the paper's quality lever.
 
-### Phase 1: Semantic plan matching (`plan_match` MCP tool)
+### Phase 1: Semantic plan matching (`plan_match` MCP tool, T1-cached)
 
-Pickup of RDR-042 §Alternatives "T3 for plan storage (deferred)".
+Pickup of RDR-042 §Alternatives "T3 for plan storage (deferred)". The original deferral assumed a T3 collection; on review the session-scoped T1 ChromaDB is a better fit — the cache rebuilds on every SessionStart from T2, so there is no sync drift, no TTL coordination, and no dual-write race.
 
-- New T3 collection `plans__semantic`: embed each plan's `query` field via the standard index-time embedding pipeline. One embedding per plan row. Plan metadata (`project`, `tags`, `ttl`) carried as ChromaDB metadata for filter.
-- Write path: `plan_save` gains a post-commit side effect — embed the query and upsert to `plans__semantic`. Failure is logged but not fatal (FTS5 remains the source of truth; semantic is a cache).
-- Read path: new MCP tool `plan_match(query, project=None, n=5, min_confidence=0.0, outcome='success')` returns `[(plan_id, plan_query, confidence, plan_json), ...]`. Confidence is cosine similarity. Default filter excludes failed plans.
-- Deletion path: `plans.close` TTL purge deletes the matching `plans__semantic` row. Idempotent.
-- The existing `plan_search` FTS5 tool is untouched — it remains the fast path for tag/project filters and exact token matches.
+- **T2 remains authoritative.** `plans` table + FTS5 (existing, RDR-042) is the source of truth. All writes go to T2 via `plan_save`. No schema changes.
+- **T1 holds the session semantic cache.** New collection `plans__session` (via RDR-041's T1 HTTP server) populated at SessionStart: `SELECT id, query, plan_json, tags FROM plans WHERE outcome='success' AND (ttl_days = 0 OR expires_at > now)` → embed the query text → upsert one document per plan with `metadata={plan_id, verb_name, handler_kind, tags, project, ttl, last_used}`.
+- **`plan_match(query, project=None, n=5, min_confidence=0.0, tag_filter=None)` MCP tool** — T1 cosine query, returns `[(plan_id, plan_query, confidence, plan_json, metadata), ...]`. `tag_filter` accepts a glob like `"verb:*"` or a comma-separated list; filters on T1 metadata before ranking. Default excludes failed plans via the SessionStart populator (only `outcome='success'` rows are loaded).
+- **Fallback path.** When T1 is unavailable (EphemeralClient in tests, or session server failed to start), `plan_match` degrades to `plan_search` FTS5 over T2. Tests get deterministic behavior; production gets the semantic path.
+- **Write visibility.** A new plan saved mid-session via `plan_save` is also upserted to T1 by the same commit hook — so the calling session sees it immediately without waiting for the next SessionStart. Subagents sharing the parent T1 (RDR-041 session inheritance) see it too.
+- The existing `plan_search` FTS5 tool is untouched — it remains the fast path for exact-token and tag-only lookups.
 
-**Expected benefit:** ~40% compute cost reduction on scenario-matched queries once the library is populated (RF-1, efficiency not quality).
+**What this drops vs. earlier draft:** no new T3 collection; no T3 embedding cost per `plan_save`; no TTL-triggered T3 deletion; no reindex command. T1 rebuilds every session by construction.
+
+**Expected benefit (RF-1):** ~40% compute cost reduction on scenario-matched queries once the library is populated. Efficiency story, not quality.
 
 ### Phase 2: Domain-scoped retrieval steps
 
@@ -132,14 +135,16 @@ The ergonomic change. Agents must reach for `plan_match` **before** decomposing 
 
 - **`nx:plan-first` skill** — invoked at the top of every research/review/analyze/debug/doc task. Triggers on verbs like "plan", "design", "review", "analyze", "debug", "document". Instructs: call `plan_match(query, min_confidence=0.85)` first; if a match exists, present it and execute; if not, dispatch `/nx:query` (the query-planner) and save the result.
 - **Five scenario skills**: `nx:research-plan`, `nx:review-context`, `nx:analyze-corpus`, `nx:debug-context`, `nx:doc-scope`. Each is a thin wrapper that calls `plan_match("<scenario-name> <user-query>")` with a bias toward the matching scenario plan. Names intentionally match the seeded plan names.
-- **SessionStart hook** (`nx/hooks/scripts/session_start_hook.py`) — add a "## Plan Library" block to the injected context listing `plan_match` / `plan_save` / `plan_search` and the five scenario names. Extends the existing "## nx Capabilities" section.
+- **SessionStart hook** (`nx/hooks/scripts/session_start_hook.py`) — two additions:
+    1. **Populate T1 `plans__session` semantic cache.** Read `SELECT id, query, plan_json, tags FROM plans WHERE outcome='success' AND (ttl_days=0 OR expires_at>now)` → embed query text → upsert to T1 collection `plans__session` with metadata `{plan_id, verb_name, handler_kind, tags, project, ttl, last_used}`. Skipped gracefully if T1 server unavailable (fallback to FTS5 at match time). Log the populated count.
+    2. **Inject a "## Plan Library" context block** listing `plan_match` / `plan_save` / `plan_search` and the five scenario/verb names. Extends the existing "## nx Capabilities" section.
 - **SubagentStart hook** (`nx/hooks/scripts/subagent-start.sh`) — for the eight retrieval-shaped agents (strategic-planner, architect-planner, code-review-expert, substantive-critic, deep-analyst, deep-research-synthesizer, debugger, plan-auditor), inject a "plan-match-first" preamble: *before decomposing any retrieval task, call `plan_match(query, min_confidence=0.85)`; execute the returned plan if match confidence clears the threshold.*
 - **Per-agent `nx/agents/<name>.md`** — each target agent's opening instruction cites the `plan_match`-first pattern independently of the hook, so behavior survives hook-context trimming.
 
 ## Success Criteria
 
 - **SC-1** — `plan_match` MCP tool lands. Given a plan with query *"how does projection quality work"* saved to the library, `plan_match("what's the mechanism for projection quality hub suppression")` returns that plan with cosine confidence > 0.80. Exact-token variants return the plan from FTS5 (`plan_search`) with equivalent or higher confidence.
-- **SC-2** — Plan embedding is upserted on `plan_save` and deleted on TTL purge. T3 collection `plans__semantic` stays in sync with the T2 `plans` table (`COUNT(plans) == COUNT(plans__semantic)` after a reindex sweep).
+- **SC-2** — T1 `plans__session` collection is populated at SessionStart from T2. After SessionStart, `COUNT(T1 plans__session) == COUNT(T2 plans WHERE outcome='success' AND (ttl_days=0 OR expires_at>now))`. A `plan_save` during the session upserts to T1 immediately via the commit hook; the new row is visible to `plan_match` within the same session without a restart.
 - **SC-3** — Plan step schema accepts the `scope` field with `taxonomy_domain` ∈ {`prose`, `code`} and per-domain `topic=`. The plan runner forwards scope to the correct retrieval tool and corpus set. Cross-embedding cosine is never computed; verifiable by grep.
 - **SC-4** — Plan step schema accepts `{tool: "traverse", args: {seeds, link_types, depth, direction, return}}`. Depth is capped at 3. `seeds` accepts both literal tumbler lists and `$step_N` references. The runner resolves both cases and returns the agreed shape.
 - **SC-5** — `traverse` operator uses `Catalog.graph()` for BFS; no new graph-walking code. Returning `collections` from a traverse step usable as `subtree=` / explicit `corpus=` input to a downstream retrieval step is end-to-end tested.
@@ -175,6 +180,9 @@ The ergonomic change. Agents must reach for `plan_match` **before** decomposing 
 - **PQ-6** — Failed-plan filter in `plan_match`. Default `outcome='success'` is correct. Should traverse-heavy plans carry a different success signal (e.g., "at least one typed-link traversal returned a non-empty neighbourhood")? Defer; the existing outcome field starts coarse.
 - **PQ-7** — Drift between T2 `plans` and T3 `plans__semantic`. Opt-in periodic reindex via `nx catalog setup --reindex-plans`. Not required for first iteration.
 - **PQ-8** — Scenario plan portability across projects. Plans ship project-neutral (templates); agent customises per-project before saving a project-scoped variant. Substitution mechanism (`$var` references in `plan_json`) needs a small runner contract.
+- **PQ-9** — Verbs as emergent taxonomy. Today the `verb:*` tag convention is human-curated. Future work: apply HDBSCAN-style clustering to the `plans.query` embeddings themselves, so recurrently-phrased intents surface as candidate verb clusters. Out of scope for this iteration; naming it so the first agent that asks doesn't rediscover the question.
+- **PQ-10** — Cache scope: all plans or just verbs. Starts with all `outcome='success'` plans in T1. Revisit if T1 memory footprint becomes an issue at 10k+ plans (unlikely — 1k plans × 1024d float32 embedding ≈ 4 MB).
+- **PQ-11** — Cross-subagent visibility. RDR-041's T1 HTTP server lets a spawned subagent inherit the parent's session via PPID walking. The T1 `plans__session` cache persists for the parent session's lifetime; subagents see the same cache without re-populating. Name it so the behaviour is documented before it surfaces as a live-debug confusion.
 
 ## Out of Scope (deferred, each may spawn its own RDR)
 
