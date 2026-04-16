@@ -43,6 +43,8 @@ def test_core_registered_tools():
         "store_get_many",
         # RDR-080 P1: plan-match-first orchestration tool.
         "nx_answer",
+        # RDR-080 P3: consolidation tools replacing thin-wrapper agents.
+        "nx_tidy", "nx_enrich_beads", "nx_plan_audit",
     }
     assert expected == tool_names, f"Missing: {expected - tool_names}, Extra: {tool_names - expected}"
 

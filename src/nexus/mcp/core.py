@@ -2,9 +2,10 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """MCP core tools: search, store, memory, scratch, collections, plans.
 
-18 registered tools + 3 demoted (plain functions, no @mcp.tool()).
+21 registered tools + 3 demoted (plain functions, no @mcp.tool()).
 RDR-078 P1 added ``plan_match`` + ``plan_run`` to the existing
-``plan_save`` / ``plan_search`` pair. RDR-080 P1 added ``nx_answer``.
+``plan_save`` / ``plan_search`` pair. RDR-080 P1 added ``nx_answer``;
+RDR-080 P3 added ``nx_tidy``, ``nx_enrich_beads``, ``nx_plan_audit``.
 """
 from __future__ import annotations
 
@@ -60,6 +61,9 @@ _WORKER_FORBIDDEN_TOOLS: frozenset[str] = frozenset({
     "plan_match",
     "plan_run",
     "nx_answer",
+    "nx_tidy",
+    "nx_enrich_beads",
+    "nx_plan_audit",
     "operator_extract",
     "operator_rank",
     "operator_compare",
@@ -2754,6 +2758,207 @@ async def nx_answer(
         pass  # Best-effort recording.
 
     return final_text
+
+
+# ── P3 consolidation tools (RDR-080) ─────────────────────────────────────────
+
+
+@_mcp_tool()
+async def nx_tidy(
+    topic: str,
+    collection: str = "knowledge",
+    timeout: float = 120.0,
+) -> str:
+    """Consolidate knowledge entries on *topic*. RDR-080 P3.
+
+    Replaces the ``knowledge-tidier`` agent. Dispatches to the operator
+    pool: the worker searches T3 for entries matching *topic*, identifies
+    duplicates and contradictions, and returns a consolidated summary.
+
+    Args:
+        topic: The knowledge topic to consolidate (e.g. "chromadb quotas").
+        collection: T3 collection to search (default: knowledge).
+        timeout: Worker-dispatch timeout in seconds.
+
+    Returns:
+        Consolidated summary as a human-readable string.
+    """
+    from nexus.mcp_infra import get_operator_pool
+
+    pool = get_operator_pool(
+        "tidy",
+        operator_role=(
+            "You are the `tidy` knowledge consolidation operator. You have "
+            "access to nx MCP tools (search, query, store_put, store_get). "
+            "For each user turn: (1) search the specified collection for "
+            "entries matching the topic, (2) identify duplicates, contradictions, "
+            "and outdated entries, (3) emit a StructuredOutput with "
+            '{"summary": "<consolidated text>", "actions": [{"action": "...", '
+            '"entry_id": "...", "reason": "..."}]}. Return no prose outside '
+            "the structured output."
+        ),
+        json_schema={
+            "type": "object",
+            "required": ["summary", "actions"],
+            "properties": {
+                "summary": {"type": "string"},
+                "actions": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                },
+            },
+        },
+    )
+
+    prompt = (
+        f"Consolidate knowledge entries about '{topic}' in collection "
+        f"'{collection}'. Search for all related entries, identify duplicates "
+        f"or contradictions, and produce a consolidated summary."
+    )
+    payload = await _dispatch_with_auth_guard(
+        pool, "tidy", prompt=prompt, timeout=timeout,
+    )
+
+    summary = payload.get("summary", "") if isinstance(payload, dict) else str(payload)
+    actions = payload.get("actions", []) if isinstance(payload, dict) else []
+
+    lines = [summary]
+    if actions:
+        lines.append(f"\n{len(actions)} action(s) suggested.")
+    return "\n".join(lines)
+
+
+@_mcp_tool()
+async def nx_enrich_beads(
+    bead_description: str,
+    context: str = "",
+    timeout: float = 120.0,
+) -> str:
+    """Enrich a bead with execution context. RDR-080 P3.
+
+    Replaces the ``plan-enricher`` agent. Dispatches to the operator
+    pool: the worker searches the codebase for relevant file paths,
+    code patterns, constraints, and test commands, then returns enriched
+    markdown.
+
+    Args:
+        bead_description: The bead's title and description to enrich.
+        context: Optional additional context (e.g. audit findings).
+        timeout: Worker-dispatch timeout in seconds.
+
+    Returns:
+        Enriched bead markdown as a human-readable string.
+    """
+    from nexus.mcp_infra import get_operator_pool
+
+    pool = get_operator_pool(
+        "enrich",
+        operator_role=(
+            "You are the `enrich` bead enrichment operator. You have access "
+            "to nx MCP tools (search, query) for codebase exploration. "
+            "For each user turn: (1) analyze the bead description, (2) search "
+            "the codebase for relevant files, symbols, and patterns, (3) emit "
+            "a StructuredOutput with "
+            '{"enriched_description": "<full enriched markdown>", '
+            '"key_files": ["<path>", ...], "test_commands": ["<cmd>", ...], '
+            '"constraints": ["<constraint>", ...]}. '
+            "Return no prose outside the structured output."
+        ),
+        json_schema={
+            "type": "object",
+            "required": ["enriched_description"],
+            "properties": {
+                "enriched_description": {"type": "string"},
+                "key_files": {"type": "array", "items": {"type": "string"}},
+                "test_commands": {"type": "array", "items": {"type": "string"}},
+                "constraints": {"type": "array", "items": {"type": "string"}},
+            },
+        },
+    )
+
+    prompt = f"Enrich this bead with execution context:\n\n{bead_description}"
+    if context:
+        prompt += f"\n\nAdditional context:\n{context}"
+
+    payload = await _dispatch_with_auth_guard(
+        pool, "enrich", prompt=prompt, timeout=timeout,
+    )
+
+    enriched = (
+        payload.get("enriched_description", "")
+        if isinstance(payload, dict) else str(payload)
+    )
+    return enriched
+
+
+@_mcp_tool()
+async def nx_plan_audit(
+    plan_json: str,
+    context: str = "",
+    timeout: float = 120.0,
+) -> str:
+    """Audit a plan for correctness and codebase alignment. RDR-080 P3.
+
+    Replaces the ``plan-auditor`` agent. Dispatches to the operator
+    pool: the worker validates the plan's file paths, dependencies,
+    and assumptions against the current codebase state.
+
+    Args:
+        plan_json: The plan to audit (JSON string or free-text description).
+        context: Optional additional context (e.g. RDR reference).
+        timeout: Worker-dispatch timeout in seconds.
+
+    Returns:
+        Audit verdict as a human-readable string.
+    """
+    from nexus.mcp_infra import get_operator_pool
+
+    pool = get_operator_pool(
+        "audit",
+        operator_role=(
+            "You are the `audit` plan validation operator. You have access "
+            "to nx MCP tools (search, query) for codebase verification. "
+            "For each user turn: (1) parse the plan, (2) verify file paths "
+            "exist, (3) check dependency ordering, (4) identify gaps or "
+            "incorrect assumptions, (5) emit a StructuredOutput with "
+            '{"verdict": "pass|fail|warn", "findings": [{"severity": '
+            '"critical|important|suggestion", "title": "...", "detail": '
+            '"...", "fix": "..."}], "summary": "<one-line verdict>"}. '
+            "Return no prose outside the structured output."
+        ),
+        json_schema={
+            "type": "object",
+            "required": ["verdict", "findings", "summary"],
+            "properties": {
+                "verdict": {"type": "string"},
+                "findings": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                },
+                "summary": {"type": "string"},
+            },
+        },
+    )
+
+    prompt = f"Audit this plan for correctness and codebase alignment:\n\n{plan_json}"
+    if context:
+        prompt += f"\n\nContext:\n{context}"
+
+    payload = await _dispatch_with_auth_guard(
+        pool, "audit", prompt=prompt, timeout=timeout,
+    )
+
+    if isinstance(payload, dict):
+        verdict = payload.get("verdict", "unknown")
+        summary = payload.get("summary", "")
+        findings = payload.get("findings", [])
+        lines = [f"Verdict: {verdict}", summary]
+        for f in findings:
+            sev = f.get("severity", "?")
+            title = f.get("title", "")
+            lines.append(f"  [{sev}] {title}")
+        return "\n".join(lines)
+    return str(payload)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
