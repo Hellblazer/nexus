@@ -767,6 +767,7 @@ def _discover_and_index_rdrs(
     now_iso: str,
     *,
     force: bool = False,
+    embed_fn: Callable | None = None,
 ) -> tuple[int, int, int]:
     """Find .md files under RDR paths and index them via batch_index_markdowns.
 
@@ -804,7 +805,9 @@ def _discover_and_index_rdrs(
     collection = _rdr_collection_name(repo)
 
     _log.info("indexing RDR files", count=len(md_paths), collection=collection)
-    results = batch_index_markdowns(md_paths, corpus=basename, t3=db, collection_name=collection, force=force)
+    results = batch_index_markdowns(md_paths, corpus=basename, t3=db,
+                                    collection_name=collection, force=force,
+                                    embed_fn=embed_fn)
     indexed = sum(1 for s in results.values() if s == "indexed")
     skipped = sum(1 for s in results.values() if s == "skipped")
     failed = sum(1 for s in results.values() if s == "failed")
@@ -1163,8 +1166,13 @@ def _run_index(
             on_file(file, chunks, time.monotonic() - t0)
 
     # Discover and index RDR markdown files → rdr__
+    # Pass the local embed_fn so RDR indexing respects NX_LOCAL mode
+    # (without it, the RDR branch defaulted to Voyage 1024-dim; query
+    # time with local MiniLM 384-dim hit "Collection expecting embedding
+    # with dimension of 1024, got 384").
     rdr_indexed, rdr_current, rdr_failed = _discover_and_index_rdrs(
-        repo, rdr_abs_paths, db, voyage_key, now_iso, force=force
+        repo, rdr_abs_paths, db, voyage_key, now_iso, force=force,
+        embed_fn=_embed_fn,
     )
 
     # Prune misclassified chunks (reclassification cleanup)

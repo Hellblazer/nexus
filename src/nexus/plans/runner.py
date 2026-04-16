@@ -556,9 +556,24 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
                 action="positional truncation to max_inputs",
             )
             non_empty = non_empty[:_OPERATOR_MAX_INPUTS]
-        # Replace ids/collections with inputs (JSON array string).
+        # Replace ids/collections with the operator's expected content arg.
+        # Each operator takes a different parameter name for the hydrated
+        # content — match the tool signature so auto-hydration plugs in
+        # correctly regardless of whether the LLM planner emitted ids or
+        # explicit content.
         args = {k: v for k, v in args.items() if k not in ("ids", "collections")}
-        args["inputs"] = json.dumps(non_empty)
+        if resolved_tool in ("operator_summarize",):
+            # summarize() takes a single string; join the hydrated chunks.
+            args.setdefault("content", "\n\n".join(non_empty))
+        elif resolved_tool in ("operator_generate",):
+            # generate() uses `context` for the backing material.
+            args.setdefault("context", "\n\n".join(non_empty))
+        elif resolved_tool in ("operator_rank", "operator_compare"):
+            # rank/compare take `items` as the list.
+            args.setdefault("items", json.dumps(non_empty))
+        else:
+            # extract (and any future list-consuming operator) uses `inputs`.
+            args.setdefault("inputs", json.dumps(non_empty))
 
     # RF-13: translate extract template dict → fields CSV.
     # Fires for ALL operator_extract calls, not just auto-hydrated ones.
@@ -566,6 +581,15 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
         template = args.pop("template")
         if isinstance(template, dict):
             args["fields"] = ",".join(template.keys())
+
+    # Normalize list-valued args for summarize/generate when the LLM planner
+    # passes $stepN.contents (a list) directly instead of routing via
+    # auto-hydration.  Without this the operator errors with
+    # "content must be str, got list".
+    if resolved_tool == "operator_summarize" and isinstance(args.get("content"), list):
+        args["content"] = "\n\n".join(str(x) for x in args["content"] if x)
+    if resolved_tool == "operator_generate" and isinstance(args.get("context"), list):
+        args["context"] = "\n\n".join(str(x) for x in args["context"] if x)
 
     fn = getattr(mcp_core, resolved_tool, None)
     if fn is None or not callable(fn):

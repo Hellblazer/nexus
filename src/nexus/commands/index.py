@@ -642,9 +642,28 @@ def index_rdr_cmd(path: Path, force: bool, monitor: bool) -> None:
             else:
                 click.echo(line)
 
+    # Honor NX_LOCAL by passing the local embed_fn — otherwise the RDR
+    # collection gets created with Voyage 1024-dim expectations and fails
+    # at query time with the local MiniLM 384-dim embedder.
+    #
+    # The doc_indexer embed_fn contract is `(texts, model) → (embeddings, model)`.
+    # LocalEmbeddingFunction's __call__ is a ChromaDB EF — `(input) → embeddings`.
+    # We wrap it to match the indexer contract.
+    from nexus.config import is_local_mode
+    _embed_fn = None
+    if is_local_mode():
+        from nexus.db.local_ef import LocalEmbeddingFunction
+        _local_ef = LocalEmbeddingFunction()
+
+        def _embed_fn(texts: list[str], model: str) -> tuple[list[list[float]], str]:
+            # Force Python floats — ChromaDB rejects np.float32 in the
+            # embedding list with "Expected embeddings to be a list of
+            # floats or ints, got [[np.float32(...)..."
+            return [[float(x) for x in v] for v in _local_ef(texts)], model
+
     results = batch_index_markdowns(rdr_files, corpus=basename, collection_name=collection,
                                     content_type="rdr", force=force, on_file=on_file,
-                                    base_path=repo_root)
+                                    base_path=repo_root, embed_fn=_embed_fn)
     bar.close()
     indexed = sum(1 for s in results.values() if s == "indexed")
     result_label = "Force re-indexed" if force else "Indexed"

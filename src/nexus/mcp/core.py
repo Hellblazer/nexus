@@ -61,7 +61,8 @@ def search(
     where: str = "",
     cluster_by: str = "",
     topic: str = "",
-) -> str:
+    structured: bool = False,
+) -> "str | dict":
     """Semantic search across T3 collections. Paged results (``offset=N`` for next page).
 
     Args:
@@ -72,6 +73,9 @@ def search(
         where: Metadata filter (KEY=VALUE, comma-separated). Ops: = >= <= > < !=
         cluster_by: "semantic" for topic/Ward clustering (default), empty to disable
         topic: Pre-filter to documents in this topic label (from nx taxonomy discover)
+        structured: Return ``{ids, tumblers, distances, collections}`` dict instead
+            of human-readable string.  Used by the plan runner so ``$stepN.ids``
+            references resolve to actual chunk IDs.
     """
     try:
         from nexus.config import load_config
@@ -131,12 +135,16 @@ def search(
         if not clustered:
             results.sort(key=lambda r: r.distance)
         if not results:
+            if structured:
+                return {"ids": [], "tumblers": [], "distances": [], "collections": []}
             return "No results."
 
         # Apply pagination
         total = len(results)
         page = results[offset:offset + limit]
         if not page:
+            if structured:
+                return {"ids": [], "tumblers": [], "distances": [], "collections": []}
             return f"No results at offset {offset} (total {total})."
 
         # Record search trace for RDR-061 E2 retrieval feedback correlation.
@@ -153,6 +161,16 @@ def search(
         except Exception:
             import structlog
             structlog.get_logger().debug("relevance_trace_record_failed", exc_info=True)
+
+        # Structured return for plan-runner step output contract.
+        # Resolves $stepN.ids / $stepN.collections / $stepN.distances refs.
+        if structured:
+            return {
+                "ids": [r.id for r in page],
+                "tumblers": [r.metadata.get("tumbler", "") for r in page],
+                "distances": [float(r.distance) for r in page],
+                "collections": list({r.collection for r in page}),
+            }
 
         lines: list[str] = []
         current_cluster: str | None = None
@@ -197,7 +215,8 @@ def query(
     follow_links: str = "",
     depth: int = 1,
     subtree: str = "",
-) -> str:
+    structured: bool = False,
+) -> "str | dict":
     """Document-level semantic search for analytical questions.
 
     Results are capped at ``limit``. When more documents match, a footer line shows
@@ -353,7 +372,18 @@ def query(
             )
         results.sort(key=lambda r: r.distance)
         if not results:
+            if structured:
+                return {"ids": [], "tumblers": [], "distances": [], "collections": []}
             return "No documents found."
+
+        if structured:
+            page = results[:limit]
+            return {
+                "ids": [r.id for r in page],
+                "tumblers": [r.metadata.get("tumbler", "") for r in page],
+                "distances": [float(r.distance) for r in page],
+                "collections": list({r.collection for r in page}),
+            }
 
         # Group by document: use content_hash or source_title as doc key
         docs: dict[str, dict] = {}  # doc_key → {meta, snippets, best_distance}
@@ -1246,7 +1276,7 @@ def collection_verify(name: str) -> str:
 
 
 @mcp.tool()
-async def operator_extract(inputs: str, fields: str, timeout: float = 60.0) -> dict:
+async def operator_extract(inputs: str, fields: str, timeout: float = 120.0) -> dict:
     """Extract structured fields from each input item using claude -p.
 
     Args:
@@ -1274,7 +1304,7 @@ async def operator_extract(inputs: str, fields: str, timeout: float = 60.0) -> d
 
 
 @mcp.tool()
-async def operator_rank(items: str, criterion: str, timeout: float = 60.0) -> dict:
+async def operator_rank(items: str, criterion: str, timeout: float = 120.0) -> dict:
     """Rank items by a criterion using claude -p.
 
     Args:
@@ -1300,7 +1330,7 @@ async def operator_rank(items: str, criterion: str, timeout: float = 60.0) -> di
 
 
 @mcp.tool()
-async def operator_compare(items: str, focus: str = "", timeout: float = 60.0) -> dict:
+async def operator_compare(items: str, focus: str = "", timeout: float = 120.0) -> dict:
     """Compare items and return a structured comparison using claude -p.
 
     Args:
@@ -1329,7 +1359,7 @@ async def operator_compare(items: str, focus: str = "", timeout: float = 60.0) -
 async def operator_summarize(
     content: str,
     cited: bool = False,
-    timeout: float = 60.0,
+    timeout: float = 120.0,
 ) -> dict:
     """Summarize content using claude -p, optionally with citations.
 
@@ -1358,7 +1388,7 @@ async def operator_generate(
     template: str,
     context: str,
     cited: bool = False,
-    timeout: float = 60.0,
+    timeout: float = 120.0,
 ) -> dict:
     """Generate output from a template and context using claude -p.
 
@@ -1536,6 +1566,100 @@ _PLANNER_SCHEMA: dict = {
     "additionalProperties": False,
 }
 
+#: Tool-signature hint text included in the inline-planner prompt so the
+#: LLM generates args that match the actual MCP tool contracts.  Without
+#: this, the planner typically emits ``operator_extract(corpus=..., query=...)``
+#: — tokens the tool's signature doesn't accept — and the step fails with
+#: ``missing required argument 'inputs'/'fields'``.
+_PLANNER_TOOL_REFERENCE = """\
+Use ONLY these tools (bare names; the runner maps them to MCP calls).
+
+=== Retrieval tools ===
+Each returns {"ids": [...], "tumblers": [...], "distances": [...], "collections": [...]}.
+THEY DO NOT RETURN CONTENT. To get text, chain into store_get_many.
+
+  search(query, corpus="all", limit=10, topic="", where="")
+      - `query` is the search string.  `corpus` must be "all", a prefix
+        (rdr/knowledge/code), or a full collection name.
+      - Output: {ids, tumblers, distances, collections}
+
+  query(question, corpus="all", limit=10, author="", content_type="",
+        subtree="", follow_links="", depth=1)
+      - Document-level retrieval with catalog-aware routing.
+      - Output: {ids, tumblers, distances, collections}
+
+  traverse(seeds, link_types=[...] OR purpose="<name>", depth=1, direction="both")
+      - Walk catalog edges from seed tumblers.
+      - `seeds` is a list of tumbler strings. Specify EITHER link_types
+        (e.g. ["implements"]) OR purpose ("find-implementations",
+        "decision-evolution", "reference-chain", "documentation-for") —
+        never both. Depth capped at 3.
+      - Output: {tumblers, ids, collections}
+
+=== Content hydration ===
+  store_get_many(ids=[...], collections="knowledge")
+      - Batch hydration — turn IDs into actual text.
+      - `ids` MUST come from a prior retrieval step: ids=$step1.ids
+      - `collections` MUST come from a prior retrieval step:
+        collections=$step1.collections
+      - Output: {contents: [str, ...], missing: [str, ...]}
+
+=== Operators (LLM-backed) ===
+Each requires hydrated text as input — NOT ids/tumblers.
+
+  extract(inputs, fields)
+      - `inputs` is a JSON array of content strings. Pass $stepN.contents
+        where step N was store_get_many.
+      - `fields` is a comma-separated string like "topic,decision,year".
+      - Output: {extractions: [dict, ...]}
+
+  rank(items, criterion)
+      - `items` is a JSON array. `criterion` is a string.
+      - Output: {ranked: [...]}
+
+  compare(items, focus="")
+      - `items` is a JSON array.  `focus` is an optional axis.
+      - Output: {comparison: str or {dict}}
+
+  summarize(content, cited=false)
+      - `content` is a SINGLE string (not a list).  Pass one of:
+          * $stepN.contents when step N is store_get_many (runner will
+            auto-join the list into a single string).
+          * A literal string.
+      - Output: {summary: str}
+
+  generate(template, context, cited=false)
+      - `template` is a natural-language instruction; `context` is a
+        string (similar rules as summarize.content).
+      - Output: {text: str}
+
+=== Correct chain patterns ===
+
+Pattern A (search → hydrate → operate):
+  step1: search(query=..., corpus="all")      → {ids, tumblers, collections}
+  step2: store_get_many(ids=$step1.ids,
+                        collections=$step1.collections)
+                                               → {contents, missing}
+  step3: summarize(content=$step2.contents)    → {summary}
+
+Pattern B (operator auto-hydration shortcut):
+  step1: search(query=..., corpus="all")
+  step2: summarize(ids=$step1.ids,
+                   collections=$step1.collections)
+    # Runner auto-calls store_get_many for you when an operator step
+    # receives `ids` + `collections`.  Skips the explicit hydration step.
+
+=== Step-output reference plumbing ===
+  $stepN.<field> — e.g. $step1.ids, $step2.contents.  Never $stepN alone.
+  The <field> must be one the tool actually returns (see output contracts
+  above).  A mismatch fails with PlanRunStepRefError.
+
+=== Forbidden tools ===
+  Do NOT emit mcp__plugin_nx_nexus-catalog__* names — use traverse.
+  Do NOT emit Read, Grep, Bash, Write, or web_* — they are not part of
+  the plan dispatcher.
+"""
+
 
 def _nx_answer_match_is_hit(confidence: float | None) -> bool:
     """Return True when a plan_match confidence qualifies as a hit.
@@ -1634,8 +1758,12 @@ async def _nx_answer_plan_miss(
 
     prompt = (
         f"Decompose this question into a retrieval-and-analysis plan "
-        f"with at most {max_steps} steps:{corpus_hint}\n\n{question}"
-        f"{corpus_names_hint}"
+        f"with at most {max_steps} steps:{corpus_hint}\n\n"
+        f"Question: {question}\n"
+        f"{corpus_names_hint}\n\n"
+        f"{_PLANNER_TOOL_REFERENCE}\n"
+        f"Return the plan as {{\"steps\": [...]}} where each step is "
+        f"{{\"tool\": \"<bare name>\", \"args\": {{...}}}}."
     )
 
     payload = await claude_dispatch(prompt, _PLANNER_SCHEMA, timeout=120.0)
@@ -1662,6 +1790,22 @@ async def _nx_answer_plan_miss(
         "operator_summarize": "summarize",
         "operator_generate": "generate",
     }
+    # Catalog tools the LLM might reach for — map to the closest allowed
+    # tool (traverse covers link walks; search covers catalog_search use
+    # cases).  Prevents silent `planner_step_dropped` when the planner
+    # hasn't fully internalised the "no catalog_* in plans" rule.
+    _CATALOG_TOOL_REDIRECTS = {
+        "link_query": "traverse",
+        "links": "traverse",
+        "catalog_search": "search",
+        "catalog_show": "query",
+        "catalog_list": "query",
+        "catalog_resolve": "traverse",
+        "catalog_stats": None,  # nothing plan-step-worthy to redirect to
+    }
+    _TOOL_ALIASES.update({
+        k: v for k, v in _CATALOG_TOOL_REDIRECTS.items() if v is not None
+    })
     import structlog as _slog
     _plog = _slog.get_logger()
     normalized = []

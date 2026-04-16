@@ -1051,6 +1051,7 @@ def batch_index_markdowns(
     force: bool = False,
     on_file: Callable[[Path, int, float], None] | None = None,
     base_path: Path | None = None,
+    embed_fn: EmbedFn | None = None,
 ) -> dict[str, str]:
     """Index multiple Markdown files sequentially, returning per-file status.
 
@@ -1078,7 +1079,8 @@ def batch_index_markdowns(
         t0 = time.monotonic()
         try:
             raw = index_markdown(path, corpus, t3=t3, collection_name=collection_name,
-                                 content_type=content_type, force=force, base_path=base_path)
+                                 content_type=content_type, force=force,
+                                 base_path=base_path, embed_fn=embed_fn)
             count = raw if isinstance(raw, int) else 0
             results[str(path)] = "indexed" if count else "skipped"
         except Exception as e:
