@@ -295,34 +295,68 @@ def _exercise_search_query() -> None:
 # ── operators (LLM-backed; skipped by default) ───────────────────────────────
 
 def _exercise_operators() -> None:
-    step("operator_* (LLM-backed)")
+    step("operator_* (LLM-backed, all async)")
     if os.environ.get("NX_VALIDATE_WITH_LLM") != "1":
         for n in ("operator_extract", "operator_rank", "operator_compare",
                   "operator_summarize", "operator_generate"):
             skip(n, "LLM off (set NX_VALIDATE_WITH_LLM=1 to enable)")
         return
 
+    # Redirect HOME to ORIG_HOME for the claude -p subprocesses these
+    # operators spawn internally. Sandbox HOME has no claude login.
+    orig_home = os.environ.get("ORIG_HOME")
+    if orig_home:
+        os.environ["HOME"] = orig_home
+
     from nexus.mcp.core import (
         operator_extract, operator_rank, operator_compare,
         operator_summarize, operator_generate,
     )
-    inputs = ["The retrieval layer was simplified.", "Plans now carry dimensions."]
+    inputs_text = "The retrieval layer was simplified. Plans now carry dimensions."
 
-    with case("operator_extract"):
-        out = operator_extract(inputs=inputs, fields="rdr,component")
-        assert isinstance(out, (str, dict))
-    with case("operator_rank"):
-        out = operator_rank(inputs=inputs, criterion="relevance to RDR-080")
-        assert isinstance(out, (str, dict))
-    with case("operator_compare"):
-        out = operator_compare(inputs=inputs, criterion="scope")
-        assert isinstance(out, (str, dict))
-    with case("operator_summarize"):
-        out = operator_summarize(inputs=inputs)
-        assert isinstance(out, (str, dict))
-    with case("operator_generate"):
-        out = operator_generate(outline="one-line summary of retrieval layer", inputs=inputs)
-        assert isinstance(out, (str, dict))
+    async def _run(coro):
+        return await coro
+
+    with case("operator_extract — returns requested fields"):
+        out = asyncio.run(_run(operator_extract(
+            inputs=inputs_text, fields="topic,change_type", timeout=60.0,
+        )))
+        assert isinstance(out, dict) and out, f"empty or non-dict: {out!r}"
+        info(f"  keys: {list(out.keys())[:5]}")
+
+    with case("operator_rank — returns ranking payload"):
+        out = asyncio.run(_run(operator_rank(
+            items="a. retrieval\nb. plans\nc. ui",
+            criterion="relevance to RDR-080", timeout=60.0,
+        )))
+        assert isinstance(out, dict) and out
+        info(f"  keys: {list(out.keys())[:5]}")
+
+    with case("operator_compare — returns comparison payload"):
+        out = asyncio.run(_run(operator_compare(
+            items="A: plans carry dimensions.\nB: plans are templates.",
+            focus="scope", timeout=60.0,
+        )))
+        assert isinstance(out, dict) and out
+        info(f"  keys: {list(out.keys())[:5]}")
+
+    with case("operator_summarize — output mentions input keyword"):
+        out = asyncio.run(_run(operator_summarize(
+            content=inputs_text, timeout=60.0,
+        )))
+        assert isinstance(out, dict) and out
+        body = " ".join(str(v).lower() for v in out.values() if isinstance(v, (str, list)))
+        assert "retrieval" in body or "plan" in body or "dimension" in body, \
+            f"summary doesn't reference input keywords: {body[:200]!r}"
+
+    with case("operator_generate — produces text following template"):
+        out = asyncio.run(_run(operator_generate(
+            template="one-line summary of retrieval layer",
+            context=inputs_text, timeout=60.0,
+        )))
+        assert isinstance(out, dict) and out
+        body = " ".join(str(v).lower() for v in out.values() if isinstance(v, (str, list)))
+        assert len(body) > 10, f"generated body too short: {body!r}"
 
 
 # ── nx_answer (orchestration trunk, plan_run mocked) ─────────────────────────
@@ -348,17 +382,31 @@ def _exercise_nx_answer() -> None:
 
 # ── Stub replacements (all 3 are LLM-backed via claude -p subprocess) ────────
 
+def _with_claude_home():
+    """Redirect HOME to ORIG_HOME so claude -p subprocesses can authenticate."""
+    orig_home = os.environ.get("ORIG_HOME")
+    if orig_home:
+        os.environ["HOME"] = orig_home
+
+
 def _exercise_nx_tidy() -> None:
     step("nx_tidy (replaces knowledge-tidier agent; LLM-backed)")
     if os.environ.get("NX_VALIDATE_WITH_LLM") != "1":
         skip("nx_tidy", "spawns claude -p subprocess (set NX_VALIDATE_WITH_LLM=1)")
         return
+    _with_claude_home()
     from nexus.mcp.core import nx_tidy
 
     async def _run():
-        out = await nx_tidy(topic="chromadb quotas", timeout=60.0)
-        assert isinstance(out, str) and len(out) > 0
-        info(f"  result head: {out.splitlines()[0][:100] if out else '(empty)'}")
+        out = await nx_tidy(topic="chromadb quotas")
+        assert isinstance(out, str), f"expected str, got {type(out)}"
+        # On empty sandbox, tidy should still produce a coherent summary
+        # that references the topic; a bare empty string = the structured
+        # output unwrap bug (fixed in dispatch.py).
+        assert len(out) > 0, "empty output — dispatch unwrap bug?"
+        assert "chromadb" in out.lower() or "quota" in out.lower() or "knowledge" in out.lower(), \
+            f"summary doesn't reference topic 'chromadb quotas': {out[:200]!r}"
+        info(f"  len={len(out)}  head: {out.splitlines()[0][:100]}")
 
     with case("nx_tidy (claude -p subprocess)"):
         asyncio.run(_run())
@@ -369,16 +417,23 @@ def _exercise_nx_enrich_beads() -> None:
     if os.environ.get("NX_VALIDATE_WITH_LLM") != "1":
         skip("nx_enrich_beads", "spawns claude -p subprocess (set NX_VALIDATE_WITH_LLM=1)")
         return
+    _with_claude_home()
     from nexus.mcp.core import nx_enrich_beads
 
     async def _run():
+        # Bead enrichment spawns a claude Code agent that does file-system
+        # search; 60-180s typical.  Tool default timeout is 120s.
         out = await nx_enrich_beads(
             bead_description="Add CLI flag --foo to nx search that filters by tag",
             context="",
-            timeout=60.0,
         )
-        assert isinstance(out, str) and len(out) > 0
-        info(f"  result head: {out.splitlines()[0][:100] if out else '(empty)'}")
+        assert isinstance(out, str)
+        assert len(out) > 0, "empty output — dispatch unwrap bug?"
+        # Meaningful: enriched output should reference the bead's key nouns.
+        lower = out.lower()
+        assert "flag" in lower or "tag" in lower or "search" in lower, \
+            f"enrichment doesn't reference bead content: {out[:200]!r}"
+        info(f"  len={len(out)}  head: {out.splitlines()[0][:100]}")
 
     with case("nx_enrich_beads (claude -p subprocess)"):
         asyncio.run(_run())
@@ -389,13 +444,19 @@ def _exercise_nx_plan_audit() -> None:
     if os.environ.get("NX_VALIDATE_WITH_LLM") != "1":
         skip("nx_plan_audit", "spawns claude -p subprocess (set NX_VALIDATE_WITH_LLM=1)")
         return
+    _with_claude_home()
     from nexus.mcp.core import nx_plan_audit
 
     async def _run():
         plan = '{"steps":[{"tool":"search","args":{"query":"$topic"}}]}'
-        out = await nx_plan_audit(plan_json=plan, context="", timeout=60.0)
-        assert isinstance(out, str) and len(out) > 0
-        info(f"  result head: {out.splitlines()[0][:100] if out else '(empty)'}")
+        out = await nx_plan_audit(plan_json=plan, context="")
+        assert isinstance(out, str)
+        assert len(out) > 0, "empty output — dispatch unwrap bug?"
+        # Audit response shape: should carry a verdict OR findings text.
+        lower = out.lower()
+        assert any(kw in lower for kw in ("verdict", "pass", "fail", "ok", "warning", "risk", "finding", "plan")), \
+            f"audit doesn't read like a verdict: {out[:200]!r}"
+        info(f"  len={len(out)}  head: {out.splitlines()[0][:100]}")
 
     with case("nx_plan_audit (claude -p subprocess)"):
         asyncio.run(_run())

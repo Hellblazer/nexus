@@ -41,11 +41,13 @@ echo "════════════════════════�
 
 # ── Suite dispatch ───────────────────────────────────────────────────────────
 declare -a ALL_SUITES=(
-    "mcp-core"       "01-mcp-core.py"
-    "mcp-catalog"    "02-mcp-catalog.py"
-    "cli"            "03-cli.sh"
-    "hooks"          "04-hooks.sh"
-    "plugin-wiring"  "05-plugin-wiring.py"
+    "mcp-core"         "01-mcp-core.py"
+    "mcp-catalog"      "02-mcp-catalog.py"
+    "cli"              "03-cli.sh"
+    "hooks"            "04-hooks.sh"
+    "plugin-wiring"    "05-plugin-wiring.py"
+    "agent-wiring"     "06-agent-wiring.py"
+    "agent-behavior"   "07-agent-behavior.py"
 )
 
 # Optional suite filter: $1 is a suite name

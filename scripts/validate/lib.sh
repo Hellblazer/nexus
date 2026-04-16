@@ -20,6 +20,15 @@ export NEXUS_CATALOG_PATH="$SANDBOX/.config/nexus/catalog"
 mkdir -p "$SANDBOX/.config/nexus" "$SANDBOX/.local/share/nexus" "$SANDBOX/.cache"
 cp "${ORIG_HOME:-}/.gitconfig" "$SANDBOX/.gitconfig" 2>/dev/null || true
 
+# Let the sandbox subprocesses (claude, anthropic SDK) authenticate by
+# symlinking the real auth state. ~/.claude (dir) has settings/agents;
+# ~/.claude.json (file) has the login session; ~/.anthropic has SDK config.
+# None of these hold nexus data so sandbox isolation is preserved.
+for target in .claude .claude.json .anthropic; do
+    [[ -n "${ORIG_HOME:-}" && -e "${ORIG_HOME}/${target}" ]] && \
+        ln -sfn "${ORIG_HOME}/${target}" "$SANDBOX/${target}"
+done
+
 # ── Counters & logs ──────────────────────────────────────────────────────────
 PASS=${PASS:-0}
 FAIL=${FAIL:-0}

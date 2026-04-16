@@ -92,8 +92,26 @@ async def claude_dispatch(
         raise OperatorOutputError("claude -p produced empty stdout")
 
     try:
-        return json.loads(raw)
+        parsed = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise OperatorOutputError(
             f"claude -p output is not valid JSON: {exc} — got: {raw[:200]}"
         ) from exc
+
+    # `claude -p --output-format json` returns a wrapper:
+    # {"type":"result", "is_error":bool, "result":str, "structured_output":dict, ...}
+    # Callers supplied a `json_schema`, so they expect the schema-conforming
+    # dict, not the wrapper.  Surface errors explicitly, unwrap otherwise.
+    if isinstance(parsed, dict) and "structured_output" in parsed:
+        if parsed.get("is_error"):
+            raise OperatorError(
+                f"claude -p reported error: {parsed.get('result', '')[:300]}"
+            )
+        structured = parsed.get("structured_output")
+        if structured is None:
+            raise OperatorOutputError(
+                f"claude -p returned null structured_output; "
+                f"result={parsed.get('result', '')[:200]!r}"
+            )
+        return structured
+    return parsed
