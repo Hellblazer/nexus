@@ -74,6 +74,81 @@ def test_build_worker_cmdline_default_keeps_no_persistence_flag() -> None:
     assert "--no-session-persistence" in cmd
 
 
+def test_init_slot_warmup_omits_json_schema(monkeypatch) -> None:
+    """Review Significant #4: warmup MUST spawn without ``--json-schema``
+    to keep the synthetic ``StructuredOutput`` tool out of the cached
+    prefix. With the schema active at warmup, the warmup turn could
+    emit a tool_use that lives forever in the JSONL below the
+    checkpoint, contaminating every subsequent ``--resume`` dispatch.
+
+    This test intercepts ``build_worker_cmdline`` and captures the
+    ``json_schema`` kwarg on the warmup call vs. the dispatch call.
+    """
+    import asyncio
+
+    from nexus.operators import rewind_pool as rp_mod
+
+    captured_calls: list[dict] = []
+    original_build = rp_mod.build_worker_cmdline
+
+    def spy(**kwargs):
+        captured_calls.append(dict(kwargs))
+        return original_build(**kwargs)
+
+    monkeypatch.setattr(rp_mod, "build_worker_cmdline", spy)
+    monkeypatch.setenv("NEXUS_T1_SESSION_ID", "pool-test-warmup-schema")
+    monkeypatch.setattr(
+        rp_mod, "check_auth", lambda: None,
+    )
+
+    # Stub subprocess so we never actually spawn claude.
+    class _StubProc:
+        returncode = 0
+        stdout = asyncio.StreamReader()
+        stderr = asyncio.StreamReader()
+        stdin = None
+
+        async def wait(self):
+            return 0
+
+    async def fake_spawn(*a, **kw):
+        # Inject a fake 'result' record so _drain_until_result returns
+        # and _init_slot proceeds to the jsonl-path lookup.
+        raise FileNotFoundError("deliberate — we only inspect cmdline")
+
+    monkeypatch.setattr(
+        asyncio, "create_subprocess_exec", fake_spawn, raising=True,
+    )
+
+    pool = rp_mod.RewindPool(
+        size=1,
+        operator_role="X",
+        json_schema={"type": "object", "required": ["y"],
+                     "properties": {"y": {"type": "string"}}},
+    )
+
+    async def run():
+        # We expect _init_slot to raise on the fake spawn — we just
+        # need the build_worker_cmdline call to have happened first.
+        try:
+            await pool._init_slot(pool.slots[0])
+        except Exception:
+            pass
+
+    asyncio.run(run())
+
+    assert captured_calls, "warmup must call build_worker_cmdline"
+    warmup_call = captured_calls[0]
+    assert warmup_call.get("json_schema") is None, (
+        "Significant #4: warmup must spawn WITHOUT --json-schema so "
+        "the synthetic StructuredOutput tool is absent from the cached "
+        "prefix. If this test fails, warmup is contaminating every "
+        "future rewind-dispatched turn."
+    )
+    # The pool itself retains the schema for real dispatches.
+    assert pool.json_schema is not None
+
+
 def test_build_worker_cmdline_resume_uses_resume_flag() -> None:
     """``resume=True`` swaps ``--session-id`` for ``--resume <uuid>``."""
     from nexus.operators.pool import build_worker_cmdline

@@ -244,7 +244,15 @@ _NON_EMBEDDING_TOOLS: frozenset[str] = frozenset({"traverse"})
 #: it returns dict natively without needing the flag. The runner's
 #: ``_default_dispatcher`` auto-injects ``structured=True`` for the tools in
 #: this set so plan steps can reference ``$stepN.ids`` / ``$stepN.tumblers``.
-_RETRIEVAL_TOOLS: frozenset[str] = frozenset({"search", "query"})
+#: Retrieval tools auto-promoted to ``structured=True`` by the
+#: default dispatcher. ``store_get_many`` is listed here (rather
+#: than as a plain MCP tool) because plan steps feeding it into an
+#: operator need ``{contents, missing}`` shape — the seeds would
+#: otherwise have to thread ``structured=True`` into every YAML
+#: hydration step.
+_RETRIEVAL_TOOLS: frozenset[str] = frozenset(
+    {"search", "query", "store_get_many"},
+)
 
 #: Args keys that may carry a collection name. The runner extracts
 #: candidates from these to validate the cross-embedding guard, and

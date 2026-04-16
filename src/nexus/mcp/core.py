@@ -688,6 +688,113 @@ def store_get(doc_id: str, collection: str = "knowledge") -> str:
         return f"Error: {e}"
 
 
+@_mcp_tool()
+def store_get_many(
+    ids: str | list,
+    collections: str | list = "knowledge",
+    *,
+    max_chars_per_doc: int = 4000,
+    structured: bool = False,
+) -> str | dict:
+    """Batch-hydrate document content by ID. RDR-079 hydration primitive.
+
+    The plan runner's retrieval tools (search, query) return
+    ``{ids, tumblers, distances, collections}`` — identifiers, not
+    content. Operator steps (rank/summarize/compare/extract/generate)
+    expect actual text. This tool bridges the gap: pass ``ids`` +
+    ``collections`` from a prior retrieval step, receive ``contents``
+    aligned 1:1 with ``ids``.
+
+    Args:
+        ids: Document IDs to fetch. Accepts a comma-separated string
+            OR a Python list (the runner's step-ref resolution yields
+            a list; direct MCP callers pass a string).
+        collections: Target collection name(s). Accepts a single name,
+            comma-separated, OR a list the same length as ``ids``
+            (pair-wise lookup). Defaults to ``"knowledge"`` if omitted.
+        max_chars_per_doc: Per-document truncation cap to keep the
+            downstream operator prompt bounded. 4 KB covers most
+            chunks while leaving budget for multi-doc fan-out.
+        structured: Return a dict ``{contents, missing}`` when True;
+            a human-readable string when False. The runner auto-
+            promotes retrieval tools, but ``store_get_many`` is
+            explicitly NOT in ``_RETRIEVAL_TOOLS`` — plans that feed
+            it into an operator must pass ``structured=True``.
+
+    Returns:
+        When ``structured=True``: ``{"contents": [<text>, ...],
+        "missing": [<id>, ...]}``. ``contents`` is 1:1 with input
+        ``ids``; entries for unresolvable IDs land in ``missing`` and
+        the corresponding slot in ``contents`` is an empty string.
+    """
+    try:
+        id_list: list[str]
+        if isinstance(ids, list):
+            id_list = [str(i) for i in ids if i]
+        else:
+            id_list = [s.strip() for s in str(ids or "").split(",") if s.strip()]
+
+        coll_list: list[str]
+        if isinstance(collections, list):
+            coll_list = [str(c) for c in collections if c]
+        else:
+            coll_list = [
+                s.strip()
+                for s in str(collections or "knowledge").split(",")
+                if s.strip()
+            ]
+        if not coll_list:
+            coll_list = ["knowledge"]
+
+        t3 = _get_t3()
+        contents: list[str] = []
+        missing: list[str] = []
+
+        for idx, doc_id in enumerate(id_list):
+            # Pair-wise collection lookup when the caller supplied a
+            # collections list aligned 1:1 with ids (typical plan-runner
+            # pattern — search returns `collections` alongside `ids`).
+            # Otherwise fall back to trying each collection in turn.
+            if len(coll_list) == len(id_list):
+                candidates = [coll_list[idx]]
+            else:
+                candidates = coll_list
+
+            entry = None
+            for cand in candidates:
+                col_name = t3_collection_name(cand)
+                try:
+                    entry = t3.get_by_id(col_name, doc_id)
+                except Exception:
+                    entry = None
+                if entry is not None:
+                    break
+
+            if entry is None:
+                missing.append(doc_id)
+                contents.append("")
+                continue
+
+            body = str(entry.get("content") or "")
+            if max_chars_per_doc > 0 and len(body) > max_chars_per_doc:
+                body = body[:max_chars_per_doc] + "…"
+            contents.append(body)
+
+        if structured:
+            return {"contents": contents, "missing": missing}
+        lines = [f"Hydrated {len(contents) - len(missing)}/{len(id_list)} docs"]
+        if missing:
+            lines.append(f"Missing: {', '.join(missing[:10])}")
+        return "\n".join(lines)
+    except Exception as e:
+        if structured:
+            return {
+                "contents": [], "missing": [],
+                "error": f"store_get_many failed: {e}",
+            }
+        return f"Error: {e}"
+
+
 @mcp.tool()
 def store_list(
     collection: str = "knowledge",

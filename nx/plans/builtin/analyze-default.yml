@@ -2,8 +2,8 @@ name: default
 description: >-
   Analysis and synthesis of a research area across prose and code corpora.
   Gather from both sides, walk reference chains to find supporting work,
-  rank survivors against the caller's criterion, then summarise the
-  ranked evidence so downstream agents start from the strongest matches.
+  hydrate the candidates' content, rank against the caller's criterion,
+  then summarise the top-ranked evidence.
 dimensions:
   verb: analyze
   scope: global
@@ -38,10 +38,14 @@ plan_json:
         purpose: reference-chain
         depth: 2
         direction: both
+    - tool: store_get_many
+      args:
+        ids: [$step1.ids, $step2.ids]
+        collections: [$step1.collections, $step2.collections]
     - tool: rank
       args:
         criterion: $criterion
-        inputs: [$step1.tumblers, $step2.tumblers, $step3.tumblers]
+        inputs: $step4.contents
     - tool: summarize
       args:
-        inputs: $step4.ranked
+        inputs: $step4.contents

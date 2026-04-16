@@ -4,8 +4,8 @@ description: >-
   starts from a concrete failure and the primary link walk is the catalog's
   per-file lookup (not multi-hop graph traversal — Serena handles symbol-
   level navigation separately). Surface the RDRs that authored or touched
-  the failing path, then summarise the design context so the debug loop
-  starts from "what did we decide about this code".
+  the failing path, hydrate their content, then summarise the design
+  context so the debug loop starts from "what did we decide about this code".
 dimensions:
   verb: debug
   scope: global
@@ -23,6 +23,10 @@ plan_json:
         question: "design context and authoring RDRs for $failing_path"
         subtree: $failing_path
         author: nexus
+    - tool: store_get_many
+      args:
+        ids: $step1.ids
+        collections: $step1.collections
     - tool: summarize
       args:
-        inputs: $step1.tumblers
+        inputs: $step2.contents

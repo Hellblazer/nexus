@@ -68,7 +68,8 @@ _migrated_lock = threading.Lock()
 #           "syntax error near ','" when a tokeniser leaves them bare.
 #           Hit by RDR-079 P7 on seed descriptions like ``entries,``)
 # Note: trailing * is a valid FTS5 prefix wildcard (e.g. auth*) — NOT included here.
-_FTS5_SPECIAL = set('-:()"^~.*+/,;')
+# Note: trailing * is a valid FTS5 prefix wildcard (e.g. auth*) — NOT included here.
+_FTS5_SPECIAL = set('-:()"^~.*+/,;?!#@$%&|\\<>[]{}=')
 
 
 def _sanitize_fts5(query: str) -> str:

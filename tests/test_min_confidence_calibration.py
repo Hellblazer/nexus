@@ -255,6 +255,77 @@ def test_best_threshold_clears_minimum_f1(
     )
 
 
+def test_fts5_fallback_beats_cosine_or_cosine_is_justified(
+    library_with_seeds, seed_ids_by_identity, cache, capsys,
+) -> None:
+    """Critic Significant #3: before shipping a 0.40 cosine default
+    that fires on 43% of intents with 25% wrong-plan rate, compare
+    against the FTS5 fallback on the same dataset. If FTS5 delivers
+    comparable or better accuracy, the T1 cosine cache is ceremony
+    without value and the shipped default should be revisited.
+
+    This test computes FTS5-path precision/recall on the calibration
+    dataset by calling ``library.search_plans()`` directly (bypassing
+    the cache) for every positive intent.
+    """
+    from tests.fixtures.calibration_paraphrases import paraphrase_dataset
+
+    dataset = paraphrase_dataset()
+
+    fts_tp = fts_fp = fts_fn = 0
+    for entry in dataset:
+        if not entry.is_positive:
+            continue
+        try:
+            rows = library_with_seeds.search_plans(entry.intent, limit=1)
+        except ValueError:
+            # FTS5 sanitizer can't handle all punctuation; count as miss.
+            rows = []
+        expected_id = seed_ids_by_identity.get(
+            (entry.expected_verb, entry.expected_strategy),
+        )
+        if not rows:
+            fts_fn += 1
+            continue
+        if rows[0]["id"] == expected_id:
+            fts_tp += 1
+        else:
+            fts_fp += 1
+
+    fts_precision = fts_tp / (fts_tp + fts_fp) if (fts_tp + fts_fp) else 0.0
+    fts_recall = fts_tp / (fts_tp + fts_fn) if (fts_tp + fts_fn) else 0.0
+    fts_f1 = (
+        2 * fts_precision * fts_recall / (fts_precision + fts_recall)
+        if (fts_precision + fts_recall) else 0.0
+    )
+
+    # Cosine at the shipped 0.40 default for comparison.
+    metrics_by_t = _evaluate_at_threshold(
+        dataset, seed_ids_by_identity, cache,
+    )
+    cosine = metrics_by_t[0.40]
+
+    print()
+    print("FTS5 vs cosine@0.40 on same calibration dataset")
+    print(f"  FTS5:       precision={fts_precision:.3f} recall={fts_recall:.3f} F1={fts_f1:.3f}")
+    print(f"  cosine@0.40 precision={cosine.precision:.3f} recall={cosine.recall:.3f} F1={cosine.f1:.3f}")
+
+    # The claim the shipped cosine path earns its complexity: cosine
+    # F1 is within reasonable distance of FTS5 OR higher. If cosine
+    # is dramatically worse (F1 < FTS5 F1 - 0.10), the cache is pure
+    # ceremony and the default should be raised (cache abstains,
+    # FTS5 takes over). Fire this test as a hard gate, not just a
+    # print, so the regression is caught automatically.
+    assert cosine.f1 >= fts_f1 - 0.10, (
+        f"cosine F1 {cosine.f1:.3f} is materially worse than FTS5 "
+        f"F1 {fts_f1:.3f}. The T1 cache is adding no value at "
+        f"min_confidence=0.40 — either raise the threshold so cosine "
+        f"abstains and FTS5 dominates, or migrate the T1 cache to "
+        f"voyage-context-3 (tracked follow-up in "
+        f"docs/rdr/rdr-079-calibration.md)."
+    )
+
+
 def test_negatives_do_not_match_above_high_threshold(
     library_with_seeds, seed_ids_by_identity, cache,
 ) -> None:

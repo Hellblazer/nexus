@@ -179,13 +179,26 @@ class RewindPool:
             check_auth()  # may raise PoolAuthUnavailableError
             self._auth_checked = True
 
+        # Critical: spawn the warmup WITHOUT `--json-schema`.
+        # If the schema is active at warmup time, the synthetic
+        # ``StructuredOutput`` tool lands in the cached prefix and the
+        # warmup turn may produce a tool_use that then lives forever
+        # in the JSONL below the checkpoint. Every subsequent
+        # ``--resume`` dispatch would see "on my last turn I emitted
+        # StructuredOutput with <values>" as prior context —
+        # contamination the critique flagged as a latent defect.
+        #
+        # Workflow: warmup-without-schema establishes the session
+        # file; `_dispatch_on_slot` re-spawns with the schema for
+        # every real dispatch. The prompt cache still warms on the
+        # system prompt + operator role which DON'T change.
         cmd = build_worker_cmdline(
             session_id=slot.session_id,
             operator_role=self.operator_role,
             max_budget_usd=self.max_budget_usd,
             max_turns=self.max_turns,
             model=self.model,
-            json_schema=self.json_schema,
+            json_schema=None,
             resume=False,
             persist_session=True,
         )
