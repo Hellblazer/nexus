@@ -1388,8 +1388,29 @@ def traverse(
         if hasattr(n, "physical_collection") and n.physical_collection
     })
 
-    # ids = [] for now — chunk-level tracking deferred (nexus-0m3).
-    return {"tumblers": tumblers, "ids": [], "collections": collections}
+    # Resolve chunk IDs from T3 for nodes that have a file_path.
+    chunk_ids: list[str] = []
+    candidates = [
+        (getattr(n, "file_path", "") or "", getattr(n, "physical_collection", "") or "")
+        for n in nodes
+        if (getattr(n, "file_path", "") or "") and (getattr(n, "physical_collection", "") or "")
+    ]
+    if candidates:
+        try:
+            t3 = _get_t3()
+            seen_ids: set[str] = set()
+            for fp, pc in candidates:
+                try:
+                    for cid in t3.ids_for_source(pc, fp):
+                        if cid not in seen_ids:
+                            seen_ids.add(cid)
+                            chunk_ids.append(cid)
+                except Exception:
+                    pass  # degrade gracefully per node
+        except Exception:
+            pass  # T3 unavailable — ids stays empty
+
+    return {"tumblers": tumblers, "ids": chunk_ids, "collections": collections}
 
 
 # ── nx_answer helpers (RDR-080) ───────────────────────────────────────────────

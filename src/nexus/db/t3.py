@@ -799,16 +799,16 @@ class T3Database:
         """Delete a T3 collection entirely."""
         self._client_for(name).delete_collection(name)
 
-    def delete_by_source(self, collection_name: str, source_path: str) -> int:
-        """Delete all chunks for a given source path. Returns count deleted.
+    def ids_for_source(self, collection_name: str, source_path: str) -> list[str]:
+        """Return all chunk IDs for a given source path. Does not fetch content.
 
-        Uses paginated ``col.get()`` to avoid the ChromaDB Cloud 300-record
-        truncation limit.  Same short-page termination pattern as ``expire()``.
+        Paginates ``col.get()`` to respect the ChromaDB Cloud 300-record limit.
+        Returns empty list if the collection does not exist.
         """
         try:
             col = self._client_for(collection_name).get_collection(collection_name)
         except _ChromaNotFoundError:
-            return 0
+            return []
         ids: list[str] = []
         offset = 0
         page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
@@ -824,7 +824,20 @@ class T3Database:
             ids.extend(page_ids)
             offset += len(page_ids)
             if len(page_ids) < page_limit:
-                break  # last page (short or empty)
+                break
+        return ids
+
+    def delete_by_source(self, collection_name: str, source_path: str) -> int:
+        """Delete all chunks for a given source path. Returns count deleted.
+
+        Uses paginated ``col.get()`` to avoid the ChromaDB Cloud 300-record
+        truncation limit.  Same short-page termination pattern as ``expire()``.
+        """
+        try:
+            col = self._client_for(collection_name).get_collection(collection_name)
+        except _ChromaNotFoundError:
+            return 0
+        ids = self.ids_for_source(collection_name, source_path)
         if ids:
             self._delete_batch(col, collection_name, ids)
         return len(ids)

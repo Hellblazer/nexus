@@ -260,3 +260,122 @@ def test_traverse_mcp_tool_rejects_link_types_and_purpose_together(
     # MCP tools surface errors as strings rather than raising.
     assert isinstance(result, dict)
     assert result.get("error"), f"expected error, got {result}"
+
+
+# ── chunk IDs from T3 (nexus-0m3) ──────────────────────────────────────────
+
+
+@pytest.fixture()
+def fake_catalog_with_paths(tmp_path: Path):
+    """Catalog seeded with file_path so T3 ID lookup can be tested."""
+    from nexus.catalog.catalog import Catalog
+
+    cat_dir = tmp_path / "catalog"
+    cat_dir.mkdir(parents=True, exist_ok=True)
+    cat = Catalog(catalog_dir=cat_dir, db_path=tmp_path / "catalog.db")
+    owner = cat.register_owner("p", "test")
+    rdr = cat.register(
+        owner, "RDR",
+        physical_collection="rdr__test",
+        file_path="docs/rdr/rdr-001.md",
+    )
+    impl = cat.register(
+        owner, "ImplA",
+        physical_collection="code__test",
+        file_path="src/foo.py",
+    )
+    cat.link(rdr, impl, "implements", created_by="t")
+    return cat, rdr, impl
+
+
+def test_traverse_ids_populated_from_t3(fake_catalog_with_paths) -> None:
+    """traverse populates ``ids`` by querying T3 with each node's file_path."""
+    from unittest.mock import MagicMock
+    from nexus.mcp import core as mcp_core
+    from nexus.mcp_infra import inject_catalog, inject_t3
+
+    cat, rdr, impl = fake_catalog_with_paths
+
+    mock_t3 = MagicMock()
+    # Map (collection, source_path) → chunk IDs
+    def _ids_for_source(collection, source_path):
+        return {
+            ("rdr__test", "docs/rdr/rdr-001.md"): ["chunk-r1", "chunk-r2"],
+            ("code__test", "src/foo.py"): ["chunk-c1"],
+        }.get((collection, source_path), [])
+
+    mock_t3.ids_for_source.side_effect = _ids_for_source
+
+    inject_catalog(cat)
+    inject_t3(mock_t3)
+    try:
+        result = mcp_core.traverse(
+            seeds=[str(rdr)],
+            link_types=["implements"],
+            depth=1,
+            direction="out",
+        )
+    finally:
+        inject_catalog(None)
+        inject_t3(None)
+
+    # The seed RDR is not in the result nodes (only traversed nodes), but
+    # the impl node's chunks should appear.
+    assert "chunk-c1" in result["ids"]
+
+
+def test_traverse_ids_gracefully_degrade_when_t3_unavailable(
+    fake_catalog_with_paths,
+) -> None:
+    """ids=[] when T3 raises — no exception propagated to caller."""
+    from unittest.mock import MagicMock
+    from nexus.mcp import core as mcp_core
+    from nexus.mcp_infra import inject_catalog, inject_t3
+
+    cat, rdr, _ = fake_catalog_with_paths
+
+    mock_t3 = MagicMock()
+    mock_t3.ids_for_source.side_effect = RuntimeError("T3 unavailable")
+
+    inject_catalog(cat)
+    inject_t3(mock_t3)
+    try:
+        result = mcp_core.traverse(
+            seeds=[str(rdr)],
+            link_types=["implements"],
+            depth=1,
+        )
+    finally:
+        inject_catalog(None)
+        inject_t3(None)
+
+    assert result["ids"] == []
+
+
+def test_traverse_ids_dedup_across_nodes(fake_catalog_with_paths) -> None:
+    """Duplicate chunk IDs across nodes are deduplicated in output."""
+    from unittest.mock import MagicMock
+    from nexus.mcp import core as mcp_core
+    from nexus.mcp_infra import inject_catalog, inject_t3
+
+    cat, rdr, impl = fake_catalog_with_paths
+
+    mock_t3 = MagicMock()
+    # Both nodes share the same chunk ID (shouldn't happen in practice, but
+    # the dedup guard should handle it).
+    mock_t3.ids_for_source.return_value = ["shared-chunk"]
+
+    inject_catalog(cat)
+    inject_t3(mock_t3)
+    try:
+        result = mcp_core.traverse(
+            seeds=[str(rdr)],
+            link_types=["implements"],
+            depth=1,
+            direction="out",
+        )
+    finally:
+        inject_catalog(None)
+        inject_t3(None)
+
+    assert result["ids"].count("shared-chunk") == 1
