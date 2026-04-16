@@ -99,7 +99,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-075](rdr-075-cross-collection-topic-projection.md) | Cross-Collection Topic Projection | Feature | Closed (implemented) | 2026-04-13 |
 | [RDR-076](rdr-076-idempotent-upgrade-mechanism.md) | Idempotent Upgrade Mechanism | Architecture | Closed (implemented) | 2026-04-13 |
 | [RDR-077](rdr-077-projection-quality-similarity-icf.md) | Projection Quality — Similarity Scores and ICF Hub Detection | Feature | Accepted | 2026-04-14 |
-| [RDR-078](rdr-078-unified-context-graph-and-retrieval.md) | Plan-Centric Retrieval — Semantic Plan Matching, Typed-Graph Traversal, Scenario Plans | Feature | Accepted | 2026-04-14 |
+| [RDR-078](rdr-078-unified-context-graph-and-retrieval.md) | Plan-Centric Retrieval — Semantic Plan Matching, Typed-Graph Traversal, Scenario Plans | Feature | Closed (implemented) | 2026-04-14 |
 | [RDR-079](rdr-079-operator-dispatch-and-execution.md) | Operator Dispatch + Plan Execution End-to-End | Feature | Abandoned | 2026-04-15 |
 | [RDR-080](rdr-080-retrieval-layer-consolidation.md) | Retrieval Layer Consolidation — `nx_answer` + Agent/Skill Pruning | Feature | Closed (implemented) | 2026-04-15 |
 
