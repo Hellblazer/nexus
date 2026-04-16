@@ -550,7 +550,10 @@ class OperatorPool:
             )
 
         if not self._auth_checked:
-            check_auth()  # raises PoolAuthUnavailableError on failure
+            # check_auth uses subprocess.run (synchronous). Run in executor
+            # to avoid blocking the MCP server's event loop.
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, check_auth)
             self._auth_checked = True
 
         # ``claude --session-id`` expects a bare UUID; our internal

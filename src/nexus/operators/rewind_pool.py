@@ -176,7 +176,10 @@ class RewindPool:
             )
 
         if not self._auth_checked:
-            check_auth()  # may raise PoolAuthUnavailableError
+            # check_auth uses subprocess.run (synchronous). Run in executor
+            # to avoid blocking the MCP server's event loop.
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, check_auth)
             self._auth_checked = True
 
         # Critical: spawn the warmup WITHOUT `--json-schema`.
