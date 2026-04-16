@@ -1834,14 +1834,9 @@ _OPERATOR_SCHEMA_VERSION = 1
 # FastMCP's Tool.run supports async callables natively. (Review C-1.)
 
 
-# Upper bound on operator `inputs` length. A plan step that refs
-# ``$stepN.tumblers`` off a wide search can produce hundreds of items;
-# shipping that directly into a Haiku prompt dominates the context
-# with raw data and leaves no budget for reasoning. Plans that need
-# to fan out this wide must winnow via a preceding ``rank`` step.
-# 100 is empirical — Haiku 4.5's context budget handles structured
-# output over 100 short inputs comfortably; 500+ starts to degrade.
-_OPERATOR_MAX_INPUTS = 100
+# Upper bound on operator `inputs` length — imported from runner.py
+# (single source of truth, also used by auto-hydration overflow cap).
+from nexus.plans.runner import _OPERATOR_MAX_INPUTS
 
 
 async def _dispatch_with_auth_guard(
@@ -2468,26 +2463,11 @@ def _nx_answer_match_is_hit(confidence: float | None) -> bool:
     return confidence >= 0.40
 
 
-def _nx_answer_is_single_query(match: Any) -> bool:
-    """Return True when *match* has exactly 1 step and it's ``query``.
+def _nx_answer_classify_plan(match: Any) -> str:
+    """Classify a matched plan: ``"single_query"`` | ``"retrieval_only"`` | ``"needs_operators"``.
 
-    The single-step guard reroutes to ``query()`` directly, skipping
-    ``plan_run`` overhead.
-    """
-    try:
-        plan = json.loads(match.plan_json)
-    except (json.JSONDecodeError, TypeError):
-        return False
-    steps = plan.get("steps") or []
-    return len(steps) == 1 and steps[0].get("tool") == "query"
-
-
-def _nx_answer_needs_operators(match: Any) -> bool:
-    """Return True when the plan requires operator pool auth.
-
-    Derives the operator set from ``_OPERATOR_TOOL_MAP`` in runner.py
-    (single source of truth). Plans whose steps are all non-operator
-    tools work without auth; plans with any operator step require the pool.
+    Parses ``match.plan_json`` once (S-4 fix). The caller branches on the
+    returned string instead of calling two separate helpers that each parse.
     """
     from nexus.plans.runner import _OPERATOR_TOOL_MAP
 
@@ -2495,9 +2475,22 @@ def _nx_answer_needs_operators(match: Any) -> bool:
     try:
         plan = json.loads(match.plan_json)
     except (json.JSONDecodeError, TypeError):
-        return True  # Assume operators needed when plan is unparseable.
+        return "needs_operators"  # Assume operators needed when unparseable.
     steps = plan.get("steps") or []
-    return any(step.get("tool", "") in _OPERATOR_TOOLS for step in steps)
+    if len(steps) == 1 and steps[0].get("tool") == "query":
+        return "single_query"
+    if any(step.get("tool", "") in _OPERATOR_TOOLS for step in steps):
+        return "needs_operators"
+    return "retrieval_only"
+
+
+# Backward-compat shims used by tests.
+def _nx_answer_is_single_query(match: Any) -> bool:
+    return _nx_answer_classify_plan(match) == "single_query"
+
+
+def _nx_answer_needs_operators(match: Any) -> bool:
+    return _nx_answer_classify_plan(match) == "needs_operators"
 
 
 def _nx_answer_translate_extract_fields(args: dict[str, Any]) -> dict[str, Any]:
@@ -2526,7 +2519,14 @@ def _nx_answer_record_run(
     duration_ms: int,
     trace: bool,
 ) -> None:
-    """Write one row to ``nx_answer_runs``.  Redacts when ``trace=False``."""
+    """Write one row to ``nx_answer_runs``.  Redacts when ``trace=False``.
+
+    Lazily creates the table if missing (I-5: migration 4.5.0 won't run
+    until version bump, so ensure the table exists regardless).
+    """
+    from nexus.db.migrations import migrate_nx_answer_runs
+
+    migrate_nx_answer_runs(conn)  # Idempotent — no-op if table exists.
     q = question if trace else "[redacted]"
     text = final_text if trace else "[redacted]"
     conn.execute(
@@ -2550,6 +2550,7 @@ _PLANNER_SCHEMA: dict = {
             "items": {
                 "type": "object",
                 "required": ["tool", "args"],
+                "additionalProperties": False,
                 "properties": {
                     "tool": {"type": "string"},
                     "args": {"type": "object"},
@@ -2557,6 +2558,7 @@ _PLANNER_SCHEMA: dict = {
             },
         },
     },
+    "additionalProperties": False,
 }
 
 
@@ -2688,10 +2690,9 @@ async def nx_answer(
     if not matches or not _nx_answer_match_is_hit(matches[0].confidence):
         # Plan miss — dispatch inline LLM planner to decompose the question.
         # SC-9: check auth before attempting the planner dispatch.
-        from nexus.operators.pool import PoolAuthUnavailableError
+        from nexus.operators.pool import PoolAuthUnavailableError, check_auth
 
         try:
-            from nexus.operators.pool import check_auth
             check_auth()
         except PoolAuthUnavailableError:
             _log.warning("nx_answer_plan_miss_no_auth")
@@ -2738,8 +2739,10 @@ async def nx_answer(
     else:
         conf_str = f"{best.confidence:.3f}"
 
-    # ── Step 2: single-step guard ────────────────────────────────────────
-    if _nx_answer_is_single_query(best):
+    # ── Step 2: classify plan (single parse — S-4 fix) ─────────────────
+    plan_class = _nx_answer_classify_plan(best)
+
+    if plan_class == "single_query":
         _log.info(
             "nx_answer_single_step_guard",
             plan_id=best.plan_id,
@@ -2788,23 +2791,39 @@ async def nx_answer(
             return f"Error in single-step query: {exc}"
 
     # ── Step 2.5: SC-9 graceful degradation ──────────────────────────────
-    if _nx_answer_needs_operators(best):
-        from nexus.operators.pool import PoolAuthUnavailableError
+    if plan_class == "needs_operators":
+        from nexus.operators.pool import PoolAuthUnavailableError, check_auth
 
         try:
-            from nexus.operators.pool import check_auth
             check_auth()
         except PoolAuthUnavailableError:
             elapsed_ms = int((time.monotonic() - start) * 1000)
             _log.warning(
                 "nx_answer_no_auth_operators_required",
                 plan_id=best.plan_id,
+                duration_ms=elapsed_ms,
             )
-            return (
+            msg = (
                 "This question requires operator processing (extract/rank/"
                 "compare/summarize/generate), but the operator pool is "
                 "unavailable (no auth). Retrieval-only plans still work."
             )
+            try:
+                with _t2_ctx() as db:
+                    _nx_answer_record_run(
+                        db.conn,
+                        question=question,
+                        plan_id=best.plan_id,
+                        matched_confidence=best.confidence,
+                        step_count=0,
+                        final_text=msg,
+                        cost_usd=0.0,
+                        duration_ms=elapsed_ms,
+                        trace=trace,
+                    )
+            except Exception:
+                pass
+            return msg
 
     # ── Step 3: seed link-context ────────────────────────────────────────
     try:

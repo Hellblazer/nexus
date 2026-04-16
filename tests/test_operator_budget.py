@@ -2,12 +2,11 @@
 """Unit tests for P5 operator cost-budget surfacing — RDR-080.
 
 Tests cover:
-  - OperatorBudget config parsing from .nexus.yml
+  - OperatorBudget config parsing
   - 80% warn threshold
   - 100% refuse threshold
-  - Budget reset at midnight boundary
   - No-budget pass-through
-  - nx doctor --operators output format
+  - today_spend_usd from DB (with date filtering)
 """
 from __future__ import annotations
 
