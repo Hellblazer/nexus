@@ -78,7 +78,7 @@ Phased execution plan with dependency graph, success criteria per phase, test st
 - [ ] Test strategy included for each phase
 - [ ] Beads created for all trackable items
 
-**IMPORTANT**: After planning completes, MUST delegate to plan-auditor for validation before implementation.
+**IMPORTANT**: After planning completes, call `mcp__plugin_nx_nexus__nx_plan_audit` for validation before implementation (RDR-080 — direct MCP call).
 ```
 
 For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../agents/_shared/RELAY_TEMPLATE.md).

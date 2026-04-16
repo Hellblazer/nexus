@@ -218,7 +218,7 @@ Store using these naming conventions:
 ## Relationship to Other Agents
 
 - **vs substantive-critic**: Deep-critic provides broad critique of any content. You specialize in code review with technical depth on implementation quality.
-- **vs plan-auditor**: Plan-auditor reviews plans before implementation. You review code after implementation.
+- **vs nx_plan_audit**: `mcp__plugin_nx_nexus__nx_plan_audit` validates plans before implementation (RDR-080). You review code after implementation.
 - **vs codebase-deep-analyzer**: Analyzer provides broad codebase understanding. You provide focused review of specific changes.
 
 ## Completion Protocol

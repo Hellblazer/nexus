@@ -1,5 +1,5 @@
 ---
-description: Audit a plan using plan-auditor agent
+description: Audit a plan using mcp__plugin_nx_nexus__nx_plan_audit (RDR-080)
 ---
 
 # Plan Audit Request
@@ -31,31 +31,15 @@ $ARGUMENTS
 
 ## Action
 
-Invoke the **plan-validation** skill with the following relay. Fill in dynamic fields from the context above:
+Invoke the **plan-validation** skill (calls `mcp__plugin_nx_nexus__nx_plan_audit` directly — RDR-080, no agent spawn):
 
-```markdown
-## Relay: plan-auditor
-
-**Task**: Validate implementation plan before execution
-**Bead**: [fill from epic bead above or 'none']
-
-### Input Artifacts
-- Files: [fill from key files referenced in plan]
-
-### Plan to Validate
-$ARGUMENTS
-
-[fill from strategic-planner output or provided plan]
-
-### Deliverable
-Validation report with go/no-go decision: assumption verification results, dependency confirmation, build/test command validation, risk assessment, and clear recommendation.
-
-### Quality Criteria
-- [ ] All assumptions verified against actual codebase state
-- [ ] Dependencies confirmed to exist (classes, APIs, libraries)
-- [ ] Build/test commands validated (runnable as specified)
-- [ ] Risks identified with severity and mitigation status
-- [ ] Clear go/no-go recommendation with rationale
+```
+mcp__plugin_nx_nexus__nx_plan_audit(
+    plan_json="<serialized plan or plan description>",
+    context="<codebase context relevant to the plan, if any>"
+)
 ```
 
-For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../agents/_shared/RELAY_TEMPLATE.md).
+Fill `plan_json` from the plan to validate (`$ARGUMENTS` or strategic-planner output). Fill `context` from key files referenced in the plan.
+
+Deliverable: validation report with go/no-go decision — assumption verification, dependency confirmation, build/test command validation, risk assessment.

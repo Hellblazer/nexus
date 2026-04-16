@@ -137,7 +137,7 @@ If your project uses beads for task tracking, consider linking research findings
 
 You MUST persist your research findings to the nx knowledge store BEFORE returning — **unless the dispatching relay specifies an alternative storage target** (e.g. a T2 `memory_put` destination or a T1 `scratch` target) in its Input Artifacts, Deliverable, or Operational Notes section. In that case, honor the relay's target and skip the T3 default.
 
-**Why the default is T3**: for generic `/nx:research` dispatches, the auto-linker creates catalog links at `store_put` time, and those links are lost if you skip this step. Defer consolidation to knowledge-tidier but do not defer persistence.
+**Why the default is T3**: for generic `/nx:research` dispatches, the auto-linker creates catalog links at `store_put` time, and those links are lost if you skip this step. Do not defer persistence — call `mcp__plugin_nx_nexus__store_put` directly.
 
 **When to override to T2 or T1**: when the dispatching skill is using this agent as a classifier or analyzer rather than as a research persister — for example, `nx:rdr-audit` dispatches this agent to run an audit whose output is a project-local audit record that belongs in T2 `rdr_process`, not in the permanent T3 knowledge graph. If the relay says "write findings to `<project>/<title>` via `memory_put`", do that instead and do not also redundantly store to T3.
 

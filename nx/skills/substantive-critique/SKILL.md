@@ -12,7 +12,7 @@ Delegates to the **substantive-critic** agent. See [registry.yaml](../../registr
 
 - After completing a design document or specification
 - When reviewing architectural decisions
-- After plan-auditor for additional depth
+- After `mcp__plugin_nx_nexus__nx_plan_audit` for additional depth (RDR-080)
 - When validating implementation against specification
 - When cross-referencing documentation for consistency
 - When verifying claims against evidence
