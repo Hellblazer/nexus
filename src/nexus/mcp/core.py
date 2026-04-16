@@ -2690,6 +2690,20 @@ async def nx_answer(
 
     if not matches or not _nx_answer_match_is_hit(matches[0].confidence):
         # Plan miss — dispatch inline LLM planner to decompose the question.
+        # SC-9: check auth before attempting the planner dispatch.
+        from nexus.operators.pool import PoolAuthUnavailableError
+
+        try:
+            from nexus.operators.pool import check_auth
+            check_auth()
+        except PoolAuthUnavailableError:
+            _log.warning("nx_answer_plan_miss_no_auth")
+            return (
+                "No matching plan found, and the operator pool is "
+                "unavailable (no auth) so the question cannot be "
+                "decomposed. Retrieval-only plan-hits still work."
+            )
+
         _log.info(
             "nx_answer_plan_miss",
             question=question[:100] if trace else "[redacted]",
@@ -2720,7 +2734,12 @@ async def nx_answer(
     else:
         best = matches[0]
 
-    conf_str = "fts5" if best.confidence is None else f"{best.confidence:.3f}"
+    if best.plan_id == 0:
+        conf_str = "ad-hoc"
+    elif best.confidence is None:
+        conf_str = "fts5"
+    else:
+        conf_str = f"{best.confidence:.3f}"
 
     # ── Step 2: single-step guard ────────────────────────────────────────
     if _nx_answer_is_single_query(best):

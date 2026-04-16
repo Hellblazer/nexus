@@ -567,8 +567,8 @@ pipelines:
     description: "Full feature development from planning to validation"
     sequence:
       - strategic-planner
-      - plan-auditor
-      - plan-enricher  # conditional: only when rdr-planning-context T1 tag present
+      - plan-auditor   # stub → nx_plan_audit MCP tool
+      - plan-enricher  # stub → nx_enrich_beads MCP tool (conditional)
       - architect-planner
       - developer
       - code-review-expert
@@ -586,7 +586,7 @@ pipelines:
     description: "Research with knowledge persistence"
     sequence:
       - deep-research-synthesizer
-      - knowledge-tidier
+      - knowledge-tidier  # stub → nx_tidy MCP tool
 
   onboarding:
     description: "New codebase understanding"
@@ -600,7 +600,7 @@ pipelines:
       - codebase-deep-analyzer
       - deep-analyst
       - strategic-planner
-      - plan-auditor
+      - plan-auditor  # stub → nx_plan_audit MCP tool
       - architect-planner
 
 # =============================================================================
@@ -638,11 +638,9 @@ model_summary:
     - substantive-critic
     - deep-research-synthesizer
     - developer
-    - plan-auditor
-    - plan-enricher
     - test-validator
-  haiku: # Fast, cheap - utility agents
-    - knowledge-tidier
+    # plan-auditor, plan-enricher: stubs → MCP tools (no model budget)
+  haiku: []  # knowledge-tidier: stub → nx_tidy MCP tool (no model budget)
 
 # =============================================================================
 # UTILITY COMMANDS

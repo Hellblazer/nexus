@@ -540,13 +540,20 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
         # Filter out empty strings (missing docs).
         non_empty = [c for c in contents if c]
         if len(non_empty) > _OPERATOR_MAX_INPUTS:
+            # Spec deviation: RDR-080 §Design says auto-insert a synthetic
+            # rank winnow step here. Implementation truncates positionally
+            # instead — search results arrive distance-ordered, so the first
+            # N are already roughly relevance-ordered. The rank winnow would
+            # add a pool dispatch ($0.01-0.04 + 5-15s latency) for marginal
+            # quality improvement on a rare path (>100 docs from a single
+            # retrieval step). Accepted as pragmatic tradeoff.
             _log.warning(
                 "auto_hydration_overflow",
                 tool=tool,
                 resolved_tool=resolved_tool,
                 input_count=len(non_empty),
                 max_inputs=_OPERATOR_MAX_INPUTS,
-                action="truncating to max_inputs; consider adding a rank winnow step",
+                action="positional truncation to max_inputs",
             )
             non_empty = non_empty[:_OPERATOR_MAX_INPUTS]
         # Replace ids/collections with inputs (JSON array string).
