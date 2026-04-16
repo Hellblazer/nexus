@@ -2720,19 +2720,10 @@ async def nx_answer(
 
     if not matches or not _nx_answer_match_is_hit(matches[0].confidence):
         # Plan miss — dispatch inline LLM planner to decompose the question.
-        # SC-9: check auth before attempting the planner dispatch.
-        from nexus.operators.pool import PoolAuthUnavailableError, check_auth
-
-        try:
-            check_auth()
-        except PoolAuthUnavailableError:
-            _log.warning("nx_answer_plan_miss_no_auth")
-            return (
-                "No matching plan found, and the operator pool is "
-                "unavailable (no auth) so the question cannot be "
-                "decomposed. Retrieval-only plan-hits still work."
-            )
-
+        # SC-9 note: auth failures surface as PlanRunOperatorUnavailableError
+        # from _dispatch_with_auth_guard inside _nx_answer_plan_miss. The pool
+        # handles check_auth internally — no synchronous pre-check here (it
+        # blocks the event loop via subprocess.run).
         _log.info(
             "nx_answer_plan_miss",
             question=question[:100] if trace else "[redacted]",
@@ -2821,40 +2812,10 @@ async def nx_answer(
                 pass
             return f"Error in single-step query: {exc}"
 
-    # ── Step 2.5: SC-9 graceful degradation ──────────────────────────────
-    if plan_class == "needs_operators":
-        from nexus.operators.pool import PoolAuthUnavailableError, check_auth
-
-        try:
-            check_auth()
-        except PoolAuthUnavailableError:
-            elapsed_ms = int((time.monotonic() - start) * 1000)
-            _log.warning(
-                "nx_answer_no_auth_operators_required",
-                plan_id=best.plan_id,
-                duration_ms=elapsed_ms,
-            )
-            msg = (
-                "This question requires operator processing (extract/rank/"
-                "compare/summarize/generate), but the operator pool is "
-                "unavailable (no auth). Retrieval-only plans still work."
-            )
-            try:
-                with _t2_ctx() as db:
-                    _nx_answer_record_run(
-                        db.conn,
-                        question=question,
-                        plan_id=best.plan_id,
-                        matched_confidence=best.confidence,
-                        step_count=0,
-                        final_text=msg,
-                        cost_usd=0.0,
-                        duration_ms=elapsed_ms,
-                        trace=trace,
-                    )
-            except Exception:
-                pass
-            return msg
+    # SC-9 note: auth failures for operator-requiring plans are caught
+    # downstream by _dispatch_with_auth_guard → PlanRunOperatorUnavailableError
+    # → plan_run error handler. No synchronous check_auth pre-check here
+    # (subprocess.run blocks the MCP event loop).
 
     # ── Step 3: seed link-context ────────────────────────────────────────
     try:

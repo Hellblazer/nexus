@@ -183,37 +183,40 @@ class TestGracefulDegradation:
 
     @pytest.mark.asyncio
     async def test_operator_plan_with_mocked_auth_failure(self):
-        """When auth check fails and the plan needs operators,
-        nx_answer returns a clear error message."""
+        """When auth fails during plan_run (operator step), nx_answer
+        returns an error message (not a hang or crash)."""
         from nexus.mcp.core import nx_answer
-        from nexus.operators.pool import PoolAuthUnavailableError
-
-        def mock_check_auth():
-            raise PoolAuthUnavailableError("mocked auth failure")
+        from nexus.plans.match import Match
+        from nexus.plans.runner import PlanRunOperatorUnavailableError
 
         # Patch plan_match to return a match that needs operators.
-        mock_match_result = [type('Match', (), {
-            'plan_id': 1,
-            'confidence': 0.55,
-            'plan_json': json.dumps({
+        mock_match = Match(
+            plan_id=1,
+            name="test",
+            description="test",
+            confidence=0.55,
+            dimensions={},
+            tags="",
+            plan_json=json.dumps({
                 "steps": [
                     {"tool": "search", "args": {"query": "$intent"}},
                     {"tool": "extract", "args": {"inputs": "$step1.ids", "fields": "title"}},
                 ],
             }),
-            'name': 'test',
-            'description': 'test',
-            'dimensions': {},
-            'tags': '',
-            'required_bindings': ['intent'],
-            'optional_bindings': [],
-            'default_bindings': {},
-            'parent_dims': None,
-        })()]
+            required_bindings=["intent"],
+            optional_bindings=[],
+            default_bindings={},
+            parent_dims=None,
+        )
+
+        async def mock_plan_run(match, bindings, **kw):
+            raise PlanRunOperatorUnavailableError(
+                operator="extract", reason="mocked auth failure"
+            )
 
         with patch("nexus.mcp.core.scratch", return_value="ok"), \
-             patch("nexus.plans.matcher.plan_match", return_value=mock_match_result), \
-             patch("nexus.operators.pool.check_auth", mock_check_auth):
+             patch("nexus.plans.matcher.plan_match", return_value=[mock_match]), \
+             patch("nexus.plans.runner.plan_run", mock_plan_run):
             result = await nx_answer(
                 question="test operator plan",
                 trace=False,
