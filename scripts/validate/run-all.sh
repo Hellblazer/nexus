@@ -48,6 +48,7 @@ declare -a ALL_SUITES=(
     "plugin-wiring"    "05-plugin-wiring.py"
     "agent-wiring"     "06-agent-wiring.py"
     "agent-behavior"   "07-agent-behavior.py"
+    "rdr-scenario"     "08-rdr-scenario.py"
 )
 
 # Optional suite filter: $1 is a suite name
