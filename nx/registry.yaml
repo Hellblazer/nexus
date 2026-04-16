@@ -161,7 +161,7 @@ agents:
 
   knowledge-tidier:
     model: haiku
-    version: "2.0"
+    version: "3.0"
     color: mint
     skill: knowledge-tidying
     slash_command: /knowledge-tidy
@@ -200,7 +200,7 @@ agents:
 
   plan-auditor:
     model: sonnet
-    version: "2.0"
+    version: "3.0"
     color: orange
     skill: plan-validation
     slash_command: /plan-audit
@@ -219,7 +219,7 @@ agents:
 
   plan-enricher:
     model: sonnet
-    version: "2.0"
+    version: "3.0"
     color: emerald
     skill: enrich-plan
     slash_command: /enrich-plan
