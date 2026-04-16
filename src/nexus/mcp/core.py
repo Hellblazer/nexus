@@ -83,12 +83,21 @@ def search(
             query = sanitize_query(query)
 
         t3 = _get_t3()
+        all_names = _get_collection_names()
 
         if corpus == "all":
-            corpus = "knowledge,code,docs,rdr"
+            # True "all": every unique prefix that appears in the live
+            # collection list. Fixes the gap where the old constant
+            # ("knowledge,code,docs,rdr") missed projects whose only
+            # collection is e.g. rdr__* or a custom prefix.
+            seen_prefixes: list[str] = []
+            for n in all_names:
+                prefix = n.split("__", 1)[0]
+                if prefix and prefix not in seen_prefixes:
+                    seen_prefixes.append(prefix)
+            corpus = ",".join(seen_prefixes) if seen_prefixes else "knowledge,code,docs,rdr"
 
         target: list[str] = []
-        all_names = _get_collection_names()
         for part in corpus.split(","):
             part = part.strip()
             if not part:
@@ -308,11 +317,17 @@ def query(
                 parts.append(f"follow_links={follow_links!r}")
             routing_note = f"[Catalog routing: {', '.join(parts)} -> {len(target)} collections]"
         else:
+            all_names = _get_collection_names()
+
             if corpus == "all":
-                corpus = "knowledge,code,docs,rdr"
+                seen_prefixes: list[str] = []
+                for n in all_names:
+                    prefix = n.split("__", 1)[0]
+                    if prefix and prefix not in seen_prefixes:
+                        seen_prefixes.append(prefix)
+                corpus = ",".join(seen_prefixes) if seen_prefixes else "knowledge,code,docs,rdr"
 
             target: list[str] = []
-            all_names = _get_collection_names()
             for part in corpus.split(","):
                 part = part.strip()
                 if not part:
@@ -1595,11 +1610,32 @@ async def _nx_answer_plan_miss(
     """
     from nexus.operators.dispatch import claude_dispatch
     from nexus.plans.match import Match
+    from nexus.mcp_infra import get_collection_names
 
     corpus_hint = f" Focus on the '{scope}' corpus." if scope else ""
+
+    # Give the planner the actual collection names it can search against.
+    # Without this, the LLM writes `corpus="knowledge,code,docs"` — generic
+    # tokens that may not match any collection in the caller's sandbox.
+    try:
+        available = get_collection_names()
+    except Exception:
+        available = []
+    corpus_names_hint = ""
+    if available:
+        corpus_names_hint = (
+            f"\n\nAvailable collection names in this environment: "
+            f"{', '.join(sorted(available)[:20])}"
+            + (f" (and {len(available) - 20} more)" if len(available) > 20 else "")
+            + ".  Pass collection names to `search` via `corpus=<name>` — "
+            "bare prefixes like 'knowledge' or 'code' will miss if no "
+            "collection actually starts with that prefix."
+        )
+
     prompt = (
         f"Decompose this question into a retrieval-and-analysis plan "
         f"with at most {max_steps} steps:{corpus_hint}\n\n{question}"
+        f"{corpus_names_hint}"
     )
 
     payload = await claude_dispatch(prompt, _PLANNER_SCHEMA, timeout=120.0)
@@ -1611,10 +1647,20 @@ async def _nx_answer_plan_miss(
         "search", "query", "traverse", "store_get_many",
         "extract", "rank", "compare", "summarize", "generate",
     }
+    # The LLM planner emits either the bare operator name ("extract") or
+    # the resolved MCP tool name ("operator_extract" / full prefix form).
+    # Normalize all three to the bare form the dispatcher's _OPERATOR_TOOL_MAP
+    # expects as a key.
     _TOOL_ALIASES = {
         "grep": "search", "read": "search", "bash": "search",
         "find": "search", "glob": "search",
         "web_search": "search", "web_fetch": "search",
+        # operator_* → bare op name (the runner dispatcher remaps back)
+        "operator_extract": "extract",
+        "operator_rank": "rank",
+        "operator_compare": "compare",
+        "operator_summarize": "summarize",
+        "operator_generate": "generate",
     }
     import structlog as _slog
     _plog = _slog.get_logger()

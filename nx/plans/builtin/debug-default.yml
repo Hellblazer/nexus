@@ -1,32 +1,31 @@
 name: default
-description: >-
-  Dev / debug against a failing code path. Intentionally flat: dev work
-  starts from a concrete failure and the primary link walk is the catalog's
-  per-file lookup (not multi-hop graph traversal — Serena handles symbol-
-  level navigation separately). Surface the RDRs that authored or touched
-  the failing path, hydrate their content, then summarise the design
-  context so the debug loop starts from "what did we decide about this code".
+description: "Dev / debug against a failing code path. Intentionally flat: dev work starts from\
+  \ a concrete failure and the primary link walk is the catalog's per-file lookup (not multi-hop\
+  \ graph traversal \u2014 Serena handles symbol- level navigation separately). Surface the\
+  \ RDRs that authored or touched the failing path, hydrate their content, then summarise the\
+  \ design context so the debug loop starts from \"what did we decide about this code\"."
 dimensions:
   verb: debug
   scope: global
   strategy: default
 required_bindings:
-  - failing_path
-  - symptom
+- failing_path
+- symptom
 optional_bindings: []
 default_bindings: {}
 tags: builtin-template,rdr-078,debug
 plan_json:
   steps:
-    - tool: query
-      args:
-        question: "design context and authoring RDRs for $failing_path"
-        subtree: $failing_path
-        author: nexus
-    - tool: store_get_many
-      args:
-        ids: $step1.ids
-        collections: $step1.collections
-    - tool: summarize
-      args:
-        inputs: $step2.contents
+  - tool: query
+    args:
+      question: design context and authoring RDRs for $failing_path
+      subtree: $failing_path
+      author: nexus
+      corpus: all
+  - tool: store_get_many
+    args:
+      ids: $step1.ids
+      collections: $step1.collections
+  - tool: summarize
+    args:
+      inputs: $step2.contents
