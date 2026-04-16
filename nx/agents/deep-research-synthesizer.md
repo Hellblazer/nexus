@@ -87,16 +87,8 @@ This ensures your `store_put` calls create catalog links regardless of how you w
 ## PDF Processing Protocol
 
 1. **First, check if it is already indexed** by searching nx store for the document
-2. **If NOT indexed**: Always delegate to the pdf-chromadb-processor agent to handle extraction and storage
+2. **If NOT indexed**: Direct the user to run `nx index pdf <file> --collection <name>` for extraction and storage
 3. **Once indexed**: Use the search tool to explore the content efficiently
-
-**Never process PDFs directly yourself** - the pdf-chromadb-processor agent specializes in:
-- Context-safe chunking for PDFs of any size
-- Parallel processing to avoid token overflow
-- Proper metadata and indexing for semantic search
-- Checkpoint recovery if interrupted
-
-Always delegate PDF processing to pdf-chromadb-processor first, then research the processed content via the search tool.
 
 ## Core Capabilities
 
@@ -323,12 +315,9 @@ Present findings including:
 - **nx_tidy**: After major research for cleanup and consolidation
 - **architect-planner**: Research findings for architecture decisions
 - **nx_plan_audit**: Research that informs plan validation
-- **pdf-chromadb-processor**: PDFs requiring extraction before research
-
 ## Relationship to Other Agents
 
 - **vs deep-analyst**: You gather and synthesize information. Deep-analyst investigates specific problems in depth.
-- **vs pdf-chromadb-processor**: You research processed content. Pdf-chromadb-processor handles extraction and indexing of PDFs into nx store first.
 - **vs nx_tidy**: You create knowledge. Tidier cleans and consolidates it.
 
 ## Quality Metrics

@@ -103,8 +103,7 @@ nx/
     ├── development/         # → developer agent
     ├── knowledge-tidying/   # → knowledge-tidier agent
     ├── orchestration/       # routing reference (no agent)
-    ├── pdf-processing/      # → pdf-chromadb-processor agent
-    ├── plan-validation/     # → plan-auditor agent
+    ├── plan-validation/     # → nx_plan_audit MCP tool
     ├── research-synthesis/  # → deep-research-synthesizer agent
     ├── strategic-planning/  # → strategic-planner agent
     ├── test-validation/     # → test-validator agent
@@ -149,10 +148,9 @@ See [`registry.yaml`](./registry.yaml) for full metadata (model, triggers, prede
 | deep-analyst | deep-analysis | `/nx:deep-analysis` | opus | Complex problem investigation, root cause |
 | deep-research-synthesizer | research-synthesis | `/nx:research` | sonnet | Multi-source research with synthesis |
 | developer | development | `/nx:implement` | sonnet | TDD implementation, test-first methodology |
-| knowledge-tidier | knowledge-tidying | `/nx:knowledge-tidy` | haiku | Persist and organize knowledge in nx store |
-| pdf-chromadb-processor | pdf-processing | `/nx:pdf-process` | haiku | Index PDFs into nx store for semantic search |
-| plan-auditor | plan-validation | `/nx:plan-audit` | sonnet | Validate plans before execution |
-| plan-enricher | enrich-plan | `/nx:enrich-plan` | sonnet | Enrich beads with execution context |
+| knowledge-tidier | knowledge-tidying | `/nx:knowledge-tidy` | haiku | Persist and organize knowledge in nx store (stub → nx_tidy MCP tool) |
+| plan-auditor | plan-validation | `/nx:plan-audit` | sonnet | Validate plans before execution (stub → nx_plan_audit MCP tool) |
+| plan-enricher | enrich-plan | `/nx:enrich-plan` | sonnet | Enrich beads with execution context (stub → nx_enrich_beads MCP tool) |
 | strategic-planner | strategic-planning | `/nx:create-plan` | opus | Implementation planning, task decomposition |
 | substantive-critic | substantive-critique | `/nx:substantive-critique` | sonnet | Constructive critique of plans/designs/code |
 | test-validator | test-validation | `/nx:test-validate` | sonnet | Test coverage and quality validation |
@@ -197,7 +195,6 @@ See `hooks/hooks.json` for exact wiring. Paths below use `$CLAUDE_PLUGIN_ROOT` a
 - `/nx:debug` → debugger
 - `/nx:architecture` → architect-planner
 - `/nx:knowledge-tidy` → knowledge-tidier
-- `/nx:pdf-process` → pdf-chromadb-processor
 - `/nx:deep-analysis` → deep-analyst
 - `/nx:substantive-critique` → substantive-critic
 - `/nx:enrich-plan` → plan-enricher

@@ -170,5 +170,4 @@ These patterns are stored in the T2 plan library and are returned by `plan_searc
 |-------|-------------|
 | strategic-planner | Project planning, bead management, infrastructure setup |
 | nx_tidy | Clean and consolidate knowledge bases |
-| pdf-chromadb-processor | Process PDFs for semantic search via nx index pdf |
 | test-validator | Verify test coverage, run test suites |
