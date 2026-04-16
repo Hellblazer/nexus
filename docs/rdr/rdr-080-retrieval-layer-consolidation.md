@@ -147,7 +147,7 @@ The discipline itself moves inside `nx_answer`; an agent that calls `nx_answer` 
 ## Success Criteria
 
 - **SC-1** — Machine-checkable equivalence on a ≥20-question paraphrase set reused from RDR-079 P5 calibration. Two deterministic assertions per question: (a) same `plan_id` hit as `/nx:query` reference run (plan-match decision); (b) for plan-hit questions, `nx_answer`'s final step output includes EVERY tumbler ID cited by the reference run's final step (set-containment over cited evidence). Plan-miss questions relaxed to: (c) `nx_answer` produces a plan with ≥ N-1 steps where N is the reference's step count (synthesis quality deferred to PQ-1's run-trace). Test file: `tests/integration/test_nx_answer_equivalence.py`.
-- **SC-2** — Latency: `nx_answer` p50 ≤ `/nx:query` p50 on warm operator pool. Measured via `nx doctor --answer-latency` emitted per-invocation timings over the SC-1 paraphrase set. Target: wins by eliminating three agent spawns. Cold-worker path measured separately and reported, not gated.
+- **SC-2** — Latency: `nx_answer` p50 ≤ 10s on warm operator pool over the SC-1 paraphrase set (absolute target; the prior `/nx:query` path had no warm-pool baseline to compare against since it pre-dates the pool). Pre-P2 measurement: replay the SC-1 set through `/nx:query` (no warm pool) and commit the baseline to `docs/rdr/rdr-080-latency-baselines.md` alongside the post-consolidation measurement. Cold-worker path measured separately and reported, not gated.
 - **SC-3** — Cost: `nx_answer` per-invocation cost ≤ `/nx:query` per-invocation cost on warm pool. Baseline from replaying the SC-1 paraphrase set through the pre-consolidation path; new measurement on the post-consolidation path. Both measurements committed to `docs/rdr/rdr-080-cost-baselines.md`.
 - **SC-4** — Agent/skill migration complete. Files deleted: `nx/agents/query-planner.md`, `nx/agents/analytical-operator.md` (folded into operator tools per RDR-079 P3), `nx/agents/pdf-chromadb-processor.md`, `nx/agents/knowledge-tidier.md`, `nx/agents/plan-enricher.md`. `nx/agents/plan-auditor.md` reduces to a trivial pointer (≤ 15 lines) stating "use `nx_plan_audit` MCP tool." ALL references to the deleted agents in the rest of the plugin are updated to cite the replacement MCP tool: ~11 agent .md files + ~11 skill SKILL.md files (inventory committed to `docs/plans/2026-04-15-rdr-080-migration-scope.md` at P2a). Grep post-migration: `grep -r "plan-auditor\|knowledge-tidier\|pdf-chromadb-processor\|plan-enricher\|query-planner\|analytical-operator" nx/agents/ nx/skills/ | grep -v "\.md:\s*#"` returns zero non-comment matches outside the trivial `plan-auditor.md` pointer.
 - **SC-5** — `nx/retrieval-agents.txt` is 2 entries (down from 10). Test `test_plan_first_skills.py::RETRIEVAL_AGENTS` updated, plugin structure test passes.
@@ -294,6 +294,7 @@ The `analytical-operator` agent accepted `params.template` (JSON dict `{"field":
 ## Assumptions
 
 - RDR-079 has landed and is **closed** (operator pool + `operator_*` MCP tools + `structured` flag + `store_get_many` + RewindPool + calibrated `min_confidence=0.40`).
+- `nx/agents/analytical-operator.md` is **still present** at RDR-080 start. RDR-079 P3 shipped the replacement `operator_*` MCP tools; the agent file stays until this RDR's **P2a** deletes it alongside the skill-layer collapse. It is NOT deleted in P1.
 - `claude auth status` continues to be the single auth-presence signal.
 - No changes to the plan JSON schema from RDR-078.
 - No changes to the plan library schema from RDR-078/076.
@@ -319,7 +320,7 @@ The `analytical-operator` agent accepted `params.template` (JSON dict `{"field":
 - RDR-078 — Plan-Centric Retrieval. Infrastructure this RDR reuses (plan library, schema, loader, runner, catalog traversal).
 - RDR-079 — Operator Dispatch. Operator pool, `operator_*` MCP tools, `_structured` flag. Pre-requisite for P1.
 - `nx/skills/query/SKILL.md` — the 257-line orchestration skill that collapses to ~15 lines in P2.
-- `nx/agents/query-planner.md`, `nx/agents/analytical-operator.md` — agents deleted in P2 and P1 respectively (the latter folds into RDR-079 P3's operator tools).
+- `nx/agents/query-planner.md`, `nx/agents/analytical-operator.md` — both deleted in **P2a** (skill-layer collapse). RDR-079 P3 shipped the replacement `operator_*` tools; the agent files persist until this RDR's P2a lands.
 - `nx/retrieval-agents.txt` — the canonical registry that shrinks 10 → 2 entries in P2.
 - `src/nexus/mcp/core.py` — new home of `nx_answer`, `nx_tidy`, `nx_enrich_beads`, `nx_plan_audit` tools.
 - `src/nexus/operators/pool.py` — RDR-079 pool, reused transitively.
