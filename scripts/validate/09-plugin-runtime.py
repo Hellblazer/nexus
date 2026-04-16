@@ -243,7 +243,8 @@ _AGENT_CASES = [
 
     # Active agents — assert on their core output contracts.
     Case("substantive-critic",        _AGENT_META + "Critique: 'A plan library is useful.'",
-         ["finding", "critical", "significant", "minor", "priority"], kind="agent"),
+         ["finding", "critical", "significant", "minor", "priority",
+          "critique", "claim", "evidence", "assumption"], kind="agent"),
     Case("code-review-expert",        _AGENT_META + "Review: `def add(a,b): return a+b`. Any issues?",
          ["type", "hint", "quality", "test", "concern", "ok", "good"], kind="agent"),
     Case("debugger",                  _AGENT_META + "Test fails with `AssertionError` intermittently.",
@@ -257,7 +258,8 @@ _AGENT_CASES = [
     Case("strategic-planner",         _AGENT_META + "Decompose 'add --foo flag to nx search' into tasks.",
          ["phase", "task", "step", "bead"], kind="agent"),
     Case("architect-planner",         _AGENT_META + "Architecture for a new event bus. Assume scope is 'Nexus internal decoupling'.",
-         ["component", "interface", "architecture", "phase", "design"], kind="agent"),
+         ["component", "interface", "architecture", "phase", "design",
+          "module", "boundary", "subscriber", "publisher", "event"], kind="agent"),
     Case("codebase-deep-analyzer",    _AGENT_META + "Analyze the module structure of a typical Python package.",
          ["module", "structure", "pattern", "depend", "entry"], kind="agent"),
     Case("developer",                 _AGENT_META + "Implement: 'add --foo flag to nx search'. Assume bead exists.",
