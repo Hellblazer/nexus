@@ -114,7 +114,7 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 ## Relationship to Other Agents
 
 - **vs deep-research-synthesizer**: You index PDFs into T3. Synthesizer researches the indexed content via the search tool.
-- **vs knowledge-tidier**: You create raw indexed content. Tidier organizes and consolidates.
+- **vs nx_tidy MCP tool**: You create raw indexed content. nx_tidy organizes and consolidates.
 
 ## Success Criteria
 

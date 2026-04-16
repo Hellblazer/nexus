@@ -291,8 +291,8 @@ You maintain intellectual rigor by:
 
 Your analysis integrates with:
 - **deep-research-synthesizer**: For gathering background information
-- **knowledge-tidier**: For cleaning up analysis outputs
-- **plan-auditor**: When analysis leads to solution proposals
+- **nx_tidy MCP tool**: For cleaning up analysis outputs
+- **nx_plan_audit MCP tool**: When analysis leads to solution proposals
 - **mcp__plugin_nx_sequential-thinking__sequentialthinking**: For structured reasoning
 - **store_put tool**: For storing analysis findings and relationships
 

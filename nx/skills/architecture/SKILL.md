@@ -48,7 +48,7 @@ Default: **sonnet**. Escalate via `model` parameter on the Agent tool:
 ## Pipeline Position
 
 ```
-strategic-planner -> plan-auditor -> architect-planner -> developer
+strategic-planner -> nx_plan_audit -> architect-planner -> developer
 ```
 
 ## Pre-Dispatch: Seed Link Context
@@ -104,7 +104,7 @@ The architect-planner uses `nx search --corpus code --hybrid` for discovery (30-
 - [ ] Execution plan created with beads
 - [ ] Beads created for trackable work
 - [ ] Risks identified with mitigations
-- [ ] Ready for plan-auditor validation
+- [ ] Ready for nx_plan_audit validation
 
 ## Agent-Specific PRODUCE
 
