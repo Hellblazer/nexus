@@ -320,6 +320,8 @@ See `src/nexus/db/t2/__init__.py` for the facade source and
 
    When authoring agent/skill instructions, always use the full MCP tool name (`mcp__plugin_nx_nexus__<tool>`) — short names fail at runtime.
 
+   See [MCP Tools vs Agents](mcp-vs-agents.md) for the full boundary rule, the stub-agent pattern, and guidance on where to place new capabilities. See [Plan-Centric Retrieval](plan-centric-retrieval.md) for how `nx_answer` + the plan library replaced the earlier retrieval-agent chain.
+
 ## Heritage
 
 | Tool | What Nexus borrows |

@@ -299,3 +299,14 @@ neither result is dropped.
 (shared with clustering when both are enabled — the helper fetches
 embeddings once and passes them to both features). See
 [Configuration](configuration.md) for the config key.
+
+---
+
+## See also
+
+- [Plan-Centric Retrieval](plan-centric-retrieval.md) — the full `nx_answer`
+  trunk, plan library, dimensions, and builtin scenario templates.
+- [Plan Authoring Guide](plan-authoring-guide.md) — template schema for
+  authoring new plans.
+- [MCP Tools vs Agents](mcp-vs-agents.md) — why `nx_answer` replaced the
+  `query-planner` + `analytical-operator` agent pair.

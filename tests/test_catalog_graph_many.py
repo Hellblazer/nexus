@@ -16,6 +16,19 @@ from nexus.catalog.catalog import Catalog
 from nexus.catalog.tumbler import Tumbler
 
 
+@pytest.fixture(autouse=True)
+def _git_identity(monkeypatch):
+    """CI runners have no git identity; Catalog.init() issues a commit.
+
+    Set env-only identity so the test's `git commit` succeeds without
+    touching the caller's ~/.gitconfig.
+    """
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "Test")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@test.invalid")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "Test")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@test.invalid")
+
+
 def _make_node(tumbler_str: str) -> MagicMock:
     """Return a fake catalog node with a .tumbler attribute."""
     node = MagicMock()
