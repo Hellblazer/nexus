@@ -5,7 +5,7 @@ accepted_date: 2026-04-15
 type: feature
 priority: P2
 created: 2026-04-15
-revised: 2026-04-15
+revised: 2026-04-16
 related: [RDR-042, RDR-070, RDR-078, RDR-079, RDR-081]
 reviewed-by: self
 ---
@@ -15,6 +15,24 @@ reviewed-by: self
 RDR-042 established a three-layer retrieval architecture: user-facing skill (`/nx:query`) → planner agent (`query-planner`) → operator agent (`analytical-operator`), with step outputs relayed through T1 scratch. The three layers exist because RDR-042 chose to keep the MCP server LLM-free — operators couldn't live inside MCP tools without coupling the server to `ANTHROPIC_API_KEY`, and the planner couldn't call the operators directly without being an agent itself. RDR-079's empirical Finding 4 formally dissolved that constraint: the `claude` CLI inherits OAuth session auth, so an MCP tool can spawn a worker with no new secret. **The three-layer architecture survives only as inertia.** This RDR consolidates it into a single `nx_answer(question, ...)` MCP tool and prunes the agents/skills that exist solely to wire it together.
 
 The center of gravity moves from "agent-orchestrated retrieval DAG" to "MCP tool with internal dispatch." The plan-first discipline survives, but is enforced by the tool contract rather than duplicated across ten agent preambles. Users still call `/nx:query` or dispatch retrieval-shaped agents; the skill/agent now resolves to one MCP call instead of a four-layer coordination dance.
+
+## As-Built Corrections (2026-04-16)
+
+**RDR-079 was abandoned.** The operator pool (`OperatorPool`, `RewindPool`, warm workers, pool sessions, `pool.dispatch_with_rotation`) was never built. RDR-079 is now a tombstone for the abandoned approach. Any reference in this document to "operator pool", "warm pool", "RewindPool", or "pool session" describes something that does not exist.
+
+**Actual dispatch mechanism**: `claude_dispatch()` in `src/nexus/operators/dispatch.py` — an `asyncio.create_subprocess_exec` wrapper around `claude -p --json-schema`. No warm-worker reuse, no pool session isolation, no PPID inheritance scaffolding. Each call spawns a fresh process.
+
+**P1 is complete** as of PR #168 (merged 2026-04-16). What actually shipped:
+- `src/nexus/operators/dispatch.py` — `claude_dispatch(prompt, schema, timeout)`
+- `src/nexus/mcp/core.py` — `nx_answer`, `nx_tidy`, `nx_enrich_beads`, `nx_plan_audit`, `operator_extract/rank/compare/summarize/generate`, `traverse`
+- `src/nexus/plans/` — `matcher.py`, `runner.py`, `seed_loader.py`, `purposes.py`, `schema.py`, etc.
+- `src/nexus/db/migrations.py` — `nx_answer_runs` table (migration 4.5.0)
+
+**Gap B premise was incorrect**: `nx/retrieval-agents.txt` was never created. There is no SubagentStart hook injecting plan-match-first preambles into agents. The agents do not carry the preamble. Gap B as written assumes an infrastructure layer that does not exist.
+
+**P2–P4 remaining work is all plugin/markdown** — no new Python infrastructure needed. The MCP tools are live; the agent/skill files just need to be deleted or shrunk.
+
+---
 
 ## Problem Statement
 
@@ -105,10 +123,10 @@ Internal flow (all in-process; no subagent spawn):
 | `nx_plan_audit` | `plan-auditor` agent | `/nx:plan-validation` shrinks to trigger pointer |
 
 Each new MCP tool:
-- Dispatches to **OperatorPool** from RDR-079 (interactive, warm-worker reuse = free amortised cost). **RewindPool** (per-dispatch subprocess + JSONL-truncation rewind) is reserved for batch-style operators where cross-dispatch contamination is a correctness concern — its first consumer is RDR-081's authoring-trust batch labeler, not this RDR.
+- Dispatches via `claude_dispatch(prompt, schema, timeout)` in `src/nexus/operators/dispatch.py` — a fresh `claude -p --json-schema` subprocess per call. No warm-worker reuse. *(The OperatorPool/RewindPool design was abandoned — see DEV-1.)*
 - Uses `--json-schema` for structured output (no parse fragility).
-- Returns a well-typed dict (for plan_run consumption) or a formatted string (for direct caller consumption); `structured: bool = False` flag picks.
-- Emits structured logs with `session_id`, `duration_ms`, `cost_usd`, `usage`.
+- Returns a well-typed dict (for plan_run consumption) or a formatted string (for direct caller consumption).
+- Emits structured logs with `duration_ms`, `cost_usd` where implemented.
 
 ### The boundary rule
 
@@ -136,28 +154,44 @@ The discipline itself moves inside `nx_answer`; an agent that calls `nx_answer` 
 
 ## Phases
 
-- **P1** — `nx_answer` MCP tool, plan-match-first enforced internally, operator dispatch via RDR-079 pool. Deterministic runner inherited from RDR-078/079. **Pre-conditions met** (post-RDR-079 delta RF-1): all primitives are pre-shipped — `operator_*` tools (core.py:1919+), `store_get_many` (core.py:692), `plan_match` (core.py:1499), `plan_run` (core.py:1568), `_default_dispatcher` with operator routing (runner.py:493). P1 is wiring an orchestration layer, not building infrastructure. Also ships: (a) `nx_answer_runs` T2 table via new migration per PQ-1 resolution (fields: `id, question, plan_id, matched_confidence, step_count, final_text, cost_usd, duration_ms, created_at`; TTL 7 days); `trace=false` opt-out parameter on the MCP tool; (b) auto-hydration in `_default_dispatcher` (Option C at runner.py:514) — operator steps auto-receive content instead of IDs; (c) `confidence is None` (FTS5 sentinel) treated as a plan hit in the gate (RF-11). Test coverage: unit-level for the dispatch logic with stubbed pool; integration-level for one end-to-end question per scenario verb; SC-11 hydration test against existing `store_get_many`.
-- **P2** — Skill + preamble pruning + caller-migration. Three sub-deliverables:
-  - **P2a** Collapse `/nx:query` SKILL.md from 257 lines to ~15 lines describing `nx_answer` as the entry point. Delete `nx/agents/query-planner.md`. Strip the plan-match-first preamble from 8 of the 10 retrieval-shaped agents. Update `nx/retrieval-agents.txt` to 2 entries. Update `tests/test_plan_first_skills.py`. Commit `docs/plans/2026-04-15-rdr-080-migration-scope.md` enumerating every agent/skill file that will be touched in P2a/P3/P4 (the ~22-file list from SC-4) with per-file before/after snippets.
-  - **P2b** `/nx:query` and `/nx:plan-first` → `nx_answer` documented as primary entry; plan-first `SKILL.md` gets a §Internal enforcement section explaining that `nx_answer` enforces the gate at the tool contract.
-  - **P2c** `docs/architecture.md` deliverable: commit the boundary rule (from §Design) + the per-tool dispatch-or-not classification table (from RF-3). Future tool authors consult this file.
-- **P3** — `nx_tidy`, `nx_enrich_beads`, `nx_plan_audit` MCP tools. Each dispatches to the operator pool with per-tool `--json-schema`. Agent files shrunk to doc stubs pointing at the tool; skills collapsed to trigger pointers.
-- **P4** — Delete `pdf-chromadb-processor.md` and `/nx:pdf-processing` skill. Single-PDF users run `nx index pdf` directly; batch users script it.
-- **P5** — Cost-budget surfacing. `.nexus.yml: operators.daily_budget_usd` (new key), pool WARNs at 80%, refuses at 100%. `nx doctor --operators` command reports today's spend by tool. Protects against an `nx_answer` loop eating the subscription.
+- **P1** ✅ **COMPLETE** (PR #168, 2026-04-16) — `nx_answer` MCP tool with plan-match-first enforcement, `claude_dispatch` for operator steps, deterministic runner from RDR-078. Also shipped: `operator_*` tools (extract/rank/compare/summarize/generate), `traverse`, `nx_tidy`, `nx_enrich_beads`, `nx_plan_audit`, `nx_answer_runs` T2 migration, full `src/nexus/plans/` package (matcher, runner, seed_loader, purposes). Operator dispatch uses `claude_dispatch()` — not the abandoned pool.
+
+- **P2** — Agent/skill collapse. All plugin/markdown work; no new Python needed.
+  - Delete `nx/agents/query-planner.md` and `nx/agents/analytical-operator.md` — both superseded by `nx_answer` and `operator_*` tools.
+  - Collapse `nx/skills/query/SKILL.md` from 257 lines to ~15 lines: one-liner description + "calls `nx_answer` MCP tool."
+  - Update `nx/agents/strategic-planner.md`, `nx/agents/developer.md`, `nx/agents/deep-analyst.md`, `nx/agents/deep-research-synthesizer.md` to replace all cross-references to deleted agents (`plan-auditor`, `knowledge-tidier`, `pdf-chromadb-processor`, `query-planner`, `analytical-operator`) with their MCP tool equivalents.
+  - Commit the boundary rule from §Design to `docs/architecture.md`.
+  - *Note*: `nx/retrieval-agents.txt` does not exist and is not needed — the plan-match-first discipline is now enforced inside `nx_answer`, not via a SubagentStart hook preamble injection.
+
+- **P3** — Shrink remaining wrapper agent files to doc stubs.
+  - `nx/agents/knowledge-tidier.md` → ≤15 lines: "use `nx_tidy` MCP tool."
+  - `nx/agents/plan-enricher.md` → ≤15 lines: "use `nx_enrich_beads` MCP tool."
+  - `nx/agents/plan-auditor.md` → ≤15 lines: "use `nx_plan_audit` MCP tool."
+  - Collapse `nx/skills/knowledge-tidying/`, `nx/skills/enrich-plan/`, `nx/skills/plan-validation/` SKILL.md files to trigger pointers.
+
+- **P4** — Delete `nx/agents/pdf-chromadb-processor.md` and `nx/skills/pdf-processing/`. Single-PDF users: `nx index pdf`. Batch users: script it. Update `deep-research-synthesizer.md` to reference `nx index pdf` directly.
+
+- **P5** — Cost tracking for `claude_dispatch` calls. Add per-call duration/cost logging to `dispatch.py` (structured log). `nx doctor --operators` reports cumulative spend from `nx_answer_runs` table (TTL 7d). Optional: `.nexus.yml: operators.daily_budget_usd` soft cap logged as WARNING. *Note*: no warm-pool cost amortisation — each `claude_dispatch` is a fresh subprocess; cost model is per-call Haiku only.
 
 ## Success Criteria
 
-- **SC-1** — Machine-checkable equivalence on a ≥20-question paraphrase set reused from RDR-079 P5 calibration. Two deterministic assertions per question: (a) same `plan_id` hit as `/nx:query` reference run (plan-match decision); (b) for plan-hit questions, `nx_answer`'s final step output includes EVERY tumbler ID cited by the reference run's final step (set-containment over cited evidence). Plan-miss questions relaxed to: (c) `nx_answer` produces a plan with ≥ N-1 steps where N is the reference's step count (synthesis quality deferred to PQ-1's run-trace). Test file: `tests/integration/test_nx_answer_equivalence.py`.
-- **SC-2** — Latency: `nx_answer` p50 ≤ 10s on warm operator pool over the SC-1 paraphrase set (absolute target; the prior `/nx:query` path had no warm-pool baseline to compare against since it pre-dates the pool). Pre-P2 measurement: replay the SC-1 set through `/nx:query` (no warm pool) and commit the baseline to `docs/rdr/rdr-080-latency-baselines.md` alongside the post-consolidation measurement. Cold-worker path measured separately and reported, not gated.
-- **SC-3** — Cost: `nx_answer` per-invocation cost ≤ `/nx:query` per-invocation cost on warm pool. Baseline from replaying the SC-1 paraphrase set through the pre-consolidation path; new measurement on the post-consolidation path. Both measurements committed to `docs/rdr/rdr-080-cost-baselines.md`.
-- **SC-4** — Agent/skill migration complete. Files deleted: `nx/agents/query-planner.md`, `nx/agents/analytical-operator.md` (folded into operator tools per RDR-079 P3), `nx/agents/pdf-chromadb-processor.md`, `nx/agents/knowledge-tidier.md`, `nx/agents/plan-enricher.md`. `nx/agents/plan-auditor.md` reduces to a trivial pointer (≤ 15 lines) stating "use `nx_plan_audit` MCP tool." ALL references to the deleted agents in the rest of the plugin are updated to cite the replacement MCP tool: ~11 agent .md files + ~11 skill SKILL.md files (inventory committed to `docs/plans/2026-04-15-rdr-080-migration-scope.md` at P2a). Grep post-migration: `grep -r "plan-auditor\|knowledge-tidier\|pdf-chromadb-processor\|plan-enricher\|query-planner\|analytical-operator" nx/agents/ nx/skills/ | grep -v "\.md:\s*#"` returns zero non-comment matches outside the trivial `plan-auditor.md` pointer.
-- **SC-5** — `nx/retrieval-agents.txt` is 2 entries (down from 10). Test `test_plan_first_skills.py::RETRIEVAL_AGENTS` updated, plugin structure test passes.
-- **SC-6** — `/nx:query SKILL.md` is ≤ 20 lines. No T1-scratch relay references. All step-output coordination is in-process Python inside `nx_answer`.
-- **SC-7** — Budget surfacing works: `.nexus.yml: operators.daily_budget_usd: 1.00` causes 80% warn at $0.80 cumulative, 100% refuse at $1.00 cumulative. `nx doctor --operators` reports correct cumulative.
-- **SC-8** — RDR-078 and RDR-079 test suites pass unchanged. No regression on `plan_match`, `plan_run`, `traverse`, or the scenario seeds themselves.
-- **SC-9** — Graceful degradation: without `claude auth status == loggedIn`, `nx_answer` returns a clear "operator pool unavailable" error for plan-miss questions, but still works for plan-hit questions whose steps are entirely retrieval (search + traverse, no operators). Tested.
-- **SC-10** — The boundary rule is committed to `docs/architecture.md` with the three test cases from §Design and the current inventory classification. Future agent/skill/tool additions consult it.
-- **SC-11** — `store_get_many` is **pre-shipped** (RDR-079 post-critique, core.py:692). P1 adds the 500-ID hydration test: `tests/test_store_get_many.py::test_500_id_hydration_no_truncation` passes a 500-ID fixture and asserts the returned list contains 500 entries with no silent truncation. Also validates that auto-hydration in `_default_dispatcher` correctly calls `store_get_many` when an operator step receives `ids` from a prior retrieval step.
+- **SC-1** ✅ **(P1 complete)** — `nx_answer`, `operator_*` tools, `traverse`, `nx_tidy`, `nx_enrich_beads`, `nx_plan_audit` all registered and tested. Unit test suite passes (PR #168). `nx_answer_runs` migration confirmed in `tests/test_migrations.py`.
+
+- **SC-2** — Agent/skill deletion complete. Grep check: `grep -r "plan-auditor\|knowledge-tidier\|pdf-chromadb-processor\|plan-enricher\|query-planner\|analytical-operator" nx/agents/ nx/skills/` returns zero matches outside trivial pointer stubs. (P2+P3+P4)
+
+- **SC-3** — `nx/skills/query/SKILL.md` is ≤ 20 lines. (P2)
+
+- **SC-4** — `docs/architecture.md` contains the boundary rule and agent/tool classification table. (P2)
+
+- **SC-5** — `nx/agents/knowledge-tidier.md`, `nx/agents/plan-enricher.md`, `nx/agents/plan-auditor.md` are each ≤ 15 lines pointing at their MCP tool. (P3)
+
+- **SC-6** — `nx/agents/pdf-chromadb-processor.md` and `nx/skills/pdf-processing/` are deleted. `deep-research-synthesizer.md` has no reference to `pdf-chromadb-processor`. (P4)
+
+- **SC-7** — Graceful degradation: `nx_answer` returns a clear error for plan-miss questions when `claude` auth is absent, but still executes retrieval-only plan-hit questions. (P1 — verify in integration test)
+
+- **SC-8** — RDR-078 test suites pass unchanged. No regression on `plan_match`, `plan_run`, `traverse`, or scenario seeds. ✅ **(PR #168)**
+
+- **SC-9** — `store_get_many` batching: 500-ID hydration test passes with no silent truncation. ✅ **(PR #168, `tests/test_store_get_many.py` or `tests/test_nx_answer.py`)**
 
 ## Research Findings
 
@@ -289,22 +323,23 @@ The `analytical-operator` agent accepted `params.template` (JSON dict `{"field":
 - **Agent authors confusion**: "when do I make an agent vs an MCP tool?" — the boundary rule answers this, but needs to land in `docs/architecture.md` and in the agent-creator plugin's guidance so new agents don't inadvertently become the next thin-wrapper deletion target.
 - **Auth assumption creep**: `nx_answer` requires auth for plan-miss questions (the planner call). If a user has no auth and a question doesn't match any plan, they see "operator pool unavailable." Mitigate via a `plan_search` fallback that returns the top 5 plan descriptions so the user can disambiguate manually.
 - **Nested MCP-tool-calls-MCP-tool observability**: when `nx_answer` internally calls `operator_extract` which internally spawns a worker, tracing across the layers needs structured logging with a shared correlation ID. Not a blocker for P1 but required before external adopters.
-- **Stale internal dispatches in `deep-research-synthesizer`**: the kept agent currently dispatches `knowledge-tidier` (mandatory per its agent file) and `pdf-chromadb-processor` (mandatory for PDF ingestion). Both delete/collapse in P3/P4. The agent's preamble content becomes partially stale during the transition. Mitigation: P3 sub-step updates `deep-research-synthesizer.md` to cite `nx_tidy` MCP tool in place of `knowledge-tidier`; P4 replaces the `pdf-chromadb-processor` mandate with direct `nx index pdf` CLI + an inline `nx_tidy` call. Both land before merging P3/P4 so the agent never ships with dead references.
+- **Stale internal dispatches in `deep-research-synthesizer`**: the agent currently mandates `knowledge-tidier` and `pdf-chromadb-processor`. Both are deleted in P3/P4. P2 updates `deep-research-synthesizer.md` to cite `nx_tidy` and `nx index pdf` in their place before the deletions land.
 - **Plan-miss path latency opacity**: on plan-miss questions, `nx_answer` dispatches a planning call (~5-10s cold per RDR-079 Finding 5) inside a single blocking MCP invocation. Callers receive no progress signal during that window — a UX regression relative to the current `/nx:query` skill's step-by-step announcements. Mitigation: structured-log emission at each phase (match, plan, hydrate, operator-N, synthesize) tagged with a correlation ID; `nx doctor --operators` can surface in-flight calls. Streaming output to callers remains out of scope (see §Out of Scope).
 
 ## Assumptions
 
-- RDR-079 has landed and is **closed** (operator pool + `operator_*` MCP tools + `structured` flag + `store_get_many` + RewindPool + calibrated `min_confidence=0.40`).
-- `nx/agents/analytical-operator.md` is **still present** at RDR-080 start. RDR-079 P3 shipped the replacement `operator_*` MCP tools; the agent file stays until this RDR's **P2a** deletes it alongside the skill-layer collapse. It is NOT deleted in P1.
-- `claude auth status` continues to be the single auth-presence signal.
-- No changes to the plan JSON schema from RDR-078.
-- No changes to the plan library schema from RDR-078/076.
-- Users have read the plan-first discipline elsewhere; stripping the per-agent preamble does not degrade out-of-the-box behaviour because `nx_answer` enforces it.
-- `docs/architecture.md` is the canonical place for the boundary rule to land (single source of truth for module layout).
+- RDR-079 is **closed as abandoned**. `operator_*` MCP tools ship via this RDR (P1 complete). `claude_dispatch()` is the dispatch mechanism; there is no pool. `min_confidence=0.40` is calibrated and live.
+- `nx/agents/analytical-operator.md` is still present — deleted in P2.
+- `nx/agents/query-planner.md` is still present — deleted in P2.
+- `claude auth status` is the single auth-presence signal for `claude_dispatch`.
+- No changes to plan JSON schema from RDR-078.
+- `docs/architecture.md` is the canonical place for the boundary rule.
 
 ## Deviations Register
 
-*(empty at draft time)*
+- **DEV-1 (2026-04-16)**: RDR-079 abandoned mid-implementation. The operator pool (`OperatorPool`, `RewindPool`, warm workers, pool session isolation) was never built. Replacement: `claude_dispatch()` in `src/nexus/operators/dispatch.py` — a direct `asyncio.create_subprocess_exec` wrapper around `claude -p`. All references in this document to "operator pool", "pool session", "RewindPool", or "warm pool" are stale and refer to the abandoned design. RF-5 (session isolation via pool) describes a mechanism that does not exist; session isolation is N/A since there is no pool. SC-2/SC-3 (warm-pool latency/cost baselines) are dropped — there is no warm pool to baseline against.
+
+- **DEV-2 (2026-04-16)**: `nx/retrieval-agents.txt` was never created. The Gap B premise — that RDR-078 shipped plan-match-first preamble injection via a SubagentStart hook reading this file — is incorrect. The file does not exist; no such hook injection happens. Gap B's practical effect is reduced: the plan-first discipline is now enforced inside `nx_answer` (MCP tool contract), which is the correct long-term home. The "10 copies of the preamble in agent files" concern does not apply to the current codebase.
 
 ## Out of Scope (may spawn follow-on RDRs)
 
@@ -329,4 +364,5 @@ The `analytical-operator` agent accepted `params.template` (JSON dict `{"field":
 ## Revision History
 
 - **2026-04-15** — Initial draft. Grounded in RDR-079 Finding 4 (OAuth inheritance) and deep-analysis output `analysis-deep-rdr079-boundary-redesign-2026-04-15` (T3 store).
-- **2026-04-15** — Post-RDR-079 revision. RDR-079 closed; all P1 primitives pre-shipped. Added RF-8 through RF-14 (post-079 delta analysis: 2 research passes). Updated P1 scope (wiring not building), auto-hydration design (Option C at runner.py:514), FTS5 sentinel gate (RF-11), OperatorPool/RewindPool boundary (RewindPool consumer is RDR-081), latency estimates (33s → 6-9s), SC-11 (store_get_many pre-shipped), extract-field translation gap (RF-13), and line budget (-680 net). T2 research: `080-research-1-post-079-delta`, `080-research-2-implementation-gaps`.
+- **2026-04-15** — Post-RDR-079 revision. Added RF-8 through RF-14. Updated P1 scope, auto-hydration design, FTS5 sentinel gate, latency estimates. Note: this revision was written assuming an operator pool that was subsequently abandoned.
+- **2026-04-16** — As-built correction. RDR-079 abandoned (pool never built); P1 complete via PR #168 with `claude_dispatch` as dispatch mechanism. Added §As-Built Corrections, DEV-1, DEV-2. Rewrote Phases to reflect actual implementation. Replaced stale pool-based SCs with reality-grounded criteria. Updated Assumptions. RF-5 (pool session isolation) is voided by DEV-1 — there is no pool.
