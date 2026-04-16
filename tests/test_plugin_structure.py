@@ -531,3 +531,41 @@ class TestBidirectionalRegistry:
             registered.add(name)
         for cf in command_files():
             assert cf.stem in registered, f"commands/{cf.name} not in registry.yaml"
+
+
+# ── RDR-080 stub agent content guards ────────────────────────────────────────
+
+# Agents deleted by RDR-080 P3/P4. Stub files must not reference these names
+# or an agent reading the stub would try to dispatch a non-existent agent.
+_DELETED_AGENTS = frozenset({
+    "query-planner",
+    "analytical-operator",
+    "pdf-chromadb-processor",
+})
+
+# Stub agent files that redirect to MCP tools (RDR-080 SC-5).
+_STUB_AGENTS = ("knowledge-tidier", "plan-auditor", "plan-enricher")
+
+
+class TestRdr080StubAgents:
+    """Stub agents must redirect to MCP tools and not reference deleted agents."""
+
+    @pytest.mark.parametrize("agent_name", _STUB_AGENTS)
+    def test_stub_does_not_reference_deleted_agents(self, agent_name: str) -> None:
+        stub = PLUGIN_DIR / "agents" / f"{agent_name}.md"
+        assert stub.exists(), f"Expected stub file: {stub}"
+        content = stub.read_text()
+        for deleted in _DELETED_AGENTS:
+            assert deleted not in content, (
+                f"nx/agents/{agent_name}.md references deleted agent '{deleted}'. "
+                "Stubs must redirect to MCP tools only (RDR-080 SC-4)."
+            )
+
+    @pytest.mark.parametrize("agent_name", _STUB_AGENTS)
+    def test_stub_references_mcp_tool(self, agent_name: str) -> None:
+        stub = PLUGIN_DIR / "agents" / f"{agent_name}.md"
+        content = stub.read_text()
+        assert "mcp__plugin_nx_nexus__" in content, (
+            f"nx/agents/{agent_name}.md must reference an MCP tool "
+            "(mcp__plugin_nx_nexus__*) as its redirect target (RDR-080)."
+        )

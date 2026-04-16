@@ -234,3 +234,58 @@ def test_fts5_fallback_increments_match_count_only(library) -> None:
     assert row is not None
     assert row["match_count"] == 1
     assert row["match_conf_sum"] == 0.0
+
+
+# ── Stub parameter pinning (SC-TODO: Phase 2) ────────────────────────────────
+
+
+def test_scope_preference_is_a_no_op(library) -> None:
+    """scope_preference is accepted but does not change results (Phase 2 stub).
+
+    This test pins the current no-op contract so a future implementation
+    knows exactly what it needs to replace. When Phase 2 scope ranking
+    ships, this test must be updated to assert different behaviour.
+    """
+    from nexus.plans.matcher import plan_match
+
+    plan_id = _seed(library, query="research projection quality",
+                    dimensions={"verb": "research", "scope": "global"})
+    cache = _FakeCache(hits=[(plan_id, 0.05)])
+
+    without_scope = plan_match(
+        intent="projection quality", library=library, cache=cache,
+        min_confidence=0.5,
+    )
+    # Reset cache so second call sees the same hits
+    cache_b = _FakeCache(hits=[(plan_id, 0.05)])
+    with_scope = plan_match(
+        intent="projection quality", library=library, cache=cache_b,
+        min_confidence=0.5,
+        scope_preference="rdr-080",
+    )
+
+    assert [m.plan_id for m in without_scope] == [m.plan_id for m in with_scope], (
+        "scope_preference must be a no-op until Phase 2 ships"
+    )
+
+
+def test_context_parameter_is_a_no_op(library) -> None:
+    """context dict is accepted but does not change results (Phase 2 stub)."""
+    from nexus.plans.matcher import plan_match
+
+    plan_id = _seed(library, query="research mechanism",
+                    dimensions={"verb": "research"})
+    cache_a = _FakeCache(hits=[(plan_id, 0.05)])
+    cache_b = _FakeCache(hits=[(plan_id, 0.05)])
+
+    without_ctx = plan_match(
+        intent="mechanism", library=library, cache=cache_a, min_confidence=0.5,
+    )
+    with_ctx = plan_match(
+        intent="mechanism", library=library, cache=cache_b, min_confidence=0.5,
+        context={"user_context": "some extra context"},
+    )
+
+    assert [m.plan_id for m in without_ctx] == [m.plan_id for m in with_ctx], (
+        "context parameter must be a no-op until Phase 2 ships"
+    )

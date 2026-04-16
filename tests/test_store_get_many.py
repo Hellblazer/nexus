@@ -71,3 +71,48 @@ class TestStoreGetMany500ID:
         assert result["contents"][2] == "b"
         assert result["contents"][3] == ""
         assert set(result["missing"]) == {"missing-1", "missing-2"}
+
+
+class TestStoreGetManyBatchBoundary:
+    """Verify store_get_many correctly handles IDs at and above the ChromaDB
+    MAX_QUERY_RESULTS=300 boundary using a real per-document lookup.
+
+    Uses a structured fake T3 to verify the per-ID dispatch loop doesn't
+    truncate at 300, without requiring ChromaDB Cloud credentials.
+    """
+
+    def test_300_id_boundary_no_truncation(self):
+        """301 IDs must all be returned — no off-by-one at the quota boundary."""
+        from nexus.mcp.core import store_get_many
+
+        n = 301  # one above the ChromaDB MAX_QUERY_RESULTS cap
+        ids = [f"doc-{i:04d}" for i in range(n)]
+        store = {doc_id: {"content": f"body-{i}"} for i, doc_id in enumerate(ids)}
+
+        mock_t3 = MagicMock()
+        mock_t3.get_by_id = lambda col, doc_id: store.get(doc_id)
+
+        with patch("nexus.mcp.core._get_t3", return_value=mock_t3):
+            result = store_get_many(ids=ids, collections="knowledge", structured=True)
+
+        assert len(result["contents"]) == n, (
+            f"Expected {n} contents at quota boundary, got {len(result['contents'])}"
+        )
+        assert len(result["missing"]) == 0
+
+    def test_all_missing_above_boundary(self):
+        """301 IDs that are all absent land in 'missing', not silently dropped."""
+        from nexus.mcp.core import store_get_many
+
+        n = 301
+        ids = [f"absent-{i}" for i in range(n)]
+
+        mock_t3 = MagicMock()
+        mock_t3.get_by_id = lambda col, doc_id: None
+
+        with patch("nexus.mcp.core._get_t3", return_value=mock_t3):
+            result = store_get_many(ids=ids, collections="knowledge", structured=True)
+
+        assert len(result["contents"]) == n
+        assert all(c == "" for c in result["contents"])
+        assert len(result["missing"]) == n

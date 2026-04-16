@@ -1523,11 +1523,16 @@ class Catalog:
         merged_edges: dict[tuple[str, str, str], object] = {}
 
         for seed in seeds:
+            if len(merged_nodes) >= self._MAX_GRAPH_NODES:
+                _log.warning("graph_many_node_limit", visited=len(merged_nodes))
+                break
             result = self.graph(
                 seed, depth=depth, direction=direction,
                 link_type=link_type, link_types=link_types,
             )
             for node in result.get("nodes") or []:
+                if len(merged_nodes) >= self._MAX_GRAPH_NODES:
+                    break
                 key = str(node.tumbler) if hasattr(node, "tumbler") else str(node)
                 if key not in merged_nodes:
                     merged_nodes[key] = node
@@ -1535,10 +1540,6 @@ class Catalog:
                 edge_key = (str(edge.from_tumbler), str(edge.to_tumbler), edge.link_type)
                 if edge_key not in merged_edges:
                     merged_edges[edge_key] = edge
-
-            if len(merged_nodes) >= self._MAX_GRAPH_NODES:
-                _log.warning("graph_many_node_limit", visited=len(merged_nodes))
-                break
 
         return {
             "nodes": list(merged_nodes.values()),

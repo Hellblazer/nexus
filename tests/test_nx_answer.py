@@ -509,3 +509,224 @@ class TestNxPlanAudit:
         sentinel_plan = '{"steps": [{"tool": "search_sentinel_xyz"}]}'
         await nx_plan_audit(plan_json=sentinel_plan)
         assert "search_sentinel_xyz" in captured[0]
+
+
+# ── nx_answer end-to-end orchestration (trunk tests, no API keys) ─────────────
+
+
+def _fake_t2_ctx(tmp_path):
+    """Return a factory that yields a real T2Database at tmp_path/t2.db."""
+    from contextlib import contextmanager
+    from nexus.db.t2 import T2Database
+
+    @contextmanager
+    def _ctx():
+        with T2Database(tmp_path / "t2.db") as db:
+            yield db
+
+    return _ctx
+
+
+class TestNxAnswerEndToEnd:
+    """nx_answer() orchestration wiring with fully mocked sub-calls.
+
+    No live API keys needed. Verifies match→classify→run→record trunk.
+    """
+
+    @pytest.mark.asyncio
+    async def test_hit_path_calls_plan_run_and_returns_text(self, tmp_path):
+        """Hit (cosine ≥ 0.40) → plan_run called → final text returned."""
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult
+
+        match = _make_match(confidence=0.75)
+        run_result = PlanResult(steps=[{"text": "The final answer."}])
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(return_value=run_result)),
+        ):
+            from nexus.mcp.core import nx_answer
+            result = await nx_answer("what is projection quality?")
+
+        assert "final answer" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_miss_path_calls_plan_miss_planner(self, tmp_path):
+        """No matches (plan miss) → _nx_answer_plan_miss dispatched."""
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        import nexus.mcp.core as _core
+        from nexus.plans.runner import PlanResult
+
+        ad_hoc = _make_match(plan_id=0, confidence=None)
+        run_result = PlanResult(steps=[{"text": "Inline answer."}])
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_core, "_nx_answer_plan_miss",
+                         AsyncMock(return_value=ad_hoc)),
+            patch.object(_runner, "plan_run", AsyncMock(return_value=run_result)),
+        ):
+            from nexus.mcp.core import nx_answer
+            result = await nx_answer("novel question with no plan")
+
+        assert "inline answer" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_planner_fail_returns_user_readable_error(self, tmp_path):
+        """When inline planner raises, nx_answer returns a readable error string."""
+        import nexus.mcp_infra as _infra
+        import nexus.mcp.core as _core
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch.object(_core, "_nx_answer_plan_miss",
+                         AsyncMock(side_effect=ValueError("dispatch failed"))),
+        ):
+            from nexus.mcp.core import nx_answer
+            result = await nx_answer("unanswerable question")
+
+        assert isinstance(result, str)
+        assert "planner" in result.lower() or "search" in result.lower()
+
+
+class TestNxAnswerFTS5HitPath:
+    """FTS5 sentinel (confidence=None) is treated as a hit, not a miss."""
+
+    @pytest.mark.asyncio
+    async def test_fts5_sentinel_routes_to_plan_run(self, tmp_path):
+        """confidence=None match → plan_run called (not inline planner)."""
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult
+
+        fts5_match = _make_match(confidence=None)
+        run_result = PlanResult(steps=[{"text": "FTS5 answer."}])
+
+        plan_miss_calls = []
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[fts5_match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(return_value=run_result)),
+            patch("nexus.mcp.core._nx_answer_plan_miss",
+                  AsyncMock(side_effect=lambda *a, **k: plan_miss_calls.append(1))),
+        ):
+            from nexus.mcp.core import nx_answer
+            result = await nx_answer("fts5 question")
+
+        assert not plan_miss_calls, "FTS5 hit must not fall through to inline planner"
+        assert "FTS5 answer" in result
+
+
+class TestNxAnswerTimeoutHandling:
+    """claude_dispatch timeout raises OperatorTimeoutError → user-readable error."""
+
+    @pytest.mark.asyncio
+    async def test_plan_miss_timeout_returns_readable_string(self, tmp_path):
+        """OperatorTimeoutError from inline planner → graceful error return."""
+        import nexus.mcp_infra as _infra
+        import nexus.mcp.core as _core
+        from nexus.operators.dispatch import OperatorTimeoutError
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch.object(_core, "_nx_answer_plan_miss",
+                         AsyncMock(side_effect=OperatorTimeoutError("timed out"))),
+        ):
+            from nexus.mcp.core import nx_answer
+            result = await nx_answer("slow question")
+
+        assert isinstance(result, str)
+        # Must not re-raise — must surface as a readable message
+        assert "planner" in result.lower() or "search" in result.lower() or "error" in result.lower()
+
+
+class TestNxAnswerCostStub:
+    """cost_usd is hardcoded 0.0 — pin the stub contract explicitly."""
+
+    def test_cost_usd_recorded_as_zero(self, tmp_path):
+        """_nx_answer_record_run stores cost_usd=0.0 (P5 stub — not real cost)."""
+        import sqlite3
+        from nexus.mcp.core import _nx_answer_record_run
+        from nexus.db.migrations import migrate_nx_answer_runs
+
+        conn = sqlite3.connect(":memory:")
+        migrate_nx_answer_runs(conn)
+
+        _nx_answer_record_run(
+            conn, question="q", plan_id=1, matched_confidence=0.8,
+            step_count=2, final_text="answer", cost_usd=0.0,
+            duration_ms=500, trace=True,
+        )
+
+        row = conn.execute("SELECT cost_usd FROM nx_answer_runs").fetchone()
+        assert row is not None
+        # SC-TODO P5: cost_usd is a stub (always 0.0). When real cost tracking
+        # ships, this test documents the before state and must be updated.
+        assert row[0] == 0.0
+
+    def test_budget_usd_parameter_accepted_without_error(self, tmp_path):
+        """budget_usd is a no-op parameter — accepted but not enforced (P5 stub)."""
+        import inspect
+        from nexus.mcp.core import nx_answer
+
+        sig = inspect.signature(nx_answer)
+        assert "budget_usd" in sig.parameters, "budget_usd must remain in signature"
+        # Default must be present (contract stability)
+        assert sig.parameters["budget_usd"].default == 0.25
+
+
+class TestNxAnswerLatencyProxy:
+    """nx_answer with mocked sub-calls completes in <1s (no blocking calls)."""
+
+    @pytest.mark.asyncio
+    async def test_orchestration_has_no_blocking_calls(self, tmp_path):
+        """With all I/O mocked, nx_answer completes in under 1 second.
+
+        A >1s wall time indicates an inadvertent blocking sleep or subprocess.
+        """
+        import time
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult
+
+        match = _make_match(confidence=0.9)
+        run_result = PlanResult(steps=[{"text": "Fast answer."}])
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(return_value=run_result)),
+        ):
+            from nexus.mcp.core import nx_answer
+            t0 = time.monotonic()
+            await nx_answer("fast question")
+            elapsed = time.monotonic() - t0
+
+        assert elapsed < 1.0, (
+            f"nx_answer with mocked I/O took {elapsed:.2f}s — "
+            "possible blocking call reintroduced"
+        )
