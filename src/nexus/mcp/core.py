@@ -6,6 +6,9 @@
 """
 from __future__ import annotations
 
+import json
+from typing import Any
+
 from mcp.server.fastmcp import FastMCP
 
 from nexus.corpus import (
@@ -1287,6 +1290,514 @@ async def operator_generate(
         },
     }
     return await claude_dispatch(prompt, schema, timeout=timeout)
+
+
+# ── nx_answer helpers (RDR-080) ───────────────────────────────────────────────
+
+#: Maximum inputs passed to an operator before auto-inserting a rank winnow.
+_OPERATOR_MAX_INPUTS: int = 100
+
+#: Minimum confidence for a plan_match result to count as a hit.
+_PLAN_MATCH_MIN_CONFIDENCE: float = 0.40
+
+#: JSON schema for the inline plan-miss planner.
+_PLANNER_SCHEMA: dict = {
+    "type": "object",
+    "required": ["steps"],
+    "properties": {
+        "steps": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["tool", "args"],
+                "additionalProperties": False,
+                "properties": {
+                    "tool": {"type": "string"},
+                    "args": {"type": "object"},
+                },
+            },
+        },
+    },
+    "additionalProperties": False,
+}
+
+
+def _nx_answer_match_is_hit(confidence: float | None) -> bool:
+    """Return True when a plan_match confidence qualifies as a hit.
+
+    ``confidence is None`` (FTS5 sentinel, RF-11) is always a hit.
+    Numeric confidence must be >= 0.40 (RDR-079 P5 calibration).
+    """
+    if confidence is None:
+        return True
+    return confidence >= _PLAN_MATCH_MIN_CONFIDENCE
+
+
+def _nx_answer_classify_plan(match: Any) -> str:
+    """Classify a matched plan: ``"single_query"`` | ``"retrieval_only"`` | ``"needs_operators"``."""
+    from nexus.plans.runner import _OPERATOR_TOOL_MAP
+    _OPERATOR_TOOLS = frozenset(_OPERATOR_TOOL_MAP.keys())
+    try:
+        plan = json.loads(match.plan_json)
+    except (json.JSONDecodeError, TypeError):
+        return "needs_operators"
+    steps = plan.get("steps") or []
+    if len(steps) == 1 and steps[0].get("tool") == "query":
+        return "single_query"
+    if any(step.get("tool", "") in _OPERATOR_TOOLS for step in steps):
+        return "needs_operators"
+    return "retrieval_only"
+
+
+def _nx_answer_is_single_query(match: Any) -> bool:
+    return _nx_answer_classify_plan(match) == "single_query"
+
+
+def _nx_answer_needs_operators(match: Any) -> bool:
+    return _nx_answer_classify_plan(match) == "needs_operators"
+
+
+def _nx_answer_record_run(
+    conn: Any,
+    *,
+    question: str,
+    plan_id: int | None,
+    matched_confidence: float | None,
+    step_count: int,
+    final_text: str,
+    cost_usd: float,
+    duration_ms: int,
+    trace: bool,
+) -> None:
+    """Write one row to ``nx_answer_runs``. Redacts when ``trace=False``."""
+    from nexus.db.migrations import migrate_nx_answer_runs
+    migrate_nx_answer_runs(conn)
+    q = question if trace else "[redacted]"
+    text = final_text if trace else "[redacted]"
+    conn.execute(
+        """INSERT INTO nx_answer_runs
+           (question, plan_id, matched_confidence, step_count,
+            final_text, cost_usd, duration_ms)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (q, plan_id, matched_confidence, step_count, text, cost_usd, duration_ms),
+    )
+    conn.commit()
+
+
+async def _nx_answer_plan_miss(
+    question: str,
+    *,
+    scope: str = "",
+    max_steps: int = 6,
+) -> Any:
+    """Decompose *question* into a plan via claude_dispatch, execute it,
+    and return a synthetic Match for plan_run.
+    """
+    from nexus.operators.dispatch import claude_dispatch
+    from nexus.plans.match import Match
+
+    corpus_hint = f" Focus on the '{scope}' corpus." if scope else ""
+    prompt = (
+        f"Decompose this question into a retrieval-and-analysis plan "
+        f"with at most {max_steps} steps:{corpus_hint}\n\n{question}"
+    )
+
+    payload = await claude_dispatch(prompt, _PLANNER_SCHEMA, timeout=120.0)
+    steps = payload.get("steps", []) if isinstance(payload, dict) else []
+    if not steps:
+        raise ValueError("planner returned empty plan")
+
+    _ALLOWED_TOOLS = {
+        "search", "query", "traverse", "store_get_many",
+        "extract", "rank", "compare", "summarize", "generate",
+    }
+    _TOOL_ALIASES = {
+        "grep": "search", "read": "search", "bash": "search",
+        "find": "search", "glob": "search",
+        "web_search": "search", "web_fetch": "search",
+    }
+    import structlog as _slog
+    _plog = _slog.get_logger()
+    normalized = []
+    for step in steps:
+        raw_tool = step.get("tool", "")
+        bare = raw_tool.rsplit("__", 1)[-1] if raw_tool.startswith("mcp__") else raw_tool
+        bare = _TOOL_ALIASES.get(bare.lower(), bare)
+        if bare not in _ALLOWED_TOOLS:
+            _plog.warning("planner_step_dropped", raw_tool=raw_tool, bare=bare)
+            continue
+        step["tool"] = bare
+        normalized.append(step)
+
+    if not normalized:
+        raise ValueError("planner returned no dispatchable steps after normalization")
+
+    plan_json = json.dumps({"steps": normalized})
+    return Match(
+        plan_id=0,
+        name="ad-hoc",
+        description=question,
+        confidence=None,
+        dimensions={},
+        tags="ad-hoc",
+        plan_json=plan_json,
+        required_bindings=["intent"],
+        optional_bindings=[],
+        default_bindings={"intent": question},
+        parent_dims=None,
+    )
+
+
+# ── RDR-080 orchestration tools ───────────────────────────────────────────────
+
+
+@mcp.tool()
+async def nx_answer(
+    question: str,
+    scope: str = "",
+    context: str = "",
+    max_steps: int = 6,
+    budget_usd: float = 0.25,
+    trace: bool = True,
+) -> str:
+    """Answer a knowledge question using plan-match-first retrieval. RDR-080 P1.
+
+    Internal flow:
+
+    1. **Plan-match gate**: call ``plan_match(intent=question)``. On hit
+       (confidence >= 0.40 or FTS5 sentinel), execute the matched plan.
+       On miss, dispatch an inline LLM planner via ``claude -p`` to
+       decompose the question and execute the resulting plan.
+    2. **Single-step guard**: if the matched plan has exactly 1 ``query``
+       step, reroute to ``query()`` directly.
+    3. **Execute plan**: run via ``plan_run``.
+    4. **Record**: write run metrics to T2 ``nx_answer_runs``.
+
+    Args:
+        question: Natural-language question to answer.
+        scope: Catalog subtree or corpus filter (e.g. ``"1.2"`` or ``"knowledge"``).
+        context: Supplementary caller-supplied context for the plan matcher.
+        max_steps: Cap on plan DAG size (passed to inline planner on miss).
+        budget_usd: Per-invocation cost cap (reserved for future enforcement).
+        trace: When False, redacts question and final_text in the run log.
+
+    Returns:
+        The final step's output as a human-readable string.
+    """
+    import time
+    import structlog as _slog
+
+    from nexus.mcp_infra import get_t1_plan_cache
+    from nexus.plans.matcher import plan_match as _plan_match
+    from nexus.plans.runner import plan_run as _plan_run
+
+    _log = _slog.get_logger()
+    start = time.monotonic()
+
+    # ── Step 1: plan-match gate ──────────────────────────────────────────
+    try:
+        with _t2_ctx() as db:
+            cache = get_t1_plan_cache(populate_from=db.plans)
+            matches = _plan_match(
+                question,
+                library=db.plans,
+                cache=cache,
+                scope_preference=scope,
+                context={"user_context": context} if context else None,
+                min_confidence=_PLAN_MATCH_MIN_CONFIDENCE,
+                n=5,
+            )
+    except Exception as exc:
+        return f"Error during plan match: {exc}"
+
+    if not matches or not _nx_answer_match_is_hit(matches[0].confidence):
+        # Plan miss — inline LLM planner via claude_dispatch.
+        _log.info(
+            "nx_answer_plan_miss",
+            question=question[:100] if trace else "[redacted]",
+        )
+        try:
+            best = await _nx_answer_plan_miss(question, scope=scope, max_steps=max_steps)
+        except Exception as exc:
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+            _log.warning("nx_answer_planner_failed", error=str(exc))
+            try:
+                with _t2_ctx() as db:
+                    _nx_answer_record_run(
+                        db.conn, question=question, plan_id=None,
+                        matched_confidence=matches[0].confidence if matches else None,
+                        step_count=0, final_text=f"Planner error: {exc}",
+                        cost_usd=0.0, duration_ms=elapsed_ms, trace=trace,
+                    )
+            except Exception:
+                pass
+            return (
+                "No matching plan found and inline planner failed. "
+                "Try rephrasing, or use search/query directly."
+            )
+    else:
+        best = matches[0]
+
+    if best.plan_id == 0:
+        conf_str = "ad-hoc"
+    elif best.confidence is None:
+        conf_str = "fts5"
+    else:
+        conf_str = f"{best.confidence:.3f}"
+
+    # ── Step 2: single-step guard ────────────────────────────────────────
+    plan_class = _nx_answer_classify_plan(best)
+
+    if plan_class == "single_query":
+        _log.info("nx_answer_single_step_guard", plan_id=best.plan_id, confidence=conf_str)
+        try:
+            plan = json.loads(best.plan_json)
+            step_args = plan["steps"][0].get("args", {})
+            q = step_args.get("question", question)
+            corpus = step_args.get("corpus", "knowledge")
+            result_text = query(question=q, corpus=corpus)
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+            try:
+                with _t2_ctx() as db:
+                    _nx_answer_record_run(
+                        db.conn, question=question, plan_id=best.plan_id,
+                        matched_confidence=best.confidence, step_count=1,
+                        final_text=str(result_text)[:2000], cost_usd=0.0,
+                        duration_ms=elapsed_ms, trace=trace,
+                    )
+            except Exception:
+                pass
+            return str(result_text)
+        except Exception as exc:
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+            try:
+                with _t2_ctx() as db:
+                    _nx_answer_record_run(
+                        db.conn, question=question, plan_id=best.plan_id,
+                        matched_confidence=best.confidence, step_count=1,
+                        final_text=f"Error: {exc}", cost_usd=0.0,
+                        duration_ms=elapsed_ms, trace=trace,
+                    )
+            except Exception:
+                pass
+            return f"Error in single-step query: {exc}"
+
+    # ── Step 3: seed link-context ────────────────────────────────────────
+    try:
+        scratch(
+            action="put",
+            content=json.dumps({"question": question, "scope": scope, "plan_id": best.plan_id}),
+            tags="link-context",
+        )
+    except Exception:
+        pass
+
+    # ── Step 4: execute plan ─────────────────────────────────────────────
+    try:
+        result = await _plan_run(best, {"intent": question})
+    except Exception as exc:
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        _log.error("nx_answer_plan_run_error", plan_id=best.plan_id, error=str(exc))
+        try:
+            with _t2_ctx() as db:
+                _nx_answer_record_run(
+                    db.conn, question=question, plan_id=best.plan_id,
+                    matched_confidence=best.confidence, step_count=0,
+                    final_text=f"Error: {exc}", cost_usd=0.0,
+                    duration_ms=elapsed_ms, trace=trace,
+                )
+        except Exception:
+            pass
+        return f"Error during plan execution: {exc}"
+
+    # ── Step 5: extract final answer ─────────────────────────────────────
+    elapsed_ms = int((time.monotonic() - start) * 1000)
+    final_step = result.steps[-1] if result.steps else {}
+    text_key = next((k for k in ("text", "summary", "answer") if k in final_step), None)
+    final_text = str(final_step.get(text_key, "")) if text_key else json.dumps(final_step)
+
+    _log.info(
+        "nx_answer_complete",
+        plan_id=best.plan_id,
+        confidence=conf_str,
+        step_count=len(result.steps),
+        duration_ms=elapsed_ms,
+    )
+
+    # Save ad-hoc plans on success (I-6).
+    if best.plan_id == 0:
+        try:
+            plan_save(query=question, plan_json=best.plan_json, outcome="success", ttl=30)
+        except Exception:
+            pass
+
+    # ── Step 6: record run ───────────────────────────────────────────────
+    try:
+        with _t2_ctx() as db:
+            _nx_answer_record_run(
+                db.conn, question=question, plan_id=best.plan_id,
+                matched_confidence=best.confidence, step_count=len(result.steps),
+                final_text=final_text[:2000], cost_usd=0.0,
+                duration_ms=elapsed_ms, trace=trace,
+            )
+    except Exception:
+        pass
+
+    return final_text
+
+
+@mcp.tool()
+async def nx_tidy(
+    topic: str,
+    collection: str = "knowledge",
+    timeout: float = 120.0,
+) -> str:
+    """Consolidate knowledge entries on *topic* via claude -p. RDR-080 P3.
+
+    Replaces the ``knowledge-tidier`` agent. Spawns a ``claude -p``
+    subprocess that searches T3 for entries matching *topic*, identifies
+    duplicates and contradictions, and returns a consolidated summary.
+
+    Args:
+        topic: The knowledge topic to consolidate (e.g. "chromadb quotas").
+        collection: T3 collection to search (default: knowledge).
+        timeout: Subprocess timeout in seconds.
+
+    Returns:
+        Consolidated summary as a human-readable string.
+    """
+    from nexus.operators.dispatch import claude_dispatch
+
+    schema = {
+        "type": "object",
+        "required": ["summary", "actions"],
+        "properties": {
+            "summary": {"type": "string"},
+            "actions": {"type": "array", "items": {"type": "object"}},
+        },
+    }
+    prompt = (
+        "You are the `tidy` knowledge consolidation operator. You have "
+        "access to nx MCP tools (search, query, store_put, store_get). "
+        "Search the specified collection for entries matching the topic, "
+        "identify duplicates, contradictions, and outdated entries, then "
+        "produce a consolidated summary.\n\n"
+        f"Consolidate knowledge entries about '{topic}' in collection "
+        f"'{collection}'. Search for all related entries, identify duplicates "
+        "or contradictions, and produce a consolidated summary."
+    )
+    payload = await claude_dispatch(prompt, schema, timeout=timeout)
+
+    summary = payload.get("summary", "") if isinstance(payload, dict) else str(payload)
+    actions = payload.get("actions", []) if isinstance(payload, dict) else []
+    lines = [summary]
+    if actions:
+        lines.append(f"\n{len(actions)} action(s) suggested.")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def nx_enrich_beads(
+    bead_description: str,
+    context: str = "",
+    timeout: float = 120.0,
+) -> str:
+    """Enrich a bead with execution context via claude -p. RDR-080 P3.
+
+    Replaces the ``plan-enricher`` agent. Spawns a ``claude -p``
+    subprocess that searches the codebase for relevant file paths,
+    code patterns, constraints, and test commands, then returns enriched
+    markdown.
+
+    Args:
+        bead_description: The bead's title and description to enrich.
+        context: Optional additional context (e.g. audit findings).
+        timeout: Subprocess timeout in seconds.
+
+    Returns:
+        Enriched bead markdown as a human-readable string.
+    """
+    from nexus.operators.dispatch import claude_dispatch
+
+    schema = {
+        "type": "object",
+        "required": ["enriched_description"],
+        "properties": {
+            "enriched_description": {"type": "string"},
+            "key_files": {"type": "array", "items": {"type": "string"}},
+            "test_commands": {"type": "array", "items": {"type": "string"}},
+            "constraints": {"type": "array", "items": {"type": "string"}},
+        },
+    }
+    prompt = (
+        "You are the `enrich` bead enrichment operator. You have access "
+        "to nx MCP tools (search, query) for codebase exploration. "
+        "Analyze the bead description, search the codebase for relevant "
+        "files, symbols, and patterns, then produce enriched markdown with "
+        "key_files, test_commands, and constraints.\n\n"
+        f"Enrich this bead with execution context:\n\n{bead_description}"
+    )
+    if context:
+        prompt += f"\n\nAdditional context:\n{context}"
+
+    payload = await claude_dispatch(prompt, schema, timeout=timeout)
+    return (
+        payload.get("enriched_description", "")
+        if isinstance(payload, dict) else str(payload)
+    )
+
+
+@mcp.tool()
+async def nx_plan_audit(
+    plan_json: str,
+    context: str = "",
+    timeout: float = 120.0,
+) -> str:
+    """Audit a plan for correctness and codebase alignment via claude -p. RDR-080 P3.
+
+    Replaces the ``plan-auditor`` agent. Spawns a ``claude -p``
+    subprocess that validates the plan's file paths, dependencies,
+    and assumptions against the current codebase state.
+
+    Args:
+        plan_json: The plan to audit (JSON string or free-text description).
+        context: Optional additional context (e.g. RDR reference).
+        timeout: Subprocess timeout in seconds.
+
+    Returns:
+        Audit verdict as a human-readable string.
+    """
+    from nexus.operators.dispatch import claude_dispatch
+
+    schema = {
+        "type": "object",
+        "required": ["verdict", "findings", "summary"],
+        "properties": {
+            "verdict": {"type": "string"},
+            "findings": {"type": "array", "items": {"type": "object"}},
+            "summary": {"type": "string"},
+        },
+    }
+    prompt = (
+        "You are the `audit` plan validation operator. You have access "
+        "to nx MCP tools (search, query) for codebase verification. "
+        "Parse the plan, verify file paths exist, check dependency ordering, "
+        "identify gaps or incorrect assumptions, then emit a structured verdict.\n\n"
+        f"Audit this plan for correctness and codebase alignment:\n\n{plan_json}"
+    )
+    if context:
+        prompt += f"\n\nContext:\n{context}"
+
+    payload = await claude_dispatch(prompt, schema, timeout=timeout)
+    if isinstance(payload, dict):
+        verdict = payload.get("verdict", "unknown")
+        summary = payload.get("summary", "")
+        findings = payload.get("findings", [])
+        lines = [f"Verdict: {verdict}", summary]
+        for f in findings:
+            lines.append(f"  [{f.get('severity', '?')}] {f.get('title', '')}")
+        return "\n".join(lines)
+    return str(payload)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

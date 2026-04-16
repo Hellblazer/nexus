@@ -307,6 +307,34 @@ def _add_projection_quality_columns(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 
+def migrate_nx_answer_runs(conn: sqlite3.Connection) -> None:
+    """Create the ``nx_answer_runs`` table for RDR-080 run telemetry.
+
+    Idempotent — no-op if the table already exists. Called lazily from
+    ``_nx_answer_record_run`` so the table is created on first use.
+    """
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='nx_answer_runs'"
+    ).fetchone()
+    if row is not None:
+        return
+    conn.execute("""
+        CREATE TABLE nx_answer_runs (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            question    TEXT    NOT NULL,
+            plan_id     INTEGER,
+            matched_confidence REAL,
+            step_count  INTEGER NOT NULL DEFAULT 0,
+            final_text  TEXT    NOT NULL DEFAULT '',
+            cost_usd    REAL    NOT NULL DEFAULT 0.0,
+            duration_ms INTEGER NOT NULL DEFAULT 0,
+            created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )
+    """)
+    conn.commit()
+    _log.info("Migrated: created nx_answer_runs table (RDR-080)")
+
+
 def migrate_review_columns(conn: sqlite3.Connection) -> None:
     """Add ``review_status`` and ``terms`` columns to ``topics`` if missing."""
     cols = {
@@ -345,6 +373,11 @@ MIGRATIONS: list[Migration] = [
         "4.3.0",
         "Add projection-quality columns (similarity, assigned_at, source_collection)",
         _add_projection_quality_columns,
+    ),
+    Migration(
+        "4.5.0",
+        "Add nx_answer_runs table (RDR-080)",
+        migrate_nx_answer_runs,
     ),
 ]
 
