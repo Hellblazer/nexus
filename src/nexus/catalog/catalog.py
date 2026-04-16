@@ -1532,12 +1532,22 @@ class Catalog:
             )
             for node in result.get("nodes") or []:
                 if len(merged_nodes) >= self._MAX_GRAPH_NODES:
+                    _log.debug(
+                        "graph_many_node_limit_mid_seed",
+                        visited=len(merged_nodes),
+                    )
                     break
                 key = str(node.tumbler) if hasattr(node, "tumbler") else str(node)
                 if key not in merged_nodes:
                     merged_nodes[key] = node
+            # Drop edges whose endpoints were excluded by the node cap — otherwise
+            # callers iterating nodes-then-edges see dangling references.
             for edge in result.get("edges") or []:
-                edge_key = (str(edge.from_tumbler), str(edge.to_tumbler), edge.link_type)
+                from_key = str(edge.from_tumbler)
+                to_key = str(edge.to_tumbler)
+                if from_key not in merged_nodes or to_key not in merged_nodes:
+                    continue
+                edge_key = (from_key, to_key, edge.link_type)
                 if edge_key not in merged_edges:
                     merged_edges[edge_key] = edge
 

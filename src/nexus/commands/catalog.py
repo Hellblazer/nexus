@@ -116,15 +116,16 @@ def _seed_plan_templates() -> int:
 
         # RDR-078 scoped plan loader — four tiers:
         # plugin builtin → per-RDR plans → project → repo umbrella.
+        from nexus.indexer_utils import find_repo_root
         from nexus.plans.loader import load_all_tiers
 
-        repo_root_str = subprocess_git_toplevel() or str(Path.cwd())
+        repo_root = find_repo_root(Path.cwd()) or Path.cwd()
         plugin_root = (
             Path(__file__).resolve().parent.parent.parent.parent / "nx"
         )
         tier_results = load_all_tiers(
             plugin_root=plugin_root,
-            repo_root=Path(repo_root_str),
+            repo_root=repo_root,
             library=db.plans,
         )
         for scope, result in tier_results.items():
@@ -136,21 +137,6 @@ def _seed_plan_templates() -> int:
             seeded += len(result.inserted)
 
     return seeded
-
-
-def subprocess_git_toplevel() -> str | None:
-    """Return the current repo's toplevel directory via git, or None."""
-    import subprocess
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip() or None
-    except Exception:
-        return None
-    return None
 
 
 def _get_catalog() -> Catalog:

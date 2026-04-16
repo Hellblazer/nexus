@@ -141,6 +141,14 @@ def t2_ctx():
 # ── T1 plan session cache (RDR-078) ──────────────────────────────────────────
 # Singleton wrapper around PlanSessionCache; shared across MCP tool calls in
 # one process.  reset_plan_cache_for_tests() tears it down between test cases.
+#
+# Three states:
+#   None                      — not yet initialised, eligible for init attempt
+#   _PLAN_CACHE_UNAVAILABLE   — init failed; callers short-circuit to FTS5
+#                               without taking the lock on every call
+#   PlanSessionCache instance — healthy, available for matching
+
+_PLAN_CACHE_UNAVAILABLE = object()  # sentinel — distinct from None
 
 _plan_cache_instance = None
 _plan_cache_lock = threading.Lock()
@@ -155,9 +163,12 @@ def get_t1_plan_cache(*, populate_from=None):
     calls short-circuit — the ``plan_save`` MCP hook keeps the cache fresh.
 
     Returns ``None`` when no T1 client is reachable — the matcher falls back
-    to FTS5 in that case.
+    to FTS5 in that case.  Subsequent calls after an init failure return
+    ``None`` immediately without re-entering the lock (see sentinel above).
     """
     global _plan_cache_instance, _plan_cache_populated
+    if _plan_cache_instance is _PLAN_CACHE_UNAVAILABLE:
+        return None
     if _plan_cache_instance is None:
         with _plan_cache_lock:
             if _plan_cache_instance is None:
@@ -168,10 +179,11 @@ def get_t1_plan_cache(*, populate_from=None):
                         client=t1._client, session_id=t1.session_id,
                     )
                 except Exception:
-                    _plan_cache_instance = None
+                    _plan_cache_instance = _PLAN_CACHE_UNAVAILABLE
+    if _plan_cache_instance is _PLAN_CACHE_UNAVAILABLE:
+        return None
     if (
-        _plan_cache_instance is not None
-        and populate_from is not None
+        populate_from is not None
         and not _plan_cache_populated
     ):
         with _plan_cache_lock:

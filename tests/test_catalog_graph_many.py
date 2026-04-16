@@ -148,3 +148,38 @@ class TestGraphManyNodeCap:
         assert len(result["nodes"]) == 1, (
             "Shared node discovered from two seeds must appear only once"
         )
+
+    def test_no_dangling_edges_when_cap_truncates_nodes(self, tmp_path: Path) -> None:
+        """Edges referencing nodes dropped by the cap must not appear in output.
+
+        Regression for code-review S2: when the node cap fires mid-seed,
+        edges whose endpoints were dropped must be excluded so callers
+        iterating nodes-then-edges don't see dangling references.
+        """
+        Catalog.init(tmp_path)
+        cat = Catalog(tmp_path, tmp_path / ".catalog.db")
+
+        def fake_graph(seed, **kwargs):
+            # 501 nodes (1 over cap) with an edge from node-0 to node-500.
+            # node-500 will be dropped by the cap at merge time.
+            nodes = [_make_node(f"1.0.{i}") for i in range(501)]
+            edges = [_make_edge("1.0.0", "1.0.500")]  # endpoint will be capped out
+            return {"nodes": nodes, "edges": edges}
+
+        seeds = [Tumbler.parse("1.1")]
+        with patch.object(cat, "graph", side_effect=fake_graph):
+            result = cat.graph_many(seeds, depth=1)
+
+        node_keys = {
+            str(n.tumbler) if hasattr(n, "tumbler") else str(n)
+            for n in result["nodes"]
+        }
+        for edge in result["edges"]:
+            assert str(edge.from_tumbler) in node_keys, (
+                f"Edge from {edge.from_tumbler} references a node "
+                f"not present in merged_nodes"
+            )
+            assert str(edge.to_tumbler) in node_keys, (
+                f"Edge to {edge.to_tumbler} references a node "
+                f"not present in merged_nodes"
+            )
