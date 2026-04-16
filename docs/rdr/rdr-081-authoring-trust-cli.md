@@ -1,15 +1,18 @@
 ---
 title: "RDR-081: Stale-Reference Validator (nx taxonomy validate-refs)"
 id: RDR-081
-status: draft
+status: closed
 type: Feature
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-15
 revised: 2026-04-16
+accepted_date: 2026-04-16
+closed_date: 2026-04-16
+close_reason: implemented
 related_issues: []
-related: [RDR-075, RDR-077, RDR-080]
+related: [RDR-075, RDR-077, RDR-080, RDR-085]
 supersedes_drafts: [rdr-081-2026-04-15-labeler-pool]
 ---
 
@@ -108,9 +111,14 @@ prefix does not silently bypass the scanner.
 
 - [x] Prefix whitelist is the correct scanner contract — **Verified** (RF-1).
 - [x] Chunk-count extraction with ±10% tolerance is sufficiently precise
-  to surface real drift without high false-positive rate — **Verification
-  plan**: run the validator on `docs/rdr/` + `docs/architecture.md` on a
-  clean checkout; expected zero drifts. Executes in the MVV (below).
+  to surface real drift without high false-positive rate — **Verified
+  by MVV 2026-04-16**: dogfood on `docs/rdr/README.md` +
+  `docs/architecture.md` on clean main reported "No references found"
+  (zero false positives); fixture file claiming 50 chunks against a
+  collection with actual count 134 correctly reported `Drift` with
+  exit code 1; fixture claims "134 chunks" (exact) and "140 chunks"
+  (within ±10%) both reported `OK`. Evidence: commit `2ab7845`, live
+  sandbox runs.
 
 ## Proposed Solution
 
@@ -401,7 +409,8 @@ material from the earlier draft was the only source of contradictions
 ### Assumption Verification
 
 - A1 (prefix whitelist) — RF-1, verified via source search.
-- A2 (tolerance envelope) — to be verified by the MVV.
+- A2 (tolerance envelope) — **Verified** by MVV 2026-04-16 (see
+  Critical Assumptions § A2 above).
 
 #### API Verification
 
@@ -444,11 +453,11 @@ to future RDRs.
 
 ## Follow-up (out of scope for this RDR)
 
-- **Glossary-aware topic labeler.** Original RDR-081 Gap 1. Needs redesign
-  against the shipped `claude_dispatch` path (RDR-080) rather than the
-  abandoned RDR-079 pool. Concrete failure case documented in field
-  report §3.1/F2 (SSMF → "Single Mode Fiber"). Files as a separate RDR
-  once the labeler substrate decision is made.
+- **Glossary-aware topic labeler.** Original RDR-081 Gap 1. Filed as
+  **RDR-085** (glossary-aware topic labeler, re-targeted at the
+  shipped `claude_dispatch` substrate per RDR-080 rather than the
+  abandoned RDR-079 pool). Concrete failure case documented in field
+  report §3.1/F2 (SSMF → "Single Mode Fiber").
 - **RDR/bead status as doc-build tokens.** Field report §3.1/F3 — separate
   concern, separate RDR.
 - **Notation linter.** Field report §3.1/F4 — separate concern.
