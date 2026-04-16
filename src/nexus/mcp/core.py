@@ -2719,38 +2719,36 @@ async def nx_answer(
         return f"Error during plan match: {exc}"
 
     if not matches or not _nx_answer_match_is_hit(matches[0].confidence):
-        # Plan miss — dispatch inline LLM planner to decompose the question.
-        # SC-9 note: auth failures surface as PlanRunOperatorUnavailableError
-        # from _dispatch_with_auth_guard inside _nx_answer_plan_miss. The pool
-        # handles check_auth internally — no synchronous pre-check here (it
-        # blocks the event loop via subprocess.run).
+        # Plan miss — no matching plan in the library.
+        # The inline LLM planner (_nx_answer_plan_miss) exists but is
+        # disabled: spawning claude subprocesses from the MCP server's
+        # event loop hangs due to synchronous I/O in the pool session
+        # setup path. Needs proper async pool infrastructure first.
+        elapsed_ms = int((time.monotonic() - start) * 1000)
         _log.info(
             "nx_answer_plan_miss",
             question=question[:100] if trace else "[redacted]",
+            duration_ms=elapsed_ms,
         )
         try:
-            best = await _nx_answer_plan_miss(
-                question, scope=scope, max_steps=max_steps,
-            )
-        except Exception as exc:
-            elapsed_ms = int((time.monotonic() - start) * 1000)
-            _log.warning("nx_answer_planner_failed", error=str(exc))
-            try:
-                with _t2_ctx() as db:
-                    _nx_answer_record_run(
-                        db.conn,
-                        question=question,
-                        plan_id=None,
-                        matched_confidence=matches[0].confidence if matches else None,
-                        step_count=0,
-                        final_text=f"Planner error: {exc}",
-                        cost_usd=0.0,
-                        duration_ms=elapsed_ms,
-                        trace=trace,
-                    )
-            except Exception:
-                pass
-            return f"Error: plan-miss planner failed: {exc}"
+            with _t2_ctx() as db:
+                _nx_answer_record_run(
+                    db.conn,
+                    question=question,
+                    plan_id=None,
+                    matched_confidence=matches[0].confidence if matches else None,
+                    step_count=0,
+                    final_text="",
+                    cost_usd=0.0,
+                    duration_ms=elapsed_ms,
+                    trace=trace,
+                )
+        except Exception:
+            pass
+        return (
+            "No matching plan found. Try rephrasing, or use "
+            "search/query directly for this question."
+        )
     else:
         best = matches[0]
 
