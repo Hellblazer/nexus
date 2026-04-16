@@ -1,6 +1,8 @@
 ---
 title: "RDR-077: Projection Quality — Similarity Scores and ICF Hub Detection"
-status: accepted
+status: closed
+closed_date: 2026-04-16
+close_reason: implemented
 type: feature
 priority: P2
 created: 2026-04-14
