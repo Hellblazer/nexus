@@ -531,6 +531,85 @@ def store_get(doc_id: str, collection: str = "knowledge") -> str:
 
 
 @mcp.tool()
+def store_get_many(
+    ids: str | list,
+    collections: str | list = "knowledge",
+    *,
+    max_chars_per_doc: int = 4000,
+    structured: bool = False,
+) -> str | dict:
+    """Batch-hydrate document content by ID. RDR-079 hydration primitive.
+
+    Args:
+        ids: Document IDs to fetch. Accepts a comma-separated string or list.
+        collections: Target collection name(s). Accepts a single name,
+            comma-separated, or a list aligned 1:1 with ``ids``.
+        max_chars_per_doc: Per-document truncation cap (default 4 KB).
+        structured: Return ``{contents, missing}`` dict when True;
+            human-readable string when False.
+    """
+    try:
+        id_list: list[str]
+        if isinstance(ids, list):
+            id_list = [str(i) for i in ids if i]
+        else:
+            id_list = [s.strip() for s in str(ids or "").split(",") if s.strip()]
+
+        coll_list: list[str]
+        if isinstance(collections, list):
+            coll_list = [str(c) for c in collections if c]
+        else:
+            coll_list = [
+                s.strip()
+                for s in str(collections or "knowledge").split(",")
+                if s.strip()
+            ]
+        if not coll_list:
+            coll_list = ["knowledge"]
+
+        t3 = _get_t3()
+        contents: list[str] = []
+        missing: list[str] = []
+
+        for idx, doc_id in enumerate(id_list):
+            if len(coll_list) == len(id_list):
+                candidates = [coll_list[idx]]
+            else:
+                candidates = coll_list
+
+            entry = None
+            for cand in candidates:
+                col_name = t3_collection_name(cand)
+                try:
+                    entry = t3.get_by_id(col_name, doc_id)
+                except Exception:
+                    entry = None
+                if entry is not None:
+                    break
+
+            if entry is None:
+                missing.append(doc_id)
+                contents.append("")
+                continue
+
+            body = str(entry.get("content") or "")
+            if max_chars_per_doc > 0 and len(body) > max_chars_per_doc:
+                body = body[:max_chars_per_doc] + "…"
+            contents.append(body)
+
+        if structured:
+            return {"contents": contents, "missing": missing}
+        lines = [f"Hydrated {len(contents) - len(missing)}/{len(id_list)} docs"]
+        if missing:
+            lines.append(f"Missing: {', '.join(missing[:10])}")
+        return "\n".join(lines)
+    except Exception as e:
+        if structured:
+            return {"contents": [], "missing": [], "error": f"store_get_many failed: {e}"}
+        return f"Error: {e}"
+
+
+@mcp.tool()
 def store_list(
     collection: str = "knowledge",
     limit: int = 20,

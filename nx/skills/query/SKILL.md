@@ -5,7 +5,6 @@ effort: medium
 ---
 
 # Query
-
 Calls the `nx_answer` MCP tool, which enforces plan-match-first internally:
 
 1. Matches the question against the plan library (threshold 0.40).

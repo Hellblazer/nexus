@@ -306,7 +306,19 @@ See `src/nexus/db/t2/__init__.py` for the facade source and
 3. **Constructor injection** -- Dependencies via constructor, no global singletons.
 4. **Ported, not imported** -- SeaGOAT and Arcaneum patterns rewritten in Nexus module structure.
 5. **PPID-chain session propagation** -- The `SessionStart` hook starts a per-session ChromaDB HTTP server (using the `chroma` entry-point co-installed with the package) and writes its address to `~/.config/nexus/sessions/{ppid}.session`, keyed by the Claude Code process PID. Child agents walk the OS PPID chain to find the nearest ancestor session file and connect to the same server, sharing T1 scratch across the entire agent tree. Concurrent independent windows stay isolated via disjoint process trees. Falls back to `EphemeralClient` when the server cannot start or the PPID chain yields no record.
-6. **MCP tools over agent-spawns for utility operations** (RDR-080) -- Operations that formerly required spawning a named agent (`knowledge-tidier`, `plan-auditor`, `plan-enricher`, `query-planner`, `analytical-operator`, `pdf-chromadb-processor`) are now MCP tools that execute in-process: `mcp__plugin_nx_nexus__nx_tidy`, `mcp__plugin_nx_nexus__nx_plan_audit`, `mcp__plugin_nx_nexus__nx_enrich_beads`, `mcp__plugin_nx_nexus__nx_answer`. Agent files are retained as stubs that redirect to the MCP tool. When authoring agent/skill instructions, always use the full MCP tool name (`mcp__plugin_nx_nexus__<tool>`) — short names fail at runtime.
+6. **MCP tools over agent-spawns for utility operations** (RDR-080) -- Operations that formerly required spawning a named agent are now MCP tools that execute in-process. Agent files are retained as stubs that redirect to the MCP tool.
+
+   **Boundary rule**: If an operation can be expressed as a deterministic function of its inputs and completes in under one API call, it is an MCP tool. If it requires multi-turn reasoning, tool selection, or context accumulation across turns, it is an agent.
+
+   | Capability | Before RDR-080 | After RDR-080 |
+   |------------|---------------|---------------|
+   | Knowledge consolidation | `knowledge-tidier` agent | `mcp__plugin_nx_nexus__nx_tidy` |
+   | Plan audit | `plan-auditor` agent | `mcp__plugin_nx_nexus__nx_plan_audit` |
+   | Bead enrichment | `plan-enricher` agent | `mcp__plugin_nx_nexus__nx_enrich_beads` |
+   | Multi-step retrieval | `query-planner` + `analytical-operator` agents | `mcp__plugin_nx_nexus__nx_answer` |
+   | PDF indexing | `pdf-chromadb-processor` agent | `nx index pdf` CLI / direct ingest |
+
+   When authoring agent/skill instructions, always use the full MCP tool name (`mcp__plugin_nx_nexus__<tool>`) — short names fail at runtime.
 
 ## Heritage
 
