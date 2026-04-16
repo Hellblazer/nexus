@@ -111,7 +111,7 @@ If the task requires multiple stages:
 4. test-validator: Verify fix and regression tests
 
 ### Catalog Query Pipeline
-Use `/nx:query` skill directly (it orchestrates query-planner + analytical-operator internally).
+Use `mcp__plugin_nx_nexus__nx_answer(question=...)` directly. It handles plan matching, operator dispatch, and auto-hydration internally.
 Route here when the question involves: specific authors, paper citations, "what cites X",
 "what research informed Y", corpus-scoped retrieval, or document provenance chains.
 
@@ -145,7 +145,6 @@ These patterns are stored in the T2 plan library and are returned by `plan_searc
 | developer | Execute implementation plans, write code with TDD |
 | architect-planner | Design architecture, create execution plans |
 | debugger | Complex bugs, non-deterministic failures, performance issues |
-| analytical-operator | Execute analytical operations (extract, summarize, rank, compare, generate) on retrieved content |
 
 ### Review Agents
 | Agent | When to Use |

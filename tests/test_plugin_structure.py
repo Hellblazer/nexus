@@ -37,6 +37,8 @@ _STANDALONE_SKILLS = {
     # the skill body is the full implementation.
     "plan-first", "research", "review", "analyze", "debug", "document",
     "plan-author", "plan-inspect", "plan-promote",
+    # RDR-080 P2a: query skill collapsed to nx_answer MCP tool pointer.
+    "query",
 }
 
 

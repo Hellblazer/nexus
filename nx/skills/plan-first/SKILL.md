@@ -32,9 +32,9 @@ match clears `min_confidence`, execute the returned plan via
    - Invoke `plan_run(plan_id=<match.id>, bindings='{...}')`.
    - Return the final step's result to the caller.
 3. **If no match clears the threshold**:
-   - Dispatch `/nx:query` with the original intent. The
-     query-planner agent will decompose; save the resulting plan
-     via `plan_save` so the next identical intent is a cache hit.
+   - Dispatch `nx_answer(question=<intent>)`. The tool handles
+     decomposition internally; new plans are auto-saved via
+     `plan_save` so the next identical intent is a cache hit.
 
 ## When to pin dimensions
 

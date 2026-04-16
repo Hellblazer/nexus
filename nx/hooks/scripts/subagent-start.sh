@@ -245,9 +245,7 @@ cat <<'OPERATORS'
 
 ## Analytical Operators
 
-Agent `analytical-operator` — dispatch via Agent tool with relay containing operation + inputs + params.
-Operations: extract (JSON template), summarize (short|detailed|evidence), rank (criterion), compare (criterion), generate (cited text).
-Step outputs: T1 scratch tag `query-step,step-N`.
+Use `mcp__plugin_nx_nexus__nx_answer(question=...)` for plan-match-first retrieval with auto-hydration and operator dispatch. Operator tools (`operator_extract`, `operator_rank`, `operator_compare`, `operator_summarize`, `operator_generate`) are available for direct use when needed.
 OPERATORS
 fi
 

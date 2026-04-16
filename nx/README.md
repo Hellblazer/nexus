@@ -142,7 +142,6 @@ See [`registry.yaml`](./registry.yaml) for full metadata (model, triggers, prede
 
 | Agent | Skill | Command | Model | Purpose |
 |-------|-------|---------|-------|---------|
-| analytical-operator | query | *(dispatched)* | sonnet | Structured extraction, summarization, ranking, comparison |
 | architect-planner | architecture | `/nx:architecture` | opus | Software architecture design, execution plans |
 | code-review-expert | code-review | `/nx:review-code` | sonnet | Code quality, security, best practices |
 | codebase-deep-analyzer | codebase-analysis | `/nx:analyze-code` | sonnet | Architecture, patterns, dependency mapping |
@@ -154,7 +153,6 @@ See [`registry.yaml`](./registry.yaml) for full metadata (model, triggers, prede
 | pdf-chromadb-processor | pdf-processing | `/nx:pdf-process` | haiku | Index PDFs into nx store for semantic search |
 | plan-auditor | plan-validation | `/nx:plan-audit` | sonnet | Validate plans before execution |
 | plan-enricher | enrich-plan | `/nx:enrich-plan` | sonnet | Enrich beads with execution context |
-| query-planner | query | *(dispatched)* | sonnet | Decompose analytical questions into execution plans |
 | strategic-planner | strategic-planning | `/nx:create-plan` | opus | Implementation planning, task decomposition |
 | substantive-critic | substantive-critique | `/nx:substantive-critique` | sonnet | Constructive critique of plans/designs/code |
 | test-validator | test-validation | `/nx:test-validate` | sonnet | Test coverage and quality validation |

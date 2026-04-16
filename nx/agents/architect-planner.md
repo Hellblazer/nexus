@@ -7,17 +7,6 @@ color: green
 effort: high
 ---
 
-## RDR-078: plan_match-first
-
-Before decomposing any retrieval task, call
-`mcp__plugin_nx_nexus__plan_match(intent=<caller phrasing>,
-dimensions={verb:<v>}, min_confidence=0.40, n=1)`. If the match clears
-the threshold, execute via `plan_run(plan_id=<match.id>, bindings='{...}')` and return
-the final step's result. Only dispatch `/nx:query` on a miss. This
-instruction is also injected by the SubagentStart hook; it is cited
-here independently so the discipline survives hook-context trimming.
-
-
 ## Usage Examples
 
 - **Microservice Architecture**: Design scalable microservice architecture for real-time data processing -> Use to create comprehensive architecture and execution plan
