@@ -533,6 +533,61 @@ class TestPlanMissPlanner:
         assert all(t in {"search", "summarize"} for t in tools)
 
     @pytest.mark.asyncio
+    async def test_plan_miss_aliases_common_tools(self):
+        """Common non-nexus tools should be aliased, not dropped."""
+        from nexus.mcp.core import _nx_answer_plan_miss
+
+        plan_with_aliases = {
+            "steps": [
+                {"tool": "Grep", "args": {"query": "test"}},
+                {"tool": "Read", "args": {"path": "file.py"}},
+                {"tool": "Bash", "args": {"command": "ls"}},
+                {"tool": "find", "args": {"pattern": "*.py"}},
+                {"tool": "glob", "args": {"pattern": "*.md"}},
+            ],
+        }
+
+        async def mock_dispatch(*a, **kw):
+            return plan_with_aliases
+
+        mock_pool = MagicMock()
+        mock_pool.dispatch_with_rotation = mock_dispatch
+
+        with patch("nexus.mcp_infra.get_operator_pool", return_value=mock_pool):
+            match = await _nx_answer_plan_miss("test")
+
+        plan = json.loads(match.plan_json)
+        # All should be aliased to "search".
+        assert all(s["tool"] == "search" for s in plan["steps"])
+
+    @pytest.mark.asyncio
+    async def test_plan_miss_mixed_valid_and_unmappable(self):
+        """Steps with truly unmappable tools are dropped, valid kept."""
+        from nexus.mcp.core import _nx_answer_plan_miss
+
+        mixed = {
+            "steps": [
+                {"tool": "search", "args": {"query": "$intent"}},
+                {"tool": "some_random_tool", "args": {}},
+                {"tool": "summarize", "args": {"inputs": "$step1.ids"}},
+            ],
+        }
+
+        async def mock_dispatch(*a, **kw):
+            return mixed
+
+        mock_pool = MagicMock()
+        mock_pool.dispatch_with_rotation = mock_dispatch
+
+        with patch("nexus.mcp_infra.get_operator_pool", return_value=mock_pool):
+            match = await _nx_answer_plan_miss("test")
+
+        plan = json.loads(match.plan_json)
+        tools = [s["tool"] for s in plan["steps"]]
+        assert tools == ["search", "summarize"]
+        assert "some_random_tool" not in tools
+
+    @pytest.mark.asyncio
     async def test_plan_miss_normalizes_mcp_prefixed_tools(self):
         """Planner that uses mcp__plugin_nx_nexus__search should have it
         normalized to bare 'search' in the saved plan."""
