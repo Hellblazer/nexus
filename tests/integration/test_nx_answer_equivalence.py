@@ -134,7 +134,21 @@ class TestGracefulDegradation:
 
     @pytest.mark.asyncio
     async def test_plan_miss_returns_clear_message(self):
-        """When no plan matches, nx_answer returns a clear miss message."""
+        """When no plan matches, nx_answer still produces a coherent response.
+
+        Two valid graceful-degrade shapes:
+         1. Error string — "no matching plan" / "error" / "planner failed"
+            (the historical pre-RDR-080 shape; still emitted on
+            inline-planner failure).
+         2. Inline-planner success — the planner decomposed the question,
+            plan_run executed, and the operator (summarize/extract/etc.)
+            correctly recognised that the corpus can't answer the question.
+            Signals: mentions the corpus doesn't contain the info, or the
+            question is out of scope, or no data was found.
+
+        Either is acceptable; what we're pinning is that the user gets a
+        response string, not a silent failure.
+        """
         from nexus.mcp.core import nx_answer
 
         result = await nx_answer(
@@ -142,7 +156,22 @@ class TestGracefulDegradation:
             trace=False,
         )
         assert isinstance(result, str)
-        assert "no matching plan" in result.lower() or "error" in result.lower()
+        assert len(result) > 0
+        lowered = result.lower()
+        # Either shape is fine:
+        accepted_markers = (
+            # Historical error shapes
+            "no matching plan", "error", "planner failed",
+            # Inline-planner graceful-degrade: recognises it can't answer
+            "no real-time", "no weather", "out of scope",
+            "not available", "does not contain", "no information",
+            "cannot answer", "unable to", "no data",
+            "no results", "no documents",
+        )
+        assert any(m in lowered for m in accepted_markers), (
+            f"nx_answer response didn't match any graceful-degrade marker; "
+            f"got: {result[:300]!r}"
+        )
 
     @pytest.mark.asyncio
     async def test_retrieval_plan_does_not_need_operators(self):
