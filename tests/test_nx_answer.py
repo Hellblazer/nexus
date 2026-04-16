@@ -248,11 +248,38 @@ class TestAutoHydration:
 
     @pytest.mark.asyncio
     async def test_hydration_caps_at_max_inputs(self):
-        """When hydrated inputs exceed _OPERATOR_MAX_INPUTS, a rank winnow
-        should be auto-inserted (logged at WARNING)."""
-        from nexus.plans.runner import _OPERATOR_MAX_INPUTS
+        """When hydrated inputs exceed _OPERATOR_MAX_INPUTS, the dispatcher
+        truncates to the cap and logs a WARNING."""
+        import logging
+
+        from nexus.plans.runner import _OPERATOR_MAX_INPUTS, _default_dispatcher
 
         assert _OPERATOR_MAX_INPUTS == 100
+
+        # 150 IDs — exceeds the 100 cap.
+        fake_ids = [f"id{i}" for i in range(150)]
+        hydrated_contents = [f"content {i}" for i in range(150)]
+
+        mock_get_many = MagicMock(return_value={
+            "contents": hydrated_contents,
+            "missing": [],
+        })
+        received_args = {}
+
+        async def mock_operator(**kwargs):
+            received_args.update(kwargs)
+            return {"text": "summarized", "citations": []}
+
+        with patch("nexus.mcp.core.store_get_many", mock_get_many), \
+             patch("nexus.mcp.core.operator_summarize", mock_operator):
+            result = await _default_dispatcher("summarize", {
+                "ids": fake_ids,
+                "collections": "knowledge",
+            })
+
+        # The operator should receive at most _OPERATOR_MAX_INPUTS inputs.
+        parsed = json.loads(received_args["inputs"])
+        assert len(parsed) == _OPERATOR_MAX_INPUTS
 
 
 # ── Extract-field translation ────────────────────────────────────────────────

@@ -2559,8 +2559,8 @@ async def nx_answer(
         question: Natural-language question to answer.
         scope: Catalog subtree or corpus filter (e.g. ``"1.2"`` or ``"knowledge"``).
         context: Supplementary caller-supplied context for the plan matcher.
-        max_steps: Cap on plan DAG size.
-        budget_usd: Per-invocation cost cap.
+        max_steps: Cap on plan DAG size (reserved for P5 enforcement).
+        budget_usd: Per-invocation cost cap (reserved for P5 enforcement).
         trace: When False, redacts question and final_text in the run log.
 
     Returns:
@@ -2659,10 +2659,12 @@ async def nx_answer(
 
     # ── Step 2.5: SC-9 graceful degradation ──────────────────────────────
     if _nx_answer_needs_operators(best):
+        from nexus.operators.pool import PoolAuthUnavailableError
+
         try:
             from nexus.operators.pool import check_auth
             check_auth()
-        except Exception:
+        except PoolAuthUnavailableError:
             elapsed_ms = int((time.monotonic() - start) * 1000)
             _log.warning(
                 "nx_answer_no_auth_operators_required",
@@ -2676,19 +2678,15 @@ async def nx_answer(
 
     # ── Step 3: seed link-context ────────────────────────────────────────
     try:
-        t1 = _get_t1()
-        if t1 is not None:
-            from nexus.mcp import core as _self
-
-            _self.scratch(
-                action="put",
-                content=json.dumps({
-                    "question": question,
-                    "scope": scope,
-                    "plan_id": best.plan_id,
-                }),
-                tag="link-context",
-            )
+        scratch(
+            action="put",
+            content=json.dumps({
+                "question": question,
+                "scope": scope,
+                "plan_id": best.plan_id,
+            }),
+            tags="link-context",
+        )
     except Exception:
         pass  # Best-effort; auto-linker will work without it.
 
@@ -2738,6 +2736,7 @@ async def nx_answer(
     )
 
     # ── Step 6: record run ───────────────────────────────────────────────
+    # TODO(RDR-080 P5): populate cost_usd from pool worker token counters.
     try:
         with _t2_ctx() as db:
             _nx_answer_record_run(
