@@ -1,0 +1,50 @@
+# RDR-078 P6 (nexus-05i.10 / SC-15): validate every plan YAML under
+# the four-tier scoped loader tree on every pull request. Failure
+# surfaces the offending file + named schema error.
+name: plan-schema
+
+on:
+  pull_request:
+    paths:
+      - "nx/plans/**/*.yml"
+      - "nx/plans/**/*.yaml"
+      - ".nexus/plans/**/*.yml"
+      - ".nexus/plans/**/*.yaml"
+      - "docs/rdr/**/plans.yml"
+      - "src/nexus/plans/**"
+      - "tests/test_plan_template_schema.py"
+      - "tests/test_scoped_plan_loader.py"
+      - ".github/workflows/plan-schema-check.yml"
+
+jobs:
+  validate:
+    name: Validate plan schema
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      - name: Install project (dev deps)
+        run: uv sync
+
+      - name: Validate plan tree
+        run: |
+          uv run python -c "
+          import sys
+          from pathlib import Path
+          from nexus.plans.loader import ci_validate_plan_tree
+
+          repo_root = Path('.').resolve()
+          plugin_root = repo_root / 'nx'
+          sys.exit(ci_validate_plan_tree(
+              plugin_root=plugin_root, repo_root=repo_root,
+          ))
+          "
+
+      - name: Run plan template schema tests
+        run: uv run pytest tests/test_plan_template_schema.py tests/test_scoped_plan_loader.py -v

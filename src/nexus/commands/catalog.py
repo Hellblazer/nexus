@@ -83,17 +83,28 @@ _PLAN_TEMPLATES: list[dict[str, str]] = [
 
 
 def _seed_plan_templates() -> int:
-    """Seed pre-built plan templates into T2. Idempotent — skips existing."""
-    from nexus.db.t2 import T2Database
+    """Seed pre-built plan templates into T2. Idempotent — skips existing.
+
+    Two seed sources coexist:
+
+    * The RDR-063 :data:`_PLAN_TEMPLATES` list — legacy builtin plans keyed by
+      ``query + 'builtin-template'`` tag. These rows carry ``dimensions=NULL``
+      so they don't collide with the new RDR-078 scope:global seeds.
+    * The RDR-078 P4b scenario templates shipped as YAML files under
+      ``nx/plans/builtin/`` — loaded via the four-tier loader and deduplicated
+      via the ``UNIQUE (project, dimensions)`` partial index (nexus-05i.6).
+
+    Returns the total number of newly-inserted rows across both sources.
+    """
+    from pathlib import Path
+
     from nexus.commands._helpers import default_db_path
+    from nexus.db.t2 import T2Database
 
     seeded = 0
     with T2Database(default_db_path()) as db:
+        # Legacy builtin plans (RDR-063).
         for tmpl in _PLAN_TEMPLATES:
-            # RDR-063 Phase 1 step 3 (Landmine 1 / audit F2): use the
-            # public plan_exists() method instead of reaching through
-            # db.conn directly. After Phase 2 the facade no longer
-            # exposes a single .conn — each domain store has its own.
             if db.plan_exists(tmpl["query"], "builtin-template"):
                 continue
             db.save_plan(
@@ -102,7 +113,44 @@ def _seed_plan_templates() -> int:
                 tags=tmpl["tags"],
             )
             seeded += 1
+
+        # RDR-078 scoped plan loader — four tiers:
+        # plugin builtin → per-RDR plans → project → repo umbrella.
+        from nexus.plans.loader import load_all_tiers
+
+        repo_root_str = subprocess_git_toplevel() or str(Path.cwd())
+        plugin_root = (
+            Path(__file__).resolve().parent.parent.parent.parent / "nx"
+        )
+        tier_results = load_all_tiers(
+            plugin_root=plugin_root,
+            repo_root=Path(repo_root_str),
+            library=db.plans,
+        )
+        for scope, result in tier_results.items():
+            for source, error in result.errors:
+                _log.warning(
+                    "rdr078_seed_load_error",
+                    scope=scope, source=source, error=error,
+                )
+            seeded += len(result.inserted)
+
     return seeded
+
+
+def subprocess_git_toplevel() -> str | None:
+    """Return the current repo's toplevel directory via git, or None."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip() or None
+    except Exception:
+        return None
+    return None
 
 
 def _get_catalog() -> Catalog:

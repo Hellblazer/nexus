@@ -542,10 +542,13 @@ def _pdf_chunks(
     has_formulas = result.metadata.get("formula_count", 0) > 0
 
     # Compute source_title once before the loop so bib lookup uses the same value.
+    # nexus-8l6 fallback: extractor metadata wins; otherwise derive from
+    # first H1 or normalised filename (preserves initialisms like RDR, API).
+    from nexus.indexer_utils import derive_title
     source_title = (
-        result.metadata.get("docling_title", "")
-        or result.metadata.get("pdf_title", "")
-        or pdf_path.stem.replace("_", " ").replace("-", " ")
+        str(result.metadata.get("docling_title") or "").strip()
+        or str(result.metadata.get("pdf_title") or "").strip()
+        or derive_title(pdf_path, body=None)
     )
     bib: dict = {}
     if bib_enrich_enabled:
@@ -628,12 +631,21 @@ def _markdown_chunks(
     if not chunks:
         return []
 
+    # nexus-8l6: source_title fallback chain. Frontmatter ``title:`` wins;
+    # otherwise derive from the first H1 or the normalised filename so
+    # ``nx store list`` never displays ``untitled``.
+    from nexus.indexer_utils import derive_title
+    source_title = (
+        str(frontmatter.get("title") or "").strip()
+        or derive_title(md_path, body)
+    )
+
     prepared: list[tuple[str, str, dict]] = []
     for chunk in chunks:
         chunk_id = f"{content_hash[:16]}_{chunk.chunk_index}"
         meta: dict = {
             "source_path": sp,
-            "source_title": str(frontmatter.get("title", "")),
+            "source_title": source_title,
             "source_author": str(frontmatter.get("author", "")),
             "source_date": str(frontmatter.get("date", "")),
             "corpus": corpus,

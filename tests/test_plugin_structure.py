@@ -35,6 +35,9 @@ _STANDALONE_SKILLS = {
     "receiving-review", "git-worktrees", "finishing-branch",
     # RDR-080 P3: pointer skills — delegate directly to MCP tools, no relay structure needed
     "query", "enrich-plan", "knowledge-tidying", "plan-validation",
+    # RDR-078 verb skills — dispatch plan_match + plan_run directly, no agent relay
+    "research", "review", "analyze", "debug", "document",
+    "plan-author", "plan-inspect", "plan-promote", "plan-first",
 }
 
 
