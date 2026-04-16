@@ -2537,6 +2537,96 @@ def _nx_answer_record_run(
     conn.commit()
 
 
+# ── Plan-miss planner (RDR-080 P1, C-1 critique remediation) ────────────────
+
+_PLANNER_SCHEMA: dict = {
+    "type": "object",
+    "required": ["steps"],
+    "properties": {
+        "steps": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["tool", "args"],
+                "properties": {
+                    "tool": {"type": "string"},
+                    "args": {"type": "object"},
+                },
+            },
+        },
+    },
+}
+
+
+async def _nx_answer_plan_miss(
+    question: str,
+    *,
+    scope: str = "",
+    max_steps: int = 6,
+) -> Any:
+    """Decompose *question* into a plan via the operator pool, execute it,
+    and save the plan for future reuse.
+
+    Returns a synthetic :class:`Match` that ``nx_answer`` can execute
+    via ``plan_run``.
+    """
+    from nexus.mcp_infra import get_operator_pool
+    from nexus.plans.match import Match
+
+    pool = get_operator_pool(
+        "planner",
+        operator_role=(
+            "You are the `planner` decomposition operator. Given a question, "
+            "produce a retrieval-and-analysis plan as a StructuredOutput. "
+            "Available tools for plan steps: search, query, traverse, "
+            "extract, rank, compare, summarize, generate. "
+            "Use $intent as a placeholder for the original question. "
+            "Use $stepN.ids, $stepN.tumblers, $stepN.text for step references. "
+            "Keep plans concise — prefer fewer steps. "
+            "Do NOT execute the plan — only produce the JSON structure."
+        ),
+        json_schema=_PLANNER_SCHEMA,
+    )
+
+    corpus_hint = f" Focus on the '{scope}' corpus." if scope else ""
+    prompt = (
+        f"Decompose this question into a retrieval-and-analysis plan "
+        f"with at most {max_steps} steps:{corpus_hint}\n\n{question}"
+    )
+
+    payload = await _dispatch_with_auth_guard(
+        pool, "planner", prompt=prompt, timeout=120.0,
+    )
+
+    steps = payload.get("steps", []) if isinstance(payload, dict) else []
+    if not steps:
+        raise ValueError("planner returned empty plan")
+
+    plan_json = json.dumps({"steps": steps})
+
+    # Save the plan for future reuse (ttl=30 days).
+    plan_save(
+        query=question,
+        plan_json=plan_json,
+        outcome="success",
+        ttl=30,
+    )
+
+    return Match(
+        plan_id=0,  # Synthetic — not yet looked up from T2.
+        name="ad-hoc",
+        description=question,
+        confidence=None,
+        dimensions={},
+        tags="ad-hoc",
+        plan_json=plan_json,
+        required_bindings=["intent"],
+        optional_bindings=[],
+        default_bindings={"intent": question},
+        parent_dims=None,
+    )
+
+
 @_mcp_tool()
 async def nx_answer(
     question: str,
@@ -2552,8 +2642,9 @@ async def nx_answer(
 
     1. **Plan-match gate**: call ``plan_match(intent=question)``. On hit
        (confidence >= 0.40 OR confidence is None / FTS5 sentinel), proceed
-       to execution. On miss, return a clear error (P1 scope — inline LLM
-       decomposition ships in P1 follow-up).
+       to execution. On miss, dispatch an inline LLM planner to decompose
+       the question, execute the resulting plan, and ``plan_save(ttl=30)``
+       for future reuse.
     2. **Single-step guard**: if the matched plan has exactly 1 step and
        that step is ``query``, reroute to ``query()`` directly.
     3. **Execute plan**: reuse ``plan_run`` from RDR-078/079.
@@ -2598,34 +2689,37 @@ async def nx_answer(
         return f"Error during plan match: {exc}"
 
     if not matches or not _nx_answer_match_is_hit(matches[0].confidence):
-        # Plan miss — no matching plan found.
-        elapsed_ms = int((time.monotonic() - start) * 1000)
+        # Plan miss — dispatch inline LLM planner to decompose the question.
         _log.info(
             "nx_answer_plan_miss",
             question=question[:100] if trace else "[redacted]",
-            duration_ms=elapsed_ms,
         )
         try:
-            with _t2_ctx() as db:
-                _nx_answer_record_run(
-                    db.conn,
-                    question=question,
-                    plan_id=None,
-                    matched_confidence=matches[0].confidence if matches else None,
-                    step_count=0,
-                    final_text="",
-                    cost_usd=0.0,
-                    duration_ms=elapsed_ms,
-                    trace=trace,
-                )
-        except Exception:
-            pass  # Best-effort recording.
-        return (
-            "No matching plan found. Try rephrasing the question, or "
-            "save a plan with plan_save for this query pattern."
-        )
+            best = await _nx_answer_plan_miss(
+                question, scope=scope, max_steps=max_steps,
+            )
+        except Exception as exc:
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+            _log.warning("nx_answer_planner_failed", error=str(exc))
+            try:
+                with _t2_ctx() as db:
+                    _nx_answer_record_run(
+                        db.conn,
+                        question=question,
+                        plan_id=None,
+                        matched_confidence=matches[0].confidence if matches else None,
+                        step_count=0,
+                        final_text=f"Planner error: {exc}",
+                        cost_usd=0.0,
+                        duration_ms=elapsed_ms,
+                        trace=trace,
+                    )
+            except Exception:
+                pass
+            return f"Error: plan-miss planner failed: {exc}"
+    else:
+        best = matches[0]
 
-    best = matches[0]
     conf_str = "fts5" if best.confidence is None else f"{best.confidence:.3f}"
 
     # ── Step 2: single-step guard ────────────────────────────────────────

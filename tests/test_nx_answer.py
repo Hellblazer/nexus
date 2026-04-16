@@ -403,3 +403,82 @@ class TestRunRecording:
         assert row[1] == "[redacted]"
         # final_text should be redacted.
         assert row[5] == "[redacted]"
+
+
+# ── Plan-miss planner ────────────────────────────────────────────────────────
+
+
+class TestPlanMissPlanner:
+    """C-1 remediation: plan-miss dispatches an inline LLM planner."""
+
+    @pytest.mark.asyncio
+    async def test_plan_miss_dispatches_planner(self):
+        """On plan miss, _nx_answer_plan_miss should dispatch the planner
+        pool and return a Match with the decomposed plan."""
+        from nexus.mcp.core import _nx_answer_plan_miss
+
+        fake_plan = {
+            "steps": [
+                {"tool": "search", "args": {"query": "$intent", "corpus": "knowledge"}},
+                {"tool": "summarize", "args": {"inputs": "$step1.ids"}},
+            ],
+        }
+
+        async def mock_dispatch_with_rotation(*, prompt, timeout=60.0):
+            return fake_plan
+
+        mock_pool = MagicMock()
+        mock_pool.dispatch_with_rotation = mock_dispatch_with_rotation
+
+        with patch("nexus.mcp_infra.get_operator_pool", return_value=mock_pool), \
+             patch("nexus.mcp.core.plan_save", return_value="Saved"):
+            match = await _nx_answer_plan_miss("how does X work")
+
+        assert match.name == "ad-hoc"
+        plan = json.loads(match.plan_json)
+        assert len(plan["steps"]) == 2
+        assert plan["steps"][0]["tool"] == "search"
+        assert match.default_bindings["intent"] == "how does X work"
+
+    @pytest.mark.asyncio
+    async def test_plan_miss_saves_plan(self):
+        """The planner should call plan_save(ttl=30) after decomposition."""
+        from nexus.mcp.core import _nx_answer_plan_miss
+
+        fake_plan = {
+            "steps": [{"tool": "search", "args": {"query": "$intent"}}],
+        }
+
+        async def mock_dispatch(*a, **kw):
+            return fake_plan
+
+        mock_pool = MagicMock()
+        mock_pool.dispatch_with_rotation = mock_dispatch
+        save_calls = []
+
+        def mock_plan_save(**kwargs):
+            save_calls.append(kwargs)
+            return "Saved"
+
+        with patch("nexus.mcp_infra.get_operator_pool", return_value=mock_pool), \
+             patch("nexus.mcp.core.plan_save", mock_plan_save):
+            await _nx_answer_plan_miss("test question")
+
+        assert len(save_calls) == 1
+        assert save_calls[0]["ttl"] == 30
+        assert save_calls[0]["query"] == "test question"
+
+    @pytest.mark.asyncio
+    async def test_plan_miss_empty_plan_raises(self):
+        """Planner returning empty steps should raise ValueError."""
+        from nexus.mcp.core import _nx_answer_plan_miss
+
+        async def mock_dispatch(*a, **kw):
+            return {"steps": []}
+
+        mock_pool = MagicMock()
+        mock_pool.dispatch_with_rotation = mock_dispatch
+
+        with patch("nexus.mcp_infra.get_operator_pool", return_value=mock_pool):
+            with pytest.raises(ValueError, match="empty plan"):
+                await _nx_answer_plan_miss("test")
