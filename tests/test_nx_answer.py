@@ -481,3 +481,51 @@ class TestPlanMissPlanner:
         with patch("nexus.mcp_infra.get_operator_pool", return_value=mock_pool):
             with pytest.raises(ValueError, match="empty plan"):
                 await _nx_answer_plan_miss("test")
+
+    @pytest.mark.asyncio
+    async def test_plan_miss_rejects_non_nexus_tools(self):
+        """Planner that generates non-dispatchable tools (serena, etc.)
+        should be rejected before execution."""
+        from nexus.mcp.core import _nx_answer_plan_miss
+
+        bad_plan = {
+            "steps": [
+                {"tool": "mcp__plugin_sn_serena__jet_brains_find_symbol", "args": {"query": "test"}},
+            ],
+        }
+
+        async def mock_dispatch(*a, **kw):
+            return bad_plan
+
+        mock_pool = MagicMock()
+        mock_pool.dispatch_with_rotation = mock_dispatch
+
+        with patch("nexus.mcp_infra.get_operator_pool", return_value=mock_pool):
+            with pytest.raises(ValueError, match="non-dispatchable tool"):
+                await _nx_answer_plan_miss("test")
+
+    @pytest.mark.asyncio
+    async def test_plan_miss_normalizes_mcp_prefixed_tools(self):
+        """Planner that uses mcp__plugin_nx_nexus__search should have it
+        normalized to bare 'search' in the saved plan."""
+        from nexus.mcp.core import _nx_answer_plan_miss
+
+        prefixed_plan = {
+            "steps": [
+                {"tool": "mcp__plugin_nx_nexus__search", "args": {"query": "$intent"}},
+                {"tool": "summarize", "args": {"inputs": "$step1.ids"}},
+            ],
+        }
+
+        async def mock_dispatch(*a, **kw):
+            return prefixed_plan
+
+        mock_pool = MagicMock()
+        mock_pool.dispatch_with_rotation = mock_dispatch
+
+        with patch("nexus.mcp_infra.get_operator_pool", return_value=mock_pool):
+            match = await _nx_answer_plan_miss("how does X work")
+
+        plan = json.loads(match.plan_json)
+        assert plan["steps"][0]["tool"] == "search"
+        assert plan["steps"][1]["tool"] == "summarize"

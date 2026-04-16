@@ -2582,8 +2582,10 @@ async def _nx_answer_plan_miss(
         operator_role=(
             "You are the `planner` decomposition operator. Given a question, "
             "produce a retrieval-and-analysis plan as a StructuredOutput. "
-            "Available tools for plan steps: search, query, traverse, "
-            "extract, rank, compare, summarize, generate. "
+            "ONLY use these tool names in plan steps (bare names, no prefixes): "
+            "search, query, traverse, extract, rank, compare, summarize, generate. "
+            "Do NOT use fully-qualified MCP names like mcp__plugin_nx_nexus__search. "
+            "Do NOT use tools from other servers (serena, context7, etc.). "
             "Use $intent as a placeholder for the original question. "
             "Use $stepN.ids, $stepN.tumblers, $stepN.text for step references. "
             "Keep plans concise — prefer fewer steps. "
@@ -2605,6 +2607,23 @@ async def _nx_answer_plan_miss(
     steps = payload.get("steps", []) if isinstance(payload, dict) else []
     if not steps:
         raise ValueError("planner returned empty plan")
+
+    # Validate: only nexus-dispatchable tools are allowed in plans.
+    _ALLOWED_TOOLS = {
+        "search", "query", "traverse", "store_get_many",
+        "extract", "rank", "compare", "summarize", "generate",
+    }
+    for step in steps:
+        raw_tool = step.get("tool", "")
+        # Strip any MCP prefix for validation.
+        bare = raw_tool.rsplit("__", 1)[-1] if raw_tool.startswith("mcp__") else raw_tool
+        if bare not in _ALLOWED_TOOLS:
+            raise ValueError(
+                f"planner generated non-dispatchable tool '{raw_tool}' "
+                f"(bare: '{bare}'). Allowed: {sorted(_ALLOWED_TOOLS)}"
+            )
+        # Normalize to bare name in the plan.
+        step["tool"] = bare
 
     plan_json = json.dumps({"steps": steps})
 

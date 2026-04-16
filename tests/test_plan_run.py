@@ -447,6 +447,19 @@ class TestMCPPrefixStripping:
         await plan_run(_match(plan), {}, dispatcher=disp)
         assert disp.calls[0][0] == "search"
 
+    @pytest.mark.asyncio
+    async def test_non_nexus_mcp_prefix_stripped(self):
+        """Planner may use tools from other MCP servers (serena, context7).
+        The prefix should be stripped to the bare tool name."""
+        from nexus.plans.runner import plan_run
+
+        plan = {"steps": [
+            {"tool": "mcp__plugin_sn_serena__jet_brains_find_symbol", "args": {"query": "test"}},
+        ]}
+        disp = _FakeDispatcher()
+        await plan_run(_match(plan), {}, dispatcher=disp)
+        assert disp.calls[0][0] == "jet_brains_find_symbol"
+
 
 class TestLegacyToolKeyAliases:
     """Old plans use 'op' or 'operation' instead of 'tool'. The runner

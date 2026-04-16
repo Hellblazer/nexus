@@ -702,9 +702,14 @@ async def plan_run(
 
     for index, step in enumerate(steps):
         tool = step.get("tool") or step.get("op") or step.get("operation") or ""
-        # Strip MCP prefix — planner workers generate fully-qualified names.
-        if tool.startswith("mcp__plugin_nx_nexus__"):
-            tool = tool[len("mcp__plugin_nx_nexus__"):]
+        # Strip any MCP prefix — planner workers see fully-qualified names
+        # from all MCP servers (nexus, serena, context7, etc.) and may
+        # generate plans using them. Only nexus tools are dispatchable.
+        if tool.startswith("mcp__"):
+            # mcp__plugin_nx_nexus__search → search
+            # mcp__plugin_sn_serena__find_symbol → find_symbol (will fail
+            #   at dispatch, but with a clear "unknown tool" error)
+            tool = tool.rsplit("__", 1)[-1]
         raw_args = step.get("args", {}) or {}
         scope = step.get("scope")
 
