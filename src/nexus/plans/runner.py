@@ -701,7 +701,10 @@ async def plan_run(
     step_outputs: list[dict[str, Any]] = []
 
     for index, step in enumerate(steps):
-        tool = step.get("tool", "")
+        tool = step.get("tool") or step.get("op") or step.get("operation") or ""
+        # Strip MCP prefix — planner workers generate fully-qualified names.
+        if tool.startswith("mcp__plugin_nx_nexus__"):
+            tool = tool[len("mcp__plugin_nx_nexus__"):]
         raw_args = step.get("args", {}) or {}
         scope = step.get("scope")
 
