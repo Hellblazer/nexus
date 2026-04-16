@@ -16,7 +16,7 @@ description: Implement feature using developer agent
     echo ""
   fi
 
-  echo "**Note:** Ensure plan has been validated by plan-auditor before implementing."
+  echo "**Note:** Ensure plan has been validated by nx_plan_audit MCP tool before implementing."
   echo ""
 
   # Bead context
@@ -62,7 +62,7 @@ $ARGUMENTS
 
 ## Action
 
-**PREREQUISITE**: Plan must be validated by plan-auditor before implementation.
+**PREREQUISITE**: Plan must be validated by nx_plan_audit MCP tool before implementation.
 
 Invoke the **development** skill with the following relay. Fill in dynamic fields from the context above:
 
@@ -76,7 +76,7 @@ Invoke the **development** skill with the following relay. Fill in dynamic field
 - Files: [fill from existing files to modify or target package]
 
 ### Plan Context
-[fill from approved plan-auditor output]
+[fill from approved nx_plan_audit output]
 
 ### Requirements
 $ARGUMENTS

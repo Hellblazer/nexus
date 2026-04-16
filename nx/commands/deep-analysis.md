@@ -70,7 +70,7 @@ Root cause analysis with hypothesis chain, evidence inventory, confidence-rated 
 - [ ] Each conclusion supported by specific cited evidence
 - [ ] Recommendations are actionable and prioritized by impact
 
-**IMPORTANT**: After analysis completes, persist findings using store_put tool (or delegate to knowledge-tidier).
+**IMPORTANT**: After analysis completes, persist findings using store_put tool (or call `mcp__plugin_nx_nexus__nx_tidy(...)`).
 ```
 
 For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../agents/_shared/RELAY_TEMPLATE.md).

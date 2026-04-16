@@ -101,14 +101,14 @@ nx/
     ├── architecture/        # → architect-planner agent
     ├── debugging/           # → debugger agent
     ├── development/         # → developer agent
-    ├── knowledge-tidying/   # → knowledge-tidier agent
+    ├── knowledge-tidying/   # → nx_tidy MCP tool
     ├── orchestration/       # routing reference (no agent)
     ├── plan-validation/     # → nx_plan_audit MCP tool
     ├── research-synthesis/  # → deep-research-synthesizer agent
     ├── strategic-planning/  # → strategic-planner agent
     ├── test-validation/     # → test-validator agent
     ├── rdr-accept/          # RDR workflow: accept a gated RDR
-    ├── enrich-plan/         # → plan-enricher agent
+    ├── enrich-plan/         # → nx_enrich_beads MCP tool
     ├── rdr-close/           # RDR workflow: close RDR, bead advisory
     ├── rdr-create/          # RDR workflow: create new RDR from template
     ├── rdr-gate/            # RDR workflow: quality gate before finalizing
@@ -159,11 +159,11 @@ See [`registry.yaml`](./registry.yaml) for full metadata (model, triggers, prede
 
 Defined in `registry.yaml`:
 
-- **feature**: strategic-planner → plan-auditor → plan-enricher *(conditional)* → architect-planner → developer → code-review-expert → test-validator
+- **feature**: strategic-planner → `nx_plan_audit` → `nx_enrich_beads` *(conditional)* → architect-planner → developer → code-review-expert → test-validator
 - **bug**: debugger → developer → code-review-expert → test-validator
-- **research**: deep-research-synthesizer → knowledge-tidier
+- **research**: deep-research-synthesizer → `nx_tidy`
 - **onboarding**: codebase-deep-analyzer → strategic-planner
-- **architecture**: codebase-deep-analyzer → deep-analyst → strategic-planner → plan-auditor → architect-planner
+- **architecture**: codebase-deep-analyzer → deep-analyst → strategic-planner → `nx_plan_audit` → architect-planner
 
 ## Hooks
 
@@ -187,17 +187,17 @@ See `hooks/hooks.json` for exact wiring. Paths below use `$CLAUDE_PLUGIN_ROOT` a
 **Agent commands** (`/command → agent`):
 - `/nx:research` → deep-research-synthesizer
 - `/nx:create-plan` → strategic-planner
-- `/nx:plan-audit` → plan-auditor
+- `/nx:plan-audit` → `nx_plan_audit` MCP tool
 - `/nx:analyze-code` → codebase-deep-analyzer
 - `/nx:review-code` → code-review-expert
 - `/nx:test-validate` → test-validator
 - `/nx:implement` → developer
 - `/nx:debug` → debugger
 - `/nx:architecture` → architect-planner
-- `/nx:knowledge-tidy` → knowledge-tidier
+- `/nx:knowledge-tidy` → `nx_tidy` MCP tool
 - `/nx:deep-analysis` → deep-analyst
 - `/nx:substantive-critique` → substantive-critic
-- `/nx:enrich-plan` → plan-enricher
+- `/nx:enrich-plan` → `nx_enrich_beads` MCP tool
 
 **RDR commands**: `/nx:rdr-create`, `/nx:rdr-list`, `/nx:rdr-show`, `/nx:rdr-research`, `/nx:rdr-gate`, `/nx:rdr-accept`, `/nx:rdr-close`
 

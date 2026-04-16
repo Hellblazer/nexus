@@ -2485,17 +2485,17 @@ def _nx_answer_is_single_query(match: Any) -> bool:
 def _nx_answer_needs_operators(match: Any) -> bool:
     """Return True when the plan requires operator pool auth.
 
-    Retrieval-only plans (search, query, traverse, store_get_many)
-    work without auth. Plans with operator steps (extract, rank,
-    compare, summarize, generate) require the pool.
+    Uses an allowlist of operator tool names (from ``_OPERATOR_TOOL_MAP``
+    in runner.py). Plans whose steps are all non-operator tools work
+    without auth; plans with any operator step require the pool.
     """
-    _RETRIEVAL_ONLY = {"search", "query", "traverse", "store_get_many"}
+    _OPERATOR_TOOLS = {"extract", "rank", "compare", "summarize", "generate"}
     try:
         plan = json.loads(match.plan_json)
     except (json.JSONDecodeError, TypeError):
         return True  # Assume operators needed when plan is unparseable.
     steps = plan.get("steps") or []
-    return any(step.get("tool", "") not in _RETRIEVAL_ONLY for step in steps)
+    return any(step.get("tool", "") in _OPERATOR_TOOLS for step in steps)
 
 
 def _nx_answer_translate_extract_fields(args: dict[str, Any]) -> dict[str, Any]:

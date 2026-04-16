@@ -552,11 +552,13 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
         # Replace ids/collections with inputs (JSON array string).
         args = {k: v for k, v in args.items() if k not in ("ids", "collections")}
         args["inputs"] = json.dumps(non_empty)
-        # RF-13: translate extract template dict → fields CSV.
-        if "template" in args and "fields" not in args:
-            template = args.pop("template")
-            if isinstance(template, dict):
-                args["fields"] = ",".join(template.keys())
+
+    # RF-13: translate extract template dict → fields CSV.
+    # Fires for ALL operator_extract calls, not just auto-hydrated ones.
+    if resolved_tool == "operator_extract" and "template" in args and "fields" not in args:
+        template = args.pop("template")
+        if isinstance(template, dict):
+            args["fields"] = ",".join(template.keys())
 
     fn = getattr(mcp_core, resolved_tool, None)
     if fn is None or not callable(fn):

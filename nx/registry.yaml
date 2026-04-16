@@ -320,7 +320,7 @@ rdr_skills:
     slash_command: /rdr-accept
     command_file: commands/rdr-accept.md
     description: "Accept a gated RDR — verify gate PASSED, update status, optional planning dispatch"
-    dispatches_to: [strategic-planner, plan-auditor, plan-enricher]  # sequential chain, orchestrated by skill
+    dispatches_to: [strategic-planner]  # plan-auditor/plan-enricher replaced by nx_plan_audit/nx_enrich_beads MCP tools (RDR-080)
     triggers:
       - "accept this RDR"
       - "mark RDR as accepted"
@@ -334,7 +334,7 @@ rdr_skills:
       - "close this RDR"
       - "RDR done"
       - "finish RDR"
-    dispatches_to: [knowledge-tidier]
+    dispatches_to: []  # knowledge-tidier replaced by nx_tidy MCP tool (RDR-080)
 
   rdr-audit:
     slash_command: /rdr-audit

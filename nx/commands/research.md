@@ -62,7 +62,7 @@ Comprehensive research synthesis that integrates findings from nx store, web, an
 - [ ] Actionable recommendations provided with confidence levels
 - [ ] All claims cite their source
 
-**IMPORTANT**: After research completes, MUST delegate to knowledge-tidier to persist findings to nx store.
+**IMPORTANT**: After research completes, MUST call `mcp__plugin_nx_nexus__nx_tidy(...)` to persist findings to nx store.
 ```
 
 For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../agents/_shared/RELAY_TEMPLATE.md).
