@@ -54,7 +54,7 @@ description: Design architecture and create phased execution plans using archite
 
   echo "### Pipeline Position"
   echo ""
-  echo "strategic-planner -> plan-auditor -> architect-planner -> developer"
+  echo "strategic-planner -> nx_plan_audit -> architect-planner -> developer"
   echo ""
   echo "### Tip"
   echo ""
@@ -98,9 +98,9 @@ Comprehensive architecture design with component boundaries, interface contracts
 - [ ] Phased execution plan created with beads and dependencies
 - [ ] Risks identified with concrete mitigations
 - [ ] Design follows project conventions (check CLAUDE.md)
-- [ ] Ready for plan-auditor validation
+- [ ] Ready for nx_plan_audit validation
 
-**IMPORTANT**: After architecture is designed, MUST delegate to plan-auditor for validation before implementation begins.
+**IMPORTANT**: After architecture is designed, MUST call `mcp__plugin_nx_nexus__nx_plan_audit(...)` for validation before implementation begins.
 ```
 
 For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../agents/_shared/RELAY_TEMPLATE.md).

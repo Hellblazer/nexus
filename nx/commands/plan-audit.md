@@ -1,5 +1,5 @@
 ---
-description: Audit a plan using plan-auditor agent
+description: Audit a plan via nx_plan_audit MCP tool
 ---
 
 # Plan Audit Request
@@ -31,24 +31,9 @@ $ARGUMENTS
 
 ## Action
 
-Invoke the **plan-validation** skill with the following relay. Fill in dynamic fields from the context above:
+Call `mcp__plugin_nx_nexus__nx_plan_audit(plan_json=<plan>, context=<context>)` to validate the plan.
 
-```markdown
-## Relay: plan-auditor
-
-**Task**: Validate implementation plan before execution
-**Bead**: [fill from epic bead above or 'none']
-
-### Input Artifacts
-- Files: [fill from key files referenced in plan]
-
-### Plan to Validate
-$ARGUMENTS
-
-[fill from strategic-planner output or provided plan]
-
-### Deliverable
-Validation report with go/no-go decision: assumption verification results, dependency confirmation, build/test command validation, risk assessment, and clear recommendation.
+Populate `plan_json` with the plan content from `$ARGUMENTS` (or from the strategic-planner output). Populate `context` with relevant bead and file information from the context above.
 
 ### Quality Criteria
 - [ ] All assumptions verified against actual codebase state
@@ -56,6 +41,3 @@ Validation report with go/no-go decision: assumption verification results, depen
 - [ ] Build/test commands validated (runnable as specified)
 - [ ] Risks identified with severity and mitigation status
 - [ ] Clear go/no-go recommendation with rationale
-```
-
-For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../agents/_shared/RELAY_TEMPLATE.md).

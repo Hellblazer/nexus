@@ -208,7 +208,7 @@ $ARGUMENTS
 > You MUST NOT create beads, write plans, enrich beads, or perform any planning/enrichment work yourself.
 > You are the **caller only**. Running `bd create`, `bd dep add`, `bd update --description`,
 > or writing plan content in the Planning Chain is a HARD STOP — halt and report the error.
-> Only the dispatched subagents (strategic-planner, plan-auditor, plan-enricher) do this work.
+> Only the dispatched strategic-planner subagent and the MCP tools (nx_plan_audit, nx_enrich_beads) do this work.
 > Doing it yourself bypasses the audit and enrichment chain, producing unvalidated plans.
 >
 > **SUBAGENT FAILURE**: If any subagent in the chain fails or returns partial results,
@@ -260,19 +260,17 @@ Dispatch `nx:strategic-planner` agent (via Agent tool, subagent_type="nx:strateg
 Note the plan file path and bead IDs from the planner's output.
 **If the planner did not create beads, this is a failure — report it and stop. The RDR acceptance is still valid. To retry the planning chain only, run `/nx:create-plan` manually with the RDR file path.**
 
-**Step 8c — Dispatch plan-auditor (MANDATORY — do NOT skip):**
-After the planner completes, dispatch `nx:plan-auditor` agent (via Agent tool, subagent_type="nx:plan-auditor") with prompt:
-> Audit the execution plan just created for RDR-<ID>: <title>. Check T1 scratch for rdr-planning-context. Validate the plan against the codebase. Check beads created by the planner.
+**Step 8c — Call nx_plan_audit MCP tool (MANDATORY — do NOT skip):**
+After the planner completes, call `mcp__plugin_nx_nexus__nx_plan_audit(plan_json=<plan-from-planner>, context="RDR-<ID>: <title>. Validate against codebase. Check beads created by the planner.")`.
 
-**Wait for the auditor to complete before proceeding. Do NOT skip this step.**
+**Wait for the audit to complete before proceeding. Do NOT skip this step.**
 
-**Step 8d — Dispatch plan-enricher (MANDATORY — do NOT skip):**
-After the auditor completes, dispatch `nx:plan-enricher` agent (via Agent tool, subagent_type="nx:plan-enricher") with prompt:
-> Enrich all beads for RDR-<ID>: <title> with execution context. Incorporate audit findings from T1 scratch if present. Write epic bead ID to T2.
+**Step 8d — Call nx_enrich_beads MCP tool (MANDATORY — do NOT skip):**
+After the audit completes, call `mcp__plugin_nx_nexus__nx_enrich_beads(epic_bead=<epic-bead-id>, context="RDR-<ID>: <title>. Incorporate audit findings from T1 scratch if present. Write epic bead ID to T2.")`.
 
-**Wait for the enricher to complete. Do NOT skip this step.**
+**Wait for enrichment to complete. Do NOT skip this step.**
 
 **Step 8e — Verify chain completion:**
-Confirm all three agents ran: planner created beads, auditor validated, enricher enriched.
-Print: `> RDR-<ID> accepted. Planning chain complete: planner → auditor → enricher. Use 'bd ready' to see executable tasks.`
+Confirm all three steps ran: planner created beads, nx_plan_audit validated, nx_enrich_beads enriched.
+Print: `> RDR-<ID> accepted. Planning chain complete: planner → nx_plan_audit → nx_enrich_beads. Use 'bd ready' to see executable tasks.`
 **If any step was skipped or failed, report which step broke the chain and provide the retry command.**

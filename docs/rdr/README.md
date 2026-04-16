@@ -100,6 +100,11 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-076](rdr-076-idempotent-upgrade-mechanism.md) | Idempotent Upgrade Mechanism | Architecture | Closed (implemented) | 2026-04-13 |
 | [RDR-077](rdr-077-projection-quality-similarity-icf.md) | Projection Quality — Similarity Scores and ICF Hub Detection | Feature | Accepted | 2026-04-14 |
 | [RDR-078](rdr-078-unified-context-graph-and-retrieval.md) | Plan-Centric Retrieval — Semantic Plan Matching, Typed-Graph Traversal, Scenario Plans | Feature | Accepted | 2026-04-14 |
+| [RDR-079](rdr-079-operator-dispatch-and-execution.md) | Operator Dispatch + Plan Execution End-to-End | Feature | Closed (implemented) | 2026-04-15 |
+| [RDR-080](rdr-080-retrieval-layer-consolidation.md) | Retrieval Layer Consolidation — `nx_answer` + Agent/Skill Pruning | Feature | Accepted | 2026-04-15 |
+| [RDR-081](rdr-081-authoring-trust-cli.md) | Authoring-Trust CLI — Glossary-Aware Labeler via Operator Pool + Stale-Reference Validator | Feature | Draft | 2026-04-15 |
+| [RDR-082](rdr-082-doc-render-tokens.md) | Doc-Build Token Resolution — `nx doc render` with Bead/RDR/Anchor Tokens | Feature | Draft | 2026-04-15 |
+| [RDR-083](rdr-083-chunk-grounded-citations.md) | Chunk-Grounded Citations — `chash:` Spans, Grounding Validator, Author-Extension Auto-Flag | Feature | Draft | 2026-04-15 |
 
 ---
 

@@ -136,7 +136,7 @@ intervening review. The review task should depend on all implementation
 tasks in its phase and block subsequent phases.
 
 ### Phase 3: Audit Handoff
-**MANDATORY**: Always use the plan-auditor agent to review plans before finalization:
+**MANDATORY**: Always call the `nx_plan_audit` MCP tool to review plans before finalization:
 - Check for completeness and gaps
 - Identify redundancy and consolidation opportunities
 - Validate dependency ordering
@@ -209,14 +209,14 @@ Skip only if the plan contains no architectural decisions (pure task decompositi
 
 ## Recommended Next Step (MANDATORY output)
 
-Your final output MUST include a clearly labeled next-step recommendation for the caller to dispatch `plan-auditor`.
+Your final output MUST include a clearly labeled next-step recommendation for the caller to call `nx_plan_audit` MCP tool.
 
 **Condition**: ALWAYS after creating a plan
 **Rationale**: Plans must be validated before implementation
 **Mechanism**: You do not have the Agent tool — your caller orchestrates the chain. Include this block at the end of your output so the caller knows to continue:
 
 ```
-## Next Step: plan-auditor
+## Next Step: nx_plan_audit
 **Task**: Validate the execution plan for [topic]
 **Input Artifacts**: [plan file path, bead IDs, nx memory keys you wrote]
 **Deliverable**: Plan validation report with go/no-go decision
@@ -270,12 +270,12 @@ Example: If 2 of 5 beads fail to create, note in response: "3 beads created succ
 ## Relationship to Other Agents
 
 - **vs architect-planner**: You focus on project management, phases, and beads structure. Architect-planner focuses on technical architecture and design patterns. You typically call architect-planner for technical design.
-- **vs plan-auditor**: You create plans. Auditor validates them. Always spawn auditor before finalizing.
+- **vs nx_plan_audit**: You create plans. The audit tool validates them. Always call nx_plan_audit before finalizing.
 
 ## Critical Reminders
 
 ### For You (Strategic Planner)
-- **Always audit plans** via plan-auditor before presenting to user
+- **Always audit plans** via nx_plan_audit before presenting to user
 - **Keep continuation state current** via memory_put tool: title="continuation-state.md"
 - **Search knowledge bases** before planning: search tool for T3, memory_search tool for T2
 - **Use beads** (`/beads:*` skills) for ALL task tracking - never markdown TODO lists
@@ -310,7 +310,7 @@ When presenting plans:
 ## Quality Gates
 
 Before finalizing any plan:
-- [ ] Plan audited by plan-auditor agent
+- [ ] Plan audited by nx_plan_audit MCP tool
 - [ ] All beads contain complete execution context
 - [ ] Dependencies properly linked via /beads:dep add
 - [ ] TDD approach embedded in every development task

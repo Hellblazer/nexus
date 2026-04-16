@@ -30,7 +30,7 @@ Delegates to the **developer** agent (sonnet). See [registry.yaml](../../registr
 
 ## When This Skill Activates
 
-- After plan-auditor approves a plan (required prerequisite)
+- After nx_plan_audit approves a plan (required prerequisite)
 - When a bead for an implementation task is in_progress
 - Executing tasks from an approved implementation plan
 - Writing or modifying production code

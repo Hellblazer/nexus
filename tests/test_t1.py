@@ -35,14 +35,14 @@ class TestT1DatabaseConstructor:
         record = {"session_id": "parent-session-uuid", "server_host": "127.0.0.1", "server_port": 51234}
         mock_http = MagicMock()
         mock_http.get_or_create_collection.return_value = MagicMock()
-        with patch("nexus.db.t1.find_ancestor_session", return_value=record), \
+        with patch("nexus.db.t1.resolve_t1_session", return_value=record), \
              patch("chromadb.HttpClient", return_value=mock_http):
             t1 = T1Database()
         assert t1._session_id == "parent-session-uuid"
         assert t1._client is mock_http
 
     def test_falls_back_to_ephemeral_when_no_record(self) -> None:
-        with patch("nexus.db.t1.find_ancestor_session", return_value=None), \
+        with patch("nexus.db.t1.resolve_t1_session", return_value=None), \
              warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             t1 = T1Database(session_id="fallback-id")
@@ -52,7 +52,7 @@ class TestT1DatabaseConstructor:
 
     def test_explicit_client_injection_bypasses_chain(self) -> None:
         client = chromadb.EphemeralClient()
-        with patch("nexus.db.t1.find_ancestor_session") as mock_find:
+        with patch("nexus.db.t1.resolve_t1_session") as mock_find:
             t1 = T1Database(session_id="injected", client=client)
         mock_find.assert_not_called()
         assert t1._session_id == "injected"
@@ -116,17 +116,17 @@ class TestT1DatabaseReconnect:
         record = {"session_id": "orig-session", "server_host": "127.0.0.1", "server_port": 54321}
         mock_http = MagicMock()
         mock_http.get_or_create_collection.return_value = MagicMock()
-        with patch("nexus.db.t1.find_ancestor_session", return_value=record), \
+        with patch("nexus.db.t1.resolve_t1_session", return_value=record), \
              patch("chromadb.HttpClient", return_value=mock_http):
             t1 = T1Database()
         assert t1._client is mock_http
-        with patch("nexus.db.t1.find_ancestor_session", return_value=None):
+        with patch("nexus.db.t1.resolve_t1_session", return_value=None):
             t1._reconnect()
         assert t1._dead is True and t1._client is not mock_http
 
     def test_reconnect_sets_dead_flag(self) -> None:
         t1 = _ephemeral_t1()
-        with patch("nexus.db.t1.find_ancestor_session", return_value=None):
+        with patch("nexus.db.t1.resolve_t1_session", return_value=None):
             t1._reconnect()
         assert t1._dead is True
 
@@ -134,7 +134,7 @@ class TestT1DatabaseReconnect:
         t1 = _ephemeral_t1()
         t1._dead = True
         original = t1._client
-        with patch("nexus.db.t1.find_ancestor_session") as mock:
+        with patch("nexus.db.t1.resolve_t1_session") as mock:
             t1._reconnect()
         mock.assert_not_called()
         assert t1._client is original

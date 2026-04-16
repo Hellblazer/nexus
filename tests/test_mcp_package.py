@@ -21,7 +21,8 @@ def test_catalog_module_importable():
 
 
 def test_core_registered_tools():
-    """15 core tools are registered with @mcp.tool()."""
+    """24 core tools: 15 legacy + 3 RDR-078 P1+P3 + 5 RDR-079 P3 operators
+    + 1 RDR-079 post-critique hydration primitive."""
     from nexus.mcp.core import mcp
 
     tool_names = {t.name for t in mcp._tool_manager.list_tools()}
@@ -30,6 +31,20 @@ def test_core_registered_tools():
         "memory_put", "memory_get", "memory_delete", "memory_search", "memory_consolidate",
         "scratch", "scratch_manage", "collection_list",
         "plan_save", "plan_search",
+        # RDR-078 P1 (nexus-05i.2): semantic plan matching + deterministic runner.
+        "plan_match", "plan_run",
+        # RDR-078 P3 (nexus-05i.5): typed-graph traversal of the catalog.
+        "traverse",
+        # RDR-079 P3 (nexus-wc3.1): analytical operators backed by pool workers.
+        "operator_extract", "operator_rank", "operator_compare",
+        "operator_summarize", "operator_generate",
+        # RDR-079 post-critique: content hydration primitive so operator
+        # steps receive document text rather than tumbler address strings.
+        "store_get_many",
+        # RDR-080 P1: plan-match-first orchestration tool.
+        "nx_answer",
+        # RDR-080 P3: consolidation tools replacing thin-wrapper agents.
+        "nx_tidy", "nx_enrich_beads", "nx_plan_audit",
     }
     assert expected == tool_names, f"Missing: {expected - tool_names}, Extra: {tool_names - expected}"
 

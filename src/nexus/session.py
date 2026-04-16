@@ -127,6 +127,58 @@ def _ppid_of(pid: int) -> int | None:
         return None  # intentional: process gone or ps unavailable — expected during PPID walk
 
 
+def resolve_t1_session(
+    sessions_dir: Path | None = None,
+    start_pid: int | None = None,
+) -> dict | None:
+    """Resolve the T1 session record for this process.
+
+    RDR-079 P2.3 single entry point. Order:
+      1. If ``NEXUS_T1_SESSION_ID`` env is set and non-empty, look up
+         ``{SESSIONS_DIR}/{NEXUS_T1_SESSION_ID}.session``. Return it when
+         present and parseable.
+      2. Otherwise (unset, empty, missing file, or corrupt JSON), fall
+         through to the RDR-078 PPID-walk via
+         :func:`find_ancestor_session`.
+
+    This is the mechanism that isolates pool workers from the user's T1
+    session (I-1). When a worker is spawned with
+    ``NEXUS_T1_SESSION_ID=pool-<uuid>``, it joins the pool's session
+    instead of PPID-walking to the user's. When the env is absent (the
+    common case), behavior is identical to the pre-RDR-079 discovery
+    path — no regression on RDR-078 T1 tests (SC-14(a)).
+
+    Use this everywhere ``find_ancestor_session()`` used to be called.
+    """
+    if sessions_dir is None:
+        sessions_dir = SESSIONS_DIR
+
+    explicit = os.environ.get("NEXUS_T1_SESSION_ID", "").strip()
+    if explicit:
+        candidate = sessions_dir / f"{explicit}.session"
+        if candidate.exists():
+            try:
+                record = json.loads(candidate.read_text())
+                if isinstance(record, dict) and all(
+                    k in record for k in ("server_host", "server_port", "session_id")
+                ):
+                    return record
+            except (json.JSONDecodeError, OSError):
+                _log.debug(
+                    "resolve_t1_session: env-specified session file unreadable; "
+                    "falling through to PPID-walk",
+                    path=str(candidate),
+                )
+        # Missing/corrupt env-specified file falls through to PPID-walk —
+        # documented behavior (SC-14(b)). A stale NEXUS_T1_SESSION_ID in
+        # the environment (e.g. from a previous aborted pool) should not
+        # break session discovery for non-pool callers.
+
+    return find_ancestor_session(
+        sessions_dir=sessions_dir, start_pid=start_pid,
+    )
+
+
 def find_ancestor_session(
     sessions_dir: Path | None = None,
     start_pid: int | None = None,
@@ -313,11 +365,31 @@ def write_session_record(
     port: int,
     server_pid: int,
     tmpdir: str = "",
+    *,
+    pool_session: bool = False,
+    pool_pid: int | None = None,
 ) -> Path:
-    """Write a JSON session record to *sessions_dir*/{ppid}.session (mode 0o600)."""
+    """Write a JSON session record to *sessions_dir*/{name}.session (mode 0o600).
+
+    ``name`` is ``{ppid}`` for user sessions (the RDR-078 default) or
+    ``{session_id}`` for pool sessions (RDR-079 P2.5). Pool sessions
+    additionally persist ``pool_pid`` (for P2.2 liveness reconciliation via
+    ``os.kill(pid, 0)``) and the marker ``pool_session: true``. User
+    sessions omit both fields entirely — backward compatible with any
+    existing consumer that reads the JSON.
+    """
+    if pool_session and pool_pid is None:
+        raise ValueError(
+            "pool_pid is required when pool_session=True — "
+            "reconciliation cannot probe liveness without a PID"
+        )
     sessions_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    path = sessions_dir / f"{ppid}.session"
-    record = {
+    # Pool sessions are named by their UUID so the session file is
+    # discoverable by session_id; user sessions stay PPID-named so the
+    # existing PPID-walk discovery path is unchanged.
+    filename = f"{session_id}.session" if pool_session else f"{ppid}.session"
+    path = sessions_dir / filename
+    record: dict[str, object] = {
         "session_id": session_id,
         "server_host": host,
         "server_port": port,
@@ -325,6 +397,9 @@ def write_session_record(
         "created_at": time.time(),
         "tmpdir": tmpdir,
     }
+    if pool_session:
+        record["pool_session"] = True
+        record["pool_pid"] = pool_pid
     fd = os.open(str(path), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
     try:
         os.write(fd, json.dumps(record).encode())

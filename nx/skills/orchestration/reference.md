@@ -17,7 +17,7 @@ digraph routing {
     "Analyze system" [shape=box];
 
     "strategic-planner" [shape=ellipse];
-    "plan-auditor" [shape=ellipse];
+    "nx_plan_audit" [shape=ellipse];
     "architect-planner" [shape=ellipse];
     "developer" [shape=ellipse];
     "code-review-expert" [shape=ellipse];
@@ -26,7 +26,7 @@ digraph routing {
     "deep-analyst" [shape=ellipse];
     "substantive-critic" [shape=ellipse];
     "deep-research-synthesizer" [shape=ellipse];
-    "knowledge-tidier" [shape=ellipse];
+    "nx_tidy" [shape=ellipse];
     "codebase-deep-analyzer" [shape=ellipse];
 
     "Request type?" -> "Plan a feature" [label="plan/design"];
@@ -37,8 +37,8 @@ digraph routing {
     "Request type?" -> "Analyze system" [label="explore/understand"];
 
     "Plan a feature" -> "strategic-planner";
-    "strategic-planner" -> "plan-auditor" [label="then"];
-    "plan-auditor" -> "architect-planner" [label="then"];
+    "strategic-planner" -> "nx_plan_audit" [label="then"];
+    "nx_plan_audit" -> "architect-planner" [label="then"];
 
     "Implement code" -> "developer";
     "developer" -> "code-review-expert" [label="then"];
@@ -53,7 +53,7 @@ digraph routing {
     "code-review-expert" -> "substantive-critic" [label="if critical"];
 
     "Research topic" -> "deep-research-synthesizer";
-    "deep-research-synthesizer" -> "knowledge-tidier" [label="then"];
+    "deep-research-synthesizer" -> "nx_tidy" [label="then"];
 
     "Analyze system" -> "codebase-deep-analyzer";
     "codebase-deep-analyzer" -> "deep-analyst" [label="if deep"];
@@ -64,12 +64,12 @@ digraph routing {
 
 | Request Type | Primary Agent | Pipeline |
 |-------------|---------------|----------|
-| Plan a feature | strategic-planner | -> plan-auditor -> architect-planner |
+| Plan a feature | strategic-planner | -> nx_plan_audit -> architect-planner |
 | Implement code | developer | -> code-review-expert -> test-validator |
 | Implement code (circuit breaker fired) | debugger | [after developer stops] -> debugger -> developer resumes |
 | Debug issue | debugger | -> (if cross-cutting) deep-analyst |
 | Review code | code-review-expert | -> (if critical) substantive-critic |
-| Research topic | deep-research-synthesizer | -> knowledge-tidier |
+| Research topic | deep-research-synthesizer | -> nx_tidy |
 | Analyze system | codebase-deep-analyzer | -> (if deep) deep-analyst |
 
 ## Decision Framework
@@ -78,7 +78,7 @@ digraph routing {
 - **Implementation**: Code needs to be written -> developer
 - **Architecture/Design**: System design needed -> architect-planner or strategic-planner
 - **Bug/Issue**: Something is broken -> debugger
-- **Review**: Work needs validation -> code-review-expert, plan-auditor, or substantive-critic
+- **Review**: Work needs validation -> code-review-expert, nx_plan_audit, or substantive-critic
 - **Catalog Query**: Question about specific authors, papers, citations, provenance, references, corpus -> `/nx:query` skill (catalog-aware retrieval)
 - **Research**: General information gathering -> deep-research-synthesizer
 - **Analysis**: Understanding needed -> deep-analyst or codebase-deep-analyzer
@@ -98,7 +98,7 @@ If the task requires multiple stages:
 
 ### Feature Development Pipeline
 1. strategic-planner: Create plan with beads
-2. plan-auditor: Validate plan
+2. nx_plan_audit: Validate plan
 3. architect-planner: Design architecture
 4. developer: Implement with TDD
 5. code-review-expert: Review implementation
@@ -111,18 +111,18 @@ If the task requires multiple stages:
 4. test-validator: Verify fix and regression tests
 
 ### Catalog Query Pipeline
-Use `/nx:query` skill directly (it orchestrates query-planner + analytical-operator internally).
+Use `mcp__plugin_nx_nexus__nx_answer(question=...)` directly. It handles plan matching, operator dispatch, and auto-hydration internally.
 Route here when the question involves: specific authors, paper citations, "what cites X",
 "what research informed Y", corpus-scoped retrieval, or document provenance chains.
 
 ### Research Pipeline
 1. deep-research-synthesizer: Gather information
-2. knowledge-tidier: Consolidate findings
+2. nx_tidy: Consolidate findings
 3. (optional) architect-planner: Apply findings to design
 
 ### Plan Validation Pipeline
 1. strategic-planner or architect-planner: Create plan
-2. plan-auditor: Validate technical accuracy
+2. nx_plan_audit: Validate technical accuracy
 3. substantive-critic: Critique for gaps and assumptions
 
 ## Pipeline Pattern Catalog
@@ -131,9 +131,9 @@ These patterns are stored in the T2 plan library and are returned by `plan_searc
 
 | Pattern | Agents | When to Use | Prerequisites |
 |---------|--------|-------------|---------------|
-| RDR Chain | deep-research-synthesizer → `/nx:rdr-gate` → `/nx:rdr-accept` → strategic-planner → plan-auditor → plan-enricher → developer → code-review-expert → test-validator | Non-trivial features needing design documentation before coding | RDR created and populated with research findings |
-| Plan-Audit-Implement | strategic-planner → plan-auditor → developer → code-review-expert → test-validator | Standard feature development with clear requirements | Requirements defined, no RDR needed |
-| Research-Synthesize | deep-research-synthesizer → knowledge-tidier | Gathering information on unfamiliar topics or comparing approaches | Topic identified |
+| RDR Chain | deep-research-synthesizer → `/nx:rdr-gate` → `/nx:rdr-accept` → strategic-planner → nx_plan_audit → nx_enrich_beads → developer → code-review-expert → test-validator | Non-trivial features needing design documentation before coding | RDR created and populated with research findings |
+| Plan-Audit-Implement | strategic-planner → nx_plan_audit → developer → code-review-expert → test-validator | Standard feature development with clear requirements | Requirements defined, no RDR needed |
+| Research-Synthesize | deep-research-synthesizer → nx_tidy | Gathering information on unfamiliar topics or comparing approaches | Topic identified |
 | Code Review | code-review-expert → test-validator | Post-implementation quality gate before merge or PR | Code changes committed |
 | Debug | debugger → developer → test-validator | Test failures or non-deterministic behavior, especially after 2+ failed manual fix attempts | Reproducible failure or clear symptom |
 
@@ -145,13 +145,12 @@ These patterns are stored in the T2 plan library and are returned by `plan_searc
 | developer | Execute implementation plans, write code with TDD |
 | architect-planner | Design architecture, create execution plans |
 | debugger | Complex bugs, non-deterministic failures, performance issues |
-| analytical-operator | Execute analytical operations (extract, summarize, rank, compare, generate) on retrieved content |
 
 ### Review Agents
 | Agent | When to Use |
 |-------|-------------|
 | code-review-expert | Review implemented code for quality and best practices |
-| plan-auditor | Validate plans before implementation |
+| nx_plan_audit | Validate plans before implementation |
 | substantive-critic | Deep critique of any content (code, docs, designs) |
 
 ### Analysis Agents
@@ -170,6 +169,5 @@ These patterns are stored in the T2 plan library and are returned by `plan_searc
 | Agent | When to Use |
 |-------|-------------|
 | strategic-planner | Project planning, bead management, infrastructure setup |
-| knowledge-tidier | Clean and consolidate knowledge bases |
-| pdf-chromadb-processor | Process PDFs for semantic search via nx index pdf |
+| nx_tidy | Clean and consolidate knowledge bases |
 | test-validator | Verify test coverage, run test suites |

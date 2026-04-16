@@ -157,11 +157,22 @@ def _run_check_schema() -> None:
     default=False,
     help="Validate T2 database schema and report pending migrations.",
 )
+@click.option(
+    "--operators",
+    is_flag=True,
+    default=False,
+    help="Report today's operator spend and budget status (RDR-080 P5).",
+)
 def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
-               fix_paths: bool, dry_run: bool, check_schema: bool) -> None:
+               fix_paths: bool, dry_run: bool, check_schema: bool,
+               operators: bool) -> None:
     """Verify that all required services and credentials are available."""
     if check_schema:
         _run_check_schema()
+        return
+
+    if operators:
+        _run_operators_report()
         return
 
     if fix:
@@ -298,3 +309,49 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
 
     if failed:
         raise click.exceptions.Exit(1)
+
+
+def _run_operators_report() -> None:
+    """Report today's operator spend and budget status (RDR-080 P5)."""
+    from nexus.config import get_operator_budget_config
+    from nexus.mcp_infra import _t2_db_path
+    from nexus.operators.budget import check_budget, today_spend_usd
+
+    budget_cfg = get_operator_budget_config()
+    db_path = _t2_db_path()
+
+    import sqlite3
+
+    try:
+        conn = sqlite3.connect(str(db_path))
+        # Check if nx_answer_runs table exists.
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='nx_answer_runs'"
+        ).fetchone()
+        if row is None:
+            click.echo("nx_answer_runs table not found. Run 'nx upgrade' first.")
+            return
+        spend = today_spend_usd(conn)
+        conn.close()
+    except Exception as exc:
+        click.echo(f"Error reading T2 database: {exc}")
+        return
+
+    result = check_budget(
+        daily_budget_usd=budget_cfg.daily_budget_usd,
+        today_spend=spend,
+    )
+
+    click.echo(f"Today's operator spend: ${spend:.4f}")
+    if budget_cfg.daily_budget_usd is not None:
+        pct = (spend / budget_cfg.daily_budget_usd * 100) if budget_cfg.daily_budget_usd > 0 else 0
+        click.echo(f"Daily budget:          ${budget_cfg.daily_budget_usd:.2f}")
+        click.echo(f"Used:                  {pct:.1f}%")
+        if not result.allowed:
+            click.echo("Status:                REFUSED (budget exhausted)")
+        elif result.warning:
+            click.echo("Status:                WARNING (≥80%)")
+        else:
+            click.echo("Status:                OK")
+    else:
+        click.echo("Daily budget:          not configured")

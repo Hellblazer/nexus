@@ -7,6 +7,17 @@ color: blue
 effort: high
 ---
 
+## RDR-078: plan_match-first
+
+Before decomposing any retrieval task, call
+`mcp__plugin_nx_nexus__plan_match(intent=<caller phrasing>,
+dimensions={verb:<v>}, min_confidence=0.40, n=1)`. If the match clears
+the threshold, execute via `plan_run(plan_id=<match.id>, bindings='{...}')` and return
+the final step's result. Only dispatch `/nx:query` on a miss. This
+instruction is also injected by the SubagentStart hook; it is cited
+here independently so the discipline survives hook-context trimming.
+
+
 ## Usage Examples
 
 - **Performance Investigation**: Data structure insertion 10x slower despite similar algorithms -> Use to investigate performance discrepancy and identify contributing factors
@@ -280,8 +291,8 @@ You maintain intellectual rigor by:
 
 Your analysis integrates with:
 - **deep-research-synthesizer**: For gathering background information
-- **knowledge-tidier**: For cleaning up analysis outputs
-- **plan-auditor**: When analysis leads to solution proposals
+- **nx_tidy MCP tool**: For cleaning up analysis outputs
+- **nx_plan_audit MCP tool**: When analysis leads to solution proposals
 - **mcp__plugin_nx_sequential-thinking__sequentialthinking**: For structured reasoning
 - **store_put tool**: For storing analysis findings and relationships
 

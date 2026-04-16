@@ -1,5 +1,5 @@
 ---
-description: Enrich beads with execution context using plan-enricher agent
+description: Enrich beads with execution context via nx_enrich_beads MCP tool
 ---
 
 # Enrich Plan
@@ -27,25 +27,11 @@ $ARGUMENTS
 
 ## Action
 
-Invoke the **enrich-plan** skill with the following relay. Fill in dynamic fields from the context above:
+Call `mcp__plugin_nx_nexus__nx_enrich_beads(epic_bead=<epic-bead-id>, context=<context>)` to enrich all beads with execution context.
 
-```markdown
-## Relay: plan-enricher
-
-**Task**: Enrich all beads with execution context and codebase alignment
-**Bead**: [fill from epic bead above or 'none']
-
-### Input Artifacts
-- nx scratch: plan structure, bead IDs, audit findings (if present from same-session /nx:plan-audit)
-- Files: [fill from key files referenced in plan]
-
-### Deliverable
-All beads enriched with file paths, code patterns, test commands, constraints, and (when available) audit gap mitigations. Epic bead ID persisted to T2.
+Populate `epic_bead` with the epic bead ID from the context above (or 'none'). Populate `context` with relevant file paths and audit findings from T1 scratch if present.
 
 ### Quality Criteria
 - [ ] Every bead enriched with execution context
 - [ ] Epic bead ID written to T2 for close-time advisory
 - [ ] Enrichment summary reported to user
-```
-
-For full relay structure, see [RELAY_TEMPLATE.md](../agents/_shared/RELAY_TEMPLATE.md).

@@ -101,15 +101,14 @@ nx/
     ├── architecture/        # → architect-planner agent
     ├── debugging/           # → debugger agent
     ├── development/         # → developer agent
-    ├── knowledge-tidying/   # → knowledge-tidier agent
+    ├── knowledge-tidying/   # → nx_tidy MCP tool
     ├── orchestration/       # routing reference (no agent)
-    ├── pdf-processing/      # → pdf-chromadb-processor agent
-    ├── plan-validation/     # → plan-auditor agent
+    ├── plan-validation/     # → nx_plan_audit MCP tool
     ├── research-synthesis/  # → deep-research-synthesizer agent
     ├── strategic-planning/  # → strategic-planner agent
     ├── test-validation/     # → test-validator agent
     ├── rdr-accept/          # RDR workflow: accept a gated RDR
-    ├── enrich-plan/         # → plan-enricher agent
+    ├── enrich-plan/         # → nx_enrich_beads MCP tool
     ├── rdr-close/           # RDR workflow: close RDR, bead advisory
     ├── rdr-create/          # RDR workflow: create new RDR from template
     ├── rdr-gate/            # RDR workflow: quality gate before finalizing
@@ -142,7 +141,6 @@ See [`registry.yaml`](./registry.yaml) for full metadata (model, triggers, prede
 
 | Agent | Skill | Command | Model | Purpose |
 |-------|-------|---------|-------|---------|
-| analytical-operator | query | *(dispatched)* | sonnet | Structured extraction, summarization, ranking, comparison |
 | architect-planner | architecture | `/nx:architecture` | opus | Software architecture design, execution plans |
 | code-review-expert | code-review | `/nx:review-code` | sonnet | Code quality, security, best practices |
 | codebase-deep-analyzer | codebase-analysis | `/nx:analyze-code` | sonnet | Architecture, patterns, dependency mapping |
@@ -150,11 +148,9 @@ See [`registry.yaml`](./registry.yaml) for full metadata (model, triggers, prede
 | deep-analyst | deep-analysis | `/nx:deep-analysis` | opus | Complex problem investigation, root cause |
 | deep-research-synthesizer | research-synthesis | `/nx:research` | sonnet | Multi-source research with synthesis |
 | developer | development | `/nx:implement` | sonnet | TDD implementation, test-first methodology |
-| knowledge-tidier | knowledge-tidying | `/nx:knowledge-tidy` | haiku | Persist and organize knowledge in nx store |
-| pdf-chromadb-processor | pdf-processing | `/nx:pdf-process` | haiku | Index PDFs into nx store for semantic search |
-| plan-auditor | plan-validation | `/nx:plan-audit` | sonnet | Validate plans before execution |
-| plan-enricher | enrich-plan | `/nx:enrich-plan` | sonnet | Enrich beads with execution context |
-| query-planner | query | *(dispatched)* | sonnet | Decompose analytical questions into execution plans |
+| knowledge-tidier | knowledge-tidying | `/nx:knowledge-tidy` | haiku | Persist and organize knowledge in nx store (stub → nx_tidy MCP tool) |
+| plan-auditor | plan-validation | `/nx:plan-audit` | sonnet | Validate plans before execution (stub → nx_plan_audit MCP tool) |
+| plan-enricher | enrich-plan | `/nx:enrich-plan` | sonnet | Enrich beads with execution context (stub → nx_enrich_beads MCP tool) |
 | strategic-planner | strategic-planning | `/nx:create-plan` | opus | Implementation planning, task decomposition |
 | substantive-critic | substantive-critique | `/nx:substantive-critique` | sonnet | Constructive critique of plans/designs/code |
 | test-validator | test-validation | `/nx:test-validate` | sonnet | Test coverage and quality validation |
@@ -163,11 +159,11 @@ See [`registry.yaml`](./registry.yaml) for full metadata (model, triggers, prede
 
 Defined in `registry.yaml`:
 
-- **feature**: strategic-planner → plan-auditor → plan-enricher *(conditional)* → architect-planner → developer → code-review-expert → test-validator
+- **feature**: strategic-planner → `nx_plan_audit` → `nx_enrich_beads` *(conditional)* → architect-planner → developer → code-review-expert → test-validator
 - **bug**: debugger → developer → code-review-expert → test-validator
-- **research**: deep-research-synthesizer → knowledge-tidier
+- **research**: deep-research-synthesizer → `nx_tidy`
 - **onboarding**: codebase-deep-analyzer → strategic-planner
-- **architecture**: codebase-deep-analyzer → deep-analyst → strategic-planner → plan-auditor → architect-planner
+- **architecture**: codebase-deep-analyzer → deep-analyst → strategic-planner → `nx_plan_audit` → architect-planner
 
 ## Hooks
 
@@ -191,18 +187,17 @@ See `hooks/hooks.json` for exact wiring. Paths below use `$CLAUDE_PLUGIN_ROOT` a
 **Agent commands** (`/command → agent`):
 - `/nx:research` → deep-research-synthesizer
 - `/nx:create-plan` → strategic-planner
-- `/nx:plan-audit` → plan-auditor
+- `/nx:plan-audit` → `nx_plan_audit` MCP tool
 - `/nx:analyze-code` → codebase-deep-analyzer
 - `/nx:review-code` → code-review-expert
 - `/nx:test-validate` → test-validator
 - `/nx:implement` → developer
 - `/nx:debug` → debugger
 - `/nx:architecture` → architect-planner
-- `/nx:knowledge-tidy` → knowledge-tidier
-- `/nx:pdf-process` → pdf-chromadb-processor
+- `/nx:knowledge-tidy` → `nx_tidy` MCP tool
 - `/nx:deep-analysis` → deep-analyst
 - `/nx:substantive-critique` → substantive-critic
-- `/nx:enrich-plan` → plan-enricher
+- `/nx:enrich-plan` → `nx_enrich_beads` MCP tool
 
 **RDR commands**: `/nx:rdr-create`, `/nx:rdr-list`, `/nx:rdr-show`, `/nx:rdr-research`, `/nx:rdr-gate`, `/nx:rdr-accept`, `/nx:rdr-close`
 

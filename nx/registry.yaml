@@ -19,23 +19,6 @@ generated_docs:
 # Agents output "Recommended Next Step" blocks; the caller orchestrates dispatch.
 
 agents:
-  analytical-operator:
-    model: sonnet
-    version: "1.0"
-    color: cyan
-    skill: query
-    description: "Executes analytical operations (extract, summarize, rank, compare, generate) on retrieved content"
-    triggers:
-      - "dispatched by /nx:query skill for structured data processing"
-      - "multi-step query operator execution"
-    strengths:
-      - "Structured extraction"
-      - "Evidence-grounded summarization"
-      - "Comparative analysis"
-    typical_runtime: "15-30 seconds"
-    predecessors: []
-    successors: []
-
   code-review-expert:
     model: sonnet
     version: "2.0"
@@ -178,7 +161,7 @@ agents:
 
   knowledge-tidier:
     model: haiku
-    version: "2.0"
+    version: "3.0"
     color: mint
     skill: knowledge-tidying
     slash_command: /knowledge-tidy
@@ -196,46 +179,10 @@ agents:
     predecessors: [deep-research-synthesizer]
     successors: []
 
-  pdf-chromadb-processor:
-    model: haiku
-    version: "3.0"
-    color: coral
-    skill: pdf-processing
-    slash_command: /pdf-process
-    description: "Processes PDF files into nx store for semantic search"
-    triggers:
-      - "user says index PDF"
-      - "importing technical documentation"
-      - "PDFs need semantic indexing"
-    strengths:
-      - "PDF extraction"
-      - "Chunk optimization"
-      - "Metadata preservation"
-    typical_runtime: "30-60 seconds per PDF"
-    predecessors: []
-    successors: []
-
-  query-planner:
-    model: sonnet
-    version: "2.0"
-    color: blue
-    skill: query
-    slash_command: /query
-    description: "Decomposes analytical questions into step-by-step execution plans with operator references"
-    triggers:
-      - "dispatched by /nx:query skill for plan generation"
-      - "complex analytical question decomposition"
-    strengths:
-      - "Query decomposition"
-      - "Operator selection"
-      - "Plan optimization"
-    typical_runtime: "15-30 seconds"
-    predecessors: []
-    successors: [analytical-operator]
 
   plan-auditor:
     model: sonnet
-    version: "2.0"
+    version: "3.0"
     color: orange
     skill: plan-validation
     slash_command: /plan-audit
@@ -254,7 +201,7 @@ agents:
 
   plan-enricher:
     model: sonnet
-    version: "2.0"
+    version: "3.0"
     color: emerald
     skill: enrich-plan
     slash_command: /enrich-plan
@@ -373,7 +320,7 @@ rdr_skills:
     slash_command: /rdr-accept
     command_file: commands/rdr-accept.md
     description: "Accept a gated RDR — verify gate PASSED, update status, optional planning dispatch"
-    dispatches_to: [strategic-planner, plan-auditor, plan-enricher]  # sequential chain, orchestrated by skill
+    dispatches_to: [strategic-planner]  # plan-auditor/plan-enricher replaced by nx_plan_audit/nx_enrich_beads MCP tools (RDR-080)
     triggers:
       - "accept this RDR"
       - "mark RDR as accepted"
@@ -387,7 +334,7 @@ rdr_skills:
       - "close this RDR"
       - "RDR done"
       - "finish RDR"
-    dispatches_to: [knowledge-tidier]
+    dispatches_to: []  # knowledge-tidier replaced by nx_tidy MCP tool (RDR-080)
 
   rdr-audit:
     slash_command: /rdr-audit
@@ -424,6 +371,14 @@ rdr_skills:
 # no predecessors/successors (not part of agent pipelines).
 
 standalone_skills:
+  query:
+    description: "Multi-step retrieval and analysis via nx_answer MCP tool. Plan-match-first orchestration with auto-hydration and operator dispatch."
+    triggers:
+      - "cross-corpus consistency check"
+      - "structured extraction with comparison"
+      - "multi-source synthesis"
+      - "evidence-grounded generation"
+      - "author or citation query"
   serena-code-nav:
     description: "LSP-backed symbol navigation via Serena MCP — find definitions, all callers, type hierarchies, safe rename, and symbol-scoped editing. Use instead of Grep for any symbol-level task."
     triggers:
@@ -529,6 +484,79 @@ standalone_skills:
     tools: [Bash, Read, Grep, Glob]
     dispatches_to: [general-purpose]
 
+  # RDR-078 P5: plan-centric retrieval skills (nexus-05i.9)
+  plan-first:
+    description: "Gate skill at the top of every retrieval task — tries plan_match first, executes via plan_run if a match clears the threshold, falls through to /nx:query otherwise"
+    triggers:
+      - "before any retrieval task"
+      - "before dispatching search/query"
+      - "before decomposing an agentic pipeline"
+    tools: [Read]
+
+  research:
+    description: "Verb skill for design / architecture / planning tasks — dispatches plan_match with dimensions={verb:research}, executes via plan_run with caller bindings"
+    triggers:
+      - "how does X work"
+      - "design context for Y"
+      - "trace Z from spec to code"
+    tools: [Read]
+
+  review:
+    description: "Verb skill for critique / audit / code-review against a change set — dispatches plan_match with dimensions={verb:review}"
+    triggers:
+      - "review this change set"
+      - "did the refactor drift from the RDR"
+      - "critique the new logic"
+    tools: [Read]
+
+  analyze:
+    description: "Verb skill for analysis / synthesis / cross-corpus tasks — dispatches plan_match with dimensions={verb:analyze}"
+    triggers:
+      - "compare approaches across corpora"
+      - "survey options"
+      - "rank candidates by criterion"
+    tools: [Read]
+
+  debug:
+    description: "Verb skill for dev / debug from a failing code path — dispatches plan_match with dimensions={verb:debug}; intentionally flat (no traverse — Serena handles symbol navigation)"
+    triggers:
+      - "debug this test failure"
+      - "why is this handler failing"
+      - "trace the stack of the panic"
+    tools: [Read]
+
+  document:
+    description: "Verb skill for documentation authoring or audit — dispatches plan_match with dimensions={verb:document}"
+    triggers:
+      - "audit doc coverage"
+      - "find doc-coverage gaps"
+      - "what RDRs should I cite when documenting X"
+    tools: [Read]
+
+  plan-author:
+    description: "Meta-seed skill for authoring new plan templates — dispatches plan_match with dimensions={verb:plan-author} and surveys prior art before drafting"
+    triggers:
+      - "author a new plan template"
+      - "how do I write a plan for X"
+      - "draft a plan for this verb"
+    tools: [Read]
+
+  plan-inspect:
+    description: "Meta-seed skill for inspecting plan metrics or the dimension registry — dispatches plan_match with dimensions={verb:plan-inspect}"
+    triggers:
+      - "inspect plan metrics"
+      - "show dimension registry usage"
+      - "what plans are earning their slot"
+    tools: [Read]
+
+  plan-promote:
+    description: "Meta-seed skill that surveys plan library metrics and ranks promotion candidates — dispatches plan_match with dimensions={verb:plan-promote, strategy:propose}"
+    triggers:
+      - "promote high-use plans"
+      - "rank promotion candidates"
+      - "surface plans ready for a higher scope"
+    tools: [Read]
+
 # =============================================================================
 # PIPELINES
 # =============================================================================
@@ -539,8 +567,8 @@ pipelines:
     description: "Full feature development from planning to validation"
     sequence:
       - strategic-planner
-      - plan-auditor
-      - plan-enricher  # conditional: only when rdr-planning-context T1 tag present
+      - plan-auditor   # stub → nx_plan_audit MCP tool
+      - plan-enricher  # stub → nx_enrich_beads MCP tool (conditional)
       - architect-planner
       - developer
       - code-review-expert
@@ -558,7 +586,7 @@ pipelines:
     description: "Research with knowledge persistence"
     sequence:
       - deep-research-synthesizer
-      - knowledge-tidier
+      - knowledge-tidier  # stub → nx_tidy MCP tool
 
   onboarding:
     description: "New codebase understanding"
@@ -572,7 +600,7 @@ pipelines:
       - codebase-deep-analyzer
       - deep-analyst
       - strategic-planner
-      - plan-auditor
+      - plan-auditor  # stub → nx_plan_audit MCP tool
       - architect-planner
 
 # =============================================================================
@@ -605,19 +633,14 @@ model_summary:
     - debugger
     - deep-analyst
   sonnet: # Balanced - most common agents
-    - analytical-operator
     - code-review-expert
     - codebase-deep-analyzer
     - substantive-critic
     - deep-research-synthesizer
     - developer
-    - plan-auditor
-    - plan-enricher
-    - query-planner
     - test-validator
-  haiku: # Fast, cheap - utility agents
-    - knowledge-tidier
-    - pdf-chromadb-processor
+    # plan-auditor, plan-enricher: stubs → MCP tools (no model budget)
+  haiku: []  # knowledge-tidier: stub → nx_tidy MCP tool (no model budget)
 
 # =============================================================================
 # UTILITY COMMANDS
@@ -629,6 +652,10 @@ utility_commands:
   nx-preflight:
     slash_command: /nx-preflight
     description: "Verify nx plugin dependencies: nx CLI, nx doctor, bd (beads)"
+    disable_model_invocation: false
+  pdf-process:
+    slash_command: /pdf-process
+    description: "Index PDF files into nx store for semantic search via nx index pdf"
     disable_model_invocation: false
 
 

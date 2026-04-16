@@ -6,6 +6,7 @@ Separated from tool definitions (mcp_server.py) to isolate concerns.
 """
 from __future__ import annotations
 
+import os
 import threading
 import time
 import warnings
@@ -26,6 +27,19 @@ _COLLECTIONS_CACHE_TTL = 60.0
 
 _catalog_instance = None
 _catalog_lock = threading.Lock()
+
+# RDR-079 P2: operator pool singletons. Lazy-init on first
+# get_operator_pool() call — creates a dedicated pool T1 session and
+# wires NEXUS_T1_SESSION_ID into this process's env so spawn_worker()
+# guards pass. Per-operator pools live in _operator_pools keyed by
+# operator_name (P3: 5 operators, each with its own role + schema per
+# RDR-079 Empirical Finding 3 — --json-schema is per-spawn, not per-turn).
+# The default (None-keyed) entry is the generic no-schema pool used by
+# plan_run dispatches that don't declare an operator type.
+_operator_pool = None  # default/no-schema pool
+_operator_pools: dict = {}  # per-operator-name pools
+_operator_pool_lock = threading.Lock()
+_operator_pool_session = None  # shared pool T1 session across all operator pools
 _catalog_mtime: float = 0.0
 
 # ── Search trace cache (RDR-061 E2) ──────────────────────────────────────────
@@ -118,6 +132,62 @@ def get_t3():
                 from nexus.db import make_t3
                 _t3_instance = make_t3()
     return _t3_instance
+
+
+# ── T1 plan_session cache (RDR-078 P1) ────────────────────────────────────
+#
+# Singleton wrapper around :class:`~nexus.plans.session_cache.PlanSessionCache`.
+# Populated lazily on first use from T2. Subsequent calls reuse the same
+# cache instance; a ``plan_save`` hook (see below) keeps it current.
+
+_plan_cache_instance: Any = None
+_plan_cache_lock = threading.Lock()
+_plan_cache_populated: bool = False
+
+
+def get_t1_plan_cache(*, populate_from: Any = None) -> Any:
+    """Return the T1 ``plans__session`` cache, lazy-populated on first call.
+
+    When *populate_from* (a PlanLibrary) is supplied and the cache has
+    not yet been populated this process, the full active plan set is
+    loaded. Subsequent calls short-circuit — the ``plan_save`` MCP
+    hook keeps the cache fresh in-session.
+
+    Returns ``None`` when no T1 client is reachable — the matcher
+    treats that as "fall back to FTS5".
+    """
+    global _plan_cache_instance, _plan_cache_populated
+    if _plan_cache_instance is None:
+        with _plan_cache_lock:
+            if _plan_cache_instance is None:
+                try:
+                    t1, _ = get_t1()
+                    from nexus.plans.session_cache import PlanSessionCache
+                    _plan_cache_instance = PlanSessionCache(
+                        client=t1._client, session_id=t1.session_id,
+                    )
+                except Exception:
+                    _plan_cache_instance = None
+    if (
+        _plan_cache_instance is not None
+        and populate_from is not None
+        and not _plan_cache_populated
+    ):
+        with _plan_cache_lock:
+            if not _plan_cache_populated:
+                try:
+                    _plan_cache_instance.populate(populate_from)
+                finally:
+                    _plan_cache_populated = True
+    return _plan_cache_instance
+
+
+def reset_plan_cache_for_tests() -> None:
+    """Test helper: drop the cache singleton so the next call re-init."""
+    global _plan_cache_instance, _plan_cache_populated
+    with _plan_cache_lock:
+        _plan_cache_instance = None
+        _plan_cache_populated = False
 
 
 def get_collection_names() -> list[str]:
@@ -435,6 +505,126 @@ def check_version_compatibility() -> None:
         pass  # never block MCP startup
 
 
+# ── RDR-079 P2.1: operator-pool singleton ───────────────────────────────────
+
+
+def _load_config_for_pool() -> dict:
+    """Read ``operators.*`` settings from ``.nexus.yml``.
+
+    Overridable hook for tests — monkeypatch this to inject config
+    without touching the filesystem.
+    """
+    from nexus.config import load_config
+    cfg = load_config() or {}
+    return cfg
+
+
+def _ensure_pool_session():
+    """Ensure the shared pool T1 session exists + env var is set.
+
+    Called from every ``get_operator_pool`` variant so the first pool
+    constructed lazily spins up the pool session, and subsequent pools
+    (for different operators) reuse it. Returns the shared
+    ``PoolSession``.
+    """
+    global _operator_pool_session
+    if _operator_pool_session is not None:
+        return _operator_pool_session
+    from nexus.operators.pool import create_pool_session
+
+    _operator_pool_session = create_pool_session()
+    os.environ["NEXUS_T1_SESSION_ID"] = _operator_pool_session.session_id
+    return _operator_pool_session
+
+
+def get_operator_pool(
+    operator_name: str | None = None,
+    *,
+    operator_role: str | None = None,
+    json_schema: dict | None = None,
+):
+    """Lazy-init singleton(s) for RDR-079 operator pools.
+
+    When ``operator_name`` is None: returns the default no-schema pool
+    (used by the runner for generic step dispatches). One singleton.
+
+    When ``operator_name`` is given: returns the per-operator pool
+    keyed by name. Each per-operator pool carries its own
+    ``operator_role`` + ``json_schema`` (worker-spawn-time; RDR-079
+    Empirical Finding 3 — ``--json-schema`` is per-spawn, not per-turn).
+    The first call with a given ``operator_name`` constructs the pool
+    using ``operator_role`` and ``json_schema``; subsequent calls with
+    the same name return the cached instance and IGNORE the role/schema
+    args. Reset via :func:`reset_operator_pool` in tests.
+
+    All pools share the same T1 session (a single ``pool-<uuid>``
+    session file) — multiple pool instances, one T1 endpoint.
+    """
+    global _operator_pool
+    if operator_name is None:
+        if _operator_pool is not None:
+            return _operator_pool
+        with _operator_pool_lock:
+            if _operator_pool is not None:
+                return _operator_pool
+            from nexus.operators.pool import OperatorPool
+
+            session = _ensure_pool_session()
+            cfg = _load_config_for_pool() or {}
+            op_cfg = cfg.get("operators", {}) or {}
+            pool = OperatorPool(
+                size=int(op_cfg.get("pool_size", 2)),
+                model=str(op_cfg.get("model", "haiku")),
+                max_budget_usd=float(op_cfg.get("max_budget_usd", 1.0)),
+                max_turns=int(op_cfg.get("max_turns", 6)),
+                retirement_token_threshold=int(
+                    op_cfg.get("retirement_token_threshold", 150_000),
+                ),
+            )
+            pool.pool_session = session
+            _operator_pool = pool
+            return _operator_pool
+
+    # Per-operator pool
+    if operator_name in _operator_pools:
+        return _operator_pools[operator_name]
+    with _operator_pool_lock:
+        if operator_name in _operator_pools:
+            return _operator_pools[operator_name]
+        from nexus.operators.pool import OperatorPool
+
+        session = _ensure_pool_session()
+        cfg = _load_config_for_pool() or {}
+        op_cfg = cfg.get("operators", {}) or {}
+        pool = OperatorPool(
+            size=int(op_cfg.get("pool_size", 2)),
+            model=str(op_cfg.get("model", "haiku")),
+            max_budget_usd=float(op_cfg.get("max_budget_usd", 1.0)),
+            max_turns=int(op_cfg.get("max_turns", 6)),
+            retirement_token_threshold=int(
+                op_cfg.get("retirement_token_threshold", 150_000),
+            ),
+            operator_role=operator_role or f"You are the `{operator_name}` operator.",
+            json_schema=json_schema,
+        )
+        pool.pool_session = session
+        _operator_pools[operator_name] = pool
+        return pool
+
+
+def reset_operator_pool() -> None:
+    """Reset the operator-pool singletons. Test-only.
+
+    Does NOT call ``pool.shutdown()`` — tests that hold live workers
+    are responsible for their own teardown. Also clears the shared
+    pool-session reference so the next test can spin up a fresh one.
+    """
+    global _operator_pool, _operator_pool_session, _operator_pools
+    _operator_pool = None
+    _operator_pools = {}
+    _operator_pool_session = None
+
+
 # ── Test injection ────────────────────────────────────────────────────────────
 
 
@@ -448,13 +638,21 @@ def reset_singletons():
     for the remainder of the test session.  Tests that need an empty hook
     list should clear ``_post_store_hooks`` explicitly in their own fixture.
     """
-    global _t1_instance, _t1_isolated, _t3_instance, _collections_cache, _catalog_instance, _catalog_mtime
+    global _t1_instance, _t1_isolated, _t3_instance, _collections_cache, _catalog_instance, _catalog_mtime, _operator_pool, _operator_pools, _operator_pool_session
     _t1_instance = None
     _t1_isolated = False
     _t3_instance = None
     _collections_cache = ([], 0.0)
     _catalog_instance = None
     _catalog_mtime = 0.0
+    # Clear all operator-pool singletons (default + per-operator dict +
+    # shared pool session) — test suites calling reset_singletons expect
+    # a clean MCP-infra slate. Live workers owned by a prior test are
+    # the test's responsibility to shut down; this just clears the
+    # cached references.
+    _operator_pool = None
+    _operator_pools = {}
+    _operator_pool_session = None
     clear_search_traces()
 
 

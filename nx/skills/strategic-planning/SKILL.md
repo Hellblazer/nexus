@@ -69,7 +69,7 @@ The agent uses `mcp__plugin_nx_sequential-thinking__sequentialthinking`:
 6. Create beads for trackable work items
 7. Define success criteria and test strategy
 
-**REQUIRED SUB-SKILL:** Use nx:plan-validation (plan-auditor) after creating any plan.
+**REQUIRED SUB-SKILL:** Use nx:plan-validation (nx_plan_audit) after creating any plan.
 
 ## Success Criteria
 
@@ -79,7 +79,7 @@ The agent uses `mcp__plugin_nx_sequential-thinking__sequentialthinking`:
 - [ ] Beads created for all tasks
 - [ ] Success criteria defined per task
 - [ ] Risks identified and mitigated
-- [ ] Plan validated by plan-auditor
+- [ ] Plan validated by nx_plan_audit
 
 ## Agent-Specific PRODUCE
 

@@ -1,0 +1,45 @@
+# Dimensions registry for RDR-078 plan templates.
+#
+# Each top-level key names a registered dimension; the value is a
+# free-form description used by the plan-author meta-seed and the
+# SC-19 schema validator. The validator warns (or, with --strict,
+# rejects) plan templates whose dimension keys are not in this set.
+#
+# Sharing model: this file is shipped by the nx plugin (scope:global).
+# Project overrides may add new dimensions in `.nexus/plans/dimensions.yml`
+# (additive — name collisions surface at load time).
+#
+# SC-19 contract: at least 5 dimensions registered, including verb,
+# scope, and strategy as required canonical axes.
+
+verb:
+  description: >-
+    The action a plan performs. One of: research, review, analyze,
+    debug, document, plan-author, plan-promote, plan-inspect.
+  required: true
+
+scope:
+  description: >-
+    Where the plan is published. One of: personal, rdr-<slug>, project,
+    repo, global. Plans at higher scopes shadow lower ones at lookup
+    time via the cascade weighting.
+  required: true
+
+strategy:
+  description: >-
+    The variant or specialisation within a verb. Defaults to "default";
+    other values like "security", "performance", "compliance" select
+    curried variants when a matching domain pin is present.
+  default: default
+
+object:
+  description: >-
+    The artefact a plan operates on. Optional. Examples:
+    "change-set" (for review), "rdr" (for research), "module" (for
+    analyze), "test-suite" (for debug).
+
+domain:
+  description: >-
+    Subject-matter qualifier. Optional. Examples: "security",
+    "compliance", "ml-systems", "frontend". Used as the curry pin
+    for strategy variants.

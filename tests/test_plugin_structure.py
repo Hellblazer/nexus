@@ -33,8 +33,20 @@ _STANDALONE_SKILLS = {
     "sequential-thinking",
     "serena-code-nav", "catalog",
     "receiving-review", "git-worktrees", "finishing-branch",
+    # RDR-078 P5 (nexus-05i.9): plan-centric skills — no agent dispatch,
+    # the skill body is the full implementation.
+    "plan-first", "research", "review", "analyze", "debug", "document",
+    "plan-author", "plan-inspect", "plan-promote",
+    # RDR-080 P2a: query skill collapsed to nx_answer MCP tool pointer.
+    "query",
+    # RDR-080 P3: skills collapsed to MCP tool trigger pointers.
+    "knowledge-tidying", "enrich-plan", "plan-validation",
 }
 
+
+# RDR-080 P3: agents collapsed to doc stubs pointing at MCP tools.
+# Exempt from required-section checks (no Relay Reception, Context Protocol, etc.)
+_STUB_AGENTS = {"knowledge-tidier", "plan-enricher", "plan-auditor"}
 
 def agent_files() -> list[Path]:
     return sorted(p for p in AGENTS_DIR.glob("*.md"))
@@ -161,13 +173,16 @@ class TestAgentStructure:
     @pytest.mark.parametrize("agent_path", _agent_params())
     def test_required_sections_and_frontmatter(self, agent_path: Path) -> None:
         text = agent_path.read_text()
-        for section in AGENT_REQUIRED_SECTIONS:
-            assert section in text, f"{agent_path.name}: missing '{section}'"
-        assert "CONTEXT_PROTOCOL.md" in text, f"{agent_path.name}: missing CONTEXT_PROTOCOL.md reference"
         fm = _extract_frontmatter(text)
         assert fm, f"{agent_path.name}: no YAML frontmatter found"
         for field in AGENT_FRONTMATTER_FIELDS:
             assert field in fm, f"{agent_path.name}: frontmatter missing '{field}'"
+        # Stub agents (RDR-080 P3) point at MCP tools; skip section checks.
+        if agent_path.stem in _STUB_AGENTS:
+            return
+        for section in AGENT_REQUIRED_SECTIONS:
+            assert section in text, f"{agent_path.name}: missing '{section}'"
+        assert "CONTEXT_PROTOCOL.md" in text, f"{agent_path.name}: missing CONTEXT_PROTOCOL.md reference"
 
 
 
@@ -203,6 +218,9 @@ class TestRecoverProtocol:
         pytest.param("memory_search", id="memory-search"),
     ])
     def test_recover_block(self, agent_path: Path, check: str) -> None:
+        if agent_path.stem in _STUB_AGENTS:
+            pytest.skip(f"{agent_path.name}: stub agent (RDR-080 P3)")
+            return
         text = agent_path.read_text()
         block = _extract_recover_block(text)
         if check == "memory_search" and not block:

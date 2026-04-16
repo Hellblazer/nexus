@@ -37,6 +37,7 @@ def test_all_command_modules_registered():
         "doctor": "doctor",
         "hook": "hook",
         "mineru": "mineru",
+        "plan_cmd": "plan",
         "search_cmd": "search",
         "taxonomy_cmd": "taxonomy",
     }

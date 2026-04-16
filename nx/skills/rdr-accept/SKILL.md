@@ -35,8 +35,8 @@ Accepts an RDR after it passes the gate. This is the author/reviewer decision po
    - **If yes — execute the full chain (3 sequential dispatches + catalog enrichment, orchestrated by this skill):**
      1. Write T1 scratch entry tagged `rdr-planning-context`: mcp__plugin_nx_nexus__scratch(action="put", content="RDR {id}: planning context for {title}. RDR file: {rdr_file}", tags="rdr-planning-context,rdr-{id}"
      2. **Dispatch strategic-planner** (Agent tool) — create phased plan with beads. **Wait for completion.**
-     3. **Dispatch plan-auditor** (Agent tool) — audit the plan against codebase. T1 scratch has rdr-planning-context tag. **Wait for completion.**
-     4. **Dispatch plan-enricher** (Agent tool) — enrich beads with execution context (+ audit findings from T1), write epic bead ID to T2. **Wait for completion.**
+     3. **Call nx_plan_audit MCP tool** — audit the plan against codebase. T1 scratch has rdr-planning-context tag. **Wait for completion.**
+     4. **Call nx_enrich_beads MCP tool** — enrich beads with execution context (+ audit findings from T1), write epic bead ID to T2. **Wait for completion.**
      5. **Catalog links** (if catalog initialized): Search for related RDRs and create `relates` links:
         - `mcp__plugin_nx_nexus-catalog__search(query="<rdr-title-keywords>", content_type="rdr")`
         - For each result that is NOT this RDR: `mcp__plugin_nx_nexus-catalog__link(from_tumbler="<this-rdr-title>", to_tumbler="<related-rdr-tumbler>", link_type="relates", created_by="rdr-accept")`
@@ -48,8 +48,8 @@ Accepts an RDR after it passes the gate. This is the author/reviewer decision po
 
 Steps 1-6 execute directly — no agent delegation. Step 7 (planning handoff) optionally dispatches three agents **sequentially, orchestrated by this skill** (not by agent-to-agent relay):
 1. `strategic-planner` — creates plan and beads
-2. `plan-auditor` — validates plan against codebase
-3. `plan-enricher` — enriches beads with execution context (+ audit findings), writes epic bead ID to T2
+2. `nx_plan_audit` — validates plan against codebase
+3. `nx_enrich_beads` — enriches beads with execution context (+ audit findings), writes epic bead ID to T2
 
 Each dispatch waits for the previous agent to complete before proceeding. The accept skill writes a T1 scratch entry tagged `rdr-planning-context` before the first dispatch.
 
@@ -75,5 +75,5 @@ Outputs produced directly by this skill (Steps 1-6):
 - **T2 memory**: Updated status record via memory_put tool: project="{repo}_rdr", title="NNN", ttl="permanent", tags="rdr,accepted"
 - **Filesystem**: Updated RDR markdown (frontmatter `status: accepted`, `accepted_date`), regenerated `{rdr_dir}/README.md`
 - **T1 scratch**: mcp__plugin_nx_nexus__scratch(action="put", content="RDR NNN: accepted YYYY-MM-DD" for ephemeral tracking during multi-step acceptance flow
-- **T1 scratch**: rdr-planning-context tag entry via scratch tool (for plan-auditor successor routing)
-- **Agent dispatch**: sequential chain of strategic-planner → plan-auditor → plan-enricher (optional, user-confirmed, orchestrated by this skill)
+- **T1 scratch**: rdr-planning-context tag entry via scratch tool (for nx_plan_audit successor routing)
+- **Agent dispatch**: sequential chain of strategic-planner → nx_plan_audit → nx_enrich_beads (optional, user-confirmed, orchestrated by this skill)

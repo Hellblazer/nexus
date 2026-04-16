@@ -17,8 +17,8 @@ from nexus.db.t2 import T2Database
 from nexus.session import (
     SESSIONS_DIR,
     _ppid_of,
-    find_ancestor_session,
     generate_session_id,
+    resolve_t1_session,
     start_t1_server,
     stop_t1_server,
     sweep_stale_sessions,
@@ -73,7 +73,7 @@ def session_start(claude_session_id: str | None = None) -> str:
     sweep_stale_sessions(SESSIONS_DIR)
 
     # Initialize session_id before the lock block so it is always bound even if
-    # flock or find_ancestor_session raises an unexpected exception.
+    # flock or resolve_t1_session raises an unexpected exception.
     session_id = claude_session_id or generate_session_id()
 
     # Acquire an exclusive lock before the find+write sequence to prevent two
@@ -88,7 +88,10 @@ def session_start(claude_session_id: str | None = None) -> str:
         os.write(lock_fd, str(os.getpid()).encode())
         os.fsync(lock_fd)
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        ancestor = find_ancestor_session(SESSIONS_DIR)
+        # RDR-079 P2.3: env-first resolve so a pool-owner process that
+        # sets NEXUS_T1_SESSION_ID at startup does NOT spawn a duplicate
+        # T1 server — it joins the pool's existing session.
+        ancestor = resolve_t1_session(SESSIONS_DIR)
         if ancestor:
             session_id = ancestor["session_id"]
         else:
@@ -148,9 +151,10 @@ def session_end() -> str:
         except (json.JSONDecodeError, OSError) as exc:
             _log.debug("session_end_own_record_corrupt", path=str(own_file), error=str(exc))
 
-    # For T1 flush, use own record if available; otherwise walk the chain
-    # (child-agent scenario where the parent's file is further up).
-    flush_record = own_record or find_ancestor_session(SESSIONS_DIR)
+    # For T1 flush, use own record if available; otherwise resolve via the
+    # RDR-079 env-first path (pool worker's session wins over PPID-walk
+    # when NEXUS_T1_SESSION_ID is set).
+    flush_record = own_record or resolve_t1_session(SESSIONS_DIR)
     if flush_record is None:
         _log.warning(
             "session_end: no T1 session record found; flagged scratch entries may not have been flushed"

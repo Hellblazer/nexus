@@ -20,7 +20,7 @@ def _patch_session_start(tmp_path: Path, *, ancestor=None, server_raises=False):
     patches = [
         patch("nexus.hooks._default_db_path", return_value=db_path),
         patch("nexus.hooks.sweep_stale_sessions"),
-        patch("nexus.hooks.find_ancestor_session", return_value=ancestor),
+        patch("nexus.hooks.resolve_t1_session", return_value=ancestor),
         patch("nexus.hooks.write_claude_session_id"),
     ]
     if ancestor is None:
@@ -39,7 +39,7 @@ def test_session_start_returns_session_id(mock_sid, tmp_path: Path) -> None:
     with (
         patch("nexus.hooks._default_db_path", return_value=tmp_path / "memory.db"),
         patch("nexus.hooks.sweep_stale_sessions"),
-        patch("nexus.hooks.find_ancestor_session", return_value=None),
+        patch("nexus.hooks.resolve_t1_session", return_value=None),
         patch("nexus.hooks.write_claude_session_id"),
         patch("nexus.hooks.start_t1_server", return_value=("127.0.0.1", 51823, 9900, "/tmp/x")),
         patch("nexus.hooks.write_session_record"),
@@ -63,7 +63,7 @@ def test_session_start_adopts_ancestor_session(tmp_path: Path) -> None:
     with (
         patch("nexus.hooks._default_db_path", return_value=tmp_path / "memory.db"),
         patch("nexus.hooks.sweep_stale_sessions"),
-        patch("nexus.hooks.find_ancestor_session", return_value=ancestor),
+        patch("nexus.hooks.resolve_t1_session", return_value=ancestor),
         patch("nexus.hooks.write_claude_session_id"),
         patch("nexus.hooks.start_t1_server", mock_start),
         patch("nexus.hooks._infer_repo", return_value="myrepo"),
@@ -79,7 +79,7 @@ def test_session_start_server_failure_is_graceful(tmp_path: Path) -> None:
     with (
         patch("nexus.hooks._default_db_path", return_value=tmp_path / "memory.db"),
         patch("nexus.hooks.sweep_stale_sessions"),
-        patch("nexus.hooks.find_ancestor_session", return_value=None),
+        patch("nexus.hooks.resolve_t1_session", return_value=None),
         patch("nexus.hooks.write_claude_session_id"),
         patch("nexus.hooks.start_t1_server", side_effect=RuntimeError("chroma not found")),
         patch("nexus.hooks.generate_session_id", return_value="fallback-uuid"),
@@ -115,7 +115,7 @@ def test_session_end_no_session_record(tmp_path: Path) -> None:
 
     with (
         patch("nexus.hooks.SESSIONS_DIR", sessions),
-        patch("nexus.hooks.find_ancestor_session", return_value=None),
+        patch("nexus.hooks.resolve_t1_session", return_value=None),
         patch("nexus.hooks._default_db_path", return_value=db_path),
     ):
         output = session_end()
@@ -137,7 +137,7 @@ def test_session_end_with_session_record(tmp_path: Path) -> None:
 
     with (
         patch("nexus.hooks.SESSIONS_DIR", sessions),
-        patch("nexus.hooks.find_ancestor_session", return_value=None),
+        patch("nexus.hooks.resolve_t1_session", return_value=None),
         patch("nexus.hooks._default_db_path", return_value=db_path),
         patch("nexus.hooks._open_t1", return_value=mock_t1),
         patch("nexus.hooks.stop_t1_server", mock_stop),
@@ -166,7 +166,7 @@ def test_session_end_flushes_flagged_entries(tmp_path: Path) -> None:
 
     with (
         patch("nexus.hooks.SESSIONS_DIR", sessions),
-        patch("nexus.hooks.find_ancestor_session", return_value=None),
+        patch("nexus.hooks.resolve_t1_session", return_value=None),
         patch("nexus.hooks._default_db_path", return_value=db_path),
         patch("nexus.hooks._open_t1", return_value=mock_t1),
         patch("nexus.hooks.stop_t1_server"),
@@ -201,7 +201,7 @@ def test_session_end_child_does_not_stop_server(tmp_path: Path) -> None:
     with (
         patch("nexus.hooks.SESSIONS_DIR", sessions),
         # No own session file: getppid() file does not exist in sessions/
-        patch("nexus.hooks.find_ancestor_session", return_value=ancestor),
+        patch("nexus.hooks.resolve_t1_session", return_value=ancestor),
         patch("nexus.hooks._default_db_path", return_value=db_path),
         patch("nexus.hooks._open_t1", return_value=mock_t1),
         patch("nexus.hooks.stop_t1_server", mock_stop),
@@ -219,7 +219,7 @@ def test_session_end_db_error_doesnt_crash(tmp_path: Path) -> None:
 
     with (
         patch("nexus.hooks.SESSIONS_DIR", sessions),
-        patch("nexus.hooks.find_ancestor_session", return_value=None),
+        patch("nexus.hooks.resolve_t1_session", return_value=None),
         patch("nexus.hooks._default_db_path", return_value=tmp_path / "nonexistent_dir" / "memory.db"),
     ):
         output = session_end()
@@ -238,7 +238,7 @@ def test_session_start_writes_pid_to_lock(tmp_path: Path) -> None:
     with (
         patch("nexus.hooks.SESSIONS_DIR", sessions),
         patch("nexus.hooks.sweep_stale_sessions"),
-        patch("nexus.hooks.find_ancestor_session", return_value=None),
+        patch("nexus.hooks.resolve_t1_session", return_value=None),
         patch("nexus.hooks.write_claude_session_id"),
         patch("nexus.hooks.start_t1_server", return_value=("127.0.0.1", 51823, 9900, "/tmp/x")),
         patch("nexus.hooks.write_session_record"),
@@ -268,7 +268,7 @@ def test_session_start_clears_stale_lock(tmp_path: Path) -> None:
     with (
         patch("nexus.hooks.SESSIONS_DIR", sessions),
         patch("nexus.hooks.sweep_stale_sessions"),
-        patch("nexus.hooks.find_ancestor_session", return_value=None),
+        patch("nexus.hooks.resolve_t1_session", return_value=None),
         patch("nexus.hooks.write_claude_session_id"),
         patch("nexus.hooks.start_t1_server", return_value=("127.0.0.1", 51823, 9900, "/tmp/x")),
         patch("nexus.hooks.write_session_record"),

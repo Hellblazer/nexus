@@ -193,7 +193,7 @@ Example: If nx store write fails but nx memory succeeds, note in response: "Crit
 
 ## Relationship to Other Agents
 
-- **vs plan-auditor**: Plan-auditor specializes in technical plan validation with codebase alignment. You provide broader critique of any content type with focus on structural and logical issues.
+- **vs nx_plan_audit**: nx_plan_audit specializes in technical plan validation with codebase alignment. You provide broader critique of any content type with focus on structural and logical issues.
 - **vs code-review-expert**: Code-review-expert focuses on implementation quality and best practices. You focus on deeper structural issues and alignment with design intent.
 - **vs deep-analyst**: Deep-analyst investigates and explains system behavior. You critique proposed or completed work products.
 

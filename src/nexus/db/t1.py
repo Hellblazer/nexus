@@ -18,7 +18,7 @@ from nexus.db.t2 import T2Database
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
-from nexus.session import SESSIONS_DIR, find_ancestor_session
+from nexus.session import SESSIONS_DIR, resolve_t1_session
 
 _T = TypeVar("_T")
 
@@ -137,7 +137,10 @@ class T1Database:
             self._client = client
             self._session_id = session_id or str(uuid4())
         else:
-            record = find_ancestor_session(SESSIONS_DIR)
+            # RDR-079 P2.3: resolve_t1_session checks NEXUS_T1_SESSION_ID env
+            # first (pool worker isolation), falls through to PPID-walk
+            # otherwise. Replaces the bare find_ancestor_session call.
+            record = resolve_t1_session(SESSIONS_DIR)
             if record is not None:
                 self._client = chromadb.HttpClient(
                     host=record["server_host"],
@@ -172,7 +175,12 @@ class T1Database:
             return
         self._dead = True  # set before any I/O to prevent loops on re-entry
 
-        record = find_ancestor_session(SESSIONS_DIR)
+        # RDR-079 P2.3 CRITICAL: use resolve_t1_session (not bare
+        # find_ancestor_session) so a worker reconnect after a server
+        # failure rebinds to the POOL session, not the user's via
+        # PPID-walk. Omitting this replacement would silently violate
+        # I-1 on every reconnect.
+        record = resolve_t1_session(SESSIONS_DIR)
         if record is not None:
             self._client = chromadb.HttpClient(
                 host=record["server_host"],

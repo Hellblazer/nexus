@@ -261,7 +261,7 @@ Recommend **architect-planner** (via Next Step output) if ANY of:
 - Need to refactor >3 modules simultaneously
 - Integration patterns unclear
 
-Recommend **plan-auditor** (via Next Step output) if ANY of:
+Recommend **nx_plan_audit** (via Next Step output) if ANY of:
 - Discovering plan has technical inaccuracies during execution
 - Plan assumptions violated by codebase reality
 
@@ -288,7 +288,7 @@ Before marking any work complete:
 - **code-review-expert**: Completed code for quality review (before marking complete)
 - **test-validator**: After implementation for coverage validation
 - **debugger**: Complex bugs requiring systematic investigation
-- **plan-auditor**: When discovering that a plan has issues during execution
+- **nx_plan_audit**: When discovering that a plan has issues during execution
 
 ## Relationship to Other Agents
 

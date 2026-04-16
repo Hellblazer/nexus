@@ -52,15 +52,36 @@ _migrated_lock = threading.Lock()
 
 _PLANS_SCHEMA_SQL = """\
 CREATE TABLE IF NOT EXISTS plans (
-    id         INTEGER PRIMARY KEY,
-    project    TEXT NOT NULL DEFAULT '',
-    query      TEXT NOT NULL,
-    plan_json  TEXT NOT NULL,
-    outcome    TEXT DEFAULT 'success',
-    tags       TEXT DEFAULT '',
-    created_at TEXT NOT NULL,
-    ttl        INTEGER
+    id              INTEGER PRIMARY KEY,
+    project         TEXT NOT NULL DEFAULT '',
+    query           TEXT NOT NULL,
+    plan_json       TEXT NOT NULL,
+    outcome         TEXT DEFAULT 'success',
+    tags            TEXT DEFAULT '',
+    created_at      TEXT NOT NULL,
+    ttl             INTEGER,
+    -- RDR-078 dimensional identity, currying, metrics columns. Present on
+    -- fresh installs; the ``_add_plan_dimensional_identity`` migration
+    -- (4.4.0) covers upgrade-in-place.
+    name            TEXT,
+    verb            TEXT,
+    scope           TEXT,
+    dimensions      TEXT,
+    default_bindings TEXT,
+    parent_dims     TEXT,
+    use_count       INTEGER NOT NULL DEFAULT 0,
+    last_used       TEXT,
+    match_count     INTEGER NOT NULL DEFAULT 0,
+    match_conf_sum  REAL NOT NULL DEFAULT 0.0,
+    success_count   INTEGER NOT NULL DEFAULT 0,
+    failure_count   INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE INDEX IF NOT EXISTS idx_plans_verb ON plans(verb);
+CREATE INDEX IF NOT EXISTS idx_plans_scope ON plans(scope);
+CREATE INDEX IF NOT EXISTS idx_plans_verb_scope ON plans(verb, scope);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_plans_project_dimensions
+    ON plans(project, dimensions) WHERE dimensions IS NOT NULL;
 
 CREATE VIRTUAL TABLE IF NOT EXISTS plans_fts USING fts5(
     query,
@@ -86,7 +107,31 @@ CREATE TRIGGER IF NOT EXISTS plans_au AFTER UPDATE ON plans BEGIN
 END;
 """
 
-_PLAN_COLUMNS = ("id", "project", "query", "plan_json", "outcome", "tags", "created_at", "ttl")
+_PLAN_COLUMNS = (
+    "id", "project", "query", "plan_json", "outcome", "tags",
+    "created_at", "ttl",
+    # RDR-078 dimensional identity, currying, and metrics columns —
+    # added by ``_add_plan_dimensional_identity`` (migration 4.4.0).
+    # SELECTs guard with ``IFNULL`` so RDR-042 rows continue to load.
+    "name", "verb", "scope", "dimensions", "default_bindings", "parent_dims",
+    "use_count", "last_used", "match_count", "match_conf_sum",
+    "success_count", "failure_count",
+)
+
+#: Comma-separated SELECT clause aligned with :data:`_PLAN_COLUMNS`.
+#: Lifted to module scope so :meth:`PlanLibrary.search_plans`,
+#: :meth:`PlanLibrary.list_plans`, and :meth:`PlanLibrary.get_plan`
+#: stay byte-identical and the dictionary build in :func:`_row_to_dict`
+#: never drifts out of column order.
+_PLAN_SELECT_COLS = ", ".join(_PLAN_COLUMNS)
+
+
+def _row_to_dict(row: tuple) -> dict[str, Any]:
+    """Wrap a raw plans row in a column-keyed dict.
+
+    Centralised so any future column addition is one edit.
+    """
+    return dict(zip(_PLAN_COLUMNS, row))
 
 
 # ── PlanLibrary ───────────────────────────────────────────────────────────────
@@ -163,23 +208,151 @@ class PlanLibrary:
         tags: str = "",
         project: str = "",
         ttl: int | None = None,
+        *,
+        name: str | None = None,
+        verb: str | None = None,
+        scope: str | None = None,
+        dimensions: str | None = None,
+        default_bindings: str | None = None,
+        parent_dims: str | None = None,
     ) -> int:
         """Insert a plan record. Returns the new row ID.
 
         Args:
             ttl: Time-to-live in days. None means permanent (no expiry).
+            name, verb, scope, dimensions, default_bindings, parent_dims:
+                RDR-078 dimensional-identity / currying fields. All
+                optional — RDR-042 callers continue to work unchanged.
+                ``dimensions``, ``default_bindings``, ``parent_dims`` are
+                expected to be canonical JSON strings produced by
+                :func:`nexus.plans.schema.canonical_dimensions_json` (the
+                ``UNIQUE (project, dimensions) WHERE dimensions IS NOT NULL``
+                index enforces dedup at this byte string).
         """
         created_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         with self._lock:
             cursor = self.conn.execute(
                 """
-                INSERT INTO plans (project, query, plan_json, outcome, tags, created_at, ttl)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO plans (
+                    project, query, plan_json, outcome, tags, created_at, ttl,
+                    name, verb, scope, dimensions, default_bindings, parent_dims
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (project, query, plan_json, outcome, tags, created_at, ttl),
+                (
+                    project, query, plan_json, outcome, tags, created_at, ttl,
+                    name, verb, scope, dimensions, default_bindings, parent_dims,
+                ),
             )
             self.conn.commit()
         return cursor.lastrowid  # type: ignore[return-value]
+
+    def get_plan(self, plan_id: int) -> dict[str, Any] | None:
+        """Return the row for *plan_id*, or ``None`` if it doesn't exist."""
+        with self._lock:
+            row = self.conn.execute(
+                f"SELECT {_PLAN_SELECT_COLS} FROM plans WHERE id = ? LIMIT 1",
+                (plan_id,),
+            ).fetchone()
+        return _row_to_dict(row) if row else None
+
+    def get_plan_by_dimensions(
+        self, *, project: str, dimensions: str,
+    ) -> dict[str, Any] | None:
+        """Return the plan with canonical *dimensions* JSON, or ``None``.
+
+        Used by idempotent scoped loaders (``nx catalog setup`` and
+        the Phase 6 scoped loader). The ``UNIQUE (project, dimensions)``
+        partial index makes this a single-row read; a re-seed that
+        matches an existing entry can short-circuit without a write.
+        """
+        with self._lock:
+            row = self.conn.execute(
+                f"SELECT {_PLAN_SELECT_COLS} FROM plans "
+                "WHERE project = ? AND dimensions = ? LIMIT 1",
+                (project, dimensions),
+            ).fetchone()
+        return _row_to_dict(row) if row else None
+
+    def list_active_plans(
+        self,
+        *,
+        outcome: str = "success",
+        project: str = "",
+    ) -> list[dict[str, Any]]:
+        """Return every non-expired plan with the given *outcome*.
+
+        Used at SessionStart by the T1 ``plans__session`` cache loader
+        (RDR-078 §Phase 1, SC-2). The TTL predicate matches the one in
+        :meth:`search_plans` byte-for-byte so the two paths can never
+        disagree about which rows are "live".
+        """
+        ttl_filter = (
+            "(ttl IS NULL OR julianday('now') - julianday(created_at) <= ttl)"
+        )
+        if project:
+            sql = (
+                f"SELECT {_PLAN_SELECT_COLS} FROM plans "
+                f"WHERE outcome = ? AND project = ? AND {ttl_filter} "
+                f"ORDER BY created_at DESC"
+            )
+            params: tuple = (outcome, project)
+        else:
+            sql = (
+                f"SELECT {_PLAN_SELECT_COLS} FROM plans "
+                f"WHERE outcome = ? AND {ttl_filter} "
+                f"ORDER BY created_at DESC"
+            )
+            params = (outcome,)
+        with self._lock:
+            rows = self.conn.execute(sql, params).fetchall()
+        return [_row_to_dict(r) for r in rows]
+
+    def increment_match_metrics(
+        self, plan_id: int, *, confidence: float | None,
+    ) -> None:
+        """Bump ``match_count`` and (when scored) ``match_conf_sum``.
+
+        Called from ``plan_match`` for every returned candidate.
+        ``confidence=None`` (FTS5 fallback) increments only the count
+        so the running average stays a true average over scored hits.
+        SC-12.
+        """
+        with self._lock:
+            if confidence is None:
+                self.conn.execute(
+                    "UPDATE plans SET match_count = match_count + 1 "
+                    "WHERE id = ?",
+                    (plan_id,),
+                )
+            else:
+                self.conn.execute(
+                    "UPDATE plans SET match_count = match_count + 1, "
+                    "match_conf_sum = match_conf_sum + ? WHERE id = ?",
+                    (float(confidence), plan_id),
+                )
+            self.conn.commit()
+
+    def increment_run_started(self, plan_id: int) -> None:
+        """Bump ``use_count`` and stamp ``last_used`` (SC-12)."""
+        now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with self._lock:
+            self.conn.execute(
+                "UPDATE plans SET use_count = use_count + 1, last_used = ? "
+                "WHERE id = ?",
+                (now, plan_id),
+            )
+            self.conn.commit()
+
+    def increment_run_outcome(self, plan_id: int, *, success: bool) -> None:
+        """Bump ``success_count`` or ``failure_count`` (SC-12)."""
+        column = "success_count" if success else "failure_count"
+        with self._lock:
+            self.conn.execute(
+                f"UPDATE plans SET {column} = {column} + 1 WHERE id = ?",
+                (plan_id,),
+            )
+            self.conn.commit()
 
     def search_plans(
         self,
@@ -195,9 +368,10 @@ class PlanLibrary:
         ttl_filter = (
             "AND (p.ttl IS NULL OR julianday('now') - julianday(p.created_at) <= p.ttl)"
         )
+        cols = ", ".join(f"p.{c}" for c in _PLAN_COLUMNS)
         if project:
             sql = f"""
-                SELECT p.id, p.project, p.query, p.plan_json, p.outcome, p.tags, p.created_at, p.ttl
+                SELECT {cols}
                 FROM plans p
                 JOIN plans_fts ON plans_fts.rowid = p.id
                 WHERE plans_fts MATCH ? AND p.project = ?
@@ -208,7 +382,7 @@ class PlanLibrary:
             params: tuple = (safe, project, limit)
         else:
             sql = f"""
-                SELECT p.id, p.project, p.query, p.plan_json, p.outcome, p.tags, p.created_at, p.ttl
+                SELECT {cols}
                 FROM plans p
                 JOIN plans_fts ON plans_fts.rowid = p.id
                 WHERE plans_fts MATCH ?
@@ -222,26 +396,28 @@ class PlanLibrary:
                 rows = self.conn.execute(sql, params).fetchall()
             except sqlite3.OperationalError as exc:
                 raise ValueError(f"Invalid search query {query!r}: {exc}") from exc
-        return [dict(zip(_PLAN_COLUMNS, row)) for row in rows]
+        return [_row_to_dict(row) for row in rows]
 
     def list_plans(self, limit: int = 20, project: str = "") -> list[dict[str, Any]]:
         """Return most recent non-expired plans ordered by created_at DESC."""
         ttl_filter = "(ttl IS NULL OR julianday('now') - julianday(created_at) <= ttl)"
         if project:
-            sql = f"""
-                SELECT id, project, query, plan_json, outcome, tags, created_at, ttl
-                FROM plans WHERE project = ? AND {ttl_filter} ORDER BY created_at DESC LIMIT ?
-            """
+            sql = (
+                f"SELECT {_PLAN_SELECT_COLS} FROM plans "
+                f"WHERE project = ? AND {ttl_filter} "
+                f"ORDER BY created_at DESC LIMIT ?"
+            )
             params_l: tuple = (project, limit)
         else:
-            sql = f"""
-                SELECT id, project, query, plan_json, outcome, tags, created_at, ttl
-                FROM plans WHERE {ttl_filter} ORDER BY created_at DESC LIMIT ?
-            """
+            sql = (
+                f"SELECT {_PLAN_SELECT_COLS} FROM plans "
+                f"WHERE {ttl_filter} "
+                f"ORDER BY created_at DESC LIMIT ?"
+            )
             params_l = (limit,)
         with self._lock:
             rows = self.conn.execute(sql, params_l).fetchall()
-        return [dict(zip(_PLAN_COLUMNS, row)) for row in rows]
+        return [_row_to_dict(row) for row in rows]
 
     def plan_exists(self, query: str, tag: str) -> bool:
         """Return True if any plan with *query* has *tag* as a comma-separated token.
