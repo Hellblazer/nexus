@@ -17,6 +17,7 @@ from nexus.mcp.core import (  # noqa: F401
     collection_list,
     plan_save,
     plan_search,
+    traverse,
     operator_extract,
     operator_rank,
     operator_compare,

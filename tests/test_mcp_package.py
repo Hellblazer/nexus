@@ -21,7 +21,7 @@ def test_catalog_module_importable():
 
 
 def test_core_registered_tools():
-    """24 core tools are registered with @mcp.tool()."""
+    """25 core tools are registered with @mcp.tool()."""
     from nexus.mcp.core import mcp
 
     tool_names = {t.name for t in mcp._tool_manager.list_tools()}
@@ -30,6 +30,7 @@ def test_core_registered_tools():
         "memory_put", "memory_get", "memory_delete", "memory_search", "memory_consolidate",
         "scratch", "scratch_manage", "collection_list",
         "plan_save", "plan_search",
+        "traverse",
         "operator_extract", "operator_rank", "operator_compare",
         "operator_summarize", "operator_generate",
         "nx_answer", "nx_tidy", "nx_enrich_beads", "nx_plan_audit",
@@ -76,6 +77,7 @@ def test_init_reexports_all():
         "memory_put", "memory_get", "memory_delete", "memory_search", "memory_consolidate",
         "scratch", "scratch_manage", "collection_list",
         "plan_save", "plan_search",
+        "traverse",
         "operator_extract", "operator_rank", "operator_compare",
         "operator_summarize", "operator_generate",
         "nx_answer", "nx_tidy", "nx_enrich_beads", "nx_plan_audit",

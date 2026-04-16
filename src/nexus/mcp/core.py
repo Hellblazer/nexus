@@ -1292,6 +1292,106 @@ async def operator_generate(
     return await claude_dispatch(prompt, schema, timeout=timeout)
 
 
+# ── traverse (RDR-078 P3) ─────────────────────────────────────────────────────
+
+#: Depth cap for traverse steps (SC-4).
+_TRAVERSE_MAX_DEPTH: int = 3
+
+
+@mcp.tool()
+def traverse(
+    seeds: list[str] | str,
+    link_types: list[str] | None = None,
+    purpose: str = "",
+    depth: int = 1,
+    direction: str = "both",
+) -> dict:
+    """Walk the catalog link graph from seed tumblers. RDR-078 P3 (SC-4/SC-5).
+
+    Accepts either explicit ``link_types`` **or** a ``purpose`` name — never
+    both (SC-16). Returns the standard retrieval step-output contract so
+    downstream plan steps can reference ``$stepN.tumblers``,
+    ``$stepN.collections``, or ``$stepN.ids``.
+
+    Args:
+        seeds: One or more tumbler strings (e.g. ``["1.1", "1.2"]``).
+               Also accepts a single string for convenience.
+        link_types: Explicit catalog link types to follow
+                    (``"implements"``, ``"cites"``, …).
+                    Mutually exclusive with ``purpose``.
+        purpose: Named alias for a link-type set (e.g.
+                 ``"find-implementations"``).  Resolved via
+                 ``nexus.plans.purposes.resolve_purpose``.
+                 Mutually exclusive with ``link_types``.
+        depth: BFS depth. Capped at 3 (SC-4).
+        direction: ``"out"`` | ``"in"`` | ``"both"`` (default).
+
+    Returns:
+        ``{"tumblers": [...], "ids": [], "collections": [...]}``
+    """
+    from nexus.plans.purposes import resolve_purpose
+
+    # SC-16: mutual exclusion.
+    if link_types and purpose:
+        return {"error": "traverse: specify link_types OR purpose, not both"}
+
+    # Normalise seeds to a list.
+    if isinstance(seeds, str):
+        seeds = [seeds] if seeds else []
+
+    if not seeds:
+        return {"tumblers": [], "ids": [], "collections": []}
+
+    # Resolve link types.
+    if purpose:
+        resolved = resolve_purpose(purpose)
+        if not resolved:
+            return {
+                "tumblers": [], "ids": [], "collections": [],
+                "warning": f"traverse: unknown purpose {purpose!r}",
+            }
+        effective_types: list[str] = resolved
+    elif link_types:
+        effective_types = list(link_types)
+    else:
+        effective_types = []
+
+    depth = min(depth, _TRAVERSE_MAX_DEPTH)
+
+    catalog = _get_catalog()
+    if catalog is None:
+        return {"error": "traverse: catalog not available"}
+
+    from nexus.catalog.tumbler import Tumbler
+
+    seed_tumblers = []
+    for s in seeds:
+        try:
+            seed_tumblers.append(Tumbler.parse(s))
+        except Exception:
+            pass  # drop unparseable seeds
+
+    if not seed_tumblers:
+        return {"tumblers": [], "ids": [], "collections": []}
+
+    kw = dict(depth=depth, direction=direction, link_types=effective_types or None)
+    if len(seed_tumblers) == 1:
+        result = catalog.graph(seed_tumblers[0], **kw)
+    else:
+        result = catalog.graph_many(seed_tumblers, **kw)
+
+    nodes = result.get("nodes") or []
+    tumblers = [str(n.tumbler) for n in nodes if hasattr(n, "tumbler")]
+    collections = list({
+        n.physical_collection
+        for n in nodes
+        if hasattr(n, "physical_collection") and n.physical_collection
+    })
+
+    # ids = [] for now — chunk-level tracking deferred (nexus-0m3).
+    return {"tumblers": tumblers, "ids": [], "collections": collections}
+
+
 # ── nx_answer helpers (RDR-080) ───────────────────────────────────────────────
 
 #: Maximum inputs passed to an operator before auto-inserting a rank winnow.
