@@ -1,9 +1,7 @@
 ---
 title: "RDR-080: Retrieval Layer Consolidation — `nx_answer` + Agent/Skill Pruning"
-status: closed
+status: accepted
 accepted_date: 2026-04-15
-closed_date: 2026-04-16
-close_reason: implemented
 type: feature
 priority: P2
 created: 2026-04-15
