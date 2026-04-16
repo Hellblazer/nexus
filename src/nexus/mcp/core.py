@@ -1145,6 +1145,150 @@ def collection_verify(name: str) -> str:
         return f"Error: {e}"
 
 
+# ── Operator tools ───────────────────────────────────────────────────────────
+
+
+@mcp.tool()
+async def operator_extract(inputs: str, fields: str, timeout: float = 60.0) -> dict:
+    """Extract structured fields from each input item using claude -p.
+
+    Args:
+        inputs: Items to extract from (plain text or JSON array string).
+        fields: Comma-separated field names to extract.
+        timeout: Seconds before the subprocess is killed.
+    """
+    from nexus.operators.dispatch import claude_dispatch
+
+    prompt = (
+        f"Extract the following fields from each item: {fields}\n\n"
+        f"Items:\n{inputs}"
+    )
+    schema = {
+        "type": "object",
+        "required": ["extractions"],
+        "properties": {
+            "extractions": {
+                "type": "array",
+                "items": {"type": "object"},
+            }
+        },
+    }
+    return await claude_dispatch(prompt, schema, timeout=timeout)
+
+
+@mcp.tool()
+async def operator_rank(items: str, criterion: str, timeout: float = 60.0) -> dict:
+    """Rank items by a criterion using claude -p.
+
+    Args:
+        items: Items to rank (plain text or JSON array string).
+        criterion: Natural-language ranking criterion.
+        timeout: Seconds before the subprocess is killed.
+    """
+    from nexus.operators.dispatch import claude_dispatch
+
+    prompt = (
+        f"Rank the following items by {criterion}.\n"
+        f"Return them in ranked order, best first.\n\n"
+        f"Items:\n{items}"
+    )
+    schema = {
+        "type": "object",
+        "required": ["ranked"],
+        "properties": {
+            "ranked": {"type": "array", "items": {"type": "string"}},
+        },
+    }
+    return await claude_dispatch(prompt, schema, timeout=timeout)
+
+
+@mcp.tool()
+async def operator_compare(items: str, focus: str = "", timeout: float = 60.0) -> dict:
+    """Compare items and return a structured comparison using claude -p.
+
+    Args:
+        items: Items to compare (plain text or JSON array string).
+        focus: Optional aspect to focus the comparison on.
+        timeout: Seconds before the subprocess is killed.
+    """
+    from nexus.operators.dispatch import claude_dispatch
+
+    focus_clause = f" Focus on: {focus}." if focus else ""
+    prompt = (
+        f"Compare the following items.{focus_clause}\n\n"
+        f"Items:\n{items}"
+    )
+    schema = {
+        "type": "object",
+        "required": ["comparison"],
+        "properties": {
+            "comparison": {"type": "string"},
+        },
+    }
+    return await claude_dispatch(prompt, schema, timeout=timeout)
+
+
+@mcp.tool()
+async def operator_summarize(
+    content: str,
+    cited: bool = False,
+    timeout: float = 60.0,
+) -> dict:
+    """Summarize content using claude -p, optionally with citations.
+
+    Args:
+        content: Text to summarize.
+        cited: If True, include a citations list in the output.
+        timeout: Seconds before the subprocess is killed.
+    """
+    from nexus.operators.dispatch import claude_dispatch
+
+    cite_clause = " Include citations as a list of source references." if cited else ""
+    prompt = f"Summarize the following content concisely.{cite_clause}\n\n{content}"
+    schema: dict = {
+        "type": "object",
+        "required": ["summary"],
+        "properties": {
+            "summary": {"type": "string"},
+            "citations": {"type": "array", "items": {"type": "string"}},
+        },
+    }
+    return await claude_dispatch(prompt, schema, timeout=timeout)
+
+
+@mcp.tool()
+async def operator_generate(
+    template: str,
+    context: str,
+    cited: bool = False,
+    timeout: float = 60.0,
+) -> dict:
+    """Generate output from a template and context using claude -p.
+
+    Args:
+        template: Named template or description of desired output form.
+        context: Source material or context to generate from.
+        cited: If True, include a citations list in the output.
+        timeout: Seconds before the subprocess is killed.
+    """
+    from nexus.operators.dispatch import claude_dispatch
+
+    cite_clause = " Include citations as a list of source references." if cited else ""
+    prompt = (
+        f"Generate a {template}.{cite_clause}\n\n"
+        f"Context:\n{context}"
+    )
+    schema: dict = {
+        "type": "object",
+        "required": ["output"],
+        "properties": {
+            "output": {"type": "string"},
+            "citations": {"type": "array", "items": {"type": "string"}},
+        },
+    }
+    return await claude_dispatch(prompt, schema, timeout=timeout)
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 
