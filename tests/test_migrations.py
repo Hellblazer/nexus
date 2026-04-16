@@ -73,7 +73,7 @@ class TestMigrationDataclass:
         from nexus.db.migrations import MIGRATIONS
 
         assert isinstance(MIGRATIONS, list)
-        assert len(MIGRATIONS) == 9  # 8 pre-existing + RDR-078 Phase 4c
+        assert len(MIGRATIONS) == 10  # 9 pre-existing + RDR-080 nx_answer_runs
 
     def test_migrations_ordered_by_version(self) -> None:
         from nexus.db.migrations import MIGRATIONS, _parse_version

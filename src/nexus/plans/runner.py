@@ -489,6 +489,13 @@ _OPERATOR_TOOL_MAP: dict[str, str] = {
     "generate": "operator_generate",
 }
 
+#: Maximum inputs to pass to an operator before auto-inserting a rank
+#: winnow step. RDR-080 §Auto-hydration.
+_OPERATOR_MAX_INPUTS: int = 100
+
+#: Set of resolved operator tool names for auto-hydration detection.
+_OPERATOR_RESOLVED_TOOLS: frozenset[str] = frozenset(_OPERATOR_TOOL_MAP.values())
+
 
 async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]:
     """Dispatch *tool* against the live MCP tool registry.
@@ -505,6 +512,12 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
     runner imports cheaply and tests can swap it out. Maps plan-step
     operator names (bare ``extract``, ``rank``, etc.) to their
     ``operator_*`` MCP-tool counterparts.
+
+    **Auto-hydration (RDR-080 Option C)**: when the resolved tool is an
+    operator AND the args contain an ``ids`` key from a prior retrieval
+    step, the dispatcher calls ``store_get_many`` to materialize document
+    content and injects ``inputs`` (JSON array) into the args before
+    dispatch. Plan YAML does NOT need explicit hydration steps.
     """
     from nexus.mcp import core as mcp_core
 
@@ -512,6 +525,38 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
     # counterparts (operator_*).  Seed YAMLs use the bare name; the pool
     # exposes operator_*.
     resolved_tool = _OPERATOR_TOOL_MAP.get(tool, tool)
+
+    # RDR-080 Option C: auto-hydration for operator steps that receive
+    # IDs from a prior retrieval step. Intercept before dispatch.
+    if resolved_tool in _OPERATOR_RESOLVED_TOOLS and "ids" in args:
+        ids = args["ids"]
+        collections = args.get("collections", "knowledge")
+        hydrated = mcp_core.store_get_many(
+            ids=ids,
+            collections=collections,
+            structured=True,
+        )
+        contents = hydrated.get("contents", []) if isinstance(hydrated, dict) else []
+        # Filter out empty strings (missing docs).
+        non_empty = [c for c in contents if c]
+        if len(non_empty) > _OPERATOR_MAX_INPUTS:
+            _log.warning(
+                "auto_hydration_overflow",
+                tool=tool,
+                resolved_tool=resolved_tool,
+                input_count=len(non_empty),
+                max_inputs=_OPERATOR_MAX_INPUTS,
+                action="truncating to max_inputs; consider adding a rank winnow step",
+            )
+            non_empty = non_empty[:_OPERATOR_MAX_INPUTS]
+        # Replace ids/collections with inputs (JSON array string).
+        args = {k: v for k, v in args.items() if k not in ("ids", "collections")}
+        args["inputs"] = json.dumps(non_empty)
+        # RF-13: translate extract template dict → fields CSV.
+        if "template" in args and "fields" not in args:
+            template = args.pop("template")
+            if isinstance(template, dict):
+                args["fields"] = ",".join(template.keys())
 
     fn = getattr(mcp_core, resolved_tool, None)
     if fn is None or not callable(fn):

@@ -2,9 +2,9 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """MCP core tools: search, store, memory, scratch, collections, plans.
 
-17 registered tools + 3 demoted (plain functions, no @mcp.tool()).
+18 registered tools + 3 demoted (plain functions, no @mcp.tool()).
 RDR-078 P1 added ``plan_match`` + ``plan_run`` to the existing
-``plan_save`` / ``plan_search`` pair.
+``plan_save`` / ``plan_search`` pair. RDR-080 P1 added ``nx_answer``.
 """
 from __future__ import annotations
 
@@ -59,6 +59,7 @@ _WORKER_MODE: bool = _os.environ.get("NEXUS_MCP_WORKER_MODE", "").strip() == "1"
 _WORKER_FORBIDDEN_TOOLS: frozenset[str] = frozenset({
     "plan_match",
     "plan_run",
+    "nx_answer",
     "operator_extract",
     "operator_rank",
     "operator_compare",
@@ -2447,6 +2448,313 @@ async def operator_generate(
             reason=f"`citations` must be a list, got {type(citations).__name__}",
         )
     return {"text": payload["text"], "citations": citations}
+
+
+# ── nx_answer helpers (RDR-080 P1) ────────────────────────────────────────────
+
+
+def _nx_answer_match_is_hit(confidence: float | None) -> bool:
+    """Return True when a plan_match confidence qualifies as a hit.
+
+    ``confidence is None`` (FTS5 sentinel, RF-11) is always a hit.
+    Numeric confidence must be >= 0.40 (RDR-079 P5 calibration).
+    """
+    if confidence is None:
+        return True
+    return confidence >= 0.40
+
+
+def _nx_answer_is_single_query(match: Any) -> bool:
+    """Return True when *match* has exactly 1 step and it's ``query``.
+
+    The single-step guard reroutes to ``query()`` directly, skipping
+    ``plan_run`` overhead.
+    """
+    try:
+        plan = json.loads(match.plan_json)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    steps = plan.get("steps") or []
+    return len(steps) == 1 and steps[0].get("tool") == "query"
+
+
+def _nx_answer_needs_operators(match: Any) -> bool:
+    """Return True when the plan requires operator pool auth.
+
+    Retrieval-only plans (search, query, traverse, store_get_many)
+    work without auth. Plans with operator steps (extract, rank,
+    compare, summarize, generate) require the pool.
+    """
+    _RETRIEVAL_ONLY = {"search", "query", "traverse", "store_get_many"}
+    try:
+        plan = json.loads(match.plan_json)
+    except (json.JSONDecodeError, TypeError):
+        return True  # Assume operators needed when plan is unparseable.
+    steps = plan.get("steps") or []
+    return any(step.get("tool", "") not in _RETRIEVAL_ONLY for step in steps)
+
+
+def _nx_answer_translate_extract_fields(args: dict[str, Any]) -> dict[str, Any]:
+    """RF-13: translate old ``template`` dict to ``fields`` CSV.
+
+    ``analytical-operator`` accepted ``params.template`` (dict), but
+    ``operator_extract`` takes ``fields`` (CSV). Translate on the fly.
+    """
+    if "template" in args and "fields" not in args:
+        template = args["template"]
+        if isinstance(template, dict):
+            args = {k: v for k, v in args.items() if k != "template"}
+            args["fields"] = ",".join(template.keys())
+    return args
+
+
+def _nx_answer_record_run(
+    conn: Any,
+    *,
+    question: str,
+    plan_id: int | None,
+    matched_confidence: float | None,
+    step_count: int,
+    final_text: str,
+    cost_usd: float,
+    duration_ms: int,
+    trace: bool,
+) -> None:
+    """Write one row to ``nx_answer_runs``.  Redacts when ``trace=False``."""
+    q = question if trace else "[redacted]"
+    text = final_text if trace else "[redacted]"
+    conn.execute(
+        """INSERT INTO nx_answer_runs
+           (question, plan_id, matched_confidence, step_count,
+            final_text, cost_usd, duration_ms)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (q, plan_id, matched_confidence, step_count, text, cost_usd, duration_ms),
+    )
+    conn.commit()
+
+
+@_mcp_tool()
+async def nx_answer(
+    question: str,
+    scope: str = "",
+    context: str = "",
+    max_steps: int = 6,
+    budget_usd: float = 0.25,
+    trace: bool = True,
+) -> str:
+    """Answer a knowledge question using plan-match-first retrieval. RDR-080 P1.
+
+    Internal flow (all in-process; no subagent spawn):
+
+    1. **Plan-match gate**: call ``plan_match(intent=question)``. On hit
+       (confidence >= 0.40 OR confidence is None / FTS5 sentinel), proceed
+       to execution. On miss, return a clear error (P1 scope — inline LLM
+       decomposition ships in P1 follow-up).
+    2. **Single-step guard**: if the matched plan has exactly 1 step and
+       that step is ``query``, reroute to ``query()`` directly.
+    3. **Execute plan**: reuse ``plan_run`` from RDR-078/079.
+    4. **Record**: write run metrics to T2 ``nx_answer_runs``.
+
+    Args:
+        question: Natural-language question to answer.
+        scope: Catalog subtree or corpus filter (e.g. ``"1.2"`` or ``"knowledge"``).
+        context: Supplementary caller-supplied context for the plan matcher.
+        max_steps: Cap on plan DAG size.
+        budget_usd: Per-invocation cost cap.
+        trace: When False, redacts question and final_text in the run log.
+
+    Returns:
+        The final step's output as a human-readable string.
+    """
+    import time
+
+    import structlog
+
+    from nexus.mcp_infra import get_t1_plan_cache
+    from nexus.plans.matcher import plan_match as _plan_match
+    from nexus.plans.runner import plan_run as _plan_run
+
+    _log = structlog.get_logger()
+    start = time.monotonic()
+
+    # ── Step 1: plan-match gate ──────────────────────────────────────────
+    try:
+        with _t2_ctx() as db:
+            cache = get_t1_plan_cache(populate_from=db.plans)
+            matches = _plan_match(
+                question,
+                library=db.plans,
+                cache=cache,
+                scope_preference=scope,
+                context={"user_context": context} if context else None,
+                min_confidence=0.40,
+                n=5,
+            )
+    except Exception as exc:
+        return f"Error during plan match: {exc}"
+
+    if not matches or not _nx_answer_match_is_hit(matches[0].confidence):
+        # Plan miss — no matching plan found.
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        _log.info(
+            "nx_answer_plan_miss",
+            question=question[:100] if trace else "[redacted]",
+            duration_ms=elapsed_ms,
+        )
+        try:
+            with _t2_ctx() as db:
+                _nx_answer_record_run(
+                    db.conn,
+                    question=question,
+                    plan_id=None,
+                    matched_confidence=matches[0].confidence if matches else None,
+                    step_count=0,
+                    final_text="",
+                    cost_usd=0.0,
+                    duration_ms=elapsed_ms,
+                    trace=trace,
+                )
+        except Exception:
+            pass  # Best-effort recording.
+        return (
+            "No matching plan found. Try rephrasing the question, or "
+            "save a plan with plan_save for this query pattern."
+        )
+
+    best = matches[0]
+    conf_str = "fts5" if best.confidence is None else f"{best.confidence:.3f}"
+
+    # ── Step 2: single-step guard ────────────────────────────────────────
+    if _nx_answer_is_single_query(best):
+        _log.info(
+            "nx_answer_single_step_guard",
+            plan_id=best.plan_id,
+            confidence=conf_str,
+        )
+        try:
+            plan = json.loads(best.plan_json)
+            step_args = plan["steps"][0].get("args", {})
+            q = step_args.get("question", question)
+            corpus = step_args.get("corpus", "knowledge")
+            result_text = query(question=q, corpus=corpus)
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+            try:
+                with _t2_ctx() as db:
+                    _nx_answer_record_run(
+                        db.conn,
+                        question=question,
+                        plan_id=best.plan_id,
+                        matched_confidence=best.confidence,
+                        step_count=1,
+                        final_text=str(result_text)[:2000],
+                        cost_usd=0.0,
+                        duration_ms=elapsed_ms,
+                        trace=trace,
+                    )
+            except Exception:
+                pass
+            return str(result_text)
+        except Exception as exc:
+            return f"Error in single-step query: {exc}"
+
+    # ── Step 2.5: SC-9 graceful degradation ──────────────────────────────
+    if _nx_answer_needs_operators(best):
+        try:
+            from nexus.operators.pool import check_auth
+            check_auth()
+        except Exception:
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+            _log.warning(
+                "nx_answer_no_auth_operators_required",
+                plan_id=best.plan_id,
+            )
+            return (
+                "This question requires operator processing (extract/rank/"
+                "compare/summarize/generate), but the operator pool is "
+                "unavailable (no auth). Retrieval-only plans still work."
+            )
+
+    # ── Step 3: seed link-context ────────────────────────────────────────
+    try:
+        t1 = _get_t1()
+        if t1 is not None:
+            from nexus.mcp import core as _self
+
+            _self.scratch(
+                action="put",
+                content=json.dumps({
+                    "question": question,
+                    "scope": scope,
+                    "plan_id": best.plan_id,
+                }),
+                tag="link-context",
+            )
+    except Exception:
+        pass  # Best-effort; auto-linker will work without it.
+
+    # ── Step 4: execute plan ─────────────────────────────────────────────
+    try:
+        result = await _plan_run(best, {"intent": question})
+    except Exception as exc:
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        _log.error(
+            "nx_answer_plan_run_error",
+            plan_id=best.plan_id,
+            error=str(exc),
+            duration_ms=elapsed_ms,
+        )
+        try:
+            with _t2_ctx() as db:
+                _nx_answer_record_run(
+                    db.conn,
+                    question=question,
+                    plan_id=best.plan_id,
+                    matched_confidence=best.confidence,
+                    step_count=0,
+                    final_text=f"Error: {exc}",
+                    cost_usd=0.0,
+                    duration_ms=elapsed_ms,
+                    trace=trace,
+                )
+        except Exception:
+            pass
+        return f"Error during plan execution: {exc}"
+
+    # ── Step 5: extract final answer ─────────────────────────────────────
+    elapsed_ms = int((time.monotonic() - start) * 1000)
+    final_step = result.steps[-1] if result.steps else {}
+    # Prefer text > summary > answer keys for the final output.
+    text_key = next(
+        (k for k in ("text", "summary", "answer") if k in final_step), None,
+    )
+    final_text = str(final_step.get(text_key, "")) if text_key else json.dumps(final_step)
+
+    _log.info(
+        "nx_answer_complete",
+        plan_id=best.plan_id,
+        confidence=conf_str,
+        step_count=len(result.steps),
+        duration_ms=elapsed_ms,
+    )
+
+    # ── Step 6: record run ───────────────────────────────────────────────
+    try:
+        with _t2_ctx() as db:
+            _nx_answer_record_run(
+                db.conn,
+                question=question,
+                plan_id=best.plan_id,
+                matched_confidence=best.confidence,
+                step_count=len(result.steps),
+                final_text=final_text[:2000],
+                cost_usd=0.0,
+                duration_ms=elapsed_ms,
+                trace=trace,
+            )
+    except Exception:
+        pass  # Best-effort recording.
+
+    return final_text
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

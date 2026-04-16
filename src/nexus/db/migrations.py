@@ -397,6 +397,35 @@ def migrate_review_columns(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 
+def migrate_nx_answer_runs(conn: sqlite3.Connection) -> None:
+    """Create the ``nx_answer_runs`` table for RDR-080 run telemetry.
+
+    Fields: id, question, plan_id, matched_confidence, step_count,
+    final_text, cost_usd, duration_ms, created_at.  TTL 7 days
+    (enforced by the caller, not by SQLite).
+    """
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='nx_answer_runs'"
+    ).fetchone()
+    if row is not None:
+        return
+    conn.execute("""
+        CREATE TABLE nx_answer_runs (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            question    TEXT    NOT NULL,
+            plan_id     INTEGER,
+            matched_confidence REAL,
+            step_count  INTEGER NOT NULL DEFAULT 0,
+            final_text  TEXT    NOT NULL DEFAULT '',
+            cost_usd    REAL    NOT NULL DEFAULT 0.0,
+            duration_ms INTEGER NOT NULL DEFAULT 0,
+            created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )
+    """)
+    conn.commit()
+    _log.info("Migrated: created nx_answer_runs table (RDR-080)")
+
+
 # ── Migration registry ──────────────────────────────────────────────────────
 # Ordered by introduced version.  Tags verified via ``git tag --contains``
 # for each migration commit.
@@ -418,6 +447,11 @@ MIGRATIONS: list[Migration] = [
         "4.4.0",
         "Add plan dimensional identity + currying + metrics (RDR-078)",
         _add_plan_dimensional_identity,
+    ),
+    Migration(
+        "4.5.0",
+        "Add nx_answer_runs table (RDR-080)",
+        migrate_nx_answer_runs,
     ),
 ]
 

@@ -41,6 +41,8 @@ def test_core_registered_tools():
         # RDR-079 post-critique: content hydration primitive so operator
         # steps receive document text rather than tumbler address strings.
         "store_get_many",
+        # RDR-080 P1: plan-match-first orchestration tool.
+        "nx_answer",
     }
     assert expected == tool_names, f"Missing: {expected - tool_names}, Extra: {tool_names - expected}"
 
