@@ -71,6 +71,18 @@ the missing bindings to the user rather than guessing defaults.
 - **`plan_run` raised** → surface the error verbatim; do not retry
   with heuristic bindings.
 
+## Internal enforcement
+
+`nx_answer` enforces the plan-match-first gate at the MCP tool contract
+level. Every caller — skill, agent, or script — that calls `nx_answer`
+gets the discipline automatically: plan_match is the first step, and
+only on a miss does the tool proceed to decomposition or fallback. This
+means the preamble injection that previously lived in 10 agent files is
+no longer necessary for correctness — `nx_answer` is the single
+enforcement point. The SubagentStart hook injection (`retrieval-agents.txt`)
+now targets only 2 agents (deep-analyst, deep-research-synthesizer) that
+benefit from plan-reuse awareness during exploratory work.
+
 ## Anti-patterns
 
 - **Skipping plan_match for "simple" queries.** Description: "Just

@@ -307,6 +307,37 @@ See `src/nexus/db/t2/__init__.py` for the facade source and
 4. **Ported, not imported** -- SeaGOAT and Arcaneum patterns rewritten in Nexus module structure.
 5. **PPID-chain session propagation** -- The `SessionStart` hook starts a per-session ChromaDB HTTP server (using the `chroma` entry-point co-installed with the package) and writes its address to `~/.config/nexus/sessions/{ppid}.session`, keyed by the Claude Code process PID. Child agents walk the OS PPID chain to find the nearest ancestor session file and connect to the same server, sharing T1 scratch across the entire agent tree. Concurrent independent windows stay isolated via disjoint process trees. Falls back to `EphemeralClient` when the server cannot start or the PPID chain yields no record.
 
+## Boundary Rule (RDR-080)
+
+A capability belongs in:
+
+- **MCP tool** when (i) its I/O is a pure function of relay + nx state, (ii) it completes without user clarification mid-turn, and (iii) schema conformance is valuable to callers.
+- **Agent** when the user or another agent is expected to interject during execution, or when the output is a conversation rather than a document.
+- **Skill** when the value is the *trigger* — the discipline of invoking it — rather than the logic it runs.
+
+### Classification Table
+
+| Capability | Placement | Rationale |
+|------------|-----------|-----------|
+| `nx_answer` | MCP tool | Pure function of (question, scope, nx state) → answer; no mid-turn clarification; schema-typed dict output |
+| `operator_extract/rank/compare/summarize/generate` | MCP tool | Stateless text→JSON transforms; pool-backed; deterministic schema |
+| `plan_match`, `plan_run`, `plan_save` | MCP tool | Pure retrieval + deterministic DAG execution; no LLM decision logic |
+| `search`, `query`, `store_get_many`, `traverse` | MCP tool | Retrieval primitives; no user interaction |
+| `debugger` | Agent | User interjection expected: hypothesis review, test selection, reproduction steps |
+| `deep-analyst` | Agent | Exploratory investigation; user steers direction mid-analysis |
+| `developer` | Agent | TDD loop requires user approval of test expectations before implementation |
+| `code-review-expert` | Agent | Review findings need user triage (fix vs defer vs dismiss) |
+| `strategic-planner` | Agent | Plan requires user approval before execution; iterative refinement |
+| `plan-first` | Skill | Value is the *gate discipline* — ensuring plan_match runs before decomposition |
+| `brainstorming-gate` | Skill | Value is the *process discipline* — design before code |
+| `query` | Skill | Trigger pointer to `nx_answer` MCP tool |
+
+### Test Cases (SC-10)
+
+1. **`nx_answer` → MCP tool**: I/O is a pure function of question + nx state. Completes without user clarification. Returns schema-typed output. All three criteria met.
+2. **`debugger` → Agent**: User expected to review hypotheses, select which to test, and provide reproduction context. Criterion (ii) fails — user interjection is the design.
+3. **`plan-first` → Skill**: Contains no implementation logic — just the rule "call plan_match before decomposing." The value is the trigger discipline, not computation.
+
 ## Heritage
 
 | Tool | What Nexus borrows |
