@@ -6,6 +6,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **RDR-078 Plan-Centric Retrieval** — semantic plan matching (T1 cosine + FTS5 fallback), typed-graph traversal as a first-class plan operator, scenario-plan library, dimensional plan identity. New MCP tools: `plan_match` (internal), `plan_run` (internal), `traverse` (catalog graph walk, depth cap 3), `store_get_many` (batch hydration past the ChromaDB 300-record quota). Migration `4.4.0` adds `plans.verb` / `scope` / `dimensions` / `default_bindings` / `parent_dims` columns + lifetime metrics. 9 builtin YAML scenario templates under `nx/plans/builtin/`. `PlanLibrary.get_plan_by_dimensions()` + `increment_match_metrics()` / `increment_run_started()` / `increment_run_outcome()`. `.github/workflows/plan-schema-check.yml` validates plan YAML on PR.
+- **RDR-080 Retrieval Layer Consolidation** — single `nx_answer` MCP tool replaces the `query-planner` + `analytical-operator` agent pair and the inline three-path dispatcher. Trunk: `plan_match` → classify → `plan_run` → record (`nx_answer_runs` table). Plan-miss falls through to an inline `claude -p` planner. Three stub agents (`knowledge-tidier`, `plan-auditor`, `plan-enricher`) shrink to 40-line redirects pointing at `nx_tidy`, `nx_plan_audit`, `nx_enrich_beads`. `pdf-chromadb-processor` agent removed (use `nx index pdf` or `/pdf-process`).
+- **5 operator MCP tools** — `operator_extract`, `operator_rank`, `operator_compare`, `operator_summarize`, `operator_generate` (each spawns `claude -p --output-format json --json-schema …`).
+- **`derive_title()` restored with initialism preservation** (`indexer_utils.py`). `my_api_v2.md` → `"My API V2"` instead of empty. `_PRESERVE_UPPER` covers 30+ common technical acronyms.
+- **FTS5 special-character sanitization expanded** in `memory_store` to cover `,;?!#@$%&|\<>[]{}=` (previously raised `OperationalError` on queries with URLs or CLI flags).
+- **Live validation harness** under `scripts/validate/` — 9 suites, 320 runtime cases exercising every MCP tool, CLI command, hook, skill, and agent in an isolated sandbox. Per-case streaming + per-suite roll-up. LLM suites gated on `NX_VALIDATE_WITH_LLM=1`.
+
+### Fixed
+
+- **`claude_dispatch` now unwraps `structured_output`** from `claude -p --output-format json` wrapper (`src/nexus/operators/dispatch.py`). Before: `nx_tidy` / `nx_enrich_beads` / `nx_plan_audit` and all 5 `operator_*` tools silently returned empty strings because they read schema fields at the top level of claude's result wrapper. Surfaced by the harness's semantic assertions.
+- **`Catalog.graph_many()` no longer produces dangling edges** when the node cap fires — edges referencing truncated nodes are filtered out of `merged_edges`.
+- **`get_t1_plan_cache` init-failure short-circuit** via `_PLAN_CACHE_UNAVAILABLE` sentinel — prevents lock contention on the degraded-T1 hot path.
+- **`store_get_many`** returns N contents for N input ids without silent truncation at the ChromaDB 300-record quota boundary.
+
+### Changed
+
+- **`T2Database.save_plan()` facade** accepts and forwards dimensional kwargs (`name`, `verb`, `scope`, `dimensions`, `default_bindings`, `parent_dims`). Previously stripped silently.
+- **`_seed_plan_templates()` restores `load_all_tiers()` call** — 9 YAML templates under `nx/plans/builtin/` now actually seed into T2 (the call had been dead code).
+
 ## [4.3.2] - 2026-04-15
 
 ### Added

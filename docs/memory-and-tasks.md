@@ -74,7 +74,8 @@ UPDATE and DELETE are atomic. If `keep_id` was deleted by a concurrent
 preventing silent data loss when the consolidation scan races with TTL
 expiry.
 
-The `/nx:query` skill and the knowledge-tidier agent both use these
+The `/nx:query` skill (via `nx_answer`) and the `nx_tidy` MCP tool
+(formerly the knowledge-tidier agent; RDR-080) both use these
 operations during periodic memory hygiene.
 
 ## Session Integration

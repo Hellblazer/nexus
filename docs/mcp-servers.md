@@ -31,18 +31,18 @@ servers was driven by three problems the monolith created:
 
 | Server | Entry point | Tools | Purpose |
 |---|---|---|---|
-| `nexus` | `nx-mcp` | 15 | Storage tiers, memory, scratch, plans, consolidation |
+| `nexus` | `nx-mcp` | 26 | Storage tiers, retrieval trunk, operators, orchestration |
 | `nexus-catalog` | `nx-mcp-catalog` | 10 | Document catalog, link graph, tumbler resolution |
 
 Both servers are bundled in the `nx` plugin's `.mcp.json`. Installing the
 plugin (`/plugin install nx@nexus-plugins`) registers both with Claude Code
 automatically. No separate install step.
 
-## `nexus` — core storage and memory (15 tools)
+## `nexus` — retrieval + storage (26 tools)
 
 Full tool names follow Claude Code's convention: `mcp__plugin_nx_nexus__<tool>`.
 
-### Tier operations
+### Retrieval (T3)
 
 | Tool | Purpose |
 |---|---|
@@ -50,6 +50,7 @@ Full tool names follow Claude Code's convention: `mcp__plugin_nx_nexus__<tool>`.
 | `query` | Document-level catalog-aware retrieval (scope by `author`, `content_type`, `subtree`, `follow_links`, `depth`). Results ranked with both link-aware and topic-aware boosting. |
 | `store_put` | Write a document into a T3 collection. Triggers a post-store hook that auto-assigns the document to its nearest topic via centroid ANN lookup. |
 | `store_get` | Retrieve a document by id from a T3 collection |
+| `store_get_many` | Batch hydration: given N ids, return N contents (with `missing` for not-found). Handles 300+ ids without the ChromaDB quota limit. |
 | `store_list` | Paginate documents in a T3 collection |
 
 ### Memory (T2)
@@ -69,13 +70,39 @@ Full tool names follow Claude Code's convention: `mcp__plugin_nx_nexus__<tool>`.
 | `scratch` | Put / get / search / list / delete session-scoped scratch entries |
 | `scratch_manage` | Flag for promotion, unflag, promote to T2, reconnect after T1 server restart |
 
-### Supporting
+### Collections + Plan library (RDR-078)
 
 | Tool | Purpose |
 |---|---|
 | `collection_list` | List all T3 collections visible to the current credentials |
-| `plan_save` | Persist a query execution plan (TTL-bounded) for later reuse |
-| `plan_search` | Retrieve cached plans by query similarity |
+| `plan_save` | Persist a plan template or ad-hoc plan (TTL-bounded) for later reuse |
+| `plan_search` | Retrieve cached plans by semantic similarity (FTS5) |
+| `traverse` | Walk the catalog link graph from seed tumblers with typed link filters or a named purpose. Depth capped at 3. Returns `{tumblers, ids, collections}` for downstream retrieval. |
+
+### Operators (RDR-079 — LLM-backed via `claude -p` subprocess)
+
+Each operator spawns a `claude -p --output-format json --json-schema …`
+subprocess with a task-specific system prompt.  Structured output is
+unwrapped from claude's wrapper and returned as a plain dict.
+
+| Tool | Purpose |
+|---|---|
+| `operator_extract` | Pull structured fields (`fields="a,b,c"`) from free text |
+| `operator_rank` | Order items by a criterion |
+| `operator_compare` | Compare items focused on a specific axis |
+| `operator_summarize` | Summarize content (citation-aware via `cited=True`) |
+| `operator_generate` | Generate text following a template, grounded in `context` |
+
+### Orchestration (RDR-080 — consolidated from deleted agents)
+
+| Tool | Purpose |
+|---|---|
+| `nx_answer` | Retrieval entry point: `plan_match` → `plan_run` → record. Falls through to inline claude-p planner on miss. Replaces the `query-planner` + `analytical-operator` agent pair. |
+| `nx_tidy` | Consolidate T3 knowledge entries on a topic. Replaces the `knowledge-tidier` agent. |
+| `nx_enrich_beads` | Enrich a bead with execution context (file paths, test commands, constraints). Replaces the `plan-enricher` agent. |
+| `nx_plan_audit` | Audit a plan for correctness and codebase alignment. Replaces the `plan-auditor` agent. |
+
+All four `nx_*` tools are async (`claude -p` subprocess) with configurable `timeout` (default 120s).
 
 ## `nexus-catalog` — document catalog (10 tools)
 

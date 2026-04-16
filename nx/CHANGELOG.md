@@ -6,6 +6,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **9 RDR-078 verb skills** — `research`, `review`, `analyze`, `debug`, `document`, `plan-author`, `plan-inspect`, `plan-promote`, `plan-first`. Each dispatches `plan_match` scoped to the skill's verb and executes the returned plan via `plan_run`. Falls through to `/nx:query` on miss.
+- **`/nx:query` slash command** — pointer to `mcp__plugin_nx_nexus__nx_answer`. Replaces the `query-planner` + `analytical-operator` agents from RDR-042.
+- **`/nx:pdf-process` command file** — pointer to `nx index pdf` CLI. Replaces the `pdf-chromadb-processor` agent.
+- **Builtin plan templates** — `nx/plans/builtin/*.yml` (9 scenario templates) + `nx/plans/dimensions.yml` (SC-19 dimension registry). Seed on `nx catalog setup`.
+- **Documentation** — `docs/plan-authoring-guide.md`, `docs/catalog-link-types.md`, `docs/catalog-purposes.md`. Planning references: `docs/plans/2026-04-14-rdr-078-plan-centric-retrieval-impl-plan.md`, `docs/plans/2026-04-15-rdr-079-operator-dispatch-plan.md`, `docs/plans/2026-04-15-rdr-080-migration-scope.md`.
+
+### Changed
+
+- **Three agents are now 40-line stubs** — `knowledge-tidier.md`, `plan-auditor.md`, `plan-enricher.md` direct callers at `nx_tidy` / `nx_plan_audit` / `nx_enrich_beads` MCP tools respectively (RDR-080). Stubs remain in the registry so legacy dispatch references don't break; new code should invoke the MCP tool directly.
+- **`registry.yaml`** — `agents:` 16 → 13 (removed `query-planner`, `analytical-operator`, `pdf-chromadb-processor`); `standalone_skills:` 11 → 24 (added 9 verb skills + 4 pointer skills). `model_summary` updated. Pipelines `feature` and `research` replace agent steps with MCP-tool invocations.
+
 ## [4.3.2] - 2026-04-15
 
 Plugin version aligned with Nexus CLI 4.3.2. No plugin-level functional changes.

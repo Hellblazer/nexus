@@ -13,7 +13,7 @@ The typical agent workflow touches the storage tiers at each stage:
 1. **Before new work** — search T3 for prior RDRs: `nx search "topic" --corpus rdr`. New designs often build on or refine earlier decisions; the search surfaces that chain automatically.
 2. **During research** — `/nx:rdr-research` can delegate to `deep-research-synthesizer` or `codebase-deep-analyzer` for investigation that goes beyond what a single agent session can cover.
 3. **At gate time** — `substantive-critic` provides independent review of the RDR's logic, evidence, and completeness.
-4. **At accept time** — `/nx:rdr-accept` updates T2 metadata, then optionally dispatches the planning chain (strategic-planner → plan-auditor → plan-enricher) to decompose the implementation into trackable beads.
+4. **At accept time** — `/nx:rdr-accept` updates T2 metadata, then optionally dispatches the planning chain: `strategic-planner` agent → `nx_plan_audit` MCP tool → `nx_enrich_beads` MCP tool. The last two were agents before RDR-080; they're now direct MCP-tool calls that the strategic-planner can invoke without a sub-agent spawn.
 5. **After close** — `/nx:rdr-close` archives the full RDR to T3 for permanent semantic retrieval.
 
 Agents access all storage tiers via structured MCP tools rather than CLI commands, which works reliably in background agents and restricted permission contexts. Team members use the `nx` CLI directly. See [nx/README.md](../nx/README.md#mcp-servers) for MCP tool details.
