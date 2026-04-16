@@ -331,7 +331,43 @@ nx taxonomy project code__nexus --use-icf --persist  # suppress hub topics (RDR-
 nx taxonomy project --backfill --persist        # project all collections
 nx taxonomy hubs --min-collections 5 --max-icf 1.2 --explain  # hub detector (RDR-077)
 nx taxonomy audit --collection code__nexus                    # projection quality audit (RDR-077)
+nx taxonomy validate-refs docs/**/*.md                        # stale-reference validator (RDR-081)
 ```
+
+### `nx taxonomy validate-refs`
+
+Scan markdown docs for stale collection references and chunk-count claims
+that have drifted from current T3 state. **Deterministic** — pure regex
+plus `collection_list()` / `count()` lookups; no LLM.
+
+```
+nx taxonomy validate-refs docs/rdr/README.md docs/architecture.md
+nx taxonomy validate-refs docs/**/*.md --strict                 # exit 1 on Missing too
+nx taxonomy validate-refs docs/**/*.md --tolerance 0.20         # ±20% count window
+nx taxonomy validate-refs docs/**/*.md --format json            # machine-readable
+nx taxonomy validate-refs docs/**/*.md --prefixes docs,code     # override whitelist
+```
+
+Scans for `<prefix>__<name>` references (default prefixes `docs`, `code`,
+`knowledge`, `rdr`) and proximate chunk-count claims like `"12,900 chunks"`,
+`"~13k chunks"`. References inside fenced code blocks (``` ``` ``` or `~~~`)
+are ignored so tutorial snippets don't false-positive.
+
+Per-reference verdicts:
+- `OK` — collection exists and (when a count is claimed) it matches within tolerance.
+- `Drift` — collection exists but the claimed count differs by more than `--tolerance`.
+- `Missing` — collection is not in the current T3 (renamed, split, or never indexed).
+
+Exit codes: `0` = all OK (or only `Missing` without `--strict`); `1` = drift
+(or `Missing` with `--strict`); `2` = scanner or T3 failure.
+
+Prefix whitelist can be configured in `.nexus.yml`:
+
+```yaml
+taxonomy:
+  collection_prefixes: [docs, code, knowledge, rdr, custom]
+```
+
 
 | Subcommand | Description |
 |------------|-------------|
