@@ -6,21 +6,23 @@ effort: medium
 
 # review
 
-Pure verb skill. One-shot: call `plan_match` with `verb=review`,
-execute via `plan_run`, return the final step's result.
+Pure verb skill. Routes through `nx_answer` with `dimensions={verb: "review"}`
+so the plan-match gate narrows to review templates and the full trunk runs
+in one tool call.
 
 ## Flow
 
 ```
-plan_match(
-    intent=<caller's phrasing>,
-    dimensions={verb: "review"},
-    min_confidence=0.40,
-    n=1,
+mcp__plugin_nx_nexus__nx_answer(
+    question=<caller's phrasing>,
+    dimensions={"verb": "review"},
+    context=<changed_paths + depth, as JSON string if needed>,
 )
-→ if match: plan_run(match, bindings={changed_paths: [...], depth: 1})
-→ else: /nx:query <caller's intent>
 ```
+
+`nx_answer` handles match → run → record. Plan-miss falls through to an
+inline `claude -p` planner; on total miss the tool returns an error string
+the caller can show to the user.
 
 ## Required bindings
 
@@ -46,6 +48,9 @@ when it exists, falling back to `strategy:default` otherwise.
 
 ## Anti-patterns
 
+- **Calling `plan_match` directly instead of `nx_answer`.** You lose
+  the record step and the miss-path inline-planner fallback.  Let
+  `nx_answer` be the entry point; it's the MCP-level contract.
 - **Running `review` without changed_paths.** The review template
   has no sensible default — missing `changed_paths` raises
   `PlanRunBindingError(missing=["changed_paths"])`. Surface the

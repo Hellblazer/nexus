@@ -6,21 +6,22 @@ effort: medium
 
 # analyze
 
-Pure verb skill. One-shot: `plan_match` with `verb=analyze` →
-`plan_run` → return final.
+Pure verb skill. Routes through `nx_answer` with `dimensions={verb: "analyze"}`
+so the plan-match gate narrows to analyze templates and the full trunk runs
+in one tool call.
 
 ## Flow
 
 ```
-plan_match(
-    intent=<caller's phrasing>,
-    dimensions={verb: "analyze"},
-    min_confidence=0.40,
-    n=1,
+mcp__plugin_nx_nexus__nx_answer(
+    question=<caller's phrasing>,
+    dimensions={"verb": "analyze"},
+    context=<area, criterion, limit — as JSON string if needed>,
 )
-→ if match: plan_run(match, bindings={area: <topic>, criterion: <ranking axis>, limit: 12})
-→ else: /nx:query <caller's intent>
 ```
+
+`nx_answer` handles match → run → record. Plan-miss falls through to an
+inline `claude -p` planner.
 
 ## Required bindings
 
@@ -40,6 +41,8 @@ plan_match(
 
 ## Anti-patterns
 
+- **Calling `plan_match` directly instead of `nx_answer`.** You lose
+  the record step and the miss-path inline-planner fallback.
 - **Using `analyze` when `research` would suffice.** `research` is
   single-concept; `analyze` implies cross-corpus / cross-approach
   synthesis. If the caller only wants to understand one thing, use

@@ -6,21 +6,22 @@ effort: medium
 
 # document
 
-Pure verb skill. One-shot: `plan_match` with `verb=document` →
-`plan_run` → return final.
+Pure verb skill. Routes through `nx_answer` with `dimensions={verb: "document"}`
+so the plan-match gate narrows to document templates and the full trunk runs
+in one tool call.
 
 ## Flow
 
 ```
-plan_match(
-    intent=<caller's phrasing>,
-    dimensions={verb: "document"},
-    min_confidence=0.40,
-    n=1,
+mcp__plugin_nx_nexus__nx_answer(
+    question=<caller's phrasing>,
+    dimensions={"verb": "document"},
+    context=<area + limit — as JSON string if needed>,
 )
-→ if match: plan_run(match, bindings={area: <topic>, limit: 10})
-→ else: /nx:query <caller's intent>
 ```
+
+`nx_answer` handles match → run → record. Plan-miss falls through to an
+inline `claude -p` planner.
 
 ## Required bindings
 
@@ -39,6 +40,8 @@ plan_match(
 
 ## Anti-patterns
 
+- **Calling `plan_match` directly instead of `nx_answer`.** You lose
+  the record step and the miss-path inline-planner fallback.
 - **Using `document` for new writing.** The plan surveys existing
   coverage and flags gaps; actually authoring new prose belongs to
   the user + the caller's downstream tool.

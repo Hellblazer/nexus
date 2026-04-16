@@ -108,18 +108,21 @@ _META_PREFIX = (
     "and the key arg(s).  Then stop.\n\nTask: "
 )
 
-# Category 1: Verb skills — should route to plan_match / plan_run / nx_answer.
+# Category 1: Verb skills — must route through nx_answer with verb dimensions.
+# After the "skills through nx_answer" refactor (PR #168 late commits), each
+# verb skill's SKILL.md names nx_answer as the tool to call with
+# dimensions={verb: <skill>}.
 _VERB_SKILLS = [
     Case("research",      _META_PREFIX + "How does the projection quality mechanism work?",
-         ["plan_match", "plan_run", "nx_answer", "research"]),
+         ["nx_answer", "mcp__plugin_nx_nexus__nx_answer"]),
     Case("review",        _META_PREFIX + "Review a diff that added `def add(a,b): return a+b`.",
-         ["plan_match", "plan_run", "nx_answer", "review", "drift"]),
+         ["nx_answer", "mcp__plugin_nx_nexus__nx_answer"]),
     Case("analyze",       _META_PREFIX + "Compare BM25 vs dense retrieval across our corpora.",
-         ["plan_match", "plan_run", "nx_answer", "analyze", "compare"]),
+         ["nx_answer", "mcp__plugin_nx_nexus__nx_answer"]),
     Case("debug",         _META_PREFIX + "Test `test_foo` fails with ImportError.",
-         ["plan_match", "plan_run", "nx_answer", "debug", "failing_path"]),
+         ["nx_answer", "mcp__plugin_nx_nexus__nx_answer"]),
     Case("document",      _META_PREFIX + "Audit doc coverage for the retrieval module.",
-         ["plan_match", "plan_run", "nx_answer", "document", "coverage"]),
+         ["nx_answer", "mcp__plugin_nx_nexus__nx_answer"]),
     Case("plan-author",   _META_PREFIX + "Draft a plan template for verb=migrate.",
          ["plan_match", "plan_run", "plan_author", "author"]),
     Case("plan-inspect",  _META_PREFIX + "Inspect plan metrics for verb=research.",

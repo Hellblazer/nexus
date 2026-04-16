@@ -1659,15 +1659,16 @@ async def nx_answer(
     max_steps: int = 6,
     budget_usd: float = 0.25,
     trace: bool = True,
+    dimensions: dict[str, Any] | None = None,
 ) -> str:
     """Answer a knowledge question using plan-match-first retrieval. RDR-080 P1.
 
     Internal flow:
 
-    1. **Plan-match gate**: call ``plan_match(intent=question)``. On hit
-       (confidence >= 0.40 or FTS5 sentinel), execute the matched plan.
-       On miss, dispatch an inline LLM planner via ``claude -p`` to
-       decompose the question and execute the resulting plan.
+    1. **Plan-match gate**: call ``plan_match(intent=question, dimensions=…)``.
+       On hit (confidence >= 0.40 or FTS5 sentinel), execute the matched
+       plan.  On miss, dispatch an inline LLM planner via ``claude -p``
+       to decompose the question and execute the resulting plan.
     2. **Single-step guard**: if the matched plan has exactly 1 ``query``
        step, reroute to ``query()`` directly.
     3. **Execute plan**: run via ``plan_run``.
@@ -1680,6 +1681,10 @@ async def nx_answer(
         max_steps: Cap on plan DAG size (passed to inline planner on miss).
         budget_usd: Per-invocation cost cap (reserved for future enforcement).
         trace: When False, redacts question and final_text in the run log.
+        dimensions: Dimensional filter for the plan-match gate.  Pass
+            ``{"verb": "research"}`` (etc.) so verb skills narrow the
+            match to templates of the appropriate verb.  Unset means
+            the matcher considers every active plan.
 
     Returns:
         The final step's output as a human-readable string.
@@ -1702,6 +1707,7 @@ async def nx_answer(
                 question,
                 library=db.plans,
                 cache=cache,
+                dimensions=dimensions,
                 scope_preference=scope,
                 context={"user_context": context} if context else None,
                 min_confidence=_PLAN_MATCH_MIN_CONFIDENCE,

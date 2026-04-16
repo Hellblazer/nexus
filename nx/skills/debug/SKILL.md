@@ -6,8 +6,9 @@ effort: medium
 
 # debug
 
-Pure verb skill. One-shot: `plan_match` with `verb=debug` →
-`plan_run` → return final.
+Pure verb skill. Routes through `nx_answer` with `dimensions={verb: "debug"}`
+so the plan-match gate narrows to debug templates and the full trunk runs
+in one tool call.
 
 **Note — the debug scenario is intentionally flat** (no `traverse`
 step). Dev work starts from a concrete failing path; the primary
@@ -17,15 +18,15 @@ traversal). Serena handles symbol-level navigation separately.
 ## Flow
 
 ```
-plan_match(
-    intent=<caller's phrasing>,
-    dimensions={verb: "debug"},
-    min_confidence=0.40,
-    n=1,
+mcp__plugin_nx_nexus__nx_answer(
+    question=<caller's phrasing>,
+    dimensions={"verb": "debug"},
+    context=<failing_path + symptom — as JSON string if needed>,
 )
-→ if match: plan_run(match, bindings={failing_path: <path>, symptom: <description>})
-→ else: /nx:query <caller's intent>
 ```
+
+`nx_answer` handles match → run → record. Plan-miss falls through to an
+inline `claude -p` planner.
 
 ## Required bindings
 
@@ -49,6 +50,8 @@ plan_match(
 
 ## Anti-patterns
 
+- **Calling `plan_match` directly instead of `nx_answer`.** You lose
+  the record step and the miss-path inline-planner fallback.
 - **Expecting the debug plan to walk the full call graph.** It
   won't — that's Serena's job. The debug plan answers "what did we
   decide about this code?", not "what calls this function?".

@@ -1,37 +1,33 @@
 ---
 name: research
-description: Use when doing design / architecture / planning work that walks from prose (RDRs, docs, knowledge) into the modules implementing a concept — tries the research plan library first via plan_match, falls through to /nx:query if nothing matches
+description: Use when doing design / architecture / planning work that walks from prose (RDRs, docs, knowledge) into the modules implementing a concept
 effort: medium
 ---
 
 # research
 
-Pure verb skill. The body is one-shot: call `plan_match` with
-`verb=research`, execute the returned plan via `plan_run`, return
-the final step's result.
+Pure verb skill. Routes through `nx_answer` with `dimensions={verb: "research"}`
+so the plan-match gate narrows to research-verb templates and the full
+trunk (match → run → record) runs in one tool call.
 
 ## Flow
 
 ```
-plan_match(
-    intent=<caller's phrasing>,
-    dimensions={verb: "research"},
-    min_confidence=0.40,
-    n=1,
+mcp__plugin_nx_nexus__nx_answer(
+    question=<caller's phrasing>,
+    dimensions={"verb": "research"},
+    scope=<optional corpus / subtree filter>,
 )
-→ if match: plan_run(match, bindings={concept: <intent-derived-concept>, ...})
-→ else: /nx:query <caller's intent>
 ```
 
-## Required bindings
+`nx_answer` internally:
 
-- `concept` — the central concept to research (e.g. "projection
-  quality", "ICF hub detection").
-
-## Optional bindings
-
-- `limit` — per-corpus result cap (defaults to 10 via
-  `default_bindings`).
+1. `plan_match(intent=question, dimensions={verb: "research"})` — narrowed
+   to the research scenario templates.
+2. On hit: `plan_run` the matched template with bindings from `context`.
+3. On miss: inline `claude -p` planner decomposes the question into a DAG,
+   then `plan_run` executes it.
+4. Records the run to `nx_answer_runs` for observability.
 
 ## Typical intent shapes
 
@@ -41,13 +37,13 @@ plan_match(
 
 ## Anti-patterns
 
-- **Invoking `plan_run` with a literal description as `concept`.**
-  `concept` should be a noun phrase (2-5 words), not a full
-  question. Extract the key noun phrase from the intent.
-- **Setting `min_confidence=0` to force a match.** Below-threshold
-  matches waste `plan_run` on a weakly-matching plan; defer to
-  `/nx:query` instead.
+- **Calling `plan_match` directly instead of `nx_answer`.** You lose the
+  record step and the miss-path inline-planner fallback.  Let `nx_answer`
+  be the entry point; it's the MCP-level contract.
+- **Passing a narrower `dimensions` filter than `{verb: "research"}`.**
+  Research plans are `scope:global` and don't pin a domain; narrowing
+  further will miss.
 
-See `/nx:plan-first` for the gate discipline, and
-`docs/plan-authoring-guide.md` for how the research plan template
-is authored.
+See [`/nx:plan-first`](../plan-first/SKILL.md) for the gate discipline
+across all retrieval, and `docs/plan-authoring-guide.md` for how the
+research plan template is authored.

@@ -557,6 +557,45 @@ class TestNxAnswerEndToEnd:
         assert "final answer" in result.lower()
 
     @pytest.mark.asyncio
+    async def test_dimensions_forwarded_to_plan_match(self, tmp_path):
+        """Verb skills pass dimensions={verb: ...} → forwarded to plan_match.
+
+        Verifies the signature extension that lets verb skills route through
+        nx_answer (unifying the trunk + picking up the record step) instead
+        of hand-rolling plan_match + plan_run.
+        """
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult
+
+        match = _make_match(confidence=0.75)
+        run_result = PlanResult(steps=[{"text": "Research answer."}])
+        pm_calls = []
+
+        def _spy(*args, **kwargs):
+            pm_calls.append(kwargs)
+            return [match]
+
+        with (
+            patch("nexus.plans.matcher.plan_match", side_effect=_spy),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(return_value=run_result)),
+        ):
+            from nexus.mcp.core import nx_answer
+            await nx_answer(
+                "how does projection quality work?",
+                dimensions={"verb": "research"},
+            )
+
+        assert pm_calls, "plan_match was never called"
+        assert pm_calls[0].get("dimensions") == {"verb": "research"}, (
+            f"plan_match dimensions not forwarded: {pm_calls[0]!r}"
+        )
+
+    @pytest.mark.asyncio
     async def test_miss_path_calls_plan_miss_planner(self, tmp_path):
         """No matches (plan miss) → _nx_answer_plan_miss dispatched."""
         import nexus.mcp_infra as _infra
