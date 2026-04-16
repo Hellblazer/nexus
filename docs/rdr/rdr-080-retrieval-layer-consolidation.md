@@ -4,7 +4,8 @@ status: draft
 type: feature
 priority: P2
 created: 2026-04-15
-related: [RDR-042, RDR-070, RDR-078, RDR-079]
+revised: 2026-04-15
+related: [RDR-042, RDR-070, RDR-078, RDR-079, RDR-081]
 reviewed-by: self
 ---
 
@@ -84,10 +85,12 @@ nx_answer(
 
 Internal flow (all in-process; no subagent spawn):
 
-1. **Plan-match gate**: call `plan_match(intent=question, ...)`. On hit (confidence ≥ threshold or FTS5 sentinel), proceed to execution. On miss, dispatch an in-MCP planning call (one worker turn with `--json-schema` for plan JSON).
-2. **Execute plan**: reuse `plan_run` runner from RDR-078. Step outputs accumulate in a local Python dict; no scratch round-trips. Retrieval steps call other MCP tools directly (via the runner's `_default_dispatcher`). Operator steps call the `operator_*` tools from RDR-079.
-3. **Synthesize** (if the plan ends with a synthesis step, which most do): the final step's output is the user-visible answer.
-4. **Record**: write the plan's run metrics back to T2 (existing `plan_match_metrics` / `plan_run_metrics` paths). If the plan was newly planned (miss path), `plan_save` the new plan at scope=session.
+1. **Plan-match gate**: call `plan_match(intent=question, min_confidence=0.40, ...)`. On hit — confidence ≥ threshold OR `confidence is None` (FTS5 fallback sentinel; internally a plan hit, not a miss) — proceed to execution. On miss, dispatch an in-MCP planning call (one worker turn with `--json-schema` for plan JSON). **Single-step guard**: if the matched plan has exactly 1 step and that step is `query`, reroute to `query()` directly (skip `plan_run` overhead).
+2. **Execute plan**: reuse `plan_run` runner from RDR-078/079. Step outputs accumulate in a local Python `step_outputs: list[dict]`; no scratch round-trips. Retrieval steps call other MCP tools directly (via the runner's `_default_dispatcher`). Operator steps call the `operator_*` tools from RDR-079.
+3. **Auto-hydration** (RDR-079 critique fix, pre-shipped): the `_default_dispatcher` (runner.py:514, Option C) intercepts retrieval→operator transitions: when the resolved tool is an operator AND the args contain an `ids` key from a prior retrieval step, the dispatcher calls `store_get_many(ids, collections)` to materialize document content before building the operator prompt. Plan YAML should NOT need explicit hydration steps for standard retrieval→operator chains — the dispatcher handles it. When hydrated inputs exceed `_OPERATOR_MAX_INPUTS` (100), the dispatcher auto-inserts a synthetic `rank(criterion='relevance to original question')` winnow step and logs at WARNING.
+4. **Synthesize** (if the plan ends with a synthesis step, which most do): the final step's output is the user-visible answer.
+5. **Record**: write the plan's run metrics back to T2 (existing `plan_match_metrics` / `plan_run_metrics` paths). If the plan was newly planned (miss path), `plan_save` the new plan at scope=session with `ttl=30`. Partial failures recorded with `outcome="partial"`.
+6. **Link-context seeding**: before `plan_run`, seed `link-context` in T1 scratch so the auto-linker (auto_linker.py) has targets for any `store_put` calls during plan execution.
 
 **Plan-first enforcement lives in the tool contract**, not in ten agent preambles. Any caller — skill, agent, Python script, another MCP tool — gets the discipline by default.
 
@@ -101,9 +104,9 @@ Internal flow (all in-process; no subagent spawn):
 | `nx_plan_audit` | `plan-auditor` agent | `/nx:plan-validation` shrinks to trigger pointer |
 
 Each new MCP tool:
-- Dispatches to the operator pool from RDR-079 (worker reuse = free amortised cost).
+- Dispatches to **OperatorPool** from RDR-079 (interactive, warm-worker reuse = free amortised cost). **RewindPool** (per-dispatch subprocess + JSONL-truncation rewind) is reserved for batch-style operators where cross-dispatch contamination is a correctness concern — its first consumer is RDR-081's authoring-trust batch labeler, not this RDR.
 - Uses `--json-schema` for structured output (no parse fragility).
-- Returns a well-typed dict (for plan_run consumption) or a formatted string (for direct caller consumption); `_structured: bool = False` flag picks.
+- Returns a well-typed dict (for plan_run consumption) or a formatted string (for direct caller consumption); `structured: bool = False` flag picks.
 - Emits structured logs with `session_id`, `duration_ms`, `cost_usd`, `usage`.
 
 ### The boundary rule
@@ -132,7 +135,7 @@ The discipline itself moves inside `nx_answer`; an agent that calls `nx_answer` 
 
 ## Phases
 
-- **P1** — `nx_answer` MCP tool, plan-match-first enforced internally, operator dispatch via RDR-079 pool. Deterministic runner inherited from RDR-078. Also ships: (a) `store_get_many(doc_ids: list[str]) -> list[dict]` with explicit batching at ≤ `MAX_QUERY_RESULTS (300)` IDs per ChromaDB call, used by `nx_answer`'s synthesis hydration (RF-6); (b) `nx_answer_runs` T2 table via new migration per PQ-1 resolution (fields: `id, question, plan_id, matched_confidence, step_count, final_text, cost_usd, duration_ms, created_at`; TTL 7 days); `trace=false` opt-out parameter on the MCP tool. Test coverage: unit-level for the dispatch logic with stubbed pool; integration-level for one end-to-end question per scenario verb; dedicated 500-ID hydration test asserting no silent truncation.
+- **P1** — `nx_answer` MCP tool, plan-match-first enforced internally, operator dispatch via RDR-079 pool. Deterministic runner inherited from RDR-078/079. **Pre-conditions met** (post-RDR-079 delta RF-1): all primitives are pre-shipped — `operator_*` tools (core.py:1919+), `store_get_many` (core.py:692), `plan_match` (core.py:1499), `plan_run` (core.py:1568), `_default_dispatcher` with operator routing (runner.py:493). P1 is wiring an orchestration layer, not building infrastructure. Also ships: (a) `nx_answer_runs` T2 table via new migration per PQ-1 resolution (fields: `id, question, plan_id, matched_confidence, step_count, final_text, cost_usd, duration_ms, created_at`; TTL 7 days); `trace=false` opt-out parameter on the MCP tool; (b) auto-hydration in `_default_dispatcher` (Option C at runner.py:514) — operator steps auto-receive content instead of IDs; (c) `confidence is None` (FTS5 sentinel) treated as a plan hit in the gate (RF-11). Test coverage: unit-level for the dispatch logic with stubbed pool; integration-level for one end-to-end question per scenario verb; SC-11 hydration test against existing `store_get_many`.
 - **P2** — Skill + preamble pruning + caller-migration. Three sub-deliverables:
   - **P2a** Collapse `/nx:query` SKILL.md from 257 lines to ~15 lines describing `nx_answer` as the entry point. Delete `nx/agents/query-planner.md`. Strip the plan-match-first preamble from 8 of the 10 retrieval-shaped agents. Update `nx/retrieval-agents.txt` to 2 entries. Update `tests/test_plan_first_skills.py`. Commit `docs/plans/2026-04-15-rdr-080-migration-scope.md` enumerating every agent/skill file that will be touched in P2a/P3/P4 (the ~22-file list from SC-4) with per-file before/after snippets.
   - **P2b** `/nx:query` and `/nx:plan-first` → `nx_answer` documented as primary entry; plan-first `SKILL.md` gets a §Internal enforcement section explaining that `nx_answer` enforces the gate at the tool contract.
@@ -153,7 +156,7 @@ The discipline itself moves inside `nx_answer`; an agent that calls `nx_answer` 
 - **SC-8** — RDR-078 and RDR-079 test suites pass unchanged. No regression on `plan_match`, `plan_run`, `traverse`, or the scenario seeds themselves.
 - **SC-9** — Graceful degradation: without `claude auth status == loggedIn`, `nx_answer` returns a clear "operator pool unavailable" error for plan-miss questions, but still works for plan-hit questions whose steps are entirely retrieval (search + traverse, no operators). Tested.
 - **SC-10** — The boundary rule is committed to `docs/architecture.md` with the three test cases from §Design and the current inventory classification. Future agent/skill/tool additions consult it.
-- **SC-11** — `store_get_many(doc_ids: list[str]) -> list[dict]` ships in P1 with explicit batching at ≤ `MAX_QUERY_RESULTS = 300` IDs per ChromaDB call. Test `tests/test_store_get_many.py::test_500_id_hydration_no_truncation` passes a 500-ID fixture and asserts the returned list contains 500 entries (no silent truncation). `nx_answer`'s synthesis hydration step uses this helper; verified by grep of the synthesis code path.
+- **SC-11** — `store_get_many` is **pre-shipped** (RDR-079 post-critique, core.py:692). P1 adds the 500-ID hydration test: `tests/test_store_get_many.py::test_500_id_hydration_no_truncation` passes a 500-ID fixture and asserts the returned list contains 500 entries with no silent truncation. Also validates that auto-hydration in `_default_dispatcher` correctly calls `store_get_many` when an operator step receives `ids` from a prior retrieval step.
 
 ## Research Findings
 
@@ -203,6 +206,46 @@ The same argument rules OUT the kept agents: `debugger`, `deep-analyst`, etc. ha
 
 **Implication**: the boundary rule is not a one-direction heuristic ("push things to MCP when possible") but a symmetric fitness test. Some agents MUST stay agents; some MCP tools MUST stay MCP tools. RDR-080 doesn't just move things into MCP — it validates that each moved thing actually belongs there by the test in §Boundary rule.
 
+### RF-8 — Post-RDR-079 delta: all P1 primitives are pre-shipped (2026-04-15)
+
+**Source**: deep-research-synthesizer + codebase-deep-analyzer, two research passes post-079 close. T2 memory: `nexus_rdr/080-research-1-post-079-delta`, `nexus_rdr/080-research-2-implementation-gaps`.
+
+RDR-079 shipped `operator_*` tools, `store_get_many`, `plan_match` (calibrated at 0.40), `plan_run` (async, auto-kwarg-filter), and the `_default_dispatcher` with operator routing. P1 is wiring, not building. The analytical-operator and query-planner agents are functionally superseded but still live — deletion gates on P2a (skill collapse). RewindPool is complete but its first consumer is RDR-081 (batch labeler), not this RDR.
+
+### RF-9 — Auto-hydration insertion point: `_default_dispatcher` Option C (2026-04-15)
+
+**Source**: codebase-deep-analyzer Q3. T2 memory: `nexus_rdr/080-research-2-implementation-gaps`.
+
+Three options evaluated for auto-hydrating retrieval→operator transitions. Option C (at `runner.py:514`, after `_OPERATOR_TOOL_MAP` resolution, before dispatch) is the recommended insertion point. When the resolved tool is an operator AND args contain an `ids` key, call `store_get_many(ids, collections)` and replace IDs with texts. No plan structure changes, no step renumbering, already async. Options A (in `_resolve_value`) and B (synthetic step injection) were rejected for architectural contamination and step-numbering breakage respectively.
+
+### RF-10 — `/nx:query` path analysis: 4 paths, 3 already covered (2026-04-15)
+
+**Source**: codebase-deep-analyzer Q1. T2 memory: `nexus_rdr/080-research-2-implementation-gaps`.
+
+`/nx:query` has four execution paths. Path 1 (catalog/single) and Path 2 (template match) are fully covered by `plan_match → plan_run`. Path 3 (full planning via query-planner) requires the one new capability `nx_answer` adds: inline LLM decomposition on plan miss. Path 4 (direct search fallback) is the single-step guard. `nx_answer` must add: (a) LLM decomposition, (b) `plan_save(ttl=30)` auto-cache, (c) single-step guard, (d) partial-failure tracking. Estimated: ~100 lines of Python.
+
+### RF-11 — `confidence=None` FTS5 sentinel must be a hit in `nx_answer`'s gate (2026-04-15)
+
+**Source**: codebase-deep-analyzer Q1 + `plan-first/SKILL.md:27-29`. T2 memory: `nexus_rdr/080-research-2-implementation-gaps`.
+
+`plan_match` returns `Match(confidence=None)` for FTS5 fallback hits (rendered as `confidence=fts5` to callers). The `nx_answer` gate MUST treat `None` as a hit, not a miss — otherwise FTS5-matched plans fall through to the expensive planning call. Unit test: assert that `Match(confidence=None)` proceeds to `plan_run`, not to the planner.
+
+### RF-12 — T1 scratch elimination: all inter-agent relay is dead; link-context survives (2026-04-15)
+
+**Source**: codebase-deep-analyzer Q4. T2 memory: `nexus_rdr/080-research-2-implementation-gaps`.
+
+All `query-step,step-{N}` scratch tags are inter-agent relay — eliminated when `plan_run` carries `step_outputs` in-process. One scratch concern survives: `link-context` seeding for the auto-linker (`auto_linker.py` reads this tag on every `store_put`). `nx_answer` should seed `link-context` before `plan_run` if auto-linking is desired. The query-planner's RECOVER path (reads scratch for retries) is eliminated since the planner is no longer a subagent.
+
+### RF-13 — `extract` field translation gap: agent used template dict, tool uses CSV (2026-04-15)
+
+**Source**: codebase-deep-analyzer Q2. T2 memory: `nexus_rdr/080-research-2-implementation-gaps`.
+
+The `analytical-operator` agent accepted `params.template` (JSON dict `{"field": "type"}`), but `operator_extract` takes `fields` (CSV string). 4 of 5 operators are 1:1 replacements; `extract` is the exception. `nx_answer` or the plan step normalization must translate `dict.keys() → CSV string` when a plan step uses the old template format. Document in P1 implementation notes.
+
+### RF-14 — Line budget: 783 deleted, ~100 added = -680 net (2026-04-15)
+
+**Source**: codebase-deep-analyzer Q5. `analytical-operator.md` (248 lines) + `query-planner.md` (279 lines) + `query/SKILL.md` (256 lines) = 783 lines of coordination markdown. `nx_answer` estimated at ~100 lines of Python. Net deletion: ~680 lines.
+
 ## Proposed Questions
 
 - **PQ-1** — RESOLVED. `nx_answer` persists each run to T2 `nx_answer_runs` (new table at P1, TTL 7 days, fields: `id, question, plan_id, matched_confidence, step_count, final_text, cost_usd, duration_ms, created_at`). T2 migration added to P1 deliverables. Users inspect runs via `nx memory search --project nx_answer_runs "<query>"`. Privacy-sensitive questions opt out via `nx_answer(..., trace=false)`.
@@ -230,7 +273,7 @@ The same argument rules OUT the kept agents: `debugger`, `deep-analyst`, etc. ha
 
 ## Trade-offs
 
-- **Latency on warm pool**: wins (no subagent spawn overhead). **Latency on cold pool**: neutral (first agent spawn was also a cold hit).
+- **Latency on warm pool**: wins — measured 20-25s savings per complex query (current worst case ~33s with 70% spent on process spawning; `nx_answer` worst case ~6-9s with 0 subagent spawns). **Latency on cold pool**: neutral (first operator dispatch incurs the same ~5s cold-worker cost either way).
 - **Cost**: neutral for most workloads (same operators; same model). Wins when warm pool has >1 cached operator across multi-step plans (agent-to-agent path re-pays cache tax per subagent).
 - **Surface area**: fewer files, more per-tool code. Net LOC likely neutral; net moving parts strictly fewer.
 - **User-facing behaviour change**: skills still trigger the same way (`/nx:query`, etc.). Agents still exist where they add value. The consolidation is internal.
@@ -250,7 +293,7 @@ The same argument rules OUT the kept agents: `debugger`, `deep-analyst`, etc. ha
 
 ## Assumptions
 
-- RDR-079 has landed (operator pool + `operator_*` MCP tools + `_structured` flag on core tools).
+- RDR-079 has landed and is **closed** (operator pool + `operator_*` MCP tools + `structured` flag + `store_get_many` + RewindPool + calibrated `min_confidence=0.40`).
 - `claude auth status` continues to be the single auth-presence signal.
 - No changes to the plan JSON schema from RDR-078.
 - No changes to the plan library schema from RDR-078/076.
@@ -284,3 +327,4 @@ The same argument rules OUT the kept agents: `debugger`, `deep-analyst`, etc. ha
 ## Revision History
 
 - **2026-04-15** — Initial draft. Grounded in RDR-079 Finding 4 (OAuth inheritance) and deep-analysis output `analysis-deep-rdr079-boundary-redesign-2026-04-15` (T3 store).
+- **2026-04-15** — Post-RDR-079 revision. RDR-079 closed; all P1 primitives pre-shipped. Added RF-8 through RF-14 (post-079 delta analysis: 2 research passes). Updated P1 scope (wiring not building), auto-hydration design (Option C at runner.py:514), FTS5 sentinel gate (RF-11), OperatorPool/RewindPool boundary (RewindPool consumer is RDR-081), latency estimates (33s → 6-9s), SC-11 (store_get_many pre-shipped), extract-field translation gap (RF-13), and line budget (-680 net). T2 research: `080-research-1-post-079-delta`, `080-research-2-implementation-gaps`.
