@@ -19,23 +19,6 @@ generated_docs:
 # Agents output "Recommended Next Step" blocks; the caller orchestrates dispatch.
 
 agents:
-  analytical-operator:
-    model: sonnet
-    version: "1.0"
-    color: cyan
-    skill: query
-    description: "Executes analytical operations (extract, summarize, rank, compare, generate) on retrieved content"
-    triggers:
-      - "dispatched by /nx:query skill for structured data processing"
-      - "multi-step query operator execution"
-    strengths:
-      - "Structured extraction"
-      - "Evidence-grounded summarization"
-      - "Comparative analysis"
-    typical_runtime: "15-30 seconds"
-    predecessors: []
-    successors: []
-
   code-review-expert:
     model: sonnet
     version: "2.0"
@@ -114,7 +97,7 @@ agents:
       - "Best practice discovery"
     typical_runtime: "45-90 seconds"
     predecessors: []
-    successors: [knowledge-tidier]
+    successors: []
 
   architect-planner:
     model: opus
@@ -133,7 +116,7 @@ agents:
       - "Phase planning"
       - "Integration patterns"
     typical_runtime: "60-120 seconds"
-    predecessors: [strategic-planner, plan-auditor]
+    predecessors: [strategic-planner]
     successors: [developer]
 
   debugger:
@@ -173,102 +156,52 @@ agents:
       - "Clean code practices"
       - "Modern language patterns"
     typical_runtime: "varies by complexity"
-    predecessors: [plan-auditor, architect-planner]
+    predecessors: [architect-planner]
     successors: [code-review-expert, test-validator]
 
   knowledge-tidier:
     model: haiku
-    version: "2.0"
+    version: "3.0"
     color: mint
     skill: knowledge-tidying
     slash_command: /knowledge-tidy
-    description: "Persists and organizes knowledge in nx store (T3)"
+    description: "STUB — superseded by mcp__plugin_nx_nexus__nx_tidy MCP tool (RDR-080)"
     triggers:
-      - "research-synthesis completes"
-      - "3 or more validated findings need persisting across sessions"
-      - "valuable insights discovered that should survive session end"
-      - "consolidating cross-session information into T3"
+      - "call mcp__plugin_nx_nexus__nx_tidy directly instead"
     strengths:
-      - "Knowledge organization"
-      - "nx store management"
-      - "Deduplication"
-    typical_runtime: "15-30 seconds"
-    predecessors: [deep-research-synthesizer]
-    successors: []
-
-  pdf-chromadb-processor:
-    model: haiku
-    version: "3.0"
-    color: coral
-    skill: pdf-processing
-    slash_command: /pdf-process
-    description: "Processes PDF files into nx store for semantic search"
-    triggers:
-      - "user says index PDF"
-      - "importing technical documentation"
-      - "PDFs need semantic indexing"
-    strengths:
-      - "PDF extraction"
-      - "Chunk optimization"
-      - "Metadata preservation"
-    typical_runtime: "30-60 seconds per PDF"
+      - "See nx_tidy MCP tool"
+    typical_runtime: "n/a — stub"
     predecessors: []
     successors: []
-
-  query-planner:
-    model: sonnet
-    version: "2.0"
-    color: blue
-    skill: query
-    slash_command: /query
-    description: "Decomposes analytical questions into step-by-step execution plans with operator references"
-    triggers:
-      - "dispatched by /nx:query skill for plan generation"
-      - "complex analytical question decomposition"
-    strengths:
-      - "Query decomposition"
-      - "Operator selection"
-      - "Plan optimization"
-    typical_runtime: "15-30 seconds"
-    predecessors: []
-    successors: [analytical-operator]
 
   plan-auditor:
     model: sonnet
-    version: "2.0"
+    version: "3.0"
     color: orange
     skill: plan-validation
     slash_command: /plan-audit
-    description: "Validates implementation plans before execution"
+    description: "STUB — superseded by mcp__plugin_nx_nexus__nx_plan_audit MCP tool (RDR-080)"
     triggers:
-      - "strategic-planner completes a plan"
-      - "before starting implementation"
-      - "reviewing existing plan"
+      - "call mcp__plugin_nx_nexus__nx_plan_audit directly instead"
     strengths:
-      - "Plan validation"
-      - "Risk identification"
-      - "Codebase alignment"
-    typical_runtime: "30-60 seconds"
-    predecessors: [strategic-planner]
-    successors: [architect-planner, developer, plan-enricher]
+      - "See nx_plan_audit MCP tool"
+    typical_runtime: "n/a — stub"
+    predecessors: []
+    successors: []
 
   plan-enricher:
     model: sonnet
-    version: "2.0"
+    version: "3.0"
     color: emerald
     skill: enrich-plan
     slash_command: /enrich-plan
-    description: "Enriches beads with execution context — file paths, code patterns, constraints, test commands, and audit findings when available"
+    description: "STUB — superseded by mcp__plugin_nx_nexus__nx_enrich_beads MCP tool (RDR-080)"
     triggers:
-      - "plan-auditor completes in RDR planning chain"
-      - "user says enrich beads or groom plan"
-      - "beads need execution context before implementation"
+      - "call mcp__plugin_nx_nexus__nx_enrich_beads directly instead"
     strengths:
-      - "Bead enrichment"
-      - "Audit finding integration"
-      - "Execution context assembly"
-    typical_runtime: "30-60 seconds"
-    predecessors: [plan-auditor]
+      - "See nx_enrich_beads MCP tool"
+    typical_runtime: "n/a — stub"
+    predecessors: []
     successors: []
 
   strategic-planner:
@@ -289,7 +222,7 @@ agents:
       - "Risk assessment"
     typical_runtime: "45-90 seconds"
     predecessors: [codebase-deep-analyzer]
-    successors: [plan-auditor]
+    successors: [architect-planner]
 
   substantive-critic:
     model: sonnet
@@ -373,7 +306,7 @@ rdr_skills:
     slash_command: /rdr-accept
     command_file: commands/rdr-accept.md
     description: "Accept a gated RDR — verify gate PASSED, update status, optional planning dispatch"
-    dispatches_to: [strategic-planner, plan-auditor, plan-enricher]  # sequential chain, orchestrated by skill
+    dispatches_to: [strategic-planner]  # plan-auditor/plan-enricher superseded by MCP tools
     triggers:
       - "accept this RDR"
       - "mark RDR as accepted"
@@ -387,7 +320,7 @@ rdr_skills:
       - "close this RDR"
       - "RDR done"
       - "finish RDR"
-    dispatches_to: [knowledge-tidier]
+    dispatches_to: []  # knowledge-tidier superseded by mcp__plugin_nx_nexus__nx_tidy MCP tool
 
   rdr-audit:
     slash_command: /rdr-audit
@@ -424,6 +357,13 @@ rdr_skills:
 # no predecessors/successors (not part of agent pipelines).
 
 standalone_skills:
+  query:
+    description: "Use when a question needs multi-step retrieval via mcp__plugin_nx_nexus__nx_answer"
+    triggers:
+      - "analytical question over nx knowledge"
+      - "plan-match-first retrieval"
+    tools: []
+
   serena-code-nav:
     description: "LSP-backed symbol navigation via Serena MCP — find definitions, all callers, type hierarchies, safe rename, and symbol-scoped editing. Use instead of Grep for any symbol-level task."
     triggers:
@@ -539,8 +479,6 @@ pipelines:
     description: "Full feature development from planning to validation"
     sequence:
       - strategic-planner
-      - plan-auditor
-      - plan-enricher  # conditional: only when rdr-planning-context T1 tag present
       - architect-planner
       - developer
       - code-review-expert
@@ -558,7 +496,7 @@ pipelines:
     description: "Research with knowledge persistence"
     sequence:
       - deep-research-synthesizer
-      - knowledge-tidier
+      # use mcp__plugin_nx_nexus__nx_tidy directly after research
 
   onboarding:
     description: "New codebase understanding"
@@ -572,7 +510,6 @@ pipelines:
       - codebase-deep-analyzer
       - deep-analyst
       - strategic-planner
-      - plan-auditor
       - architect-planner
 
 # =============================================================================
@@ -589,8 +526,7 @@ naming_aliases:
   /research: research-synthesis        # Common usage
   /knowledge-tidy: knowledge-tidying   # Verb form preference
   /test-validate: test-validation      # Verb form preference
-  /plan-audit: plan-validation         # Action-oriented
-  /pdf-process: pdf-processing         # Verb form preference
+  /plan-audit: plan-validation         # Action-oriented (stub — use nx_plan_audit MCP tool)
   /analyze-code: codebase-analysis     # Different naming convention
 
 # =============================================================================
@@ -605,19 +541,16 @@ model_summary:
     - debugger
     - deep-analyst
   sonnet: # Balanced - most common agents
-    - analytical-operator
     - code-review-expert
     - codebase-deep-analyzer
     - substantive-critic
     - deep-research-synthesizer
     - developer
-    - plan-auditor
-    - plan-enricher
-    - query-planner
+    - plan-auditor   # stub
+    - plan-enricher  # stub
     - test-validator
   haiku: # Fast, cheap - utility agents
-    - knowledge-tidier
-    - pdf-chromadb-processor
+    - knowledge-tidier  # stub
 
 # =============================================================================
 # UTILITY COMMANDS

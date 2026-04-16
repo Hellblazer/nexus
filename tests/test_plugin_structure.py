@@ -33,6 +33,8 @@ _STANDALONE_SKILLS = {
     "sequential-thinking",
     "serena-code-nav", "catalog",
     "receiving-review", "git-worktrees", "finishing-branch",
+    # RDR-080 P3: pointer skills — delegate directly to MCP tools, no relay structure needed
+    "query", "enrich-plan", "knowledge-tidying", "plan-validation",
 }
 
 

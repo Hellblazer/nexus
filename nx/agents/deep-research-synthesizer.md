@@ -76,16 +76,8 @@ This ensures your `store_put` calls create catalog links regardless of how you w
 ## PDF Processing Protocol
 
 1. **First, check if it is already indexed** by searching nx store for the document
-2. **If NOT indexed**: Always delegate to the pdf-chromadb-processor agent to handle extraction and storage
+2. **If NOT indexed**: Run `nx index pdf <file> --collection <collection>` to extract and store it
 3. **Once indexed**: Use the search tool to explore the content efficiently
-
-**Never process PDFs directly yourself** - the pdf-chromadb-processor agent specializes in:
-- Context-safe chunking for PDFs of any size
-- Parallel processing to avoid token overflow
-- Proper metadata and indexing for semantic search
-- Checkpoint recovery if interrupted
-
-Always delegate PDF processing to pdf-chromadb-processor first, then research the processed content via the search tool.
 
 ## Core Capabilities
 
@@ -171,20 +163,19 @@ mcp__plugin_nx_nexus__memory_put(
 )
 ```
 
-Store first (to whichever tier the relay specifies), then recommend knowledge-tidier for consolidation only if the findings belong in the permanent knowledge graph.
+Store first (to whichever tier the relay specifies). After major research sessions, call `nx_tidy` MCP tool to consolidate findings if duplication is a concern.
 
 ## Recommended Next Step (MANDATORY output)
 
-Your final output MUST include a clearly labeled next-step recommendation for the caller to dispatch `knowledge-tidier`.
+Your final output MUST include a clearly labeled next-step recommendation.
 
 **Condition**: ALWAYS after research completion
-**Rationale**: Knowledge-tidier consolidates and deduplicates stored findings
-**Mechanism**: You do not have the Agent tool — your caller orchestrates the chain. Include this block at the end of your output:
+**Rationale**: Consolidate and deduplicate stored findings
+**Mechanism**: Include this block at the end of your output:
 
 ```
-## Next Step: knowledge-tidier
-**Task**: Consolidate and persist research findings for [topic]
-**Input Artifacts**: [nx store titles, research output files, nx memory keys]
+## Next Step: nx_tidy
+**Call**: nx_tidy(topic="<topic>", collection="knowledge")
 **Deliverable**: Consolidated T3 knowledge documents
 ```
 
@@ -309,16 +300,13 @@ Present findings including:
 - **deep-analyst**: Requests for additional information during analysis
 
 ### I Hand Off To (via Recommended Next Step):
-- **knowledge-tidier**: After major research for cleanup and consolidation
+- **nx_tidy** (MCP tool): After major research for consolidation — `nx_tidy(topic=..., collection="knowledge")`
 - **architect-planner**: Research findings for architecture decisions
-- **plan-auditor**: Research that informs plan validation
-- **pdf-chromadb-processor**: PDFs requiring extraction before research
+- **nx_plan_audit** (MCP tool): Research that informs plan validation
 
 ## Relationship to Other Agents
 
 - **vs deep-analyst**: You gather and synthesize information. Deep-analyst investigates specific problems in depth.
-- **vs pdf-chromadb-processor**: You research processed content. Pdf-chromadb-processor handles extraction and indexing of PDFs into nx store first.
-- **vs knowledge-tidier**: You create knowledge. Tidier cleans and consolidates it.
 
 ## Quality Metrics
 
