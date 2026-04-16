@@ -2608,22 +2608,46 @@ async def _nx_answer_plan_miss(
     if not steps:
         raise ValueError("planner returned empty plan")
 
-    # Validate: only nexus-dispatchable tools are allowed in plans.
+    # Validate and normalize: only nexus-dispatchable tools allowed.
+    # Workers see the full Claude Code tool surface (Grep, Read, Bash,
+    # serena, etc.) and may use them in plans. Map common non-nexus tools
+    # to their nexus equivalents; drop unmappable steps.
     _ALLOWED_TOOLS = {
         "search", "query", "traverse", "store_get_many",
         "extract", "rank", "compare", "summarize", "generate",
     }
+    _TOOL_ALIASES = {
+        "grep": "search", "read": "search", "bash": "search",
+        "find": "search", "glob": "search",
+        "web_search": "search", "web_fetch": "search",
+    }
+    normalized_steps = []
     for step in steps:
         raw_tool = step.get("tool", "")
-        # Strip any MCP prefix for validation.
+        # Strip any MCP prefix.
         bare = raw_tool.rsplit("__", 1)[-1] if raw_tool.startswith("mcp__") else raw_tool
+        bare_lower = bare.lower()
+        # Try alias mapping.
+        if bare_lower in _TOOL_ALIASES:
+            bare = _TOOL_ALIASES[bare_lower]
         if bare not in _ALLOWED_TOOLS:
-            raise ValueError(
-                f"planner generated non-dispatchable tool '{raw_tool}' "
-                f"(bare: '{bare}'). Allowed: {sorted(_ALLOWED_TOOLS)}"
+            # Drop non-dispatchable step rather than failing the whole plan.
+            import structlog
+            structlog.get_logger().warning(
+                "planner_step_dropped",
+                raw_tool=raw_tool,
+                bare=bare,
+                reason="not in allowed tool set",
             )
-        # Normalize to bare name in the plan.
+            continue
         step["tool"] = bare
+        normalized_steps.append(step)
+
+    if not normalized_steps:
+        raise ValueError(
+            "planner returned no dispatchable steps after normalization"
+        )
+    steps = normalized_steps
 
     plan_json = json.dumps({"steps": steps})
 
