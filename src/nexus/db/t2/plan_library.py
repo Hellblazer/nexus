@@ -240,6 +240,24 @@ class PlanLibrary:
             ).fetchone()
         return _row_to_dict(row) if row else None
 
+    def get_plan_by_dimensions(
+        self, *, project: str, dimensions: str,
+    ) -> dict[str, Any] | None:
+        """Return the plan with canonical *dimensions* JSON, or ``None``.
+
+        Used by idempotent scoped loaders (``nx catalog setup`` and the
+        Phase 6 scoped loader).  The ``UNIQUE (project, dimensions)``
+        partial index makes this a single-row read; a re-seed that
+        matches an existing entry can short-circuit without a write.
+        """
+        with self._lock:
+            row = self.conn.execute(
+                f"SELECT {_PLAN_SELECT_COLS} FROM plans "
+                "WHERE project = ? AND dimensions = ? LIMIT 1",
+                (project, dimensions),
+            ).fetchone()
+        return _row_to_dict(row) if row else None
+
     def list_active_plans(
         self,
         *,

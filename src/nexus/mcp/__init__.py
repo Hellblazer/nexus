@@ -7,6 +7,7 @@ from nexus.mcp.core import (  # noqa: F401
     store_put,
     store_get,
     store_list,
+    store_get_many,
     memory_put,
     memory_get,
     memory_delete,

@@ -1,0 +1,31 @@
+name: default
+description: >-
+  Inspect a single plan's runtime metrics and match history. Given a plan
+  identifier (id or verb+scope dimensions), surfaces use_count, last_used,
+  match_count, match_conf_sum, success_count, failure_count, plus recent
+  match traces so the operator can judge whether a plan is earning its
+  slot in the library.
+dimensions:
+  verb: plan-inspect
+  scope: global
+  strategy: default
+required_bindings:
+  - target
+optional_bindings:
+  - history_limit
+default_bindings:
+  history_limit: 10
+tags: builtin-template,rdr-078,plan-inspect,meta-seed
+plan_json:
+  steps:
+    - tool: plan_search
+      args:
+        query: $target
+        limit: 1
+    - tool: extract
+      args:
+        inputs: [$step1.text]
+        fields: use_count,last_used,match_count,match_conf_sum,success_count,failure_count
+    - tool: summarize
+      args:
+        inputs: $step2.extractions
