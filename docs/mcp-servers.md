@@ -145,9 +145,9 @@ than agent convenience.
 The underlying Python functions still exist under the same names inside
 `src/nexus/mcp/core.py` and `src/nexus/mcp/catalog.py` — they're just no
 longer decorated with `@mcp.tool()`. The legacy `nexus.mcp_server` module is
-kept as a backward-compat shim that re-exports all 30 functions (15 core +
-10 catalog + 6 demoted) so any external code that imported directly from the
-old module keeps working.
+kept as a backward-compat shim that re-exports every function (26 core +
+10 catalog + demoted helpers) so any external code that imported directly
+from the old module keeps working.
 
 ## Pagination
 

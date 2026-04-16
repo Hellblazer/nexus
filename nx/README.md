@@ -1,6 +1,6 @@
 # Nexus Claude Code Plugin
 
-16 agents, 33 skills, session hooks, slash commands, and two bundled MCP servers for software engineering workflows — backed by the [Nexus CLI](../README.md) for semantic search and knowledge management.
+13 agents (10 active + 3 stubs pointing at MCP tools), 43 skills, session hooks, slash commands, and two bundled MCP servers for software engineering workflows — backed by the [Nexus CLI](../README.md) for semantic search, plan-centric retrieval via `nx_answer`, and knowledge management.
 
 ## Installation
 
@@ -36,12 +36,12 @@ Run `/nx:nx-preflight` after installing to verify all dependencies are present.
 
 ## What You Get
 
-- **16 agents** matched to task complexity: opus for reasoning, sonnet for implementation, haiku for utility
-- **33 skills** — 11 standalone + 15 agent-delegating + 7 RDR workflow
-- **5 standard pipelines** — feature, bug, research, onboarding, architecture
+- **13 agents** (10 active + 3 MCP-tool redirect stubs) matched to task complexity: opus for reasoning, sonnet for implementation, haiku for utility
+- **43 skills** — 12 infrastructure standalone + 9 RDR-078 verb skills + 4 MCP-tool pointer skills (RDR-080) + 10 agent-dispatcher skills + 8 RDR workflow skills
+- **5 standard pipelines** — feature, bug, research, onboarding, architecture (`plan-auditor` / `plan-enricher` / `knowledge-tidier` steps now direct MCP tool invocations per RDR-080)
 - **Session hooks** — surface T2 memory context, prime beads, health-check dependencies
 - **Permission auto-approval** — safe commands and all nexus MCP tools skip the confirmation prompt
-- **Two bundled MCP servers** — `nexus` (15 core tools: storage, memory, scratch, plans, consolidation) and `nexus-catalog` (10 catalog tools: search, show, link, resolve, stats) — plus `sequential-thinking` fetched via npx
+- **Two bundled MCP servers** — `nexus` (26 tools: search, query, store, memory, scratch, plans, traverse, 5 LLM-backed operators, and 4 orchestration tools including `nx_answer` for plan-centric retrieval) and `nexus-catalog` (10 catalog tools) — plus `sequential-thinking` fetched via npx
 
 ### Pick your entry point
 

@@ -75,7 +75,7 @@ T2 is the persistent local layer that bridges sessions. Notes, project state, an
 - **Developer notes** — hypotheses, findings, decisions-in-progress via `nx memory put`
 - **Project memory** — design notes, working state, active decisions. Store with `nx memory put`, retrieve with `nx memory get`. See [Memory and Tasks](memory-and-tasks.md).
 - **RDR metadata** — status, type, priority, dates for each RDR document. See [RDR: Nexus Integration](rdr-nexus-integration.md).
-- **Plan library** — saved query execution plans with project scoping, FTS5 search, and optional TTL. The `/nx:query` skill auto-caches novel multi-step plans (2+ steps) with a 30-day TTL on success — no user prompt. Five builtin templates are seeded at `nx catalog setup` with no TTL (permanent). Access via `plan_save(ttl=30)` / `plan_search` MCP tools.
+- **Plan library** — saved query execution plans with project scoping, FTS5 search, dimensional identity (`verb`, `scope`, `strategy` + optional axes), and optional TTL. Fourteen builtin templates are seeded at `nx catalog setup` (5 legacy + 9 RDR-078 scenario plans for `verb: research` / `review` / `analyze` / `debug` / `document` + 4 meta-seeds). Access via `plan_save` / `plan_search` MCP tools, or indirectly via `nx_answer` (the retrieval trunk — see [Plan-Centric Retrieval](plan-centric-retrieval.md)). Note: auto-growth of the library from successful ad-hoc plans is filed as RDR-084 (draft, not yet implemented) — today the library stays at the 14 seed templates plus any manually-authored YAMLs.
 - **Agent relay** — context passed between agent invocations
 - **Promoted scratch** — T1 entries flagged during a session are auto-flushed to T2 at session end
 

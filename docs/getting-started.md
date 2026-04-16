@@ -93,7 +93,7 @@ See [Document Catalog](catalog.md) for details.
 
 ## Claude Code plugin (optional)
 
-The `nx` plugin gives Claude Code agents access to all three storage tiers, 16 specialized agents, and 33 development workflow skills.
+The `nx` plugin gives Claude Code agents access to all three storage tiers, 13 specialized agents, and 43 skills covering the RDR lifecycle, plan-centric retrieval, and development workflows.
 
 ```bash
 /plugin marketplace add Hellblazer/nexus
