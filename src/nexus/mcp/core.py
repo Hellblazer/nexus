@@ -2702,41 +2702,6 @@ async def nx_answer(
     _log = structlog.get_logger()
     start = time.monotonic()
 
-    # ── Step 0: pre-warm planner pool ────────────────────────────────────
-    # Eagerly create the planner pool and spawn a worker so that if the
-    # plan-match gate misses, the planner dispatch is warm (no cold start).
-    # spawn_worker is async — fire it concurrently with plan_match.
-    _prespawn_task = None
-    try:
-        from nexus.mcp_infra import get_operator_pool as _get_pool
-
-        _planner_pool = _get_pool(
-            "planner",
-            operator_role=(
-                "You are the `planner` decomposition operator. Given a question, "
-                "produce a retrieval-and-analysis plan as a StructuredOutput.\n\n"
-                "Available tools and their args (use ONLY these, bare names):\n"
-                "- search(query, corpus='knowledge', limit=10) → {ids, tumblers, distances}\n"
-                "- query(question, corpus='knowledge', limit=10) → {ids, tumblers, distances}\n"
-                "- traverse(seeds, depth=1, link_types=[]) → {tumblers, ids, collections}\n"
-                "- extract(inputs, fields) → {extractions}\n"
-                "- rank(criterion, inputs) → {ranked}\n"
-                "- compare(criterion, inputs) → {agreements, conflicts, gaps}\n"
-                "- summarize(inputs) → {text, citations}\n"
-                "- generate(outline, inputs) → {text, citations}\n\n"
-                "Use $intent for the original question. "
-                "Use $stepN.ids, $stepN.text for step references. "
-                "Keep plans to 2-4 steps. "
-                "Do NOT use tools not listed above. "
-                "Do NOT execute the plan — only produce the JSON."
-            ),
-            json_schema=_PLANNER_SCHEMA,
-        )
-        if not any(w.alive for w in _planner_pool.workers):
-            _prespawn_task = asyncio.ensure_future(_planner_pool.spawn_worker())
-    except Exception:
-        pass  # Pre-warm is best-effort; plan-miss path will spawn lazily.
-
     # ── Step 1: plan-match gate ──────────────────────────────────────────
     try:
         with _t2_ctx() as db:
