@@ -2485,11 +2485,13 @@ def _nx_answer_is_single_query(match: Any) -> bool:
 def _nx_answer_needs_operators(match: Any) -> bool:
     """Return True when the plan requires operator pool auth.
 
-    Uses an allowlist of operator tool names (from ``_OPERATOR_TOOL_MAP``
-    in runner.py). Plans whose steps are all non-operator tools work
-    without auth; plans with any operator step require the pool.
+    Derives the operator set from ``_OPERATOR_TOOL_MAP`` in runner.py
+    (single source of truth). Plans whose steps are all non-operator
+    tools work without auth; plans with any operator step require the pool.
     """
-    _OPERATOR_TOOLS = {"extract", "rank", "compare", "summarize", "generate"}
+    from nexus.plans.runner import _OPERATOR_TOOL_MAP
+
+    _OPERATOR_TOOLS = frozenset(_OPERATOR_TOOL_MAP.keys())
     try:
         plan = json.loads(match.plan_json)
     except (json.JSONDecodeError, TypeError):
@@ -2604,14 +2606,9 @@ async def _nx_answer_plan_miss(
 
     plan_json = json.dumps({"steps": steps})
 
-    # Save the plan for future reuse (ttl=30 days).
-    plan_save(
-        query=question,
-        plan_json=plan_json,
-        outcome="success",
-        ttl=30,
-    )
-
+    # Do NOT save the plan here — save after plan_run succeeds in
+    # nx_answer. Saving before execution caches broken plans that
+    # cause repeated failures on future plan_match hits (I-6).
     return Match(
         plan_id=0,  # Synthetic — not yet looked up from T2.
         name="ad-hoc",
@@ -2772,6 +2769,22 @@ async def nx_answer(
                 pass
             return str(result_text)
         except Exception as exc:
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+            try:
+                with _t2_ctx() as db:
+                    _nx_answer_record_run(
+                        db.conn,
+                        question=question,
+                        plan_id=best.plan_id,
+                        matched_confidence=best.confidence,
+                        step_count=1,
+                        final_text=f"Error: {exc}",
+                        cost_usd=0.0,
+                        duration_ms=elapsed_ms,
+                        trace=trace,
+                    )
+            except Exception:
+                pass
             return f"Error in single-step query: {exc}"
 
     # ── Step 2.5: SC-9 graceful degradation ──────────────────────────────
@@ -2851,6 +2864,18 @@ async def nx_answer(
         step_count=len(result.steps),
         duration_ms=elapsed_ms,
     )
+
+    # ── Step 5.5: save ad-hoc plans on success (I-6 fix) ────────────────
+    if best.plan_id == 0:
+        try:
+            plan_save(
+                query=question,
+                plan_json=best.plan_json,
+                outcome="success",
+                ttl=30,
+            )
+        except Exception:
+            pass  # Best-effort; plan is cached for 30 days.
 
     # ── Step 6: record run ───────────────────────────────────────────────
     # TODO(RDR-080 P5): populate cost_usd from pool worker token counters.

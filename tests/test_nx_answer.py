@@ -441,8 +441,9 @@ class TestPlanMissPlanner:
         assert match.default_bindings["intent"] == "how does X work"
 
     @pytest.mark.asyncio
-    async def test_plan_miss_saves_plan(self):
-        """The planner should call plan_save(ttl=30) after decomposition."""
+    async def test_plan_miss_does_not_save_before_execution(self):
+        """_nx_answer_plan_miss should NOT call plan_save — saving happens
+        in nx_answer after plan_run succeeds (I-6 fix)."""
         from nexus.mcp.core import _nx_answer_plan_miss
 
         fake_plan = {
@@ -464,9 +465,7 @@ class TestPlanMissPlanner:
              patch("nexus.mcp.core.plan_save", mock_plan_save):
             await _nx_answer_plan_miss("test question")
 
-        assert len(save_calls) == 1
-        assert save_calls[0]["ttl"] == 30
-        assert save_calls[0]["query"] == "test question"
+        assert len(save_calls) == 0, "plan_save should not be called before execution"
 
     @pytest.mark.asyncio
     async def test_plan_miss_empty_plan_raises(self):
