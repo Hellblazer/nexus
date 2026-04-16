@@ -1430,3 +1430,156 @@ def audit_cmd(collection: str, threshold: float | None, top_n: int) -> None:
                 )
     finally:
         db.close()
+
+
+# ── validate-refs (RDR-081) ───────────────────────────────────────────────────
+
+
+_DEFAULT_PREFIXES = ["docs", "code", "knowledge", "rdr"]
+
+
+def _resolve_prefixes(cli_override: str) -> list[str]:
+    """Resolve prefix whitelist from CLI flag → config → hardcoded default.
+
+    Priority: ``--prefixes`` → ``.nexus.yml#taxonomy.collection_prefixes`` →
+    hardcoded ``[docs, code, knowledge, rdr]``.
+    """
+    if cli_override:
+        return [p.strip() for p in cli_override.split(",") if p.strip()]
+    try:
+        from nexus.config import load_config
+        cfg = load_config()
+        cfg_prefixes = (cfg.get("taxonomy") or {}).get("collection_prefixes")
+        if isinstance(cfg_prefixes, list) and cfg_prefixes:
+            return [str(p).strip() for p in cfg_prefixes if str(p).strip()]
+    except Exception:
+        pass
+    return list(_DEFAULT_PREFIXES)
+
+
+@taxonomy.command("validate-refs")
+@click.argument(
+    "paths",
+    nargs=-1,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=str),
+    required=True,
+)
+@click.option(
+    "--tolerance", default=0.10, type=float, show_default=True,
+    help="Chunk-count match window (fractional; 0.10 = ±10%).",
+)
+@click.option(
+    "--strict", is_flag=True, default=False,
+    help="Exit non-zero on Missing refs (default: Missing is informational only).",
+)
+@click.option(
+    "--prefixes", default="",
+    help="Comma-separated prefix whitelist override (default: config or docs,code,knowledge,rdr).",
+)
+@click.option(
+    "--format", "fmt", type=click.Choice(["table", "json"]), default="table",
+    show_default=True,
+)
+def validate_refs_cmd(paths, tolerance, strict, prefixes, fmt):
+    """Scan markdown for stale collection references (RDR-081).
+
+    For each file, finds references like ``docs__architecture`` and
+    chunk-count claims like "12,900 chunks" in the same paragraph, then
+    compares against current T3 state. Reports drift.
+
+    Exit codes:
+      0 — every ref OK (or Missing without --strict)
+      1 — at least one Drift (or Missing with --strict)
+      2 — scanner/T3 failure
+    """
+    import json
+    import sys
+
+    from nexus.db import make_t3
+    from nexus.doc.ref_scanner import (
+        VERDICT_DRIFT, VERDICT_MISSING, VERDICT_OK,
+        scan_markdown, validate,
+    )
+
+    resolved_prefixes = _resolve_prefixes(prefixes)
+
+    try:
+        t3 = make_t3()
+    except Exception as exc:
+        click.echo(f"Error: T3 unavailable: {exc}", err=True)
+        sys.exit(2)
+
+    try:
+        all_refs = []
+        for p in paths:
+            from pathlib import Path as _P
+            try:
+                all_refs.extend(scan_markdown(_P(p), resolved_prefixes))
+            except ValueError as exc:
+                click.echo(f"Error: {exc}", err=True)
+                sys.exit(2)
+            except Exception as exc:
+                click.echo(f"Warning: scanner failed on {p}: {exc}", err=True)
+
+        drifts = validate(all_refs, t3, tolerance=tolerance)
+    finally:
+        # t3 is not a context manager; best-effort close if present
+        close = getattr(t3, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+
+    # ── Render ──
+    if fmt == "json":
+        out = [
+            {
+                "path": str(d.ref.path),
+                "line": d.ref.line,
+                "collection": d.ref.collection,
+                "prefix": d.ref.prefix,
+                "claimed_count": d.ref.claimed_count,
+                "actual_count": d.actual_count,
+                "delta": d.delta,
+                "verdict": d.verdict,
+                "note": d.note,
+            }
+            for d in drifts
+        ]
+        click.echo(json.dumps(out, indent=2))
+    else:
+        # Table view
+        if not drifts:
+            click.echo("No references found.")
+        else:
+            click.echo(
+                f"{'Verdict':<8}  {'Collection':<36}  "
+                f"{'Claimed':>8}  {'Actual':>8}  {'Delta':>6}  Location"
+            )
+            click.echo("-" * 96)
+            for d in drifts:
+                claim = "-" if d.ref.claimed_count is None else f"{d.ref.claimed_count:,}"
+                actual = "-" if d.actual_count is None else f"{d.actual_count:,}"
+                delta = "-" if d.delta is None else f"{d.delta:+,}"
+                loc = f"{d.ref.path}:{d.ref.line}"
+                click.echo(
+                    f"{d.verdict:<8}  {d.ref.collection:<36}  "
+                    f"{claim:>8}  {actual:>8}  {delta:>6}  {loc}"
+                )
+            # Summary
+            drift_n = sum(1 for d in drifts if d.verdict == VERDICT_DRIFT)
+            missing_n = sum(1 for d in drifts if d.verdict == VERDICT_MISSING)
+            ok_n = sum(1 for d in drifts if d.verdict == VERDICT_OK)
+            click.echo("")
+            click.echo(
+                f"Summary: {ok_n} OK, {drift_n} Drift, {missing_n} Missing "
+                f"(tolerance ±{tolerance:.0%})"
+            )
+
+    # ── Exit code ──
+    any_drift = any(d.verdict == VERDICT_DRIFT for d in drifts)
+    any_missing = any(d.verdict == VERDICT_MISSING for d in drifts)
+    if any_drift or (strict and any_missing):
+        sys.exit(1)
+    sys.exit(0)

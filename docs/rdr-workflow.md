@@ -92,7 +92,7 @@ The gate either **BLOCKS** (critical issues — fix and re-gate) or **PASSES** (
 
 The decision point. The gate validates; acceptance is a deliberate human choice.
 
-Verifies that the gate passed, updates T2 status to Accepted, updates the file frontmatter to match, and regenerates the index. For multi-phase implementation plans, `/nx:rdr-accept` optionally dispatches the planning chain (strategic-planner → plan-auditor → plan-enricher) to decompose the work into trackable beads.
+Verifies that the gate passed, updates T2 status to Accepted, updates the file frontmatter to match, and regenerates the index. For multi-phase implementation plans, `/nx:rdr-accept` optionally dispatches the planning chain: `strategic-planner` agent → `nx_plan_audit` MCP tool → `nx_enrich_beads` MCP tool, decomposing the work into trackable beads. (The latter two were agents before RDR-080; they are now direct MCP-tool calls.)
 
 If T2 and the file disagree on status, `/nx:rdr-accept` self-heals by repairing the file to match T2.
 

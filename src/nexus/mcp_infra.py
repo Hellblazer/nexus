@@ -138,6 +138,71 @@ def t2_ctx():
     return T2Database(default_db_path())
 
 
+# ── T1 plan session cache (RDR-078) ──────────────────────────────────────────
+# Singleton wrapper around PlanSessionCache; shared across MCP tool calls in
+# one process.  reset_plan_cache_for_tests() tears it down between test cases.
+#
+# Three states:
+#   None                      — not yet initialised, eligible for init attempt
+#   _PLAN_CACHE_UNAVAILABLE   — init failed; callers short-circuit to FTS5
+#                               without taking the lock on every call
+#   PlanSessionCache instance — healthy, available for matching
+
+_PLAN_CACHE_UNAVAILABLE = object()  # sentinel — distinct from None
+
+_plan_cache_instance = None
+_plan_cache_lock = threading.Lock()
+_plan_cache_populated: bool = False
+
+
+def get_t1_plan_cache(*, populate_from=None):
+    """Return the T1 ``plans__session`` cache, lazy-populated on first call.
+
+    When *populate_from* (a PlanLibrary) is supplied and the cache has not yet
+    been populated this process, the full active plan set is loaded. Subsequent
+    calls short-circuit — the ``plan_save`` MCP hook keeps the cache fresh.
+
+    Returns ``None`` when no T1 client is reachable — the matcher falls back
+    to FTS5 in that case.  Subsequent calls after an init failure return
+    ``None`` immediately without re-entering the lock (see sentinel above).
+    """
+    global _plan_cache_instance, _plan_cache_populated
+    if _plan_cache_instance is _PLAN_CACHE_UNAVAILABLE:
+        return None
+    if _plan_cache_instance is None:
+        with _plan_cache_lock:
+            if _plan_cache_instance is None:
+                try:
+                    t1, _ = get_t1()
+                    from nexus.plans.session_cache import PlanSessionCache
+                    _plan_cache_instance = PlanSessionCache(
+                        client=t1._client, session_id=t1.session_id,
+                    )
+                except Exception:
+                    _plan_cache_instance = _PLAN_CACHE_UNAVAILABLE
+    if _plan_cache_instance is _PLAN_CACHE_UNAVAILABLE:
+        return None
+    if (
+        populate_from is not None
+        and not _plan_cache_populated
+    ):
+        with _plan_cache_lock:
+            if not _plan_cache_populated:
+                try:
+                    _plan_cache_instance.populate(populate_from)
+                finally:
+                    _plan_cache_populated = True
+    return _plan_cache_instance
+
+
+def reset_plan_cache_for_tests() -> None:
+    """Test helper: drop the cache singleton so the next call re-init."""
+    global _plan_cache_instance, _plan_cache_populated
+    with _plan_cache_lock:
+        _plan_cache_instance = None
+        _plan_cache_populated = False
+
+
 # ── Catalog management ────────────────────────────────────────────────────────
 
 

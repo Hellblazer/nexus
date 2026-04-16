@@ -120,12 +120,14 @@ Topic taxonomy settings. Topics are auto-discovered after `nx index repo`.
 taxonomy:
   auto_label: true                       # Generate labels via claude -p --model haiku (default)
   local_exclude_collections: ["code__*"] # Skip code collections in local mode (MiniLM is poor for code)
+  collection_prefixes: [docs, code, knowledge, rdr]  # Prefixes recognized by nx taxonomy validate-refs (RDR-081)
 ```
 
 | Key | Default | Description |
 |-----|---------|-------------|
 | `auto_label` | `true` | Auto-label topics with Claude haiku after discover. Requires `claude` CLI on PATH. Set `false` to keep c-TF-IDF labels. |
 | `local_exclude_collections` | `["code__*"]` | Glob patterns for collections to skip in local mode. Cloud mode (Voyage embeddings) ignores this — set to `[]` to enable all collections locally. |
+| `collection_prefixes` | `["docs", "code", "knowledge", "rdr"]` | Prefix whitelist for `nx taxonomy validate-refs`. Extend this when your project adds a new user-facing collection prefix (e.g. `"custom"`). Internal-prefix collections (`taxonomy__*`, `plans__*`) are implementation-fixed and intentionally excluded. |
 
 ## Tuning Parameters
 

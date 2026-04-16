@@ -1,0 +1,17 @@
+# RDR-080 P2a — Canonical registry of retrieval-shaped agents.
+#
+# This is the SINGLE SOURCE OF TRUTH. Both `nx/hooks/scripts/subagent-start.sh`
+# and `tests/test_plan_first_skills.py` read from it. To add a new
+# retrieval-shaped agent to the plan-match-first injection, add the
+# canonical agent name below (dashes, no file extension). A matching
+# grep pattern is derived automatically.
+#
+# RDR-080 collapsed the plan-match-first preamble from 10 agents to 2.
+# nx_answer enforces the discipline at the tool contract; only these
+# two agents retain the preamble because users dispatch them directly
+# for exploratory work that benefits from plan-reuse awareness.
+#
+# One agent name per line; # comments and blank lines ignored.
+
+deep-analyst
+deep-research-synthesizer

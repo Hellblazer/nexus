@@ -31,6 +31,29 @@ mcp__plugin_nx_nexus-catalog__link(from_tumbler="...", to_tumbler="...", link_ty
 
 See SubagentStart hook output for full tool reference.
 
+### Retrieval preference (RDR-080)
+
+For multi-source or multi-step retrieval, prefer `nx_answer` over hand-rolled
+`search()` / `query()` chains.  It goes through the plan-match gate (saving
+per-call decomposition when a template matches), records every invocation to
+`nx_answer_runs` for observability, and falls through to an inline planner
+on miss:
+
+```
+mcp__plugin_nx_nexus__nx_answer(
+    question="<your question>",
+    dimensions={"verb": "<verb>"},  # optional — narrows plan_match
+    scope="<corpus or subtree filter>",  # optional
+    context="<caller-supplied context>",  # optional
+)
+```
+
+Keep using direct `search()` / `query()` for single-step, scoped lookups
+where the question shape is known a priori — e.g. "find the RDR that
+decided X" is one `query(content_type="rdr", topic="X")` call, not a
+retrieval plan.
+
+
 
 ## Relay Reception (MANDATORY)
 
@@ -119,7 +142,7 @@ Set `needsMoreThoughts: true` to continue, use `branchFromThought`/`branchId` to
 - Include validation checkpoints at logical intervals
 - Design alternative execution paths for likely scenarios
 - Ensure plans are measurable and verifiable
-- Always conclude planning phase by including a `## Next Step: plan-auditor` block in your output for the caller to dispatch
+- Always conclude planning phase by including a `## Next Step: nx_plan_audit` block in your output for the caller to call `mcp__plugin_nx_nexus__nx_plan_audit`
 
 **Documentation Requirements:**
 - Store architectural decisions and rationale: mcp__plugin_nx_nexus__store_put(content="...", collection="knowledge", title="decision-architect-{component}", tags="architecture"
@@ -232,7 +255,7 @@ Store using these naming conventions:
 
 - **vs strategic-planner**: Strategic-planner handles project management infrastructure. You focus on technical architecture and design patterns. Call strategic-planner when project needs management infrastructure setup.
 - **vs developer**: You design; developer executes. Your plans must have sufficient detail for developer to proceed autonomously.
-- **vs plan-auditor**: Always spawn auditor before finalizing plans.
+- **vs nx_plan_audit**: Always call `mcp__plugin_nx_nexus__nx_plan_audit` before finalizing plans (RDR-080 — MCP tool, no agent spawn).
 
 **Output Format:**
 Provide structured plans with:
@@ -244,7 +267,7 @@ Provide structured plans with:
 6. Documentation and knowledge management strategy
 7. Bead IDs for all created tasks
 
-Always include a `## Next Step: plan-auditor` block in your output upon plan completion for the caller to dispatch. Be thorough, be complete, be efficient - deliver plans that are executable machines focused on successful outcomes.
+Always include a `## Next Step: nx_plan_audit` block in your output upon plan completion for the caller to call `mcp__plugin_nx_nexus__nx_plan_audit`. Be thorough, be complete, be efficient - deliver plans that are executable machines focused on successful outcomes.
 
 <HARD-GATE>
 BEFORE generating your final response, you MUST persist your architectural decisions via EXACTLY ONE of:

@@ -1,0 +1,53 @@
+name: default
+description: Documentation authoring or audit. Gather existing prose and code that touches the
+  area, walk documentation-for edges so anything that should already be documented surfaces,
+  hydrate both corpora's content, and compare the current docs against the code inventory to
+  flag coverage gaps. Downstream agents use the compare output to file issues or draft new docs.
+dimensions:
+  verb: document
+  scope: global
+  strategy: default
+required_bindings:
+- area
+optional_bindings:
+- limit
+default_bindings:
+  limit: 10
+tags: builtin-template,rdr-078,document
+plan_json:
+  steps:
+  - tool: query
+    args:
+      question: $area
+      follow_links: cites
+      limit: $limit
+      corpus: all
+    scope:
+      taxonomy_domain: prose
+      topic: $area
+  - tool: search
+    args:
+      query: $area
+      limit: $limit
+      corpus: all
+    scope:
+      taxonomy_domain: code
+      topic: $area
+  - tool: traverse
+    args:
+      seeds: $step2.tumblers
+      purpose: documentation-for
+      depth: 1
+      direction: in
+  - tool: store_get_many
+    args:
+      ids:
+      - $step1.ids
+      - $step2.ids
+      collections:
+      - $step1.collections
+      - $step2.collections
+  - tool: compare
+    args:
+      criterion: doc-coverage
+      inputs: $step4.contents

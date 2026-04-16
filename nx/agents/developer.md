@@ -31,6 +31,29 @@ mcp__plugin_nx_nexus-catalog__link(from_tumbler="...", to_tumbler="...", link_ty
 
 See SubagentStart hook output for full tool reference.
 
+### Retrieval preference (RDR-080)
+
+For multi-source or multi-step retrieval, prefer `nx_answer` over hand-rolled
+`search()` / `query()` chains.  It goes through the plan-match gate (saving
+per-call decomposition when a template matches), records every invocation to
+`nx_answer_runs` for observability, and falls through to an inline planner
+on miss:
+
+```
+mcp__plugin_nx_nexus__nx_answer(
+    question="<your question>",
+    dimensions={"verb": "<verb>"},  # optional — narrows plan_match
+    scope="<corpus or subtree filter>",  # optional
+    context="<caller-supplied context>",  # optional
+)
+```
+
+Keep using direct `search()` / `query()` for single-step, scoped lookups
+where the question shape is known a priori — e.g. "find the RDR that
+decided X" is one `query(content_type="rdr", topic="X")` call, not a
+retrieval plan.
+
+
 
 ## Relay Reception (MANDATORY)
 
@@ -261,7 +284,7 @@ Recommend **architect-planner** (via Next Step output) if ANY of:
 - Need to refactor >3 modules simultaneously
 - Integration patterns unclear
 
-Recommend **plan-auditor** (via Next Step output) if ANY of:
+Call `nx_plan_audit` MCP tool if ANY of:
 - Discovering plan has technical inaccuracies during execution
 - Plan assumptions violated by codebase reality
 
@@ -288,7 +311,7 @@ Before marking any work complete:
 - **code-review-expert**: Completed code for quality review (before marking complete)
 - **test-validator**: After implementation for coverage validation
 - **debugger**: Complex bugs requiring systematic investigation
-- **plan-auditor**: When discovering that a plan has issues during execution
+- **nx_plan_audit** (MCP tool): When discovering that a plan has issues during execution
 
 ## Relationship to Other Agents
 

@@ -108,11 +108,11 @@ query(question="architecture", subtree="1.1")                # subtree-scoped
 query(question="related work", follow_links="cites")         # citation-enriched
 ```
 
-For simple scoped queries, `query()` with catalog params is a single MCP call — no agent dispatch needed. For complex analytical queries (compare, extract, generate), the `/nx:query` skill orchestrates multi-step plans via three-path dispatch: Path 1 (single `query()` call) → Path 2 (template match) → Path 3 (planner agent).
+For simple scoped queries, `query()` with catalog params is a single MCP call — no agent dispatch needed. For complex analytical queries (compare, extract, generate), call `mcp__plugin_nx_nexus__nx_answer` directly — it runs `plan_match` against the library, executes the best match via `plan_run`, and falls through to an inline planner on miss. The `/nx:query` skill is now a pointer to `nx_answer` (RDR-080 consolidation — replaces the earlier query-planner + analytical-operator agent pair).
 
 Individual catalog MCP tools on the `nexus-catalog` server use short names without the `catalog_` prefix (since RDR-062). The 10 registered tools are: `search`, `show`, `list`, `register`, `update`, `link`, `links`, `link_query`, `resolve`, `stats`. Full names follow the pattern `mcp__plugin_nx_nexus-catalog__<tool>` (e.g., `mcp__plugin_nx_nexus-catalog__search`). Three operations (`unlink`, `link_audit`, `link_bulk`) are demoted — they are plain Python functions not exposed on the MCP surface.
 
-Agents also create links during their work — the debugger creates `relates` links between findings, the developer creates `implements` links to RDRs, the knowledge-tidier creates `supersedes` links when consolidating documents.
+Agents also create links during their work — the debugger creates `relates` links between findings, the developer creates `implements` links to RDRs, and the `nx_tidy` MCP tool (formerly the knowledge-tidier agent, RDR-080) creates `supersedes` links when consolidating documents.
 
 ## Link types
 
@@ -121,7 +121,7 @@ Agents also create links during their work — the debugger creates `relates` li
 | `cites` | Citation reference | Paper A references Paper B | `nx enrich` (auto), agents, manual |
 | `implements-heuristic` | Code→RDR (auto-detected) | Indexer found title substring match | Indexer hook (automatic) |
 | `implements` | Code→RDR (confirmed) | Code intentionally realizes a design doc | Developer agent, manual |
-| `supersedes` | Document replaced by another | Retiring old doc, consolidating duplicates | RDR close, knowledge-tidier, manual |
+| `supersedes` | Document replaced by another | Retiring old doc, consolidating duplicates | RDR close, `nx_tidy` MCP tool, manual |
 | `relates` | Related findings | Cross-cutting concerns, similar topics | Debugger, deep-analyst, manual |
 | `quotes` | Direct quotation with spans | Citing a specific passage as evidence | Manual |
 | `comments` | Commentary or annotation | Metadata notes about a document | Manual |

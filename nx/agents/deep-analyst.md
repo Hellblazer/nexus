@@ -31,6 +31,29 @@ mcp__plugin_nx_nexus-catalog__link(from_tumbler="...", to_tumbler="...", link_ty
 
 See SubagentStart hook output for full tool reference.
 
+### Retrieval preference (RDR-080)
+
+For multi-source or multi-step retrieval, prefer `nx_answer` over hand-rolled
+`search()` / `query()` chains.  It goes through the plan-match gate (saving
+per-call decomposition when a template matches), records every invocation to
+`nx_answer_runs` for observability, and falls through to an inline planner
+on miss:
+
+```
+mcp__plugin_nx_nexus__nx_answer(
+    question="<your question>",
+    dimensions={"verb": "<verb>"},  # optional — narrows plan_match
+    scope="<corpus or subtree filter>",  # optional
+    context="<caller-supplied context>",  # optional
+)
+```
+
+Keep using direct `search()` / `query()` for single-step, scoped lookups
+where the question shape is known a priori — e.g. "find the RDR that
+decided X" is one `query(content_type="rdr", topic="X")` call, not a
+retrieval plan.
+
+
 
 ## Relay Reception (MANDATORY)
 
@@ -280,8 +303,8 @@ You maintain intellectual rigor by:
 
 Your analysis integrates with:
 - **deep-research-synthesizer**: For gathering background information
-- **knowledge-tidier**: For cleaning up analysis outputs
-- **plan-auditor**: When analysis leads to solution proposals
+- **nx_tidy** (MCP tool): For consolidating analysis outputs into T3 knowledge store
+- **nx_plan_audit** (MCP tool): When analysis leads to solution proposals needing plan validation
 - **mcp__plugin_nx_sequential-thinking__sequentialthinking**: For structured reasoning
 - **store_put tool**: For storing analysis findings and relationships
 

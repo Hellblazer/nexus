@@ -236,14 +236,17 @@ class TestOwnersCommand:
 
 
 class TestSeedPlanTemplates:
-    def test_seed_creates_five_templates(self, tmp_path, monkeypatch):
+    def test_seed_creates_legacy_templates(self, tmp_path, monkeypatch):
+        """5 legacy RDR-063 plans + 9 RDR-078 YAML templates = 14 total inserts."""
         from nexus.db.t2 import T2Database
         db_path = tmp_path / "t2.db"
         monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: db_path)
         from nexus.commands.catalog import _seed_plan_templates
         count = _seed_plan_templates()
-        assert count == 5
+        # 5 legacy builtin plans + 9 RDR-078 YAML scenario templates.
+        assert count == 14
         db = T2Database(db_path)
+        # Legacy plans carry the 'builtin-template' tag.
         results = db.search_plans("builtin-template")
         assert len(results) == 5
         db.close()
@@ -255,7 +258,7 @@ class TestSeedPlanTemplates:
         from nexus.commands.catalog import _seed_plan_templates
         first = _seed_plan_templates()
         second = _seed_plan_templates()
-        assert first == 5
+        assert first == 14
         assert second == 0
 
     def test_seed_templates_have_builtin_tag(self, tmp_path, monkeypatch):

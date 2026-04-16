@@ -1,5 +1,5 @@
 ---
-description: Persist and organize knowledge into nx store using knowledge-tidier agent
+description: Persist and organize knowledge into nx store using mcp__plugin_nx_nexus__nx_tidy (RDR-080)
 ---
 
 # Knowledge Tidying Request
@@ -44,29 +44,23 @@ $ARGUMENTS
 
 ## Action
 
-Invoke the **knowledge-tidying** skill with the following relay. Fill in dynamic fields from the context above:
+Invoke the **knowledge-tidying** skill (calls `mcp__plugin_nx_nexus__nx_tidy` directly — RDR-080, no agent spawn):
 
-```markdown
-## Relay: knowledge-tidier
-
-**Task**: Organize and persist knowledge about "$ARGUMENTS" into nx store (T3)
-**Bead**: [fill from recently completed bead above or 'none']
-
-### Input Artifacts
-- Files: [fill from source files or documents containing findings]
-
-### Knowledge to Organize
-$ARGUMENTS
-
-### Deliverable
-Knowledge persisted to nx store T3 with correct title convention, meaningful tags, contradiction check against existing entries, and verified searchability.
-
-### Quality Criteria
-- [ ] Knowledge stored via store_put tool: collection="knowledge"
-- [ ] No contradictions with existing entries (checked and resolved)
-- [ ] Title follows naming convention (research-*, decision-*, pattern-*, debug-*)
-- [ ] Tags are meaningful and consistent with existing tag vocabulary
-- [ ] Searchable -- verified with search tool: query="topic", corpus="knowledge"
+```
+mcp__plugin_nx_nexus__nx_tidy(
+    topic="<topic from $ARGUMENTS>",
+    collection="knowledge"
+)
 ```
 
-For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../agents/_shared/RELAY_TEMPLATE.md).
+Then store the organized knowledge:
+```
+mcp__plugin_nx_nexus__store_put(
+    content="<knowledge to persist>",
+    collection="knowledge",
+    title="<research-*|decision-*|pattern-*|debug-*>",
+    tags="<meaningful tags>"
+)
+```
+
+Verify searchability: `mcp__plugin_nx_nexus__search(query="<topic>", corpus="knowledge")`

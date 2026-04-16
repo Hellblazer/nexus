@@ -32,6 +32,29 @@ mcp__plugin_nx_nexus-catalog__link(from_tumbler="...", to_tumbler="...", link_ty
 
 See SubagentStart hook output for full tool reference.
 
+### Retrieval preference (RDR-080)
+
+For multi-source or multi-step retrieval, prefer `nx_answer` over hand-rolled
+`search()` / `query()` chains.  It goes through the plan-match gate (saving
+per-call decomposition when a template matches), records every invocation to
+`nx_answer_runs` for observability, and falls through to an inline planner
+on miss:
+
+```
+mcp__plugin_nx_nexus__nx_answer(
+    question="<your question>",
+    dimensions={"verb": "<verb>"},  # optional — narrows plan_match
+    scope="<corpus or subtree filter>",  # optional
+    context="<caller-supplied context>",  # optional
+)
+```
+
+Keep using direct `search()` / `query()` for single-step, scoped lookups
+where the question shape is known a priori — e.g. "find the RDR that
+decided X" is one `query(content_type="rdr", topic="X")` call, not a
+retrieval plan.
+
+
 
 ## Relay Reception (MANDATORY)
 
@@ -76,16 +99,8 @@ This ensures your `store_put` calls create catalog links regardless of how you w
 ## PDF Processing Protocol
 
 1. **First, check if it is already indexed** by searching nx store for the document
-2. **If NOT indexed**: Always delegate to the pdf-chromadb-processor agent to handle extraction and storage
+2. **If NOT indexed**: Run `nx index pdf <file> --collection <collection>` to extract and store it
 3. **Once indexed**: Use the search tool to explore the content efficiently
-
-**Never process PDFs directly yourself** - the pdf-chromadb-processor agent specializes in:
-- Context-safe chunking for PDFs of any size
-- Parallel processing to avoid token overflow
-- Proper metadata and indexing for semantic search
-- Checkpoint recovery if interrupted
-
-Always delegate PDF processing to pdf-chromadb-processor first, then research the processed content via the search tool.
 
 ## Core Capabilities
 
@@ -145,7 +160,7 @@ If your project uses beads for task tracking, consider linking research findings
 
 You MUST persist your research findings to the nx knowledge store BEFORE returning — **unless the dispatching relay specifies an alternative storage target** (e.g. a T2 `memory_put` destination or a T1 `scratch` target) in its Input Artifacts, Deliverable, or Operational Notes section. In that case, honor the relay's target and skip the T3 default.
 
-**Why the default is T3**: for generic `/nx:research` dispatches, the auto-linker creates catalog links at `store_put` time, and those links are lost if you skip this step. Defer consolidation to knowledge-tidier but do not defer persistence.
+**Why the default is T3**: for generic `/nx:research` dispatches, the auto-linker creates catalog links at `store_put` time, and those links are lost if you skip this step. Do not defer persistence — call `mcp__plugin_nx_nexus__store_put` directly.
 
 **When to override to T2 or T1**: when the dispatching skill is using this agent as a classifier or analyzer rather than as a research persister — for example, `nx:rdr-audit` dispatches this agent to run an audit whose output is a project-local audit record that belongs in T2 `rdr_process`, not in the permanent T3 knowledge graph. If the relay says "write findings to `<project>/<title>` via `memory_put`", do that instead and do not also redundantly store to T3.
 
@@ -171,20 +186,19 @@ mcp__plugin_nx_nexus__memory_put(
 )
 ```
 
-Store first (to whichever tier the relay specifies), then recommend knowledge-tidier for consolidation only if the findings belong in the permanent knowledge graph.
+Store first (to whichever tier the relay specifies). After major research sessions, call `nx_tidy` MCP tool to consolidate findings if duplication is a concern.
 
 ## Recommended Next Step (MANDATORY output)
 
-Your final output MUST include a clearly labeled next-step recommendation for the caller to dispatch `knowledge-tidier`.
+Your final output MUST include a clearly labeled next-step recommendation.
 
 **Condition**: ALWAYS after research completion
-**Rationale**: Knowledge-tidier consolidates and deduplicates stored findings
-**Mechanism**: You do not have the Agent tool — your caller orchestrates the chain. Include this block at the end of your output:
+**Rationale**: Consolidate and deduplicate stored findings
+**Mechanism**: Include this block at the end of your output:
 
 ```
-## Next Step: knowledge-tidier
-**Task**: Consolidate and persist research findings for [topic]
-**Input Artifacts**: [nx store titles, research output files, nx memory keys]
+## Next Step: nx_tidy
+**Call**: nx_tidy(topic="<topic>", collection="knowledge")
 **Deliverable**: Consolidated T3 knowledge documents
 ```
 
@@ -309,16 +323,13 @@ Present findings including:
 - **deep-analyst**: Requests for additional information during analysis
 
 ### I Hand Off To (via Recommended Next Step):
-- **knowledge-tidier**: After major research for cleanup and consolidation
+- **nx_tidy** (MCP tool): After major research for consolidation — `nx_tidy(topic=..., collection="knowledge")`
 - **architect-planner**: Research findings for architecture decisions
-- **plan-auditor**: Research that informs plan validation
-- **pdf-chromadb-processor**: PDFs requiring extraction before research
+- **nx_plan_audit** (MCP tool): Research that informs plan validation
 
 ## Relationship to Other Agents
 
 - **vs deep-analyst**: You gather and synthesize information. Deep-analyst investigates specific problems in depth.
-- **vs pdf-chromadb-processor**: You research processed content. Pdf-chromadb-processor handles extraction and indexing of PDFs into nx store first.
-- **vs knowledge-tidier**: You create knowledge. Tidier cleans and consolidates it.
 
 ## Quality Metrics
 

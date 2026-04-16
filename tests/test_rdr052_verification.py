@@ -141,8 +141,9 @@ class TestReferenceQuestions:
 
 class TestPlanTemplates:
     def test_seed_creates_five_idempotent(self, tmp_path, monkeypatch):
+        # 5 legacy RDR-063 plans + 9 RDR-078 YAML scenario templates = 14
         db_path, seed_fn = _seed_templates(tmp_path, monkeypatch)
-        assert seed_fn() == 5
+        assert seed_fn() == 14
         assert seed_fn() == 0  # idempotent
 
     @pytest.mark.parametrize("field,expected", [

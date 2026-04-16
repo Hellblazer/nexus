@@ -78,7 +78,7 @@ The agent uses `mcp__plugin_nx_sequential-thinking__sequentialthinking`:
 - [ ] Key findings synthesized (not just listed)
 - [ ] Contradictions identified and resolved
 - [ ] Recommendations provided with supporting evidence
-- [ ] Findings persisted to nx T3 store via knowledge-tidier
+- [ ] Findings persisted to nx T3 store via `mcp__plugin_nx_nexus__store_put` (RDR-080 — direct call, no agent spawn)
 - [ ] Round artifacts persisted to T2 or T3
 
 ## Agent-Specific PRODUCE

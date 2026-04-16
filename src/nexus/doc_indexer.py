@@ -542,10 +542,13 @@ def _pdf_chunks(
     has_formulas = result.metadata.get("formula_count", 0) > 0
 
     # Compute source_title once before the loop so bib lookup uses the same value.
+    # nexus-8l6 fallback: extractor metadata wins; otherwise derive from
+    # first H1 or normalised filename (preserves initialisms like RDR, API).
+    from nexus.indexer_utils import derive_title
     source_title = (
-        result.metadata.get("docling_title", "")
-        or result.metadata.get("pdf_title", "")
-        or pdf_path.stem.replace("_", " ").replace("-", " ")
+        str(result.metadata.get("docling_title") or "").strip()
+        or str(result.metadata.get("pdf_title") or "").strip()
+        or derive_title(pdf_path, body=None)
     )
     bib: dict = {}
     if bib_enrich_enabled:
@@ -628,12 +631,21 @@ def _markdown_chunks(
     if not chunks:
         return []
 
+    # nexus-8l6: source_title fallback chain. Frontmatter ``title:`` wins;
+    # otherwise derive from the first H1 or the normalised filename so
+    # ``nx store list`` never displays ``untitled``.
+    from nexus.indexer_utils import derive_title
+    source_title = (
+        str(frontmatter.get("title") or "").strip()
+        or derive_title(md_path, body)
+    )
+
     prepared: list[tuple[str, str, dict]] = []
     for chunk in chunks:
         chunk_id = f"{content_hash[:16]}_{chunk.chunk_index}"
         meta: dict = {
             "source_path": sp,
-            "source_title": str(frontmatter.get("title", "")),
+            "source_title": source_title,
             "source_author": str(frontmatter.get("author", "")),
             "source_date": str(frontmatter.get("date", "")),
             "corpus": corpus,
@@ -1039,6 +1051,7 @@ def batch_index_markdowns(
     force: bool = False,
     on_file: Callable[[Path, int, float], None] | None = None,
     base_path: Path | None = None,
+    embed_fn: EmbedFn | None = None,
 ) -> dict[str, str]:
     """Index multiple Markdown files sequentially, returning per-file status.
 
@@ -1066,7 +1079,8 @@ def batch_index_markdowns(
         t0 = time.monotonic()
         try:
             raw = index_markdown(path, corpus, t3=t3, collection_name=collection_name,
-                                 content_type=content_type, force=force, base_path=base_path)
+                                 content_type=content_type, force=force,
+                                 base_path=base_path, embed_fn=embed_fn)
             count = raw if isinstance(raw, int) else 0
             results[str(path)] = "indexed" if count else "skipped"
         except Exception as e:

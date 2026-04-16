@@ -29,7 +29,7 @@ These agents **MUST proactively search** for context before starting:
 These agents **rely on relays** for context (do not proactively search):
 - **developer**: Expects architecture/plan in relay
 - **code-review-expert**: Expects files to review in relay
-- **plan-auditor**: Expects plan document in relay
+- **nx_plan_audit** (`mcp__plugin_nx_nexus__nx_plan_audit`): call with `plan_json` + `context` (RDR-080 — no relay needed)
 - **test-validator**: Expects code/test paths in relay
 - **debugger**: Expects failure description in relay
 

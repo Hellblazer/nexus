@@ -135,29 +135,50 @@ The `search()` tool does **not** apply link boost but does apply topic boost. Us
 
 ---
 
-## /nx:query skill (analytical queries)
+## /nx:query skill → `nx_answer` MCP tool (analytical queries)
 
-For questions that require multiple retrieval steps — comparing sources, extracting structured data, or generating from evidence — the `/nx:query` skill orchestrates a multi-step plan.
+For questions that require multiple retrieval steps — comparing sources, extracting structured data, or generating from evidence — invoke the `nx_answer` MCP tool.  The `/nx:query` skill is now a thin pointer to this tool (RDR-080 consolidation — replaces the earlier `query-planner` + `analytical-operator` agent pair).
 
-### Three-path dispatch
+### The trunk: plan-match → plan-run → record
 
-The skill routes queries through three paths in order of complexity:
+`nx_answer` runs this sequence on every call:
 
-**Path 1 — Single query**: If the question can be answered by a single `query()` call with catalog params (author, content_type, subtree), it does that directly. Fastest.
+1. **`plan_match`** — semantic search against the T2 plan library (`plans` table) for an intent-similar plan.  T1 cosine cache is tried first; falls through to FTS5 when the cache is empty or unavailable.  A match with confidence ≥ 0.40 is a hit.
+2. **Classify + `plan_run`** — execute the matched plan's steps via the operator dispatcher.  Each step is an MCP tool call (`search`, `query`, `traverse`, `store_get_many`, or an `operator_*`).  Step outputs thread through as `$stepN.<field>` references for downstream steps.
+3. **Plan-miss path** — if no match clears the threshold, an inline planner (claude_dispatch to `claude -p`) decomposes the question into a DAG of ≤ `max_steps` steps and `plan_run` executes it.
+4. **Record** — every run is logged in `nx_answer_runs` (T2) with duration, step count, cost, matched plan id, and the final answer.
 
-**Path 2 — Template match**: If the question matches a pre-built query template (e.g., "compare X across corpora"), it uses the cached plan. The 5 built-in templates are:
+### Builtin scenario plans (RDR-078 Phase 6)
 
-| Template | Matches questions like |
-|----------|----------------------|
-| Author search | "Find papers by [author]" |
-| Citation chain | "What does [paper] cite?" |
-| Provenance chain | "What implements [design doc]?" |
-| Cross-corpus compare | "Compare [topic] across code and docs" |
-| Type-scoped search | "Find all [content type] about [topic]" |
+`nx catalog setup` seeds 9 YAML plan templates under `nx/plans/builtin/`:
 
-Custom plans that succeed are cached for 30 days and matched on subsequent similar queries.
+| Template | Verb | Covers |
+|----------|------|--------|
+| research-default | research | Design / architecture walks from prose to implementing code |
+| review-default | review | Critique a change set against decision-evolution history |
+| analyze-default | analyze | Cross-corpus synthesis with reference chains |
+| debug-default | debug | Design context + authoring RDRs for a failing path |
+| document-default | document | Documentation coverage audit (prose ∩ code) |
+| plan-author-default | plan-author | Meta-seed: draft a new plan template |
+| plan-inspect-default | plan-inspect | Inspect plan metrics |
+| plan-inspect-dimensions | plan-inspect (variant) | Enumerate dimension registry usage |
+| plan-promote-propose | plan-promote | Rank plans worth promoting to higher scope |
 
-**Path 3 — Planner**: For novel analytical questions, a planner agent decomposes the question into retrieval + analysis steps.
+Plans match by **dimensions** (`verb`, `scope`, `strategy`) + semantic similarity to the plan's description.  See [plan-authoring-guide.md](plan-authoring-guide.md) for the template schema.
+
+### Verb skills (new in RDR-078)
+
+Instead of `/nx:query "research how X works"`, the verb skills route directly to `plan_match` scoped to the matching verb:
+
+| Skill | Intent shape |
+|-------|--------------|
+| `/nx:research` | "How does X work?", "Design context for Y" |
+| `/nx:review` | "Review this change set", "Did the refactor drift from the RDR?" |
+| `/nx:analyze` | "Compare approaches across corpora", "Rank candidates by criterion" |
+| `/nx:debug` | "Why is this handler failing?", "Trace the stack of the panic" |
+| `/nx:document` | "Audit doc coverage", "Find coverage gaps" |
+
+Each skill scopes `plan_match` with `dimensions={verb: <skill>}` and executes the returned plan via `plan_run`.  Falls through to `/nx:query` on miss.
 
 ### Example analytical queries
 
@@ -278,3 +299,14 @@ neither result is dropped.
 (shared with clustering when both are enabled — the helper fetches
 embeddings once and passes them to both features). See
 [Configuration](configuration.md) for the config key.
+
+---
+
+## See also
+
+- [Plan-Centric Retrieval](plan-centric-retrieval.md) — the full `nx_answer`
+  trunk, plan library, dimensions, and builtin scenario templates.
+- [Plan Authoring Guide](plan-authoring-guide.md) — template schema for
+  authoring new plans.
+- [MCP Tools vs Agents](mcp-vs-agents.md) — why `nx_answer` replaced the
+  `query-planner` + `analytical-operator` agent pair.

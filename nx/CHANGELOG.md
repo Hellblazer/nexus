@@ -6,6 +6,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.4.0] - 2026-04-16
+
+### Added
+
+- **9 RDR-078 verb skills** — `research`, `review`, `analyze`, `debug`, `document`, `plan-author`, `plan-inspect`, `plan-promote`, `plan-first`. Each calls `nx_answer(dimensions={"verb": <skill>})` so the plan-match gate narrows to templates of the appropriate verb. Picks up the record step (`nx_answer_runs` T2 table) automatically.
+- **`/nx:query` slash command** — pointer to `mcp__plugin_nx_nexus__nx_answer`. Replaces the `query-planner` + `analytical-operator` agents from RDR-042.
+- **`/nx:pdf-process` command file** — pointer to `nx index pdf` CLI. Replaces the `pdf-chromadb-processor` agent.
+- **Builtin plan templates** — `nx/plans/builtin/*.yml` (9 scenario templates) + `nx/plans/dimensions.yml` (dimension registry). Seed on `nx catalog setup`.
+- **"Retrieval preference (RDR-080)" block** in all 10 active agents — recommends `nx_answer` for multi-source retrieval; keeps direct `search()` / `query()` appropriate for single-step scoped lookups.
+- **Plugin-runtime validation suite** (`scripts/validate/09-plugin-runtime.py`) — runtime exercise of all 43 skills + 13 agents via `claude -p` with schema-aware assertions.
+
+### Changed
+
+- **Three agents are now 40-line stubs** — `knowledge-tidier.md`, `plan-auditor.md`, `plan-enricher.md` direct callers at `nx_tidy` / `nx_plan_audit` / `nx_enrich_beads` MCP tools respectively (RDR-080). Stubs remain in the registry so legacy dispatch references don't break; new code should invoke the MCP tool directly.
+- **`registry.yaml`** — `agents:` 16 → 13 (removed `query-planner`, `analytical-operator`, `pdf-chromadb-processor`); `standalone_skills:` 11 → 24 (added 9 verb skills + 4 pointer skills). `model_summary` updated. Pipelines `feature` and `research` replace agent steps with MCP-tool invocations.
+
+### Docs
+
+- Ported from feature branch: `docs/plan-authoring-guide.md`, `docs/catalog-link-types.md`, `docs/catalog-purposes.md`, 3 implementation-plan references under `docs/plans/`.
+- RDR index updated with RDR-081 (closed), RDR-082/083/084/085 (drafts).
+
 ## [4.3.2] - 2026-04-15
 
 Plugin version aligned with Nexus CLI 4.3.2. No plugin-level functional changes.

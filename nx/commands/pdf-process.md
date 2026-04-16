@@ -1,5 +1,5 @@
 ---
-description: Index PDF files into nx store for semantic search using pdf-chromadb-processor agent
+description: Index PDF files into nx store for semantic search
 ---
 
 # PDF Processing Request
@@ -23,7 +23,7 @@ description: Index PDF files into nx store for semantic search using pdf-chromad
 
   echo "### Tip"
   echo ""
-  echo "Specify PDF paths or a directory. The agent extracts text, chunks content,"
+  echo "Specify PDF paths or a directory. nx index pdf extracts text, chunks content,"
   echo "and indexes into T3 for semantic search via the search tool."
 }
 
@@ -33,8 +33,10 @@ $ARGUMENTS
 
 ## Action
 
-Invoke the **pdf-processing** skill. It will determine the right approach:
-- **Single PDF**: Run `nx index pdf` directly (no agent needed)
-- **Multiple PDFs or complex scenarios**: Dispatch **pdf-chromadb-processor** agent
+Run `nx index pdf <file> --collection <name>` for each PDF. For batch processing, use a loop:
+
+```bash
+for f in *.pdf; do nx index pdf "$f" --collection knowledge__<corpus>; done
+```
 
 Pass through the user's arguments: $ARGUMENTS

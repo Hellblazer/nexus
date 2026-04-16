@@ -21,15 +21,19 @@ def test_catalog_module_importable():
 
 
 def test_core_registered_tools():
-    """15 core tools are registered with @mcp.tool()."""
+    """25 core tools are registered with @mcp.tool()."""
     from nexus.mcp.core import mcp
 
     tool_names = {t.name for t in mcp._tool_manager.list_tools()}
     expected = {
-        "search", "query", "store_put", "store_get", "store_list",
+        "search", "query", "store_put", "store_get", "store_list", "store_get_many",
         "memory_put", "memory_get", "memory_delete", "memory_search", "memory_consolidate",
         "scratch", "scratch_manage", "collection_list",
         "plan_save", "plan_search",
+        "traverse",
+        "operator_extract", "operator_rank", "operator_compare",
+        "operator_summarize", "operator_generate",
+        "nx_answer", "nx_tidy", "nx_enrich_beads", "nx_plan_audit",
     }
     assert expected == tool_names, f"Missing: {expected - tool_names}, Extra: {tool_names - expected}"
 
@@ -69,10 +73,14 @@ def test_init_reexports_all():
 
     # Core tools
     for name in [
-        "search", "query", "store_put", "store_get", "store_list",
+        "search", "query", "store_put", "store_get", "store_list", "store_get_many",
         "memory_put", "memory_get", "memory_delete", "memory_search", "memory_consolidate",
         "scratch", "scratch_manage", "collection_list",
         "plan_save", "plan_search",
+        "traverse",
+        "operator_extract", "operator_rank", "operator_compare",
+        "operator_summarize", "operator_generate",
+        "nx_answer", "nx_tidy", "nx_enrich_beads", "nx_plan_audit",
         # demoted
         "store_delete", "collection_info", "collection_verify",
     ]:

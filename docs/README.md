@@ -33,6 +33,11 @@ Structured decision tracking for human-AI collaboration. Read in order:
 ## Search and Analysis
 
 - [Querying Guide](querying-guide.md) — When to use `nx search` vs `query()` MCP vs `/nx:query` skill, catalog-aware routing, analytical query examples
+- [Plan-Centric Retrieval](plan-centric-retrieval.md) — How `nx_answer` ties plan matching, typed-graph traversal, and scenario templates into one retrieval trunk (RDR-078)
+- [Plan Authoring Guide](plan-authoring-guide.md) — YAML schema for authoring plan templates, dimensions, default bindings, CI validation
+- [MCP Tools vs Agents](mcp-vs-agents.md) — When to ship a capability as an MCP tool vs a Claude Code agent (RDR-080 boundary rule + stub-agent pattern)
+- [Catalog Link Types](catalog-link-types.md) — Typed edges between documents: `cites`, `implements`, `supersedes`, etc.
+- [Catalog Purposes](catalog-purposes.md) — Named aliases for link-type bundles that `traverse` walks
 - [Xanadu in Nexus](xanadu-in-nexus.md) — What we borrowed from Ted Nelson's Project Xanadu: tumbler addressing, typed links, span transclusion, and what we deliberately left out
 
 ## Reference

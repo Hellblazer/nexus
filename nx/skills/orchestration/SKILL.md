@@ -28,11 +28,11 @@ There is no orchestrator agent — the caller (main conversation or skill) dispa
 
 | Request Type | Primary Agent | Pipeline |
 |-------------|---------------|----------|
-| Plan a feature | strategic-planner | -> plan-auditor -> architect-planner |
+| Plan a feature | strategic-planner | -> nx_plan_audit -> architect-planner |
 | Implement code | developer | -> code-review-expert -> test-validator |
 | Debug issue | debugger | -> (if cross-cutting) deep-analyst |
 | Review code | code-review-expert | -> (if critical) substantive-critic |
-| Research topic | deep-research-synthesizer | -> knowledge-tidier |
+| Research topic | deep-research-synthesizer | -> store_put (direct) |
 | Analyze system | codebase-deep-analyzer | -> (if deep) deep-analyst |
 
 For the full routing graph, decision framework, and standard pipelines, see [reference.md](./reference.md).

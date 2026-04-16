@@ -1,0 +1,58 @@
+# Purposes registry — RDR-078 P3.
+#
+# A "purpose" is a human-named alias for a list of catalog link types
+# that the traverse operator should walk. Plan templates declare
+# ``purpose: <name>`` instead of an explicit ``link_types: [...]`` list
+# so the same template stays correct as new link types are introduced.
+#
+# Unknown link types are dropped at resolution time with a structured
+# warning ``purpose_unknown_link_type`` — the resolver returns the
+# subset that matched and a plan run continues with what's available.
+
+find-implementations:
+  description: >-
+    Walk from a design / RDR doc to the code modules that implement it.
+    Used by ``verb:research`` and ``verb:analyze`` scenario templates.
+  link_types:
+    - implements
+    - implements-heuristic
+
+decision-evolution:
+  description: >-
+    Walk from a doc back through the decision history that authored it
+    (RDRs that supersede / amend / cite each other). Used by
+    ``verb:review`` and ``verb:debug`` for "what did we decide and why?".
+  link_types:
+    - supersedes
+    - cites
+
+reference-chain:
+  description: >-
+    Walk citation chains across docs / papers. Used by ``verb:analyze``
+    when synthesising across a reference graph.
+  link_types:
+    - cites
+    - quotes
+
+documentation-for:
+  description: >-
+    Walk from code or an artefact back to the docs that describe it.
+    Inverse of ``find-implementations``. Used by ``verb:document`` to
+    locate doc-coverage gaps.
+  link_types:
+    - implements
+    - implements-heuristic
+    - cites
+
+soft-relations:
+  description: >-
+    Walk loose semantic associations. Useful for exploratory traversals.
+  link_types:
+    - relates
+    - comments
+
+all-implementations:
+  description: >-
+    Strict-only implementation links — excludes ``implements-heuristic``.
+  link_types:
+    - implements

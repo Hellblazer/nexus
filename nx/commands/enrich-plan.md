@@ -1,5 +1,5 @@
 ---
-description: Enrich beads with execution context using plan-enricher agent
+description: Enrich beads with execution context using mcp__plugin_nx_nexus__nx_enrich_beads (RDR-080)
 ---
 
 # Enrich Plan
@@ -27,25 +27,15 @@ $ARGUMENTS
 
 ## Action
 
-Invoke the **enrich-plan** skill with the following relay. Fill in dynamic fields from the context above:
+Invoke the **enrich-plan** skill (calls `mcp__plugin_nx_nexus__nx_enrich_beads` directly — RDR-080, no agent spawn):
 
-```markdown
-## Relay: plan-enricher
-
-**Task**: Enrich all beads with execution context and codebase alignment
-**Bead**: [fill from epic bead above or 'none']
-
-### Input Artifacts
-- nx scratch: plan structure, bead IDs, audit findings (if present from same-session /nx:plan-audit)
-- Files: [fill from key files referenced in plan]
-
-### Deliverable
-All beads enriched with file paths, code patterns, test commands, constraints, and (when available) audit gap mitigations. Epic bead ID persisted to T2.
-
-### Quality Criteria
-- [ ] Every bead enriched with execution context
-- [ ] Epic bead ID written to T2 for close-time advisory
-- [ ] Enrichment summary reported to user
+```
+mcp__plugin_nx_nexus__nx_enrich_beads(
+    bead_description="<plan title + description from $ARGUMENTS>",
+    context="<audit findings from T1 scratch if present>"
+)
 ```
 
-For full relay structure, see [RELAY_TEMPLATE.md](../agents/_shared/RELAY_TEMPLATE.md).
+Fill `bead_description` from the epic bead title and description above. Fill `context` from any prior `nx_plan_audit` findings in T1 scratch.
+
+Deliverable: all beads enriched with file paths, code patterns, test commands, constraints, and audit gap mitigations. Epic bead ID persisted to T2.

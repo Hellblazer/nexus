@@ -29,6 +29,29 @@ mcp__plugin_nx_nexus__memory_get(project="...", title="")
 
 See SubagentStart hook output for full tool reference.
 
+### Retrieval preference (RDR-080)
+
+For multi-source or multi-step retrieval, prefer `nx_answer` over hand-rolled
+`search()` / `query()` chains.  It goes through the plan-match gate (saving
+per-call decomposition when a template matches), records every invocation to
+`nx_answer_runs` for observability, and falls through to an inline planner
+on miss:
+
+```
+mcp__plugin_nx_nexus__nx_answer(
+    question="<your question>",
+    dimensions={"verb": "<verb>"},  # optional — narrows plan_match
+    scope="<corpus or subtree filter>",  # optional
+    context="<caller-supplied context>",  # optional
+)
+```
+
+Keep using direct `search()` / `query()` for single-step, scoped lookups
+where the question shape is known a priori — e.g. "find the RDR that
+decided X" is one `query(content_type="rdr", topic="X")` call, not a
+retrieval plan.
+
+
 
 ## Relay Reception (MANDATORY)
 
@@ -218,7 +241,7 @@ Store using these naming conventions:
 ## Relationship to Other Agents
 
 - **vs substantive-critic**: Deep-critic provides broad critique of any content. You specialize in code review with technical depth on implementation quality.
-- **vs plan-auditor**: Plan-auditor reviews plans before implementation. You review code after implementation.
+- **vs nx_plan_audit**: `mcp__plugin_nx_nexus__nx_plan_audit` validates plans before implementation (RDR-080). You review code after implementation.
 - **vs codebase-deep-analyzer**: Analyzer provides broad codebase understanding. You provide focused review of specific changes.
 
 ## Completion Protocol

@@ -60,12 +60,10 @@ _migrated_lock = threading.Lock()
 
 # ── FTS5 helpers ──────────────────────────────────────────────────────────────
 
-# FTS5 special characters that cause OperationalError when unquoted:
-#   -  (column filter: "col-name" → look in column "col" for "name")
-#   :  (explicit column filter: "col:term")
-#   (  )  ^  "  (grouping / phrase / boost — crash if unbalanced)
-# Note: trailing * is a valid FTS5 prefix wildcard (e.g. auth*) — NOT included here.
-_FTS5_SPECIAL = set('-:()"^~.*+/')
+# FTS5 special characters that cause OperationalError when unquoted.
+# Expanded to cover the full set of characters that FTS5 treats as
+# operators or structural tokens (queries from code, URLs, CLI input).
+_FTS5_SPECIAL = set('-:()\'"^~.*+/,;?!#@$%&|\\<>[]{}=')
 
 
 def _sanitize_fts5(query: str) -> str:

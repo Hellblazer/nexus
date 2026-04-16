@@ -1103,26 +1103,46 @@ class Catalog:
             meta=json.loads(row[7]) if row[7] else {},
         )
 
-    def links_from(self, tumbler: Tumbler, link_type: str = "") -> list[CatalogLink]:
+    def links_from(
+        self,
+        tumbler: Tumbler,
+        link_type: str = "",
+        link_types: list[str] | None = None,
+    ) -> list[CatalogLink]:
         sql = (
             "SELECT from_tumbler, to_tumbler, link_type, from_span, to_span, "
             "created_by, created_at, metadata FROM links WHERE from_tumbler = ?"
         )
         params: list[str] = [str(tumbler)]
-        if link_type:
+        effective = link_types or ([link_type] if link_type else [])
+        if len(effective) == 1:
             sql += " AND link_type = ?"
-            params.append(link_type)
+            params.append(effective[0])
+        elif len(effective) > 1:
+            placeholders = ",".join("?" * len(effective))
+            sql += f" AND link_type IN ({placeholders})"
+            params.extend(effective)
         return [self._row_to_link(r) for r in self._db.execute(sql, params).fetchall()]
 
-    def links_to(self, tumbler: Tumbler, link_type: str = "") -> list[CatalogLink]:
+    def links_to(
+        self,
+        tumbler: Tumbler,
+        link_type: str = "",
+        link_types: list[str] | None = None,
+    ) -> list[CatalogLink]:
         sql = (
             "SELECT from_tumbler, to_tumbler, link_type, from_span, to_span, "
             "created_by, created_at, metadata FROM links WHERE to_tumbler = ?"
         )
         params: list[str] = [str(tumbler)]
-        if link_type:
+        effective = link_types or ([link_type] if link_type else [])
+        if len(effective) == 1:
             sql += " AND link_type = ?"
-            params.append(link_type)
+            params.append(effective[0])
+        elif len(effective) > 1:
+            placeholders = ",".join("?" * len(effective))
+            sql += f" AND link_type IN ({placeholders})"
+            params.extend(effective)
         return [self._row_to_link(r) for r in self._db.execute(sql, params).fetchall()]
 
     def link_query(
@@ -1443,12 +1463,15 @@ class Catalog:
         depth: int = 1,
         direction: str = "both",
         link_type: str = "",
+        link_types: list[str] | None = None,
     ) -> dict:
         """BFS traversal to given depth. Returns {"nodes": [...], "edges": [...]}.
 
         Depth capped at _MAX_GRAPH_DEPTH. Traversal stops at _MAX_GRAPH_NODES visited.
+        ``link_types`` (plural list) takes precedence over ``link_type`` (single str).
         """
         depth = min(depth, self._MAX_GRAPH_DEPTH)
+        effective_types: list[str] = link_types or ([link_type] if link_type else [])
         visited: set[str] = {str(tumbler)}
         seen_edges: set[tuple[str, str, str]] = set()
         all_edges: list[CatalogLink] = []
@@ -1464,16 +1487,15 @@ class Catalog:
 
             neighbors: list[CatalogLink] = []
             if direction in ("out", "both"):
-                neighbors.extend(self.links_from(current, link_type=link_type))
+                neighbors.extend(self.links_from(current, link_types=effective_types or None))
             if direction in ("in", "both"):
-                neighbors.extend(self.links_to(current, link_type=link_type))
+                neighbors.extend(self.links_to(current, link_types=effective_types or None))
 
             for edge in neighbors:
                 edge_key = (str(edge.from_tumbler), str(edge.to_tumbler), edge.link_type)
                 if edge_key not in seen_edges:
                     seen_edges.add(edge_key)
                     all_edges.append(edge)
-                # Determine the "other" end
                 other = edge.to_tumbler if edge.from_tumbler == current else edge.from_tumbler
                 if str(other) not in visited:
                     visited.add(str(other))
@@ -1482,6 +1504,57 @@ class Catalog:
         nodes = [self.resolve(Tumbler.parse(t)) for t in visited]
         nodes = [n for n in nodes if n is not None]
         return {"nodes": nodes, "edges": all_edges}
+
+    def graph_many(
+        self,
+        seeds: list[Tumbler],
+        depth: int = 1,
+        direction: str = "both",
+        link_type: str = "",
+        link_types: list[str] | None = None,
+    ) -> dict:
+        """BFS traversal from multiple seed tumblers — thin wrapper over :meth:`graph`.
+
+        Merges per-seed results with node-key = ``str(tumbler)`` and
+        edge-key = ``(from, to, link_type)`` deduplication so a shared
+        node or edge discovered from two seeds only appears once.
+        """
+        merged_nodes: dict[str, object] = {}
+        merged_edges: dict[tuple[str, str, str], object] = {}
+
+        for seed in seeds:
+            if len(merged_nodes) >= self._MAX_GRAPH_NODES:
+                _log.warning("graph_many_node_limit", visited=len(merged_nodes))
+                break
+            result = self.graph(
+                seed, depth=depth, direction=direction,
+                link_type=link_type, link_types=link_types,
+            )
+            for node in result.get("nodes") or []:
+                if len(merged_nodes) >= self._MAX_GRAPH_NODES:
+                    _log.debug(
+                        "graph_many_node_limit_mid_seed",
+                        visited=len(merged_nodes),
+                    )
+                    break
+                key = str(node.tumbler) if hasattr(node, "tumbler") else str(node)
+                if key not in merged_nodes:
+                    merged_nodes[key] = node
+            # Drop edges whose endpoints were excluded by the node cap — otherwise
+            # callers iterating nodes-then-edges see dangling references.
+            for edge in result.get("edges") or []:
+                from_key = str(edge.from_tumbler)
+                to_key = str(edge.to_tumbler)
+                if from_key not in merged_nodes or to_key not in merged_nodes:
+                    continue
+                edge_key = (from_key, to_key, edge.link_type)
+                if edge_key not in merged_edges:
+                    merged_edges[edge_key] = edge
+
+        return {
+            "nodes": list(merged_nodes.values()),
+            "edges": list(merged_edges.values()),
+        }
 
     # ── Rebuild ───────────���──────────────────────────��─────────────────────
 

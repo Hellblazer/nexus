@@ -10,6 +10,7 @@ Leaf-ish module: imports from nexus.retry and nexus.errors only.
 from __future__ import annotations
 
 import fnmatch
+import re
 import subprocess
 from pathlib import Path
 
@@ -43,6 +44,63 @@ def find_repo_root(path: Path) -> Path | None:
     except Exception:
         pass
     return None
+
+
+#: Tokens that stay all-caps after filename normalisation. Common
+#: initialisms / acronyms used in technical filenames where naive
+#: title-casing would mis-render them ("api" → "Api" is wrong).
+_PRESERVE_UPPER: frozenset[str] = frozenset({
+    "ai", "ml", "api", "url", "uri", "pdf", "html", "css", "js",
+    "ts", "json", "yaml", "xml", "sql", "cli", "ide", "io",
+    "rdr", "mcp", "llm", "gpu", "cpu", "tcp", "udp", "ssl", "tls",
+    "ssh", "ftp", "smtp", "http", "https", "rest", "rpc", "uuid",
+    "art", "bert", "lstm", "rnn", "cnn", "gan",
+    "nlp", "ocr", "tts", "stt",
+    "v1", "v2", "v3", "v4", "v5",
+})
+
+_INITIALISM_DIGIT_RE = re.compile(r"^([A-Za-z]+)(\d+)$")
+
+
+def _normalise_filename_token(token: str) -> str:
+    """Title-case a single filename token, preserving known initialisms."""
+    if not token:
+        return token
+    lowered = token.lower()
+    if lowered in _PRESERVE_UPPER:
+        return token.upper()
+    m = _INITIALISM_DIGIT_RE.match(token)
+    if m is not None:
+        prefix, digits = m.group(1), m.group(2)
+        if prefix.lower() in _PRESERVE_UPPER:
+            return prefix.upper() + digits
+    return token.capitalize()
+
+
+def derive_title(path: Path, body: str | None) -> str:
+    """Resolve a human-readable document title (nexus-8l6).
+
+    Two-step fallback:
+
+      1. **First H1 in *body*** — the first ``# Title`` line wins.
+      2. **Normalised filename stem** — split on ``[_\\- ]``, title-case
+         each token (preserving common initialisms via ``_PRESERVE_UPPER``).
+    """
+    if body:
+        for line in body.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("# "):
+                continue
+            title = stripped[2:].strip()
+            if title:
+                return title
+
+    stem = path.stem or path.name
+    if not stem:
+        return ""
+    tokens = re.split(r"[_\- ]+", stem)
+    normalised = [_normalise_filename_token(t) for t in tokens if t]
+    return " ".join(normalised) or stem
 
 
 def detect_git_metadata(path: Path) -> dict[str, str]:
