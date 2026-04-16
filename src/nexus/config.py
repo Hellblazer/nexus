@@ -104,6 +104,33 @@ def _tuning_from_dict(raw: dict[str, Any]) -> TuningConfig:
 
 
 @dataclass(frozen=True)
+class OperatorBudgetConfig:
+    """Operator budget settings from ``[operators]`` config section.
+
+    RDR-080 P5. Parsed from ``.nexus.yml``::
+
+        operators:
+          daily_budget_usd: 5.0
+    """
+
+    daily_budget_usd: float | None = None
+
+
+def get_operator_budget_config(repo_root: Path | None = None) -> OperatorBudgetConfig:
+    """Load operator budget config from .nexus.yml."""
+    operators = load_config(repo_root=repo_root).get("operators", {})
+    if not isinstance(operators, dict):
+        return OperatorBudgetConfig()
+    budget = operators.get("daily_budget_usd")
+    if budget is not None:
+        try:
+            budget = float(budget)
+        except (TypeError, ValueError):
+            budget = None
+    return OperatorBudgetConfig(daily_budget_usd=budget)
+
+
+@dataclass(frozen=True)
 class PDFConfig:
     """PDF extraction settings from ``[pdf]`` config section."""
 
