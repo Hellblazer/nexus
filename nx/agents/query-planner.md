@@ -11,7 +11,7 @@ effort: medium
 
 Before decomposing any retrieval task, call
 `mcp__plugin_nx_nexus__plan_match(intent=<caller phrasing>,
-dimensions='{"verb":"<v>"}', min_confidence=0.85, n=1)`. If the match
+dimensions='{"verb":"<v>"}', min_confidence=0.40, n=1)`. If the match
 clears the threshold, execute via `plan_run(plan_id=<match.id>,
 bindings='{...}')` and return the final step's result. Only produce a
 new plan on a miss. This instruction is also injected by the

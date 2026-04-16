@@ -19,7 +19,7 @@ Two variants share this skill. The `strategy` dimension picks which:
 plan_match(
     intent="inspect plan $target",
     dimensions={verb: "plan-inspect", strategy: "default"},
-    min_confidence=0.85,
+    min_confidence=0.40,
     n=1,
 )
 → plan_run(match, bindings={target: <plan_id or search string>})
@@ -31,7 +31,7 @@ plan_match(
 plan_match(
     intent="show dimension registry usage",
     dimensions={verb: "plan-inspect", strategy: "dimensions"},
-    min_confidence=0.85,
+    min_confidence=0.40,
     n=1,
 )
 → plan_run(match, bindings={})

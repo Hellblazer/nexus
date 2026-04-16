@@ -46,7 +46,11 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
+import structlog
+
 from nexus.plans.match import Match
+
+_log = structlog.get_logger(__name__)
 
 __all__ = [
     "PlanResult",
@@ -525,10 +529,12 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
     # Drop kwargs the resolved tool doesn't accept. Plan YAML carries
     # extra metadata (e.g. ``scope.topic`` forwarded as ``topic=…``,
     # authoring-layer hints like ``mode``, ``target``) that an older
-    # tool signature may not implement yet. Silently dropping unknown
-    # kwargs keeps plans portable across tool-evolution without forcing
-    # every seed to track the current signature. ``**kwargs``-accepting
-    # tools keep every kwarg.
+    # tool signature may not implement yet. Silently dropping would
+    # mask plan-YAML typos (e.g. ``colllection``) as well as genuinely-
+    # forward-compatible kwargs. The compromise: drop the kwarg so the
+    # call succeeds, AND log the drop at warning level so misspelled
+    # or unwired kwargs stay observable. ``**kwargs``-accepting tools
+    # keep every kwarg.
     try:
         sig = inspect.signature(fn)
         accepts_any_kwarg = any(
@@ -537,6 +543,14 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
         )
         if not accepts_any_kwarg:
             known = set(sig.parameters.keys())
+            dropped = sorted(k for k in args if k not in known)
+            if dropped:
+                _log.warning(
+                    "plan_dispatcher_kwargs_dropped",
+                    tool=resolved_tool,
+                    dropped=dropped,
+                    known_sample=sorted(known)[:12],
+                )
             args = {k: v for k, v in args.items() if k in known}
     except (TypeError, ValueError):
         # Builtins / C-level callables can't always be inspected; leave
@@ -565,6 +579,18 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
     # error text in an ``error`` key for visibility.
     if isinstance(result, str):
         if tool in _RETRIEVAL_TOOLS:
+            # Retrieval error strings usually indicate a plan-binding
+            # issue (bad subtree, missing catalog, unresolvable filter).
+            # Synthesize the empty structured shape so ``$stepN.tumblers``
+            # resolves, but log at warning level so the next operator
+            # step isn't silently handed empty inputs without anyone
+            # noticing. Callers can inspect the ``error`` key on the
+            # step output for programmatic branching.
+            _log.warning(
+                "plan_retrieval_error_synthesized",
+                tool=tool,
+                error=result[:200],
+            )
             return {
                 "ids": [], "tumblers": [], "distances": [], "collections": [],
                 "error": result,

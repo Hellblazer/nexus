@@ -95,4 +95,7 @@ def evaluate_gates(
             f"need ≥ {min_description_chars})",
         )
 
-    return GateVerdict(passed=not reasons, reasons=reasons, plan=plan)
+    # Copy the row dict so mutations on the verdict don't reach back
+    # into PlanLibrary's returned row (``frozen=True`` protects the
+    # reference, not the object it points to).
+    return GateVerdict(passed=not reasons, reasons=reasons, plan=dict(plan))

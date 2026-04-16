@@ -114,7 +114,7 @@ def main() -> None:
     # --- RDR-078 Plan Library (SC-7): try plans before decomposing queries ---
     output_lines.append("## Plan Library (RDR-078)")
     output_lines.append("")
-    output_lines.append("Before any retrieval task, call `plan_match(intent, dimensions={verb:<verb>}, min_confidence=0.85, n=1)` and if a match lands, execute via `plan_run(match, bindings=...)`. Five scenario verbs ship at `scope:global`:")
+    output_lines.append("Before any retrieval task, call `plan_match(intent, dimensions={verb:<verb>}, min_confidence=0.40, n=1)` and if a match lands, execute via `plan_run(match, bindings=...)`. Five scenario verbs ship at `scope:global`:")
     output_lines.append("")
     output_lines.append("- **research** — design / architecture / planning (walk from prose to implementing code)")
     output_lines.append("- **review** — critique / audit a change set (decision-evolution traversal)")

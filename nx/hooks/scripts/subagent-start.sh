@@ -71,7 +71,7 @@ cat <<'PLANFIRST'
 
 Before decomposing any retrieval task, call
 `mcp__plugin_nx_nexus__plan_match(intent=<caller's phrasing>,
-dimensions='{"verb":"<v>"}', min_confidence=0.85, n=1)`. If a match
+dimensions='{"verb":"<v>"}', min_confidence=0.40, n=1)`. If a match
 lands, execute via `plan_run(plan_id=<match.id>, bindings='{...}')`
 and return its final step result. Fall through to `/nx:query` only on
 miss.
@@ -83,7 +83,7 @@ Match semantics:
   * "No matching plans." → MISS — fall through to /nx:query.
 
 Plan tool signatures (even if full storage docs are omitted below):
-  mcp__plugin_nx_nexus__plan_match(intent, dimensions='{}', scope_preference="", min_confidence=0.85, n=5, project="")
+  mcp__plugin_nx_nexus__plan_match(intent, dimensions='{}', scope_preference="", min_confidence=0.40, n=5, project="")
   mcp__plugin_nx_nexus__plan_run(plan_id, bindings='{}')
   mcp__plugin_nx_nexus__plan_save(query, plan_json, project="", tags="", ttl=None, name="", verb="", scope="", dimensions='{}', default_bindings='{}', parent_dims='{}')
   mcp__plugin_nx_nexus__plan_search(query, project="", limit=5)

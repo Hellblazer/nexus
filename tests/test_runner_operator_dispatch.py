@@ -139,6 +139,71 @@ async def test_dispatcher_propagates_async_exception(monkeypatch) -> None:
         await _default_dispatcher("extract", {"inputs": "[]", "fields": "x"})
 
 
+# ── Kwarg filter: drops unknown kwargs but logs a warning ─────────────────
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_drops_unknown_kwargs_with_warning(
+    monkeypatch,
+) -> None:
+    """Post-review fix: when a plan step passes a kwarg the resolved
+    tool doesn't accept (typo or unimplemented scope forwarding), the
+    dispatcher drops it to keep the call succeeding AND emits a
+    ``plan_dispatcher_kwargs_dropped`` warning so the silent drop
+    stays observable."""
+    from structlog.testing import capture_logs
+
+    from nexus.plans.runner import _default_dispatcher
+    from nexus.mcp import core as mcp_core
+
+    captured: dict = {}
+
+    def narrow_tool(*, query: str) -> dict:
+        captured.update(query=query)
+        return {"ids": []}
+
+    monkeypatch.setattr(mcp_core, "narrow_tool", narrow_tool, raising=False)
+
+    with capture_logs() as logs:
+        result = await _default_dispatcher(
+            "narrow_tool",
+            {"query": "ok", "colllection": "typo", "topic": "forward-compat"},
+        )
+    assert result == {"ids": []}
+    assert captured == {"query": "ok"}
+    events = [e for e in logs if e.get("event") == "plan_dispatcher_kwargs_dropped"]
+    assert events, "misspelled kwarg must emit the drop-warning event"
+    assert "colllection" in events[0]["dropped"]
+    assert "topic" in events[0]["dropped"]
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_retrieval_error_string_logs_warning(
+    monkeypatch,
+) -> None:
+    """When a retrieval tool returns a bare error string, the
+    dispatcher synthesizes the empty structured shape AND logs at
+    warning so the next operator step isn't silently handed empty
+    inputs without anyone noticing."""
+    from structlog.testing import capture_logs
+
+    from nexus.plans.runner import _default_dispatcher
+    from nexus.mcp import core as mcp_core
+
+    def broken_search(**kw) -> str:
+        return "Error: catalog not initialized"
+
+    monkeypatch.setattr(mcp_core, "search", broken_search)
+
+    with capture_logs() as logs:
+        out = await _default_dispatcher("search", {"query": "x"})
+    assert out["ids"] == [] and out["tumblers"] == []
+    assert "Error: catalog not initialized" in out.get("error", "")
+    events = [e for e in logs if e.get("event") == "plan_retrieval_error_synthesized"]
+    assert events
+    assert "catalog not initialized" in events[0]["error"]
+
+
 # ── Unknown tool name: existing behavior preserved ─────────────────────────
 
 

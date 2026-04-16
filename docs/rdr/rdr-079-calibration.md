@@ -52,6 +52,14 @@ Harness: `tests/test_min_confidence_calibration.py`. Dataset:
 
 Regenerate: `uv run pytest tests/test_min_confidence_calibration.py -s`.
 
+> **Reading note**: precision = 1.000 at thresholds ≥ 0.60 is an
+> abstention artifact, not evidence that the embedder is highly
+> confident. Above 0.60, MiniLM has near-totally stopped firing (TP ≤ 4
+> across 48 positives). The cases it does fire on happen to be correct,
+> but the sample is too small to draw a quality inference. Trust the
+> F1 column — not the precision column read in isolation — when
+> picking an operating point.
+
 ## Findings
 
 ### F-1 — Shipped `min_confidence=0.85` is broken for the MiniLM T1 cache

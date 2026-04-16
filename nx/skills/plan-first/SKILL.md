@@ -18,11 +18,11 @@ match clears `min_confidence`, execute the returned plan via
 
 ## Flow
 
-1. **`plan_match(intent, dimensions={...}, min_confidence=0.85, n=1)`**
+1. **`plan_match(intent, dimensions={...}, min_confidence=0.40, n=1)`**
    — match the caller's intent against the T1 `plans__session`
    cache. Pin `verb` when known (via the caller's own verb skill),
    leave `dimensions={}` when unknown.
-2. **If match returned with `confidence >= 0.85`** (or if the output
+2. **If match returned with `confidence >= 0.40`** (or if the output
    line shows `confidence=fts5` — the FTS5 fallback sentinel that
    `plan_match` renders when the in-session cosine cache is
    unavailable; internally this is `confidence=None` on the `Match`

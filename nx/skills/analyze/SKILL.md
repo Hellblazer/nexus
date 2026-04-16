@@ -15,7 +15,7 @@ Pure verb skill. One-shot: `plan_match` with `verb=analyze` →
 plan_match(
     intent=<caller's phrasing>,
     dimensions={verb: "analyze"},
-    min_confidence=0.85,
+    min_confidence=0.40,
     n=1,
 )
 → if match: plan_run(match, bindings={area: <topic>, criterion: <ranking axis>, limit: 12})

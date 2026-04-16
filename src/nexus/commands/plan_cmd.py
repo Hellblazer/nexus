@@ -202,6 +202,21 @@ def promote(
 
         repo_root = repo_root or Path.cwd()
         plugin_root = plugin_root or _plugin_plans_builtin_dir().parents[1]
+        repo_root = repo_root.resolve()
+        plugin_root = plugin_root.resolve()
+
+        # Guard against ``--repo-root ../../etc``-style path traversal.
+        # We refuse to promote into a directory that isn't a git tree
+        # (repo_root/.git present) unless it's the plugin_root itself
+        # (global-tier writes).
+        if target == "project" and not (repo_root / ".git").exists():
+            raise click.ClickException(
+                f"--repo-root {repo_root} is not a git working tree "
+                f"(no .git directory). Refusing to promote into an "
+                f"arbitrary path. Pass --repo-root pointing at the "
+                f"repo whose .nexus/plans/ should receive the plan."
+            )
+
         target_dir = _target_dir(
             target, repo_root=repo_root, plugin_root=plugin_root,
         )
@@ -211,6 +226,16 @@ def promote(
         doc = _plan_row_to_yaml_doc(verdict.plan, target=target)
         stem = _slugify(doc.get("name", ""), fallback=f"plan-{plan_id}")
         out_path = target_dir / f"{stem}.yml"
+        # Refuse to overwrite an existing plan file — the slug is
+        # deterministic and lossy, so "My Plan!" and "my plan" collide.
+        # A silent overwrite here would drop a prior promotion.
+        if out_path.exists():
+            raise click.ClickException(
+                f"{out_path} already exists. Rename the plan (name: "
+                f"field in the row) or delete the existing file first. "
+                f"Slug collisions silently overwriting prior promotions "
+                f"is a data-loss footgun."
+            )
         out_path.write_text(yaml.safe_dump(doc, sort_keys=False))
         click.echo(f"Promoted to {out_path}")
     finally:

@@ -1722,6 +1722,16 @@ _OPERATOR_SCHEMA_VERSION = 1
 # FastMCP's Tool.run supports async callables natively. (Review C-1.)
 
 
+# Upper bound on operator `inputs` length. A plan step that refs
+# ``$stepN.tumblers`` off a wide search can produce hundreds of items;
+# shipping that directly into a Haiku prompt dominates the context
+# with raw data and leaves no budget for reasoning. Plans that need
+# to fan out this wide must winnow via a preceding ``rank`` step.
+# 100 is empirical — Haiku 4.5's context budget handles structured
+# output over 100 short inputs comfortably; 500+ starts to degrade.
+_OPERATOR_MAX_INPUTS = 100
+
+
 async def _dispatch_with_auth_guard(
     pool, operator: str, *, prompt: str, timeout: float,
 ) -> dict:
@@ -1757,6 +1767,15 @@ def _parse_inputs_json(operator: str, inputs: str | list) -> list:
     from nexus.plans.runner import PlanRunOperatorOutputError
 
     if isinstance(inputs, list):
+        if len(inputs) > _OPERATOR_MAX_INPUTS:
+            raise PlanRunOperatorOutputError(
+                operator=operator,
+                reason=(
+                    f"`inputs` has {len(inputs)} items; operator budget "
+                    f"is {_OPERATOR_MAX_INPUTS}. Winnow via a preceding "
+                    f"`rank` step before dispatching a wide fan-out."
+                ),
+            )
         return inputs
 
     if not isinstance(inputs, str):
@@ -1776,6 +1795,15 @@ def _parse_inputs_json(operator: str, inputs: str | list) -> list:
         raise PlanRunOperatorOutputError(
             operator=operator,
             reason=f"`inputs` must decode to a JSON array, got {type(parsed).__name__}",
+        )
+    if len(parsed) > _OPERATOR_MAX_INPUTS:
+        raise PlanRunOperatorOutputError(
+            operator=operator,
+            reason=(
+                f"`inputs` has {len(parsed)} items; operator budget is "
+                f"{_OPERATOR_MAX_INPUTS}. Winnow via a preceding `rank` "
+                f"step before dispatching a wide fan-out into the model."
+            ),
         )
     return parsed
 

@@ -15,7 +15,7 @@ write plans; invoking this skill executes that seed.
 plan_match(
     intent="author a plan for $target_verb: $concept",
     dimensions={verb: "plan-author", strategy: "default"},
-    min_confidence=0.85,
+    min_confidence=0.40,
     n=1,
 )
 → plan_run(match, bindings={concept: <target>, target_verb: <verb>})

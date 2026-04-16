@@ -144,7 +144,6 @@ class RewindPool:
     json_schema: dict | None = None
     pool_session: PoolSession | None = None
     slots: list[RewindSlot] = field(default_factory=list)
-    _init_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _auth_checked: bool = False
 
     def __post_init__(self) -> None:
@@ -217,7 +216,9 @@ class RewindPool:
 
         # Read until the warmup's result record lands. We don't need
         # the payload — we just need the session file to exist.
-        await self._drain_until_result(proc, timeout=120.0)
+        await asyncio.wait_for(
+            self._drain_until_result(proc), timeout=120.0,
+        )
         await proc.wait()
 
         slot.jsonl_path = _jsonl_for(slot.session_id)
@@ -261,7 +262,15 @@ class RewindPool:
         RewindPool pins the role at construction time via
         ``self.operator_role`` (slots can't switch roles mid-lifetime
         without reinitializing, and batch consumers rarely need it).
+        A caller that passes a DIFFERENT role gets a warning so the
+        silent drop doesn't masquerade as success.
         """
+        if operator_role != "You are a pool worker." and operator_role != self.operator_role:
+            _log.warning(
+                "rewind_pool_operator_role_ignored",
+                passed=operator_role[:80],
+                pool_role=self.operator_role[:80],
+            )
         slot = await self._acquire_slot()
         try:
             if not slot.initialized:
@@ -306,29 +315,51 @@ class RewindPool:
         await proc.stdin.drain()
         proc.stdin.close()
 
+        payload: dict | None = None
         try:
             payload = await asyncio.wait_for(
-                self._drain_until_result(proc, timeout=timeout),
+                self._drain_until_result(proc),
                 timeout=timeout,
             )
+            # Claude sometimes lingers a fraction of a second after the
+            # `result` record before exiting. Cap the tail wait so a
+            # hung subprocess cannot block the rewind.
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                proc.kill()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    _log.error(
+                        "rewind_pool_kill_did_not_reap",
+                        session_id=slot.session_id,
+                        pid=proc.pid,
+                    )
         except asyncio.TimeoutError:
             proc.kill()
-            await proc.wait()
-            self._rewind(slot)
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                pass
             raise
+        finally:
+            # Rewind MUST run whether the dispatch succeeded, timed
+            # out, or raised — otherwise the next dispatch on this
+            # slot sees the in-flight turn as prior history and every
+            # subsequent call accumulates state (the very contamination
+            # this pool exists to prevent).
+            self._rewind(slot)
 
-        await proc.wait()
+        # Count only successful dispatches so telemetry matches reality.
         slot.dispatch_count += 1
-
-        # Rewind: inode-preserving truncation back to checkpoint.
-        self._rewind(slot)
-
+        assert payload is not None  # no TimeoutError → payload was set
         return payload
 
     # ── StreamReader loop ─────────────────────────────────────────────
 
     async def _drain_until_result(
-        self, proc: asyncio.subprocess.Process, *, timeout: float,
+        self, proc: asyncio.subprocess.Process,
     ) -> dict:
         """Read stream-json lines until the turn's ``result`` record.
 
@@ -391,6 +422,13 @@ class RewindPool:
         ``--resume <uuid>`` to continue finding the file on subsequent
         dispatches. Shell ``>`` redirect replaces the inode and
         breaks the next resume (nexus-axu Phase A finding).
+
+        On any ``OSError`` (``EPERM``, ``EROFS``, quota, etc.), the
+        slot is marked ``initialized=False`` so the NEXT dispatch
+        re-runs ``_init_slot`` and re-establishes the JSONL + fresh
+        checkpoint. Without this recovery the slot would be silently
+        corrupted (JSONL at wrong offset, next ``--resume`` ships
+        contaminated history).
         """
         if slot.jsonl_path is None:
             return
@@ -402,6 +440,18 @@ class RewindPool:
                 session_id=slot.session_id,
                 jsonl_path=str(slot.jsonl_path),
             )
+            slot.initialized = False
+        except OSError as exc:
+            _log.error(
+                "rewind_pool_truncate_failed",
+                session_id=slot.session_id,
+                jsonl_path=str(slot.jsonl_path),
+                error=str(exc),
+                errno=getattr(exc, "errno", None),
+            )
+            # Force re-init on the next dispatch so downstream callers
+            # don't pick up contaminated history via a stale JSONL.
+            slot.initialized = False
 
     # ── Shutdown ──────────────────────────────────────────────────────
 
@@ -409,22 +459,27 @@ class RewindPool:
         """Release every slot, delete its JSONL, and tear down the
         pool session. Idempotent.
 
-        RewindPool has no live subprocesses to kill (each dispatch is
-        self-contained), so shutdown is purely filesystem cleanup.
+        RewindPool has no persistent worker subprocesses between
+        dispatches — per-dispatch spawns are self-reaping. Shutdown
+        is therefore mostly filesystem cleanup. Concurrent in-flight
+        dispatches are serialized out by acquiring each slot's lock
+        BEFORE unlinking; without this guard, a concurrent dispatch
+        could still be reading/writing the JSONL when shutdown runs.
         """
         for slot in list(self.slots):
-            if slot.jsonl_path is not None:
-                try:
-                    slot.jsonl_path.unlink()
-                except FileNotFoundError:
-                    pass
-                except OSError as exc:
-                    _log.debug(
-                        "rewind_pool_jsonl_unlink_failed",
-                        jsonl_path=str(slot.jsonl_path),
-                        error=str(exc),
-                    )
-            slot.initialized = False
+            async with slot.lock:
+                if slot.jsonl_path is not None:
+                    try:
+                        slot.jsonl_path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    except OSError as exc:
+                        _log.debug(
+                            "rewind_pool_jsonl_unlink_failed",
+                            jsonl_path=str(slot.jsonl_path),
+                            error=str(exc),
+                        )
+                slot.initialized = False
         self.slots.clear()
 
         if self.pool_session is not None:
@@ -453,14 +508,17 @@ class RewindPool:
         """Construct a RewindPool alongside a dedicated pool session.
 
         Mirrors the one-call factory used by
-        :func:`~nexus.mcp_infra.get_operator_pool`. The returned pool's
-        ``pool_session`` is populated and the caller is responsible for
-        setting ``NEXUS_T1_SESSION_ID`` before the first dispatch if
-        the env isn't already wired (``get_operator_pool`` does this
-        automatically for the OperatorPool singleton).
+        :func:`~nexus.mcp_infra.get_operator_pool`: creates the pool
+        session AND sets ``NEXUS_T1_SESSION_ID`` on the current
+        process env so the first dispatch satisfies the SC-15 / I-4
+        precondition without extra ceremony at the call site.
         """
         session = create_pool_session()
-        pool = cls(
+        # Wire the env var so _init_slot's precondition check passes
+        # on first dispatch. Callers that want isolation from a
+        # pre-existing NEXUS_T1_SESSION_ID must unset it first.
+        os.environ["NEXUS_T1_SESSION_ID"] = session.session_id
+        return cls(
             size=size,
             model=model,
             operator_role=operator_role,
@@ -469,4 +527,3 @@ class RewindPool:
             max_turns=max_turns,
             pool_session=session,
         )
-        return pool

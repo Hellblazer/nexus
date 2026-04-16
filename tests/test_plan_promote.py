@@ -154,6 +154,7 @@ def test_cli_dry_run_never_writes_file(library, tmp_path, monkeypatch) -> None:
 
     project_dir = tmp_path / "repo"
     (project_dir / ".nexus" / "plans").mkdir(parents=True)
+    (project_dir / ".git").mkdir()  # containment guard accepts git trees
     before = sorted((project_dir / ".nexus" / "plans").iterdir())
 
     runner = CliRunner()
@@ -213,6 +214,7 @@ def test_cli_promotion_writes_yaml_when_gate_passes(
 
     project_dir = tmp_path / "repo"
     (project_dir / ".nexus" / "plans").mkdir(parents=True)
+    (project_dir / ".git").mkdir()  # containment guard accepts git trees
 
     runner = CliRunner()
     result = runner.invoke(
@@ -241,6 +243,7 @@ def test_cli_promotion_refuses_when_gate_fails(library, tmp_path) -> None:
 
     project_dir = tmp_path / "repo"
     (project_dir / ".nexus" / "plans").mkdir(parents=True)
+    (project_dir / ".git").mkdir()  # containment guard accepts git trees
 
     runner = CliRunner()
     result = runner.invoke(
@@ -255,6 +258,72 @@ def test_cli_promotion_refuses_when_gate_fails(library, tmp_path) -> None:
     assert result.exit_code != 0
     written = list((project_dir / ".nexus" / "plans").glob("*.yml"))
     assert not written, "failed gate must not produce a file"
+
+
+def test_cli_promotion_refuses_overwrite_on_slug_collision(
+    library, tmp_path,
+) -> None:
+    """Two plans whose names slugify to the same stem must NOT silently
+    overwrite — the CLI exits non-zero with a clear error. Rescues the
+    author from losing a prior promotion to a same-slug plan."""
+    from nexus.commands.plan_cmd import plan as plan_group
+
+    plan_id = _insert_plan(
+        library, use_count=5, success_count=5, failure_count=0,
+        query="a suitably descriptive query over a dozen characters",
+        name="my-plan",
+    )
+
+    project_dir = tmp_path / "repo"
+    (project_dir / ".nexus" / "plans").mkdir(parents=True)
+    (project_dir / ".git").mkdir()
+    # Pre-existing YAML that would collide with the slugified name.
+    (project_dir / ".nexus" / "plans" / "my-plan.yml").write_text("existing")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        plan_group,
+        [
+            "promote", str(plan_id),
+            "--target", "project",
+            "--db-path", str(tmp_path / "plans.db"),
+            "--repo-root", str(project_dir),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "already exists" in result.output
+    # The pre-existing file is untouched.
+    assert (project_dir / ".nexus" / "plans" / "my-plan.yml").read_text() == "existing"
+
+
+def test_cli_refuses_repo_root_outside_git_tree(library, tmp_path) -> None:
+    """SC-9 safety: ``--repo-root /tmp/foo`` (no .git inside) must be
+    rejected so the CLI can't be weaponized into a path-traversal
+    write. ``--target global`` is exempt (it writes into the plugin
+    directory, not the repo)."""
+    from nexus.commands.plan_cmd import plan as plan_group
+
+    plan_id = _insert_plan(
+        library, use_count=5, success_count=5, failure_count=0,
+        query="a suitably descriptive query over a dozen characters",
+    )
+
+    arbitrary = tmp_path / "not-a-repo"
+    arbitrary.mkdir()
+    # NO .git directory created → containment guard must fire.
+
+    runner = CliRunner()
+    result = runner.invoke(
+        plan_group,
+        [
+            "promote", str(plan_id),
+            "--target", "project",
+            "--db-path", str(tmp_path / "plans.db"),
+            "--repo-root", str(arbitrary),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "not a git working tree" in result.output
 
 
 def test_cli_unknown_plan_id_fails_cleanly(library, tmp_path) -> None:

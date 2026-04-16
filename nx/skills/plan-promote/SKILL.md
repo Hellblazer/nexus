@@ -21,7 +21,7 @@ candidates via markdown shortlist; let the user decide.
 plan_match(
     intent="rank plan promotion candidates",
     dimensions={verb: "plan-promote", strategy: "propose"},
-    min_confidence=0.85,
+    min_confidence=0.40,
     n=1,
 )
 → plan_run(match, bindings={threshold: 5, limit: 20})

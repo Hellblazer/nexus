@@ -240,6 +240,19 @@ def test_best_threshold_clears_minimum_f1(
         f"below the minimum acceptable {_MIN_ACCEPTABLE_F1:.2f}. "
         f"See test output for the full ROC table."
     )
+    # Review S-1: additionally assert the shipped default (0.40) is
+    # near the F1-optimal point. If the best threshold drifts above
+    # 0.50 — e.g. because the T1 embedder was swapped for a stronger
+    # CCE model — someone must update the shipped default to match.
+    # This test fails LOUDLY when the ROC shape changes under us,
+    # rather than silently leaving the shipped default stale.
+    assert best.threshold <= 0.50, (
+        f"F1-optimal threshold drifted to {best.threshold:.2f}; "
+        f"shipped default 0.40 may no longer be near-optimal. Update "
+        f"the default in nexus/plans/matcher.py and the MCP tool at "
+        f"nexus/mcp/core.py to track, and refresh the calibration "
+        f"artifact (docs/rdr/rdr-079-calibration.md)."
+    )
 
 
 def test_negatives_do_not_match_above_high_threshold(

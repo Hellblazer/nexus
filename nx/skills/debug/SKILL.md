@@ -20,7 +20,7 @@ traversal). Serena handles symbol-level navigation separately.
 plan_match(
     intent=<caller's phrasing>,
     dimensions={verb: "debug"},
-    min_confidence=0.85,
+    min_confidence=0.40,
     n=1,
 )
 → if match: plan_run(match, bindings={failing_path: <path>, symptom: <description>})

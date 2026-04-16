@@ -118,7 +118,8 @@ def test_rewind_truncates_to_checkpoint_preserving_inode(tmp_path: Path) -> None
 
 def test_rewind_is_safe_when_file_missing(tmp_path: Path) -> None:
     """A slot whose JSONL was externally deleted must not crash on
-    rewind — just log and continue."""
+    rewind. (Recovery behavior — ``initialized=False`` — is pinned by
+    ``test_rewind_file_not_found_also_marks_for_reinit``.)"""
     from nexus.operators.rewind_pool import RewindPool, RewindSlot
 
     slot = RewindSlot(
@@ -138,6 +139,55 @@ def test_rewind_is_noop_when_path_not_set(tmp_path: Path) -> None:
 
     slot = RewindSlot(session_id="abc")
     RewindPool(slots=[slot], size=1)._rewind(slot)  # no crash
+
+
+def test_rewind_os_error_marks_slot_for_reinit(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Review C-2: when ``os.truncate`` fails with a non-
+    FileNotFoundError (EPERM, EROFS, quota, …), the slot MUST be
+    marked ``initialized=False`` so the next dispatch re-runs
+    ``_init_slot``. Without this recovery the slot would be silently
+    corrupted — JSONL at wrong offset, next ``--resume`` ships
+    contaminated history."""
+    import os as os_module
+
+    from nexus.operators.rewind_pool import RewindPool, RewindSlot
+
+    jsonl = tmp_path / "session.jsonl"
+    jsonl.write_text("line1\nline2\n")
+    slot = RewindSlot(
+        session_id="abc", jsonl_path=jsonl, checkpoint_offset=6,
+        initialized=True,
+    )
+
+    def boom(path, size):
+        raise PermissionError("EACCES")
+
+    monkeypatch.setattr(os_module, "truncate", boom)
+
+    pool = RewindPool(slots=[slot], size=1)
+    pool._rewind(slot)  # must not raise
+
+    assert slot.initialized is False, (
+        "review C-2: OSError on truncate must force re-init on next "
+        "dispatch; silent corruption would ship contaminated history"
+    )
+
+
+def test_rewind_file_not_found_also_marks_for_reinit(tmp_path: Path) -> None:
+    """FileNotFoundError on rewind (external deletion) must behave
+    identically to other OSErrors — force re-init."""
+    from nexus.operators.rewind_pool import RewindPool, RewindSlot
+
+    slot = RewindSlot(
+        session_id="abc",
+        jsonl_path=tmp_path / "missing.jsonl",
+        checkpoint_offset=0,
+        initialized=True,
+    )
+    RewindPool(slots=[slot], size=1)._rewind(slot)
+    assert slot.initialized is False
 
 
 # ── Slot acquisition / concurrency ────────────────────────────────────────

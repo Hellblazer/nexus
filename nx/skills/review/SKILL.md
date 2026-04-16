@@ -15,7 +15,7 @@ execute via `plan_run`, return the final step's result.
 plan_match(
     intent=<caller's phrasing>,
     dimensions={verb: "review"},
-    min_confidence=0.85,
+    min_confidence=0.40,
     n=1,
 )
 → if match: plan_run(match, bindings={changed_paths: [...], depth: 1})
