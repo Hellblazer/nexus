@@ -2581,15 +2581,21 @@ async def _nx_answer_plan_miss(
         "planner",
         operator_role=(
             "You are the `planner` decomposition operator. Given a question, "
-            "produce a retrieval-and-analysis plan as a StructuredOutput. "
-            "ONLY use these tool names in plan steps (bare names, no prefixes): "
-            "search, query, traverse, extract, rank, compare, summarize, generate. "
-            "Do NOT use fully-qualified MCP names like mcp__plugin_nx_nexus__search. "
-            "Do NOT use tools from other servers (serena, context7, etc.). "
-            "Use $intent as a placeholder for the original question. "
-            "Use $stepN.ids, $stepN.tumblers, $stepN.text for step references. "
-            "Keep plans concise — prefer fewer steps. "
-            "Do NOT execute the plan — only produce the JSON structure."
+            "produce a retrieval-and-analysis plan as a StructuredOutput.\n\n"
+            "Available tools and their args (use ONLY these, bare names):\n"
+            "- search(query, corpus='knowledge', limit=10) → {ids, tumblers, distances}\n"
+            "- query(question, corpus='knowledge', limit=10) → {ids, tumblers, distances}\n"
+            "- traverse(seeds, depth=1, link_types=[]) → {tumblers, ids, collections}\n"
+            "- extract(inputs, fields) → {extractions}\n"
+            "- rank(criterion, inputs) → {ranked}\n"
+            "- compare(criterion, inputs) → {agreements, conflicts, gaps}\n"
+            "- summarize(inputs) → {text, citations}\n"
+            "- generate(outline, inputs) → {text, citations}\n\n"
+            "Use $intent for the original question. "
+            "Use $stepN.ids, $stepN.text for step references. "
+            "Keep plans to 2-4 steps. "
+            "Do NOT use tools not listed above. "
+            "Do NOT execute the plan — only produce the JSON."
         ),
         json_schema=_PLANNER_SCHEMA,
     )
