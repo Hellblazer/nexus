@@ -546,33 +546,6 @@ def test_threshold_and_no_threshold_mutually_exclusive(
 # ── Phase 1.2 (RDR-087 / nexus-yi4b.1.2): silent-zero stderr ────────────────
 
 
-def _silent_zero_diag_factory(raw_count: int, *, worst: tuple[str, float, float] | None,
-                              collections_with_drops: int, total_dropped: int):
-    """Build a fake ``diagnostics_out``-populating side_effect.
-
-    ``worst`` is ``(collection, threshold, top_distance)`` or ``None``.
-    """
-    def fake(query, cols, n_results, t3, where=None, **kwargs):
-        diag_out = kwargs.get("diagnostics_out")
-        if diag_out is not None:
-            from nexus.search_engine import SearchDiagnostics
-            per_collection = {cols[0]: (raw_count, total_dropped, 0.65, worst[2] if worst else None)}
-            # Caller's expected worst_offender behaviour is already aggregated
-            # into the per_collection shape; the CLI calls worst_offender()
-            # on the resulting struct.
-            diag = SearchDiagnostics(
-                per_collection=per_collection,
-                total_dropped=total_dropped,
-                total_raw=raw_count,
-            )
-            # Override worst_offender via monkey-injection so the test can
-            # force the aggregation it wants without rebuilding the engine.
-            diag._forced_worst = worst  # type: ignore[attr-defined]
-            diag_out.append(diag)
-        return []
-    return fake
-
-
 def test_silent_zero_emits_single_stderr_line_when_raw_gt_zero(
     runner: CliRunner, cloud_env, monkeypatch,
 ) -> None:

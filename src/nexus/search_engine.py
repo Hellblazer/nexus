@@ -27,8 +27,11 @@ class SearchDiagnostics:
     """Per-call threshold-filter telemetry (RDR-087 Phase 1.2).
 
     ``per_collection`` maps name → ``(raw, dropped, threshold, top_distance)``
-    where *top_distance* is the minimum (best-ranked) distance among dropped
-    candidates for that collection, or ``None`` when nothing was dropped.
+    where *top_distance* is the minimum (best-ranked, i.e. closest-to-query)
+    distance among dropped candidates for that collection, or ``None`` when
+    nothing was dropped. The name ``top_distance`` matches the RDR-087 stderr
+    format (the "top of the ranking"); internally it is a ``min`` over dropped
+    distances because smaller cosine distance = higher rank.
 
     The struct is populated by ``search_cross_corpus`` when the caller passes
     ``diagnostics_out=[]``; the CLI reads ``worst_offender()`` to emit the
@@ -204,7 +207,7 @@ def search_cross_corpus(
     taxonomy: Any | None = None,
     topic: str | None = None,
     threshold_override: float | None = None,
-    diagnostics_out: list | None = None,
+    diagnostics_out: list[SearchDiagnostics] | None = None,
 ) -> list[SearchResult]:
     """Query each collection independently, returning combined raw results.
 
@@ -297,15 +300,15 @@ def search_cross_corpus(
         dropped = 0
         # Minimum distance among dropped items — best-of-dropped, used as
         # the "how much higher would the threshold need to be" signal.
-        top_dropped_distance: float | None = None
+        min_dropped_distance: float | None = None
         for r in raw:
             distance = r["distance"]
             # RDR-055 E2 quality_boost runs after hybrid scoring in the
             # CLI/MCP paths. Thresholds apply to raw distance here.
             if threshold is not None and distance > threshold:
                 dropped += 1
-                if top_dropped_distance is None or distance < top_dropped_distance:
-                    top_dropped_distance = distance
+                if min_dropped_distance is None or distance < min_dropped_distance:
+                    min_dropped_distance = distance
                 continue
             all_results.append(SearchResult(
                 id=r["id"],
@@ -315,7 +318,7 @@ def search_cross_corpus(
                 metadata={k: v for k, v in r.items()
                           if k not in {"id", "content", "distance"}},
             ))
-        diag_per_collection[col] = (len(raw), dropped, threshold, top_dropped_distance)
+        diag_per_collection[col] = (len(raw), dropped, threshold, min_dropped_distance)
         total_raw += len(raw)
         total_dropped += dropped
         if dropped:
