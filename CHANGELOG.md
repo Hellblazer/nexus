@@ -6,6 +6,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.6.1] - 2026-04-17
+
+### Fixed
+
+- **RDR-087 review follow-up** (nexus-yi4b.2.5) — two post-merge nits from the Phase 2 code review:
+  - **Typed telemetry accessor on hot path** — `search_engine.search_cross_corpus` and `commands/search_cmd._emit_silent_zero_note` now read the `telemetry.search_enabled` / `telemetry.stderr_silent_zero` opt-outs via `config.get_telemetry_config(cfg=cfg)` instead of raw `cfg.get("telemetry", {}).get(...)`. Malformed `.nexus.yml` values (e.g. `search_enabled: "yes"`) now surface the structured `telemetry_config_malformed` warning on every call, matching the design intent of Phase 2.3's typed accessor. `get_telemetry_config` accepts an optional pre-loaded `cfg` kwarg so the hot path skips the disk re-read.
+  - **Schema column rename** (migration 4.6.1) — `search_telemetry.dropped_count` → `kept_count` with value flip (`kept = raw − dropped`). RDR-087 §Proposed Solution specifies `kept_count`; 4.6.0 shipped with `dropped_count`. Idempotent ALTER + UPDATE migration; no-op on already-renamed or missing tables. Fresh installs get `kept_count` directly via `_TELEMETRY_SCHEMA_SQL`. Phase 3 consumers can now rely on spec-aligned column semantics.
+
+## [4.6.0] - 2026-04-17
+
+### Added
+
+- **RDR-087 Phase 2: Telemetry Persistence** (nexus-yi4b.2) — four stacked beads that turn the Phase 1 silent-zero stderr diagnostic into queryable T2 state:
+  - **2.1** — `search_telemetry` T2 table + registered migration; `nx doctor --check-schema` recognises it.
+  - **2.2** — hot-path `INSERT OR IGNORE` from `search_cross_corpus` writing one row per (query, collection). Failure is swallowed at DEBUG so a telemetry fault never breaks search. Composite PK `(ts, query_hash, collection)` dedupes same-second writers.
+  - **2.3** — `telemetry.search_enabled` / `telemetry.stderr_silent_zero` opt-out section in `.nexus.yml`; `TelemetryConfig` dataclass + `get_telemetry_config()` accessor with malformed-value structured warning.
+  - **2.4** — `nx doctor --trim-telemetry [--days N]` (default 30d, `click.IntRange(min=1)`); safe on empty tables, missing-DB handled gracefully.
+
 ## [4.5.3] - 2026-04-17
 
 ### Fixed

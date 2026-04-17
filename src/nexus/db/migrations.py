@@ -373,6 +373,32 @@ def migrate_search_telemetry(conn: sqlite3.Connection) -> None:
     _log.info("Migrated: created search_telemetry table (RDR-087)")
 
 
+def migrate_rename_dropped_to_kept(conn: sqlite3.Connection) -> None:
+    """Rename ``search_telemetry.dropped_count`` → ``kept_count`` and flip values.
+
+    RDR-087 review follow-up (nexus-yi4b.2.5). The RDR spec calls for
+    ``kept_count``; 4.6.0 shipped with ``dropped_count``. Rename the
+    column and flip stored values via ``kept_count = raw_count - kept_count``
+    so downstream Phase 3 consumers see spec-aligned column semantics.
+
+    Idempotent — no-op when ``dropped_count`` is already absent (either
+    because the column was renamed previously, or the table doesn't
+    exist yet).
+    """
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='search_telemetry'"
+    ).fetchone()
+    if row is None:
+        return
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(search_telemetry)").fetchall()}
+    if "dropped_count" not in cols:
+        return
+    conn.execute("ALTER TABLE search_telemetry RENAME COLUMN dropped_count TO kept_count")
+    conn.execute("UPDATE search_telemetry SET kept_count = raw_count - kept_count")
+    conn.commit()
+    _log.info("Migrated: search_telemetry.dropped_count → kept_count (RDR-087 errata)")
+
+
 def _add_plan_dimensional_identity(conn: sqlite3.Connection) -> None:
     """Add RDR-078 dimensional identity + currying + metrics columns to plans.
 
@@ -494,6 +520,11 @@ MIGRATIONS: list[Migration] = [
         "4.6.0",
         "Add search_telemetry table (RDR-087)",
         migrate_search_telemetry,
+    ),
+    Migration(
+        "4.6.1",
+        "Rename search_telemetry.dropped_count to kept_count (RDR-087 errata)",
+        migrate_rename_dropped_to_kept,
     ),
 ]
 

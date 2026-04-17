@@ -458,7 +458,7 @@ class _StubTelemetry:
 class TestSearchTelemetryHotPath:
     """``search_cross_corpus`` writes one row per collection to
     ``Telemetry.log_search_batch`` when a telemetry store is injected.
-    Row shape: ``(ts, query_hash, collection, raw_count, dropped_count,
+    Row shape: ``(ts, query_hash, collection, raw_count, kept_count,
     top_distance, threshold)``. ``top_distance`` here is the min distance
     across ALL raw candidates (not just the dropped subset).
     """
@@ -485,7 +485,7 @@ class TestSearchTelemetryHotPath:
         assert names == {"code__a", "knowledge__b"}
 
     def test_row_shape_matches_spec(self):
-        """Row layout: (ts, query_hash, collection, raw, dropped, top_distance, threshold)."""
+        """Row layout: (ts, query_hash, collection, raw, kept, top_distance, threshold)."""
         import hashlib
 
         telemetry = _StubTelemetry()
@@ -500,12 +500,12 @@ class TestSearchTelemetryHotPath:
         )
         rows = telemetry.batches[0]
         assert len(rows) == 1
-        ts, query_hash, collection, raw_count, dropped_count, top_distance, threshold = rows[0]
+        ts, query_hash, collection, raw_count, kept_count, top_distance, threshold = rows[0]
         expected_hash = hashlib.sha256("my query".encode()).hexdigest()[:64]
         assert query_hash == expected_hash
         assert collection == "code__a"
         assert raw_count == 2
-        assert dropped_count == 1  # 0.50 > 0.45
+        assert kept_count == 1  # 2 raw − 1 dropped (0.50 > 0.45)
         assert top_distance == pytest.approx(0.30)  # min over RAW (kept or dropped)
         assert threshold == pytest.approx(0.45)
         assert isinstance(ts, str) and "T" in ts
@@ -519,9 +519,9 @@ class TestSearchTelemetryHotPath:
         )
         rows = telemetry.batches[0]
         assert len(rows) == 1
-        _, _, _, raw_count, dropped_count, top_distance, _ = rows[0]
+        _, _, _, raw_count, kept_count, top_distance, _ = rows[0]
         assert raw_count == 0
-        assert dropped_count == 0
+        assert kept_count == 0
         assert top_distance is None
 
     def test_no_write_when_telemetry_absent(self):
@@ -560,9 +560,9 @@ class TestSearchTelemetryHotPath:
             "q", ["code__a"], 10, t3, telemetry=telemetry,
         )
         rows = telemetry.batches[0]
-        _, _, _, raw, dropped, _, threshold = rows[0]
+        _, _, _, raw, kept, _, threshold = rows[0]
         assert raw == 1
-        assert dropped == 0
+        assert kept == 1  # no filtering → all raw are kept
         assert threshold is None
 
     def test_duplicate_insert_is_ignored_not_raised(self, tmp_path):

@@ -6,7 +6,7 @@ from pathlib import Path
 import click
 import structlog
 
-from nexus.config import get_tuning_config, load_config
+from nexus.config import get_telemetry_config, get_tuning_config, load_config
 from nexus.corpus import resolve_corpus
 from nexus.commands.store import _t3
 from nexus.ripgrep_cache import search_ripgrep
@@ -61,7 +61,7 @@ def _maybe_emit_silent_zero_note(
     """
     if quiet:
         return
-    if not config.get("telemetry", {}).get("stderr_silent_zero", True):
+    if not get_telemetry_config(cfg=config).stderr_silent_zero:
         return
     if not diagnostics_out:
         return

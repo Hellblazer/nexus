@@ -160,14 +160,21 @@ def _coerce_bool(value: Any, *, key: str, default: bool) -> bool:
     return default
 
 
-def get_telemetry_config(repo_root: Path | None = None) -> TelemetryConfig:
+def get_telemetry_config(
+    repo_root: Path | None = None,
+    *,
+    cfg: dict | None = None,
+) -> TelemetryConfig:
     """Load the ``telemetry`` config section into a typed struct.
 
     Malformed boolean values coerce to the default with a structured
     warning so a stray string in ``.nexus.yml`` never silently disables
     the feature (or silently enables it).
+
+    Pass *cfg* to reuse an already-loaded config dict and skip the disk
+    read — required on the search hot path.
     """
-    tel = load_config(repo_root=repo_root).get("telemetry", {})
+    tel = (cfg if cfg is not None else load_config(repo_root=repo_root)).get("telemetry", {})
     return TelemetryConfig(
         search_enabled=_coerce_bool(
             tel.get("search_enabled", True),
