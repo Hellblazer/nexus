@@ -6,6 +6,32 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.5.0] - 2026-04-17
+
+Plugin version bumped to track the `nx doc` command group shipped with
+RDR-082 (doc-build tokens) and RDR-083 (corpus-evidence tokens). See the
+root `CHANGELOG.md` for the full release notes covering RDR-082 / 083 /
+084 / 085 implementations, RDR-086 draft filing, and the nexus-lub /
+nexus-9ji bug fixes.
+
+### Added
+
+- **`nx doc render`** — resolve `{{bd:…}}` / `{{rdr:…}}` tokens in
+  markdown against bead DB + RDR frontmatter. Fail-loud default;
+  `--allow-unresolved` preserves literal tokens.
+- **`nx doc validate`** — same engine, no emit, non-zero on unresolved.
+- **`nx doc check-grounding`** — citation-coverage report
+  (chash-shaped / prose / bracket counts + ratio).
+- **`nx doc check-extensions`** — `[experimental]` — flags doc chunks
+  that don't project into a primary-source collection.
+
+### Changed
+
+- `nx collection delete` now reports taxonomy-cascade counts
+  (topics / assignments / links / meta).
+- `nx index pdf --force` now works end-to-end against a partial prior
+  ingest — wipes pipeline.db state + T3 orphan chunks pre-flight.
+
 ## [4.4.1] - 2026-04-16
 
 ### Fixed

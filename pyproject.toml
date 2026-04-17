@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "conexus"
-version = "4.4.1"
+version = "4.5.0"
 description = "Self-hosted semantic search and knowledge management for LLM-driven development"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.12,<3.14"
