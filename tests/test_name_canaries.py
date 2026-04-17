@@ -18,7 +18,7 @@ _VALID_SURFACES = {"resolve_corpus", "rdr_resolve", "resolve_span"}
 
 @pytest.fixture(scope="module")
 def canaries():
-    from tests.fixtures.name_canaries import NAME_CANARIES
+    from nexus.name_canaries import NAME_CANARIES
 
     return NAME_CANARIES
 
@@ -28,8 +28,8 @@ def canaries():
 
 class TestFixtureLoads:
     def test_import_resolves(self) -> None:
-        """Fixture module imports without error."""
-        from tests.fixtures import name_canaries
+        """Module imports without error."""
+        from nexus import name_canaries
 
         assert hasattr(name_canaries, "NAME_CANARIES")
 
@@ -38,7 +38,7 @@ class TestFixtureLoads:
 
     def test_entries_parse(self, canaries) -> None:
         """Every entry is a ``NameCanary`` with the right field shape."""
-        from tests.fixtures.name_canaries import NameCanary
+        from nexus.name_canaries import NameCanary
 
         for c in canaries:
             assert isinstance(c, NameCanary)
