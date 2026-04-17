@@ -158,6 +158,8 @@ def search(
         with _t2_ctx() as _t2_db:
             # Note: no ``diagnostics_out`` — MCP does not emit stderr
             # (RDR-087 Phase 1 scope is CLI-only).
+            # ``telemetry`` wired for RDR-087 Phase 2.2 hot-path logging;
+            # opt-out via ``telemetry.search_enabled=false`` in .nexus.yml.
             results = search_cross_corpus(
                 query, target, n_results=fetch_n, t3=t3, where=where_dict,
                 cluster_by=cluster_by or None,
@@ -166,6 +168,7 @@ def search(
                 taxonomy=_t2_db.taxonomy,
                 topic=topic or None,
                 threshold_override=threshold,
+                telemetry=_t2_db.telemetry,
             )
         # Only sort by distance for flat (non-clustered) results.
         # Clustered results arrive in cluster-grouped order from search_engine.
@@ -406,6 +409,7 @@ def query(
                 catalog=_get_catalog(),
                 link_boost=True,
                 taxonomy=_t2_db.taxonomy,
+                telemetry=_t2_db.telemetry,
             )
         results.sort(key=lambda r: r.distance)
         if not results:

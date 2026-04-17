@@ -77,6 +77,26 @@ CREATE INDEX IF NOT EXISTS idx_relevance_log_chunk
     ON relevance_log(chunk_id);
 CREATE INDEX IF NOT EXISTS idx_relevance_log_session
     ON relevance_log(session_id);
+
+-- RDR-087 Phase 2: per-call threshold-filter telemetry.
+-- Schema duplicated from migrations.migrate_search_telemetry so that
+-- fresh T2Database constructions get the table even before apply_pending
+-- runs. IF NOT EXISTS makes construction idempotent with the migration.
+CREATE TABLE IF NOT EXISTS search_telemetry (
+    ts             TEXT    NOT NULL,
+    query_hash     TEXT    NOT NULL,
+    collection     TEXT    NOT NULL,
+    raw_count      INTEGER NOT NULL,
+    dropped_count  INTEGER NOT NULL,
+    top_distance   REAL,
+    threshold      REAL,
+    PRIMARY KEY (ts, query_hash, collection)
+);
+
+CREATE INDEX IF NOT EXISTS idx_search_tel_collection
+    ON search_telemetry(collection);
+CREATE INDEX IF NOT EXISTS idx_search_tel_ts
+    ON search_telemetry(ts);
 """
 
 _RELEVANCE_LOG_COLUMNS = (
@@ -223,3 +243,32 @@ class Telemetry:
             )
             self.conn.commit()
         return cur.rowcount
+
+    # ── search_telemetry (RDR-087 Phase 2) ────────────────────────────────
+
+    def log_search_batch(
+        self,
+        rows: list[tuple[str, str, str, int, int, float | None, float | None]],
+    ) -> int:
+        """Insert per-call threshold-filter telemetry in a single transaction.
+
+        Row tuple layout: ``(ts, query_hash, collection, raw_count,
+        dropped_count, top_distance, threshold)``.
+
+        Uses ``INSERT OR IGNORE`` on the composite PK so two writers
+        racing within the same ISO-second emit exactly one row. Duplicate
+        same-second calls are silently discarded — the retention-trim
+        (Phase 2.4) will clean up stragglers.
+        """
+        if not rows:
+            return 0
+        with self._lock:
+            self.conn.executemany(
+                "INSERT OR IGNORE INTO search_telemetry "
+                "(ts, query_hash, collection, raw_count, dropped_count, "
+                "top_distance, threshold) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+            self.conn.commit()
+        return len(rows)
