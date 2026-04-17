@@ -1,5 +1,5 @@
 ---
-title: "RDR-082: Doc-Build Token Resolution — `nx doc render` with Bead/RDR/Anchor Tokens"
+title: "RDR-082: Doc-Build Token Resolution — `nx doc render` with Bead and RDR Tokens"
 id: RDR-082
 status: draft
 type: Feature
@@ -8,12 +8,12 @@ author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-15
 related_issues: []
-related: [RDR-075, RDR-077, RDR-078, RDR-081]
+related: [RDR-078, RDR-081, RDR-083]
 ---
 
 # RDR-082: Doc-Build Token Resolution
 
-Architecture and design docs routinely hard-code values that Nexus already owns authoritatively: bead statuses (`Phase 3 = COMPLETE`), RDR states (`RDR-072 ACCEPTED`), component wiring claims (`SovereignDialogPipeline WIRED`), and empirical cross-collection topic anchors. Every one requires manual update when the underlying truth moves. The ART field report (2026-04-15, §3.1/F3 and §3.2/F8) documents multiple drift cases — superseded `MaskingFieldCompetition`, RDR-061 status ambiguity, dead-code references to `SemanticResponseField` that was in fact wired. We have all the source data (bead DB, RDR frontmatter, T2 `topic_assignments`); we lack a renderer that expands authored tokens at build time. This RDR introduces `nx doc render` as the minimal CLI surface and defines a small, versioned token grammar (`{{bd:…}}`, `{{rdr:…}}`, `{{nx-anchor:…}}`) resolved from existing stores.
+Architecture and design docs routinely hard-code values that Nexus already owns authoritatively: bead statuses (`Phase 3 = COMPLETE`), RDR states (`RDR-072 ACCEPTED`), component wiring claims (`SovereignDialogPipeline WIRED`). Every one requires manual update when the underlying truth moves. The ART field report (2026-04-15, §3.1/F3 and §3.2/F8) documents multiple drift cases — superseded `MaskingFieldCompetition`, RDR-061 status ambiguity, dead-code references to `SemanticResponseField` that was in fact wired. We have the source data (bead DB, RDR frontmatter); we lack a renderer that expands authored tokens at build time. This RDR introduces `nx doc render` as the minimal CLI surface and defines a small, versioned token grammar (`{{bd:…}}`, `{{rdr:…}}`) resolved from existing system-of-record stores. Projection-derived rendering tokens (anchor / chunk-excerpt) are scoped to RDR-083, which extends the same token pipeline with corpus-evidence resolvers.
 
 ## Problem Statement
 
@@ -23,11 +23,7 @@ Architecture and design docs routinely hard-code values that Nexus already owns 
 
 Every architecture doc that names a bead or RDR embeds a status snapshot. When the bead closes, the RDR accepts, or the work gets superseded, the prose lies until someone notices. The ART session found three such drifts in ten files during one audit; scaled across all downstream projects, this is the dominant doc-drift class. We already have the state machines (`bd` DB, RDR frontmatter + `{repo}_rdr` T2 project); the missing primitive is a token syntax in markdown that expands at render time.
 
-#### Gap 2: Docs cannot surface their own empirical semantic shape
-
-A reader of `docs__art-architecture` cannot tell from the prose that the collection's semantic center of mass is "Semantic Vector Topic Clustering" at 0.75 cosine — they would have to run projection and ICF by hand. RDR-077's projection-quality data makes this answerable in a single query, but there is no rendering convention that embeds the answer into a doc. Readers see only the *claimed* shape, never the *empirical* shape.
-
-#### Gap 3: No machine-checkable contract for render correctness
+#### Gap 2: No machine-checkable contract for render correctness
 
 Even if tokens were defined ad-hoc, a doc with an unknown or malformed token should fail loudly at render, not fall through to literal text in published output. A validator step (parse → resolve → error on unresolved) is part of the same primitive, not a separate surface.
 
@@ -37,7 +33,7 @@ Even if tokens were defined ad-hoc, a doc with an unknown or malformed token sho
 
 RDR-081 shipped a scanner for collection-name drift in prose. This RDR is the natural next layer: instead of scanning hand-written references and flagging drift, we let authors express the reference as a token, and the renderer resolves it from authoritative state on every build. The two are complementary — `validate-refs` handles legacy prose; tokens handle new authoring. ART's disciplines in §6 of the field report (explicit §0 notation block, per-layer canonical files, hand-curated tumblers) are exactly the patterns that benefit: ceremonial boilerplate today, token-resolved at build-time after this RDR.
 
-Bead state lives in `.beads/` (SQLite, `bd show <id>` JSON output). RDR state lives in `docs/rdr/<id>.md` frontmatter and is mirrored in T2 `{repo}_rdr` (memory_get by title). Projection-anchor data lives in T2 `topic_assignments` (enriched by RDR-077). All are queryable today; none are surfaced through a markdown-author-friendly API.
+Bead state lives in `.beads/` (SQLite, `bd show <id>` JSON output). RDR state lives in `docs/rdr/<id>.md` frontmatter and is mirrored in T2 `{repo}_rdr` (memory_get by title). Both are queryable today; neither is surfaced through a markdown-author-friendly API. Projection-derived data (topic anchors, chunk excerpts) also qualifies for token expansion — see RDR-083 for that surface.
 
 ### Technical Environment
 
@@ -50,21 +46,21 @@ Bead state lives in `.beads/` (SQLite, `bd show <id>` JSON output). RDR state li
 
 ### Investigation
 
-- Surveyed current ad-hoc drift patterns in `docs/rdr/*.md` and `docs/architecture*.md`: most drift clusters around three token types (bead status, RDR status, collection/topic anchors). Other long-tail patterns (chunk counts, call-graph fragments, file-path lists) are out of scope — they belong to the chunk-citation work (RDR-083) or symbol-graph work (F9).
+- Surveyed current ad-hoc drift patterns in `docs/rdr/*.md` and `docs/architecture*.md`: the two dominant system-of-record token types are bead status and RDR status. Projection-anchor and chunk-excerpt patterns are handled by RDR-083; other long-tail patterns (call-graph fragments, file-path lists) are out of scope — they belong to the chunk-citation work (RDR-083) or symbol-graph work (F9).
 - Verified `bd show <id> --json` exposes `status`, `title`, `assignee`, `closed_at`, `epic_id`, `progress` in stable fields.
 - Verified RDR T2 records (RDR-081 Step 4 precedent in `nx/skills/rdr-create/SKILL.md`) contain `status`, `gated`, `closed`, `close_reason`, `epic_bead`.
-- Verified projection anchor query is a bounded SQL: top-K topics by `SUM(similarity)` grouped by `topic_id` for a given `source_collection`.
 
 ### Key Discoveries
 
-- **Verified** — Three token families cover the observed drift cases in the field report with no residual unhandled.
+- **Verified** — Two token families cover the system-of-record drift cases in the field report; projection-derived tokens are out of scope here (RDR-083).
 - **Documented** — `bd show --json` and `memory_get` both return structured records today; no new exporters needed.
 - **Documented** — RDR-078 (plan-centric retrieval) introduces `follow_links` but is orthogonal to rendering; no coupling.
 - **Assumed** — A two-phase renderer (parse → resolve → emit) is sufficient; nested tokens are not needed for the in-scope cases. **Verification**: sample-set pass through a prototype.
+- **Designed-for-extension** — The Resolver protocol is deliberately simple so RDR-083 can register `AnchorResolver`, `ChashResolver`, etc. without grammar churn.
 
 ### Critical Assumptions
 
-- [ ] The token grammar `{{NAMESPACE:KEY[.FIELD][|FILTER]}}` covers all three in-scope token families without special-casing — **Status**: Unverified — **Method**: Prototype + sample docs.
+- [ ] The token grammar `{{NAMESPACE:KEY[.FIELD][|FILTER]}}` covers all in-scope token families without special-casing, and leaves room for RDR-083's additions — **Status**: Unverified — **Method**: Prototype + sample docs.
 - [ ] Rendering can be fully synchronous (no web calls) on a typical 100-page doc in <5s — **Status**: Unverified — **Method**: Spike on `docs/rdr/` corpus.
 - [ ] Downstream markdown consumers (GitHub, mkdocs) treat `{{…}}` as literal text when unrendered, so an un-rendered source doc does not silently look wrong — **Status**: Verified by inspection — **Method**: Docs Only.
 
@@ -72,13 +68,12 @@ Bead state lives in `.beads/` (SQLite, `bd show <id>` JSON output). RDR state li
 
 ### Approach
 
-A single new command `nx doc render <path>` that expands tokens from a small, versioned grammar. Three token families ship in v1; grammar is extensible so RDR-083 (chunk citations) can add `{{chash:…}}` without schema churn.
+A single new command `nx doc render <path>` that expands tokens from a small, versioned grammar. Two token families ship in v1; grammar is extensible so RDR-083 can add `{{chash:…}}` and `{{nx-anchor:…}}` without schema churn.
 
 - `{{bd:<id>.<field>}}` — bead state: `.status`, `.title`, `.assignee`, `.epic.progress`.
 - `{{rdr:<id>.<field>}}` — RDR state: `.status`, `.title`, `.gated`, `.closed`.
-- `{{nx-anchor:<collection>[|top=N]}}` — top-N projected topics for the collection, rendered as a markdown list.
 
-Author writes tokens inline; `nx doc render` emits a resolved `.rendered.md` sibling; `nx doc validate` (same engine, `--no-emit`) exits non-zero on any unresolved token. Default is fail-loud — an unknown bead ID or collection fails the render.
+Author writes tokens inline; `nx doc render` emits a resolved `.rendered.md` sibling; `nx doc validate` (same engine, `--no-emit`) exits non-zero on any unresolved token. Default is fail-loud — an unknown bead or RDR id fails the render.
 
 ### Technical Design
 
@@ -87,10 +82,11 @@ Author writes tokens inline; `nx doc render` emits a resolved `.rendered.md` sib
 ```text
 {{NAMESPACE:KEY[.FIELD][|FILTER=VALUE]*}}
 
-namespaces: bd | rdr | nx-anchor
-key:        bead id | rdr id | collection name
-field:      dotted path into resolver output (optional; resolver supplies default)
-filter:     resolver-specific directive, e.g., top=5
+namespaces (v1):   bd | rdr         # system-of-record
+namespaces (v2):   + chash | nx-anchor   # corpus-evidence, added by RDR-083
+key:               bead id | rdr id | (RDR-083: chunk hash | collection name)
+field:             dotted path into resolver output (optional; resolver supplies default)
+filter:            resolver-specific directive, e.g., top=5
 ```
 
 **Resolver protocol** (new, `src/nexus/doc/resolvers.py`):
@@ -103,11 +99,12 @@ class Resolver(Protocol):
     # raises ResolutionError on unknown key / unsupported field
 ```
 
-Three resolvers ship in v1, each small:
+Two resolvers ship in v1, each small:
 
 - `BeadResolver` shells `bd show <id> --json`, indexes fields.
 - `RdrResolver` reads `docs/rdr/rdr-<id>-*.md` frontmatter (authoritative) with T2 `memory_get` fallback.
-- `AnchorResolver` runs a bounded SQL over `topic_assignments` filtered by `source_collection`, ordered by `SUM(similarity) DESC`.
+
+The `Resolver` protocol is deliberately minimal so RDR-083 can register its own resolvers (`AnchorResolver`, `ChashResolver`) without changing grammar, engine, or CLI.
 
 **Renderer** (new, `src/nexus/doc/render.py`):
 
@@ -126,16 +123,16 @@ Pipeline: read markdown → regex-tokenize with a single pass (`\{\{([a-z-]+):([
 | --- | --- | --- |
 | Bead lookup | `bd` CLI subprocess | Reuse via `subprocess.run` — same pattern as labeler in RDR-081 |
 | RDR frontmatter read | `src/nexus/commands/rdr.py` (if exists) or inline YAML parse | Implement inline with `tomllib`/`pyyaml` — trivial |
-| Projection anchor SQL | `src/nexus/db/t2/catalog_taxonomy.py` | Extend with `top_topics_for_collection(collection, top_n)` method |
 | Token parser | none — new | New module |
 | CLI surface | `src/nexus/commands/doc.py` | New command group |
+| Resolver registry | none — new | Minimal `dict[namespace, Resolver]`; RDR-083 registers additional resolvers at the same extension point |
 
 ### Decision Rationale
 
-- Pre-defined three-namespace grammar avoids bikeshedding and covers the observed drift cases with zero waste. Extension requires writing a new Resolver, not grammar changes.
+- Pre-defined namespace grammar avoids bikeshedding and covers the system-of-record drift cases with zero waste. Extension requires writing a new Resolver, not grammar changes. RDR-083's corpus-evidence resolvers plug into the same registry.
 - Renderer over sidecar output (`<path>.rendered.md`) preserves source-as-truth discipline — diffing, review, and version control all stay clean.
 - Bead access via subprocess matches RDR-081's labeler pattern; no new `bd` client library dependency.
-- AnchorResolver reuses RDR-077's `source_collection` column directly; zero new schema.
+- Scoping 082 to system-of-record tokens keeps the first ship small and lets the corpus-evidence resolvers (which depend on projection data) arrive through RDR-083's calibration lens rather than hiding inside a generic render feature.
 
 ## Alternatives Considered
 
@@ -198,12 +195,11 @@ Pipeline: read markdown → regex-tokenize with a single pass (`\{\{([a-z-]+):([
 
 ### Prerequisites
 
-- [ ] RDR-077 `source_collection` column populated (already accepted; backfill in progress) — for AnchorResolver.
-- [ ] RDR-081 merged — not a hard dep, but parallel work should land first to avoid merge conflicts in `src/nexus/doc/`.
+- [ ] RDR-081 shipped — not a hard dep, but parallel work should land first to avoid merge conflicts in `src/nexus/doc/`.
 
 ### Minimum Viable Validation
 
-`nx doc render docs/rdr/rdr-078-unified-context-graph-and-retrieval.md` on a copy that has been edited to include one token of each family (`{{bd:nexus-xxx.status}}`, `{{rdr:072.status}}`, `{{nx-anchor:docs__nexus-rdrs|top=5}}`) produces a `.rendered.md` with all three resolved correctly. Must be executed in scope; not deferred.
+`nx doc render docs/rdr/rdr-078-unified-context-graph-and-retrieval.md` on a copy that has been edited to include one token of each family (`{{bd:nexus-xxx.status}}`, `{{rdr:072.status}}`) produces a `.rendered.md` with both resolved correctly. Must be executed in scope; not deferred.
 
 ### Phase 1: Code Implementation
 
@@ -213,12 +209,11 @@ Pipeline: read markdown → regex-tokenize with a single pass (`\{\{([a-z-]+):([
 - Define `Resolver` protocol in `src/nexus/doc/resolvers.py`.
 - Unit tests: grammar coverage, malformed rejection.
 
-#### Step 2: Three v1 resolvers
+#### Step 2: Two v1 resolvers
 
 - `BeadResolver` (subprocess `bd show --json`; cache per render).
 - `RdrResolver` (frontmatter read; cache per render).
-- `AnchorResolver` (SQL on `topic_assignments`; new `CatalogTaxonomy.top_topics_for_collection()`).
-- Unit tests per resolver: mock bead/fs/db.
+- Unit tests per resolver: mock bead/fs.
 
 #### Step 3: Render engine + CLI command
 
@@ -244,7 +239,6 @@ Pipeline: read markdown → regex-tokenize with a single pass (`\{\{([a-z-]+):([
 | --- | --- | --- | --- | --- | --- |
 | Rendered sidecar | `ls *.rendered.md` | diff against source | `rm` | Re-render | Source is backup |
 | Resolver cache | In-process only | N/A | N/A | N/A | N/A |
-| Projection anchors | T2 `topic_assignments` | `nx taxonomy project` | via T2 delete | Re-run projection | Via T2 backup |
 
 ### New Dependencies
 
@@ -252,13 +246,13 @@ None.
 
 ## Test Plan
 
-- **Scenario**: Render doc with 3 bead tokens, 2 RDR tokens, 1 anchor token — **Verify**: all 6 resolved, `.rendered.md` byte-exact against golden.
+- **Scenario**: Render doc with 3 bead tokens + 2 RDR tokens — **Verify**: all 5 resolved, `.rendered.md` byte-exact against golden.
 - **Scenario**: Unknown bead ID — **Verify**: `nx doc render` exits non-zero; reports `file:line:col`.
 - **Scenario**: Malformed token `{{bd:|}}` — **Verify**: parser rejects with clear error.
-- **Scenario**: Collection with <5 projected topics, `top=5` requested — **Verify**: resolver returns what exists (3/4/5), does not pad.
 - **Scenario**: `nx doc validate` on clean doc — **Verify**: exit 0, no emit.
 - **Scenario**: `nx doc validate` on doc with one stale RDR ID — **Verify**: exit non-zero, no emit, error lists offending token.
 - **Scenario**: Author updates source; `nx doc render` produces updated sidecar — **Verify**: diff of sidecar matches source change semantically.
+- **Scenario (extension point)**: A test-registered stub resolver for `{{fake:foo}}` is picked up and invoked without modifying parser, engine, or CLI — **Verify**: resolver registry is the only extension surface RDR-083 needs.
 
 ## Validation
 
@@ -312,11 +306,11 @@ One CLI command, three resolvers, one small grammar. Resist adding token familie
 ## References
 
 - `docs/field-reports/2026-04-15-architecture-as-code-from-art.md` §3.1/F3, §3.2/F8
-- RDR-075 (cross-collection projection)
-- RDR-077 (projection quality — `source_collection`)
 - RDR-081 (stale-reference validator — complementary: legacy prose vs. new tokens)
+- RDR-083 (chunk-grounded citations — extends this RDR's resolver registry with corpus-evidence resolvers)
 - `bd` beads CLI — `bd show --json` output contract
 
 ## Revision History
 
 - 2026-04-15 — Draft authored from ART field report findings F3, F8.
+- 2026-04-16 — Scope reduction: projection-derived tokens (`{{nx-anchor:…}}`) and chunk-excerpt rendering moved to RDR-083. Resolver protocol retained as an extension point; 082 ships with bead + RDR resolvers only. Prerequisites pruned (RDR-077 no longer needed by 082).
