@@ -2172,6 +2172,79 @@ class CatalogTaxonomy:
             "total_centroids": len(ctr_metas),
         }
 
+    def purge_collection(self, collection: str) -> dict[str, int]:
+        """Cascade-purge every row tied to *collection* across the four
+        taxonomy tables. Transactional — any failure rolls back all
+        deletes in this call.
+
+        Returns a count dict: ``{"topics", "assignments", "links",
+        "meta"}``. nexus-lub regression: `nx collection delete` was
+        removing the Chroma collection but leaving these four tables
+        orphaned. Call this after the Chroma delete.
+
+        Order of operations matters:
+          1. ``topic_links`` — drop every edge touching a doomed topic
+             (in either direction). Must run before we drop the topics
+             themselves to satisfy the FK reference.
+          2. ``topic_assignments`` — drop every row whose ``topic_id``
+             belongs to the collection OR whose ``source_collection``
+             equals it (projection residue).
+          3. ``topics`` — drop the collection's topic rows.
+          4. ``taxonomy_meta`` — drop the collection's `last_discover_at`
+             bookkeeping row.
+        """
+        out = {"topics": 0, "assignments": 0, "links": 0, "meta": 0}
+        with self._lock:
+            try:
+                doomed_ids = [
+                    r[0] for r in self.conn.execute(
+                        "SELECT id FROM topics WHERE collection = ?",
+                        (collection,),
+                    ).fetchall()
+                ]
+                if doomed_ids:
+                    placeholders = ",".join("?" for _ in doomed_ids)
+                    # 1. links touching any doomed topic
+                    cur = self.conn.execute(
+                        f"DELETE FROM topic_links "
+                        f"WHERE from_topic_id IN ({placeholders}) "
+                        f"   OR to_topic_id IN ({placeholders})",
+                        (*doomed_ids, *doomed_ids),
+                    )
+                    out["links"] = cur.rowcount or 0
+                    # 2a. assignments by topic_id
+                    cur = self.conn.execute(
+                        f"DELETE FROM topic_assignments "
+                        f"WHERE topic_id IN ({placeholders})",
+                        tuple(doomed_ids),
+                    )
+                    out["assignments"] = cur.rowcount or 0
+                # 2b. assignments by source_collection (projection residue
+                #     whose target topic may live in a surviving collection)
+                cur = self.conn.execute(
+                    "DELETE FROM topic_assignments "
+                    "WHERE source_collection = ?",
+                    (collection,),
+                )
+                out["assignments"] += cur.rowcount or 0
+                # 3. topics
+                cur = self.conn.execute(
+                    "DELETE FROM topics WHERE collection = ?",
+                    (collection,),
+                )
+                out["topics"] = cur.rowcount or 0
+                # 4. meta
+                cur = self.conn.execute(
+                    "DELETE FROM taxonomy_meta WHERE collection = ?",
+                    (collection,),
+                )
+                out["meta"] = cur.rowcount or 0
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
+        return out
+
     def purge_assignments_for_doc(self, project: str, title: str) -> int:
         """Remove topic_assignments for a deleted memory entry, empty topics.
 
