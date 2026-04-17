@@ -40,6 +40,53 @@ _CONTENT_MAX_CHARS: int = 200
 EXACT_MATCH_BOOST: float = 0.15
 RG_ONLY_PENALTY: float = 0.8  # Multiplier for rg-only results (files not in vector top-K)
 
+# Threshold recommendation offset: worst-offender threshold + this value is
+# suggested as the ``--threshold`` users should try first. 0.20 empirically
+# surfaces most dense-prose collection hits without flooding with garbage.
+_THRESHOLD_SUGGESTION_OFFSET: float = 0.20
+
+
+def _maybe_emit_silent_zero_note(
+    diagnostics_out: list,
+    *,
+    quiet: bool,
+    config: dict,
+) -> None:
+    """Emit the RDR-087 silent-zero stderr line when the conditions match.
+
+    Fires when a call returned zero post-threshold results yet had at least
+    one dropped candidate. Exactly one line per call (not per collection —
+    avoids a 15-line storm on prefix broadcasts). ``--quiet`` on the CLI
+    or ``telemetry.stderr_silent_zero = false`` in ``.nexus.yml`` suppresses.
+    """
+    if quiet:
+        return
+    if not config.get("telemetry", {}).get("stderr_silent_zero", True):
+        return
+    if not diagnostics_out:
+        return
+    diag = diagnostics_out[0]
+    if diag.total_dropped < 1:
+        return
+    worst = diag.worst_offender()
+    if worst is None:
+        return
+    name, threshold, top_distance = worst
+    collections_with_drops = diag.collections_with_drops()
+    threshold_str = f"{threshold:.3f}" if threshold is not None else "n/a"
+    top_distance_str = f"{top_distance:.3f}"
+    suggested = (
+        (threshold if threshold is not None else top_distance)
+        + _THRESHOLD_SUGGESTION_OFFSET
+    )
+    click.echo(
+        f"note: {diag.total_dropped} candidates dropped across "
+        f"{collections_with_drops} collections (worst: {name} "
+        f"threshold {threshold_str} top_distance {top_distance_str}). "
+        f"Use --threshold {suggested:.3f} to surface.",
+        err=True,
+    )
+
 # Directory where ripgrep cache files are stored (overridable in tests via monkeypatch)
 _CONFIG_DIR: Path = Path.home() / ".config" / "nexus"
 
@@ -129,6 +176,10 @@ def _rg_hit_to_result(hit: dict) -> SearchResult:
                    "candidate returned by the vector search. Mutually exclusive "
                    "with --threshold. (RDR-087 Phase 1 workaround for silent "
                    "threshold-drop on dense-prose collections.)")
+@click.option("--quiet", "quiet", is_flag=True, default=False,
+              help="Suppress the RDR-087 silent-zero stderr note (shown when a "
+                   "query returns zero results because every candidate was "
+                   "dropped by the distance threshold).")
 def search_cmd(
     query: str,
     path: str | None,
@@ -151,6 +202,7 @@ def search_cmd(
     reverse: bool,
     threshold: float | None,
     no_threshold: bool,
+    quiet: bool,
 ) -> None:
     """Semantic search across T3 knowledge collections.
 
@@ -226,6 +278,8 @@ def search_cmd(
     if not hybrid:
         hybrid = config.get("search", {}).get("hybrid_default", False)
 
+    diagnostics_out: list = []
+
     def _retrieve(q: str) -> list[SearchResult]:
         # Pass taxonomy for topic grouping + topic boost (RDR-070)
         from nexus.commands._helpers import default_db_path as _db_path
@@ -236,6 +290,7 @@ def search_cmd(
                 where=where_filter, link_boost=False,
                 taxonomy=_t2.taxonomy,
                 threshold_override=threshold_override,
+                diagnostics_out=diagnostics_out,
             )
         if hybrid:
             # Scope ripgrep to matching caches when a single corpus is targeted
@@ -248,6 +303,9 @@ def search_cmd(
     results = _retrieve(query)
 
     if not results:
+        _maybe_emit_silent_zero_note(
+            diagnostics_out, quiet=quiet, config=config,
+        )
         click.echo("No results.")
         return
 
