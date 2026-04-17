@@ -160,6 +160,7 @@ def search_cross_corpus(
     link_boost: bool = False,
     taxonomy: Any | None = None,
     topic: str | None = None,
+    threshold_override: float | None = None,
 ) -> list[SearchResult]:
     """Query each collection independently, returning combined raw results.
 
@@ -179,6 +180,13 @@ def search_cross_corpus(
     *taxonomy* is an optional :class:`CatalogTaxonomy` instance for topic
     lookups. When ``None`` and ``cluster_by="semantic"``, falls back to
     Ward clustering.
+
+    *threshold_override* (RDR-087 Phase 1.1 / nexus-yi4b.1.1) replaces the
+    per-collection distance threshold when non-``None``. The override is
+    applied uniformly across all collections and bypasses the
+    Voyage-client gate — explicit user intent takes precedence over the
+    local-mode skip heuristic. Use ``float('inf')`` to disable filtering
+    entirely (exposed as ``--no-threshold`` in the CLI).
     """
     cfg = load_config()
     # Config can override: search.cluster_by in .nexus.yml
@@ -205,7 +213,11 @@ def search_cross_corpus(
 
     # Thresholds are calibrated for Voyage AI embeddings.
     # Skip filtering when Voyage is not in use (local mode, test injection).
-    apply_thresholds = getattr(t3, "_voyage_client", None) is not None
+    # Explicit threshold_override bypasses this gate — caller intent wins.
+    apply_thresholds = (
+        threshold_override is not None
+        or getattr(t3, "_voyage_client", None) is not None
+    )
 
     # Catalog pre-filter: for high-selectivity predicates, narrow the search
     # space via source_path $in filter (Compass, RF-3).
@@ -222,7 +234,12 @@ def search_cross_corpus(
     for col in collections:
         mult = _overfetch_multiplier(col)
         per_k = max(5, n_results * mult)
-        threshold = _threshold_for_collection(col, cfg) if apply_thresholds else None
+        if not apply_thresholds:
+            threshold = None
+        elif threshold_override is not None:
+            threshold = threshold_override
+        else:
+            threshold = _threshold_for_collection(col, cfg)
         raw = t3.search(query, [col], n_results=per_k, where=effective_where)
         dropped = 0
         for r in raw:

@@ -203,3 +203,115 @@ def test_min_max_normalize_over_combined_not_per_corpus():
     assert norm_code < norm_doc
 
 
+# ── Phase 1.1 (RDR-087 / nexus-yi4b.1.1): threshold_override ─────────────────
+
+
+class _ThresholdFakeT3:
+    """Minimal T3 stand-in that returns preset per-collection rows.
+
+    Distances are raw (pre-filter). ``_voyage_client`` is toggled so the
+    callee's ``apply_thresholds`` gate can be exercised.
+    """
+
+    def __init__(self, results_by_col: dict[str, list[dict]], voyage: bool = True):
+        self._results = results_by_col
+        self._voyage_client = "fake-voyage" if voyage else None
+
+    def search(self, query, collection_names, n_results=10, where=None):
+        return self._results.get(collection_names[0], [])
+
+
+class TestThresholdOverride:
+    """``threshold_override`` replaces the per-collection config threshold
+    uniformly across collections. Entry point for the RDR-087 Phase 1
+    workaround for silent threshold-drop on dense-prose collections.
+    """
+
+    def test_none_preserves_config_threshold(self):
+        """Override=None falls back to per-collection config (code=0.45)."""
+        t3 = _ThresholdFakeT3({
+            "code__nexus": [
+                {"id": "a", "content": "keep", "distance": 0.30},
+                {"id": "b", "content": "drop", "distance": 0.50},
+            ],
+        })
+        results = search_cross_corpus(
+            "test", ["code__nexus"], 10, t3, threshold_override=None,
+        )
+        assert {r.id for r in results} == {"a"}
+
+    def test_strict_override_filters_more(self):
+        """Override=0.35 filters results that the 0.45 config would keep."""
+        t3 = _ThresholdFakeT3({
+            "code__nexus": [
+                {"id": "a", "content": "keep", "distance": 0.30},
+                {"id": "b", "content": "edge", "distance": 0.40},
+            ],
+        })
+        results = search_cross_corpus(
+            "test", ["code__nexus"], 10, t3, threshold_override=0.35,
+        )
+        assert {r.id for r in results} == {"a"}
+
+    def test_permissive_override_keeps_more(self):
+        """Override=1.0 keeps results the 0.65 knowledge threshold would drop."""
+        t3 = _ThresholdFakeT3({
+            "knowledge__papers": [
+                {"id": "a", "content": "below", "distance": 0.60},
+                {"id": "b", "content": "above", "distance": 0.80},
+            ],
+        })
+        results = search_cross_corpus(
+            "test", ["knowledge__papers"], 10, t3, threshold_override=1.0,
+        )
+        assert {r.id for r in results} == {"a", "b"}
+
+    def test_infinity_override_disables_filter(self):
+        """Override=inf keeps everything regardless of distance."""
+        t3 = _ThresholdFakeT3({
+            "knowledge__papers": [
+                {"id": "a", "content": "fine", "distance": 0.30},
+                {"id": "b", "content": "noise", "distance": 0.95},
+                {"id": "c", "content": "garbage", "distance": 1.50},
+            ],
+        })
+        results = search_cross_corpus(
+            "test", ["knowledge__papers"], 10, t3,
+            threshold_override=float("inf"),
+        )
+        assert {r.id for r in results} == {"a", "b", "c"}
+
+    def test_override_applies_without_voyage_client(self):
+        """``threshold_override`` bypasses the Voyage gate — explicit user
+        intent overrides the local-mode skip heuristic."""
+        t3 = _ThresholdFakeT3(
+            {"knowledge__papers": [
+                {"id": "a", "content": "keep", "distance": 0.50},
+                {"id": "b", "content": "drop", "distance": 0.90},
+            ]},
+            voyage=False,
+        )
+        results = search_cross_corpus(
+            "test", ["knowledge__papers"], 10, t3, threshold_override=0.70,
+        )
+        assert {r.id for r in results} == {"a"}
+
+    def test_override_applies_uniformly_across_collections(self):
+        """One override replaces the per-corpus threshold for every collection."""
+        t3 = _ThresholdFakeT3({
+            "code__nexus": [
+                {"id": "c1", "content": "c1", "distance": 0.40},
+                {"id": "c2", "content": "c2", "distance": 0.60},
+            ],
+            "knowledge__papers": [
+                {"id": "k1", "content": "k1", "distance": 0.40},
+                {"id": "k2", "content": "k2", "distance": 0.60},
+            ],
+        })
+        results = search_cross_corpus(
+            "test", ["code__nexus", "knowledge__papers"], 10, t3,
+            threshold_override=0.50,
+        )
+        assert {r.id for r in results} == {"c1", "k1"}
+
+
