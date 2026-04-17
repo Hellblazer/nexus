@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.5.2] - 2026-04-17
+
+### Fixed
+
+- **nexus-51j** — `{{rdr:<id>.<field>}}` token resolution now works for projects using the uppercase `RDR-NNN-*.md` filename convention (common practice — makes RDR files visually distinct from other `docs/` content). The shipped `RdrResolver` (RDR-082) used `Path.glob("rdr-{key}-*.md")` which is case-sensitive on Linux/macOS filesystems and silently missed uppercase files. `_fetch` now iterates `*.md` files and matches case-insensitively via `re.IGNORECASE`. Zero-padding handling preserved; mixed-case cohabitation works (same directory with both `rdr-072-*.md` and `RDR-073-*.md` resolves both). Five regression tests in `tests/test_rdr_082_doc_tokens.py::TestRdrResolver` pin the behaviour. Observed on ART (70+ uppercase RDR files) during 2026-04-16 token pilot.
+
 ## [4.5.1] - 2026-04-17
 
 ### Fixed
