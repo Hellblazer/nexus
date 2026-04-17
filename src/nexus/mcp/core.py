@@ -1277,13 +1277,13 @@ def collection_verify(name: str) -> str:
 
 
 @mcp.tool()
-async def operator_extract(inputs: str, fields: str, timeout: float = 120.0) -> dict:
+async def operator_extract(inputs: str, fields: str, timeout: float = 300.0) -> dict:
     """Extract structured fields from each input item using claude -p.
 
     Args:
         inputs: Items to extract from (plain text or JSON array string).
         fields: Comma-separated field names to extract.
-        timeout: Seconds before the subprocess is killed.
+        timeout: Seconds before the subprocess is killed. Default 300s (5 min) — the claude -p substrate handles multi-step analytical workloads; 120s was hitting false timeouts on real input.
     """
     from nexus.operators.dispatch import claude_dispatch
 
@@ -1305,13 +1305,13 @@ async def operator_extract(inputs: str, fields: str, timeout: float = 120.0) -> 
 
 
 @mcp.tool()
-async def operator_rank(items: str, criterion: str, timeout: float = 120.0) -> dict:
+async def operator_rank(items: str, criterion: str, timeout: float = 300.0) -> dict:
     """Rank items by a criterion using claude -p.
 
     Args:
         items: Items to rank (plain text or JSON array string).
         criterion: Natural-language ranking criterion.
-        timeout: Seconds before the subprocess is killed.
+        timeout: Seconds before the subprocess is killed. Default 300s (5 min) — the claude -p substrate handles multi-step analytical workloads; 120s was hitting false timeouts on real input.
     """
     from nexus.operators.dispatch import claude_dispatch
 
@@ -1331,13 +1331,13 @@ async def operator_rank(items: str, criterion: str, timeout: float = 120.0) -> d
 
 
 @mcp.tool()
-async def operator_compare(items: str, focus: str = "", timeout: float = 120.0) -> dict:
+async def operator_compare(items: str, focus: str = "", timeout: float = 300.0) -> dict:
     """Compare items and return a structured comparison using claude -p.
 
     Args:
         items: Items to compare (plain text or JSON array string).
         focus: Optional aspect to focus the comparison on.
-        timeout: Seconds before the subprocess is killed.
+        timeout: Seconds before the subprocess is killed. Default 300s (5 min) — the claude -p substrate handles multi-step analytical workloads; 120s was hitting false timeouts on real input.
     """
     from nexus.operators.dispatch import claude_dispatch
 
@@ -1360,14 +1360,14 @@ async def operator_compare(items: str, focus: str = "", timeout: float = 120.0) 
 async def operator_summarize(
     content: str,
     cited: bool = False,
-    timeout: float = 120.0,
+    timeout: float = 300.0,
 ) -> dict:
     """Summarize content using claude -p, optionally with citations.
 
     Args:
         content: Text to summarize.
         cited: If True, include a citations list in the output.
-        timeout: Seconds before the subprocess is killed.
+        timeout: Seconds before the subprocess is killed. Default 300s (5 min) — the claude -p substrate handles multi-step analytical workloads; 120s was hitting false timeouts on real input.
     """
     from nexus.operators.dispatch import claude_dispatch
 
@@ -1389,7 +1389,7 @@ async def operator_generate(
     template: str,
     context: str,
     cited: bool = False,
-    timeout: float = 120.0,
+    timeout: float = 300.0,
 ) -> dict:
     """Generate output from a template and context using claude -p.
 
@@ -1397,7 +1397,7 @@ async def operator_generate(
         template: Named template or description of desired output form.
         context: Source material or context to generate from.
         cited: If True, include a citations list in the output.
-        timeout: Seconds before the subprocess is killed.
+        timeout: Seconds before the subprocess is killed. Default 300s (5 min) — the claude -p substrate handles multi-step analytical workloads; 120s was hitting false timeouts on real input.
     """
     from nexus.operators.dispatch import claude_dispatch
 
@@ -1767,7 +1767,12 @@ async def _nx_answer_plan_miss(
         f"{{\"tool\": \"<bare name>\", \"args\": {{...}}}}."
     )
 
-    payload = await claude_dispatch(prompt, _PLANNER_SCHEMA, timeout=120.0)
+    # Inline planner timeout: 300s — decomposing a question into a
+    # plan is heavier than a single operator call (multi-step reasoning,
+    # tool-choice enumeration). 120s was hitting the timeout on
+    # non-trivial questions. Callers of nx_answer see the miss path
+    # as a hang when this trips.
+    payload = await claude_dispatch(prompt, _PLANNER_SCHEMA, timeout=300.0)
     steps = payload.get("steps", []) if isinstance(payload, dict) else []
     if not steps:
         raise ValueError("planner returned empty plan")
@@ -2106,7 +2111,7 @@ async def nx_answer(
 async def nx_tidy(
     topic: str,
     collection: str = "knowledge",
-    timeout: float = 120.0,
+    timeout: float = 600.0,
 ) -> str:
     """Consolidate knowledge entries on *topic* via claude -p. RDR-080 P3.
 
@@ -2117,7 +2122,10 @@ async def nx_tidy(
     Args:
         topic: The knowledge topic to consolidate (e.g. "chromadb quotas").
         collection: T3 collection to search (default: knowledge).
-        timeout: Subprocess timeout in seconds.
+        timeout: Subprocess timeout in seconds. Default 600s (10 min) —
+            consolidation on a large corpus does multi-step search +
+            cross-reference; 120s was hitting the timeout routinely on
+            real workloads. Caller can override lower for small topics.
 
     Returns:
         Consolidated summary as a human-readable string.
@@ -2156,7 +2164,7 @@ async def nx_tidy(
 async def nx_enrich_beads(
     bead_description: str,
     context: str = "",
-    timeout: float = 120.0,
+    timeout: float = 300.0,
 ) -> str:
     """Enrich a bead with execution context via claude -p. RDR-080 P3.
 
@@ -2168,7 +2176,11 @@ async def nx_enrich_beads(
     Args:
         bead_description: The bead's title and description to enrich.
         context: Optional additional context (e.g. audit findings).
-        timeout: Subprocess timeout in seconds.
+        timeout: Subprocess timeout in seconds. Default 300s (5 min) —
+            codebase exploration with file:line verification is
+            multi-step; 120s was a frequent false-timeout on beads
+            with broad scope. Caller can override lower for simple
+            single-file beads.
 
     Returns:
         Enriched bead markdown as a human-readable string.
@@ -2207,7 +2219,7 @@ async def nx_enrich_beads(
 async def nx_plan_audit(
     plan_json: str,
     context: str = "",
-    timeout: float = 120.0,
+    timeout: float = 600.0,
 ) -> str:
     """Audit a plan for correctness and codebase alignment via claude -p. RDR-080 P3.
 
@@ -2218,7 +2230,12 @@ async def nx_plan_audit(
     Args:
         plan_json: The plan to audit (JSON string or free-text description).
         context: Optional additional context (e.g. RDR reference).
-        timeout: Subprocess timeout in seconds.
+        timeout: Subprocess timeout in seconds. Default 600s (10 min) —
+            a real plan audit verifies file:line pointers, cross-
+            references research findings, walks dependency graphs;
+            120s was hitting the timeout on RDR-086's real plan
+            (11 beads, 5 phases). Caller can override lower for
+            small spot-checks.
 
     Returns:
         Audit verdict as a human-readable string.

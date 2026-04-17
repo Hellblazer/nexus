@@ -41,7 +41,7 @@ class OperatorOutputError(OperatorError):
 async def claude_dispatch(
     prompt: str,
     json_schema: dict[str, Any],
-    timeout: float = 60.0,
+    timeout: float = 300.0,
 ) -> dict[str, Any]:
     """Dispatch a single operator call to claude -p, fully async.
 
@@ -49,7 +49,14 @@ async def claude_dispatch(
         prompt: The full prompt text, delivered via stdin.
         json_schema: JSON Schema the model output must conform to.
             Passed via --output-format json and --json-schema flag.
-        timeout: Seconds before the subprocess is killed.
+        timeout: Seconds before the subprocess is killed. Default 300s
+            (5 min) — the analytical workloads these tools run
+            (audit, enrich, summarise, extract) can legitimately
+            take minutes. Callers that know their input is short
+            should override lower; callers running heavy audits
+            override up (``nx_plan_audit`` / ``nx_tidy`` use 600s).
+            The prior 60s default produced a lot of false timeouts
+            on real workloads.
 
     Returns:
         Parsed JSON dict from stdout.
