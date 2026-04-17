@@ -2,16 +2,18 @@
 """Known-shape names exercising the three name-resolution surfaces.
 
 RDR-087 Phase 3.1 (nexus-yi4b.3.1). Foundation for Probe 3a of
-``nx doctor --check=search``: a curated list of name shapes whose
+``nx doctor --check-search``: a curated list of name shapes whose
 resolution was either a historical bug (nexus-51j, nexus-7ay,
 nexus-rc45) or an edge case worth pinning (long names, dot-bearing
 bead-id shapes). Probe 3a walks this list, dispatches each entry to
-its ``expected_surface``, and fails loud when a routing result
-regresses.
+its ``expected_surface``, and flags any dispatch that raises an
+unexpected exception as a regression.
 
-The fixture itself is pure data — no live calls — so it's safe to
-import in any test context without Voyage / ChromaDB / filesystem.
-Surface bindings live in the probe, not here.
+Lives under ``src/nexus/`` rather than ``tests/fixtures/`` because
+``nexus.doctor_search`` imports it at runtime — probe 3a ships as
+a production CLI surface, not a test fixture. Pure data — no live
+calls — so it's safe to import in any context without Voyage /
+ChromaDB / filesystem. Surface bindings live in the probe, not here.
 
 Surface literals:
 
