@@ -41,6 +41,33 @@ mcp = FastMCP("nexus")
 
 _DEFAULT_PAGE_SIZE = 10
 
+# Minimum effective timeout for claude -p subagent tools. Planning and
+# enrichment agents have been observed passing 180s / 300s overrides
+# that re-trigger the class of false-positive timeouts v4.5.3 raised
+# the defaults to prevent (see bead nexus-7sbf). The floor clamps
+# caller-supplied values upward so agents can raise but not lower
+# the effective budget.
+_SUBAGENT_TIMEOUT_FLOOR = 300.0
+
+
+def _clamp_subagent_timeout(requested: float, tool_name: str) -> float:
+    """Clamp a caller-supplied subagent timeout to the floor.
+
+    Emits a structured warning when a caller's requested timeout is
+    below the floor so the override is visible in logs without
+    blocking the call.
+    """
+    if requested < _SUBAGENT_TIMEOUT_FLOOR:
+        import structlog
+        structlog.get_logger().warning(
+            "subagent_timeout_clamped",
+            tool=tool_name,
+            requested=requested,
+            floor=_SUBAGENT_TIMEOUT_FLOOR,
+        )
+        return _SUBAGENT_TIMEOUT_FLOOR
+    return requested
+
 # ── Post-store hooks (register once at import) ──────────────────────────────
 
 from nexus.mcp_infra import register_post_store_hook, taxonomy_assign_hook
@@ -2179,13 +2206,17 @@ async def nx_enrich_beads(
         timeout: Subprocess timeout in seconds. Default 300s (5 min) —
             codebase exploration with file:line verification is
             multi-step; 120s was a frequent false-timeout on beads
-            with broad scope. Caller can override lower for simple
-            single-file beads.
+            with broad scope. Requests below the 300s floor are
+            clamped upward (see nexus-7sbf) to prevent agent
+            overrides from re-introducing false-positive timeouts;
+            a structlog warning is emitted when clamping occurs.
 
     Returns:
         Enriched bead markdown as a human-readable string.
     """
     from nexus.operators.dispatch import claude_dispatch
+
+    timeout = _clamp_subagent_timeout(timeout, "nx_enrich_beads")
 
     schema = {
         "type": "object",
@@ -2234,13 +2265,18 @@ async def nx_plan_audit(
             a real plan audit verifies file:line pointers, cross-
             references research findings, walks dependency graphs;
             120s was hitting the timeout on RDR-086's real plan
-            (11 beads, 5 phases). Caller can override lower for
-            small spot-checks.
+            (11 beads, 5 phases). Requests below the 300s floor are
+            clamped upward (see nexus-7sbf) to prevent planning
+            agents from re-introducing false-positive timeouts via
+            low overrides; a structlog warning is emitted when
+            clamping occurs.
 
     Returns:
         Audit verdict as a human-readable string.
     """
     from nexus.operators.dispatch import claude_dispatch
+
+    timeout = _clamp_subagent_timeout(timeout, "nx_plan_audit")
 
     schema = {
         "type": "object",

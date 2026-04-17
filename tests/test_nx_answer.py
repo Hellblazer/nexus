@@ -933,3 +933,105 @@ class TestNxAnswerLatencyProxy:
             f"nx_answer with mocked I/O took {elapsed:.2f}s — "
             "possible blocking call reintroduced"
         )
+
+
+# ── Subagent timeout floor (nexus-7sbf) ──────────────────────────────────────
+
+
+class TestSubagentTimeoutFloor:
+    """Agents (e.g. strategic-planner) occasionally pass explicit low
+    timeouts to ``nx_plan_audit`` / ``nx_enrich_beads`` (seen: 180s,
+    300s), bypassing the v4.5.3 raised defaults and producing
+    false-positive timeouts on multi-phase plans. The tool body
+    clamps the requested timeout to a floor so agent overrides can
+    only raise, not lower, the effective timeout.
+    """
+
+    SUBAGENT_TIMEOUT_FLOOR = 300.0
+
+    @pytest.mark.asyncio
+    async def test_plan_audit_clamps_below_floor(self, monkeypatch):
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import nx_plan_audit
+
+        captured = {}
+
+        async def fake(prompt, schema, timeout=60.0):
+            captured["timeout"] = timeout
+            return {"verdict": "pass", "findings": [], "summary": "ok"}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        await nx_plan_audit(plan_json='{"steps": []}', timeout=60.0)
+        assert captured["timeout"] == self.SUBAGENT_TIMEOUT_FLOOR, (
+            f"nx_plan_audit with timeout=60 must clamp to "
+            f"{self.SUBAGENT_TIMEOUT_FLOOR}; got {captured['timeout']}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_plan_audit_honours_above_floor(self, monkeypatch):
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import nx_plan_audit
+
+        captured = {}
+
+        async def fake(prompt, schema, timeout=60.0):
+            captured["timeout"] = timeout
+            return {"verdict": "pass", "findings": [], "summary": "ok"}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        await nx_plan_audit(plan_json='{"steps": []}', timeout=900.0)
+        assert captured["timeout"] == 900.0, (
+            "timeouts above the floor must be honoured verbatim"
+        )
+
+    @pytest.mark.asyncio
+    async def test_enrich_beads_clamps_below_floor(self, monkeypatch):
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import nx_enrich_beads
+
+        captured = {}
+
+        async def fake(prompt, schema, timeout=60.0):
+            captured["timeout"] = timeout
+            return {"enriched_description": "ok"}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        await nx_enrich_beads(bead_description="task", timeout=120.0)
+        assert captured["timeout"] == self.SUBAGENT_TIMEOUT_FLOOR, (
+            f"nx_enrich_beads with timeout=120 must clamp to "
+            f"{self.SUBAGENT_TIMEOUT_FLOOR}; got {captured['timeout']}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_enrich_beads_honours_above_floor(self, monkeypatch):
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import nx_enrich_beads
+
+        captured = {}
+
+        async def fake(prompt, schema, timeout=60.0):
+            captured["timeout"] = timeout
+            return {"enriched_description": "ok"}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        await nx_enrich_beads(bead_description="task", timeout=450.0)
+        assert captured["timeout"] == 450.0
+
+    @pytest.mark.asyncio
+    async def test_plan_audit_logs_warning_on_clamp(self, monkeypatch, capsys):
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import nx_plan_audit
+
+        async def fake(prompt, schema, timeout=60.0):
+            return {"verdict": "pass", "findings": [], "summary": "ok"}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        await nx_plan_audit(plan_json='{"steps": []}', timeout=180.0)
+        out = capsys.readouterr()
+        emitted = out.out + out.err
+        assert "subagent_timeout_clamped" in emitted, (
+            "expected a structured warning when caller timeout is below floor"
+        )
+        assert "tool=nx_plan_audit" in emitted
+        assert "requested=180" in emitted
+        assert "floor=300" in emitted
