@@ -1,13 +1,14 @@
 ---
 title: "RDR-086: Chash Span Surface — Authoring, Resolution, and Verification"
 id: RDR-086
-status: draft
+status: accepted
 type: Feature
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-16
 revised: 2026-04-17
+accepted_date: 2026-04-17
 related_issues: []
 related: [RDR-053, RDR-075, RDR-078, RDR-082, RDR-083]
 ---

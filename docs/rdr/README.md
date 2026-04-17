@@ -107,7 +107,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-083](rdr-083-chunk-grounded-citations.md) | Corpus-Evidence Tokens — `chash:` Spans, Grounding Validator, `nx-anchor` | Feature | Draft | 2026-04-15 |
 | [RDR-084](rdr-084-plan-library-growth.md) | Plan Library Growth — Auto-Save Successful Ad-Hoc Plans | Feature | Draft | 2026-04-16 |
 | [RDR-085](rdr-085-glossary-aware-labeler.md) | Glossary-Aware Topic Labeler — Project Vocabulary via `claude_dispatch` | Feature | Draft | 2026-04-16 |
-| [RDR-086](rdr-086-chash-span-resolution.md) | Chash Span Surface — Authoring, Resolution, and Verification | Feature | Draft | 2026-04-16 |
+| [RDR-086](rdr-086-chash-span-resolution.md) | Chash Span Surface — Authoring, Resolution, and Verification | Feature | Accepted | 2026-04-16 |
 
 ---
 
