@@ -88,6 +88,23 @@ identified the mismatch. Per-collection calibrated thresholds are the
 correct long-term answer; a distance-distribution reporter is the
 immediate unblocker.
 
+#### Gap 5: Silent name-resolution failures (same class, three incidents)
+
+Three bugs filed in a single week's ART work — nexus-51j (RDR-resolver
+case-sensitive glob), nexus-7ay (validate-refs proximity false
+positives), nexus-rc45 (multi-hyphen corpus-name parsing) — are the
+same bug shape: name/path/identifier resolution failing silently on
+non-default input, returning "no results" or "no match" with no
+indication that the name failed to route. Distance-distribution
+probes would not have caught any of them; they never reach the
+embedding layer. The observability surfaces must include a
+name-resolution canary: a fixture of known collection names
+(multi-hyphen, mixed-case, hash-suffixed) that `nx doctor` verifies
+route correctly through every relevant surface (corpus resolver,
+RDR-file glob, validate-refs proximity). An observability layer that
+measures query quality but ignores identifier routing is
+incomplete.
+
 ## Context
 
 ### Background
@@ -124,22 +141,36 @@ RDR-070 (taxonomy), RDR-075 (cross-collection projection), RDR-077
 
 ### Critical Assumptions
 
-- [ ] **A-1 — The projection substrate is actually populated across
-  the ART corpus and other user corpora.** If `source_collection IS
-  NULL` for the majority of rows, the merge-candidate surface has
-  nothing to aggregate. **Status**: Unverified — **Method**:
-  `SELECT COUNT(*), COUNT(source_collection) FROM topic_assignments`
-  on a user's live DB; target >50% non-null.
-- [ ] **A-2 — Distance-distribution histograms for per-collection
-  calibration are cheaply computable** without running thousands of
-  sampled queries. **Status**: Unverified — **Method**: sample
-  N=100 queries from `nx` usage history (or synthetic) against a
-  candidate collection, record top-K raw distances, measure wall-time.
-- [ ] **A-3 — Query telemetry can be persisted without measurable
-  overhead on the search hot path.** **Status**: Unverified —
-  **Method**: prototype a `search_telemetry` T2 table with a
-  fire-and-forget insert, measure `nx search` wall-clock before/after
-  on a 10-query smoke suite; target <5% regression.
+- [x] **A-1 — The projection substrate is actually populated across
+  the ART corpus and other user corpora.** **Status**: **VERIFIED**
+  2026-04-17 (T2: `087-research-1`). 433,321 total `topic_assignments`
+  rows; 205,975 (47.5%) have `source_collection`; 118 distinct source
+  collections. Slightly under the 50% target, clearable with one
+  backfill pass before Phase 4. Hub-domination is empirically real
+  (topic 2024 "Database and Programming Research" spans 23 collections
+  / 1166 chunks; topic 1494 spans 14 collections / 1131 chunks).
+- [x] **A-2 — Distance-distribution histograms for per-collection
+  calibration are cheaply computable.** **Status**: **VERIFIED**
+  2026-04-17 (T2: `087-research-2`). ~400ms per query on ChromaDB
+  Cloud; N=25 sample completes in ~10s, N=100 in ~40s. Sub-
+  interactive-command budget. Secondary finding: software-engineering
+  queries against scholarly-PDF collections return distances 1.6–1.8
+  (effectively orthogonal) — the threshold mismatch is even worse
+  than initially measured for the `docs__art-grossberg-papers` case.
+- [x] **A-3 — Query telemetry can be persisted without measurable
+  overhead on the search hot path.** **Status**: **VERIFIED**
+  2026-04-17 (T2: `087-research-3`). 0.08ms median insert, 0.14ms
+  p95 on WAL-mode SQLite; 0.02% overhead vs the ~400ms ChromaDB
+  round-trip. Two orders of magnitude inside the <5% target.
+  Synchronous insert is safe; no batching needed for v1.
+- [x] **A-4 — Name-canary fixture routes through existing APIs.**
+  **Status**: **VERIFIED** 2026-04-17 (T2: `087-research-4`).
+  Canaries 1 (multi-hyphen corpus) and 3 (prefix broadcast) routed
+  correctly through `resolve_corpus`; canary 2 (uppercase RDR)
+  feasibility confirmed via `RdrResolver` API reachability. Fixture
+  is a lightweight `tests/fixtures/name_canaries.py` module, no new
+  primitives. `nexus-rc45` confirmed as the exemplar of needing
+  both probes: routing is fine, threshold-filter is the actual bug.
 
 ### Investigation items
 
@@ -179,13 +210,27 @@ distance 0.81). Use --threshold 0.85 to surface.` Substrate: already
 tracked in the `dropped` counter at `search_engine.py:230-249`. The
 addition is stderr emission + opt-out via `--quiet`.
 
-**3. `nx doctor --check=search`.** Probe every registered collection
-with a canned minimal query ("example test probe"); report collections
-returning raw==0 (genuinely empty or corrupt), collections returning
-raw>0 with all dropped (threshold mismatch), collections where the
-registered `embedding_model` metadata mismatches the resolver's
-expected model. Substrate: `search_cross_corpus` called in a loop;
-existing model lookup at `corpus.voyage_model_for_collection`.
+**3. `nx doctor --check=search`.** Two probes, not one.
+
+*Probe 3a — name-resolution canary.* A fixture of known-shape
+collection names (multi-hyphen, mixed-case, hash-suffixed,
+dot-bearing, long-name) is run through every name-routing surface:
+`corpus.resolve_corpus`, `doc.resolvers.RdrResolver`, catalog
+`resolve_span`. Each surface returns `(matched, unmatched)`;
+unmatched canaries with valid shape are routing bugs. This is the
+probe that would have caught nexus-51j, nexus-7ay, and nexus-rc45
+as a class, not individual one-off filings.
+
+*Probe 3b — retrieval quality.* Every registered collection is
+queried with a canned minimal query ("example test probe"); report
+collections returning raw==0 (genuinely empty or corrupt),
+collections returning raw>0 with all dropped (threshold mismatch),
+collections where the registered `embedding_model` metadata mismatches
+the resolver's expected model.
+
+Substrate: `search_cross_corpus` + `corpus.voyage_model_for_collection`
+for 3b; a new `tests/fixtures/name_canaries.py` + existing resolver
+entry points for 3a.
 
 **4. `nx collection health`.** Per-collection composite report.
 Columns: `name`, `chunk_count`, `last_indexed`, `zero_hit_rate_30d`,
@@ -248,6 +293,26 @@ actual overhead.
 - Distance-threshold values themselves. This RDR makes the mismatch
   visible and overridable; calibrated-per-collection thresholds are
   a follow-up once `search_telemetry` has 30 days of real data.
+- Chunk-level migration between collections. The ART session
+  hand-rolled two direct-ChromaDB scripts (`copy_papers.py`,
+  `move_fixtures.py`) to move chunks between collections without
+  re-embedding. This is a (c) curation primitive — merge-candidates
+  surfaces the pairs that would benefit, but the migration command
+  itself is deferred to a follow-up RDR paired with naming-scheme
+  work. Mentioned here so the merge-candidates output is
+  action-connected rather than purely informational.
+- First-class bridge links between overlapping collections. The
+  link-graph primitive already supports typed edges; the merge-
+  candidates surface should emit an explicit `--create-link` option
+  for human/agent confirmation, but the workflow for
+  *automatically*-proposed bridges is deferred.
+- Role tags at collection level (primary-source / working /
+  archive). The ART instance substituted prose tiers in
+  `primary-sources.md` for this. First-class role attribute is (c)
+  substrate work; this RDR does not introduce it.
+- Path-form normalization before ingestion. The ART ingestion
+  hand-rolled absolute vs relative dedup. Deduplication at ingest
+  is indexing-layer concern, not observability.
 - Automatic collection merge or rename. Merge-candidate *detection*
   only — the action remains manual until the workflow is known.
 - Agent-facing MCP surfaces. Defer until the CLI surfaces prove
@@ -278,6 +343,37 @@ The decision to defer MCP integration is load-bearing: if the
 CLI surfaces turn out to be wrong-shaped for curation, exposing them
 to agents just multiplies the wrongness. One round of human use
 informs shape before agent consumers land.
+
+### Priority framing: effort vs risk
+
+ART-instance feedback (2026-04-17) ranked the same four symptom
+classes by two different criteria:
+
+| # | Symptom                          | Effort consumed | Risk to correctness |
+|---|----------------------------------|----------------:|--------------------:|
+| 1 | Signal-vs-noise inside coll.     | highest         | second              |
+| 2 | Duplicate / mixed collections    | second          | fourth              |
+| 3 | Silent zero-results (rc45)       | third           | **highest**         |
+| 4 | Prefix model / role ambiguity    | lowest          | third               |
+
+This RDR's surfaces address these asymmetrically by design:
+
+- `search_telemetry` + silent-zero stderr + `--threshold` override →
+  symptom #3 (highest-risk: false "no results" corrupts downstream
+  research passes; a deep-research-synthesizer returned "No CogEM
+  material in paper corpus" on 19,417 real chunks).
+- `nx collection audit` + `hub_domination_score` →
+  symptom #1 (most-effort: ART spent a full day rebuilding the
+  `code__ART-8c2e74c0` taxonomy and registering a 40-term glossary
+  via RDR-085 because "Float Literal Syntax" 868 and "Unit Test
+  Assertions" 3× dominated the domain terms).
+- `nx collection merge-candidates` →
+  symptom #2 (second-most-effort, second-highest structural cost:
+  ART hand-migrated chunks between three overlapping collections
+  with `/tmp/copy_papers.py` and `/tmp/move_fixtures.py` because
+  no detection surface existed).
+- Symptom #4 is deferred to RDR-088; this RDR's output is the
+  evidence base the naming-substrate decision needs.
 
 ## Alternatives Considered
 
@@ -389,8 +485,16 @@ human-driven. Agents can't click. CLI + MCP is the right shape.
 - RDR-070 — Taxonomy with calibrated topic assignments
 - RDR-075 — Cross-collection projection
 - RDR-077 — Projection-threshold tuning
+- RDR-085 — Glossary-aware labeler (shipped substrate that makes
+  `hub_domination_score` meaningful — without glossary-driven labels,
+  hub detection would fire on legitimate domain terms)
 - nexus-rc45 — triggering incident (silent threshold-drop on
   scholarly PDF collection)
+- nexus-51j — case-sensitive RDR glob (same name-resolution class,
+  informs Gap 5 + Probe 3a)
+- nexus-7ay — validate-refs proximity false-positives (same class)
+- nexus-1uf — closed epic with latent authoring-workflow gaps;
+  subset informs deferred (c) scope
 
 ## Revision History
 
@@ -399,3 +503,11 @@ human-driven. Agents can't click. CLI + MCP is the right shape.
   user-facing surfaces compose it. Scope: surfaces only; naming and
   threshold-calibration changes deferred until this RDR's telemetry
   is in place.
+- 2026-04-17 (rev 2) — ART-instance feedback integrated. Added Gap 5
+  (silent name-resolution class — three incidents this week).
+  Expanded Probe 3 into 3a (name-resolution canary) + 3b (retrieval
+  quality). Priority-framing section added with effort-vs-risk
+  asymmetry; surfaces mapped to specific ART session pain points.
+  Explicit non-scope additions: chunk-level migration (deferred to
+  follow-up RDR paired with naming work), bridge-link workflow,
+  role tags, path-form normalization at ingest.
