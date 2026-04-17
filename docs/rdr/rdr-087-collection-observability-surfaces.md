@@ -166,11 +166,17 @@ RDR-070 (taxonomy), RDR-075 (cross-collection projection), RDR-077
 - [x] **A-4 — Name-canary fixture routes through existing APIs.**
   **Status**: **VERIFIED** 2026-04-17 (T2: `087-research-4`).
   Canaries 1 (multi-hyphen corpus) and 3 (prefix broadcast) routed
-  correctly through `resolve_corpus`; canary 2 (uppercase RDR)
-  feasibility confirmed via `RdrResolver` API reachability. Fixture
-  is a lightweight `tests/fixtures/name_canaries.py` module, no new
-  primitives. `nexus-rc45` confirmed as the exemplar of needing
-  both probes: routing is fine, threshold-filter is the actual bug.
+  correctly through `resolve_corpus`. Canary 2 (uppercase RDR)
+  initial probe tripped a `TypeError` because the quick feasibility
+  invocation passed `resolver.resolve('73', None)` — the second
+  argument is a token-context object, not `None`. The canary fixture
+  will call `RdrResolver(rdr_dir).lookup('73')` (or the equivalent
+  post-RDR-082 accessor); the TypeError was test-harness API misuse,
+  not a routing irregularity. The lightweight
+  `tests/fixtures/name_canaries.py` module reaches existing routing
+  surfaces without new primitives. `nexus-rc45` confirmed as the
+  exemplar of needing both probes: routing is fine, threshold-filter
+  is the actual bug.
 
 ### Investigation items
 
@@ -199,16 +205,43 @@ noted.
 
 **1. `nx search --threshold VALUE` override** (and `--no-threshold`
 shortcut for `--threshold 1.0`). Bypasses the per-prefix default.
-Substrate: one kwarg plumbed through `search_cross_corpus`. Zero new
-state. Ships standalone as the immediate user workaround for
+
+*Signature change, not a plumbing change.* `search_cross_corpus`
+today has no threshold parameter — it loads config internally via
+`load_config()` at `src/nexus/search_engine.py:183-188` and calls
+`_threshold_for_collection(col, cfg)` per collection. Surface 1
+adds `threshold_override: float | None = None` to the function
+signature; when non-None it replaces the per-collection result from
+`_threshold_for_collection`. Two callers must thread the parameter
+through: `src/nexus/commands/search_cmd.py` (CLI flag to kwarg) and
+`src/nexus/mcp/core.py` (MCP `search` tool optional kwarg). Zero new
+T2/T3 state. Ships standalone as the immediate user workaround for
 nexus-rc45.
 
 **2. Silent-zero telemetry.** When `search_cross_corpus` returns
-zero post-threshold results but had ≥1 raw candidate, emit one stderr
-line: `note: N candidates dropped by docs threshold 0.65 (top
-distance 0.81). Use --threshold 0.85 to surface.` Substrate: already
-tracked in the `dropped` counter at `search_engine.py:230-249`. The
-addition is stderr emission + opt-out via `--quiet`.
+zero post-threshold results but had ≥1 raw candidate across *any*
+collection in the call, emit **exactly one** stderr line per call
+(not per collection — avoids a 15-line storm on a 15-collection
+prefix broadcast).
+
+Format specification:
+```
+note: <total_dropped> candidates dropped across <N> collections
+(worst: <coll_name> threshold <T> top_distance <D>).
+Use --threshold <T+0.2> to surface.
+```
+
+The "worst offender" is the collection with the highest
+`top_distance` among those where every candidate was dropped. When
+thresholds differ across collections in the call (docs vs knowledge
+in the same `--corpus docs,knowledge`), the line reports the
+worst-offender's threshold, not a blended average.
+
+Substrate: `dropped` counter already tracked per collection at
+`search_engine.py:230-249`. New work: post-loop aggregation of
+`{collection: (raw, dropped, threshold, top_distance)}` tuples
+and stderr emission. Opt-out via `--quiet` (CLI) or
+`telemetry.stderr_silent_zero=false` (`.nexus.yml`).
 
 **3. `nx doctor --check=search`.** Two probes, not one.
 
@@ -280,9 +313,18 @@ TTL'd via a maintenance cron or manual `nx doctor --trim-telemetry`
 (30d retention default). Query hash is sha256 so the table is safe
 to ship across users without leaking query content. Config toggle
 in `.nexus.yml`: `telemetry.search_enabled` (default: `true`,
-disabled logs to local only). Hot-path cost: one fire-and-forget
-`INSERT OR IGNORE` per `search_cross_corpus` call. A-3 measures the
-actual overhead.
+disabled logs to local only). Hot-path cost: one `INSERT OR IGNORE`
+per collection touched per `search_cross_corpus` call (PRIMARY KEY
+is `(ts, query_hash, collection)` — per-collection row, not per-call
+row — so a 15-collection prefix broadcast writes 15 rows). A-3
+measures 0.08ms per insert, so 15 rows ≈ 1.2ms — still sub-1% of
+the ChromaDB round-trip.
+
+Surface 2's stderr line reads `top_distance` of the worst-offender
+row (the collection with the highest `top_distance` among those
+where every candidate was dropped). Consumers of `search_telemetry`
+that want a call-level summary GROUP BY `(ts, query_hash)` and
+aggregate; the schema is per-collection.
 
 ### What this RDR explicitly does NOT change
 
@@ -511,3 +553,15 @@ human-driven. Agents can't click. CLI + MCP is the right shape.
   Explicit non-scope additions: chunk-level migration (deferred to
   follow-up RDR paired with naming work), bridge-link workflow,
   role tags, path-form normalization at ingest.
+- 2026-04-17 (rev 3) — Gate layer-3 critique (substantive-critic)
+  closed three Significant findings in-place before T2 gate record.
+  Surface 1 rewritten to make the `search_cross_corpus` signature
+  change explicit (parameter addition, two caller sites named).
+  Surface 2 rewritten for multi-collection semantics: exactly one
+  stderr line per call, worst-offender format specified, 15-coll
+  storm risk mitigated. Schema section clarified that
+  `search_telemetry` rows are per-collection and stderr consumers
+  aggregate via GROUP BY. A-4 disposition expanded to explain the
+  `TypeError` was test-harness API misuse (`resolver.resolve('73',
+  None)` passed wrong second argument); canary will use the proper
+  `lookup` accessor.
