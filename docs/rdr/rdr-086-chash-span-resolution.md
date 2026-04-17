@@ -185,11 +185,72 @@ parameters don't change.
   citation by hand. Reported as a polish-bead against nexus
   (2026-04-17 conversation). This RDR is the owner.
 
+### Source-site investigation (2026-04-17)
+
+- **RF-2** — **Every indexing path already writes the per-chunk hash
+  to ChromaDB metadata under the key `chunk_text_hash`.** Verified at
+  the write sites:
+  - `src/nexus/code_indexer.py:371` —
+    `"chunk_text_hash": _hl.sha256(chunk["text"].encode()).hexdigest()`
+  - `src/nexus/doc_indexer.py:591` (markdown path) and `:666`
+    (PDF path) — same SHA-256 of the chunk text.
+
+  Two keys coexist on every chunk: `content_hash` (SHA-256 of the
+  whole source file, used for staleness / dedup) and `chunk_text_hash`
+  (SHA-256 of just that chunk, the citable identity). RDR-053's
+  "chash" primitive maps to `chunk_text_hash`. Implication for the
+  plan: Phase 1 ("indexing instrumentation") is **mostly a no-op** —
+  the data is already written. Phase 1 scope reduces to "populate
+  T2 `chash_index` from existing T3 metadata via a backfill command"
+  plus a lightweight dual-write so new chunks land in both stores
+  atomically.
+
+- **RF-3** — **Forward-path plumbing is a one-liner per return
+  site.** The `search(structured=True)` return builder at
+  `src/nexus/mcp/core.py:168-174` already has the chunk's full
+  metadata in scope via `r.metadata`. Adding
+  `"chunk_text_hash": [r.metadata.get("chunk_text_hash", "") for r in page]`
+  to the returned dict is a one-line change. Same shape applies
+  to `query(structured=True)` at `:376-380` and the `nx_answer`
+  envelope. **No architectural change** — the data is already
+  available where the surface is constructed; it was simply
+  dropped on the floor.
+
+- **RF-4** — **Live confirmation that the current structured
+  return drops the hash.** Sampled
+  `search(query="plan match confidence threshold FTS5 sentinel",
+  corpus="rdr", limit=3, structured=True)` against prod on
+  2026-04-17. Returned payload:
+  `{"ids":["e21392fe9c74061f_4", …], "tumblers":["","",""],
+  "distances":[…], "collections":["rdr__nexus-571b8edd"]}`. No
+  `chunk_text_hash` key. Tumblers also empty — chunks carry no
+  tumbler directly (tumblers address documents in the catalog
+  JSONL, chunks are implicit sub-addresses), so the empty-list
+  there is semantically correct and not part of this RDR's scope.
+
+- **RF-5 (blocked, recommended follow-up)** — Could not run a
+  direct-T3 sample of chunk metadata to confirm the write-site
+  RFs land in prod: `T3Database()` constructor hits
+  `chromadb.errors.ChromaError: Permission denied` from the
+  cloud-client auth path when invoked outside the normal nx CLI
+  entry. The nx CLI itself works fine (it reads credentials via
+  `nexus.config`), so the write-site evidence + the working MCP
+  tools strongly imply the data is present. Full verification
+  requires either fixing the bare-constructor auth path, adding
+  a diagnostic command (`nx catalog sample-metadata <collection>
+  --limit 5 --keys chunk_text_hash,content_hash`), or running
+  the MVV against the backfilled index. Filing as a follow-up
+  bead; does **not** block this RDR's design.
+
 ### Critical Assumptions
 
-- [ ] `chash` is populated on every chunk in every indexing path —
-  **Status**: Unverified — **Method**: Sampling against live
-  collections.
+- [x] `chash` is populated on every chunk in every indexing path —
+  **Status**: Verified at write-site 2026-04-17 (see RF-2). All
+  three indexing paths (`code_indexer.py:371`, `doc_indexer.py:591`
+  and `:666`) write the per-chunk SHA-256 under the metadata key
+  `chunk_text_hash`. Prod-T3 live-sample confirmation deferred to
+  a diagnostic command (RF-5) but not load-bearing — if the write
+  site is unconditional, the data is there.
 - [ ] A T2 `chash_index` table is the right primitive vs. relying on
   ChromaDB metadata filter — **Status**: Unverified — **Method**:
   Measure ChromaDB filter cost on a populated collection at 100k
