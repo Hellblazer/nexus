@@ -16,22 +16,44 @@ related: [RDR-053, RDR-075, RDR-078, RDR-082, RDR-083]
 
 RDR-083 shipped the `chash:` citation grammar, the scanner, and the
 `AnchorResolver` that plugs into RDR-082's Resolver registry. It did
-not ship the machinery that makes those citations *verifiable*. The
-2026-04-17 ART-instance feedback then surfaced a deeper problem: it
-also didn't ship the machinery to *author* them. An author or agent
-that wants to cite a specific chunk has no CLI or MCP path to obtain
-the chash — they have to drop to the raw ChromaDB API, run
-`collection.get(include=["metadatas"])`, and copy the `chash` value by
-hand. Every `search`, `query`, and `nx_answer` structured return omits
-the chunk hash. That makes the whole `chash:` citation primitive
-dead-on-arrival for typical Tier-3 grounding workflows.
+not ship the machinery that makes those citations *usable at speed* —
+and the 2026-04-17 ART-instance feedback surfaced a deeper problem:
+it also didn't surface the machinery authors need. An author or
+agent that wants to cite a specific chunk has no CLI or MCP path to
+obtain the chash — they have to drop to the raw ChromaDB API and
+copy the hash by hand.
 
-This RDR owns the chash primitive surface end-to-end — authoring
-and verification are mirror workflows over the same T2 index. The
-original draft (2026-04-16) covered only the reverse direction
-(resolve hash → chunk). This revision widens scope to the forward
-direction (surface chunk hashes through normal retrieval) and the
-convenience CLI that composes them.
+**The primitive is partly built already.** Gate layer-3 discovered
+that significant chunks of infrastructure this RDR would otherwise
+reinvent already exist:
+
+- **Per-collection chash lookup** — `catalog.resolve_span(span,
+  physical_collection, t3)` at `src/nexus/catalog/catalog.py:575`
+  takes a `chash:<hex>` span and returns `{chunk_text, metadata,
+  chunk_hash}`. Missing: a collection-agnostic (global) variant.
+- **Backfill command** — `_backfill_chunk_text_hash()` at
+  `src/nexus/commands/collection.py:307` populates missing
+  `chunk_text_hash` on existing chunks; wired to `nx collection
+  backfill-hash`. No T2 reinvention needed for existing chunks.
+- **Write-site coverage** — the indexing pipelines already write
+  `chunk_text_hash` on every chunk at **six** sites (see RF-2).
+  There is no instrumentation gap.
+
+What is genuinely missing, and what this RDR actually owns:
+
+1. **A collection-agnostic `resolve_chash(chash)`** that doesn't
+   require the caller to know which physical collection holds the
+   chunk.
+2. **A T2 speedup layer** so the global lookup doesn't pay the
+   13-min-serial ChromaDB-filter tax measured in RF-6.
+3. **`chunk_text_hash` on structured returns** of `search`, `query`,
+   and `nx_answer` — the forward path that closes the authoring
+   loop (ART feedback, RF-1).
+4. **`nx doc cite`** — one-shot CLI that composes (3) into a
+   ready-to-paste markdown citation.
+
+Reframed: this RDR is **extend + speed + surface + compose**, not
+build-from-scratch.
 
 Four concrete holes to close:
 
@@ -153,16 +175,21 @@ parameters don't change.
 
 ## Research Findings
 
-### Investigation (to be completed during drafting)
+### Investigation (all resolved as of 2026-04-17)
 
-- **Verify** — does every indexing path (`code_indexer.py`,
-  `doc_indexer.py`, `pdf_chunker.py`) actually write `chash` to
-  ChromaDB metadata? Sampling: query an existing `rdr__` and
-  `knowledge__` collection via `collection.get(limit=5, include=["metadatas"])`
-  and confirm the `chash` key is present.
-- **Verify** — what fraction of chunks in a typical corpus have a
-  `chash` value vs. missing? If gappy, indexing backfill is a
-  prerequisite.
+- **Verify** — does every indexing path actually write the hash
+  to ChromaDB metadata? **Resolved (RF-2)**: six write sites —
+  `code_indexer.py:371`, `doc_indexer.py:591` + `:666`,
+  `prose_indexer.py:96` + `:141`, `pipeline_stages.py:163`.
+  `pdf_chunker.py` produces chunks but does NOT write the hash —
+  the write happens downstream in `doc_indexer.py` or
+  `pipeline_stages.py`.
+- **Verify** — what fraction of chunks in a typical corpus have
+  the hash vs. missing? **Resolved (RF-5)**: live sample of 10
+  chunks per prefix on prod returned `chunk_text_hash` on 10/10
+  for every citable-content prefix (code, docs, rdr, knowledge).
+  `taxonomy__centroids` correctly has none (topic centroids,
+  not indexed chunks).
 - **Design choice** — global lookup cost: SHA-256 is 64 hex chars;
   querying every T3 collection by metadata is O(N_collections) per
   chash. For `check-extensions` across a 20-citation doc with 100
@@ -188,22 +215,28 @@ parameters don't change.
 ### Source-site investigation (2026-04-17)
 
 - **RF-2** — **Every indexing path already writes the per-chunk hash
-  to ChromaDB metadata under the key `chunk_text_hash`.** Verified at
-  the write sites:
-  - `src/nexus/code_indexer.py:371` —
-    `"chunk_text_hash": _hl.sha256(chunk["text"].encode()).hexdigest()`
-  - `src/nexus/doc_indexer.py:591` (markdown path) and `:666`
-    (PDF path) — same SHA-256 of the chunk text.
+  to ChromaDB metadata under the key `chunk_text_hash`.** Verified
+  by `grep chunk_text_hash src/nexus/`:
+  - `src/nexus/code_indexer.py:371` — code path
+  - `src/nexus/doc_indexer.py:591` — markdown batch path
+  - `src/nexus/doc_indexer.py:666` — PDF batch path
+  - `src/nexus/prose_indexer.py:96` — CCE markdown path
+  - `src/nexus/prose_indexer.py:141` — single-chunk CCE path
+  - `src/nexus/pipeline_stages.py:163` — streaming PDF pipeline
+
+  **Six write sites, not three.** The initial draft cited only the
+  first three; `prose_indexer.py` and `pipeline_stages.py` were
+  missed. `pdf_chunker.py` produces the chunks but does **not**
+  write the hash — that happens in `doc_indexer.py` (batch) and
+  `pipeline_stages.py` (streaming), downstream of the chunker.
 
   Two keys coexist on every chunk: `content_hash` (SHA-256 of the
-  whole source file, used for staleness / dedup) and `chunk_text_hash`
-  (SHA-256 of just that chunk, the citable identity). RDR-053's
-  "chash" primitive maps to `chunk_text_hash`. Implication for the
-  plan: Phase 1 ("indexing instrumentation") is **mostly a no-op** —
-  the data is already written. Phase 1 scope reduces to "populate
-  T2 `chash_index` from existing T3 metadata via a backfill command"
-  plus a lightweight dual-write so new chunks land in both stores
-  atomically.
+  whole source file, for staleness / dedup) and `chunk_text_hash`
+  (SHA-256 of the chunk text — the citable identity). RDR-053's
+  "chash" primitive maps to `chunk_text_hash`.
+
+  Implication for the plan: **there is no instrumentation gap.**
+  The dual-write to T2 lands at exactly the six known sites.
 
 - **RF-3** — **Forward-path plumbing is a one-liner per return
   site.** The `search(structured=True)` return builder at
@@ -258,22 +291,24 @@ parameters don't change.
   scope for `chash:` citations. Design assumption fully confirmed
   against prod.
 
-- **RF-6 (2026-04-17)** — Measured the T2-index-vs-ChromaDB-filter
-  cost asymmetry that the Alternatives section asserts. Sampled
-  a single `chunk_text_hash` lookup across 20 representative prod
+- **RF-6 (2026-04-17)** — Order-of-magnitude measurement of the
+  ChromaDB-filter-vs-T2-JOIN asymmetry. Sampled a single
+  `chunk_text_hash` lookup across 20 representative prod
   collections via `col.get(where={"chunk_text_hash": <hex>})`:
-  mean 289ms per collection, 5.78s total for 20 serial calls.
-  Projection for a 20-citation doc scanned across the 136 prod
-  collections: **~786s (~13 minutes) per doc**. An equivalent
-  T2 SQLite JOIN on a `chash_index` table is ~50µs per lookup —
-  4+ orders of magnitude faster and well under the interactive
-  latency budget.
+  mean ~300ms per collection (289ms observed; cold-cache and
+  first-call effects in the noise), 5.78s total for 20 serial
+  calls. Extrapolation for a 20-citation doc scanned across the
+  136 prod collections is on the order of minutes serial, tens
+  of seconds at 10× parallelism — either way an order of
+  magnitude too slow for an interactive author surface. A T2
+  SQLite JOIN on a `chash_index` table is ~50µs per lookup,
+  well under the interactive budget.
 
-  Parallelism (ThreadPoolExecutor at 10× concurrency) would cut
-  ChromaDB path to ~80s, still unusable as an authoring surface.
-  Result: the T2 index is not an optimization — it is a hard
-  requirement for `check-extensions` and `nx doc cite` to be
-  interactive. **Critical Assumption 2 verified.**
+  The numeric projection ("~13 minutes") is order-of-magnitude,
+  not a precise latency — ChromaDB Cloud cold-cache and network
+  variance make the exact figure noisy. The conclusion
+  (a T2 speedup layer is required, not optional) is insensitive
+  to the variance. **Critical Assumption 2 verified.**
 
 - **RF-7 (architecture, 2026-04-17)** — Chash stability across
   reindex events (Critical Assumption 3) is guaranteed by
@@ -302,26 +337,63 @@ parameters don't change.
   `search(structured=True)` / `query(structured=True)` as the
   authoring surfaces. Recommend (a): the kwarg pattern is
   precedented, callers opt in, default behaviour unchanged.
-  Noted for Phase 3 design; not a blocker for gate. If (a) is
-  rejected, Phase 3 narrows to search + query only and `nx doc
-  cite` composes on top of `search(structured=True)`.
+  Open question to resolve before Phase 3 starts: `nx_answer`
+  composes multi-step plans — surface chash from all retrieval
+  steps, only the final step, or only when the final step is
+  itself a retrieval op? The structured envelope shape depends
+  on this call.
+
+- **RF-9 (gate discovery, 2026-04-17)** — **Significant existing
+  infrastructure.** Gate layer-3 surfaced that two pieces of the
+  originally-proposed build are already shipped:
+
+  1. **`Catalog.resolve_span(span, physical_collection, t3)`** at
+     `src/nexus/catalog/catalog.py:575` — takes a `chash:<hex>` span
+     (also supports `chash:<hex>:<start>-<end>` char-range spans)
+     and returns `{chunk_text, metadata, chunk_hash}`. It is
+     collection-scoped: the caller must already know the physical
+     collection. For the reverse-direction primitive this RDR
+     proposed, the collection-scoped half is done; the missing
+     piece is a **global** variant that scans all collections (or
+     hits the T2 speedup index, once built).
+
+  2. **`_backfill_chunk_text_hash(col)`** at
+     `src/nexus/commands/collection.py:307` plus the
+     `nx collection backfill-hash [--all]` CLI subcommand. It
+     reads each chunk's stored text and writes `chunk_text_hash`
+     when missing, skipping already-hashed rows. The T2
+     `chash_index` bootstrap doesn't need a new command — the
+     same iteration can write both destinations.
+
+  3. **Call-site confirmation**: `catalog.py:1287` and `:1425`
+     already invoke `col.get(where={"chunk_text_hash": ...})`
+     for span resolution, so the ChromaDB-side metadata filter
+     is a proven path.
+
+  **Implication**: Phase 1 shrinks from "build backfill command
+  + instrument six indexers" to "add T2 dual-write at the six
+  existing sites + reuse the existing backfill loop to populate
+  T2 for historical chunks." Phase 2 shrinks from "build
+  resolve_chash from scratch" to "extend `resolve_span` with a
+  collection-agnostic variant that defers to the T2 index."
 
 ### Critical Assumptions
 
 - [x] `chash` is populated on every chunk in every indexing path —
-  **Status**: Verified at write-site 2026-04-17 (see RF-2). All
-  three indexing paths (`code_indexer.py:371`, `doc_indexer.py:591`
-  and `:666`) write the per-chunk SHA-256 under the metadata key
-  `chunk_text_hash`. Prod-T3 live-sample confirmation deferred to
-  a diagnostic command (RF-5) but not load-bearing — if the write
-  site is unconditional, the data is there.
+  **Status**: Verified at write-site + live sample 2026-04-17
+  (RF-2, RF-5). **Six** indexing paths all write the per-chunk
+  SHA-256 under the metadata key `chunk_text_hash`: `code_indexer.py:371`,
+  `doc_indexer.py:591` + `:666`, `prose_indexer.py:96` + `:141`,
+  `pipeline_stages.py:163`. Prod-T3 live sample (10 chunks per
+  prefix) confirms 10/10 present on every citable-content prefix.
 - [x] A T2 `chash_index` table is the right primitive vs. relying on
   ChromaDB metadata filter — **Status**: Verified 2026-04-17 (RF-6).
-  Measured: ChromaDB filter 289ms/call × 136 collections × 20
-  citations = ~13min per doc serial, ~80s at 10× parallelism.
-  T2 JOIN ~50µs per lookup. 4+ orders of magnitude gap. T2 index
-  is a hard requirement for interactive author latency, not an
-  optimisation.
+  Order-of-magnitude measurement: ChromaDB metadata filter
+  ~300ms/call; extrapolation to a 20-citation doc across the 136
+  prod collections is on the order of minutes serial, tens of
+  seconds even at 10× parallelism. T2 SQLite JOIN is ~50µs per
+  lookup. The speedup layer is required for interactive author
+  latency, not an optimisation.
 - [x] Chash values are stable across the re-indexing events observed
   in the nexus + ART corpora over the last 30 days — **Status**:
   Verified by architecture 2026-04-17 (RF-7). `chunk_text_hash` is
@@ -337,8 +409,9 @@ parameters don't change.
 Four cooperating surfaces — one primitive, two retrieval surface
 changes, one convenience command:
 
-1. **T2 `chash_index` table**, populated at indexing time by each
-   pipeline (`code_indexer`, `doc_indexer`, `pdf_chunker`).
+1. **T2 `chash_index` table**, populated at the six existing
+   indexing write sites (code, docs batch, PDF batch, CCE
+   markdown, CCE single-chunk, streaming PDF — see RF-2).
    Schema: `(chash TEXT PRIMARY KEY, physical_collection TEXT,
    doc_id TEXT, created_at TEXT)`.
 
@@ -378,14 +451,17 @@ indexing-path instrumentation.)
 
 | Proposed Component | Existing Module | Decision |
 |---|---|---|
-| Chash → chunk lookup | `src/nexus/catalog/catalog.py:resolve_span` | **Extend** — add a collection-agnostic `resolve_chash` method that delegates to a T2 index |
-| T2 migration | `src/nexus/db/migrations.py` | **Add** — new migration for `chash_index` table |
-| Indexing instrumentation | `src/nexus/code_indexer.py`, `src/nexus/doc_indexer.py`, `src/nexus/pdf_chunker.py` | **Extend** — write to `chash_index` on each chunk upsert |
-| Backfill command | `src/nexus/commands/catalog.py` | **Extend** — `nx catalog rebuild-chash-index` walks existing T3 collections and populates T2 |
-| `search(structured=True)` payload | `src/nexus/mcp/core.py` search tool | **Extend** — add `chunk_text_hash` (list aligned with `ids`) to the returned dict |
-| `query(structured=True)` payload | `src/nexus/mcp/core.py` query tool | **Extend** — surface the representative-chunk hash on each document result |
-| `nx_answer` envelope | `src/nexus/mcp/core.py:nx_answer` | **Extend** — when a plan's final step is a retrieval op, include the top chunks' hashes in the envelope so the caller can cite without re-querying |
-| `nx doc cite` command | `src/nexus/commands/doc.py` (RDR-082 group) | **Add** — new subcommand composing `search(limit=1, structured=True)` + markdown link emission |
+| Per-collection chash→chunk lookup | `src/nexus/catalog/catalog.py:575` `resolve_span(span, physical_collection, t3)` | **Reuse** — already handles `chash:<hex>` and `chash:<hex>:<start>-<end>` spans |
+| Global chash→chunk lookup | none | **Add** — `Catalog.resolve_chash(chash: str) -> ChunkRef | None`; consults T2 index; falls back to iterating collections when the T2 index is empty |
+| T2 `chash_index` table + migration | `src/nexus/db/migrations.py` | **Add** — schema `(chash TEXT PRIMARY KEY, physical_collection TEXT, doc_id TEXT, created_at TEXT)`; indexed on `chash` (primary) and `physical_collection` (for collection-delete cleanup) |
+| Indexing dual-write | `code_indexer.py:371`, `doc_indexer.py:591` + `:666`, `prose_indexer.py:96` + `:141`, `pipeline_stages.py:163` | **Extend** — after the existing ChromaDB upsert at each of the six sites, insert-or-replace into the T2 `chash_index`. Best-effort: a T2 failure logs and continues; backfill recovers |
+| Backfill loop | `src/nexus/commands/collection.py:307` `_backfill_chunk_text_hash()` | **Extend** — the same per-chunk iteration that writes `chunk_text_hash` to T3 also writes `(chash, collection, doc_id)` to T2 if missing. One pass, two destinations |
+| Backfill CLI | `nx collection backfill-hash [--all]` | **Reuse** — no new command; the extended loop above backfills T2 whenever a caller runs the existing command |
+| `search(structured=True)` payload | `src/nexus/mcp/core.py:168-174` | **Extend** — add `"chunk_text_hash": [r.metadata.get("chunk_text_hash", "") for r in page]` to the returned dict (metadata already in scope) |
+| `query(structured=True)` payload | `src/nexus/mcp/core.py` `query` tool structured branch | **Extend** — surface the representative-chunk hash per document result |
+| `nx_answer` envelope | `src/nexus/mcp/core.py:nx_answer` | **Extend with opt-in** — new `structured=True` kwarg (precedent: `trace=True`) returns `{final_text, chunks: [{id, chash, …}], …}`; default `structured=False` preserves the current `str` return |
+| `nx doc cite` command | `src/nexus/commands/doc.py` (RDR-082 group) | **Add** — new subcommand composing `search(limit=N, structured=True)` + `--min-similarity` gate + markdown link emission |
+| `nx collection delete` cleanup | `src/nexus/commands/collection.py` delete path (nexus-lub cascade) | **Extend** — add `chash_index WHERE physical_collection = ?` to the cascade so deleted collections don't leave orphan hashes pointing at gone chunks |
 
 ### Decision Rationale
 
@@ -429,11 +505,50 @@ place.
 
 ### Failure Modes
 
-- Empty T2 index (fresh install): `resolve_chash` falls back to
-  ChromaDB metadata filter; first-call latency is higher until
-  backfill runs.
-- Indexing pipeline crashes mid-write: next run's idempotent upsert
-  corrects.
+- **Empty T2 index (fresh install)**: `resolve_chash` detects zero
+  rows for the target chash and falls back to iterating
+  collections with the ChromaDB metadata filter. Slow (tens of
+  seconds worst case) but correct. A one-line `_log.warning` at
+  first fallback tells the operator to run `nx collection
+  backfill-hash --all`.
+
+- **Indexing pipeline crashes mid-batch** (T3 upsert committed, T2
+  write did not): next run's idempotent `INSERT OR REPLACE` into
+  `chash_index` corrects. If the process exits permanently mid-
+  batch, `nx collection backfill-hash` reconciles via the
+  existing loop.
+
+- **T2 write fails while T3 succeeds**: logged at warning level;
+  the chunk is usable via the slow ChromaDB fallback until
+  backfill runs. Not a correctness issue.
+
+- **T3 upsert fails while T2 was already written** (e.g., during
+  a retry cycle where the T2 row was created speculatively):
+  `resolve_chash` returns a `ChunkRef` whose `physical_collection`
+  still exists but `doc_id` does not — the `get_collection.get()`
+  call returns empty. Phase 2's resolver treats this as a miss
+  and deletes the stale T2 row ("self-healing read"). No
+  invariant violated.
+
+- **`nx collection delete` race**: the cascade extension in
+  Phase 1 removes `chash_index` rows for the deleted collection
+  before returning. If another process reads `chash_index`
+  between the Chroma delete and the T2 delete, it gets a stale
+  row; the self-healing read above repairs it on the next
+  request.
+
+- **Backfill on 1M+ chunks**: the existing
+  `_backfill_chunk_text_hash` loop already paginates at
+  `_BACKFILL_BATCH`; adding T2 writes stays within the same
+  batching. No special handling required — the existing loop's
+  per-batch commit is the recovery unit.
+
+- **Chunk text re-chunked under a new boundary (architectural
+  change to chunker)**: RDR-053 forbids this without a migration
+  plan. If one happens anyway, stale T2 rows point at chunks
+  whose `chunk_text_hash` no longer matches. The self-healing
+  read catches each on access; a full `nx collection
+  backfill-hash --all` repopulates.
 
 ## Implementation Plan
 
@@ -459,40 +574,101 @@ place.
    (feed the output through `nx doc check-grounding` with
    `--fail-ungrounded`; expect exit 0).
 
-### Phase 1: Indexing instrumentation
+### Phase 1: T2 `chash_index` + dual-write at the six existing sites
 
-- Add `chash_index` table migration.
-- Extend the three indexers to upsert.
-- Backfill command.
+- Add migration for `chash_index` table
+  (`chash TEXT PRIMARY KEY, physical_collection TEXT, doc_id TEXT,
+  created_at TEXT`).
+- At each of the six write sites listed in RF-2, after the existing
+  ChromaDB upsert, insert-or-replace into `chash_index`. Failure
+  to write T2 is best-effort — log and continue; the backfill
+  loop reconciles.
+- Extend `_backfill_chunk_text_hash()` at `commands/collection.py:307`
+  so the same per-chunk iteration that populates `chunk_text_hash`
+  in T3 also populates the T2 row. No new CLI — reuse
+  `nx collection backfill-hash [--all]`.
+- Extend `nx collection delete` (the nexus-lub cascade) with
+  `DELETE FROM chash_index WHERE physical_collection = ?` so
+  deleting a collection doesn't leave orphan hashes pointing at
+  gone chunks.
 
-### Phase 2: Catalog resolver (reverse direction)
+### Phase 2: Global `resolve_chash` (extends existing `resolve_span`)
 
-- `resolve_chash(chash) -> ChunkRef | None` method.
-- Unit tests with fixture T2 + fixture T3.
+- Add `Catalog.resolve_chash(chash: str) -> ChunkRef | None` —
+  collection-agnostic. Lookup path:
+  1. `SELECT physical_collection, doc_id FROM chash_index WHERE chash = ?`.
+  2. On hit, validate the target collection still exists (guards
+     against orphan rows from race with collection delete).
+  3. Delegate to the existing per-collection `resolve_span` to
+     fetch chunk text + metadata.
+  4. On T2 miss (fresh install, backfill not yet run): iterate
+     collections calling `col.get(where={"chunk_text_hash":
+     chash})` — slow fallback, logs once per process.
+- Unit tests with fixture T2 (rows + deleted collection) + fixture T3.
 
-### Phase 3: Retrieval surface (forward direction)
+### Phase 3: Surface `chunk_text_hash` on structured retrieval returns
 
-- Add `chunk_text_hash` to `search(structured=True)` payload.
-- Add the same to `query(structured=True)` document results.
-- Add the same to the `nx_answer` envelope when the final step is
-  a retrieval op.
-- Unit + integration tests: verify every surfaced hash resolves.
+- **`search(structured=True)`** at `src/nexus/mcp/core.py:168-174` —
+  add `"chunk_text_hash": [r.metadata.get("chunk_text_hash", "")
+  for r in page]` to the returned dict. One-line change; metadata
+  is already in scope.
+- **`query(structured=True)`** — same addition to the document-
+  result builder.
+- **`nx_answer(structured=True)`** (new kwarg, default False) —
+  return `{final_text, chunks: [{id, chash, collection, distance,
+  text}], plan_id, step_count}` instead of the current `str`. The
+  question "which step's chash" resolves as: **all retrieval-op
+  steps contribute their top chunks to a single merged `chunks`
+  list, ordered by final-step relevance**; non-retrieval steps
+  (summarize, generate) contribute nothing to `chunks`.
+- Unit + integration tests: every surfaced hash round-trips
+  through `resolve_chash`.
 
-### Phase 4: RDR-083 consumer wiring
+### Phase 4: RDR-083 consumer wiring (precise spec)
 
-- `check-grounding` gains `--fail-ungrounded`.
-- `check-extensions` replaces the chash-as-doc-id proxy with real
-  resolved catalog doc_id.
-- Remove `[experimental]` marker and WARNING path when the resolver
-  is populated.
-- `nx doc render --expand-citations` ships.
+- **`check-grounding` gains `--fail-ungrounded`** — exit non-zero
+  when any `chash:` span in the input doc fails `resolve_chash`.
+- **`check-extensions` fix** — **the change is in the caller, not
+  in `chunk_grounded_in`**. Current flow (RDR-083 v1) passes the
+  raw chash hex value as `doc_id` to
+  `CatalogTaxonomy.chunk_grounded_in(doc_id, source_collection,
+  threshold)`. The fix: call `Catalog.resolve_chash(chash)` first,
+  extract `ChunkRef.doc_id`, pass the resolved doc_id to
+  `chunk_grounded_in` **unchanged**. The `chunk_grounded_in`
+  method's signature and semantics do NOT change — it still
+  accepts a ChromaDB-scoped `doc_id: str`. This preserves every
+  existing caller.
+- **Remove the `[experimental]` marker and the "all inputs returned
+  no_data" WARNING** on `check-extensions` once the resolver is
+  populated.
+- **`nx doc render --expand-citations`** — new flag that resolves
+  every `chash:` span via `resolve_chash` and emits a footnote
+  block with the chunk text.
 
-### Phase 5: Authoring CLI
+### Phase 5: `nx doc cite` authoring CLI
 
-- `nx doc cite "<claim>" --against <collection> [--limit N] [--json]`.
-- Default output: `[<first 60 chars of chunk>](chash:<hex>)`.
-- `--json`: structured payload with the top-N candidate chunks +
-  hashes so pipeline scripts can pick a specific one.
+- `nx doc cite "<claim>" --against <collection> [--limit N]
+  [--min-similarity F] [--json]`.
+- Flow: `search(query=claim, corpus=collection, limit=N,
+  structured=True)` → reads the new `chunk_text_hash` field →
+  emits markdown.
+- **Default stdout shape**: `[<first 60 chars of matched chunk>](chash:<hex>)`.
+  Exits non-zero when the top result's `distance` exceeds the
+  similarity threshold (`--min-similarity` default 0.30; lower
+  = more strict since we compare raw cosine distance, not
+  similarity).
+- **`--json` schema**: `{"candidates": [{"chash": str, "distance":
+  float, "collection": str, "chunk_excerpt": str (first 200 chars),
+  "markdown_link": str}], "query": str, "threshold_met": bool}`.
+- **Failure modes specified**:
+  - Empty collection → exit 2 with "no indexed content in
+    <collection>".
+  - Top result above threshold → exit 1, print warning to
+    stderr, emit nothing to stdout (lets shell pipelines
+    `nx doc cite "..." --against X > cite.md` fail loud).
+  - Multiple candidates tied within 0.01 distance → `--json`
+    returns all tied candidates; default stdout picks the first
+    and notes `# N candidates tied (see --json)`.
 - Docs + live smoke against `docs__art-grossberg-papers`.
 
 ## References
@@ -520,3 +696,30 @@ place.
   "Chash Span Surface" to reflect that this RDR owns the
   primitive end-to-end (authoring + verification), not just
   reverse resolution.
+- 2026-04-17 — **Gate layer-3 BLOCKED** (3 Critical, 2 Significant,
+  3 Observations). Rewrite applied:
+  - RF-2 corrected: six write sites (not three) —
+    `prose_indexer.py:96` + `:141` and `pipeline_stages.py:163`
+    were missed; `pdf_chunker.py` does not write the hash.
+  - RF-9 added: significant existing infrastructure surfaced —
+    `Catalog.resolve_span` at `catalog.py:575` is a shipped
+    per-collection chash lookup; `_backfill_chunk_text_hash` at
+    `commands/collection.py:307` + `nx collection backfill-hash`
+    is a shipped backfill command.
+  - RF-6 wording downgraded from precise "~13 min" to "order of
+    magnitude" — conclusion (T2 speedup required) unchanged.
+  - Framing reset from "ship the primitive end-to-end" to
+    **extend + speed + surface + compose**. Phase 1 shrinks to
+    dual-write at six sites + backfill-loop extension + delete
+    cleanup. Phase 2 shrinks to "extend `resolve_span` with a
+    global variant."
+  - Phase 4 spec made precise: the `check-extensions` fix is
+    in the caller (resolve chash → extract doc_id → call
+    existing `chunk_grounded_in` with the resolved doc_id).
+    `chunk_grounded_in`'s contract does NOT change.
+  - Failure-modes section expanded with dual-write race,
+    self-healing read, collection-delete cascade, backfill cost.
+  - Phase 5 (`nx doc cite`) gained `--min-similarity`,
+    failure-mode specs, and explicit `--json` schema.
+  - Existing Infrastructure Audit table rebuilt to distinguish
+    **Reuse** / **Extend** / **Add** per component.
