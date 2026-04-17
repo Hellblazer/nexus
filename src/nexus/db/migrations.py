@@ -335,6 +335,44 @@ def migrate_nx_answer_runs(conn: sqlite3.Connection) -> None:
     _log.info("Migrated: created nx_answer_runs table (RDR-080)")
 
 
+def migrate_search_telemetry(conn: sqlite3.Connection) -> None:
+    """Create the ``search_telemetry`` table for RDR-087 Phase 2 persistence.
+
+    Per-call threshold-filter telemetry. One row per (query, collection)
+    pair — Phase 2.2's hot-path INSERT OR IGNORE writes a row for every
+    collection touched by a ``search_cross_corpus`` call. Query text is
+    hashed (sha256) rather than stored raw for privacy. Composite PK
+    ``(ts, query_hash, collection)`` lets the same query re-run in a
+    later second emit a fresh row while duplicate writes within the
+    same ISO-second are deduped.
+
+    Idempotent — no-op if the table already exists.
+    """
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='search_telemetry'"
+    ).fetchone()
+    if row is not None:
+        return
+    conn.executescript("""
+        CREATE TABLE search_telemetry (
+            ts             TEXT    NOT NULL,
+            query_hash     TEXT    NOT NULL,
+            collection     TEXT    NOT NULL,
+            raw_count      INTEGER NOT NULL,
+            dropped_count  INTEGER NOT NULL,
+            top_distance   REAL,
+            threshold      REAL,
+            PRIMARY KEY (ts, query_hash, collection)
+        );
+        CREATE INDEX idx_search_tel_collection
+            ON search_telemetry(collection);
+        CREATE INDEX idx_search_tel_ts
+            ON search_telemetry(ts);
+    """)
+    conn.commit()
+    _log.info("Migrated: created search_telemetry table (RDR-087)")
+
+
 def _add_plan_dimensional_identity(conn: sqlite3.Connection) -> None:
     """Add RDR-078 dimensional identity + currying + metrics columns to plans.
 
@@ -451,6 +489,11 @@ MIGRATIONS: list[Migration] = [
         "4.5.0",
         "Add nx_answer_runs table (RDR-080)",
         migrate_nx_answer_runs,
+    ),
+    Migration(
+        "4.6.0",
+        "Add search_telemetry table (RDR-087)",
+        migrate_search_telemetry,
     ),
 ]
 

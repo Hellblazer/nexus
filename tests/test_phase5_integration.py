@@ -180,5 +180,22 @@ class TestDoctorCheckSchema:
         # Should report issues
         assert "nx upgrade" in result.output.lower() or _WARN_CHAR in result.output
 
+    def test_reports_search_telemetry_table(
+        self, runner: CliRunner, tmp_path: Path,
+    ) -> None:
+        """RDR-087 Phase 2.1: doctor --check-schema knows about search_telemetry."""
+        from nexus.commands.upgrade import _current_version
+        from nexus.db.migrations import apply_pending
+
+        db_path = tmp_path / "memory.db"
+        conn = sqlite3.connect(str(db_path))
+        apply_pending(conn, _current_version())
+        conn.close()
+
+        with patch("nexus.commands._helpers.default_db_path", return_value=db_path):
+            result = runner.invoke(main, ["doctor", "--check-schema"])
+        assert result.exit_code == 0
+        assert "search_telemetry" in result.output
+
 
 _WARN_CHAR = "\u2717"  # ✗

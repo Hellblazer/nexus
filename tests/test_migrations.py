@@ -73,7 +73,7 @@ class TestMigrationDataclass:
         from nexus.db.migrations import MIGRATIONS
 
         assert isinstance(MIGRATIONS, list)
-        assert len(MIGRATIONS) == 10  # 8 pre-existing + RDR-080 nx_answer_runs + RDR-078 dimensional identity
+        assert len(MIGRATIONS) == 11  # + RDR-087 search_telemetry
 
     def test_migrations_ordered_by_version(self) -> None:
         from nexus.db.migrations import MIGRATIONS, _parse_version
@@ -881,3 +881,136 @@ class TestT2DatabaseIntegration:
 
         for db in databases:
             db.close()
+
+
+# ── RDR-087 Phase 2.1: search_telemetry migration ───────────────────────────
+
+
+class TestMigrateSearchTelemetry:
+    """``migrate_search_telemetry`` creates the ``search_telemetry`` table
+    + two indices (collection, ts) on a fresh DB and is a no-op on
+    re-apply. Used by RDR-087 Phase 2 to persist per-call threshold
+    filter telemetry.
+    """
+
+    def test_creates_table_on_fresh_db(self) -> None:
+        from nexus.db.migrations import migrate_search_telemetry
+
+        conn = sqlite3.connect(":memory:")
+        migrate_search_telemetry(conn)
+
+        tables = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "search_telemetry" in tables
+
+    def test_creates_indices(self) -> None:
+        from nexus.db.migrations import migrate_search_telemetry
+
+        conn = sqlite3.connect(":memory:")
+        migrate_search_telemetry(conn)
+
+        indices = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            ).fetchall()
+        }
+        assert "idx_search_tel_collection" in indices
+        assert "idx_search_tel_ts" in indices
+
+    def test_schema_columns_match_spec(self) -> None:
+        """RDR-087 spec (lines 299-308): columns + types must match."""
+        from nexus.db.migrations import migrate_search_telemetry
+
+        conn = sqlite3.connect(":memory:")
+        migrate_search_telemetry(conn)
+
+        cols = {
+            r[1]: r[2]
+            for r in conn.execute(
+                "PRAGMA table_info(search_telemetry)"
+            ).fetchall()
+        }
+        assert cols.keys() == {
+            "ts", "query_hash", "collection",
+            "raw_count", "dropped_count", "top_distance", "threshold",
+        }
+        assert cols["ts"] == "TEXT"
+        assert cols["query_hash"] == "TEXT"
+        assert cols["collection"] == "TEXT"
+        assert cols["raw_count"] == "INTEGER"
+        assert cols["dropped_count"] == "INTEGER"
+        assert cols["top_distance"] == "REAL"
+        assert cols["threshold"] == "REAL"
+
+    def test_primary_key_is_composite(self) -> None:
+        """PRIMARY KEY (ts, query_hash, collection) per RDR-087 line 307."""
+        from nexus.db.migrations import migrate_search_telemetry
+
+        conn = sqlite3.connect(":memory:")
+        migrate_search_telemetry(conn)
+
+        # PRAGMA table_info pk column: 1/2/3 for composite PK members.
+        pk_cols = sorted(
+            (r[5], r[1])  # (pk_position, column_name)
+            for r in conn.execute(
+                "PRAGMA table_info(search_telemetry)"
+            ).fetchall()
+            if r[5] > 0
+        )
+        assert [name for _, name in pk_cols] == ["ts", "query_hash", "collection"]
+
+    def test_idempotent_on_reapply(self) -> None:
+        from nexus.db.migrations import migrate_search_telemetry
+
+        conn = sqlite3.connect(":memory:")
+        migrate_search_telemetry(conn)
+        migrate_search_telemetry(conn)  # must not raise
+
+    def test_in_migrations_list(self) -> None:
+        from nexus.db.migrations import MIGRATIONS
+
+        matches = [
+            (m.introduced, m.name) for m in MIGRATIONS
+            if "search_telemetry" in m.name
+        ]
+        assert matches, (
+            "search_telemetry migration must be registered in MIGRATIONS"
+        )
+        assert matches[0][0] >= "4.6.0", (
+            f"search_telemetry migration must be introduced in 4.6.0+; "
+            f"got {matches[0][0]}"
+        )
+
+    def test_accepts_insert_or_ignore(self) -> None:
+        """Insert via the Phase 2.2 contract shape — duplicate PK must not raise."""
+        from nexus.db.migrations import migrate_search_telemetry
+
+        conn = sqlite3.connect(":memory:")
+        migrate_search_telemetry(conn)
+
+        row = (
+            "2026-04-17T18:00:00Z", "abc123", "knowledge__art",
+            3, 3, 0.80, 0.65,
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO search_telemetry "
+            "(ts, query_hash, collection, raw_count, dropped_count, top_distance, threshold) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            row,
+        )
+        # Same composite PK — second insert must be a no-op, not an error.
+        conn.execute(
+            "INSERT OR IGNORE INTO search_telemetry "
+            "(ts, query_hash, collection, raw_count, dropped_count, top_distance, threshold) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            row,
+        )
+        count = conn.execute(
+            "SELECT COUNT(*) FROM search_telemetry"
+        ).fetchone()[0]
+        assert count == 1
