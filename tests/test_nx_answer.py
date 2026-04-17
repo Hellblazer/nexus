@@ -410,6 +410,28 @@ class TestNxTidy:
         await nx_tidy(topic="test")
         assert dispatch_calls, "claude_dispatch must be called"
 
+    @pytest.mark.asyncio
+    async def test_default_timeout_is_600s(self, monkeypatch):
+        """nx_tidy default timeout is 600s (10 min).
+
+        Consolidation on a large corpus hits the old 120s ceiling
+        routinely. Default raised 2026-04-17; caller can override.
+        """
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import nx_tidy
+
+        captured = {}
+
+        async def fake(prompt, schema, timeout=60.0):
+            captured["timeout"] = timeout
+            return {"summary": "ok", "actions": []}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        await nx_tidy(topic="test")
+        assert captured["timeout"] == 600.0, (
+            f"nx_tidy default timeout must be 600s; got {captured['timeout']}"
+        )
+
 
 # ── nx_enrich_beads ───────────────────────────────────────────────────────────
 
@@ -457,6 +479,29 @@ class TestNxEnrichBeads:
         monkeypatch.setattr(_mod, "claude_dispatch", fake)
         await nx_enrich_beads(bead_description="task", context="extra ctx sentinel")
         assert "extra ctx sentinel" in captured[0]
+
+    @pytest.mark.asyncio
+    async def test_default_timeout_is_300s(self, monkeypatch):
+        """nx_enrich_beads default timeout is 300s (5 min).
+
+        Codebase enrichment with file:line verification is
+        multi-step; 120s was a frequent false-timeout.
+        """
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import nx_enrich_beads
+
+        captured = {}
+
+        async def fake(prompt, schema, timeout=60.0):
+            captured["timeout"] = timeout
+            return {"enriched_description": "ok"}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        await nx_enrich_beads(bead_description="task")
+        assert captured["timeout"] == 300.0, (
+            f"nx_enrich_beads default timeout must be 300s; "
+            f"got {captured['timeout']}"
+        )
 
 
 # ── nx_plan_audit ─────────────────────────────────────────────────────────────
@@ -509,6 +554,125 @@ class TestNxPlanAudit:
         sentinel_plan = '{"steps": [{"tool": "search_sentinel_xyz"}]}'
         await nx_plan_audit(plan_json=sentinel_plan)
         assert "search_sentinel_xyz" in captured[0]
+
+    @pytest.mark.asyncio
+    async def test_default_timeout_is_600s(self, monkeypatch):
+        """nx_plan_audit default timeout is 600s (10 min).
+
+        A real plan audit verifies file:line pointers across the
+        codebase and cross-references research findings; 120s was
+        routinely hitting the timeout on non-trivial plans
+        (observed on RDR-086's 11-bead plan, 2026-04-17).
+        """
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import nx_plan_audit
+
+        captured = {}
+
+        async def fake(prompt, schema, timeout=60.0):
+            captured["timeout"] = timeout
+            return {"verdict": "pass", "findings": [], "summary": "ok"}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        await nx_plan_audit(plan_json='{"steps": []}')
+        assert captured["timeout"] == 600.0, (
+            f"nx_plan_audit default timeout must be 600s; "
+            f"got {captured['timeout']}"
+        )
+
+
+# ── Operator timeout defaults (all raised to 300s 2026-04-17) ────────────────
+
+
+class TestOperatorTimeoutDefaults:
+    """The 5 operator_* MCP tools default to 300s. 120s was too tight
+    on real input (long documents, large item lists, complex criteria).
+    Callers can still override lower when they know the scope is small.
+    """
+
+    @pytest.mark.asyncio
+    async def test_operator_summarize_default_is_300s(self, monkeypatch):
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_summarize
+
+        captured = {}
+
+        async def fake(prompt, schema, timeout=60.0):
+            captured["timeout"] = timeout
+            return {"summary": "ok"}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        await operator_summarize(content="text")
+        assert captured["timeout"] == 300.0
+
+    @pytest.mark.asyncio
+    async def test_operator_extract_default_is_300s(self, monkeypatch):
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_extract
+
+        captured = {}
+
+        async def fake(prompt, schema, timeout=60.0):
+            captured["timeout"] = timeout
+            return {"extractions": []}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        await operator_extract(inputs="x", fields="a,b")
+        assert captured["timeout"] == 300.0
+
+    @pytest.mark.asyncio
+    async def test_operator_rank_default_is_300s(self, monkeypatch):
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_rank
+
+        captured = {}
+
+        async def fake(prompt, schema, timeout=60.0):
+            captured["timeout"] = timeout
+            return {"ranked": []}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        await operator_rank(items="a", criterion="x")
+        assert captured["timeout"] == 300.0
+
+    @pytest.mark.asyncio
+    async def test_operator_compare_default_is_300s(self, monkeypatch):
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_compare
+
+        captured = {}
+
+        async def fake(prompt, schema, timeout=60.0):
+            captured["timeout"] = timeout
+            return {"comparison": "ok"}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        await operator_compare(items="a")
+        assert captured["timeout"] == 300.0
+
+    @pytest.mark.asyncio
+    async def test_operator_generate_default_is_300s(self, monkeypatch):
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_generate
+
+        captured = {}
+
+        async def fake(prompt, schema, timeout=60.0):
+            captured["timeout"] = timeout
+            return {"output": "ok"}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        await operator_generate(template="x", context="y")
+        assert captured["timeout"] == 300.0
+
+    def test_claude_dispatch_default_is_300s(self):
+        """The dispatch substrate default should not regress below 300s —
+        it's the floor every direct caller inherits."""
+        import inspect
+        from nexus.operators.dispatch import claude_dispatch
+
+        sig = inspect.signature(claude_dispatch)
+        assert sig.parameters["timeout"].default == 300.0
 
 
 # ── nx_answer end-to-end orchestration (trunk tests, no API keys) ─────────────
