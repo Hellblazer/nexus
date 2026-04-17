@@ -735,9 +735,13 @@ place.
   1. `SELECT physical_collection, doc_id FROM chash_index WHERE chash = ?`.
   2. **If multiple rows** (compound PK permits this — same chunk
      in multiple collections), pick by precedence: (a) the row
-     matching `prefer_collection` if supplied, (b) the oldest
-     `created_at` (most established registration), (c) first
-     row by collection-name sort (deterministic).
+     matching `prefer_collection` if supplied, (b) the **newest**
+     `created_at` — most recent active registration is the most
+     likely current provenance (e.g., `knowledge__delos_docling`
+     re-indexed with better extraction supersedes
+     `knowledge__delos` even though both carry the same chunk
+     hash; "oldest" would return the stale collection), (c) first
+     row by collection-name sort (deterministic tie-break).
   3. Validate the target collection still exists (guards against
      orphan rows from race with collection delete).
   4. Delegate to the existing per-collection `resolve_span` to
@@ -823,6 +827,17 @@ place.
   - Multiple candidates tied within 0.01 distance → `--json`
     returns all tied candidates; default stdout picks the first
     and notes `# N candidates tied (see --json)`.
+  - **T2 `chash_index` empty / fallback timeout**: before running
+    `search`, `nx doc cite` short-circuits on
+    `SELECT COUNT(*) FROM chash_index` == 0, exiting 2 with an
+    actionable message: `"chash_index not populated — run \`nx
+    collection backfill-hash --all\` (25-70 min on a 278k-chunk
+    corpus). Re-run after backfill completes."` This prevents
+    the 30-second silent-hang-then-empty-result experience on
+    fresh installs. If the index has rows but the specific
+    chash isn't in it, the per-chash fallback still runs within
+    the 30s deadline and the caller gets a valid result or a
+    clean timeout.
 - Docs + live smoke against `docs__art-grossberg-papers`.
 
 ## References
@@ -884,6 +899,20 @@ place.
   writes. No new claims left unverified; all are traced to
   live code references (`commands/collection.py:304`,
   `mcp/core.py:1676`/`:1972`, `pipeline_stages.py:591`).
+- 2026-04-17 (re-gate PASSED, 0 Critical + 2 Significant) —
+  substantive-critic confirmed all 5 prior findings and all 4
+  RF-10 rewrite-gap fixes are closed. Two new Significant issues
+  surfaced by the re-gate and fixed in place:
+  - Phase 2 tie-break for compound-PK multi-match flipped from
+    "oldest `created_at` (most established)" → "newest
+    `created_at` (most recent active)". Oldest risked returning
+    a stale / superseded collection (e.g. `knowledge__delos`
+    after re-index into `knowledge__delos_docling`).
+  - Phase 5 gained an explicit empty-index failure mode: `nx doc
+    cite` short-circuits on `SELECT COUNT(*) FROM chash_index == 0`
+    with an actionable error pointing at `nx collection
+    backfill-hash --all`, rather than hang for the 30-second
+    fallback deadline and then return empty.
 - 2026-04-17 (second research round) — RF-11 probes load-bearing
   claims and prod scale:
   - `resolve_span` actually returns a `dict`, not a `ChunkRef`.
