@@ -69,11 +69,25 @@ def delete_cmd(name: str, yes: bool) -> None:
     """Delete a T3 collection + cascade-purge taxonomy state (irreversible)."""
     if not yes:
         click.confirm(f"Delete collection '{name}'? This cannot be undone.", abort=True)
-    _t3().delete_collection(name)
 
-    # nexus-lub: cascade-purge taxonomy state (topics, assignments,
-    # links, meta) so `nx taxonomy status` / hub detection don't drag
-    # ghost rows across deletions.
+    # nexus-lub: T3 delete may fail with NotFoundError when the caller
+    # is recovering from an orphan-taxonomy state where the collection
+    # was deleted previously but the cascade didn't run (pre-4.5.0). We
+    # still run the cascade in that case so the orphan rows are cleaned.
+    # Any other T3 error aborts before cascade.
+    from chromadb.errors import NotFoundError as _ChromaNotFoundError
+    t3_absent = False
+    try:
+        _t3().delete_collection(name)
+    except _ChromaNotFoundError:
+        t3_absent = True
+        click.echo(
+            f"note: T3 collection '{name}' already absent — running cascade anyway",
+            err=True,
+        )
+
+    # Cascade-purge taxonomy state (topics, assignments, links, meta)
+    # so `nx taxonomy status` / hub detection don't drag ghost rows.
     taxonomy_counts: dict[str, int] | None = None
     try:
         from nexus.commands._helpers import default_db_path
@@ -82,8 +96,9 @@ def delete_cmd(name: str, yes: bool) -> None:
         with T2Database(default_db_path()) as db:
             taxonomy_counts = db.taxonomy.purge_collection(name)
     except Exception as exc:
+        prefix = "absent" if t3_absent else "succeeded"
         click.echo(
-            f"warn: T3 delete succeeded but taxonomy cascade failed: {exc}",
+            f"warn: T3 delete {prefix} but taxonomy cascade failed: {exc}",
             err=True,
         )
 
