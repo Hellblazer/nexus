@@ -452,6 +452,9 @@ faster; measured during MVV.
 - RDR-070 (taxonomy + HDBSCAN)
 - RDR-080 (`claude_dispatch` substrate)
 - RDR-081 (taxonomy config section; superseded-part)
+- `nexus-axu` (closed) — prompt-cache persistence across rewound
+  `claude -p --resume` sessions, measured 2026-04-15. Informed the
+  decision to defer session-reuse optimization (see Follow-up).
 
 ## Follow-up (out of scope)
 
@@ -461,3 +464,13 @@ faster; measured during MVV.
 - **Auto-extracted glossary** from co-token clustering. Speculative.
 - **Cross-collection glossary merging** (when two collections share
   vocabulary). Easy extension of `load_glossary`.
+- **Session-based prompt-cache reuse** across batches. Evaluated
+  2026-04-16: the `nexus-axu` Phase A measurement (47–97k
+  `cache_read` tokens per post-rewind turn on Haiku) confirms the
+  mechanism works for single-caller batched workloads, but the
+  current labeler envelope (13–27s per batch × 4 parallel workers
+  on typical 50-topic runs → ~20-25s wall clock) is already
+  comfortable. Adding per-worker session UUIDs with cumulative-
+  context rotation is real complexity for pennies of savings on
+  today's workload. Reopen if observed runs exceed a minute and
+  the input-token fraction dominates.

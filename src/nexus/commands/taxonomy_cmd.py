@@ -856,18 +856,46 @@ def _claude_available() -> bool:
     return shutil.which("claude") is not None
 
 
-def _generate_labels_batch(
+_LABEL_SCHEMA: dict = {
+    "type": "object",
+    "required": ["labels"],
+    "properties": {
+        "labels": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["idx", "label"],
+                "properties": {
+                    "idx": {"type": "integer", "minimum": 1},
+                    "label": {
+                        "type": "string",
+                        "minLength": 3,
+                        "maxLength": 60,
+                    },
+                },
+            },
+        },
+    },
+}
+
+
+async def _generate_labels_batch(
     items: list[tuple[list[str], list[str]]],
+    glossary_text: str = "",
 ) -> list[str | None]:
-    """Generate labels for a batch of topics in one claude -p call.
+    """Generate labels for a batch of topics via ``claude_dispatch``.
 
-    Each item is (terms, sample_doc_ids). Returns a list of labels
-    (same length as items, None for failures). One subprocess call
-    for the whole batch instead of one per topic.
+    RDR-085: Each item is ``(terms, sample_doc_ids)``. Returns a list of
+    labels — same length as ``items``, ``None`` at indices where the
+    schema-enforced response either omitted an entry or returned one
+    outside the 3–60 char window.
+
+    When *glossary_text* is supplied (via :func:`nexus.glossary.format_for_prompt`),
+    it is prepended to the prompt so the LLM has project vocabulary
+    context before the numbered topic list — eliminates the
+    ``SSMF → "Single Mode Fiber"`` class of training-prior hallucination
+    documented in ``docs/field-reports/2026-04-15-architecture-as-code-from-art.md``.
     """
-    import re
-    import subprocess
-
     if not items:
         return []
 
@@ -878,37 +906,39 @@ def _generate_labels_batch(
             f"{i}. terms=[{', '.join(terms[:5])}] docs=[{', '.join(doc_names)}]"
         )
 
-    prompt = (
-        "Label each topic in 3-5 words. "
-        "Output: numbered labels only, one per line.\n\n"
-        + "\n".join(lines)
+    prompt_parts: list[str] = []
+    if glossary_text:
+        prompt_parts.append(glossary_text)
+    prompt_parts.append(
+        "You are a topic labeler. Label each numbered topic in 3-5 words.\n"
+        'Return {"labels": [{"idx": <1-based>, "label": "<3-60 chars>"}, ...]} — '
+        "one entry per numbered topic, idx matches the number you were given.\n"
     )
+    prompt_parts.append("\n".join(lines))
+    prompt = "\n\n".join(prompt_parts)
 
     results: list[str | None] = [None] * len(items)
     try:
-        proc = subprocess.run(
-            ["claude", "-p", "--model", "haiku",
-             "--system-prompt", "You are a topic labeler. Output only numbered labels.",
-             "--no-session-persistence"],
-            input=prompt,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        if proc.returncode != 0:
-            return results
+        from nexus.operators.dispatch import claude_dispatch
 
-        for line in proc.stdout.strip().splitlines():
-            line = line.strip()
-            m = re.match(r"^(\d+)\.\s*(.+)$", line)
-            if m:
-                idx = int(m.group(1)) - 1
-                label = m.group(2).strip().strip('"').strip("'")
-                if 0 <= idx < len(items) and 3 <= len(label) <= 60:
-                    results[idx] = label
+        payload = await claude_dispatch(prompt, _LABEL_SCHEMA, timeout=120.0)
     except Exception:
-        pass
+        return results
 
+    labels = payload.get("labels") if isinstance(payload, dict) else None
+    if not isinstance(labels, list):
+        return results
+
+    for entry in labels:
+        if not isinstance(entry, dict):
+            continue
+        idx = entry.get("idx")
+        label = entry.get("label", "")
+        if not isinstance(idx, int) or not isinstance(label, str):
+            continue
+        slot = idx - 1
+        if 0 <= slot < len(items) and 3 <= len(label) <= 60:
+            results[slot] = label.strip().strip('"').strip("'")
     return results
 
 
@@ -919,13 +949,21 @@ def relabel_topics(
     only_pending: bool = True,
     batch_size: int = 20,
     workers: int = 4,
+    project_root: Path | None = None,
 ) -> int:
-    """Relabel topics using batched claude -p calls with parallel workers.
+    """Relabel topics using batched ``claude_dispatch`` calls.
 
-    Sends batches of ``batch_size`` topics per claude -p call (amortizes
-    startup + system prompt overhead). Runs ``workers`` batches concurrently.
-    Returns number of topics relabeled.
+    RDR-085 migrates the labeler off its bespoke subprocess shell-out
+    onto the shipped ``claude_dispatch`` substrate. Glossary resolution
+    runs once per command invocation and is reused across every batch —
+    subsequent ThreadPoolExecutor workers each call ``asyncio.run()`` to
+    drive the async dispatcher in isolation.
+
+    Args:
+        project_root: Repo root for glossary resolution. Defaults to
+            ``Path.cwd()`` when unset.
     """
+    import asyncio
     import json
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -949,6 +987,17 @@ def relabel_topics(
     if not work:
         return 0
 
+    # Resolve glossary once per command invocation (RDR-085).
+    glossary_text = ""
+    try:
+        from nexus.glossary import format_for_prompt, load_glossary
+
+        root = project_root or Path.cwd()
+        glossary = load_glossary(root, collection=collection or None)
+        glossary_text = format_for_prompt(glossary) if glossary else ""
+    except Exception:
+        _log.debug("glossary_load_failed", exc_info=True)
+
     # Split into batches
     batches: list[list[tuple[int, str, list[str], list[str]]]] = []
     for i in range(0, len(work), batch_size):
@@ -961,7 +1010,8 @@ def relabel_topics(
 
     def _label_batch(batch: list) -> list[tuple[int, str | None]]:
         items = [(w[2], w[3]) for w in batch]  # (terms, doc_ids)
-        labels = _generate_labels_batch(items)
+        # Each worker thread has no event loop; asyncio.run() is safe.
+        labels = asyncio.run(_generate_labels_batch(items, glossary_text=glossary_text))
         return [(w[0], lbl) for w, lbl in zip(batch, labels)]
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
