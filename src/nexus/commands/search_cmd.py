@@ -291,6 +291,7 @@ def search_cmd(
                 taxonomy=_t2.taxonomy,
                 threshold_override=threshold_override,
                 diagnostics_out=diagnostics_out,
+                telemetry=_t2.telemetry,
             )
         if hybrid:
             # Scope ripgrep to matching caches when a single corpus is targeted

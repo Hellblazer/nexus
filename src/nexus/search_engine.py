@@ -208,6 +208,7 @@ def search_cross_corpus(
     topic: str | None = None,
     threshold_override: float | None = None,
     diagnostics_out: list[SearchDiagnostics] | None = None,
+    telemetry: Any | None = None,
 ) -> list[SearchResult]:
     """Query each collection independently, returning combined raw results.
 
@@ -240,6 +241,18 @@ def search_cross_corpus(
     instance summarising per-collection raw/dropped counts and threshold
     context. Used by the CLI to emit the silent-zero stderr note; the
     engine never emits stderr itself.
+
+    *telemetry* (RDR-087 Phase 2.2 / nexus-yi4b.2.2), when provided,
+    receives one ``(ts, query_hash, collection, raw_count, dropped_count,
+    top_distance, threshold)`` row per collection via
+    ``log_search_batch``. Opt-out via ``telemetry.search_enabled = false``
+    in ``.nexus.yml`` — the engine reads the flag and silently skips the
+    write even when *telemetry* is non-``None``. *query_hash* is
+    ``sha256(query)[:64]`` so raw query text is never persisted.
+    *top_distance* is the minimum (best-ranked) distance across ALL raw
+    candidates for that collection (kept or dropped), not just the
+    dropped subset — see ``SearchDiagnostics`` for the dropped-only
+    variant.
     """
     cfg = load_config()
     # Config can override: search.cluster_by in .nexus.yml
@@ -287,6 +300,9 @@ def search_cross_corpus(
     diag_per_collection: dict[str, tuple[int, int, float | None, float | None]] = {}
     total_dropped = 0
     total_raw = 0
+    # Per-collection raw min-distance accumulator for search_telemetry rows.
+    # Distinct from ``min_dropped_distance`` which covers only dropped items.
+    min_raw_per_collection: dict[str, float | None] = {}
     for col in collections:
         mult = _overfetch_multiplier(col)
         per_k = max(5, n_results * mult)
@@ -298,11 +314,16 @@ def search_cross_corpus(
             threshold = _threshold_for_collection(col, cfg)
         raw = t3.search(query, [col], n_results=per_k, where=effective_where)
         dropped = 0
-        # Minimum distance among dropped items — best-of-dropped, used as
-        # the "how much higher would the threshold need to be" signal.
+        # Minimum distance among dropped items — best-of-dropped, used by
+        # SearchDiagnostics.worst_offender() for the "threshold bump" hint.
         min_dropped_distance: float | None = None
+        # Minimum distance across ALL raw candidates — stored in
+        # search_telemetry as ``top_distance`` (best-of-raw).
+        min_raw_distance: float | None = None
         for r in raw:
             distance = r["distance"]
+            if min_raw_distance is None or distance < min_raw_distance:
+                min_raw_distance = distance
             # RDR-055 E2 quality_boost runs after hybrid scoring in the
             # CLI/MCP paths. Thresholds apply to raw distance here.
             if threshold is not None and distance > threshold:
@@ -319,6 +340,7 @@ def search_cross_corpus(
                           if k not in {"id", "content", "distance"}},
             ))
         diag_per_collection[col] = (len(raw), dropped, threshold, min_dropped_distance)
+        min_raw_per_collection[col] = min_raw_distance
         total_raw += len(raw)
         total_dropped += dropped
         if dropped:
@@ -335,6 +357,28 @@ def search_cross_corpus(
             total_dropped=total_dropped,
             total_raw=total_raw,
         ))
+
+    # RDR-087 Phase 2.2: persist per-call threshold-filter telemetry.
+    # Opt-out gate read from the same ``cfg`` used above to avoid a second
+    # config load on the hot path.
+    if telemetry is not None and cfg.get("telemetry", {}).get("search_enabled", True):
+        import hashlib
+        from datetime import UTC, datetime
+
+        ts = datetime.now(UTC).isoformat()
+        query_hash = hashlib.sha256(query.encode()).hexdigest()[:64]
+        rows = [
+            (
+                ts, query_hash, col,
+                raw_count, dropped_count, min_raw_per_collection[col], thr,
+            )
+            for col, (raw_count, dropped_count, thr, _dropped_min)
+            in diag_per_collection.items()
+        ]
+        try:
+            telemetry.log_search_batch(rows)
+        except Exception:
+            _log.debug("search_telemetry_write_failed", exc_info=True)
 
     # Topic post-filter: keep only results in the requested topic
     if topic_doc_ids is not None:
