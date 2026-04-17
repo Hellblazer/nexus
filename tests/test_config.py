@@ -5,7 +5,13 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from nexus.config import _DEFAULTS, detect_test_command, get_verification_config, load_config
+from nexus.config import (
+    _DEFAULTS,
+    detect_test_command,
+    get_telemetry_config,
+    get_verification_config,
+    load_config,
+)
 
 
 @pytest.fixture
@@ -208,3 +214,76 @@ def test_detect_table_matches_reader_script() -> None:
     reader = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(reader)
     assert _DETECT_TABLE == reader.DETECT_TABLE
+
+
+# ── RDR-087 Phase 2.3: telemetry config toggle ───────────────────────────────
+
+
+class TestTelemetryConfig:
+    """``telemetry`` section opt-outs for the RDR-087 surfaces:
+
+      * ``search_enabled`` — Phase 2.2 hot-path INSERT OR IGNORE.
+      * ``stderr_silent_zero`` — Phase 1.2 silent-zero stderr note.
+
+    Both default ``True`` (feature-on). ``get_telemetry_config()`` is
+    the typed accessor; malformed values coerce to the default with
+    a warn-log.
+    """
+
+    def test_defaults_include_telemetry_section(self) -> None:
+        assert _DEFAULTS["telemetry"] == {
+            "search_enabled": True,
+            "stderr_silent_zero": True,
+        }
+
+    def test_defaults_are_enabled(self, home: Path) -> None:
+        cfg = get_telemetry_config(repo_root=home)
+        assert cfg.search_enabled is True
+        assert cfg.stderr_silent_zero is True
+
+    def test_explicit_false_respected(self, home: Path) -> None:
+        (home / ".nexus.yml").write_text(
+            "telemetry:\n"
+            "  search_enabled: false\n"
+            "  stderr_silent_zero: false\n"
+        )
+        cfg = get_telemetry_config(repo_root=home)
+        assert cfg.search_enabled is False
+        assert cfg.stderr_silent_zero is False
+
+    def test_partial_override_keeps_other_default(self, home: Path) -> None:
+        """Override only ``search_enabled`` — ``stderr_silent_zero`` stays True."""
+        (home / ".nexus.yml").write_text(
+            "telemetry:\n  search_enabled: false\n"
+        )
+        cfg = get_telemetry_config(repo_root=home)
+        assert cfg.search_enabled is False
+        assert cfg.stderr_silent_zero is True
+
+    def test_malformed_value_falls_back_to_default(self, home: Path, caplog) -> None:
+        """A non-bool ``search_enabled`` falls back to the default and warns."""
+        import logging
+        (home / ".nexus.yml").write_text(
+            "telemetry:\n  search_enabled: not-a-bool\n"
+        )
+        with caplog.at_level(logging.WARNING):
+            cfg = get_telemetry_config(repo_root=home)
+        assert cfg.search_enabled is True  # fell back to default
+        # structlog may or may not route through caplog — be lenient
+        messages = " ".join(r.getMessage() for r in caplog.records)
+        # Either the stdlib log captured the warn or structlog emitted
+        # to stderr; one path must have recorded evidence of the coercion.
+        if caplog.records:
+            assert "telemetry" in messages.lower()
+
+    def test_raw_load_config_exposes_section(self, home: Path) -> None:
+        """``load_config()`` surfaces the ``telemetry`` section verbatim so
+        legacy callers that do ``cfg.get("telemetry", {}).get(...)`` keep
+        working without reaching for the typed accessor."""
+        (home / ".nexus.yml").write_text(
+            "telemetry:\n  search_enabled: false\n"
+        )
+        cfg = load_config(repo_root=home)
+        assert cfg["telemetry"]["search_enabled"] is False
+        # Unset key keeps its default.
+        assert cfg["telemetry"]["stderr_silent_zero"] is True

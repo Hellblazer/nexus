@@ -128,6 +128,60 @@ def get_pdf_config(repo_root: Path | None = None) -> PDFConfig:
     )
 
 
+@dataclass(frozen=True)
+class TelemetryConfig:
+    """Opt-outs for the RDR-087 search observability surfaces.
+
+    - ``search_enabled``: Phase 2.2 hot-path ``INSERT OR IGNORE`` into
+      ``search_telemetry``. When False, ``search_cross_corpus`` skips
+      the write even when a telemetry store is injected.
+    - ``stderr_silent_zero``: Phase 1.2 silent-zero stderr note. When
+      False, ``nx search`` never emits the "candidates dropped..."
+      diagnostic.
+
+    Both default ``True`` — feature-on. Opt-out is project-scoped via
+    ``.nexus.yml#telemetry``.
+    """
+
+    search_enabled: bool = True
+    stderr_silent_zero: bool = True
+
+
+def _coerce_bool(value: Any, *, key: str, default: bool) -> bool:
+    """Coerce ``value`` to bool, warn + fall back to ``default`` on malformed input."""
+    if isinstance(value, bool):
+        return value
+    _log.warning(
+        "telemetry_config_malformed",
+        key=key,
+        value=value,
+        fell_back_to=default,
+    )
+    return default
+
+
+def get_telemetry_config(repo_root: Path | None = None) -> TelemetryConfig:
+    """Load the ``telemetry`` config section into a typed struct.
+
+    Malformed boolean values coerce to the default with a structured
+    warning so a stray string in ``.nexus.yml`` never silently disables
+    the feature (or silently enables it).
+    """
+    tel = load_config(repo_root=repo_root).get("telemetry", {})
+    return TelemetryConfig(
+        search_enabled=_coerce_bool(
+            tel.get("search_enabled", True),
+            key="telemetry.search_enabled",
+            default=True,
+        ),
+        stderr_silent_zero=_coerce_bool(
+            tel.get("stderr_silent_zero", True),
+            key="telemetry.stderr_silent_zero",
+            default=True,
+        ),
+    )
+
+
 # Backward-compatible accessors — thin wrappers for existing callers.
 def get_pdf_extractor(repo_root: Path | None = None) -> str:
     return get_pdf_config(repo_root).extractor
@@ -328,6 +382,11 @@ _DEFAULTS: dict[str, Any] = {
     },
     "voyageai": {
         "read_timeout_seconds": 120,
+    },
+    # RDR-087: search-observability opt-outs. Default-on.
+    "telemetry": {
+        "search_enabled": True,       # Phase 2.2 hot-path INSERT OR IGNORE.
+        "stderr_silent_zero": True,   # Phase 1.2 silent-zero stderr note.
     },
     "verification": {
         "on_stop": False,

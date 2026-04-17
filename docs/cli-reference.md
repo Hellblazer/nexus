@@ -33,6 +33,21 @@ nx search "authentication middleware" --corpus code --hybrid --n 20
 | `--compact` | One line per result: `path:line:text` (grep-compatible) |
 | `--bat` | Syntax highlight with `bat` (ignored with `--json`/`--vimgrep`/`--files`) |
 | `--no-color` | Disable colored output (also skips `--bat`) |
+| `--threshold DISTANCE` | Override per-collection distance threshold (raw cosine distance, lower = stricter). Applies uniformly across selected collections. (RDR-087) |
+| `--no-threshold` | Disable distance-threshold filtering entirely. Mutually exclusive with `--threshold`. Workaround for silent threshold-drop on dense-prose collections. (RDR-087) |
+| `--quiet` | Suppress the RDR-087 silent-zero stderr note ("candidates dropped across N collections...") when every candidate is filtered by the distance threshold |
+
+### Search telemetry (`.nexus.yml`)
+
+RDR-087 observability surfaces are configurable via the `telemetry` section:
+
+```yaml
+telemetry:
+  search_enabled: true        # Phase 2.2: persist per-call threshold-filter rows to T2 (search_telemetry table)
+  stderr_silent_zero: true    # Phase 1.2: emit stderr note when a query returns zero results due to threshold filtering
+```
+
+Both default `true`. Set either to `false` to opt out project-wide. Query strings are sha256-hashed before persistence — raw queries are never stored.
 
 ---
 
