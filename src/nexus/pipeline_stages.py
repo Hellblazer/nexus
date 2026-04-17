@@ -513,6 +513,7 @@ def pipeline_index_pdf(
     corpus: str = "",
     target_model: str = "voyage-context-3",
     git_meta: dict | None = None,
+    force: bool = False,
 ) -> int:
     """Three-stage streaming pipeline for PDFs.
 
@@ -521,6 +522,15 @@ def pipeline_index_pdf(
     - Tag table-page chunks
     - Correct chunk_count to the final total
     - Prune stale chunks from a previous version
+
+    Args:
+        force: Break the partial-ingest deadlock (nexus-9ji). When True,
+            pre-flight deletes both (a) the pipeline.db rows for this
+            ``content_hash`` across ``pdf_pipeline``/``pdf_pages``/
+            ``pdf_chunks`` and (b) any orphan T3 chunks in *collection*
+            whose ``content_hash`` matches — so neither the pipeline
+            state nor half-written prior chunks can silently skip the
+            re-ingest or race the upsert. No-op when False.
 
     Returns total chunks indexed.
     """
@@ -538,6 +548,22 @@ def pipeline_index_pdf(
     if git_meta is None:
         from nexus.indexer_utils import detect_git_metadata
         git_meta = detect_git_metadata(pdf_path)
+
+    # nexus-9ji: --force must break the partial-ingest deadlock. Both
+    # pipeline.db state and T3 orphan chunks can independently block
+    # re-ingest; wipe both before the pre-flight.
+    if force:
+        db.delete_pipeline_data(content_hash)
+        try:
+            col = t3.get_or_create_collection(collection)
+            col.delete(where={"content_hash": content_hash})
+        except Exception as exc:
+            _log.warning(
+                "force_t3_orphan_cleanup_failed",
+                content_hash=content_hash,
+                collection=collection,
+                error=str(exc),
+            )
 
     # Pre-flight: check if pipeline should run before resolving credentials.
     result = db.create_pipeline(content_hash, str(pdf_path), collection)

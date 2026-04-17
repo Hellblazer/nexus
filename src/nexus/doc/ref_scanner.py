@@ -75,7 +75,7 @@ class Drift:
 
 # ── Scanner ──────────────────────────────────────────────────────────────────
 
-_FENCE_RE = re.compile(r"^\s*(```|~~~)")
+from nexus.doc._common import FENCE_RE as _FENCE_RE
 
 #: Chunk-count claim patterns.  Order matters — longer/more-specific wins.
 #: ``\b`` anchors so we don't match "4k7chunks" or similar tokens.
@@ -111,32 +111,7 @@ def _collection_regex(prefixes: list[str]) -> re.Pattern:
     )
 
 
-def _iter_plain_lines(text: str):
-    """Yield (1-based line number, line) skipping fenced code blocks.
-
-    Both ``` and ~~~ fences are recognised. A matching closing fence on
-    its own line exits the block. Inline backticks are not fences — only
-    full-line fence markers toggle state.
-    """
-    in_fence = False
-    fence_marker: str | None = None
-    for lineno, line in enumerate(text.splitlines(), 1):
-        m = _FENCE_RE.match(line)
-        if m:
-            tok = m.group(1)
-            if in_fence:
-                # Closing fence must match opener marker
-                if fence_marker == tok:
-                    in_fence = False
-                    fence_marker = None
-            else:
-                in_fence = True
-                fence_marker = tok
-            # Fence-delimiter lines never carry references themselves
-            continue
-        if in_fence:
-            continue
-        yield lineno, line
+from nexus.doc._common import iter_plain_lines as _iter_plain_lines
 
 
 def _paragraph_for_line(lines: list[tuple[int, str]], target_lineno: int) -> list[str]:

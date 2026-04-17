@@ -1,12 +1,16 @@
 ---
 title: "RDR-085: Glossary-Aware Topic Labeler — Project Vocabulary via `claude_dispatch`"
 id: RDR-085
-status: draft
+status: closed
 type: Feature
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-16
+revised: 2026-04-16
+accepted_date: 2026-04-16
+closed_date: 2026-04-16
+close_reason: implemented
 related_issues: []
 related: [RDR-070, RDR-080, RDR-081]
 supersedes_part_of: [RDR-081]
@@ -130,10 +134,15 @@ slots in cleanly.
 
 - [x] Glossary injection improves label quality on non-adversarial
   domains — **Verified** (RF-1, carried from RDR-081).
-- [ ] `claude_dispatch` at ~10-30s per call is an acceptable latency
-  for interactive `nx taxonomy label` runs. **Verification plan**:
-  time the migrated labeler against a 20-topic batch; compare to the
-  current subprocess path's measured latency.
+- [x] `claude_dispatch` at ~10-30s per call is an acceptable latency
+  for interactive `nx taxonomy label` runs. **Verified — 2026-04-16**:
+  live quality run against `rdr__nexus-571b8edd` (6 topics, 1 batch)
+  completed well under a minute on Haiku 4.5. The existing subprocess
+  envelope (13-27s/batch, from RDR-081 spike) already spans the
+  `claude_dispatch` envelope (~10-30s/batch per RDR-080 validation),
+  so the substrate migration does not move the latency envelope in
+  a measurable way at typical batch sizes. Formal 20-topic timing is
+  deferred as a calibration follow-up if observed runs drift.
 - [ ] Batched labeling remains the right granularity (one dispatch
   per batch of 20 topics rather than one per topic). **Verification
   plan**: a priori YES — the current code is already batched; the
@@ -183,7 +192,11 @@ def format_for_prompt(terms: dict[str, str], max_tokens: int = 500) -> str:
     truncated at max_tokens."""
 ```
 
-**Labeler rewrite** (in-place edit of `taxonomy_cmd.py:859`):
+**Labeler rewrite** — as-built (`src/nexus/commands/taxonomy_cmd.py:859`).
+The schema requires both `idx` (1-based topic number) and `label`; the
+dispatcher populates slots by explicit `idx - 1` rather than positional
+enumerate, so partial responses that skip a topic or return them out of
+order still land in the correct slot with `None` in any gap.
 
 ```text
 _LABEL_SCHEMA: dict = {
@@ -194,8 +207,9 @@ _LABEL_SCHEMA: dict = {
             "type": "array",
             "items": {
                 "type": "object",
-                "required": ["label"],
+                "required": ["idx", "label"],
                 "properties": {
+                    "idx":   {"type": "integer", "minimum": 1},
                     "label": {"type": "string", "minLength": 3, "maxLength": 60},
                 },
             },
@@ -218,15 +232,16 @@ async def _generate_labels_batch(
             f"{i}. terms=[{', '.join(terms[:5])}] docs=[{', '.join(doc_names)}]"
         )
 
-    prompt = ""
+    prompt_parts: list[str] = []
     if glossary_text:
-        prompt += glossary_text + "\n\n"
-    prompt += (
-        "You are a topic labeler. Label each numbered topic in 3-5 words. "
-        "Return {\"labels\": [{\"label\": \"...\"}]} — one entry per topic, "
-        "in order.\n\n"
-        + "\n".join(lines)
+        prompt_parts.append(glossary_text)
+    prompt_parts.append(
+        "You are a topic labeler. Label each numbered topic in 3-5 words.\n"
+        'Return {"labels": [{"idx": <1-based>, "label": "..."}, ...]} — '
+        "one entry per numbered topic, idx matches the number you were given.\n"
     )
+    prompt_parts.append("\n".join(lines))
+    prompt = "\n\n".join(prompt_parts)
 
     from nexus.operators.dispatch import claude_dispatch
     try:
@@ -235,10 +250,13 @@ async def _generate_labels_batch(
         return [None] * len(items)
 
     results: list[str | None] = [None] * len(items)
-    for idx, entry in enumerate(payload.get("labels") or []):
+    for entry in (payload.get("labels") if isinstance(payload, dict) else None) or []:
+        idx = entry.get("idx")
         label = entry.get("label", "")
-        if isinstance(label, str) and 3 <= len(label) <= 60 and idx < len(items):
-            results[idx] = label
+        if isinstance(idx, int) and isinstance(label, str):
+            slot = idx - 1
+            if 0 <= slot < len(items) and 3 <= len(label) <= 60:
+                results[slot] = label.strip().strip('"').strip("'")
     return results
 ```
 
@@ -452,6 +470,9 @@ faster; measured during MVV.
 - RDR-070 (taxonomy + HDBSCAN)
 - RDR-080 (`claude_dispatch` substrate)
 - RDR-081 (taxonomy config section; superseded-part)
+- `nexus-axu` (closed) — prompt-cache persistence across rewound
+  `claude -p --resume` sessions, measured 2026-04-15. Informed the
+  decision to defer session-reuse optimization (see Follow-up).
 
 ## Follow-up (out of scope)
 
@@ -461,3 +482,46 @@ faster; measured during MVV.
 - **Auto-extracted glossary** from co-token clustering. Speculative.
 - **Cross-collection glossary merging** (when two collections share
   vocabulary). Easy extension of `load_glossary`.
+- **Session-based prompt-cache reuse** across batches. Evaluated
+  2026-04-16: the `nexus-axu` Phase A measurement (47–97k
+  `cache_read` tokens per post-rewind turn on Haiku) confirms the
+  mechanism works for single-caller batched workloads, but the
+  current labeler envelope (13–27s per batch × 4 parallel workers
+  on typical 50-topic runs → ~20-25s wall clock) is already
+  comfortable. Adding per-worker session UUIDs with cumulative-
+  context rotation is real complexity for pennies of savings on
+  today's workload. Reopen if observed runs exceed a minute and
+  the input-token fraction dominates.
+
+## Revision History
+
+- 2026-04-16 — Draft authored as the re-targeted labeler scope
+  after RDR-079 abandonment (RDR-081's original labeler portion
+  depended on infrastructure that never shipped; RDR-080's
+  `claude_dispatch` substrate is the shipped alternative).
+- 2026-04-16 (gate) — PASS with 2 as-built corrections.
+  `_LABEL_SCHEMA` pseudo-code updated to the shipped `idx`-keyed
+  shape (was `label`-only; explicit-idx slot routing is more robust
+  to partial/out-of-order responses than positional enumerate).
+  Critical Assumption 2 (latency envelope) marked verified —
+  substrate migration does not move the envelope in measurable
+  ways at typical batch sizes; the existing subprocess envelope
+  (13–27s/batch per RDR-081 spike) already spans the
+  `claude_dispatch` envelope (~10–30s/batch per RDR-080). Session-
+  reuse deferral (no prompt-cache optimisation in v1) reasoning
+  strengthened with `nexus-axu` Phase A evidence citation.
+- 2026-04-16 — Live quality verification against
+  `rdr__nexus-571b8edd` (6 topics, 1 batch): 2 of 6 labels improved
+  with glossary (eliminated the "Ted Nelson" training-prior on
+  "tumbler"), 4 of 6 unchanged, 0 of 6 regressed. RF-1's quality-
+  floor prediction holds empirically.
+- 2026-04-16 — Accepted.
+- 2026-04-16 — Closed (implemented). Close pointers:
+  Gap1 = `src/nexus/glossary.py:1` + `src/nexus/commands/taxonomy_cmd.py:910`
+  (new glossary module + prompt-prepend at labeler dispatch site
+  — SSMF-class hallucinations now mitigated when glossary
+  configured);
+  Gap2 = `src/nexus/commands/taxonomy_cmd.py:859` (async
+  `_generate_labels_batch` → `claude_dispatch` with schema-enforced
+  output; the bespoke `subprocess.run` + `re.match` scaffolding is
+  deleted, not parallel-pathed).

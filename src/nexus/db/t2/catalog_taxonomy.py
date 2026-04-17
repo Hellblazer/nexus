@@ -862,6 +862,62 @@ class CatalogTaxonomy:
             ).fetchall()
         return {row[0]: row[1] for row in rows}
 
+    # ── RDR-083: corpus-evidence helpers ─────────────────────────────────
+
+    def top_topics_for_collection(
+        self, collection: str, *, top_n: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Return the top-N projected topics for *collection* ordered by
+        ``SUM(similarity) DESC``. Serves ``{{nx-anchor:<collection>|top=N}}``.
+
+        Only projection-assigned rows (``assigned_by='projection'``) are
+        counted — native-collection topics are already visible via the
+        normal topic browser.
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                """
+                SELECT t.label, COUNT(*) AS chunks, SUM(ta.similarity) AS sum_sim
+                FROM topic_assignments ta
+                JOIN topics t ON t.id = ta.topic_id
+                WHERE ta.assigned_by = 'projection'
+                  AND ta.source_collection = ?
+                  AND ta.similarity IS NOT NULL
+                GROUP BY ta.topic_id, t.label
+                ORDER BY sum_sim DESC, chunks DESC
+                LIMIT ?
+                """,
+                (collection, top_n),
+            ).fetchall()
+        return [{"label": r[0], "chunks": r[1], "sum_similarity": r[2]} for r in rows]
+
+    def chunk_grounded_in(
+        self, doc_id: str, source_collection: str, *, threshold: float,
+    ) -> float | None:
+        """Return the max similarity of *doc_id*'s chunks projecting into
+        *source_collection*, or ``None`` when no projection data exists.
+
+        Serves ``check-extensions``: a doc whose top projection similarity
+        falls below the caller's threshold is an author-extension candidate.
+        ``threshold`` is accepted for future use (e.g. prefilter); current
+        impl returns the raw max.
+        """
+        with self._lock:
+            row = self.conn.execute(
+                """
+                SELECT MAX(similarity)
+                FROM topic_assignments
+                WHERE assigned_by = 'projection'
+                  AND doc_id = ?
+                  AND source_collection = ?
+                  AND similarity IS NOT NULL
+                """,
+                (doc_id, source_collection),
+            ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        return float(row[0])
+
     # ── Review workflow (RDR-070, nexus-lbu) ─────────────────────────────
 
     def get_unreviewed_topics(
@@ -2115,6 +2171,79 @@ class CatalogTaxonomy:
             "total_chunks": len(src_ids),
             "total_centroids": len(ctr_metas),
         }
+
+    def purge_collection(self, collection: str) -> dict[str, int]:
+        """Cascade-purge every row tied to *collection* across the four
+        taxonomy tables. Transactional — any failure rolls back all
+        deletes in this call.
+
+        Returns a count dict: ``{"topics", "assignments", "links",
+        "meta"}``. nexus-lub regression: `nx collection delete` was
+        removing the Chroma collection but leaving these four tables
+        orphaned. Call this after the Chroma delete.
+
+        Order of operations matters:
+          1. ``topic_links`` — drop every edge touching a doomed topic
+             (in either direction). Must run before we drop the topics
+             themselves to satisfy the FK reference.
+          2. ``topic_assignments`` — drop every row whose ``topic_id``
+             belongs to the collection OR whose ``source_collection``
+             equals it (projection residue).
+          3. ``topics`` — drop the collection's topic rows.
+          4. ``taxonomy_meta`` — drop the collection's `last_discover_at`
+             bookkeeping row.
+        """
+        out = {"topics": 0, "assignments": 0, "links": 0, "meta": 0}
+        with self._lock:
+            try:
+                doomed_ids = [
+                    r[0] for r in self.conn.execute(
+                        "SELECT id FROM topics WHERE collection = ?",
+                        (collection,),
+                    ).fetchall()
+                ]
+                if doomed_ids:
+                    placeholders = ",".join("?" for _ in doomed_ids)
+                    # 1. links touching any doomed topic
+                    cur = self.conn.execute(
+                        f"DELETE FROM topic_links "
+                        f"WHERE from_topic_id IN ({placeholders}) "
+                        f"   OR to_topic_id IN ({placeholders})",
+                        (*doomed_ids, *doomed_ids),
+                    )
+                    out["links"] = cur.rowcount or 0
+                    # 2a. assignments by topic_id
+                    cur = self.conn.execute(
+                        f"DELETE FROM topic_assignments "
+                        f"WHERE topic_id IN ({placeholders})",
+                        tuple(doomed_ids),
+                    )
+                    out["assignments"] = cur.rowcount or 0
+                # 2b. assignments by source_collection (projection residue
+                #     whose target topic may live in a surviving collection)
+                cur = self.conn.execute(
+                    "DELETE FROM topic_assignments "
+                    "WHERE source_collection = ?",
+                    (collection,),
+                )
+                out["assignments"] += cur.rowcount or 0
+                # 3. topics
+                cur = self.conn.execute(
+                    "DELETE FROM topics WHERE collection = ?",
+                    (collection,),
+                )
+                out["topics"] = cur.rowcount or 0
+                # 4. meta
+                cur = self.conn.execute(
+                    "DELETE FROM taxonomy_meta WHERE collection = ?",
+                    (collection,),
+                )
+                out["meta"] = cur.rowcount or 0
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
+        return out
 
     def purge_assignments_for_doc(self, project: str, title: str) -> int:
         """Remove topic_assignments for a deleted memory entry, empty topics.

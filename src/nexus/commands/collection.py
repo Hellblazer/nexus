@@ -66,11 +66,37 @@ def info_cmd(name: str) -> None:
 @click.argument("name")
 @click.option("--yes", "-y", "--confirm", is_flag=True, help="Skip interactive confirmation prompt")
 def delete_cmd(name: str, yes: bool) -> None:
-    """Delete a T3 collection (irreversible)."""
+    """Delete a T3 collection + cascade-purge taxonomy state (irreversible)."""
     if not yes:
         click.confirm(f"Delete collection '{name}'? This cannot be undone.", abort=True)
     _t3().delete_collection(name)
-    click.echo(f"Deleted: {name}")
+
+    # nexus-lub: cascade-purge taxonomy state (topics, assignments,
+    # links, meta) so `nx taxonomy status` / hub detection don't drag
+    # ghost rows across deletions.
+    taxonomy_counts: dict[str, int] | None = None
+    try:
+        from nexus.commands._helpers import default_db_path
+        from nexus.db.t2 import T2Database
+
+        with T2Database(default_db_path()) as db:
+            taxonomy_counts = db.taxonomy.purge_collection(name)
+    except Exception as exc:
+        click.echo(
+            f"warn: T3 delete succeeded but taxonomy cascade failed: {exc}",
+            err=True,
+        )
+
+    if taxonomy_counts and any(taxonomy_counts.values()):
+        click.echo(
+            f"Deleted: {name} (taxonomy: "
+            f"{taxonomy_counts['topics']} topics, "
+            f"{taxonomy_counts['assignments']} assignments, "
+            f"{taxonomy_counts['links']} links, "
+            f"{taxonomy_counts['meta']} meta)"
+        )
+    else:
+        click.echo(f"Deleted: {name}")
 
 
 @collection.command("reindex")

@@ -6,6 +6,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.5.0] - 2026-04-17
+
+### Added
+
+- **RDR-082 Doc-Build Token Resolution** — new `nx doc render` / `nx doc validate` commands that expand `{{bd:<id>[.field]}}` and `{{rdr:<id>[.field]}}` tokens against authoritative state (bead DB, RDR frontmatter) at build time. Resolver registry is the extension point for future namespaces. Emits `<stem>.rendered.md` sibling; fail-loud on unresolved tokens. Shared `src/nexus/doc/_common.py` fence helpers now used by both 082's tokenizer and RDR-081's `ref_scanner`.
+- **RDR-083 Corpus-Evidence Tokens** — `{{nx-anchor:<collection>[|top=N]}}` token plus `nx doc check-grounding` (citation-coverage report) and `nx doc check-extensions` (projection-based author-extension flagger) subcommands. `AnchorResolver` is the first external consumer of RDR-082's registry — plugs in without parser/engine/CLI changes. v1 ships with a documented scope reduction: hash-to-chunk resolution (`resolve_chash`) deferred; `check-extensions` marked `[experimental]` with loud stderr WARNING when its inertness case fires. Deferrals owned by draft RDR-086.
+- **RDR-084 Plan Library Growth** — successful ad-hoc plans produced by `nx_answer`'s plan-miss path are now auto-persisted via `save_plan(scope="personal", tags="ad-hoc,grown")`. Paraphrased questions match the grown plan through the plan_match gate instead of re-running the inline planner. New config key `plans.ad_hoc_ttl` (default 30d; set 0 to disable). T1 cosine cache receives `upsert(row)` so matches work without SessionStart re-populate.
+- **RDR-085 Glossary-Aware Topic Labeler** — migrates `_generate_labels_batch` off its bespoke subprocess shell-out onto the shipped `claude_dispatch` substrate with schema-enforced output. Project vocabulary from `.nexus.yml#taxonomy.glossary` or `docs/glossary.md` prepended to the labeler prompt eliminates training-prior hallucinations (observed SSMF → "Single Mode Fiber" on ART corpus; live smoke on `rdr__nexus-571b8edd` shows 2/6 topics improved, 0/6 regressed). Supersedes the labeler portion of RDR-081.
+- **RDR-086 Chash Span Resolution** (draft) — owner-RDR for RDR-083's deferred work. Proposes `catalog.resolve_chash(chash)` backed by a T2 `chash_index` table populated at indexing time. Unblocks `check-grounding --fail-ungrounded`, `check-extensions` meaningful candidates, and `nx doc render --expand-citations`.
+
+### Fixed
+
+- **nexus-lub** — `nx collection delete` now cascade-purges taxonomy state (`topics`, `topic_assignments`, `topic_links`, `taxonomy_meta`). Prior behaviour left orphan rows so `nx taxonomy status` and hub detection dragged ghost rows across deletions. New `CatalogTaxonomy.purge_collection(name)` method is transactional; delete command reports cleaned-row counts.
+- **nexus-9ji** — `nx index pdf --force` now breaks the partial-ingest deadlock. `pipeline_index_pdf` gains `force: bool = False`; when True, `db.delete_pipeline_data(content_hash)` wipes stale pipeline.db state AND `col.delete(where={"content_hash": <hash>})` wipes T3 orphan chunks before `create_pipeline` runs. Both cleanups are pre-flight, so the normal "already running" skip still protects concurrent peers.
+
 ## [4.4.1] - 2026-04-16
 
 ### Fixed

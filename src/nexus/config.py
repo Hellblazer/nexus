@@ -295,6 +295,18 @@ _DEFAULTS: dict[str, Any] = {
         # Auto-label topics with Claude haiku after discover.
         # Requires `claude` CLI on PATH. Set False to keep c-TF-IDF labels.
         "auto_label": True,
+        # RDR-085: project vocabulary for glossary-aware labeling.
+        # When set, each term expansion is prepended to the labeler
+        # prompt so Claude resolves project acronyms correctly (e.g.
+        # SSMF → SelfSimilarMaskingField, not "Single Mode Fiber").
+        # Empty dict disables — labeler behaves as pre-RDR-085.
+        "glossary": {},
+    },
+    "plans": {
+        # RDR-084: Auto-save successful ad-hoc plans for this many days.
+        # Set 0 to disable grown-plan persistence entirely (library stays
+        # at the seed-template set).
+        "ad_hoc_ttl": 30,
     },
     "search": {
         "hybrid_default": False,
