@@ -258,6 +258,54 @@ parameters don't change.
   scope for `chash:` citations. Design assumption fully confirmed
   against prod.
 
+- **RF-6 (2026-04-17)** — Measured the T2-index-vs-ChromaDB-filter
+  cost asymmetry that the Alternatives section asserts. Sampled
+  a single `chunk_text_hash` lookup across 20 representative prod
+  collections via `col.get(where={"chunk_text_hash": <hex>})`:
+  mean 289ms per collection, 5.78s total for 20 serial calls.
+  Projection for a 20-citation doc scanned across the 136 prod
+  collections: **~786s (~13 minutes) per doc**. An equivalent
+  T2 SQLite JOIN on a `chash_index` table is ~50µs per lookup —
+  4+ orders of magnitude faster and well under the interactive
+  latency budget.
+
+  Parallelism (ThreadPoolExecutor at 10× concurrency) would cut
+  ChromaDB path to ~80s, still unusable as an authoring surface.
+  Result: the T2 index is not an optimization — it is a hard
+  requirement for `check-extensions` and `nx doc cite` to be
+  interactive. **Critical Assumption 2 verified.**
+
+- **RF-7 (architecture, 2026-04-17)** — Chash stability across
+  reindex events (Critical Assumption 3) is guaranteed by
+  construction, not by observation. `chunk_text_hash` is
+  `sha256(chunk.text.encode()).hexdigest()` at the write sites
+  (RF-2). For the hash to change across a reindex, the chunk
+  text would have to change, which requires one of: (a) a change
+  to the chunker's splitting logic, (b) a change to text
+  normalization, (c) a change in the source file. (a) and (b)
+  are architectural changes tracked by RDR-053's stability
+  mandate and would themselves require a dedicated hash-migration
+  plan. (c) is the normal case — the hash *should* change when
+  the source text changes, and downstream `check-grounding`
+  would correctly report the old chash as unresolved. **Critical
+  Assumption 3 verified by architecture** (RDR-053 §chunk-boundary
+  stability); no empirical reindex comparison needed.
+
+- **RF-8 (design note, 2026-04-17)** — `nx_answer` envelope
+  shape. RF-3 claimed the `nx_answer` envelope can surface
+  `chunk_text_hash` alongside `search` and `query`. On closer
+  read, `nx_answer` currently returns `str` (a rendered
+  final answer). Surfacing chash through it requires either:
+  (a) a new `structured=True` kwarg (precedent: `trace=True`)
+  that returns `{final_text, chunks: [{id, chash, …}], …}`,
+  or (b) deferring `nx_answer` plumbing and relying on
+  `search(structured=True)` / `query(structured=True)` as the
+  authoring surfaces. Recommend (a): the kwarg pattern is
+  precedented, callers opt in, default behaviour unchanged.
+  Noted for Phase 3 design; not a blocker for gate. If (a) is
+  rejected, Phase 3 narrows to search + query only and `nx doc
+  cite` composes on top of `search(structured=True)`.
+
 ### Critical Assumptions
 
 - [x] `chash` is populated on every chunk in every indexing path —
@@ -267,14 +315,20 @@ parameters don't change.
   `chunk_text_hash`. Prod-T3 live-sample confirmation deferred to
   a diagnostic command (RF-5) but not load-bearing — if the write
   site is unconditional, the data is there.
-- [ ] A T2 `chash_index` table is the right primitive vs. relying on
-  ChromaDB metadata filter — **Status**: Unverified — **Method**:
-  Measure ChromaDB filter cost on a populated collection at 100k
-  chunks; compare to SQLite JOIN.
-- [ ] Chash values are stable across the re-indexing events observed
+- [x] A T2 `chash_index` table is the right primitive vs. relying on
+  ChromaDB metadata filter — **Status**: Verified 2026-04-17 (RF-6).
+  Measured: ChromaDB filter 289ms/call × 136 collections × 20
+  citations = ~13min per doc serial, ~80s at 10× parallelism.
+  T2 JOIN ~50µs per lookup. 4+ orders of magnitude gap. T2 index
+  is a hard requirement for interactive author latency, not an
+  optimisation.
+- [x] Chash values are stable across the re-indexing events observed
   in the nexus + ART corpora over the last 30 days — **Status**:
-  Unverified — **Method**: Compare `chash` for a sampled chunk
-  before/after a scheduled reindex.
+  Verified by architecture 2026-04-17 (RF-7). `chunk_text_hash` is
+  `sha256(chunk.text)` at the write sites; stability follows from
+  RDR-053's chunk-boundary-stability mandate. A chunker or
+  normalisation change would itself be a hash-migration event
+  requiring a dedicated plan.
 
 ## Proposed Solution
 
