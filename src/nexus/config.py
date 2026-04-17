@@ -296,6 +296,12 @@ _DEFAULTS: dict[str, Any] = {
         # Requires `claude` CLI on PATH. Set False to keep c-TF-IDF labels.
         "auto_label": True,
     },
+    "plans": {
+        # RDR-084: Auto-save successful ad-hoc plans for this many days.
+        # Set 0 to disable grown-plan persistence entirely (library stays
+        # at the seed-template set).
+        "ad_hoc_ttl": 30,
+    },
     "search": {
         "hybrid_default": False,
         "hnsw_ef": 256,

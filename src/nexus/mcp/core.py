@@ -19,6 +19,7 @@ from nexus.corpus import (
 )
 from nexus.db.t3 import verify_collection_deep
 from nexus.filters import parse_where_str as _parse_where_str
+from nexus.config import load_config
 from nexus.mcp_infra import (
     catalog_auto_link as _catalog_auto_link,
     fire_post_store_hooks as _fire_post_store_hooks,
@@ -1838,6 +1839,30 @@ async def _nx_answer_plan_miss(
     )
 
 
+# ── RDR-084 helpers ───────────────────────────────────────────────────────────
+
+
+def _load_ad_hoc_ttl() -> int:
+    """Return the TTL (days) applied to auto-saved ad-hoc plans.
+
+    Reads ``.nexus.yml#plans.ad_hoc_ttl`` via :func:`nexus.config.load_config`
+    with a 30-day fallback. A config load failure also falls back to 30
+    — the growth feature is best-effort and must never block ``nx_answer``.
+    """
+    try:
+        config = load_config()
+    except Exception:
+        return 30
+    plans_section = config.get("plans") if isinstance(config, dict) else None
+    if not isinstance(plans_section, dict):
+        return 30
+    value = plans_section.get("ad_hoc_ttl", 30)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 30
+
+
 # ── RDR-080 orchestration tools ───────────────────────────────────────────────
 
 
@@ -2020,12 +2045,47 @@ async def nx_answer(
         duration_ms=elapsed_ms,
     )
 
-    # Save ad-hoc plans on success (I-6).
+    # RDR-084: Save successful ad-hoc plans so the plan library compounds
+    # with usage. scope=personal keeps growth isolated to the caller (the
+    # project/global scopes are reached only via /nx:plan-promote). TTL is
+    # config-driven; 30-day default. Best-effort — a save failure never
+    # affects the user's answer, and the T1 cache upsert is a separate
+    # best-effort step inside the same guard.
     if best.plan_id == 0:
-        try:
-            plan_save(query=question, plan_json=best.plan_json, outcome="success", ttl=30)
-        except Exception:
-            pass
+        ttl_days = _load_ad_hoc_ttl()
+        if ttl_days > 0:
+            try:
+                from pathlib import Path as _Path
+
+                project_name = _Path.cwd().name
+                with _t2_ctx() as _save_db:
+                    grown_id = _save_db.plans.save_plan(
+                        query=question,
+                        plan_json=best.plan_json,
+                        outcome="success",
+                        tags="ad-hoc,grown",
+                        project=project_name,
+                        ttl=ttl_days,
+                        scope="personal",
+                    )
+                    # Feed the new plan into the T1 cosine cache so the next
+                    # paraphrase can match without a SessionStart re-populate.
+                    try:
+                        cache = get_t1_plan_cache()
+                        if cache is not None:
+                            row = _save_db.plans.get_plan(grown_id)
+                            if row:
+                                cache.upsert(row)
+                    except Exception:
+                        _log.debug("plan_grow_cache_upsert_failed", exc_info=True)
+                _log.info(
+                    "plan_grow_saved",
+                    plan_id=grown_id,
+                    ttl_days=ttl_days,
+                    project=project_name,
+                )
+            except Exception as exc:
+                _log.warning("plan_grow_save_failed", error=str(exc))
 
     # ── Step 6: record run ───────────────────────────────────────────────
     try:
