@@ -178,6 +178,22 @@ def _run_trim_telemetry(days: int) -> None:
     help="Validate T2 database schema and report pending migrations.",
 )
 @click.option(
+    "--check-search",
+    "check_search",
+    is_flag=True,
+    default=False,
+    help="Run probe 3a — the name-resolution canary from "
+         "tests/fixtures/name_canaries.py. Exits 2 when any surface "
+         "raises an unexpected exception. RDR-087 Phase 3.2.",
+)
+@click.option(
+    "--json",
+    "json_out",
+    is_flag=True,
+    default=False,
+    help="Emit machine-parseable JSON (used with --check-search).",
+)
+@click.option(
     "--trim-telemetry",
     "trim_telemetry",
     is_flag=True,
@@ -195,10 +211,16 @@ def _run_trim_telemetry(days: int) -> None:
 )
 def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                fix_paths: bool, dry_run: bool, check_schema: bool,
+               check_search: bool, json_out: bool,
                trim_telemetry: bool, days: int) -> None:
     """Verify that all required services and credentials are available."""
     if check_schema:
         _run_check_schema()
+        return
+
+    if check_search:
+        from nexus.doctor_search import run_check_search
+        run_check_search(json_out=json_out)
         return
 
     if trim_telemetry:
