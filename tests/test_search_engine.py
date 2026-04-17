@@ -442,3 +442,144 @@ class TestSearchDiagnostics:
         assert diag_out[0].collections_with_drops() == 2
 
 
+# ── Phase 2.2 (RDR-087 / nexus-yi4b.2.2): hot-path telemetry INSERT ──────────
+
+
+class _StubTelemetry:
+    """Stand-in for ``db.t2.telemetry.Telemetry`` capturing log_search_batch calls."""
+
+    def __init__(self) -> None:
+        self.batches: list[list[tuple]] = []
+
+    def log_search_batch(self, rows):
+        self.batches.append(list(rows))
+
+
+class TestSearchTelemetryHotPath:
+    """``search_cross_corpus`` writes one row per collection to
+    ``Telemetry.log_search_batch`` when a telemetry store is injected.
+    Row shape: ``(ts, query_hash, collection, raw_count, dropped_count,
+    top_distance, threshold)``. ``top_distance`` here is the min distance
+    across ALL raw candidates (not just the dropped subset).
+    """
+
+    def test_writes_one_row_per_collection(self):
+        telemetry = _StubTelemetry()
+        t3 = _ThresholdFakeT3({
+            "code__a": [
+                {"id": "a1", "content": "x", "distance": 0.30},
+                {"id": "a2", "content": "x", "distance": 0.50},
+            ],
+            "knowledge__b": [
+                {"id": "b1", "content": "x", "distance": 0.60},
+            ],
+        })
+        search_cross_corpus(
+            "query one", ["code__a", "knowledge__b"], 10, t3,
+            telemetry=telemetry,
+        )
+        assert len(telemetry.batches) == 1
+        rows = telemetry.batches[0]
+        assert len(rows) == 2
+        names = {r[2] for r in rows}
+        assert names == {"code__a", "knowledge__b"}
+
+    def test_row_shape_matches_spec(self):
+        """Row layout: (ts, query_hash, collection, raw, dropped, top_distance, threshold)."""
+        import hashlib
+
+        telemetry = _StubTelemetry()
+        t3 = _ThresholdFakeT3({
+            "code__a": [
+                {"id": "a1", "content": "x", "distance": 0.30},
+                {"id": "a2", "content": "x", "distance": 0.50},
+            ],
+        })
+        search_cross_corpus(
+            "my query", ["code__a"], 10, t3, telemetry=telemetry,
+        )
+        rows = telemetry.batches[0]
+        assert len(rows) == 1
+        ts, query_hash, collection, raw_count, dropped_count, top_distance, threshold = rows[0]
+        expected_hash = hashlib.sha256("my query".encode()).hexdigest()[:64]
+        assert query_hash == expected_hash
+        assert collection == "code__a"
+        assert raw_count == 2
+        assert dropped_count == 1  # 0.50 > 0.45
+        assert top_distance == pytest.approx(0.30)  # min over RAW (kept or dropped)
+        assert threshold == pytest.approx(0.45)
+        assert isinstance(ts, str) and "T" in ts
+
+    def test_top_distance_null_when_raw_empty(self):
+        """Collection returning zero raw candidates → top_distance is None."""
+        telemetry = _StubTelemetry()
+        t3 = _ThresholdFakeT3({"code__empty": []})
+        search_cross_corpus(
+            "any", ["code__empty"], 10, t3, telemetry=telemetry,
+        )
+        rows = telemetry.batches[0]
+        assert len(rows) == 1
+        _, _, _, raw_count, dropped_count, top_distance, _ = rows[0]
+        assert raw_count == 0
+        assert dropped_count == 0
+        assert top_distance is None
+
+    def test_no_write_when_telemetry_absent(self):
+        """Omitting ``telemetry`` preserves pre-2.2 engine behaviour — no writes."""
+        t3 = _ThresholdFakeT3({
+            "code__a": [{"id": "a", "content": "x", "distance": 0.30}],
+        })
+        results = search_cross_corpus("q", ["code__a"], 10, t3)
+        assert len(results) == 1
+
+    def test_config_flag_disables_insert(self, monkeypatch):
+        """``telemetry.search_enabled=false`` in config suppresses writes even
+        when a telemetry store is provided."""
+        telemetry = _StubTelemetry()
+        t3 = _ThresholdFakeT3({
+            "code__a": [{"id": "a", "content": "x", "distance": 0.30}],
+        })
+
+        def fake_load_config():
+            return {"telemetry": {"search_enabled": False}}
+
+        monkeypatch.setattr("nexus.search_engine.load_config", fake_load_config)
+        search_cross_corpus(
+            "q", ["code__a"], 10, t3, telemetry=telemetry,
+        )
+        assert telemetry.batches == []
+
+    def test_threshold_is_none_when_filtering_skipped(self):
+        """Non-Voyage + no override → no threshold applied, row reports None."""
+        telemetry = _StubTelemetry()
+        t3 = _ThresholdFakeT3(
+            {"code__a": [{"id": "a", "content": "x", "distance": 0.30}]},
+            voyage=False,
+        )
+        search_cross_corpus(
+            "q", ["code__a"], 10, t3, telemetry=telemetry,
+        )
+        rows = telemetry.batches[0]
+        _, _, _, raw, dropped, _, threshold = rows[0]
+        assert raw == 1
+        assert dropped == 0
+        assert threshold is None
+
+    def test_duplicate_insert_is_ignored_not_raised(self, tmp_path):
+        """INSERT OR IGNORE on the real Telemetry store absorbs a duplicate PK."""
+        from nexus.db.t2.telemetry import Telemetry
+
+        telemetry = Telemetry(tmp_path / "mem.db")
+        try:
+            row = (
+                "2026-04-17T18:00:00Z", "h" * 64, "code__a",
+                3, 1, 0.30, 0.45,
+            )
+            telemetry.log_search_batch([row])
+            telemetry.log_search_batch([row])  # duplicate PK — must not raise
+            count = telemetry.conn.execute(
+                "SELECT COUNT(*) FROM search_telemetry"
+            ).fetchone()[0]
+            assert count == 1
+        finally:
+            telemetry.close()
