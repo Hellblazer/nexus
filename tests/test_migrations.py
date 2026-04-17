@@ -883,6 +883,81 @@ class TestT2DatabaseIntegration:
             db.close()
 
 
+# ── Issue #190 regression: _create_base_tables on pre-4.4.0 DB ──────────────
+
+
+class TestBootstrapOnPreRdr078Plans:
+    """``bootstrap_version`` must not crash when the existing ``plans``
+    table lacks the RDR-078 columns (``verb``, ``scope``, ``dimensions``,
+    …). Seeded the crash Steve reported in issue #190 on conexus 4.5.3.
+
+    Root cause: ``_PLANS_SCHEMA_SQL`` previously created four indexes
+    referencing RDR-078 columns inline. On a pre-4.4.0 DB the plans
+    table existed without those columns; the ``CREATE TABLE IF NOT
+    EXISTS`` was a no-op, but the ``CREATE INDEX IF NOT EXISTS
+    idx_plans_verb ON plans(verb)`` statement crashed before the 4.4.0
+    ``_add_plan_dimensional_identity`` migration could add the columns.
+    """
+
+    def _seed_pre_rdr078_plans(self, conn: sqlite3.Connection) -> None:
+        """Seed a ``plans`` table shaped like pre-4.4.0 installs."""
+        conn.executescript(
+            """\
+            CREATE TABLE plans (
+                id         INTEGER PRIMARY KEY,
+                project    TEXT NOT NULL DEFAULT '',
+                query      TEXT NOT NULL,
+                plan_json  TEXT NOT NULL,
+                outcome    TEXT DEFAULT 'success',
+                tags       TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                ttl        INTEGER
+            );
+            """
+        )
+        conn.commit()
+
+    def test_bootstrap_does_not_crash_on_pre_rdr078_plans(self) -> None:
+        """Regression: bootstrap_version + _create_base_tables must no-op
+        cleanly against an old plans shape."""
+        from nexus.db.migrations import bootstrap_version
+
+        conn = sqlite3.connect(":memory:")
+        self._seed_pre_rdr078_plans(conn)
+
+        # Must not raise ``sqlite3.OperationalError: no such column: verb``.
+        last_seen = bootstrap_version(conn)
+        assert isinstance(last_seen, str) and last_seen
+
+    def test_apply_pending_adds_columns_then_indexes(self) -> None:
+        """After ``apply_pending`` walks past 4.4.0, the plans table has
+        both the RDR-078 columns and the four indexes.
+        """
+        from nexus.db.migrations import apply_pending
+
+        conn = sqlite3.connect(":memory:")
+        self._seed_pre_rdr078_plans(conn)
+
+        apply_pending(conn, "4.6.2")
+
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(plans)").fetchall()}
+        assert {"verb", "scope", "dimensions"} <= cols
+
+        # PRAGMA index_list rows: (seq, name, unique, origin, partial).
+        index_info = {
+            r[1]: {"unique": bool(r[2]), "partial": bool(r[4])}
+            for r in conn.execute("PRAGMA index_list(plans)").fetchall()
+        }
+        assert "idx_plans_verb" in index_info
+        assert "idx_plans_scope" in index_info
+        assert "idx_plans_verb_scope" in index_info
+        assert "idx_plans_project_dimensions" in index_info
+        # Guard against silent degradation: this one MUST be unique AND
+        # partial (``WHERE dimensions IS NOT NULL``) per the migration.
+        assert index_info["idx_plans_project_dimensions"]["unique"]
+        assert index_info["idx_plans_project_dimensions"]["partial"]
+
+
 # ── RDR-087 Phase 2.1: search_telemetry migration ───────────────────────────
 
 
