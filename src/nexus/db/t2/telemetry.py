@@ -272,3 +272,22 @@ class Telemetry:
             )
             self.conn.commit()
         return len(rows)
+
+    def trim_search_telemetry(self, days: int = 30) -> int:
+        """Delete ``search_telemetry`` rows older than *days* days (Phase 2.4).
+
+        Exposed via ``nx doctor --trim-telemetry [--days N]``. Default 30d
+        balances an analytical window long enough to detect slow-burn
+        silent-threshold-drop patterns against disk use. Safe on empty
+        tables. Returns the number of rows deleted.
+        """
+        if days < 1:
+            raise ValueError(f"days must be >= 1; got {days}")
+        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+        with self._lock:
+            cur = self.conn.execute(
+                "DELETE FROM search_telemetry WHERE ts < ?",
+                (cutoff,),
+            )
+            self.conn.commit()
+        return cur.rowcount

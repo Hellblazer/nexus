@@ -120,6 +120,26 @@ def _run_check_schema() -> None:
         click.echo("\nAll checks passed.")
 
 
+def _run_trim_telemetry(days: int) -> None:
+    """Delete search_telemetry rows older than *days* (RDR-087 Phase 2.4)."""
+    from nexus.commands._helpers import default_db_path
+    from nexus.db.t2.telemetry import Telemetry
+
+    db_path = default_db_path()
+    if not db_path.exists():
+        click.echo("T2 database not found — nothing to trim.")
+        return
+    telemetry = Telemetry(db_path)
+    try:
+        deleted = telemetry.trim_search_telemetry(days=days)
+    finally:
+        telemetry.close()
+    noun = "row" if deleted == 1 else "rows"
+    click.echo(
+        f"Trimmed {deleted} search_telemetry {noun} older than {days} days."
+    )
+
+
 @click.command("doctor")
 @click.option(
     "--clean-checkpoints",
@@ -157,11 +177,32 @@ def _run_check_schema() -> None:
     default=False,
     help="Validate T2 database schema and report pending migrations.",
 )
+@click.option(
+    "--trim-telemetry",
+    "trim_telemetry",
+    is_flag=True,
+    default=False,
+    help="Delete search_telemetry rows older than --days (default 30) to "
+         "cap T2 disk use. RDR-087 Phase 2.4.",
+)
+@click.option(
+    "--days",
+    "days",
+    default=30,
+    type=click.IntRange(min=1),
+    show_default=True,
+    help="Retention window for --trim-telemetry (days; minimum 1).",
+)
 def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
-               fix_paths: bool, dry_run: bool, check_schema: bool) -> None:
+               fix_paths: bool, dry_run: bool, check_schema: bool,
+               trim_telemetry: bool, days: int) -> None:
     """Verify that all required services and credentials are available."""
     if check_schema:
         _run_check_schema()
+        return
+
+    if trim_telemetry:
+        _run_trim_telemetry(days=days)
         return
 
     if fix:
