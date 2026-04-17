@@ -84,6 +84,77 @@ def test_cloudclient_receives_none_for_empty_tenant(mock_chromadb):
         assert c.kwargs["tenant"] is None
 
 
+def test_bare_constructor_falls_back_to_get_credential(mock_chromadb):
+    """Bare T3Database() (no args) must pick up credentials via
+    nexus.config.get_credential — otherwise scripts and research
+    probes hit 'Permission denied' from CloudClient auth because the
+    constructor forwards empty strings downstream.
+
+    Discovered 2026-04-17 during RDR-086 research; prior behaviour
+    required every caller to know about make_t3() in nexus.db.__init__.
+    """
+    chromadb_m, _ = mock_chromadb
+
+    fake = {
+        "chroma_tenant": "tenant-from-config",
+        "chroma_database": "db-from-config",
+        "chroma_api_key": "key-from-config",
+        "voyage_api_key": "voyage-key-from-config",
+        "migrated": "1",   # skip the old-layout probe
+    }
+    with patch(
+        "nexus.db.t3.get_credential",
+        side_effect=lambda k: fake.get(k, ""),
+    ):
+        T3Database()
+
+    # CloudClient must have been called with the config values, not ""
+    call = chromadb_m.CloudClient.call_args
+    assert call.kwargs["tenant"] == "tenant-from-config"
+    assert call.kwargs["database"] == "db-from-config"
+    assert call.kwargs["api_key"] == "key-from-config"
+
+
+def test_bare_constructor_explicit_args_override_fallback(mock_chromadb):
+    """Explicit args still win over the config fallback."""
+    chromadb_m, _ = mock_chromadb
+    with patch(
+        "nexus.db.t3.get_credential",
+        side_effect=lambda k: "should-not-see-this" if k != "migrated" else "1",
+    ):
+        T3Database(tenant="explicit-t", database="explicit-db", api_key="explicit-k")
+
+    call = chromadb_m.CloudClient.call_args
+    assert call.kwargs["tenant"] == "explicit-t"
+    assert call.kwargs["database"] == "explicit-db"
+    assert call.kwargs["api_key"] == "explicit-k"
+
+
+def test_fallback_skipped_when_client_injected(mock_chromadb):
+    """Tests that pass _client= must not trigger the credential
+    fallback — otherwise get_credential would get called on every
+    test that injects an EphemeralClient or MagicMock."""
+    from unittest.mock import MagicMock
+    chromadb_m, _ = mock_chromadb
+    sentinel = MagicMock()
+    with patch(
+        "nexus.db.t3.get_credential",
+    ) as gc:
+        T3Database(_client=sentinel)
+    assert not gc.called, (
+        "get_credential must not be called when _client is injected"
+    )
+
+
+def test_fallback_skipped_in_local_mode(tmp_path):
+    """Local mode skips the credential fallback — no cloud creds needed."""
+    from unittest.mock import patch, MagicMock
+    with patch("nexus.db.t3.get_credential") as gc, \
+         patch("chromadb.PersistentClient", return_value=MagicMock()):
+        T3Database(local_mode=True, local_path=str(tmp_path))
+    assert not gc.called
+
+
 def test_old_layout_detected(mock_chromadb):
     chromadb_m, mock_client = mock_chromadb
     chromadb_m.CloudClient.side_effect = lambda **kw: mock_client

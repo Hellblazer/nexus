@@ -228,19 +228,35 @@ parameters don't change.
   JSONL, chunks are implicit sub-addresses), so the empty-list
   there is semantically correct and not part of this RDR's scope.
 
-- **RF-5 (blocked, recommended follow-up)** — Could not run a
-  direct-T3 sample of chunk metadata to confirm the write-site
-  RFs land in prod: `T3Database()` constructor hits
-  `chromadb.errors.ChromaError: Permission denied` from the
-  cloud-client auth path when invoked outside the normal nx CLI
-  entry. The nx CLI itself works fine (it reads credentials via
-  `nexus.config`), so the write-site evidence + the working MCP
-  tools strongly imply the data is present. Full verification
-  requires either fixing the bare-constructor auth path, adding
-  a diagnostic command (`nx catalog sample-metadata <collection>
-  --limit 5 --keys chunk_text_hash,content_hash`), or running
-  the MVV against the backfilled index. Filing as a follow-up
-  bead; does **not** block this RDR's design.
+- **RF-5 (resolved 2026-04-17)** — Direct-T3 sampling was
+  initially blocked: `T3Database()` bare constructor hit
+  `chromadb.errors.ChromaError: Permission denied` because empty
+  credential args were forwarded to `CloudClient` without the
+  config fallback that the `make_t3()` factory applies. Fixed in
+  `src/nexus/db/t3.py:193` — the constructor now falls back to
+  `nexus.config.get_credential()` for empty args when a client
+  isn't injected and local mode isn't set. Tests in
+  `tests/test_t3.py::test_bare_constructor_falls_back_to_get_credential`
+  and three sibling cases pin the behaviour (explicit args still
+  win, `_client=` injection skips fallback, local mode skips
+  fallback).
+
+  With the fix in place, sampled 10 chunks across one collection
+  per prefix (code, docs, rdr, knowledge, taxonomy):
+
+  | Collection prefix | chunk_text_hash present | non-empty |
+  |---|---|---|
+  | `code__` | 10/10 | 10/10 |
+  | `docs__` | 10/10 | 10/10 |
+  | `rdr__`  | 10/10 | 10/10 |
+  | `knowledge__` | 1/1  | 1/1  |
+  | `taxonomy__centroids` | 0/10 | 0/10 |
+
+  All citable-content prefixes carry the 64-char SHA-256 hex on
+  every chunk. `taxonomy__centroids` correctly has no hash — those
+  rows are topic centroids, not indexed chunks, and are out of
+  scope for `chash:` citations. Design assumption fully confirmed
+  against prod.
 
 ### Critical Assumptions
 
