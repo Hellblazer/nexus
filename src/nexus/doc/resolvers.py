@@ -163,23 +163,27 @@ class RdrResolver:
         return str(value)
 
     def _fetch(self, key: str) -> dict[str, Any]:
-        # Match rdr-<id>-*.md or rdr-<zero-padded>-*.md
-        stem_prefix = f"rdr-{key.lstrip('0').zfill(len(key)) or key}-"
-        # Also match un-padded form
-        candidates = list(self._rdr_dir.glob(f"rdr-{key}-*.md"))
-        if not candidates:
-            candidates = list(self._rdr_dir.glob(f"{stem_prefix}*.md"))
-        if not candidates:
-            # Fallback: scan with regex for any rdr-<any leading zeros><key>-
-            pattern = re.compile(rf"^rdr-0*{int(key)}-.+\.md$") if key.isdigit() else None
-            if pattern:
-                for p in self._rdr_dir.glob("rdr-*.md"):
-                    if pattern.match(p.name):
-                        candidates = [p]
-                        break
+        # nexus-51j: case-insensitive match so projects that use the
+        # uppercase ``RDR-NNN-*.md`` convention (common, visually
+        # distinguishes RDRs from other docs/) work alongside the
+        # nexus-default lowercase ``rdr-NNN-*.md``. A numeric key
+        # matches any zero-padding of the same integer; a non-numeric
+        # key matches the literal text.
+        if key.isdigit():
+            pattern = re.compile(
+                rf"^rdr-0*{int(key)}-.+\.md$", re.IGNORECASE,
+            )
+        else:
+            pattern = re.compile(
+                rf"^rdr-{re.escape(key)}-.+\.md$", re.IGNORECASE,
+            )
+        candidates = [
+            p for p in self._rdr_dir.glob("*.md") if pattern.match(p.name)
+        ]
         if not candidates:
             raise ResolutionError(
-                f"no RDR file matching rdr-{key}-*.md under {self._rdr_dir}"
+                f"no RDR file matching rdr-{key}-*.md (case-insensitive) "
+                f"under {self._rdr_dir}"
             )
         text = candidates[0].read_text(errors="replace")
         m = _FRONTMATTER_RE.search(text)

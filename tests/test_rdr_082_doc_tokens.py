@@ -202,6 +202,67 @@ class TestRdrResolver:
         with pytest.raises(ResolutionError):
             r.resolve("999", field=None, filters={})
 
+    def test_resolves_uppercase_RDR_prefix(self, tmp_path: Path) -> None:
+        """nexus-51j: projects using the RDR-NNN-*.md (uppercase) convention
+        must resolve the same as lowercase."""
+        from nexus.doc.resolvers import RdrResolver
+
+        rdr_dir = tmp_path / "docs" / "rdr"
+        rdr_dir.mkdir(parents=True)
+        (rdr_dir / "RDR-068-masking-field-plan-learning.md").write_text(
+            "---\n"
+            "title: \"RDR-068: Masking Field Plan Learning\"\n"
+            "status: accepted\n"
+            "---\n"
+        )
+        r = RdrResolver(rdr_dir=rdr_dir)
+        assert r.resolve("068", field="status", filters={}) == "accepted"
+
+    def test_mixed_case_cohabitation(self, tmp_path: Path) -> None:
+        """Lowercase and uppercase RDRs in the same directory are both found."""
+        from nexus.doc.resolvers import RdrResolver
+
+        rdr_dir = tmp_path / "docs" / "rdr"
+        rdr_dir.mkdir(parents=True)
+        (rdr_dir / "rdr-072-lowercase.md").write_text(
+            "---\nstatus: draft\n---\n"
+        )
+        (rdr_dir / "RDR-073-uppercase.md").write_text(
+            "---\nstatus: accepted\n---\n"
+        )
+        r = RdrResolver(rdr_dir=rdr_dir)
+        assert r.resolve("072", field="status", filters={}) == "draft"
+        assert r.resolve("073", field="status", filters={}) == "accepted"
+
+    def test_zero_padding_still_works_case_insensitive(
+        self, tmp_path: Path,
+    ) -> None:
+        """Numeric key with or without zero-padding resolves against
+        either case of prefix. Regression: the original impl had a
+        zero-padding fallback; that behaviour is preserved."""
+        from nexus.doc.resolvers import RdrResolver
+
+        rdr_dir = tmp_path / "docs" / "rdr"
+        rdr_dir.mkdir(parents=True)
+        (rdr_dir / "RDR-9-foo.md").write_text("---\nstatus: x\n---\n")
+        r = RdrResolver(rdr_dir=rdr_dir)
+        # Padded key
+        assert r.resolve("009", field="status", filters={}) == "x"
+        # Unpadded key
+        assert r.resolve("9", field="status", filters={}) == "x"
+
+    def test_non_numeric_key_case_insensitive(self, tmp_path: Path) -> None:
+        """Non-numeric keys also honour case-insensitive matching."""
+        from nexus.doc.resolvers import RdrResolver
+
+        rdr_dir = tmp_path / "docs" / "rdr"
+        rdr_dir.mkdir(parents=True)
+        (rdr_dir / "RDR-proposal-alpha-notes.md").write_text(
+            "---\nstatus: draft\n---\n"
+        )
+        r = RdrResolver(rdr_dir=rdr_dir)
+        assert r.resolve("proposal", field="status", filters={}) == "draft"
+
 
 # ── Render engine ────────────────────────────────────────────────────────────
 

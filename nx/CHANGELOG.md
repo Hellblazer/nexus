@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.5.2] - 2026-04-17
+
+Plugin version bump alongside conexus 4.5.2. See root CHANGELOG for
+the nexus-51j case-insensitive RDR-file-glob fix in `{{rdr:…}}`
+token resolution.
+
 ## [4.5.1] - 2026-04-17
 
 Follow-up bug fix bundled with conexus 4.5.1. See root `CHANGELOG.md`.
