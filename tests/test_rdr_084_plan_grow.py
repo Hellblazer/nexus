@@ -321,3 +321,128 @@ class TestAdHocTtlConfig:
         from nexus.config import _DEFAULTS
 
         assert _DEFAULTS.get("plans", {}).get("ad_hoc_ttl") == 30
+
+
+# ── Live-SQLite round-trip (critic gap from PR #170) ─────────────────────────
+
+
+class TestLiveSqliteRoundTrip:
+    """End-to-end against a real on-disk SQLite T2Database.
+
+    The other suites in this file mock ``_t2_ctx`` — that catches
+    call-shape regressions but cannot catch cross-transaction bugs
+    like ``save_plan`` returning an id that ``get_plan`` fails to
+    resolve under the same ``_t2_ctx`` block. The critic in PR #170
+    flagged this as a coverage gap; this suite closes it.
+
+    Patches applied:
+      * ``nexus.commands._helpers.default_db_path`` → tmp_path/memory.db
+        so every ``_t2_ctx()`` opens the isolated fixture db.
+      * ``plan_match`` → empty so nx_answer takes the plan-miss branch.
+      * ``_nx_answer_plan_miss`` → returns a synthetic ad-hoc Match.
+      * ``_plan_run`` → returns a trivial success.
+      * ``get_t1_plan_cache`` → captures the row passed to ``upsert``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_save_plan_get_plan_cache_upsert_round_trips(
+        self, tmp_path,
+    ):
+        from nexus.mcp.core import nx_answer
+
+        # Real, isolated T2 on disk
+        db_path = tmp_path / "memory.db"
+
+        cache_stub = MagicMock()
+        cache_stub.upsert = MagicMock(return_value=True)
+
+        match = _ad_hoc_match()
+
+        with patch(
+            "nexus.mcp_infra.default_db_path",
+            return_value=db_path,
+        ), patch("nexus.plans.matcher.plan_match", return_value=[]), \
+           patch(
+               "nexus.mcp.core._nx_answer_plan_miss",
+               AsyncMock(return_value=match),
+           ), \
+           patch(
+               "nexus.plans.runner.plan_run",
+               AsyncMock(return_value=_plan_run_success()),
+           ), \
+           patch("nexus.mcp.core.scratch", return_value="ok"), \
+           patch("nexus.mcp_infra.get_t1_plan_cache", return_value=cache_stub):
+            result = await nx_answer(question="what is nexus retrieval")
+
+        # User still got their answer
+        assert "42" in result
+
+        # Real DB: the row is queryable after the command returned.
+        from nexus.db.t2 import T2Database
+
+        with T2Database(db_path) as verify_db:
+            rows = verify_db.plans.list_active_plans(outcome="success")
+        assert rows, "save_plan should have persisted at least one plan"
+        saved = next(
+            (r for r in rows if "ad-hoc" in (r.get("tags") or "")),
+            None,
+        )
+        assert saved is not None, (
+            "ad-hoc plan not found in T2 after save — save_plan → list desync"
+        )
+        assert saved["scope"] == "personal"
+        assert "grown" in saved["tags"]
+        assert saved["query"] == "what is nexus retrieval"
+        # ttl_days default is 30 (no .nexus.yml override in tmp_path)
+        assert saved["ttl"] == 30
+
+        # Cache upsert received the exact row save_plan produced.
+        assert cache_stub.upsert.called, (
+            "T1 cache.upsert must fire after a successful save"
+        )
+        passed_row = cache_stub.upsert.call_args.args[0]
+        assert passed_row["id"] == saved["id"], (
+            f"cache saw id={passed_row.get('id')!r} but T2 has "
+            f"id={saved['id']!r} — save_plan → get_plan desync"
+        )
+        assert passed_row["query"] == saved["query"]
+        assert passed_row["plan_json"] == saved["plan_json"]
+
+    @pytest.mark.asyncio
+    async def test_save_plan_ttl_zero_disables_growth(self, tmp_path):
+        """plans.ad_hoc_ttl = 0 in config disables growth entirely."""
+        from nexus.mcp.core import nx_answer
+
+        db_path = tmp_path / "memory.db"
+        cache_stub = MagicMock()
+        match = _ad_hoc_match()
+
+        with patch(
+            "nexus.mcp_infra.default_db_path",
+            return_value=db_path,
+        ), patch("nexus.plans.matcher.plan_match", return_value=[]), \
+           patch(
+               "nexus.mcp.core._nx_answer_plan_miss",
+               AsyncMock(return_value=match),
+           ), \
+           patch(
+               "nexus.plans.runner.plan_run",
+               AsyncMock(return_value=_plan_run_success()),
+           ), \
+           patch("nexus.mcp.core.scratch", return_value="ok"), \
+           patch("nexus.mcp_infra.get_t1_plan_cache", return_value=cache_stub), \
+           patch(
+               "nexus.mcp.core.load_config",
+               return_value={"plans": {"ad_hoc_ttl": 0}},
+           ):
+            await nx_answer(question="ttl-zero-question")
+
+        # ttl=0 must short-circuit save entirely
+        from nexus.db.t2 import T2Database
+
+        with T2Database(db_path) as verify_db:
+            rows = verify_db.plans.list_active_plans(outcome="success")
+        assert rows == [], (
+            "ttl_days=0 must disable growth; no plan should have been saved"
+        )
+        assert not cache_stub.upsert.called
