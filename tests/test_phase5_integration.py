@@ -198,4 +198,104 @@ class TestDoctorCheckSchema:
         assert "search_telemetry" in result.output
 
 
+# ── RDR-087 Phase 2.4: nx doctor --trim-telemetry ───────────────────────────
+
+
+class TestDoctorTrimTelemetry:
+    """``nx doctor --trim-telemetry [--days N]`` deletes ``search_telemetry``
+    rows older than the retention window. Default 30d; --days validates min=1.
+    """
+
+    def _seed_and_trim(
+        self, runner: CliRunner, tmp_path: Path, *,
+        ages_days: list[int], trim_days: int,
+    ) -> tuple["object", int]:
+        """Seed rows at the given ages (days before now) and run the trim."""
+        from datetime import UTC, datetime, timedelta
+        from nexus.commands.upgrade import _current_version
+        from nexus.db.migrations import apply_pending
+
+        db_path = tmp_path / "memory.db"
+        conn = sqlite3.connect(str(db_path))
+        apply_pending(conn, _current_version())
+        now = datetime.now(UTC)
+        for i, age in enumerate(ages_days):
+            ts = (now - timedelta(days=age)).isoformat()
+            conn.execute(
+                "INSERT INTO search_telemetry "
+                "(ts, query_hash, collection, raw_count, dropped_count, "
+                "top_distance, threshold) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (ts, f"hash{i:02d}", f"coll__{i}", 3, 1, 0.30, 0.45),
+            )
+        conn.commit()
+        conn.close()
+
+        with patch("nexus.commands._helpers.default_db_path", return_value=db_path):
+            result = runner.invoke(
+                main, ["doctor", "--trim-telemetry", "--days", str(trim_days)],
+            )
+        remaining_conn = sqlite3.connect(str(db_path))
+        remaining = remaining_conn.execute(
+            "SELECT COUNT(*) FROM search_telemetry"
+        ).fetchone()[0]
+        remaining_conn.close()
+        return result, remaining
+
+    def test_trims_rows_older_than_default_30d(
+        self, runner: CliRunner, tmp_path: Path,
+    ) -> None:
+        """Default 30d retention: rows at t-45d deleted, t-15d and t-0 kept."""
+        result, remaining = self._seed_and_trim(
+            runner, tmp_path, ages_days=[45, 15, 0], trim_days=30,
+        )
+        assert result.exit_code == 0, result.output
+        assert remaining == 2
+        assert "Trimmed 1 search_telemetry" in result.output
+
+    def test_aggressive_retention_days_7(
+        self, runner: CliRunner, tmp_path: Path,
+    ) -> None:
+        """``--days 7`` trims t-45d and t-15d; only t-0 survives."""
+        result, remaining = self._seed_and_trim(
+            runner, tmp_path, ages_days=[45, 15, 0], trim_days=7,
+        )
+        assert result.exit_code == 0, result.output
+        assert remaining == 1
+
+    def test_empty_table_is_safe(
+        self, runner: CliRunner, tmp_path: Path,
+    ) -> None:
+        """Trim on an empty table is a no-op (zero deletions reported)."""
+        from nexus.commands.upgrade import _current_version
+        from nexus.db.migrations import apply_pending
+
+        db_path = tmp_path / "memory.db"
+        conn = sqlite3.connect(str(db_path))
+        apply_pending(conn, _current_version())
+        conn.close()
+
+        with patch("nexus.commands._helpers.default_db_path", return_value=db_path):
+            result = runner.invoke(main, ["doctor", "--trim-telemetry"])
+        assert result.exit_code == 0, result.output
+        assert "Trimmed 0 search_telemetry" in result.output
+
+    def test_rejects_zero_days(self, runner: CliRunner) -> None:
+        """``--days 0`` fails the click.IntRange(min=1) validator."""
+        result = runner.invoke(
+            main, ["doctor", "--trim-telemetry", "--days", "0"],
+        )
+        assert result.exit_code != 0
+
+    def test_no_db_file_handled_gracefully(
+        self, runner: CliRunner, tmp_path: Path,
+    ) -> None:
+        """Trim against a missing DB reports 'not found' without crashing."""
+        db_path = tmp_path / "nonexistent" / "memory.db"
+        with patch("nexus.commands._helpers.default_db_path", return_value=db_path):
+            result = runner.invoke(main, ["doctor", "--trim-telemetry"])
+        assert result.exit_code == 0
+        assert "not found" in result.output.lower()
+
+
 _WARN_CHAR = "\u2717"  # ✗
