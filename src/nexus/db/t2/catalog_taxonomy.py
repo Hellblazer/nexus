@@ -862,6 +862,62 @@ class CatalogTaxonomy:
             ).fetchall()
         return {row[0]: row[1] for row in rows}
 
+    # ── RDR-083: corpus-evidence helpers ─────────────────────────────────
+
+    def top_topics_for_collection(
+        self, collection: str, *, top_n: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Return the top-N projected topics for *collection* ordered by
+        ``SUM(similarity) DESC``. Serves ``{{nx-anchor:<collection>|top=N}}``.
+
+        Only projection-assigned rows (``assigned_by='projection'``) are
+        counted — native-collection topics are already visible via the
+        normal topic browser.
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                """
+                SELECT t.label, COUNT(*) AS chunks, SUM(ta.similarity) AS sum_sim
+                FROM topic_assignments ta
+                JOIN topics t ON t.id = ta.topic_id
+                WHERE ta.assigned_by = 'projection'
+                  AND ta.source_collection = ?
+                  AND ta.similarity IS NOT NULL
+                GROUP BY ta.topic_id, t.label
+                ORDER BY sum_sim DESC, chunks DESC
+                LIMIT ?
+                """,
+                (collection, top_n),
+            ).fetchall()
+        return [{"label": r[0], "chunks": r[1], "sum_similarity": r[2]} for r in rows]
+
+    def chunk_grounded_in(
+        self, doc_id: str, source_collection: str, *, threshold: float,
+    ) -> float | None:
+        """Return the max similarity of *doc_id*'s chunks projecting into
+        *source_collection*, or ``None`` when no projection data exists.
+
+        Serves ``check-extensions``: a doc whose top projection similarity
+        falls below the caller's threshold is an author-extension candidate.
+        ``threshold`` is accepted for future use (e.g. prefilter); current
+        impl returns the raw max.
+        """
+        with self._lock:
+            row = self.conn.execute(
+                """
+                SELECT MAX(similarity)
+                FROM topic_assignments
+                WHERE assigned_by = 'projection'
+                  AND doc_id = ?
+                  AND source_collection = ?
+                  AND similarity IS NOT NULL
+                """,
+                (doc_id, source_collection),
+            ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        return float(row[0])
+
     # ── Review workflow (RDR-070, nexus-lbu) ─────────────────────────────
 
     def get_unreviewed_topics(
