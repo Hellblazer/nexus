@@ -1,0 +1,370 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 1160" width="1400" height="1160"
+     font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#1e293b"/>
+    </marker>
+    <marker id="arrow-dim" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#64748b"/>
+    </marker>
+    <marker id="arrow-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#6b21a8"/>
+    </marker>
+    <marker id="arrow-bi-start" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M10,0 L0,5 L10,10 Z" fill="#166534"/>
+    </marker>
+    <marker id="arrow-bi-end" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#166534"/>
+    </marker>
+  </defs>
+
+  <style><![CDATA[
+    .layer-title { font-weight: 700; font-size: 20px; letter-spacing: 0.3px; }
+    .box-title   { font-weight: 700; font-size: 14px; fill: #0f172a; }
+    .box-sub     { font-size: 11px; fill: #475569; font-style: italic; }
+    .box-text    { font-size: 11px; fill: #475569; }
+    .arrow-label { font-size: 11px; fill: #334155; font-weight: 600; }
+    .arrow-label-i { font-size: 11px; fill: #64748b; font-style: italic; }
+    .icon-label  { font-size: 11px; font-style: italic; }
+    .group-title { font-weight: 700; font-size: 13px; }
+  ]]></style>
+
+  <!-- ======================================================= -->
+  <!-- APPLICATION LAYER                                       -->
+  <!-- ======================================================= -->
+  <g>
+    <rect x="20" y="20" width="1360" height="110" rx="14" fill="#dbeafe" stroke="#1e3a8a" stroke-width="2"/>
+    <text x="40" y="48" class="layer-title" fill="#1e3a8a">Application Layer</text>
+
+    <g transform="translate(70, 62)">
+      <rect width="390" height="52" rx="8" fill="#ffffff" stroke="#1e3a8a" stroke-width="1.5"/>
+      <text x="195" y="22" text-anchor="middle" class="box-title">🔍  Retrieval Queries</text>
+      <text x="195" y="40" text-anchor="middle" class="box-sub">nx search · search MCP · nx memory</text>
+    </g>
+
+    <g transform="translate(490, 62)">
+      <rect width="430" height="52" rx="8" fill="#ffffff" stroke="#1e3a8a" stroke-width="1.5"/>
+      <text x="215" y="22" text-anchor="middle" class="box-title">🔽  Extraction &amp; Synthesis Queries</text>
+      <text x="215" y="40" text-anchor="middle" class="box-sub">query MCP · operator_extract / summarize / compare</text>
+    </g>
+
+    <g transform="translate(950, 62)">
+      <rect width="400" height="52" rx="8" fill="#ffffff" stroke="#1e3a8a" stroke-width="1.5"/>
+      <text x="200" y="22" text-anchor="middle" class="box-title">🧠  Knowledge Discovery &amp; Generation</text>
+      <text x="200" y="40" text-anchor="middle" class="box-sub">nx_answer · operator_generate · /nx:analyze</text>
+    </g>
+  </g>
+
+  <!-- ======================================================= -->
+  <!-- PLANNING LAYER                                          -->
+  <!-- ======================================================= -->
+  <g>
+    <rect x="20" y="150" width="1360" height="320" rx="14" fill="#ffedd5" stroke="#9a3412" stroke-width="2"/>
+    <text x="40" y="178" class="layer-title" fill="#9a3412">LLM-Centric Hybrid Planning Layer</text>
+
+    <g transform="translate(50, 270)">
+      <path d="M14,8 L56,8 L68,20 L68,82 L14,82 Z" fill="#fff7ed" stroke="#9a3412" stroke-width="1.2"/>
+      <path d="M7,4 L49,4 L61,16 L61,78 L7,78 Z" fill="#fff7ed" stroke="#9a3412" stroke-width="1.2"/>
+      <path d="M0,0 L42,0 L54,12 L54,74 L0,74 Z" fill="#fff7ed" stroke="#9a3412" stroke-width="1.5"/>
+      <path d="M42,0 L42,12 L54,12" fill="none" stroke="#9a3412" stroke-width="1.5"/>
+      <line x1="8" y1="22" x2="46" y2="22" stroke="#cbd5e1" stroke-width="1"/>
+      <line x1="8" y1="32" x2="46" y2="32" stroke="#cbd5e1" stroke-width="1"/>
+      <line x1="8" y1="42" x2="46" y2="42" stroke="#cbd5e1" stroke-width="1"/>
+      <line x1="8" y1="52" x2="38" y2="52" stroke="#cbd5e1" stroke-width="1"/>
+    </g>
+    <text x="88" y="375" text-anchor="middle" class="icon-label" fill="#9a3412">Scholarly Queries</text>
+
+    <g transform="translate(170, 290)">
+      <rect width="160" height="80" rx="8" fill="#ffffff" stroke="#9a3412" stroke-width="2"/>
+      <text x="80" y="30" text-anchor="middle" class="box-title">Query</text>
+      <text x="80" y="48" text-anchor="middle" class="box-title">Decomposer</text>
+      <text x="80" y="68" text-anchor="middle" class="box-sub">/nx:query · /nx:plan-first</text>
+    </g>
+
+    <line x1="125" y1="317" x2="167" y2="317" stroke="#1e293b" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+    <g transform="translate(380, 200)">
+      <rect width="360" height="130" rx="10" fill="#fffbeb" stroke="#9a3412" stroke-width="1.8" stroke-dasharray="6,4"/>
+      <text x="180" y="24" text-anchor="middle" class="group-title" fill="#9a3412">Predefined Plan Selection</text>
+
+      <rect x="30" y="38" width="300" height="30" rx="6" fill="#ffffff" stroke="#9a3412" stroke-width="1"/>
+      <text x="180" y="58" text-anchor="middle" class="box-text">plan_match · dimension + semantic rerank</text>
+
+      <rect x="30" y="78" width="300" height="30" rx="6" fill="#ffffff" stroke="#9a3412" stroke-width="1"/>
+      <text x="180" y="98" text-anchor="middle" class="box-text">LLM-based rerank  ·  nx_plan_audit</text>
+
+      <g transform="translate(278, 90)">
+        <ellipse cx="0" cy="0" rx="28" ry="5" fill="#fef3c7" stroke="#9a3412" stroke-width="1.2"/>
+        <path d="M-28,0 L-28,22 A28,5 0 0 0 28,22 L28,0" fill="#fef3c7" stroke="#9a3412" stroke-width="1.2"/>
+        <ellipse cx="0" cy="0" rx="28" ry="5" fill="#fef3c7" stroke="#9a3412" stroke-width="1.2"/>
+        <text x="0" y="15" text-anchor="middle" font-size="9" fill="#9a3412" font-weight="700">Plans</text>
+      </g>
+    </g>
+
+    <g transform="translate(800, 200)">
+      <rect width="380" height="240" rx="10" fill="#fffbeb" stroke="#9a3412" stroke-width="1.8" stroke-dasharray="6,4"/>
+      <text x="190" y="24" text-anchor="middle" class="group-title" fill="#9a3412">Dynamic Plan Generator</text>
+
+      <rect x="25" y="38" width="330" height="52" rx="6" fill="#ffffff" stroke="#9a3412" stroke-width="1"/>
+      <text x="190" y="58" text-anchor="middle" class="box-title">High-level planning</text>
+      <text x="190" y="76" text-anchor="middle" class="box-sub">planner prompt + tool signatures</text>
+
+      <rect x="25" y="100" width="330" height="52" rx="6" fill="#ffffff" stroke="#9a3412" stroke-width="1"/>
+      <text x="190" y="120" text-anchor="middle" class="box-title">Low-level operator instantiation</text>
+      <text x="190" y="138" text-anchor="middle" class="box-sub">DAG of operator_* calls</text>
+
+      <rect x="25" y="162" width="330" height="52" rx="6" fill="#ffffff" stroke="#9a3412" stroke-width="1"/>
+      <text x="190" y="182" text-anchor="middle" class="box-title">Validation &amp; self-correction</text>
+      <text x="190" y="200" text-anchor="middle" class="box-sub">nx_plan_audit · composition-probe</text>
+
+      <text x="355" y="20" text-anchor="end" font-size="16">✨</text>
+    </g>
+
+    <!-- Decomposer → Selection (Task) — clean orthogonal up-and-right -->
+    <path d="M330,305 L360,305 L360,265 L378,265" fill="none" stroke="#1e293b" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="340" y="258" class="arrow-label-i">Task</text>
+
+    <!-- Selection → Generator (miss) — horizontal dashed -->
+    <path d="M740,265 L800,265" fill="none" stroke="#475569" stroke-width="1.4" stroke-dasharray="5,3" marker-end="url(#arrow-dim)"/>
+    <text x="770" y="258" text-anchor="middle" class="arrow-label-i">miss</text>
+
+    <!-- Scope: from Decomposer bottom, straight down across the band boundary into Exec -->
+    <path d="M250,370 L250,490" fill="none" stroke="#475569" stroke-width="1.4" stroke-dasharray="5,3" marker-end="url(#arrow-dim)"/>
+    <text x="258" y="420" class="arrow-label-i">Scope</text>
+
+    <!-- matched: from Selection bottom, straight down across the boundary -->
+    <path d="M560,330 L560,490" fill="none" stroke="#475569" stroke-width="1.4" stroke-dasharray="5,3" marker-end="url(#arrow-dim)"/>
+    <text x="568" y="410" class="arrow-label-i">matched</text>
+
+    <!-- Execution Plan: from Generator bottom, straight down across the boundary -->
+    <path d="M990,440 L990,490" fill="none" stroke="#1e293b" stroke-width="1.6" marker-end="url(#arrow)"/>
+    <text x="1000" y="470" class="arrow-label">Execution Plan</text>
+  </g>
+
+  <!-- ======================================================= -->
+  <!-- UNIFIED EXECUTION LAYER                                 -->
+  <!-- ======================================================= -->
+  <g>
+    <rect x="20" y="490" width="1360" height="200" rx="14" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+    <text x="40" y="518" class="layer-title" fill="#166534">Unified Execution Layer</text>
+
+    <!-- Execution Plan (DAG) — tidy 4-node tree, centered at x=105 -->
+    <g transform="translate(60, 540)">
+      <!-- edges first so nodes overlap them cleanly -->
+      <g stroke="#166534" stroke-width="1.4" fill="none">
+        <line x1="45" y1="22"  x2="15"  y2="58"/>
+        <line x1="45" y1="22"  x2="75"  y2="58"/>
+        <line x1="15" y1="58"  x2="45"  y2="94"/>
+        <line x1="75" y1="58"  x2="45"  y2="94"/>
+      </g>
+      <!-- 4 hexagon nodes -->
+      <polygon points="45,0 63,11 63,33 45,44 27,33 27,11" fill="#ef4444" stroke="#7f1d1d" stroke-width="1.3"/>
+      <polygon points="15,36 33,47 33,69 15,80 -3,69 -3,47" fill="#facc15" stroke="#713f12" stroke-width="1.3"/>
+      <polygon points="75,36 93,47 93,69 75,80 57,69 57,47" fill="#4ade80" stroke="#14532d" stroke-width="1.3"/>
+      <polygon points="45,72 63,83 63,105 45,116 27,105 27,83" fill="#60a5fa" stroke="#1e3a8a" stroke-width="1.3"/>
+    </g>
+    <text x="105" y="675" text-anchor="middle" class="icon-label" fill="#166534">Execution Plan (DAG)</text>
+
+    <!-- Execution Engine — plan_run + Result Cache, vertically stacked for balance -->
+    <g transform="translate(220, 540)">
+      <rect width="400" height="140" rx="10" fill="#bbf7d0" stroke="#166534" stroke-width="1.8"/>
+      <text x="200" y="24" text-anchor="middle" class="group-title" fill="#166534">Execution Engine</text>
+
+      <!-- plan_run panel (left half) -->
+      <g transform="translate(20, 38)">
+        <rect width="180" height="88" rx="8" fill="#ffffff" stroke="#166534" stroke-width="1.5"/>
+        <text x="90" y="26" text-anchor="middle" class="box-title">plan_run</text>
+        <text x="90" y="44" text-anchor="middle" class="box-sub">Parallel DAG Executor</text>
+        <!-- tiny DAG glyph -->
+        <g transform="translate(90, 68)">
+          <g stroke="#166534" stroke-width="1.2" fill="none">
+            <line x1="-22" y1="-2"  x2="0"  y2="-12"/>
+            <line x1="22"  y1="-2"  x2="0"  y2="-12"/>
+            <line x1="-22" y1="-2"  x2="0"  y2="10"/>
+            <line x1="22"  y1="-2"  x2="0"  y2="10"/>
+          </g>
+          <circle cx="0"   cy="-12" r="4.5" fill="#166534"/>
+          <circle cx="-22" cy="-2"  r="4.5" fill="#166534"/>
+          <circle cx="22"  cy="-2"  r="4.5" fill="#166534"/>
+          <circle cx="0"   cy="10"  r="4.5" fill="#166534"/>
+        </g>
+      </g>
+
+      <!-- bidirectional arrow between plan_run and cache -->
+      <g stroke="#166534" stroke-width="1.8" fill="none">
+        <line x1="205" y1="82" x2="218" y2="82"/>
+      </g>
+      <polygon points="205,78 205,86 199,82" fill="#166534"/>
+      <polygon points="218,78 218,86 224,82" fill="#166534"/>
+
+      <!-- Result Cache panel (right half) -->
+      <g transform="translate(225, 38)">
+        <rect width="155" height="88" rx="8" fill="#ffffff" stroke="#166534" stroke-width="1.5"/>
+        <text x="77" y="24" text-anchor="middle" class="box-title">Result Cache</text>
+        <!-- cylinder -->
+        <g transform="translate(77, 48)">
+          <ellipse cx="0" cy="0" rx="32" ry="6" fill="#dcfce7" stroke="#166534" stroke-width="1.2"/>
+          <path d="M-32,0 L-32,24 A32,6 0 0 0 32,24 L32,0" fill="#dcfce7" stroke="#166534" stroke-width="1.2"/>
+          <ellipse cx="0" cy="0" rx="32" ry="6" fill="#dcfce7" stroke="#166534" stroke-width="1.2"/>
+          <text x="0" y="18" text-anchor="middle" font-size="10" fill="#166534" font-weight="700">T1</text>
+        </g>
+      </g>
+    </g>
+
+    <!-- Defined Operator Set — structured 3-column grid, primaries vs. extensions -->
+    <g transform="translate(660, 540)">
+      <rect width="680" height="140" rx="10" fill="#ffffff" stroke="#166534" stroke-width="1.8"/>
+      <text x="340" y="24" text-anchor="middle" class="group-title" fill="#166534">Defined Operator Set</text>
+
+      <!-- column dividers (subtle) -->
+      <line x1="238" y1="38" x2="238" y2="128" stroke="#d1fae5" stroke-width="1"/>
+      <line x1="460" y1="38" x2="460" y2="128" stroke="#d1fae5" stroke-width="1"/>
+
+      <!-- Column 1 header: Retrieval -->
+      <text x="119" y="52" text-anchor="middle" font-size="10" font-weight="700" fill="#166534" letter-spacing="0.5">RETRIEVAL</text>
+      <g font-size="12" fill="#0f172a" font-weight="600">
+        <text x="35"  y="74">Search</text>
+        <text x="130" y="74">Query</text>
+        <text x="35"  y="96">Traverse</text>
+        <text x="130" y="96">FindNode</text>
+        <text x="35"  y="118">Filter</text>
+        <text x="130" y="118">GroupBy</text>
+      </g>
+
+      <!-- Column 2 header: Synthesis -->
+      <text x="349" y="52" text-anchor="middle" font-size="10" font-weight="700" fill="#166534" letter-spacing="0.5">SYNTHESIS</text>
+      <g font-size="12" fill="#0f172a" font-weight="600">
+        <text x="260" y="74">Extract</text>
+        <text x="360" y="74">Summarize</text>
+        <text x="260" y="96">Compare</text>
+        <text x="360" y="96">Rank</text>
+        <text x="260" y="118">Generate</text>
+        <text x="360" y="118">Aggregate</text>
+      </g>
+
+      <!-- Column 3 header: State -->
+      <text x="570" y="52" text-anchor="middle" font-size="10" font-weight="700" fill="#166534" letter-spacing="0.5">STATE</text>
+      <g font-size="12" fill="#0f172a" font-weight="600">
+        <text x="485" y="74">memory_*</text>
+        <text x="590" y="74">store_*</text>
+        <text x="485" y="96">plan_*</text>
+        <text x="590" y="96">scratch_*</text>
+        <text x="485" y="118">catalog_link</text>
+        <text x="590" y="118">operator_*</text>
+      </g>
+    </g>
+
+    <!-- arrows: DAG → Engine, Engine → Operators -->
+    <path d="M160,605 L216,605" fill="none" stroke="#1e293b" stroke-width="1.6" marker-end="url(#arrow)"/>
+    <path d="M622,610 L656,610" fill="none" stroke="#1e293b" stroke-width="1.6" marker-end="url(#arrow)"/>
+  </g>
+
+  <!-- ======================================================= -->
+  <!-- KNOWLEDGE REPRESENTATION LAYER                          -->
+  <!-- ======================================================= -->
+  <g>
+    <rect x="20" y="710" width="1360" height="430" rx="14" fill="#f3e8ff" stroke="#6b21a8" stroke-width="2"/>
+    <text x="40" y="738" class="layer-title" fill="#6b21a8">Knowledge Representation Layer</text>
+
+    <g transform="translate(50, 860)">
+      <path d="M22,14 L74,14 L86,26 L86,104 L22,104 Z" fill="#faf5ff" stroke="#6b21a8" stroke-width="1.2"/>
+      <path d="M11,7 L63,7 L75,19 L75,97 L11,97 Z" fill="#faf5ff" stroke="#6b21a8" stroke-width="1.2"/>
+      <path d="M0,0 L52,0 L64,12 L64,90 L0,90 Z" fill="#faf5ff" stroke="#6b21a8" stroke-width="1.5"/>
+      <path d="M52,0 L52,12 L64,12" fill="none" stroke="#6b21a8" stroke-width="1.5"/>
+      <line x1="8" y1="22" x2="56" y2="22" stroke="#cbd5e1" stroke-width="1"/>
+      <line x1="8" y1="32" x2="56" y2="32" stroke="#cbd5e1" stroke-width="1"/>
+      <line x1="8" y1="42" x2="56" y2="42" stroke="#cbd5e1" stroke-width="1"/>
+      <line x1="8" y1="52" x2="56" y2="52" stroke="#cbd5e1" stroke-width="1"/>
+      <line x1="8" y1="62" x2="44" y2="62" stroke="#cbd5e1" stroke-width="1"/>
+    </g>
+    <text x="93" y="985" text-anchor="middle" class="icon-label" fill="#6b21a8">Source Documents</text>
+    <text x="93" y="1000" text-anchor="middle" font-size="10" fill="#6b21a8" font-style="italic">code · prose · PDF · RDR</text>
+
+    <g transform="translate(195, 830)">
+      <rect width="260" height="170" rx="10" fill="#ffffff" stroke="#6b21a8" stroke-width="2"/>
+      <text x="130" y="28" text-anchor="middle" class="box-title">Inner-document</text>
+      <text x="130" y="46" text-anchor="middle" class="box-title">Content Extractor</text>
+      <line x1="30" y1="58" x2="230" y2="58" stroke="#e9d5ff" stroke-width="1"/>
+      <text x="130" y="78"  text-anchor="middle" class="box-text">classifier → chunker</text>
+      <text x="130" y="93"  text-anchor="middle" class="box-sub">tree-sitter · 31 languages</text>
+      <text x="130" y="112" text-anchor="middle" class="box-text">code_indexer · prose_indexer</text>
+      <text x="130" y="127" text-anchor="middle" class="box-text">pdf_extractor</text>
+      <text x="130" y="142" text-anchor="middle" class="box-sub">Docling → MinerU → PyMuPDF</text>
+      <text x="130" y="158" text-anchor="middle" class="box-text">bib_enricher</text>
+    </g>
+
+    <line x1="142" y1="905" x2="192" y2="905" stroke="#1e293b" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+    <!-- Extractor → Taxonomy with centered label above -->
+    <path d="M455,905 L572,905" fill="none" stroke="#1e293b" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="513" y="880" text-anchor="middle" class="arrow-label-i">Scholarly Document</text>
+    <text x="513" y="894" text-anchor="middle" class="arrow-label-i">Knowledge</text>
+
+    <g transform="translate(575, 850)">
+      <rect width="260" height="130" rx="10" fill="#ffffff" stroke="#6b21a8" stroke-width="2"/>
+      <text x="130" y="28" text-anchor="middle" class="box-title">Problem / Method</text>
+      <text x="130" y="46" text-anchor="middle" class="box-title">Taxonomy Construction</text>
+      <line x1="30" y1="58" x2="230" y2="58" stroke="#e9d5ff" stroke-width="1"/>
+      <text x="130" y="80"  text-anchor="middle" class="box-text">CatalogTaxonomy</text>
+      <text x="130" y="98"  text-anchor="middle" class="box-sub">BERTopic + HDBSCAN</text>
+      <text x="130" y="116" text-anchor="middle" class="box-sub">per-collection topic model</text>
+    </g>
+
+    <g transform="translate(575, 1010)">
+      <rect width="260" height="110" rx="10" fill="#ffffff" stroke="#6b21a8" stroke-width="2"/>
+      <text x="130" y="26" text-anchor="middle" class="box-title">Progressive Update</text>
+      <line x1="30" y1="38" x2="230" y2="38" stroke="#e9d5ff" stroke-width="1"/>
+      <text x="130" y="58"  text-anchor="middle" class="box-text">auto_linker (on store_put)</text>
+      <text x="130" y="74"  text-anchor="middle" class="box-text">taxonomy_assign_hook</text>
+      <text x="130" y="90"  text-anchor="middle" class="box-text">link_generator</text>
+      <text x="130" y="104" text-anchor="middle" class="box-sub">citation · code-RDR · file-path</text>
+    </g>
+
+    <path d="M93,970 L93,1060 L572,1060" fill="none" stroke="#475569" stroke-width="1.4" stroke-dasharray="5,3" marker-end="url(#arrow-dim)"/>
+    <text x="105" y="1055" class="arrow-label-i">new documents</text>
+
+    <line x1="705" y1="1010" x2="705" y2="980" stroke="#1e293b" stroke-width="1.5"
+          marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+
+    <text x="870" y="885" class="arrow-label" fill="#6b21a8">construct</text>
+    <path d="M835,900 L1040,895" fill="none" stroke="#6b21a8" stroke-width="1.6" marker-end="url(#arrow-purple)"/>
+
+    <g transform="translate(1040, 830)">
+      <rect width="320" height="290" rx="12" fill="#ffffff" stroke="#6b21a8" stroke-width="1.8"/>
+      <circle cx="160" cy="135" r="110" fill="#f3e8ff" opacity="0.5"/>
+
+      <g stroke="#6b21a8" stroke-width="1.3" fill="none">
+        <line x1="80"  y1="75"  x2="160" y2="55"/>
+        <line x1="160" y1="55"  x2="245" y2="85"/>
+        <line x1="80"  y1="75"  x2="60"  y2="150"/>
+        <line x1="60"  y1="150" x2="130" y2="180"/>
+        <line x1="130" y1="180" x2="200" y2="165"/>
+        <line x1="200" y1="165" x2="245" y2="85"/>
+        <line x1="160" y1="55"  x2="130" y2="180"/>
+        <line x1="200" y1="165" x2="265" y2="210"/>
+        <line x1="130" y1="180" x2="100" y2="230"/>
+        <line x1="245" y1="85"  x2="280" y2="155"/>
+        <line x1="60"  y1="150" x2="100" y2="230"/>
+      </g>
+
+      <g stroke="#7c2d12" stroke-width="1.5">
+        <circle cx="80"  cy="75"  r="11" fill="#fb923c"/>
+        <circle cx="160" cy="55"  r="13" fill="#fb923c"/>
+        <circle cx="245" cy="85"  r="11" fill="#fb923c"/>
+        <circle cx="100" cy="230" r="11" fill="#fb923c"/>
+      </g>
+      <g stroke="#6b21a8" stroke-width="1.3" fill="#ffffff">
+        <circle cx="60"  cy="150" r="8"/>
+        <circle cx="130" cy="180" r="8"/>
+        <circle cx="200" cy="165" r="8"/>
+        <circle cx="265" cy="210" r="8"/>
+        <circle cx="280" cy="155" r="8"/>
+      </g>
+
+      <text x="160" y="270" text-anchor="middle" class="group-title" fill="#6b21a8">Nexus Knowledge Graph</text>
+      <text x="160" y="285" text-anchor="middle" font-size="10" fill="#6b21a8" font-style="italic">T1 · T2 · T3  —  tumblers + typed links</text>
+    </g>
+  </g>
+
+</svg>

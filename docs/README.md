@@ -8,6 +8,7 @@ Nexus provides persistent memory and semantic search for AI coding agents. Begin
 
 ## Core Concepts
 
+- [Architecture](architecture.md) — Four-layer reference architecture diagram and module map
 - [Storage Tiers](storage-tiers.md) — T1 (inter-agent session context), T2 (project memory), T3 (semantic knowledge) — architecture and data flow
 - [Document Catalog](catalog.md) — Track every indexed document and the links between them — citations, implementations, provenance
 - [Memory and Tasks](memory-and-tasks.md) — T2 memory, beads integration, session context
