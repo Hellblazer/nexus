@@ -41,16 +41,18 @@ def doc() -> None:
     """Doc-build token rendering (RDR-082)."""
 
 
-def _default_registry(project_root: Path) -> ResolverRegistry:
+def _default_registry(
+    project_root: Path, *, db: T2Database | None = None,
+) -> ResolverRegistry:
     """Build the default Resolver registry: bead + RDR system-of-record
     resolvers (RDR-082) plus corpus-evidence resolvers (RDR-083) when
-    T2 is reachable.
+    a T2Database is supplied.
 
-    If T2 can't be opened (fresh install, no db) we silently degrade
-    to the bead + RDR pair — a project that has no projection data
-    has nothing for ``nx-anchor`` to render anyway.
+    Callers opening a live T2Database should pass it in so resolvers
+    that need taxonomy data see a non-closed connection; without *db*,
+    only the bead + RDR resolvers register.
     """
-    cfg = {}
+    cfg: dict = {}
     try:
         cfg = load_config(project_root)
     except Exception:
@@ -62,15 +64,8 @@ def _default_registry(project_root: Path) -> ResolverRegistry:
         "bd": BeadResolver(),
         "rdr": RdrResolver(rdr_dir=rdr_dir),
     })
-
-    # RDR-083: corpus-evidence resolvers.  Register lazily — if T2 is
-    # unreachable we skip rather than crash the render.
-    try:
-        db = T2Database(default_db_path())
+    if db is not None:
         registry.register("nx-anchor", AnchorResolver(taxonomy=db.taxonomy))
-    except Exception:
-        pass
-
     return registry
 
 
@@ -98,32 +93,45 @@ def render_cmd(
 ) -> None:
     """Render markdown tokens into resolved sidecar files."""
     root = project_root or Path.cwd()
-    registry = _default_registry(root)
+
+    # Open T2 inside a context manager; resolvers live for the duration
+    # of the command. Best-effort — if T2 can't be opened (fresh
+    # install, no db), fall back to bead + RDR resolvers only.
+    db: T2Database | None = None
+    try:
+        db = T2Database(default_db_path())
+    except Exception:
+        db = None
 
     total_resolved = 0
     total_misses = 0
     try:
-        for path in paths:
-            result = render_file(
-                path,
-                registry,
-                out_dir=out_dir,
-                allow_unresolved=allow_unresolved,
-                emit=True,
-            )
-            total_resolved += result.resolved
-            for tok, reason in result.unresolved:
-                click.echo(
-                    f"{path}:{tok.lineno}:{tok.col}: unresolved {tok.raw} — {reason}",
-                    err=True,
+        registry = _default_registry(root, db=db)
+        try:
+            for path in paths:
+                result = render_file(
+                    path,
+                    registry,
+                    out_dir=out_dir,
+                    allow_unresolved=allow_unresolved,
+                    emit=True,
                 )
-                total_misses += 1
-    except RenderError as exc:
-        click.echo(f"render error: {exc}", err=True)
-        sys.exit(1)
-    except OSError as exc:
-        click.echo(f"io error: {exc}", err=True)
-        sys.exit(2)
+                total_resolved += result.resolved
+                for tok, reason in result.unresolved:
+                    click.echo(
+                        f"{path}:{tok.lineno}:{tok.col}: unresolved {tok.raw} — {reason}",
+                        err=True,
+                    )
+                    total_misses += 1
+        except RenderError as exc:
+            click.echo(f"render error: {exc}", err=True)
+            sys.exit(1)
+        except OSError as exc:
+            click.echo(f"io error: {exc}", err=True)
+            sys.exit(2)
+    finally:
+        if db is not None:
+            db.close()
 
     click.echo(f"rendered {total_resolved} tokens across {len(paths)} file(s)")
     if total_misses:
@@ -139,25 +147,35 @@ def render_cmd(
 def validate_cmd(paths: tuple[Path, ...], project_root: Path | None) -> None:
     """Parse + resolve without emitting. Exits non-zero on any miss."""
     root = project_root or Path.cwd()
-    registry = _default_registry(root)
+
+    db: T2Database | None = None
+    try:
+        db = T2Database(default_db_path())
+    except Exception:
+        db = None
 
     total_misses = 0
     total_ok = 0
-    for path in paths:
-        try:
-            result = render_file(
-                path, registry, allow_unresolved=True, emit=False,
-            )
-        except OSError as exc:
-            click.echo(f"io error: {exc}", err=True)
-            sys.exit(2)
-        for tok, reason in result.unresolved:
-            click.echo(
-                f"{path}:{tok.lineno}:{tok.col}: {tok.raw} — {reason}",
-                err=True,
-            )
-            total_misses += 1
-        total_ok += result.resolved
+    try:
+        registry = _default_registry(root, db=db)
+        for path in paths:
+            try:
+                result = render_file(
+                    path, registry, allow_unresolved=True, emit=False,
+                )
+            except OSError as exc:
+                click.echo(f"io error: {exc}", err=True)
+                sys.exit(2)
+            for tok, reason in result.unresolved:
+                click.echo(
+                    f"{path}:{tok.lineno}:{tok.col}: {tok.raw} — {reason}",
+                    err=True,
+                )
+                total_misses += 1
+            total_ok += result.resolved
+    finally:
+        if db is not None:
+            db.close()
 
     click.echo(
         f"validated {total_ok} tokens across {len(paths)} file(s); "
@@ -254,11 +272,15 @@ def check_extensions_cmd(
     threshold: float,
     output_format: str,
 ) -> None:
-    """Flag doc chunks that don't project into a primary source.
+    """[experimental] Flag doc chunks that don't project into a primary source.
 
-    The doc's own chunks are keyed by the ``chash:`` citations it
-    contains — absence of projection into ``--primary-source`` is
-    treated as an author-extension candidate.
+    v1 limitation (RDR-083): ``doc_ids`` are taken as the set of
+    ``chash:`` hex values in prose, but ``topic_assignments.doc_id``
+    stores ChromaDB collection-scoped document IDs — a different
+    namespace. Until chash→doc-id resolution ships, this command cannot
+    produce meaningful candidates; it will report every input as
+    ``no-data``. A warning fires loudly when that happens so you know
+    the result is not a quality signal.
     """
     import json
     from nexus.commands._helpers import default_db_path
@@ -266,35 +288,42 @@ def check_extensions_cmd(
 
     results = []
     any_candidate = False
+    all_no_data = True   # RDR-083 v1 inertness signal
+    examined_any = False
+
     try:
-        db = T2Database(default_db_path())
-    except Exception as exc:
+        with T2Database(default_db_path()) as db:
+            for path in paths:
+                text = path.read_text(errors="replace")
+                cites = scan_citations(text)
+                # v1: collect the unique chash values as proxy doc ids;
+                # when chash-to-doc resolution lands, swap this out for
+                # the resolved document ids.
+                doc_ids = sorted({c.chash for c in cites if c.chash})
+                report = extensions_report(
+                    doc_ids,
+                    primary_source=primary_source,
+                    threshold=threshold,
+                    taxonomy=db.taxonomy,
+                )
+                if report.checked > 0:
+                    examined_any = True
+                    if len(report.no_data) < report.checked:
+                        all_no_data = False
+                results.append({
+                    "path": str(path),
+                    "checked": report.checked,
+                    "candidates": [
+                        {"doc_id": d, "similarity": s}
+                        for d, s in report.candidates
+                    ],
+                    "no_data": list(report.no_data),
+                })
+                if report.candidates:
+                    any_candidate = True
+    except sqlite_errors() as exc:
         click.echo(f"cannot open T2: {exc}", err=True)
         sys.exit(2)
-
-    for path in paths:
-        text = path.read_text(errors="replace")
-        cites = scan_citations(text)
-        # v1: collect the unique chash values as proxy doc ids; when
-        # chash-to-doc resolution lands, swap this out for the resolved
-        # document ids.
-        doc_ids = sorted({c.chash for c in cites if c.chash})
-        report = extensions_report(
-            doc_ids,
-            primary_source=primary_source,
-            threshold=threshold,
-            taxonomy=db.taxonomy,
-        )
-        results.append({
-            "path": str(path),
-            "checked": report.checked,
-            "candidates": [
-                {"doc_id": d, "similarity": s} for d, s in report.candidates
-            ],
-            "no_data": list(report.no_data),
-        })
-        if report.candidates:
-            any_candidate = True
 
     if output_format == "json":
         click.echo(json.dumps(results, indent=2))
@@ -312,5 +341,23 @@ def check_extensions_cmd(
                     f"  candidate: {c['doc_id'][:40]} "
                     f"(similarity={c['similarity']:.3f})"
                 )
+
+    if examined_any and all_no_data:
+        click.echo(
+            "\nWARNING: every input had no projection data. This is the "
+            "RDR-083 v1 inertness case — chash values don't match the "
+            "ChromaDB doc_ids stored in topic_assignments. Result is NOT a "
+            "quality signal until chash→doc-id resolution ships.",
+            err=True,
+        )
+
     if any_candidate:
         sys.exit(1)
+
+
+def sqlite_errors() -> tuple[type[BaseException], ...]:
+    """Broad exception tuple for T2 open failures — sqlite3.DatabaseError
+    plus anything else the facade may raise."""
+    import sqlite3
+
+    return (sqlite3.Error, OSError)

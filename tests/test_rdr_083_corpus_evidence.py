@@ -80,6 +80,41 @@ class TestCitationScanner:
         cites = scan_citations(md)
         assert [c for c in cites if c.kind == "chash"] == []
 
+    @pytest.mark.parametrize("token", [
+        "[Error 2013]",
+        "[RFC 2119]",
+        "[Note 2024]",
+        "[Figure 2020]",
+        "[Table 2023]",
+        "[Closes 2025]",
+        "[Fixes 2024]",
+        "[Issue 2022]",
+        "[Draft 2025]",
+        "[Release 2024]",
+        "[Section 2020]",
+        "[Warning 2023]",
+    ])
+    def test_prose_stoplist_suppresses_false_positives(self, token: str) -> None:
+        """Dev-prose false-positives must not inflate the prose count."""
+        from nexus.doc.citations import scan_citations
+
+        cites = scan_citations(f"See {token} for the derivation.")
+        assert [c for c in cites if c.kind == "prose"] == [], (
+            f"{token} should have been suppressed by the stop-list"
+        )
+
+    def test_real_author_citations_still_detected_after_stoplist(self) -> None:
+        """Stop-list must not regress the positive case."""
+        from nexus.doc.citations import scan_citations
+
+        md = (
+            "Per [Grossberg 2013] and [Ashby 1956], the loop is stable. "
+            "Not [Note 2024] though."
+        )
+        prose = [c for c in scan_citations(md) if c.kind == "prose"]
+        displays = sorted(c.display for c in prose)
+        assert displays == ["Ashby 1956", "Grossberg 2013"]
+
 
 # ── AnchorResolver — RDR-082 extension point ─────────────────────────────────
 

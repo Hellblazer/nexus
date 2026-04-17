@@ -60,9 +60,43 @@ _CHASH_LINK_RE = re.compile(
 #   - Author starts with a capital letter
 #   - year is 4 digits
 #   - case: [Grossberg 2013], [Smith, J. 2020]
+#
+# Stop-list suppresses common non-citation bracketed tokens in dev
+# prose (changelogs, commit messages, RDR bodies): [Error 2013],
+# [RFC 2119], [Note 2024], [Closes 2025], [Figure 2020], etc.
 _PROSE_CITE_RE = re.compile(
     r"\[(?P<author>[A-Z][A-Za-z.\-' ,]{1,40}?)\s+(?P<year>\d{4})\]"
 )
+
+_PROSE_CITE_STOPLIST = frozenset({
+    # Commit / PR / issue framing
+    "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves",
+    "resolved", "issue", "pr", "note", "notes", "draft", "release",
+    "version", "v", "rev", "revision",
+    # Doc structure
+    "figure", "fig", "table", "section", "chapter", "appendix",
+    "equation", "eq",
+    # Standards / IDs
+    "rfc", "iso", "iec", "ietf", "ansi", "w3c",
+    # Log levels
+    "error", "warn", "warning", "info", "debug", "trace", "fatal",
+    "critical",
+    # Generic markers
+    "todo", "fixme", "xxx", "hack", "deprecated",
+})
+
+
+def _is_real_prose_citation(author: str) -> bool:
+    """Filter false-positives from the prose-citation regex.
+
+    Returns False for stop-list entries, single letters, and 2-char
+    segments that are almost never real author names.
+    """
+    head = author.split()[0].lower().rstrip(",.")
+    if head in _PROSE_CITE_STOPLIST:
+        return False
+    alpha = sum(ch.isalpha() for ch in head)
+    return alpha >= 3
 
 # Bracketed number: [12], [3], [99] — must be digits only to avoid
 #   conflict with wiki/task-list markers like [x] or [12 ideas].
@@ -92,9 +126,12 @@ def scan_citations(md_text: str) -> list[Citation]:
         for m in _PROSE_CITE_RE.finditer(line):
             if _in_chash(m.start()):
                 continue
+            author = m.group("author")
+            if not _is_real_prose_citation(author):
+                continue
             cites.append(Citation(
                 kind="prose",
-                display=f"{m.group('author')} {m.group('year')}",
+                display=f"{author} {m.group('year')}",
                 lineno=lineno,
                 col=m.start() + 1,
             ))
