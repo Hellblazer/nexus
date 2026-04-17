@@ -228,6 +228,60 @@ class TestPurgeCollection:
 class TestCollectionDeleteCommandCascades:
     """Integration: `nx collection delete` cascades via Click entry point."""
 
+    def test_cli_delete_cascades_when_t3_collection_absent(self, tmp_path):
+        """Discovered during 4.5.0 shakeout: if the Chroma collection is
+        already gone (previous delete left orphan taxonomy rows), the T3
+        delete raises NotFoundError. The cascade MUST still run so the
+        orphans can be cleaned up — otherwise the recovery case never
+        terminates and users are stuck with manual sqlite surgery per
+        the pre-fix workaround."""
+        from click.testing import CliRunner
+        from chromadb.errors import NotFoundError
+        from unittest.mock import MagicMock, patch
+
+        from nexus.db.t2 import T2Database
+        from nexus.commands.collection import delete_cmd
+
+        db_path = tmp_path / "memory.db"
+        db = T2Database(db_path)
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, centroid_hash, "
+            "doc_count, terms, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            ("Orphan", "docs__gone", "h", 1, "[]", "2026-04-17T00:00:00Z"),
+        )
+        db.taxonomy.conn.commit()
+        db.close()
+
+        fake_t3 = MagicMock()
+        fake_t3.delete_collection = MagicMock(
+            side_effect=NotFoundError("Collection [docs__gone] does not exist")
+        )
+
+        runner = CliRunner()
+        with patch("nexus.commands.collection._t3", return_value=fake_t3), \
+             patch("nexus.mcp_infra.default_db_path", return_value=db_path), \
+             patch(
+                 "nexus.commands._helpers.default_db_path",
+                 return_value=db_path,
+             ):
+            result = runner.invoke(delete_cmd, ["docs__gone", "--yes"])
+
+        assert result.exit_code == 0, result.output
+        assert "already absent" in result.output, (
+            f"Expected informational note that T3 collection was absent. "
+            f"Got: {result.output!r}"
+        )
+
+        # Cascade DID run despite the NotFoundError
+        with T2Database(db_path) as verify_db:
+            remaining = verify_db.taxonomy.conn.execute(
+                "SELECT COUNT(*) FROM topics WHERE collection = ?",
+                ("docs__gone",),
+            ).fetchone()[0]
+        assert remaining == 0, (
+            "Cascade must run even when T3 collection is absent"
+        )
+
     def test_cli_delete_calls_purge_collection(self, tmp_path, monkeypatch):
         """The CLI path must invoke purge_collection after the Chroma
         delete — not skip it, not run before (order matters for the
