@@ -219,8 +219,10 @@ class TestRenderer:
         reg = ResolverRegistry({"bd": fake_bd, "rdr": fake_rdr})
 
         md = "Status: {{bd:x.status}} and RDR: {{rdr:072.title}}"
-        out = render_text(md, reg)
+        out, resolved, misses = render_text(md, reg)
         assert out == "Status: bd-x-status and RDR: rdr-072-title"
+        assert resolved == 2
+        assert misses == []
 
     def test_unresolved_namespace_raises(self) -> None:
         from nexus.doc.render import render_text, RenderError
@@ -247,12 +249,15 @@ class TestRenderer:
         from nexus.doc.resolvers import ResolverRegistry
 
         reg = ResolverRegistry({})
-        out = render_text(
+        out, resolved, misses = render_text(
             "{{bd:x.status}} and plain text",
             reg,
             allow_unresolved=True,
         )
         assert "{{bd:x.status}}" in out
+        assert resolved == 0
+        assert len(misses) == 1
+        assert "no resolver for namespace 'bd'" in misses[0][1]
 
     def test_tokens_inside_fenced_code_untouched(self) -> None:
         from nexus.doc.render import render_text
@@ -267,10 +272,11 @@ class TestRenderer:
             "```\n"
             "Real: {{bd:y.status}}\n"
         )
-        out = render_text(md, reg)
+        out, resolved, _ = render_text(md, reg)
         # Fenced instance preserved verbatim; non-fenced substituted
         assert "```\nSample: {{bd:x.status}}\n```\n" in out
         assert "Real: RESOLVED" in out
+        assert resolved == 1
 
 
 # ── Extension point — RDR-083 forward-compat ─────────────────────────────────
@@ -279,6 +285,57 @@ class TestRenderer:
 class TestResolverRegistryExtensibility:
     """RDR-083's AnchorResolver must plug in without touching parser,
     engine, or CLI. This test protects that invariant."""
+
+    def test_mirror_tree_preserves_relative_path_under_out_dir(
+        self, tmp_path: Path,
+    ) -> None:
+        """Gate fix (082 Sig #2): --out-dir must mirror the source tree,
+        not flatten every rendered file to the same directory."""
+        from nexus.doc.render import render_file
+        from nexus.doc.resolvers import ResolverRegistry
+
+        # Build: <tmp>/src/docs/rdr/doc.md
+        root = tmp_path / "src"
+        nested = root / "docs" / "rdr"
+        nested.mkdir(parents=True)
+        source = nested / "doc.md"
+        source.write_text("no tokens here\n")
+
+        out_dir = tmp_path / "out"
+        render_file(
+            source, ResolverRegistry({}), out_dir=out_dir,
+            emit=True, source_root=root,
+        )
+        expected = out_dir / "docs" / "rdr" / "doc.rendered.md"
+        assert expected.exists(), (
+            f"mirror-tree destination not found: {expected}. "
+            f"Directory contents: {list(out_dir.rglob('*'))}"
+        )
+
+    def test_resolved_count_excludes_failed_resolutions(self) -> None:
+        """Gate fix (082 Sig #1): render_file's resolved count must NOT
+        include tokens that raised ResolutionError. Previously it counted
+        every registered-namespace token as resolved regardless of outcome."""
+        from nexus.doc.render import render_text
+        from nexus.doc.resolvers import ResolutionError, ResolverRegistry
+
+        fake = MagicMock()
+
+        def _resolve(key, field, filters):
+            if key == "bad":
+                raise ResolutionError("boom")
+            return "OK"
+
+        fake.resolve = _resolve
+        reg = ResolverRegistry({"bd": fake})
+
+        md = "{{bd:good.x}} and {{bd:bad.x}} and {{bd:good.y}}"
+        out, resolved, misses = render_text(md, reg, allow_unresolved=True)
+        assert resolved == 2, (
+            f"Expected 2 resolved, got {resolved}. Misses: {misses}"
+        )
+        assert len(misses) == 1
+        assert "boom" in misses[0][1]
 
     def test_third_party_namespace_registers_and_resolves(self) -> None:
         from nexus.doc.render import render_text
@@ -291,5 +348,5 @@ class TestResolverRegistryExtensibility:
 
         reg = ResolverRegistry({})
         reg.register("nx-anchor", FakeAnchor())
-        out = render_text("Anchors: {{nx-anchor:docs__x|top=5}}", reg)
+        out, _, _ = render_text("Anchors: {{nx-anchor:docs__x|top=5}}", reg)
         assert "top-5 topics for docs__x" in out

@@ -181,8 +181,9 @@ class TestAnchorResolver:
         reg.register("nx-anchor", AnchorResolver(taxonomy=fake_tax))
 
         md = "Corpus shape: {{nx-anchor:docs__art|top=2}}"
-        out = render_text(md, reg)
+        out, resolved, _ = render_text(md, reg)
         assert "Boundary Feedback" in out and "Top-Down Expectation" in out
+        assert resolved == 1
 
 
 # ── check-grounding logic ────────────────────────────────────────────────────

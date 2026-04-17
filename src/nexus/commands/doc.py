@@ -115,6 +115,7 @@ def render_cmd(
                     out_dir=out_dir,
                     allow_unresolved=allow_unresolved,
                     emit=True,
+                    source_root=root,
                 )
                 total_resolved += result.resolved
                 for tok, reason in result.unresolved:

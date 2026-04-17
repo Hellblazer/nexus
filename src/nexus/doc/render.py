@@ -38,14 +38,23 @@ def render_text(
     registry: ResolverRegistry,
     *,
     allow_unresolved: bool = False,
-) -> str:
-    """Return *text* with every in-scope token substituted."""
+) -> tuple[str, int, list[tuple[Token, str]]]:
+    """Return ``(output, resolved_count, misses)``.
+
+    ``resolved_count`` only counts tokens that a registered resolver
+    handled without raising. Tokens with no registered namespace or
+    ones that raise ``ResolutionError`` are misses; when
+    ``allow_unresolved`` is False the first miss raises ``RenderError``,
+    otherwise they accumulate in the ``misses`` list and the literal
+    token text is preserved in the output.
+    """
     tokens = parse_tokens(text)
     if not tokens:
-        return text
+        return text, 0, []
 
     out_parts: list[str] = []
     last = 0
+    resolved = 0
     misses: list[tuple[Token, str]] = []
 
     for tok in tokens:
@@ -65,6 +74,7 @@ def render_text(
             try:
                 value = resolver.resolve(tok.key, tok.field, tok.filters)
                 out_parts.append(value)
+                resolved += 1
             except ResolutionError as exc:
                 if allow_unresolved:
                     out_parts.append(tok.raw)
@@ -77,7 +87,7 @@ def render_text(
         last = end
 
     out_parts.append(text[last:])
-    return "".join(out_parts)
+    return "".join(out_parts), resolved, misses
 
 
 def render_file(
@@ -87,6 +97,7 @@ def render_file(
     out_dir: Path | None = None,
     allow_unresolved: bool = False,
     emit: bool = True,
+    source_root: Path | None = None,
 ) -> RenderResult:
     """Render *path*, writing a ``<stem>.rendered.md`` sibling by default.
 
@@ -94,46 +105,42 @@ def render_file(
         path: Source markdown.
         registry: Namespace → Resolver registry.
         out_dir: When set, writes the rendered sibling inside this
-            directory instead of next to the source (mirrors the source
-            directory structure). When ``None``, writes a sibling.
+            directory. The source's *relative* path (against
+            *source_root*) is preserved — a mirror tree.
+        source_root: Anchor for mirror-tree relative-path computation.
+            Defaults to ``Path.cwd()``. Ignored when ``out_dir`` is None.
         allow_unresolved: If True, unresolved tokens are preserved
             verbatim in the output and collected in the result.
         emit: When False, the output is computed but NOT written to
             disk — the ``nx doc validate`` mode.
     """
     text = path.read_text()
-    resolved_count = _count_resolvable_tokens(text, registry)
-    out = render_text(text, registry, allow_unresolved=allow_unresolved)
-
-    misses: list[tuple[Token, str]] = []
-    if allow_unresolved:
-        # Re-scan to collect misses (the render loop discards them when
-        # the caller asked for permissive mode; callers that need a
-        # miss report pay one extra pass here — cheap vs render cost).
-        for tok in parse_tokens(text):
-            resolver = registry.get(tok.namespace)
-            if resolver is None:
-                misses.append((tok, f"no resolver for namespace {tok.namespace!r}"))
-                continue
-            try:
-                resolver.resolve(tok.key, tok.field, tok.filters)
-            except ResolutionError as exc:
-                misses.append((tok, str(exc)))
-
+    out, resolved_count, misses = render_text(
+        text, registry, allow_unresolved=allow_unresolved,
+    )
     if emit:
-        dest = _rendered_sibling(path, out_dir)
+        dest = _rendered_sibling(path, out_dir, source_root)
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(out)
-
     return RenderResult(output=out, resolved=resolved_count, unresolved=misses)
 
 
-def _count_resolvable_tokens(text: str, registry: ResolverRegistry) -> int:
-    return sum(1 for tok in parse_tokens(text) if tok.namespace in registry)
+def _rendered_sibling(
+    path: Path, out_dir: Path | None, source_root: Path | None = None,
+) -> Path:
+    """Compute the destination path for a rendered sibling.
 
-
-def _rendered_sibling(path: Path, out_dir: Path | None) -> Path:
+    When *out_dir* is None, the sibling lives next to the source with
+    a ``.rendered`` stem suffix. When *out_dir* is set, the source's
+    path relative to *source_root* (default: cwd) is preserved under
+    *out_dir* — a mirror tree. Sources outside *source_root* fall back
+    to basename-only placement under *out_dir*.
+    """
     if out_dir is None:
         return path.with_suffix(f".rendered{path.suffix}")
-    # Mirror tree: preserve the source file's stem + ".rendered"
-    return (out_dir / path.name).with_suffix(f".rendered{path.suffix}")
+    anchor = (source_root or Path.cwd()).resolve()
+    try:
+        rel = path.resolve().relative_to(anchor)
+    except ValueError:
+        rel = Path(path.name)
+    return (out_dir / rel).with_suffix(f".rendered{path.suffix}")

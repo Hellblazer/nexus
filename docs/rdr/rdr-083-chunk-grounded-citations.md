@@ -71,7 +71,7 @@ The ART collection's primary-sources.md manually curates 80 Grossberg papers as 
 
 ### Critical Assumptions
 
-- [ ] `chash:` prefix can be reliably extracted from `[text](chash:…)` without regex pathologies — **Status**: Unverified — **Method**: Source Search existing catalog URL parsers + prototype extractor.
+- [x] `chash:` prefix can be reliably extracted from `[text](chash:…)` without regex pathologies — **Status**: Verified — `_CHASH_LINK_RE` in `src/nexus/doc/citations.py:55` enforces exactly 64 hex chars; positive + invalid-length + fenced-skip cases covered by parametrized tests in `tests/test_rdr_083_corpus_evidence.py`.
 - [ ] The projection similarity threshold used by the auto-flag (default 0.70) is stable enough to be useful across domains — **Status**: Unverified — **Method**: Spike on ART and Nexus corpora; tune per-project if needed.
 - [ ] Chunk hashes stay stable across reindexing (no salt changes, no chunking-strategy churn) — **Status**: Verified — **Method**: Source Search — RDR-053 fixed chunk boundaries and hash inputs.
 
@@ -81,19 +81,31 @@ The ART collection's primary-sources.md manually curates 80 Grossberg papers as 
 
 Four cooperating surfaces, all under the `nx doc` command group introduced by RDR-082:
 
-1. **Prose syntax** (`chash:` spans) — `[display text](chash:<chunk-hash>)`. Standard markdown link; `chash:` resolves via catalog's `resolve_chunk()`. `nx doc render` expands it to a tooltip/footnote with the cited chunk text when `--expand-citations` is passed.
-2. **Grounding validator** — `nx doc check-grounding <path>`. Scans prose for citation-shaped patterns (`chash:` spans, `[<Author> <year>]` patterns, bracketed-number references). For `chash:` spans, verifies the hash resolves to an indexed chunk. For prose citations, reports them as ungrounded. Reports per-doc coverage ratio.
-3. **Author-extension auto-flag** — `nx doc check-extensions <path> --primary-source <collection>`. For each chunk in the doc that has a registered catalog entry, queries `topic_assignments` filtered to `--primary-source`. Chunks below threshold similarity → reported as author-extension candidates with suggested inline flag.
-4. **Corpus-shape anchor** (`{{nx-anchor:…}}` token) — `{{nx-anchor:<collection>[|top=N]}}` renders as a markdown list of the top-N projected topics for the collection, pulled from `topic_assignments` filtered by `source_collection`. Registers as an additional Resolver on RDR-082's Resolver registry; no grammar churn.
+1. **Prose syntax** (`chash:` spans) — `[display text](chash:<chunk-hash>)`. Standard markdown link with a deliberate URL scheme; `chash:` is reserved in the catalog (`src/nexus/catalog/catalog.py:resolve_span`) for content-addressed chunk references. **v1 ships the grammar and the scanner; it does not resolve the hash to a chunk. A resolver (`resolve_chash`) is deferred — see §v1 Scope Reduction.**
+2. **Grounding validator** — `nx doc check-grounding <path>`. Scans prose for citation-shaped patterns (`chash:` spans, `[<Author> <year>]` patterns, bracketed-number references) and reports per-doc counts + coverage ratio (chash / total). **v1 counts chash-shaped citations as grounded-shape; it does not verify that each hash exists in the corpus. `--fail-under <ratio>` exits non-zero when the ratio falls under a floor — this works against the shape-only counts.**
+3. **Author-extension auto-flag** — `nx doc check-extensions <path> --primary-source <collection>`. Conceptually: for each chunk in the doc with a registered catalog entry, query `topic_assignments` filtered to `--primary-source` and flag chunks below threshold. **v1 limitation: the command passes `chash:` hex strings as `doc_ids`, but `topic_assignments.doc_id` stores ChromaDB collection-scoped IDs — the namespaces never intersect, so every input lands in `no_data`. The command emits a loud WARNING in that case and the docstring marks it `[experimental]`.**
+4. **Corpus-shape anchor** (`{{nx-anchor:…}}` token) — `{{nx-anchor:<collection>[|top=N]}}` renders as a markdown list of the top-N projected topics for the collection, pulled from `topic_assignments` filtered by `source_collection`. Registers as an additional Resolver on RDR-082's Resolver registry; no grammar churn. **Fully functional in v1.**
 
 All four land behind the `nx doc` group so the learning surface is coherent.
 
+### v1 Scope Reduction
+
+All four deferrals below are owned by **RDR-086: Chash Span
+Resolution** (draft, 2026-04-16).  RDR-086's single primitive —
+`catalog.resolve_chash(chash)` backed by a T2 `chash_index` table
+— unblocks all four consumers here.
+
+- `src/nexus/catalog/catalog.py` `resolve_chash(chash) -> ChunkRef | None` — lookup a chunk by its content hash across indexed collections. Without this, `check-grounding` cannot tell "valid hash in corpus" from "valid-looking hash of unindexed chunk".
+- chash → ChromaDB-doc-id resolution — required for `check-extensions` to produce meaningful candidates rather than the current always-`no_data` behaviour.
+- `--fail-ungrounded` flag on `check-grounding` — currently absent; would fail the build when any chash span fails to resolve. Depends on `resolve_chash`.
+- `--expand-citations` flag on `nx doc render` — renderer-polish Phase 2, preserves `chash:` links in v1 output without expansion.
+
 ### Technical Design
 
-**Span resolution** (extend `src/nexus/catalog/catalog.py`):
+**Span resolution** — *deferred from v1, see §v1 Scope Reduction.* The illustrative `resolve_chash()` method below is the design target for a follow-up bead; it is NOT part of the v1 ship.
 
 ```text
-# Illustrative — verify interface during implementation
+# Future — deferred to a follow-up bead
 def resolve_chash(self, chash: str) -> ChunkRef | None:
     """Look up chunk by content hash; return (doc_id, chunk_index, text) or None."""
 ```
@@ -112,16 +124,17 @@ class Citation:
     display: str                       # "as shown by Grossberg 2013" etc.
 ```
 
-**Grounding validator** (extends `src/nexus/doc/render.py` via new `check_grounding` entrypoint):
+**Grounding validator** — shipped as `nx doc check-grounding` (separate subcommand in `src/nexus/commands/doc.py`, not bolted on to `render`):
 
 ```text
 nx doc check-grounding <path>...
-  --fail-ungrounded                 # exit non-zero if any chash span fails to resolve
-  --fail-under <ratio>              # e.g., 0.5 → fail if <50% of citations are chash-grounded
+  --fail-under <ratio>              # e.g., 0.5 → fail if <50% of citations are chash-shaped
   --format table|json
+
+  # --fail-ungrounded DEFERRED — depends on resolve_chash, see §v1 Scope Reduction
 ```
 
-Reports per doc: total citations, chash-backed, prose-only, broken-chash. Coverage ratio surfaces to stderr.
+Reports per doc: total citations, chash-shaped, prose, bracketed. Coverage ratio = chash / total — a shape-only signal until `resolve_chash` ships.
 
 **Author-extension validator** (new):
 
@@ -132,7 +145,7 @@ nx doc check-extensions <path> --primary-source <collection>
   --format table|json
 ```
 
-Resolves per-paragraph chunk references (via `chash:` spans; falls back to projection on the doc's own T3 entry if present). For each, queries `topic_assignments` for `source_collection = <primary>` and `similarity >= threshold`. Absence → candidate for `> [Author extension]` flag; presence of the flag without absence-evidence → candidate for removal.
+**v1 limitation**: the command collects the unique `chash:` hex values from prose and passes them to `CatalogTaxonomy.chunk_grounded_in(doc_id, source_collection, threshold=...)`. That method queries `topic_assignments.doc_id`, which is populated with ChromaDB collection-scoped IDs (`knowledge__art:doc:chunk:0` shape) — a different namespace from content hashes. Every input therefore returns `None` (no data). The command emits a WARNING to stderr in that 100%-no-data case and the docstring marks it `[experimental]`. Meaningful candidate flagging is unblocked once `resolve_chash` ships — see §v1 Scope Reduction.
 
 ### Existing Infrastructure Audit
 

@@ -314,3 +314,4 @@ One CLI command, three resolvers, one small grammar. Resist adding token familie
 
 - 2026-04-15 — Draft authored from ART field report findings F3, F8.
 - 2026-04-16 — Scope reduction: projection-derived tokens (`{{nx-anchor:…}}`) and chunk-excerpt rendering moved to RDR-083. Resolver protocol retained as an extension point; 082 ships with bead + RDR resolvers only. Prerequisites pruned (RDR-077 no longer needed by 082).
+- 2026-04-16 (gate pass) — two as-built corrections applied: (1) `render_text` now returns a `(output, resolved_count, misses)` tuple so `RenderResult.resolved` only counts tokens that actually resolved — the prior shape counted every registered-namespace token regardless of resolve-time outcome; (2) `--out-dir` preserves the source path relative to `--project-root` (default cwd) so the mirror-tree guarantee in the `.rendered.md` output convention actually holds. Both fixes covered by new regression tests in `tests/test_rdr_082_doc_tokens.py`.

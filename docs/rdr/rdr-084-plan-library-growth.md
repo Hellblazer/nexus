@@ -138,35 +138,42 @@ with:
 
 ### Technical Design
 
+As-built (`src/nexus/mcp/core.py:2046-2088`). The tuple-return
+pattern the draft originally proposed was discarded during
+implementation: `_nx_answer_plan_miss` continues to return a single
+`Match` and the caller reads `best.plan_json` inline. Simpler and
+equivalent.
+
 ```text
-# Illustrative — verify interfaces at implementation time.
-async def _nx_answer_plan_miss(question, scope="", max_steps=6, ...):
-    ...
-    payload = await claude_dispatch(prompt, _PLANNER_SCHEMA, ...)
-    steps = payload.get("steps", [])
-    ...
-    plan_json = json.dumps({"steps": normalized})
-
-    # After plan_run succeeds in the caller, the grown plan is saved.
-    # We return it + the canonical dimensions so the caller can decide.
-    match = Match(plan_id=0, plan_json=plan_json, …)
-    return match, plan_json  # new tuple return
-
-# In nx_answer main body, after plan_run success:
-if matches[0].plan_id == 0:  # ad-hoc
-    try:
-        with _t2_ctx() as db:
-            db.save_plan(
-                query=question,
-                plan_json=plan_json,
-                scope="personal",
-                outcome="success",
-                tags="ad-hoc,grown",
-                ttl=30,
-            )
-    except Exception as exc:
-        # Non-fatal — growing the library is best-effort.
-        _log.warning("plan_grow_save_failed", error=str(exc))
+# nx_answer main body, after plan_run success:
+if best.plan_id == 0:
+    ttl_days = _load_ad_hoc_ttl()   # .nexus.yml#plans.ad_hoc_ttl
+    if ttl_days > 0:
+        try:
+            from pathlib import Path as _Path
+            project_name = _Path.cwd().name
+            with _t2_ctx() as _save_db:
+                grown_id = _save_db.plans.save_plan(
+                    query=question,
+                    plan_json=best.plan_json,
+                    outcome="success",
+                    tags="ad-hoc,grown",
+                    project=project_name,
+                    ttl=ttl_days,
+                    scope="personal",
+                )
+                try:
+                    cache = get_t1_plan_cache()
+                    if cache is not None:
+                        row = _save_db.plans.get_plan(grown_id)
+                        if row:
+                            cache.upsert(row)
+                except Exception:
+                    _log.debug("plan_grow_cache_upsert_failed", exc_info=True)
+            _log.info("plan_grow_saved", plan_id=grown_id, ttl_days=ttl_days,
+                      project=project_name)
+        except Exception as exc:
+            _log.warning("plan_grow_save_failed", error=str(exc))
 ```
 
 ### Existing Infrastructure Audit
@@ -296,6 +303,30 @@ balance; explicit save-plan is already available for users who want it.
 3. Kill and restart the sandbox. Verify the plan persists and matches
    after restart (durable T2 write).
 
+**As-built (2026-04-16 live run)**:
+
+All three steps passed end-to-end against a fresh isolated T2 via
+`nx_answer`:
+
+- **Step 1** — q1 = "What is the plan library growth architecture in
+  Nexus?". Inline planner fired (no seed match), `plan_run` executed,
+  grown plan persisted. Wall-clock 48.0s. T2 after: 1 active plan,
+  `tags="ad-hoc,grown"`, `scope="personal"`.
+- **Step 2** — q2 = "How does the plan library get new entries over
+  time in Nexus?" (paraphrase of q1). Wall-clock **25.7s — ~2× faster
+  than Step 1**. T2 after: still 1 active plan. The paraphrase matched
+  the grown plan via `plan_match`; the inline planner did NOT re-fire
+  (if it had, a second grown plan would be present).
+- **Step 3** — T2 re-opened after the session; 1 plan still present,
+  durability confirmed.
+
+This empirically verifies both Critical Assumption 1 (saved plans
+match paraphrases at a useful rate — 1-of-1 on this seed) and
+Critical Assumption 2 (plans stable enough to be reused — the q2
+execution completed without error on the q1-derived DAG). Step 1 + 3
+are also automated in
+`test_save_plan_get_plan_cache_upsert_round_trips`.
+
 ### Phase 1: Code Implementation
 
 #### Step 1: Plumb `plan_json` through the plan-miss success path
@@ -348,7 +379,16 @@ balance; explicit save-plan is already available for users who want it.
 ### Testing Strategy
 
 1. **Unit** — mock `plan_run`, assert `save_plan` invocation shape.
-2. **Integration** — SQLite round-trip + `plan_match` re-match.
+   Shipped in `tests/test_rdr_084_plan_grow.py::TestAdHocSaveOnSuccess` (4 tests),
+   `::TestT1CachePropagation` (3 tests), `::TestAdHocTtlConfig` (5 tests).
+2. **Integration (live SQLite)** — `tests/test_rdr_084_plan_grow.py::TestLiveSqliteRoundTrip`
+   opens a real on-disk `T2Database` at `tmp_path/memory.db`, runs
+   `nx_answer` end-to-end, and asserts both (a) the saved plan is
+   independently re-queryable via a fresh `T2Database` after the
+   command returns, and (b) the row passed to `cache.upsert` carries
+   the same `id`/`query`/`plan_json` as the persisted row. Closes
+   the mock-only coverage gap raised at gate. Also covers the
+   `ad_hoc_ttl=0` opt-out path.
 3. **Manual** — dogfood on real Nexus questions for a week, measure
    observed hit rate improvement.
 
