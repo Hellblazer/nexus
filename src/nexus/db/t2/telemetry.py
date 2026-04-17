@@ -275,6 +275,58 @@ class Telemetry:
             self.conn.commit()
         return len(rows)
 
+    def query_collection_stats(
+        self, collection: str, *, days: int = 30,
+    ) -> dict[str, Any]:
+        """Return retrieval-health stats for *collection* over the last *days*.
+
+        Used by ``nx collection health`` (RDR-087 Phase 3.4). Returns a
+        dict with keys:
+
+        - ``row_count``            : rows in-window for this collection.
+        - ``zero_hit_rate``        : ``kept_count == 0`` fraction, or
+          ``None`` when ``row_count == 0``.
+        - ``median_top_distance``  : median ``top_distance`` over rows
+          with ``raw_count > 0``, or ``None`` when no such rows.
+
+        Does not write. Uses the same 30-day window the CLI flag uses
+        by default; *days* is overridable for testing / audits.
+        """
+        if days < 1:
+            raise ValueError(f"days must be >= 1; got {days}")
+        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+        with self._lock:
+            row_count, zero_count = self.conn.execute(
+                "SELECT COUNT(*), "
+                "SUM(CASE WHEN kept_count = 0 THEN 1 ELSE 0 END) "
+                "FROM search_telemetry WHERE collection = ? AND ts >= ?",
+                (collection, cutoff),
+            ).fetchone()
+            distances = [
+                r[0] for r in self.conn.execute(
+                    "SELECT top_distance FROM search_telemetry "
+                    "WHERE collection = ? AND ts >= ? "
+                    "AND raw_count > 0 AND top_distance IS NOT NULL "
+                    "ORDER BY top_distance",
+                    (collection, cutoff),
+                ).fetchall()
+            ]
+        zero_rate: float | None = None
+        if row_count:
+            zero_rate = (zero_count or 0) / row_count
+        median: float | None = None
+        n = len(distances)
+        if n:
+            if n % 2 == 1:
+                median = distances[n // 2]
+            else:
+                median = (distances[n // 2 - 1] + distances[n // 2]) / 2
+        return {
+            "row_count": row_count or 0,
+            "zero_hit_rate": zero_rate,
+            "median_top_distance": median,
+        }
+
     def trim_search_telemetry(self, days: int = 30) -> int:
         """Delete ``search_telemetry`` rows older than *days* days (Phase 2.4).
 
