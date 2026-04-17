@@ -6,6 +6,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.4.1] - 2026-04-16
+
+### Fixed
+
+- **Auto-approval allow list** — `nx/hooks/scripts/auto-approve-nx-mcp.sh` was shipped with the 4.3.x tool surface. Added the 11 MCP tools introduced in 4.4.0 (`nx_answer`, `nx_tidy`, `nx_enrich_beads`, `nx_plan_audit`, `traverse`, `store_get_many`, 5 `operator_*`). Anyone running 4.4.0 from the marketplace saw a permission prompt on every call; 4.4.1 silences them.
+- **SubagentStart operators guidance** — the "Analytical Operators" block was still telling subagents to `Agent` tool dispatch to the removed `analytical-operator` agent. Replaced with the 5 `operator_*` MCP tool signatures and a pointer to `nx_answer` for plan-matched multi-step retrieval.
+- **`nexus` skill** — `SKILL.md` common-operations block was missing every tool added in 4.4.0. Rewrote to include `nx_answer`, `traverse`, `store_get_many`, the 5 operators, and the 3 hygiene tools, plus a "When to reach for each" guide. `reference.md` gained full entries for the same 11 tools; tool count corrected (15 → 26).
+- **`_shared/README.md`** — "All 15 agents" updated to reflect the post-RDR-080 shape (13 agents = 10 active + 3 MCP-tool redirect stubs).
+
 ## [4.4.0] - 2026-04-16
 
 ### Added

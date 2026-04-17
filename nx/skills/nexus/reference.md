@@ -11,7 +11,7 @@ Nexus provides MCP tools for semantic search, persistent memory, and knowledge m
 
 Core tools are prefixed `mcp__plugin_nx_nexus__`; catalog tools are prefixed `mcp__plugin_nx_nexus-catalog__`.
 
-There are 15 core tools: `search`, `query`, `store_put`, `store_get`, `store_list`, `memory_put`, `memory_get`, `memory_delete`, `memory_search`, `memory_consolidate`, `scratch`, `scratch_manage`, `collection_list`, `plan_save`, `plan_search`.
+There are 26 core tools: `search`, `query`, `store_put`, `store_get`, `store_get_many`, `store_list`, `memory_put`, `memory_get`, `memory_delete`, `memory_search`, `memory_consolidate`, `scratch`, `scratch_manage`, `collection_list`, `plan_save`, `plan_search`, `traverse`, `nx_answer`, `nx_tidy`, `nx_enrich_beads`, `nx_plan_audit`, `operator_summarize`, `operator_extract`, `operator_rank`, `operator_compare`, `operator_generate`.
 There are 10 catalog tools (nexus-catalog server): `search`, `show`, `list`, `register`, `update`, `link`, `links`, `link_query`, `resolve`, `stats`.
 
 ### search
@@ -59,6 +59,126 @@ mcp__plugin_nx_nexus__query(question="error handling patterns", corpus="code", l
 Returns per-document: title, relevance score, bibliographic metadata (year, authors, venue, citations), technical metadata (pages, chunks, extraction method, formulas), collection, and best matching snippet.
 
 Use `search` for chunk-level retrieval. Use `query` when you need to know **which documents** match.
+
+### nx_answer
+
+Plan-match-first analytical retrieval (RDR-080). Primary front door for research / review / analyze / debug verb skills. Internally: `plan_match` → (on hit) run matched plan via `plan_run`; (on miss) dispatch inline `claude -p` planner. Every run logged to T2 `nx_answer_runs`.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `question` | str | required | Natural-language question |
+| `scope` | str | `""` | Catalog subtree (e.g. `"1.2"`) or corpus filter (e.g. `"knowledge"`) |
+| `context` | str | `""` | Supplementary caller-supplied context for the plan matcher |
+| `max_steps` | int | `6` | Cap on plan DAG size (applied to inline planner on miss) |
+| `budget_usd` | float | `0.25` | Per-invocation cost cap (reserved for future enforcement) |
+| `trace` | bool | `True` | When False, redacts question + final_text in the run log |
+| `dimensions` | dict/null | `null` | Dimensional filter for the matcher. Verb skills pin `{"verb": "research"}` etc. |
+
+```
+mcp__plugin_nx_nexus__nx_answer(question="how does plan matching work"
+mcp__plugin_nx_nexus__nx_answer(question="...", dimensions={"verb":"research"}
+mcp__plugin_nx_nexus__nx_answer(question="...", scope="1.2"
+mcp__plugin_nx_nexus__nx_answer(question="...", trace=False            # redact in run log
+```
+
+### traverse
+
+Walk the catalog link graph from seed tumblers (RDR-078 P3). Accepts `link_types` **XOR** `purpose` — never both. Returns the standard retrieval step-output contract so downstream plan steps can reference `$stepN.tumblers` / `$stepN.collections` / `$stepN.ids`.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `seeds` | list/str | required | Tumbler(s) to start from (e.g. `["1.1.635"]` or `"1.1.635"`) |
+| `link_types` | list/null | `null` | Catalog link types to follow (`implements`, `cites`, ...). Mutually exclusive with `purpose` |
+| `purpose` | str | `""` | Named alias for a link-type set (e.g. `"find-implementations"`). Mutually exclusive with `link_types` |
+| `depth` | int | `1` | BFS depth. Capped at 3 (SC-4) |
+| `direction` | str | `"both"` | `"out"`, `"in"`, or `"both"` |
+
+```
+mcp__plugin_nx_nexus__traverse(seeds=["1.1.635"], link_types=["implements","cites"], depth=2
+mcp__plugin_nx_nexus__traverse(seeds="1.1.635", purpose="find-implementations"
+```
+
+Returns `{"tumblers": [...], "ids": [...], "collections": [...]}`.
+
+### store_get_many
+
+Batch-hydrate document content by ID past the ChromaDB 300-record read cap (RDR-079 hydration primitive). Use after `search(structured=True)` or `traverse` to fetch the actual text.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `ids` | list/str | required | Document IDs. Accepts comma-separated string or list |
+| `collections` | list/str | `"knowledge"` | Target collection(s). Single name, comma-separated, or list aligned 1:1 with `ids` |
+| `max_chars_per_doc` | int | `4000` | Per-document truncation cap |
+| `structured` | bool | `false` | Return `{contents, missing}` dict when True; human-readable string when False |
+
+```
+mcp__plugin_nx_nexus__store_get_many(ids=["id1","id2"], collections="knowledge__art"
+mcp__plugin_nx_nexus__store_get_many(ids="id1,id2", collections="rdr__nexus", structured=True
+```
+
+### operator_summarize
+
+Summarize content via `claude -p` (default timeout 120s). Set `cited=True` for a citations list in the output.
+
+```
+mcp__plugin_nx_nexus__operator_summarize(content="<text>"
+mcp__plugin_nx_nexus__operator_summarize(content="<text>", cited=True
+```
+
+### operator_extract
+
+Extract named fields from each input item. `inputs` accepts a list or a JSON-array string. `fields` is a comma-separated list of field names.
+
+```
+mcp__plugin_nx_nexus__operator_extract(inputs=["doc1","doc2"], fields="title,year,author"
+```
+
+Returns `{"extractions": [{...}, {...}]}`.
+
+### operator_rank
+
+Rank items by a natural-language criterion.
+
+```
+mcp__plugin_nx_nexus__operator_rank(items=["a","b","c"], criterion="relevance to X"
+```
+
+Returns `{"ranked": [...]}`.
+
+### operator_compare
+
+Compare items; optional `focus` narrows the comparison dimension.
+
+```
+mcp__plugin_nx_nexus__operator_compare(items=["x","y"], focus="scalability"
+```
+
+Returns `{"comparison": "<markdown>"}`.
+
+### operator_generate
+
+Generate output from a template + context. Template is a natural-language description or named template; `context` is source material. `cited=True` to include a citations list.
+
+```
+mcp__plugin_nx_nexus__operator_generate(template="release note", context="v4.4.0 adds ..."
+mcp__plugin_nx_nexus__operator_generate(template="..", context="..", cited=True
+```
+
+Returns `{"output": "<generated>"}`.
+
+### nx_tidy / nx_enrich_beads / nx_plan_audit
+
+Background hygiene tools — each spawns a long-lived `claude -p` subprocess. Call and move on; these are slow (minutes, not seconds).
+
+- **`nx_tidy`** — T2 memory consolidation sweep (overlaps, stale entries).
+- **`nx_enrich_beads`** — auto-fills missing `design` / `notes` sections on open beads.
+- **`nx_plan_audit`** — plan library quality audit (missing required fields, low match confidence, stale entries).
+
+```
+mcp__plugin_nx_nexus__nx_tidy()
+mcp__plugin_nx_nexus__nx_enrich_beads()
+mcp__plugin_nx_nexus__nx_plan_audit()
+```
 
 ### store_put
 
