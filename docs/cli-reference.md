@@ -685,6 +685,13 @@ The `--fix` flag retroactively applies HNSW `search_ef` tuning to all existing l
 nx doctor --check-schema          # Validate T2 database schema and report pending migrations
 ```
 
+```
+nx doctor --trim-telemetry              # Delete search_telemetry rows older than 30 days (RDR-087)
+nx doctor --trim-telemetry --days 7     # Aggressive retention (minimum 1 day)
+```
+
+The `--trim-telemetry` flag caps `search_telemetry` disk use. The table accrues one row per (query, collection) pair on every `nx search` and MCP search call when `telemetry.search_enabled` is true. Run periodically from cron or a CI job; the default 30-day window keeps an analytical signal long enough to detect slow-burn silent-threshold-drop patterns.
+
 ---
 
 ## nx upgrade
