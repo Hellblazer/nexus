@@ -223,10 +223,10 @@ class TestDoctorTrimTelemetry:
             ts = (now - timedelta(days=age)).isoformat()
             conn.execute(
                 "INSERT INTO search_telemetry "
-                "(ts, query_hash, collection, raw_count, dropped_count, "
+                "(ts, query_hash, collection, raw_count, kept_count, "
                 "top_distance, threshold) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (ts, f"hash{i:02d}", f"coll__{i}", 3, 1, 0.30, 0.45),
+                (ts, f"hash{i:02d}", f"coll__{i}", 3, 2, 0.30, 0.45),
             )
         conn.commit()
         conn.close()

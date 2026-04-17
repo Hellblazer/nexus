@@ -82,12 +82,14 @@ CREATE INDEX IF NOT EXISTS idx_relevance_log_session
 -- Schema duplicated from migrations.migrate_search_telemetry so that
 -- fresh T2Database constructions get the table even before apply_pending
 -- runs. IF NOT EXISTS makes construction idempotent with the migration.
+-- ``kept_count`` matches the RDR-087 spec; 4.6.0 shipped this column as
+-- ``dropped_count`` — the 4.6.1 rename migration upgrades existing DBs.
 CREATE TABLE IF NOT EXISTS search_telemetry (
     ts             TEXT    NOT NULL,
     query_hash     TEXT    NOT NULL,
     collection     TEXT    NOT NULL,
     raw_count      INTEGER NOT NULL,
-    dropped_count  INTEGER NOT NULL,
+    kept_count     INTEGER NOT NULL,
     top_distance   REAL,
     threshold      REAL,
     PRIMARY KEY (ts, query_hash, collection)
@@ -253,7 +255,7 @@ class Telemetry:
         """Insert per-call threshold-filter telemetry in a single transaction.
 
         Row tuple layout: ``(ts, query_hash, collection, raw_count,
-        dropped_count, top_distance, threshold)``.
+        kept_count, top_distance, threshold)``.
 
         Uses ``INSERT OR IGNORE`` on the composite PK so two writers
         racing within the same ISO-second emit exactly one row. Duplicate
@@ -265,7 +267,7 @@ class Telemetry:
         with self._lock:
             self.conn.executemany(
                 "INSERT OR IGNORE INTO search_telemetry "
-                "(ts, query_hash, collection, raw_count, dropped_count, "
+                "(ts, query_hash, collection, raw_count, kept_count, "
                 "top_distance, threshold) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 rows,

@@ -10,7 +10,7 @@ from typing import Any
 
 import structlog
 
-from nexus.config import load_config
+from nexus.config import get_telemetry_config, load_config
 from nexus.types import SearchResult
 
 _log = structlog.get_logger(__name__)
@@ -243,7 +243,7 @@ def search_cross_corpus(
     engine never emits stderr itself.
 
     *telemetry* (RDR-087 Phase 2.2 / nexus-yi4b.2.2), when provided,
-    receives one ``(ts, query_hash, collection, raw_count, dropped_count,
+    receives one ``(ts, query_hash, collection, raw_count, kept_count,
     top_distance, threshold)`` row per collection via
     ``log_search_batch``. Opt-out via ``telemetry.search_enabled = false``
     in ``.nexus.yml`` — the engine reads the flag and silently skips the
@@ -359,9 +359,10 @@ def search_cross_corpus(
         ))
 
     # RDR-087 Phase 2.2: persist per-call threshold-filter telemetry.
-    # Opt-out gate read from the same ``cfg`` used above to avoid a second
-    # config load on the hot path.
-    if telemetry is not None and cfg.get("telemetry", {}).get("search_enabled", True):
+    # Opt-out gate reads from the typed accessor so malformed
+    # ``.nexus.yml`` values surface a structured warning instead of
+    # silently coercing to a truthy string.
+    if telemetry is not None and get_telemetry_config(cfg=cfg).search_enabled:
         import hashlib
         from datetime import UTC, datetime
 
@@ -370,7 +371,7 @@ def search_cross_corpus(
         rows = [
             (
                 ts, query_hash, col,
-                raw_count, dropped_count, min_raw_per_collection[col], thr,
+                raw_count, raw_count - dropped_count, min_raw_per_collection[col], thr,
             )
             for col, (raw_count, dropped_count, thr, _dropped_min)
             in diag_per_collection.items()

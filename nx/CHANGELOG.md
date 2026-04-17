@@ -6,6 +6,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.6.1] - 2026-04-17
+
+Plugin version bump alongside conexus 4.6.1. See root CHANGELOG for
+the RDR-087 review follow-ups: typed telemetry accessor on the hot
+path and the `search_telemetry.dropped_count` → `kept_count` schema
+rename migration.
+
+## [4.6.0] - 2026-04-17
+
+Plugin version bump alongside conexus 4.6.0. See root CHANGELOG for
+RDR-087 Phase 2: `search_telemetry` table + migration, hot-path
+writes from `search_cross_corpus`, `telemetry.*` opt-out config, and
+`nx doctor --trim-telemetry` retention command.
+
 ## [4.5.3] - 2026-04-17
 
 Plugin version bump alongside conexus 4.5.3. See root CHANGELOG for

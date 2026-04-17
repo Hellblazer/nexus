@@ -73,7 +73,7 @@ class TestMigrationDataclass:
         from nexus.db.migrations import MIGRATIONS
 
         assert isinstance(MIGRATIONS, list)
-        assert len(MIGRATIONS) == 11  # + RDR-087 search_telemetry
+        assert len(MIGRATIONS) == 12  # + RDR-087 4.6.1 rename-to-kept_count
 
     def test_migrations_ordered_by_version(self) -> None:
         from nexus.db.migrations import MIGRATIONS, _parse_version
@@ -1014,3 +1014,78 @@ class TestMigrateSearchTelemetry:
             "SELECT COUNT(*) FROM search_telemetry"
         ).fetchone()[0]
         assert count == 1
+
+
+# ── RDR-087 errata: rename dropped_count → kept_count (4.6.1) ───────────────
+
+
+class TestMigrateRenameDroppedToKept:
+    """``migrate_rename_dropped_to_kept`` upgrades a 4.6.0-era DB whose
+    ``search_telemetry`` table has ``dropped_count`` to the spec-aligned
+    ``kept_count``. Stored values are flipped via
+    ``kept_count = raw_count - dropped_count``.
+    """
+
+    def _seed_4_6_0(self, conn: sqlite3.Connection) -> None:
+        from nexus.db.migrations import migrate_search_telemetry
+
+        migrate_search_telemetry(conn)
+
+    def test_renames_column_and_flips_values(self) -> None:
+        from nexus.db.migrations import migrate_rename_dropped_to_kept
+
+        conn = sqlite3.connect(":memory:")
+        self._seed_4_6_0(conn)
+        conn.execute(
+            "INSERT INTO search_telemetry "
+            "(ts, query_hash, collection, raw_count, dropped_count, top_distance, threshold) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("2026-04-17T18:00:00Z", "h" * 64, "code__a", 5, 2, 0.30, 0.45),
+        )
+        conn.commit()
+
+        migrate_rename_dropped_to_kept(conn)
+
+        cols = {
+            r[1]
+            for r in conn.execute("PRAGMA table_info(search_telemetry)").fetchall()
+        }
+        assert "dropped_count" not in cols
+        assert "kept_count" in cols
+
+        row = conn.execute(
+            "SELECT raw_count, kept_count FROM search_telemetry"
+        ).fetchone()
+        assert row == (5, 3)  # kept = raw − dropped = 5 − 2
+
+    def test_idempotent_on_reapply(self) -> None:
+        """Second call is a no-op — column already renamed."""
+        from nexus.db.migrations import migrate_rename_dropped_to_kept
+
+        conn = sqlite3.connect(":memory:")
+        self._seed_4_6_0(conn)
+        migrate_rename_dropped_to_kept(conn)
+        migrate_rename_dropped_to_kept(conn)  # must not raise
+
+        row = conn.execute(
+            "SELECT kept_count FROM search_telemetry"
+        ).fetchone()
+        assert row is None  # empty table, column still exists
+
+    def test_noop_when_table_absent(self) -> None:
+        """No ``search_telemetry`` table — migration must be a silent no-op."""
+        from nexus.db.migrations import migrate_rename_dropped_to_kept
+
+        conn = sqlite3.connect(":memory:")
+        migrate_rename_dropped_to_kept(conn)  # must not raise
+
+    def test_in_migrations_list(self) -> None:
+        from nexus.db.migrations import MIGRATIONS
+
+        matches = [
+            (m.introduced, m.name)
+            for m in MIGRATIONS
+            if "kept_count" in m.name
+        ]
+        assert matches, "rename-to-kept_count migration must be registered"
+        assert matches[0][0] == "4.6.1"
