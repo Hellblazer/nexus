@@ -541,3 +541,155 @@ def test_threshold_and_no_threshold_mutually_exclusive(
     assert "threshold" in err.lower() and (
         "mutually exclusive" in err.lower() or "cannot" in err.lower()
     )
+
+
+# ── Phase 1.2 (RDR-087 / nexus-yi4b.1.2): silent-zero stderr ────────────────
+
+
+def test_silent_zero_emits_single_stderr_line_when_raw_gt_zero(
+    runner: CliRunner, cloud_env, monkeypatch,
+) -> None:
+    """Zero post-threshold results + raw>0 + drops>0 → exactly one stderr line."""
+    import structlog
+    from nexus.search_engine import SearchDiagnostics
+
+    mock_t3 = _mock_t3(["knowledge__art"])
+
+    # Use the real engine diagnostics shape — simulate 3 candidates, all dropped,
+    # top_distance = 0.70.
+    def fake(query, cols, n_results, t3, where=None, **kwargs):
+        diag_out = kwargs.get("diagnostics_out")
+        if diag_out is not None:
+            diag_out.append(SearchDiagnostics(
+                per_collection={"knowledge__art": (3, 3, 0.65, 0.70)},
+                total_dropped=3,
+                total_raw=3,
+            ))
+        return []
+
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake), \
+         patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
+        result = runner.invoke(main, ["search", "query", "--corpus", "knowledge"])
+    assert result.exit_code == 0, result.output
+    stderr = result.output  # CliRunner merges by default
+    assert stderr.count("candidates dropped") == 1
+    assert "knowledge__art" in stderr
+    assert "threshold" in stderr
+    assert "top_distance" in stderr
+
+
+def test_silent_zero_omitted_when_raw_is_zero(
+    runner: CliRunner, cloud_env,
+) -> None:
+    """No stderr note when there were no raw candidates to begin with."""
+    from nexus.search_engine import SearchDiagnostics
+
+    mock_t3 = _mock_t3(["knowledge__art"])
+
+    def fake(query, cols, n_results, t3, where=None, **kwargs):
+        diag_out = kwargs.get("diagnostics_out")
+        if diag_out is not None:
+            diag_out.append(SearchDiagnostics(
+                per_collection={"knowledge__art": (0, 0, 0.65, None)},
+                total_dropped=0,
+                total_raw=0,
+            ))
+        return []
+
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake), \
+         patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
+        result = runner.invoke(main, ["search", "query", "--corpus", "knowledge"])
+    assert result.exit_code == 0, result.output
+    assert "candidates dropped" not in result.output
+
+
+def test_silent_zero_suppressed_by_quiet_flag(
+    runner: CliRunner, cloud_env,
+) -> None:
+    """--quiet suppresses the note even when drops fired."""
+    from nexus.search_engine import SearchDiagnostics
+
+    mock_t3 = _mock_t3(["knowledge__art"])
+
+    def fake(query, cols, n_results, t3, where=None, **kwargs):
+        diag_out = kwargs.get("diagnostics_out")
+        if diag_out is not None:
+            diag_out.append(SearchDiagnostics(
+                per_collection={"knowledge__art": (3, 3, 0.65, 0.70)},
+                total_dropped=3,
+                total_raw=3,
+            ))
+        return []
+
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake), \
+         patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
+        result = runner.invoke(
+            main, ["search", "query", "--corpus", "knowledge", "--quiet"],
+        )
+    assert result.exit_code == 0, result.output
+    assert "candidates dropped" not in result.output
+
+
+def test_silent_zero_suppressed_by_config(runner: CliRunner, cloud_env) -> None:
+    """``telemetry.stderr_silent_zero = false`` in config disables the note."""
+    from nexus.search_engine import SearchDiagnostics
+
+    mock_t3 = _mock_t3(["knowledge__art"])
+
+    def fake(query, cols, n_results, t3, where=None, **kwargs):
+        diag_out = kwargs.get("diagnostics_out")
+        if diag_out is not None:
+            diag_out.append(SearchDiagnostics(
+                per_collection={"knowledge__art": (3, 3, 0.65, 0.70)},
+                total_dropped=3,
+                total_raw=3,
+            ))
+        return []
+
+    cfg_with_opt_out = {
+        **_LOAD_CFG,
+        "telemetry": {"stderr_silent_zero": False},
+    }
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake), \
+         patch("nexus.commands.search_cmd.load_config", return_value=cfg_with_opt_out):
+        result = runner.invoke(main, ["search", "query", "--corpus", "knowledge"])
+    assert result.exit_code == 0, result.output
+    assert "candidates dropped" not in result.output
+
+
+def test_silent_zero_picks_worst_offender_across_collections(
+    runner: CliRunner, cloud_env,
+) -> None:
+    """With full-drops on two collections, worst = highest top_distance."""
+    from nexus.search_engine import SearchDiagnostics
+
+    mock_t3 = _mock_t3(["code__a", "knowledge__b"])
+
+    def fake(query, cols, n_results, t3, where=None, **kwargs):
+        diag_out = kwargs.get("diagnostics_out")
+        if diag_out is not None:
+            diag_out.append(SearchDiagnostics(
+                per_collection={
+                    "code__a": (2, 2, 0.45, 0.50),
+                    "knowledge__b": (2, 2, 0.65, 0.82),
+                },
+                total_dropped=4,
+                total_raw=4,
+            ))
+        return []
+
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake), \
+         patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
+        result = runner.invoke(
+            main, ["search", "query", "--corpus", "code", "--corpus", "knowledge"],
+        )
+    assert result.exit_code == 0, result.output
+    assert "knowledge__b" in result.output
+    # Must NOT report the other collection's threshold as if it were worst.
+    assert "code__a" not in result.output.split("knowledge__b")[0] or \
+        "top_distance 0.82" in result.output

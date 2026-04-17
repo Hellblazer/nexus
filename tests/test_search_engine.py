@@ -315,3 +315,130 @@ class TestThresholdOverride:
         assert {r.id for r in results} == {"c1", "k1"}
 
 
+# ── Phase 1.2 (RDR-087 / nexus-yi4b.1.2): SearchDiagnostics ──────────────────
+
+
+class TestSearchDiagnostics:
+    """``search_cross_corpus`` populates a ``SearchDiagnostics`` struct when
+    caller passes ``diagnostics_out=[]``. The CLI uses it to emit the
+    RDR-087 silent-zero stderr line naming the worst-offender collection.
+    """
+
+    def test_diagnostics_absent_by_default(self):
+        """Omitting ``diagnostics_out`` preserves the pre-1.2 return type."""
+        t3 = _ThresholdFakeT3({
+            "code__nexus": [{"id": "a", "content": "ok", "distance": 0.30}],
+        })
+        results = search_cross_corpus("test", ["code__nexus"], 10, t3)
+        assert len(results) == 1
+
+    def test_diagnostics_populated_when_requested(self):
+        """``diagnostics_out=[]`` gets exactly one ``SearchDiagnostics`` appended."""
+        from nexus.search_engine import SearchDiagnostics
+
+        t3 = _ThresholdFakeT3({
+            "code__nexus": [
+                {"id": "a", "content": "keep", "distance": 0.30},
+                {"id": "b", "content": "drop", "distance": 0.50},
+            ],
+        })
+        diag_out: list = []
+        search_cross_corpus(
+            "test", ["code__nexus"], 10, t3, diagnostics_out=diag_out,
+        )
+        assert len(diag_out) == 1
+        diag = diag_out[0]
+        assert isinstance(diag, SearchDiagnostics)
+        raw, dropped, threshold, top_dist = diag.per_collection["code__nexus"]
+        assert raw == 2 and dropped == 1
+        assert threshold == pytest.approx(0.45)
+        assert top_dist == pytest.approx(0.50)
+        assert diag.total_dropped == 1
+
+    def test_diagnostics_no_drops_tracks_zero(self):
+        """Diagnostics reports zero drops when every candidate passes."""
+        t3 = _ThresholdFakeT3({
+            "code__nexus": [{"id": "a", "content": "ok", "distance": 0.30}],
+        })
+        diag_out: list = []
+        search_cross_corpus(
+            "test", ["code__nexus"], 10, t3, diagnostics_out=diag_out,
+        )
+        diag = diag_out[0]
+        assert diag.total_dropped == 0
+        raw, dropped, _, top_dist = diag.per_collection["code__nexus"]
+        assert raw == 1 and dropped == 0
+        assert top_dist is None
+
+    def test_worst_offender_picks_highest_top_distance(self):
+        """Worst offender = full-drop collection with highest top_distance."""
+        t3 = _ThresholdFakeT3({
+            "code__a": [
+                {"id": "a1", "content": "x", "distance": 0.50},
+                {"id": "a2", "content": "x", "distance": 0.55},
+            ],
+            "knowledge__b": [
+                {"id": "b1", "content": "x", "distance": 0.80},
+                {"id": "b2", "content": "x", "distance": 0.95},
+            ],
+        })
+        diag_out: list = []
+        search_cross_corpus(
+            "test", ["code__a", "knowledge__b"], 10, t3,
+            diagnostics_out=diag_out,
+        )
+        worst = diag_out[0].worst_offender()
+        assert worst is not None
+        name, threshold, top_distance = worst
+        assert name == "knowledge__b"
+        assert top_distance == pytest.approx(0.80)
+
+    def test_worst_offender_ignores_partial_drops(self):
+        """Collections with any survivor are not eligible as 'worst'."""
+        t3 = _ThresholdFakeT3({
+            "code__a": [
+                {"id": "a1", "content": "keep", "distance": 0.30},
+                {"id": "a2", "content": "drop", "distance": 0.80},
+            ],
+            "knowledge__b": [
+                {"id": "b1", "content": "x", "distance": 0.70},
+            ],
+        })
+        diag_out: list = []
+        search_cross_corpus(
+            "test", ["code__a", "knowledge__b"], 10, t3,
+            diagnostics_out=diag_out,
+        )
+        worst = diag_out[0].worst_offender()
+        assert worst is not None
+        assert worst[0] == "knowledge__b"
+
+    def test_worst_offender_none_when_no_full_drops(self):
+        """``None`` when no collection had every candidate dropped."""
+        t3 = _ThresholdFakeT3({
+            "code__a": [{"id": "a", "content": "keep", "distance": 0.30}],
+        })
+        diag_out: list = []
+        search_cross_corpus(
+            "test", ["code__a"], 10, t3, diagnostics_out=diag_out,
+        )
+        assert diag_out[0].worst_offender() is None
+
+    def test_collections_with_drops_counts_nonzero(self):
+        """``collections_with_drops`` counts collections with ``dropped >= 1``."""
+        t3 = _ThresholdFakeT3({
+            "code__a": [
+                {"id": "a1", "content": "keep", "distance": 0.30},
+                {"id": "a2", "content": "drop", "distance": 0.80},
+            ],
+            "knowledge__b": [{"id": "b1", "content": "drop", "distance": 0.90}],
+            "docs__c": [{"id": "c1", "content": "keep", "distance": 0.30}],
+        })
+        diag_out: list = []
+        search_cross_corpus(
+            "test", ["code__a", "knowledge__b", "docs__c"], 10, t3,
+            diagnostics_out=diag_out,
+        )
+        assert diag_out[0].collections_with_drops() == 2
+
+

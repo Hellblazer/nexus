@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import itertools
 import sqlite3
+from dataclasses import dataclass, field
 from typing import Any
 
 import structlog
@@ -17,7 +18,52 @@ _log = structlog.get_logger(__name__)
 __all__ = [
     "search_cross_corpus",
     "_overfetch_multiplier",
+    "SearchDiagnostics",
 ]
+
+
+@dataclass
+class SearchDiagnostics:
+    """Per-call threshold-filter telemetry (RDR-087 Phase 1.2).
+
+    ``per_collection`` maps name → ``(raw, dropped, threshold, top_distance)``
+    where *top_distance* is the minimum (best-ranked, i.e. closest-to-query)
+    distance among dropped candidates for that collection, or ``None`` when
+    nothing was dropped. The name ``top_distance`` matches the RDR-087 stderr
+    format (the "top of the ranking"); internally it is a ``min`` over dropped
+    distances because smaller cosine distance = higher rank.
+
+    The struct is populated by ``search_cross_corpus`` when the caller passes
+    ``diagnostics_out=[]``; the CLI reads ``worst_offender()`` to emit the
+    silent-zero stderr note. The engine itself never emits stderr.
+    """
+
+    per_collection: dict[str, tuple[int, int, float | None, float | None]] = field(
+        default_factory=dict,
+    )
+    total_dropped: int = 0
+    total_raw: int = 0
+
+    def collections_with_drops(self) -> int:
+        return sum(
+            1 for _, dropped, _, _ in self.per_collection.values() if dropped > 0
+        )
+
+    def worst_offender(self) -> tuple[str, float | None, float] | None:
+        """Return ``(name, threshold, top_distance)`` for the worst offender.
+
+        Worst offender = collection where every candidate was dropped, with
+        the highest ``top_distance`` among those. ``None`` when no collection
+        had every candidate filtered.
+        """
+        candidates = [
+            (name, threshold, top_dist)
+            for name, (raw, dropped, threshold, top_dist) in self.per_collection.items()
+            if raw > 0 and dropped == raw and top_dist is not None
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda item: item[2])
 
 # Maximum ID-set size for ChromaDB $in filter — cap to avoid payload bloat.
 _MAX_PREFILTER_IDS = 500
@@ -161,6 +207,7 @@ def search_cross_corpus(
     taxonomy: Any | None = None,
     topic: str | None = None,
     threshold_override: float | None = None,
+    diagnostics_out: list[SearchDiagnostics] | None = None,
 ) -> list[SearchResult]:
     """Query each collection independently, returning combined raw results.
 
@@ -187,6 +234,12 @@ def search_cross_corpus(
     Voyage-client gate — explicit user intent takes precedence over the
     local-mode skip heuristic. Use ``float('inf')`` to disable filtering
     entirely (exposed as ``--no-threshold`` in the CLI).
+
+    *diagnostics_out* (RDR-087 Phase 1.2 / nexus-yi4b.1.2), when provided
+    as an empty list, is populated with a single :class:`SearchDiagnostics`
+    instance summarising per-collection raw/dropped counts and threshold
+    context. Used by the CLI to emit the silent-zero stderr note; the
+    engine never emits stderr itself.
     """
     cfg = load_config()
     # Config can override: search.cluster_by in .nexus.yml
@@ -231,6 +284,9 @@ def search_cross_corpus(
         effective_where = where
 
     all_results: list[SearchResult] = []
+    diag_per_collection: dict[str, tuple[int, int, float | None, float | None]] = {}
+    total_dropped = 0
+    total_raw = 0
     for col in collections:
         mult = _overfetch_multiplier(col)
         per_k = max(5, n_results * mult)
@@ -242,12 +298,17 @@ def search_cross_corpus(
             threshold = _threshold_for_collection(col, cfg)
         raw = t3.search(query, [col], n_results=per_k, where=effective_where)
         dropped = 0
+        # Minimum distance among dropped items — best-of-dropped, used as
+        # the "how much higher would the threshold need to be" signal.
+        min_dropped_distance: float | None = None
         for r in raw:
             distance = r["distance"]
             # RDR-055 E2 quality_boost runs after hybrid scoring in the
             # CLI/MCP paths. Thresholds apply to raw distance here.
             if threshold is not None and distance > threshold:
                 dropped += 1
+                if min_dropped_distance is None or distance < min_dropped_distance:
+                    min_dropped_distance = distance
                 continue
             all_results.append(SearchResult(
                 id=r["id"],
@@ -257,6 +318,9 @@ def search_cross_corpus(
                 metadata={k: v for k, v in r.items()
                           if k not in {"id", "content", "distance"}},
             ))
+        diag_per_collection[col] = (len(raw), dropped, threshold, min_dropped_distance)
+        total_raw += len(raw)
+        total_dropped += dropped
         if dropped:
             _log.debug(
                 "threshold_filtered",
@@ -264,6 +328,13 @@ def search_cross_corpus(
                 dropped=dropped,
                 threshold=threshold,
             )
+
+    if diagnostics_out is not None:
+        diagnostics_out.append(SearchDiagnostics(
+            per_collection=diag_per_collection,
+            total_dropped=total_dropped,
+            total_raw=total_raw,
+        ))
 
     # Topic post-filter: keep only results in the requested topic
     if topic_doc_ids is not None:
