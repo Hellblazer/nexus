@@ -416,6 +416,69 @@ parameters don't change.
   `mcp/core.py:1676` and `:1972`. Streaming pipeline's
   `ThreadPoolExecutor(max_workers=3)` at `pipeline_stages.py:591`.
 
+- **RF-11 (second research round, 2026-04-17)** — Deeper probe of
+  load-bearing code claims and corpus scale.
+
+  **Return-shape continuity — `ChunkRef` is the dict `resolve_span`
+  already returns.** Reading `catalog.py:575-612`, the existing
+  `resolve_span` returns
+  `{"chunk_text": str, "metadata": dict, "chunk_hash": str,
+  "char_range": tuple[int,int]?}`. No `ChunkRef` dataclass
+  exists. Phase 2's `resolve_chash(chash)` wrapper returns a
+  **superset** of that dict, adding the fields the global
+  variant knows but the per-collection one doesn't need:
+  `{"chash": str, "physical_collection": str, "doc_id": str,
+  "chunk_text": str, "metadata": dict}`. Both keys `chash` and
+  `chunk_hash` appear on the return for back-compat with
+  existing `resolve_span` callers; the RDR treats this as a
+  typed alias, not two different fields. Phase 2 deliverable
+  updated: introduce a `ChunkRef` `TypedDict` in
+  `src/nexus/catalog/types.py` so the shape is documented
+  instead of informal.
+
+  **`chunk_text_hash` is a validated metadata key.** The field
+  is listed in `ALLOWED_TOP_LEVEL` at
+  `src/nexus/metadata_schema.py:53` — the nexus metadata-schema
+  allowlist. Renaming it would require a schema migration and
+  touch every indexer. The RDR treats the key name as fixed.
+
+  **Existing chash-lookup call sites are real consumers, not
+  fixtures.** `catalog.py:1287` (inside a catalog helper that
+  resolves chash spans to chunk text) and `catalog.py:1425`
+  (inside `link_audit`, checking for stale chash links) both
+  run `col.get(where={"chunk_text_hash": <hex>})` in
+  production. Phase 2's `resolve_chash` subsumes these two
+  patterns; they can be refactored to call `resolve_chash`
+  instead of duplicating the ChromaDB filter logic. Filed as a
+  Phase 2 follow-up refactor (not blocking).
+
+  **Prod backfill scale (measured 2026-04-17).** T3 inventory:
+  136 collections, **278,458 total chunks**. Largest single
+  collection: `code__ART-8c2e74c0` at 63,103 chunks. Backfill
+  cost estimate at existing `_BACKFILL_BATCH = 300`:
+
+  - Theoretical minimum (local-network, no API latency):
+    ~5 min
+  - Realistic (ChromaDB Cloud latency, sequential):
+    ~25-70 min full `--all`
+  - Typical per-collection backfill: seconds to minutes
+
+  Implication: `nx collection backfill-hash --all` is a
+  maintenance-window operation for the top-5 collections, not
+  an inline install step. The RDR should (a) add a progress
+  bar to the backfill loop (existing `_backfill_chunk_text_hash`
+  already supports `on_progress` callback), and (b) document
+  the "fresh install takes an hour for a 278k-chunk corpus"
+  expectation. Phase 1 deliverable updated.
+
+  **`nx_answer(structured=True)` is purely additive.** Grepped
+  all `nx_answer(...)` call sites in `src/` and `tests/` — every
+  existing caller passes `question=...` (required) and
+  optionally `trace=...`. No caller passes a `structured` kwarg
+  today, and adding it with default `False` cannot break any
+  existing caller. Confirms the "precedent: `trace=True`"
+  reasoning in RF-8.
+
 ### Critical Assumptions
 
 - [x] `chash` is populated on every chunk in every indexing path —
@@ -495,7 +558,9 @@ indexing-path instrumentation.)
 | Proposed Component | Existing Module | Decision |
 |---|---|---|
 | Per-collection chash→chunk lookup | `src/nexus/catalog/catalog.py:575` `resolve_span(span, physical_collection, t3)` | **Reuse** — already handles `chash:<hex>` and `chash:<hex>:<start>-<end>` spans |
-| Global chash→chunk lookup | none | **Add** — `Catalog.resolve_chash(chash: str) -> ChunkRef | None`; consults T2 index; falls back to iterating collections when the T2 index is empty |
+| Global chash→chunk lookup | none | **Add** — `Catalog.resolve_chash(chash: str) -> ChunkRef | None`; consults T2 index; falls back to iterating collections (10× parallel, 30s deadline) when the T2 index is empty |
+| `ChunkRef` return type | none (`resolve_span` returns untyped `dict`) | **Add** — `TypedDict` in `src/nexus/catalog/types.py`; shape is a superset of the existing `resolve_span` return dict so callers can migrate without breakage |
+| Existing chash-filter call sites | `catalog.py:1287` (chash span → text), `catalog.py:1425` (`link_audit`) | **Refactor (Phase 2 follow-up, non-blocking)** — both currently call `resolve_span` (collection-scoped); can be simplified to `resolve_chash` once Phase 2 ships |
 | T2 `chash_index` table + migration | `src/nexus/db/migrations.py` | **Add** — schema `(chash TEXT, physical_collection TEXT, doc_id TEXT, created_at TEXT, PRIMARY KEY (chash, physical_collection))`; compound PK allows the same chunk text to appear in multiple collections. Secondary index on `physical_collection` for the nexus-lub cascade's `DELETE WHERE physical_collection = ?` |
 | Indexing dual-write | `code_indexer.py:371`, `doc_indexer.py:591` + `:666`, `prose_indexer.py:96` + `:141`, `pipeline_stages.py:163` | **Extend** — after the existing ChromaDB upsert at each of the six sites, insert-or-replace into the T2 `chash_index`. Best-effort: a T2 failure logs and continues; backfill recovers |
 | Backfill loop | `src/nexus/commands/collection.py:307` `_backfill_chunk_text_hash()` | **Extend** — the same per-chunk iteration that writes `chunk_text_hash` to T3 also writes `(chash, collection, doc_id)` to T2 if missing. One pass, two destinations |
@@ -647,9 +712,23 @@ place.
   `DELETE FROM chash_index WHERE physical_collection = ?` so
   deleting a collection doesn't leave orphan hashes pointing at
   gone chunks.
+- **Progress reporting**: extend the existing
+  `on_progress(updated, skipped, total)` callback wired into
+  `_backfill_chunk_text_hash` so `nx collection backfill-hash`
+  emits a progress bar. Measured corpus scale (RF-11): 278,458
+  chunks across 136 collections on prod today; full `--all`
+  runs take ~25-70 min realistic against ChromaDB Cloud
+  (top collection alone is 63k chunks). This needs to be
+  observable operator-side, not a silent minutes-long hang.
 
 ### Phase 2: Global `resolve_chash` (extends existing `resolve_span`)
 
+- Introduce `ChunkRef` as a `TypedDict` in a small new module
+  `src/nexus/catalog/types.py`. Shape: `{chash: str, chunk_hash:
+  str (alias for chash, for resolve_span back-compat),
+  physical_collection: str, doc_id: str, chunk_text: str,
+  metadata: dict}`. Optional `char_range: tuple[int, int]` when
+  the span includes a char range.
 - Add `Catalog.resolve_chash(chash: str, *, prefer_collection:
   str | None = None) -> ChunkRef | None` — collection-agnostic.
   Lookup path:
@@ -805,3 +884,25 @@ place.
   writes. No new claims left unverified; all are traced to
   live code references (`commands/collection.py:304`,
   `mcp/core.py:1676`/`:1972`, `pipeline_stages.py:591`).
+- 2026-04-17 (second research round) — RF-11 probes load-bearing
+  claims and prod scale:
+  - `resolve_span` actually returns a `dict`, not a `ChunkRef`.
+    Phase 2 now introduces a `ChunkRef` `TypedDict` in
+    `src/nexus/catalog/types.py` and the return carries both
+    `chash` and `chunk_hash` keys for back-compat with existing
+    `resolve_span` consumers.
+  - `chunk_text_hash` is in the validated metadata allowlist
+    at `metadata_schema.py:53` — key name is fixed by the
+    schema layer.
+  - Two existing chash-filter call sites (`catalog.py:1287`,
+    `catalog.py:1425`) are real consumers, not dead code;
+    filed as non-blocking Phase 2 follow-up refactor to
+    consolidate on `resolve_chash`.
+  - Prod backfill scale: **278,458 chunks across 136
+    collections**; full `--all` is a maintenance-window
+    operation (~25-70 min on ChromaDB Cloud). Phase 1 deliverable
+    gains a progress bar via the existing `on_progress`
+    callback already wired into `_backfill_chunk_text_hash`.
+  - `nx_answer(structured=True)` is purely additive — no
+    current caller passes the kwarg; adding with default
+    `False` cannot break any existing code.
