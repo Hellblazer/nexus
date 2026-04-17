@@ -1,5 +1,5 @@
 ---
-title: "RDR-086: Chash Span Resolution — Catalog chash-to-chunk Lookup + Doc-ID Mapping"
+title: "RDR-086: Chash Span Surface — Authoring, Resolution, and Verification"
 id: RDR-086
 status: draft
 type: Feature
@@ -7,16 +7,33 @@ priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-16
+revised: 2026-04-17
 related_issues: []
 related: [RDR-053, RDR-075, RDR-078, RDR-082, RDR-083]
 ---
 
-# RDR-086: Chash Span Resolution
+# RDR-086: Chash Span Surface
 
 RDR-083 shipped the `chash:` citation grammar, the scanner, and the
 `AnchorResolver` that plugs into RDR-082's Resolver registry. It did
 not ship the machinery that makes those citations *verifiable*. The
-v1 scope reduction noted in RDR-083 leaves two concrete holes:
+2026-04-17 ART-instance feedback then surfaced a deeper problem: it
+also didn't ship the machinery to *author* them. An author or agent
+that wants to cite a specific chunk has no CLI or MCP path to obtain
+the chash — they have to drop to the raw ChromaDB API, run
+`collection.get(include=["metadatas"])`, and copy the `chash` value by
+hand. Every `search`, `query`, and `nx_answer` structured return omits
+the chunk hash. That makes the whole `chash:` citation primitive
+dead-on-arrival for typical Tier-3 grounding workflows.
+
+This RDR owns the chash primitive surface end-to-end — authoring
+and verification are mirror workflows over the same T2 index. The
+original draft (2026-04-16) covered only the reverse direction
+(resolve hash → chunk). This revision widens scope to the forward
+direction (surface chunk hashes through normal retrieval) and the
+convenience CLI that composes them.
+
+Four concrete holes to close:
 
 1. `nx doc check-grounding` counts chash-shaped citations but cannot
    tell a hash-of-a-real-chunk from a hash-of-an-unindexed-chunk. Its
@@ -28,12 +45,16 @@ v1 scope reduction noted in RDR-083 leaves two concrete holes:
    The namespaces never intersect; every input returns `no_data`. The
    command emits a WARNING and the docstring marks it `[experimental]`,
    but it is currently inert.
-
-This RDR fixes both holes with one primitive: a
-`catalog.resolve_chash(chash) -> ChunkRef | None` method that returns
-the (document tumbler, chunk index, physical collection, optional
-text) for a chash, or `None` when the chash is not indexed. Every
-downstream feature composes on top of it.
+3. **Authors have no path to obtain a chash.** `search(structured=True)`
+   returns `{ids, tumblers, distances, collections}`. `query(structured=True)`
+   is similar. `nx_answer` envelopes carry final-text, not hashes. An
+   agent that just *found* the exact chunk to cite still has no way
+   to cite it without ChromaDB-API surgery.
+4. **No "cite this claim" command.** The normal workflow is "here's
+   my prose claim, find the best-matching chunk, give me a ready-to-
+   paste `[display](chash:…)` markdown link." That's a three-step
+   ChromaDB dance today — embed the claim, top-k query, copy hash
+   metadata by hand. It should be one command.
 
 ## Problem Statement
 
@@ -73,6 +94,34 @@ RDR-083's Phase 2 polish for `nx doc render --expand-citations`
 (inline footnote/tooltip with the cited chunk text) is blocked on
 the same resolver. The renderer currently preserves `chash:` links
 verbatim.
+
+#### Gap 5: No forward path from retrieval to chash
+
+`search(structured=True)` returns `{ids, tumblers, distances,
+collections}`. `query(structured=True)` returns document-level
+results with the same shape. `nx_answer` returns final text. None
+of them surface the underlying chunk's content hash. An agent
+running `search(query=<claim>, corpus=<primary-source>, limit=1,
+structured=True)` finds the right chunk but cannot read its chash
+out of the payload. The authoring workflow then forces a descent
+into the ChromaDB API to recover the metadata — exactly the
+"descend to the raw backend" anti-pattern the MCP surface exists to
+prevent. Surfacing `chunk_text_hash` on the structured-return
+payload closes the forward direction. The ART-instance feedback
+(2026-04-17) estimates this single field change closes ~80% of the
+authoring gap on its own.
+
+#### Gap 6: No one-shot "cite this claim" command
+
+Even with `chunk_text_hash` on structured returns, the author still
+runs three steps: call `search`, inspect the top result, assemble
+a markdown link. A focused CLI — `nx doc cite "<claim text>"
+--against <collection>` — collapses this to one invocation that
+emits a ready-to-paste `[summary](chash:<hex>)` snippet (plus, on
+`--json`, the resolved metadata for pipeline scripting). Without it
+the `chash:` citation grammar stays correct-but-painful, which the
+ART-instance feedback identifies as adoption-limiting for RDR-083's
+main value proposition.
 
 ## Context
 
@@ -122,6 +171,20 @@ parameters don't change.
   T2 SQLite, populated at indexing time. Single JOIN replaces
   N_collections scans. Most scalable; requires a new T2 migration.
 
+### External evidence
+
+- **RF-1 (2026-04-17)** — ART-instance observation on the
+  authoring gap. The instance tried to author `chash:` citations
+  against `docs__art-grossberg-papers` and could not — no CLI or
+  MCP surface exposes the chunk-to-hash mapping. `operator_extract`
+  works on text content, not metadata. `store_get`/`store_list`
+  show document-level views, not per-chunk hashes. `nx taxonomy`
+  operates at the topic/collection level. Even `search(structured=True)`
+  omits the chunk hash. The instance had to drop to `collection.get(include=["metadatas"])`
+  on the raw ChromaDB client to recover the hash and assemble the
+  citation by hand. Reported as a polish-bead against nexus
+  (2026-04-17 conversation). This RDR is the owner.
+
 ### Critical Assumptions
 
 - [ ] `chash` is populated on every chunk in every indexing path —
@@ -140,18 +203,32 @@ parameters don't change.
 
 ### Approach
 
-Two cooperating surfaces:
+Four cooperating surfaces — one primitive, two retrieval surface
+changes, one convenience command:
 
 1. **T2 `chash_index` table**, populated at indexing time by each
    pipeline (`code_indexer`, `doc_indexer`, `pdf_chunker`).
    Schema: `(chash TEXT PRIMARY KEY, physical_collection TEXT,
    doc_id TEXT, created_at TEXT)`.
 
-2. **`catalog.resolve_chash(chash) -> ChunkRef | None`** that
-   consults the T2 index first, falls back to a T3 metadata filter
-   when the index is empty (fresh install), returns `None` on miss.
+2. **`catalog.resolve_chash(chash) -> ChunkRef | None`** (reverse
+   direction) that consults the T2 index first, falls back to a T3
+   metadata filter when the index is empty (fresh install), returns
+   `None` on miss.
 
-Downstream consumers (RDR-083):
+3. **`chunk_text_hash` on structured retrieval returns** (forward
+   direction) — added to `search(structured=True)`,
+   `query(structured=True)`, and the `nx_answer` envelope. Agents
+   and authors that `search` for a claim can now read the citable
+   hash straight off the payload instead of descending to ChromaDB.
+
+4. **`nx doc cite "<claim>" --against <collection>`** (convenience
+   CLI) that composes `search(limit=1, structured=True)` with the
+   hash surfaced in #3 and emits a ready-to-paste
+   `[<display>](chash:<hex>)` markdown link. `--json` returns the
+   structured payload for pipeline scripting.
+
+Downstream consumers unblocked by this work (RDR-083):
 
 - `nx doc check-grounding --fail-ungrounded` ships.
 - `nx doc check-extensions` replaces its chash-as-doc-id proxy with
@@ -174,6 +251,10 @@ indexing-path instrumentation.)
 | T2 migration | `src/nexus/db/migrations.py` | **Add** — new migration for `chash_index` table |
 | Indexing instrumentation | `src/nexus/code_indexer.py`, `src/nexus/doc_indexer.py`, `src/nexus/pdf_chunker.py` | **Extend** — write to `chash_index` on each chunk upsert |
 | Backfill command | `src/nexus/commands/catalog.py` | **Extend** — `nx catalog rebuild-chash-index` walks existing T3 collections and populates T2 |
+| `search(structured=True)` payload | `src/nexus/mcp/core.py` search tool | **Extend** — add `chunk_text_hash` (list aligned with `ids`) to the returned dict |
+| `query(structured=True)` payload | `src/nexus/mcp/core.py` query tool | **Extend** — surface the representative-chunk hash on each document result |
+| `nx_answer` envelope | `src/nexus/mcp/core.py:nx_answer` | **Extend** — when a plan's final step is a retrieval op, include the top chunks' hashes in the envelope so the caller can cite without re-querying |
+| `nx doc cite` command | `src/nexus/commands/doc.py` (RDR-082 group) | **Add** — new subcommand composing `search(limit=1, structured=True)` + markdown link emission |
 
 ### Decision Rationale
 
@@ -238,6 +319,14 @@ place.
 3. Run `nx doc check-grounding --fail-ungrounded` on a doc with one
    real chash and one made-up chash — verify exit 1, correct error
    locations.
+4. Run `search(structured=True)` on a real corpus — verify
+   `chunk_text_hash` appears in the returned dict with length
+   matching `ids`, and every hash round-trips through
+   `resolve_chash` to its owning chunk.
+5. Run `nx doc cite "<a real claim>" --against docs__art-grossberg-papers`
+   and confirm the emitted markdown link has a resolvable chash
+   (feed the output through `nx doc check-grounding` with
+   `--fail-ungrounded`; expect exit 0).
 
 ### Phase 1: Indexing instrumentation
 
@@ -245,12 +334,20 @@ place.
 - Extend the three indexers to upsert.
 - Backfill command.
 
-### Phase 2: Catalog resolver
+### Phase 2: Catalog resolver (reverse direction)
 
 - `resolve_chash(chash) -> ChunkRef | None` method.
 - Unit tests with fixture T2 + fixture T3.
 
-### Phase 3: RDR-083 consumer wiring
+### Phase 3: Retrieval surface (forward direction)
+
+- Add `chunk_text_hash` to `search(structured=True)` payload.
+- Add the same to `query(structured=True)` document results.
+- Add the same to the `nx_answer` envelope when the final step is
+  a retrieval op.
+- Unit + integration tests: verify every surfaced hash resolves.
+
+### Phase 4: RDR-083 consumer wiring
 
 - `check-grounding` gains `--fail-ungrounded`.
 - `check-extensions` replaces the chash-as-doc-id proxy with real
@@ -258,6 +355,14 @@ place.
 - Remove `[experimental]` marker and WARNING path when the resolver
   is populated.
 - `nx doc render --expand-citations` ships.
+
+### Phase 5: Authoring CLI
+
+- `nx doc cite "<claim>" --against <collection> [--limit N] [--json]`.
+- Default output: `[<first 60 chars of chunk>](chash:<hex>)`.
+- `--json`: structured payload with the top-N candidate chunks +
+  hashes so pipeline scripts can pick a specific one.
+- Docs + live smoke against `docs__art-grossberg-papers`.
 
 ## References
 
@@ -274,3 +379,13 @@ place.
   (resolve_chash, chash → doc-id mapping, `--fail-ungrounded`,
   `--expand-citations`) all depend on the single primitive
   specified here.
+- 2026-04-17 — Scope expanded after ART-instance feedback (RF-1):
+  authors today cannot obtain chash values through any nexus CLI
+  or MCP surface, forcing direct ChromaDB-API use. Added Gap 5
+  (no forward path from retrieval to chash), Gap 6 (no "cite
+  this" CLI), and corresponding Phase 3 (`chunk_text_hash` in
+  structured returns) and Phase 5 (`nx doc cite`) to the
+  implementation plan. Title retyped "Chash Span Resolution" →
+  "Chash Span Surface" to reflect that this RDR owns the
+  primitive end-to-end (authoring + verification), not just
+  reverse resolution.
