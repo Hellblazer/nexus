@@ -108,7 +108,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-084](rdr-084-plan-library-growth.md) | Plan Library Growth — Auto-Save Successful Ad-Hoc Plans | Feature | Closed (implemented) | 2026-04-16 |
 | [RDR-085](rdr-085-glossary-aware-labeler.md) | Glossary-Aware Topic Labeler — Project Vocabulary via `claude_dispatch` | Feature | Closed (implemented) | 2026-04-16 |
 | [RDR-086](rdr-086-chash-span-resolution.md) | Chash Span Surface — Authoring, Resolution, and Verification | Feature | Accepted | 2026-04-16 |
-| [RDR-087](rdr-087-collection-observability-surfaces.md) | Collection Observability and Curation Surfaces | Feature | Draft | 2026-04-17 |
+| [RDR-087](rdr-087-collection-observability-surfaces.md) | Collection Observability and Curation Surfaces | Feature | Accepted | 2026-04-17 |
 
 ---
 
