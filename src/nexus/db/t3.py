@@ -190,6 +190,17 @@ class T3Database:
         _client=None,
         _ef_override=None,
     ) -> None:
+        # Credential fallback (nexus-9ji/086 follow-up): when a caller passes
+        # the bare constructor (scripts, research probes, quick repls), empty
+        # args default to the configured credentials via nexus.config so the
+        # constructor is not a footgun. Callers that supply explicit values
+        # still win. Skipped entirely when ``_client`` is injected (tests).
+        if _client is None and not local_mode:
+            tenant = tenant or get_credential("chroma_tenant")
+            database = database or get_credential("chroma_database")
+            api_key = api_key or get_credential("chroma_api_key")
+            voyage_api_key = voyage_api_key or get_credential("voyage_api_key")
+
         self._local_mode = local_mode
         self._voyage_api_key = voyage_api_key
         self._ef_override = _ef_override
