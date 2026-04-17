@@ -2,6 +2,14 @@
 
 > When in doubt, check `src/nexus/` -- the code is the ground truth.
 
+## Reference Architecture
+
+Four layers: queries come in at the top, get decomposed into plans, executed as a DAG of operators, backed by a catalog-aware knowledge graph. Modeled on the AgenticScholar four-layer reference architecture.
+
+![Nexus four-layer architecture](architecture-diagram.svg)
+
+Source: [`architecture-diagram.svg`](architecture-diagram.svg) — edit the SVG directly, then re-render the PNG with `rsvg-convert -z 1.5 docs/architecture-diagram.svg -o docs/architecture-diagram.png`.
+
 ## How It Fits Together
 
 Nexus has three layers: a CLI (for humans) and an MCP server (for agents) that
