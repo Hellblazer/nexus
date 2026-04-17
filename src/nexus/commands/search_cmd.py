@@ -19,7 +19,7 @@ from nexus.formatters import (
     format_vimgrep,
 )
 from nexus.scoring import RG_FLOOR_SCORE, apply_hybrid_scoring, rerank_results, round_robin_interleave
-from nexus.search_engine import search_cross_corpus
+from nexus.search_engine import SearchDiagnostics, search_cross_corpus
 from nexus.types import SearchResult
 
 
@@ -47,7 +47,7 @@ _THRESHOLD_SUGGESTION_OFFSET: float = 0.20
 
 
 def _maybe_emit_silent_zero_note(
-    diagnostics_out: list,
+    diagnostics_out: list[SearchDiagnostics],
     *,
     quiet: bool,
     config: dict,
@@ -278,7 +278,7 @@ def search_cmd(
     if not hybrid:
         hybrid = config.get("search", {}).get("hybrid_default", False)
 
-    diagnostics_out: list = []
+    diagnostics_out: list[SearchDiagnostics] = []
 
     def _retrieve(q: str) -> list[SearchResult]:
         # Pass taxonomy for topic grouping + topic boost (RDR-070)

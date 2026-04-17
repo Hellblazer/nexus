@@ -129,6 +129,8 @@ def search(
         # Always pass taxonomy for topic grouping + topic boost (RDR-070).
         # Wrapped in context manager to avoid connection leak.
         with _t2_ctx() as _t2_db:
+            # Note: no ``diagnostics_out`` — MCP does not emit stderr
+            # (RDR-087 Phase 1 scope is CLI-only).
             results = search_cross_corpus(
                 query, target, n_results=fetch_n, t3=t3, where=where_dict,
                 cluster_by=cluster_by or None,
