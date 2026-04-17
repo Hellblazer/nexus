@@ -6,6 +6,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.6.2] - 2026-04-17
+
+Plugin version bump alongside conexus 4.6.2. See root CHANGELOG for
+the issue #190 `plans(verb)` index crash fix on pre-4.4.0 DBs.
+
 ## [4.6.1] - 2026-04-17
 
 Plugin version bump alongside conexus 4.6.1. See root CHANGELOG for

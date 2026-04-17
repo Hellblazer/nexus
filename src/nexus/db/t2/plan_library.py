@@ -77,11 +77,13 @@ CREATE TABLE IF NOT EXISTS plans (
     failure_count   INTEGER NOT NULL DEFAULT 0
 );
 
-CREATE INDEX IF NOT EXISTS idx_plans_verb ON plans(verb);
-CREATE INDEX IF NOT EXISTS idx_plans_scope ON plans(scope);
-CREATE INDEX IF NOT EXISTS idx_plans_verb_scope ON plans(verb, scope);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_plans_project_dimensions
-    ON plans(project, dimensions) WHERE dimensions IS NOT NULL;
+-- Indexes on the RDR-078 columns (verb/scope/dimensions) live in the
+-- 4.4.0 ``_add_plan_dimensional_identity`` migration, not here. On a
+-- pre-4.4.0 DB the plans table exists without those columns (the
+-- ``CREATE TABLE IF NOT EXISTS`` above is a no-op against an existing
+-- table) and creating the indexes inline crashes with
+-- ``sqlite3.OperationalError: no such column: verb`` before the
+-- migration that would add them has a chance to run. Issue #190.
 
 CREATE VIRTUAL TABLE IF NOT EXISTS plans_fts USING fts5(
     query,

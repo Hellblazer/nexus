@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.6.2] - 2026-04-17
+
+### Fixed
+
+- **Issue #190** — `nx search` (and any `T2Database` construction) crashed with `sqlite3.OperationalError: no such column: verb` for anyone whose DB was created before 4.4.0 (RDR-078 dimensional-identity columns). `_PLANS_SCHEMA_SQL` in `db/t2/plan_library.py` created four `CREATE INDEX` statements referencing the `verb` / `scope` / `dimensions` columns inline, so `_create_base_tables` crashed before the 4.4.0 `_add_plan_dimensional_identity` migration had a chance to add those columns. Indexes removed from `_PLANS_SCHEMA_SQL`; the migration already creates all four idempotently (`CREATE INDEX IF NOT EXISTS`), so fresh installs still get them via the migration and upgrading installs get both the columns and the indexes added together. Two regression tests seed a pre-4.4.0 plans table and pin `bootstrap_version` + `apply_pending` behaviour.
+
 ## [4.6.1] - 2026-04-17
 
 ### Fixed
