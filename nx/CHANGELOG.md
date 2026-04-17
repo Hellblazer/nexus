@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.5.1] - 2026-04-17
+
+Follow-up bug fix bundled with conexus 4.5.1. See root `CHANGELOG.md`.
+
 ## [4.5.0] - 2026-04-17
 
 Plugin version bumped to track the `nx doc` command group shipped with

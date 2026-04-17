@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.5.1] - 2026-04-17
+
+### Fixed
+
+- **nexus-lub follow-up** — `nx collection delete` cascade now runs even when the Chroma collection is already absent (discovered during the v4.5.0 live shakeout). The v4.5.0 cascade fix assumed the T3 delete succeeds before the cascade runs; when a user invokes the command to clean up orphan taxonomy state left by a pre-4.5.0 deletion (the recovery case the fix was supposed to unblock), `chromadb.errors.NotFoundError` bubbled out before the cascade, leaving orphans intact. v4.5.1 wraps the T3 delete in `try/except NotFoundError`, prints an informational `note:` to stderr, and proceeds with the taxonomy cleanup. One new regression test exercises the absent-collection path end-to-end via the Click runner.
+
 ## [4.5.0] - 2026-04-17
 
 ### Added
