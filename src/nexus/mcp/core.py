@@ -63,6 +63,7 @@ def search(
     cluster_by: str = "",
     topic: str = "",
     structured: bool = False,
+    threshold: float | None = None,
 ) -> "str | dict":
     """Semantic search across T3 collections. Paged results (``offset=N`` for next page).
 
@@ -77,6 +78,11 @@ def search(
         structured: Return ``{ids, tumblers, distances, collections}`` dict instead
             of human-readable string.  Used by the plan runner so ``$stepN.ids``
             references resolve to actual chunk IDs.
+        threshold: Override the per-collection distance threshold uniformly
+            (raw cosine distance, lower is stricter). Pass ``float('inf')``
+            to disable filtering entirely. ``None`` (default) uses per-corpus
+            config thresholds. RDR-087 Phase 1.1 workaround for silent
+            threshold-drop on dense-prose collections.
     """
     try:
         from nexus.config import load_config
@@ -130,6 +136,7 @@ def search(
                 link_boost=False,
                 taxonomy=_t2_db.taxonomy,
                 topic=topic or None,
+                threshold_override=threshold,
             )
         # Only sort by distance for flat (non-clustered) results.
         # Clustered results arrive in cluster-grouped order from search_engine.

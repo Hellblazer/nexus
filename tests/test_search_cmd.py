@@ -472,3 +472,72 @@ def test_search_single_corpus_snapshot(query: str, search_corpus: T3Database, sn
     raw = search_cross_corpus(query, ["code__snapshot"], n_results=5, t3=search_corpus)
     scored = apply_hybrid_scoring(raw, hybrid=False)
     assert _format_results(scored) == snapshot
+
+
+# ── Phase 1.1 (RDR-087): --threshold / --no-threshold ───────────────────────
+
+
+def _capture_ctx_full(collections: list[str] | None = None):
+    """Like ``_capture_ctx`` but captures the full kwargs dict."""
+    mock = _mock_t3(collections)
+    captured: list[dict] = []
+
+    def fake(query, cols, n_results, t3, where=None, **kwargs):
+        captured.append({"where": where, **kwargs})
+        return []
+
+    return mock, captured, fake
+
+
+def test_threshold_flag_passes_override_to_engine(runner: CliRunner, cloud_env) -> None:
+    mock, captured, fake = _capture_ctx_full(["knowledge__test"])
+    with patch("nexus.commands.search_cmd._t3", return_value=mock), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake), \
+         patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
+        result = runner.invoke(
+            main, ["search", "query", "--corpus", "knowledge", "--threshold", "0.8"],
+        )
+    assert result.exit_code == 0, result.output
+    assert captured[0].get("threshold_override") == pytest.approx(0.8)
+
+
+def test_no_threshold_flag_disables_filtering(runner: CliRunner, cloud_env) -> None:
+    import math
+    mock, captured, fake = _capture_ctx_full(["knowledge__test"])
+    with patch("nexus.commands.search_cmd._t3", return_value=mock), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake), \
+         patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
+        result = runner.invoke(
+            main, ["search", "query", "--corpus", "knowledge", "--no-threshold"],
+        )
+    assert result.exit_code == 0, result.output
+    override = captured[0].get("threshold_override")
+    assert override is not None and math.isinf(override)
+
+
+def test_default_passes_none_override(runner: CliRunner, cloud_env) -> None:
+    mock, captured, fake = _capture_ctx_full(["knowledge__test"])
+    with patch("nexus.commands.search_cmd._t3", return_value=mock), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake), \
+         patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
+        result = runner.invoke(main, ["search", "query", "--corpus", "knowledge"])
+    assert result.exit_code == 0, result.output
+    assert captured[0].get("threshold_override") is None
+
+
+def test_threshold_and_no_threshold_mutually_exclusive(
+    runner: CliRunner, cloud_env,
+) -> None:
+    mock_t3 = _mock_t3(["knowledge__test"])
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]), \
+         patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
+        result = runner.invoke(main, [
+            "search", "query", "--corpus", "knowledge",
+            "--threshold", "0.7", "--no-threshold",
+        ])
+    assert result.exit_code != 0
+    err = (result.output or "") + (str(result.exception) if result.exception else "")
+    assert "threshold" in err.lower() and (
+        "mutually exclusive" in err.lower() or "cannot" in err.lower()
+    )

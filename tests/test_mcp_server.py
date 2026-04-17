@@ -139,6 +139,36 @@ def test_search_no_results(t3):
     assert "no" in result.lower()
 
 
+def _capture_search_kwargs():
+    """Return (captured, fake_fn) that records all engine kwargs."""
+    captured: list[dict] = []
+
+    def fake(query, collections, n_results, t3, where=None, **kwargs):
+        captured.append({"where": where, **kwargs})
+        return []
+
+    return captured, fake
+
+
+def test_search_threshold_kwarg_routed_to_engine():
+    """search(..., threshold=0.7) plumbs through as threshold_override=0.7."""
+    _mock_t3([{"name": "knowledge__test", "count": 5}])
+    captured, fake = _capture_search_kwargs()
+    with patch("nexus.search_engine.search_cross_corpus", fake):
+        search(query="vector db", corpus="knowledge__test", threshold=0.7)
+    assert captured, "engine must be invoked"
+    assert captured[0].get("threshold_override") == pytest.approx(0.7)
+
+
+def test_search_no_threshold_kwarg_passes_none():
+    """Omitting ``threshold`` leaves ``threshold_override`` at None (config default)."""
+    _mock_t3([{"name": "knowledge__test", "count": 5}])
+    captured, fake = _capture_search_kwargs()
+    with patch("nexus.search_engine.search_cross_corpus", fake):
+        search(query="vector db", corpus="knowledge__test")
+    assert captured[0].get("threshold_override") is None
+
+
 # ── Store ────────────────────────────────────────────────────────────────────
 
 def test_store_put(t3):

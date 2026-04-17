@@ -121,6 +121,14 @@ def _rg_hit_to_result(hit: dict) -> SearchResult:
               help="One line per result: path:line:text (grep-compatible)")
 @click.option("--reverse", "-r", is_flag=True, default=False,
               help="Reverse output order (highest-scoring last)")
+@click.option("--threshold", "threshold", default=None, type=float, metavar="DISTANCE",
+              help="Override per-collection distance threshold (raw cosine distance, "
+                   "lower is stricter). Applies uniformly across selected collections.")
+@click.option("--no-threshold", "no_threshold", is_flag=True, default=False,
+              help="Disable distance-threshold filtering entirely — show every "
+                   "candidate returned by the vector search. Mutually exclusive "
+                   "with --threshold. (RDR-087 Phase 1 workaround for silent "
+                   "threshold-drop on dense-prose collections.)")
 def search_cmd(
     query: str,
     path: str | None,
@@ -141,6 +149,8 @@ def search_cmd(
     use_bat: bool,
     compact: bool,
     reverse: bool,
+    threshold: float | None,
+    no_threshold: bool,
 ) -> None:
     """Semantic search across T3 knowledge collections.
 
@@ -152,6 +162,16 @@ def search_cmd(
     --corpus may be a prefix (code, docs, knowledge) or a fully-qualified
     collection name (code__myrepo).  Repeat --corpus to search multiple corpora.
     """
+    if threshold is not None and no_threshold:
+        raise click.UsageError(
+            "--threshold and --no-threshold are mutually exclusive"
+        )
+    threshold_override: float | None
+    if no_threshold:
+        threshold_override = float("inf")
+    else:
+        threshold_override = threshold
+
     # Structured output modes (--json, --vimgrep, --files, --compact) must
     # produce clean machine-parseable output.  Suppress log messages below
     # ERROR so warnings don't pollute stdout.
@@ -211,7 +231,12 @@ def search_cmd(
         from nexus.commands._helpers import default_db_path as _db_path
         from nexus.db.t2 import T2Database
         with T2Database(_db_path()) as _t2:
-            raw = search_cross_corpus(q, target_collections, n_results=n, t3=db, where=where_filter, link_boost=False, taxonomy=_t2.taxonomy)
+            raw = search_cross_corpus(
+                q, target_collections, n_results=n, t3=db,
+                where=where_filter, link_boost=False,
+                taxonomy=_t2.taxonomy,
+                threshold_override=threshold_override,
+            )
         if hybrid:
             # Scope ripgrep to matching caches when a single corpus is targeted
             rg_corpus = target_collections[0] if len(target_collections) == 1 else None
