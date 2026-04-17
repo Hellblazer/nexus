@@ -6,6 +6,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.5.3] - 2026-04-17
+
+### Fixed
+
+- **MCP analytical-tool timeouts** — `claude_dispatch` default raised from 60s → 300s; per-tool defaults raised from 120s → 300s (`operator_extract`, `operator_rank`, `operator_compare`, `operator_summarize`, `operator_generate`, `nx_enrich_beads`, `_nx_answer_plan_miss`) and 120s → 600s (`nx_tidy`, `nx_plan_audit`). The prior 120s ceiling was producing false timeouts on real analytical workloads (observed: `nx_plan_audit` on the RDR-086 accept chain exhausted 120s mid-run). Timeouts now tier by workload: content transforms at 300s, whole-corpus sweeps at 600s. Callers pass an explicit timeout override when their input is known-short. Nine regression tests pin the new defaults via `inspect.signature`.
+- **T3 bare-constructor credential fallback** — `chromadb.CloudClient()` invoked without explicit args now falls back through `get_credential()` before failing. Previously scripts that didn't know about the `make_t3()` factory surfaced `ChromaError: Permission denied`.
+
+### Changed
+
+- **RDR-086 scope expanded** — moved from draft to accepted. Original scope ("ship `resolve_chash` primitive + consumers") expanded after ART-instance feedback revealed authors have no CLI/MCP surface for obtaining chash values. New scope owns the primitive end-to-end: authoring (`nx doc cite`), resolution (T2 `chash_index` + global `Catalog.resolve_chash`), and verification (grounded citation coverage). 6 Gaps, 11 research findings, 5 implementation phases; compound PK `(chash, physical_collection)` for collision tolerance; empty-index short-circuit for fresh installs.
+
 ## [4.5.2] - 2026-04-17
 
 ### Fixed

@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.5.3] - 2026-04-17
+
+Plugin version bump alongside conexus 4.5.3. See root CHANGELOG for
+the analytical-tool timeout raise and the T3 bare-constructor
+credential fallback.
+
 ## [4.5.2] - 2026-04-17
 
 Plugin version bump alongside conexus 4.5.2. See root CHANGELOG for
