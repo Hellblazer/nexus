@@ -1,12 +1,16 @@
 ---
 title: "RDR-084: Plan Library Growth — Auto-Save Successful Ad-Hoc Plans"
 id: RDR-084
-status: draft
+status: closed
 type: Feature
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-16
+revised: 2026-04-16
+accepted_date: 2026-04-16
+closed_date: 2026-04-16
+close_reason: implemented
 related_issues: []
 related: [RDR-078, RDR-080]
 ---
@@ -412,3 +416,30 @@ Negligible vs the seconds-to-minutes of the underlying LLM work.
   personal plans into a project-scope seed.
 - **Human-review gate on promotion** — personal → project requires
   review; already covered by `plan-promote-propose`.
+
+## Revision History
+
+- 2026-04-16 — Draft authored from the I-6 placeholder observation in
+  `src/nexus/mcp/core.py` (RDR-080 ad-hoc success path had a stub
+  `plan_save(..., ttl=30)` call with no scope/tags/project plumbing
+  and no T1 cache upsert).
+- 2026-04-16 (gate) — PASS with 2 as-built corrections. Technical
+  Design pseudo-code updated to the shipped single-Match return
+  (the drafted tuple-return was discarded during implementation as
+  unnecessary). §Test Plan and §MVV extended to register
+  `TestLiveSqliteRoundTrip` (2 new tests: round-trip + `ttl=0`
+  opt-out). Live MVV run captured: q1 "What is the plan library
+  growth architecture?" → 48.0s, grown plan saved; q2 paraphrase
+  → 25.7s, `plan_match` hit (no second save), T2 durable after
+  re-open. Critical Assumptions 1 and 2 empirically verified.
+- 2026-04-16 — Accepted.
+- 2026-04-16 — Closed (implemented). Close pointers:
+  Gap1 = `src/nexus/mcp/core.py:2054` (ad-hoc-success save guard);
+  Gap2 = `src/nexus/mcp/core.py:2081` (`plan_grow_saved` structured
+  log; tags="ad-hoc,grown" surface the re-decompose-vs-novel signal;
+  a dedicated `nx plans grown` subcommand is deferred as a routine
+  follow-up bead, not a gap);
+  Gap3 = `src/nexus/config.py:305` + `src/nexus/mcp/core.py:2062`
+  (`plans.ad_hoc_ttl` config + `save_plan(scope="personal", ...)`
+  call — automatic growth replaces hand-authoring as the primary
+  path; `plan-promote-propose` remains for promotion to project/global).

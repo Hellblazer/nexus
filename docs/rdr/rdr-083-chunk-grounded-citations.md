@@ -1,14 +1,18 @@
 ---
 title: "RDR-083: Corpus-Evidence Tokens — `chash:` Spans, Grounding Validator, Author-Extension Auto-Flag, `nx-anchor` Rendering"
 id: RDR-083
-status: draft
+status: closed
 type: Feature
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-15
+revised: 2026-04-16
+accepted_date: 2026-04-16
+closed_date: 2026-04-16
+close_reason: implemented
 related_issues: []
-related: [RDR-053, RDR-075, RDR-077, RDR-078, RDR-082]
+related: [RDR-053, RDR-075, RDR-077, RDR-078, RDR-082, RDR-086]
 ---
 
 # RDR-083: Corpus-Evidence Tokens
@@ -370,3 +374,25 @@ Three cooperating validators atop one new prose primitive. Resist LLM-based grou
 
 - 2026-04-15 — Draft authored from ART field report findings F5, F6, F11.
 - 2026-04-16 — Scope expansion: absorbed `{{nx-anchor:…}}` corpus-shape token (originally scoped to RDR-082) and Gap 4 (empirical collection shape). 083 now owns every rendering surface that depends on projection data; 082 stays on system-of-record tokens only. Title retyped "Chunk-Grounded Citations" → "Corpus-Evidence Tokens" to reflect the broader scope.
+- 2026-04-16 (gate) — NOT JUSTIFIED on initial pass (2 Critical, 2 Significant) — RDR body claimed unshipped hash-resolution behaviour for `check-grounding` and `check-extensions`. Corrections applied: §Proposed Solution Approach explicitly marks `check-grounding` shape-only, `check-extensions` `[experimental]` with the chash-vs-doc-id namespace mismatch, and a new §v1 Scope Reduction subsection lists the four deferrals (`resolve_chash`, chash→doc-id mapping, `--fail-ungrounded`, `--expand-citations`) — all four now owned by **RDR-086**. Critical Assumption 1 (chash regex) marked verified against `_CHASH_LINK_RE`.
+- 2026-04-16 — Accepted.
+- 2026-04-16 — Closed (implemented v1; v1 scope reduction owned by RDR-086). Close pointers:
+  Gap1 = `src/nexus/doc/citations.py:55` (`_CHASH_LINK_RE`
+  enforces exactly 64 hex characters; scanner reports `chash:`
+  spans + prose + bracket citations with fenced-code skip);
+  Gap2 = `src/nexus/commands/doc.py:206` (`check-grounding`
+  command — counts chash-shaped citations, emits coverage ratio
+  + `--fail-under` gate; hash-to-chunk *resolution* deferred to
+  RDR-086);
+  Gap3 = `src/nexus/commands/doc.py:266` (`check-extensions`
+  command ships `[experimental]`; loud WARNING fires when every
+  input hits `no_data` so the inertness is never silent; real
+  chash→doc-id resolution ships with RDR-086);
+  Gap4 = `src/nexus/doc/resolvers_corpus.py:18` (`AnchorResolver`
+  plugs into RDR-082's Resolver registry as the first external
+  consumer — extension-point invariant verified by the live
+  render smoke against `docs__art-grossberg-papers` yielding
+  top-5 projected topics).
+  Close approved with 5 open beads (umbrella epic `nexus-1uf`
+  stays open to track the RDR-086 follow-up; remaining 4 beads
+  unrelated to this RDR).

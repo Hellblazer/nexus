@@ -1,12 +1,16 @@
 ---
 title: "RDR-085: Glossary-Aware Topic Labeler — Project Vocabulary via `claude_dispatch`"
 id: RDR-085
-status: draft
+status: closed
 type: Feature
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-16
+revised: 2026-04-16
+accepted_date: 2026-04-16
+closed_date: 2026-04-16
+close_reason: implemented
 related_issues: []
 related: [RDR-070, RDR-080, RDR-081]
 supersedes_part_of: [RDR-081]
@@ -488,3 +492,36 @@ faster; measured during MVV.
   context rotation is real complexity for pennies of savings on
   today's workload. Reopen if observed runs exceed a minute and
   the input-token fraction dominates.
+
+## Revision History
+
+- 2026-04-16 — Draft authored as the re-targeted labeler scope
+  after RDR-079 abandonment (RDR-081's original labeler portion
+  depended on infrastructure that never shipped; RDR-080's
+  `claude_dispatch` substrate is the shipped alternative).
+- 2026-04-16 (gate) — PASS with 2 as-built corrections.
+  `_LABEL_SCHEMA` pseudo-code updated to the shipped `idx`-keyed
+  shape (was `label`-only; explicit-idx slot routing is more robust
+  to partial/out-of-order responses than positional enumerate).
+  Critical Assumption 2 (latency envelope) marked verified —
+  substrate migration does not move the envelope in measurable
+  ways at typical batch sizes; the existing subprocess envelope
+  (13–27s/batch per RDR-081 spike) already spans the
+  `claude_dispatch` envelope (~10–30s/batch per RDR-080). Session-
+  reuse deferral (no prompt-cache optimisation in v1) reasoning
+  strengthened with `nexus-axu` Phase A evidence citation.
+- 2026-04-16 — Live quality verification against
+  `rdr__nexus-571b8edd` (6 topics, 1 batch): 2 of 6 labels improved
+  with glossary (eliminated the "Ted Nelson" training-prior on
+  "tumbler"), 4 of 6 unchanged, 0 of 6 regressed. RF-1's quality-
+  floor prediction holds empirically.
+- 2026-04-16 — Accepted.
+- 2026-04-16 — Closed (implemented). Close pointers:
+  Gap1 = `src/nexus/glossary.py:1` + `src/nexus/commands/taxonomy_cmd.py:910`
+  (new glossary module + prompt-prepend at labeler dispatch site
+  — SSMF-class hallucinations now mitigated when glossary
+  configured);
+  Gap2 = `src/nexus/commands/taxonomy_cmd.py:859` (async
+  `_generate_labels_batch` → `claude_dispatch` with schema-enforced
+  output; the bespoke `subprocess.run` + `re.match` scaffolding is
+  deleted, not parallel-pathed).
