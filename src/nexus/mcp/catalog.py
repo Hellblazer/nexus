@@ -394,7 +394,7 @@ def catalog_link_query(
     Results are paged. When truncated, a ``_pagination`` entry appears at the end
     with ``next_offset``. Pass that as ``offset`` to get the next page.
 
-    NOT a query-planner step — use catalog_links for graph traversal.
+    NOT a retrieval step — use catalog_links (or the `traverse` MCP tool) for graph traversal.
     Use for: audit by creator, find all links of a type, count generator output.
     created_at_before: ISO timestamp — only links created before this time.
     Note: returns ALL matching links including orphans (links to deleted documents).

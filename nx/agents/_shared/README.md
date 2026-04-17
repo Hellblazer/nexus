@@ -11,7 +11,7 @@ This directory contains shared resources used across multiple agents.
 
 ## Usage Pattern
 
-All 15 agents reference this shared Context Protocol using:
+All 13 agents (10 active + 3 RDR-080 MCP-tool redirect stubs) reference this shared Context Protocol using:
 
 ```markdown
 ## Context Protocol

@@ -6,6 +6,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.4.1] - 2026-04-16
+
+### Fixed
+
+- **Plugin auto-approval allow list** — added the 11 MCP tools shipped in 4.4.0 that were missing from `nx/hooks/scripts/auto-approve-nx-mcp.sh`: `nx_answer`, `nx_tidy`, `nx_enrich_beads`, `nx_plan_audit`, `traverse`, `store_get_many`, and the 5 operators (`operator_summarize`, `operator_extract`, `operator_rank`, `operator_compare`, `operator_generate`). Without this, every call to any of these tools surfaced a permission prompt instead of running silently. Plugin-only fix — no Python code changed.
+- **Subagent-start operators block** — the analytical-operators guidance in `nx/hooks/scripts/subagent-start.sh` still told subagents to dispatch the removed `analytical-operator` agent. Replaced with direct invocations of the 5 `operator_*` MCP tools plus a pointer to `nx_answer` for plan-matched retrieval.
+- **`nexus` skill reference** — `SKILL.md` common-operations block and `reference.md` tool catalog were frozen at the 15-tool v4.3.x surface. Added full entries for `nx_answer`, `traverse`, `store_get_many`, the 5 operators, and the 3 hygiene tools (`nx_tidy` / `nx_enrich_beads` / `nx_plan_audit`); corrected core-tool count to 26.
+- **Stale "15 agents" reference** in `nx/agents/_shared/README.md` updated to "13 agents (10 active + 3 RDR-080 MCP-tool redirect stubs)".
+- **`catalog.py` docstring** — removed lingering `query-planner` reference from `link_query`.
+
 ## [4.4.0] - 2026-04-16
 
 ### Added

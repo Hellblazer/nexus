@@ -178,11 +178,17 @@ SEQTHINK
 if [[ $SKIP_OPERATORS -eq 0 ]]; then
 cat <<'OPERATORS'
 
-## Analytical Operators
+## Analytical Operators (RDR-080)
 
-Agent `analytical-operator` — dispatch via Agent tool with relay containing operation + inputs + params.
-Operations: extract (JSON template), summarize (short|detailed|evidence), rank (criterion), compare (criterion), generate (cited text).
-Step outputs: T1 scratch tag `query-step,step-N`.
+Five MCP tools wrap the five operations — each spawns `claude -p` (default timeout 120s). Call them directly; no Agent dispatch.
+
+  mcp__plugin_nx_nexus__operator_summarize(content="<text>", cited=True)
+  mcp__plugin_nx_nexus__operator_extract(inputs=["doc1","doc2"], fields="title,year,author")
+  mcp__plugin_nx_nexus__operator_rank(items=["a","b","c"], criterion="<criterion>")
+  mcp__plugin_nx_nexus__operator_compare(items=["x","y"], focus="<aspect>")
+  mcp__plugin_nx_nexus__operator_generate(template="<template>", context="<source material>")
+
+For plan-matched multi-step retrieval use `mcp__plugin_nx_nexus__nx_answer` — it composes search/query/operators under a plan-match-first gate.
 OPERATORS
 fi
 

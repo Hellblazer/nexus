@@ -17,10 +17,36 @@ effort: low
 ## Common Operations
 
 ```
-# Search
+# Analytical answer (RDR-080) — plan-match-first, falls through to inline planner on miss
+mcp__plugin_nx_nexus__nx_answer(question="how does plan matching work"                  # primary front door
+mcp__plugin_nx_nexus__nx_answer(question="...", dimensions={"verb":"research"}          # pin a verb for the matcher
+mcp__plugin_nx_nexus__nx_answer(question="...", scope="1.2"                             # catalog subtree filter
+
+# Search (chunk-level) / query (document-level)
 mcp__plugin_nx_nexus__search(query="query"                          # semantic search across T3
 mcp__plugin_nx_nexus__search(query="query", corpus="code"           # code only
-mcp__plugin_nx_nexus__search(query="query", corpus="knowledge", limit=5 # knowledge with limit
+mcp__plugin_nx_nexus__search(query="query", structured=True         # returns {ids, tumblers, distances, collections}
+mcp__plugin_nx_nexus__query(question="...", corpus="knowledge", follow_links="cites"    # catalog-aware, document-level
+
+# Batch hydrate chunks past the ChromaDB 300-record quota
+mcp__plugin_nx_nexus__store_get_many(ids=["id1","id2","id3"], collections="knowledge__art"
+mcp__plugin_nx_nexus__store_get_many(ids="id1,id2", collections="rdr__nexus", structured=True
+
+# Walk the catalog link graph (depth capped at 3 — SC-4)
+mcp__plugin_nx_nexus__traverse(seeds=["1.1.635"], link_types=["implements","cites"], depth=2
+mcp__plugin_nx_nexus__traverse(seeds="1.1.635", purpose="find-implementations"          # link_types XOR purpose
+
+# Analytical operators — each spawns `claude -p` (default timeout 120s)
+mcp__plugin_nx_nexus__operator_summarize(content="...", cited=True
+mcp__plugin_nx_nexus__operator_extract(inputs=["doc1","doc2"], fields="title,year,author"
+mcp__plugin_nx_nexus__operator_rank(items=["a","b","c"], criterion="relevance to X"
+mcp__plugin_nx_nexus__operator_compare(items=["x","y"], focus="scalability"
+mcp__plugin_nx_nexus__operator_generate(template="release note", context="..."
+
+# Background hygiene — call and let run (long-lived claude -p subprocesses)
+mcp__plugin_nx_nexus__nx_tidy()                                     # T2 memory consolidation
+mcp__plugin_nx_nexus__nx_enrich_beads()                             # design-notes auto-fill
+mcp__plugin_nx_nexus__nx_plan_audit()                               # plan library quality sweep
 
 # Memory (T2)
 mcp__plugin_nx_nexus__memory_put(content="content", project="{repo}", title="file.md"
@@ -34,7 +60,20 @@ mcp__plugin_nx_nexus__store_list(collection="knowledge"
 # Scratch (T1)
 mcp__plugin_nx_nexus__scratch(action="put", content="working note"
 mcp__plugin_nx_nexus__scratch_manage(action="flag", entry_id="<id>"       # auto-promote to T2 at session end
+
+# Plan library (T2)
+mcp__plugin_nx_nexus__plan_search(query="retrieval"                       # find reusable plans
+mcp__plugin_nx_nexus__plan_save(query="...", plan_json="{...}"            # persist a successful plan
 ```
+
+## When to reach for each
+
+- **`nx_answer`** — analytical questions, cross-corpus synthesis. Primary front door for research / review / analyze / debug verb skills. Plan-match-first; falls through to inline planner on miss.
+- **`search` vs `query`** — `search` returns chunks (finest grain), `query` returns documents grouped by source. Use `search` for fragment hunting, `query` for literature scoping + catalog traversal.
+- **`traverse`** — walk the typed link graph from known tumblers. `link_types` XOR `purpose`; depth ≤ 3.
+- **`store_get_many`** — batch-hydrate chunk IDs from `search(structured=True)` or `traverse`. Safe past the 300-record write cap.
+- **Operators** — content transforms; take raw text, return structured JSON. Use after retrieval to summarize/extract/rank/compare/generate.
+- **`nx_tidy` / `nx_enrich_beads` / `nx_plan_audit`** — background hygiene; slow (claude -p). Call and move on.
 
 ## Catalog (T3 metadata — document registry + typed link graph)
 

@@ -11,6 +11,7 @@ case "$TOOL_NAME" in
   mcp__plugin_nx_nexus__query|\
   mcp__plugin_nx_nexus__store_put|\
   mcp__plugin_nx_nexus__store_get|\
+  mcp__plugin_nx_nexus__store_get_many|\
   mcp__plugin_nx_nexus__store_list|\
   mcp__plugin_nx_nexus__memory_put|\
   mcp__plugin_nx_nexus__memory_get|\
@@ -22,6 +23,16 @@ case "$TOOL_NAME" in
   mcp__plugin_nx_nexus__collection_list|\
   mcp__plugin_nx_nexus__plan_save|\
   mcp__plugin_nx_nexus__plan_search|\
+  mcp__plugin_nx_nexus__traverse|\
+  mcp__plugin_nx_nexus__nx_answer|\
+  mcp__plugin_nx_nexus__nx_tidy|\
+  mcp__plugin_nx_nexus__nx_enrich_beads|\
+  mcp__plugin_nx_nexus__nx_plan_audit|\
+  mcp__plugin_nx_nexus__operator_summarize|\
+  mcp__plugin_nx_nexus__operator_extract|\
+  mcp__plugin_nx_nexus__operator_rank|\
+  mcp__plugin_nx_nexus__operator_compare|\
+  mcp__plugin_nx_nexus__operator_generate|\
   mcp__plugin_nx_nexus-catalog__search|\
   mcp__plugin_nx_nexus-catalog__show|\
   mcp__plugin_nx_nexus-catalog__list|\
