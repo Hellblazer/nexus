@@ -377,6 +377,45 @@ parameters don't change.
   resolve_chash from scratch" to "extend `resolve_span` with a
   collection-agnostic variant that defers to the T2 index."
 
+- **RF-10 (post-rewrite audit, 2026-04-17)** — Reviewed the
+  rewritten RDR for new gaps introduced by the scope reframing.
+  Four real issues found and fixed in place:
+
+  1. **Compound primary key**: the original text specified
+     `chash TEXT PRIMARY KEY` but the same chunk can legitimately
+     be indexed into multiple collections (e.g. a paper in both
+     `knowledge__delos` and `knowledge__delos_docling` — both
+     hit the same `chunk_text_hash`). Schema corrected to
+     `PRIMARY KEY (chash, physical_collection)`. `resolve_chash`
+     signature gained a `prefer_collection` kwarg and a documented
+     multi-match tie-break precedence.
+
+  2. **Single-step guard interaction** (`mcp/core.py:1972`): the
+     `nx_answer(structured=True)` path has to work on the
+     shortcut that reroutes one-step `query` plans directly to
+     `query()`, bypassing `plan_run`. Phase 3 now specifies the
+     guard stays in place and the envelope is built from
+     `query(structured=True)`'s returned fields.
+
+  3. **Fallback latency bound**: Phase 2's "iterate collections"
+     fallback for an empty T2 index had no bound. Specified:
+     parallelised 10× with a 30-second deadline, `None` return
+     on timeout (caller treats as unresolved). Prevents indefinite
+     blocking on a large corpus before the backfill runs.
+
+  4. **Concurrency contract**: six write sites include the
+     3-worker streaming-PDF pipeline, and multiple `nx index`
+     invocations may run concurrently. Added a Failure-Mode
+     entry specifying WAL-mode SQLite with `INSERT OR REPLACE`
+     is sufficient — matches the existing `pdf_pipeline`
+     table's concurrency posture (nexus-9ji precedent).
+
+  Verified pre-existing facts cited by the rewrite:
+  `_BACKFILL_BATCH = 300` exists at `commands/collection.py:304`.
+  `_nx_answer_classify_plan` and the single-step guard exist at
+  `mcp/core.py:1676` and `:1972`. Streaming pipeline's
+  `ThreadPoolExecutor(max_workers=3)` at `pipeline_stages.py:591`.
+
 ### Critical Assumptions
 
 - [x] `chash` is populated on every chunk in every indexing path —
@@ -412,8 +451,12 @@ changes, one convenience command:
 1. **T2 `chash_index` table**, populated at the six existing
    indexing write sites (code, docs batch, PDF batch, CCE
    markdown, CCE single-chunk, streaming PDF — see RF-2).
-   Schema: `(chash TEXT PRIMARY KEY, physical_collection TEXT,
-   doc_id TEXT, created_at TEXT)`.
+   Schema: `(chash TEXT, physical_collection TEXT, doc_id TEXT,
+   created_at TEXT, PRIMARY KEY (chash, physical_collection))`.
+   Compound PK: the same chunk text can legitimately be indexed
+   into multiple collections (e.g. a paper in both
+   `knowledge__delos` and `knowledge__delos_docling`), so the
+   hash alone is not unique.
 
 2. **`catalog.resolve_chash(chash) -> ChunkRef | None`** (reverse
    direction) that consults the T2 index first, falls back to a T3
@@ -453,7 +496,7 @@ indexing-path instrumentation.)
 |---|---|---|
 | Per-collection chash→chunk lookup | `src/nexus/catalog/catalog.py:575` `resolve_span(span, physical_collection, t3)` | **Reuse** — already handles `chash:<hex>` and `chash:<hex>:<start>-<end>` spans |
 | Global chash→chunk lookup | none | **Add** — `Catalog.resolve_chash(chash: str) -> ChunkRef | None`; consults T2 index; falls back to iterating collections when the T2 index is empty |
-| T2 `chash_index` table + migration | `src/nexus/db/migrations.py` | **Add** — schema `(chash TEXT PRIMARY KEY, physical_collection TEXT, doc_id TEXT, created_at TEXT)`; indexed on `chash` (primary) and `physical_collection` (for collection-delete cleanup) |
+| T2 `chash_index` table + migration | `src/nexus/db/migrations.py` | **Add** — schema `(chash TEXT, physical_collection TEXT, doc_id TEXT, created_at TEXT, PRIMARY KEY (chash, physical_collection))`; compound PK allows the same chunk text to appear in multiple collections. Secondary index on `physical_collection` for the nexus-lub cascade's `DELETE WHERE physical_collection = ?` |
 | Indexing dual-write | `code_indexer.py:371`, `doc_indexer.py:591` + `:666`, `prose_indexer.py:96` + `:141`, `pipeline_stages.py:163` | **Extend** — after the existing ChromaDB upsert at each of the six sites, insert-or-replace into the T2 `chash_index`. Best-effort: a T2 failure logs and continues; backfill recovers |
 | Backfill loop | `src/nexus/commands/collection.py:307` `_backfill_chunk_text_hash()` | **Extend** — the same per-chunk iteration that writes `chunk_text_hash` to T3 also writes `(chash, collection, doc_id)` to T2 if missing. One pass, two destinations |
 | Backfill CLI | `nx collection backfill-hash [--all]` | **Reuse** — no new command; the extended loop above backfills T2 whenever a caller runs the existing command |
@@ -550,6 +593,17 @@ place.
   read catches each on access; a full `nx collection
   backfill-hash --all` repopulates.
 
+- **Concurrent writers on T2 `chash_index`**: the streaming PDF
+  pipeline (`pipeline_stages.py`) runs a 3-worker
+  `ThreadPoolExecutor` per ingest, and multiple `nx index pdf`
+  invocations may run concurrently. The dual-write uses
+  `INSERT OR REPLACE INTO chash_index ...`. SQLite in WAL mode
+  handles concurrent INSERT OR REPLACE with row-level upsert
+  semantics at the cost of a brief busy-wait on the write lock
+  — no additional locking required beyond nexus' existing T2
+  connection pattern. Matches the nexus-9ji `pdf_pipeline`
+  table's concurrency posture.
+
 ## Implementation Plan
 
 ### Prerequisites
@@ -577,8 +631,10 @@ place.
 ### Phase 1: T2 `chash_index` + dual-write at the six existing sites
 
 - Add migration for `chash_index` table
-  (`chash TEXT PRIMARY KEY, physical_collection TEXT, doc_id TEXT,
-  created_at TEXT`).
+  (`chash TEXT, physical_collection TEXT, doc_id TEXT,
+  created_at TEXT, PRIMARY KEY (chash, physical_collection)`).
+  Compound PK — a chunk text can be indexed into multiple
+  collections and each registration gets its own row.
 - At each of the six write sites listed in RF-2, after the existing
   ChromaDB upsert, insert-or-replace into `chash_index`. Failure
   to write T2 is best-effort — log and continue; the backfill
@@ -594,17 +650,28 @@ place.
 
 ### Phase 2: Global `resolve_chash` (extends existing `resolve_span`)
 
-- Add `Catalog.resolve_chash(chash: str) -> ChunkRef | None` —
-  collection-agnostic. Lookup path:
+- Add `Catalog.resolve_chash(chash: str, *, prefer_collection:
+  str | None = None) -> ChunkRef | None` — collection-agnostic.
+  Lookup path:
   1. `SELECT physical_collection, doc_id FROM chash_index WHERE chash = ?`.
-  2. On hit, validate the target collection still exists (guards
-     against orphan rows from race with collection delete).
-  3. Delegate to the existing per-collection `resolve_span` to
+  2. **If multiple rows** (compound PK permits this — same chunk
+     in multiple collections), pick by precedence: (a) the row
+     matching `prefer_collection` if supplied, (b) the oldest
+     `created_at` (most established registration), (c) first
+     row by collection-name sort (deterministic).
+  3. Validate the target collection still exists (guards against
+     orphan rows from race with collection delete).
+  4. Delegate to the existing per-collection `resolve_span` to
      fetch chunk text + metadata.
-  4. On T2 miss (fresh install, backfill not yet run): iterate
+  5. On T2 miss (fresh install, backfill not yet run): iterate
      collections calling `col.get(where={"chunk_text_hash":
-     chash})` — slow fallback, logs once per process.
-- Unit tests with fixture T2 (rows + deleted collection) + fixture T3.
+     chash})`. **Bound: parallelised at 10× concurrency with
+     a 30-second deadline.** Logs once per process with guidance
+     to run `nx collection backfill-hash --all`. After the
+     deadline, return `None` rather than blocking the caller
+     (callers treat as unresolved).
+- Unit tests with fixture T2 (rows + deleted collection + multi-
+  collection chash) + fixture T3.
 
 ### Phase 3: Surface `chunk_text_hash` on structured retrieval returns
 
@@ -621,6 +688,14 @@ place.
   steps contribute their top chunks to a single merged `chunks`
   list, ordered by final-step relevance**; non-retrieval steps
   (summarize, generate) contribute nothing to `chunks`.
+- **Single-step guard interaction** (`mcp/core.py:1972`): the
+  existing perf guard short-circuits to `query()` when the
+  matched plan has exactly one `query` step. With
+  `structured=True`, the guard still fires — we call
+  `query(structured=True)` and build the envelope from its
+  returned `{ids, tumblers, distances, collections,
+  chunk_text_hash}` payload. The guard is preserved; only the
+  return-shape builder differs per `structured` flag.
 - Unit + integration tests: every surfaced hash round-trips
   through `resolve_chash`.
 
@@ -723,3 +798,10 @@ place.
     failure-mode specs, and explicit `--json` schema.
   - Existing Infrastructure Audit table rebuilt to distinguish
     **Reuse** / **Extend** / **Add** per component.
+- 2026-04-17 (post-rewrite audit) — RF-10 captures four rewrite-
+  introduced gaps found on re-read and fixed in place:
+  schema compound-PK, `nx_answer` single-step-guard interaction,
+  Phase-2 fallback latency bound, concurrency contract on T2
+  writes. No new claims left unverified; all are traced to
+  live code references (`commands/collection.py:304`,
+  `mcp/core.py:1676`/`:1972`, `pipeline_stages.py:591`).
