@@ -39,7 +39,8 @@ CREATE TABLE IF NOT EXISTS documents (
     chunk_count INTEGER,
     head_hash TEXT,
     indexed_at TEXT,
-    metadata JSON
+    metadata JSON,
+    source_mtime REAL NOT NULL DEFAULT 0
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
@@ -115,6 +116,17 @@ class CatalogDB:
             with self._conn:
                 self._conn.execute("ALTER TABLE owners ADD COLUMN repo_root TEXT DEFAULT ''")
 
+        # nexus-8luh: add source_mtime column to existing databases so
+        # RDR-087 Phase 3.4's stale_source_ratio has something to read
+        # from. Default 0 for pre-migration rows (meaning "unknown").
+        try:
+            self._conn.execute("SELECT source_mtime FROM documents LIMIT 0")
+        except sqlite3.OperationalError:
+            with self._conn:
+                self._conn.execute(
+                    "ALTER TABLE documents ADD COLUMN source_mtime REAL NOT NULL DEFAULT 0"
+                )
+
     def rebuild(
         self,
         owners: dict[str, OwnerRecord],
@@ -139,8 +151,9 @@ class CatalogDB:
                 self._conn.execute(
                     "INSERT INTO documents "
                     "(tumbler, title, author, year, content_type, file_path, "
-                    "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
+                    "metadata, source_mtime) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         tumbler,
                         d.title,
@@ -154,6 +167,7 @@ class CatalogDB:
                         d.head_hash,
                         d.indexed_at,
                         json.dumps(d.meta),
+                        d.source_mtime,
                     ),
                 )
 
@@ -203,7 +217,7 @@ class CatalogDB:
             sql = (
                 "SELECT d.tumbler, d.title, d.author, d.year, d.content_type, "
                 "d.file_path, d.corpus, d.physical_collection, d.chunk_count, "
-                "d.head_hash, d.indexed_at, d.metadata "
+                "d.head_hash, d.indexed_at, d.metadata, d.source_mtime "
                 "FROM documents d "
                 "JOIN documents_fts f ON d.rowid = f.rowid "
                 "WHERE documents_fts MATCH ?"
@@ -217,7 +231,7 @@ class CatalogDB:
             rows = self._conn.execute(sql, params).fetchall()
             columns = ["tumbler", "title", "author", "year", "content_type",
                         "file_path", "corpus", "physical_collection", "chunk_count",
-                        "head_hash", "indexed_at", "metadata"]
+                        "head_hash", "indexed_at", "metadata", "source_mtime"]
             return [dict(zip(columns, row)) for row in rows]
 
     def descendants(self, prefix: str) -> list[dict]:
@@ -230,14 +244,14 @@ class CatalogDB:
             rows = self._conn.execute(
                 "SELECT tumbler, title, author, year, content_type, "
                 "file_path, corpus, physical_collection, chunk_count, "
-                "head_hash, indexed_at, metadata "
+                "head_hash, indexed_at, metadata, source_mtime "
                 "FROM documents WHERE tumbler LIKE ?",
                 (prefix + ".%",),
             ).fetchall()
         columns = [
             "tumbler", "title", "author", "year", "content_type",
             "file_path", "corpus", "physical_collection", "chunk_count",
-            "head_hash", "indexed_at", "metadata",
+            "head_hash", "indexed_at", "metadata", "source_mtime",
         ]
         return [dict(zip(columns, row)) for row in rows]
 

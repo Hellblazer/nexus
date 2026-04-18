@@ -156,6 +156,11 @@ class DocumentRecord:
     head_hash: str
     indexed_at: str
     meta: dict = field(default_factory=dict)
+    # nexus-8luh: POSIX mtime (seconds since epoch) of ``file_path`` at
+    # index time. 0.0 means "not captured" (pre-migration rows, manual
+    # registrations, synthesized docs). Used by stale-source detection
+    # to flag documents whose source file has changed since last index.
+    source_mtime: float = 0.0
     _deleted: bool = False
 
 

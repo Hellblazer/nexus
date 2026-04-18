@@ -227,6 +227,8 @@ class CatalogEntry:
     head_hash: str
     indexed_at: str
     meta: dict = field(default_factory=dict)
+    # nexus-8luh: POSIX mtime at index time; 0.0 → not captured.
+    source_mtime: float = 0.0
 
     def to_dict(self) -> dict:
         return {
@@ -242,6 +244,7 @@ class CatalogEntry:
             "head_hash": self.head_hash,
             "indexed_at": self.indexed_at,
             "meta": self.meta,
+            "source_mtime": self.source_mtime,
         }
 
 
@@ -545,6 +548,7 @@ class Catalog:
         author: str = "",
         year: int = 0,
         meta: dict | None = None,
+        source_mtime: float = 0.0,
     ) -> Tumbler:
         dir_fd = self._acquire_lock()
         try:
@@ -611,17 +615,19 @@ class Catalog:
                 head_hash=head_hash,
                 indexed_at=now,
                 meta=meta or {},
+                source_mtime=source_mtime,
             )
             self._append_jsonl(self._documents_path, rec.__dict__)
             self._db.execute(
                 "INSERT INTO documents "
                 "(tumbler, title, author, year, content_type, file_path, "
-                "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
+                "metadata, source_mtime) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     str(tumbler), title, author, year, content_type, file_path,
                     corpus, physical_collection, chunk_count, head_hash, now,
-                    json.dumps(meta or {}),
+                    json.dumps(meta or {}), source_mtime,
                 ),
             )
             self._db.commit()
@@ -632,7 +638,7 @@ class Catalog:
     def resolve(self, tumbler: Tumbler) -> CatalogEntry | None:
         row = self._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
+            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime "
             "FROM documents WHERE tumbler = ?",
             (str(tumbler),),
         ).fetchone()
@@ -651,6 +657,7 @@ class Catalog:
             head_hash=row[9],
             indexed_at=row[10],
             meta=json.loads(row[11]) if row[11] else {},
+            source_mtime=row[12] or 0.0,
         )
 
     def resolve_path(self, tumbler: Tumbler) -> Path | None:
@@ -928,6 +935,7 @@ class Catalog:
                 "head_hash": entry.head_hash,
                 "indexed_at": entry.indexed_at,
                 "meta": entry.meta,
+                "source_mtime": entry.source_mtime,
             }
             # Merge meta dict rather than replace
             if "meta" in fields and isinstance(fields["meta"], dict):
@@ -940,14 +948,16 @@ class Catalog:
             self._db.execute(
                 "INSERT OR REPLACE INTO documents "
                 "(tumbler, title, author, year, content_type, file_path, "
-                "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
+                "metadata, source_mtime) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     rec_dict["tumbler"], rec_dict["title"], rec_dict["author"],
                     rec_dict["year"], rec_dict["content_type"], rec_dict["file_path"],
                     rec_dict["corpus"], rec_dict["physical_collection"],
                     rec_dict["chunk_count"], rec_dict["head_hash"],
                     rec_dict["indexed_at"], json.dumps(rec_dict["meta"]),
+                    rec_dict.get("source_mtime", 0.0),
                 ),
             )
             self._db.commit()
@@ -978,6 +988,7 @@ class Catalog:
                 "head_hash": entry.head_hash,
                 "indexed_at": entry.indexed_at,
                 "meta": entry.meta,
+                "source_mtime": entry.source_mtime,
                 "_deleted": True,
             }
             self._append_jsonl(self._documents_path, tombstone)
@@ -1003,6 +1014,7 @@ class Catalog:
                 head_hash=r["head_hash"] or "",
                 indexed_at=r["indexed_at"] or "",
                 meta=json.loads(r["metadata"]) if r.get("metadata") else {},
+                source_mtime=r["source_mtime"] if "source_mtime" in r.keys() else 0.0,
             )
             for r in rows
         ]
@@ -1010,7 +1022,7 @@ class Catalog:
     def by_file_path(self, owner: Tumbler, file_path: str) -> CatalogEntry | None:
         row = self._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
+            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime "
             f"FROM documents WHERE {self._prefix_sql(str(owner))[0]} AND file_path = ?",
             (*self._prefix_sql(str(owner))[1], file_path),
         ).fetchone()
@@ -1029,12 +1041,13 @@ class Catalog:
             head_hash=row[9],
             indexed_at=row[10],
             meta=json.loads(row[11]) if row[11] else {},
+            source_mtime=row[12] or 0.0,
         )
 
     def by_owner(self, owner: Tumbler) -> list[CatalogEntry]:
         rows = self._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
+            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime "
             f"FROM documents WHERE {self._prefix_sql(str(owner))[0]}",
             self._prefix_sql(str(owner))[1],
         ).fetchall()
@@ -1052,6 +1065,7 @@ class Catalog:
                 head_hash=r[9],
                 indexed_at=r[10],
                 meta=json.loads(r[11]) if r[11] else {},
+                source_mtime=r[12] or 0.0,
             )
             for r in rows
         ]
@@ -1060,7 +1074,7 @@ class Catalog:
         """List all entries with the given content type (code, paper, rdr, knowledge)."""
         rows = self._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
+            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime "
             "FROM documents WHERE content_type = ?",
             (content_type,),
         ).fetchall()
@@ -1070,6 +1084,7 @@ class Catalog:
                 content_type=r[4], file_path=r[5], corpus=r[6],
                 physical_collection=r[7], chunk_count=r[8], head_hash=r[9],
                 indexed_at=r[10], meta=json.loads(r[11]) if r[11] else {},
+                source_mtime=r[12] or 0.0,
             )
             for r in rows
         ]
@@ -1078,7 +1093,7 @@ class Catalog:
         """List all entries with the given corpus tag."""
         rows = self._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
+            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime "
             "FROM documents WHERE corpus = ?",
             (corpus,),
         ).fetchall()
@@ -1088,6 +1103,7 @@ class Catalog:
                 content_type=r[4], file_path=r[5], corpus=r[6],
                 physical_collection=r[7], chunk_count=r[8], head_hash=r[9],
                 indexed_at=r[10], meta=json.loads(r[11]) if r[11] else {},
+                source_mtime=r[12] or 0.0,
             )
             for r in rows
         ]
@@ -1101,7 +1117,7 @@ class Catalog:
         """Return all catalog entries. limit=0 means unlimited."""
         sql = (
             "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
+            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime "
             "FROM documents"
         )
         if limit > 0:
@@ -1113,6 +1129,7 @@ class Catalog:
                 content_type=r[4], file_path=r[5], corpus=r[6],
                 physical_collection=r[7], chunk_count=r[8], head_hash=r[9],
                 indexed_at=r[10], meta=json.loads(r[11]) if r[11] else {},
+                source_mtime=r[12] or 0.0,
             )
             for r in rows
         ]
@@ -1121,7 +1138,7 @@ class Catalog:
         """Look up catalog entry by T3 doc_id stored in meta.doc_id."""
         row = self._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
+            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime "
             "FROM documents WHERE json_extract(metadata, '$.doc_id') = ?",
             (doc_id,),
         ).fetchone()
@@ -1140,6 +1157,7 @@ class Catalog:
             head_hash=row[9],
             indexed_at=row[10],
             meta=json.loads(row[11]) if row[11] else {},
+            source_mtime=row[12] or 0.0,
         )
 
     # ── Links ──────────────────────────────────────────────────────────────
