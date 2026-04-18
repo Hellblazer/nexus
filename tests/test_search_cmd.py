@@ -633,6 +633,96 @@ def test_silent_zero_suppressed_by_quiet_flag(
     assert "candidates dropped" not in result.output
 
 
+def test_silent_zero_end_to_end_real_engine(
+    runner: CliRunner, cloud_env, monkeypatch, tmp_path,
+) -> None:
+    """nexus-vwvx — real ``search_cross_corpus`` → stderr note round-trip.
+
+    Every other silent-zero test in this file stubs ``search_cross_corpus``
+    with a side_effect that manually injects a pre-built
+    ``SearchDiagnostics``. That covers the CLI-side consumer
+    (``_maybe_emit_silent_zero_note``) but leaves the engine's
+    diagnostics-population path unverified by the CLI layer.
+
+    This test plugs a real ``EphemeralClient`` T3 into the CLI and lets
+    the real ``_search_collection`` loop compute raw/dropped counts from
+    known distances. The ``--threshold`` flag's ``threshold_override`` path
+    forces ``apply_thresholds=True`` regardless of ``_voyage_client``
+    presence, so seeded docs get filtered.
+
+    Stability bar per bead: re-runs in loop must produce identical stderr
+    (no timing noise, no distance jitter). Driven by the ONNX MiniLM EF
+    which is deterministic for a given input.
+    """
+    import chromadb
+    from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+
+    coll_name = "knowledge__e2e_silentzero"
+    ef = DefaultEmbeddingFunction()
+    client = chromadb.EphemeralClient()
+    real_t3 = T3Database(_client=client, _ef_override=ef)
+
+    # Seed a collection with three documents whose raw distances will
+    # exceed a tiny threshold. MiniLM distances are deterministic for
+    # the same (query, corpus) pair — stability follows.
+    col = real_t3.get_or_create_collection(coll_name)
+    col.add(
+        ids=["d1", "d2", "d3"],
+        documents=[
+            "meditations on the architecture of cathedrals",
+            "notes on medieval stained-glass iconography",
+            "survey of vaulting techniques in Gothic nave design",
+        ],
+        metadatas=[
+            {"source_path": "a.md"},
+            {"source_path": "b.md"},
+            {"source_path": "c.md"},
+        ],
+    )
+
+    # Threshold far below any plausible MiniLM distance for a loosely-
+    # related query → every raw candidate drops → silent-zero fires.
+    query = "quantum field theory in curved spacetime"
+    threshold = "0.01"
+
+    # Isolate T2 writes (taxonomy lookup opens a T2Database) into tmp_path
+    # so the test doesn't touch the developer's prod memory.db.
+    sandbox_db = tmp_path / "memory.db"
+    monkeypatch.setattr(
+        "nexus.commands._helpers.default_db_path",
+        lambda: sandbox_db,
+    )
+
+    with patch("nexus.commands.search_cmd._t3", return_value=real_t3), \
+         patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
+        invoke = lambda: runner.invoke(
+            main,
+            [
+                "search", query,
+                "--corpus", coll_name,
+                "--threshold", threshold,
+            ],
+        )
+        results = [invoke() for _ in range(3)]
+
+    for i, result in enumerate(results):
+        assert result.exit_code == 0, f"run {i}: {result.output}"
+        assert result.output.count("candidates dropped") == 1, (
+            f"run {i}: expected exactly one silent-zero line, got:\n{result.output}"
+        )
+        assert coll_name in result.output
+        assert "threshold 0.010" in result.output  # rendered as 3-decimal
+
+    # Stability bar: stderr line identical across runs (no distance jitter).
+    lines = [
+        next(line for line in r.output.splitlines() if "candidates dropped" in line)
+        for r in results
+    ]
+    assert lines[0] == lines[1] == lines[2], (
+        f"silent-zero stderr differed across runs:\n" + "\n---\n".join(lines)
+    )
+
+
 def test_silent_zero_suppressed_by_config(runner: CliRunner, cloud_env) -> None:
     """``telemetry.stderr_silent_zero = false`` in config disables the note."""
     from nexus.search_engine import SearchDiagnostics
