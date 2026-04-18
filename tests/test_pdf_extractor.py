@@ -393,6 +393,70 @@ class TestAutoDetectRouting:
             "mineru_extraction_failed", error="download failed", path=str(dummy_pdf),
         )
 
+    def test_auto_fallback_replays_on_page_after_mineru_fails(self, extractor, dummy_pdf):
+        """nexus-7ne1 regression: the MinerU-failed fallback must replay on_page
+        from fast_result.page_boundaries, mirroring the formula_count < 5 happy
+        path. Without this replay, the streaming pipeline never sees pages and
+        the chunker emits 0 chunks for the entire document — the bug that
+        masqueraded as MinerU brokenness during the 2026-04-17 Delos re-index.
+        """
+        # Three pages joined with "\n" → text = "Page A\nPage B\nPage C" (20 chars).
+        # page_text_length includes the +1 for the joining "\n" except the final page.
+        page_a = "Page A"   # 6 chars, boundary length = 7 (+1 for \n)
+        page_b = "Page B"   # 6 chars, boundary length = 7
+        page_c = "Page C"   # 6 chars, boundary length = 7 (final, but convention preserves +1)
+        full_text = "\n".join([page_a, page_b, page_c])
+        fast_result = ExtractionResult(
+            text=full_text,
+            metadata={
+                "extraction_method": "docling",
+                "page_count": 3,
+                "page_boundaries": [
+                    {"page_number": 1, "start_char": 0,  "page_text_length": 7},
+                    {"page_number": 2, "start_char": 7,  "page_text_length": 7},
+                    {"page_number": 3, "start_char": 14, "page_text_length": 7},
+                ],
+                "format": "markdown",
+                "formula_count": 10,
+            },
+        )
+        received: list[tuple] = []
+        def _on_page(page_idx: int, page_text: str, page_meta: dict) -> None:
+            received.append((page_idx, page_text, page_meta))
+
+        with (
+            patch("nexus.pdf_extractor._has_formulas_quick", return_value=10),
+            patch.object(extractor, "_extract_with_docling", return_value=fast_result),
+            patch.object(extractor, "_extract_with_mineru", side_effect=RuntimeError("MinerU 409")),
+        ):
+            result = extractor.extract(dummy_pdf, extractor="auto", on_page=_on_page)
+
+        # Returned the fast_result (existing contract — preserved).
+        assert result is fast_result
+        # AND now the on_page callback fired once per page, with the
+        # right text for each page (the pre-fix behavior produced 0 callbacks).
+        assert len(received) == 3, f"expected 3 callbacks, got {len(received)}"
+        # 0-indexed page positions per RDR-048 callback contract.
+        assert [r[0] for r in received] == [0, 1, 2]
+        assert [r[1] for r in received] == [page_a, page_b, page_c]
+        # Page metadata uses 1-based page_number.
+        assert [r[2]["page_number"] for r in received] == [1, 2, 3]
+        # text_length matches the page text (length-1 from page_text_length).
+        assert [r[2]["text_length"] for r in received] == [6, 6, 6]
+
+    def test_auto_fallback_no_callback_when_on_page_is_none(self, extractor, dummy_pdf):
+        """nexus-7ne1: ensure the replay loop is gated on on_page being non-None,
+        so callers that don't supply a callback still get the existing fast_result
+        return without errors.
+        """
+        with (
+            patch("nexus.pdf_extractor._has_formulas_quick", return_value=10),
+            patch.object(extractor, "_extract_with_docling", return_value=self._docling_f),
+            patch.object(extractor, "_extract_with_mineru", side_effect=RuntimeError("MinerU 409")),
+        ):
+            result = extractor.extract(dummy_pdf, extractor="auto", on_page=None)
+        assert result is self._docling_f  # contract preserved when no callback
+
     def test_forced_docling_skips_mineru(self, extractor, dummy_pdf):
         with (
             patch.object(extractor, "_extract_with_docling", return_value=self._docling_f),

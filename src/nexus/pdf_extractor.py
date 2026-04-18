@@ -220,6 +220,20 @@ class PDFExtractor:
         except Exception as exc:
             _progress(f"  MinerU failed ({type(exc).__name__}), using Docling result: {pdf_path.name}")
             _log.debug("mineru_extraction_failed", error=str(exc), path=str(pdf_path))
+            # nexus-7ne1: replay on_page from fast_result.page_boundaries when
+            # falling back. The probe pass (`_extract_with_docling(..., enriched=False)`
+            # above) is intentionally invoked WITHOUT on_page so callbacks aren't
+            # double-fired if MinerU takes over. When MinerU then fails and we
+            # return fast_result, the streaming pipeline (only sees pages via
+            # on_page) gets nothing → 0 chunks. Mirror the replay logic from the
+            # formula_count < 5 branch above.
+            if on_page is not None:
+                for boundary in fast_result.metadata.get("page_boundaries", []):
+                    page_num = boundary["page_number"]
+                    start = boundary["start_char"]
+                    length = boundary["page_text_length"] - 1  # -1 for \n separator
+                    page_text = fast_result.text[start : start + length]
+                    on_page(page_num - 1, page_text, {"page_number": page_num, "text_length": length})
             return fast_result
 
     # ── internal extraction methods ───────────────────────────────────────────
