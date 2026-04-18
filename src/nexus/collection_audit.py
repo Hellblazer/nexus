@@ -347,4 +347,23 @@ def format_audit_human(report: AuditReport) -> str:
 
 
 def format_audit_json(report: AuditReport) -> str:
-    return json.dumps(asdict(report), indent=2)
+    """Serialise the audit report as JSON.
+
+    Schema review I-2: the ``distance_histogram.buckets`` field is a
+    bare list of counts; the bin edges aren't recoverable from the
+    payload. Add an explicit ``bin_edges`` sibling so downstream
+    consumers (dashboards, agent tools) can reconstruct bucket
+    boundaries unambiguously. Edges are left-closed / right-open
+    except for the last bucket which is inclusive at the upper bound.
+    """
+    data = asdict(report)
+    hist = data.get("distance_histogram")
+    if isinstance(hist, dict) and isinstance(hist.get("buckets"), list):
+        n = len(hist["buckets"])
+        hist["bin_edges"] = [
+            [round(i * _HIST_BIN_WIDTH, 4),
+             round((i + 1) * _HIST_BIN_WIDTH, 4)]
+            for i in range(n)
+        ]
+        hist["bin_inclusivity"] = "left-closed, right-open (last bucket inclusive)"
+    return json.dumps(data, indent=2)

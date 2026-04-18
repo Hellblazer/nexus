@@ -1671,7 +1671,9 @@ def backfill_source_collection_cmd(apply_: bool) -> None:
 
     t2 = T2Database(db_path)
     try:
-        report = backfill_source_collection(t2.taxonomy.conn, apply=apply_)
+        # Pass the store (not the raw conn) so _lock is held for the
+        # read + UPDATE sequence (review gate C-1).
+        report = backfill_source_collection(t2.taxonomy, apply=apply_)
     finally:
         t2.close()
 

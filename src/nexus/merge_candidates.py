@@ -78,6 +78,12 @@ def compute_merge_candidates(
             hub_filter = f" AND ta.topic_id NOT IN ({placeholders})"
             hub_params = hub_ids
 
+    # Symmetric-pair normalisation (review I-3): without this guard a
+    # bidirectional projection (A→B and B→A both populated) would
+    # emit the same pair twice with different scores. Enforcing a
+    # lexicographic order on the projection side ensures exactly one
+    # row per symmetric pair and makes the output deterministic
+    # regardless of which direction was populated first.
     sql = f"""
         SELECT ta.source_collection AS a,
                t.collection AS b,
@@ -86,7 +92,7 @@ def compute_merge_candidates(
         FROM topic_assignments ta
         JOIN topics t ON ta.topic_id = t.id
         WHERE ta.source_collection IS NOT NULL
-          AND ta.source_collection <> t.collection
+          AND ta.source_collection < t.collection
           AND ta.similarity IS NOT NULL
           {hub_filter}
         GROUP BY ta.source_collection, t.collection
@@ -161,16 +167,21 @@ def run_merge_candidates(
     finally:
         t2.close()
     if fmt == "json":
+        # Schema review I-3: omit hub_top_n entirely when exclude_hubs
+        # is False rather than emitting `null`. Agents parsing the
+        # schema no longer need to special-case a null sentinel.
+        filters: dict = {
+            "min_shared": min_shared,
+            "min_similarity": min_similarity,
+            "exclude_hubs": exclude_hubs,
+            "limit": limit,
+        }
+        if exclude_hubs:
+            filters["hub_top_n"] = hub_top_n
         return json.dumps(
             {
                 "candidates": [asdict(p) for p in pairs],
-                "filters": {
-                    "min_shared": min_shared,
-                    "min_similarity": min_similarity,
-                    "exclude_hubs": exclude_hubs,
-                    "hub_top_n": hub_top_n if exclude_hubs else None,
-                    "limit": limit,
-                },
+                "filters": filters,
             },
             indent=2,
         )
