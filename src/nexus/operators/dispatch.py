@@ -89,13 +89,24 @@ async def claude_dispatch(
             timeout=timeout,
         )
     except asyncio.TimeoutError:
+        # Search review I-6: reach the whole process group so any claude
+        # children (nested planners, tool subprocesses) get reaped too.
+        # Falls back to proc.kill() on any OS / mock that can't do killpg
+        # so mocked-subprocess tests still verify the kill side effect.
         import os
         import signal
+        killpg_ok = False
         try:
             pgid = os.getpgid(proc.pid)
             os.killpg(pgid, signal.SIGKILL)
-        except ProcessLookupError:
+            killpg_ok = True
+        except (ProcessLookupError, PermissionError, OSError, TypeError):
             pass
+        if not killpg_ok:
+            try:
+                proc.kill()
+            except Exception:
+                pass
         # Reap the leader so the asyncio transport closes cleanly.
         try:
             await proc.wait()

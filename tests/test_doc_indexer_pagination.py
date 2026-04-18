@@ -106,9 +106,19 @@ class TestStaleChunkPaginatedPruning:
 
         assert result == new_chunk_count
 
-        # Verify delete was called with the stale IDs
-        mock_col.delete.assert_called_once()
-        deleted_ids = mock_col.delete.call_args[1].get("ids") or mock_col.delete.call_args[0][0]
+        # Verify delete was called in MAX_RECORDS_PER_WRITE=300-sized batches
+        # (indexing review I4: the unbatched single-call shape violated the
+        # ChromaDB Cloud quota). For 350 stale IDs we expect 2 calls: 300 + 50.
+        assert mock_col.delete.call_count == 2, (
+            f"expected 2 batched deletes for 350 stale IDs, "
+            f"got {mock_col.delete.call_count}"
+        )
+        # Aggregate the IDs across both calls.
+        deleted_ids: list[str] = []
+        for call in mock_col.delete.call_args_list:
+            ids = call.kwargs.get("ids") or call.args[0]
+            assert len(ids) <= 300, f"batch size {len(ids)} exceeds quota cap"
+            deleted_ids.extend(ids)
 
         # All 350 old IDs that are NOT in the new set should be deleted
         new_ids = {f"{content_hash[:16]}_{i}" for i in range(new_chunk_count)}
