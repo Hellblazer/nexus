@@ -34,6 +34,7 @@ _SORT_COLUMNS = (
     "cross_projection_rank",
     "orphan_catalog_rows",
     "hub_domination_score",
+    "chash_indexed_ratio",
 )
 
 
@@ -48,6 +49,11 @@ class CollectionHealthRow:
     orphan_catalog_rows: int | None
     hub_domination_score: float | None = None
     stale_source_ratio: str = _STALE_PLACEHOLDER  # deferred: nexus-8luh
+    # RDR-087 Phase 4.6 (nexus-c2op): ratio of chash_index rows for this
+    # collection to its T3 chunk_count. 1.0 → fully backfilled; < 1.0 →
+    # nx collection backfill-hash has work to do. None when either the
+    # chash_index is empty or the collection has 0 T3 chunks.
+    chash_indexed_ratio: float | None = None
 
 
 # ── Default production runners (dep-injected) ───────────────────────────────
@@ -212,12 +218,59 @@ def _default_hub_score_fn(col: str) -> float | None:
         t2.close()
 
 
+def _default_chash_coverage_fn(col: str) -> float | None:
+    """Ratio of chash_index rows for *col* to its T3 chunk count.
+
+    1.0 means every T3 chunk has a chash_index entry (preferred state
+    for nx doc cite / resolve_chash); < 1.0 means nx collection
+    backfill-hash has work to do. Returns None when the chash_index
+    is empty (fresh install) or the collection has no T3 chunks.
+
+    Introduced in RDR-087 Phase 4.6 (nexus-c2op) after RDR-086 added
+    the chash_index surface. Pure SQL composition — no new primitives.
+    """
+    from nexus.commands._helpers import default_db_path
+    from nexus.db import make_t3
+    from nexus.db.t2.chash_index import ChashIndex
+
+    db_path = default_db_path()
+    if not db_path.exists():
+        return None
+
+    idx = ChashIndex(db_path)
+    try:
+        with idx._lock:
+            row = idx.conn.execute(
+                "SELECT COUNT(*) FROM chash_index "
+                "WHERE physical_collection = ?",
+                (col,),
+            ).fetchone()
+        chash_count = int(row[0] or 0)
+    finally:
+        idx.close()
+
+    try:
+        t3 = make_t3()
+        try:
+            coll = t3.get_or_create_collection(col)
+            chunk_count = coll.count()
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+    if chunk_count == 0:
+        return None
+    return min(1.0, chash_count / chunk_count)
+
+
 # Module-level runner bindings — tests monkeypatch these directly.
 _enumerate_collections = _default_enumerate_collections
 _catalog_stats_fn = _default_catalog_stats_fn
 _telemetry_stats_fn = _default_telemetry_stats_fn
 _projection_rank_fn = _default_projection_rank_fn
 _hub_score_fn = _default_hub_score_fn
+_chash_coverage_fn = _default_chash_coverage_fn
 
 
 # ── Orchestrator ────────────────────────────────────────────────────────────
@@ -230,10 +283,14 @@ def compute_collection_health(
     telemetry_stats_fn: Callable[[str], dict[str, Any]],
     projection_rank_fn: Callable[[list[str]], dict[str, int]],
     hub_score_fn: Callable[[str], float | None],
+    chash_coverage_fn: Callable[[str], float | None] | None = None,
 ) -> list[CollectionHealthRow]:
     """Assemble per-collection health rows from the injected callables.
 
     Ordering follows *collections*; callers sort via ``format_health_table``.
+
+    ``chash_coverage_fn`` is optional only for backward-compat with the
+    pre-nexus-c2op signature; production callers always pass it.
     """
     ranks = projection_rank_fn(collections)
     rows: list[CollectionHealthRow] = []
@@ -251,6 +308,9 @@ def compute_collection_health(
                 orphan_catalog_rows=int(catalog.get("orphan_count", 0))
                     if catalog.get("orphan_count") is not None else None,
                 hub_domination_score=hub_score_fn(col),
+                chash_indexed_ratio=(
+                    chash_coverage_fn(col) if chash_coverage_fn is not None else None
+                ),
             )
         )
     return rows
@@ -293,6 +353,7 @@ def format_health_table(
         "name", "chunk_count", "last_indexed", "zero_hit_rate_30d",
         "median_query_distance_30d", "cross_projection_rank",
         "orphan_catalog_rows", "stale_source_ratio", "hub_domination_score",
+        "chash_indexed_ratio",
     ]
     data = [
         [
@@ -305,6 +366,7 @@ def format_health_table(
             _fmt_cell(r.orphan_catalog_rows),
             r.stale_source_ratio,
             _fmt_cell(r.hub_domination_score),
+            _fmt_cell(r.chash_indexed_ratio),
         ]
         for r in ordered
     ]
@@ -316,6 +378,21 @@ def format_health_table(
         return "  ".join(c.ljust(w) for c, w in zip(cells, widths))
     lines = [_row(headers), _row(["─" * w for w in widths])]
     lines.extend(_row(r) for r in data)
+
+    # RDR-087 Phase 4.6 hint: if any collection has a ratio below 1.0,
+    # suggest the backfill. Absent ratios (None) don't trigger the hint.
+    under_covered = [
+        r for r in ordered
+        if r.chash_indexed_ratio is not None and r.chash_indexed_ratio < 1.0
+    ]
+    if under_covered:
+        lines.append("")
+        lines.append(
+            f"note: {len(under_covered)} collection"
+            f"{'s' if len(under_covered) != 1 else ''} under-indexed for "
+            "chash citations. Run `nx collection backfill-hash --all` "
+            "to populate (25-70 min on a 278k-chunk corpus)."
+        )
     return "\n".join(lines)
 
 
@@ -339,6 +416,7 @@ def run_collection_health(*, sort_by: str = "name", fmt: str = "table") -> str:
         telemetry_stats_fn=_telemetry_stats_fn,
         projection_rank_fn=_projection_rank_fn,
         hub_score_fn=_hub_score_fn,
+        chash_coverage_fn=_chash_coverage_fn,
     )
     if fmt == "json":
         return format_health_json(rows)

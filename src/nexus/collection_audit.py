@@ -70,12 +70,28 @@ class HubAssignment:
 
 
 @dataclass(frozen=True)
+class ChashCoverage:
+    """RDR-087 Phase 4.6: chash_index coverage for *collection*.
+
+    ``None`` fields distinguish "backfill needed" from "schema absent".
+    The ``missing_sample`` is a best-effort list of up to 5 T3 chunk IDs
+    whose ``chunk_text_hash`` metadata is not present in ``chash_index``
+    — populated when 0 < ratio < 1.0. Empty when ratio is 1.0 or None.
+    """
+    total_chunks: int | None
+    indexed_rows: int
+    ratio: float | None
+    missing_sample: list[str]
+
+
+@dataclass(frozen=True)
 class AuditReport:
     collection: str
     distance_histogram: DistanceHistogram
     cross_projections: list[ProjectionPair]
     orphans: list[OrphanChunk]
     hub_assignments: list[HubAssignment]
+    chash_coverage: ChashCoverage | None = None
 
 
 # ── Section 1: distance histogram (telemetry-only; live deferred) ───────────
@@ -252,6 +268,107 @@ def _open_catalog_conn() -> sqlite3.Connection | None:
     return sqlite3.connect(str(path / ".catalog.db"))
 
 
+# ── Section 5: chash_index coverage (RDR-087 Phase 4.6 / nexus-c2op) ────────
+
+
+def compute_chash_coverage(collection: str) -> ChashCoverage | None:
+    """Report chash_index coverage for *collection*.
+
+    Composes (1) ``COUNT(*) FROM chash_index WHERE physical_collection = ?``
+    for indexed rows, (2) ``col.count()`` on the T3 collection for total
+    chunks, (3) a best-effort sampled T3 ``get(where={'chunk_text_hash':
+    ...})`` walk to produce up to 5 IDs whose hash is not registered in
+    T2 — observable "run backfill" evidence without chunk-by-chunk
+    inspection.
+
+    Returns ``None`` when either side of the ratio is unreachable
+    (T2 file missing, T3 unavailable); calling code treats this
+    the same as ratio=None (schema absent vs backfill needed).
+    """
+    from nexus.commands._helpers import default_db_path
+    from nexus.db import make_t3
+    from nexus.db.t2.chash_index import ChashIndex
+
+    db_path = default_db_path()
+    if not db_path.exists():
+        return None
+
+    idx = ChashIndex(db_path)
+    try:
+        with idx._lock:
+            row = idx.conn.execute(
+                "SELECT COUNT(*) FROM chash_index "
+                "WHERE physical_collection = ?",
+                (collection,),
+            ).fetchone()
+        indexed_rows = int(row[0] or 0)
+    finally:
+        idx.close()
+
+    try:
+        t3 = make_t3()
+        col = t3.get_or_create_collection(collection)
+        total_chunks = col.count()
+    except Exception:
+        return ChashCoverage(
+            total_chunks=None,
+            indexed_rows=indexed_rows,
+            ratio=None,
+            missing_sample=[],
+        )
+
+    if total_chunks == 0:
+        return ChashCoverage(
+            total_chunks=0, indexed_rows=indexed_rows,
+            ratio=None, missing_sample=[],
+        )
+
+    ratio = min(1.0, indexed_rows / total_chunks)
+
+    # Sample missing chunks only when there's actually a gap. Bounded at
+    # 5 to keep the audit cheap; the operator uses nx collection
+    # backfill-hash for the real fix.
+    missing: list[str] = []
+    if ratio < 1.0:
+        try:
+            # Pull up to MAX_QUERY_RESULTS=300 chunks' ids + hashes from
+            # T3 and cross-check against the chash_index. One get() is
+            # bounded by the ChromaDB quota.
+            page = col.get(limit=300, include=["metadatas"])
+            ids = page.get("ids") or []
+            metadatas = page.get("metadatas") or []
+            if ids and metadatas:
+                # Re-open chash_index for the lookup pass.
+                probe = ChashIndex(db_path)
+                try:
+                    with probe._lock:
+                        placeholders = ",".join("?" * len(ids))
+                        indexed = {
+                            r[0] for r in probe.conn.execute(
+                                f"SELECT doc_id FROM chash_index "
+                                f"WHERE physical_collection = ? "
+                                f"AND doc_id IN ({placeholders})",
+                                (collection, *ids),
+                            ).fetchall()
+                        }
+                finally:
+                    probe.close()
+                for cid in ids:
+                    if cid not in indexed:
+                        missing.append(cid)
+                    if len(missing) >= 5:
+                        break
+        except Exception:
+            missing = []  # best-effort: ratio still meaningful
+
+    return ChashCoverage(
+        total_chunks=total_chunks,
+        indexed_rows=indexed_rows,
+        ratio=ratio,
+        missing_sample=missing,
+    )
+
+
 # ── Orchestrator ────────────────────────────────────────────────────────────
 
 
@@ -281,12 +398,21 @@ def run_collection_audit(collection: str) -> AuditReport:
             t2.close()
         if cat_conn is not None:
             cat_conn.close()
+    # RDR-087 Phase 4.6 (nexus-c2op): chash coverage section. Own error
+    # boundary — the rest of the audit is purely T2, chash coverage hits
+    # T3, so failures (missing collection, network) shouldn't lose the
+    # other sections.
+    try:
+        chash = compute_chash_coverage(collection)
+    except Exception:
+        chash = None
     return AuditReport(
         collection=collection,
         distance_histogram=hist,
         cross_projections=projections,
         orphans=orphans,
         hub_assignments=hubs,
+        chash_coverage=chash,
     )
 
 
@@ -343,6 +469,34 @@ def format_audit_human(report: AuditReport) -> str:
                 f"srcs={h_.source_collection_count:>3}  "
                 f"this_col_chunks={h_.chunks_in_hub:>4}"
             )
+    lines.append("")
+    # Section 5: chash_index coverage (RDR-087 Phase 4.6 / nexus-c2op)
+    lines.append("=== chash_index coverage ===")
+    cov = report.chash_coverage
+    if cov is None:
+        lines.append(
+            "  (chash_index unavailable — T2 missing or T3 unreachable)"
+        )
+    elif cov.total_chunks == 0 or cov.total_chunks is None:
+        lines.append(
+            f"  indexed_rows={cov.indexed_rows}  (collection has no T3 chunks)"
+        )
+    else:
+        ratio_pct = 100.0 * (cov.ratio or 0.0)
+        lines.append(
+            f"  total_chunks={cov.total_chunks}  "
+            f"indexed_rows={cov.indexed_rows}  "
+            f"ratio={cov.ratio:.3f} ({ratio_pct:.1f}%)"
+        )
+        if cov.ratio is not None and cov.ratio < 1.0:
+            lines.append(
+                "  Run `nx collection backfill-hash "
+                f"{report.collection}` to close the gap."
+            )
+            if cov.missing_sample:
+                lines.append("  Sample unindexed chunk IDs:")
+                for cid in cov.missing_sample:
+                    lines.append(f"    - {cid}")
     return "\n".join(lines)
 
 

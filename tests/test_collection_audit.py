@@ -260,6 +260,130 @@ class TestDistanceHistogramTelemetryOnly:
         assert hist.source == "empty"
 
 
+# ── Section 5: chash_index coverage (RDR-087 Phase 4.6 / nexus-c2op) ────────
+
+
+class TestChashCoverageSection:
+    """Audit section 5 ratio + missing_sample shape.
+
+    The production ``compute_chash_coverage`` hits T3 for the total
+    chunk count. We exercise the pure-T2 path by stubbing make_t3's
+    collection.count() so the test is deterministic without network.
+    """
+
+    def _seed_chash_index(self, db_path: Path, rows: list[tuple[str, str, str]]):
+        """Seed ``chash_index`` rows: (chash, collection, doc_id)."""
+        from nexus.db.t2.chash_index import ChashIndex
+
+        idx = ChashIndex(db_path)
+        try:
+            for chash, coll, doc_id in rows:
+                idx.upsert(chash=chash, collection=coll, doc_id=doc_id)
+        finally:
+            idx.close()
+
+    def test_full_coverage_ratio_1(self, tmp_path: Path, monkeypatch) -> None:
+        from nexus.collection_audit import compute_chash_coverage
+
+        db_path = tmp_path / "memory.db"
+        self._seed_chash_index(db_path, [
+            ("h0", "code__x", "id0"),
+            ("h1", "code__x", "id1"),
+            ("h2", "code__x", "id2"),
+        ])
+
+        class _FakeCol:
+            def count(self): return 3
+        class _FakeT3:
+            def get_or_create_collection(self, _n): return _FakeCol()
+
+        monkeypatch.setattr(
+            "nexus.commands._helpers.default_db_path", lambda: db_path,
+        )
+        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
+
+        cov = compute_chash_coverage("code__x")
+        assert cov is not None
+        assert cov.total_chunks == 3
+        assert cov.indexed_rows == 3
+        assert cov.ratio == 1.0
+        assert cov.missing_sample == []
+
+    def test_partial_coverage_ratio_less_than_one(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        from nexus.collection_audit import compute_chash_coverage
+
+        db_path = tmp_path / "memory.db"
+        # Only 2 of 4 chunks indexed.
+        self._seed_chash_index(db_path, [
+            ("h0", "code__x", "id0"),
+            ("h1", "code__x", "id1"),
+        ])
+
+        class _FakeCol:
+            def count(self): return 4
+            def get(self, **kwargs):
+                return {
+                    "ids": ["id0", "id1", "id2", "id3"],
+                    "metadatas": [{}, {}, {}, {}],
+                }
+        class _FakeT3:
+            def get_or_create_collection(self, _n): return _FakeCol()
+
+        monkeypatch.setattr(
+            "nexus.commands._helpers.default_db_path", lambda: db_path,
+        )
+        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
+
+        cov = compute_chash_coverage("code__x")
+        assert cov is not None
+        assert cov.total_chunks == 4
+        assert cov.indexed_rows == 2
+        assert cov.ratio == 0.5
+        # Missing-sample contains id2 + id3 (any of the non-indexed ids
+        # in the sample page; bounded at 5).
+        assert set(cov.missing_sample).issubset({"id2", "id3"})
+        assert len(cov.missing_sample) == 2
+
+    def test_empty_t3_collection_returns_none_ratio(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        from nexus.collection_audit import compute_chash_coverage
+
+        db_path = tmp_path / "memory.db"
+        self._seed_chash_index(db_path, [])
+
+        class _FakeCol:
+            def count(self): return 0
+        class _FakeT3:
+            def get_or_create_collection(self, _n): return _FakeCol()
+
+        monkeypatch.setattr(
+            "nexus.commands._helpers.default_db_path", lambda: db_path,
+        )
+        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
+
+        cov = compute_chash_coverage("code__empty")
+        assert cov is not None
+        assert cov.total_chunks == 0
+        assert cov.indexed_rows == 0
+        assert cov.ratio is None
+
+    def test_missing_t2_returns_none(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        from nexus.collection_audit import compute_chash_coverage
+
+        # T2 file does not exist.
+        monkeypatch.setattr(
+            "nexus.commands._helpers.default_db_path",
+            lambda: tmp_path / "nonexistent.db",
+        )
+        cov = compute_chash_coverage("code__x")
+        assert cov is None
+
+
 # ── CLI integration ─────────────────────────────────────────────────────────
 
 

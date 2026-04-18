@@ -141,6 +141,15 @@ def _fake_hub_score(col: str) -> float | None:
     return {"code__alpha": 0.05, "docs__beta": 0.20}.get(col)
 
 
+def _fake_chash_coverage(col: str) -> float | None:
+    # code__alpha fully backfilled; docs__beta partial; docs__stale absent.
+    return {
+        "code__alpha": 1.0,
+        "docs__beta": 0.75,
+        "docs__stale": 0.0,
+    }.get(col)
+
+
 class TestComputeCollectionHealth:
     def test_rows_assemble_from_injected_fns(self) -> None:
         from nexus.collection_health import compute_collection_health
@@ -151,6 +160,7 @@ class TestComputeCollectionHealth:
             telemetry_stats_fn=_fake_telemetry_stats,
             projection_rank_fn=_fake_projection_ranks,
             hub_score_fn=_fake_hub_score,
+            chash_coverage_fn=_fake_chash_coverage,
         )
         by_name = {r.name: r for r in rows}
         assert by_name["code__alpha"].chunk_count == 120
@@ -170,6 +180,7 @@ class TestComputeCollectionHealth:
             telemetry_stats_fn=_fake_telemetry_stats,
             projection_rank_fn=_fake_projection_ranks,
             hub_score_fn=_fake_hub_score,
+            chash_coverage_fn=_fake_chash_coverage,
         )
         assert rows[0].zero_hit_rate_30d is None
         assert rows[0].median_query_distance_30d is None
@@ -183,6 +194,7 @@ class TestComputeCollectionHealth:
             telemetry_stats_fn=_fake_telemetry_stats,
             projection_rank_fn=_fake_projection_ranks,
             hub_score_fn=_fake_hub_score,
+            chash_coverage_fn=_fake_chash_coverage,
         )
         assert rows[0].cross_projection_rank is None
 
@@ -195,8 +207,81 @@ class TestComputeCollectionHealth:
             telemetry_stats_fn=_fake_telemetry_stats,
             projection_rank_fn=_fake_projection_ranks,
             hub_score_fn=_fake_hub_score,
+            chash_coverage_fn=_fake_chash_coverage,
         )
         assert rows[0].hub_domination_score is None
+
+
+# ── Chash coverage (RDR-087 Phase 4.6) ─────────────────────────────────────
+
+
+class TestChashCoverage:
+    """Ratio of chash_index rows to T3 chunks, surfaced post-RDR-086."""
+
+    def test_ratio_surfaces_on_rows(self) -> None:
+        from nexus.collection_health import compute_collection_health
+
+        rows = compute_collection_health(
+            ["code__alpha", "docs__beta", "docs__stale"],
+            catalog_stats_fn=_fake_catalog_stats,
+            telemetry_stats_fn=_fake_telemetry_stats,
+            projection_rank_fn=_fake_projection_ranks,
+            hub_score_fn=_fake_hub_score,
+            chash_coverage_fn=_fake_chash_coverage,
+        )
+        by_name = {r.name: r for r in rows}
+        assert by_name["code__alpha"].chash_indexed_ratio == pytest.approx(1.0)
+        assert by_name["docs__beta"].chash_indexed_ratio == pytest.approx(0.75)
+        assert by_name["docs__stale"].chash_indexed_ratio == pytest.approx(0.0)
+
+    def test_missing_coverage_is_none(self) -> None:
+        from nexus.collection_health import compute_collection_health
+
+        rows = compute_collection_health(
+            ["code__unknown"],
+            catalog_stats_fn=_fake_catalog_stats,
+            telemetry_stats_fn=_fake_telemetry_stats,
+            projection_rank_fn=_fake_projection_ranks,
+            hub_score_fn=_fake_hub_score,
+            chash_coverage_fn=_fake_chash_coverage,
+        )
+        assert rows[0].chash_indexed_ratio is None
+
+    def test_human_output_hints_when_coverage_below_one(self) -> None:
+        from nexus.collection_health import (
+            compute_collection_health, format_health_table,
+        )
+
+        rows = compute_collection_health(
+            ["code__alpha", "docs__beta", "docs__stale"],
+            catalog_stats_fn=_fake_catalog_stats,
+            telemetry_stats_fn=_fake_telemetry_stats,
+            projection_rank_fn=_fake_projection_ranks,
+            hub_score_fn=_fake_hub_score,
+            chash_coverage_fn=_fake_chash_coverage,
+        )
+        out = format_health_table(rows, sort_by="name")
+        # At least one row has ratio < 1.0 → hint line must appear.
+        assert "backfill-hash" in out
+
+    def test_human_output_no_hint_when_all_fully_covered(self) -> None:
+        from nexus.collection_health import (
+            compute_collection_health, format_health_table,
+        )
+
+        def _all_covered(_col: str) -> float:
+            return 1.0
+
+        rows = compute_collection_health(
+            ["code__alpha"],
+            catalog_stats_fn=_fake_catalog_stats,
+            telemetry_stats_fn=_fake_telemetry_stats,
+            projection_rank_fn=_fake_projection_ranks,
+            hub_score_fn=_fake_hub_score,
+            chash_coverage_fn=_all_covered,
+        )
+        out = format_health_table(rows, sort_by="name")
+        assert "backfill-hash" not in out
 
 
 # ── Formatters ─────────────────────────────────────────────────────────────
@@ -213,6 +298,7 @@ class TestFormatters:
             telemetry_stats_fn=_fake_telemetry_stats,
             projection_rank_fn=_fake_projection_ranks,
             hub_score_fn=_fake_hub_score,
+            chash_coverage_fn=_fake_chash_coverage,
         )
 
     def test_human_format_contains_all_columns(self, rows) -> None:
