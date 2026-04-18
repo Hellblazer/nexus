@@ -447,6 +447,35 @@ def taxonomy_assign_batch(
         return 0
 
 
+# ── Chash dual-write (RDR-086 Phase 1.2) ──────────────────────────────────────
+
+
+def chash_dual_write_batch(
+    doc_ids: list[str],
+    collection: str,
+    metadatas: list[dict],
+) -> None:
+    """Best-effort dual-write of ``chash_index`` rows after a T3 upsert.
+
+    Called from each of the six indexing write sites immediately after
+    ``t3.upsert_chunks_with_embeddings(...)``. Opens a fresh T2Database
+    (matching ``taxonomy_assign_batch``'s lifecycle), delegates to the
+    store-level ``dual_write_chash_index`` helper, and closes. Logs at
+    debug level on any outer failure — a T2 failure must never abort
+    the enclosing T3 write path.
+    """
+    if not doc_ids or not metadatas:
+        return
+    try:
+        from nexus.db.t2.chash_index import dual_write_chash_index
+
+        with t2_ctx() as db:
+            dual_write_chash_index(db.chash_index, collection, doc_ids, metadatas)
+    except Exception:
+        import structlog
+        structlog.get_logger().debug("chash_dual_write_batch_failed", exc_info=True)
+
+
 # ── Version compatibility check (RDR-076) ─────────────────────────────────────
 
 

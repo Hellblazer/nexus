@@ -348,6 +348,13 @@ def _index_document(
             m["embedding_model"] = actual_model
     db.upsert_chunks_with_embeddings(collection_name, ids, documents, embeddings, metadatas)
 
+    # Chash dual-write (RDR-086 Phase 1.2): global chash → (collection, doc_id).
+    try:
+        from nexus.mcp_infra import chash_dual_write_batch
+        chash_dual_write_batch(ids, collection_name, metadatas)
+    except Exception:
+        _log.debug("chash_dual_write_failed", exc_info=True)
+
     # Incremental taxonomy: assign chunks to nearest existing topics.
     try:
         from nexus.mcp_infra import taxonomy_assign_batch
@@ -447,6 +454,13 @@ def _index_pdf_incremental(
 
         # Upsert
         t3.upsert_chunks_with_embeddings(collection_name, batch_ids, batch_docs, embeddings, batch_metas)
+
+        # Chash dual-write (RDR-086 Phase 1.2): global chash → (collection, doc_id).
+        try:
+            from nexus.mcp_infra import chash_dual_write_batch
+            chash_dual_write_batch(batch_ids, collection_name, batch_metas)
+        except Exception:
+            _log.debug("chash_dual_write_failed", exc_info=True)
 
         # Incremental taxonomy: assign this batch to nearest existing topics.
         try:
@@ -841,6 +855,13 @@ def index_pdf(
         for m in metadatas_list:
             m["embedding_model"] = actual_model
     db.upsert_chunks_with_embeddings(col_name, ids, documents, embeddings, metadatas_list)
+
+    # Chash dual-write (RDR-086 Phase 1.2): global chash → (collection, doc_id).
+    try:
+        from nexus.mcp_infra import chash_dual_write_batch
+        chash_dual_write_batch(ids, col_name, metadatas_list)
+    except Exception:
+        _log.debug("chash_dual_write_failed", exc_info=True)
 
     # Incremental taxonomy: assign chunks to nearest existing topics.
     try:

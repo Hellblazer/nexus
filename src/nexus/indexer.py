@@ -749,6 +749,13 @@ def _index_pdf_file(
         metadatas=metadatas,
     )
 
+    # Chash dual-write (RDR-086 Phase 1.2): global chash → (collection, doc_id).
+    try:
+        from nexus.mcp_infra import chash_dual_write_batch
+        chash_dual_write_batch(ids, collection_name, metadatas)
+    except Exception:
+        _log.debug("chash_dual_write_failed", exc_info=True)
+
     # Incremental taxonomy: assign chunks to nearest existing topics.
     try:
         from nexus.mcp_infra import taxonomy_assign_batch

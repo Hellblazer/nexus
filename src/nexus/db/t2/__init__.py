@@ -62,6 +62,7 @@ import sqlite3
 import structlog
 
 from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+from nexus.db.t2.chash_index import ChashIndex
 from nexus.db.t2.memory_store import (
     AccessPolicy,
     MemoryStore,
@@ -135,6 +136,10 @@ class T2Database:
         # get_topic_docs JOIN (RDR-063 §Cross-Domain Contracts).
         self.taxonomy: CatalogTaxonomy = CatalogTaxonomy(path, self.memory)
         self.telemetry: Telemetry = Telemetry(path)
+        # RDR-086 Phase 1: global chash → (collection, doc_id) lookup
+        # populated by the six indexing write sites via best-effort
+        # dual-write after each T3 upsert.
+        self.chash_index: ChashIndex = ChashIndex(path)
 
     def __enter__(self) -> "T2Database":
         return self
@@ -149,6 +154,7 @@ class T2Database:
         close order is reverse of construction so that the most
         recently opened connection (telemetry) is released first.
         """
+        self.chash_index.close()
         self.telemetry.close()
         self.taxonomy.close()
         self.plans.close()
