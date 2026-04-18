@@ -193,6 +193,11 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
         label = "Indexing"
     click.echo(f"{label} {path}…")
 
+    # nexus-vatx Gap 4: zero the retry accumulators so the end-of-run
+    # summary reflects only this run's backoffs.
+    from nexus.retry import get_retry_stats, reset_retry_stats
+    reset_retry_stats()
+
     bar: tqdm | None = None
     n = 0
     total = 0
@@ -368,6 +373,27 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
                 click.echo("Tip: run `nx hooks install` to auto-index this repo on every commit.")
         except Exception as exc:
             _log.debug("hook_detection_failed", error=str(exc))  # Don't let hook detection break indexing
+
+    # nexus-vatx Gap 4: emit retry-time summary when any transient-error
+    # backoff fired. Silent when zero so normal runs stay tidy.
+    retry_stats = get_retry_stats()
+    if retry_stats["total_count"]:
+        parts = []
+        if retry_stats["voyage_count"]:
+            parts.append(
+                f"voyage {retry_stats['voyage_seconds']:.1f}s over "
+                f"{retry_stats['voyage_count']} retries"
+            )
+        if retry_stats["chroma_count"]:
+            parts.append(
+                f"chroma {retry_stats['chroma_seconds']:.1f}s over "
+                f"{retry_stats['chroma_count']} retries"
+            )
+        click.echo(
+            f"  Transient-error backoff: {retry_stats['total_seconds']:.1f}s total "
+            f"({', '.join(parts)})",
+            err=True,
+        )
     click.echo("Done.")
 
 
