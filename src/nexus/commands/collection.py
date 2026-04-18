@@ -508,3 +508,34 @@ def health_cmd(sort_by: str, fmt: str) -> None:
     from nexus.collection_health import run_collection_health
 
     click.echo(run_collection_health(sort_by=sort_by, fmt=fmt))
+
+
+@collection.command("audit")
+@click.argument("name")
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["table", "json"]),
+    default="table",
+    show_default=True,
+    help="Output format.",
+)
+def audit_cmd(name: str, fmt: str) -> None:
+    """Deep-dive audit for a single collection (RDR-087 Phase 4.2).
+
+    Four sections: distance histogram (30d), top-5 cross-projections,
+    orphan chunks (>30d, no incoming links), top-10 cross-collection
+    hub topic assignments. Live-probe distance fallback deferred to
+    follow-up bead nexus-fx2d — telemetry-only for now.
+    """
+    from nexus.collection_audit import (
+        format_audit_human,
+        format_audit_json,
+        run_collection_audit,
+    )
+
+    report = run_collection_audit(name)
+    if fmt == "json":
+        click.echo(format_audit_json(report))
+    else:
+        click.echo(format_audit_human(report))
