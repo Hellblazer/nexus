@@ -56,6 +56,148 @@ def make_relative(abs_path: str | Path, repo_root: Path) -> str:
         return str(abs_path)
 
 
+# ── resolve_chash fallback helpers (RDR-086 Phase 2) ──────────────────────────
+
+# Fallback parallelism matches ChromaDB Cloud MAX_CONCURRENT_READS=10.
+_CHASH_FALLBACK_CONCURRENCY = 10
+# 30-second wall-clock deadline for the full T3 scan fallback.
+_CHASH_FALLBACK_DEADLINE_S = 30.0
+# Process-scoped flag: emit the "fallback entered" warning exactly once so
+# a repeatedly-missing chash does not flood the log.
+_chash_fallback_warned = False
+
+
+def _negate_iso(ts: str) -> str:
+    """Build a sort key that sorts newer ISO timestamps first.
+
+    ISO-8601 strings sort lexicographically from oldest to newest, so we
+    need a key that inverts the comparison. Mapping each digit through
+    9 - d flips the natural order — ``'2026'`` becomes ``'7973'`` and
+    newer dates sort first. Non-digits fall through unchanged so the
+    ``-``, ``:``, ``T``, and ``+`` separators keep their relative
+    positions in the string.
+    """
+    return "".join(
+        str(9 - int(c)) if c.isdigit() else c for c in ts
+    )
+
+
+def _fallback_chash_scan(
+    *,
+    hex_chash: str,
+    span: str,
+    t3,
+    build_ref,
+) -> dict | None:
+    """Parallel scan across all T3 collections for a missing chash.
+
+    Invoked when the T2 ``chash_index`` returns no live row. Runs
+    ``resolve_span`` against every collection in batches of
+    ``_CHASH_FALLBACK_CONCURRENCY``; the first hit wins. The full scan
+    is bounded by a 30-second deadline. Logs a single warning per
+    process to surface the missing-index signal to operators.
+    """
+    global _chash_fallback_warned
+    import time
+    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+
+    try:
+        all_cols = [c.name for c in t3.list_collections()]
+    except Exception:
+        _log.debug("chash_fallback_list_collections_failed", exc_info=True)
+        return None
+
+    if not _chash_fallback_warned:
+        _log.warning(
+            "resolve_chash_fallback_scanning",
+            chash_prefix=hex_chash[:16],
+            collection_count=len(all_cols),
+            guidance="run 'nx collection backfill-hash --all' to populate T2",
+        )
+        _chash_fallback_warned = True
+
+    # Shared closure over the outer ``resolve_span`` reachable via ``t3`` —
+    # we can't capture ``self`` here (module-level helper), but resolve_span
+    # is a pure lookup on (t3, collection, chash) so a local shim suffices.
+    # The caller supplies ``build_ref`` already closed over char_range etc.
+    from nexus.catalog.catalog import Catalog  # noqa: F401 (self-import documents intent)
+
+    # Rebuild a disposable Catalog-like resolver: resolve_span only reads
+    # ``t3`` and the hash — instance state is irrelevant. Reuse the same
+    # parsing + range slicing by calling ``Catalog.resolve_span`` unbound.
+    def _probe(coll: str) -> dict | None:
+        try:
+            return Catalog.resolve_span(None, span, coll, t3)  # type: ignore[arg-type]
+        except Exception:
+            return None
+
+    deadline = time.monotonic() + _CHASH_FALLBACK_DEADLINE_S
+    idx = 0
+    with ThreadPoolExecutor(max_workers=_CHASH_FALLBACK_CONCURRENCY) as ex:
+        in_flight: dict = {}
+        while idx < len(all_cols) or in_flight:
+            # Fill up to concurrency window.
+            while (
+                len(in_flight) < _CHASH_FALLBACK_CONCURRENCY
+                and idx < len(all_cols)
+            ):
+                col = all_cols[idx]
+                in_flight[ex.submit(_probe, col)] = col
+                idx += 1
+
+            if not in_flight:
+                break
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _log.warning(
+                    "resolve_chash_fallback_timeout",
+                    chash_prefix=hex_chash[:16],
+                    deadline_s=_CHASH_FALLBACK_DEADLINE_S,
+                )
+                return None
+
+            done, _ = wait(
+                list(in_flight.keys()),
+                timeout=remaining,
+                return_when=FIRST_COMPLETED,
+            )
+            if not done:
+                _log.warning(
+                    "resolve_chash_fallback_timeout",
+                    chash_prefix=hex_chash[:16],
+                    deadline_s=_CHASH_FALLBACK_DEADLINE_S,
+                )
+                return None
+
+            for fut in done:
+                coll = in_flight.pop(fut)
+                span_res = fut.result()
+                if span_res is None:
+                    continue
+                # Recover doc_id from resolve_span's returned metadata — for
+                # fallback we don't have a T2 row, so query the collection
+                # directly.
+                try:
+                    col = t3.get_collection(coll)
+                    hit = col.get(
+                        where={"chunk_text_hash": hex_chash},
+                        include=[],
+                    )
+                    doc_id = hit["ids"][0] if hit["ids"] else ""
+                except Exception:
+                    doc_id = ""
+                return build_ref(coll=coll, doc_id=doc_id, span_result=span_res)
+
+    return None
+
+
+def reset_chash_fallback_warning_for_tests() -> None:
+    """Test hook — clear the once-per-process fallback warning flag."""
+    global _chash_fallback_warned
+    _chash_fallback_warned = False
+
+
 @dataclass
 class CatalogEntry:
     tumbler: Tumbler
@@ -608,6 +750,128 @@ class Catalog:
         if char_range:
             out["char_range"] = char_range
         return out
+
+    def resolve_chash(
+        self,
+        chash: str,
+        t3: "ClientAPI",
+        chash_index: "Any",
+        *,
+        prefer_collection: str | None = None,
+    ) -> "dict | None":
+        """Globally resolve a chash to the chunk it names (RDR-086 Phase 2).
+
+        Unlike ``resolve_span``, the caller does not need to know which
+        collection holds the chunk: the T2 ``chash_index`` populated by
+        Phase 1 dual-write answers that question in one SQL lookup.
+
+        Resolution order:
+          1. T2 lookup via ``chash_index.lookup(chash)``.
+          2. Drop rows whose ``physical_collection`` no longer exists in T3
+             (self-healing: the stale row is deleted on access).
+          3. Tie-break the survivors — ``prefer_collection`` first, then
+             newest ``created_at``, then deterministic name sort.
+          4. Delegate to ``resolve_span`` for chunk text + metadata on
+             the winner. On any per-candidate failure fall through.
+          5. If T2 was empty or exhausted, fall back to a parallel T3 scan
+             across all collections (10× concurrency, 30 s deadline).
+             Missing from index is a performance hit, not a correctness
+             one — ``nx collection backfill-hash --all`` reconciles.
+
+        Accepts three input forms (same as ``resolve_span``):
+          * bare ``<sha256hex>``
+          * ``chash:<sha256hex>``
+          * ``chash:<sha256hex>:<start>-<end>``
+        """
+        # ── Parse input ─────────────────────────────────────────────────
+        body = chash[len("chash:"):] if chash.startswith("chash:") else chash
+        char_range: tuple[int, int] | None = None
+        m = re.match(r"^([0-9a-f]{64}):(\d+)-(\d+)$", body)
+        if m:
+            hex_chash = m.group(1)
+            char_range = (int(m.group(2)), int(m.group(3)))
+        elif re.fullmatch(r"[0-9a-f]{64}", body):
+            hex_chash = body
+        else:
+            raise ValueError(f"malformed chash: {chash!r}")
+
+        # Reconstruct the span form that ``resolve_span`` expects.
+        span = f"chash:{hex_chash}"
+        if char_range:
+            span = f"{span}:{char_range[0]}-{char_range[1]}"
+
+        def _build_ref(
+            *,
+            coll: str,
+            doc_id: str,
+            span_result: dict,
+        ) -> dict:
+            ref = {
+                "chash": hex_chash,
+                "chunk_hash": hex_chash,
+                "physical_collection": coll,
+                "doc_id": doc_id,
+                "chunk_text": span_result["chunk_text"],
+                "metadata": span_result["metadata"],
+            }
+            if "char_range" in span_result:
+                ref["char_range"] = span_result["char_range"]
+            return ref
+
+        # ── T2 path ─────────────────────────────────────────────────────
+        rows = chash_index.lookup(hex_chash)
+        if rows:
+            # Self-healing: filter rows whose collection no longer exists in T3.
+            try:
+                live = {c.name for c in t3.list_collections()}
+            except Exception:
+                live = set()
+            survivors: list[dict] = []
+            for row in rows:
+                if row["collection"] in live:
+                    survivors.append(row)
+                else:
+                    try:
+                        chash_index.conn.execute(
+                            "DELETE FROM chash_index "
+                            "WHERE chash = ? AND physical_collection = ?",
+                            (hex_chash, row["collection"]),
+                        )
+                        chash_index.conn.commit()
+                    except Exception:
+                        _log.debug(
+                            "chash_index_selfheal_delete_failed",
+                            chash_prefix=hex_chash[:16],
+                            collection=row["collection"],
+                            exc_info=True,
+                        )
+
+            # Tie-break: prefer_collection → newest created_at → name sort.
+            def _sort_key(r: dict) -> tuple:
+                preferred = 0 if r["collection"] == prefer_collection else 1
+                # Reverse created_at so newest sorts first.
+                return (preferred, _negate_iso(r["created_at"]), r["collection"])
+
+            for row in sorted(survivors, key=_sort_key):
+                try:
+                    span_res = self.resolve_span(span, row["collection"], t3)
+                except Exception:
+                    span_res = None
+                if span_res is None:
+                    continue
+                return _build_ref(
+                    coll=row["collection"],
+                    doc_id=row["doc_id"],
+                    span_result=span_res,
+                )
+
+        # ── T3 fallback ─────────────────────────────────────────────────
+        return _fallback_chash_scan(
+            hex_chash=hex_chash,
+            span=span,
+            t3=t3,
+            build_ref=_build_ref,
+        )
 
     def update(self, tumbler: Tumbler, **fields: object) -> None:
         dir_fd = self._acquire_lock()
