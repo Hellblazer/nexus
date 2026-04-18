@@ -24,6 +24,13 @@ _log = structlog.get_logger(__name__)
 # was spent waiting on transient-error backoffs. Both ChromaDB and Voyage
 # retries contribute. Concurrent voyage calls in pipeline_stages can
 # increment from worker threads — hence the lock.
+#
+# Semantics note (Reviewer A/S-2): ``_add_*_retry(delay)`` is called BEFORE
+# ``time.sleep(delay)``, so the counters measure *intended* backoff
+# (total sleep time committed to). If the process is killed mid-sleep, the
+# counter will over-count. That's acceptable — under-counting would hide
+# the cause of a hang, over-counting at most overstates a stall we did
+# actually decide to enter.
 _retry_lock = threading.Lock()
 _voyage_retry_seconds: float = 0.0
 _voyage_retry_count: int = 0

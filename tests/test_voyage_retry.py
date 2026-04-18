@@ -7,6 +7,20 @@ import voyageai.error as _ve
 from nexus.retry import _is_retryable_voyage_error, _voyage_with_retry
 
 
+# Review remediation (Reviewer A/I-4): reset the retry accumulators on
+# every test entry. The counters live in module state (`nexus.retry`), and
+# a test that asserts `stats["total_count"] == N` without a paired reset
+# will flake when a prior test leaves residue behind (e.g. an assertion
+# failure that skips the trailing `reset_retry_stats()` at the end of the
+# test body).
+@pytest.fixture(autouse=True)
+def _reset_retry_stats_on_entry():
+    from nexus.retry import reset_retry_stats
+    reset_retry_stats()
+    yield
+    reset_retry_stats()
+
+
 # ── _is_retryable_voyage_error oracle ───────────────────────────────────────
 
 @pytest.mark.parametrize("exc,expected", [

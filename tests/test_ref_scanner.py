@@ -252,6 +252,31 @@ def test_bullet_without_count_does_not_leak_sibling_count(tmp_path):
     assert by_coll["docs__no-count"] is None
 
 
+def test_equidistant_counts_tie_break_is_stable(tmp_path):
+    """Review remediation (Reviewer C/I-3): when two count claims are
+    exactly equidistant from a reference, the tie-break is deterministic.
+    Plain-integer matches are iterated ahead of k-shorthand matches by
+    ``_iter_count_matches``, and Python's stable ``min()`` picks the
+    first equidistant candidate.
+
+    Layout: ``"5k chunks docs__foo 100 chunks."``. ``docs__foo`` starts
+    at position 10; ``5k`` at 0 (distance 10); ``100`` at 20 (distance
+    10). Candidates iterated as plain-int then k-shorthand:
+    ``[(20, 100), (0, 5000)]``. Stable ``min`` picks the first minimum
+    → ``100``.
+    """
+    p = _write(
+        tmp_path,
+        "5k chunks docs__foo 100 chunks.\n",
+    )
+    refs = scan_markdown(p, DEFAULT_PREFIXES)
+    assert len(refs) == 1
+    assert refs[0].claimed_count == 100, (
+        "equidistant tie should go to plain-integer over k-shorthand; "
+        f"got {refs[0].claimed_count}"
+    )
+
+
 def test_bullet_list_inside_multiline_paragraph(tmp_path):
     """A list sandwiched between prose paragraphs still scopes per-bullet."""
     p = _write(

@@ -264,11 +264,12 @@ def start_t1_server() -> tuple[str, int, int, str]:
 
     tmpdir = tempfile.mkdtemp(prefix="nx_t1_")
     # start_new_session=True isolates chroma + its multiprocessing workers
-    # into their own process group so `os.killpg(getpgid(pid), …)` at
-    # shutdown reaches the whole subtree. Without this, SIGTERM only hits
-    # the chroma head; workers get orphaned and their POSIX named
-    # semaphores are never ``sem_unlink()``-ed → Errno 28 namespace
-    # exhaustion (bead nexus-dc57 / nexus-ze2a root cause).
+    # into their own process group so ``safe_killpg(pid, …)`` (defined in
+    # ``nexus.util.process_group``) reaches the whole subtree at shutdown.
+    # Without this, SIGTERM only hits the chroma head; workers get
+    # orphaned and their POSIX named semaphores are never
+    # ``sem_unlink()``-ed → Errno 28 namespace exhaustion (beads
+    # nexus-dc57 / nexus-ze2a root cause).
     proc = subprocess.Popen(
         [
             chroma, "run",
@@ -306,12 +307,13 @@ def stop_t1_server(server_pid: int) -> None:
     """Send SIGTERM → SIGKILL to the *entire process group* owned by
     *server_pid*.
 
-    Uses ``os.killpg(os.getpgid(pid), …)`` rather than ``os.kill(pid, …)``
-    so chroma's multiprocessing workers and their ``resource_tracker``
-    children receive the signal too. The tracker unlinks POSIX named
-    semaphores during its own shutdown; without it, workers' semaphores
-    stay registered with the kernel until reboot and eventually exhaust
-    ``kern.posix.sem.max`` (beads nexus-dc57 + nexus-ze2a).
+    Signals the process group via ``safe_killpg`` (pgid of *server_pid*)
+    rather than ``os.kill(pid, …)`` so chroma's multiprocessing workers
+    and their ``resource_tracker`` children receive the signal too. The
+    tracker unlinks POSIX named semaphores during its own shutdown;
+    without it, workers' semaphores stay registered with the kernel
+    until reboot and eventually exhaust ``kern.posix.sem.max`` (beads
+    nexus-dc57 + nexus-ze2a).
 
     Graceful SIGTERM first; escalates to SIGKILL after 3 s. Both signal
     calls go through ``nexus.util.process_group.safe_killpg`` so the

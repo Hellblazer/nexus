@@ -494,6 +494,13 @@ def _catalog_pdf_hook(
         file_path_str = pdf_path.name  # Portable — not machine-specific absolute path
         existing = cat.by_file_path(owner, file_path_str)
 
+        # Known TOCTOU window (Reviewer B/I-3): this stat happens AFTER
+        # the PDF was extracted + chunked earlier in the pipeline. A
+        # concurrent write between extraction and this stat records an
+        # mtime newer than the indexed content, suppressing a later
+        # staleness flag. Proper fix requires threading source_mtime
+        # from the extraction point. Filed as follow-up; see matching
+        # comment in ``doc_indexer._catalog_markdown_hook``.
         try:
             source_mtime = pdf_path.stat().st_mtime
         except OSError:

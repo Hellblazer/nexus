@@ -31,6 +31,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import structlog
+
+_log = structlog.get_logger(__name__)
+
 
 # ── Dataclasses ─────────────────────────────────────────────────────────────
 
@@ -160,6 +164,14 @@ def sample_live_distances(
     try:
         got = col.get(limit=n, include=["embeddings"])
     except Exception:
+        # Review remediation (Reviewer B/S-1 + C/S-2): log at DEBUG so a
+        # quota-exceeded or timeout during sampling is recoverable via
+        # logs, rather than producing an "empty histogram" that looks
+        # identical to a genuinely empty collection.
+        _log.debug(
+            "sample_live_distances_failed",
+            collection=collection, n=n, exc_info=True,
+        )
         return []
     # ChromaDB returns embeddings as a numpy ndarray; guard the
     # "truth-value ambiguous" trap with an explicit ``is None`` + length
@@ -365,73 +377,67 @@ def compute_chash_coverage(collection: str) -> ChashCoverage | None:
     if not db_path.exists():
         return None
 
+    # Review remediation (Reviewer B/I-1, B/S-3, C/I-4): open ChashIndex
+    # once for the whole coverage computation instead of opening + closing
+    # + reopening around the missing-sample probe. Also narrows the TOCTOU
+    # window: ``indexed_rows`` and ``missing_sample`` are drawn from the
+    # same snapshot. ``ratio`` remains advisory — the T3 ``col.count()``
+    # happens between the two chash_index reads and a concurrent indexer
+    # run can shift either side. Callers treat the number as a point-in-
+    # time estimate.
     idx = ChashIndex(db_path)
     try:
-        with idx._lock:
-            row = idx.conn.execute(
-                "SELECT COUNT(*) FROM chash_index "
-                "WHERE physical_collection = ?",
-                (collection,),
-            ).fetchone()
-        indexed_rows = int(row[0] or 0)
+        indexed_rows = idx.count_for_collection(collection)
+
+        try:
+            t3 = make_t3()
+            col = t3.get_or_create_collection(collection)
+            total_chunks = col.count()
+        except Exception:
+            return ChashCoverage(
+                total_chunks=None,
+                indexed_rows=indexed_rows,
+                ratio=None,
+                missing_sample=[],
+            )
+
+        if total_chunks == 0:
+            return ChashCoverage(
+                total_chunks=0, indexed_rows=indexed_rows,
+                ratio=None, missing_sample=[],
+            )
+
+        ratio = min(1.0, indexed_rows / total_chunks)
+
+        # Sample missing chunks only when there's actually a gap. Bounded
+        # at 5 to keep the audit cheap; the operator uses nx collection
+        # backfill-hash for the real fix.
+        missing: list[str] = []
+        if ratio < 1.0:
+            try:
+                # Pull up to MAX_QUERY_RESULTS=300 chunks from T3 and
+                # cross-check against the chash_index. One get() is
+                # bounded by the ChromaDB quota.
+                page = col.get(limit=300, include=["metadatas"])
+                ids = page.get("ids") or []
+                metadatas = page.get("metadatas") or []
+                if ids and metadatas:
+                    indexed_ids = idx.doc_ids_present_in_collection(
+                        collection, ids,
+                    )
+                    for cid in ids:
+                        if cid not in indexed_ids:
+                            missing.append(cid)
+                        if len(missing) >= 5:
+                            break
+            except Exception:
+                _log.debug(
+                    "chash_coverage_missing_sample_failed",
+                    collection=collection, exc_info=True,
+                )
+                missing = []  # best-effort: ratio still meaningful
     finally:
         idx.close()
-
-    try:
-        t3 = make_t3()
-        col = t3.get_or_create_collection(collection)
-        total_chunks = col.count()
-    except Exception:
-        return ChashCoverage(
-            total_chunks=None,
-            indexed_rows=indexed_rows,
-            ratio=None,
-            missing_sample=[],
-        )
-
-    if total_chunks == 0:
-        return ChashCoverage(
-            total_chunks=0, indexed_rows=indexed_rows,
-            ratio=None, missing_sample=[],
-        )
-
-    ratio = min(1.0, indexed_rows / total_chunks)
-
-    # Sample missing chunks only when there's actually a gap. Bounded at
-    # 5 to keep the audit cheap; the operator uses nx collection
-    # backfill-hash for the real fix.
-    missing: list[str] = []
-    if ratio < 1.0:
-        try:
-            # Pull up to MAX_QUERY_RESULTS=300 chunks' ids + hashes from
-            # T3 and cross-check against the chash_index. One get() is
-            # bounded by the ChromaDB quota.
-            page = col.get(limit=300, include=["metadatas"])
-            ids = page.get("ids") or []
-            metadatas = page.get("metadatas") or []
-            if ids and metadatas:
-                # Re-open chash_index for the lookup pass.
-                probe = ChashIndex(db_path)
-                try:
-                    with probe._lock:
-                        placeholders = ",".join("?" * len(ids))
-                        indexed = {
-                            r[0] for r in probe.conn.execute(
-                                f"SELECT doc_id FROM chash_index "
-                                f"WHERE physical_collection = ? "
-                                f"AND doc_id IN ({placeholders})",
-                                (collection, *ids),
-                            ).fetchall()
-                        }
-                finally:
-                    probe.close()
-                for cid in ids:
-                    if cid not in indexed:
-                        missing.append(cid)
-                    if len(missing) >= 5:
-                        break
-        except Exception:
-            missing = []  # best-effort: ratio still meaningful
 
     return ChashCoverage(
         total_chunks=total_chunks,
@@ -493,7 +499,13 @@ def run_collection_audit(
                 t3 = make_t3()
             hist = compute_live_distance_histogram(collection, t3, n=live_n)
         except Exception:
-            pass
+            # Review remediation (Reviewer B/S-1): log so a missing `hist`
+            # on a --live run isn't invisible. DEBUG keeps normal runs
+            # quiet; the operator can re-run with verbose logging.
+            _log.debug(
+                "live_histogram_failed",
+                collection=collection, live_n=live_n, exc_info=True,
+            )
     # RDR-087 Phase 4.6 (nexus-c2op): chash coverage section. Own error
     # boundary — the rest of the audit is purely T2, chash coverage hits
     # T3, so failures (missing collection, network) shouldn't lose the

@@ -653,6 +653,14 @@ def test_silent_zero_end_to_end_real_engine(
     Stability bar per bead: re-runs in loop must produce identical stderr
     (no timing noise, no distance jitter). Driven by the ONNX MiniLM EF
     which is deterministic for a given input.
+
+    Note on stderr capture (Reviewer C/S-1): Click's ``CliRunner`` mixes
+    stderr into ``result.output`` by default (the ``mix_stderr=True``
+    constructor flag). The silent-zero note is emitted via
+    ``click.echo(..., err=True)``, so an assertion on ``result.output``
+    that looks like a stdout check is actually exercising both streams.
+    Do not split to ``mix_stderr=False`` without switching the
+    assertions to ``result.stderr`` simultaneously.
     """
     import chromadb
     from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
