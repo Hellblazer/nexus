@@ -176,7 +176,10 @@ def search(
             results.sort(key=lambda r: r.distance)
         if not results:
             if structured:
-                return {"ids": [], "tumblers": [], "distances": [], "collections": []}
+                return {
+                    "ids": [], "tumblers": [], "distances": [],
+                    "collections": [], "chunk_text_hash": [],
+                }
             return "No results."
 
         # Apply pagination
@@ -184,7 +187,10 @@ def search(
         page = results[offset:offset + limit]
         if not page:
             if structured:
-                return {"ids": [], "tumblers": [], "distances": [], "collections": []}
+                return {
+                    "ids": [], "tumblers": [], "distances": [],
+                    "collections": [], "chunk_text_hash": [],
+                }
             return f"No results at offset {offset} (total {total})."
 
         # Record search trace for RDR-061 E2 retrieval feedback correlation.
@@ -204,12 +210,17 @@ def search(
 
         # Structured return for plan-runner step output contract.
         # Resolves $stepN.ids / $stepN.collections / $stepN.distances refs.
+        # RDR-086 Phase 3.1: chunk_text_hash forwarded per-result so callers
+        # can build chash:<hex> citations without a second fetch.
         if structured:
             return {
                 "ids": [r.id for r in page],
                 "tumblers": [r.metadata.get("tumbler", "") for r in page],
                 "distances": [float(r.distance) for r in page],
                 "collections": list({r.collection for r in page}),
+                "chunk_text_hash": [
+                    r.metadata.get("chunk_text_hash", "") for r in page
+                ],
             }
 
         lines: list[str] = []
@@ -414,7 +425,10 @@ def query(
         results.sort(key=lambda r: r.distance)
         if not results:
             if structured:
-                return {"ids": [], "tumblers": [], "distances": [], "collections": []}
+                return {
+                    "ids": [], "tumblers": [], "distances": [],
+                    "collections": [], "chunk_text_hash": [],
+                }
             return "No documents found."
 
         if structured:
@@ -424,6 +438,11 @@ def query(
                 "tumblers": [r.metadata.get("tumbler", "") for r in page],
                 "distances": [float(r.distance) for r in page],
                 "collections": list({r.collection for r in page}),
+                # RDR-086 Phase 3.2: chunk_text_hash forwarded for chash
+                # citation authoring at the document layer.
+                "chunk_text_hash": [
+                    r.metadata.get("chunk_text_hash", "") for r in page
+                ],
             }
 
         # Group by document: use content_hash or source_title as doc key
@@ -1920,7 +1939,8 @@ async def nx_answer(
     budget_usd: float = 0.25,
     trace: bool = True,
     dimensions: dict[str, Any] | None = None,
-) -> str:
+    structured: bool = False,
+) -> "str | dict":
     """Answer a knowledge question using plan-match-first retrieval. RDR-080 P1.
 
     Internal flow:
@@ -1945,9 +1965,18 @@ async def nx_answer(
             ``{"verb": "research"}`` (etc.) so verb skills narrow the
             match to templates of the appropriate verb.  Unset means
             the matcher considers every active plan.
+        structured: RDR-086 Phase 3.3 opt-in. When True, returns an
+            envelope dict ``{final_text, chunks, plan_id, step_count}``
+            instead of a bare string. Each entry in ``chunks`` carries
+            ``id``, ``chash``, ``collection`` (and ``distance``, ``text``
+            when available) so callers can build ``chash:<hex>`` citations
+            without a second fetch. The single-step guard path produces
+            the same envelope shape — the guard logic itself is unchanged.
+            On pure-generate plans or retrieval misses, ``chunks`` is ``[]``.
 
     Returns:
-        The final step's output as a human-readable string.
+        The final step's output — a string by default, or the envelope
+        dict described above when ``structured=True``.
     """
     import time
     import structlog as _slog
@@ -1958,6 +1987,19 @@ async def nx_answer(
 
     _log = _slog.get_logger()
     start = time.monotonic()
+
+    # RDR-086 Phase 3.3: envelope builder. String mode returns the text
+    # directly; structured mode wraps it into the documented envelope.
+    def _result(text: str, *, plan_id: int = 0, step_count: int = 0,
+                chunks: "list | None" = None) -> "str | dict":
+        if not structured:
+            return text
+        return {
+            "final_text": text,
+            "chunks": chunks if chunks is not None else [],
+            "plan_id": plan_id,
+            "step_count": step_count,
+        }
 
     # ── Step 1: plan-match gate ──────────────────────────────────────────
     try:
@@ -1974,7 +2016,7 @@ async def nx_answer(
                 n=5,
             )
     except Exception as exc:
-        return f"Error during plan match: {exc}"
+        return _result(f"Error during plan match: {exc}")
 
     if not matches or not _nx_answer_match_is_hit(matches[0].confidence):
         # Plan miss — inline LLM planner via claude_dispatch.
@@ -1997,7 +2039,7 @@ async def nx_answer(
                     )
             except Exception:
                 pass
-            return (
+            return _result(
                 "No matching plan found and inline planner failed. "
                 "Try rephrasing, or use search/query directly."
             )
@@ -2021,7 +2063,36 @@ async def nx_answer(
             step_args = plan["steps"][0].get("args", {})
             q = step_args.get("question", question)
             corpus = step_args.get("corpus", "knowledge")
-            result_text = query(question=q, corpus=corpus)
+            # RDR-086 Phase 3.4: request structured return so the envelope
+            # can include chunks. Human text mode falls back to a str.
+            if structured:
+                q_struct = query(question=q, corpus=corpus, structured=True)
+                # Build chunks list from the structured query response.
+                chunks = []
+                if isinstance(q_struct, dict):
+                    ids = q_struct.get("ids", [])
+                    colls = q_struct.get("collections", [])
+                    hashes = q_struct.get("chunk_text_hash", [])
+                    dists = q_struct.get("distances", [])
+                    # collections is collapsed in structured returns; fall
+                    # back to the first entry if we can't align per-chunk.
+                    default_coll = colls[0] if colls else ""
+                    for i, cid in enumerate(ids):
+                        chunks.append({
+                            "id": cid,
+                            "chash": hashes[i] if i < len(hashes) else "",
+                            "collection": default_coll,
+                            "distance": dists[i] if i < len(dists) else None,
+                        })
+                final_text = q_struct.get("final_text", "") if isinstance(q_struct, dict) else str(q_struct)
+                # When the plain-text render is wanted, re-run non-structured
+                # for the final_text field. But since chunks have id+chash we
+                # already have the content addressing. Use a concise summary.
+                result_text = str(query(question=q, corpus=corpus))
+            else:
+                result_text = query(question=q, corpus=corpus)
+                chunks = []
+
             elapsed_ms = int((time.monotonic() - start) * 1000)
             try:
                 with _t2_ctx() as db:
@@ -2033,7 +2104,12 @@ async def nx_answer(
                     )
             except Exception:
                 pass
-            return str(result_text)
+            return _result(
+                str(result_text),
+                plan_id=best.plan_id,
+                step_count=1,
+                chunks=chunks,
+            )
         except Exception as exc:
             elapsed_ms = int((time.monotonic() - start) * 1000)
             try:
@@ -2046,7 +2122,11 @@ async def nx_answer(
                     )
             except Exception:
                 pass
-            return f"Error in single-step query: {exc}"
+            return _result(
+                f"Error in single-step query: {exc}",
+                plan_id=best.plan_id,
+                step_count=1,
+            )
 
     # ── Step 3: seed link-context ────────────────────────────────────────
     try:
@@ -2074,13 +2154,39 @@ async def nx_answer(
                 )
         except Exception:
             pass
-        return f"Error during plan execution: {exc}"
+        return _result(
+            f"Error during plan execution: {exc}",
+            plan_id=best.plan_id,
+        )
 
     # ── Step 5: extract final answer ─────────────────────────────────────
     elapsed_ms = int((time.monotonic() - start) * 1000)
     final_step = result.steps[-1] if result.steps else {}
     text_key = next((k for k in ("text", "summary", "answer") if k in final_step), None)
     final_text = str(final_step.get(text_key, "")) if text_key else json.dumps(final_step)
+
+    # RDR-086 Phase 3.3: harvest chunk refs from retrieval-op steps so the
+    # envelope's ``chunks`` list carries id+chash+collection for every
+    # retrieved chunk, ordered by final-step relevance.
+    envelope_chunks: list[dict] = []
+    if structured:
+        for step_out in result.steps:
+            if not isinstance(step_out, dict):
+                continue
+            ids = step_out.get("ids")
+            if not isinstance(ids, list) or not ids:
+                continue
+            hashes = step_out.get("chunk_text_hash", []) or []
+            colls = step_out.get("collections", []) or []
+            dists = step_out.get("distances", []) or []
+            default_coll = colls[0] if colls else ""
+            for i, cid in enumerate(ids):
+                envelope_chunks.append({
+                    "id": cid,
+                    "chash": hashes[i] if i < len(hashes) else "",
+                    "collection": default_coll,
+                    "distance": dists[i] if i < len(dists) else None,
+                })
 
     _log.info(
         "nx_answer_complete",
@@ -2144,7 +2250,12 @@ async def nx_answer(
     except Exception:
         pass
 
-    return final_text
+    return _result(
+        final_text,
+        plan_id=best.plan_id,
+        step_count=len(result.steps),
+        chunks=envelope_chunks if structured else None,
+    )
 
 
 @mcp.tool()
