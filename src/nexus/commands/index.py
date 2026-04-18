@@ -2,6 +2,9 @@
 """nx index — code repository indexing commands."""
 import subprocess
 import sys
+import threading
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 import click
@@ -34,6 +37,97 @@ def _discover_taxonomy(collection_name, taxonomy, chroma_client, *, force=False)
     return discover_for_collection(
         collection_name, taxonomy, chroma_client, force=force,
     )
+
+
+# ── ETA ticker (nexus-vatx Gap 3) ────────────────────────────────────────────
+
+
+def _format_eta(n: int, total: int, chunks: int, elapsed_s: float) -> str:
+    """Return the periodic `[eta] …` line for an in-progress indexing run.
+
+    Pure for testability: given per-run counters and wall-clock elapsed,
+    emit the exact stderr line the ETA ticker prints every interval. Falls
+    back to ``pending`` for the remaining estimate when ``n==0`` so the
+    first tick fired before any files complete still emits something useful.
+    """
+    avg = elapsed_s / n if n else 0.0
+    remaining_files = max(0, total - n)
+    if n == 0:
+        eta = "pending"
+    else:
+        eta_seconds = remaining_files * avg
+        eta_min = max(1, round(eta_seconds / 60))
+        eta = f"~{eta_min} min remaining"
+    avg_str = f"{avg:.1f}s/file avg" if n else "no samples yet"
+    return (
+        f"[eta] {n}/{total} files · {chunks:,} chunks · "
+        f"{avg_str} · {eta}"
+    )
+
+
+class _ETATicker:
+    """Background 60 s ticker that emits `[eta] …` to *emit* regardless of TTY.
+
+    Exists so operators running `nx index` with stdout redirected to a file
+    (CI, `nohup`, `tail -f`) keep seeing pace. Tqdm's own progress bar is
+    TTY-gated and falls silent in those contexts (nexus-vatx Gap 3).
+
+    Lifecycle: construct → :meth:`start` when the total file count is
+    known → :meth:`record` on each completed file → :meth:`stop` in a
+    ``finally`` block. Missing a ``stop`` leaks a daemon thread until
+    process exit, which is graceful enough not to wedge a CLI run.
+    """
+
+    def __init__(
+        self,
+        interval: float = 60.0,
+        emit: Callable[[str], None] | None = None,
+    ) -> None:
+        self._interval = interval
+        self._emit = emit or (lambda _msg: None)
+        self._done = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self._n = 0
+        self._total = 0
+        self._chunks = 0
+        self._start_mono = 0.0
+
+    def start(self, total: int) -> None:
+        with self._lock:
+            self._total = total
+            self._start_mono = time.monotonic()
+        self._done.clear()
+        self._thread = threading.Thread(
+            target=self._loop, name="nx-eta-ticker", daemon=True,
+        )
+        self._thread.start()
+
+    def record(self, chunks: int) -> None:
+        with self._lock:
+            self._n += 1
+            self._chunks += chunks
+
+    def stop(self) -> None:
+        self._done.set()
+        thread = self._thread
+        self._thread = None
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+
+    def _loop(self) -> None:
+        # ``Event.wait`` returns True on set (stop requested) so a normal
+        # completion breaks the loop without a stray final emission.
+        while not self._done.wait(self._interval):
+            self._tick()
+
+    def _tick(self) -> None:
+        with self._lock:
+            n, total, chunks = self._n, self._total, self._chunks
+            elapsed = time.monotonic() - self._start_mono
+        if total <= 0:
+            return
+        self._emit(_format_eta(n, total, chunks, elapsed))
 
 
 @index.command("repo")
@@ -102,15 +196,21 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
     bar: tqdm | None = None
     n = 0
     total = 0
+    eta_ticker = _ETATicker(emit=lambda msg: click.echo(f"  {msg}", err=True))
 
     def on_start(count: int) -> None:
         nonlocal bar, total
         total = count
         bar = tqdm(total=count, disable=None, desc=path.name, unit="file")
+        # nexus-vatx Gap 3: kick off the stderr ETA ticker once the total is
+        # known. Runs every 60 s regardless of TTY so background / CI runs
+        # see pace even when tqdm suppresses itself.
+        eta_ticker.start(count)
 
     def on_file(fpath: Path, chunks: int, elapsed: float) -> None:
         nonlocal n
         n += 1
+        eta_ticker.record(chunks)
         if bar is not None:
             bar.update(1)
             bar.set_postfix(now=fpath.name)
@@ -128,10 +228,13 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
         # Stderr so the line is visible even when stdout is redirected.
         click.echo(f"  [post] {msg}", err=True)
 
-    stats = index_repository(path, reg, frecency_only=frecency_only, force=force,
-                             force_stale=force_stale,
-                             on_locked=on_locked, on_start=on_start, on_file=on_file,
-                             on_phase=on_phase)
+    try:
+        stats = index_repository(path, reg, frecency_only=frecency_only, force=force,
+                                 force_stale=force_stale,
+                                 on_locked=on_locked, on_start=on_start, on_file=on_file,
+                                 on_phase=on_phase)
+    finally:
+        eta_ticker.stop()
     if bar:
         bar.close()
     if not frecency_only and stats:

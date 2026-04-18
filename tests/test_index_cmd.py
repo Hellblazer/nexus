@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import contextlib
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -369,3 +370,75 @@ def test_mineru_not_installed_gives_helpful_error(runner, fake_pdf):
         result = runner.invoke(main, ["index", "pdf", str(fake_pdf), "--extractor", "mineru"])
     assert result.exit_code != 0
     assert "MinerU" in result.output
+
+
+# ── ETA ticker (nexus-vatx Gap 3) ────────────────────────────────────────────
+
+
+def test_format_eta_with_samples():
+    """After a few files complete, the ETA line carries n/total, chunk total,
+    avg s/file, and a minute estimate."""
+    from nexus.commands.index import _format_eta
+    # 100 files, 10 done in 20s → 2.0s/file avg, 90 files * 2s = 180s ≈ 3 min
+    line = _format_eta(n=10, total=100, chunks=1234, elapsed_s=20.0)
+    assert line.startswith("[eta] 10/100 files")
+    assert "1,234 chunks" in line
+    assert "2.0s/file avg" in line
+    assert "~3 min remaining" in line
+
+
+def test_format_eta_pending_before_first_file():
+    """The first tick can fire before any file completes — the formatter
+    must degrade gracefully, not divide by zero."""
+    from nexus.commands.index import _format_eta
+    line = _format_eta(n=0, total=100, chunks=0, elapsed_s=5.0)
+    assert "0/100 files" in line
+    assert "no samples yet" in line
+    assert "pending" in line
+
+
+def test_format_eta_floors_eta_to_minimum_one_minute():
+    """A nearly-done run (2 files remaining, 1s/file) shouldn't report
+    '~0 min remaining' — floor to 1 min so the signal stays positive."""
+    from nexus.commands.index import _format_eta
+    line = _format_eta(n=998, total=1000, chunks=50_000, elapsed_s=998.0)
+    assert "~1 min remaining" in line
+
+
+def test_eta_ticker_emits_at_interval():
+    """The ticker fires at least once when started + given enough wall
+    time, and the emitted line is `[eta] ...` format."""
+    from nexus.commands.index import _ETATicker
+    emitted: list[str] = []
+    # Very short interval so the test runs fast; CI ≤ 100ms reliably.
+    t = _ETATicker(interval=0.02, emit=emitted.append)
+    t.start(total=10)
+    t.record(chunks=100)
+    t.record(chunks=200)
+    time.sleep(0.08)
+    t.stop()
+    assert emitted, "ticker never emitted despite wall-clock > interval"
+    assert all(ln.startswith("[eta]") for ln in emitted)
+
+
+def test_eta_ticker_stop_is_idempotent_and_joins_thread():
+    """Double-stop must not raise; after stop the thread is gone."""
+    from nexus.commands.index import _ETATicker
+    t = _ETATicker(interval=0.05, emit=lambda _: None)
+    t.start(total=10)
+    t.stop()
+    # Second stop is a no-op on the already-set event.
+    t.stop()
+    assert t._thread is None
+
+
+def test_eta_ticker_no_emit_before_start():
+    """Ticker created but never started must not spawn a thread or emit."""
+    from nexus.commands.index import _ETATicker
+    emitted: list[str] = []
+    t = _ETATicker(interval=0.01, emit=emitted.append)
+    # No start() call.
+    time.sleep(0.03)
+    assert emitted == []
+    # stop() without start() must also be safe.
+    t.stop()
