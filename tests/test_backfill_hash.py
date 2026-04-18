@@ -208,3 +208,55 @@ class TestBackfillPopulatesT2ChashIndex:
         assert updated == 1
         assert skipped == 1
         assert total == 2
+
+
+# ── Phase 1.5 (nexus-jfi) — progress reporting ───────────────────────────────
+
+
+class TestBackfillProgressReporting:
+    """_backfill_chunk_text_hash must invoke on_progress at batch boundaries
+    so the CLI's tqdm wrapper can drive a visual bar for the ~25–70 min
+    full-corpus runs (278k chunks across 136 collections, RF-11).
+    """
+
+    def test_on_progress_called_per_batch(self):
+        """With _BACKFILL_BATCH=300, a 301-chunk collection must yield 2 callback invocations."""
+        from nexus.commands import collection as collection_mod
+        from nexus.commands.collection import _backfill_chunk_text_hash
+
+        client = chromadb.EphemeralClient()
+        # Use a small batch size to keep the test fast while still exercising
+        # the "multiple batches" branch.
+        monkey_orig = collection_mod._BACKFILL_BATCH
+        try:
+            collection_mod._BACKFILL_BATCH = 5
+            col = _make_collection(client, "code__progress", [
+                (f"chunk {i} code", False) for i in range(12)
+            ])
+            calls: list[tuple[int, int, int]] = []
+
+            def _observe(updated: int, skipped: int, total: int) -> None:
+                calls.append((updated, skipped, total))
+
+            _backfill_chunk_text_hash(col, on_progress=_observe)
+
+            # 12 chunks / batch 5 = 3 batches → 3 callback invocations
+            assert len(calls) == 3, f"expected 3 callbacks, got {len(calls)}: {calls}"
+            # Monotonic non-decreasing on total
+            assert calls[0][2] <= calls[1][2] <= calls[2][2]
+            # Final call must reflect full corpus
+            assert calls[-1][2] == 12
+        finally:
+            collection_mod._BACKFILL_BATCH = monkey_orig
+
+    def test_on_progress_none_is_silent(self):
+        """Omitting on_progress is fine — no coupling to reporting UX."""
+        from nexus.commands.collection import _backfill_chunk_text_hash
+
+        client = chromadb.EphemeralClient()
+        col = _make_collection(client, "code__silent", [
+            ("whatever", False),
+        ])
+
+        # Must not raise.
+        _backfill_chunk_text_hash(col, on_progress=None)

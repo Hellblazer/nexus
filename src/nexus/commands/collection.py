@@ -413,6 +413,7 @@ def backfill_hash_cmd(name: str | None, all_collections: bool) -> None:
     # a fresh sqlite3 connection per chunk batch.
     from nexus.commands._helpers import default_db_path
     from nexus.db.t2.chash_index import ChashIndex
+    from tqdm import tqdm
 
     chash_index = ChashIndex(default_db_path())
     try:
@@ -424,18 +425,37 @@ def backfill_hash_cmd(name: str | None, all_collections: bool) -> None:
                 click.echo(f"  [{i}/{len(targets)}] {col_name}: {type(exc).__name__}, skipping", err=True)
                 continue
 
-            def _progress(updated: int, skipped: int, total: int) -> None:
-                msg = f"\r  [{i}/{len(targets)}] {col_name}: {updated} updated, {skipped} skipped, {total} scanned..."
-                sys.stderr.write(msg)
-                sys.stderr.flush()
+            # Query collection count so tqdm has a known total. On quota
+            # failure, fall back to an indeterminate bar.
+            try:
+                col_total = col.count()
+            except Exception:
+                col_total = 0
 
-            updated, skipped, total_count = _backfill_chunk_text_hash(
-                col, on_progress=_progress, chash_index=chash_index,
+            # disable=None lets tqdm auto-detect TTY — bar shows in an
+            # interactive terminal, silently no-ops in CI logs. The
+            # per-collection click.echo summary below is always emitted.
+            bar = tqdm(
+                total=col_total or None,
+                disable=None,
+                desc=f"[{i}/{len(targets)}] {col_name}",
+                unit="chunk",
+                leave=False,
             )
+
+            def _progress(updated: int, skipped: int, total: int) -> None:
+                # total = cumulative scanned so far; update bar position.
+                bar.n = total
+                bar.refresh()
+
+            try:
+                updated, skipped, total_count = _backfill_chunk_text_hash(
+                    col, on_progress=_progress, chash_index=chash_index,
+                )
+            finally:
+                bar.close()
+
             grand_updated += updated
-            # Clear the progress line
-            sys.stderr.write("\r" + " " * 120 + "\r")
-            sys.stderr.flush()
             if updated:
                 click.echo(f"  [{i}/{len(targets)}] {col_name}: {updated} updated, {skipped} already had hash ({total_count} total)")
             else:
