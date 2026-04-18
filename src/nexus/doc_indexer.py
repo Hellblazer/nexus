@@ -158,7 +158,7 @@ def _embed_with_fallback(
             limit=_CCE_MAX_TOTAL_CHUNKS,
         )
     import voyageai
-    client = voyageai.Client(api_key=api_key, timeout=timeout, max_retries=3)
+    client = voyageai.Client(api_key=api_key, timeout=timeout, max_retries=0)
     if model == "voyage-context-3":
         # CCE API accepts single-element inputs — use it for all chunk counts.
         # The old >=2 requirement was our incorrect assumption; removing it ensures

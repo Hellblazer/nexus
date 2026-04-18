@@ -350,7 +350,7 @@ def _voyage_client():
             _voyage_instance = voyageai.Client(
                 api_key=get_credential("voyage_api_key"),
                 timeout=timeout,
-                max_retries=3,
+                max_retries=0,
             )
     return _voyage_instance
 

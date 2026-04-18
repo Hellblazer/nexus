@@ -433,7 +433,7 @@ def test_search_cce_collection_uses_query_embeddings(mock_chromadb):
         db = T3Database(tenant="t", database="d", api_key="k", voyage_api_key="vkey")
         results = db.search("four store t3 architecture", ["rdr__nexus-abc123"], n_results=5)
 
-    mock_vo_mod.Client.assert_called_once_with(api_key="vkey", timeout=120.0, max_retries=3)
+    mock_vo_mod.Client.assert_called_once_with(api_key="vkey", timeout=120.0, max_retries=0)
     mock_vo_inst.contextualized_embed.assert_called_once_with(
         inputs=[["four store t3 architecture"]], model="voyage-context-3", input_type="query",
     )
