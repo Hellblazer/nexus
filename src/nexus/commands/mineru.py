@@ -244,13 +244,11 @@ def stop() -> None:
     # global namespace (bead nexus-ze2a root cause). ``start_new_session
     # =True`` at spawn (mineru.py start) guarantees they share one
     # killable pgid.
-    try:
-        pgid = os.getpgid(pid)
-    except OSError:
-        pgid = pid  # fallback: treat head pid as its own group
-    try:
-        os.killpg(pgid, signal.SIGTERM)
-    except OSError:
+    # Both signals go through safe_killpg for mock-guard + error-swallow
+    # consistency with every other subprocess cleanup site.
+    from nexus.util.process_group import safe_killpg
+
+    if not safe_killpg(pid, signal.SIGTERM):
         # Process group already gone — nothing to do.
         pid_path.unlink(missing_ok=True)
         click.echo(f"MinerU server stopped (PID {pid})")
@@ -265,10 +263,7 @@ def stop() -> None:
         time.sleep(0.2)
     else:
         # Escalate to SIGKILL on the group — same reason (reach workers).
-        try:
-            os.killpg(pgid, signal.SIGKILL)
-        except OSError:
-            pass  # already gone
+        safe_killpg(pid, signal.SIGKILL)
         click.echo(
             f"Warning: MinerU server (PID {pid}) did not exit within "
             f"{_STOP_TIMEOUT_SECONDS}s; escalated SIGKILL to process group",

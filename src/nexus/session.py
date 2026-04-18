@@ -313,17 +313,15 @@ def stop_t1_server(server_pid: int) -> None:
     stay registered with the kernel until reboot and eventually exhaust
     ``kern.posix.sem.max`` (beads nexus-dc57 + nexus-ze2a).
 
-    Graceful SIGTERM first; escalates to SIGKILL after 3 s.
+    Graceful SIGTERM first; escalates to SIGKILL after 3 s. Both signal
+    calls go through ``nexus.util.process_group.safe_killpg`` so the
+    mock-guard + error-swallow contract stays consistent with every
+    other subprocess cleanup site.
     """
-    try:
-        pgid = os.getpgid(server_pid)
-    except OSError:
-        return  # intentional: process already gone before any signal
+    from nexus.util.process_group import safe_killpg
 
-    try:
-        os.killpg(pgid, signal.SIGTERM)
-    except OSError:
-        return  # intentional: process group vanished between getpgid and signal
+    if not safe_killpg(server_pid, signal.SIGTERM):
+        return  # process already gone or unreachable before any signal
 
     # Wait up to 3 seconds for graceful exit.
     deadline = time.time() + 3.0
@@ -335,10 +333,7 @@ def stop_t1_server(server_pid: int) -> None:
         time.sleep(0.1)
 
     # Escalate.
-    try:
-        os.killpg(pgid, signal.SIGKILL)
-    except OSError:
-        return  # intentional: process group exited between poll and SIGKILL
+    safe_killpg(server_pid, signal.SIGKILL)
 
     # Reap the zombie so it does not linger in the process table.
     try:

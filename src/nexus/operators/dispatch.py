@@ -91,28 +91,14 @@ async def claude_dispatch(
     except asyncio.TimeoutError:
         # Search review I-6: reach the whole process group so any claude
         # children (nested planners, tool subprocesses) get reaped too.
-        # Falls back to proc.kill() on any OS / mock that can't do killpg
-        # so mocked-subprocess tests still verify the kill side effect.
-        #
-        # CRITICAL: guard on ``isinstance(proc.pid, int)`` first. MagicMock
-        # coerces to int via __index__ returning 1, so a naive
-        # ``os.getpgid(proc.pid)`` on a mock yields pgid=1 (init / launchd)
-        # and the subsequent ``killpg`` attempts to signal the container's
-        # init process group. On CI runners this can stall or misbehave
-        # depending on the orchestrator's signal handling. The int check
-        # keeps the real-subprocess path (proc.pid is an OS PID) while
-        # making mock tests deterministically fall through to proc.kill().
-        import os
+        # safe_killpg guards on isinstance(proc.pid, int) so mocked-
+        # subprocess tests deterministically fall through to proc.kill()
+        # — the pgid=1 deadlock on GitHub ubuntu-latest is covered by
+        # tests/test_process_group_safety.py.
+        from nexus.util.process_group import safe_killpg
         import signal
-        killpg_ok = False
-        if isinstance(proc.pid, int):
-            try:
-                pgid = os.getpgid(proc.pid)
-                os.killpg(pgid, signal.SIGKILL)
-                killpg_ok = True
-            except (ProcessLookupError, PermissionError, OSError):
-                pass
-        if not killpg_ok:
+
+        if not safe_killpg(proc, signal.SIGKILL):
             try:
                 proc.kill()
             except Exception:
