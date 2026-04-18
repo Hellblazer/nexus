@@ -556,3 +556,186 @@ def _phase4_t2_taxonomy():
     from nexus.db.t2 import T2Database
 
     return T2Database(default_db_path()).taxonomy
+
+
+# ── RDR-086 Phase 5: nx doc cite ─────────────────────────────────────────────
+
+
+def _phase5_search(*, query: str, corpus: str, limit: int) -> dict:
+    """Composable indirection over ``nexus.mcp.core.search``.
+
+    A dedicated seam so ``test_phase5_doc_cite`` can replace the wire
+    call with a fake that returns a deterministic structured response.
+    The MCP ``search`` tool already runs the full search pipeline and
+    returns the Phase 3 envelope (``ids``, ``distances``, ``collections``,
+    ``chunk_text_hash``, ``tumblers``) — exactly what ``cite`` needs.
+    """
+    from nexus.mcp.core import search as _mcp_search
+
+    result = _mcp_search(
+        query=query, corpus=corpus, limit=limit, structured=True,
+    )
+    return result if isinstance(result, dict) else {}
+
+
+def _chash_index_is_empty(chash_index) -> bool:
+    """True if no chash_index rows exist anywhere — fresh-install guard."""
+    try:
+        row = chash_index.conn.execute(
+            "SELECT 1 FROM chash_index LIMIT 1"
+        ).fetchone()
+    except Exception:
+        return False
+    return row is None
+
+
+@doc.command("cite")
+@click.argument("claim", type=str)
+@click.option(
+    "--against", "collection", required=True,
+    help="Collection to search for a grounding chunk (e.g. "
+         "knowledge__art-grossberg-papers).",
+)
+@click.option(
+    "--limit", type=int, default=5,
+    help="Candidate fan-out (default 5). Tied candidates within 0.01 "
+         "distance are surfaced in --json; stdout picks the first.",
+)
+@click.option(
+    "--min-similarity", type=float, default=0.30,
+    help="Maximum acceptable distance (lower is stricter). Top result "
+         "with distance above this is treated as 'no good cite' — exit 1.",
+)
+@click.option(
+    "--json", "as_json", is_flag=True, default=False,
+    help="Emit the full candidate schema as JSON instead of a markdown link.",
+)
+def cite_cmd(
+    claim: str,
+    collection: str,
+    limit: int,
+    min_similarity: float,
+    as_json: bool,
+) -> None:
+    """Emit a chash: markdown link grounding *claim* in *collection*.
+
+    Composes ``search(structured=True)`` with the ``chunk_text_hash``
+    surface from Phase 3 and resolves the top hash via
+    ``Catalog.resolve_chash`` to fetch the chunk excerpt. Default
+    stdout is a paste-ready ``[excerpt](chash:<hex>)`` markdown link.
+
+    Exit contract:
+      * 0 — cite emitted (JSON mode: ``threshold_met`` reflects --min-similarity)
+      * 1 — top distance above --min-similarity; stderr warning, stdout empty
+        for the markdown path; JSON still returns candidates with
+        ``threshold_met=false``
+      * 2 — usage errors: empty chash_index (fresh install), empty
+        collection, or unknown collection
+    """
+    import json as _json
+
+    try:
+        cat, t3, chash_index = _phase4_catalog_t3_chash()
+    except Exception as exc:
+        click.echo(f"cannot open resolver: {exc}", err=True)
+        sys.exit(2)
+
+    try:
+        # RDR-086 gate finding S2: empty-index short-circuit.
+        if _chash_index_is_empty(chash_index):
+            click.echo(
+                "chash_index not populated — run 'nx collection backfill-hash "
+                "--all' (25-70 min on a 278k-chunk corpus). Re-run after "
+                "backfill completes.",
+                err=True,
+            )
+            sys.exit(2)
+
+        result = _phase5_search(query=claim, corpus=collection, limit=limit)
+        ids = result.get("ids") or []
+        hashes = result.get("chunk_text_hash") or []
+        distances = result.get("distances") or []
+        collections = result.get("collections") or [collection]
+
+        if not ids or not hashes:
+            click.echo(
+                f"no indexed content in {collection}",
+                err=True,
+            )
+            sys.exit(2)
+
+        # Fetch chunk text for the top candidate.
+        top_hash = hashes[0]
+        top_distance = float(distances[0]) if distances else 1.0
+        threshold_met = top_distance <= min_similarity
+
+        try:
+            ref = cat.resolve_chash(top_hash, t3, chash_index)
+        except Exception:
+            ref = None
+        excerpt = ""
+        if ref is not None:
+            excerpt = str(ref.get("chunk_text", "")).strip()
+        # Trim to 200 chars for JSON excerpt + 60 for markdown display.
+        excerpt_200 = excerpt[:200]
+        display = excerpt[:60] if excerpt else f"chash:{top_hash[:8]}…"
+        top_link = f"[{display}](chash:{top_hash})"
+
+        # Tied candidates (within 0.01 distance).
+        tied: list[int] = []
+        if distances:
+            for i, d in enumerate(distances):
+                if abs(float(d) - top_distance) <= 0.01:
+                    tied.append(i)
+
+        # JSON envelope — always returns candidates, threshold_met flag
+        # differentiates above/below min-similarity.
+        if as_json:
+            candidates = []
+            for i in tied if as_json else [0]:
+                h = hashes[i] if i < len(hashes) else ""
+                d = float(distances[i]) if i < len(distances) else 1.0
+                c = collections[0] if collections else collection
+                try:
+                    r = cat.resolve_chash(h, t3, chash_index) if h else None
+                except Exception:
+                    r = None
+                exc = (str(r.get("chunk_text", "")).strip()[:200]
+                       if r is not None else "")
+                disp = exc[:60] if exc else f"chash:{h[:8]}…"
+                candidates.append({
+                    "chash": h,
+                    "distance": d,
+                    "collection": c,
+                    "chunk_excerpt": exc,
+                    "markdown_link": f"[{disp}](chash:{h})",
+                })
+            payload = {
+                "query": claim,
+                "threshold_met": threshold_met,
+                "candidates": candidates,
+            }
+            click.echo(_json.dumps(payload, indent=2))
+            sys.exit(0 if threshold_met else 1)
+
+        # Markdown-link mode.
+        if not threshold_met:
+            click.echo(
+                f"top candidate distance {top_distance:.3f} "
+                f"above threshold {min_similarity:.3f} — no cite emitted. "
+                "Try a narrower claim or broaden the collection.",
+                err=True,
+            )
+            sys.exit(1)
+
+        click.echo(top_link)
+        if len(tied) > 1:
+            click.echo(
+                f"# {len(tied)} candidates tied (see --json)", err=True,
+            )
+        sys.exit(0)
+    finally:
+        try:
+            chash_index.close()
+        except Exception:
+            pass
