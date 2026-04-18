@@ -585,13 +585,32 @@ def health_cmd(sort_by: str, fmt: str) -> None:
     show_default=True,
     help="Output format.",
 )
-def audit_cmd(name: str, fmt: str) -> None:
+@click.option(
+    "--live",
+    is_flag=True,
+    default=False,
+    help=(
+        "When the 30-day search_telemetry histogram is empty, sample N "
+        "chunks from ChromaDB and derive the distance histogram from "
+        "self-queries (budget ~10 s at N=25). Reuses stored embeddings "
+        "— no Voyage API roundtrips."
+    ),
+)
+@click.option(
+    "--live-n",
+    "live_n",
+    type=int,
+    default=25,
+    show_default=True,
+    help="Number of live-probe samples when --live fires.",
+)
+def audit_cmd(name: str, fmt: str, live: bool, live_n: int) -> None:
     """Deep-dive audit for a single collection (RDR-087 Phase 4.2).
 
-    Four sections: distance histogram (30d), top-5 cross-projections,
+    Five sections: distance histogram (30d telemetry, ``--live`` to
+    probe ChromaDB when telemetry is cold), top-5 cross-projections,
     orphan chunks (>30d, no incoming links), top-10 cross-collection
-    hub topic assignments. Live-probe distance fallback deferred to
-    follow-up bead nexus-fx2d — telemetry-only for now.
+    hub topic assignments, chash_index coverage.
     """
     from nexus.collection_audit import (
         format_audit_human,
@@ -599,7 +618,7 @@ def audit_cmd(name: str, fmt: str) -> None:
         run_collection_audit,
     )
 
-    report = run_collection_audit(name)
+    report = run_collection_audit(name, live=live, live_n=live_n)
     if fmt == "json":
         click.echo(format_audit_json(report))
     else:

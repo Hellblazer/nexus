@@ -94,11 +94,23 @@ class AuditReport:
     chash_coverage: ChashCoverage | None = None
 
 
-# ── Section 1: distance histogram (telemetry-only; live deferred) ───────────
+# ── Section 1: distance histogram (telemetry primary, live fallback) ────────
 
 
 _HIST_BIN_WIDTH = 0.2
 _HIST_BINS = 10  # covers [0.0, 2.0]
+_LIVE_PROBE_DEFAULT_N = 25
+
+
+def _bucketize(distances: list[float], source: str) -> DistanceHistogram:
+    """Pack *distances* into the 10-bin 0.0-2.0 histogram."""
+    buckets = [0] * _HIST_BINS
+    for d in distances:
+        idx = min(max(int(d / _HIST_BIN_WIDTH), 0), _HIST_BINS - 1)
+        buckets[idx] += 1
+    return DistanceHistogram(
+        buckets=buckets, source=source, sample_size=len(distances),
+    )
 
 
 def compute_distance_histogram(
@@ -107,8 +119,9 @@ def compute_distance_histogram(
     """Histogram of ``top_distance`` from search_telemetry for *collection*.
 
     10 fixed bins over [0.0, 2.0]. Empty table or <1 in-window rows →
-    ``DistanceHistogram(source="empty", sample_size=0)``. Live-probe
-    fallback is deferred to bead ``nexus-fx2d``.
+    ``DistanceHistogram(source="empty", sample_size=0)``. Use
+    :func:`sample_live_distances` + :func:`compute_live_distance_histogram`
+    for a live-probe fallback when telemetry is cold.
     """
     cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
     rows = taxonomy_conn.execute(
@@ -122,13 +135,72 @@ def compute_distance_histogram(
         return DistanceHistogram(
             buckets=[0] * _HIST_BINS, source="empty", sample_size=0,
         )
-    buckets = [0] * _HIST_BINS
-    for d in distances:
-        idx = min(int(d / _HIST_BIN_WIDTH), _HIST_BINS - 1)
-        buckets[idx] += 1
-    return DistanceHistogram(
-        buckets=buckets, source="telemetry", sample_size=len(distances),
-    )
+    return _bucketize(distances, "telemetry")
+
+
+def sample_live_distances(
+    collection: str, t3: Any, *, n: int = _LIVE_PROBE_DEFAULT_N,
+) -> list[float]:
+    """Run up to *n* self-queries against *collection* and return the
+    nearest-other distances (nexus-fx2d).
+
+    Samples N chunk embeddings directly from the collection via
+    ``col.get(include=["embeddings"])``, then for each runs
+    ``col.query(query_embeddings=[emb], n_results=2)`` and records the
+    distance at position ``[1]`` — position ``[0]`` is the chunk itself.
+    No re-embedding, no Voyage API roundtrips: we reuse the vectors
+    already in ChromaDB. Budget: ~10 s for N=25 against cloud under
+    light contention.
+
+    Returns a possibly-shorter list if the collection has fewer than
+    *n* chunks, or if individual probes return < 2 neighbours (solo
+    chunks). Caller decides what to do with a sparse sample.
+    """
+    col = t3.get_or_create_collection(collection)
+    try:
+        got = col.get(limit=n, include=["embeddings"])
+    except Exception:
+        return []
+    # ChromaDB returns embeddings as a numpy ndarray; guard the
+    # "truth-value ambiguous" trap with an explicit ``is None`` + length
+    # check, not a boolean collapse.
+    embeddings_raw = got.get("embeddings")
+    if embeddings_raw is None or len(embeddings_raw) == 0:
+        return []
+    embeddings = embeddings_raw
+
+    distances: list[float] = []
+    for emb in embeddings:
+        try:
+            res = col.query(
+                query_embeddings=[emb], n_results=2, include=["distances"],
+            )
+        except Exception:
+            continue
+        d_rows = res.get("distances") or [[]]
+        if not d_rows or not d_rows[0] or len(d_rows[0]) < 2:
+            continue
+        distances.append(float(d_rows[0][1]))
+    return distances
+
+
+def compute_live_distance_histogram(
+    collection: str, t3: Any, *, n: int = _LIVE_PROBE_DEFAULT_N,
+) -> DistanceHistogram:
+    """Build a histogram from :func:`sample_live_distances` (nexus-fx2d).
+
+    Distinct ``source="live"`` marker so downstream consumers can see
+    the audit hit ChromaDB, not search_telemetry. Cold collection (no
+    chunks, all probes failed) → ``source="empty"`` with sample_size=0
+    — identical to the telemetry-empty case so formatters only need
+    one branch.
+    """
+    distances = sample_live_distances(collection, t3, n=n)
+    if not distances:
+        return DistanceHistogram(
+            buckets=[0] * _HIST_BINS, source="empty", sample_size=0,
+        )
+    return _bucketize(distances, "live")
 
 
 # ── Section 2: top-N cross-projections ──────────────────────────────────────
@@ -372,11 +444,23 @@ def compute_chash_coverage(collection: str) -> ChashCoverage | None:
 # ── Orchestrator ────────────────────────────────────────────────────────────
 
 
-def run_collection_audit(collection: str) -> AuditReport:
+def run_collection_audit(
+    collection: str,
+    *,
+    live: bool = False,
+    t3: Any = None,
+    live_n: int = _LIVE_PROBE_DEFAULT_N,
+) -> AuditReport:
     """Assemble the full audit report for *collection*.
 
     Sections tolerate absent backing stores (empty-telemetry / uninit
     catalog) — each falls back to a neutral empty value.
+
+    nexus-fx2d: when *live* is True and the telemetry histogram is
+    ``source="empty"``, run :func:`compute_live_distance_histogram`
+    against *t3* (resolved via :func:`nexus.db.make_t3` when ``None``).
+    The telemetry path is always tried first so warm collections
+    stay cheap. Budget: ~10 s for N=25 probes against cloud T3.
     """
     t2 = _open_t2()
     cat_conn = _open_catalog_conn()
@@ -398,6 +482,18 @@ def run_collection_audit(collection: str) -> AuditReport:
             t2.close()
         if cat_conn is not None:
             cat_conn.close()
+
+    # Live-probe fallback — only when telemetry came back empty AND
+    # caller opted in. Same error boundary as chash coverage: a T3
+    # hiccup shouldn't blank the telemetry/projection/hub results.
+    if live and hist.source == "empty":
+        try:
+            if t3 is None:
+                from nexus.db import make_t3
+                t3 = make_t3()
+            hist = compute_live_distance_histogram(collection, t3, n=live_n)
+        except Exception:
+            pass
     # RDR-087 Phase 4.6 (nexus-c2op): chash coverage section. Own error
     # boundary — the rest of the audit is purely T2, chash coverage hits
     # T3, so failures (missing collection, network) shouldn't lose the
@@ -426,7 +522,7 @@ def format_audit_human(report: AuditReport) -> str:
     h = report.distance_histogram
     if h.sample_size == 0:
         lines.append(
-            f"  (no telemetry rows; live-probe fallback deferred — nexus-fx2d)"
+            "  (no telemetry rows; pass --live to sample from ChromaDB)"
         )
     else:
         lines.append(f"  source={h.source} samples={h.sample_size}")

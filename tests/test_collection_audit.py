@@ -260,6 +260,132 @@ class TestDistanceHistogramTelemetryOnly:
         assert hist.source == "empty"
 
 
+# ── Section 1: live-probe fallback (nexus-fx2d) ─────────────────────────────
+
+
+class TestLiveDistanceProbe:
+    """Live probe reuses stored embeddings — no Voyage API, no network
+    when backed by an EphemeralClient."""
+
+    def _ephemeral_collection_with_embeddings(self, name: str):
+        """Seed a Chroma EphemeralClient collection with N deterministic
+        embeddings so ``col.query`` returns repeatable distances."""
+        import chromadb
+        from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+
+        client = chromadb.EphemeralClient()
+        ef = DefaultEmbeddingFunction()
+        col = client.create_collection(name=name, embedding_function=ef)
+        col.add(
+            ids=[f"d{i}" for i in range(6)],
+            documents=[
+                "authentication handler for OIDC flows",
+                "database migrations via Alembic",
+                "caching layer with Redis backing",
+                "async task queue over RabbitMQ",
+                "observability via OpenTelemetry spans",
+                "GraphQL schema with federation directives",
+            ],
+            metadatas=[{"idx": i} for i in range(6)],
+        )
+        return col
+
+    def test_sample_live_distances_returns_values_for_each_seed(self) -> None:
+        from nexus.collection_audit import sample_live_distances
+
+        col = self._ephemeral_collection_with_embeddings("code__live_probe")
+
+        class FakeT3:
+            def get_or_create_collection(self_, name):
+                assert name == "code__live_probe"
+                return col
+
+        distances = sample_live_distances("code__live_probe", FakeT3(), n=6)
+        # Each seed → one nearest-other distance. Self should have been
+        # excluded (position [0] is self; we take [1]).
+        assert len(distances) == 6
+        # MiniLM self → nearest-other distance must be >0 (else we
+        # accidentally returned self).
+        assert all(d > 0 for d in distances)
+
+    def test_compute_live_histogram_marks_source_live(self) -> None:
+        from nexus.collection_audit import compute_live_distance_histogram
+
+        col = self._ephemeral_collection_with_embeddings("code__live_mark")
+
+        class FakeT3:
+            def get_or_create_collection(self_, name):
+                return col
+
+        hist = compute_live_distance_histogram("code__live_mark", FakeT3(), n=6)
+        assert hist.source == "live"
+        assert hist.sample_size == 6
+        assert sum(hist.buckets) == 6
+        assert len(hist.buckets) == 10
+
+    def test_live_histogram_empty_when_collection_empty(self) -> None:
+        from nexus.collection_audit import compute_live_distance_histogram
+        import chromadb
+        from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+
+        client = chromadb.EphemeralClient()
+        ef = DefaultEmbeddingFunction()
+        empty = client.create_collection(name="code__empty", embedding_function=ef)
+
+        class FakeT3:
+            def get_or_create_collection(self_, name):
+                return empty
+
+        hist = compute_live_distance_histogram("code__empty", FakeT3(), n=5)
+        assert hist.source == "empty"
+        assert hist.sample_size == 0
+
+    def test_run_audit_uses_live_probe_only_when_telemetry_is_cold(
+        self, tmp_path: Path,
+    ) -> None:
+        """If warm telemetry already exists the live probe must not
+        fire — keeps the audit cheap and avoids rate-limit contention."""
+        from nexus.collection_audit import run_collection_audit
+        from unittest.mock import patch
+
+        _seed_t2(tmp_path / "memory.db")
+
+        # make_t3 must never be called because telemetry is warm.
+        sentinel_called = {"hit": False}
+
+        class ExplodingT3:
+            def get_or_create_collection(self_, name):
+                sentinel_called["hit"] = True
+                raise AssertionError("live probe fired despite warm telemetry")
+
+        with patch("nexus.commands._helpers.default_db_path", return_value=tmp_path / "memory.db"):
+            report = run_collection_audit(
+                "code__main", live=True, t3=ExplodingT3(),
+            )
+        assert sentinel_called["hit"] is False
+        assert report.distance_histogram.source == "telemetry"
+
+    def test_run_audit_falls_back_to_live_when_telemetry_empty(
+        self, tmp_path: Path,
+    ) -> None:
+        from nexus.collection_audit import run_collection_audit
+        from unittest.mock import patch
+
+        _seed_t2(tmp_path / "memory.db")
+        col = self._ephemeral_collection_with_embeddings("code__fallback_live")
+
+        class FakeT3:
+            def get_or_create_collection(self_, name):
+                return col
+
+        with patch("nexus.commands._helpers.default_db_path", return_value=tmp_path / "memory.db"):
+            report = run_collection_audit(
+                "code__fallback_live", live=True, t3=FakeT3(), live_n=6,
+            )
+        assert report.distance_histogram.source == "live"
+        assert report.distance_histogram.sample_size == 6
+
+
 # ── Section 5: chash_index coverage (RDR-087 Phase 4.6 / nexus-c2op) ────────
 
 
@@ -443,3 +569,52 @@ class TestCollectionAuditCli:
         assert "cross_projections" in payload
         assert "orphans" in payload
         assert "hub_assignments" in payload
+
+    def test_live_flag_populates_histogram_when_telemetry_cold(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """nexus-fx2d — ``--live`` promotes source="empty" → source="live"
+        by probing ChromaDB for chunks that have never been searched."""
+        import chromadb
+        import json
+        from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+        from unittest.mock import patch
+
+        from nexus.cli import main
+        from nexus.db.t2 import T2Database
+
+        # T2 with zero search_telemetry rows for code__live_cli.
+        db_path = tmp_path / "memory.db"
+        with T2Database(db_path):
+            pass
+        monkeypatch.setattr(
+            "nexus.commands._helpers.default_db_path", lambda: db_path,
+        )
+
+        # Seed an EphemeralClient collection the --live probe can sample.
+        client = chromadb.EphemeralClient()
+        ef = DefaultEmbeddingFunction()
+        col = client.create_collection(name="code__live_cli", embedding_function=ef)
+        col.add(
+            ids=[f"d{i}" for i in range(4)],
+            documents=["auth", "cache", "queue", "graphql"],
+            metadatas=[{"i": i} for i in range(4)],
+        )
+
+        class FakeT3:
+            def get_or_create_collection(self_, name):
+                assert name == "code__live_cli"
+                return col
+
+        with patch("nexus.db.make_t3", return_value=FakeT3()):
+            result = runner.invoke(
+                main,
+                [
+                    "collection", "audit", "code__live_cli",
+                    "--live", "--live-n", "4", "--format", "json",
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["distance_histogram"]["source"] == "live"
+        assert payload["distance_histogram"]["sample_size"] == 4
