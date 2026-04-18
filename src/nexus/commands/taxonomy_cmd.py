@@ -1633,3 +1633,61 @@ def validate_refs_cmd(paths, tolerance, strict, prefixes, fmt):
     if any_drift or (strict and any_missing):
         sys.exit(1)
     sys.exit(0)
+
+
+@taxonomy.command("backfill-source-collection")
+@click.option(
+    "--apply",
+    "apply_",
+    is_flag=True,
+    default=False,
+    help="Commit writes (default is dry-run). IRREVERSIBLE — review the "
+         "dry-run output first.",
+)
+def backfill_source_collection_cmd(apply_: bool) -> None:
+    """Backfill topic_assignments.source_collection for legacy hdbscan/
+    centroid rows.
+
+    RDR-087 Phase 4.1. Fills NULL source_collection by copying from
+    topics.collection where the clustering path (hdbscan/centroid)
+    guarantees correctness. Projection rows are untouched; auto-matched
+    rows stay NULL (ambiguous source).
+    """
+    from nexus.commands._helpers import default_db_path
+    from nexus.db.t2 import T2Database
+    from nexus.taxonomy_backfill import backfill_source_collection
+
+    db_path = default_db_path()
+    if not db_path.exists():
+        raise click.ClickException(f"T2 database not found: {db_path}")
+
+    t2 = T2Database(db_path)
+    try:
+        report = backfill_source_collection(t2.taxonomy.conn, apply=apply_)
+    finally:
+        t2.close()
+
+    mode = "DRY-RUN" if report.dry_run else "APPLIED"
+    click.echo(f"topic_assignments source_collection backfill ({mode})")
+    click.echo(f"  total rows:           {report.total_rows:>8}")
+    click.echo(
+        f"  non-null before:      {report.non_null_before:>8}  "
+        f"({report.coverage_before:.1%} coverage)"
+    )
+    click.echo(
+        f"  eligible (NULL):      {report.eligible_rows:>8}"
+    )
+    for cat, count in sorted(report.eligible_by_category.items()):
+        click.echo(f"    by assigned_by={cat:<10}  {count:>8}")
+    if report.dry_run:
+        click.echo(
+            f"  projected after apply: "
+            f"{report.non_null_before + report.eligible_rows:>8}  "
+            f"({report.coverage_projected:.1%} coverage)"
+        )
+        click.echo("Run with --apply to commit.")
+    else:
+        click.echo(
+            f"  updated:              {report.updated_rows:>8}  "
+            f"({report.coverage_after:.1%} coverage)"
+        )
