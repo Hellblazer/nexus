@@ -263,6 +263,114 @@ class TestRdrResolver:
         r = RdrResolver(rdr_dir=rdr_dir)
         assert r.resolve("proposal", field="status", filters={}) == "draft"
 
+    # ── nexus-gcwq: child-file disambiguation ───────────────────────────────
+
+    def test_ignores_impl_child_prefers_primary(self, tmp_path: Path) -> None:
+        """nexus-gcwq: a main RDR file and a sibling IMPL / post-mortem /
+        supplement / calibration artifact share the same RDR-NNN- prefix.
+        The main (canonical) file must be selected regardless of
+        filesystem order (IMPL sorts before the usual lowercase title on
+        most filesystems).
+        """
+        from nexus.doc.resolvers import RdrResolver
+
+        rdr_dir = tmp_path / "docs" / "rdr"
+        rdr_dir.mkdir(parents=True)
+        (rdr_dir / "RDR-072-IMPL-06-calibration-report.md").write_text(
+            "---\nstatus: passed\n---\n"
+        )
+        (rdr_dir / "RDR-072-cogem-credit-assignment.md").write_text(
+            "---\nstatus: closed\n---\n"
+        )
+        r = RdrResolver(rdr_dir=rdr_dir)
+        # Correct: the primary RDR (status=closed), NOT the IMPL (status=passed).
+        assert r.resolve("072", field="status", filters={}) == "closed"
+
+    def test_ignores_post_mortem_child(self, tmp_path: Path) -> None:
+        from nexus.doc.resolvers import RdrResolver
+
+        rdr_dir = tmp_path / "docs" / "rdr"
+        rdr_dir.mkdir(parents=True)
+        (rdr_dir / "RDR-055-post-mortem-initial-scope-cut.md").write_text(
+            "---\nstatus: archived\n---\n"
+        )
+        (rdr_dir / "RDR-055-section-type-metadata.md").write_text(
+            "---\nstatus: closed\n---\n"
+        )
+        r = RdrResolver(rdr_dir=rdr_dir)
+        assert r.resolve("055", field="status", filters={}) == "closed"
+
+    def test_ignores_supplement_child(self, tmp_path: Path) -> None:
+        from nexus.doc.resolvers import RdrResolver
+
+        rdr_dir = tmp_path / "docs" / "rdr"
+        rdr_dir.mkdir(parents=True)
+        (rdr_dir / "RDR-080-supplement-plan-runner-contract.md").write_text(
+            "---\nstatus: draft\n---\n"
+        )
+        (rdr_dir / "RDR-080-retrieval-layer-consolidation.md").write_text(
+            "---\nstatus: closed\n---\n"
+        )
+        r = RdrResolver(rdr_dir=rdr_dir)
+        assert r.resolve("080", field="status", filters={}) == "closed"
+
+    def test_ignores_calibration_child(self, tmp_path: Path) -> None:
+        """Calibration artifact pattern matches the 079-calibration.md
+        case we actually shipped in nexus v4.7.0."""
+        from nexus.doc.resolvers import RdrResolver
+
+        rdr_dir = tmp_path / "docs" / "rdr"
+        rdr_dir.mkdir(parents=True)
+        (rdr_dir / "rdr-079-calibration.md").write_text(
+            "---\nstatus: closed\n---\n"
+        )
+        (rdr_dir / "rdr-079-operator-dispatch-and-execution.md").write_text(
+            "---\nstatus: abandoned\n---\n"
+        )
+        r = RdrResolver(rdr_dir=rdr_dir)
+        # The operator-dispatch one is the "feature" RDR (abandoned);
+        # -calibration- is the child artifact.
+        assert r.resolve("079", field="status", filters={}) == "abandoned"
+
+    def test_falls_back_to_only_child_when_no_primary(
+        self, tmp_path: Path,
+    ) -> None:
+        """When every candidate looks like a child file, take the first
+        deterministically-sorted one rather than failing — better to
+        return a noisy value than an error that misleads the user.
+        """
+        from nexus.doc.resolvers import RdrResolver
+
+        rdr_dir = tmp_path / "docs" / "rdr"
+        rdr_dir.mkdir(parents=True)
+        (rdr_dir / "RDR-099-IMPL-01.md").write_text("---\nstatus: a\n---\n")
+        (rdr_dir / "RDR-099-IMPL-02.md").write_text("---\nstatus: b\n---\n")
+        r = RdrResolver(rdr_dir=rdr_dir)
+        # Alphabetical order of stems: IMPL-01 < IMPL-02, so "a" wins.
+        assert r.resolve("099", field="status", filters={}) == "a"
+
+    def test_deterministic_order_across_filesystems(
+        self, tmp_path: Path,
+    ) -> None:
+        """Multiple primary candidates (shouldn't happen in practice —
+        an RDR-NNN prefix is supposed to be unique) still resolve
+        deterministically: alphabetical sort wins, not filesystem
+        glob order.
+        """
+        from nexus.doc.resolvers import RdrResolver
+
+        rdr_dir = tmp_path / "docs" / "rdr"
+        rdr_dir.mkdir(parents=True)
+        (rdr_dir / "rdr-100-zebra-title.md").write_text(
+            "---\nstatus: z\n---\n"
+        )
+        (rdr_dir / "rdr-100-alpha-title.md").write_text(
+            "---\nstatus: a\n---\n"
+        )
+        r = RdrResolver(rdr_dir=rdr_dir)
+        # Alphabetical: alpha-title < zebra-title → "a" wins.
+        assert r.resolve("100", field="status", filters={}) == "a"
+
 
 # ── Render engine ────────────────────────────────────────────────────────────
 

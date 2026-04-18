@@ -185,13 +185,57 @@ class RdrResolver:
                 f"no RDR file matching rdr-{key}-*.md (case-insensitive) "
                 f"under {self._rdr_dir}"
             )
-        text = candidates[0].read_text(errors="replace")
+        # nexus-gcwq: disambiguate when the RDR directory carries sibling
+        # child-artifact files (IMPL reports, post-mortems, supplements,
+        # calibration artifacts) sharing the same ``RDR-NNN-`` prefix.
+        # The raw glob returns all matches; ``candidates[0]`` is
+        # filesystem-order-dependent and typically picks the child file
+        # because "IMPL" sorts before most lowercase titles on macOS.
+        # Partition into primary (main RDR) vs child (marker-bearing)
+        # files and prefer primary when any exist. Sort each partition
+        # alphabetically so the return is deterministic across file-
+        # systems — the prior contract leaked glob order into the result.
+        selected = _select_primary_rdr(candidates)
+        text = selected.read_text(errors="replace")
         m = _FRONTMATTER_RE.search(text)
         if not m:
             raise ResolutionError(
                 f"rdr-{key} has no YAML frontmatter"
             )
         return _parse_frontmatter(m.group(1))
+
+
+# Tokens that denote a child-artifact RDR file rather than the main RDR.
+# Matched as a lowercase kebab-case segment: ``-IMPL-``, ``-post-mortem-``,
+# ``-supplement-``, ``-calibration-``. The separators constrain the match
+# so genuine title words happening to contain these letters (unlikely,
+# but possible for e.g. "implementation-details") don't get mis-classified.
+_CHILD_MARKERS: tuple[str, ...] = (
+    "-impl-",
+    "-post-mortem-",
+    "-supplement-",
+    "-calibration",  # no trailing dash: matches both "-calibration.md" + "-calibration-*"
+)
+
+
+def _select_primary_rdr(candidates: list["Path"]) -> "Path":
+    """Return the primary (main) RDR file from a list of candidates.
+
+    A "primary" file's stem has no child-artifact marker; a "child" has
+    at least one. When both exist, primary wins. Within each class the
+    alphabetically-first stem wins so the return value is filesystem-
+    order-independent (globs on macOS HFS+ differ from Linux ext4).
+
+    Invariant: ``candidates`` is non-empty. The caller enforces this.
+    """
+    def _is_child(path: "Path") -> bool:
+        stem_lower = path.stem.lower()
+        return any(marker in stem_lower for marker in _CHILD_MARKERS)
+
+    primaries = sorted([c for c in candidates if not _is_child(c)])
+    if primaries:
+        return primaries[0]
+    return sorted(candidates)[0]
 
 
 def _parse_frontmatter(block: str) -> dict[str, Any]:
