@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.6.3] - 2026-04-17
+
+Plugin version bump alongside conexus 4.6.3. See root CHANGELOG for
+the dimension-mismatch skip-and-warn guard in `T3Database.search`
+(issue #190 follow-up).
+
 ## [4.6.2] - 2026-04-17
 
 Plugin version bump alongside conexus 4.6.2. See root CHANGELOG for
