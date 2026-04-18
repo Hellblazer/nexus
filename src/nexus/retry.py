@@ -5,6 +5,7 @@ Leaf module — no nexus.* imports.  Only stdlib + httpx + structlog + soft voya
 """
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable
 from typing import Any
@@ -15,6 +16,64 @@ import httpx
 import structlog
 
 _log = structlog.get_logger(__name__)
+
+
+# ── Retry accumulator (nexus-vatx Gap 4) ─────────────────────────────────────
+
+# Process-local counters so the CLI can report how much of an indexing run
+# was spent waiting on transient-error backoffs. Both ChromaDB and Voyage
+# retries contribute. Concurrent voyage calls in pipeline_stages can
+# increment from worker threads — hence the lock.
+_retry_lock = threading.Lock()
+_voyage_retry_seconds: float = 0.0
+_voyage_retry_count: int = 0
+_chroma_retry_seconds: float = 0.0
+_chroma_retry_count: int = 0
+
+
+def _add_voyage_retry(delay: float) -> None:
+    global _voyage_retry_seconds, _voyage_retry_count
+    with _retry_lock:
+        _voyage_retry_seconds += delay
+        _voyage_retry_count += 1
+
+
+def _add_chroma_retry(delay: float) -> None:
+    global _chroma_retry_seconds, _chroma_retry_count
+    with _retry_lock:
+        _chroma_retry_seconds += delay
+        _chroma_retry_count += 1
+
+
+def get_retry_stats() -> dict[str, float | int]:
+    """Return a snapshot of retry counters — voyage + chroma, time + count.
+
+    Returned keys: ``voyage_seconds``, ``voyage_count``, ``chroma_seconds``,
+    ``chroma_count``, ``total_seconds``, ``total_count``. Resetting the
+    counters is the caller's responsibility via :func:`reset_retry_stats`.
+    """
+    with _retry_lock:
+        return {
+            "voyage_seconds": _voyage_retry_seconds,
+            "voyage_count": _voyage_retry_count,
+            "chroma_seconds": _chroma_retry_seconds,
+            "chroma_count": _chroma_retry_count,
+            "total_seconds": _voyage_retry_seconds + _chroma_retry_seconds,
+            "total_count": _voyage_retry_count + _chroma_retry_count,
+        }
+
+
+def reset_retry_stats() -> None:
+    """Zero the process-local retry counters. CLI callers invoke this at
+    the start of an indexing run so the end-of-run summary reflects only
+    that run's backoffs."""
+    global _voyage_retry_seconds, _voyage_retry_count
+    global _chroma_retry_seconds, _chroma_retry_count
+    with _retry_lock:
+        _voyage_retry_seconds = 0.0
+        _voyage_retry_count = 0
+        _chroma_retry_seconds = 0.0
+        _chroma_retry_count = 0
 
 
 # ── ChromaDB transient-error retry ───────────────────────────────────────────
@@ -74,6 +133,7 @@ def _chroma_with_retry(
                 delay=delay,
                 error=str(exc)[:120],
             )
+            _add_chroma_retry(delay)
             time.sleep(delay)
             delay = min(delay * 2, 30.0)
 
@@ -140,5 +200,6 @@ def _voyage_with_retry(
                 error_type=type(exc).__name__,
                 error=str(exc)[:120],
             )
+            _add_voyage_retry(delay)
             time.sleep(delay)
             delay = min(delay * 2, 10.0)
