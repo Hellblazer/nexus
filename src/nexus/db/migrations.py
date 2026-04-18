@@ -493,6 +493,57 @@ def migrate_review_columns(conn: sqlite3.Connection) -> None:
 # Ordered by introduced version.  Tags verified via ``git tag --contains``
 # for each migration commit.
 
+def migrate_chash_index(conn: sqlite3.Connection) -> None:
+    """Create the ``chash_index`` table for RDR-086 Phase 1.
+
+    Global content-addressed chunk lookup: given a ``chash:<hex>`` span,
+    find which (physical_collection, doc_id) pair(s) carry that chunk.
+    Phase 2 builds ``Catalog.resolve_chash(chash)`` on top of this;
+    without the T2 index the serial-ChromaDB-filter alternative takes
+    ~300ms/collection (RF-6 measurement: 13 min on a 136-collection prod
+    DB). With the T2 JOIN, ~50µs.
+
+    Schema:
+      - chash              TEXT NOT NULL
+      - physical_collection TEXT NOT NULL
+      - doc_id             TEXT NOT NULL
+      - created_at         TEXT NOT NULL  (ISO-8601 UTC, set at INSERT time;
+                                           Phase 2 uses it for multi-match
+                                           newest-wins tie-break)
+      - PRIMARY KEY (chash, physical_collection)
+
+    Compound PK rationale (RF-10 Issue 1): the same chunk text (same
+    SHA-256 chash) can legitimately be indexed into multiple collections
+    — e.g. ``knowledge__delos`` and ``knowledge__delos_docling`` both
+    ingest the same paper, so every chunk's SHA-256 is identical. A
+    single-column chash PK would FK-violate on the second write.
+
+    Secondary index: ``idx_chash_index_collection`` on ``physical_collection``
+    — the Phase 1.4 delete cascade issues ``DELETE FROM chash_index WHERE
+    physical_collection = ?`` (inherited from nexus-lub), which without
+    the index would be a table scan.
+
+    Idempotent: no-op if the table already exists (re-apply safe).
+    """
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='chash_index'"
+    ).fetchone()
+    if row is not None:
+        return
+    conn.executescript("""
+        CREATE TABLE chash_index (
+            chash                TEXT NOT NULL,
+            physical_collection  TEXT NOT NULL,
+            doc_id               TEXT NOT NULL,
+            created_at           TEXT NOT NULL,
+            PRIMARY KEY (chash, physical_collection)
+        );
+        CREATE INDEX idx_chash_index_collection
+            ON chash_index(physical_collection);
+    """)
+    conn.commit()
+
+
 MIGRATIONS: list[Migration] = [
     Migration("1.10.0", "Memory FTS rebuild with title", migrate_memory_fts),
     Migration("2.8.0", "Add plan project column", migrate_plan_project),
@@ -525,6 +576,11 @@ MIGRATIONS: list[Migration] = [
         "4.6.1",
         "Rename search_telemetry.dropped_count to kept_count (RDR-087 errata)",
         migrate_rename_dropped_to_kept,
+    ),
+    Migration(
+        "4.7.0",
+        "Add chash_index table (RDR-086 Phase 1.1)",
+        migrate_chash_index,
     ),
 ]
 

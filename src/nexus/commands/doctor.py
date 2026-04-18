@@ -62,7 +62,7 @@ def _run_check_schema() -> None:
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()
     }
-    for tbl in ("memory", "plans", "topics", "topic_assignments", "taxonomy_meta", "topic_links", "relevance_log", "search_telemetry"):
+    for tbl in ("memory", "plans", "topics", "topic_assignments", "taxonomy_meta", "topic_links", "relevance_log", "search_telemetry", "chash_index"):
         ok = tbl in tables
         lines.append(_check_line(f"Table {tbl}", ok))
         if not ok:
