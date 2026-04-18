@@ -187,6 +187,16 @@ def _run_trim_telemetry(days: int) -> None:
          "raises an unexpected exception. RDR-087 Phase 3.2.",
 )
 @click.option(
+    "--check-resources",
+    "check_resources",
+    is_flag=True,
+    default=False,
+    help="Probe POSIX semaphore headroom. Exits 2 with 'Errno 28' when "
+         "the namespace is exhausted (known sources: MinerU workers / "
+         "orphan chroma children leaking via multiprocessing). Beads "
+         "nexus-dc57 + nexus-ze2a.",
+)
+@click.option(
     "--json",
     "json_out",
     is_flag=True,
@@ -211,7 +221,7 @@ def _run_trim_telemetry(days: int) -> None:
 )
 def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                fix_paths: bool, dry_run: bool, check_schema: bool,
-               check_search: bool, json_out: bool,
+               check_search: bool, check_resources: bool, json_out: bool,
                trim_telemetry: bool, days: int) -> None:
     """Verify that all required services and credentials are available."""
     if check_schema:
@@ -221,6 +231,10 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
     if check_search:
         from nexus.doctor_search import run_check_search
         run_check_search(json_out=json_out)
+        return
+
+    if check_resources:
+        _run_check_resources()
         return
 
     if trim_telemetry:
@@ -361,3 +375,50 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
 
     if failed:
         raise click.exceptions.Exit(1)
+
+
+def _probe_semaphore_namespace() -> tuple[bool, str]:
+    """Probe POSIX named-semaphore availability.
+
+    Attempts to allocate and immediately unlink one throwaway named
+    semaphore. Returns ``(True, info_msg)`` when the kernel namespace
+    has headroom; ``(False, error_repr)`` when allocation fails —
+    typically ``[Errno 28] No such space left on device`` under
+    exhaustion (beads nexus-dc57 + nexus-ze2a).
+
+    Separated from the CLI handler so tests can monkeypatch it.
+    """
+    import os as _os
+    try:
+        from _multiprocessing import SemLock  # type: ignore[attr-defined]
+    except ImportError:
+        return True, "SemLock probe unavailable on this platform"
+    probe_name = f"/nx-doctor-probe-{_os.getpid()}"
+    try:
+        lock = SemLock(0, 0, 1, name=probe_name, unlink=True)
+        # SemLock ctor created and owns the semaphore; unlink happens
+        # via the ``unlink=True`` flag on close.
+        del lock
+        return True, "POSIX named-semaphore namespace has headroom"
+    except OSError as exc:
+        return False, f"{exc!r}"
+
+
+def _run_check_resources() -> None:
+    """Emit a resource-pressure report to stdout; exit 2 on failure."""
+    ok, msg = _probe_semaphore_namespace()
+    if ok:
+        click.echo(f"[\u2713] resources: {msg}")
+        return
+    click.echo(f"[\u2717] resources: SemLock probe FAILED — {msg}", err=True)
+    click.echo(
+        "Known sources of POSIX semaphore exhaustion on this project:\n"
+        "  - nexus-ze2a: MinerU workers leak semaphores.\n"
+        "    Workaround: `nx mineru stop` (kills the whole process group).\n"
+        "  - nexus-dc57: orphan chroma children from earlier nexus sessions.\n"
+        "    Workaround: kill orphan chromas (`ps aux | grep 'chroma run'`).\n"
+        "If the count does not recover, reboot — macOS does not unlink\n"
+        "leaked named semaphores until the next boot.",
+        err=True,
+    )
+    raise click.exceptions.Exit(2)

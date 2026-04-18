@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.6.4] - 2026-04-18
+
+### Fixed
+
+- **nexus-ze2a (P0) + nexus-dc57 (P1) — POSIX semaphore-leak root cause** — cross-corpus `_multiprocessing.SemLock()` was failing with `[Errno 28] No space left on device` whenever MinerU or orphaned T1 chroma children had accumulated. Both bugs shared a single root: we used `os.kill(pid, SIGTERM/SIGKILL)` on the long-running subprocess head, which did not propagate to its multiprocessing workers or their `resource_tracker`. Workers got orphaned and their POSIX named semaphores were never `sem_unlink()`-ed, eventually exhausting the kernel namespace (`kern.posix.sem.max = 10000`). **Fix**: (1) T1 chroma spawn in `session.py` now uses `start_new_session=True` so chroma plus its workers share one killable process group; (2) `stop_t1_server` uses `os.killpg(os.getpgid(pid), SIGTERM)` → `os.killpg(..., SIGKILL)` so the whole subtree receives the signal; (3) `nx mineru stop` uses the same `killpg` pattern so MinerU workers' `resource_tracker` runs before the group exits. No periodic-restart band-aid — the process-group contract itself was broken. New `nx doctor --check-resources` probes the POSIX semaphore namespace and exits 2 with actionable guidance on `[Errno 28]` pressure (pointing at both sources by name).
+
 ## [4.6.3] - 2026-04-17
 
 ### Fixed

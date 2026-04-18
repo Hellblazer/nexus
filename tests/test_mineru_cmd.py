@@ -130,15 +130,32 @@ class TestMineruStop:
                     raise OSError("No such process")
         return side_effect, signals
 
-    def test_stop_sends_sigterm_and_cleans_pid(self, runner, pid_file):
+    def test_stop_sends_sigterm_to_process_group(self, runner, pid_file):
+        """``nx mineru stop`` must SIGTERM the whole process group so
+        MinerU's multiprocessing workers' resource_tracker gets a
+        chance to ``sem_unlink`` POSIX named semaphores before exit.
+        Regression for bead nexus-ze2a.
+        """
         _write_pid(pid_file, pid=12345)
-        effect, signals = self._kill_tracking()
-        with patch("nexus.commands.mineru.os.kill", side_effect=effect) as mock_kill, \
+        killpg_calls: list[tuple[int, int]] = []
+
+        def _fake_killpg(pgid: int, sig: int) -> None:
+            killpg_calls.append((pgid, sig))
+
+        # Initial liveness probe True, then dead after SIGTERM delivery.
+        alive_states = [True, False, False, False]
+
+        def _alive(pid: int) -> bool:
+            return alive_states.pop(0) if alive_states else False
+
+        with patch("nexus.commands.mineru.os.killpg", side_effect=_fake_killpg), \
+             patch("nexus.commands.mineru.os.getpgid", lambda pid: pid), \
+             patch("nexus.commands.mineru._is_process_alive", side_effect=_alive), \
              patch("nexus.commands.mineru.time.sleep"):
             result = runner.invoke(main, ["mineru", "stop"])
         assert result.exit_code == 0 and not pid_file.exists()
-        mock_kill.assert_any_call(12345, signal.SIGTERM)
-        assert signal.SIGTERM in signals and signal.SIGKILL not in signals
+        assert (12345, signal.SIGTERM) in killpg_calls
+        assert (12345, signal.SIGKILL) not in killpg_calls
 
     def test_stop_no_pid_file(self, runner, pid_file):
         result = runner.invoke(main, ["mineru", "stop"])
@@ -146,7 +163,9 @@ class TestMineruStop:
 
     def test_stop_stale_pid(self, runner, pid_file):
         _write_pid(pid_file, pid=99999)
-        with patch("nexus.commands.mineru.os.kill", side_effect=OSError("No such process")):
+        with patch(
+            "nexus.commands.mineru._is_process_alive", return_value=False,
+        ):
             result = runner.invoke(main, ["mineru", "stop"])
         assert result.exit_code == 0 and not pid_file.exists()
 

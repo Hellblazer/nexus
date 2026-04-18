@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.6.4] - 2026-04-18
+
+Plugin version bump alongside conexus 4.6.4. See root CHANGELOG for
+the POSIX-semaphore leak root-cause fix (nexus-ze2a + nexus-dc57)
+and the new `nx doctor --check-resources` probe.
+
 ## [4.6.3] - 2026-04-17
 
 Plugin version bump alongside conexus 4.6.3. See root CHANGELOG for
