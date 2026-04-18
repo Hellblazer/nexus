@@ -88,15 +88,46 @@ class TestResolveChashT2Hit:
         assert ref["chunk_text"] == "text-b"
 
     def test_newest_created_at_wins_when_no_preference(self, resolve_env):
-        """Re-indexing into a better collection (e.g. _docling variant) supersedes the old one."""
-        import time
+        """Re-indexing into a better collection (e.g. _docling variant) supersedes the old one.
 
+        Uses explicit ``created_at`` timestamps rather than ``datetime.now()``
+        so the test is deterministic on loaded CI — a prior iteration
+        relied on a 10 ms sleep to force distinct ISO stamps, which the
+        code-review called out as flaky.
+        """
         cat, t3, chash_index = resolve_env
         h = "c" * 64
-        _seed_chunk(t3, chash_index, "code__old", "c-old", "stale", h)
-        # Ensure a distinct ISO timestamp for the second write.
-        time.sleep(0.01)
-        _seed_chunk(t3, chash_index, "code__new", "c-new", "fresh", h)
+
+        # Seed both chunks into T3; then overwrite the two T2 rows with
+        # explicit created_at timestamps so the tie-break has a
+        # deterministic "newer" to pick.
+        col_old = t3.get_or_create_collection("code__old")
+        col_old.add(
+            ids=["c-old"], documents=["stale"],
+            metadatas=[{"chunk_text_hash": h, "source_path": "s.py"}],
+        )
+        col_new = t3.get_or_create_collection("code__new")
+        col_new.add(
+            ids=["c-new"], documents=["fresh"],
+            metadatas=[{"chunk_text_hash": h, "source_path": "s.py"}],
+        )
+
+        # Direct SQL with explicit timestamps — the default upsert uses
+        # datetime.now() which can collide at microsecond resolution.
+        with chash_index._lock:
+            chash_index.conn.execute(
+                "INSERT OR REPLACE INTO chash_index "
+                "(chash, physical_collection, doc_id, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (h, "code__old", "c-old", "2025-01-01T00:00:00+00:00"),
+            )
+            chash_index.conn.execute(
+                "INSERT OR REPLACE INTO chash_index "
+                "(chash, physical_collection, doc_id, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (h, "code__new", "c-new", "2026-04-18T00:00:00+00:00"),
+            )
+            chash_index.conn.commit()
 
         ref = cat.resolve_chash(h, t3, chash_index)
 

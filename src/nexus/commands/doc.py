@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -434,56 +435,60 @@ def check_extensions_cmd(
         sys.exit(2)
 
     try:
-        taxonomy = _phase4_t2_taxonomy()
-    except sqlite_errors() as exc:
-        click.echo(f"cannot open T2: {exc}", err=True)
-        sys.exit(2)
+        # Hold the T2 taxonomy open for the whole command, then drop it
+        # — ``_phase4_t2_taxonomy`` now returns a context manager so the
+        # underlying T2Database closes on exit (review #3).
+        try:
+            taxonomy_ctx = _phase4_t2_taxonomy()
+        except sqlite_errors() as exc:
+            click.echo(f"cannot open T2: {exc}", err=True)
+            sys.exit(2)
 
-    try:
-        for path in paths:
-            text = path.read_text(errors="replace")
-            cites = scan_citations(text)
+        with taxonomy_ctx as taxonomy:
+            for path in paths:
+                text = path.read_text(errors="replace")
+                cites = scan_citations(text)
 
-            # RDR-086 Phase 4.2: resolve each chash → ChunkRef → doc_id
-            # BEFORE handing to extensions_report. The chunk_grounded_in
-            # call underneath receives a Chroma-scoped doc_id that
-            # matches ``topic_assignments.doc_id``.
-            resolved_doc_ids: list[str] = []
-            for c in cites:
-                if c.kind != "chash" or not c.chash:
-                    continue
-                try:
-                    ref = cat.resolve_chash(c.chash, t3, chash_index)
-                except Exception:
-                    ref = None
-                if ref is not None and ref.get("doc_id"):
-                    resolved_doc_ids.append(ref["doc_id"])
+                # RDR-086 Phase 4.2: resolve each chash → ChunkRef → doc_id
+                # BEFORE handing to extensions_report. The chunk_grounded_in
+                # call underneath receives a Chroma-scoped doc_id that
+                # matches ``topic_assignments.doc_id``.
+                resolved_doc_ids: list[str] = []
+                for c in cites:
+                    if c.kind != "chash" or not c.chash:
+                        continue
+                    try:
+                        ref = cat.resolve_chash(c.chash, t3, chash_index)
+                    except Exception:
+                        ref = None
+                    if ref is not None and ref.get("doc_id"):
+                        resolved_doc_ids.append(ref["doc_id"])
 
-            # Deduplicate while preserving order (first-resolved wins).
-            seen: set[str] = set()
-            doc_ids: list[str] = []
-            for d in resolved_doc_ids:
-                if d not in seen:
-                    seen.add(d)
-                    doc_ids.append(d)
+                # Deduplicate while preserving order (first-resolved wins).
+                seen: set[str] = set()
+                doc_ids: list[str] = []
+                for d in resolved_doc_ids:
+                    if d not in seen:
+                        seen.add(d)
+                        doc_ids.append(d)
 
-            report = extensions_report(
-                doc_ids,
-                primary_source=primary_source,
-                threshold=threshold,
-                taxonomy=taxonomy,
-            )
-            results.append({
-                "path": str(path),
-                "checked": report.checked,
-                "candidates": [
-                    {"doc_id": d, "similarity": s}
-                    for d, s in report.candidates
-                ],
-                "no_data": list(report.no_data),
-            })
-            if report.candidates:
-                any_candidate = True
+                report = extensions_report(
+                    doc_ids,
+                    primary_source=primary_source,
+                    threshold=threshold,
+                    taxonomy=taxonomy,
+                )
+                results.append({
+                    "path": str(path),
+                    "checked": report.checked,
+                    "candidates": [
+                        {"doc_id": d, "similarity": s}
+                        for d, s in report.candidates
+                    ],
+                    "no_data": list(report.no_data),
+                })
+                if report.candidates:
+                    any_candidate = True
     finally:
         try:
             chash_index.close()
@@ -527,8 +532,15 @@ def sqlite_errors() -> tuple[type[BaseException], ...]:
 # construction so tests can monkeypatch one call site to inject fakes.
 
 
-def _phase4_catalog_t3_chash() -> tuple:
-    """Return (Catalog, T3 client, ChashIndex) for chash resolution.
+def _phase4_catalog_t3_chash() -> tuple[Any, Any, Any]:
+    """Return (Catalog, T3Database, ChashIndex) for chash resolution.
+
+    Forward-ref typed to avoid a top-level import of the three heavy
+    modules (``Catalog`` pulls in ``CatalogDB``, ``T3Database`` pulls
+    in ``chromadb``) at module load. The tuple shape is a contract
+    enforced by the three CLI consumers, documented here:
+
+        cat, t3, chash_index = _phase4_catalog_t3_chash()
 
     The Catalog is constructed from the conventional catalog path under
     ``default_db_path()``'s parent, matching ``mcp_infra.get_catalog``.
@@ -541,21 +553,34 @@ def _phase4_catalog_t3_chash() -> tuple:
 
     db_path = default_db_path()
     cat_path = db_path.parent / "catalog"
-    cat = Catalog(cat_path, cat_path / ".catalog.db")
-    t3 = make_t3()
-    chash_index = ChashIndex(db_path)
+    cat: Any = Catalog(cat_path, cat_path / ".catalog.db")
+    t3: Any = make_t3()
+    chash_index: Any = ChashIndex(db_path)
     return cat, t3, chash_index
 
 
 def _phase4_t2_taxonomy():
-    """Return a T2 taxonomy store wrapped in a context manager.
+    """Yield a T2 taxonomy store; closes the underlying T2Database on exit.
 
     Separate from ``_phase4_catalog_t3_chash`` so tests can patch the
-    taxonomy independently of the chash resolver collaborators.
+    taxonomy independently of the chash resolver collaborators. Returned
+    as a context manager — the previous ``.taxonomy`` attribute-return
+    leaked the five-connection T2Database for the command's lifetime
+    (review #3).
     """
+    from contextlib import contextmanager
+
     from nexus.db.t2 import T2Database
 
-    return T2Database(default_db_path()).taxonomy
+    @contextmanager
+    def _taxonomy_ctx():
+        db = T2Database(default_db_path())
+        try:
+            yield db.taxonomy
+        finally:
+            db.close()
+
+    return _taxonomy_ctx()
 
 
 # ── RDR-086 Phase 5: nx doc cite ─────────────────────────────────────────────
@@ -579,14 +604,16 @@ def _phase5_search(*, query: str, corpus: str, limit: int) -> dict:
 
 
 def _chash_index_is_empty(chash_index) -> bool:
-    """True if no chash_index rows exist anywhere — fresh-install guard."""
+    """True if no chash_index rows exist anywhere — fresh-install guard.
+
+    Thin wrapper over ``ChashIndex.is_empty()`` that swallows open/IO
+    failures so a corrupt or missing T2 file doesn't crash ``nx doc cite``
+    before the caller sees the "run backfill" hint.
+    """
     try:
-        row = chash_index.conn.execute(
-            "SELECT 1 FROM chash_index LIMIT 1"
-        ).fetchone()
+        return chash_index.is_empty()
     except Exception:
         return False
-    return row is None
 
 
 @doc.command("cite")

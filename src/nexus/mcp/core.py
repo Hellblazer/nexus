@@ -178,7 +178,8 @@ def search(
             if structured:
                 return {
                     "ids": [], "tumblers": [], "distances": [],
-                    "collections": [], "chunk_text_hash": [],
+                    "collections": [], "chunk_collections": [],
+                    "chunk_text_hash": [],
                 }
             return "No results."
 
@@ -189,7 +190,8 @@ def search(
             if structured:
                 return {
                     "ids": [], "tumblers": [], "distances": [],
-                    "collections": [], "chunk_text_hash": [],
+                    "collections": [], "chunk_collections": [],
+                    "chunk_text_hash": [],
                 }
             return f"No results at offset {offset} (total {total})."
 
@@ -212,12 +214,18 @@ def search(
         # Resolves $stepN.ids / $stepN.collections / $stepN.distances refs.
         # RDR-086 Phase 3.1: chunk_text_hash forwarded per-result so callers
         # can build chash:<hex> citations without a second fetch.
+        #
+        # Review #7: ``collections`` is dedup'd (plan-runner contract) while
+        # ``chunk_collections`` is per-result aligned with ``ids`` so
+        # consumers that need per-chunk origin (e.g. ``nx_answer``) get
+        # the right collection for every hit, not just the top result.
         if structured:
             return {
                 "ids": [r.id for r in page],
                 "tumblers": [r.metadata.get("tumbler", "") for r in page],
                 "distances": [float(r.distance) for r in page],
                 "collections": list({r.collection for r in page}),
+                "chunk_collections": [r.collection for r in page],
                 "chunk_text_hash": [
                     r.metadata.get("chunk_text_hash", "") for r in page
                 ],
@@ -427,7 +435,8 @@ def query(
             if structured:
                 return {
                     "ids": [], "tumblers": [], "distances": [],
-                    "collections": [], "chunk_text_hash": [],
+                    "collections": [], "chunk_collections": [],
+                    "chunk_text_hash": [],
                 }
             return "No documents found."
 
@@ -438,6 +447,9 @@ def query(
                 "tumblers": [r.metadata.get("tumbler", "") for r in page],
                 "distances": [float(r.distance) for r in page],
                 "collections": list({r.collection for r in page}),
+                # Review #7: per-result aligned list for consumers
+                # that need per-chunk origin (e.g. nx_answer envelope).
+                "chunk_collections": [r.collection for r in page],
                 # RDR-086 Phase 3.2: chunk_text_hash forwarded for chash
                 # citation authoring at the document layer.
                 "chunk_text_hash": [
@@ -2063,32 +2075,55 @@ async def nx_answer(
             step_args = plan["steps"][0].get("args", {})
             q = step_args.get("question", question)
             corpus = step_args.get("corpus", "knowledge")
-            # RDR-086 Phase 3.4: request structured return so the envelope
-            # can include chunks. Human text mode falls back to a str.
+            # RDR-086 review #4: exactly one ``query()`` call — the
+            # previous structured path re-ran non-structured for
+            # ``result_text`` (doubling the T3 round-trip) even though
+            # the structured envelope already contains enough to
+            # synthesize a result summary.
             if structured:
                 q_struct = query(question=q, corpus=corpus, structured=True)
-                # Build chunks list from the structured query response.
-                chunks = []
+                chunks: list[dict] = []
                 if isinstance(q_struct, dict):
                     ids = q_struct.get("ids", [])
-                    colls = q_struct.get("collections", [])
+                    colls_list = q_struct.get("chunk_collections") or (
+                        q_struct.get("collections") or []
+                    )
                     hashes = q_struct.get("chunk_text_hash", [])
                     dists = q_struct.get("distances", [])
-                    # collections is collapsed in structured returns; fall
-                    # back to the first entry if we can't align per-chunk.
-                    default_coll = colls[0] if colls else ""
+                    default_coll = colls_list[0] if colls_list else ""
                     for i, cid in enumerate(ids):
                         chunks.append({
                             "id": cid,
                             "chash": hashes[i] if i < len(hashes) else "",
-                            "collection": default_coll,
+                            # Per-chunk alignment when chunk_collections is
+                            # available (Phase 3 surface fix); otherwise
+                            # fall back to the first dedup'd collection.
+                            "collection": (
+                                colls_list[i]
+                                if i < len(colls_list)
+                                else default_coll
+                            ),
                             "distance": dists[i] if i < len(dists) else None,
                         })
-                final_text = q_struct.get("final_text", "") if isinstance(q_struct, dict) else str(q_struct)
-                # When the plain-text render is wanted, re-run non-structured
-                # for the final_text field. But since chunks have id+chash we
-                # already have the content addressing. Use a concise summary.
-                result_text = str(query(question=q, corpus=corpus))
+                # Synthesize a compact human-readable summary from the
+                # envelope — no second query() required.
+                if chunks:
+                    lines = [
+                        f"Found {len(chunks)} result"
+                        f"{'s' if len(chunks) != 1 else ''} for {q!r}:",
+                    ]
+                    for ch in chunks[:5]:
+                        lines.append(
+                            f"  - {ch['id']} in {ch['collection']} "
+                            f"(distance={ch['distance']:.3f})"
+                            if ch["distance"] is not None
+                            else f"  - {ch['id']} in {ch['collection']}"
+                        )
+                    if len(chunks) > 5:
+                        lines.append(f"  ... and {len(chunks) - 5} more")
+                    result_text = "\n".join(lines)
+                else:
+                    result_text = "No results."
             else:
                 result_text = query(question=q, corpus=corpus)
                 chunks = []
@@ -2167,7 +2202,10 @@ async def nx_answer(
 
     # RDR-086 Phase 3.3: harvest chunk refs from retrieval-op steps so the
     # envelope's ``chunks`` list carries id+chash+collection for every
-    # retrieved chunk, ordered by final-step relevance.
+    # retrieved chunk, ordered by final-step relevance. Review #7: prefer
+    # the per-result ``chunk_collections`` list (Phase 3 fix) so every
+    # chunk is tagged with its actual origin — not the first dedup'd
+    # collection.
     envelope_chunks: list[dict] = []
     if structured:
         for step_out in result.steps:
@@ -2177,14 +2215,19 @@ async def nx_answer(
             if not isinstance(ids, list) or not ids:
                 continue
             hashes = step_out.get("chunk_text_hash", []) or []
-            colls = step_out.get("collections", []) or []
+            per_chunk_colls = step_out.get("chunk_collections") or []
+            dedup_colls = step_out.get("collections", []) or []
             dists = step_out.get("distances", []) or []
-            default_coll = colls[0] if colls else ""
+            default_coll = dedup_colls[0] if dedup_colls else ""
             for i, cid in enumerate(ids):
+                if i < len(per_chunk_colls):
+                    coll = per_chunk_colls[i]
+                else:
+                    coll = default_coll
                 envelope_chunks.append({
                     "id": cid,
                     "chash": hashes[i] if i < len(hashes) else "",
-                    "collection": default_coll,
+                    "collection": coll,
                     "distance": dists[i] if i < len(dists) else None,
                 })
 

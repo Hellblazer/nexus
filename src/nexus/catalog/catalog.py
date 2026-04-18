@@ -76,6 +76,19 @@ def _negate_iso(ts: str) -> str:
     newer dates sort first. Non-digits fall through unchanged so the
     ``-``, ``:``, ``T``, and ``+`` separators keep their relative
     positions in the string.
+
+    Correctness scope (review #5): the algorithm assumes every input
+    shares the same separator/timezone skeleton. ``created_at`` is
+    always written by ``ChashIndex.upsert`` via
+    ``datetime.now(UTC).isoformat()``, which emits
+    ``YYYY-MM-DDTHH:MM:SS.ffffff+00:00`` with a fixed
+    4-digit year and a ``+00:00`` suffix — so the key is well-defined
+    across any two values this catalog compares. Inputs with a
+    different suffix (``Z``, negative offsets, unicode minus) would
+    still sort deterministically but the "newest first" guarantee
+    only holds for values sharing the canonical shape. Fails
+    gracefully for year >= 10000 (column shift) — out of scope for
+    this decade.
     """
     return "".join(
         str(9 - int(c)) if c.isdigit() else c for c in ts
@@ -116,15 +129,8 @@ def _fallback_chash_scan(
         )
         _chash_fallback_warned = True
 
-    # Shared closure over the outer ``resolve_span`` reachable via ``t3`` —
-    # we can't capture ``self`` here (module-level helper), but resolve_span
-    # is a pure lookup on (t3, collection, chash) so a local shim suffices.
-    # The caller supplies ``build_ref`` already closed over char_range etc.
-    from nexus.catalog.catalog import Catalog  # noqa: F401 (self-import documents intent)
-
-    # Rebuild a disposable Catalog-like resolver: resolve_span only reads
-    # ``t3`` and the hash — instance state is irrelevant. Reuse the same
-    # parsing + range slicing by calling ``Catalog.resolve_span`` unbound.
+    # resolve_span is a pure lookup on (t3, collection, hex_chash) —
+    # instance state is irrelevant, so we call it unbound via the class.
     def _probe(coll: str) -> dict | None:
         try:
             return Catalog.resolve_span(None, span, coll, t3)  # type: ignore[arg-type]
@@ -133,7 +139,10 @@ def _fallback_chash_scan(
 
     deadline = time.monotonic() + _CHASH_FALLBACK_DEADLINE_S
     idx = 0
-    with ThreadPoolExecutor(max_workers=_CHASH_FALLBACK_CONCURRENCY) as ex:
+    # Manual lifecycle so early return can call shutdown(cancel_futures=True)
+    # instead of blocking on in-flight futures during __exit__ (review #2).
+    ex = ThreadPoolExecutor(max_workers=_CHASH_FALLBACK_CONCURRENCY)
+    try:
         in_flight: dict = {}
         while idx < len(all_cols) or in_flight:
             # Fill up to concurrency window.
@@ -175,9 +184,8 @@ def _fallback_chash_scan(
                 span_res = fut.result()
                 if span_res is None:
                     continue
-                # Recover doc_id from resolve_span's returned metadata — for
-                # fallback we don't have a T2 row, so query the collection
-                # directly.
+                # Recover doc_id from the hit collection — for fallback we
+                # have no T2 row, so query the collection directly.
                 try:
                     col = t3.get_collection(coll)
                     hit = col.get(
@@ -189,7 +197,12 @@ def _fallback_chash_scan(
                     doc_id = ""
                 return build_ref(coll=coll, doc_id=doc_id, span_result=span_res)
 
-    return None
+        return None
+    finally:
+        # cancel_futures=True (3.9+) drops queued futures; wait=False stops
+        # shutdown from joining in-flight probes. The pool itself dies with
+        # the last reference so we don't leak threads after a hit or timeout.
+        ex.shutdown(wait=False, cancel_futures=True)
 
 
 def reset_chash_fallback_warning_for_tests() -> None:
@@ -831,13 +844,14 @@ class Catalog:
                 if row["collection"] in live:
                     survivors.append(row)
                 else:
+                    # Go through the locked public API — this must not
+                    # race a concurrent upsert / delete_collection on the
+                    # same store. Direct conn.execute() would bypass
+                    # ChashIndex._lock (review #1).
                     try:
-                        chash_index.conn.execute(
-                            "DELETE FROM chash_index "
-                            "WHERE chash = ? AND physical_collection = ?",
-                            (hex_chash, row["collection"]),
+                        chash_index.delete_stale(
+                            chash=hex_chash, collection=row["collection"],
                         )
-                        chash_index.conn.commit()
                     except Exception:
                         _log.debug(
                             "chash_index_selfheal_delete_failed",

@@ -30,6 +30,11 @@ from click.testing import CliRunner
 def _seed_catalog_and_t3(tmp_path: Path):
     """Create a Catalog, T3 EphemeralClient, and T2 ChashIndex. Return
     (cat, t3, chash_index, chash_hex) after seeding one resolvable chunk.
+
+    ``chromadb.EphemeralClient()`` is a process-shared singleton — drop
+    the phase4-specific collection before recreating so two tests in
+    the same process don't leak chunks between ``knowledge__phase4``
+    instances.
     """
     from nexus.catalog.catalog import Catalog
     from nexus.db.t2.chash_index import ChashIndex
@@ -39,6 +44,10 @@ def _seed_catalog_and_t3(tmp_path: Path):
     cat = Catalog(cat_dir, cat_dir / ".catalog.db")
 
     t3 = chromadb.EphemeralClient()
+    try:
+        t3.delete_collection("knowledge__phase4")
+    except Exception:
+        pass
     chash = "a" * 64
     col = t3.get_or_create_collection("knowledge__phase4")
     col.add(
@@ -81,7 +90,11 @@ class TestCheckGroundingFailUngrounded:
         from nexus.commands.doc import check_grounding_cmd
 
         cat, t3, chash_index, known = _seed_catalog_and_t3(tmp_path)
-        fake_chash = "f" * 64
+        # Use a chash unique to this test — chromadb.EphemeralClient is a
+        # process-shared singleton, so a hex literal like "f"*64 could
+        # collide with a chunk seeded by another test's fallback scenario
+        # and make the "unresolved" assertion silently pass.
+        fake_chash = "9" * 63 + "4"
 
         doc = tmp_path / "mixed.md"
         doc.write_text(
@@ -145,12 +158,18 @@ class TestCheckExtensionsResolvesChashToDocId:
         fake_taxonomy = MagicMock()
         fake_taxonomy.chunk_grounded_in = fake_cgi
 
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _fake_taxonomy_ctx():
+            yield fake_taxonomy
+
         with patch(
             "nexus.commands.doc._phase4_catalog_t3_chash",
             return_value=(cat, t3, chash_index),
         ), patch(
             "nexus.commands.doc._phase4_t2_taxonomy",
-            return_value=fake_taxonomy,
+            _fake_taxonomy_ctx,
         ):
             runner = CliRunner()
             result = runner.invoke(

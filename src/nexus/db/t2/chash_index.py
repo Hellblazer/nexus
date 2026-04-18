@@ -154,6 +154,42 @@ class ChashIndex:
             self.conn.commit()
             return cur.rowcount
 
+    def delete_stale(self, *, chash: str, collection: str) -> int:
+        """Drop the single row identified by the compound PK ``(chash, collection)``.
+
+        Used by Phase 2's self-healing read in ``Catalog.resolve_chash``:
+        when a T2 row points at a collection that no longer exists in T3,
+        the stale row is removed on access. Must acquire ``self._lock``
+        so concurrent ``upsert`` / ``delete_collection`` calls on the
+        same store don't race against the same SQLite connection.
+
+        Returns the deleted row count (0 when the PK was already absent —
+        idempotent under concurrent self-heal invocations).
+        """
+        with self._lock:
+            cur = self.conn.execute(
+                "DELETE FROM chash_index "
+                "WHERE chash = ? AND physical_collection = ?",
+                (chash, collection),
+            )
+            self.conn.commit()
+            return cur.rowcount
+
+    def is_empty(self) -> bool:
+        """True when no rows exist — the "fresh install" guard.
+
+        Used by Phase 5's ``nx doc cite`` short-circuit so a caller
+        hitting the command before any backfill gets an actionable
+        error instead of a 30-second fallback timeout. Acquires
+        ``self._lock`` to keep the contract that every connection
+        access goes through the lock.
+        """
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT 1 FROM chash_index LIMIT 1"
+            ).fetchone()
+        return row is None
+
 
 # ── Dual-write helper (RDR-086 Phase 1.2) ────────────────────────────────────
 

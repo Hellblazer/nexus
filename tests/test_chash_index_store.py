@@ -240,6 +240,103 @@ class TestChashIndexErrors:
             store.close()
 
 
+# ── delete_stale + is_empty encapsulation (review #1, #6) ────────────────────
+
+
+class TestChashIndexEncapsulation:
+    """Every connection access must go through a locked public method.
+    ``resolve_chash``'s self-healing delete + ``nx doc cite``'s empty-index
+    short-circuit previously bypassed ``_lock`` by touching ``.conn``
+    directly — a data-race with concurrent writers.
+    """
+
+    def test_delete_stale_removes_exact_row(self, tmp_path: Path) -> None:
+        from nexus.db.t2.chash_index import ChashIndex
+
+        store = ChashIndex(tmp_path / "t2.db")
+        try:
+            store.upsert(chash="aa", collection="c1", doc_id="d1")
+            store.upsert(chash="aa", collection="c2", doc_id="d2")
+            removed = store.delete_stale(chash="aa", collection="c1")
+            assert removed == 1
+            rows = sorted(store.conn.execute(
+                "SELECT chash, physical_collection FROM chash_index"
+            ).fetchall())
+            assert rows == [("aa", "c2")]
+        finally:
+            store.close()
+
+    def test_delete_stale_missing_row_returns_zero(self, tmp_path: Path) -> None:
+        from nexus.db.t2.chash_index import ChashIndex
+
+        store = ChashIndex(tmp_path / "t2.db")
+        try:
+            removed = store.delete_stale(chash="absent", collection="nope")
+            assert removed == 0
+        finally:
+            store.close()
+
+    def test_delete_stale_acquires_lock(self, tmp_path: Path) -> None:
+        """Two threads must serialize on the same lock."""
+        import threading
+
+        from nexus.db.t2.chash_index import ChashIndex
+
+        store = ChashIndex(tmp_path / "t2.db")
+        try:
+            # Seed 100 rows, then have two threads racing delete_stale + upsert
+            # on disjoint keys. Both must complete without DB lock errors.
+            for i in range(100):
+                store.upsert(chash=f"h{i:03d}", collection="race", doc_id=f"d{i}")
+
+            errors: list[BaseException] = []
+
+            def deleter():
+                try:
+                    for i in range(50):
+                        store.delete_stale(
+                            chash=f"h{i:03d}", collection="race",
+                        )
+                except BaseException as e:
+                    errors.append(e)
+
+            def upserter():
+                try:
+                    for i in range(100, 150):
+                        store.upsert(
+                            chash=f"h{i:03d}", collection="race",
+                            doc_id=f"d{i}",
+                        )
+                except BaseException as e:
+                    errors.append(e)
+
+            t1 = threading.Thread(target=deleter)
+            t2 = threading.Thread(target=upserter)
+            t1.start(); t2.start(); t1.join(); t2.join()
+            assert not errors, errors
+        finally:
+            store.close()
+
+    def test_is_empty_on_fresh_db(self, tmp_path: Path) -> None:
+        from nexus.db.t2.chash_index import ChashIndex
+
+        store = ChashIndex(tmp_path / "t2.db")
+        try:
+            assert store.is_empty() is True
+        finally:
+            store.close()
+
+    def test_is_empty_false_once_populated(self, tmp_path: Path) -> None:
+        from nexus.db.t2.chash_index import ChashIndex
+
+        store = ChashIndex(tmp_path / "t2.db")
+        try:
+            store.upsert(chash="h", collection="c", doc_id="d")
+            assert store.is_empty() is False
+        finally:
+            store.close()
+
+
 # ── dual_write_chash_index helper ────────────────────────────────────────────
 
 
