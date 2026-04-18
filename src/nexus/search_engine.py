@@ -574,8 +574,22 @@ def _flag_contradictions(
 
     flagged: set[int] = set()
     pairs_checked = 0
+    # Search review I-8: cap the O(n²) pairwise check to keep a single
+    # noisy collection (near-duplicate chunks, e.g. a knowledge__* corpus
+    # with repeated boilerplate) from dominating search-engine latency.
+    # At 30 indices, the pair count is 435 — above that the pairwise
+    # signal is rarely informative and the cost grows quadratically.
+    _CONTRADICTION_MAX_PER_COLLECTION = 30
     for col, indices in col_groups.items():
         if len(indices) < 2:
+            continue
+        if len(indices) > _CONTRADICTION_MAX_PER_COLLECTION:
+            _log.debug(
+                "contradiction_check_skipped_collection",
+                collection=col,
+                size=len(indices),
+                cap=_CONTRADICTION_MAX_PER_COLLECTION,
+            )
             continue
         for a, b in itertools.combinations(indices, 2):
             pairs_checked += 1

@@ -535,6 +535,12 @@ def check_version_compatibility() -> None:
 def reset_singletons():
     """Reset lazy singletons (for tests only).
 
+    Search review I-2: also resets the T1 plan-match cache. Previously
+    the plan cache survived ``reset_singletons()`` calls — tests that
+    injected a fresh T1 but kept the populated plan cache saw stale
+    embeddings against the injected client and produced nondeterministic
+    matches.
+
     NOTE: _post_store_hooks is intentionally NOT cleared here.  Hooks are
     registered at module-import time (e.g. ``register_post_store_hook`` in
     ``nexus.mcp.core``).  Because Python only executes module-level code
@@ -550,6 +556,7 @@ def reset_singletons():
     _catalog_instance = None
     _catalog_mtime = 0.0
     clear_search_traces()
+    reset_plan_cache_for_tests()
 
 
 def inject_t1(t1, *, isolated: bool = False):

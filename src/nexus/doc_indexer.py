@@ -436,8 +436,25 @@ def _index_pdf_incremental(
     total = len(prepared)
 
     # Check for existing checkpoint — resume from where we left off.
+    #
+    # Indexing review I1: if the extractor/chunker produced fewer chunks
+    # this run than the checkpoint claims (e.g. Docling vs MinerU version
+    # mismatch or PDF re-chunked under a new chunk_chars setting), the
+    # naive ``min(ckpt.chunks_upserted, total)`` would skip the whole
+    # loop and leave the T3 collection with stale chunks beyond index
+    # ``total``. Detect the mismatch and discard the checkpoint so we
+    # re-index from 0 — slower but correct.
     ckpt = read_checkpoint(content_hash, collection_name)
     start_offset = 0
+    if ckpt is not None and ckpt.chunks_upserted > total:
+        _log.warning(
+            "checkpoint_count_shrunk_discarding",
+            stored=ckpt.chunks_upserted,
+            current=total,
+            pdf=str(file_path),
+        )
+        delete_checkpoint(content_hash, collection_name)
+        ckpt = None
     if ckpt is not None:
         start_offset = min(ckpt.chunks_upserted, total)
         _log.info(

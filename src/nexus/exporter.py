@@ -322,6 +322,14 @@ def import_collection(
     embeddings: list[list[float]] = []
     metadatas: list[dict] = []
 
+    # CLI review: infer the expected embedding byte-size from the first
+    # record and reject any subsequent record whose embedding doesn't
+    # match. This catches truncation/corruption mid-file without
+    # hard-coding a model-specific dim (tests use 384-dim MiniLM;
+    # production uses 1024-dim Voyage). Also sanity-checks that the
+    # byte-size is a multiple of 4 (float32).
+    expected_emb_bytes: int | None = None
+
     with open(input_path, "rb") as f:
         f.readline()  # skip header (already parsed above)
         with gzip.GzipFile(fileobj=f, mode="rb") as gz:
@@ -331,6 +339,23 @@ def import_collection(
                 doc: str = record["document"]
                 meta: dict = record["metadata"]
                 emb_bytes: bytes = record["embedding"]
+
+                if expected_emb_bytes is None:
+                    if len(emb_bytes) == 0 or len(emb_bytes) % 4 != 0:
+                        raise FormatVersionError(
+                            f"Export file {input_path!r} has a malformed "
+                            f"embedding for record {rec_id!r}: "
+                            f"{len(emb_bytes)} bytes is not a multiple of 4 "
+                            "(float32). File may be corrupt."
+                        )
+                    expected_emb_bytes = len(emb_bytes)
+                elif len(emb_bytes) != expected_emb_bytes:
+                    raise FormatVersionError(
+                        f"Export file {input_path!r} contains an embedding "
+                        f"of {len(emb_bytes)} bytes for record {rec_id!r}, "
+                        f"expected {expected_emb_bytes} bytes (same as the "
+                        "first record). File may be truncated or corrupt."
+                    )
 
                 if remaps and "source_path" in meta:
                     meta = dict(meta)

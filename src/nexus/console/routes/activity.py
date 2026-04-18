@@ -38,12 +38,21 @@ def _read_recent_events(
         if not path.exists():
             continue
         try:
-            lines = path.read_text().splitlines()
-            # Read from the end for efficiency
-            for line in reversed(lines):
+            # CLI review: stream-read from the file's end using a deque
+            # sized at ``limit`` so we never materialize the whole file
+            # in memory. Each route call used to ``path.read_text()``
+            # the full JSONL, blocking the event loop on any large
+            # catalog. This loop stays O(limit) instead of O(file).
+            from collections import deque
+
+            with path.open("r", encoding="utf-8") as fh:
+                tail: deque[str] = deque(maxlen=max(limit * 4, 400))
+                for raw in fh:
+                    tail.append(raw)
+            for raw_line in reversed(tail):
                 if len(events) >= limit:
                     break
-                line = line.strip()
+                line = raw_line.strip()
                 if not line:
                     continue
                 try:

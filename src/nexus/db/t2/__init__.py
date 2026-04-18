@@ -241,6 +241,19 @@ class T2Database:
         and should not. When the delete is by numeric id, we resolve
         the row's project and title first so the cascade can scope
         correctly.
+
+        Lock ordering (storage review I-4): this is the ONLY cross-domain
+        cascade in the facade. The order is:
+
+            1. ``memory._lock`` (ID resolution only, released before step 2)
+            2. ``memory._lock`` (re-acquired by ``memory.delete``)
+            3. ``taxonomy._lock`` (acquired by ``purge_assignments_for_doc``)
+
+        Callers MUST NOT hold ``taxonomy._lock`` when entering this
+        method — doing so would invert the ordering and deadlock against
+        any concurrent writer that follows the memory-before-taxonomy
+        convention established here. No current caller violates this
+        rule; the docstring is a contract for future edits.
         """
         # Resolve (project, title) for cascade scoping. Cheap indexed
         # lookup via the memory connection directly to avoid the

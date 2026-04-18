@@ -1886,18 +1886,26 @@ async def _nx_answer_plan_miss(
     import structlog as _slog
     _plog = _slog.get_logger()
     normalized = []
+    dropped: list[str] = []
     for step in steps:
         raw_tool = step.get("tool", "")
         bare = raw_tool.rsplit("__", 1)[-1] if raw_tool.startswith("mcp__") else raw_tool
         bare = _TOOL_ALIASES.get(bare.lower(), bare)
         if bare not in _ALLOWED_TOOLS:
             _plog.warning("planner_step_dropped", raw_tool=raw_tool, bare=bare)
+            dropped.append(raw_tool or bare or "?")
             continue
         step["tool"] = bare
         normalized.append(step)
 
     if not normalized:
-        raise ValueError("planner returned no dispatchable steps after normalization")
+        # Search review I-5: surface the dropped tools in the error so the
+        # caller's "planner failed" message can explain why (e.g. the LLM
+        # picked Bash / grep / WebFetch which aren't dispatchable).
+        detail = ", ".join(sorted(set(dropped))) if dropped else "(no tools at all)"
+        raise ValueError(
+            f"planner returned only non-dispatchable tools: {detail}"
+        )
 
     plan_json = json.dumps({"steps": normalized})
     return Match(
@@ -2051,8 +2059,12 @@ async def nx_answer(
                     )
             except Exception:
                 pass
+            # Search review I-5: propagate the planner's detail — e.g.
+            # "planner returned only non-dispatchable tools: Bash, grep"
+            # — so the user isn't left guessing why the inline path failed.
+            reason = str(exc) or "unknown error"
             return _result(
-                "No matching plan found and inline planner failed. "
+                f"No matching plan found and inline planner failed: {reason}. "
                 "Try rephrasing, or use search/query directly."
             )
     else:

@@ -74,9 +74,25 @@ def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool =
     conn.execute("PRAGMA journal_mode=WAL")
 
     try:
-        # Read last-seen version (bootstrap_version handles base tables,
-        # version table creation, and existing-vs-fresh detection).
-        last_seen = bootstrap_version(conn)
+        # CLI review: in --dry-run we must never write. ``bootstrap_version``
+        # creates base tables and seeds ``_nexus_version`` when absent,
+        # which is a legitimate write. Peek at the version row directly
+        # when dry-run is set and treat a missing row as the pre-bootstrap
+        # seed value (``PRE_REGISTRY_VERSION`` for an existing schema,
+        # ``0.0.0`` for a fresh DB).
+        if dry_run:
+            try:
+                row = conn.execute(
+                    "SELECT value FROM _nexus_version WHERE key='cli_version'"
+                ).fetchone()
+                last_seen = row[0] if row else "0.0.0"
+            except sqlite3.OperationalError:
+                # _nexus_version doesn't exist yet; fresh install.
+                last_seen = "0.0.0"
+        else:
+            # Read last-seen version (bootstrap_version handles base tables,
+            # version table creation, and existing-vs-fresh detection).
+            last_seen = bootstrap_version(conn)
         last_seen_t = _parse_version(last_seen)
 
         if force:
@@ -136,24 +152,73 @@ def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool =
                 click.echo(f"Up to date (v{current}).")
 
         # T3 steps (skipped in auto mode — require ChromaDB, may exceed hook timeout)
+        #
+        # CLI review: track T3 step completion in a dedicated
+        # ``_nexus_t3_steps`` table so a failed step is retried on the
+        # next ``nx upgrade`` run. The previous code caught the exception
+        # with a warning — but because ``apply_pending`` had already
+        # advanced ``_nexus_version.cli_version`` to ``current``, the
+        # next run computed ``pending_t3 = []`` and never re-tried.
         if not auto_mode and pending_t3:
             from nexus.commands._helpers import default_db_path
             from nexus.db import make_t3
             from nexus.db.t2 import T2Database
 
-            try:
-                t3_db = make_t3()
-                t2_db = T2Database(default_db_path())
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS _nexus_t3_steps ("
+                "    introduced TEXT NOT NULL, "
+                "    name       TEXT NOT NULL, "
+                "    applied_at TEXT NOT NULL, "
+                "    PRIMARY KEY (introduced, name)"
+                ")"
+            )
+            done_rows = conn.execute(
+                "SELECT introduced, name FROM _nexus_t3_steps"
+            ).fetchall()
+            done_set = {(r[0], r[1]) for r in done_rows}
+            unapplied = [s for s in pending_t3 if (s.introduced, s.name) not in done_set]
+            if not unapplied:
+                click.echo("All T3 upgrade steps already applied.")
+            else:
+                t2_db: T2Database | None = None
+                applied = 0
+                any_failed = False
                 try:
-                    for step in pending_t3:
+                    t3_db = make_t3()
+                    t2_db = T2Database(default_db_path())
+                    for step in unapplied:
                         click.echo(f"  T3: [{step.introduced}] {step.name}")
-                        step.fn(t3_db, t2_db.taxonomy)
-                    click.echo(f"Applied {len(pending_t3)} T3 upgrade step(s).")
+                        try:
+                            step.fn(t3_db, t2_db.taxonomy)
+                        except Exception as step_exc:
+                            any_failed = True
+                            _log.warning(
+                                "t3_upgrade_step_failed",
+                                introduced=step.introduced,
+                                name=step.name,
+                                error=str(step_exc),
+                                exc_info=True,
+                            )
+                            click.echo(
+                                f"    FAILED: {step_exc} — will retry on next `nx upgrade`",
+                                err=True,
+                            )
+                            continue
+                        conn.execute(
+                            "INSERT OR REPLACE INTO _nexus_t3_steps "
+                            "(introduced, name, applied_at) VALUES (?, ?, datetime('now'))",
+                            (step.introduced, step.name),
+                        )
+                        conn.commit()
+                        applied += 1
                 finally:
-                    t2_db.close()
-            except Exception:
-                _log.warning("t3_upgrade_failed", exc_info=True)
-                click.echo("T3 upgrade step failed (see log for details).")
+                    if t2_db is not None:
+                        t2_db.close()
+                if applied:
+                    click.echo(f"Applied {applied}/{len(unapplied)} T3 upgrade step(s).")
+                if any_failed:
+                    # Non-zero exit so CI / orchestrators see the failure.
+                    raise click.exceptions.Exit(1)
 
     finally:
         conn.close()

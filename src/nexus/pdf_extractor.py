@@ -722,7 +722,19 @@ class PDFExtractor:
 
             pdf_name = pdf_path.name
             base = Path(result_dir) / pdf_name / "auto"
-            md = (base / f"{pdf_name}.md").read_text(encoding="utf-8")
+            # Indexing review I2: assume MinerU's output layout but fail
+            # loudly with a useful message when it diverges (e.g. version
+            # upgrade changes the "auto" directory name). The subprocess
+            # already exited 0, so a missing output file is an unexpected
+            # state not a runtime error.
+            md_file = base / f"{pdf_name}.md"
+            if not md_file.exists():
+                raise RuntimeError(
+                    f"MinerU produced no output at {md_file} "
+                    f"(subprocess exited 0; layout may have changed). "
+                    f"Pages {start}–{end}, path={pdf_path}"
+                )
+            md = md_file.read_text(encoding="utf-8")
             content_list: list[dict] = json.loads(
                 (base / f"{pdf_name}_content_list.json").read_text(encoding="utf-8")
             )

@@ -592,6 +592,15 @@ class MemoryStore:
         Uses boundary matching via ``(',' || tags || ',') LIKE '%,{tag},%'``
         to avoid false positives (e.g. 'rdr' matching 'rdr-archived').
         """
+        # Storage review I-3: LIKE metacharacters `_` / `%` in *tag* would
+        # match unintended rows (bound parameters block SQL injection but
+        # not glob matching). Escape with a backslash and declare the
+        # escape char on the LIKE expression.
+        escaped_tag = (
+            tag.replace("\\", "\\\\")
+               .replace("%", "\\%")
+               .replace("_", "\\_")
+        )
         sql = """
             SELECT m.id, m.project, m.title, m.session, m.agent,
                    m.content, m.tags, m.timestamp, m.ttl,
@@ -599,10 +608,10 @@ class MemoryStore:
             FROM memory m
             JOIN memory_fts ON memory_fts.rowid = m.id
             WHERE memory_fts MATCH ?
-              AND (',' || m.tags || ',') LIKE ?
+              AND (',' || m.tags || ',') LIKE ? ESCAPE '\\'
             ORDER BY rank
         """
-        like_pattern = f"%,{tag},%"
+        like_pattern = f"%,{escaped_tag},%"
         safe = _sanitize_fts5(query)
         with self._lock:
             try:

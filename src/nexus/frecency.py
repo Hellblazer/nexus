@@ -92,9 +92,16 @@ def batch_frecency(
     *decay_rate* defaults to 0.01; *timeout* defaults to 30 s (batch uses 2×
     that for the internal subprocess call).  Override via TuningConfig.
     """
+    # Search review I-7: the previous sentinel ``COMMIT %ct`` relied on
+    # no file path starting with "COMMIT " — technically possible and
+    # would corrupt all subsequent file scores in that commit. Use a
+    # delimiter git will never emit for paths (vertical bars surrounding
+    # the timestamp) so we can split unambiguously on a substring that
+    # never appears in a valid file path.
+    _MARKER = "|||nxcommit|||"
     try:
         result = subprocess.run(
-            ["git", "log", "--format=COMMIT %ct", "--name-only"],
+            ["git", "log", f"--format={_MARKER}%ct{_MARKER}", "--name-only"],
             cwd=repo,
             capture_output=True,
             text=True,
@@ -110,19 +117,17 @@ def batch_frecency(
     scores: dict[Path, float] = {}
     current_ts: float | None = None
 
-    # Format: "COMMIT <timestamp>\n<file1>\n<file2>\n\n"
-    # The "COMMIT " prefix is 7 chars; blank lines between commits are skipped.
-    # Fragile assumption: file paths never start with "COMMIT ".
-    # If git output format changes, this parser may silently misassign timestamps.
+    # Format: "|||nxcommit|||<timestamp>|||nxcommit|||\n<file1>\n<file2>\n\n"
     for line in result.stdout.splitlines():
         line = line.strip()
         if not line:
             continue
-        if line.startswith("COMMIT "):
+        if line.startswith(_MARKER) and line.endswith(_MARKER):
+            inner = line[len(_MARKER):-len(_MARKER)]
             try:
-                current_ts = float(line[7:])
+                current_ts = float(inner)
             except ValueError:
-                current_ts = None  # intentional: corrupt git log line, skip
+                current_ts = None  # corrupt git log line, skip
         elif current_ts is not None:
             file_path = repo / line
             days = max(0.0, (now - current_ts) / 86400.0)
