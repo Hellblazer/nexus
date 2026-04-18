@@ -577,6 +577,73 @@ def test_rdr_files_do_not_trigger_on_file(tmp_path):
     assert len(calls) == 1 and calls[0][0].name == "code.py"
 
 
+# ── on_phase post-processing callbacks (nexus-vatx Gap 2) ───────────────────
+
+
+def test_on_phase_fires_on_post_processing_phases(tmp_path):
+    """`_run_index` emits phase markers for every post-per-file-loop stage
+    so the operator can tell hung from busy after "[N/N]" finishes."""
+    run, repo = _cb_repo(tmp_path)
+    db, _ = _mock_db()
+    phases: list[str] = []
+    with _cb_patches(db, rdr=(1, 0, 0)):
+        run(repo, _reg(), on_phase=phases.append)
+
+    # The key beats: RDR start/done, prune misclassified, prune deleted,
+    # catalog registration, and the closing "complete" line.
+    joined = "\n".join(phases)
+    assert "Discovering and indexing RDR markdown files" in joined
+    assert "RDR indexing done" in joined
+    assert "Pruning misclassified chunks" in joined
+    assert "Pruning misclassified done" in joined
+    assert "Pruning deleted files" in joined
+    assert "Pruning deleted files done" in joined
+    assert "Registering" in joined and "catalog entries" in joined
+    assert "Catalog registration done" in joined
+    assert "Post-processing complete" in joined
+
+
+def test_on_phase_reports_rdr_counts(tmp_path):
+    """The RDR "done" line carries the indexed/current/failed triple so
+    operators see the same summary the final stats would show."""
+    run, repo = _cb_repo(tmp_path)
+    db, _ = _mock_db()
+    phases: list[str] = []
+    with _cb_patches(db, rdr=(4, 2, 1)):
+        run(repo, _reg(), on_phase=phases.append)
+    done = next(p for p in phases if p.startswith("RDR indexing done"))
+    assert "4 indexed" in done
+    assert "2 current" in done
+    assert "1 failed" in done
+
+
+def test_on_phase_none_is_safe(tmp_path):
+    """on_phase=None must not raise — matches on_start/on_file idiom."""
+    run, repo = _cb_repo(tmp_path)
+    db, _ = _mock_db()
+    with _cb_patches(db):
+        run(repo, _reg())  # on_phase omitted → None default
+
+
+def test_on_phase_includes_stamp_phase_on_force(tmp_path):
+    """The pipeline-version stamp phase only fires when ``force=True``."""
+    run, repo = _cb_repo(tmp_path)
+    db, _ = _mock_db()
+
+    # Without force → no stamp phase
+    phases_no_force: list[str] = []
+    with _cb_patches(db):
+        run(repo, _reg(), on_phase=phases_no_force.append)
+    assert not any("Stamping pipeline version" in p for p in phases_no_force)
+
+    # With force → stamp phase present
+    phases_force: list[str] = []
+    with _cb_patches(db):
+        run(repo, _reg(), force=True, on_phase=phases_force.append)
+    assert any("Stamping pipeline version" in p for p in phases_force)
+    assert any("Pipeline version stamped" in p for p in phases_force)
+
+
 # ── Pagination tests ────────────────────────────────────────────────────────
 
 def test_prune_deleted_files_paginates(tmp_path):

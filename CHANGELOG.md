@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`nx index` post-processing phase markers** (nexus-vatx Gap 2). After the per-file `[N/N]` progress bar finishes, the pipeline keeps running for several seconds to minutes — RDR discovery, misclassified-chunk pruning, deleted-file pruning, pipeline-version stamping, and catalog registration. Previously the operator saw silence and could not tell hung from busy. A new `on_phase` callback threaded through `index_repository` → `_run_index` emits `[post] <phase>…` / `[post] <phase> done (Xs)` lines to stderr for each phase, bookended by `[post] Post-processing complete (Xs)`. The `nx index` CLI wires the callback to `click.echo(..., err=True)` so markers are visible even when stdout is redirected to a file. Four new tests in `tests/test_indexer.py` pin the phase surface.
+
 ### Fixed
 
 - **`nx taxonomy validate-refs` proximity false-positives on bullet lists and multi-count paragraphs** (nexus-7ay). Each markdown list item (`-`, `*`, `+`, ordered) is now its own count-binding scope — a count claim in one bullet no longer leaks into every sibling, which previously produced a single OK line followed by a cascade of spurious Drift lines. Within a prose paragraph that names more than one collection, each reference now binds to the textually nearest chunk-count claim instead of always the first one encountered. Seven new tests in `tests/test_ref_scanner.py` pin the expected proximity semantics.

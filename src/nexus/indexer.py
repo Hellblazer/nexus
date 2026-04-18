@@ -431,6 +431,7 @@ def index_repository(
     on_locked: str = "wait",
     on_start: Callable[[int], None] | None = None,
     on_file: Callable[[Path, int, float], None] | None = None,
+    on_phase: Callable[[str], None] | None = None,
 ) -> dict[str, int]:
     """Index all files in *repo* into T3 code__ and docs__ collections.
 
@@ -485,7 +486,7 @@ def index_repository(
                 _run_index_frecency_only(repo, registry)
                 stats: dict[str, int] = {}
             else:
-                stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_stale=force_stale, on_start=on_start, on_file=on_file)
+                stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_stale=force_stale, on_start=on_start, on_file=on_file, on_phase=on_phase)
                 registry.update(repo, head_hash=_current_head(repo))
             registry.update(repo, status="ready")
             return stats
@@ -960,6 +961,7 @@ def _run_index(
     force_stale: bool = False,
     on_start: Callable[[int], None] | None = None,
     on_file: Callable[[Path, int, float], None] | None = None,
+    on_phase: Callable[[str], None] | None = None,
 ) -> dict[str, int]:
     """Full indexing pipeline: classify → route → embed → upsert → prune.
 
@@ -1206,6 +1208,16 @@ def _run_index(
         if on_file:
             on_file(file, chunks, time.monotonic() - t0)
 
+    # Post-processing phase markers (nexus-vatx Gap 2): the per-file
+    # progress bar ends at "[N/N]" but the pipeline keeps running for
+    # pruning, stamping, and catalog registration. Without markers the
+    # operator sees silence and cannot tell hung from busy.
+    post_t0 = time.monotonic()
+
+    def _phase(msg: str) -> None:
+        if on_phase is not None:
+            on_phase(msg)
+
     # Discover and index RDR markdown files → rdr__
     # Pass the local embed_fn so RDR indexing respects NX_LOCAL mode
     # (without it, the RDR branch defaulted to Voyage 1024-dim; query
@@ -1215,12 +1227,20 @@ def _run_index(
     # ``(texts, model) -> (embeddings, actual_model)``. In local mode
     # hand over the tuple-returning adapter; in cloud mode pass None so
     # doc_indexer falls back to _embed_with_fallback on its own.
+    _phase("Discovering and indexing RDR markdown files…")
+    _t = time.monotonic()
     rdr_indexed, rdr_current, rdr_failed = _discover_and_index_rdrs(
         repo, rdr_abs_paths, db, voyage_key, now_iso, force=force,
         embed_fn=_embed_fn_doc,
     )
+    _phase(
+        f"RDR indexing done — {rdr_indexed} indexed, {rdr_current} current, "
+        f"{rdr_failed} failed ({time.monotonic() - _t:.1f}s)"
+    )
 
     # Prune misclassified chunks (reclassification cleanup)
+    _phase("Pruning misclassified chunks…")
+    _t = time.monotonic()
     _prune_misclassified(
         repo, code_collection, docs_collection,
         [f for _, f in code_files],
@@ -1228,8 +1248,11 @@ def _run_index(
         [f for _, f in pdf_files],
         db,
     )
+    _phase(f"Pruning misclassified done ({time.monotonic() - _t:.1f}s)")
 
     # C3: Prune deleted files — remove chunks for files no longer in the repo
+    _phase("Pruning deleted files…")
+    _t = time.monotonic()
     all_current_paths: set[str] = set()
     for _, f in code_files:
         all_current_paths.add(str(f))
@@ -1238,9 +1261,12 @@ def _run_index(
     for _, f in pdf_files:
         all_current_paths.add(str(f))
     _prune_deleted_files(code_collection, docs_collection, all_current_paths, db)
+    _phase(f"Pruning deleted files done ({time.monotonic() - _t:.1f}s)")
 
     # Stamp pipeline version on force indexing (after all work completes)
     if force:
+        _phase("Stamping pipeline version on forced collections…")
+        _t = time.monotonic()
         stamp_collection_version(code_col)
         stamp_collection_version(docs_col)
         # Stamp RDR collection if it was indexed
@@ -1252,6 +1278,7 @@ def _run_index(
                 stamp_collection_version(rdr_col)
             except Exception:
                 _log.debug("rdr_stamp_skipped", collection=rdr_col_name)
+        _phase(f"Pipeline version stamped ({time.monotonic() - _t:.1f}s)")
 
     # Catalog hook: register indexed files (opt-in, graceful absence)
     indexed_for_catalog: list[tuple[Path, str, str]] = []
@@ -1269,6 +1296,8 @@ def _run_index(
                 for md_file in sorted(rdr_dir.rglob("*.md")):
                     if md_file.is_file():
                         indexed_for_catalog.append((md_file, "rdr", rdr_col))
+    _phase(f"Registering {len(indexed_for_catalog)} catalog entries…")
+    _t = time.monotonic()
     _catalog_hook(
         repo=repo,
         repo_name=_repo_basename,
@@ -1276,6 +1305,9 @@ def _run_index(
         head_hash=_current_head(repo),
         indexed_files=indexed_for_catalog,
     )
+    _phase(f"Catalog registration done ({time.monotonic() - _t:.1f}s)")
+
+    _phase(f"Post-processing complete ({time.monotonic() - post_t0:.1f}s)")
 
     return {"rdr_indexed": rdr_indexed, "rdr_current": rdr_current, "rdr_failed": rdr_failed}
 
