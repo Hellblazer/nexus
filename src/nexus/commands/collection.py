@@ -539,3 +539,70 @@ def audit_cmd(name: str, fmt: str) -> None:
         click.echo(format_audit_json(report))
     else:
         click.echo(format_audit_human(report))
+
+
+@collection.command("merge-candidates")
+@click.option(
+    "--min-shared", "min_shared", type=int, default=3, show_default=True,
+    help="Minimum distinct shared topics between two collections "
+         "to qualify as a candidate.",
+)
+@click.option(
+    "--min-similarity", "min_similarity", type=float, default=0.5,
+    show_default=True,
+    help="Minimum mean ``similarity`` across shared topics.",
+)
+@click.option(
+    "--exclude-hubs", "exclude_hubs", is_flag=True, default=False,
+    help="Drop top-N cross-collection hub topics from the shared-topic "
+         "count before thresholding (reduces false positives from "
+         "generic hubs).",
+)
+@click.option(
+    "--hub-top-n", "hub_top_n", type=int, default=10, show_default=True,
+    help="Hub depth used by --exclude-hubs.",
+)
+@click.option(
+    "--limit", "limit", type=int, default=50, show_default=True,
+    help="Max number of candidate pairs returned.",
+)
+@click.option(
+    "--format", "fmt",
+    type=click.Choice(["table", "json"]), default="table", show_default=True,
+    help="Output format.",
+)
+@click.option(
+    "--create-link", "create_link", is_flag=True, default=False,
+    help="(deferred) Write catalog `relates`/`bridges` edges for each "
+         "surfaced pair. Currently reports a deferred-workflow advisory "
+         "per RDR §bridge-link — use nx catalog link manually.",
+)
+def merge_candidates_cmd(
+    min_shared: int, min_similarity: float,
+    exclude_hubs: bool, hub_top_n: int,
+    limit: int, fmt: str, create_link: bool,
+) -> None:
+    """Pair-wise cross-collection overlap ranking (RDR-087 Phase 4.3).
+
+    Surfaces (a, b) pairs where collection *a* projects into topics in
+    collection *b* with high similarity — hints at merge or bridge-
+    link opportunities for a human / agent to decide on. NEVER writes
+    catalog edges automatically; --create-link is advisory and deferred.
+    """
+    if create_link:
+        raise click.ClickException(
+            "--create-link is deferred per RDR-087 §bridge-link workflow. "
+            "Use `nx catalog link` manually after reviewing the candidates."
+        )
+    from nexus.merge_candidates import run_merge_candidates
+
+    click.echo(
+        run_merge_candidates(
+            min_shared=min_shared,
+            min_similarity=min_similarity,
+            exclude_hubs=exclude_hubs,
+            hub_top_n=hub_top_n,
+            limit=limit,
+            fmt=fmt,
+        )
+    )
