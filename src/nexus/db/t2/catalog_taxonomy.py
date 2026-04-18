@@ -2276,6 +2276,46 @@ class CatalogTaxonomy:
                 raise
         return out
 
+    def rename_collection(self, old: str, new: str) -> dict[str, int]:
+        """Re-point every taxonomy row from ``old`` → ``new``.
+
+        nexus-1ccq: `nx collection rename` cascade. Updates three
+        tables in one transaction:
+
+          * ``topics.collection`` — where the cluster lives
+          * ``topic_assignments.source_collection`` — projection origin
+          * ``taxonomy_meta.collection`` — discovery bookkeeping
+
+        ``topic_links`` is keyed by topic_id (FK), not by collection
+        name, so links survive unchanged. Returns count dict mirroring
+        ``purge_collection`` so the CLI can surface the row counts.
+        Transactional — partial failure rolls back.
+        """
+        out = {"topics": 0, "assignments": 0, "meta": 0}
+        with self._lock:
+            try:
+                cur = self.conn.execute(
+                    "UPDATE topics SET collection = ? WHERE collection = ?",
+                    (new, old),
+                )
+                out["topics"] = cur.rowcount or 0
+                cur = self.conn.execute(
+                    "UPDATE topic_assignments SET source_collection = ? "
+                    "WHERE source_collection = ?",
+                    (new, old),
+                )
+                out["assignments"] = cur.rowcount or 0
+                cur = self.conn.execute(
+                    "UPDATE taxonomy_meta SET collection = ? WHERE collection = ?",
+                    (new, old),
+                )
+                out["meta"] = cur.rowcount or 0
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
+        return out
+
     def purge_assignments_for_doc(self, project: str, title: str) -> int:
         """Remove topic_assignments for a deleted memory entry, empty topics.
 

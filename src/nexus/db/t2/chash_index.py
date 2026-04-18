@@ -154,6 +154,37 @@ class ChashIndex:
             self.conn.commit()
             return cur.rowcount
 
+    def rename_collection(self, *, old: str, new: str) -> int:
+        """Re-point every row from ``old`` → ``new``. Returns row count updated.
+
+        nexus-1ccq: `nx collection rename` cascade. Safe because
+        ``(chash, physical_collection)`` is the PK: when a chash existed
+        in both ``old`` and ``new`` simultaneously (should be rare,
+        but possible from interleaved indexes), the UPDATE would
+        collide on the new PK. We defend by deleting any
+        ``(chash, new)`` row that already exists before the UPDATE —
+        rename is an atomic re-home so preserving the ``new``-side row
+        would drop our updated ``doc_id`` silently.
+        """
+        with self._lock:
+            # Drop any pre-existing new-collection rows that would collide
+            # with the rename. This is conservative — most real renames
+            # have an empty destination — but guarantees the UPDATE below
+            # can never raise UNIQUE.
+            self.conn.execute(
+                "DELETE FROM chash_index "
+                "WHERE physical_collection = ? "
+                "  AND chash IN (SELECT chash FROM chash_index WHERE physical_collection = ?)",
+                (new, old),
+            )
+            cur = self.conn.execute(
+                "UPDATE chash_index SET physical_collection = ? "
+                "WHERE physical_collection = ?",
+                (new, old),
+            )
+            self.conn.commit()
+            return cur.rowcount
+
     def delete_stale(self, *, chash: str, collection: str) -> int:
         """Drop the single row identified by the compound PK ``(chash, collection)``.
 

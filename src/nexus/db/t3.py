@@ -838,6 +838,28 @@ class T3Database:
         """Delete a T3 collection entirely."""
         self._client_for(name).delete_collection(name)
 
+    def rename_collection(self, old: str, new: str) -> None:
+        """Rename a T3 collection via ``collection.modify(name=new)``.
+
+        ChromaDB exposes ``modify(name=...)`` as an O(1) metadata-only
+        rename — no embedding re-upload, no data movement. nexus-1ccq
+        exposes this primitive as ``nx collection rename``. Caller
+        guarantees ``new`` does not collide (we raise here if it does).
+        """
+        from nexus.corpus import validate_collection_name
+        validate_collection_name(new)
+        client = self._client_for(old)
+        if self.collection_exists(new):
+            raise ValueError(
+                f"cannot rename to {new!r}: a collection with that name already exists",
+            )
+        col = client.get_collection(old)
+        col.modify(name=new)
+        # Bust the embedding-function cache under the old key so the next
+        # caller fetching ``new`` does not reuse an unrelated EF.
+        with self._ef_lock:
+            self._ef_cache.pop(old, None)
+
     def ids_for_source(self, collection_name: str, source_path: str) -> list[str]:
         """Return all chunk IDs for a given source path. Does not fetch content.
 
