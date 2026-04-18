@@ -50,13 +50,16 @@ def test_batch_frecency_single_subprocess_call() -> None:
     """batch_frecency issues a single git log call regardless of file count."""
     from nexus.frecency import batch_frecency
 
+    # The parser expects ``|||nxcommit|||<ts>|||nxcommit|||`` sentinels per
+    # commit (search review I-7) so file paths that happen to start with
+    # "COMMIT " can't be misparsed as timestamp markers.
     git_output = (
-        "COMMIT 1700000000\n"
+        "|||nxcommit|||1700000000|||nxcommit|||\n"
         "\n"
         "src/foo.py\n"
         "src/bar.py\n"
         "\n"
-        "COMMIT 1699000000\n"
+        "|||nxcommit|||1699000000|||nxcommit|||\n"
         "\n"
         "src/foo.py\n"
     )
@@ -130,15 +133,15 @@ def test_git_commit_timestamps_nonzero_returncode() -> None:
 
 
 def test_batch_frecency_invalid_timestamp_skipped() -> None:
-    """When COMMIT line has non-numeric value, it is skipped gracefully."""
+    """When the commit sentinel has a non-numeric value, it is skipped gracefully."""
     from nexus.frecency import batch_frecency
 
     git_output = (
-        "COMMIT not-a-number\n"
+        "|||nxcommit|||not-a-number|||nxcommit|||\n"
         "\n"
         "src/foo.py\n"
         "\n"
-        "COMMIT 1700000000\n"
+        "|||nxcommit|||1700000000|||nxcommit|||\n"
         "\n"
         "src/bar.py\n"
     )
@@ -149,7 +152,7 @@ def test_batch_frecency_invalid_timestamp_skipped() -> None:
     with patch("subprocess.run", return_value=mock_result):
         scores = batch_frecency(Path("/repo"))
 
-    # foo.py should NOT be scored (its COMMIT timestamp was invalid → current_ts=None)
+    # foo.py should NOT be scored (timestamp was invalid → current_ts=None)
     assert Path("/repo/src/foo.py") not in scores
     # bar.py should be scored normally
     assert Path("/repo/src/bar.py") in scores

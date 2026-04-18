@@ -51,22 +51,65 @@ def _run_check_schema() -> None:
         return
 
     conn = sqlite3.connect(str(db_path))
-    conn.execute("PRAGMA busy_timeout=2000")
+    conn.execute("PRAGMA busy_timeout=5000")
+    # CLI review: match the other T2 connection defaults. Opening without
+    # WAL here caused immediate lock errors when a concurrent MCP tool
+    # was writing during the check.
+    conn.execute("PRAGMA journal_mode=WAL")
     lines: list[str] = []
     all_ok = True
 
-    # Check expected tables
+    # Check expected tables (base tables and every domain store).
     tables = {
         r[0]
         for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()
     }
-    for tbl in ("memory", "plans", "topics", "topic_assignments", "taxonomy_meta", "topic_links", "relevance_log", "search_telemetry"):
+    for tbl in ("memory", "plans", "topics", "topic_assignments", "taxonomy_meta", "topic_links", "relevance_log", "search_telemetry", "chash_index"):
         ok = tbl in tables
         lines.append(_check_line(f"Table {tbl}", ok))
         if not ok:
             all_ok = False
+
+    # CLI review: the FTS5 virtual tables are load-bearing for memory
+    # search + plan match. A schema without them passes the table
+    # check but fails at query time. Include them + critical indexes.
+    fts_names = {
+        r[0]
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND sql LIKE '%USING fts5%'"
+        ).fetchall()
+    }
+    for fts in ("memory_fts",):
+        ok = fts in fts_names or fts in tables
+        lines.append(_check_line(f"FTS5 table {fts}", ok))
+        if not ok:
+            all_ok = False
+
+    index_names = {
+        r[0]
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'"
+        ).fetchall()
+    }
+    expected_indexes = {
+        "idx_chash_index_collection",
+        "idx_topic_assignments_topic_id",
+    }
+    for idx in sorted(expected_indexes):
+        ok = idx in index_names
+        # Fail loud only for chash_index — the taxonomy index may not
+        # exist on pre-4.2 schemas that ran ad-hoc migrations; note it
+        # as a warning rather than a failure.
+        if idx == "idx_chash_index_collection":
+            lines.append(_check_line(f"Index {idx}", ok))
+            if not ok:
+                all_ok = False
+        else:
+            if not ok:
+                lines.append(f"  note: optional index {idx} missing")
 
     # Check _nexus_version
     has_ver = "_nexus_version" in tables
@@ -305,7 +348,9 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         owners = read_owners(owners_path) if owners_path.exists() else {}
 
         # Get registry for fallback
-        registry_path = Path.home() / ".config" / "nexus" / "repos.json"
+        from nexus.config import nexus_config_dir
+
+        registry_path = nexus_config_dir() / "repos.json"
         registry = RepoRegistry(registry_path) if registry_path.exists() else None
 
         t3_db = None

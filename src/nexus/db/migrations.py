@@ -493,6 +493,57 @@ def migrate_review_columns(conn: sqlite3.Connection) -> None:
 # Ordered by introduced version.  Tags verified via ``git tag --contains``
 # for each migration commit.
 
+def migrate_chash_index(conn: sqlite3.Connection) -> None:
+    """Create the ``chash_index`` table for RDR-086 Phase 1.
+
+    Global content-addressed chunk lookup: given a ``chash:<hex>`` span,
+    find which (physical_collection, doc_id) pair(s) carry that chunk.
+    Phase 2 builds ``Catalog.resolve_chash(chash)`` on top of this;
+    without the T2 index the serial-ChromaDB-filter alternative takes
+    ~300ms/collection (RF-6 measurement: 13 min on a 136-collection prod
+    DB). With the T2 JOIN, ~50µs.
+
+    Schema:
+      - chash              TEXT NOT NULL
+      - physical_collection TEXT NOT NULL
+      - doc_id             TEXT NOT NULL
+      - created_at         TEXT NOT NULL  (ISO-8601 UTC, set at INSERT time;
+                                           Phase 2 uses it for multi-match
+                                           newest-wins tie-break)
+      - PRIMARY KEY (chash, physical_collection)
+
+    Compound PK rationale (RF-10 Issue 1): the same chunk text (same
+    SHA-256 chash) can legitimately be indexed into multiple collections
+    — e.g. ``knowledge__delos`` and ``knowledge__delos_docling`` both
+    ingest the same paper, so every chunk's SHA-256 is identical. A
+    single-column chash PK would FK-violate on the second write.
+
+    Secondary index: ``idx_chash_index_collection`` on ``physical_collection``
+    — the Phase 1.4 delete cascade issues ``DELETE FROM chash_index WHERE
+    physical_collection = ?`` (inherited from nexus-lub), which without
+    the index would be a table scan.
+
+    Idempotent: no-op if the table already exists (re-apply safe).
+    """
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='chash_index'"
+    ).fetchone()
+    if row is not None:
+        return
+    conn.executescript("""
+        CREATE TABLE chash_index (
+            chash                TEXT NOT NULL,
+            physical_collection  TEXT NOT NULL,
+            doc_id               TEXT NOT NULL,
+            created_at           TEXT NOT NULL,
+            PRIMARY KEY (chash, physical_collection)
+        );
+        CREATE INDEX idx_chash_index_collection
+            ON chash_index(physical_collection);
+    """)
+    conn.commit()
+
+
 MIGRATIONS: list[Migration] = [
     Migration("1.10.0", "Memory FTS rebuild with title", migrate_memory_fts),
     Migration("2.8.0", "Add plan project column", migrate_plan_project),
@@ -525,6 +576,11 @@ MIGRATIONS: list[Migration] = [
         "4.6.1",
         "Rename search_telemetry.dropped_count to kept_count (RDR-087 errata)",
         migrate_rename_dropped_to_kept,
+    ),
+    Migration(
+        "4.7.0",
+        "Add chash_index table (RDR-086 Phase 1.1)",
+        migrate_chash_index,
     ),
 ]
 
@@ -621,10 +677,13 @@ def backfill_projection(t3_db: Any, taxonomy: Any) -> None:
 
     total_elapsed = time.monotonic() - total_start
     # Count actual rows written (INSERT OR IGNORE deduplicates; the per-call
-    # 'attempted' counts may exceed actual writes).
-    actual_written = taxonomy.conn.execute(
-        "SELECT COUNT(*) FROM topic_assignments WHERE assigned_by = 'projection'"
-    ).fetchone()[0]
+    # 'attempted' counts may exceed actual writes). Lock taken per storage
+    # review I-1 — this runs in a long upgrade context where concurrent
+    # writes on the same connection are plausible.
+    with taxonomy._lock:
+        actual_written = taxonomy.conn.execute(
+            "SELECT COUNT(*) FROM topic_assignments WHERE assigned_by = 'projection'"
+        ).fetchone()[0]
     print(
         f"  Backfill complete: {actual_written} projection assignments stored "
         f"({total_assigned} attempted) in {total_elapsed:.1f}s across {n} collections.",
@@ -725,15 +784,25 @@ def apply_pending(conn: sqlite3.Connection, current_version: str) -> None:
     """Run all migrations introduced between last-seen and *current_version*.
 
     Idempotent — every migration function has column/table-existence guards.
+
+    Concurrency: ``_upgrade_lock`` is held for the entire migration run so
+    a second thread opening the same database file never races the
+    bootstrap+migrate sequence. An earlier version reserved the
+    ``_upgrade_done`` slot *before* running migrations, relying on a
+    try/except to discard on failure — but that left a window where
+    ``bootstrap_version()`` could raise and a concurrent caller that
+    entered under the released lock would see the path as "done" and
+    proceed against a half-initialised schema (storage review C-1).
     """
     path_key = _connection_path_key(conn)
     with _upgrade_lock:
         if path_key in _upgrade_done:
             return
-        # Reserve the slot under lock — prevents concurrent entry.
-        _upgrade_done.add(path_key)
 
-    try:
+        # Run the entire sequence under the lock — bootstrap_version +
+        # migrations + version update. Only mark the path done on
+        # successful completion so a failure (or crash mid-migration)
+        # is retried by the next open.
         last_seen = bootstrap_version(conn)
         last_seen_t = _parse_version(last_seen)
         current_t = _parse_version(current_version)
@@ -756,13 +825,10 @@ def apply_pending(conn: sqlite3.Connection, current_version: str) -> None:
                 (current_version,),
             )
             conn.commit()
-    except Exception:
-        # On failure, remove from set under lock so the next call retries.
-        # Must hold _upgrade_lock to prevent a concurrent thread from
-        # seeing a stale _upgrade_done state mid-discard.
-        with _upgrade_lock:
-            _upgrade_done.discard(path_key)
-        raise
+
+        # Only now — after bootstrap + migrations + version update all
+        # succeeded — record the path as done.
+        _upgrade_done.add(path_key)
 
 
 def _connection_path_key(conn: sqlite3.Connection) -> str:

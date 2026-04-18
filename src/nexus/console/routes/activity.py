@@ -14,12 +14,11 @@ router = APIRouter(tags=["activity"])
 
 def _catalog_dir() -> Path:
     """Return the catalog directory path."""
-    import os
+    # Delegate to the canonical resolver so NEXUS_CONFIG_DIR and
+    # NEXUS_CATALOG_PATH redirections land consistently.
+    from nexus.config import catalog_path
 
-    override = os.environ.get("NEXUS_CATALOG_PATH")
-    if override:
-        return Path(override)
-    return Path.home() / ".config" / "nexus" / "catalog"
+    return catalog_path()
 
 
 def _read_recent_events(
@@ -38,12 +37,21 @@ def _read_recent_events(
         if not path.exists():
             continue
         try:
-            lines = path.read_text().splitlines()
-            # Read from the end for efficiency
-            for line in reversed(lines):
+            # CLI review: stream-read from the file's end using a deque
+            # sized at ``limit`` so we never materialize the whole file
+            # in memory. Each route call used to ``path.read_text()``
+            # the full JSONL, blocking the event loop on any large
+            # catalog. This loop stays O(limit) instead of O(file).
+            from collections import deque
+
+            with path.open("r", encoding="utf-8") as fh:
+                tail: deque[str] = deque(maxlen=max(limit * 4, 400))
+                for raw in fh:
+                    tail.append(raw)
+            for raw_line in reversed(tail):
                 if len(events) >= limit:
                     break
-                line = line.strip()
+                line = raw_line.strip()
                 if not line:
                     continue
                 try:
@@ -74,8 +82,25 @@ def _read_recent_events(
     return events[:limit]
 
 
+# Whitelist of kind values safe to emit into the CSS ``class`` attribute
+# of ``_stream.html``. Any other value is silently coerced to ``"event"``
+# to keep a future edit that threads untrusted input through this function
+# from producing attribute injection (CLI review Critical — defensive).
+_ALLOWED_KINDS: frozenset[str] = frozenset({"link", "document", "event"})
+
+
+def _safe_kind(value: str) -> str:
+    return value if value in _ALLOWED_KINDS else "event"
+
+
 def _event_summary(event: dict[str, Any]) -> dict[str, str]:
-    """Extract display fields from a raw event."""
+    """Extract display fields from a raw event.
+
+    Every returned ``kind`` is drawn from ``_ALLOWED_KINDS`` so the
+    template's ``<tr class="event-row {{ e.kind }}">`` cannot be used
+    to inject arbitrary attributes even if the JSONL source is
+    corrupted or written by an external tool.
+    """
     kind = event.get("_event_type", "")
     if kind == "link":
         return {
@@ -83,14 +108,14 @@ def _event_summary(event: dict[str, Any]) -> dict[str, str]:
             "actor": event.get("created_by", ""),
             "action": event.get("link_type", "link"),
             "target": f"{event.get('from_t', '')} → {event.get('to_t', '')}",
-            "kind": "link",
+            "kind": _safe_kind("link"),
         }
     return {
         "timestamp": event.get("indexed_at", ""),
         "actor": event.get("created_by", "") or "indexer",
         "action": f"register {event.get('content_type', '')}",
         "target": event.get("title", event.get("tumbler", "")),
-        "kind": "document",
+        "kind": _safe_kind("document"),
     }
 
 

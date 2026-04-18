@@ -681,10 +681,24 @@ class PDFExtractor:
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,  # own process group
             )
+            # Use killpg(getpgid(pid)) rather than killpg(pid) directly —
+            # with start_new_session=True the pgid equals pid at spawn time,
+            # but by the time we kill the child may be dead and the PID
+            # recycled by the kernel. getpgid() resolves the current pgid
+            # from the live PID slot (raises ProcessLookupError if the
+            # process is already gone, which we swallow). Matches the
+            # session.py:301 idiom (indexing review C1).
+            def _killpg_safe() -> None:
+                try:
+                    pgid = _os.getpgid(proc.pid)
+                    _os.killpg(pgid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
             try:
                 returncode = proc.wait(timeout=180)
             except subprocess.TimeoutExpired:
-                _os.killpg(proc.pid, signal.SIGKILL)
+                _killpg_safe()
                 proc.wait()
                 raise RuntimeError(
                     f"MinerU subprocess timed out after 180s "
@@ -692,10 +706,7 @@ class PDFExtractor:
                 )
             if returncode != 0:
                 # Clean up any orphaned children in the process group
-                try:
-                    _os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                _killpg_safe()
                 _log.error(
                     "mineru_subprocess_failed",
                     returncode=returncode,
@@ -707,14 +718,23 @@ class PDFExtractor:
                     f"(pages {start}–{end}, path={pdf_path})"
                 )
             # Kill any lingering workers in the process group
-            try:
-                _os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            _killpg_safe()
 
             pdf_name = pdf_path.name
             base = Path(result_dir) / pdf_name / "auto"
-            md = (base / f"{pdf_name}.md").read_text(encoding="utf-8")
+            # Indexing review I2: assume MinerU's output layout but fail
+            # loudly with a useful message when it diverges (e.g. version
+            # upgrade changes the "auto" directory name). The subprocess
+            # already exited 0, so a missing output file is an unexpected
+            # state not a runtime error.
+            md_file = base / f"{pdf_name}.md"
+            if not md_file.exists():
+                raise RuntimeError(
+                    f"MinerU produced no output at {md_file} "
+                    f"(subprocess exited 0; layout may have changed). "
+                    f"Pages {start}–{end}, path={pdf_path}"
+                )
+            md = md_file.read_text(encoding="utf-8")
             content_list: list[dict] = json.loads(
                 (base / f"{pdf_name}_content_list.json").read_text(encoding="utf-8")
             )

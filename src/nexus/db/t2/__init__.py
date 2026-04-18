@@ -62,6 +62,7 @@ import sqlite3
 import structlog
 
 from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+from nexus.db.t2.chash_index import ChashIndex
 from nexus.db.t2.memory_store import (
     AccessPolicy,
     MemoryStore,
@@ -135,6 +136,10 @@ class T2Database:
         # get_topic_docs JOIN (RDR-063 §Cross-Domain Contracts).
         self.taxonomy: CatalogTaxonomy = CatalogTaxonomy(path, self.memory)
         self.telemetry: Telemetry = Telemetry(path)
+        # RDR-086 Phase 1: global chash → (collection, doc_id) lookup
+        # populated by the six indexing write sites via best-effort
+        # dual-write after each T3 upsert.
+        self.chash_index: ChashIndex = ChashIndex(path)
 
     def __enter__(self) -> "T2Database":
         return self
@@ -149,6 +154,7 @@ class T2Database:
         close order is reverse of construction so that the most
         recently opened connection (telemetry) is released first.
         """
+        self.chash_index.close()
         self.telemetry.close()
         self.taxonomy.close()
         self.plans.close()
@@ -235,6 +241,19 @@ class T2Database:
         and should not. When the delete is by numeric id, we resolve
         the row's project and title first so the cascade can scope
         correctly.
+
+        Lock ordering (storage review I-4): this is the ONLY cross-domain
+        cascade in the facade. The order is:
+
+            1. ``memory._lock`` (ID resolution only, released before step 2)
+            2. ``memory._lock`` (re-acquired by ``memory.delete``)
+            3. ``taxonomy._lock`` (acquired by ``purge_assignments_for_doc``)
+
+        Callers MUST NOT hold ``taxonomy._lock`` when entering this
+        method — doing so would invert the ordering and deadlock against
+        any concurrent writer that follows the memory-before-taxonomy
+        convention established here. No current caller violates this
+        rule; the docstring is a contract for future edits.
         """
         # Resolve (project, title) for cascade scoping. Cheap indexed
         # lookup via the memory connection directly to avoid the

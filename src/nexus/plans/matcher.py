@@ -104,6 +104,13 @@ def plan_match(
         for plan_id, distance in hits:
             row = library.get_plan(plan_id)
             if row is None:
+                # Search review I-4: the plan was deleted from T2 but the
+                # T1 cache still carries its embedding. Evict it now so
+                # the stale row stops skewing future top-N fetches.
+                try:
+                    cache.remove(plan_id)
+                except Exception:
+                    pass
                 continue
             confidence = max(0.0, 1.0 - float(distance))
             if confidence < min_confidence:

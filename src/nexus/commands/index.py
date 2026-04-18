@@ -14,7 +14,9 @@ _log = structlog.get_logger()
 
 
 def _registry_path() -> Path:
-    return Path.home() / ".config" / "nexus" / "repos.json"
+    from nexus.config import nexus_config_dir
+
+    return nexus_config_dir() / "repos.json"
 
 
 def _registry() -> RepoRegistry:

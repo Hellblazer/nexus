@@ -153,6 +153,27 @@ class PlanSessionCache:
             return False
         return self._upsert_row(row)
 
+    def remove(self, plan_id: int) -> bool:
+        """Drop a stale cache entry for *plan_id*.
+
+        Called from ``plan_match`` when ``library.get_plan(plan_id)``
+        returns ``None`` — the plan was deleted from T2 but the T1
+        embedding remains (search review I-4). Best-effort; returns
+        False when the cache is unavailable or the delete fails.
+        """
+        if not self.is_available:
+            return False
+        doc_id = f"{self._session_id}:{int(plan_id)}"
+        try:
+            self._col.delete(ids=[doc_id])
+            return True
+        except Exception:
+            _log.warning(
+                "plan_session_cache_remove_failed",
+                plan_id=plan_id, exc_info=True,
+            )
+            return False
+
     def _upsert_row(self, row: dict[str, Any]) -> bool:
         description = (row.get("query") or "").strip()
         if not description:

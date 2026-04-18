@@ -421,9 +421,11 @@ def _check_git_hooks() -> list[HealthResult]:
     from nexus.commands.hooks import _effective_hooks_dir, SENTINEL_BEGIN
     from nexus.registry import RepoRegistry
 
+    from nexus.config import nexus_config_dir
+
     results: list[HealthResult] = []
     hook_names = ("post-commit", "post-merge", "post-rewrite")
-    registry_path = Path.home() / ".config" / "nexus" / "repos.json"
+    registry_path = nexus_config_dir() / "repos.json"
 
     try:
         reg = RepoRegistry(registry_path)
@@ -467,7 +469,9 @@ def _check_git_hooks() -> list[HealthResult]:
 
 
 def _check_index_log() -> list[HealthResult]:
-    log_path = Path.home() / ".config" / "nexus" / "index.log"
+    from nexus.config import nexus_config_dir
+
+    log_path = nexus_config_dir() / "index.log"
     if log_path.exists():
         mtime = log_path.stat().st_mtime
         age_s = time.time() - mtime

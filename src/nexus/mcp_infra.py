@@ -447,6 +447,35 @@ def taxonomy_assign_batch(
         return 0
 
 
+# ── Chash dual-write (RDR-086 Phase 1.2) ──────────────────────────────────────
+
+
+def chash_dual_write_batch(
+    doc_ids: list[str],
+    collection: str,
+    metadatas: list[dict],
+) -> None:
+    """Best-effort dual-write of ``chash_index`` rows after a T3 upsert.
+
+    Called from each of the six indexing write sites immediately after
+    ``t3.upsert_chunks_with_embeddings(...)``. Opens a fresh T2Database
+    (matching ``taxonomy_assign_batch``'s lifecycle), delegates to the
+    store-level ``dual_write_chash_index`` helper, and closes. Logs at
+    debug level on any outer failure — a T2 failure must never abort
+    the enclosing T3 write path.
+    """
+    if not doc_ids or not metadatas:
+        return
+    try:
+        from nexus.db.t2.chash_index import dual_write_chash_index
+
+        with t2_ctx() as db:
+            dual_write_chash_index(db.chash_index, collection, doc_ids, metadatas)
+    except Exception:
+        import structlog
+        structlog.get_logger().debug("chash_dual_write_batch_failed", exc_info=True)
+
+
 # ── Version compatibility check (RDR-076) ─────────────────────────────────────
 
 
@@ -506,6 +535,12 @@ def check_version_compatibility() -> None:
 def reset_singletons():
     """Reset lazy singletons (for tests only).
 
+    Search review I-2: also resets the T1 plan-match cache. Previously
+    the plan cache survived ``reset_singletons()`` calls — tests that
+    injected a fresh T1 but kept the populated plan cache saw stale
+    embeddings against the injected client and produced nondeterministic
+    matches.
+
     NOTE: _post_store_hooks is intentionally NOT cleared here.  Hooks are
     registered at module-import time (e.g. ``register_post_store_hook`` in
     ``nexus.mcp.core``).  Because Python only executes module-level code
@@ -521,6 +556,7 @@ def reset_singletons():
     _catalog_instance = None
     _catalog_mtime = 0.0
     clear_search_traces()
+    reset_plan_cache_for_tests()
 
 
 def inject_t1(t1, *, isolated: bool = False):

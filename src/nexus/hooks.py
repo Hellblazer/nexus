@@ -32,7 +32,9 @@ _log = structlog.get_logger()
 # -- Helpers ------------------------------------------------------------------
 
 def _default_db_path() -> Path:
-    return Path.home() / ".config" / "nexus" / "memory.db"
+    from nexus.config import nexus_config_dir
+
+    return nexus_config_dir() / "memory.db"
 
 
 def _open_t2() -> T2Database:

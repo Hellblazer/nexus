@@ -87,8 +87,18 @@ def _maybe_emit_silent_zero_note(
         err=True,
     )
 
-# Directory where ripgrep cache files are stored (overridable in tests via monkeypatch)
-_CONFIG_DIR: Path = Path.home() / ".config" / "nexus"
+# Directory where ripgrep cache files are stored (overridable in tests via monkeypatch).
+# Resolved at import time via NEXUS_CONFIG_DIR helper for sandbox isolation.
+def _resolve_config_dir_at_import() -> Path:
+    import os as _os
+
+    override = _os.environ.get("NEXUS_CONFIG_DIR", "").strip()
+    if override:
+        return Path(override)
+    return Path.home() / ".config" / "nexus"
+
+
+_CONFIG_DIR: Path = _resolve_config_dir_at_import()
 
 # Prefixes to strip when mapping collection names to cache file names
 _COLLECTION_PREFIXES = ("code__", "docs__", "rdr__", "knowledge__")

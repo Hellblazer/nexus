@@ -339,3 +339,140 @@ class TestCollectionDeleteCommandCascades:
             ).fetchone()[0]
         assert topics == 0
         assert meta == 0
+
+
+# ── Phase 1.4 (nexus-r9b) — chash_index cascade ──────────────────────────────
+
+
+class TestChashIndexDeleteCascade:
+    """RDR-086 Phase 1.4: `nx collection delete` must also remove every
+    chash_index row pointing at the deleted collection. Without the cascade,
+    Phase 2's ``Catalog.resolve_chash`` would return stale (collection,
+    doc_id) tuples for chunks that no longer exist in T3.
+    """
+
+    def test_cli_delete_cascades_chash_index(self, tmp_path, monkeypatch):
+        """After CLI delete, every chash_index row for that collection is gone."""
+        from click.testing import CliRunner
+        from unittest.mock import MagicMock, patch
+
+        from nexus.db.t2 import T2Database
+        from nexus.commands.collection import delete_cmd
+
+        db_path = tmp_path / "memory.db"
+        with T2Database(db_path) as db:
+            db.chash_index.upsert(
+                chash="aa11", collection="code__gone", doc_id="d1",
+            )
+            db.chash_index.upsert(
+                chash="bb22", collection="code__gone", doc_id="d2",
+            )
+            # Row in a different collection — must survive the cascade.
+            db.chash_index.upsert(
+                chash="cc33", collection="code__stays", doc_id="d3",
+            )
+
+        fake_t3 = MagicMock()
+        fake_t3.delete_collection = MagicMock()
+
+        runner = CliRunner()
+        with patch("nexus.commands.collection._t3", return_value=fake_t3), \
+             patch("nexus.mcp_infra.default_db_path", return_value=db_path), \
+             patch(
+                 "nexus.commands._helpers.default_db_path",
+                 return_value=db_path,
+             ):
+            result = runner.invoke(delete_cmd, ["code__gone", "--yes"])
+
+        assert result.exit_code == 0, result.output
+
+        with T2Database(db_path) as verify_db:
+            gone_rows = verify_db.chash_index.conn.execute(
+                "SELECT COUNT(*) FROM chash_index WHERE physical_collection = ?",
+                ("code__gone",),
+            ).fetchone()[0]
+            stays_rows = verify_db.chash_index.conn.execute(
+                "SELECT COUNT(*) FROM chash_index WHERE physical_collection = ?",
+                ("code__stays",),
+            ).fetchone()[0]
+        assert gone_rows == 0, "cascade must clear deleted collection's rows"
+        assert stays_rows == 1, "cascade must NOT touch other collections"
+
+    def test_cli_delete_cascades_chash_index_when_t3_absent(
+        self, tmp_path, monkeypatch,
+    ):
+        """Cascade runs even when the Chroma delete raises NotFoundError —
+        same fail-open contract as the taxonomy cascade.
+        """
+        from click.testing import CliRunner
+        from unittest.mock import MagicMock, patch
+        from chromadb.errors import NotFoundError
+
+        from nexus.db.t2 import T2Database
+        from nexus.commands.collection import delete_cmd
+
+        db_path = tmp_path / "memory.db"
+        with T2Database(db_path) as db:
+            db.chash_index.upsert(
+                chash="aa11", collection="docs__orphan", doc_id="d1",
+            )
+
+        fake_t3 = MagicMock()
+        fake_t3.delete_collection = MagicMock(
+            side_effect=NotFoundError(
+                "Collection [docs__orphan] does not exist",
+            )
+        )
+
+        runner = CliRunner()
+        with patch("nexus.commands.collection._t3", return_value=fake_t3), \
+             patch("nexus.mcp_infra.default_db_path", return_value=db_path), \
+             patch(
+                 "nexus.commands._helpers.default_db_path",
+                 return_value=db_path,
+             ):
+            result = runner.invoke(delete_cmd, ["docs__orphan", "--yes"])
+
+        assert result.exit_code == 0, result.output
+
+        with T2Database(db_path) as verify_db:
+            remaining = verify_db.chash_index.conn.execute(
+                "SELECT COUNT(*) FROM chash_index WHERE physical_collection = ?",
+                ("docs__orphan",),
+            ).fetchone()[0]
+        assert remaining == 0
+
+    def test_cli_delete_reports_chash_index_count(self, tmp_path, monkeypatch):
+        """Delete output must include the chash_index row count so the
+        operator sees the full cascade's effect, not just taxonomy rows.
+        """
+        from click.testing import CliRunner
+        from unittest.mock import MagicMock, patch
+
+        from nexus.db.t2 import T2Database
+        from nexus.commands.collection import delete_cmd
+
+        db_path = tmp_path / "memory.db"
+        with T2Database(db_path) as db:
+            for i in range(5):
+                db.chash_index.upsert(
+                    chash=f"h{i:02d}", collection="code__reported", doc_id=f"d{i}",
+                )
+
+        fake_t3 = MagicMock()
+        fake_t3.delete_collection = MagicMock()
+
+        runner = CliRunner()
+        with patch("nexus.commands.collection._t3", return_value=fake_t3), \
+             patch("nexus.mcp_infra.default_db_path", return_value=db_path), \
+             patch(
+                 "nexus.commands._helpers.default_db_path",
+                 return_value=db_path,
+             ):
+            result = runner.invoke(delete_cmd, ["code__reported", "--yes"])
+
+        assert result.exit_code == 0, result.output
+        assert "chash" in result.output.lower() or "5" in result.output, (
+            f"Expected chash_index cleanup count in delete output. "
+            f"Got: {result.output!r}"
+        )

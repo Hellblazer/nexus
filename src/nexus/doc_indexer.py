@@ -220,18 +220,38 @@ def _embed_with_fallback(
                 bucket.acquire()
                 batch_results[idx] = _embed_one_batch(batch)
 
+            # Indexing review C3: drain every future before re-raising.
+            # The previous shape collected results in submission order via
+            # future.result() — the first raising future aborted the loop
+            # and the executor's __exit__ discarded the remaining results,
+            # so a later batch's 429 was silently swallowed. We now wait
+            # for *all* futures to complete, record the first exception,
+            # then re-raise it — callers that retry see the full failure
+            # surface, not just the first one.
             with ThreadPoolExecutor(max_workers=_PARALLEL_WORKERS) as pool:
                 futures = [
                     pool.submit(_rate_limited_embed, i, b)
                     for i, b in enumerate(batches)
                 ]
-                # Collect in submission order to preserve embedding order
+                first_exc: BaseException | None = None
+                for future in futures:
+                    try:
+                        future.result()
+                    except BaseException as exc:
+                        if first_exc is None:
+                            first_exc = exc
+                if first_exc is not None:
+                    raise first_exc
+
+                # All batches completed successfully — extend in submission
+                # order to preserve embedding alignment with the input chunks.
                 done_count = 0
-                for i, future in enumerate(futures):
-                    future.result()  # raises if the batch failed
+                for i, _ in enumerate(futures):
                     embs = batch_results[i]
                     if embs is None:
-                        raise RuntimeError(f"Batch {i} embedding result missing after future completed")
+                        raise RuntimeError(
+                            f"Batch {i} embedding result missing after future completed"
+                        )
                     all_embeddings.extend(embs)
                     done_count += len(embs)
                     if on_progress:
@@ -348,6 +368,13 @@ def _index_document(
             m["embedding_model"] = actual_model
     db.upsert_chunks_with_embeddings(collection_name, ids, documents, embeddings, metadatas)
 
+    # Chash dual-write (RDR-086 Phase 1.2): global chash → (collection, doc_id).
+    try:
+        from nexus.mcp_infra import chash_dual_write_batch
+        chash_dual_write_batch(ids, collection_name, metadatas)
+    except Exception:
+        _log.debug("chash_dual_write_failed", exc_info=True)
+
     # Incremental taxonomy: assign chunks to nearest existing topics.
     try:
         from nexus.mcp_infra import taxonomy_assign_batch
@@ -374,7 +401,9 @@ def _index_document(
             break
         offset += 300
     if stale_ids:
-        _chroma_with_retry(col.delete, ids=stale_ids)
+        # Batch deletes at MAX_RECORDS_PER_WRITE=300 (indexing review I4).
+        for i in range(0, len(stale_ids), 300):
+            _chroma_with_retry(col.delete, ids=stale_ids[i:i + 300])
 
     if return_metadata:
         return metadatas
@@ -407,8 +436,25 @@ def _index_pdf_incremental(
     total = len(prepared)
 
     # Check for existing checkpoint — resume from where we left off.
+    #
+    # Indexing review I1: if the extractor/chunker produced fewer chunks
+    # this run than the checkpoint claims (e.g. Docling vs MinerU version
+    # mismatch or PDF re-chunked under a new chunk_chars setting), the
+    # naive ``min(ckpt.chunks_upserted, total)`` would skip the whole
+    # loop and leave the T3 collection with stale chunks beyond index
+    # ``total``. Detect the mismatch and discard the checkpoint so we
+    # re-index from 0 — slower but correct.
     ckpt = read_checkpoint(content_hash, collection_name)
     start_offset = 0
+    if ckpt is not None and ckpt.chunks_upserted > total:
+        _log.warning(
+            "checkpoint_count_shrunk_discarding",
+            stored=ckpt.chunks_upserted,
+            current=total,
+            pdf=str(file_path),
+        )
+        delete_checkpoint(content_hash, collection_name)
+        ckpt = None
     if ckpt is not None:
         start_offset = min(ckpt.chunks_upserted, total)
         _log.info(
@@ -447,6 +493,13 @@ def _index_pdf_incremental(
 
         # Upsert
         t3.upsert_chunks_with_embeddings(collection_name, batch_ids, batch_docs, embeddings, batch_metas)
+
+        # Chash dual-write (RDR-086 Phase 1.2): global chash → (collection, doc_id).
+        try:
+            from nexus.mcp_infra import chash_dual_write_batch
+            chash_dual_write_batch(batch_ids, collection_name, batch_metas)
+        except Exception:
+            _log.debug("chash_dual_write_failed", exc_info=True)
 
         # Incremental taxonomy: assign this batch to nearest existing topics.
         try:
@@ -487,7 +540,9 @@ def _index_pdf_incremental(
             break
         offset += 300
     if stale_ids:
-        _chroma_with_retry(col.delete, ids=stale_ids)
+        # Batch deletes at MAX_RECORDS_PER_WRITE=300 (indexing review I4).
+        for i in range(0, len(stale_ids), 300):
+            _chroma_with_retry(col.delete, ids=stale_ids[i:i + 300])
 
     # Clean up checkpoint on success
     delete_checkpoint(content_hash, collection_name)
@@ -842,6 +897,13 @@ def index_pdf(
             m["embedding_model"] = actual_model
     db.upsert_chunks_with_embeddings(col_name, ids, documents, embeddings, metadatas_list)
 
+    # Chash dual-write (RDR-086 Phase 1.2): global chash → (collection, doc_id).
+    try:
+        from nexus.mcp_infra import chash_dual_write_batch
+        chash_dual_write_batch(ids, col_name, metadatas_list)
+    except Exception:
+        _log.debug("chash_dual_write_failed", exc_info=True)
+
     # Incremental taxonomy: assign chunks to nearest existing topics.
     try:
         from nexus.mcp_infra import taxonomy_assign_batch
@@ -867,7 +929,9 @@ def index_pdf(
             break
         offset += 300
     if stale_ids:
-        _chroma_with_retry(col.delete, ids=stale_ids)
+        # Batch deletes at MAX_RECORDS_PER_WRITE=300 (indexing review I4).
+        for i in range(0, len(stale_ids), 300):
+            _chroma_with_retry(col.delete, ids=stale_ids[i:i + 300])
 
     _register_in_catalog(metadatas_list, len(metadatas_list))
 

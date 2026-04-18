@@ -6,6 +6,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.7.0] - 2026-04-18
+
+Plugin version aligned with conexus 4.7.0. No plugin-level functional
+changes (no new skills, agents, hooks, or slash commands). See root
+CHANGELOG for the full arc: RDR-086 chash span surface (Phases 1–5),
+codebase-wide review remediation (29 findings across Critical /
+Important / Suggestion tiers), and the `NEXUS_CONFIG_DIR` isolation
+refactor that routes every ~/.config/nexus path through a canonical
+helper.
+
 ## [4.6.5] - 2026-04-18
 
 Plugin version aligned with conexus 4.6.5. No plugin-level functional

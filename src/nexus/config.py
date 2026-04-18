@@ -273,6 +273,29 @@ CREDENTIALS: dict[str, str] = {
 }
 
 
+# ── Config directory helper ──────────────────────────────────────────────────
+
+
+def nexus_config_dir() -> Path:
+    """Return the Nexus config / data directory, respecting ``NEXUS_CONFIG_DIR``.
+
+    Single source of truth for every path under ``.config/nexus/`` so sandbox
+    runs, tests, and multi-profile installs can redirect the entire T2 +
+    catalog + session + log footprint with one environment variable.
+
+    Precedence:
+      1. ``NEXUS_CONFIG_DIR`` env var (explicit override)
+      2. ``~/.config/nexus`` (default)
+
+    Nothing is created here — callers either read or ``mkdir(parents=True,
+    exist_ok=True)`` as needed.
+    """
+    override = os.environ.get("NEXUS_CONFIG_DIR", "").strip()
+    if override:
+        return Path(override)
+    return Path.home() / ".config" / "nexus"
+
+
 # ── Local mode helpers ───────────────────────────────────────────────────────
 
 
@@ -296,12 +319,13 @@ def _default_local_path() -> Path:
 def catalog_path() -> Path:
     """Return the catalog directory path.
 
-    Priority: NEXUS_CATALOG_PATH env → default ~/.config/nexus/catalog/
+    Priority: NEXUS_CATALOG_PATH env → NEXUS_CONFIG_DIR/catalog/
+    → ~/.config/nexus/catalog/
     """
     env = os.environ.get("NEXUS_CATALOG_PATH", "").strip()
     if env:
         return Path(env)
-    return Path.home() / ".config" / "nexus" / "catalog"
+    return nexus_config_dir() / "catalog"
 
 
 def is_local_mode() -> bool:
@@ -462,7 +486,7 @@ def _apply_env_overrides(config: dict[str, Any]) -> dict[str, Any]:
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def _global_config_path() -> Path:
-    return Path.home() / ".config" / "nexus" / "config.yml"
+    return nexus_config_dir() / "config.yml"
 
 
 def get_credential(name: str) -> str:
@@ -559,7 +583,7 @@ def load_config(repo_root: Path | None = None) -> dict[str, Any]:
     config = copy.deepcopy(_DEFAULTS)
 
     # Global config
-    global_path = Path.home() / ".config" / "nexus" / "config.yml"
+    global_path = nexus_config_dir() / "config.yml"
     if global_path.exists():
         with global_path.open() as fh:
             data = yaml.safe_load(fh) or {}

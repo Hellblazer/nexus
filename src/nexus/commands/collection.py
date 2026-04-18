@@ -88,28 +88,37 @@ def delete_cmd(name: str, yes: bool) -> None:
 
     # Cascade-purge taxonomy state (topics, assignments, links, meta)
     # so `nx taxonomy status` / hub detection don't drag ghost rows.
+    # RDR-086 Phase 1.4: same block also purges chash_index so Phase 2's
+    # Catalog.resolve_chash never returns (collection, doc_id) tuples
+    # pointing at chunks that no longer exist in T3.
     taxonomy_counts: dict[str, int] | None = None
+    chash_deleted = 0
     try:
         from nexus.commands._helpers import default_db_path
         from nexus.db.t2 import T2Database
 
         with T2Database(default_db_path()) as db:
             taxonomy_counts = db.taxonomy.purge_collection(name)
+            chash_deleted = db.chash_index.delete_collection(name)
     except Exception as exc:
         prefix = "absent" if t3_absent else "succeeded"
         click.echo(
-            f"warn: T3 delete {prefix} but taxonomy cascade failed: {exc}",
+            f"warn: T3 delete {prefix} but T2 cascade failed: {exc}",
             err=True,
         )
 
+    parts: list[str] = []
     if taxonomy_counts and any(taxonomy_counts.values()):
-        click.echo(
-            f"Deleted: {name} (taxonomy: "
+        parts.append(
             f"{taxonomy_counts['topics']} topics, "
             f"{taxonomy_counts['assignments']} assignments, "
             f"{taxonomy_counts['links']} links, "
-            f"{taxonomy_counts['meta']} meta)"
+            f"{taxonomy_counts['meta']} meta"
         )
+    if chash_deleted:
+        parts.append(f"{chash_deleted} chash rows")
+    if parts:
+        click.echo(f"Deleted: {name} ({'; '.join(parts)})")
     else:
         click.echo(f"Deleted: {name}")
 
@@ -307,13 +316,23 @@ _BACKFILL_BATCH = 300
 def _backfill_chunk_text_hash(
     col,
     on_progress: Callable[[int, int, int], None] | None = None,
+    *,
+    chash_index: "ChashIndex | None" = None,
 ) -> tuple[int, int, int]:
     """Add chunk_text_hash to chunks that are missing it. Returns (updated, skipped, total).
 
     Args:
         col: ChromaDB collection.
         on_progress: Optional callback(updated, skipped, total) called after each batch.
+        chash_index: Optional T2 store (RDR-086 Phase 1.3). When provided, every
+            chunk that has — or gains — a chunk_text_hash is registered as a
+            ``(chash, physical_collection, doc_id)`` row. Reconciles gaps left
+            by Phase 1.2 dual-write failures and pre-Phase-1 collections. Pass
+            ``None`` (default) to preserve the T3-only behaviour that legacy
+            callers in ``commands/catalog.py`` still rely on.
     """
+    from nexus.db.t2.chash_index import dual_write_chash_index
+
     updated = 0
     skipped = 0
     total = 0
@@ -325,15 +344,26 @@ def _backfill_chunk_text_hash(
             break
         update_ids: list[str] = []
         update_metas: list[dict] = []
+        # Parallel lists for the T2 reconciliation write — ids + metas for every
+        # row whose metadata ends this batch with a chunk_text_hash, whether
+        # newly computed or previously present.
+        t2_ids: list[str] = []
+        t2_metas: list[dict] = []
         for chunk_id, doc, meta in zip(ids, batch["documents"], batch["metadatas"]):
             total += 1
             if meta and meta.get("chunk_text_hash"):
                 skipped += 1
+                # Reconciliation path: T3 already has the hash but T2 may not.
+                t2_ids.append(chunk_id)
+                t2_metas.append(dict(meta))
                 continue
             new_meta = dict(meta) if meta else {}
             new_meta["chunk_text_hash"] = hashlib.sha256(doc.encode()).hexdigest()
             update_ids.append(chunk_id)
             update_metas.append(new_meta)
+            # Newly-hashed path: register in T2 alongside T3.
+            t2_ids.append(chunk_id)
+            t2_metas.append(new_meta)
         if update_ids:
             try:
                 col.update(ids=update_ids, metadatas=update_metas)
@@ -344,6 +374,9 @@ def _backfill_chunk_text_hash(
                     skipped += len(update_ids)  # count as skipped — too many metadata keys
                 else:
                     raise
+        if chash_index is not None and t2_ids:
+            # Best-effort: dual_write_chash_index swallows per-row failures.
+            dual_write_chash_index(chash_index, col.name, t2_ids, t2_metas)
         offset += len(ids)
         if on_progress:
             on_progress(updated, skipped, total)
@@ -375,30 +408,62 @@ def backfill_hash_cmd(name: str | None, all_collections: bool) -> None:
     else:
         targets = [name]
 
-    grand_updated = 0
-    for i, col_name in enumerate(sorted(targets), 1):
-        try:
-            col = db._client.get_collection(col_name)
-        except Exception as exc:
-            click.echo(f"  [{i}/{len(targets)}] {col_name}: {type(exc).__name__}, skipping", err=True)
-            continue
+    # RDR-086 Phase 1.3: open a single long-lived ChashIndex connection for
+    # the whole backfill run so each collection reuses it instead of opening
+    # a fresh sqlite3 connection per chunk batch.
+    from nexus.commands._helpers import default_db_path
+    from nexus.db.t2.chash_index import ChashIndex
+    from tqdm import tqdm
 
-        def _progress(updated: int, skipped: int, total: int) -> None:
-            msg = f"\r  [{i}/{len(targets)}] {col_name}: {updated} updated, {skipped} skipped, {total} scanned..."
-            sys.stderr.write(msg)
-            sys.stderr.flush()
+    chash_index = ChashIndex(default_db_path())
+    try:
+        grand_updated = 0
+        for i, col_name in enumerate(sorted(targets), 1):
+            try:
+                col = db._client.get_collection(col_name)
+            except Exception as exc:
+                click.echo(f"  [{i}/{len(targets)}] {col_name}: {type(exc).__name__}, skipping", err=True)
+                continue
 
-        updated, skipped, total_count = _backfill_chunk_text_hash(col, on_progress=_progress)
-        grand_updated += updated
-        # Clear the progress line
-        sys.stderr.write("\r" + " " * 120 + "\r")
-        sys.stderr.flush()
-        if updated:
-            click.echo(f"  [{i}/{len(targets)}] {col_name}: {updated} updated, {skipped} already had hash ({total_count} total)")
-        else:
-            click.echo(f"  [{i}/{len(targets)}] {col_name}: all {total_count} chunks already have hash")
+            # Query collection count so tqdm has a known total. On quota
+            # failure, fall back to an indeterminate bar.
+            try:
+                col_total = col.count()
+            except Exception:
+                col_total = 0
 
-    click.echo(f"Done: {grand_updated} chunks updated across {len(targets)} collection(s)")
+            # disable=None lets tqdm auto-detect TTY — bar shows in an
+            # interactive terminal, silently no-ops in CI logs. The
+            # per-collection click.echo summary below is always emitted.
+            bar = tqdm(
+                total=col_total or None,
+                disable=None,
+                desc=f"[{i}/{len(targets)}] {col_name}",
+                unit="chunk",
+                leave=False,
+            )
+
+            def _progress(updated: int, skipped: int, total: int) -> None:
+                # total = cumulative scanned so far; update bar position.
+                bar.n = total
+                bar.refresh()
+
+            try:
+                updated, skipped, total_count = _backfill_chunk_text_hash(
+                    col, on_progress=_progress, chash_index=chash_index,
+                )
+            finally:
+                bar.close()
+
+            grand_updated += updated
+            if updated:
+                click.echo(f"  [{i}/{len(targets)}] {col_name}: {updated} updated, {skipped} already had hash ({total_count} total)")
+            else:
+                click.echo(f"  [{i}/{len(targets)}] {col_name}: all {total_count} chunks already have hash")
+
+        click.echo(f"Done: {grand_updated} chunks updated across {len(targets)} collection(s)")
+    finally:
+        chash_index.close()
 
 
 @collection.command("rewrite-metadata")

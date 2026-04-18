@@ -176,7 +176,11 @@ def search(
             results.sort(key=lambda r: r.distance)
         if not results:
             if structured:
-                return {"ids": [], "tumblers": [], "distances": [], "collections": []}
+                return {
+                    "ids": [], "tumblers": [], "distances": [],
+                    "collections": [], "chunk_collections": [],
+                    "chunk_text_hash": [],
+                }
             return "No results."
 
         # Apply pagination
@@ -184,7 +188,11 @@ def search(
         page = results[offset:offset + limit]
         if not page:
             if structured:
-                return {"ids": [], "tumblers": [], "distances": [], "collections": []}
+                return {
+                    "ids": [], "tumblers": [], "distances": [],
+                    "collections": [], "chunk_collections": [],
+                    "chunk_text_hash": [],
+                }
             return f"No results at offset {offset} (total {total})."
 
         # Record search trace for RDR-061 E2 retrieval feedback correlation.
@@ -204,12 +212,23 @@ def search(
 
         # Structured return for plan-runner step output contract.
         # Resolves $stepN.ids / $stepN.collections / $stepN.distances refs.
+        # RDR-086 Phase 3.1: chunk_text_hash forwarded per-result so callers
+        # can build chash:<hex> citations without a second fetch.
+        #
+        # Review #7: ``collections`` is dedup'd (plan-runner contract) while
+        # ``chunk_collections`` is per-result aligned with ``ids`` so
+        # consumers that need per-chunk origin (e.g. ``nx_answer``) get
+        # the right collection for every hit, not just the top result.
         if structured:
             return {
                 "ids": [r.id for r in page],
                 "tumblers": [r.metadata.get("tumbler", "") for r in page],
                 "distances": [float(r.distance) for r in page],
                 "collections": list({r.collection for r in page}),
+                "chunk_collections": [r.collection for r in page],
+                "chunk_text_hash": [
+                    r.metadata.get("chunk_text_hash", "") for r in page
+                ],
             }
 
         lines: list[str] = []
@@ -414,7 +433,11 @@ def query(
         results.sort(key=lambda r: r.distance)
         if not results:
             if structured:
-                return {"ids": [], "tumblers": [], "distances": [], "collections": []}
+                return {
+                    "ids": [], "tumblers": [], "distances": [],
+                    "collections": [], "chunk_collections": [],
+                    "chunk_text_hash": [],
+                }
             return "No documents found."
 
         if structured:
@@ -424,6 +447,14 @@ def query(
                 "tumblers": [r.metadata.get("tumbler", "") for r in page],
                 "distances": [float(r.distance) for r in page],
                 "collections": list({r.collection for r in page}),
+                # Review #7: per-result aligned list for consumers
+                # that need per-chunk origin (e.g. nx_answer envelope).
+                "chunk_collections": [r.collection for r in page],
+                # RDR-086 Phase 3.2: chunk_text_hash forwarded for chash
+                # citation authoring at the document layer.
+                "chunk_text_hash": [
+                    r.metadata.get("chunk_text_hash", "") for r in page
+                ],
             }
 
         # Group by document: use content_hash or source_title as doc key
@@ -1855,18 +1886,26 @@ async def _nx_answer_plan_miss(
     import structlog as _slog
     _plog = _slog.get_logger()
     normalized = []
+    dropped: list[str] = []
     for step in steps:
         raw_tool = step.get("tool", "")
         bare = raw_tool.rsplit("__", 1)[-1] if raw_tool.startswith("mcp__") else raw_tool
         bare = _TOOL_ALIASES.get(bare.lower(), bare)
         if bare not in _ALLOWED_TOOLS:
             _plog.warning("planner_step_dropped", raw_tool=raw_tool, bare=bare)
+            dropped.append(raw_tool or bare or "?")
             continue
         step["tool"] = bare
         normalized.append(step)
 
     if not normalized:
-        raise ValueError("planner returned no dispatchable steps after normalization")
+        # Search review I-5: surface the dropped tools in the error so the
+        # caller's "planner failed" message can explain why (e.g. the LLM
+        # picked Bash / grep / WebFetch which aren't dispatchable).
+        detail = ", ".join(sorted(set(dropped))) if dropped else "(no tools at all)"
+        raise ValueError(
+            f"planner returned only non-dispatchable tools: {detail}"
+        )
 
     plan_json = json.dumps({"steps": normalized})
     return Match(
@@ -1920,7 +1959,8 @@ async def nx_answer(
     budget_usd: float = 0.25,
     trace: bool = True,
     dimensions: dict[str, Any] | None = None,
-) -> str:
+    structured: bool = False,
+) -> "str | dict":
     """Answer a knowledge question using plan-match-first retrieval. RDR-080 P1.
 
     Internal flow:
@@ -1945,9 +1985,18 @@ async def nx_answer(
             ``{"verb": "research"}`` (etc.) so verb skills narrow the
             match to templates of the appropriate verb.  Unset means
             the matcher considers every active plan.
+        structured: RDR-086 Phase 3.3 opt-in. When True, returns an
+            envelope dict ``{final_text, chunks, plan_id, step_count}``
+            instead of a bare string. Each entry in ``chunks`` carries
+            ``id``, ``chash``, ``collection`` (and ``distance``, ``text``
+            when available) so callers can build ``chash:<hex>`` citations
+            without a second fetch. The single-step guard path produces
+            the same envelope shape — the guard logic itself is unchanged.
+            On pure-generate plans or retrieval misses, ``chunks`` is ``[]``.
 
     Returns:
-        The final step's output as a human-readable string.
+        The final step's output — a string by default, or the envelope
+        dict described above when ``structured=True``.
     """
     import time
     import structlog as _slog
@@ -1958,6 +2007,19 @@ async def nx_answer(
 
     _log = _slog.get_logger()
     start = time.monotonic()
+
+    # RDR-086 Phase 3.3: envelope builder. String mode returns the text
+    # directly; structured mode wraps it into the documented envelope.
+    def _result(text: str, *, plan_id: int = 0, step_count: int = 0,
+                chunks: "list | None" = None) -> "str | dict":
+        if not structured:
+            return text
+        return {
+            "final_text": text,
+            "chunks": chunks if chunks is not None else [],
+            "plan_id": plan_id,
+            "step_count": step_count,
+        }
 
     # ── Step 1: plan-match gate ──────────────────────────────────────────
     try:
@@ -1974,7 +2036,7 @@ async def nx_answer(
                 n=5,
             )
     except Exception as exc:
-        return f"Error during plan match: {exc}"
+        return _result(f"Error during plan match: {exc}")
 
     if not matches or not _nx_answer_match_is_hit(matches[0].confidence):
         # Plan miss — inline LLM planner via claude_dispatch.
@@ -1997,8 +2059,12 @@ async def nx_answer(
                     )
             except Exception:
                 pass
-            return (
-                "No matching plan found and inline planner failed. "
+            # Search review I-5: propagate the planner's detail — e.g.
+            # "planner returned only non-dispatchable tools: Bash, grep"
+            # — so the user isn't left guessing why the inline path failed.
+            reason = str(exc) or "unknown error"
+            return _result(
+                f"No matching plan found and inline planner failed: {reason}. "
                 "Try rephrasing, or use search/query directly."
             )
     else:
@@ -2021,7 +2087,59 @@ async def nx_answer(
             step_args = plan["steps"][0].get("args", {})
             q = step_args.get("question", question)
             corpus = step_args.get("corpus", "knowledge")
-            result_text = query(question=q, corpus=corpus)
+            # RDR-086 review #4: exactly one ``query()`` call — the
+            # previous structured path re-ran non-structured for
+            # ``result_text`` (doubling the T3 round-trip) even though
+            # the structured envelope already contains enough to
+            # synthesize a result summary.
+            if structured:
+                q_struct = query(question=q, corpus=corpus, structured=True)
+                chunks: list[dict] = []
+                if isinstance(q_struct, dict):
+                    ids = q_struct.get("ids", [])
+                    colls_list = q_struct.get("chunk_collections") or (
+                        q_struct.get("collections") or []
+                    )
+                    hashes = q_struct.get("chunk_text_hash", [])
+                    dists = q_struct.get("distances", [])
+                    default_coll = colls_list[0] if colls_list else ""
+                    for i, cid in enumerate(ids):
+                        chunks.append({
+                            "id": cid,
+                            "chash": hashes[i] if i < len(hashes) else "",
+                            # Per-chunk alignment when chunk_collections is
+                            # available (Phase 3 surface fix); otherwise
+                            # fall back to the first dedup'd collection.
+                            "collection": (
+                                colls_list[i]
+                                if i < len(colls_list)
+                                else default_coll
+                            ),
+                            "distance": dists[i] if i < len(dists) else None,
+                        })
+                # Synthesize a compact human-readable summary from the
+                # envelope — no second query() required.
+                if chunks:
+                    lines = [
+                        f"Found {len(chunks)} result"
+                        f"{'s' if len(chunks) != 1 else ''} for {q!r}:",
+                    ]
+                    for ch in chunks[:5]:
+                        lines.append(
+                            f"  - {ch['id']} in {ch['collection']} "
+                            f"(distance={ch['distance']:.3f})"
+                            if ch["distance"] is not None
+                            else f"  - {ch['id']} in {ch['collection']}"
+                        )
+                    if len(chunks) > 5:
+                        lines.append(f"  ... and {len(chunks) - 5} more")
+                    result_text = "\n".join(lines)
+                else:
+                    result_text = "No results."
+            else:
+                result_text = query(question=q, corpus=corpus)
+                chunks = []
+
             elapsed_ms = int((time.monotonic() - start) * 1000)
             try:
                 with _t2_ctx() as db:
@@ -2033,7 +2151,12 @@ async def nx_answer(
                     )
             except Exception:
                 pass
-            return str(result_text)
+            return _result(
+                str(result_text),
+                plan_id=best.plan_id,
+                step_count=1,
+                chunks=chunks,
+            )
         except Exception as exc:
             elapsed_ms = int((time.monotonic() - start) * 1000)
             try:
@@ -2046,7 +2169,11 @@ async def nx_answer(
                     )
             except Exception:
                 pass
-            return f"Error in single-step query: {exc}"
+            return _result(
+                f"Error in single-step query: {exc}",
+                plan_id=best.plan_id,
+                step_count=1,
+            )
 
     # ── Step 3: seed link-context ────────────────────────────────────────
     try:
@@ -2074,13 +2201,47 @@ async def nx_answer(
                 )
         except Exception:
             pass
-        return f"Error during plan execution: {exc}"
+        return _result(
+            f"Error during plan execution: {exc}",
+            plan_id=best.plan_id,
+        )
 
     # ── Step 5: extract final answer ─────────────────────────────────────
     elapsed_ms = int((time.monotonic() - start) * 1000)
     final_step = result.steps[-1] if result.steps else {}
     text_key = next((k for k in ("text", "summary", "answer") if k in final_step), None)
     final_text = str(final_step.get(text_key, "")) if text_key else json.dumps(final_step)
+
+    # RDR-086 Phase 3.3: harvest chunk refs from retrieval-op steps so the
+    # envelope's ``chunks`` list carries id+chash+collection for every
+    # retrieved chunk, ordered by final-step relevance. Review #7: prefer
+    # the per-result ``chunk_collections`` list (Phase 3 fix) so every
+    # chunk is tagged with its actual origin — not the first dedup'd
+    # collection.
+    envelope_chunks: list[dict] = []
+    if structured:
+        for step_out in result.steps:
+            if not isinstance(step_out, dict):
+                continue
+            ids = step_out.get("ids")
+            if not isinstance(ids, list) or not ids:
+                continue
+            hashes = step_out.get("chunk_text_hash", []) or []
+            per_chunk_colls = step_out.get("chunk_collections") or []
+            dedup_colls = step_out.get("collections", []) or []
+            dists = step_out.get("distances", []) or []
+            default_coll = dedup_colls[0] if dedup_colls else ""
+            for i, cid in enumerate(ids):
+                if i < len(per_chunk_colls):
+                    coll = per_chunk_colls[i]
+                else:
+                    coll = default_coll
+                envelope_chunks.append({
+                    "id": cid,
+                    "chash": hashes[i] if i < len(hashes) else "",
+                    "collection": coll,
+                    "distance": dists[i] if i < len(dists) else None,
+                })
 
     _log.info(
         "nx_answer_complete",
@@ -2144,7 +2305,12 @@ async def nx_answer(
     except Exception:
         pass
 
-    return final_text
+    return _result(
+        final_text,
+        plan_id=best.plan_id,
+        step_count=len(result.steps),
+        chunks=envelope_chunks if structured else None,
+    )
 
 
 @mcp.tool()

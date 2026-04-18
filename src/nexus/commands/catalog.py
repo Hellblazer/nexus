@@ -1432,8 +1432,10 @@ def _make_t3():
 
 
 def _make_registry():
+    from nexus.config import nexus_config_dir
     from nexus.registry import RepoRegistry
-    return RepoRegistry(Path.home() / ".config" / "nexus" / "repos.json")
+
+    return RepoRegistry(nexus_config_dir() / "repos.json")
 
 
 @catalog.command("backfill", hidden=True)

@@ -451,6 +451,24 @@ class CatalogTaxonomy:
                 (min_collections,),
             ).fetchall()
 
+            # Storage review S-5: fetch the per-topic source collection
+            # set in a single grouped query instead of N per-hub queries
+            # under the lock. For a large hub count the old shape held
+            # the taxonomy lock through N SELECTs, blocking every
+            # concurrent writer.
+            sources_rows = self.conn.execute(
+                """
+                SELECT topic_id, source_collection
+                FROM topic_assignments
+                WHERE assigned_by = 'projection'
+                  AND source_collection IS NOT NULL
+                ORDER BY topic_id, source_collection
+                """
+            ).fetchall()
+            sources_by_topic: dict[int, list[str]] = {}
+            for tid, sc in sources_rows:
+                sources_by_topic.setdefault(int(tid), []).append(sc)
+
             hubs: list[HubRow] = []
             for topic_id, label, collection, df, total, last_at in rows:
                 icf_value = float(icf_map.get(int(topic_id), 1.0))
@@ -458,14 +476,7 @@ class CatalogTaxonomy:
                     continue
 
                 sources = tuple(
-                    r[0] for r in self.conn.execute(
-                        "SELECT DISTINCT source_collection "
-                        "FROM topic_assignments "
-                        "WHERE topic_id = ? AND assigned_by = 'projection' "
-                        "AND source_collection IS NOT NULL "
-                        "ORDER BY source_collection",
-                        (int(topic_id),),
-                    ).fetchall()
+                    dict.fromkeys(sources_by_topic.get(int(topic_id), []))
                 )
 
                 lower_label = (label or "").lower()
@@ -1004,10 +1015,30 @@ class CatalogTaxonomy:
                 "SELECT collection FROM topics WHERE id = ?", (source_id,),
             ).fetchone()
             collection = row[0] if row else None
-            # Move assignments (ignore duplicates)
+            # Move assignments — storage review I-5: when the same doc_id
+            # is assigned to both source and target topics, keep the row
+            # with the higher similarity (best projection quality). The
+            # previous INSERT OR IGNORE silently discarded the source row
+            # even when it scored higher.
             self.conn.execute(
-                "INSERT OR IGNORE INTO topic_assignments (doc_id, topic_id, assigned_by) "
-                "SELECT doc_id, ?, assigned_by FROM topic_assignments WHERE topic_id = ?",
+                "INSERT INTO topic_assignments "
+                "    (doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection) "
+                "SELECT doc_id, ?, assigned_by, similarity, assigned_at, source_collection "
+                "FROM topic_assignments WHERE topic_id = ? "
+                "ON CONFLICT(doc_id, topic_id) DO UPDATE SET "
+                "    similarity = MAX("
+                "        COALESCE(topic_assignments.similarity, -1.0), "
+                "        COALESCE(excluded.similarity, -1.0)), "
+                "    assigned_at = CASE "
+                "        WHEN COALESCE(excluded.similarity, -1.0) > "
+                "             COALESCE(topic_assignments.similarity, -1.0) "
+                "        THEN excluded.assigned_at "
+                "        ELSE topic_assignments.assigned_at END, "
+                "    source_collection = CASE "
+                "        WHEN COALESCE(excluded.similarity, -1.0) > "
+                "             COALESCE(topic_assignments.similarity, -1.0) "
+                "        THEN excluded.source_collection "
+                "        ELSE topic_assignments.source_collection END",
                 (target_id, source_id),
             )
             # Remove source assignments

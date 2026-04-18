@@ -278,7 +278,10 @@ class TestPlanMissPlanner:
             ]}
 
         with patch.object(_dispatch_mod, "claude_dispatch", fake_dispatch):
-            with pytest.raises(ValueError, match="no dispatchable steps"):
+            # Search review I-5: the message surfaces the dropped tool
+            # names so callers can report "why" instead of a generic
+            # "planner failed". Match the new message shape.
+            with pytest.raises(ValueError, match="non-dispatchable tools"):
                 await _nx_answer_plan_miss("test")
 
     @pytest.mark.asyncio

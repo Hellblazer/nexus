@@ -14,7 +14,7 @@ from nexus.console.watchers import scan_sessions_sync
 
 router = APIRouter(tags=["health"])
 
-_SESSIONS_DIR = Path.home() / ".config" / "nexus" / "sessions"
+from nexus.session import SESSIONS_DIR as _SESSIONS_DIR  # respects NEXUS_CONFIG_DIR
 
 
 def _collect_health_data() -> dict[str, Any]:
@@ -58,7 +58,9 @@ def _collect_health_data() -> dict[str, Any]:
     data["active_sessions"] = sum(1 for s in data["sessions"] if s["pid_alive"])
 
     # MinerU status
-    mineru_pid_path = Path.home() / ".config" / "nexus" / "mineru.pid"
+    from nexus.config import nexus_config_dir
+
+    mineru_pid_path = nexus_config_dir() / "mineru.pid"
     if mineru_pid_path.exists():
         try:
             info = json.loads(mineru_pid_path.read_text())
@@ -74,7 +76,7 @@ def _collect_health_data() -> dict[str, Any]:
         data["mineru"] = {"running": False}
 
     # Catalog status
-    cat_db = Path.home() / ".config" / "nexus" / "catalog" / ".catalog.db"
+    cat_db = nexus_config_dir() / "catalog" / ".catalog.db"
     if cat_db.exists():
         mtime = cat_db.stat().st_mtime
         age = time.time() - mtime
@@ -83,7 +85,7 @@ def _collect_health_data() -> dict[str, Any]:
         data["catalog"] = {"exists": False}
 
     # Index log
-    index_log = Path.home() / ".config" / "nexus" / "index.log"
+    index_log = nexus_config_dir() / "index.log"
     if index_log.exists():
         mtime = index_log.stat().st_mtime
         age = time.time() - mtime
@@ -93,7 +95,7 @@ def _collect_health_data() -> dict[str, Any]:
         data["index_log"] = {"exists": False}
 
     # Dolt server log
-    dolt_log = Path.home() / ".config" / "nexus" / "dolt-server.log"
+    dolt_log = nexus_config_dir() / "dolt-server.log"
     if dolt_log.exists():
         mtime = dolt_log.stat().st_mtime
         age = time.time() - mtime

@@ -30,9 +30,17 @@ import structlog
 
 _log = structlog.get_logger(__name__)
 
-CHECKPOINT_DIR = Path(
-    os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")
-) / "nexus" / "checkpoints"
+def _checkpoint_dir_at_import() -> Path:
+    """Resolve at import time — honours NEXUS_CONFIG_DIR, then XDG, then home."""
+    override = os.environ.get("NEXUS_CONFIG_DIR", "").strip()
+    if override:
+        return Path(override) / "checkpoints"
+    xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    base = Path(xdg) if xdg else Path.home() / ".config"
+    return base / "nexus" / "checkpoints"
+
+
+CHECKPOINT_DIR = _checkpoint_dir_at_import()
 
 
 def checkpoint_path(content_hash: str, collection: str) -> Path:

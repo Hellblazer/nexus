@@ -301,29 +301,37 @@ class T1Database:
         # Phase 1: fetch results via _exec (reconnect-safe)
         rows = self._exec(_query)
 
-        # Phase 2: update access_count per row — each update gets its own _exec
-        # so a reconnect retries only the failed update, not the whole query.
+        # Phase 2: update access_count across all returned rows in a single
+        # batched ``col.update`` (search review S-3). The previous per-row
+        # loop issued N serial HTTP round-trips to the T1 ChromaDB server,
+        # adding measurable latency to every ``nx scratch search`` call
+        # that routed through the session HTTP server.
         now = _now_iso()
+        ids_to_update: list[str] = []
+        metas_to_update: list[dict] = []
         for row in rows:
             existing_meta = {
                 k: v for k, v in row.items()
                 if k not in ("id", "content", "distance")
             }
-            updated_meta = {
+            ids_to_update.append(row["id"])
+            metas_to_update.append({
                 **existing_meta,
                 "access_count": existing_meta.get("access_count", 0) + 1,
                 "last_accessed": now,
-            }
-            rid = row["id"]
+            })
+
+        if ids_to_update:
             try:
-                # Bind loop variables via default args to avoid late-binding
-                # closure bug if this is ever refactored to collect lambdas.
                 self._exec(
-                    lambda r=rid, m=updated_meta:
-                    self._col.update(ids=[r], metadatas=[m])
+                    lambda ids=ids_to_update, metas=metas_to_update:
+                    self._col.update(ids=ids, metadatas=metas)
                 )
             except Exception:
-                _log.warning("t1_access_count_update_failed", id=rid)
+                _log.warning(
+                    "t1_access_count_batch_update_failed",
+                    count=len(ids_to_update),
+                )
         return rows
 
     def list_entries(self) -> list[dict]:

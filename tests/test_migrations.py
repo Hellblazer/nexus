@@ -73,7 +73,7 @@ class TestMigrationDataclass:
         from nexus.db.migrations import MIGRATIONS
 
         assert isinstance(MIGRATIONS, list)
-        assert len(MIGRATIONS) == 12  # + RDR-087 4.6.1 rename-to-kept_count
+        assert len(MIGRATIONS) == 13  # + RDR-086 Phase 1.1 chash_index
 
     def test_migrations_ordered_by_version(self) -> None:
         from nexus.db.migrations import MIGRATIONS, _parse_version
@@ -1164,3 +1164,173 @@ class TestMigrateRenameDroppedToKept:
         ]
         assert matches, "rename-to-kept_count migration must be registered"
         assert matches[0][0] == "4.6.1"
+
+
+# ── RDR-086 Phase 1.1: chash_index migration ───────────────────────────────
+
+
+class TestMigrateChashIndex:
+    """``migrate_chash_index`` creates the T2 ``chash_index`` table that speeds
+    up global ``resolve_chash(chash)`` lookups (RDR-086 Phase 2). Compound PK
+    ``(chash, physical_collection)`` allows the same chunk text (same SHA-256)
+    to be legitimately indexed into multiple collections without FK violation.
+    """
+
+    def test_chash_index_migration_fresh_apply(self) -> None:
+        """Fresh DB: migration creates the table."""
+        from nexus.db.migrations import migrate_chash_index
+
+        conn = sqlite3.connect(":memory:")
+        migrate_chash_index(conn)
+
+        tables = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "chash_index" in tables
+
+    def test_chash_index_schema_columns(self) -> None:
+        """Columns match the bead spec: chash, physical_collection, doc_id, created_at — all TEXT."""
+        from nexus.db.migrations import migrate_chash_index
+
+        conn = sqlite3.connect(":memory:")
+        migrate_chash_index(conn)
+
+        cols = {
+            r[1]: r[2]
+            for r in conn.execute(
+                "PRAGMA table_info(chash_index)"
+            ).fetchall()
+        }
+        assert cols.keys() == {"chash", "physical_collection", "doc_id", "created_at"}
+        assert cols["chash"] == "TEXT"
+        assert cols["physical_collection"] == "TEXT"
+        assert cols["doc_id"] == "TEXT"
+        assert cols["created_at"] == "TEXT"
+
+    def test_chash_index_compound_pk_allows_duplicate_hash_different_collection(self) -> None:
+        """Same chash in two different collections: both INSERTs must succeed.
+
+        Repro of the FK-violation the single-column PK would cause. RF-10
+        Issue 1: knowledge__delos + knowledge__delos_docling both ingest a
+        paper; every chunk's SHA-256 is identical.
+        """
+        from nexus.db.migrations import migrate_chash_index
+
+        conn = sqlite3.connect(":memory:")
+        migrate_chash_index(conn)
+
+        conn.execute(
+            "INSERT INTO chash_index VALUES (?, ?, ?, ?)",
+            ("abc123", "knowledge__delos",          "doc-1", "2026-04-18T00:00:00Z"),
+        )
+        conn.execute(
+            "INSERT INTO chash_index VALUES (?, ?, ?, ?)",
+            ("abc123", "knowledge__delos_docling", "doc-2", "2026-04-18T00:00:01Z"),
+        )
+        conn.commit()
+
+        rows = conn.execute(
+            "SELECT physical_collection, doc_id FROM chash_index WHERE chash = ? ORDER BY physical_collection",
+            ("abc123",),
+        ).fetchall()
+        assert rows == [
+            ("knowledge__delos",          "doc-1"),
+            ("knowledge__delos_docling", "doc-2"),
+        ]
+
+    def test_chash_index_compound_pk_rejects_same_chash_same_collection(self) -> None:
+        """Same (chash, collection) pair: second INSERT must violate the PK.
+
+        Guards against catalog writing the same chash to the same collection twice.
+        The Phase 1.2 dual-write sites use INSERT OR REPLACE, not bare INSERT,
+        so this is a schema contract assertion not an operational scenario.
+        """
+        from nexus.db.migrations import migrate_chash_index
+
+        conn = sqlite3.connect(":memory:")
+        migrate_chash_index(conn)
+
+        conn.execute(
+            "INSERT INTO chash_index VALUES (?, ?, ?, ?)",
+            ("abc123", "knowledge__delos", "doc-1", "2026-04-18T00:00:00Z"),
+        )
+        conn.commit()
+
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO chash_index VALUES (?, ?, ?, ?)",
+                ("abc123", "knowledge__delos", "doc-other", "2026-04-18T00:00:01Z"),
+            )
+            conn.commit()
+
+    def test_chash_index_secondary_index_exists(self) -> None:
+        """Secondary index on physical_collection — used by Phase 1.4 delete cascade.
+
+        Without it, the `DELETE FROM chash_index WHERE physical_collection = ?`
+        in `nx collection delete` is a table scan.
+        """
+        from nexus.db.migrations import migrate_chash_index
+
+        conn = sqlite3.connect(":memory:")
+        migrate_chash_index(conn)
+
+        indices = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            ).fetchall()
+        }
+        assert "idx_chash_index_collection" in indices
+
+    def test_chash_index_primary_key_is_compound(self) -> None:
+        """PRIMARY KEY (chash, physical_collection) per bead design — not single-column chash."""
+        from nexus.db.migrations import migrate_chash_index
+
+        conn = sqlite3.connect(":memory:")
+        migrate_chash_index(conn)
+
+        pk_cols = sorted(
+            (r[5], r[1])  # (pk_position, column_name)
+            for r in conn.execute(
+                "PRAGMA table_info(chash_index)"
+            ).fetchall()
+            if r[5] > 0
+        )
+        assert [name for _, name in pk_cols] == ["chash", "physical_collection"]
+
+    def test_chash_index_migration_idempotent(self) -> None:
+        """Re-applying on a populated DB must not raise or clobber data."""
+        from nexus.db.migrations import migrate_chash_index
+
+        conn = sqlite3.connect(":memory:")
+        migrate_chash_index(conn)
+        conn.execute(
+            "INSERT INTO chash_index VALUES (?, ?, ?, ?)",
+            ("abc123", "knowledge__delos", "doc-1", "2026-04-18T00:00:00Z"),
+        )
+        conn.commit()
+
+        migrate_chash_index(conn)  # must not raise
+        migrate_chash_index(conn)  # must not raise
+
+        # Data preserved.
+        row = conn.execute(
+            "SELECT chash, physical_collection, doc_id FROM chash_index"
+        ).fetchone()
+        assert row == ("abc123", "knowledge__delos", "doc-1")
+
+    def test_chash_index_in_migrations_list(self) -> None:
+        from nexus.db.migrations import MIGRATIONS
+
+        matches = [
+            (m.introduced, m.name) for m in MIGRATIONS
+            if "chash_index" in m.name
+        ]
+        assert matches, "chash_index migration must be registered in MIGRATIONS"
+        # RDR-086 lands in v4.7.0 (next minor release after v4.6.5).
+        assert matches[0][0] >= "4.7.0", (
+            f"chash_index migration must be introduced in >= 4.7.0, got {matches[0][0]!r}"
+        )
