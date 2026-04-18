@@ -1131,7 +1131,7 @@ def _run_index(
         import voyageai
         code_model = index_model_for_collection(code_collection)
         docs_model = index_model_for_collection(docs_collection)
-        voyage_client = voyageai.Client(api_key=voyage_key, timeout=read_timeout_seconds, max_retries=3)
+        voyage_client = voyageai.Client(api_key=voyage_key, timeout=read_timeout_seconds, max_retries=0)
 
     _log.debug("connecting to ChromaDB")
     db = make_t3()

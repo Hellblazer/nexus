@@ -8,7 +8,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`nx index` periodic ETA line** (nexus-vatx Gap 3). A new background ticker in `nx index repo` emits `[eta] N/total files · C chunks · Xs/file avg · ~M min remaining` to stderr every 60 s, independent of stdout's TTY state. Tqdm's built-in bar suppresses itself when stdout is redirected (CI logs, `nohup`, `tail -f`), leaving operators with no pace signal — the ticker fills that gap. Lifecycle: starts on `on_start` when the total file count is known, stops in a `finally` block so a mid-run exception still reaps the daemon thread. The first tick before any file completes renders `pending` rather than dividing by zero. Three formatter tests + three ticker-lifecycle tests pin the behaviour.
 - **`nx index` post-processing phase markers** (nexus-vatx Gap 2). After the per-file `[N/N]` progress bar finishes, the pipeline keeps running for several seconds to minutes — RDR discovery, misclassified-chunk pruning, deleted-file pruning, pipeline-version stamping, and catalog registration. Previously the operator saw silence and could not tell hung from busy. A new `on_phase` callback threaded through `index_repository` → `_run_index` emits `[post] <phase>…` / `[post] <phase> done (Xs)` lines to stderr for each phase, bookended by `[post] Post-processing complete (Xs)`. The `nx index` CLI wires the callback to `click.echo(..., err=True)` so markers are visible even when stdout is redirected to a file. Four new tests in `tests/test_indexer.py` pin the phase surface.
+
+### Changed
+
+- **Voyage AI retries are now visible to operators** (nexus-vatx Gap 1). Every `voyageai.Client(...)` construction in the tree now passes `max_retries=0` instead of the SDK's tenacity-based `max_retries=3`, and `_voyage_with_retry` is the sole retry authority. The retry predicate is extended from `APIConnectionError | TryAgain` to also cover `RateLimitError`, `ServiceUnavailableError`, `ServerError`, and `Timeout`. Each retry decision emits a WARN-level structlog line (`voyage_transient_error_retry` with `attempt`, `delay`, `error_type`, `error`) — previously voyageai's internal tenacity swallowed rate-limit backoffs, producing the 89–95 s per-file stalls with no log explanation that surfaced during the 2026-04-17 Delos re-index. Touches `db/t3.py`, `doc_indexer.py`, `indexer.py`, `scoring.py`. Six new tests in `tests/test_voyage_retry.py` pin the extended predicate, WARN-line contents, and per-error-class retry behaviour.
 
 ### Fixed
 

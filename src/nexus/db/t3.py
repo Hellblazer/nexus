@@ -228,7 +228,7 @@ class T3Database:
 
         # ── Cloud mode ───────────────────────────────────────────────────
         self._voyage_client: voyageai.Client | None = (
-            voyageai.Client(api_key=voyage_api_key, timeout=read_timeout_seconds, max_retries=3)
+            voyageai.Client(api_key=voyage_api_key, timeout=read_timeout_seconds, max_retries=0)
             if voyage_api_key else None
         )
         if _client is not None:

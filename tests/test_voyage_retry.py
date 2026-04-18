@@ -10,11 +10,15 @@ from nexus.retry import _is_retryable_voyage_error, _voyage_with_retry
 # ── _is_retryable_voyage_error oracle ───────────────────────────────────────
 
 @pytest.mark.parametrize("exc,expected", [
+    # Transient — retried by our wrapper (nexus-vatx Gap 1 extended this set
+    # when we set max_retries=0 on voyageai.Client to make retries visible).
     (_ve.APIConnectionError("connection reset"), True),
     (_ve.TryAgain("try again"), True),
-    (_ve.Timeout("timed out"), False),
-    (_ve.RateLimitError("rate limited"), False),
-    (_ve.ServiceUnavailableError("unavailable"), False),
+    (_ve.Timeout("timed out"), True),
+    (_ve.RateLimitError("rate limited"), True),
+    (_ve.ServiceUnavailableError("unavailable"), True),
+    (_ve.ServerError("server error"), True),
+    # User/config errors — never retried.
     (_ve.AuthenticationError("bad key"), False),
     (_ve.InvalidRequestError("bad input"), False),
     (ValueError("random"), False),
@@ -56,6 +60,54 @@ def test_try_again_retries() -> None:
     assert _voyage_with_retry(fn) == "result"
 
 
+# ── Extended transient set (nexus-vatx Gap 1) ───────────────────────────────
+
+
+@pytest.mark.parametrize("err_cls", [
+    _ve.RateLimitError,
+    _ve.ServiceUnavailableError,
+    _ve.ServerError,
+    _ve.Timeout,
+])
+def test_extended_transient_errors_retry(err_cls: type) -> None:
+    """Every transient Voyage error class now retries (previously only
+    APIConnectionError + TryAgain). This matters because the ingest-side
+    spikes reported in nexus-vatx were driven by rate-limit backoff —
+    formerly silent because voyageai.Client's internal tenacity swallowed
+    them."""
+    fn = MagicMock(side_effect=[err_cls("transient"), "ok"])
+    with patch("nexus.retry.time.sleep"):
+        assert _voyage_with_retry(fn) == "ok"
+    assert fn.call_count == 2
+
+
+def test_retry_warn_log_fires_on_backoff(capsys) -> None:
+    """Each retry decision must emit a WARN-level ``voyage_transient_error_retry``
+    line carrying attempt + delay + error_type — nexus-vatx Gap 1 operator
+    observability. Default structlog routes to stdout via ``PrintLoggerFactory``,
+    so we capture stdout rather than caplog."""
+    fn = MagicMock(side_effect=[
+        _ve.RateLimitError("429"),
+        _ve.ServiceUnavailableError("503"),
+        "ok",
+    ])
+    with patch("nexus.retry.time.sleep"):
+        assert _voyage_with_retry(fn) == "ok"
+    captured = capsys.readouterr()
+    warn_lines = [
+        ln for ln in captured.out.splitlines()
+        if "voyage_transient_error_retry" in ln and "warning" in ln
+    ]
+    assert len(warn_lines) == 2, (
+        f"expected 2 WARN retry lines, got {len(warn_lines)}: {captured.out!r}"
+    )
+    # Each carries attempt, delay, and error_type so operators can tell
+    # rate-limit from unavailable from connection drop.
+    assert any("RateLimitError" in ln for ln in warn_lines)
+    assert any("ServiceUnavailableError" in ln for ln in warn_lines)
+    assert all("attempt=" in ln and "delay=" in ln for ln in warn_lines)
+
+
 # ── voyageai.Client timeout + max_retries at all 4 sites ───────────────────
 
 def test_t3_database_voyage_client_has_timeout() -> None:
@@ -63,7 +115,7 @@ def test_t3_database_voyage_client_has_timeout() -> None:
     with patch("nexus.db.t3.voyageai.Client") as mock_ctor:
         mock_ctor.return_value = MagicMock()
         T3Database(voyage_api_key="test-key", read_timeout_seconds=60.0, _client=MagicMock())
-        mock_ctor.assert_called_once_with(api_key="test-key", timeout=60.0, max_retries=3)
+        mock_ctor.assert_called_once_with(api_key="test-key", timeout=60.0, max_retries=0)
 
 
 def test_embed_with_fallback_voyage_client_has_timeout() -> None:
@@ -76,7 +128,7 @@ def test_embed_with_fallback_voyage_client_has_timeout() -> None:
     with patch("voyageai.Client", return_value=mock_client) as mock_ctor, \
          patch("nexus.retry.time.sleep"):
         _embed_with_fallback(["chunk one", "chunk two"], "voyage-context-3", "test-key", timeout=75.0)
-        mock_ctor.assert_called_once_with(api_key="test-key", timeout=75.0, max_retries=3)
+        mock_ctor.assert_called_once_with(api_key="test-key", timeout=75.0, max_retries=0)
 
 
 def test_scoring_voyage_client_has_timeout() -> None:
@@ -87,7 +139,7 @@ def test_scoring_voyage_client_has_timeout() -> None:
          patch("nexus.config.load_config", return_value={"voyageai": {"read_timeout_seconds": 55}}):
         mock_ctor.return_value = MagicMock()
         scoring._voyage_client()
-        mock_ctor.assert_called_once_with(api_key="test-key", timeout=55, max_retries=3)
+        mock_ctor.assert_called_once_with(api_key="test-key", timeout=55, max_retries=0)
     scoring._reset_voyage_client()
 
 
@@ -224,4 +276,4 @@ def test_client_constructed_with_config_timeout() -> None:
     with patch("voyageai.Client", return_value=mock_client) as mock_ctor, \
          patch("nexus.retry.time.sleep"):
         _embed_with_fallback(["chunk"], "voyage-code-3", "test-key", timeout=60.0)
-        mock_ctor.assert_called_once_with(api_key="test-key", timeout=60.0, max_retries=3)
+        mock_ctor.assert_called_once_with(api_key="test-key", timeout=60.0, max_retries=0)

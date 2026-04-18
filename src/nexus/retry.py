@@ -82,19 +82,31 @@ def _chroma_with_retry(
 
 import voyageai.error as _voyageai_error
 
+#: Voyage errors we handle in ``_voyage_with_retry``. All transient classes
+#: are listed — ``voyageai.Client`` is constructed with ``max_retries=0`` at
+#: every nexus call site, so this wrapper is the sole retry authority and
+#: every retry decision surfaces through ``_log.warning`` (nexus-vatx Gap 1).
+#:
+#: Excluded: ``AuthenticationError``, ``InvalidRequestError``,
+#: ``MalformedRequestError`` (user/config errors — never transient).
 _VOYAGE_ERROR_TYPES: tuple[type, ...] = (
     _voyageai_error.APIConnectionError,
     _voyageai_error.TryAgain,
+    _voyageai_error.RateLimitError,
+    _voyageai_error.ServiceUnavailableError,
+    _voyageai_error.ServerError,
+    _voyageai_error.Timeout,
 )
 
 
 def _is_retryable_voyage_error(exc: BaseException) -> bool:
     """Return True if *exc* is a transient Voyage AI error worth retrying.
 
-    Only APIConnectionError and TryAgain are retried here.  Timeout,
-    RateLimitError, and ServiceUnavailableError are handled by the built-in
-    ``max_retries`` on ``voyageai.Client`` (tenacity-based).  The two error
-    spaces are disjoint; do not add Voyage AI types to _is_retryable_chroma_error.
+    APIConnectionError, TryAgain, RateLimitError, ServiceUnavailableError,
+    ServerError, and Timeout are retried — every attempt logs a WARN line so
+    operators can tell "slow file" from "being rate-limited" from "network
+    stalled." The two error spaces are disjoint; do not add Voyage AI types
+    to :func:`_is_retryable_chroma_error`.
     """
     return isinstance(exc, _VOYAGE_ERROR_TYPES)
 
@@ -105,10 +117,14 @@ def _voyage_with_retry(
     max_attempts: int = 3,
     **kwargs: Any,
 ) -> Any:
-    """Call *fn* with backoff on transient Voyage AI errors (APIConnectionError, TryAgain).
+    """Call *fn* with backoff on transient Voyage AI errors.
 
-    Retries up to *max_attempts* times (default 3).  Backoff starts at 1 s,
-    doubles each attempt, capped at 10 s.  Non-retryable errors raise immediately.
+    Retries up to *max_attempts* times (default 3). Backoff starts at 1 s,
+    doubles each attempt, capped at 10 s. Non-retryable errors raise
+    immediately. Each retry decision emits a WARN structlog line
+    (``voyage_transient_error_retry``) so ingest-side observability reports
+    rate-limit stalls instead of looking like silent multi-minute hangs
+    (nexus-vatx Gap 1).
     """
     delay = 1.0
     for attempt in range(1, max_attempts + 1):
@@ -121,6 +137,7 @@ def _voyage_with_retry(
                 "voyage_transient_error_retry",
                 attempt=attempt,
                 delay=delay,
+                error_type=type(exc).__name__,
                 error=str(exc)[:120],
             )
             time.sleep(delay)
