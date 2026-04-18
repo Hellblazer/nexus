@@ -60,6 +60,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Storage review I-4 — `T2Database.delete` lock ordering contract documented.** Memory → taxonomy is the required order; the docstring now guards future edits from introducing a reverse-ordered caller that could deadlock.
 - **`nx_answer` plan-miss error surfaces the dropped tool names** (e.g. "planner returned only non-dispatchable tools: Bash, grep") instead of a generic "planner failed" string.
 - **Pre-existing local-mode RDR crash.** `LocalEmbeddingFunction.__call__` is 1-arg (`texts -> embeddings`) but `doc_indexer.EmbedFn` is 2-arg (`(texts, model) -> (embeddings, model)`). A `_local_embed_fn_tuple` adapter is now wired specifically to the `_discover_and_index_rdrs` call in local mode; code / prose / PDF paths continue to use the raw `LocalEmbeddingFunction` instance directly.
+- **CI hang on `test_timeout_kills_process_and_raises`.** Both `operators/dispatch.py::claude_dispatch` and `pdf_extractor.py::_killpg_safe` now guard `killpg(getpgid(proc.pid), …)` behind `isinstance(proc.pid, int)`. `MagicMock` implements `__index__` returning 1, so unit tests that mock the subprocess previously signaled pgid=1 (init / launchd). On macOS this was benign (EPERM caught), but on GitHub ubuntu-latest containers the in-kernel signal delivery would stall deterministically — hanging the matrix pytest step for the full workflow run. Real `subprocess.Popen` / `asyncio.create_subprocess_exec` always yield an int pid; mock fixtures fall through to `proc.kill()` cleanly.
 
 ### Docs
 
