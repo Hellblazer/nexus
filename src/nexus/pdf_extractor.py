@@ -689,6 +689,12 @@ class PDFExtractor:
             # process is already gone, which we swallow). Matches the
             # session.py:301 idiom (indexing review C1).
             def _killpg_safe() -> None:
+                # Guard on integer pid — under test mocks ``proc.pid`` is a
+                # MagicMock that coerces to 1 via __index__, so without the
+                # isinstance check we'd signal pgid=1 (init / launchd).
+                # Real subprocess.Popen always yields an int pid.
+                if not isinstance(proc.pid, int):
+                    return
                 try:
                     pgid = _os.getpgid(proc.pid)
                     _os.killpg(pgid, signal.SIGKILL)

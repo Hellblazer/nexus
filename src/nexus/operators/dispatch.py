@@ -93,15 +93,25 @@ async def claude_dispatch(
         # children (nested planners, tool subprocesses) get reaped too.
         # Falls back to proc.kill() on any OS / mock that can't do killpg
         # so mocked-subprocess tests still verify the kill side effect.
+        #
+        # CRITICAL: guard on ``isinstance(proc.pid, int)`` first. MagicMock
+        # coerces to int via __index__ returning 1, so a naive
+        # ``os.getpgid(proc.pid)`` on a mock yields pgid=1 (init / launchd)
+        # and the subsequent ``killpg`` attempts to signal the container's
+        # init process group. On CI runners this can stall or misbehave
+        # depending on the orchestrator's signal handling. The int check
+        # keeps the real-subprocess path (proc.pid is an OS PID) while
+        # making mock tests deterministically fall through to proc.kill().
         import os
         import signal
         killpg_ok = False
-        try:
-            pgid = os.getpgid(proc.pid)
-            os.killpg(pgid, signal.SIGKILL)
-            killpg_ok = True
-        except (ProcessLookupError, PermissionError, OSError, TypeError):
-            pass
+        if isinstance(proc.pid, int):
+            try:
+                pgid = os.getpgid(proc.pid)
+                os.killpg(pgid, signal.SIGKILL)
+                killpg_ok = True
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
         if not killpg_ok:
             try:
                 proc.kill()
