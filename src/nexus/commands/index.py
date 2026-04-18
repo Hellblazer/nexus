@@ -122,9 +122,16 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
             else:
                 click.echo(line)
 
+    def on_phase(msg: str) -> None:
+        # nexus-vatx Gap 2: surface post-processing phases so the operator
+        # knows the indexer is still busy after the per-file bar finishes.
+        # Stderr so the line is visible even when stdout is redirected.
+        click.echo(f"  [post] {msg}", err=True)
+
     stats = index_repository(path, reg, frecency_only=frecency_only, force=force,
                              force_stale=force_stale,
-                             on_locked=on_locked, on_start=on_start, on_file=on_file)
+                             on_locked=on_locked, on_start=on_start, on_file=on_file,
+                             on_phase=on_phase)
     if bar:
         bar.close()
     if not frecency_only and stats:
