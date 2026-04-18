@@ -344,6 +344,78 @@ def test_search_skips_missing_collection_without_creating(mock_chromadb):
     mock_client.get_or_create_collection.assert_not_called()
 
 
+# ── Dimension-mismatch guard (issue #190 follow-up) ─────────────────────────
+
+
+def test_search_skips_dimension_mismatch_rather_than_crashing(mock_db):
+    """Collection indexed at a different embedding dimension than the
+    current model emits must be skipped with a warning, not crash search.
+
+    Issue #190 follow-up: users who upgraded the local embedding model
+    kept older collections around at the previous dimension; ChromaDB
+    raises ``InvalidArgumentError`` on ``col.query`` because the query
+    embedding dimension doesn't match the stored vectors. Previously
+    this crashed the whole multi-collection search. Now we log a
+    structured warning and continue with the remaining collections.
+    """
+    db, mock_col, _ = mock_db
+    mock_col.count.return_value = 3
+    mock_col.query.side_effect = chromadb.errors.InvalidArgumentError(
+        "Collection expecting embedding with dimension of 384, got 768"
+    )
+    # Single-collection call: search must return empty, not raise.
+    results = db.search("q", ["knowledge__stale"], n_results=5)
+    assert results == []
+
+
+def test_search_continues_past_dimension_mismatch_to_next_collection(
+    mock_chromadb,
+):
+    """Mismatch on collection A must not prevent collection B from being queried."""
+    _, mock_client = mock_chromadb
+
+    col_bad = MagicMock()
+    col_bad.count.return_value = 3
+    col_bad.query.side_effect = chromadb.errors.InvalidArgumentError(
+        "Collection expecting embedding with dimension of 384, got 768"
+    )
+
+    col_good = MagicMock()
+    col_good.count.return_value = 2
+    col_good.query.return_value = {
+        "ids": [["g-1"]],
+        "documents": [["good content"]],
+        "metadatas": [[{}]],
+        "distances": [[0.1]],
+    }
+
+    def _get_collection(name, **kw):
+        return col_bad if name == "knowledge__stale" else col_good
+
+    mock_client.get_collection.side_effect = _get_collection
+    db = T3Database(tenant="t", database="d", api_key="k")
+    results = db.search(
+        "q", ["knowledge__stale", "code__healthy"], n_results=5,
+    )
+    assert len(results) == 1
+    assert results[0]["id"] == "g-1"
+
+
+def test_search_propagates_non_dimension_invalid_argument_errors(mock_db):
+    """Only dimension-mismatch InvalidArgumentErrors are swallowed.
+
+    A different ``InvalidArgumentError`` (e.g. bad ``where`` clause)
+    must still surface — it points at a real caller bug.
+    """
+    db, mock_col, _ = mock_db
+    mock_col.count.return_value = 3
+    mock_col.query.side_effect = chromadb.errors.InvalidArgumentError(
+        "invalid where clause: unknown operator $weird"
+    )
+    with pytest.raises(chromadb.errors.InvalidArgumentError):
+        db.search("q", ["code__x"], n_results=5)
+
+
 def test_search_cce_collection_uses_query_embeddings(mock_chromadb):
     _, mock_client = mock_chromadb
     mock_col = MagicMock()

@@ -12,7 +12,10 @@ from typing import Literal
 import chromadb
 import chromadb.errors
 import httpx
-from chromadb.errors import NotFoundError as _ChromaNotFoundError
+from chromadb.errors import (
+    InvalidArgumentError as _ChromaInvalidArgumentError,
+    NotFoundError as _ChromaNotFoundError,
+)
 import structlog
 
 import voyageai
@@ -678,7 +681,25 @@ class T3Database:
                 }
             if where is not None:
                 query_kwargs["where"] = where
-            qr = _chroma_with_retry(col.query, **query_kwargs)
+            try:
+                qr = _chroma_with_retry(col.query, **query_kwargs)
+            except _ChromaInvalidArgumentError as exc:
+                # Dimension mismatch = collection was indexed with a
+                # different embedding model than the one currently
+                # configured. Crashes the whole multi-collection search
+                # if we let it bubble. Skip this collection, warn, and
+                # continue — issue #190 follow-up. Other
+                # ``InvalidArgumentError`` subtypes (bad where clause,
+                # malformed query, etc.) point at a caller bug and
+                # must still surface.
+                if "dimension" in str(exc).lower():
+                    _log.warning(
+                        "collection_dimension_mismatch_skipped",
+                        collection=name,
+                        error=str(exc),
+                    )
+                    continue
+                raise
             for doc_id, doc, meta, dist in zip(
                 qr["ids"][0],
                 qr["documents"][0],

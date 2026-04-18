@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.6.3] - 2026-04-17
+
+### Fixed
+
+- **Issue #190 follow-up** — `nx search` (and any cross-corpus query) no longer crashes when a T3 collection's stored embeddings don't match the current embedding model's output dimension. `T3Database.search` now catches `chromadb.errors.InvalidArgumentError` where the message contains `"dimension"`, logs a structured `collection_dimension_mismatch_skipped` warning with the collection name, and continues to the next collection. Non-dimension `InvalidArgumentError` subtypes (malformed `where` clause, bad query args, etc.) still propagate. Unblocks users who upgraded their local embedding model and left older collections around at the previous dimension — they can now search across the healthy collections without manually deleting the stale ones first.
+
 ## [4.6.2] - 2026-04-17
 
 ### Fixed
