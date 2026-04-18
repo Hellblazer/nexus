@@ -132,3 +132,53 @@ class TestErrorSwallowing:
         assert safe_killpg(None, signal.SIGKILL) is False
         # Negative int — kernel rejects.
         assert safe_killpg(-42, signal.SIGKILL) is False
+
+
+class TestNonPositivePidGuard:
+    """Regression for the review-flagged Critical hazard: ``pid <= 0`` would
+    route to the caller's own process group (``os.getpgid(0)`` returns the
+    caller's pgid) and kill the running ``nx`` CLI. A truncated mineru
+    pidfile that parses as 0 must never self-terminate the CLI.
+    """
+
+    def test_pid_zero_returns_false_without_signalling(self):
+        """pid=0 must not signal the caller's own process group."""
+        import nexus.util.process_group as mod
+        calls: list[tuple] = []
+        original_killpg = os.killpg
+
+        def _trace_killpg(pgid, sig):
+            calls.append((pgid, sig))
+            return original_killpg(pgid, sig)
+
+        mod.os.killpg = _trace_killpg  # type: ignore[assignment]
+        try:
+            assert safe_killpg(0, signal.SIGKILL) is False
+        finally:
+            mod.os.killpg = original_killpg  # type: ignore[assignment]
+        assert calls == [], (
+            f"safe_killpg(0, …) invoked os.killpg {calls!r} — the "
+            "pid <= 0 guard is broken and would kill the caller's own "
+            "process group"
+        )
+
+    def test_negative_pid_returns_false_without_signalling(self):
+        """pid=-1 / pid=-42 / etc. must also be rejected before any kernel
+        call — do not trust the OS to always reject and never reach killpg."""
+        import nexus.util.process_group as mod
+        calls: list[tuple] = []
+        original_killpg = os.killpg
+
+        def _trace_killpg(pgid, sig):
+            calls.append((pgid, sig))
+            return original_killpg(pgid, sig)
+
+        mod.os.killpg = _trace_killpg  # type: ignore[assignment]
+        try:
+            assert safe_killpg(-1, signal.SIGKILL) is False
+            assert safe_killpg(-42, signal.SIGKILL) is False
+        finally:
+            mod.os.killpg = original_killpg  # type: ignore[assignment]
+        assert calls == [], (
+            "safe_killpg invoked os.killpg for a negative pid — guard broken"
+        )
