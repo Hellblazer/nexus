@@ -22,12 +22,18 @@ _log = structlog.get_logger(__name__)
 # Stale threshold: a pipeline with no heartbeat for this long is considered crashed.
 STALE_THRESHOLD = timedelta(minutes=5)
 
+def _pipeline_db_path_at_import() -> Path:
+    """Resolve at import time — honours NEXUS_CONFIG_DIR, then XDG, then home."""
+    override = os.environ.get("NEXUS_CONFIG_DIR", "").strip()
+    if override:
+        return Path(override) / "pipeline.db"
+    xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    base = Path(xdg) if xdg else Path.home() / ".config"
+    return base / "nexus" / "pipeline.db"
+
+
 # Canonical database path (parallel to T2's nexus.db).
-PIPELINE_DB_PATH = (
-    Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-    / "nexus"
-    / "pipeline.db"
-)
+PIPELINE_DB_PATH = _pipeline_db_path_at_import()
 
 _SCHEMA_SQL = """\
 PRAGMA journal_mode=WAL;

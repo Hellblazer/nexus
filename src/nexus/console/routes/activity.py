@@ -14,12 +14,11 @@ router = APIRouter(tags=["activity"])
 
 def _catalog_dir() -> Path:
     """Return the catalog directory path."""
-    import os
+    # Delegate to the canonical resolver so NEXUS_CONFIG_DIR and
+    # NEXUS_CATALOG_PATH redirections land consistently.
+    from nexus.config import catalog_path
 
-    override = os.environ.get("NEXUS_CATALOG_PATH")
-    if override:
-        return Path(override)
-    return Path.home() / ".config" / "nexus" / "catalog"
+    return catalog_path()
 
 
 def _read_recent_events(

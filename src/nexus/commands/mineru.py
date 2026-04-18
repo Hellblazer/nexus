@@ -28,7 +28,9 @@ _STOP_TIMEOUT_SECONDS = 10
 
 
 def _pid_file_path() -> Path:
-    return Path.home() / ".config" / "nexus" / "mineru.pid"
+    from nexus.config import nexus_config_dir
+
+    return nexus_config_dir() / "mineru.pid"
 
 
 def _read_pid_file() -> dict | None:
@@ -62,11 +64,17 @@ def _mineru_output_root() -> Path:
     the directory with 0o700 so other users on the same host cannot
     read extracted documents.
     """
-    runtime = os.environ.get("XDG_RUNTIME_DIR")
-    if runtime and Path(runtime).is_dir():
-        base = Path(runtime) / "nexus-mineru"
+    # NEXUS_CONFIG_DIR takes first priority so sandbox runs keep all
+    # Nexus artifacts (T2, catalog, MinerU output) under one isolated tree.
+    override = os.environ.get("NEXUS_CONFIG_DIR", "").strip()
+    if override:
+        base = Path(override) / "mineru-output"
     else:
-        base = Path.home() / ".cache" / "nexus" / "mineru-output"
+        runtime = os.environ.get("XDG_RUNTIME_DIR")
+        if runtime and Path(runtime).is_dir():
+            base = Path(runtime) / "nexus-mineru"
+        else:
+            base = Path.home() / ".cache" / "nexus" / "mineru-output"
     base.mkdir(parents=True, exist_ok=True, mode=0o700)
     # Re-chmod in case the directory pre-existed with wider mode.
     try:

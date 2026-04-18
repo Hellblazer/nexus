@@ -16,7 +16,25 @@ _log = structlog.get_logger()
 # Shared by all Bash subprocesses within one Claude Code conversation.
 # os.getsid(0) is NOT used: Claude Code spawns each Bash(...) call in its own
 # process session, making getsid different per invocation.
-CLAUDE_SESSION_FILE = Path.home() / ".config" / "nexus" / "current_session"
+def _nexus_config_dir_at_import() -> Path:
+    """Resolve the Nexus config dir honouring ``NEXUS_CONFIG_DIR`` at import time.
+
+    ``session.py`` holds module-level path constants that must be redirectable
+    under sandbox / test isolation. Callers setting ``NEXUS_CONFIG_DIR`` in
+    the shell before invoking ``nx`` see the constants resolved against the
+    sandbox. Tests that need to flip the dir mid-process still monkeypatch
+    the module attribute (``nexus.session.SESSIONS_DIR`` /
+    ``nexus.session.CLAUDE_SESSION_FILE``) — both access paths work.
+    """
+    import os as _os
+
+    override = _os.environ.get("NEXUS_CONFIG_DIR", "").strip()
+    if override:
+        return Path(override)
+    return Path.home() / ".config" / "nexus"
+
+
+CLAUDE_SESSION_FILE = _nexus_config_dir_at_import() / "current_session"
 
 
 def generate_session_id() -> str:
@@ -65,7 +83,7 @@ def _stable_pid() -> int:
 def session_file_path(ppid: int | None = None) -> Path:
     """Return the legacy getsid-keyed session file path."""
     pid = ppid if ppid is not None else _stable_pid()
-    return Path.home() / ".config" / "nexus" / "sessions" / f"{pid}.session"
+    return _nexus_config_dir_at_import() / "sessions" / f"{pid}.session"
 
 
 def write_session_file(session_id: str, ppid: int | None = None) -> Path:
@@ -91,7 +109,7 @@ def read_session_id(ppid: int | None = None) -> str | None:
 
 # ── T1 server session management (RDR-010) ────────────────────────────────────
 
-SESSIONS_DIR: Path = Path.home() / ".config" / "nexus" / "sessions"
+SESSIONS_DIR: Path = _nexus_config_dir_at_import() / "sessions"
 _T1_SERVER_HOST: str = "127.0.0.1"
 _SESSION_MAX_AGE_SECONDS: float = 24 * 3600.0
 _SERVER_READY_TIMEOUT: float = 10.0

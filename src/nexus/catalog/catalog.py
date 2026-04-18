@@ -45,7 +45,9 @@ _log = structlog.get_logger()
 
 def _default_registry_path() -> Path:
     """Return the default path to the repo registry JSON file."""
-    return Path.home() / ".config" / "nexus" / "repos.json"
+    from nexus.config import nexus_config_dir
+
+    return nexus_config_dir() / "repos.json"
 
 
 def make_relative(abs_path: str | Path, repo_root: Path) -> str:

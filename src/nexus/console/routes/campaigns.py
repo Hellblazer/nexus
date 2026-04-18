@@ -16,10 +16,11 @@ SYSTEM_CREATORS = frozenset({"index_hook", "filepath_extractor", "auto-linker"})
 
 
 def _catalog_dir() -> Path:
-    override = os.environ.get("NEXUS_CATALOG_PATH")
-    if override:
-        return Path(override)
-    return Path.home() / ".config" / "nexus" / "catalog"
+    # Delegate to the canonical resolver so NEXUS_CONFIG_DIR and
+    # NEXUS_CATALOG_PATH redirections land consistently.
+    from nexus.config import catalog_path
+
+    return catalog_path()
 
 
 def _load_campaign_summary(links_path: Path) -> dict[str, dict[str, Any]]:

@@ -348,7 +348,9 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         owners = read_owners(owners_path) if owners_path.exists() else {}
 
         # Get registry for fallback
-        registry_path = Path.home() / ".config" / "nexus" / "repos.json"
+        from nexus.config import nexus_config_dir
+
+        registry_path = nexus_config_dir() / "repos.json"
         registry = RepoRegistry(registry_path) if registry_path.exists() else None
 
         t3_db = None

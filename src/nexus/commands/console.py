@@ -14,10 +14,11 @@ _log = structlog.get_logger(__name__)
 
 
 def _config_dir() -> Path:
-    override = os.environ.get("NEXUS_CONFIG_DIR")
-    if override:
-        return Path(override)
-    return Path.home() / ".config" / "nexus"
+    # Delegate to the canonical nexus.config.nexus_config_dir() helper so
+    # every call site resolves the dir through one source of truth.
+    from nexus.config import nexus_config_dir
+
+    return nexus_config_dir()
 
 
 def _project_name() -> str:

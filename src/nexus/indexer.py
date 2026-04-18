@@ -177,10 +177,11 @@ def _repo_lock_path(repo: Path) -> Path:
     Uses the same worktree-stable identity as the registry so two worktrees
     of the same repo map to a single lock.
     """
+    from nexus.config import nexus_config_dir
     from nexus.registry import _repo_identity
 
     _, path_hash = _repo_identity(repo)
-    return Path.home() / ".config" / "nexus" / "locks" / f"{path_hash}.lock"
+    return nexus_config_dir() / "locks" / f"{path_hash}.lock"
 
 
 _LOCK_STALE_SECONDS = 5  # lock files older than this with no live PID are stale
@@ -1059,9 +1060,10 @@ def _run_index(
         on_start(len(code_files) + len(prose_files) + len(pdf_files))
 
     # Update ripgrep cache (code + prose text files, not PDFs)
+    from nexus.config import nexus_config_dir
     from nexus.registry import _repo_identity
     _repo_basename, _repo_hash = _repo_identity(repo)
-    cache_path = Path.home() / ".config" / "nexus" / f"{_repo_basename}-{_repo_hash}.cache"
+    cache_path = nexus_config_dir() / f"{_repo_basename}-{_repo_hash}.cache"
     build_cache(repo, cache_path, all_text_scored)
 
     # Credential check and T3 setup

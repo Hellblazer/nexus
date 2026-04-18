@@ -18,9 +18,19 @@ if TYPE_CHECKING:
 
 _log = structlog.get_logger(__name__)
 
-CONTEXT_L1_DIR = Path.home() / ".config" / "nexus" / "context"
+def _ctx_nexus_config_dir() -> Path:
+    """Resolve the config dir at import time, honouring NEXUS_CONFIG_DIR."""
+    import os as _os
+
+    override = _os.environ.get("NEXUS_CONFIG_DIR", "").strip()
+    if override:
+        return Path(override)
+    return Path.home() / ".config" / "nexus"
+
+
+CONTEXT_L1_DIR = _ctx_nexus_config_dir() / "context"
 # Legacy single-file path (kept for backward compat)
-CONTEXT_L1_PATH = Path.home() / ".config" / "nexus" / "context_l1.txt"
+CONTEXT_L1_PATH = _ctx_nexus_config_dir() / "context_l1.txt"
 
 
 def _context_path_for_repo(repo_path: Path | None) -> Path:
@@ -40,7 +50,7 @@ def _repo_collections(repo_path: Path | None) -> set[str] | None:
     try:
         from nexus.registry import RepoRegistry
 
-        reg_path = Path.home() / ".config" / "nexus" / "repos.json"
+        reg_path = _ctx_nexus_config_dir() / "repos.json"
         if not reg_path.exists():
             return None
         reg = RepoRegistry(reg_path)
