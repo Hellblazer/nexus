@@ -85,7 +85,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-061](rdr-061-literature-grounded-search-knowledge-enhancement.md) | Literature-Grounded Search and Knowledge Enhancement Roadmap | Design | Closed | 2026-04-09 |
 | [RDR-062](rdr-062-mcp-interface-tiering.md) | MCP Interface Tiering — Core + Catalog Server Split | Architecture | Closed | 2026-04-09 |
 | [RDR-063](rdr-063-t2-domain-split.md) | T2 Domain Split — Separating Memory, Plans, Catalog, and Telemetry | Architecture | Closed | 2026-04-10 |
-| [RDR-064](rdr-064-nx-console-embedded-web-ui.md) | nx console — Process Monitor for Agentic Nexus | Feature | Accepted | 2026-04-11 |
+| [RDR-064](rdr-064-nx-console-embedded-web-ui.md) | nx console — Process Monitor for Agentic Nexus | Feature | Closed (implemented) | 2026-04-11 |
 | [RDR-065](rdr-065-close-time-funnel-hardening.md) | Close-Time Funnel Hardening Against Silent Scope Reduction | Process | Closed | 2026-04-11 |
 | [RDR-066](rdr-066-composition-smoke-probe-at-coordinator-beads.md) | Composition Smoke Probe at Coordinator Beads | Process | Closed | 2026-04-11 |
 | [RDR-067](rdr-067-cross-project-rdr-audit-loop.md) | Cross-Project RDR Audit Loop | Process | Closed | 2026-04-11 |

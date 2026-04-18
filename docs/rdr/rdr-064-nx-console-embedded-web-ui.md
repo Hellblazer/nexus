@@ -1,11 +1,23 @@
 ---
 title: "RDR-064: nx console — Process Monitor for Agentic Nexus"
-status: accepted
+status: closed
+close_reason: implemented
 type: feature
 priority: P1
 created: 2026-04-10
 accepted_date: 2026-04-11
+closed_date: 2026-04-18
 reviewed-by: self
+closure_summary: |
+  Console package (src/nexus/console/) with 4 route panels, FastAPI
+  app factory, and watchers shipped via omnibus commit 2325539.
+  nx console CLI entry (src/nexus/commands/console.py) ships --host
+  / --port flags plus PID-file lifecycle (v4.7.0 security remediation
+  added 0o600 mode + stale-PID reap). 15/15 unit tests green;
+  live MVV confirmed console binds + serves /activity HTTP 200 in
+  ~3.5s startup + 0.6ms response (epic bead nexus-a36 close reason
+  has details). Phase 0 (logging prereq) and Phase 1 (v0.1 panels)
+  complete; no deferred scope.
 ---
 
 # RDR-064: nx console — Process Monitor for Agentic Nexus
