@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.6.5] - 2026-04-18
+
+### Fixed
+
+- **nexus-7ne1 — PDF extractor: MinerU-failed fallback returns `fast_result` without replaying `on_page` (silent 0-chunk pathology)** — when the auto-routing PDF extractor decides to use MinerU (`formula_count >= 5`) and MinerU then fails for any reason, the fallback returns the Docling probe pass's `fast_result` — but never replayed the `on_page` callbacks. The streaming pipeline (which only sees pages via `on_page`) got nothing → chunker emitted **0 chunks** for the entire document. The probe pass at `_extract_with_docling(..., enriched=False)` is intentionally invoked without `on_page` so callbacks aren't double-fired if MinerU takes over; the `formula_count < 5` happy path replays callbacks from `fast_result.metadata["page_boundaries"]`, but the `except` branch did not. **Fix**: mirror the replay logic into the `except` branch — every page from `fast_result.text` is re-emitted via `on_page` using stored `page_boundaries`. This bug masqueraded as MinerU brokenness during the 2026-04-17 Delos re-index (13/16 papers reported "0 chunks"); once MinerU succeeded after 4.6.4's `killpg` fix, the latent issue would still re-emerge for any future MinerU failure (transient network error, formula-density OOM, rate limit, etc.). Two regression tests in `tests/test_pdf_extractor.py::TestAutoDetectRouting` cover (1) the multi-page replay path and (2) the `on_page=None` no-callback contract.
+
 ## [4.6.4] - 2026-04-18
 
 ### Fixed

@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.6.5] - 2026-04-18
+
+Plugin version aligned with conexus 4.6.5. No plugin-level functional
+changes. See root CHANGELOG for the PDF extractor `on_page` replay
+fix in the MinerU-failed fallback path (nexus-7ne1).
+
 ## [4.6.4] - 2026-04-18
 
 Plugin version bump alongside conexus 4.6.4. See root CHANGELOG for
