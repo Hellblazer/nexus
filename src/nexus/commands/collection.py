@@ -136,6 +136,95 @@ def delete_cmd(name: str, yes: bool) -> None:
         click.echo(f"Deleted: {name}")
 
 
+@collection.command("rename")
+@click.argument("old")
+@click.argument("new")
+@click.option(
+    "--force-prefix-change",
+    is_flag=True,
+    help=(
+        "Allow a cross-prefix rename (e.g. code__foo → docs__foo). "
+        "Embedding-model spaces differ across prefixes, so the renamed "
+        "collection is query-incompatible with its old clients. Use only "
+        "when you've deleted every downstream reader of the old name."
+    ),
+)
+def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
+    """Rename a collection in-place via ChromaDB's native modify(name=).
+
+    O(1) metadata update — no embedding re-upload, no Voyage cost,
+    no ChromaDB egress. Cascades the new name through T2 taxonomy,
+    chash_index, and catalog (JSONL + SQLite).
+
+    Cross-prefix renames (e.g. ``code__`` ↔ ``docs__``) change the
+    embedding-model space and are rejected unless ``--force-prefix-change``
+    is set; otherwise search hits would be garbage.
+    """
+    old_prefix = old.split("__", 1)[0] if "__" in old else ""
+    new_prefix = new.split("__", 1)[0] if "__" in new else ""
+    if old_prefix != new_prefix and not force_prefix_change:
+        raise click.ClickException(
+            f"prefix mismatch: {old_prefix!r} → {new_prefix!r} would change "
+            f"the embedding-model space. Pass --force-prefix-change if this "
+            f"is intentional (rare — usually means the caller is resurrecting "
+            f"an orphaned collection with the wrong prefix)."
+        )
+
+    db = _t3()
+    if not db.collection_exists(old):
+        raise click.ClickException(f"collection not found: {old!r}")
+    if db.collection_exists(new):
+        raise click.ClickException(f"collection already exists: {new!r}")
+
+    db.rename_collection(old, new)
+
+    # Cascade T2 + catalog. Fail-open: log and continue — T3 is already
+    # renamed, and rolling back a rename is nontrivial (would need a
+    # second modify(name=old)).
+    tax_counts: dict[str, int] | None = None
+    chash_updated = 0
+    cat_updated = 0
+    try:
+        from nexus.commands._helpers import default_db_path
+        from nexus.db.t2 import T2Database
+
+        with T2Database(default_db_path()) as t2db:
+            tax_counts = t2db.taxonomy.rename_collection(old, new)
+            chash_updated = t2db.chash_index.rename_collection(old=old, new=new)
+    except Exception as exc:
+        click.echo(
+            f"warn: T3 rename succeeded but T2 cascade failed: {exc}",
+            err=True,
+        )
+
+    try:
+        from nexus.catalog.catalog import Catalog
+        from nexus.config import catalog_path
+        cat_path = catalog_path()
+        cat_updated = Catalog(cat_path, cat_path / ".catalog.db").rename_collection(old, new)
+    except Exception as exc:
+        click.echo(
+            f"warn: T3 rename succeeded but catalog cascade failed: {exc}",
+            err=True,
+        )
+
+    parts: list[str] = []
+    if tax_counts and any(tax_counts.values()):
+        parts.append(
+            f"{tax_counts['topics']} topics, "
+            f"{tax_counts['assignments']} assignments, "
+            f"{tax_counts['meta']} meta"
+        )
+    if chash_updated:
+        parts.append(f"{chash_updated} chash rows")
+    if cat_updated:
+        parts.append(f"{cat_updated} catalog docs")
+    if parts:
+        click.echo(f"Renamed: {old} → {new} ({'; '.join(parts)})")
+    else:
+        click.echo(f"Renamed: {old} → {new}")
+
+
 @collection.command("reindex")
 @click.argument("name")
 @click.option("--force", is_flag=True, help="Force reindex even if sourceless entries exist")

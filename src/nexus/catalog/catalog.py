@@ -954,6 +954,50 @@ class Catalog:
         finally:
             self._release_lock(dir_fd)
 
+    def rename_collection(self, old: str, new: str) -> int:
+        """Re-point every document from ``physical_collection=old`` → ``new``.
+
+        nexus-1ccq: `nx collection rename` cascade. JSONL is the source
+        of truth, so for every matching row we append a new record with
+        the updated ``physical_collection`` and also update the SQLite
+        cache (one UPDATE, no per-row upsert). Rebuild-from-JSONL sees
+        the later record and wins — append-only semantics preserved.
+        Returns count renamed.
+        """
+        dir_fd = self._acquire_lock()
+        try:
+            rows = self._db.execute(
+                "SELECT tumbler, title, author, year, content_type, file_path, "
+                "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
+                "FROM documents WHERE physical_collection = ?",
+                (old,),
+            ).fetchall()
+            for row in rows:
+                rec = {
+                    "tumbler": row[0],
+                    "title": row[1],
+                    "author": row[2],
+                    "year": row[3],
+                    "content_type": row[4],
+                    "file_path": row[5],
+                    "corpus": row[6],
+                    "physical_collection": new,
+                    "chunk_count": row[8],
+                    "head_hash": row[9] or "",
+                    "indexed_at": row[10] or "",
+                    "meta": json.loads(row[11]) if row[11] else {},
+                }
+                self._append_jsonl(self._documents_path, rec)
+            self._db.execute(
+                "UPDATE documents SET physical_collection = ? "
+                "WHERE physical_collection = ?",
+                (new, old),
+            )
+            self._db.commit()
+            return len(rows)
+        finally:
+            self._release_lock(dir_fd)
+
     def delete_document(self, tumbler: Tumbler) -> bool:
         """Soft-delete a document: tombstone in JSONL, DELETE from SQLite.
 
