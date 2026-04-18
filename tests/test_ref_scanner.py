@@ -160,6 +160,116 @@ def test_embedded_reference_boundary(tmp_path):
     assert refs[0].line == 2
 
 
+# ── proximity binding (nexus-7ay) ────────────────────────────────────────────
+
+
+def test_bullet_list_each_item_is_own_scope(tmp_path):
+    """Each bullet binds to its own count, not the first count in the list.
+
+    Before nexus-7ay the first count in a bullet list leaked into every
+    sibling bullet as a false-positive Drift.
+    """
+    p = _write(
+        tmp_path,
+        "## Key Stores\n"
+        "\n"
+        "- `docs__art-grossberg-papers`: 19,417 chunks (80 papers)\n"
+        "- `knowledge__art`: 5,724 chunks (textbook)\n"
+        "- `docs__art-architecture`: 101 chunks (this set)\n",
+    )
+    refs = scan_markdown(p, DEFAULT_PREFIXES)
+    by_coll = {r.collection: r.claimed_count for r in refs}
+    assert by_coll["docs__art-grossberg-papers"] == 19417
+    assert by_coll["knowledge__art"] == 5724
+    assert by_coll["docs__art-architecture"] == 101
+
+
+def test_ordered_list_each_item_is_own_scope(tmp_path):
+    p = _write(
+        tmp_path,
+        "1. `docs__alpha`: 100 chunks\n"
+        "2. `docs__beta`: 200 chunks\n"
+        "3. `docs__gamma`: 300 chunks\n",
+    )
+    refs = scan_markdown(p, DEFAULT_PREFIXES)
+    by_coll = {r.collection: r.claimed_count for r in refs}
+    assert by_coll["docs__alpha"] == 100
+    assert by_coll["docs__beta"] == 200
+    assert by_coll["docs__gamma"] == 300
+
+
+def test_asterisk_and_plus_bullets_are_own_scope(tmp_path):
+    p = _write(
+        tmp_path,
+        "* `docs__one`: 10 chunks\n"
+        "* `docs__two`: 20 chunks\n"
+        "+ `docs__three`: 30 chunks\n",
+    )
+    refs = scan_markdown(p, DEFAULT_PREFIXES)
+    by_coll = {r.collection: r.claimed_count for r in refs}
+    assert by_coll["docs__one"] == 10
+    assert by_coll["docs__two"] == 20
+    assert by_coll["docs__three"] == 30
+
+
+def test_paragraph_multiple_counts_bind_nearest(tmp_path):
+    """Prose with multiple collections + multiple counts binds each ref
+    to its textually nearest count, not always the first."""
+    p = _write(
+        tmp_path,
+        "The source contains over 19,400 chunks in `docs__grossberg-papers`. "
+        "The textbook material (5,724 chunks) is in `knowledge__textbook`.\n",
+    )
+    refs = scan_markdown(p, DEFAULT_PREFIXES)
+    by_coll = {r.collection: r.claimed_count for r in refs}
+    assert by_coll["docs__grossberg-papers"] == 19400
+    assert by_coll["knowledge__textbook"] == 5724
+
+
+def test_paragraph_single_count_applies_to_all_refs(tmp_path):
+    """Exactly one count in a paragraph still applies to every ref in it."""
+    p = _write(
+        tmp_path,
+        "The 1,000 chunks span `docs__alpha` and `docs__beta` collections.\n",
+    )
+    refs = scan_markdown(p, DEFAULT_PREFIXES)
+    by_coll = {r.collection: r.claimed_count for r in refs}
+    assert by_coll["docs__alpha"] == 1000
+    assert by_coll["docs__beta"] == 1000
+
+
+def test_bullet_without_count_does_not_leak_sibling_count(tmp_path):
+    """A bullet with no count in its own line stays None — no leak from
+    a sibling bullet's count."""
+    p = _write(
+        tmp_path,
+        "- `docs__with-count`: 100 chunks\n"
+        "- `docs__no-count` is a sibling collection\n",
+    )
+    refs = scan_markdown(p, DEFAULT_PREFIXES)
+    by_coll = {r.collection: r.claimed_count for r in refs}
+    assert by_coll["docs__with-count"] == 100
+    assert by_coll["docs__no-count"] is None
+
+
+def test_bullet_list_inside_multiline_paragraph(tmp_path):
+    """A list sandwiched between prose paragraphs still scopes per-bullet."""
+    p = _write(
+        tmp_path,
+        "Context preamble paragraph.\n"
+        "\n"
+        "- `docs__A`: 10 chunks\n"
+        "- `docs__B`: 20 chunks\n"
+        "\n"
+        "Trailing paragraph with 999 chunks in `docs__C`.\n",
+    )
+    refs = scan_markdown(p, DEFAULT_PREFIXES)
+    by_coll = {r.collection: r.claimed_count for r in refs}
+    assert by_coll["docs__A"] == 10
+    assert by_coll["docs__B"] == 20
+    assert by_coll["docs__C"] == 999
+
+
 # ── validate ─────────────────────────────────────────────────────────────────
 
 
