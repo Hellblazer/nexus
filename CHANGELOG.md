@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`nx taxonomy validate-refs` proximity false-positives on bullet lists and multi-count paragraphs** (nexus-7ay). Each markdown list item (`-`, `*`, `+`, ordered) is now its own count-binding scope — a count claim in one bullet no longer leaks into every sibling, which previously produced a single OK line followed by a cascade of spurious Drift lines. Within a prose paragraph that names more than one collection, each reference now binds to the textually nearest chunk-count claim instead of always the first one encountered. Seven new tests in `tests/test_ref_scanner.py` pin the expected proximity semantics.
+
 ## [4.7.0] - 2026-04-18
 
 ### Added

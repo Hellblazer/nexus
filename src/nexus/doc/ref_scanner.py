@@ -114,55 +114,82 @@ def _collection_regex(prefixes: list[str]) -> re.Pattern:
 from nexus.doc._common import iter_plain_lines as _iter_plain_lines
 
 
-def _paragraph_for_line(lines: list[tuple[int, str]], target_lineno: int) -> list[str]:
-    """Return the block of consecutive non-empty plain lines containing
-    *target_lineno*. A paragraph is delimited by a blank line on either side.
+# Markdown list-item markers: -, *, +, or N. / N) — leading whitespace allowed.
+_LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
+
+
+def _is_list_item(line: str) -> bool:
+    """True if *line* starts a markdown bullet or ordered-list item."""
+    return bool(_LIST_ITEM_RE.match(line))
+
+
+def _scope_for_line(
+    lines: list[tuple[int, str]],
+    target_idx: int,
+) -> tuple[list[str], int]:
+    """Return ``(scope_lines, target_within_scope)`` for count-proximity binding.
+
+    Each list-item line is its own scope — count claims from sibling
+    bullets do not leak (nexus-7ay). Non-list lines expand to the
+    surrounding consecutive prose paragraph, with list-item boundaries
+    treated as paragraph breaks.
     """
-    idx = next((i for i, (ln, _) in enumerate(lines) if ln == target_lineno), -1)
-    if idx < 0:
-        return []
-    # Scan upward for paragraph start
-    start = idx
-    while start > 0 and lines[start - 1][1].strip() and lines[start - 1][0] == lines[start][0] - 1:
+    target_line = lines[target_idx][1]
+    if _is_list_item(target_line):
+        return [target_line], 0
+
+    start = target_idx
+    while (
+        start > 0
+        and lines[start - 1][1].strip()
+        and lines[start - 1][0] == lines[start][0] - 1
+        and not _is_list_item(lines[start - 1][1])
+    ):
         start -= 1
-    # Scan downward for paragraph end
-    end = idx
-    while end + 1 < len(lines) and lines[end + 1][1].strip() and lines[end + 1][0] == lines[end][0] + 1:
+    end = target_idx
+    while (
+        end + 1 < len(lines)
+        and lines[end + 1][1].strip()
+        and lines[end + 1][0] == lines[end][0] + 1
+        and not _is_list_item(lines[end + 1][1])
+    ):
         end += 1
-    return [ln[1] for ln in lines[start : end + 1]]
+    return [ln[1] for ln in lines[start : end + 1]], target_idx - start
 
 
-def _extract_count(paragraph_text: str) -> int | None:
-    """Find the first chunk-count claim in *paragraph_text* and return
-    the integer value. ``~13k`` → ``13000``; ``12,900`` → ``12900``.
-    Returns ``None`` if no claim is present.
+def _iter_count_matches(scope_text: str):
+    """Yield ``(start_position, value)`` for every chunk-count claim
+    in *scope_text*. Both plain-integer and k-shorthand patterns are
+    scanned; positions are character offsets into *scope_text*.
     """
-    # First pattern (plain integer) wins when both match — it's more precise.
-    m = _COUNT_RES[0].search(paragraph_text)
-    if m:
+    for m in _COUNT_RES[0].finditer(scope_text):
         try:
-            return int(m.group("n").replace(",", ""))
+            yield m.start(), int(m.group("n").replace(",", ""))
         except ValueError:
-            pass
-    m = _COUNT_RES[1].search(paragraph_text)
-    if m:
+            continue
+    for m in _COUNT_RES[1].finditer(scope_text):
         try:
-            # "~13k" → 13000; "13.5k" → 13500
-            raw = float(m.group("n"))
-            return int(raw * 1000)
+            yield m.start(), int(float(m.group("n")) * 1000)
         except ValueError:
-            pass
-    return None
+            continue
+
+
+def _extract_count_near(scope_text: str, ref_pos: int) -> int | None:
+    """Return the value of the count claim nearest *ref_pos* in
+    *scope_text*, or ``None`` when no claim is present.
+    """
+    candidates = list(_iter_count_matches(scope_text))
+    if not candidates:
+        return None
+    return min(candidates, key=lambda c: abs(c[0] - ref_pos))[1]
 
 
 def scan_markdown(path: Path, prefixes: list[str]) -> list[Reference]:
     """Return every ``<prefix>__<name>`` reference in *path*.
 
-    References inside fenced code blocks are ignored. When a reference
-    line is part of a paragraph containing a chunk-count claim, the
-    claim is associated with every reference in that paragraph
-    (same-paragraph nearest-match heuristic — cheap, and good enough
-    for the advisory scope).
+    References inside fenced code blocks are ignored. Each bullet-list
+    item is its own count-binding scope; within a prose paragraph each
+    reference binds to the textually nearest chunk-count claim.
     """
     # Validate prefixes up-front so a bad config fails fast, even on
     # empty documents (where scan would otherwise short-circuit).
@@ -175,13 +202,19 @@ def scan_markdown(path: Path, prefixes: list[str]) -> list[Reference]:
         return []
     refs: list[Reference] = []
 
-    for lineno, line in plain_lines:
+    for idx, (lineno, line) in enumerate(plain_lines):
         for m in coll_re.finditer(line):
             prefix = m.group("prefix")
             name = m.group("name")
             collection = f"{prefix}__{name}"
-            paragraph = _paragraph_for_line(plain_lines, lineno)
-            claimed = _extract_count(" ".join(paragraph)) if paragraph else None
+
+            scope_lines, target_within = _scope_for_line(plain_lines, idx)
+            scope_text = " ".join(scope_lines)
+            # Offset of the target line within the joined scope. `" "` join
+            # means a single-char separator between lines.
+            offset = sum(len(s) + 1 for s in scope_lines[:target_within])
+            claimed = _extract_count_near(scope_text, offset + m.start())
+
             refs.append(
                 Reference(
                     path=path,
