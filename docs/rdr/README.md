@@ -101,13 +101,14 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-077](rdr-077-projection-quality-similarity-icf.md) | Projection Quality — Similarity Scores and ICF Hub Detection | Feature | Closed (implemented) | 2026-04-14 |
 | [RDR-078](rdr-078-unified-context-graph-and-retrieval.md) | Plan-Centric Retrieval — Semantic Plan Matching, Typed-Graph Traversal, Scenario Plans | Feature | Closed (implemented) | 2026-04-14 |
 | [RDR-079](rdr-079-operator-dispatch-and-execution.md) | Operator Dispatch + Plan Execution End-to-End | Feature | Abandoned | 2026-04-15 |
+| [RDR-079 P5](rdr-079-calibration.md) | min_confidence calibration (ROC measurement spun off from RDR-079) | Calibration artifact | Closed | 2026-04-15 |
 | [RDR-080](rdr-080-retrieval-layer-consolidation.md) | Retrieval Layer Consolidation — `nx_answer` + Agent/Skill Pruning | Feature | Closed (implemented) | 2026-04-15 |
 | [RDR-081](rdr-081-authoring-trust-cli.md) | Stale-Reference Validator (`nx taxonomy validate-refs`) | Feature | Closed (implemented) | 2026-04-15 |
 | [RDR-082](rdr-082-doc-render-tokens.md) | Doc-Build Token Resolution — `nx doc render` with Bead and RDR Tokens | Feature | Closed (implemented) | 2026-04-15 |
 | [RDR-083](rdr-083-chunk-grounded-citations.md) | Corpus-Evidence Tokens — `chash:` Spans, Grounding Validator, `nx-anchor` | Feature | Closed (implemented) | 2026-04-15 |
 | [RDR-084](rdr-084-plan-library-growth.md) | Plan Library Growth — Auto-Save Successful Ad-Hoc Plans | Feature | Closed (implemented) | 2026-04-16 |
 | [RDR-085](rdr-085-glossary-aware-labeler.md) | Glossary-Aware Topic Labeler — Project Vocabulary via `claude_dispatch` | Feature | Closed (implemented) | 2026-04-16 |
-| [RDR-086](rdr-086-chash-span-resolution.md) | Chash Span Surface — Authoring, Resolution, and Verification | Feature | Accepted | 2026-04-16 |
+| [RDR-086](rdr-086-chash-span-resolution.md) | Chash Span Surface — Authoring, Resolution, and Verification | Feature | Closed (shipped in v4.7.0) | 2026-04-16 |
 | [RDR-087](rdr-087-collection-observability-surfaces.md) | Collection Observability and Curation Surfaces | Feature | Accepted | 2026-04-17 |
 | [RDR-088](rdr-088-agenticscholar-operator-completion.md) | AgenticScholar Operator-Set Completion | Feature | Draft | 2026-04-17 |
 | [RDR-089](rdr-089-structured-aspect-extraction-at-ingest.md) | Structured Aspect Extraction at Ingest | Feature | Draft | 2026-04-17 |

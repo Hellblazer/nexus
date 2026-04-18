@@ -1,7 +1,8 @@
 ---
 title: "RDR-086: Chash Span Surface — Authoring, Resolution, and Verification"
 id: RDR-086
-status: accepted
+status: closed
+close_reason: implemented
 type: Feature
 priority: medium
 author: Hal Hildebrand
@@ -9,6 +10,15 @@ reviewed-by: self
 created: 2026-04-16
 revised: 2026-04-17
 accepted_date: 2026-04-17
+closed_date: 2026-04-18
+shipped_in: v4.7.0
+closure_pointers:
+  Gap1: src/nexus/catalog/catalog.py:788         # Catalog.resolve_chash
+  Gap2: src/nexus/commands/doc.py:451            # check-extensions chash→doc_id fix
+  Gap3: src/nexus/commands/doc.py:281            # --fail-ungrounded flag
+  Gap4: src/nexus/commands/doc.py:84             # --expand-citations flag
+  Gap5: src/nexus/mcp/core.py:215                # chunk_text_hash on structured returns
+  Gap6: src/nexus/commands/doc.py:618            # nx doc cite
 related_issues: []
 related: [RDR-053, RDR-075, RDR-078, RDR-082, RDR-083]
 ---

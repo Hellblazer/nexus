@@ -1,9 +1,17 @@
 ---
 title: RDR-079 P5 — min_confidence calibration
-status: accepted
+status: closed
+close_reason: implemented
 type: calibration-artifact
 bead: nexus-o5q
 date: 2026-04-15
+closed_date: 2026-04-18
+note: |
+  Calibration artifact — a one-shot ROC measurement that established
+  min_confidence=0.40 as the plan-matcher threshold (see ROC table).
+  The measurement is complete; the threshold was adopted.
+  rdr-close skill gap-replay gate does not apply to calibration
+  artifacts (no Problem Statement gap headings by design).
 ---
 
 # RDR-079 P5 — min_confidence calibration
