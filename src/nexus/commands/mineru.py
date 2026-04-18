@@ -180,20 +180,41 @@ def stop() -> None:
         pid_path.unlink(missing_ok=True)
         return
 
-    # Send SIGTERM for graceful shutdown
-    os.kill(pid, signal.SIGTERM)
+    # SIGTERM the entire process group owned by *pid*. MinerU's
+    # multiprocessing workers and their ``resource_tracker`` children
+    # must receive the signal too — otherwise the tracker never gets
+    # to ``sem_unlink`` and POSIX named semaphores leak into the
+    # global namespace (bead nexus-ze2a root cause). ``start_new_session
+    # =True`` at spawn (mineru.py start) guarantees they share one
+    # killable pgid.
+    try:
+        pgid = os.getpgid(pid)
+    except OSError:
+        pgid = pid  # fallback: treat head pid as its own group
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except OSError:
+        # Process group already gone — nothing to do.
+        pid_path.unlink(missing_ok=True)
+        click.echo(f"MinerU server stopped (PID {pid})")
+        return
 
     # Poll until process exits (os.waitpid only works on child processes;
-    # the server was started by a different nx invocation)
+    # the server was started by a different nx invocation).
     deadline = time.monotonic() + _STOP_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         if not _is_process_alive(pid):
             break
         time.sleep(0.2)
     else:
+        # Escalate to SIGKILL on the group — same reason (reach workers).
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except OSError:
+            pass  # already gone
         click.echo(
             f"Warning: MinerU server (PID {pid}) did not exit within "
-            f"{_STOP_TIMEOUT_SECONDS}s",
+            f"{_STOP_TIMEOUT_SECONDS}s; escalated SIGKILL to process group",
             err=True,
         )
 

@@ -245,6 +245,12 @@ def start_t1_server() -> tuple[str, int, int, str]:
     sock.close()
 
     tmpdir = tempfile.mkdtemp(prefix="nx_t1_")
+    # start_new_session=True isolates chroma + its multiprocessing workers
+    # into their own process group so `os.killpg(getpgid(pid), …)` at
+    # shutdown reaches the whole subtree. Without this, SIGTERM only hits
+    # the chroma head; workers get orphaned and their POSIX named
+    # semaphores are never ``sem_unlink()``-ed → Errno 28 namespace
+    # exhaustion (bead nexus-dc57 / nexus-ze2a root cause).
     proc = subprocess.Popen(
         [
             chroma, "run",
@@ -254,6 +260,7 @@ def start_t1_server() -> tuple[str, int, int, str]:
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        start_new_session=True,
     )
 
     # Poll until the server accepts TCP connections or the process exits.
@@ -278,24 +285,43 @@ def start_t1_server() -> tuple[str, int, int, str]:
 
 
 def stop_t1_server(server_pid: int) -> None:
-    """Send SIGTERM to *server_pid*; escalate to SIGKILL after 3 seconds."""
+    """Send SIGTERM → SIGKILL to the *entire process group* owned by
+    *server_pid*.
+
+    Uses ``os.killpg(os.getpgid(pid), …)`` rather than ``os.kill(pid, …)``
+    so chroma's multiprocessing workers and their ``resource_tracker``
+    children receive the signal too. The tracker unlinks POSIX named
+    semaphores during its own shutdown; without it, workers' semaphores
+    stay registered with the kernel until reboot and eventually exhaust
+    ``kern.posix.sem.max`` (beads nexus-dc57 + nexus-ze2a).
+
+    Graceful SIGTERM first; escalates to SIGKILL after 3 s.
+    """
     try:
-        os.kill(server_pid, signal.SIGTERM)
+        pgid = os.getpgid(server_pid)
     except OSError:
-        return  # intentional: process already gone before SIGTERM
-    # Wait up to 3 seconds for graceful exit
+        return  # intentional: process already gone before any signal
+
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except OSError:
+        return  # intentional: process group vanished between getpgid and signal
+
+    # Wait up to 3 seconds for graceful exit.
     deadline = time.time() + 3.0
     while time.time() < deadline:
         try:
-            os.kill(server_pid, 0)  # check if alive
+            os.kill(server_pid, 0)  # readiness probe — NOT a signal delivery
         except OSError:
-            return  # intentional: process exited after SIGTERM — success
+            return  # process exited after SIGTERM — success
         time.sleep(0.1)
-    # Escalate
+
+    # Escalate.
     try:
-        os.kill(server_pid, signal.SIGKILL)
+        os.killpg(pgid, signal.SIGKILL)
     except OSError:
-        return  # intentional: process exited between poll and SIGKILL
+        return  # intentional: process group exited between poll and SIGKILL
+
     # Reap the zombie so it does not linger in the process table.
     try:
         os.waitpid(server_pid, os.WNOHANG)
