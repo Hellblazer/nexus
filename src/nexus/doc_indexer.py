@@ -993,10 +993,15 @@ def _catalog_markdown_hook(
             owner = cat.register_owner(owner_name, "curator")
 
         fp = make_relative(md_path, base_path) if base_path else str(md_path)
+        try:
+            source_mtime = md_path.stat().st_mtime
+        except OSError:
+            source_mtime = 0.0
         cat.register(
             owner=owner, title=title, content_type=content_type,
             file_path=fp, physical_collection=collection_name,
             chunk_count=chunk_count, year=year,
+            source_mtime=source_mtime,
         )
     except Exception:
         _log.debug("catalog_markdown_hook_failed", exc_info=True)

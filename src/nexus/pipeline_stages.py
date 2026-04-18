@@ -494,12 +494,17 @@ def _catalog_pdf_hook(
         file_path_str = pdf_path.name  # Portable — not machine-specific absolute path
         existing = cat.by_file_path(owner, file_path_str)
 
+        try:
+            source_mtime = pdf_path.stat().st_mtime
+        except OSError:
+            source_mtime = 0.0
         if existing:
             cat.update(
                 existing.tumbler,
                 physical_collection=collection_name,
                 chunk_count=chunk_count,
                 indexed_at=datetime.now(UTC).isoformat(),
+                source_mtime=source_mtime,
             )
         else:
             cat.register(
@@ -508,6 +513,7 @@ def _catalog_pdf_hook(
                 physical_collection=collection_name,
                 chunk_count=chunk_count,
                 file_path=file_path_str,
+                source_mtime=source_mtime,
             )
     except Exception:
         _log.debug("catalog_pdf_hook_failed", exc_info=True)

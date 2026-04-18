@@ -286,6 +286,15 @@ def _catalog_hook(
             except OSError:
                 file_hash = ""
 
+            # nexus-8luh: capture mtime at index time so stale-source
+            # detection (RDR-087 Phase 3.4) can compare stored vs
+            # current. Missing file falls back to 0 (treated as
+            # "unknown" downstream).
+            try:
+                source_mtime = abs_path.stat().st_mtime
+            except OSError:
+                source_mtime = 0.0
+
             existing = cat.by_file_path(owner, rel_path)
             if existing is None:
                 tumbler = cat.register(
@@ -296,6 +305,7 @@ def _catalog_hook(
                     physical_collection=collection_name,
                     head_hash=head_hash,
                     meta={"content_hash": file_hash} if file_hash else None,
+                    source_mtime=source_mtime,
                 )
                 new_tumblers.append(tumbler)
             else:
@@ -304,6 +314,7 @@ def _catalog_hook(
                     head_hash=head_hash,
                     physical_collection=collection_name,
                     meta={"content_hash": file_hash} if file_hash else None,
+                    source_mtime=source_mtime,
                 )
         _progress(f"  Catalog: {len(new_tumblers)} new, {len(indexed_files) - len(new_tumblers)} updated\n")
 
