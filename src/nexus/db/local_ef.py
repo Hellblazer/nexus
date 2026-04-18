@@ -11,6 +11,7 @@ Explicit: ``LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")`` forces tier 
 from __future__ import annotations
 
 import importlib
+import threading
 from typing import Any
 
 import structlog
@@ -57,6 +58,9 @@ class LocalEmbeddingFunction:
 
         self._dimensions = _MODEL_DIMS.get(self._model_name, 384)
         self._ef: Any = None  # lazy init
+        # Storage review S-2: guard lazy init so two concurrent callers
+        # don't both download/load the fastembed model and discard one.
+        self._ef_lock = threading.Lock()
 
     @property
     def model_name(self) -> str:
@@ -109,8 +113,12 @@ class LocalEmbeddingFunction:
 
     def __call__(self, input: list[str]) -> list[list[float]]:
         """Embed a list of texts, returning a list of float vectors."""
+        # Double-checked locking: the outer read is atomic under CPython's
+        # GIL; the lock guards the init so only one thread loads the model.
         if self._ef is None:
-            self._init_ef()
+            with self._ef_lock:
+                if self._ef is None:
+                    self._init_ef()
 
         if self._model_name == _TIER0_MODEL:
             # ONNXMiniLM_L6_V2 already returns list[list[float]]

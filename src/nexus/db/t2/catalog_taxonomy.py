@@ -451,6 +451,24 @@ class CatalogTaxonomy:
                 (min_collections,),
             ).fetchall()
 
+            # Storage review S-5: fetch the per-topic source collection
+            # set in a single grouped query instead of N per-hub queries
+            # under the lock. For a large hub count the old shape held
+            # the taxonomy lock through N SELECTs, blocking every
+            # concurrent writer.
+            sources_rows = self.conn.execute(
+                """
+                SELECT topic_id, source_collection
+                FROM topic_assignments
+                WHERE assigned_by = 'projection'
+                  AND source_collection IS NOT NULL
+                ORDER BY topic_id, source_collection
+                """
+            ).fetchall()
+            sources_by_topic: dict[int, list[str]] = {}
+            for tid, sc in sources_rows:
+                sources_by_topic.setdefault(int(tid), []).append(sc)
+
             hubs: list[HubRow] = []
             for topic_id, label, collection, df, total, last_at in rows:
                 icf_value = float(icf_map.get(int(topic_id), 1.0))
@@ -458,14 +476,7 @@ class CatalogTaxonomy:
                     continue
 
                 sources = tuple(
-                    r[0] for r in self.conn.execute(
-                        "SELECT DISTINCT source_collection "
-                        "FROM topic_assignments "
-                        "WHERE topic_id = ? AND assigned_by = 'projection' "
-                        "AND source_collection IS NOT NULL "
-                        "ORDER BY source_collection",
-                        (int(topic_id),),
-                    ).fetchall()
+                    dict.fromkeys(sources_by_topic.get(int(topic_id), []))
                 )
 
                 lower_label = (label or "").lower()

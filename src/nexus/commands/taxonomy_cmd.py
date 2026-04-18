@@ -1565,7 +1565,7 @@ def validate_refs_cmd(paths, tolerance, strict, prefixes, fmt):
         t3 = make_t3()
     except Exception as exc:
         click.echo(f"Error: T3 unavailable: {exc}", err=True)
-        sys.exit(2)
+        raise click.exceptions.Exit(2)
 
     try:
         all_refs = []
@@ -1575,7 +1575,7 @@ def validate_refs_cmd(paths, tolerance, strict, prefixes, fmt):
                 all_refs.extend(scan_markdown(_P(p), resolved_prefixes))
             except ValueError as exc:
                 click.echo(f"Error: {exc}", err=True)
-                sys.exit(2)
+                raise click.exceptions.Exit(2)
             except Exception as exc:
                 click.echo(f"Warning: scanner failed on {p}: {exc}", err=True)
 
@@ -1639,8 +1639,8 @@ def validate_refs_cmd(paths, tolerance, strict, prefixes, fmt):
     any_drift = any(d.verdict == VERDICT_DRIFT for d in drifts)
     any_missing = any(d.verdict == VERDICT_MISSING for d in drifts)
     if any_drift or (strict and any_missing):
-        sys.exit(1)
-    sys.exit(0)
+        raise click.exceptions.Exit(1)
+    raise click.exceptions.Exit(0)
 
 
 @taxonomy.command("backfill-source-collection")

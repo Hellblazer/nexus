@@ -310,7 +310,13 @@ class Catalog:
         self._documents_path = catalog_dir / "documents.jsonl"
         self._links_path = catalog_dir / "links.jsonl"
         self.degraded: bool = False
-        # C1+C2: rebuild SQLite from JSONL on construction to ensure consistency
+        # Storage review S-4: mtime cache so every Catalog() instantiation
+        # doesn't re-parse the full JSONL corpus and re-build the SQLite
+        # cache. For a 10k-entry catalog this was measurably slow on
+        # every MCP tool invocation — the mtime-guarded check skips the
+        # rebuild when nothing has changed since the last consistency
+        # pass.
+        self._last_consistency_mtime: float = 0.0
         if self._documents_path.exists():
             self._ensure_consistent()
 
@@ -332,17 +338,30 @@ class Catalog:
         )
 
     def _ensure_consistent(self) -> None:
-        """Rebuild SQLite from JSONL truth. Called when JSONL mtime changes.
+        """Rebuild SQLite from JSONL truth when the JSONL mtime has advanced.
 
         Sets ``degraded`` flag on failure so callers can surface the stale
         state rather than silently serving outdated data (nexus-f2vp).
+
+        Storage review S-4: skips the rebuild when no JSONL file has been
+        written since the last successful rebuild. For a large catalog
+        this eliminates the O(entries) parse cost on every ``Catalog()``
+        construction — the MCP server instantiates one per tool call.
         """
         try:
+            current_mtime = 0.0
+            for p in (self._owners_path, self._documents_path, self._links_path):
+                if p.exists():
+                    current_mtime = max(current_mtime, p.stat().st_mtime)
+            if current_mtime <= self._last_consistency_mtime and not self.degraded:
+                return
+
             owners = read_owners(self._owners_path) if self._owners_path.exists() else {}
             documents = read_documents(self._documents_path) if self._documents_path.exists() else {}
             links_dict = read_links(self._links_path) if self._links_path.exists() else {}
-            _log.debug("catalog_consistency_rebuild")
+            _log.debug("catalog_consistency_rebuild", mtime=current_mtime)
             self._db.rebuild(owners, documents, list(links_dict.values()))
+            self._last_consistency_mtime = current_mtime
             self.degraded = False
         except Exception as exc:
             _log.warning("catalog_consistency_rebuild_failed", error=str(exc), exc_info=True)

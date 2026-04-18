@@ -18,7 +18,6 @@ Exit contract::
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -119,7 +118,7 @@ def render_cmd(
             phase4_trio = _phase4_catalog_t3_chash()
         except Exception as exc:
             click.echo(f"--expand-citations cannot open resolver: {exc}", err=True)
-            sys.exit(2)
+            raise click.exceptions.Exit(2)
 
     total_resolved = 0
     total_misses = 0
@@ -149,10 +148,10 @@ def render_cmd(
                     )
         except RenderError as exc:
             click.echo(f"render error: {exc}", err=True)
-            sys.exit(1)
+            raise click.exceptions.Exit(1)
         except OSError as exc:
             click.echo(f"io error: {exc}", err=True)
-            sys.exit(2)
+            raise click.exceptions.Exit(2)
     finally:
         if db is not None:
             db.close()
@@ -246,7 +245,7 @@ def validate_cmd(paths: tuple[Path, ...], project_root: Path | None) -> None:
                 )
             except OSError as exc:
                 click.echo(f"io error: {exc}", err=True)
-                sys.exit(2)
+                raise click.exceptions.Exit(2)
             for tok, reason in result.unresolved:
                 click.echo(
                     f"{path}:{tok.lineno}:{tok.col}: {tok.raw} — {reason}",
@@ -263,7 +262,7 @@ def validate_cmd(paths: tuple[Path, ...], project_root: Path | None) -> None:
         f"{total_misses} unresolved"
     )
     if total_misses:
-        sys.exit(1)
+        raise click.exceptions.Exit(1)
 
 
 # ── RDR-083 validators ───────────────────────────────────────────────────────
@@ -316,7 +315,7 @@ def check_grounding_cmd(
             click.echo(
                 f"--fail-ungrounded cannot resolve: {exc}", err=True,
             )
-            sys.exit(2)
+            raise click.exceptions.Exit(2)
 
     results = []
     any_fail = False
@@ -382,7 +381,7 @@ def check_grounding_cmd(
             )
 
     if any_fail or (fail_ungrounded and any_unresolved):
-        sys.exit(1)
+        raise click.exceptions.Exit(1)
 
 
 @doc.command("check-extensions")
@@ -432,7 +431,7 @@ def check_extensions_cmd(
         cat, t3, chash_index = _phase4_catalog_t3_chash()
     except Exception as exc:
         click.echo(f"cannot open chash resolver: {exc}", err=True)
-        sys.exit(2)
+        raise click.exceptions.Exit(2)
 
     try:
         # Hold the T2 taxonomy open for the whole command, then drop it
@@ -442,7 +441,7 @@ def check_extensions_cmd(
             taxonomy_ctx = _phase4_t2_taxonomy()
         except sqlite_errors() as exc:
             click.echo(f"cannot open T2: {exc}", err=True)
-            sys.exit(2)
+            raise click.exceptions.Exit(2)
 
         with taxonomy_ctx as taxonomy:
             for path in paths:
@@ -513,7 +512,7 @@ def check_extensions_cmd(
                 )
 
     if any_candidate:
-        sys.exit(1)
+        raise click.exceptions.Exit(1)
 
 
 def sqlite_errors() -> tuple[type[BaseException], ...]:
@@ -665,7 +664,7 @@ def cite_cmd(
         cat, t3, chash_index = _phase4_catalog_t3_chash()
     except Exception as exc:
         click.echo(f"cannot open resolver: {exc}", err=True)
-        sys.exit(2)
+        raise click.exceptions.Exit(2)
 
     try:
         # RDR-086 gate finding S2: empty-index short-circuit.
@@ -676,7 +675,7 @@ def cite_cmd(
                 "backfill completes.",
                 err=True,
             )
-            sys.exit(2)
+            raise click.exceptions.Exit(2)
 
         result = _phase5_search(query=claim, corpus=collection, limit=limit)
         ids = result.get("ids") or []
@@ -689,7 +688,7 @@ def cite_cmd(
                 f"no indexed content in {collection}",
                 err=True,
             )
-            sys.exit(2)
+            raise click.exceptions.Exit(2)
 
         # Fetch chunk text for the top candidate.
         top_hash = hashes[0]
@@ -743,7 +742,7 @@ def cite_cmd(
                 "candidates": candidates,
             }
             click.echo(_json.dumps(payload, indent=2))
-            sys.exit(0 if threshold_met else 1)
+            raise click.exceptions.Exit(0 if threshold_met else 1)
 
         # Markdown-link mode.
         if not threshold_met:
@@ -753,14 +752,14 @@ def cite_cmd(
                 "Try a narrower claim or broaden the collection.",
                 err=True,
             )
-            sys.exit(1)
+            raise click.exceptions.Exit(1)
 
         click.echo(top_link)
         if len(tied) > 1:
             click.echo(
                 f"# {len(tied)} candidates tied (see --json)", err=True,
             )
-        sys.exit(0)
+        raise click.exceptions.Exit(0)
     finally:
         try:
             chash_index.close()
