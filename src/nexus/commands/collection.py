@@ -475,3 +475,36 @@ def rewrite_metadata_cmd(
         f"({grand_skipped} already canonical, {grand_total} scanned) "
         f"across {len(targets)} collection(s)."
     )
+
+
+@collection.command("health")
+@click.option(
+    "--sort",
+    "sort_by",
+    type=click.Choice([
+        "name", "chunk_count", "last_indexed",
+        "zero_hit_rate_30d", "median_query_distance_30d",
+        "cross_projection_rank", "orphan_catalog_rows",
+        "hub_domination_score",
+    ]),
+    default="name",
+    show_default=True,
+    help="Sort the health table by the named column.",
+)
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["table", "json"]),
+    default="table",
+    show_default=True,
+    help="Output format.",
+)
+def health_cmd(sort_by: str, fmt: str) -> None:
+    """Composite per-collection health report (RDR-087 Phase 3.4).
+
+    Folds catalog, T2 telemetry, and topic-assignment signals into one
+    row per collection. Use ``--format=json`` for agents and dashboards.
+    """
+    from nexus.collection_health import run_collection_health
+
+    click.echo(run_collection_health(sort_by=sort_by, fmt=fmt))
