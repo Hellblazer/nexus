@@ -1078,8 +1078,28 @@ def _run_index(
         check_local_path_writable()
         from nexus.db.local_ef import LocalEmbeddingFunction
         _local_ef = LocalEmbeddingFunction()
-        _embed_fn = _local_ef  # callable: (texts) -> embeddings
         local_model = _local_ef.model_name
+
+        # Two incompatible EmbedFn shapes live in the codebase:
+        #   1. Code / prose / PDF path (code_indexer.py, prose_indexer.py,
+        #      indexer.py:_index_pdf_file): ``embed_fn(texts) -> embeddings``.
+        #   2. doc_indexer.py (RDR + markdown + large PDF incremental):
+        #      ``EmbedFn = Callable[[list[str], str], tuple[list, str]]``
+        #      returning ``(embeddings, actual_model)``.
+        # LocalEmbeddingFunction implements shape #1 natively. For
+        # shape #2 callers (the RDR discovery path below), wrap with an
+        # adapter that returns the (embeddings, model) tuple. Without
+        # this, local-mode RDR indexing fails with "takes 2 positional
+        # arguments but 3 were given".
+        _embed_fn = _local_ef  # shape #1 for code / prose / PDF
+
+        def _local_embed_fn_tuple(
+            texts: list[str], target_model: str = "",
+        ) -> tuple[list[list[float]], str]:
+            return _local_ef(texts), local_model
+
+        _embed_fn_doc = _local_embed_fn_tuple  # shape #2 for doc_indexer
+
         code_model = local_model
         docs_model = local_model
         voyage_key = ""
@@ -1091,6 +1111,7 @@ def _run_index(
                 msg="Using basic embeddings (tier 0). For better code search quality: pip install conexus[local]",
             )
     else:
+        _embed_fn_doc = None
         voyage_key = get_credential("voyage_api_key")
         chroma_key = get_credential("chroma_api_key")
         check_credentials(voyage_key, chroma_key)
@@ -1179,9 +1200,13 @@ def _run_index(
     # (without it, the RDR branch defaulted to Voyage 1024-dim; query
     # time with local MiniLM 384-dim hit "Collection expecting embedding
     # with dimension of 1024, got 384").
+    # RDR indexing lives in doc_indexer which expects shape #2
+    # ``(texts, model) -> (embeddings, actual_model)``. In local mode
+    # hand over the tuple-returning adapter; in cloud mode pass None so
+    # doc_indexer falls back to _embed_with_fallback on its own.
     rdr_indexed, rdr_current, rdr_failed = _discover_and_index_rdrs(
         repo, rdr_abs_paths, db, voyage_key, now_iso, force=force,
-        embed_fn=_embed_fn,
+        embed_fn=_embed_fn_doc,
     )
 
     # Prune misclassified chunks (reclassification cleanup)
