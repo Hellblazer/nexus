@@ -88,28 +88,37 @@ def delete_cmd(name: str, yes: bool) -> None:
 
     # Cascade-purge taxonomy state (topics, assignments, links, meta)
     # so `nx taxonomy status` / hub detection don't drag ghost rows.
+    # RDR-086 Phase 1.4: same block also purges chash_index so Phase 2's
+    # Catalog.resolve_chash never returns (collection, doc_id) tuples
+    # pointing at chunks that no longer exist in T3.
     taxonomy_counts: dict[str, int] | None = None
+    chash_deleted = 0
     try:
         from nexus.commands._helpers import default_db_path
         from nexus.db.t2 import T2Database
 
         with T2Database(default_db_path()) as db:
             taxonomy_counts = db.taxonomy.purge_collection(name)
+            chash_deleted = db.chash_index.delete_collection(name)
     except Exception as exc:
         prefix = "absent" if t3_absent else "succeeded"
         click.echo(
-            f"warn: T3 delete {prefix} but taxonomy cascade failed: {exc}",
+            f"warn: T3 delete {prefix} but T2 cascade failed: {exc}",
             err=True,
         )
 
+    parts: list[str] = []
     if taxonomy_counts and any(taxonomy_counts.values()):
-        click.echo(
-            f"Deleted: {name} (taxonomy: "
+        parts.append(
             f"{taxonomy_counts['topics']} topics, "
             f"{taxonomy_counts['assignments']} assignments, "
             f"{taxonomy_counts['links']} links, "
-            f"{taxonomy_counts['meta']} meta)"
+            f"{taxonomy_counts['meta']} meta"
         )
+    if chash_deleted:
+        parts.append(f"{chash_deleted} chash rows")
+    if parts:
+        click.echo(f"Deleted: {name} ({'; '.join(parts)})")
     else:
         click.echo(f"Deleted: {name}")
 
