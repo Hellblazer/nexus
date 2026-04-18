@@ -265,45 +265,18 @@ def chunker_loop(
         if chunking_done is not None:
             chunking_done.set()
 
-    # Seed cache from existing pages (resume case).
-    existing_pages = db.read_pages(content_hash)
-    if existing_pages:
-        parts = []
-        for row in existing_pages:
-            meta = json.loads(row["metadata_json"]) if isinstance(row["metadata_json"], str) else row["metadata_json"]
-            accumulated_boundaries.append({
-                "page_number": meta.get("page_number", row["page_index"] + 1),
-                "start_char": char_pos,
-                "page_text_length": len(row["page_text"]) + 1,
-            })
-            parts.append(row["page_text"])
-            char_pos += len(row["page_text"]) + 1
-        accumulated_text = "\n".join(parts)
-        pages_cached = len(existing_pages)
-
-    while not cancel.is_set():
-        is_final = False
-        if extraction_done is not None:
-            is_final = extraction_done.is_set()
-        else:
-            state = db.get_pipeline_state(content_hash)
-            if state and state["total_pages"] is not None and state["pages_extracted"] >= state["total_pages"]:
-                is_final = True
-
-        # Read only NEW pages (O(new_pages) not O(all_pages)).
-        new_pages = db.read_pages_from(content_hash, pages_cached)
-
-        if not new_pages and not is_final:
-            if extraction_done is not None:
-                extraction_done.wait(timeout=0.5)
-            else:
-                time.sleep(_POLL_INTERVAL)
-            continue
-
-        # Append new pages to cache.
-        if new_pages:
+    # Indexing review C2: every exit path must signal chunking_done so the
+    # uploader doesn't block forever. Previously ``_signal_done()`` sat after
+    # the while loop and after the early-return in the final branch — an
+    # exception in the embed/write step skipped both, relying on the
+    # orchestrator's cancel.set() to rescue. Wrap in try/finally instead
+    # so the event fires regardless of how we leave the loop.
+    try:
+        # Seed cache from existing pages (resume case).
+        existing_pages = db.read_pages(content_hash)
+        if existing_pages:
             parts = []
-            for row in new_pages:
+            for row in existing_pages:
                 meta = json.loads(row["metadata_json"]) if isinstance(row["metadata_json"], str) else row["metadata_json"]
                 accumulated_boundaries.append({
                     "page_number": meta.get("page_number", row["page_index"] + 1),
@@ -312,54 +285,86 @@ def chunker_loop(
                 })
                 parts.append(row["page_text"])
                 char_pos += len(row["page_text"]) + 1
-            if accumulated_text:
-                accumulated_text += "\n" + "\n".join(parts)
+            accumulated_text = "\n".join(parts)
+            pages_cached = len(existing_pages)
+
+        while not cancel.is_set():
+            is_final = False
+            if extraction_done is not None:
+                is_final = extraction_done.is_set()
             else:
-                accumulated_text = "\n".join(parts)
-            pages_cached += len(new_pages)
+                state = db.get_pipeline_state(content_hash)
+                if state and state["total_pages"] is not None and state["pages_extracted"] >= state["total_pages"]:
+                    is_final = True
 
-        if not accumulated_text:
+            # Read only NEW pages (O(new_pages) not O(all_pages)).
+            new_pages = db.read_pages_from(content_hash, pages_cached)
+
+            if not new_pages and not is_final:
+                if extraction_done is not None:
+                    extraction_done.wait(timeout=0.5)
+                else:
+                    time.sleep(_POLL_INTERVAL)
+                continue
+
+            # Append new pages to cache.
+            if new_pages:
+                parts = []
+                for row in new_pages:
+                    meta = json.loads(row["metadata_json"]) if isinstance(row["metadata_json"], str) else row["metadata_json"]
+                    accumulated_boundaries.append({
+                        "page_number": meta.get("page_number", row["page_index"] + 1),
+                        "start_char": char_pos,
+                        "page_text_length": len(row["page_text"]) + 1,
+                    })
+                    parts.append(row["page_text"])
+                    char_pos += len(row["page_text"]) + 1
+                if accumulated_text:
+                    accumulated_text += "\n" + "\n".join(parts)
+                else:
+                    accumulated_text = "\n".join(parts)
+                pages_cached += len(new_pages)
+
+            if not accumulated_text:
+                if is_final:
+                    db.update_progress(content_hash, chunks_created=0, chunks_embedded=0)
+                    return
+                continue
+
+            chunk_metadata = {"page_boundaries": accumulated_boundaries, "table_regions": []}
+            chunks = chunker.chunk(accumulated_text, chunk_metadata)
+
+            batch_kwargs = dict(
+                pdf_path=pdf_path, corpus=corpus, target_model=current_model,
+                now_iso=now_iso, git_meta=git_meta,
+            )
+
             if is_final:
-                db.update_progress(content_hash, chunks_created=0, chunks_embedded=0)
-                _signal_done()
+                new_chunks = chunks[written_up_to:]
+                count, actual_model = _embed_and_write_batch(
+                    new_chunks, content_hash, db, embed_fn, cancel,
+                    total_embedded, chunk_count=len(chunks), **batch_kwargs,
+                )
+                total_embedded += count
+                written_up_to += count
+                current_model = actual_model
+                db.update_progress(content_hash, chunks_created=len(chunks), chunks_embedded=total_embedded)
                 return
-            continue
 
-        chunk_metadata = {"page_boundaries": accumulated_boundaries, "table_regions": []}
-        chunks = chunker.chunk(accumulated_text, chunk_metadata)
-
-        batch_kwargs = dict(
-            pdf_path=pdf_path, corpus=corpus, target_model=current_model,
-            now_iso=now_iso, git_meta=git_meta,
-        )
-
-        if is_final:
-            new_chunks = chunks[written_up_to:]
-            count, actual_model = _embed_and_write_batch(
-                new_chunks, content_hash, db, embed_fn, cancel,
-                total_embedded, chunk_count=len(chunks), **batch_kwargs,
-            )
-            total_embedded += count
-            written_up_to += count
-            current_model = actual_model
-            db.update_progress(content_hash, chunks_created=len(chunks), chunks_embedded=total_embedded)
-            _signal_done()
-            return
-
-        # Hold back the last chunk — its boundary may shift when more pages arrive.
-        stable_end = max(written_up_to, len(chunks) - 1)
-        new_chunks = chunks[written_up_to:stable_end]
-        if new_chunks:
-            count, actual_model = _embed_and_write_batch(
-                new_chunks, content_hash, db, embed_fn, cancel,
-                total_embedded, chunk_count=0, **batch_kwargs,  # provisional
-            )
-            current_model = actual_model
-            total_embedded += count
-            written_up_to += count
-            db.update_progress(content_hash, chunks_created=written_up_to)
-
-    _signal_done()
+            # Hold back the last chunk — its boundary may shift when more pages arrive.
+            stable_end = max(written_up_to, len(chunks) - 1)
+            new_chunks = chunks[written_up_to:stable_end]
+            if new_chunks:
+                count, actual_model = _embed_and_write_batch(
+                    new_chunks, content_hash, db, embed_fn, cancel,
+                    total_embedded, chunk_count=0, **batch_kwargs,  # provisional
+                )
+                current_model = actual_model
+                total_embedded += count
+                written_up_to += count
+                db.update_progress(content_hash, chunks_created=written_up_to)
+    finally:
+        _signal_done()
 
 
 # ── Stage 3: Uploader ───────────────────────────────────────────────────────

@@ -220,18 +220,38 @@ def _embed_with_fallback(
                 bucket.acquire()
                 batch_results[idx] = _embed_one_batch(batch)
 
+            # Indexing review C3: drain every future before re-raising.
+            # The previous shape collected results in submission order via
+            # future.result() — the first raising future aborted the loop
+            # and the executor's __exit__ discarded the remaining results,
+            # so a later batch's 429 was silently swallowed. We now wait
+            # for *all* futures to complete, record the first exception,
+            # then re-raise it — callers that retry see the full failure
+            # surface, not just the first one.
             with ThreadPoolExecutor(max_workers=_PARALLEL_WORKERS) as pool:
                 futures = [
                     pool.submit(_rate_limited_embed, i, b)
                     for i, b in enumerate(batches)
                 ]
-                # Collect in submission order to preserve embedding order
+                first_exc: BaseException | None = None
+                for future in futures:
+                    try:
+                        future.result()
+                    except BaseException as exc:
+                        if first_exc is None:
+                            first_exc = exc
+                if first_exc is not None:
+                    raise first_exc
+
+                # All batches completed successfully — extend in submission
+                # order to preserve embedding alignment with the input chunks.
                 done_count = 0
-                for i, future in enumerate(futures):
-                    future.result()  # raises if the batch failed
+                for i, _ in enumerate(futures):
                     embs = batch_results[i]
                     if embs is None:
-                        raise RuntimeError(f"Batch {i} embedding result missing after future completed")
+                        raise RuntimeError(
+                            f"Batch {i} embedding result missing after future completed"
+                        )
                     all_embeddings.extend(embs)
                     done_count += len(embs)
                     if on_progress:

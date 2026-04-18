@@ -781,15 +781,25 @@ def apply_pending(conn: sqlite3.Connection, current_version: str) -> None:
     """Run all migrations introduced between last-seen and *current_version*.
 
     Idempotent — every migration function has column/table-existence guards.
+
+    Concurrency: ``_upgrade_lock`` is held for the entire migration run so
+    a second thread opening the same database file never races the
+    bootstrap+migrate sequence. An earlier version reserved the
+    ``_upgrade_done`` slot *before* running migrations, relying on a
+    try/except to discard on failure — but that left a window where
+    ``bootstrap_version()`` could raise and a concurrent caller that
+    entered under the released lock would see the path as "done" and
+    proceed against a half-initialised schema (storage review C-1).
     """
     path_key = _connection_path_key(conn)
     with _upgrade_lock:
         if path_key in _upgrade_done:
             return
-        # Reserve the slot under lock — prevents concurrent entry.
-        _upgrade_done.add(path_key)
 
-    try:
+        # Run the entire sequence under the lock — bootstrap_version +
+        # migrations + version update. Only mark the path done on
+        # successful completion so a failure (or crash mid-migration)
+        # is retried by the next open.
         last_seen = bootstrap_version(conn)
         last_seen_t = _parse_version(last_seen)
         current_t = _parse_version(current_version)
@@ -812,13 +822,10 @@ def apply_pending(conn: sqlite3.Connection, current_version: str) -> None:
                 (current_version,),
             )
             conn.commit()
-    except Exception:
-        # On failure, remove from set under lock so the next call retries.
-        # Must hold _upgrade_lock to prevent a concurrent thread from
-        # seeing a stale _upgrade_done state mid-discard.
-        with _upgrade_lock:
-            _upgrade_done.discard(path_key)
-        raise
+
+        # Only now — after bootstrap + migrations + version update all
+        # succeeded — record the path as done.
+        _upgrade_done.add(path_key)
 
 
 def _connection_path_key(conn: sqlite3.Connection) -> str:

@@ -51,7 +51,32 @@ def _is_process_alive(pid: int) -> bool:
         return False
 
 
-def _server_env() -> dict[str, str]:
+def _mineru_output_root() -> Path:
+    """Return the per-user output root for MinerU extraction artifacts.
+
+    Avoids the world-writable ``/tmp/mineru-output`` default (CLI review
+    Critical): on shared Linux hosts, a local attacker can pre-create
+    that path or symlink it to intercept extracted PDF content. Uses
+    ``$XDG_RUNTIME_DIR`` when available (per-user, 0700 by spec) and
+    falls back to ``~/.cache/nexus/mineru-output`` otherwise. Creates
+    the directory with 0o700 so other users on the same host cannot
+    read extracted documents.
+    """
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime and Path(runtime).is_dir():
+        base = Path(runtime) / "nexus-mineru"
+    else:
+        base = Path.home() / ".cache" / "nexus" / "mineru-output"
+    base.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # Re-chmod in case the directory pre-existed with wider mode.
+    try:
+        os.chmod(base, 0o700)
+    except OSError:
+        pass
+    return base
+
+
+def _server_env(output_root: Path) -> dict[str, str]:
     """Build environment variables for the mineru-api subprocess."""
     from nexus.config import get_mineru_table_enable
 
@@ -60,10 +85,32 @@ def _server_env() -> dict[str, str]:
         "MINERU_TABLE_ENABLE": str(get_mineru_table_enable()).lower(),
         "MINERU_PROCESSING_WINDOW_SIZE": "8",
         "MINERU_VIRTUAL_VRAM_SIZE": "8192",
-        "MINERU_API_OUTPUT_ROOT": "/tmp/mineru-output",
+        "MINERU_API_OUTPUT_ROOT": str(output_root),
         "MINERU_API_TASK_RETENTION_SECONDS": "300",
     })
     return env
+
+
+def _write_pid_file(pid_path: Path, payload: dict) -> None:
+    """Write the MinerU PID file with 0o600 mode.
+
+    CLI review Critical: the previous ``pid_path.write_text(...)`` used
+    the default umask (typically 0o644) which exposed the port + CWD
+    to other users on shared hosts. Use ``os.open`` with explicit mode
+    to enforce 0o600 regardless of umask.
+    """
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+    data = json.dumps(payload).encode("utf-8")
+    # O_WRONLY | O_CREAT | O_TRUNC to replace atomically; the tempfile
+    # approach is overkill here since only one mineru server per user
+    # should exist at a time.
+    fd = os.open(
+        pid_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600,
+    )
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
 
 
 @click.group("mineru")
@@ -97,26 +144,28 @@ def start(port: int) -> None:
 
     # Launch subprocess — start_new_session=True so server survives terminal close
     cmd = ["mineru-api", "--host", "127.0.0.1", "--port", str(port)]
+    output_root = _mineru_output_root()
     try:
         proc = subprocess.Popen(
             cmd,
-            env=_server_env(),
+            env=_server_env(output_root),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
     except FileNotFoundError:
         click.echo("Error: mineru-api not found on PATH. Install MinerU first.", err=True)
-        raise SystemExit(1)
+        raise click.exceptions.Exit(1)
 
-    # Write PID file immediately so concurrent starts detect the race
+    # Write PID file with 0o600 + record output_root so stop can clean up
+    # the per-user extraction artifact directory.
     pid_path = _pid_file_path()
-    pid_path.parent.mkdir(parents=True, exist_ok=True)
-    pid_path.write_text(json.dumps({
+    _write_pid_file(pid_path, {
         "pid": proc.pid,
         "port": port,
         "started_at": datetime.now(timezone.utc).isoformat(),
-    }))
+        "output_root": str(output_root),
+    })
 
     # Poll /health until ready
     url = f"http://127.0.0.1:{port}/health"
@@ -130,7 +179,7 @@ def start(port: int) -> None:
                 f"(port {port} may be in use). Check with: lsof -i :{port}",
                 err=True,
             )
-            raise SystemExit(1)
+            raise click.exceptions.Exit(1)
         try:
             resp = httpx.get(url, timeout=2)
             if resp.status_code == 200:
@@ -152,7 +201,7 @@ def start(port: int) -> None:
             os.kill(proc.pid, signal.SIGTERM)
         except OSError:
             pass
-        raise SystemExit(1)
+        raise click.exceptions.Exit(1)
 
     # Persist the server URL to config so pdf_extractor can discover it
     from nexus.config import set_config_value
@@ -219,6 +268,20 @@ def stop() -> None:
         )
 
     pid_path.unlink(missing_ok=True)
+
+    # Clean up the per-user output directory — extracted PDF artifacts
+    # may contain confidential content and should not linger past the
+    # server's lifetime (CLI review Critical). Best-effort: the directory
+    # may not exist on older installs that used the pre-fix /tmp path.
+    output_root = info.get("output_root") if info else None
+    if output_root:
+        try:
+            import shutil
+
+            shutil.rmtree(output_root, ignore_errors=True)
+        except Exception:
+            _log.debug("mineru_output_cleanup_failed", path=output_root, exc_info=True)
+
     _log.info("mineru_stopped", pid=pid)
     click.echo(f"MinerU server stopped (PID {pid})")
 

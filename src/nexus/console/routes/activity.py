@@ -74,8 +74,25 @@ def _read_recent_events(
     return events[:limit]
 
 
+# Whitelist of kind values safe to emit into the CSS ``class`` attribute
+# of ``_stream.html``. Any other value is silently coerced to ``"event"``
+# to keep a future edit that threads untrusted input through this function
+# from producing attribute injection (CLI review Critical — defensive).
+_ALLOWED_KINDS: frozenset[str] = frozenset({"link", "document", "event"})
+
+
+def _safe_kind(value: str) -> str:
+    return value if value in _ALLOWED_KINDS else "event"
+
+
 def _event_summary(event: dict[str, Any]) -> dict[str, str]:
-    """Extract display fields from a raw event."""
+    """Extract display fields from a raw event.
+
+    Every returned ``kind`` is drawn from ``_ALLOWED_KINDS`` so the
+    template's ``<tr class="event-row {{ e.kind }}">`` cannot be used
+    to inject arbitrary attributes even if the JSONL source is
+    corrupted or written by an external tool.
+    """
     kind = event.get("_event_type", "")
     if kind == "link":
         return {
@@ -83,14 +100,14 @@ def _event_summary(event: dict[str, Any]) -> dict[str, str]:
             "actor": event.get("created_by", ""),
             "action": event.get("link_type", "link"),
             "target": f"{event.get('from_t', '')} → {event.get('to_t', '')}",
-            "kind": "link",
+            "kind": _safe_kind("link"),
         }
     return {
         "timestamp": event.get("indexed_at", ""),
         "actor": event.get("created_by", "") or "indexer",
         "action": f"register {event.get('content_type', '')}",
         "target": event.get("title", event.get("tumbler", "")),
-        "kind": "document",
+        "kind": _safe_kind("document"),
     }
 
 
