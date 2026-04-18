@@ -401,7 +401,9 @@ def _index_document(
             break
         offset += 300
     if stale_ids:
-        _chroma_with_retry(col.delete, ids=stale_ids)
+        # Batch deletes at MAX_RECORDS_PER_WRITE=300 (indexing review I4).
+        for i in range(0, len(stale_ids), 300):
+            _chroma_with_retry(col.delete, ids=stale_ids[i:i + 300])
 
     if return_metadata:
         return metadatas
@@ -521,7 +523,9 @@ def _index_pdf_incremental(
             break
         offset += 300
     if stale_ids:
-        _chroma_with_retry(col.delete, ids=stale_ids)
+        # Batch deletes at MAX_RECORDS_PER_WRITE=300 (indexing review I4).
+        for i in range(0, len(stale_ids), 300):
+            _chroma_with_retry(col.delete, ids=stale_ids[i:i + 300])
 
     # Clean up checkpoint on success
     delete_checkpoint(content_hash, collection_name)
@@ -908,7 +912,9 @@ def index_pdf(
             break
         offset += 300
     if stale_ids:
-        _chroma_with_retry(col.delete, ids=stale_ids)
+        # Batch deletes at MAX_RECORDS_PER_WRITE=300 (indexing review I4).
+        for i in range(0, len(stale_ids), 300):
+            _chroma_with_retry(col.delete, ids=stale_ids[i:i + 300])
 
     _register_in_catalog(metadatas_list, len(metadatas_list))
 

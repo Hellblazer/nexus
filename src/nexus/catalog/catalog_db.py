@@ -101,6 +101,12 @@ class CatalogDB:
         self._path = db_path
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._lock = threading.Lock()
+        # Storage review I-2: match the T2 domain-store concurrency defaults
+        # (5 s busy_timeout + WAL) so cross-process writers don't immediately
+        # raise ``OperationalError: database is locked`` when the CLI races
+        # an indexing writer.
+        self._conn.execute("PRAGMA busy_timeout=5000")
+        self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA_SQL)
         # Migration: add repo_root column if missing (pre-RDR-060 databases)
         try:

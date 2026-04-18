@@ -877,9 +877,13 @@ def _prune_stale_chunks(
     if not stale_ids:
         return True
 
-    # Phase 2: delete stale chunks
+    # Phase 2: delete stale chunks in batches of MAX_RECORDS_PER_WRITE=300.
+    # A single unbounded col.delete(ids=stale_ids) violates the ChromaDB
+    # Cloud quota on re-indexes that drop >300 chunks (indexing review I4).
     try:
-        _chroma_with_retry(col.delete, ids=stale_ids)
+        for i in range(0, len(stale_ids), 300):
+            batch = stale_ids[i:i + 300]
+            _chroma_with_retry(col.delete, ids=batch)
         _log.info("stale_chunks_pruned", count=len(stale_ids), pdf_path=pdf_path)
         return True
     except Exception as exc:

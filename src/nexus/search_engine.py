@@ -305,7 +305,12 @@ def search_cross_corpus(
     min_raw_per_collection: dict[str, float | None] = {}
     for col in collections:
         mult = _overfetch_multiplier(col)
-        per_k = max(5, n_results * mult)
+        # Search review I-3: cap per_k at MAX_QUERY_RESULTS=300. Without
+        # this, a large ``offset`` fed into ``fetch_n = offset + limit``
+        # upstream multiplies by ``mult`` (up to 4×) and the per-collection
+        # n_results punches through the ChromaDB Cloud quota.
+        from nexus.db.chroma_quotas import QUOTAS
+        per_k = min(max(5, n_results * mult), QUOTAS.MAX_QUERY_RESULTS)
         if not apply_thresholds:
             threshold = None
         elif threshold_override is not None:

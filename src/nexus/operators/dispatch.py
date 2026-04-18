@@ -67,6 +67,11 @@ async def claude_dispatch(
         OperatorOutputError: stdout was not valid JSON.
     """
     schema_json = json.dumps(json_schema)
+    # Search review I-6: start in a new process group so we can reach
+    # any child processes ``claude -p`` spawns (nested claude calls, tool
+    # subprocesses). Same killpg idiom as T1 chroma + MinerU cleanup
+    # (PR #198). Without this, ``proc.kill()`` on timeout only kills the
+    # claude leader and orphans the children.
     proc = await asyncio.create_subprocess_exec(
         "claude", "-p",
         "--output-format", "json",
@@ -75,6 +80,7 @@ async def claude_dispatch(
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
     )
 
     try:
@@ -83,7 +89,18 @@ async def claude_dispatch(
             timeout=timeout,
         )
     except asyncio.TimeoutError:
-        proc.kill()
+        import os
+        import signal
+        try:
+            pgid = os.getpgid(proc.pid)
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        # Reap the leader so the asyncio transport closes cleanly.
+        try:
+            await proc.wait()
+        except Exception:
+            pass
         raise OperatorTimeoutError(
             f"claude -p timed out after {timeout}s"
         )

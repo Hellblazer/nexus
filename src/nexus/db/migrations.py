@@ -677,10 +677,13 @@ def backfill_projection(t3_db: Any, taxonomy: Any) -> None:
 
     total_elapsed = time.monotonic() - total_start
     # Count actual rows written (INSERT OR IGNORE deduplicates; the per-call
-    # 'attempted' counts may exceed actual writes).
-    actual_written = taxonomy.conn.execute(
-        "SELECT COUNT(*) FROM topic_assignments WHERE assigned_by = 'projection'"
-    ).fetchone()[0]
+    # 'attempted' counts may exceed actual writes). Lock taken per storage
+    # review I-1 — this runs in a long upgrade context where concurrent
+    # writes on the same connection are plausible.
+    with taxonomy._lock:
+        actual_written = taxonomy.conn.execute(
+            "SELECT COUNT(*) FROM topic_assignments WHERE assigned_by = 'projection'"
+        ).fetchone()[0]
     print(
         f"  Backfill complete: {actual_written} projection assignments stored "
         f"({total_assigned} attempted) in {total_elapsed:.1f}s across {n} collections.",
