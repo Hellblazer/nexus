@@ -219,19 +219,20 @@ mutex is gone); concurrent writes across domains still serialize at
 SQLite's single-writer WAL lock, but `busy_timeout=5000` absorbs the
 brief contention without raising `OperationalError`.
 
-| Store      | Class             | Attribute       | Responsibility                                                             |
-|------------|-------------------|-----------------|----------------------------------------------------------------------------|
-| Memory     | `MemoryStore`     | `db.memory`     | Persistent notes, project context, FTS5 search, access tracking, TTL       |
-| Plans      | `PlanLibrary`     | `db.plans`      | Plan templates, plan search, plan TTL                                      |
-| Taxonomy   | `CatalogTaxonomy` | `db.taxonomy`   | HDBSCAN topic discovery, centroid ANN assignment, merge strategy, review workflow (RDR-070) |
-| Telemetry  | `Telemetry`       | `db.telemetry`  | Relevance log (query/chunk/action triples), retention-based expiry         |
+| Store      | Class             | Attribute         | Responsibility                                                             |
+|------------|-------------------|-------------------|----------------------------------------------------------------------------|
+| Memory     | `MemoryStore`     | `db.memory`       | Persistent notes, project context, FTS5 search, access tracking, TTL       |
+| Plans      | `PlanLibrary`     | `db.plans`        | Plan templates, plan search, plan TTL                                      |
+| Taxonomy   | `CatalogTaxonomy` | `db.taxonomy`     | HDBSCAN topic discovery, centroid ANN assignment, merge strategy, review workflow (RDR-070) |
+| Telemetry  | `Telemetry`       | `db.telemetry`    | Relevance log (query/chunk/action triples), retention-based expiry         |
+| Chash index| `ChashIndex`      | `db.chash_index`  | Global chash → (collection, doc_id) lookup; populated via dual-write at all seven T3 upsert sites (RDR-086 Phase 1) |
 
-`T2Database` is a composing facade: it constructs the four stores in
-order (memory → plans → taxonomy → telemetry), re-exposes their public
-methods as thin delegates for backward compatibility, and runs
-cross-domain operations like `expire()` over all of them. The facade
-holds no database connection of its own -- every SQL statement runs
-through a specific domain store.
+`T2Database` is a composing facade: it constructs the five stores in
+order (memory → plans → taxonomy → telemetry → chash_index), re-exposes
+their public methods as thin delegates for backward compatibility, and
+runs cross-domain operations like `expire()` over all of them. The
+facade holds no database connection of its own -- every SQL statement
+runs through a specific domain store.
 
 **Preferred call style for new code**:
 

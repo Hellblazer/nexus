@@ -610,6 +610,17 @@ The `reindex` command performs a pre-delete safety check before wiping the colle
 
 Reads each chunk's stored text from ChromaDB and computes `sha256(text.encode()).hexdigest()`, updating metadata in-place. Embeddings and documents are untouched — no API keys or re-embedding needed. Idempotent: chunks that already have `chunk_text_hash` are skipped. Also runs automatically during `nx catalog setup`.
 
+**RDR-086 Phase 1.3 — T2 `chash_index` reconciliation.** The same per-chunk
+pass also populates the T2 `chash_index` table so `nx doc cite` and
+`Catalog.resolve_chash` can answer "which collection + doc_id holds this
+chunk hash?" in ~50 µs instead of scanning ChromaDB. Reconciles gaps left
+by Phase 1.2 dual-write failures and pre-Phase-1 collections indexed before
+the dual-write existed. A tqdm progress bar renders in an interactive
+terminal (auto-disabled on non-TTY CI logs).
+
+Scale reference: a full `--all` on a 278k-chunk / 136-collection corpus
+takes ~25–70 minutes on ChromaDB Cloud. Maintenance-window operation.
+
 **`delete` flags:**
 
 | Flag | Description |
@@ -658,6 +669,94 @@ nx config init
 | Flag | Description |
 |------|-------------|
 | `--show` | Reveal the full value instead of masking |
+
+---
+
+## nx doc
+
+Author, validate, and cite documents backed by the Nexus content-addressed chunk surface
+(RDR-082 / RDR-083 / RDR-086).
+
+### nx doc render
+
+Render markdown tokens (`{{bd:…}}`, `{{rdr:…}}`, `{{nx-anchor:…}}`) into a
+`<stem>.rendered.md` sibling. With `--expand-citations` (RDR-086 Phase 4),
+also resolves every `[display](chash:<hex>)` span and appends a `## Citations`
+footnote block containing the chunk text (truncated at 500 chars). Unresolvable
+chash values render as `[unresolved chash: <first8>…]` rather than crashing.
+
+```
+nx doc render docs/paper.md
+nx doc render docs/paper.md --expand-citations
+nx doc render docs/paper.md --allow-unresolved        # preserve unresolved tokens verbatim
+nx doc render docs/paper.md --out-dir build/          # write to a specific directory
+```
+
+### nx doc validate
+
+Parse-and-resolve without emission. Exits non-zero on any unresolved token.
+
+```
+nx doc validate docs/paper.md
+```
+
+### nx doc check-grounding
+
+Report citation-coverage per markdown file — chash / prose / bracket counts
+and the chash-coverage ratio. With `--fail-ungrounded` (RDR-086 Phase 4),
+additionally exits 1 when any `chash:` span fails `Catalog.resolve_chash`
+and prints `file:line: unresolved chash:<first8>…` to stderr.
+
+```
+nx doc check-grounding docs/paper.md
+nx doc check-grounding docs/paper.md --fail-ungrounded
+nx doc check-grounding docs/paper.md --fail-under 0.80   # coverage-ratio gate
+nx doc check-grounding docs/paper.md --format json
+```
+
+| Flag | Description |
+| --- | --- |
+| `--fail-ungrounded` | Exit 1 when any `chash:` citation fails to resolve |
+| `--fail-under N` | Exit 1 when chash-coverage ratio falls below `N` (0.0–1.0) |
+| `--format table|json` | Report format; default `table` |
+
+### nx doc check-extensions
+
+Flag doc chunks that don't project into a primary source collection at the
+given similarity threshold. RDR-086 Phase 4 caller-side fix: the chash spans
+in your markdown are resolved to Chroma-scoped `doc_id`s *before* calling
+the taxonomy's `chunk_grounded_in`, so you get real candidates instead of
+the RDR-083 v1 "all inputs returned no_data" warning.
+
+```
+nx doc check-extensions docs/paper.md --primary-source docs__art-grossberg-papers
+nx doc check-extensions docs/paper.md --primary-source docs__foo --threshold 0.85
+```
+
+### nx doc cite
+
+One-shot authoring command: given a claim string, search the target collection,
+resolve the top chunk's hash via `Catalog.resolve_chash`, and emit a paste-ready
+`[excerpt](chash:<hex>)` markdown link. With `--json`, returns the full
+`{candidates, query, threshold_met}` envelope.
+
+```
+nx doc cite "orange foxes navigate Voronoi fields" --against docs__art-grossberg-papers
+nx doc cite "chromatic analysis" --against docs__art-grossberg-papers --json
+nx doc cite "claim" --against knowledge__corpus --limit 10 --min-similarity 0.25
+```
+
+| Flag | Description |
+| --- | --- |
+| `--against <collection>` | Required. Collection to search for a grounding chunk |
+| `--limit N` | Candidate fan-out (default 5); tied candidates within 0.01 surface in `--json` |
+| `--min-similarity F` | Maximum acceptable distance (lower is stricter); default 0.30 |
+| `--json` | Emit full candidate schema instead of a markdown link |
+
+Exit codes:
+- `0` — cite emitted; in JSON mode, `threshold_met=true`
+- `1` — top distance above `--min-similarity`; stderr warning, stdout empty (markdown); JSON still returns candidates
+- `2` — empty `chash_index` (run `nx collection backfill-hash --all`), empty collection, or unknown collection
 
 ---
 

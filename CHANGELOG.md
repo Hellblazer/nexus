@@ -6,6 +6,65 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.7.0] - 2026-04-18
+
+### Added
+
+- **RDR-086 Phase 1 — T2 `chash_index` primitive + dual-write + cascade + reconciliation.**
+  New `ChashIndex` domain store answers "which `(collection, doc_id)` holds this chunk hash?" in ~50 µs via a SQLite lookup, replacing the ~13-min serial-ChromaDB-filter alternative. Compound PK `(chash, physical_collection)` so the same chunk text can legitimately live in multiple collections (e.g. `knowledge__delos` and `knowledge__delos_docling`). Populated via best-effort dual-write at seven T3 upsert sites — `code_indexer`, `prose_indexer`, three `doc_indexer` paths, `pipeline_stages.uploader_loop`, and `indexer._index_pdf_file`. `nx collection backfill-hash [--all]` reconciles gaps with a tqdm progress bar (TTY-auto-detect via `disable=None`). `nx collection delete` cascade now also purges `chash_index` rows. 5 sub-phase beads: `nexus-l2k`, `nexus-4qm`, `nexus-ppl`, `nexus-r9b`, `nexus-jfi`.
+- **RDR-086 Phase 2 — `Catalog.resolve_chash` collection-agnostic resolver** (nexus-9a8). Given a bare hex, `chash:<hex>`, or `chash:<hex>:<start>-<end>` input: look up T2 rows, self-heal stale rows (collection no longer exists in T3 → delete the row on access), tie-break by `prefer_collection` → newest `created_at` → deterministic name sort (newest wins so re-indexing into `_docling` variants supersedes the original), delegate to `resolve_span` for chunk text + metadata. On T2 miss, parallel ChromaDB fallback (10× concurrency matching `MAX_CONCURRENT_READS`, 30 s wall-clock deadline, one warning per process). New `ChunkRef` TypedDict documents the return shape.
+- **RDR-086 Phase 3 — `chunk_text_hash` on structured returns** (nexus-d3h). `search(structured=True)` and `query(structured=True)` now include a `chunk_text_hash` list aligned with `ids`, plus a new per-result `chunk_collections` list so consumers that need per-chunk origin (e.g. `nx_answer`'s envelope) get the right collection for every hit, not just the top dedup'd one. `nx_answer(structured=True)` is a new opt-in kwarg returning `{final_text, chunks, plan_id, step_count}` where each chunk carries `{id, chash, collection, distance}`. Single-step guard path produces the same envelope with one `query()` round-trip (previously two).
+- **RDR-086 Phase 4 — `nx doc` consumers on `resolve_chash`** (nexus-6iz). `nx doc check-grounding --fail-ungrounded` — exit 1 on any unresolved `chash:` span with file:line error output. `nx doc check-extensions` resolves chash → Chroma-scoped `doc_id` before calling `chunk_grounded_in` (caller-side fix; the taxonomy signature is unchanged), removing the RDR-083 v1 inertness case. `nx doc render --expand-citations` appends a `## Citations` footnote block with chunk text (truncated at 500 chars); unresolvable hashes render as `[unresolved chash: <first 8>…]`.
+- **RDR-086 Phase 5 — `nx doc cite` authoring CLI** (nexus-3dk). Compose `search(structured=True)` with Phase 3's `chunk_text_hash` surface, resolve the top hash via `Catalog.resolve_chash` to fetch the excerpt, emit a paste-ready `[excerpt](chash:<hex>)` markdown link or the full `--json` schema `{candidates, query, threshold_met}`. Empty-index short-circuit exits 2 with a "run `nx collection backfill-hash --all`" hint instead of a 30 s fallback timeout. Tied candidates within 0.01 distance are surfaced in JSON; stdout picks first + notes `# N candidates tied (see --json)`.
+- **`ChashIndex.delete_stale(chash, collection)`** and **`ChashIndex.is_empty()`** — locked public methods the self-healing read and fresh-install guard use instead of touching `.conn` directly.
+
+### Changed
+
+- **`nexus.config.nexus_config_dir()`** is now the single source of truth for every path under `~/.config/nexus`. Twenty sites that previously hard-coded `Path.home() / ".config" / "nexus" / ...` now route through it. Covers T2 database, catalog JSONL, sessions, checkpoints, pipeline buffer, ripgrep cache, MinerU PID + output root, context cache, git-hook registry, index log, doctor registry lookup. `NEXUS_CONFIG_DIR` was previously documented as an override but silently ignored at the load-bearing T2 path — meaning a "sandbox" run could overwrite the user's production `memory.db`. 22 new isolation tests in `tests/test_config_dir_isolation.py` verify each surface.
+- **`search_engine.search_cross_corpus` per-collection `n_results`** is now capped at `QUOTAS.MAX_QUERY_RESULTS` (300). Without this, a large `offset` fed into `fetch_n = offset + limit` multiplied by `mult` (up to 4×) produced per-collection query values that punched through the ChromaDB Cloud cap.
+- **`_prune_stale_chunks` and the three `doc_indexer` stale-chunk delete sites** now batch `col.delete(ids=...)` at `MAX_RECORDS_PER_WRITE=300`. A single unbounded delete violated the Cloud quota on re-indexes that dropped >300 chunks.
+- **`CatalogDB` SQLite connection** sets `busy_timeout=5000` + `journal_mode=WAL` to match the five T2 domain stores. Without these, cross-process catalog writes during indexing raced CLI reads and raised `OperationalError: database is locked` immediately.
+- **`search_by_tag` LIKE pattern** escapes `%` and `_` metacharacters. Bound parameters block SQL injection but not glob matching — a tag like `"rdr_078"` previously matched `"rdrX078"`.
+- **`merge_topics`** uses `INSERT ... ON CONFLICT DO UPDATE` to preserve the higher-similarity projection row when source and target both carry assignments for the same `doc_id`. The previous `INSERT OR IGNORE` silently discarded higher-similarity data.
+- **`nx_answer(structured=True)` single-step guard** synthesizes the result summary from the structured envelope instead of calling `query()` twice. Halves the T3 round-trips for the single-step path.
+- **`reset_singletons()`** now also resets the T1 plan-match cache. Previously, tests that injected a fresh T1 saw stale plan embeddings from prior test state.
+- **`plan_match`** evicts stale T1 rows when `library.get_plan` returns `None`. Prevents accumulating ghost embeddings after T2 plan deletes.
+- **`frecency.batch_frecency`** uses a unique `|||nxcommit|||` sentinel around timestamps instead of the fragile `"COMMIT "` prefix. A file literally named `"COMMIT something"` could previously corrupt all subsequent scores in its commit.
+- **`_flag_contradictions`** caps the O(n²) pairwise check at 30 indices per collection. A knowledge corpus with many near-duplicate chunks used to dominate search-engine latency.
+- **Exporter import path** validates every embedding's byte-size matches the first record's (and that the first is a multiple of 4 for float32). Malformed `.nxexp` files now fail fast at the boundary instead of raising a cryptic ChromaDB dim-mismatch error deep in upsert.
+- **`nx upgrade --dry-run`** no longer writes. Previously called `bootstrap_version()` which creates base tables and seeds `_nexus_version` — legitimate writes in non-dry-run but wrong for dry-run.
+- **`nx upgrade` T3 steps** are now tracked in a `_nexus_t3_steps` table. A failed T3 step is retried on the next upgrade invocation; previously the overall version advanced on T2 success and the failed T3 step never retried.
+- **`nx doctor --check-schema`** additionally verifies `memory_fts` and the `idx_chash_index_collection` index. Opens with `journal_mode=WAL` to avoid immediate lock errors during concurrent MCP writes.
+- **`console` activity route** uses a bounded `collections.deque` instead of reading the whole JSONL into memory — keeps the async event loop unblocked on large catalogs.
+- **`Catalog._ensure_consistent`** caches the JSONL max-mtime and skips the rebuild when nothing has changed. Previously re-parsed the full corpus on every `Catalog()` construction.
+- **T1 access tracking** coalesces per-row `col.update` calls into a single batched call, dropping N serial HTTP round-trips per search.
+- **`LocalEmbeddingFunction`** guards lazy init with a lock so concurrent callers don't both download the fastembed model.
+- **`CatalogTaxonomy.detect_hubs`** replaces N per-hub `SELECT DISTINCT source_collection` queries with one grouped query + a Python dict lookup.
+- **CLI exit codes** standardized across `commands/doc.py` (16 sites) and `commands/taxonomy_cmd.py` (4 sites) — `raise click.exceptions.Exit(N)` instead of `sys.exit(N)` so the Click error pipeline fires.
+- **`nx mineru` output root** moves from world-writable `/tmp/mineru-output` to `$XDG_RUNTIME_DIR/nexus-mineru` or `$NEXUS_CONFIG_DIR/mineru-output` (mode 0o700). Path is recorded in the PID file and cleaned up on `nx mineru stop` so extracted PDF artifacts don't linger.
+- **Console + mineru PID files** use `os.open(..., 0o600)` instead of `path.write_text()` (default umask 0o644). `nx console` also probes existing PID files on startup and refuses to start over a live server.
+- **Activity-route `_event_summary`** routes the output `kind` through a frozenset whitelist as a defensive XSS hardening for the `<tr class="event-row {{ e.kind }}">` template.
+
+### Fixed
+
+- **RDR-086 review #1 (Critical) — `resolve_chash` self-heal bypassed `ChashIndex._lock`.** Self-healing `DELETE` now goes through the new `ChashIndex.delete_stale` method so concurrent `upsert` / `delete_collection` callers can't race the same SQLite connection.
+- **RDR-086 review #2 (Critical) — `_fallback_chash_scan` future leak on early exit.** `ThreadPoolExecutor` now uses explicit manual lifecycle with `shutdown(wait=False, cancel_futures=True)` in a `finally` block so the 30-second deadline is a real deadline, not a ceiling bounded by the slowest in-flight probe.
+- **Storage review C-1 (Critical) — migration race in `_upgrade_done`.** `apply_pending` now holds `_upgrade_lock` for the entire bootstrap + migrate sequence and only marks the path done on success. The previous shape reserved the slot before running migrations and relied on a try/except discard — leaving a window where a concurrent caller could see the path as done and proceed against a half-initialised schema.
+- **Indexing review C1 (Critical) — wrong `killpg` target.** PDF-extractor `killpg(proc.pid, SIGKILL)` replaced with `killpg(os.getpgid(proc.pid), SIGKILL)` + `ProcessLookupError` swallow at all three MinerU subprocess kill sites. PID reuse could SIGKILL an unrelated process group under the old idiom.
+- **Indexing review C2 (Critical) — `chunking_done` not in `finally`.** `chunker_loop` now wraps its body in try/finally so `_signal_done()` fires on every exit path including exceptions. Previously the orchestrator's `cancel.set()` was the implicit rescue — fragile and skipped the uploader's mark-completed logic.
+- **Indexing review C3 (Critical) — parallel CCE tail-batch 429 swallowed.** Every future is now drained before re-raising, recording the first exception and re-raising it after collection. Previously the executor's `__exit__` discarded pending results when the first future's `.result()` raised.
+- **Search review I-6 (Important) — `operators/dispatch.py` missing `killpg` on timeout.** `claude -p` now spawns with `start_new_session=True`; the `asyncio.TimeoutError` branch does `killpg(getpgid(pid), SIGKILL)` so children spawned by the planner are reaped, not orphaned.
+- **Indexing review I-1 — `_index_pdf_incremental` resume with shrinking chunk count.** Discards the checkpoint when stored `chunks_upserted > total` (e.g. extractor version change re-chunked to fewer units) instead of silently skipping the loop and leaving stale chunks beyond `total`.
+- **Indexing review I-2 — MinerU output-layout drift detected.** Raises a clear `RuntimeError` when subprocess exits 0 but the expected `.md` file is missing (layout change after a MinerU upgrade).
+- **Storage review I-1 — 6+ lock-bypass sites in `taxonomy_cmd.py` / `migrations.py` backfill.** Every `db.taxonomy.conn.execute(...)` is now wrapped with `with db.taxonomy._lock:` to match the domain-store contract.
+- **Storage review I-4 — `T2Database.delete` lock ordering contract documented.** Memory → taxonomy is the required order; the docstring now guards future edits from introducing a reverse-ordered caller that could deadlock.
+- **`nx_answer` plan-miss error surfaces the dropped tool names** (e.g. "planner returned only non-dispatchable tools: Bash, grep") instead of a generic "planner failed" string.
+- **Pre-existing local-mode RDR crash.** `LocalEmbeddingFunction.__call__` is 1-arg (`texts -> embeddings`) but `doc_indexer.EmbedFn` is 2-arg (`(texts, model) -> (embeddings, model)`). A `_local_embed_fn_tuple` adapter is now wired specifically to the `_discover_and_index_rdrs` call in local mode; code / prose / PDF paths continue to use the raw `LocalEmbeddingFunction` instance directly.
+
+### Docs
+
+- RDR-086 design document lives at `docs/rdr/rdr-086-chash-span-surface.md`.
+
 ## [4.6.5] - 2026-04-18
 
 ### Fixed
