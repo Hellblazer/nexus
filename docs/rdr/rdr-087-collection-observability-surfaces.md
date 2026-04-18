@@ -9,7 +9,7 @@ reviewed-by: self
 created: 2026-04-17
 accepted_date: 2026-04-17
 related_issues: [154, 161]
-related: [RDR-070, RDR-075, RDR-077, RDR-085]
+related: [RDR-070, RDR-075, RDR-077, RDR-085, nexus-vatx]
 ---
 
 # RDR-087: Collection Observability and Curation Surfaces
@@ -361,6 +361,29 @@ aggregate; the schema is per-collection.
 - Agent-facing MCP surfaces. Defer until the CLI surfaces prove
   their value; then expose `collection_health()`, `collection_audit()`,
   `merge_candidates()` as MCP tools.
+
+### Indexing-side observability (nexus-vatx)
+
+RDR-087 is the **retrieval-side** observability surface: `collection
+health`, `collection audit`, `collection audit --live`, silent-zero
+stderr notes, `search_telemetry`. The **indexing-side** twin is
+`nexus-vatx`, which shipped in parallel (2026-04-19) with equivalent
+operator surface on the ingest path:
+
+- Voyage + ChromaDB retry visibility — every transient-error backoff
+  emits a WARN line, and `nx index repo` prints an end-of-run
+  `Transient-error backoff: Xs total` summary (PR #207, #210).
+- Post-processing phase markers — each phase after the per-file loop
+  ends emits `[post] <phase>…` / `[post] <phase> done (Xs)` to stderr
+  so operators can tell hung from busy (PR #208).
+- Periodic ETA line — 60 s ticker emits `[eta] N/total files · …`
+  regardless of TTY so CI / `nohup` / `tail -f` runs see pace (PR #207).
+
+The two RDRs/beads are load-bearing together: the retrieval side tells
+operators why a query returned nothing; the indexing side tells them
+why ingestion was slow. The two remaining vatx follow-ups (intra-file
+per-stage timer decomposition, `nx doctor --check=quotas`) were split
+to separate beads after Gaps 1–3 + 4a shipped.
 
 ### Existing Infrastructure Audit
 
