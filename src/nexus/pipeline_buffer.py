@@ -420,3 +420,25 @@ class PipelineDB:
         conn.execute("DELETE FROM pdf_chunks WHERE content_hash = ?", (content_hash,))
         conn.execute("DELETE FROM pdf_pipeline WHERE content_hash = ?", (content_hash,))
         conn.commit()
+
+    def delete_pipeline_data_for_collection(self, collection: str) -> int:
+        """Remove every pipeline run (+ pages + chunks) targeting *collection*.
+
+        nexus-8a8e: ``nx collection delete`` must invoke this so that a
+        subsequent re-index doesn't short-circuit at ``create_pipeline``'s
+        ``status == 'completed'`` branch (returns ``'skip'``). Returns the
+        number of pipeline rows removed.
+        """
+        conn = self._conn()
+        hashes = [
+            row[0] for row in conn.execute(
+                "SELECT content_hash FROM pdf_pipeline WHERE collection = ?",
+                (collection,),
+            ).fetchall()
+        ]
+        for content_hash in hashes:
+            conn.execute("DELETE FROM pdf_pages WHERE content_hash = ?", (content_hash,))
+            conn.execute("DELETE FROM pdf_chunks WHERE content_hash = ?", (content_hash,))
+        conn.execute("DELETE FROM pdf_pipeline WHERE collection = ?", (collection,))
+        conn.commit()
+        return len(hashes)

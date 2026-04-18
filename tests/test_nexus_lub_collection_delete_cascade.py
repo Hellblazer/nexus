@@ -476,3 +476,103 @@ class TestChashIndexDeleteCascade:
             f"Expected chash_index cleanup count in delete output. "
             f"Got: {result.output!r}"
         )
+
+
+# ── nexus-8a8e — pdf_pipeline cascade ────────────────────────────────────────
+
+
+class TestPipelineDeleteCascade:
+    """nexus-8a8e: `nx collection delete` must purge pipeline_buffer rows
+    keyed to the deleted collection. Without the cascade, a subsequent
+    ``nx index pdf`` returns "skip" at ``create_pipeline`` because the old
+    row's ``status='completed'`` is still present — surfaces as "0 chunks"
+    with no extraction message and forces users to reach for ``--force``.
+    """
+
+    def test_cli_delete_cascades_pipeline_rows(self, tmp_path, monkeypatch):
+        from click.testing import CliRunner
+        from unittest.mock import MagicMock, patch
+
+        from nexus.commands.collection import delete_cmd
+        from nexus.db.t2 import T2Database
+        from nexus.pipeline_buffer import PipelineDB
+
+        db_path = tmp_path / "memory.db"
+        with T2Database(db_path):
+            pass  # schema initialized
+
+        pipe_path = tmp_path / "pipeline.db"
+        pdb = PipelineDB(pipe_path)
+        # Two rows targeting the doomed collection; one that must survive.
+        pdb.create_pipeline("hA", "/a.pdf", "knowledge__delos")
+        pdb.write_page("hA", 0, "a")
+        pdb.create_pipeline("hB", "/b.pdf", "knowledge__delos")
+        pdb.write_chunk("hB", 0, "b", "cid-b")
+        pdb.create_pipeline("hC", "/c.pdf", "docs__keep")
+
+        fake_t3 = MagicMock()
+        fake_t3.delete_collection = MagicMock()
+
+        runner = CliRunner()
+        with patch("nexus.commands.collection._t3", return_value=fake_t3), \
+             patch("nexus.mcp_infra.default_db_path", return_value=db_path), \
+             patch(
+                 "nexus.commands._helpers.default_db_path",
+                 return_value=db_path,
+             ), \
+             patch("nexus.pipeline_buffer.PIPELINE_DB_PATH", pipe_path):
+            result = runner.invoke(delete_cmd, ["knowledge__delos", "--yes"])
+
+        assert result.exit_code == 0, result.output
+
+        verify = PipelineDB(pipe_path)
+        assert verify.get_pipeline_state("hA") is None
+        assert verify.get_pipeline_state("hB") is None
+        assert verify.read_pages("hA") == []
+        assert verify.read_ready_chunks("hB") == []
+        # Survivor row untouched.
+        assert verify.get_pipeline_state("hC") is not None
+
+        # Output must include the pipeline-rows count so operators can
+        # see the cascade worked without re-running with `--force`.
+        assert "pipeline" in result.output.lower() or "2" in result.output, (
+            f"Expected pipeline cleanup count in delete output. "
+            f"Got: {result.output!r}"
+        )
+
+    def test_cli_delete_cascades_pipeline_when_t3_absent(self, tmp_path):
+        """Same fail-open contract as taxonomy/chash: cascade runs even
+        when the T3 collection is already gone (recovery path)."""
+        from click.testing import CliRunner
+        from unittest.mock import MagicMock, patch
+        from chromadb.errors import NotFoundError
+
+        from nexus.commands.collection import delete_cmd
+        from nexus.db.t2 import T2Database
+        from nexus.pipeline_buffer import PipelineDB
+
+        db_path = tmp_path / "memory.db"
+        with T2Database(db_path):
+            pass
+
+        pipe_path = tmp_path / "pipeline.db"
+        pdb = PipelineDB(pipe_path)
+        pdb.create_pipeline("orphan_h", "/o.pdf", "docs__gone")
+
+        fake_t3 = MagicMock()
+        fake_t3.delete_collection = MagicMock(
+            side_effect=NotFoundError("Collection [docs__gone] does not exist"),
+        )
+
+        runner = CliRunner()
+        with patch("nexus.commands.collection._t3", return_value=fake_t3), \
+             patch("nexus.mcp_infra.default_db_path", return_value=db_path), \
+             patch(
+                 "nexus.commands._helpers.default_db_path",
+                 return_value=db_path,
+             ), \
+             patch("nexus.pipeline_buffer.PIPELINE_DB_PATH", pipe_path):
+            result = runner.invoke(delete_cmd, ["docs__gone", "--yes"])
+
+        assert result.exit_code == 0, result.output
+        assert PipelineDB(pipe_path).get_pipeline_state("orphan_h") is None

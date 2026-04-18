@@ -194,6 +194,30 @@ class TestCleanup:
     def test_delete_nonexistent(self, db):
         db.delete_pipeline_data("ghost")
 
+    def test_delete_pipeline_data_for_collection(self, db):
+        # nexus-8a8e: nx collection delete must wipe pipeline rows for that
+        # collection so re-indexing (same content_hash → status=completed)
+        # does not hit create_pipeline's "skip" path.
+        db.create_pipeline("h_keep", "/k.pdf", "docs__keep")
+        db.write_page("h_keep", 0, "keep")
+        db.write_chunk("h_keep", 0, "keep chunk", "cid-keep")
+        db.create_pipeline("h_drop", "/d.pdf", "knowledge__delos")
+        db.write_page("h_drop", 0, "drop")
+        db.write_chunk("h_drop", 0, "drop chunk", "cid-drop")
+
+        removed = db.delete_pipeline_data_for_collection("knowledge__delos")
+        assert removed == 1
+
+        assert db.get_pipeline_state("h_drop") is None
+        assert db.read_pages("h_drop") == []
+        assert db.read_ready_chunks("h_drop") == []
+
+        assert db.get_pipeline_state("h_keep") is not None
+        assert len(db.read_pages("h_keep")) == 1
+
+    def test_delete_pipeline_data_for_collection_no_rows(self, db):
+        assert db.delete_pipeline_data_for_collection("docs__ghost") == 0
+
     def test_heartbeat_updated(self, db):
         db.create_pipeline("h1", "/a.pdf", "docs__test")
         t0 = db.get_pipeline_state("h1")["updated_at"]

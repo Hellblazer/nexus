@@ -107,6 +107,17 @@ def delete_cmd(name: str, yes: bool) -> None:
             err=True,
         )
 
+    # nexus-8a8e: purge streaming-pipeline rows keyed to this collection.
+    # pdf_pipeline.status='completed' otherwise makes the next `nx index pdf`
+    # return "skip" (0 chunks) for every content_hash that was previously
+    # indexed into *name*, even though T3 + T2 are now empty.
+    pipeline_rows_deleted = 0
+    try:
+        from nexus.pipeline_buffer import PIPELINE_DB_PATH, PipelineDB
+        pipeline_rows_deleted = PipelineDB(PIPELINE_DB_PATH).delete_pipeline_data_for_collection(name)
+    except Exception as exc:
+        click.echo(f"warn: pipeline-state cleanup failed: {exc}", err=True)
+
     parts: list[str] = []
     if taxonomy_counts and any(taxonomy_counts.values()):
         parts.append(
@@ -117,6 +128,8 @@ def delete_cmd(name: str, yes: bool) -> None:
         )
     if chash_deleted:
         parts.append(f"{chash_deleted} chash rows")
+    if pipeline_rows_deleted:
+        parts.append(f"{pipeline_rows_deleted} pipeline rows")
     if parts:
         click.echo(f"Deleted: {name} ({'; '.join(parts)})")
     else:
