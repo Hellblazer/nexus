@@ -18,11 +18,31 @@ AUTH_DIR="$REPO_ROOT/tests/e2e/.claude-auth"
 
 mkdir -p "$AUTH_DIR"
 
-# If already authenticated, say so
+# If already authenticated, check token expiry before short-circuiting.
+# Stale cached creds (expiresAt in the past) silently break the harness
+# with "Failed to authenticate. API Error: 401" inside tmux — the fixed
+# cache never refreshes so every subsequent run is broken until someone
+# manually deletes .credentials.json. The keychain holds the fresh token;
+# we just need to notice when the cache is stale and re-extract.
 if [[ -f "$AUTH_DIR/.credentials.json" ]]; then
-    echo "Already authenticated (credentials exist at tests/e2e/.claude-auth/.credentials.json)"
-    echo "Delete that file and re-run to re-authenticate."
-    exit 0
+    _now_ms=$(( $(date +%s) * 1000 ))
+    _exp_ms=$(python3 -c "
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        d = json.load(f)
+    print(int(d.get('claudeAiOauth', {}).get('expiresAt', 0)))
+except Exception:
+    print(0)
+" "$AUTH_DIR/.credentials.json" 2>/dev/null || echo 0)
+    if [[ "$_exp_ms" -gt "$_now_ms" ]]; then
+        _remaining_s=$(( (_exp_ms - _now_ms) / 1000 ))
+        echo "Already authenticated (cached creds valid for ~$(( _remaining_s / 3600 ))h)"
+        echo "Delete tests/e2e/.claude-auth/.credentials.json and re-run to force refresh."
+        exit 0
+    fi
+    echo "Cached credentials are stale (expiresAt already past) — refreshing from Keychain…"
+    rm -f "$AUTH_DIR/.credentials.json"
 fi
 
 # ─── Strategy 1: macOS Keychain ───────────────────────────────────────────────

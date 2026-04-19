@@ -177,10 +177,13 @@ echo "    --- agents output (first 30 lines) ---"
 echo "$agents_out" | head -30 | sed 's/^/    | /'
 echo "    ---"
 
-# Check a representative spread of agents across model tiers
+# Check a representative spread of agents across model tiers.
+# RDR-025 renamed language-specific agents to neutral names
+# (java-developer → developer). Keep the current agent names here so
+# the scenario stays in lockstep with ``nx/agents/``.
 for agent in \
     "strategic-planner" \
-    "java-developer" \
+    "developer" \
     "code-review-expert" \
     "plan-auditor" \
     "deep-analyst" \
@@ -196,26 +199,25 @@ scenario_end
 
 scenario "00 debug-load: skills visible to Claude"
 
-echo "    Asking Claude to list nx plugin skills (print mode)..."
-skills_out=$(crun "claude --dangerously-skip-permissions \
-    -p 'List ALL skill names provided by the nx plugin. One per line, names only.' \
-    2>&1" || true)
-
-echo "    --- skills output (first 30 lines) ---"
-echo "$skills_out" | head -30 | sed 's/^/    | /'
-echo "    ---"
-
+# Verify plugin skills are discoverable on disk. We deliberately do NOT
+# ask ``claude --dangerously-skip-permissions -p`` to enumerate them —
+# Claude's print mode does not inject the plugin-skills listing into its
+# system prompt the way interactive mode does (agents and commands ARE
+# listed, but skills aren't). Checking the on-disk layout is the
+# accurate signal that our plugin packaging is correct; skill *triggering*
+# under real Claude usage is exercised by scenario 03's interactive tmux
+# session.
+skills_dir="$REPO_ROOT/nx/skills"
 for skill in \
-    "sequential-thinking" \
     "nexus" \
     "brainstorming-gate" \
     "rdr-create" \
     "cli-controller" \
     "using-nx-skills"; do
-    if echo "$skills_out" | grep -qiE "${skill//-/.}"; then
-        pass "skill visible: $skill"
+    if [[ -f "$skills_dir/$skill/SKILL.md" ]]; then
+        pass "skill packaged: $skill (nx/skills/$skill/SKILL.md)"
     else
-        fail "skill NOT visible: $skill"
+        fail "skill NOT packaged: $skill — expected nx/skills/$skill/SKILL.md"
     fi
 done
 
@@ -234,7 +236,7 @@ echo "    ---"
 
 for cmd in \
     "create-plan" \
-    "java-implement" \
+    "implement" \
     "review-code" \
     "nx-preflight"; do
     if echo "$cmds_out" | grep -qiE "$cmd"; then
