@@ -442,3 +442,74 @@ def test_eta_ticker_no_emit_before_start():
     assert emitted == []
     # stop() without start() must also be safe.
     t.stop()
+
+
+# ── --debug-timing (nexus-7niu) ─────────────────────────────────────────────
+
+
+def test_debug_timing_flag_subscribes_on_stage_timers(runner, repo_dir, mock_reg):
+    """Passing ``--debug-timing`` must thread an ``on_stage_timers``
+    callback through to ``index_repository``; the default invocation
+    must pass ``None`` so the fast path stays zero-overhead."""
+    # Default run: on_stage_timers should be None
+    result, mock_idx = _invoke_repo(runner, [str(repo_dir)], mock_reg)
+    assert result.exit_code == 0
+    _, kw = mock_idx.call_args
+    assert kw.get("on_stage_timers") is None
+
+    # --debug-timing run: on_stage_timers should be callable
+    result, mock_idx = _invoke_repo(
+        runner, [str(repo_dir), "--debug-timing"], mock_reg,
+    )
+    assert result.exit_code == 0, result.output
+    _, kw = mock_idx.call_args
+    cb = kw.get("on_stage_timers")
+    assert cb is not None
+    assert callable(cb)
+
+
+def test_debug_timing_flag_emits_breakdown_when_timers_arrive(
+    runner, repo_dir, mock_reg,
+):
+    """End-of-run stderr breakdown renders the per-stage totals when
+    the callback collected any timers. Silent (no breakdown line) when
+    no timers arrive — e.g. frecency-only run, or a no-file repo."""
+    from nexus.stage_timers import StageTimers
+
+    def _side_effect(*_a, on_stage_timers=None, **_kw):
+        # Simulate the indexer firing the callback twice with known
+        # per-stage times so the CLI's end-of-run table has real data.
+        if on_stage_timers is not None:
+            t1 = StageTimers(
+                chunking_s=1.0, embed_s=4.0, upload_s=0.5, retry_s=0.0,
+            )
+            t2 = StageTimers(
+                chunking_s=2.0, embed_s=6.0, upload_s=1.5, retry_s=1.0,
+            )
+            on_stage_timers(Path("a.py"), t1)
+            on_stage_timers(Path("b.py"), t2)
+        return {}
+
+    result, _ = _invoke_repo(
+        runner,
+        [str(repo_dir), "--debug-timing"],
+        mock_reg,
+        index_side_effect=_side_effect,
+    )
+    assert result.exit_code == 0, result.output
+    # Breakdown header + per-stage rows
+    assert "[debug-timing] per-stage totals across 2 files" in result.output
+    assert "chunking_s" in result.output and "3.0s" in result.output   # 1+2
+    assert "embed_s"   in result.output and "10.0s" in result.output   # 4+6
+    assert "upload_s"  in result.output and "2.0s"  in result.output   # 0.5+1.5
+    assert "retry_s"   in result.output and "1.0s"  in result.output   # 0+1
+    assert "total"     in result.output and "16.0s" in result.output   # 3+10+2+1
+
+
+def test_debug_timing_absent_emits_no_breakdown(runner, repo_dir, mock_reg):
+    """Without ``--debug-timing`` the per-stage breakdown must not
+    appear — normal runs stay tidy."""
+    result, _ = _invoke_repo(runner, [str(repo_dir)], mock_reg)
+    assert result.exit_code == 0
+    assert "debug-timing" not in result.output
+    assert "per-stage totals" not in result.output

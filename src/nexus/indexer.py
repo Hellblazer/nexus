@@ -53,6 +53,7 @@ if TYPE_CHECKING:
     from nexus.catalog.catalog import Catalog
     from nexus.catalog.tumbler import Tumbler
     from nexus.registry import RepoRegistry
+    from nexus.stage_timers import StageTimers
 
 # Re-export from indexer_utils for backward compatibility (tests import from here).
 DEFAULT_IGNORE: list[str] = _DEFAULT_IGNORE
@@ -441,6 +442,7 @@ def index_repository(
     on_start: Callable[[int], None] | None = None,
     on_file: Callable[[Path, int, float], None] | None = None,
     on_phase: Callable[[str], None] | None = None,
+    on_stage_timers: Callable[[Path, "StageTimers"], None] | None = None,
 ) -> dict[str, int]:
     """Index all files in *repo* into T3 code__ and docs__ collections.
 
@@ -495,7 +497,7 @@ def index_repository(
                 _run_index_frecency_only(repo, registry)
                 stats: dict[str, int] = {}
             else:
-                stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_stale=force_stale, on_start=on_start, on_file=on_file, on_phase=on_phase)
+                stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_stale=force_stale, on_start=on_start, on_file=on_file, on_phase=on_phase, on_stage_timers=on_stage_timers)
                 registry.update(repo, head_hash=_current_head(repo))
             registry.update(repo, status="ready")
             return stats
@@ -595,11 +597,16 @@ def _index_code_file(
     force: bool = False,
     *,
     embed_fn: Callable | None = None,
+    stage_timers: "StageTimers | None" = None,
 ) -> int:
     """Index a single code file.  Delegates to nexus.code_indexer.index_code_file.
 
     Backward-compatible wrapper preserving the old 12-parameter signature.
     See nexus.code_indexer.index_code_file for the canonical implementation.
+
+    ``stage_timers`` (nexus-7niu) is an optional :class:`StageTimers` the
+    per-file indexer writes chunking / embed / upload / retry times into.
+    When ``None`` the instrumented blocks are no-ops; no overhead.
     """
     from nexus.code_indexer import index_code_file
     from nexus.index_context import IndexContext
@@ -618,6 +625,7 @@ def _index_code_file(
         chunk_lines=chunk_lines,
         force=force,
         embed_fn=embed_fn,
+        stage_timers=stage_timers,
     )
     return index_code_file(ctx, file)
 
@@ -971,6 +979,7 @@ def _run_index(
     on_start: Callable[[int], None] | None = None,
     on_file: Callable[[Path, int, float], None] | None = None,
     on_phase: Callable[[str], None] | None = None,
+    on_stage_timers: Callable[[Path, "StageTimers"], None] | None = None,
 ) -> dict[str, int]:
     """Full indexing pipeline: classify → route → embed → upsert → prune.
 
@@ -1175,15 +1184,25 @@ def _run_index(
     for score, file in code_files:
         _log.debug("indexing", file=str(file))
         t0 = time.monotonic()
+        # nexus-7niu: build a per-file StageTimers only when the caller
+        # subscribed via ``on_stage_timers``. ``None`` short-circuits
+        # every instrumented block inside the indexer to a no-op.
+        timers = None
+        if on_stage_timers is not None:
+            from nexus.stage_timers import StageTimers
+            timers = StageTimers()
         chunks = _index_code_file(
             file, repo, code_collection, code_model, code_col, db,
             voyage_client, git_meta, now_iso, score,
             chunk_lines=effective_chunk_lines,
             force=force,
             embed_fn=_embed_fn,
+            stage_timers=timers,
         )
         if on_file:
             on_file(file, chunks, time.monotonic() - t0)
+        if on_stage_timers is not None and timers is not None:
+            on_stage_timers(file, timers)
 
     # Index prose files → docs__ (voyage-context-3 via CCE)
     # NOTE: calls _index_prose_file (the module-level wrapper) — same reason.

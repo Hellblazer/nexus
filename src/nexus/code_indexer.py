@@ -324,7 +324,15 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
     if not ctx.force and check_staleness(ctx.col, file_path, content_hash, ctx.embedding_model):
         return 0
 
-    chunks = chunk_file(file_path, content, chunk_lines=ctx.chunk_lines)
+    # nexus-7niu: per-stage timer instrumentation. Silent when
+    # ``ctx.stage_timers is None`` — no overhead, no output.
+    _stage = (
+        ctx.stage_timers.stage if ctx.stage_timers is not None
+        else _noop_stage
+    )
+
+    with _stage("chunking"):
+        chunks = chunk_file(file_path, content, chunk_lines=ctx.chunk_lines)
     if not chunks:
         _log.debug("skipped file with no chunks", path=str(file_path))
         return 0
@@ -390,48 +398,60 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
     # Embed using prefixed texts for improved retrieval quality; raw documents are stored.
     embeddings: list[list[float]] = []
     total_chunks = len(documents)
-    if ctx.embed_fn is not None:
-        # Local mode: use injected embedding function
-        for batch_start in range(0, total_chunks, _VOYAGE_EMBED_BATCH_SIZE):
-            batch = embed_texts[batch_start : batch_start + _VOYAGE_EMBED_BATCH_SIZE]
-            embeddings.extend(ctx.embed_fn(batch))
-    else:
-        for batch_start in range(0, total_chunks, _VOYAGE_EMBED_BATCH_SIZE):
-            batch = embed_texts[batch_start : batch_start + _VOYAGE_EMBED_BATCH_SIZE]
-            _log.debug(
-                "embedding batch",
-                file=str(file_path),
-                batch=f"{batch_start+1}-{min(batch_start+len(batch), total_chunks)}/{total_chunks}",
-            )
-            result = _voyage_with_retry(
-                ctx.voyage_client.embed,  # type: ignore[attr-defined]
-                texts=batch,
-                model=ctx.embedding_model,
-                input_type="document",
-            )
-            embeddings.extend(result.embeddings)
+    with _stage("embed"):
+        if ctx.embed_fn is not None:
+            # Local mode: use injected embedding function
+            for batch_start in range(0, total_chunks, _VOYAGE_EMBED_BATCH_SIZE):
+                batch = embed_texts[batch_start : batch_start + _VOYAGE_EMBED_BATCH_SIZE]
+                embeddings.extend(ctx.embed_fn(batch))
+        else:
+            for batch_start in range(0, total_chunks, _VOYAGE_EMBED_BATCH_SIZE):
+                batch = embed_texts[batch_start : batch_start + _VOYAGE_EMBED_BATCH_SIZE]
+                _log.debug(
+                    "embedding batch",
+                    file=str(file_path),
+                    batch=f"{batch_start+1}-{min(batch_start+len(batch), total_chunks)}/{total_chunks}",
+                )
+                result = _voyage_with_retry(
+                    ctx.voyage_client.embed,  # type: ignore[attr-defined]
+                    texts=batch,
+                    model=ctx.embedding_model,
+                    input_type="document",
+                )
+                embeddings.extend(result.embeddings)
 
-    _log.debug("upserting", file=str(file_path), chunks=total_chunks)
-    ctx.db.upsert_chunks_with_embeddings(  # type: ignore[attr-defined]
-        collection_name=ctx.corpus,
-        ids=ids,
-        documents=documents,
-        embeddings=embeddings,
-        metadatas=metadatas,
-    )
+    with _stage("upload"):
+        _log.debug("upserting", file=str(file_path), chunks=total_chunks)
+        ctx.db.upsert_chunks_with_embeddings(  # type: ignore[attr-defined]
+            collection_name=ctx.corpus,
+            ids=ids,
+            documents=documents,
+            embeddings=embeddings,
+            metadatas=metadatas,
+        )
 
-    # Chash dual-write (RDR-086 Phase 1.2): global chash → (collection, doc_id).
-    try:
-        from nexus.mcp_infra import chash_dual_write_batch
-        chash_dual_write_batch(ids, ctx.corpus, metadatas)
-    except Exception:
-        _log.debug("chash_dual_write_failed", exc_info=True)
+        # Chash dual-write (RDR-086 Phase 1.2): global chash → (collection, doc_id).
+        try:
+            from nexus.mcp_infra import chash_dual_write_batch
+            chash_dual_write_batch(ids, ctx.corpus, metadatas)
+        except Exception:
+            _log.debug("chash_dual_write_failed", exc_info=True)
 
-    # Incremental taxonomy: assign chunks to nearest existing topics.
-    try:
-        from nexus.mcp_infra import taxonomy_assign_batch
-        taxonomy_assign_batch(ids, ctx.corpus, embeddings)
-    except Exception:
-        _log.debug("taxonomy_incremental_assign_failed", exc_info=True)
+        # Incremental taxonomy: assign chunks to nearest existing topics.
+        try:
+            from nexus.mcp_infra import taxonomy_assign_batch
+            taxonomy_assign_batch(ids, ctx.corpus, embeddings)
+        except Exception:
+            _log.debug("taxonomy_incremental_assign_failed", exc_info=True)
 
     return len(ids)
+
+
+# No-op context manager used when ``ctx.stage_timers is None`` so the
+# instrumented code paths stay single-shape regardless of timing mode.
+from contextlib import contextmanager as _contextmanager
+
+
+@_contextmanager
+def _noop_stage(_name: str):
+    yield
