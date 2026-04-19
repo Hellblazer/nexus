@@ -59,3 +59,15 @@ class IndexContext:
     # Local mode embedding function: (texts: list[str]) -> list[list[float]]
     # When set, replaces Voyage AI embedding in code_indexer and prose_indexer.
     embed_fn: Callable[[list[str]], list[list[float]]] | None = field(default=None)
+
+    # Per-stage intra-file timing bucket (nexus-7niu, vatx Gap 4b).
+    # Populated only when the operator passes ``nx index repo --debug-timing``.
+    # Silent when ``None`` — the per-file indexer skips the timing blocks
+    # and pays zero overhead. Not shared across files; the orchestrator
+    # builds a fresh instance per file and appends to the caller-side
+    # collector so end-of-run aggregation is deterministic.
+    stage_timers: "StageTimers | None" = field(default=None)
+
+
+if TYPE_CHECKING:
+    from nexus.stage_timers import StageTimers  # noqa: F401 — type-only

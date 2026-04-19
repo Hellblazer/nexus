@@ -644,6 +644,44 @@ def test_on_phase_includes_stamp_phase_on_force(tmp_path):
     assert any("Pipeline version stamped" in p for p in phases_force)
 
 
+# ── on_stage_timers callback (nexus-7niu) ──────────────────────────────────
+
+
+def test_on_stage_timers_fires_per_code_file_when_subscribed(tmp_path):
+    """``_run_index`` builds a fresh ``StageTimers`` per code file when
+    ``on_stage_timers`` is provided and hands it to the callback. Silent
+    (zero invocations) when the callback is ``None``."""
+    run, repo = _cb_repo(tmp_path)
+    db, _ = _mock_db()
+
+    collected: list[tuple] = []
+
+    def _cb(file, timers) -> None:
+        collected.append((file.name, timers))
+
+    with _cb_patches(db):
+        run(repo, _reg(), on_stage_timers=_cb)
+
+    # Exactly one callback per code file (one file in the fixture repo).
+    assert len(collected) == 1
+    name, timers = collected[0]
+    assert name == "code.py"
+    # StageTimers instance with the expected shape
+    snapshot = timers.snapshot()
+    assert set(snapshot.keys()) == {
+        "chunking_s", "embed_s", "upload_s", "retry_s",
+    }
+
+
+def test_on_stage_timers_none_is_safe(tmp_path):
+    """Omitting ``on_stage_timers`` (the default) must not spawn any
+    per-file timers or change behaviour — zero-overhead contract."""
+    run, repo = _cb_repo(tmp_path)
+    db, _ = _mock_db()
+    with _cb_patches(db):
+        run(repo, _reg())  # no on_stage_timers argument
+
+
 # ── Pagination tests ────────────────────────────────────────────────────────
 
 def test_prune_deleted_files_paginates(tmp_path):

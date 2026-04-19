@@ -180,7 +180,12 @@ class _ETATicker:
 )
 @click.option("--no-taxonomy", is_flag=True, default=False,
               help="Skip automatic topic discovery after indexing.")
-def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, force_stale: bool, on_locked: str, no_taxonomy: bool) -> None:
+@click.option("--debug-timing", "debug_timing", is_flag=True, default=False,
+              help="Emit an end-of-run per-stage breakdown to stderr "
+                   "(chunking / embed / upload / retry). Silent without the "
+                   "flag — nexus-7niu, vatx Gap 4b. Currently code files only; "
+                   "prose + PDF stages instrumented in follow-up PRs.")
+def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, force_stale: bool, on_locked: str, no_taxonomy: bool, debug_timing: bool) -> None:
     """Register and immediately index a code repository at PATH.
 
     Classifies files by extension: code files get voyage-code-3 embeddings (code__),
@@ -278,17 +283,36 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
             err=True,
         )
 
+    # nexus-7niu: per-stage timer collection. The callback appends one
+    # StageTimers per file; end-of-run aggregation formats the table.
+    timers_collected: list = []  # list[StageTimers]
+    on_stage_timers = None
+    if debug_timing:
+        def on_stage_timers(_file: Path, timers) -> None:  # noqa: E306
+            timers_collected.append(timers)
+
+    def _emit_debug_timing() -> None:
+        if not debug_timing:
+            return
+        from nexus.stage_timers import aggregate, format_report
+        click.echo(
+            format_report(aggregate(timers_collected), n_files=len(timers_collected)),
+            err=True,
+        )
+
     stats: dict = {}
     try:
         stats = index_repository(path, reg, frecency_only=frecency_only, force=force,
                                  force_stale=force_stale,
                                  on_locked=on_locked, on_start=on_start, on_file=on_file,
-                                 on_phase=on_phase) or {}
+                                 on_phase=on_phase,
+                                 on_stage_timers=on_stage_timers) or {}
     finally:
         eta_ticker.stop()
         if bar:
             bar.close()
         _emit_retry_summary()
+        _emit_debug_timing()
     if not frecency_only and stats:
         rdr_indexed = stats.get("rdr_indexed", 0)
         rdr_current = stats.get("rdr_current", 0)
