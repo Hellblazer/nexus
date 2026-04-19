@@ -418,3 +418,143 @@ class TestFixPaths:
             result = runner.invoke(main, ["doctor", "--fix-paths"])
         assert result.exit_code == 0
         assert "No absolute" in result.output
+
+
+# ── --check-quotas (nexus-c590) ─────────────────────────────────────────────
+
+
+class TestCheckQuotas:
+    """``nx doctor --check-quotas`` surfaces the free-tier cloud limits,
+    Voyage AI per-model token caps, and any retry load observed this
+    process. Exits 0 when the cloud tenant is reachable (or when we're
+    in local mode); exits 1 when the cloud probe fails so the report is
+    actionable via exit code (nexus-c590 acceptance)."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_retry_counters_between_tests(self):
+        """The retry accumulator is process-local state; isolate each
+        test so prior runs can't leak counts into the next case's
+        assertion (same contract as tests/test_voyage_retry.py)."""
+        from nexus.retry import reset_retry_stats
+        reset_retry_stats()
+        yield
+        reset_retry_stats()
+
+    def test_reachable_cloud_exits_zero_and_reports_all_sections(
+        self, runner: CliRunner,
+    ) -> None:
+        with (
+            patch("nexus.config.is_local_mode", return_value=False),
+            patch("nexus.db.make_t3", return_value=MagicMock()),
+            patch("nexus.config.get_credential", return_value="sk-voyage-key"),
+        ):
+            result = runner.invoke(main, ["doctor", "--check-quotas"])
+        assert result.exit_code == 0, result.output
+        # ChromaDB section + a representative limit
+        assert "ChromaDB Cloud" in result.output
+        assert "cloud tenant reachable" in result.output
+        assert "max_records_per_write" in result.output
+        assert "300" in result.output  # MAX_RECORDS_PER_WRITE / MAX_QUERY_RESULTS
+        # Voyage section
+        assert "Voyage AI" in result.output
+        assert "voyage-code-3" in result.output
+        assert "32,000" in result.output  # 32k token cap rendered with comma
+        # Retry-accumulator quiet case
+        assert "no transient backoffs observed" in result.output
+
+    def test_unreachable_cloud_exits_one(self, runner: CliRunner) -> None:
+        """A quota report without a client connection is not actionable.
+        The command must exit 1 so CI / operators can gate on it."""
+
+        def _raise(*_a, **_kw):
+            raise RuntimeError("simulated cloud outage")
+
+        with (
+            patch("nexus.config.is_local_mode", return_value=False),
+            patch("nexus.db.make_t3", side_effect=_raise),
+            patch("nexus.config.get_credential", return_value="sk-voyage-key"),
+        ):
+            result = runner.invoke(main, ["doctor", "--check-quotas"])
+        assert result.exit_code == 1, result.output
+        assert "unreachable" in result.output
+        assert "RuntimeError" in result.output
+
+    def test_local_mode_exits_zero_even_without_cloud(
+        self, runner: CliRunner,
+    ) -> None:
+        """Local mode (``NX_LOCAL=1``) doesn't need cloud — the limits
+        are reference-only in that context. Exit 0."""
+        with (
+            patch("nexus.config.is_local_mode", return_value=True),
+            patch("nexus.config.get_credential", return_value=""),
+        ):
+            result = runner.invoke(main, ["doctor", "--check-quotas"])
+        assert result.exit_code == 0, result.output
+        assert "local mode" in result.output
+
+    def test_voyage_key_absent_shows_warn_marker(
+        self, runner: CliRunner,
+    ) -> None:
+        """When ``VOYAGE_API_KEY`` is not set the voyage section must
+        use the warn marker (``✗``) so the report is scannable at a
+        glance, even though cloud itself may be reachable."""
+        with (
+            patch("nexus.config.is_local_mode", return_value=False),
+            patch("nexus.db.make_t3", return_value=MagicMock()),
+            patch("nexus.config.get_credential", return_value=""),
+        ):
+            result = runner.invoke(main, ["doctor", "--check-quotas"])
+        assert result.exit_code == 0, result.output
+        assert "VOYAGE_API_KEY: absent" in result.output
+
+    def test_retry_counters_surface_when_nonzero(
+        self, runner: CliRunner,
+    ) -> None:
+        """A session that has hit transient errors shows the cumulative
+        backoff time + count under "Observed transient-error retries"."""
+        from nexus.retry import _add_chroma_retry, _add_voyage_retry
+
+        _add_voyage_retry(1.5)
+        _add_voyage_retry(3.0)
+        _add_chroma_retry(2.0)
+
+        with (
+            patch("nexus.config.is_local_mode", return_value=False),
+            patch("nexus.db.make_t3", return_value=MagicMock()),
+            patch("nexus.config.get_credential", return_value="sk-voyage-key"),
+        ):
+            result = runner.invoke(main, ["doctor", "--check-quotas"])
+        assert result.exit_code == 0, result.output
+        assert "Observed transient-error retries" in result.output
+        assert "voyage:" in result.output
+        assert "2 retries" in result.output       # voyage count
+        assert "chroma:" in result.output
+        assert "1 retries" in result.output       # chroma count
+        # Total aggregates both sides
+        assert "3 retries" in result.output       # total_count
+        assert "6.5s" in result.output            # 1.5 + 3.0 + 2.0 total_seconds
+
+    def test_json_output_has_structured_schema(
+        self, runner: CliRunner,
+    ) -> None:
+        """``--json`` returns a parseable dict with the three expected
+        top-level sections so downstream tools (dashboards, CI gates)
+        can key off the schema."""
+        import json as _json
+
+        with (
+            patch("nexus.config.is_local_mode", return_value=False),
+            patch("nexus.db.make_t3", return_value=MagicMock()),
+            patch("nexus.config.get_credential", return_value="sk-voyage-key"),
+        ):
+            result = runner.invoke(
+                main, ["doctor", "--check-quotas", "--json"]
+            )
+        assert result.exit_code == 0, result.output
+        data = _json.loads(result.output)
+        assert set(data.keys()) == {"chromadb", "voyage", "retry"}
+        assert data["chromadb"]["reachable"] is True
+        assert data["chromadb"]["limits"]["max_records_per_write"] == 300
+        assert "voyage-code-3" in data["voyage"]["models"]
+        assert data["voyage"]["api_key_set"] is True
+        assert data["retry"]["total_count"] == 0
