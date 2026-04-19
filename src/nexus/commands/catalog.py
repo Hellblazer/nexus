@@ -724,6 +724,89 @@ def sync_cmd(message: str) -> None:
     click.echo("Catalog synced.")
 
 
+@catalog.command("dedupe-owners")
+@click.option("--apply", is_flag=True, default=False,
+              help="Commit the plan. Default is dry-run.")
+@click.option("--json", "as_json", is_flag=True,
+              help="Emit the plan as JSON instead of a human summary.")
+def dedupe_owners_cmd(apply: bool, as_json: bool) -> None:
+    """Consolidate orphan owners (nexus-tmbh, part of nexus-b34f).
+
+    Classifies each curator owner as:
+
+    \b
+      • alias   — synthetic ``<repo>-<hash>`` names map to a canonical
+                  repo owner. Each doc is aliased via documents.alias_of
+                  to its canonical equivalent (matched by file_path).
+                  Rows stay so external references keep resolving.
+      • remove  — ``int-cce-*`` / ``int-prov-*`` / ``pdf-e2e-*`` test
+                  leakage predating RDR-060's autouse fixture. Documents,
+                  links, and the owner row are all deleted with JSONL
+                  tombstones.
+      • skip    — everything else (papers, knowledge, standalone-docs …).
+
+    Dry-run by default. Use ``--apply`` to commit, then ``nx catalog
+    sync`` to push the audit trail.
+    """
+    cat = _get_catalog()
+    from nexus.catalog import dedupe as _dedupe
+
+    plan = _dedupe.plan_dedupe(cat)
+    summary = plan.summary()
+
+    if as_json:
+        payload = {
+            "dry_run": not apply,
+            "summary": summary,
+            "alias": [op.to_dict() for op in plan.alias],
+            "remove": [op.to_dict() for op in plan.remove],
+            "skip": [op.to_dict() for op in plan.skip],
+        }
+        if apply:
+            payload["applied"] = _dedupe.apply_plan(cat, plan)
+        click.echo(json.dumps(payload, indent=2))
+        return
+
+    label = "Would apply" if not apply else "Applying"
+    click.echo(f"{label} dedupe plan:")
+    click.echo(f"  alias:  {summary['alias']} owners, {summary['alias_docs']} docs")
+    click.echo(f"  remove: {summary['remove']} owners, {summary['remove_docs']} docs")
+    click.echo(f"  skip:   {summary['skip']} owners, {summary['skip_docs']} docs")
+
+    def _section(title: str, items: list, show_canonical: bool = False) -> None:
+        if not items:
+            return
+        click.echo(f"\n{title}:")
+        for op in items:
+            if show_canonical:
+                click.echo(
+                    f"  {op.orphan_prefix:<8} {op.orphan_name} "
+                    f"({op.doc_count} docs) → {op.canonical_prefix} {op.canonical_name}"
+                )
+            else:
+                click.echo(
+                    f"  {op.orphan_prefix:<8} {op.orphan_name} "
+                    f"({op.doc_count} docs)  — {op.reason}"
+                )
+
+    _section("Alias consolidation", plan.alias, show_canonical=True)
+    _section("Unconditional removal", plan.remove)
+    _section("Skipped (manual review)", plan.skip)
+
+    if not apply:
+        click.echo("\nDry-run only. Re-run with --apply to commit, "
+                   "then `nx catalog sync` to push the audit trail.")
+        return
+
+    totals = _dedupe.apply_plan(cat, plan)
+    click.echo("\nApplied:")
+    click.echo(f"  orphans aliased:  {totals['orphans_aliased']} "
+               f"({totals['aliased_docs']} docs, {totals['unmatched_docs']} unmatched)")
+    click.echo(f"  orphans removed:  {totals['orphans_removed']} "
+               f"({totals['removed_docs']} docs, {totals['removed_links']} links)")
+    click.echo("\nRun `nx catalog sync` to commit and push the audit trail.")
+
+
 @catalog.command("pull")
 def pull_cmd() -> None:
     """Pull catalog from remote and rebuild SQLite."""

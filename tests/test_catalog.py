@@ -62,6 +62,25 @@ class TestRegisterOwner:
     def test_curator_owner(self, cat):
         assert str(cat.register_owner("hal-research", "curator")) == "1.1"
 
+    def test_repo_owner_without_repo_hash_rejected(self, cat):
+        """nexus-zbne: owner_type='repo' without repo_hash is the shadow-
+        registration pathway that produced 83 orphan owners. Reject it."""
+        with pytest.raises(ValueError, match="repo_hash"):
+            cat.register_owner("nexus", "repo")
+
+    def test_repo_owner_with_whitespace_repo_hash_rejected(self, cat):
+        """Empty after strip() — also rejected, since such owners are
+        indistinguishable from the missing-hash case at lookup time."""
+        with pytest.raises(ValueError, match="repo_hash"):
+            cat.register_owner("nexus", "repo", repo_hash="   ")
+
+    def test_curator_owner_without_repo_hash_allowed(self, cat):
+        """Curator and custom types don't carry repo_hash — no enforcement."""
+        # Covered by test_curator_owner, but make the asymmetry explicit so
+        # future refactors don't accidentally enforce repo_hash globally.
+        assert str(cat.register_owner("papers", "curator")) == "1.1"
+        assert str(cat.register_owner("notes", "corpus")) == "1.2"
+
 
 class TestRegisterDocument:
     def test_first_document(self, cat_with_owner):
@@ -81,6 +100,112 @@ class TestRegisterDocument:
                            file_path="src/nexus/indexer.py", physical_collection="code__nexus", chunk_count=10)
         entry = cat.resolve(doc)
         assert entry is not None and entry.title == "indexer.py" and entry.content_type == "code"
+
+
+class TestAliasResolution:
+    """nexus-s8yz: documents.alias_of column — permanent tumbler aliasing.
+
+    Preserves external reference stability when dedupe-owners (nexus-tmbh)
+    consolidates duplicate owner registrations.
+    """
+
+    def test_new_document_has_empty_alias(self, cat_with_owner):
+        cat, owner = cat_with_owner
+        doc = cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        entry = cat.resolve(doc, follow_alias=False)
+        assert entry is not None and entry.alias_of == ""
+
+    def test_set_alias_redirects_resolve(self, cat_with_owner):
+        cat, owner = cat_with_owner
+        canonical = cat.register(owner, "canonical.py", content_type="code", file_path="canonical.py")
+        alias = cat.register(owner, "alias.py", content_type="code", file_path="alias.py")
+        cat.set_alias(alias, canonical)
+
+        # resolve() with default follow_alias=True returns the canonical entry
+        entry = cat.resolve(alias)
+        assert entry is not None and entry.tumbler == canonical
+
+        # follow_alias=False returns the raw alias row
+        raw = cat.resolve(alias, follow_alias=False)
+        assert raw is not None and raw.tumbler == alias and raw.alias_of == str(canonical)
+
+    def test_resolve_alias_canonical_returns_self(self, cat_with_owner):
+        cat, owner = cat_with_owner
+        doc = cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        assert cat.resolve_alias(doc) == doc
+
+    def test_resolve_alias_transitive_chain(self, cat_with_owner):
+        """A → B → C → canonical. resolve_alias walks the whole chain."""
+        cat, owner = cat_with_owner
+        c = cat.register(owner, "c.py", content_type="code", file_path="c.py")
+        b = cat.register(owner, "b.py", content_type="code", file_path="b.py")
+        a = cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        cat.set_alias(b, c)
+        cat.set_alias(a, b)
+        assert cat.resolve_alias(a) == c
+        # resolve() with follow_alias=True also follows to terminus
+        entry = cat.resolve(a)
+        assert entry is not None and entry.tumbler == c
+
+    def test_resolve_alias_cycle_does_not_hang(self, cat_with_owner):
+        """Direct cycle A → B → A — walker bails rather than looping forever."""
+        cat, owner = cat_with_owner
+        a = cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        b = cat.register(owner, "b.py", content_type="code", file_path="b.py")
+        cat.set_alias(a, b)
+        # Bypass set_alias guard to force a cycle — the walker must still
+        # terminate instead of looping forever.
+        cat._db.execute("UPDATE documents SET alias_of = ? WHERE tumbler = ?",
+                         (str(a), str(b)))
+        cat._db.commit()
+        result = cat.resolve_alias(a)
+        assert result in (a, b)
+
+    def test_set_alias_rejects_self_alias(self, cat_with_owner):
+        cat, owner = cat_with_owner
+        doc = cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        with pytest.raises(ValueError, match="self-alias"):
+            cat.set_alias(doc, doc)
+
+    def test_dangling_alias_terminates_safely(self, cat_with_owner):
+        """If the alias pointer targets a deleted tumbler, the walker
+        returns the last valid hop rather than returning None or
+        raising. Callers that care can compare to the input."""
+        cat, owner = cat_with_owner
+        a = cat.register(owner, "a.py", content_type="code", file_path="a.py")
+        # Point at a non-existent tumbler directly via SQL (bypassing
+        # set_alias' validation, which doesn't verify existence).
+        cat._db.execute(
+            "UPDATE documents SET alias_of = ? WHERE tumbler = ?",
+            ("1.99.99", str(a)),
+        )
+        cat._db.commit()
+        # Walker follows one hop to the dangling target, then stops.
+        assert cat.resolve_alias(a) == Tumbler.parse("1.99.99")
+
+    def test_schema_migration_adds_alias_of_to_old_db(self, tmp_path):
+        """Older catalog databases without an alias_of column must be
+        upgraded silently on open. Simulated by creating a documents
+        table with the pre-migration schema and then re-opening via
+        Catalog."""
+        import sqlite3
+
+        d = tmp_path / "oldcat"
+        d.mkdir()
+        db_path = d / ".catalog.db"
+        # Pre-migration documents schema (no alias_of column)
+        with sqlite3.connect(db_path) as conn:
+            conn.executescript(
+                "CREATE TABLE documents (tumbler TEXT PRIMARY KEY, title TEXT);"
+                "INSERT INTO documents VALUES ('1.1.1', 'legacy.md');"
+            )
+
+        # Opening via Catalog must add the column (not raise).
+        cat = Catalog(d, db_path)
+        row = cat._db.execute(
+            "SELECT alias_of FROM documents WHERE tumbler = ?", ("1.1.1",)
+        ).fetchone()
+        assert row is not None and row[0] == ""
 
 
 class TestGhostElement:

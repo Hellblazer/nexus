@@ -58,10 +58,16 @@ def _isolate_t1_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
 def _isolate_catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Redirect NEXUS_CATALOG_PATH so tests never pollute the real user catalog.
 
-    Without this, integration tests that trigger _catalog_hook() (via index_repo
-    or similar) register documents in the user's live catalog at ~/.config/nexus/.
-    This creates thousands of junk entries from pytest temp dirs that accumulate
-    across test runs.
+    Without this, integration tests that trigger _catalog_hook() (via index_repo,
+    index_markdown, or similar) register documents in the user's live catalog at
+    ~/.config/nexus/. Before this fixture landed (RDR-060, 2026-04-08), 64
+    orphan ``int-cce-*`` curator owners accumulated from
+    ``test_cce_query_retrieves_cce_indexed_markdown`` alone.
+
+    The fixture works because catalog write paths guard on
+    ``Catalog.is_initialized(cat_path)`` — the tmp path is never initialised,
+    so hooks return early. See ``tests/test_catalog_isolation.py`` for the
+    regression tests that lock this behaviour in (nexus-dqr3 / nexus-b34f).
     """
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "test-catalog"))
 
