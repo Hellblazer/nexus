@@ -645,11 +645,16 @@ def _index_prose_file(
     timeout: float = 120.0,
     *,
     embed_fn: Callable | None = None,
+    stage_timers: "StageTimers | None" = None,
 ) -> int:
     """Index a single prose file.  Delegates to nexus.prose_indexer.index_prose_file.
 
     Backward-compatible wrapper preserving the old 12-parameter signature.
     See nexus.prose_indexer.index_prose_file for the canonical implementation.
+
+    ``stage_timers`` (nexus-7niu) is an optional :class:`StageTimers` the
+    per-file indexer writes chunking / embed / upload / retry times into.
+    ``None`` is the fast path: no overhead, no output.
     """
     from nexus.prose_indexer import index_prose_file
     from nexus.index_context import IndexContext
@@ -668,6 +673,7 @@ def _index_prose_file(
         force=force,
         timeout=timeout,
         embed_fn=embed_fn,
+        stage_timers=stage_timers,
     )
     return index_prose_file(ctx, file)
 
@@ -688,6 +694,7 @@ def _index_pdf_file(
     chunk_chars: int | None = None,
     *,
     embed_fn: Callable | None = None,
+    stage_timers: "StageTimers | None" = None,
 ) -> int:
     """Index a single PDF file into the docs__ collection.
 
@@ -696,6 +703,10 @@ def _index_pdf_file(
 
     *chunk_chars* overrides the PDF chunk size (default 1500 chars).  Pass
     ``tuning.pdf_chunk_chars`` from TuningConfig to honour per-repo config.
+
+    ``stage_timers`` (nexus-7niu) is an optional :class:`StageTimers` that
+    accumulates chunking / embed / upload / retry time for this file.
+    ``None`` is the fast path — the instrumented blocks are no-ops.
     """
     import hashlib as _hl
     from nexus.doc_indexer import _embed_with_fallback, _pdf_chunks
@@ -710,7 +721,17 @@ def _index_pdf_file(
     if not force and check_staleness(col, file, content_hash_hex, target_model):
         return 0
 
-    prepared = _pdf_chunks(file, content_hash_hex, target_model, now_iso, collection_name, chunk_chars=chunk_chars)
+    # nexus-7niu: per-stage timer instrumentation. Silent when
+    # ``stage_timers is None`` — no overhead, no output.
+    if stage_timers is not None:
+        _stage = stage_timers.stage
+    else:
+        from contextlib import nullcontext
+        def _stage(_name: str):  # type: ignore[misc]
+            return nullcontext()
+
+    with _stage("chunking"):
+        prepared = _pdf_chunks(file, content_hash_hex, target_model, now_iso, collection_name, chunk_chars=chunk_chars)
     if not prepared:
         _log.debug("skipped PDF with no chunks", path=str(file))
         return 0
@@ -762,36 +783,38 @@ def _index_pdf_file(
         }
         metadatas.append(augmented)
 
-    if embed_fn is not None:
-        embeddings = embed_fn(embed_texts_pdf)
-        actual_model = target_model
-    else:
-        embeddings, actual_model = _embed_with_fallback(embed_texts_pdf, target_model, voyage_key, timeout=timeout)
+    with _stage("embed"):
+        if embed_fn is not None:
+            embeddings = embed_fn(embed_texts_pdf)
+            actual_model = target_model
+        else:
+            embeddings, actual_model = _embed_with_fallback(embed_texts_pdf, target_model, voyage_key, timeout=timeout)
     if actual_model != target_model:
         for m in metadatas:
             m["embedding_model"] = actual_model
 
-    db.upsert_chunks_with_embeddings(
-        collection_name=collection_name,
-        ids=ids,
-        documents=documents,
-        embeddings=embeddings,
-        metadatas=metadatas,
-    )
+    with _stage("upload"):
+        db.upsert_chunks_with_embeddings(
+            collection_name=collection_name,
+            ids=ids,
+            documents=documents,
+            embeddings=embeddings,
+            metadatas=metadatas,
+        )
 
-    # Chash dual-write (RDR-086 Phase 1.2): global chash → (collection, doc_id).
-    try:
-        from nexus.mcp_infra import chash_dual_write_batch
-        chash_dual_write_batch(ids, collection_name, metadatas)
-    except Exception:
-        _log.debug("chash_dual_write_failed", exc_info=True)
+        # Chash dual-write (RDR-086 Phase 1.2): global chash → (collection, doc_id).
+        try:
+            from nexus.mcp_infra import chash_dual_write_batch
+            chash_dual_write_batch(ids, collection_name, metadatas)
+        except Exception:
+            _log.debug("chash_dual_write_failed", exc_info=True)
 
-    # Incremental taxonomy: assign chunks to nearest existing topics.
-    try:
-        from nexus.mcp_infra import taxonomy_assign_batch
-        taxonomy_assign_batch(ids, collection_name, embeddings)
-    except Exception:
-        _log.debug("taxonomy_incremental_assign_failed", exc_info=True)
+        # Incremental taxonomy: assign chunks to nearest existing topics.
+        try:
+            from nexus.mcp_infra import taxonomy_assign_batch
+            taxonomy_assign_batch(ids, collection_name, embeddings)
+        except Exception:
+            _log.debug("taxonomy_incremental_assign_failed", exc_info=True)
 
     return len(prepared)
 
@@ -1210,21 +1233,34 @@ def _run_index(
     for score, file in prose_files:
         _log.debug("indexing", file=str(file))
         t0 = time.monotonic()
+        # nexus-7niu: per-file StageTimers when the caller subscribed.
+        timers = None
+        if on_stage_timers is not None:
+            from nexus.stage_timers import StageTimers
+            timers = StageTimers()
         chunks = _index_prose_file(
             file, repo, docs_collection, docs_model, docs_col, db,
             voyage_key, git_meta, now_iso, score,
             force=force,
             timeout=read_timeout_seconds,
             embed_fn=_embed_fn,
+            stage_timers=timers,
         )
         if on_file:
             on_file(file, chunks, time.monotonic() - t0)
+        if on_stage_timers is not None and timers is not None:
+            on_stage_timers(file, timers)
 
     # Index PDF files → docs__ (PDF extraction + voyage-context-3)
     _log.debug("indexing PDF files", count=len(pdf_files))
     for score, file in pdf_files:
         _log.debug("indexing", file=str(file))
         t0 = time.monotonic()
+        # nexus-7niu: per-file StageTimers when the caller subscribed.
+        timers = None
+        if on_stage_timers is not None:
+            from nexus.stage_timers import StageTimers
+            timers = StageTimers()
         chunks = _index_pdf_file(
             file, repo, docs_collection, docs_model, docs_col, db,
             voyage_key, git_meta, now_iso, score,
@@ -1232,9 +1268,12 @@ def _run_index(
             timeout=read_timeout_seconds,
             chunk_chars=tuning.pdf_chunk_chars,
             embed_fn=_embed_fn,
+            stage_timers=timers,
         )
         if on_file:
             on_file(file, chunks, time.monotonic() - t0)
+        if on_stage_timers is not None and timers is not None:
+            on_stage_timers(file, timers)
 
     # Post-processing phase markers (nexus-vatx Gap 2): the per-file
     # progress bar ends at "[N/N]" but the pipeline keeps running for
