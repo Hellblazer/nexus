@@ -165,3 +165,18 @@ def test_enrich_malformed_json():
         result = enrich("Some Paper Title")
 
     assert result == {}
+
+
+def test_enrich_null_references_and_authors():
+    """SS returns explicit null for references/authors — must not crash (nexus-8d6e)."""
+    from nexus.bib_enricher import enrich
+
+    paper = dict(_VALID_PAPER, references=None, authors=None)
+    mock_resp = _make_response(200, {"data": [paper]})
+
+    with patch("httpx.get", return_value=mock_resp):
+        result = enrich("Paper With Null Fields")
+
+    assert result["references"] == []
+    assert result["authors"] == ""
+    assert result["semantic_scholar_id"] == "abc123"

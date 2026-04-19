@@ -59,14 +59,14 @@ def enrich(title: str) -> dict[str, Any]:
                 return {}
             paper = data[0]
             refs = [
-                r.get("paperId", "") for r in paper.get("references", [])
+                r.get("paperId", "") for r in (paper.get("references") or [])
                 if r and r.get("paperId")
             ]
             return {
                 "year": paper.get("year", 0) or 0,
                 "venue": paper.get("venue", "") or "",
                 "authors": ", ".join(
-                    a.get("name", "") for a in paper.get("authors", [])[:5]
+                    a.get("name", "") for a in (paper.get("authors") or [])[:5]
                 ),
                 "citation_count": paper.get("citationCount", 0) or 0,
                 "semantic_scholar_id": paper.get("paperId", "") or "",
