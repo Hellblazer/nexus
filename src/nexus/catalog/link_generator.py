@@ -34,10 +34,11 @@ def generate_citation_links(cat: Catalog) -> int:
     entries_with_refs: list[tuple[Tumbler, list[str]]] = []
 
     for entry in entries:
-        ss_id = entry.meta.get("bib_semantic_scholar_id", "")
+        meta = entry.meta or {}
+        ss_id = meta.get("bib_semantic_scholar_id", "")
         if ss_id:
             id_to_tumbler[ss_id] = entry.tumbler
-        refs = entry.meta.get("references", [])
+        refs = meta.get("references", [])
         if refs:
             entries_with_refs.append((entry.tumbler, refs))
 
