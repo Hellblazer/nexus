@@ -84,6 +84,14 @@ def compute_merge_candidates(
     # lexicographic order on the projection side ensures exactly one
     # row per symmetric pair and makes the output deterministic
     # regardless of which direction was populated first.
+    #
+    # Semantic tradeoff (Reviewer C/S-4): ``AVG(ta.similarity)`` with the
+    # ``source_collection < t.collection`` predicate averages only the
+    # A-side similarities even when both directions were populated. This
+    # is acceptable for an advisory merge-candidate score — a slight
+    # directional bias vs the strict bidirectional mean — and the
+    # alternative (UNION ALL over both orderings, then AVG) doubles
+    # the query cost for a minor numerical refinement.
     sql = f"""
         SELECT ta.source_collection AS a,
                t.collection AS b,

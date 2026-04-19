@@ -993,6 +993,14 @@ def _catalog_markdown_hook(
             owner = cat.register_owner(owner_name, "curator")
 
         fp = make_relative(md_path, base_path) if base_path else str(md_path)
+        # Known TOCTOU window (Reviewer B/I-3): this stat happens AFTER the
+        # markdown content was read for chunking earlier in the pipeline.
+        # A concurrent write between content-read and this stat stores an
+        # mtime newer than the indexed content, suppressing a subsequent
+        # staleness flag. Proper fix requires threading source_mtime from
+        # ``index_markdown``'s content-read point down to this hook. Filed
+        # as a follow-up (nexus-vatx was scoped to ingest observability
+        # surfaces, not data-consistency reorders).
         try:
             source_mtime = md_path.stat().st_mtime
         except OSError:

@@ -221,6 +221,45 @@ class ChashIndex:
             ).fetchone()
         return row is None
 
+    def count_for_collection(self, collection: str) -> int:
+        """Return the row count for ``collection``.
+
+        Review remediation (Reviewer B/I-1): public locked alternative to
+        ``with idx._lock: idx.conn.execute("SELECT COUNT(*) …")`` so
+        external callers (``collection_audit.compute_chash_coverage``)
+        don't have to reach into ``_lock`` directly. Returns 0 for an
+        unknown collection.
+        """
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT COUNT(*) FROM chash_index WHERE physical_collection = ?",
+                (collection,),
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    def doc_ids_present_in_collection(
+        self, collection: str, doc_ids: list[str],
+    ) -> set[str]:
+        """Return the subset of ``doc_ids`` that are indexed in *collection*.
+
+        Targeted membership probe for ``compute_chash_coverage`` — takes a
+        caller-provided list of T3 chunk ids and returns the ones that
+        appear in ``chash_index`` for the given collection. Callers use
+        the set difference to surface missing ids.
+
+        Empty ``doc_ids`` → empty set (no query issued).
+        """
+        if not doc_ids:
+            return set()
+        placeholders = ",".join("?" * len(doc_ids))
+        with self._lock:
+            rows = self.conn.execute(
+                f"SELECT doc_id FROM chash_index "
+                f"WHERE physical_collection = ? AND doc_id IN ({placeholders})",
+                (collection, *doc_ids),
+            ).fetchall()
+        return {r[0] for r in rows}
+
 
 # ── Dual-write helper (RDR-086 Phase 1.2) ────────────────────────────────────
 

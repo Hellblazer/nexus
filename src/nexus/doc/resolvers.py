@@ -206,16 +206,25 @@ class RdrResolver:
 
 
 # Tokens that denote a child-artifact RDR file rather than the main RDR.
-# Matched as a lowercase kebab-case segment: ``-IMPL-``, ``-post-mortem-``,
+# Matched as a lowercase kebab-case segment: ``-impl-``, ``-post-mortem-``,
 # ``-supplement-``, ``-calibration-``. The separators constrain the match
 # so genuine title words happening to contain these letters (unlikely,
 # but possible for e.g. "implementation-details") don't get mis-classified.
-_CHILD_MARKERS: tuple[str, ...] = (
-    "-impl-",
-    "-post-mortem-",
-    "-supplement-",
-    "-calibration",  # no trailing dash: matches both "-calibration.md" + "-calibration-*"
+#
+# Review remediation (Reviewer C/I-5): each marker is a tuple of acceptable
+# *ends*. ``-calibration-`` matches ``rdr-079-calibration-phase-1.md`` (a
+# child) but NOT ``rdr-200-calibration-free-inference.md`` (a primary RDR
+# whose title starts with "calibration-free"). The dual entry "<marker>."
+# covers the extensionless child case (``rdr-079-calibration.md``).
+_CHILD_MARKER_SUFFIXES: tuple[str, ...] = (
+    "-impl-", "-impl.",
+    "-post-mortem-", "-post-mortem.",
+    "-supplement-", "-supplement.",
+    "-calibration-", "-calibration.",
 )
+
+# Back-compat alias for external callers that imported the old tuple.
+_CHILD_MARKERS: tuple[str, ...] = _CHILD_MARKER_SUFFIXES
 
 
 def _select_primary_rdr(candidates: list["Path"]) -> "Path":
@@ -229,8 +238,11 @@ def _select_primary_rdr(candidates: list["Path"]) -> "Path":
     Invariant: ``candidates`` is non-empty. The caller enforces this.
     """
     def _is_child(path: "Path") -> bool:
-        stem_lower = path.stem.lower()
-        return any(marker in stem_lower for marker in _CHILD_MARKERS)
+        # Match against the *name* (stem + ext) so the trailing "."
+        # variants like ``-calibration.`` anchor against the extension
+        # boundary rather than the end of the stem.
+        name_lower = path.name.lower()
+        return any(marker in name_lower for marker in _CHILD_MARKER_SUFFIXES)
 
     primaries = sorted([c for c in candidates if not _is_child(c)])
     if primaries:

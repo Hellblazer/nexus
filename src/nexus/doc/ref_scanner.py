@@ -161,6 +161,11 @@ def _iter_count_matches(scope_text: str):
     """Yield ``(start_position, value)`` for every chunk-count claim
     in *scope_text*. Both plain-integer and k-shorthand patterns are
     scanned; positions are character offsets into *scope_text*.
+
+    The generator yields plain-integer matches first, then k-shorthand
+    matches. ``_extract_count_near`` consumes via ``min(..., key=abs)``
+    which is O(N) in candidate count and correctly finds the nearest
+    regardless of iteration order, so no explicit sort is needed.
     """
     for m in _COUNT_RES[0].finditer(scope_text):
         try:
@@ -177,6 +182,13 @@ def _iter_count_matches(scope_text: str):
 def _extract_count_near(scope_text: str, ref_pos: int) -> int | None:
     """Return the value of the count claim nearest *ref_pos* in
     *scope_text*, or ``None`` when no claim is present.
+
+    Tie-break (Reviewer C/I-3): when two count claims are exactly
+    equidistant from *ref_pos*, Python's stable ``min()`` picks the one
+    that appears first in the candidate list. ``_iter_count_matches``
+    yields plain-integer matches ahead of k-shorthand matches, so
+    ``"5,000 chunks"`` wins over ``"5k chunks"`` at the same distance.
+    Within a pattern, the match with the lower ``start`` position wins.
     """
     candidates = list(_iter_count_matches(scope_text))
     if not candidates:

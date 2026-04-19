@@ -46,14 +46,24 @@ def _format_eta(n: int, total: int, chunks: int, elapsed_s: float) -> str:
     """Return the periodic `[eta] …` line for an in-progress indexing run.
 
     Pure for testability: given per-run counters and wall-clock elapsed,
-    emit the exact stderr line the ETA ticker prints every interval. Falls
-    back to ``pending`` for the remaining estimate when ``n==0`` so the
-    first tick fired before any files complete still emits something useful.
+    emit the exact stderr line the ETA ticker prints every interval. Three
+    regimes:
+
+    * ``n == 0`` — first tick before any file completes: render ``pending``
+      and ``no samples yet`` rather than dividing by zero.
+    * ``0 < n < total`` — normal case: floor the minute estimate to 1 so
+      a nearly-finished run doesn't report ``~0 min remaining``.
+    * ``n == total`` — every file is done but ``stop()`` hasn't fired yet
+      (narrow window between the last ``on_file`` and the ``finally`` that
+      stops the ticker): render ``done`` instead of ``~1 min remaining``.
+      Review remediation — Reviewer A/S-1.
     """
     avg = elapsed_s / n if n else 0.0
     remaining_files = max(0, total - n)
     if n == 0:
         eta = "pending"
+    elif remaining_files == 0:
+        eta = "done"
     else:
         eta_seconds = remaining_files * avg
         eta_min = max(1, round(eta_seconds / 60))
@@ -94,10 +104,19 @@ class _ETATicker:
         self._start_mono = 0.0
 
     def start(self, total: int) -> None:
+        # Review remediation (Reviewer A/S-4): refuse double-start. Two
+        # threads would share ``_done`` + ``_lock`` and ``stop()`` only
+        # joins the newest, leaking the first until process exit.
+        if self._thread is not None:
+            return
         with self._lock:
             self._total = total
             self._start_mono = time.monotonic()
-        self._done.clear()
+            # Review remediation (Reviewer A/I-3): clear the stop signal
+            # inside the lock so a concurrent stop() between the lock
+            # release and thread spawn cannot lose the stop and leak a
+            # daemon thread for the life of the process.
+            self._done.clear()
         self._thread = threading.Thread(
             target=self._loop, name="nx-eta-ticker", daemon=True,
         )
@@ -233,15 +252,43 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
         # Stderr so the line is visible even when stdout is redirected.
         click.echo(f"  [post] {msg}", err=True)
 
+    def _emit_retry_summary() -> None:
+        # Review remediation (Reviewer A/I-2): emit the retry-time summary
+        # regardless of whether index_repository succeeded. A run that
+        # crashed after repeated rate-limit backoffs is exactly the case
+        # where the summary matters most — it tells the operator "you
+        # weren't slow, you were throttled." Silent on zero retries.
+        retry_stats = get_retry_stats()
+        if not retry_stats["total_count"]:
+            return
+        parts: list[str] = []
+        if retry_stats["voyage_count"]:
+            parts.append(
+                f"voyage {retry_stats['voyage_seconds']:.1f}s over "
+                f"{retry_stats['voyage_count']} retries"
+            )
+        if retry_stats["chroma_count"]:
+            parts.append(
+                f"chroma {retry_stats['chroma_seconds']:.1f}s over "
+                f"{retry_stats['chroma_count']} retries"
+            )
+        click.echo(
+            f"  Transient-error backoff: {retry_stats['total_seconds']:.1f}s total "
+            f"({', '.join(parts)})",
+            err=True,
+        )
+
+    stats: dict = {}
     try:
         stats = index_repository(path, reg, frecency_only=frecency_only, force=force,
                                  force_stale=force_stale,
                                  on_locked=on_locked, on_start=on_start, on_file=on_file,
-                                 on_phase=on_phase)
+                                 on_phase=on_phase) or {}
     finally:
         eta_ticker.stop()
-    if bar:
-        bar.close()
+        if bar:
+            bar.close()
+        _emit_retry_summary()
     if not frecency_only and stats:
         rdr_indexed = stats.get("rdr_indexed", 0)
         rdr_current = stats.get("rdr_current", 0)
@@ -374,26 +421,9 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
         except Exception as exc:
             _log.debug("hook_detection_failed", error=str(exc))  # Don't let hook detection break indexing
 
-    # nexus-vatx Gap 4: emit retry-time summary when any transient-error
-    # backoff fired. Silent when zero so normal runs stay tidy.
-    retry_stats = get_retry_stats()
-    if retry_stats["total_count"]:
-        parts = []
-        if retry_stats["voyage_count"]:
-            parts.append(
-                f"voyage {retry_stats['voyage_seconds']:.1f}s over "
-                f"{retry_stats['voyage_count']} retries"
-            )
-        if retry_stats["chroma_count"]:
-            parts.append(
-                f"chroma {retry_stats['chroma_seconds']:.1f}s over "
-                f"{retry_stats['chroma_count']} retries"
-            )
-        click.echo(
-            f"  Transient-error backoff: {retry_stats['total_seconds']:.1f}s total "
-            f"({', '.join(parts)})",
-            err=True,
-        )
+    # Retry summary now emitted from the `finally` block around
+    # index_repository (see `_emit_retry_summary`) so it fires on both
+    # success and exception paths — Reviewer A/I-2.
     click.echo("Done.")
 
 

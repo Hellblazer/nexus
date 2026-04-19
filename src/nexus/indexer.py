@@ -279,21 +279,30 @@ def _catalog_hook(
             except ValueError:
                 rel_path = abs_path.name
 
+            # nexus-8luh: capture mtime at index time so stale-source
+            # detection (RDR-087 Phase 3.4) can compare stored vs
+            # current. Missing file falls back to 0 (treated as
+            # "unknown" downstream).
+            #
+            # Review remediation (Reviewer B/I-3): stat BEFORE read_bytes.
+            # If the file is modified between stat and read, the stored
+            # mtime will be *older* than the indexed content — the safe
+            # direction, because a future ``st_mtime > stored`` comparison
+            # correctly flags the file as stale relative to what we
+            # indexed. The reverse order (hash first, stat later) would
+            # record a stored mtime NEWER than the content we actually
+            # hashed, suppressing a staleness warning that should fire.
+            try:
+                source_mtime = abs_path.stat().st_mtime
+            except OSError:
+                source_mtime = 0.0
+
             # Per-file content hash for rename detection (RDR-060 E7)
             import hashlib as _hl
             try:
                 file_hash = _hl.sha256(abs_path.read_bytes()).hexdigest()
             except OSError:
                 file_hash = ""
-
-            # nexus-8luh: capture mtime at index time so stale-source
-            # detection (RDR-087 Phase 3.4) can compare stored vs
-            # current. Missing file falls back to 0 (treated as
-            # "unknown" downstream).
-            try:
-                source_mtime = abs_path.stat().st_mtime
-            except OSError:
-                source_mtime = 0.0
 
             existing = cat.by_file_path(owner, rel_path)
             if existing is None:
@@ -1212,102 +1221,116 @@ def _run_index(
     # progress bar ends at "[N/N]" but the pipeline keeps running for
     # pruning, stamping, and catalog registration. Without markers the
     # operator sees silence and cannot tell hung from busy.
+    #
+    # Review remediation (Reviewer A/I-1): wrap the block in try/finally
+    # so the closing "Post-processing complete" marker fires even when
+    # a post-processing step raises. Without this, an exception inside
+    # _discover_and_index_rdrs, _prune_misclassified, or _catalog_hook
+    # would leave the operator staring at the last `[post] Pruning …`
+    # line — exactly the hung/busy ambiguity Gap 2 was meant to fix.
     post_t0 = time.monotonic()
 
     def _phase(msg: str) -> None:
         if on_phase is not None:
             on_phase(msg)
 
-    # Discover and index RDR markdown files → rdr__
-    # Pass the local embed_fn so RDR indexing respects NX_LOCAL mode
-    # (without it, the RDR branch defaulted to Voyage 1024-dim; query
-    # time with local MiniLM 384-dim hit "Collection expecting embedding
-    # with dimension of 1024, got 384").
-    # RDR indexing lives in doc_indexer which expects shape #2
-    # ``(texts, model) -> (embeddings, actual_model)``. In local mode
-    # hand over the tuple-returning adapter; in cloud mode pass None so
-    # doc_indexer falls back to _embed_with_fallback on its own.
-    _phase("Discovering and indexing RDR markdown files…")
-    _t = time.monotonic()
-    rdr_indexed, rdr_current, rdr_failed = _discover_and_index_rdrs(
-        repo, rdr_abs_paths, db, voyage_key, now_iso, force=force,
-        embed_fn=_embed_fn_doc,
-    )
-    _phase(
-        f"RDR indexing done — {rdr_indexed} indexed, {rdr_current} current, "
-        f"{rdr_failed} failed ({time.monotonic() - _t:.1f}s)"
-    )
-
-    # Prune misclassified chunks (reclassification cleanup)
-    _phase("Pruning misclassified chunks…")
-    _t = time.monotonic()
-    _prune_misclassified(
-        repo, code_collection, docs_collection,
-        [f for _, f in code_files],
-        [f for _, f in prose_files],
-        [f for _, f in pdf_files],
-        db,
-    )
-    _phase(f"Pruning misclassified done ({time.monotonic() - _t:.1f}s)")
-
-    # C3: Prune deleted files — remove chunks for files no longer in the repo
-    _phase("Pruning deleted files…")
-    _t = time.monotonic()
-    all_current_paths: set[str] = set()
-    for _, f in code_files:
-        all_current_paths.add(str(f))
-    for _, f in prose_files:
-        all_current_paths.add(str(f))
-    for _, f in pdf_files:
-        all_current_paths.add(str(f))
-    _prune_deleted_files(code_collection, docs_collection, all_current_paths, db)
-    _phase(f"Pruning deleted files done ({time.monotonic() - _t:.1f}s)")
-
-    # Stamp pipeline version on force indexing (after all work completes)
-    if force:
-        _phase("Stamping pipeline version on forced collections…")
+    rdr_indexed, rdr_current, rdr_failed = 0, 0, 0
+    post_error: BaseException | None = None
+    try:
+        # Discover and index RDR markdown files → rdr__
+        # Pass the local embed_fn so RDR indexing respects NX_LOCAL mode
+        # (without it, the RDR branch defaulted to Voyage 1024-dim; query
+        # time with local MiniLM 384-dim hit "Collection expecting embedding
+        # with dimension of 1024, got 384").
+        # RDR indexing lives in doc_indexer which expects shape #2
+        # ``(texts, model) -> (embeddings, actual_model)``. In local mode
+        # hand over the tuple-returning adapter; in cloud mode pass None so
+        # doc_indexer falls back to _embed_with_fallback on its own.
+        _phase("Discovering and indexing RDR markdown files…")
         _t = time.monotonic()
-        stamp_collection_version(code_col)
-        stamp_collection_version(docs_col)
-        # Stamp RDR collection if it was indexed
-        if rdr_indexed > 0:
+        rdr_indexed, rdr_current, rdr_failed = _discover_and_index_rdrs(
+            repo, rdr_abs_paths, db, voyage_key, now_iso, force=force,
+            embed_fn=_embed_fn_doc,
+        )
+        _phase(
+            f"RDR indexing done — {rdr_indexed} indexed, {rdr_current} current, "
+            f"{rdr_failed} failed ({time.monotonic() - _t:.1f}s)"
+        )
+
+        # Prune misclassified chunks (reclassification cleanup)
+        _phase("Pruning misclassified chunks…")
+        _t = time.monotonic()
+        _prune_misclassified(
+            repo, code_collection, docs_collection,
+            [f for _, f in code_files],
+            [f for _, f in prose_files],
+            [f for _, f in pdf_files],
+            db,
+        )
+        _phase(f"Pruning misclassified done ({time.monotonic() - _t:.1f}s)")
+
+        # C3: Prune deleted files — remove chunks for files no longer in the repo
+        _phase("Pruning deleted files…")
+        _t = time.monotonic()
+        all_current_paths: set[str] = set()
+        for _, f in code_files:
+            all_current_paths.add(str(f))
+        for _, f in prose_files:
+            all_current_paths.add(str(f))
+        for _, f in pdf_files:
+            all_current_paths.add(str(f))
+        _prune_deleted_files(code_collection, docs_collection, all_current_paths, db)
+        _phase(f"Pruning deleted files done ({time.monotonic() - _t:.1f}s)")
+
+        # Stamp pipeline version on force indexing (after all work completes)
+        if force:
+            _phase("Stamping pipeline version on forced collections…")
+            _t = time.monotonic()
+            stamp_collection_version(code_col)
+            stamp_collection_version(docs_col)
+            # Stamp RDR collection if it was indexed
+            if rdr_indexed > 0:
+                from nexus.registry import _rdr_collection_name
+                rdr_col_name = _rdr_collection_name(repo)
+                try:
+                    rdr_col = db.get_or_create_collection(rdr_col_name)
+                    stamp_collection_version(rdr_col)
+                except Exception:
+                    _log.debug("rdr_stamp_skipped", collection=rdr_col_name)
+            _phase(f"Pipeline version stamped ({time.monotonic() - _t:.1f}s)")
+
+        # Catalog hook: register indexed files (opt-in, graceful absence)
+        indexed_for_catalog: list[tuple[Path, str, str]] = []
+        for _, f in code_files:
+            indexed_for_catalog.append((f, "code", code_collection))
+        for _, f in prose_files:
+            indexed_for_catalog.append((f, "prose", docs_collection))
+        # Include RDR files so code→RDR provenance links can be generated
+        # Register regardless of T3 indexing success — catalog tracks existence
+        if rdr_abs_paths:
             from nexus.registry import _rdr_collection_name
-            rdr_col_name = _rdr_collection_name(repo)
-            try:
-                rdr_col = db.get_or_create_collection(rdr_col_name)
-                stamp_collection_version(rdr_col)
-            except Exception:
-                _log.debug("rdr_stamp_skipped", collection=rdr_col_name)
-        _phase(f"Pipeline version stamped ({time.monotonic() - _t:.1f}s)")
-
-    # Catalog hook: register indexed files (opt-in, graceful absence)
-    indexed_for_catalog: list[tuple[Path, str, str]] = []
-    for _, f in code_files:
-        indexed_for_catalog.append((f, "code", code_collection))
-    for _, f in prose_files:
-        indexed_for_catalog.append((f, "prose", docs_collection))
-    # Include RDR files so code→RDR provenance links can be generated
-    # Register regardless of T3 indexing success — catalog tracks existence
-    if rdr_abs_paths:
-        from nexus.registry import _rdr_collection_name
-        rdr_col = _rdr_collection_name(repo)
-        for rdr_dir in rdr_abs_paths:
-            if rdr_dir.is_dir():
-                for md_file in sorted(rdr_dir.rglob("*.md")):
-                    if md_file.is_file():
-                        indexed_for_catalog.append((md_file, "rdr", rdr_col))
-    _phase(f"Registering {len(indexed_for_catalog)} catalog entries…")
-    _t = time.monotonic()
-    _catalog_hook(
-        repo=repo,
-        repo_name=_repo_basename,
-        repo_hash=_repo_hash,
-        head_hash=_current_head(repo),
-        indexed_files=indexed_for_catalog,
-    )
-    _phase(f"Catalog registration done ({time.monotonic() - _t:.1f}s)")
-
-    _phase(f"Post-processing complete ({time.monotonic() - post_t0:.1f}s)")
+            rdr_col = _rdr_collection_name(repo)
+            for rdr_dir in rdr_abs_paths:
+                if rdr_dir.is_dir():
+                    for md_file in sorted(rdr_dir.rglob("*.md")):
+                        if md_file.is_file():
+                            indexed_for_catalog.append((md_file, "rdr", rdr_col))
+        _phase(f"Registering {len(indexed_for_catalog)} catalog entries…")
+        _t = time.monotonic()
+        _catalog_hook(
+            repo=repo,
+            repo_name=_repo_basename,
+            repo_hash=_repo_hash,
+            head_hash=_current_head(repo),
+            indexed_files=indexed_for_catalog,
+        )
+        _phase(f"Catalog registration done ({time.monotonic() - _t:.1f}s)")
+    except BaseException as exc:
+        post_error = exc
+        raise
+    finally:
+        suffix = f" (interrupted: {type(post_error).__name__})" if post_error else ""
+        _phase(f"Post-processing complete ({time.monotonic() - post_t0:.1f}s){suffix}")
 
     return {"rdr_indexed": rdr_indexed, "rdr_current": rdr_current, "rdr_failed": rdr_failed}
 

@@ -78,6 +78,18 @@ def safe_killpg(
             msg="proc.pid is not an int — skipping killpg",
         )
         return False
+    # pid <= 0 would route the signal to a wildcard target:
+    #   pid == 0  → os.getpgid(0) returns the *caller's* pgid → kills `nx` itself
+    #   pid == -1 → would be rejected by getpgid, but be explicit
+    # A truncated or zero-byte pidfile that parses as 0 (e.g. from a mineru
+    # crash before the child wrote its pid) must never self-terminate the CLI.
+    if pid <= 0:
+        _log.debug(
+            "safe_killpg_nonpositive_pid_guard",
+            pid=pid,
+            msg="pid <= 0 would target the caller's own pgid — skipping killpg",
+        )
+        return False
     try:
         pgid = os.getpgid(pid)
         os.killpg(pgid, sig)

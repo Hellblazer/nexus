@@ -213,6 +213,41 @@ class TestCatalogRename:
         cat, *_ = self._seed(tmp_path)
         assert cat.rename_collection("knowledge__ghost", "knowledge__phantom") == 0
 
+    def test_rename_preserves_source_mtime_across_jsonl_rebuild(
+        self, tmp_path: Path,
+    ) -> None:
+        """Regression: review-flagged Critical (Reviewer B/C1).
+
+        `rename_collection` previously SELECTed 12 columns and appended a
+        JSONL record without `source_mtime`. JSONL is the rebuild source
+        of truth, so rebuild-from-JSONL silently reset mtime to 0.0 for
+        every renamed document, breaking stale-source detection.
+        """
+        from nexus.catalog.catalog import Catalog
+
+        cat_dir = tmp_path / "catalog"
+        cat_dir.mkdir()
+        cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+        owner = cat.register_owner("papers", "corpus")
+        tumbler = cat.register(
+            owner, title="doc", content_type="paper", file_path="a.pdf",
+            physical_collection="knowledge__old", chunk_count=1,
+            source_mtime=1_700_000_000.0,
+        )
+
+        cat.rename_collection("knowledge__old", "knowledge__new")
+
+        # Rebuild from JSONL — the durable source of truth. The mtime
+        # must survive the round-trip.
+        cat_rebuilt = Catalog(cat_dir, cat_dir / ".catalog-rebuilt.db")
+        entry = cat_rebuilt.resolve(tumbler)
+        assert entry is not None
+        assert entry.physical_collection == "knowledge__new"
+        assert entry.source_mtime == 1_700_000_000.0, (
+            f"rename_collection lost source_mtime on JSONL rebuild: "
+            f"got {entry.source_mtime}"
+        )
+
 
 # ── CLI `nx collection rename` ──────────────────────────────────────────────
 
@@ -322,3 +357,92 @@ class TestRenameCLI:
             )
         assert result.exit_code == 0, result.output
         fake.rename_collection.assert_called_once_with("code__foo", "docs__foo")
+
+
+# ── Partial-cascade failure mode (review finding — Reviewer B/C2) ──────────
+
+
+class TestRenameCascadeFailureModes:
+    """The rename cascade is fail-open by design: T3 renames first, then T2
+    and catalog are attempted independently. A T2 failure must NOT roll
+    back T3 (that would require a second modify(name=old) round-trip and
+    still isn't atomic). Instead, the CLI must emit a ``warn:`` line on
+    stderr naming which cascade failed, so the operator knows the divergent
+    state is there and can retry the cascade manually.
+
+    Before nexus-1ccq review, this contract was documented in the code
+    comment but not pinned by any test. Now it is."""
+
+    def test_t2_cascade_failure_prints_warn_and_continues(
+        self, tmp_path: Path, env_creds,
+    ) -> None:
+        """T2 cascade throws → T3 stays renamed, catalog cascade still
+        runs, CLI exits 0 with a stderr warn line naming T2."""
+        from nexus.commands.collection import rename_cmd
+
+        # Do NOT seed a T2 database — T2Database() will still open a fresh
+        # file, so we need to force the cascade to throw. Patch
+        # T2Database to raise on __enter__.
+        db_path = tmp_path / "memory.db"
+        cat_dir = tmp_path / "catalog"
+        cat_dir.mkdir()
+
+        fake = MagicMock()
+        fake.collection_exists = MagicMock(
+            side_effect=lambda n: n == "code__old",
+        )
+        fake.rename_collection = MagicMock()
+
+        def _t2_bomb(*a, **kw):
+            raise RuntimeError("simulated T2 outage")
+
+        runner = CliRunner()
+        with patch("nexus.commands.collection._t3", return_value=fake), \
+             patch("nexus.db.t2.T2Database", side_effect=_t2_bomb), \
+             patch("nexus.commands._helpers.default_db_path", return_value=db_path), \
+             patch("nexus.config.catalog_path", return_value=cat_dir):
+            result = runner.invoke(rename_cmd, ["code__old", "code__new"])
+
+        assert result.exit_code == 0, result.output
+        # T3 was renamed (irreversible side effect) before the T2 failure.
+        fake.rename_collection.assert_called_once_with("code__old", "code__new")
+        # Stderr carries the explicit warning so the operator knows the
+        # cascade is partial. CliRunner mixes stderr into .output.
+        assert "T2 cascade failed" in result.output
+        assert "simulated T2 outage" in result.output
+
+    def test_catalog_cascade_failure_prints_warn_and_continues(
+        self, tmp_path: Path, env_creds,
+    ) -> None:
+        """Catalog cascade throws → T3 + T2 stay renamed, CLI still exits
+        0 with a stderr warn line naming the catalog."""
+        from nexus.commands.collection import rename_cmd
+
+        db_path = tmp_path / "memory.db"
+        cat_dir = tmp_path / "catalog"
+        cat_dir.mkdir()
+        # Seed an empty T2 so the T2 cascade succeeds trivially.
+        from nexus.db.t2 import T2Database
+        with T2Database(db_path):
+            pass
+
+        fake = MagicMock()
+        fake.collection_exists = MagicMock(
+            side_effect=lambda n: n == "code__old",
+        )
+        fake.rename_collection = MagicMock()
+
+        def _catalog_bomb(*a, **kw):
+            raise RuntimeError("simulated catalog lock contention")
+
+        runner = CliRunner()
+        with patch("nexus.commands.collection._t3", return_value=fake), \
+             patch("nexus.catalog.catalog.Catalog", side_effect=_catalog_bomb), \
+             patch("nexus.commands._helpers.default_db_path", return_value=db_path), \
+             patch("nexus.config.catalog_path", return_value=cat_dir):
+            result = runner.invoke(rename_cmd, ["code__old", "code__new"])
+
+        assert result.exit_code == 0, result.output
+        fake.rename_collection.assert_called_once_with("code__old", "code__new")
+        assert "catalog cascade failed" in result.output
+        assert "simulated catalog lock contention" in result.output

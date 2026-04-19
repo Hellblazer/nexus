@@ -978,11 +978,16 @@ class Catalog:
         try:
             rows = self._db.execute(
                 "SELECT tumbler, title, author, year, content_type, file_path, "
-                "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
+                "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
+                "metadata, source_mtime "
                 "FROM documents WHERE physical_collection = ?",
                 (old,),
             ).fetchall()
             for row in rows:
+                # Preserve source_mtime across the rename — JSONL is the
+                # rebuild source of truth, so any column omitted here is
+                # reset to 0.0 when Catalog.rebuild() replays the log
+                # (review finding — Reviewer B/C1, nexus-1ccq follow-up).
                 rec = {
                     "tumbler": row[0],
                     "title": row[1],
@@ -996,6 +1001,7 @@ class Catalog:
                     "head_hash": row[9] or "",
                     "indexed_at": row[10] or "",
                     "meta": json.loads(row[11]) if row[11] else {},
+                    "source_mtime": row[12] or 0.0,
                 }
                 self._append_jsonl(self._documents_path, rec)
             self._db.execute(

@@ -332,6 +332,28 @@ class TestRdrResolver:
         # -calibration- is the child artifact.
         assert r.resolve("079", field="status", filters={}) == "abandoned"
 
+    def test_primary_with_calibration_prefix_in_title_is_not_misclassified(
+        self, tmp_path: Path,
+    ) -> None:
+        """Review remediation (Reviewer C/I-5): an RDR whose *title* begins
+        with "-calibration-" (e.g. ``rdr-200-calibration-free-inference.md``)
+        is a primary RDR, not a child of some other RDR. The old marker
+        matched the bare substring ``-calibration`` and would classify this
+        as a child, leaving the resolver to pick an arbitrary sibling.
+        """
+        from nexus.doc.resolvers import RdrResolver
+
+        rdr_dir = tmp_path / "docs" / "rdr"
+        rdr_dir.mkdir(parents=True)
+        (rdr_dir / "rdr-200-calibration-free-inference.md").write_text(
+            "---\nstatus: accepted\n---\n"
+        )
+        r = RdrResolver(rdr_dir=rdr_dir)
+        assert r.resolve("200", field="status", filters={}) == "accepted", (
+            "a primary RDR whose title begins with 'calibration-' must not "
+            "be classified as a child artifact"
+        )
+
     def test_falls_back_to_only_child_when_no_primary(
         self, tmp_path: Path,
     ) -> None:
