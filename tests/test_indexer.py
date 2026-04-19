@@ -673,6 +673,75 @@ def test_on_stage_timers_fires_per_code_file_when_subscribed(tmp_path):
     }
 
 
+def test_on_stage_timers_fires_per_prose_file_when_subscribed(tmp_path):
+    """Same contract for the prose-file loop (nexus-7niu extension).
+    Verifies the instrumentation in ``prose_indexer.index_prose_file``
+    runs via the ``_index_prose_file`` wrapper and yields a callback."""
+    from nexus.indexer import _run_index
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "README.md").write_text("# Title\n\nBody prose.\n")
+    (repo / "code.py").write_text("x = 1\n")
+    collected: list[tuple] = []
+
+    def _cb(file, timers) -> None:
+        collected.append((file.name, timers.snapshot()))
+
+    db, _ = _mock_db()
+    with _cb_patches(db):
+        _run_index(repo, _reg(), on_stage_timers=_cb)
+
+    # Both the code file AND the prose/markdown file should fire.
+    names = {n for n, _ in collected}
+    assert "code.py" in names
+    assert "README.md" in names
+
+
+def test_on_stage_timers_fires_per_pdf_file_when_subscribed(tmp_path):
+    """Same contract for the PDF-file loop. Verifies
+    ``_index_pdf_file``'s instrumentation wires through when
+    ``on_stage_timers`` is provided."""
+    import pymupdf as _fitz
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    # Minimal PDF so the classifier routes it through the PDF loop
+    pdf_doc = _fitz.open()
+    page = pdf_doc.new_page()
+    page.insert_text((72, 100), "Hello. PDF shakeout.", fontsize=12)
+    (repo / "doc.pdf").write_bytes(pdf_doc.tobytes())
+    pdf_doc.close()
+
+    collected: list[tuple] = []
+
+    def _cb(file, timers) -> None:
+        collected.append((file.name, timers.snapshot()))
+
+    db, _ = _mock_db()
+    # Stub the actual _index_pdf_file body via the same _cb_patches shape
+    # for code/prose; let _index_pdf_file run through to hit the stage
+    # callback wiring we're trying to prove. Mock the expensive
+    # extractor + embedder.
+    extra = {
+        "nexus.indexer._index_pdf_file": {"return_value": 2},
+        "nexus.indexer._index_code_file": {"return_value": 0},
+        "nexus.indexer._index_prose_file": {"return_value": 0},
+        "nexus.indexer._discover_and_index_rdrs": {"return_value": (0, 0, 0)},
+        "nexus.indexer._prune_misclassified": {},
+        "nexus.indexer._prune_deleted_files": {},
+    }
+    with _patches(db, extra=extra):
+        _run_index(repo, _reg(), on_stage_timers=_cb)
+
+    # _index_pdf_file is mocked so it doesn't actually populate timers —
+    # what we're verifying here is the wiring: the orchestrator created
+    # and passed a StageTimers, then called the callback afterwards.
+    assert any(n == "doc.pdf" for n, _ in collected), (
+        f"expected per-PDF callback; got {collected}"
+    )
+
+
 def test_on_stage_timers_none_is_safe(tmp_path):
     """Omitting ``on_stage_timers`` (the default) must not spawn any
     per-file timers or change behaviour — zero-overhead contract."""

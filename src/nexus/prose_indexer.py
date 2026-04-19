@@ -50,6 +50,13 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
     if not ctx.force and check_staleness(ctx.col, file_path, content_hash, ctx.embedding_model):
         return 0
 
+    # nexus-7niu: per-stage timer instrumentation. Silent when
+    # ``ctx.stage_timers is None`` — no overhead, no output.
+    _stage = (
+        ctx.stage_timers.stage if ctx.stage_timers is not None
+        else _noop_stage
+    )
+
     ext = file_path.suffix.lower()
     ids: list[str] = []
     documents: list[str] = []
@@ -58,10 +65,11 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
 
     if ext in (".md", ".markdown"):
         # Markdown: use SemanticMarkdownChunker (M1: uses char offsets, not line numbers)
-        frontmatter, body = parse_frontmatter(content)
-        frontmatter_len = len(content) - len(body)
-        base_meta: dict = {"source_path": str(file_path), "corpus": ctx.corpus}
-        chunks = SemanticMarkdownChunker().chunk(body, base_meta)
+        with _stage("chunking"):
+            frontmatter, body = parse_frontmatter(content)
+            frontmatter_len = len(content) - len(body)
+            base_meta: dict = {"source_path": str(file_path), "corpus": ctx.corpus}
+            chunks = SemanticMarkdownChunker().chunk(body, base_meta)
         if not chunks:
             _log.debug("skipped file with no chunks", path=str(file_path))
             return 0
@@ -109,7 +117,8 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
                 embed_texts.append(chunk.text)
     else:
         # Non-markdown prose: use line-based chunking
-        raw_chunks = _line_chunk(content)
+        with _stage("chunking"):
+            raw_chunks = _line_chunk(content)
         if not raw_chunks:
             if not content.strip():
                 return 0
@@ -165,37 +174,51 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
     ids, documents, metadatas, embed_texts = map(list, zip(*valid))
 
     # Embed: local mode uses embed_fn; cloud uses _embed_with_fallback (CCE)
-    if ctx.embed_fn is not None:
-        embeddings = ctx.embed_fn(embed_texts)
-        actual_model = ctx.embedding_model
-    else:
-        embeddings, actual_model = _embed_with_fallback(
-            embed_texts, ctx.embedding_model, ctx.voyage_key, timeout=ctx.timeout
-        )
+    with _stage("embed"):
+        if ctx.embed_fn is not None:
+            embeddings = ctx.embed_fn(embed_texts)
+            actual_model = ctx.embedding_model
+        else:
+            embeddings, actual_model = _embed_with_fallback(
+                embed_texts, ctx.embedding_model, ctx.voyage_key, timeout=ctx.timeout
+            )
     if actual_model != ctx.embedding_model:
         for m in metadatas:
             m["embedding_model"] = actual_model
 
-    ctx.db.upsert_chunks_with_embeddings(  # type: ignore[attr-defined]
-        collection_name=ctx.corpus,
-        ids=ids,
-        documents=documents,
-        embeddings=embeddings,
-        metadatas=metadatas,
-    )
+    with _stage("upload"):
+        ctx.db.upsert_chunks_with_embeddings(  # type: ignore[attr-defined]
+            collection_name=ctx.corpus,
+            ids=ids,
+            documents=documents,
+            embeddings=embeddings,
+            metadatas=metadatas,
+        )
 
-    # Chash dual-write (RDR-086 Phase 1.2): global chash → (collection, doc_id).
-    try:
-        from nexus.mcp_infra import chash_dual_write_batch
-        chash_dual_write_batch(ids, ctx.corpus, metadatas)
-    except Exception:
-        _log.debug("chash_dual_write_failed", exc_info=True)
+        # Chash dual-write (RDR-086 Phase 1.2): global chash → (collection, doc_id).
+        try:
+            from nexus.mcp_infra import chash_dual_write_batch
+            chash_dual_write_batch(ids, ctx.corpus, metadatas)
+        except Exception:
+            _log.debug("chash_dual_write_failed", exc_info=True)
 
-    # Incremental taxonomy: assign chunks to nearest existing topics.
-    try:
-        from nexus.mcp_infra import taxonomy_assign_batch
-        taxonomy_assign_batch(ids, ctx.corpus, embeddings)
-    except Exception:
-        _log.debug("taxonomy_incremental_assign_failed", exc_info=True)
+        # Incremental taxonomy: assign chunks to nearest existing topics.
+        try:
+            from nexus.mcp_infra import taxonomy_assign_batch
+            taxonomy_assign_batch(ids, ctx.corpus, embeddings)
+        except Exception:
+            _log.debug("taxonomy_incremental_assign_failed", exc_info=True)
 
     return len(ids)
+
+
+# No-op context manager used when ``ctx.stage_timers is None`` so the
+# instrumented code paths stay single-shape regardless of timing mode.
+# Matches the helper in ``code_indexer``; both sites avoid importing
+# each other to keep this module a leaf relative to the other indexer.
+from contextlib import contextmanager as _contextmanager
+
+
+@_contextmanager
+def _noop_stage(_name: str):
+    yield
