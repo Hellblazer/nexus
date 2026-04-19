@@ -81,6 +81,14 @@ nx index repo ./my-project
 | `--force-stale` | Re-index only if collection pipeline version is outdated (smart force — skips current collections) |
 | `--on-locked {skip,wait}` | Behavior when another process holds the repo lock: `skip` exits immediately, `wait` blocks (default: `wait`) |
 | `--no-taxonomy` | Skip automatic topic discovery after indexing |
+| `--debug-timing` | Emit an end-of-run per-stage breakdown to stderr (chunking / embed / upload / retry seconds per file, aggregated with percentages). Instruments code, prose, and PDF per-file paths — silent without the flag. Use when investigating "why did indexing take N minutes?" (introduced 4.9.0, nexus-7niu) |
+
+**Observability output** (stderr, all emitted automatically during `repo` runs):
+
+- **Per-file line** — `  [N/total] path — K chunks  (T.Ts)` printed as each file completes (or when `--monitor` / no-TTY).
+- **`[eta]` line** — every 60 s: `[eta] N/total files · C chunks · Xs/file avg · ~M min remaining`. Fires regardless of TTY so CI / `nohup` / `tail -f` see pace even when tqdm suppresses its bar (introduced 4.8.0, nexus-vatx Gap 3).
+- **`[post]` phase markers** — after the per-file loop, the pipeline keeps running for RDR discovery, pruning, pipeline-version stamping, and catalog registration. Each phase emits `[post] <phase>…` / `[post] <phase> done (Xs)`, bookended by `[post] Post-processing complete (Xs)` (introduced 4.8.0, nexus-vatx Gap 2).
+- **Transient-error backoff summary** — on exit, if any Voyage / ChromaDB retry fired: `Transient-error backoff: Xs total (voyage ..., chroma ...)`. Silent on clean runs. Visible on exception paths (introduced 4.8.0, nexus-vatx Gap 4a).
 
 **`pdf` and `md` flags:**
 
@@ -586,6 +594,9 @@ nx collection list
 | `verify NAME` | Existence check + document count |
 | `reindex NAME` | Delete and re-index a collection from its source documents |
 | `backfill-hash [NAME]` | Add `chunk_text_hash` metadata to chunks missing it (no re-embedding) |
+| `rename OLD NEW` | In-place rename via ChromaDB `modify(name=)` + T2 + catalog cascade (4.8.0, nexus-1ccq) |
+| `audit NAME` | Deep-dive per-collection report: distance histogram, top-5 cross-projections, orphan chunks, hub topics, chash coverage (RDR-087 Phase 4) |
+| `health` | Composite per-collection health table — chunk counts (T3-sourced), staleness, hub score, chash coverage (RDR-087 Phase 3.4) |
 | `delete NAME` | Delete collection (irreversible) |
 
 **`verify` flags:**
@@ -621,11 +632,39 @@ terminal (auto-disabled on non-TTY CI logs).
 Scale reference: a full `--all` on a 278k-chunk / 136-collection corpus
 takes ~25–70 minutes on ChromaDB Cloud. Maintenance-window operation.
 
+**`rename` flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--force-prefix-change` | Allow a cross-prefix rename (e.g. `code__foo` → `docs__foo`). Embedding-model spaces differ across prefixes, so the renamed collection is query-incompatible with its old clients — use only when you've deleted every downstream reader |
+
+Uses ChromaDB's native `modify(name=)` for an O(1) metadata update — no embedding re-upload, no Voyage cost, no ChromaDB egress. Cascades the new name through T2 taxonomy, `chash_index`, and catalog (JSONL + SQLite). The cascade is fail-open by design: T3 renames first; a T2 or catalog failure prints a `warn: …` line on stderr but leaves T3 renamed so the operation is recoverable by retrying the cascade alone.
+
+**`audit` flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--live` | When the 30-day `search_telemetry` histogram is empty, sample live chunks from ChromaDB and derive the distance histogram from self-queries (4.8.0, nexus-fx2d). Budget ~10 s at default `--live-n` |
+| `--live-n N` | Number of live-probe samples when `--live` fires (default: 25) |
+
+Renders five sections: distance histogram, top-5 cross-projections, orphan chunks (>30d with no incoming links), top-10 cross-collection hub topics this collection contributes to, and `chash_index` coverage ratio + sample unindexed chunk IDs.
+
+**`health` flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--sort COLUMN` | Sort the table by a named column (`name`, `chunk_count`, `last_indexed`, `zero_hit_rate_30d`, `median_query_distance_30d`, `cross_projection_rank`, `orphan_catalog_rows`, `hub_domination_score`). Default: `name` |
+| `--format {table,json}` | Output format (default: `table`). `--format=json` returns `{generated_at, collections: [...]}` for dashboards and CI gates |
+
+Chunk counts come from T3's live `coll.count()` (same source as `nx collection list`) so the two surfaces cannot disagree — catalog-sourced counts were historically drifting to 0 on tenants that predated the catalog's `chunk_count` column (fixed 4.9.0, nexus-39zi).
+
 **`delete` flags:**
 
 | Flag | Description |
 |------|-------------|
 | `-y` / `--yes` / `--confirm` | Skip interactive confirmation prompt |
+
+Delete cascade covers the T3 collection, T2 `chash_index` rows, T2 taxonomy assignments + topics, pipeline-buffer rows (4.8.0, nexus-8a8e), and catalog documents + links.
 
 ---
 
@@ -790,6 +829,17 @@ nx doctor --trim-telemetry --days 7     # Aggressive retention (minimum 1 day)
 ```
 
 The `--trim-telemetry` flag caps `search_telemetry` disk use. The table accrues one row per (query, collection) pair on every `nx search` and MCP search call when `telemetry.search_enabled` is true. Run periodically from cron or a CI job; the default 30-day window keeps an analytical signal long enough to detect slow-burn silent-threshold-drop patterns.
+
+```
+nx doctor --check-quotas            # Report ChromaDB Cloud + Voyage AI free-tier caps + retry headroom
+nx doctor --check-quotas --json     # Structured output for dashboards / CI gates
+```
+
+The `--check-quotas` flag (introduced 4.9.0, nexus-c590) emits a three-section pre-flight report: (1) ChromaDB Cloud limits drawn from `nexus.db.chroma_quotas.QUOTAS` (`MAX_QUERY_RESULTS`, `MAX_RECORDS_PER_WRITE`, `MAX_CONCURRENT_*`, document size caps) plus a live reachability probe of the configured tenant; (2) Voyage AI per-model token and dimension caps (`voyage-3`, `voyage-code-3`, `voyage-context-3`) with `VOYAGE_API_KEY` presence check; (3) the cumulative retry accumulator from `nexus.retry.get_retry_stats()` so any transient-error backoffs observed in the current process surface alongside the static limits.
+
+Exit codes:
+- `0` — reachable cloud tenant or local-mode (limits are reference-only).
+- `1` — cloud tenant unreachable in cloud mode; the report is not actionable without a working client. Suitable as a CI gate.
 
 ---
 

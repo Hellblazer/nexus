@@ -6,6 +6,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.9.0] - 2026-04-19
+
+Plugin version aligned with conexus 4.9.0. No plugin-level functional
+changes (no new skills, agents, hooks, or slash commands). The arc
+this release covers is entirely in the `nexus` Python package — see
+the root CHANGELOG: `nx doctor --check-quotas` pre-flight diagnostic
+(nexus-c590), `nx index --debug-timing` per-stage intra-file timing
+breakdown (nexus-7niu scaffold + prose/PDF extension), the
+`nx collection health` chunk-count-from-T3 data-integrity fix
+(nexus-39zi live-shakeout finding), and the E2E tmux harness
+remediation PR.
+
 ## [4.8.0] - 2026-04-18
 
 Plugin version aligned with conexus 4.8.0. No plugin-level functional

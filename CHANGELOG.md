@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.9.0] - 2026-04-19
+
 ### Added
 
 - **`nx index --debug-timing` — prose and PDF file paths now instrumented** (nexus-7niu extension). The scaffold PR (shipped earlier this release cycle) covered code files; this follow-up extends the same `StageTimers`-via-`IndexContext` wiring to the other two per-file paths the `nx index repo` loop exercises. `prose_indexer.index_prose_file` wraps the markdown / line-based chunker, the CCE / local embed call, and the T3 upsert + chash dual-write + taxonomy-assign block. `_index_pdf_file` (the repo-loop PDF wrapper in `indexer.py`) gets the same three-stage decomposition with a local `contextlib.nullcontext` fallback so the `stage_timers=None` fast path stays zero-overhead. The `_run_index` prose-file and PDF-file loops now build a fresh `StageTimers` per file when the CLI's `on_stage_timers` callback is installed, matching the code-file loop's pattern exactly. Three new tests in `tests/test_indexer.py` pin the callback contract for each of the three paths (code / prose / PDF); `tests/test_stage_timers.py` primitive coverage unchanged. Remaining un-instrumented sites per the bead's design doc — `doc_indexer.batch_index_markdowns` (RDR ingestion, batch-shaped rather than per-file) and `pipeline_stages.uploader_loop` (streaming PDF pipeline with decoupled extract/chunk/upload threads) — require separate design because their shapes don't map cleanly onto the per-file `StageTimers` contract.
