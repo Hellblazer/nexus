@@ -4,6 +4,7 @@
 TMUX_SESSION="e2e"
 PASS=0
 FAIL=0
+SKIP=0
 _SCENARIO=""
 
 # ─── Local tmux primitives ───────────────────────────────────────────────────
@@ -184,6 +185,7 @@ claude_wait() {
 
 pass() { echo "    ✓ $1"; PASS=$(( PASS + 1 )); }
 fail() { echo "    ✗ $1"; FAIL=$(( FAIL + 1 )); }
+skip() { echo "    ⊘ SKIP: $1"; SKIP=$(( SKIP + 1 )); }
 
 assert_output() {
     local label="$1" pattern="$2"
@@ -225,7 +227,11 @@ scenario_end() {
 summary() {
     echo ""
     echo "══════════════════════════════════"
-    echo " Results: ${PASS} passed, ${FAIL} failed"
+    local skip_suffix=""
+    if [[ $SKIP -gt 0 ]]; then
+        skip_suffix=", ${SKIP} skipped"
+    fi
+    echo " Results: ${PASS} passed, ${FAIL} failed${skip_suffix}"
     echo "══════════════════════════════════"
     [[ $FAIL -eq 0 ]]
 }

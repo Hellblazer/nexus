@@ -42,7 +42,27 @@ if [[ -f "$REPO_ROOT/.env" ]]; then
     set -a; source "$REPO_ROOT/.env"; set +a
 fi
 
-: "${ANTHROPIC_API_KEY:?'ANTHROPIC_API_KEY must be set (in .env or environment)'}"
+# Force local mode for the whole harness unless the caller explicitly
+# opts into cloud by setting NX_LOCAL=0. Without this, ``crun`` (used by
+# scenarios for direct ``nx`` invocations) inherits the outer shell's
+# ambient CHROMA_API_KEY / CHROMA_TENANT and hits production — which in
+# turn trips the OldLayoutDetected guard when the tenant still carries
+# legacy ``<db>_code`` databases. The sandbox goal is "not production."
+export NX_LOCAL="${NX_LOCAL:-1}"
+if [[ "$NX_LOCAL" == "1" ]]; then
+    unset CHROMA_API_KEY CHROMA_TENANT CHROMA_DATABASE
+fi
+
+# Accept either a real ``ANTHROPIC_API_KEY`` in the environment OR a cached
+# OAuth credential file at ``tests/e2e/.claude-auth/.credentials.json``. A
+# placeholder API key WITH real OAuth creds is worse than no key — Claude
+# Code prefers an explicit env-var key and rejects the placeholder with
+# "Invalid API key" on every request.
+if [[ -z "${ANTHROPIC_API_KEY:-}" && ! -f "$AUTH_DIR/.credentials.json" ]]; then
+    echo "Error: neither ANTHROPIC_API_KEY nor tests/e2e/.claude-auth/.credentials.json is present." >&2
+    echo "  Set ANTHROPIC_API_KEY in .env, or run ./tests/e2e/auth-login.sh to cache OAuth." >&2
+    exit 1
+fi
 : "${VOYAGE_API_KEY:?'VOYAGE_API_KEY must be set'}"
 
 # ─── Source helpers ───────────────────────────────────────────────────────────
@@ -141,11 +161,35 @@ cat > "$TEST_HOME/.env.test" << EOF
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 export HOME="$TEST_HOME"
 export PATH="$TEST_HOME/.local/bin:\$PATH"
-export ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"
+# ANTHROPIC_API_KEY: pass through when set so CI callers can provide one
+# explicitly; otherwise explicitly unset so Claude Code falls through to
+# the OAuth creds we copied into \$TEST_HOME/.claude/.credentials.json.
+# Exporting a placeholder here would make Claude prefer the bogus key
+# over OAuth and reject every request with "Invalid API key."
+EOF
+if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+    echo "export ANTHROPIC_API_KEY=\"$ANTHROPIC_API_KEY\"" >> "$TEST_HOME/.env.test"
+else
+    echo "unset ANTHROPIC_API_KEY" >> "$TEST_HOME/.env.test"
+fi
+cat >> "$TEST_HOME/.env.test" << EOF
+# NX_LOCAL=1 by default so the sandbox uses ``chromadb.PersistentClient``
+# + local ONNX embeddings instead of the cloud tenant configured in the
+# real .env. Otherwise an ambient CHROMA_API_KEY / CHROMA_TENANT bleeds
+# into the harness and ``nx index`` hits production — including the
+# OldLayoutDetected guard when the tenant still has legacy ``<db>_code``
+# databases. Override by exporting NX_LOCAL=0 before invoking run.sh.
+export NX_LOCAL="\${NX_LOCAL:-1}"
 export VOYAGE_API_KEY="${VOYAGE_API_KEY:-}"
-export CHROMA_API_KEY="${CHROMA_API_KEY:-}"
-export CHROMA_TENANT="${CHROMA_TENANT:-}"
-export CHROMA_DATABASE="${CHROMA_DATABASE:-default_database}"
+# Only forward cloud credentials when explicitly NOT in local mode, so
+# NX_LOCAL=1 stays cleanly offline from production.
+if [[ "\$NX_LOCAL" != "1" ]]; then
+    export CHROMA_API_KEY="${CHROMA_API_KEY:-}"
+    export CHROMA_TENANT="${CHROMA_TENANT:-}"
+    export CHROMA_DATABASE="${CHROMA_DATABASE:-default_database}"
+else
+    unset CHROMA_API_KEY CHROMA_TENANT CHROMA_DATABASE
+fi
 export NEXUS_SESSION_ID="$NEXUS_SESSION_ID"
 cd "$REPO_ROOT"
 EOF
