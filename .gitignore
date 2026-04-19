@@ -33,3 +33,5 @@ tests/fixtures/*.pdf
 .claude/scratch/
 .claude/scheduled_tasks.lock
 .serena/
+blog/
+output/

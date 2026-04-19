@@ -5,9 +5,15 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/conexus)](https://pypi.org/project/conexus/)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
+<a href="https://i0.wp.com/tensegrity.blog/wp-content/uploads/2026/04/tensegrity-69e5247d907e5.png?w=1024&ssl=1">
+  <img src="https://i0.wp.com/tensegrity.blog/wp-content/uploads/2026/04/tensegrity-69e5247d907e5.png?w=480&ssl=1" alt="The steam-driven semantic engine — illustration from the Nexus by Example blog post" align="right" width="320" />
+</a>
+
 Nexus is a lightweight knowledge management system for AI coding agents. It provides persistent memory and semantic search through tiered storage that preserves decisions, findings, and project knowledge across agent sessions. That knowledge compounds over time, becoming more valuable as the corpus grows.
 
 Nexus includes RDR (Research-Design-Review), an integrated human-AI design and audit system. RDRs capture the reasoning behind technical decisions — problem, research, chosen approach, rejected alternatives — as structured, searchable documents that live in the repository alongside the code. Nexus indexes the RDR corpus so team members and their agents can quickly get up to speed on a project's design history and stay aligned as the codebase evolves.
+
+> **New to Nexus?** Read [**Nexus by Example**](https://tensegrity.blog/2026/04/19/nexus-by-example/) on the Tensegrity blog — a guided walkthrough of how the pieces fit together in practice.
 
 ## What it does
 
@@ -157,6 +163,7 @@ Full details: [CLI Reference](https://github.com/Hellblazer/nexus/blob/main/docs
 | [Configuration](https://github.com/Hellblazer/nexus/blob/main/docs/configuration.md) | Config hierarchy, .nexus.yml, tuning parameters |
 | [Architecture](https://github.com/Hellblazer/nexus/blob/main/docs/architecture.md) | Module map, design decisions |
 | [Contributing](https://github.com/Hellblazer/nexus/blob/main/docs/contributing.md) | Dev setup, testing, code style |
+| [Nexus by Example](https://tensegrity.blog/2026/04/19/nexus-by-example/) | Blog walkthrough — the steam-driven semantic engine in practice |
 
 **RDR (Research-Design-Review):**
 1. [Overview](https://github.com/Hellblazer/nexus/blob/main/docs/rdr-overview.md) — What RDRs are, when to write one, evidence classification
