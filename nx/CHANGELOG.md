@@ -6,6 +6,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.8.0] - 2026-04-18
+
+Plugin version aligned with conexus 4.8.0. No plugin-level functional
+changes (no new skills, agents, hooks, or slash commands). The arc this
+release covers is entirely in the `nexus` Python package — see the root
+CHANGELOG for the full story: `nexus-vatx` ingest-observability
+surfaces (retry visibility, post-processing phase markers, ETA ticker,
+retry-time summary), collection-management surfaces (delete cascade,
+`nx collection rename`, `source_mtime`, `nx collection audit --live`),
+`nx taxonomy validate-refs` proximity fix (nexus-7ay), plus a 17-finding
+review-remediation sweep (3 Critical + 14 Important + suggestions)
+across the retry, catalog, collection-audit, and safe-killpg surfaces.
+
 ## [4.7.0] - 2026-04-18
 
 Plugin version aligned with conexus 4.7.0. No plugin-level functional

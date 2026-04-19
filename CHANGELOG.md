@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.8.0] - 2026-04-18
+
 ### Added
 
 - **`nx index` end-of-run retry-time summary** (nexus-vatx Gap 4a). Process-local counters in `nexus.retry` track aggregate voyage + chroma backoff seconds and retry counts; `nx index repo` resets them on start and emits `Transient-error backoff: Xs total (voyage … , chroma … )` at the end when any retry fired. Silent on clean runs so the normal output stays tidy. New `get_retry_stats()` / `reset_retry_stats()` public API. Three new tests pin counter accumulation across the voyage and chroma paths plus reset semantics.
