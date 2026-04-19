@@ -82,28 +82,36 @@ def _open_catalog():
 
 
 def _default_catalog_stats_fn(col: str) -> dict[str, Any]:
-    """Return ``{chunk_count, last_indexed, orphan_count}`` for *col*.
+    """Return ``{last_indexed, orphan_count}`` for *col* from the catalog.
 
-    Uses the catalog cache DB. ``chunk_count`` is the SUM across every
-    document in the collection; ``last_indexed`` is the MAX of
-    ``indexed_at``; ``orphan_count`` is the count of documents in this
-    collection that have zero incoming links.
+    ``last_indexed`` is the MAX of ``indexed_at`` across documents in
+    the collection; ``orphan_count`` is the count of documents that
+    have zero incoming links. Both properties are purely catalog-side
+    (the catalog is authoritative for its own rows and for the link
+    graph).
+
+    ``chunk_count`` is deliberately NOT returned here — the catalog's
+    ``chunk_count`` column drifts from T3 reality whenever a write
+    path skips the catalog registration step (direct ``store_put``,
+    cloud-side operations, tenants that predate the catalog column).
+    Ground-truth chunk counts come from T3 via :func:`_default_chunk_count_fn`
+    so ``nx collection health`` and ``nx collection list`` cannot
+    disagree (nexus-39zi).
     """
     cat = _open_catalog()
     if cat is None:
-        return {"chunk_count": 0, "last_indexed": None, "orphan_count": 0}
+        return {"last_indexed": None, "orphan_count": 0}
     try:
         # Catalog's SQL cache lives behind private attributes; an
         # explicit public accessor doesn't exist yet and isn't worth
         # adding just for this read-only path.
         conn = cat._db._conn  # noqa: SLF001
         row = conn.execute(
-            "SELECT COALESCE(SUM(chunk_count), 0), MAX(indexed_at) "
+            "SELECT MAX(indexed_at) "
             "FROM documents WHERE physical_collection = ?",
             (col,),
         ).fetchone()
-        chunk_count = int(row[0] or 0)
-        last_indexed = row[1] if row and row[1] else None
+        last_indexed = row[0] if row and row[0] else None
         orphan_row = conn.execute(
             "SELECT COUNT(*) FROM documents d "
             "LEFT JOIN links l ON d.tumbler = l.to_tumbler "
@@ -112,12 +120,38 @@ def _default_catalog_stats_fn(col: str) -> dict[str, Any]:
         ).fetchone()
         orphan_count = int(orphan_row[0] or 0)
         return {
-            "chunk_count": chunk_count,
             "last_indexed": last_indexed,
             "orphan_count": orphan_count,
         }
     except Exception:
-        return {"chunk_count": 0, "last_indexed": None, "orphan_count": 0}
+        return {"last_indexed": None, "orphan_count": 0}
+
+
+def _default_chunk_count_fn(col: str) -> int:
+    """Return the T3 chunk count for *col* — the ground-truth number.
+
+    Queries ``col.count()`` on the live T3 ChromaDB collection. This is
+    the same source ``nx collection list`` reads, so the health report
+    and the list command cannot disagree (nexus-39zi, 2026-04-18 live
+    shakeout finding: catalog-sourced count drifted to 0 for 129/143
+    collections on production).
+
+    Returns 0 on any failure — T3 unreachable, collection missing,
+    transient network error. The catalog-sourced ``last_indexed``
+    remains meaningful even when the T3 number is stale, so a 0 here
+    renders as an operator-visible "nothing to count" without
+    cascading errors elsewhere in the report.
+    """
+    try:
+        from nexus.db import make_t3
+        t3 = make_t3()
+        try:
+            coll = t3.get_or_create_collection(col)
+            return int(coll.count())
+        except Exception:
+            return 0
+    except Exception:
+        return 0
 
 
 def _open_t2():
@@ -239,13 +273,7 @@ def _default_chash_coverage_fn(col: str) -> float | None:
 
     idx = ChashIndex(db_path)
     try:
-        with idx._lock:
-            row = idx.conn.execute(
-                "SELECT COUNT(*) FROM chash_index "
-                "WHERE physical_collection = ?",
-                (col,),
-            ).fetchone()
-        chash_count = int(row[0] or 0)
+        chash_count = idx.count_for_collection(col)
     finally:
         idx.close()
 
@@ -267,6 +295,7 @@ def _default_chash_coverage_fn(col: str) -> float | None:
 # Module-level runner bindings — tests monkeypatch these directly.
 _enumerate_collections = _default_enumerate_collections
 _catalog_stats_fn = _default_catalog_stats_fn
+_chunk_count_fn = _default_chunk_count_fn
 _telemetry_stats_fn = _default_telemetry_stats_fn
 _projection_rank_fn = _default_projection_rank_fn
 _hub_score_fn = _default_hub_score_fn
@@ -283,11 +312,20 @@ def compute_collection_health(
     telemetry_stats_fn: Callable[[str], dict[str, Any]],
     projection_rank_fn: Callable[[list[str]], dict[str, int]],
     hub_score_fn: Callable[[str], float | None],
+    chunk_count_fn: Callable[[str], int] | None = None,
     chash_coverage_fn: Callable[[str], float | None] | None = None,
 ) -> list[CollectionHealthRow]:
     """Assemble per-collection health rows from the injected callables.
 
     Ordering follows *collections*; callers sort via ``format_health_table``.
+
+    ``chunk_count_fn`` (nexus-39zi) returns the ground-truth chunk count
+    from T3 for each collection. Optional only for backward-compat with
+    pre-39zi callers that still use ``catalog_stats_fn`` as the
+    chunk-count source. Production callers always pass it — the
+    catalog-sourced count drifts to 0 for most collections on tenants
+    that predate the catalog's ``chunk_count`` column. When both are
+    present, ``chunk_count_fn`` wins.
 
     ``chash_coverage_fn`` is optional only for backward-compat with the
     pre-nexus-c2op signature; production callers always pass it.
@@ -297,10 +335,18 @@ def compute_collection_health(
     for col in collections:
         catalog = catalog_stats_fn(col) or {}
         tel = telemetry_stats_fn(col) or {}
+        # T3 is the ground truth for chunk count. Fall back to the
+        # catalog's number only when no ``chunk_count_fn`` was injected
+        # (legacy callers) — NEVER mix the two sources inside a single
+        # row, as that would create asymmetric reporting.
+        if chunk_count_fn is not None:
+            chunk_count = int(chunk_count_fn(col))
+        else:
+            chunk_count = int(catalog.get("chunk_count", 0))
         rows.append(
             CollectionHealthRow(
                 name=col,
-                chunk_count=int(catalog.get("chunk_count", 0)),
+                chunk_count=chunk_count,
                 last_indexed=catalog.get("last_indexed"),
                 zero_hit_rate_30d=tel.get("zero_hit_rate"),
                 median_query_distance_30d=tel.get("median_top_distance"),
@@ -413,6 +459,7 @@ def run_collection_health(*, sort_by: str = "name", fmt: str = "table") -> str:
     rows = compute_collection_health(
         collections,
         catalog_stats_fn=_catalog_stats_fn,
+        chunk_count_fn=_chunk_count_fn,
         telemetry_stats_fn=_telemetry_stats_fn,
         projection_rank_fn=_projection_rank_fn,
         hub_score_fn=_hub_score_fn,

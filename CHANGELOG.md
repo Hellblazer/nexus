@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`nx collection health` chunk count now comes from T3, not the catalog** (nexus-39zi). The old report computed ``chunk_count`` as ``SELECT SUM(chunk_count) FROM catalog.documents WHERE physical_collection = ?``, which silently drifted to 0 on 129/143 production collections because the catalog's ``chunk_count`` column is only written by the paths that register through the catalog — direct ``store_put``, cloud-side operations, and tenants that predate the column leave it untouched. The 2026-04-18 live shakeout surfaced the drift: ``nx collection list`` showed ``code__ART-8c2e74c0`` with 63 077 chunks while ``nx collection health --format=json`` reported 0. Health now calls ``coll.count()`` on the live T3 collection (the same source ``nx collection list`` uses) so the two commands cannot disagree. A new `chunk_count_fn` parameter on `compute_collection_health` makes the source injectable for tests; the existing `catalog_stats_fn` still owns `last_indexed` and `orphan_count` (catalog-side properties). Four new tests pin the precedence rule, the exact drift case from the live shakeout, backward-compat for legacy callers, and the removal of ``chunk_count`` from ``_default_catalog_stats_fn``'s return. Same PR also folds the `_default_chash_coverage_fn` to use the public `ChashIndex.count_for_collection()` method instead of reaching into `_lock` (carryover from the review-remediation sweep that missed this site).
+
 ## [4.8.0] - 2026-04-18
 
 ### Added

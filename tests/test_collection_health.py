@@ -150,6 +150,17 @@ def _fake_chash_coverage(col: str) -> float | None:
     }.get(col)
 
 
+def _fake_chunk_count(col: str) -> int:
+    """T3-sourced chunk counts (nexus-39zi). The real implementation
+    reads ``coll.count()`` on the live ChromaDB collection; tests
+    return deterministic fake values."""
+    return {
+        "code__alpha": 120,
+        "docs__beta": 30,
+        "docs__stale": 0,
+    }.get(col, 0)
+
+
 class TestComputeCollectionHealth:
     def test_rows_assemble_from_injected_fns(self) -> None:
         from nexus.collection_health import compute_collection_health
@@ -210,6 +221,97 @@ class TestComputeCollectionHealth:
             chash_coverage_fn=_fake_chash_coverage,
         )
         assert rows[0].hub_domination_score is None
+
+
+# ── chunk_count sourcing (nexus-39zi) ──────────────────────────────────────
+
+
+class TestChunkCountFromT3:
+    """Chunk count must come from T3's live ``coll.count()``, not the
+    catalog's ``SUM(chunk_count)`` column. The catalog drifts when a
+    write path skips catalog registration (direct ``store_put``,
+    cloud-side operations, pre-catalog tenants) — reporting catalog-
+    sourced counts puts ``nx collection health`` out of sync with
+    ``nx collection list``.
+    """
+
+    def test_chunk_count_fn_wins_over_catalog(self) -> None:
+        """When both sources are present, ``chunk_count_fn`` takes
+        precedence. Ground truth is T3, not the catalog cache."""
+        from nexus.collection_health import compute_collection_health
+
+        # Catalog reports 120; T3 reports 500. T3 must win.
+        def _t3_chunk_count(col: str) -> int:
+            return {"code__alpha": 500}.get(col, 0)
+
+        rows = compute_collection_health(
+            ["code__alpha"],
+            catalog_stats_fn=_fake_catalog_stats,  # returns chunk_count=120
+            telemetry_stats_fn=_fake_telemetry_stats,
+            projection_rank_fn=_fake_projection_ranks,
+            hub_score_fn=_fake_hub_score,
+            chunk_count_fn=_t3_chunk_count,
+            chash_coverage_fn=_fake_chash_coverage,
+        )
+        assert rows[0].chunk_count == 500, (
+            f"chunk_count_fn must override catalog-sourced count; "
+            f"got {rows[0].chunk_count}"
+        )
+
+    def test_drift_case_catalog_says_zero_t3_says_positive(self) -> None:
+        """The exact regression from 2026-04-18 live shakeout: catalog
+        reports 0 for most production collections while T3 has real
+        counts. Health must surface the real T3 count so the report
+        cannot silently disagree with ``nx collection list``."""
+        from nexus.collection_health import compute_collection_health
+
+        def _catalog_zero(col: str) -> dict:
+            return {"last_indexed": "2026-04-15", "orphan_count": 0}
+
+        def _t3_has_chunks(col: str) -> int:
+            return 63077  # like code__ART-8c2e74c0 on the live probe
+
+        rows = compute_collection_health(
+            ["code__ART-8c2e74c0"],
+            catalog_stats_fn=_catalog_zero,
+            telemetry_stats_fn=_fake_telemetry_stats,
+            projection_rank_fn=_fake_projection_ranks,
+            hub_score_fn=_fake_hub_score,
+            chunk_count_fn=_t3_has_chunks,
+            chash_coverage_fn=_fake_chash_coverage,
+        )
+        assert rows[0].chunk_count == 63077
+
+    def test_fallback_to_catalog_when_fn_not_injected(self) -> None:
+        """Backward-compat: callers without ``chunk_count_fn`` still
+        read from catalog stats. This preserves the pre-39zi signature
+        for legacy test fixtures while production paths plumb T3."""
+        from nexus.collection_health import compute_collection_health
+
+        rows = compute_collection_health(
+            ["code__alpha"],
+            catalog_stats_fn=_fake_catalog_stats,
+            telemetry_stats_fn=_fake_telemetry_stats,
+            projection_rank_fn=_fake_projection_ranks,
+            hub_score_fn=_fake_hub_score,
+            # no chunk_count_fn — fall through to catalog
+            chash_coverage_fn=_fake_chash_coverage,
+        )
+        # _fake_catalog_stats returns chunk_count=120 for code__alpha
+        assert rows[0].chunk_count == 120
+
+    def test_default_catalog_stats_no_longer_returns_chunk_count(self) -> None:
+        """The production ``_default_catalog_stats_fn`` dropped the
+        ``chunk_count`` key after 39zi. Production catalog paths now
+        return only ``last_indexed`` and ``orphan_count``; chunk count
+        comes from the T3-sourced ``_default_chunk_count_fn``."""
+        from nexus.collection_health import _default_catalog_stats_fn
+
+        stats = _default_catalog_stats_fn("does-not-matter")
+        assert "chunk_count" not in stats, (
+            "catalog stats must not surface chunk_count any more — T3 is "
+            "the source of truth, catalog drifted to 0 on prod (nexus-39zi)"
+        )
 
 
 # ── Chash coverage (RDR-087 Phase 4.6) ─────────────────────────────────────
