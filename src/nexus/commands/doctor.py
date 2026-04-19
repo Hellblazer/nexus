@@ -240,11 +240,21 @@ def _run_trim_telemetry(days: int) -> None:
          "nexus-dc57 + nexus-ze2a.",
 )
 @click.option(
+    "--check-quotas",
+    "check_quotas",
+    is_flag=True,
+    default=False,
+    help="Report ChromaDB Cloud free-tier quotas, Voyage AI model "
+         "caps, and any transient-error retries observed this process. "
+         "Exits 1 when the cloud tenant is unreachable in cloud mode "
+         "(nexus-c590).",
+)
+@click.option(
     "--json",
     "json_out",
     is_flag=True,
     default=False,
-    help="Emit machine-parseable JSON (used with --check-search).",
+    help="Emit machine-parseable JSON (used with --check-search, --check-quotas).",
 )
 @click.option(
     "--trim-telemetry",
@@ -264,7 +274,8 @@ def _run_trim_telemetry(days: int) -> None:
 )
 def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                fix_paths: bool, dry_run: bool, check_schema: bool,
-               check_search: bool, check_resources: bool, json_out: bool,
+               check_search: bool, check_resources: bool,
+               check_quotas: bool, json_out: bool,
                trim_telemetry: bool, days: int) -> None:
     """Verify that all required services and credentials are available."""
     if check_schema:
@@ -278,6 +289,10 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
 
     if check_resources:
         _run_check_resources()
+        return
+
+    if check_quotas:
+        _run_check_quotas(json_out=json_out)
         return
 
     if trim_telemetry:
@@ -467,3 +482,164 @@ def _run_check_resources() -> None:
         err=True,
     )
     raise click.exceptions.Exit(2)
+
+
+# ── --check-quotas (nexus-c590) ──────────────────────────────────────────────
+
+
+def _collect_quota_report() -> dict:
+    """Build the structured quota-headroom report (nexus-c590).
+
+    Returns a dict with three sections: ``chromadb`` (free-tier cloud
+    limits + T3 reachability), ``voyage`` (per-model token + dimension
+    caps), and ``retry`` (cumulative backoff observed in this process
+    so far via :func:`nexus.retry.get_retry_stats`).
+
+    Pure data-shape; both the human-readable and ``--json`` renderers
+    consume this same dict so they never drift.
+
+    *Why static*: live "requests/min" probing would require a running
+    counter at every outgoing HTTP call; not shipped here. The retry
+    counters give operators the most actionable signal — "backed off N
+    times, slept Xs total" — without new plumbing.
+    """
+    from nexus.db.chroma_quotas import QUOTAS
+    from nexus.retry import get_retry_stats
+
+    chromadb_limits = {
+        "max_embedding_dimensions": QUOTAS.MAX_EMBEDDING_DIMENSIONS,
+        "max_document_bytes": QUOTAS.MAX_DOCUMENT_BYTES,
+        "safe_chunk_bytes": QUOTAS.SAFE_CHUNK_BYTES,
+        "max_query_results": QUOTAS.MAX_QUERY_RESULTS,
+        "max_query_string_chars": QUOTAS.MAX_QUERY_STRING_CHARS,
+        "max_where_predicates": QUOTAS.MAX_WHERE_PREDICATES,
+        "max_concurrent_reads": QUOTAS.MAX_CONCURRENT_READS,
+        "max_concurrent_writes": QUOTAS.MAX_CONCURRENT_WRITES,
+        "max_records_per_write": QUOTAS.MAX_RECORDS_PER_WRITE,
+        "max_records_per_collection": QUOTAS.MAX_RECORDS_PER_COLLECTION,
+        "max_collections_per_account": QUOTAS.MAX_COLLECTIONS_PER_ACCOUNT,
+    }
+
+    # T3 reachability probe: is the configured cloud tenant reachable
+    # right now? A quota report is only actionable if the client can
+    # actually connect.
+    t3_reachable = False
+    t3_detail = ""
+    try:
+        from nexus.config import is_local_mode
+        from nexus.db import make_t3
+
+        if is_local_mode():
+            t3_reachable = True
+            t3_detail = "local mode — cloud quotas are reference-only"
+        else:
+            make_t3()
+            t3_reachable = True
+            t3_detail = "cloud tenant reachable"
+    except Exception as exc:
+        t3_detail = f"unreachable: {type(exc).__name__}: {str(exc)[:80]}"
+
+    # Voyage AI limits. Model-specific token caps come from the Voyage
+    # published specs (documented alongside ``nexus.corpus``); embedding
+    # dimension is fixed across the three models we use.
+    voyage_limits = {
+        "models": {
+            "voyage-3": {"max_tokens": 32_000, "embedding_dims": 1024},
+            "voyage-code-3": {"max_tokens": 32_000, "embedding_dims": 1024},
+            "voyage-context-3": {"max_tokens": 32_000, "embedding_dims": 1024},
+        },
+        "target_rpm": 250,  # matches ``doc_indexer._RATE_LIMIT_RPM``
+        "api_key_set": False,
+    }
+    try:
+        from nexus.config import get_credential
+
+        voyage_limits["api_key_set"] = bool(get_credential("voyage_api_key"))
+    except Exception:
+        pass
+
+    # Observed retry load — cumulative this process. Zero on fresh
+    # sessions; non-zero after any `nx index` run that hit a transient
+    # error.
+    retry = dict(get_retry_stats())
+
+    return {
+        "chromadb": {
+            "limits": chromadb_limits,
+            "reachable": t3_reachable,
+            "detail": t3_detail,
+        },
+        "voyage": voyage_limits,
+        "retry": retry,
+    }
+
+
+def _format_quota_report(report: dict) -> str:
+    """Human-readable form of :func:`_collect_quota_report` output."""
+    lines: list[str] = []
+    lines.append("Quota headroom report (nexus-c590)")
+    lines.append("")
+
+    # ── ChromaDB ─────────────────────────────────────────────────────────
+    cdb = report["chromadb"]
+    status = _CHECK if cdb["reachable"] else _WARN
+    lines.append(f"  {status} ChromaDB Cloud: {cdb['detail']}")
+    lines.append("    free-tier limits (from nexus.db.chroma_quotas.QUOTAS):")
+    for k, v in cdb["limits"].items():
+        lines.append(f"      {k:32} {v:,}")
+    lines.append("")
+
+    # ── Voyage ───────────────────────────────────────────────────────────
+    v = report["voyage"]
+    status = _CHECK if v["api_key_set"] else _WARN
+    key_label = "VOYAGE_API_KEY: set" if v["api_key_set"] else "VOYAGE_API_KEY: absent"
+    lines.append(f"  {status} Voyage AI: {key_label}")
+    lines.append(f"    target rpm (indexer rate limiter):        {v['target_rpm']}")
+    for model, caps in v["models"].items():
+        lines.append(
+            f"    {model:20} tokens={caps['max_tokens']:>6,}  "
+            f"dims={caps['embedding_dims']}"
+        )
+    lines.append("")
+
+    # ── Retry accumulator ────────────────────────────────────────────────
+    r = report["retry"]
+    if r.get("total_count", 0) > 0:
+        lines.append(f"  {_WARN} Observed transient-error retries this process:")
+        if r.get("voyage_count", 0) > 0:
+            lines.append(
+                f"    voyage:  {r['voyage_seconds']:>6.1f}s over "
+                f"{r['voyage_count']} retries"
+            )
+        if r.get("chroma_count", 0) > 0:
+            lines.append(
+                f"    chroma:  {r['chroma_seconds']:>6.1f}s over "
+                f"{r['chroma_count']} retries"
+            )
+        lines.append(
+            f"    total:   {r['total_seconds']:>6.1f}s over "
+            f"{r['total_count']} retries"
+        )
+    else:
+        lines.append(f"  {_CHECK} Retry accumulator: no transient backoffs observed")
+
+    return "\n".join(lines)
+
+
+def _run_check_quotas(*, json_out: bool = False) -> None:
+    """Emit the quota-headroom report (nexus-c590).
+
+    Exits 1 when ChromaDB is unreachable in cloud mode — a quota
+    report without a client connection is not actionable. Local mode
+    and a reachable cloud tenant both exit 0.
+    """
+    import json as _json
+
+    report = _collect_quota_report()
+    if json_out:
+        click.echo(_json.dumps(report, indent=2))
+    else:
+        click.echo(_format_quota_report(report))
+
+    if not report["chromadb"]["reachable"]:
+        raise click.exceptions.Exit(1)
