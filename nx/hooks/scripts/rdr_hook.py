@@ -1,9 +1,19 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """SessionStart hook: detect RDR dir, reconcile file↔T2 status, report."""
+from __future__ import annotations
+
+import sys
+if sys.version_info < (3, 12):
+    sys.stderr.write(
+        f"ERROR: nx plugin hook requires Python 3.12+, got {sys.version.split()[0]}\n"
+        f"  Resolved: {sys.executable}\n"
+        f"  Install: brew install python@3.13 (macOS) | apt install python3.12 (Ubuntu) | uv python install 3.12\n"
+    )
+    sys.exit(1)
+
 import re
 import subprocess
-import sys
 from collections import Counter
 from pathlib import Path
 

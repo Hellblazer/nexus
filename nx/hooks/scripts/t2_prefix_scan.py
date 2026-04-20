@@ -16,7 +16,16 @@ Cap algorithm:
   Cross-namespace hard cap: 15 rendered entries total (snippet or title).
   Namespaces are processed in recency order (most-recently-updated first).
 """
+from __future__ import annotations
+
 import sys
+if sys.version_info < (3, 12):
+    sys.stderr.write(
+        f"ERROR: nx plugin hook requires Python 3.12+, got {sys.version.split()[0]}\n"
+        f"  Resolved: {sys.executable}\n"
+        f"  Install: brew install python@3.13 (macOS) | apt install python3.12 (Ubuntu) | uv python install 3.12\n"
+    )
+    sys.exit(1)
 
 _HARD_CAP = 15       # max rendered entries across all namespaces combined
 _SNIPPET_LIMIT = 5   # per-namespace: entries up to this rank get a snippet

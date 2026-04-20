@@ -393,6 +393,50 @@ class TestHooks:
     def test_hook_script_exists(self, event: str, rel_path: str) -> None:
         assert (PLUGIN_DIR / rel_path).exists(), f"hooks.json [{event}] references missing: {rel_path}"
 
+    @pytest.mark.parametrize("script_name", [
+        "session_start_hook.py",
+        "rdr_hook.py",
+        "stop_failure_hook.py",
+        "read_verification_config.py",
+        "t2_prefix_scan.py",
+    ])
+    def test_python_hook_has_future_annotations_and_version_guard(self, script_name: str) -> None:
+        """Every Python hook script must (a) defer annotation evaluation via
+        ``from __future__ import annotations`` so PEP 604 unions parse on
+        Python ≥3.7, and (b) fail fast with a clear error if running under
+        Python <3.12 (the floor conexus targets).
+
+        Without (a), `int | None` annotations crash the parser on Python
+        3.9 (still default on macOS Sonoma without homebrew Python). Without
+        (b), the script may run partially under an unsupported interpreter
+        and produce confusing failures further down. Both are required so
+        a missing-system-Python case surfaces as a single actionable error
+        rather than a SyntaxError or AttributeError chain.
+        """
+        path = PLUGIN_DIR / "hooks" / "scripts" / script_name
+        assert path.exists(), f"missing hook script: {path}"
+        head = "\n".join(path.read_text().splitlines()[:30])
+        assert "from __future__ import annotations" in head, (
+            f"{script_name}: missing 'from __future__ import annotations' in first 30 lines"
+        )
+        assert "sys.version_info < (3, 12)" in head, (
+            f"{script_name}: missing 'if sys.version_info < (3, 12)' guard in first 30 lines"
+        )
+        assert "Python 3.12+" in head, (
+            f"{script_name}: version guard does not include the 'Python 3.12+' user-facing message"
+        )
+
+    def test_plugin_json_declares_python_engine(self) -> None:
+        """nx/.claude-plugin/plugin.json must declare engines.python so the
+        Python ≥3.12 requirement is discoverable from the plugin manifest,
+        not just from the runtime guards in each hook script.
+        """
+        plugin_json = json.loads((PLUGIN_DIR / ".claude-plugin" / "plugin.json").read_text())
+        engines = plugin_json.get("engines") or {}
+        py_req = engines.get("python", "")
+        assert py_req, "plugin.json missing 'engines.python' field"
+        assert "3.12" in py_req, f"engines.python should require >=3.12, got {py_req!r}"
+
     def test_session_end_hook_registered(self) -> None:
         """Regression guard: SessionEnd must invoke ``nx hook session-end``.
 
