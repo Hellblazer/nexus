@@ -5,9 +5,17 @@ Standalone script for hook consumption — no nexus package imports.
 """
 from __future__ import annotations
 
+import sys
+if sys.version_info < (3, 12):
+    sys.stderr.write(
+        f"ERROR: nx plugin hook requires Python 3.12+, got {sys.version.split()[0]}\n"
+        f"  Resolved: {sys.executable}\n"
+        f"  Install: brew install python@3.13 (macOS) | apt install python3.12 (Ubuntu) | uv python install 3.12\n"
+    )
+    sys.exit(1)
+
 import json
 import os
-import sys
 from pathlib import Path
 
 DEBUG = os.environ.get("NX_HOOK_DEBUG", "0") == "1"

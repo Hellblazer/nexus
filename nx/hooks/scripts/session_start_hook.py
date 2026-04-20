@@ -5,11 +5,20 @@ SessionStart hook: Load project context via nx CLI.
 Surfaces T2 memory, beads, and scratch into Claude's session context.
 Output goes to stdout and is injected into Claude's session context.
 """
+from __future__ import annotations
+
+import sys
+if sys.version_info < (3, 12):
+    sys.stderr.write(
+        f"ERROR: nx plugin hook requires Python 3.12+, got {sys.version.split()[0]}\n"
+        f"  Resolved: {sys.executable}\n"
+        f"  Install: brew install python@3.13 (macOS) | apt install python3.12 (Ubuntu) | uv python install 3.12\n"
+    )
+    sys.exit(1)
 
 import os
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 # Configuration via environment variables
