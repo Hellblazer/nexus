@@ -155,14 +155,41 @@ echo
 echo "── Test 3: NEXUS_SKIP_T1=1 skips server start (claude_dispatch path) ──"
 
 UUID_SKIP="33333333-cccc-cccc-cccc-cccccccccccc"
+CHROMA_COUNT_BEFORE_SKIP=$(pgrep -f 'chroma run --host 127.0.0.1.*nx_t1_' 2>/dev/null | wc -l | tr -d ' ')
 session_start_skip_t1 "$UUID_SKIP"
+CHROMA_COUNT_AFTER_SKIP=$(pgrep -f 'chroma run --host 127.0.0.1.*nx_t1_' 2>/dev/null | wc -l | tr -d ' ')
 
 check "no session file written for skip-T1 session" \
   bash -c "! test -f $SESSIONS_DIR/$UUID_SKIP.session"
-CHROMA_COUNT_BEFORE_SKIP=2
-ACTUAL_CHROMA_COUNT=$(pgrep -f 'chroma run --host 127.0.0.1.*nx_t1_' | wc -l | tr -d ' ')
 check "no extra chroma server spawned for skip-T1 session" \
-  test "$ACTUAL_CHROMA_COUNT" -eq "$CHROMA_COUNT_BEFORE_SKIP"
+  test "$CHROMA_COUNT_AFTER_SKIP" -eq "$CHROMA_COUNT_BEFORE_SKIP"
+
+# ── Test 3b: nested session_start does NOT stomp current_session ─────────────
+# Bug-fix coverage for the "operator subprocess overwrites parent's
+# current_session pointer" issue. With NX_SESSION_ID inherited (the way
+# claude_dispatch sets it), the nested SessionStart must preserve the
+# parent's pointer so shell-side `nx scratch` etc. still find the
+# parent's T1 record after the operator returns.
+
+echo
+echo "── Test 3b: nested SessionStart preserves parent's current_session ──"
+
+# Capture the parent's current_session before the nested call.
+PARENT_CURRENT=$(cat "$SANDBOX_DIR/current_session" 2>/dev/null)
+NESTED_UUID="55555555-eeee-eeee-eeee-eeeeeeeeeeee"
+
+echo "{\"session_id\": \"$NESTED_UUID\"}" \
+  | NEXUS_CONFIG_DIR="$SANDBOX_DIR" \
+    NX_SESSION_ID="$PARENT_CURRENT" \
+    NEXUS_SKIP_T1=1 \
+    uv run --quiet --project "$REPO_ROOT" -- nx hook session-start >/dev/null
+
+CURRENT_AFTER_NESTED=$(cat "$SANDBOX_DIR/current_session" 2>/dev/null)
+
+check "current_session unchanged after nested SessionStart" \
+  test "$PARENT_CURRENT" = "$CURRENT_AFTER_NESTED"
+check "current_session still points at parent UUID, not nested UUID" \
+  test "$CURRENT_AFTER_NESTED" != "$NESTED_UUID"
 
 # ── Test 4: Legacy numeric-stem files swept on next SessionStart ─────────────
 

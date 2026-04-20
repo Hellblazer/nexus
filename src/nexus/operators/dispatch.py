@@ -75,14 +75,28 @@ async def claude_dispatch(
     # claude leader and orphans the children.
     #
     # NEXUS_SKIP_T1=1 tells the subprocess's nx SessionStart hook to NOT
-    # spin up a chroma T1 server. Operator dispatch is stateless — each
+    # spin up a chroma T1 server, and tells the T1 client to go straight
+    # to EphemeralClient. Operator dispatch is stateless — each
     # `claude -p` invocation is a one-shot call that takes its input from
     # the prompt and produces structured JSON output. There's no cross-
     # invocation scratch to preserve, so paying the chroma startup cost
-    # for every call would be pure waste. The subprocess's T1 client
-    # falls back to EphemeralClient when no server is found, which is
-    # the correct semantics here: isolated, in-process, no cross talk.
+    # for every call would be pure waste.
+    #
+    # NX_SESSION_ID=<parent-uuid> tells the subprocess's SessionStart hook
+    # that it is a NESTED session — its own conversation UUID arrives via
+    # the stdin payload, but it should preserve the parent's
+    # ``current_session`` flat-file pointer instead of stomping it. Without
+    # this, the subprocess's hook would write its own UUID into
+    # ``current_session``, the file would point at no on-disk record (skip-
+    # T1 wrote none), and the parent's shell-side ``nx scratch`` would fall
+    # back to EphemeralClient for the rest of the parent conversation.
+    # ``read_claude_session_id`` reads the parent's UUID at dispatch time —
+    # the parent's SessionStart populated it before any operator runs.
+    from nexus.session import read_claude_session_id
     env = {**os.environ, "NEXUS_SKIP_T1": "1"}
+    parent_session_id = read_claude_session_id()
+    if parent_session_id:
+        env["NX_SESSION_ID"] = parent_session_id
     proc = await asyncio.create_subprocess_exec(
         "claude", "-p",
         "--output-format", "json",

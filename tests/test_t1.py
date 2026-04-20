@@ -61,6 +61,46 @@ class TestT1DatabaseConstructor:
         t1 = T1Database(client=chromadb.EphemeralClient())
         assert t1._session_id
 
+    def test_skip_t1_env_short_circuits_to_ephemeral(self, monkeypatch) -> None:
+        """NEXUS_SKIP_T1=1 (set by claude_dispatch for stateless operator
+        subprocesses) must skip the server lookup entirely and use
+        EphemeralClient — even if NX_SESSION_ID is set in env (which would
+        otherwise resolve to the parent's record). Without this short-
+        circuit, the operator would inadvertently connect to the parent's
+        T1 server and could read/write the parent's scratch.
+
+        Also: the warning that normally fires when no T1 server is found
+        must be suppressed in the skip-T1 case, since EphemeralClient is
+        the documented intended behaviour, not a degraded fallback.
+        """
+        monkeypatch.setenv("NEXUS_SKIP_T1", "1")
+        # Set NX_SESSION_ID to simulate the operator-subprocess scenario; if
+        # the short-circuit failed, find_session_by_id would resolve this
+        # and HttpClient would get called.
+        monkeypatch.setenv("NX_SESSION_ID", "parent-uuid-not-mine")
+
+        find_calls: list[None] = []
+
+        def _should_not_be_called(*args, **kwargs):
+            find_calls.append(None)
+            return None
+
+        with (
+            patch("nexus.db.t1.find_session_by_id", side_effect=_should_not_be_called),
+            patch("nexus.db.t1.find_ancestor_session", side_effect=_should_not_be_called),
+            warnings.catch_warnings(record=True) as w,
+        ):
+            warnings.simplefilter("always")
+            t1 = T1Database()
+
+        assert not find_calls, "skip-T1 must not search for a session record"
+        assert not hasattr(t1._client, "_api_url"), "must use EphemeralClient"
+        # The "No T1 server found" warning is for the unexpected case;
+        # skip-T1 is the intended path and should be silent.
+        assert not any("EphemeralClient" in str(x.message) for x in w), (
+            f"skip-T1 should not warn about EphemeralClient fallback; got {[str(x.message) for x in w]}"
+        )
+
     def test_http_constructor_reads_real_session_file(self, tmp_path, monkeypatch) -> None:
         sessions_dir = tmp_path / "sessions"
         sessions_dir.mkdir()
