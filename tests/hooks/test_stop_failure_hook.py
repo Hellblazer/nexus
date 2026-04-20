@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 import pytest
 
@@ -43,8 +44,15 @@ def _run_hook(
         "CLAUDECODE": "",  # Prevent side effects (bd remember/create) in tests
         **(env_overrides or {}),
     }
+    # Invoke with the test interpreter (sys.executable, always 3.12+) rather
+    # than ``python3`` from PATH. Tests that override PATH (e.g. to /usr/bin
+    # for the no-bd scenario) would otherwise hit macOS's bundled
+    # /usr/bin/python3 (3.10.x), tripping the plugin hook's
+    # ``sys.version_info < (3, 12)`` runtime guard added in 4.9.1's plugin
+    # release. The guard's behaviour is the right behaviour in production;
+    # the test just shouldn't accidentally exercise it.
     return subprocess.run(
-        ["python3", str(SCRIPT)],
+        [sys.executable, str(SCRIPT)],
         input=stdin,
         capture_output=True,
         text=True,
