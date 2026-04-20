@@ -175,6 +175,7 @@ Full details: [CLI Reference](https://github.com/Hellblazer/nexus/blob/main/docs
 ## Prerequisites
 
 - Python 3.12–3.13, [`uv`](https://docs.astral.sh/uv/), `git`
+- For the Claude Code plugin: [Node.js](https://nodejs.org/) (provides `npx`) — the bundled `sequential-thinking` and `context7` MCP servers are spawned via `npx`. The `nx` CLI alone does not need it.
 - For cloud embeddings (optional): [ChromaDB Cloud](https://www.trychroma.com/) + [Voyage AI](https://www.voyageai.com/) accounts (free tiers available)
 - For hybrid search: [`ripgrep`](https://github.com/BurntSushi/ripgrep)
 

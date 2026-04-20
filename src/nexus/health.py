@@ -414,6 +414,28 @@ def _check_tools() -> list[HealthResult]:
             fix_suggestions=["https://github.com/BeadsProject/beads"],
         ))
 
+    # npx (Node.js, plugin-only)
+    # Required by the nx Claude Code plugin, which spawns the
+    # ``sequential-thinking`` and ``context7`` MCP servers via ``npx -y …``.
+    # The CLI alone does not need it, so this is non-fatal — but a missing
+    # ``npx`` causes silent MCP-server failures the moment a plugin tool is
+    # invoked. Reported as informational so plugin users see the gap before
+    # they hit it at runtime.
+    npx_path = shutil.which("npx")
+    if npx_path:
+        results.append(HealthResult(label="npx (Node.js, plugin-only)", ok=True, detail=npx_path))
+    else:
+        results.append(HealthResult(
+            label="npx (Node.js, plugin-only)",
+            ok=True,
+            detail="not found — plugin MCP servers (sequential-thinking, context7) will fail",
+            fix_suggestions=[
+                "brew install node                         (macOS)",
+                "apt install nodejs npm                    (Ubuntu/Debian)",
+                "https://nodejs.org/                       (other platforms)",
+            ],
+        ))
+
     return results
 
 
