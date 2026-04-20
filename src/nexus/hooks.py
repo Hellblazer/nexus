@@ -78,18 +78,24 @@ def session_start(claude_session_id: str | None = None) -> str:
     # the old PID-keyed scheme are reaped unconditionally here.
     sweep_stale_sessions(SESSIONS_DIR)
 
-    # Initialize session_id before the lock block so it is always bound even
-    # if flock or find_session_by_id raises an unexpected exception. The
-    # claude_session_id arrives via stdin from the SessionStart hook payload
-    # (commands/hook.py) — that's the canonical Claude conversation UUID.
-    session_id = claude_session_id or generate_session_id()
+    # Resolve session_id with this precedence:
+    #   1. ``NX_SESSION_ID`` env  — we're a nested subprocess our parent
+    #      already populated. Inherit the parent's UUID so shell tools
+    #      that look up by ``current_session`` still find the parent's
+    #      record.
+    #   2. ``claude_session_id`` from stdin — top-level Claude session.
+    #      The hook payload (commands/hook.py) carries the canonical
+    #      conversation UUID Claude Code generated.
+    #   3. A fresh UUID — fallback for invocations outside Claude Code.
+    inherited = os.environ.get("NX_SESSION_ID", "").strip() or None
+    session_id = inherited or claude_session_id or generate_session_id()
 
     # Honor NEXUS_SKIP_T1 — set by ``claude_dispatch`` (and any caller of
     # ``claude -p`` where T1 inheritance is undesirable) so short-lived
     # operator subprocesses don't pay the chroma startup cost or pollute
     # session bookkeeping. The T1 client (``db/t1.py``) falls back to
-    # EphemeralClient when no server record is found, so skipping the
-    # server start here yields the right "no T1" semantics automatically.
+    # EphemeralClient when this env is set, so skipping the server start
+    # here yields the right "no T1" semantics automatically.
     skip_t1 = os.environ.get("NEXUS_SKIP_T1", "").strip().lower() in ("1", "true", "yes")
 
     if not skip_t1:
@@ -125,14 +131,17 @@ def session_start(claude_session_id: str | None = None) -> str:
         finally:
             os.close(lock_fd)  # closing the fd releases the flock automatically
 
-    # Persist the UUID for cross-tree inheritance via the ``current_session``
-    # flat file. This is the actual mechanism that propagates the session ID
-    # across Claude Code → Bash tool → nx command boundaries (subagent
-    # SessionStart hooks read the file, find the parent's UUID, and adopt
-    # the parent's T1 server). Always written, even when skip_t1 is set, so
-    # a subagent invoked from a skip-T1 parent can still cohere on its own
-    # session if it later writes a server record.
-    write_claude_session_id(session_id)
+    # Persist the UUID via ``current_session`` flat file — only when this is
+    # a TOP-LEVEL session. Nested subprocesses (operator ``claude -p`` calls,
+    # subagents) inherit ``NX_SESSION_ID`` from their parent's env and must
+    # leave the parent's pointer alone. Without this guard, a nested
+    # subprocess's SessionStart would stomp the flat file with its own
+    # transient UUID — typically pointing at no on-disk session record at
+    # all (because skip_t1 was set) — and the parent's shell-side
+    # ``nx scratch`` / ``nx memory`` would then fall back to EphemeralClient
+    # for the rest of the conversation.
+    if not inherited:
+        write_claude_session_id(session_id)
 
     # T2 memory context is surfaced by session_start_hook.py (via t2_prefix_scan.py)
     # which provides multi-namespace, snippet-enriched output. No duplication here.

@@ -83,6 +83,57 @@ def test_session_start_adopts_existing_session_for_same_uuid(tmp_path: Path) -> 
     mock_start.assert_not_called()  # should NOT start a new server
 
 
+def test_session_start_does_not_overwrite_current_session_when_inherited(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nested subprocess (NX_SESSION_ID set in env) must NOT stomp the
+    parent's ``current_session`` flat file. Without this guard, every
+    operator ``claude -p`` call would overwrite the parent's UUID with
+    its own transient one, and the parent's shell-side ``nx scratch``
+    would fall back to EphemeralClient for the rest of the conversation.
+    """
+    monkeypatch.setenv("NX_SESSION_ID", "parent-uuid-keep-me")
+    mock_write = MagicMock()
+
+    with (
+        patch("nexus.hooks._default_db_path", return_value=tmp_path / "memory.db"),
+        patch("nexus.hooks.sweep_stale_sessions"),
+        patch("nexus.hooks.find_session_by_id", return_value=None),
+        patch("nexus.hooks.start_t1_server", side_effect=RuntimeError("no T1")),
+        patch("nexus.hooks.write_claude_session_id", mock_write),
+        patch("nexus.hooks._infer_repo", return_value="myrepo"),
+    ):
+        output = session_start(claude_session_id="my-own-transient-uuid")
+
+    # The hook should have used the inherited UUID (not the stdin one)
+    assert "parent-uuid-keep-me" in output
+    # And must NOT have written current_session — that would stomp the parent
+    mock_write.assert_not_called()
+
+
+def test_session_start_writes_current_session_when_top_level(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Top-level Claude session (no NX_SESSION_ID inherited) writes
+    ``current_session`` as today, populating the cross-tree pointer
+    that shell tools and subagents rely on.
+    """
+    monkeypatch.delenv("NX_SESSION_ID", raising=False)
+    mock_write = MagicMock()
+
+    with (
+        patch("nexus.hooks._default_db_path", return_value=tmp_path / "memory.db"),
+        patch("nexus.hooks.sweep_stale_sessions"),
+        patch("nexus.hooks.find_session_by_id", return_value=None),
+        patch("nexus.hooks.start_t1_server", side_effect=RuntimeError("no T1")),
+        patch("nexus.hooks.write_claude_session_id", mock_write),
+        patch("nexus.hooks._infer_repo", return_value="myrepo"),
+    ):
+        session_start(claude_session_id="top-level-uuid")
+
+    mock_write.assert_called_once_with("top-level-uuid")
+
+
 def test_session_start_skips_t1_when_env_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """NEXUS_SKIP_T1 honoured: claude_dispatch (and similar one-shot
     `claude -p` callers) sets this so the subprocess does not pay the

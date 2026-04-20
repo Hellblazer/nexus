@@ -2,6 +2,7 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 from __future__ import annotations
 
+import os
 import warnings
 from collections.abc import Callable
 from typing import TypeVar
@@ -137,13 +138,23 @@ class T1Database:
             self._client = client
             self._session_id = session_id or str(uuid4())
         else:
-            # UUID-keyed lookup (T1 scoped to Claude conversation, not
-            # terminal session). find_session_by_id resolves the UUID
-            # from NX_SESSION_ID env or current_session flat file.
-            # Falls back to find_ancestor_session for any legacy session
-            # files written by older nexus versions still living in
-            # ~/.config/nexus/sessions/{ppid}.session.
-            record = find_session_by_id(SESSIONS_DIR) or find_ancestor_session(SESSIONS_DIR)
+            # NEXUS_SKIP_T1=1 (set by claude_dispatch for stateless operator
+            # subprocesses) → go straight to EphemeralClient without searching
+            # for a server. Without this short-circuit, the subprocess inherits
+            # NX_SESSION_ID=<parent-uuid> from claude_dispatch and would
+            # inadvertently connect to the parent's T1 server, breaking the
+            # stateless-operator intent (operators reading/writing parent's
+            # scratch is precisely what we want to avoid).
+            skip_t1 = os.environ.get("NEXUS_SKIP_T1", "").strip().lower() in ("1", "true", "yes")
+            record = None
+            if not skip_t1:
+                # UUID-keyed lookup (T1 scoped to Claude conversation, not
+                # terminal session). find_session_by_id resolves the UUID
+                # from NX_SESSION_ID env or current_session flat file.
+                # Falls back to find_ancestor_session for any legacy session
+                # files written by older nexus versions still living in
+                # ~/.config/nexus/sessions/{ppid}.session.
+                record = find_session_by_id(SESSIONS_DIR) or find_ancestor_session(SESSIONS_DIR)
             if record is not None:
                 self._client = chromadb.HttpClient(
                     host=record["server_host"],
@@ -151,11 +162,15 @@ class T1Database:
                 )
                 self._session_id = record["session_id"]
             else:
-                warnings.warn(
-                    "No T1 server found; falling back to local EphemeralClient. "
-                    "Cross-agent scratch sharing is unavailable for this session.",
-                    stacklevel=2,
-                )
+                if not skip_t1:
+                    # Only warn when the absence of a T1 server is unexpected.
+                    # Skip-T1 is the stateless-operator path; the EphemeralClient
+                    # fallback is the documented intended behaviour there.
+                    warnings.warn(
+                        "No T1 server found; falling back to local EphemeralClient. "
+                        "Cross-agent scratch sharing is unavailable for this session.",
+                        stacklevel=2,
+                    )
                 from nexus.session import read_claude_session_id
                 self._client = chromadb.EphemeralClient()
                 self._session_id = session_id or read_claude_session_id() or str(uuid4())

@@ -202,6 +202,60 @@ class TestSubprocessContract:
         )
 
     @pytest.mark.asyncio
+    async def test_sets_nx_session_id_env_from_current_session(self) -> None:
+        """claude_dispatch must read the parent's UUID from current_session
+        and export it as NX_SESSION_ID for the subprocess. Without this, the
+        subprocess's SessionStart hook can't tell it's a nested call and
+        will stomp the parent's current_session pointer.
+        """
+        from nexus.operators.dispatch import claude_dispatch
+
+        proc = _make_proc()
+        captured: list = []
+
+        async def intercept(*args, **kwargs):
+            captured.append(kwargs)
+            return proc
+
+        with (
+            patch("asyncio.create_subprocess_exec", side_effect=intercept),
+            patch("nexus.session.read_claude_session_id", return_value="parent-uuid-from-flat-file"),
+        ):
+            await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        env = captured[0].get("env")
+        assert env is not None
+        assert env.get("NX_SESSION_ID") == "parent-uuid-from-flat-file", (
+            f"NX_SESSION_ID missing or wrong; got {env.get('NX_SESSION_ID')!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_omits_nx_session_id_when_no_parent_session(self) -> None:
+        """When there's no parent session (e.g. CLI usage outside Claude Code),
+        claude_dispatch must not export an empty/None NX_SESSION_ID — the
+        subprocess's hook would treat that as 'top-level' anyway, but exporting
+        a junk value risks confusion.
+        """
+        from nexus.operators.dispatch import claude_dispatch
+
+        proc = _make_proc()
+        captured: list = []
+
+        async def intercept(*args, **kwargs):
+            captured.append(kwargs)
+            return proc
+
+        with (
+            patch("asyncio.create_subprocess_exec", side_effect=intercept),
+            patch("nexus.session.read_claude_session_id", return_value=None),
+        ):
+            await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        env = captured[0].get("env")
+        assert env is not None
+        assert "NX_SESSION_ID" not in env or not env.get("NX_SESSION_ID")
+
+    @pytest.mark.asyncio
     async def test_sets_skip_t1_env(self) -> None:
         """claude_dispatch must export NEXUS_SKIP_T1=1 in the subprocess env so
         the spawned `claude -p`'s nx SessionStart hook does not spin up a chroma
