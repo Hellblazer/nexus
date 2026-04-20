@@ -148,12 +148,17 @@ def test_ppid_proc_read_failed_logs_debug():
 # ── Site 7: session.py sweep_stale_sessions corrupt file ──────────────────────
 
 def test_sweep_corrupt_session_file_logs_debug(tmp_path):
-    """Site 7: corrupt session file in sweep_stale_sessions emits debug-level log."""
+    """Site 7: corrupt UUID-keyed session file in sweep_stale_sessions emits debug-level log.
+
+    Numeric-stem files take the migration path (silently removed regardless
+    of contents), so the corrupt-file path is exercised via a UUID-stem file
+    that fails JSON parse.
+    """
     from nexus.session import sweep_stale_sessions
 
     sessions_dir = tmp_path / "sessions"
     sessions_dir.mkdir()
-    (sessions_dir / "999.session").write_text("not-json{{{")
+    (sessions_dir / "abc-uuid.session").write_text("not-json{{{")
 
     with capture_logs() as cap:
         sweep_stale_sessions(sessions_dir=sessions_dir)
@@ -178,20 +183,20 @@ def test_infer_repo_git_failed_logs_debug():
 
 # ── Site 9: hooks.py session_end own record corrupt ───────────────────────────
 
-def test_session_end_own_record_corrupt_logs_debug(tmp_path):
-    """Site 9: corrupt own session file in session_end emits debug-level log."""
-    import os
+def test_session_end_own_record_corrupt_logs_debug(tmp_path, monkeypatch):
+    """Site 9: corrupt own UUID-keyed session file in session_end emits debug log."""
     from nexus.hooks import session_end
 
     sessions_dir = tmp_path / "sessions"
     sessions_dir.mkdir()
-    # Write a corrupt file named after this process's parent PID
-    ppid = os.getppid()
-    corrupt_file = sessions_dir / f"{ppid}.session"
+    # Write a corrupt UUID-keyed file and point session_end at it via env.
+    session_id = "corrupt-test-uuid"
+    corrupt_file = sessions_dir / f"{session_id}.session"
     corrupt_file.write_text("not-valid-json{{{")
+    monkeypatch.setenv("NX_SESSION_ID", session_id)
 
     with patch("nexus.hooks.SESSIONS_DIR", sessions_dir), \
-         patch("nexus.hooks.find_ancestor_session", return_value=None):
+         patch("nexus.hooks.find_session_by_id", return_value=None):
         with capture_logs() as cap:
             session_end()
 

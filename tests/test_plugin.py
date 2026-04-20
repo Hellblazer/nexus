@@ -92,21 +92,27 @@ def test_session_start_outputs_session_id(
 # ── AC5: SessionEnd flush + expire ────────────────────────────────────────────
 
 def test_session_end_flushes_flagged_t1_entries(
-    runner: CliRunner, fake_home: Path, tmp_path: Path
+    runner: CliRunner, fake_home: Path, tmp_path: Path, monkeypatch
 ) -> None:
-    """SessionEnd flushes T1 flagged entries to T2."""
+    """SessionEnd flushes T1 flagged entries to T2.
+
+    UUID-keyed scheme: NX_SESSION_ID env var carries the conversation
+    UUID into the hook process; session_end resolves the record at
+    sessions/{uuid}.session.
+    """
     sessions = tmp_path / "sessions"
-    ppid = os.getppid()
-    session_file = sessions / f"{ppid}.session"
+    session_id = "test-session-id"
+    session_file = sessions / f"{session_id}.session"
     session_file.parent.mkdir(parents=True, exist_ok=True)
     session_file.write_text(json.dumps({
-        "session_id": "test-session-id",
+        "session_id": session_id,
         "server_host": "127.0.0.1",
         "server_port": 51823,
         "server_pid": 0,
         "created_at": time.time(),
         "tmpdir": "",
     }))
+    monkeypatch.setenv("NX_SESSION_ID", session_id)
 
     mock_t1 = MagicMock()
     mock_t1.flagged_entries.return_value = [
@@ -138,21 +144,22 @@ def test_session_end_flushes_flagged_t1_entries(
 
 
 def test_session_end_clears_t1_and_removes_session_file(
-    runner: CliRunner, fake_home: Path, tmp_path: Path
+    runner: CliRunner, fake_home: Path, tmp_path: Path, monkeypatch
 ) -> None:
-    """SessionEnd clears T1 and removes the session file."""
+    """SessionEnd clears T1 and removes the UUID-keyed session file."""
     sessions = tmp_path / "sessions"
-    ppid = os.getppid()
-    session_file = sessions / f"{ppid}.session"
+    session_id = "test-session-id"
+    session_file = sessions / f"{session_id}.session"
     session_file.parent.mkdir(parents=True, exist_ok=True)
     session_file.write_text(json.dumps({
-        "session_id": "test-session-id",
+        "session_id": session_id,
         "server_host": "127.0.0.1",
         "server_port": 51823,
         "server_pid": 0,
         "created_at": time.time(),
         "tmpdir": "",
     }))
+    monkeypatch.setenv("NX_SESSION_ID", session_id)
 
     mock_t1 = MagicMock()
     mock_t1.flagged_entries.return_value = []
