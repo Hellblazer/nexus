@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -424,6 +425,60 @@ class TestHooks:
         )
         assert "Python 3.12+" in head, (
             f"{script_name}: version guard does not include the 'Python 3.12+' user-facing message"
+        )
+
+    def test_python_hook_runner_helper_present_and_executable(self) -> None:
+        """The hooks.json command lines route Python hook invocations through
+        ``_run_python_hook.sh`` so a system whose default ``python3`` is older
+        than 3.12 still picks up a usable Python (probing python3.13 then
+        python3.12 explicitly, falling back to plain ``python3``).
+
+        Without this layer, hook invocations resolved ``python3`` directly
+        and broke under macOS framework Python installs (3.10) that win
+        PATH precedence over Homebrew's 3.13. The hook script's runtime
+        version guard fires as a defence-in-depth backstop.
+        """
+        helper = PLUGIN_DIR / "hooks" / "scripts" / "_run_python_hook.sh"
+        assert helper.exists(), f"missing Python hook runner: {helper}"
+        # Executable bit must be set; the json command invokes it directly.
+        assert os.access(helper, os.X_OK), f"helper is not executable: {helper}"
+        text = helper.read_text()
+        # Assert the version preference is encoded — anyone removing the
+        # python3.13/python3.12 lookups falls back to the broken behaviour
+        # we just fixed.
+        assert "python3.13" in text and "python3.12" in text, (
+            f"helper should probe explicit python3.13 / python3.12; got:\n{text}"
+        )
+        # Final fallback to plain python3 must remain so the hook script's
+        # own version guard still gets a chance to surface a friendly error.
+        assert 'exec python3 "$@"' in text, (
+            f"helper missing python3 fallback (needed for the runtime guard's clean error path):\n{text}"
+        )
+
+    def test_python_hooks_use_runner_helper(self) -> None:
+        """Every Python hook script registered in hooks.json must be invoked
+        via ``_run_python_hook.sh`` rather than a bare ``python3``. Catches
+        the regression where someone adds a new Python hook and reaches for
+        the old ``python3 path/to/hook.py`` pattern out of habit.
+        """
+        data = json.loads(HOOKS_PATH.read_text())
+        events = data.get("hooks", data)
+        offenders: list[tuple[str, str]] = []
+        for event, entries in events.items():
+            for entry in entries:
+                for sub in entry.get("hooks", []):
+                    cmd = sub.get("command", "")
+                    if cmd.endswith(".py") or " .py " in cmd or cmd.rstrip().endswith(".py"):
+                        # Cheap heuristic: command ends in a .py invocation
+                        if "_run_python_hook.sh" not in cmd:
+                            offenders.append((event, cmd))
+                    # Stricter check: any 'python3 …/hook.py' literal is wrong
+                    if re.search(r"\bpython3 \S+\.py\b", cmd):
+                        offenders.append((event, cmd))
+        assert not offenders, (
+            "hooks.json invokes Python hooks directly via 'python3'; route through "
+            f"_run_python_hook.sh instead. Offenders:\n" +
+            "\n".join(f"  [{e}] {c}" for e, c in offenders)
         )
 
     def test_plugin_json_declares_python_engine(self) -> None:

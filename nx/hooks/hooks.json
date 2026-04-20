@@ -16,12 +16,12 @@
           },
           {
             "type": "command",
-            "command": "python3 $CLAUDE_PLUGIN_ROOT/hooks/scripts/session_start_hook.py",
+            "command": "$CLAUDE_PLUGIN_ROOT/hooks/scripts/_run_python_hook.sh $CLAUDE_PLUGIN_ROOT/hooks/scripts/session_start_hook.py",
             "timeout": 10
           },
           {
             "type": "command",
-            "command": "python3 $CLAUDE_PLUGIN_ROOT/hooks/scripts/rdr_hook.py",
+            "command": "$CLAUDE_PLUGIN_ROOT/hooks/scripts/_run_python_hook.sh $CLAUDE_PLUGIN_ROOT/hooks/scripts/rdr_hook.py",
             "timeout": 10
           },
           {
@@ -63,7 +63,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 $CLAUDE_PLUGIN_ROOT/hooks/scripts/stop_failure_hook.py",
+            "command": "$CLAUDE_PLUGIN_ROOT/hooks/scripts/_run_python_hook.sh $CLAUDE_PLUGIN_ROOT/hooks/scripts/stop_failure_hook.py",
             "timeout": 5
           }
         ]
