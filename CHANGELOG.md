@@ -6,6 +6,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.9.2] - 2026-04-20
+
+### Fixed
+
+- **T1 scratch was bound to the terminal session, not the Claude conversation** (`src/nexus/session.py`, `src/nexus/hooks.py`, `src/nexus/db/t1.py`). Two `claude` invocations in the same shell shared one T1 server because `session_start` walked the PPID chain looking for "the ancestor session file" and landed on the login shell. The Claude conversation UUID was already arriving via the SessionStart hook payload but was stored only *inside* each session record, never as the *filename*. Fix: drop the PPID walk; key session files on `{session_id}.session`; resolve the UUID via the existing `current_session` flat file (subagent inheritance) or `NX_SESSION_ID` env var (opt-in). Subagents within one conversation continue to share the parent's T1; two parallel conversations now correctly get distinct T1s. Migration: numeric-stem session files (legacy PID-keyed) are swept unconditionally on first new-code SessionStart.
+- **T1 chroma server killed immediately after spawn (regression from 4.9.1)** (`src/nexus/session.py`). The `atexit.register(stop_t1_server, proc.pid)` added in 4.9.1 as a "defence-in-depth fallback" was wrong: it ran inside the short-lived `nx hook session-start` process, which exits within seconds of spawning chroma. atexit then killed every chroma server right after spawn — production T1 silently fell back to EphemeralClient on every Claude conversation since 4.9.1 shipped. Fix: remove the atexit registration. The chroma server is meant to outlive the hook process; cleanup belongs to the SessionEnd hook (kept). Ungraceful exits leak the server until the next SessionStart's `sweep_stale_sessions` reaps it — the pre-4.9.1 design.
+- **`nx doctor` did not detect missing Node.js / `npx`** (`src/nexus/health.py`). The plugin's `sequential-thinking` and `context7` MCP servers are spawned via `npx -y …` and silently fail without `npx` on PATH. Added a non-fatal `npx (Node.js, plugin-only)` line to `_check_tools()` with `nodejs.org` install hints. CLI users without the plugin keep `exit 0`.
+
+### Added
+
+- **`NEXUS_SKIP_T1` env var** (`src/nexus/hooks.py`, `src/nexus/operators/dispatch.py`). Opt-out for callers that don't want a T1 chroma server spun up for short-lived `claude -p` invocations. `claude_dispatch` (every operator + the taxonomy labeler) now exports it in the subprocess env, so per-call chroma startup overhead drops to zero. T1 client falls back to EphemeralClient when no server record is found — correct semantics for stateless operator subprocesses.
+- **`scripts/sandbox-t1-uuid.sh`** — E2E shell harness that exercises the full SessionStart/SessionEnd lifecycle against real chroma servers in an isolated `NEXUS_CONFIG_DIR`. 20 checks cover: distinct UUIDs → distinct servers, subagent inheritance via same UUID, `NEXUS_SKIP_T1` honoured, legacy migration sweep, SessionEnd cleanup. Caught the 4.9.1 atexit regression.
+
 ## [4.9.1] - 2026-04-20
 
 ### Fixed

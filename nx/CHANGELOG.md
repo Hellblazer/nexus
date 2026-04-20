@@ -6,6 +6,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.9.2] - 2026-04-20
+
+### Added
+
+- **`engines.python: ">=3.12"`** in `nx/.claude-plugin/plugin.json` — declares the runtime requirement at the manifest layer (informational; Claude Code itself doesn't enforce, but tools and humans reading the manifest now see it).
+- **`nx/hooks/scripts/_run_python_hook.sh`** — Python launcher that probes `python3.13` then `python3.12` via `command -v` before falling back to plain `python3`. Lets a user with Homebrew Python and an older `/Library/Frameworks/Python.framework/.../python3` still hit the right interpreter without PATH gymnastics.
+- **Section 5 in `/nx:nx-preflight`** — bash check for `npx` with FAIL status if missing. Previously preflight claimed to "verify all plugin dependencies are present" but didn't check Node, so `npx`-spawned MCP servers (`sequential-thinking`, `context7`) silently failed at first tool call.
+
+### Fixed
+
+- **All five Python hook scripts now declare `from __future__ import annotations` and a `sys.version_info < (3, 12)` runtime guard.** Three of them (`session_start_hook.py`, `rdr_hook.py`, `t2_prefix_scan.py`) used PEP 604 union annotations (`str | None`) without the future import, so they refused to parse on system Python <3.10. The runtime guard exits cleanly with brew/apt/uv install hints instead of an opaque parser failure when Python is too old.
+- **`hooks/hooks.json` Python-hook command lines route through `_run_python_hook.sh`** instead of bare `python3` — see Added above.
+- **Bullet separators in `using-nx-skills/SKILL.md` "Going deeper" section** — minor doc polish.
+
+### Notes
+
+- v4.9.1's "atexit-based fallback in `start_t1_server`" is **withdrawn** as of v4.9.2 (Python-package side; see root `CHANGELOG.md`). The atexit fired in the wrong process and killed every chroma server right after spawn, silently breaking T1 across all conversations on 4.9.1. The `SessionEnd` hook re-registration from v4.9.1 (this changelog) is correct and remains in effect.
+
 ## [4.9.1] - 2026-04-20
 
 ### Fixed
