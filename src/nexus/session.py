@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-import atexit
 import json
 import os
 import signal
@@ -314,12 +313,17 @@ def start_t1_server() -> tuple[str, int, int, str]:
         try:
             conn = socket.create_connection((_T1_SERVER_HOST, port), timeout=0.5)
             conn.close()
-            # Defence-in-depth: atexit reaps chroma on graceful interpreter
-            # exit even when the SessionEnd hook never fires (harness
-            # teardown cancels the hook, OOM, terminal SIGHUP that doesn't
-            # propagate because of start_new_session=True). Idempotent —
-            # stop_t1_server tolerates an already-dead PID.
-            atexit.register(stop_t1_server, proc.pid)
+            # NOTE: An ``atexit.register(stop_t1_server, proc.pid)`` was added
+            # in PR #220 as a "defence-in-depth fallback" for the case where
+            # the SessionEnd hook doesn't fire. It was wrong: this function
+            # runs inside the short-lived ``nx hook session-start`` process,
+            # which exits *immediately* after spawning chroma. atexit then
+            # killed the chroma server right after spawn — production T1
+            # silently fell back to EphemeralClient on every conversation
+            # since 4.9.1. The chroma server is meant to outlive this
+            # process; cleanup is the SessionEnd hook's job. Ungraceful
+            # exits (Claude Code SIGKILL/OOM) leak the server until the
+            # next SessionStart's ``sweep_stale_sessions`` reaps it.
             return _T1_SERVER_HOST, port, proc.pid, tmpdir
         except OSError:
             time.sleep(0.2)  # intentional: server not yet listening, retry loop
