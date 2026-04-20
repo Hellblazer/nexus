@@ -18,7 +18,7 @@ from nexus.db.t2 import T2Database
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
-from nexus.session import SESSIONS_DIR, find_ancestor_session
+from nexus.session import SESSIONS_DIR, find_ancestor_session, find_session_by_id
 
 _T = TypeVar("_T")
 
@@ -137,7 +137,13 @@ class T1Database:
             self._client = client
             self._session_id = session_id or str(uuid4())
         else:
-            record = find_ancestor_session(SESSIONS_DIR)
+            # UUID-keyed lookup (T1 scoped to Claude conversation, not
+            # terminal session). find_session_by_id resolves the UUID
+            # from NX_SESSION_ID env or current_session flat file.
+            # Falls back to find_ancestor_session for any legacy session
+            # files written by older nexus versions still living in
+            # ~/.config/nexus/sessions/{ppid}.session.
+            record = find_session_by_id(SESSIONS_DIR) or find_ancestor_session(SESSIONS_DIR)
             if record is not None:
                 self._client = chromadb.HttpClient(
                     host=record["server_host"],

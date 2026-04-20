@@ -202,6 +202,27 @@ def sweep_stale_sessions(
         return
     cutoff = time.time() - max_age_hours * 3600.0
     for f in sessions_dir.glob("*.session"):
+        # Migration: numeric-stem files come from the legacy PID-keyed scheme
+        # that bound T1 to the terminal session instead of the Claude
+        # conversation. They were never doing the right thing — sweep
+        # unconditionally on first new-code SessionStart, regardless of age.
+        # The chroma servers they pointed at were leaked aliases; reap them
+        # too. New code only writes UUID-keyed files.
+        if f.stem.isdigit():
+            try:
+                legacy = json.loads(f.read_text())
+                if isinstance(legacy, dict):
+                    server_pid = legacy.get("server_pid")
+                    if server_pid:
+                        stop_t1_server(server_pid)
+                    tmpdir = legacy.get("tmpdir", "")
+                    if tmpdir:
+                        import shutil
+                        shutil.rmtree(tmpdir, ignore_errors=True)
+            except (json.JSONDecodeError, OSError):
+                pass  # intentional: best-effort migration; the file gets removed regardless
+            _try_remove_path(f)
+            continue
         try:
             record = json.loads(f.read_text())
             if not isinstance(record, dict):
@@ -362,7 +383,12 @@ def write_session_record(
     server_pid: int,
     tmpdir: str = "",
 ) -> Path:
-    """Write a JSON session record to *sessions_dir*/{ppid}.session (mode 0o600)."""
+    """Write a JSON session record to *sessions_dir*/{ppid}.session (mode 0o600).
+
+    .. deprecated::
+        Legacy PID-keyed write. Use :func:`write_session_record_by_id` instead.
+        Kept as an alias for one release; no production code path calls this.
+    """
     sessions_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     path = sessions_dir / f"{ppid}.session"
     record = {
@@ -379,6 +405,113 @@ def write_session_record(
     finally:
         os.close(fd)
     return path
+
+
+# ── UUID-keyed session records (the current scheme) ──────────────────────────
+#
+# T1 must be scoped to a Claude conversation, not to a terminal session. The
+# previous PID-keyed scheme walked the PPID chain to "find the ancestor's
+# session file" — which on systems where Claude Code is invoked directly from
+# a shell lands on the login shell's PID. Two ``claude`` invocations in the
+# same shell then shared one T1 server; the same conversation accessed from a
+# different shell could not find it. The UUID-keyed scheme fixes both: the
+# Claude session UUID arrives via the SessionStart hook payload, and child
+# processes inherit it through ``NX_SESSION_ID`` (race-free) with the legacy
+# ``current_session`` flat file as a fallback for tools launched outside the
+# Claude process tree.
+
+_NX_SESSION_ID_ENV = "NX_SESSION_ID"
+
+
+def write_session_record_by_id(
+    sessions_dir: Path,
+    session_id: str,
+    host: str,
+    port: int,
+    server_pid: int,
+    tmpdir: str = "",
+) -> Path:
+    """Write a JSON session record at *sessions_dir*/{session_id}.session.
+
+    The UUID-keyed counterpart of :func:`write_session_record`. Always use
+    this in new code so T1 is scoped to a Claude conversation rather than
+    a terminal session.
+    """
+    sessions_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path = sessions_dir / f"{session_id}.session"
+    record = {
+        "session_id": session_id,
+        "server_host": host,
+        "server_port": port,
+        "server_pid": server_pid,
+        "created_at": time.time(),
+        "tmpdir": tmpdir,
+    }
+    fd = os.open(str(path), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, json.dumps(record).encode())
+    finally:
+        os.close(fd)
+    return path
+
+
+def find_session_by_id(
+    sessions_dir: Path | None = None,
+    session_id: str | None = None,
+) -> dict | None:
+    """Look up the T1 session record for *session_id* in *sessions_dir*.
+
+    When *session_id* is None, resolves it in this order:
+
+    1. ``NX_SESSION_ID`` environment variable (set by the SessionStart hook
+       so direct child processes inherit it without a race).
+    2. ``current_session`` flat file (fallback for tools launched outside
+       the Claude process tree, e.g. an MCP server reconnecting after the
+       hook has already exited).
+
+    Returns the parsed record dict (keys: session_id, server_host,
+    server_port, server_pid, tmpdir, created_at) or None if no record
+    exists for that ID, or if no ID could be resolved at all.
+
+    Stale records (older than 24 h) are reaped on the way out — same
+    policy as the older PPID-walking variant.
+    """
+    if sessions_dir is None:
+        sessions_dir = SESSIONS_DIR
+    if session_id is None:
+        session_id = os.environ.get(_NX_SESSION_ID_ENV) or read_claude_session_id()
+    if not session_id:
+        return None
+    candidate = sessions_dir / f"{session_id}.session"
+    if not candidate.exists():
+        return None
+    try:
+        record = json.loads(candidate.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        _log.debug(
+            "find_session_by_id: corrupt or unreadable session file",
+            path=str(candidate),
+            error=str(exc),
+        )
+        return None
+    if not isinstance(record, dict):
+        return None
+    cutoff = time.time() - _SESSION_MAX_AGE_SECONDS
+    if record.get("created_at", 0) < cutoff:
+        # Stale: reap server + remove file, return None so caller falls
+        # back to a fresh start.
+        server_pid = record.get("server_pid")
+        if server_pid:
+            stop_t1_server(server_pid)
+        _try_remove_path(candidate)
+        return None
+    if (
+        "server_host" not in record
+        or "server_port" not in record
+        or "session_id" not in record
+    ):
+        return None
+    return record
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────

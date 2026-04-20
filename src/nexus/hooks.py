@@ -18,12 +18,14 @@ from nexus.session import (
     SESSIONS_DIR,
     _ppid_of,
     find_ancestor_session,
+    find_session_by_id,
     generate_session_id,
     start_t1_server,
     stop_t1_server,
     sweep_stale_sessions,
     write_claude_session_id,
     write_session_record,
+    write_session_record_by_id,
 )
 
 
@@ -71,48 +73,65 @@ def session_start(claude_session_id: str | None = None) -> str:
 
     Returns the output string to be printed.
     """
-    # Sweep orphaned server processes from previous crashed sessions.
+    # Sweep orphaned server processes from previous crashed sessions. Also
+    # handles the migration: legacy numeric-stem session files written by
+    # the old PID-keyed scheme are reaped unconditionally here.
     sweep_stale_sessions(SESSIONS_DIR)
 
-    # Initialize session_id before the lock block so it is always bound even if
-    # flock or find_ancestor_session raises an unexpected exception.
+    # Initialize session_id before the lock block so it is always bound even
+    # if flock or find_session_by_id raises an unexpected exception. The
+    # claude_session_id arrives via stdin from the SessionStart hook payload
+    # (commands/hook.py) — that's the canonical Claude conversation UUID.
     session_id = claude_session_id or generate_session_id()
 
-    # Acquire an exclusive lock before the find+write sequence to prevent two
-    # sibling agents (same parent PID, both see ancestor=None simultaneously)
-    # from each starting their own ChromaDB server and orphaning the first.
-    SESSIONS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-    _session_lock = SESSIONS_DIR / "session.lock"
-    from nexus.indexer import _clear_stale_lock
-    _clear_stale_lock(_session_lock)
-    lock_fd = os.open(str(_session_lock), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
-    try:
-        os.write(lock_fd, str(os.getpid()).encode())
-        os.fsync(lock_fd)
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        ancestor = find_ancestor_session(SESSIONS_DIR)
-        if ancestor:
-            session_id = ancestor["session_id"]
-        else:
-            # Root session: start the ChromaDB server with the pre-generated ID.
-            # Key the session file to the grandparent (Claude Code's PID) rather
-            # than the immediate parent (a transient shell subprocess that dies
-            # as soon as the hook exits).  This ensures subsequent Bash calls from
-            # the same Claude Code process share the same T1 session.
-            _direct_ppid = os.getppid()
-            ppid = _ppid_of(_direct_ppid) or _direct_ppid
-            try:
-                host, port, server_pid, tmpdir = start_t1_server()
-                write_session_record(SESSIONS_DIR, ppid, session_id, host, port, server_pid, tmpdir)
-            except Exception as exc:
-                _log.warning(
-                    "session_start: T1 server unavailable; T1 will be local-only",
-                    error=str(exc),
-                )
-    finally:
-        os.close(lock_fd)  # closing the fd releases the flock automatically
+    # Honor NEXUS_SKIP_T1 — set by ``claude_dispatch`` (and any caller of
+    # ``claude -p`` where T1 inheritance is undesirable) so short-lived
+    # operator subprocesses don't pay the chroma startup cost or pollute
+    # session bookkeeping. The T1 client (``db/t1.py``) falls back to
+    # EphemeralClient when no server record is found, so skipping the
+    # server start here yields the right "no T1" semantics automatically.
+    skip_t1 = os.environ.get("NEXUS_SKIP_T1", "").strip().lower() in ("1", "true", "yes")
 
-    # Keep writing the flat file for any external tooling that reads it.
+    if not skip_t1:
+        # Acquire an exclusive lock before the find+write sequence to prevent
+        # two sibling agents (same UUID, both see record-absent simultaneously)
+        # from each starting their own ChromaDB server and orphaning the first.
+        SESSIONS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+        _session_lock = SESSIONS_DIR / "session.lock"
+        from nexus.indexer import _clear_stale_lock
+        _clear_stale_lock(_session_lock)
+        lock_fd = os.open(str(_session_lock), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+        try:
+            os.write(lock_fd, str(os.getpid()).encode())
+            os.fsync(lock_fd)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            # UUID-keyed lookup: T1 is scoped to a Claude conversation, not a
+            # terminal session. Two ``claude`` invocations in the same shell
+            # get distinct UUIDs → distinct session files → distinct T1
+            # servers. Subagents within one conversation share via the
+            # ``current_session`` flat file written below.
+            existing = find_session_by_id(SESSIONS_DIR, session_id)
+            if existing is None:
+                try:
+                    host, port, server_pid, tmpdir = start_t1_server()
+                    write_session_record_by_id(
+                        SESSIONS_DIR, session_id, host, port, server_pid, tmpdir
+                    )
+                except Exception as exc:
+                    _log.warning(
+                        "session_start: T1 server unavailable; T1 will be local-only",
+                        error=str(exc),
+                    )
+        finally:
+            os.close(lock_fd)  # closing the fd releases the flock automatically
+
+    # Persist the UUID for cross-tree inheritance via the ``current_session``
+    # flat file. This is the actual mechanism that propagates the session ID
+    # across Claude Code → Bash tool → nx command boundaries (subagent
+    # SessionStart hooks read the file, find the parent's UUID, and adopt
+    # the parent's T1 server). Always written, even when skip_t1 is set, so
+    # a subagent invoked from a skip-T1 parent can still cohere on its own
+    # session if it later writes a server record.
     write_claude_session_id(session_id)
 
     # T2 memory context is surfaced by session_start_hook.py (via t2_prefix_scan.py)
@@ -134,25 +153,36 @@ def session_end() -> str:
 
     Returns a summary string.
     """
-    ppid = os.getppid()
-    own_file = SESSIONS_DIR / f"{ppid}.session"
+    # Resolve the Claude conversation UUID from the env var the SessionStart
+    # hook exported, or from the legacy ``current_session`` flat file as
+    # fallback for processes launched outside the SessionStart's child tree.
+    session_id = os.environ.get("NX_SESSION_ID")
+    if not session_id:
+        from nexus.session import read_claude_session_id
+        session_id = read_claude_session_id()
 
-    # Determine if this process owns the session (wrote the record at start).
-    # own_file.read_text() is safe here: the file is written once at session_start
-    # by this process and is only deleted later in this function — no external
-    # writer can modify it between the exists() check and read_text().
     own_record: dict | None = None
-    if own_file.exists():
-        try:
-            r = json.loads(own_file.read_text())
-            if isinstance(r, dict) and "session_id" in r:
-                own_record = r
-        except (json.JSONDecodeError, OSError) as exc:
-            _log.debug("session_end_own_record_corrupt", path=str(own_file), error=str(exc))
+    own_file: Path | None = None
+    if session_id:
+        own_file = SESSIONS_DIR / f"{session_id}.session"
+        # Safe read: the file is written once at session_start by this
+        # process and only deleted later in this function — no external
+        # writer can modify it between the exists() check and read_text().
+        if own_file.exists():
+            try:
+                r = json.loads(own_file.read_text())
+                if isinstance(r, dict) and "session_id" in r:
+                    own_record = r
+            except (json.JSONDecodeError, OSError) as exc:
+                _log.debug(
+                    "session_end_own_record_corrupt",
+                    path=str(own_file),
+                    error=str(exc),
+                )
 
-    # For T1 flush, use own record if available; otherwise walk the chain
-    # (child-agent scenario where the parent's file is further up).
-    flush_record = own_record or find_ancestor_session(SESSIONS_DIR)
+    # For T1 flush: prefer the owned record; otherwise look up by UUID
+    # (child-agent scenario where the env var was inherited).
+    flush_record = own_record or find_session_by_id(SESSIONS_DIR, session_id)
     if flush_record is None:
         _log.warning(
             "session_end: no T1 session record found; flagged scratch entries may not have been flushed"
@@ -182,7 +212,7 @@ def session_end() -> str:
         _log.warning("session_end: storage error during flush/expire", error=str(exc))
 
     # Stop server and clean up only if this process owns the session.
-    if own_record:
+    if own_record and own_file is not None:
         server_pid = own_record.get("server_pid", 0)
         if server_pid:
             stop_t1_server(server_pid)

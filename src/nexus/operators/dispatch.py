@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from typing import Any
 
 import structlog
@@ -72,6 +73,16 @@ async def claude_dispatch(
     # subprocesses). Same killpg idiom as T1 chroma + MinerU cleanup
     # (PR #198). Without this, ``proc.kill()`` on timeout only kills the
     # claude leader and orphans the children.
+    #
+    # NEXUS_SKIP_T1=1 tells the subprocess's nx SessionStart hook to NOT
+    # spin up a chroma T1 server. Operator dispatch is stateless — each
+    # `claude -p` invocation is a one-shot call that takes its input from
+    # the prompt and produces structured JSON output. There's no cross-
+    # invocation scratch to preserve, so paying the chroma startup cost
+    # for every call would be pure waste. The subprocess's T1 client
+    # falls back to EphemeralClient when no server is found, which is
+    # the correct semantics here: isolated, in-process, no cross talk.
+    env = {**os.environ, "NEXUS_SKIP_T1": "1"}
     proc = await asyncio.create_subprocess_exec(
         "claude", "-p",
         "--output-format", "json",
@@ -81,6 +92,7 @@ async def claude_dispatch(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         start_new_session=True,
+        env=env,
     )
 
     try:
