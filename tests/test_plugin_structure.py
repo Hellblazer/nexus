@@ -393,6 +393,32 @@ class TestHooks:
     def test_hook_script_exists(self, event: str, rel_path: str) -> None:
         assert (PLUGIN_DIR / rel_path).exists(), f"hooks.json [{event}] references missing: {rel_path}"
 
+    def test_session_end_hook_registered(self) -> None:
+        """Regression guard: SessionEnd must invoke ``nx hook session-end``.
+
+        The hook was removed in v1.10.1 with the (incorrect) reasoning that
+        the T1 chroma server stops with the parent process tree. It does not:
+        chroma is spawned with ``start_new_session=True`` (so safe_killpg
+        reaches its multiprocessing workers; see beads nexus-dc57 / nexus-ze2a)
+        which detaches it from the terminal's process group, so OS-level
+        reaping never collects it. Removing this hook leaks one chroma child
+        per Claude Code session indefinitely. This test fails loudly if
+        anyone drops the hook again.
+        """
+        data = json.loads(HOOKS_PATH.read_text())
+        events = data.get("hooks", data)
+        session_end = events.get("SessionEnd")
+        assert session_end, "SessionEnd hook is missing — see test docstring for why it must stay"
+        commands = [
+            sub.get("command", "")
+            for entry in session_end
+            for sub in entry.get("hooks", [])
+        ]
+        assert any("nx hook session-end" in cmd for cmd in commands), (
+            f"SessionEnd registered but does not invoke 'nx hook session-end'; "
+            f"found commands: {commands}"
+        )
+
 
 class TestStandaloneSkillRegistry:
 

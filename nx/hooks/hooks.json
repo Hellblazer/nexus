@@ -32,6 +32,18 @@
         ]
       }
     ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "nx hook session-end || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "PreCompact": [],
     "PostCompact": [
       {
