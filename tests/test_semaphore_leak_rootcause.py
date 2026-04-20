@@ -66,17 +66,21 @@ def test_start_t1_server_uses_start_new_session(monkeypatch) -> None:
     assert captured["kwargs"].get("start_new_session") is True
 
 
-def test_start_t1_server_registers_atexit_cleanup(monkeypatch) -> None:
-    """Regression — start_t1_server MUST register an atexit handler that
-    kills the spawned chroma child on graceful interpreter exit.
+def test_start_t1_server_does_not_register_atexit_cleanup(monkeypatch) -> None:
+    """Regression — start_t1_server MUST NOT register an atexit handler.
 
-    This is the defence-in-depth fallback for cases the SessionEnd hook
-    cannot cover (harness cancels the hook on shutdown, OOM, terminal
-    SIGHUP that doesn't propagate because of ``start_new_session=True``).
-    Without it, chroma children leak indefinitely whenever Claude Code
-    exits without calling ``nx hook session-end`` — the symptom that
-    accumulated 43 leaked processes on the maintainer's machine.
+    A previous version (PR #220) registered ``atexit.register(stop_t1_server,
+    pid)`` here as a "defence-in-depth fallback" for cases the SessionEnd
+    hook doesn't fire. It was wrong: ``start_t1_server`` runs inside the
+    short-lived ``nx hook session-start`` process, which exits *immediately*
+    after spawning chroma. atexit then killed the chroma server within
+    milliseconds of spawn — production T1 silently fell back to
+    EphemeralClient on every Claude conversation between 4.9.1 and the
+    fix. The chroma server is meant to outlive this process; cleanup is
+    the SessionEnd hook's job. This test guards against the regression
+    coming back.
     """
+    import atexit
     from nexus import session
 
     class _FakeProc:
@@ -101,18 +105,22 @@ def test_start_t1_server_registers_atexit_cleanup(monkeypatch) -> None:
     monkeypatch.setattr(session, "_find_chroma", lambda: "/fake/chroma")
     monkeypatch.setattr(session.subprocess, "Popen", lambda *a, **kw: _FakeProc())
     monkeypatch.setattr(session.socket, "create_connection", _fake_create_connection)
-    monkeypatch.setattr(session.atexit, "register", _fake_atexit_register)
+    # Patch atexit at the source — start_t1_server no longer imports it,
+    # but we monkeypatch globally to detect any regression that adds an
+    # atexit registration back in.
+    monkeypatch.setattr(atexit, "register", _fake_atexit_register)
 
     session.start_t1_server()
 
-    matching = [
+    chroma_killers = [
         (func, args)
         for func, args, _ in registered
-        if func is session.stop_t1_server and args == (67890,)
+        if getattr(func, "__name__", "") == "stop_t1_server"
     ]
-    assert matching, (
-        "start_t1_server did not register stop_t1_server(pid) with atexit; "
-        f"registered handlers: {registered}"
+    assert not chroma_killers, (
+        "start_t1_server registered an atexit chroma killer — this kills the "
+        "server right after spawn (PR #220 mistake). Cleanup belongs in "
+        f"SessionEnd. Found: {chroma_killers}"
     )
 
 

@@ -202,6 +202,32 @@ class TestSubprocessContract:
         )
 
     @pytest.mark.asyncio
+    async def test_sets_skip_t1_env(self) -> None:
+        """claude_dispatch must export NEXUS_SKIP_T1=1 in the subprocess env so
+        the spawned `claude -p`'s nx SessionStart hook does not spin up a chroma
+        T1 server. Operator dispatch is stateless — paying the chroma startup
+        cost on every call would be pure waste, and the subprocess's T1 client
+        falls back to EphemeralClient when no server record is found.
+        """
+        from nexus.operators.dispatch import claude_dispatch
+
+        proc = _make_proc()
+        captured: list = []
+
+        async def intercept(*args, **kwargs):
+            captured.append(kwargs)
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+            await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        env = captured[0].get("env")
+        assert env is not None, "subprocess must be spawned with explicit env (got default inherit)"
+        assert env.get("NEXUS_SKIP_T1") == "1", (
+            f"NEXUS_SKIP_T1=1 missing from subprocess env; got NEXUS_SKIP_T1={env.get('NEXUS_SKIP_T1')!r}"
+        )
+
+    @pytest.mark.asyncio
     async def test_includes_p_flag(self) -> None:
         """Must pass -p flag to invoke non-interactive mode."""
         from nexus.operators.dispatch import claude_dispatch

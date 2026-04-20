@@ -11,11 +11,14 @@ import pytest
 from nexus.session import (
     _stable_pid,
     find_ancestor_session,
+    find_session_by_id,
     generate_session_id,
     read_session_id,
     sweep_stale_sessions,
+    write_claude_session_id,
     write_session_file,
     write_session_record,
+    write_session_record_by_id,
 )
 
 
@@ -176,10 +179,16 @@ def test_sweep_stale_sessions_removes_old_records(tmp_path: Path) -> None:
 
 
 def test_sweep_stale_sessions_keeps_fresh_records(tmp_path: Path) -> None:
-    """Records younger than max_age_hours are not removed."""
+    """UUID-keyed records younger than max_age_hours are not removed.
+
+    NB: Numeric-stem files are now swept *unconditionally* as a migration
+    from the legacy PID-keyed scheme — see
+    test_sweep_stale_sessions_removes_legacy_numeric_stem_unconditionally
+    for that path.
+    """
     sessions = tmp_path / "sessions"
-    path = write_session_record(sessions, ppid=5556, session_id="fresh",
-                                host="127.0.0.1", port=51004, server_pid=102)
+    path = write_session_record_by_id(sessions, "fresh-uuid",
+                                      host="127.0.0.1", port=51004, server_pid=102)
 
     sweep_stale_sessions(sessions_dir=sessions)
     assert path.exists()
@@ -190,10 +199,157 @@ def test_sweep_stale_sessions_noop_on_missing_dir(tmp_path: Path) -> None:
     sweep_stale_sessions(sessions_dir=tmp_path / "nonexistent")  # must not raise
 
 
-def test_sweep_stale_sessions_skips_non_json_files(tmp_path: Path) -> None:
-    """Non-JSON files (e.g. legacy bare-UUID) are ignored silently."""
+def test_sweep_stale_sessions_skips_non_json_uuid_files(tmp_path: Path) -> None:
+    """UUID-stem files with non-JSON content are left alone (no migration applies)."""
     sessions = tmp_path / "sessions"
     sessions.mkdir()
-    (sessions / "9999.session").write_text("bare-uuid")
+    uuid_file = sessions / "abc-123-uuid.session"
+    uuid_file.write_text("bare-uuid-not-json")
     sweep_stale_sessions(sessions_dir=sessions)  # must not raise
-    assert (sessions / "9999.session").exists()  # untouched
+    assert uuid_file.exists()  # untouched: only json-parseable UUID files are evaluated for staleness
+
+
+# ── UUID-keyed session records (current scheme; PID-keyed above is legacy) ──
+
+def test_write_session_record_by_id_uses_uuid_filename(tmp_path: Path) -> None:
+    sessions = tmp_path / "sessions"
+    path = write_session_record_by_id(
+        sessions,
+        session_id="conv-uuid-1234",
+        host="127.0.0.1",
+        port=51234,
+        server_pid=4321,
+    )
+    assert path.name == "conv-uuid-1234.session"
+    assert path.exists()
+    record = json.loads(path.read_text())
+    assert record["session_id"] == "conv-uuid-1234"
+    assert record["server_port"] == 51234
+
+
+def test_find_session_by_id_explicit_id(tmp_path: Path) -> None:
+    sessions = tmp_path / "sessions"
+    write_session_record_by_id(sessions, "uuid-A", "127.0.0.1", 11111, 9001)
+    write_session_record_by_id(sessions, "uuid-B", "127.0.0.1", 22222, 9002)
+
+    rec_a = find_session_by_id(sessions, "uuid-A")
+    assert rec_a is not None and rec_a["server_port"] == 11111
+
+    rec_b = find_session_by_id(sessions, "uuid-B")
+    assert rec_b is not None and rec_b["server_port"] == 22222
+
+
+def test_find_session_by_id_returns_none_for_unknown(tmp_path: Path) -> None:
+    sessions = tmp_path / "sessions"
+    write_session_record_by_id(sessions, "exists", "127.0.0.1", 11111, 9001)
+    assert find_session_by_id(sessions, "does-not-exist") is None
+
+
+def test_find_session_by_id_falls_back_to_env_var(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """When session_id is not passed explicitly, NX_SESSION_ID env wins."""
+    sessions = tmp_path / "sessions"
+    write_session_record_by_id(sessions, "from-env", "127.0.0.1", 33333, 9003)
+    monkeypatch.setenv("NX_SESSION_ID", "from-env")
+
+    rec = find_session_by_id(sessions)  # no explicit id — reads env
+    assert rec is not None
+    assert rec["server_port"] == 33333
+
+
+def test_find_session_by_id_falls_back_to_flat_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When NX_SESSION_ID env is absent, fall back to current_session flat file."""
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("NX_SESSION_ID", raising=False)
+
+    # Re-import-time path resolution honours the env var, but the module-level
+    # CLAUDE_SESSION_FILE constant was set at import. Patch it for this test.
+    from nexus import session as _session
+    monkeypatch.setattr(_session, "CLAUDE_SESSION_FILE", tmp_path / "current_session")
+
+    sessions = tmp_path / "sessions"
+    write_session_record_by_id(sessions, "from-flat", "127.0.0.1", 44444, 9004)
+    write_claude_session_id("from-flat")
+
+    rec = find_session_by_id(sessions)
+    assert rec is not None
+    assert rec["server_port"] == 44444
+
+
+def test_find_session_by_id_returns_none_when_no_id_resolvable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("NX_SESSION_ID", raising=False)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    from nexus import session as _session
+    monkeypatch.setattr(_session, "CLAUDE_SESSION_FILE", tmp_path / "no_such_file")
+
+    assert find_session_by_id(tmp_path / "sessions") is None
+
+
+def test_two_uuids_same_dir_get_distinct_records(tmp_path: Path) -> None:
+    """Bug-fix coverage: two Claude conversations launched from one terminal
+    must end up with distinct session files and reachable independently.
+
+    Pre-fix, both wrote to ~/.config/nexus/sessions/{login_shell_pid}.session
+    and shared the same T1. Post-fix, the UUID is the key, so two distinct
+    UUIDs produce two distinct files with no overlap.
+    """
+    sessions = tmp_path / "sessions"
+    write_session_record_by_id(sessions, "claude-conv-1", "127.0.0.1", 11111, 9101)
+    write_session_record_by_id(sessions, "claude-conv-2", "127.0.0.1", 22222, 9102)
+
+    files = sorted(p.name for p in sessions.glob("*.session"))
+    assert files == ["claude-conv-1.session", "claude-conv-2.session"]
+
+    rec1 = find_session_by_id(sessions, "claude-conv-1")
+    rec2 = find_session_by_id(sessions, "claude-conv-2")
+    assert rec1 is not None and rec2 is not None
+    assert rec1["server_port"] != rec2["server_port"]
+
+
+# ── Migration: legacy numeric-stem files swept on first new-code SessionStart
+
+def test_sweep_stale_sessions_removes_legacy_numeric_stem_unconditionally(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Numeric-stem session files come from the legacy PID-keyed scheme that
+    bound T1 to the terminal session. They never did the right thing —
+    sweep removes them unconditionally on first new-code SessionStart,
+    even if their timestamp is fresh.
+    """
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+
+    # Legacy PID-keyed file with a FRESH timestamp — would have survived the
+    # 24h sweep policy under the old code path.
+    legacy = sessions / "12345.session"
+    import time as _time
+    legacy.write_text(json.dumps({
+        "session_id": "old-uuid",
+        "server_host": "127.0.0.1",
+        "server_port": 55555,
+        "server_pid": 99999,
+        "created_at": _time.time(),
+        "tmpdir": "",
+    }))
+
+    # UUID-keyed file in the new format — should survive.
+    valid = sessions / "valid-uuid.session"
+    valid.write_text(json.dumps({
+        "session_id": "valid-uuid",
+        "server_host": "127.0.0.1",
+        "server_port": 66666,
+        "server_pid": 99998,
+        "created_at": _time.time(),
+        "tmpdir": "",
+    }))
+
+    # No-op the chroma kill so the test doesn't try to signal PID 99999.
+    monkeypatch.setattr("nexus.session.stop_t1_server", lambda _pid: None)
+
+    sweep_stale_sessions(sessions_dir=sessions)
+
+    assert not legacy.exists(), "legacy PID-keyed file should be swept regardless of age"
+    assert valid.exists(), "UUID-keyed file should survive the sweep"
