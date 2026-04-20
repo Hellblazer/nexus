@@ -150,6 +150,19 @@ def test_doctor_missing_bd_output(runner, mock_reg):
     assert "BeadsProject/beads" in result.output
 
 
+def test_doctor_missing_npx_is_non_fatal_with_plugin_hint(runner, mock_reg):
+    """Missing npx is plugin-only — non-fatal for the CLI but reported with
+    a clear hint that the plugin's MCP servers will fail without it."""
+    def which_side(name):
+        return None if name == "npx" else f"/usr/bin/{name}"
+    result = _invoke(runner, mock_reg, which=which_side)
+    assert result.exit_code == 0, "missing npx must not fail nx doctor (plugin-only)"
+    assert "npx (Node.js, plugin-only)" in result.output
+    assert "not found" in result.output
+    assert "sequential-thinking" in result.output or "context7" in result.output
+    assert "nodejs.org" in result.output
+
+
 # ── Python version ──────────────────────────────────────────────────────────
 
 def test_doctor_python_version_too_old_fails(runner, mock_reg):

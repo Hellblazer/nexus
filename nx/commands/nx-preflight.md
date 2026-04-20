@@ -68,7 +68,27 @@ disable-model-invocation: false
   fi
   echo ""
 
-  # ── 5. CLAUDE.md Agent Readiness ────────────────────────────────────────────
+  # ── 5. Node.js / npx (plugin MCP servers) ───────────────────────────────────
+  echo "### 5. Node.js / npx (required by plugin MCP servers)"
+  echo ""
+  if command -v npx &>/dev/null; then
+    NODE_VERSION=$(node --version 2>&1)
+    NPX_PATH=$(command -v npx)
+    echo "Status: PASS"
+    echo "Node: $NODE_VERSION"
+    echo "npx:  $NPX_PATH"
+  else
+    echo "Status: FAIL"
+    echo "npx not found in PATH — the plugin's sequential-thinking and context7 MCP"
+    echo "servers are spawned via 'npx -y …' and will silently fail to start."
+    echo "Install:"
+    echo "  brew install node                         (macOS)"
+    echo "  apt install nodejs npm                    (Ubuntu/Debian)"
+    echo "  https://nodejs.org/                       (other platforms)"
+  fi
+  echo ""
+
+  # ── 6. CLAUDE.md Agent Readiness ────────────────────────────────────────────
   echo "### 6. CLAUDE.md Agent Readiness"
   echo ""
   if [ -f "CLAUDE.md" ]; then
@@ -116,6 +136,7 @@ Based on the preflight output above, produce a summary table:
 | nx doctor | — | — |
 | bd (beads) | — | — |
 | uv | — | — |
+| Node.js / npx | — | — |
 | CLAUDE.md | — | — |
 
 Fill in each row from the check results above. Use "PASS", "FAIL", or "WARN" for Status. Leave Action needed blank for passing checks; for failures/warnings, provide the install command or link.
