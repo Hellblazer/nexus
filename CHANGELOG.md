@@ -6,6 +6,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.9.3] - 2026-04-20
+
+### Fixed
+
+- **Nested operator subprocesses stomped the parent's `current_session` flat file** (`src/nexus/hooks.py`, `src/nexus/operators/dispatch.py`, `src/nexus/db/t1.py`). After a parent Claude session ran any tool that fired `claude_dispatch` (operator_summarize, operator_generate, etc.), the subprocess's `SessionStart` hook unconditionally rewrote `~/.config/nexus/current_session` with its own transient UUID. The subprocess wrote no on-disk session record (skip-T1 path), so the parent's shell-side `nx scratch` / `nx memory` then resolved to a ghost UUID, found no record, and silently fell back to EphemeralClient for the rest of the conversation. Three coordinated changes resolve it: `claude_dispatch` exports `NX_SESSION_ID=<parent-uuid>` in subprocess env (populates the discriminator); `session_start` honours `NX_SESSION_ID` by preferring it as the resolved `session_id` and skipping the `write_claude_session_id()` call (preserves the parent pointer); `T1Database.__init__` short-circuits to EphemeralClient under `NEXUS_SKIP_T1` without searching for a session record (otherwise the operator would inadvertently connect to the parent's T1 server). Stateless-operator semantics preserved; cross-conversation T1 contamination eliminated.
+
+### Added
+
+- **Plugin↔CLI version drift detection at MCP server startup** (`src/nexus/mcp_infra.py`, `nx/.mcp.json`). The plugin and CLI ship from one `pyproject.toml` (CI enforces marketplace.json parity) but the user runs two separate update commands — `uv tool upgrade conexus` and `/plugin update nx@nexus-plugins`. After drift, the plugin's hooks may invoke flags the CLI no longer recognises. Extended `check_version_compatibility()` (already called from each MCP server's `main()` for CLI ↔ T2 schema drift) with a second case: read `${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json`'s `version` field, compare against `importlib.metadata.version("conexus")`, log `plugin_cli_version_mismatch` warning on minor or major divergence with the actionable update hint for the lagging side. Patch-level drift ignored (within-minor releases are wire-compatible). Never blocks startup. The MCP server is the natural single binding point — `nx-mcp` and `nx-mcp-catalog` are conexus entry points; plugin/CLI coupling runs entirely through that surface. Modelled on JupyterLab/VSCode's runtime-recheck-on-every-load pattern. `nx/.mcp.json` gains an explicit `env: {"CLAUDE_PLUGIN_ROOT": "${CLAUDE_PLUGIN_ROOT}"}` block so the spawned MCP server sees the variable as an env var (not just a path-substitution token).
+
 ## [4.9.2] - 2026-04-20
 
 ### Fixed

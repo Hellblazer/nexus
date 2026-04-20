@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.9.3] - 2026-04-20
+
+### Added
+
+- **Explicit `CLAUDE_PLUGIN_ROOT` env export in `nx/.mcp.json`** for the `nexus` and `nexus-catalog` MCP servers. Without this, `${CLAUDE_PLUGIN_ROOT}` is only available for path substitution at config-parse time; the spawned MCP server itself wouldn't see it as an env var. Now `nx-mcp` and `nx-mcp-catalog` can `os.environ.get("CLAUDE_PLUGIN_ROOT")` reliably — used by the new plugin↔CLI version drift check on the Python-package side (see root `CHANGELOG.md`).
+
 ## [4.9.2] - 2026-04-20
 
 ### Added
