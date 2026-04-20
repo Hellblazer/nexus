@@ -6,6 +6,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **`SessionEnd` hook re-registered in `hooks/hooks.json`** — retracts the
+  v1.10.1 removal. The "T1 server stops with process tree" reasoning was
+  wrong: chroma is intentionally spawned with `start_new_session=True`
+  (so `safe_killpg` reaches its multiprocessing workers and avoids
+  POSIX-named-semaphore exhaustion — beads nexus-dc57 / nexus-ze2a),
+  which detaches it from the terminal's process group. Removing the
+  hook removed the only thing that ever killed it; symptom was up to
+  43 leaked `chroma run …nx_t1_*` processes per machine, oldest 2+ days
+  old, accreting tmpdirs in `/var/folders/.../T/nx_t1_*` indefinitely.
+  The cancellation-during-teardown error noted in v1.10.1 is now
+  suppressed via `|| true` on the hook command.
+- **`atexit`-based fallback in `start_t1_server`** (`src/nexus/session.py`) —
+  registers `stop_t1_server(pid)` so the chroma child is reaped even when
+  the SessionEnd hook never fires (harness teardown, OOM, terminal SIGHUP
+  swallowed by the new-session boundary). Idempotent against already-dead
+  PIDs.
+
 ## [4.9.0] - 2026-04-19
 
 Plugin version aligned with conexus 4.9.0. No plugin-level functional

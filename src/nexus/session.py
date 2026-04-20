@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import atexit
 import json
 import os
 import signal
@@ -292,6 +293,12 @@ def start_t1_server() -> tuple[str, int, int, str]:
         try:
             conn = socket.create_connection((_T1_SERVER_HOST, port), timeout=0.5)
             conn.close()
+            # Defence-in-depth: atexit reaps chroma on graceful interpreter
+            # exit even when the SessionEnd hook never fires (harness
+            # teardown cancels the hook, OOM, terminal SIGHUP that doesn't
+            # propagate because of start_new_session=True). Idempotent —
+            # stop_t1_server tolerates an already-dead PID.
+            atexit.register(stop_t1_server, proc.pid)
             return _T1_SERVER_HOST, port, proc.pid, tmpdir
         except OSError:
             time.sleep(0.2)  # intentional: server not yet listening, retry loop

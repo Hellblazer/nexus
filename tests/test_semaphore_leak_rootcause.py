@@ -66,6 +66,56 @@ def test_start_t1_server_uses_start_new_session(monkeypatch) -> None:
     assert captured["kwargs"].get("start_new_session") is True
 
 
+def test_start_t1_server_registers_atexit_cleanup(monkeypatch) -> None:
+    """Regression — start_t1_server MUST register an atexit handler that
+    kills the spawned chroma child on graceful interpreter exit.
+
+    This is the defence-in-depth fallback for cases the SessionEnd hook
+    cannot cover (harness cancels the hook on shutdown, OOM, terminal
+    SIGHUP that doesn't propagate because of ``start_new_session=True``).
+    Without it, chroma children leak indefinitely whenever Claude Code
+    exits without calling ``nx hook session-end`` — the symptom that
+    accumulated 43 leaked processes on the maintainer's machine.
+    """
+    from nexus import session
+
+    class _FakeProc:
+        pid = 67890
+        returncode = None
+        def poll(self):
+            return None
+        def kill(self):
+            pass
+
+    def _fake_create_connection(*args, **kwargs):
+        class _FakeConn:
+            def close(self): pass
+        return _FakeConn()
+
+    registered: list[tuple] = []
+
+    def _fake_atexit_register(func, *args, **kwargs):
+        registered.append((func, args, kwargs))
+        return func
+
+    monkeypatch.setattr(session, "_find_chroma", lambda: "/fake/chroma")
+    monkeypatch.setattr(session.subprocess, "Popen", lambda *a, **kw: _FakeProc())
+    monkeypatch.setattr(session.socket, "create_connection", _fake_create_connection)
+    monkeypatch.setattr(session.atexit, "register", _fake_atexit_register)
+
+    session.start_t1_server()
+
+    matching = [
+        (func, args)
+        for func, args, _ in registered
+        if func is session.stop_t1_server and args == (67890,)
+    ]
+    assert matching, (
+        "start_t1_server did not register stop_t1_server(pid) with atexit; "
+        f"registered handlers: {registered}"
+    )
+
+
 # ── stop_t1_server: must kill the whole process group ───────────────────────
 
 
