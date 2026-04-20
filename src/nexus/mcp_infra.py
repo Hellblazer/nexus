@@ -6,6 +6,7 @@ Separated from tool definitions (mcp_server.py) to isolate concerns.
 """
 from __future__ import annotations
 
+import os
 import threading
 import time
 import warnings
@@ -480,51 +481,99 @@ def chash_dual_write_batch(
 
 
 def check_version_compatibility() -> None:
-    """Synchronous check: warn if CLI version diverges from stored version.
+    """Synchronous startup check for two version-drift cases.
 
-    Called from MCP ``main()`` before ``mcp.run()``.  Never blocks startup.
+    Called from each MCP server's ``main()`` before ``mcp.run()`` — the
+    natural single binding point between plugin and CLI (the MCP server
+    binaries ``nx-mcp`` / ``nx-mcp-catalog`` are conexus entry points;
+    plugin/CLI coupling runs entirely through this surface).
+
+    Two warnings, both non-fatal:
+
+    1. **CLI ↔ T2 schema drift** — current ``conexus`` package version
+       differs (minor or major) from ``_nexus_version.cli_version``
+       stored in T2. Suggests ``nx upgrade``. Catches the case where
+       the user upgraded conexus but hasn't run any migration-applying
+       command yet.
+
+    2. **Plugin ↔ CLI version drift** — installed Claude Code plugin's
+       declared version (read from ``${CLAUDE_PLUGIN_ROOT}/.claude-plugin/
+       plugin.json``) differs (minor or major) from the running CLI.
+       Suggests ``/plugin update nx@nexus-plugins`` or
+       ``uv tool upgrade conexus`` depending on which side is older.
+       The plugin and CLI ship from the same repo at the same version
+       (CI enforces marketplace.json parity); drift means one update
+       command was run without the other.
+
+    Never blocks startup — both checks log warnings only.
     """
+    import json
     import sqlite3
+    from pathlib import Path
 
     import structlog
 
     log = structlog.get_logger()
     try:
         from importlib.metadata import version as _pkg_version
-
-        cli_ver = _pkg_version("conexus")
-        db_path = default_db_path()
-        if not db_path.exists():
-            return
-        conn = sqlite3.connect(str(db_path))
-        try:
-            row = conn.execute(
-                "SELECT value FROM _nexus_version WHERE key='cli_version'"
-            ).fetchone()
-        except sqlite3.OperationalError:
-            return  # table doesn't exist yet
-        finally:
-            conn.close()
-        if row is None:
-            return
-        stored_ver = row[0]
         from nexus.db.migrations import _parse_version
 
-        cli_t = _parse_version(cli_ver)
-        stored_t = _parse_version(stored_ver)
-        # Warn on minor or major divergence, not patch.
-        # Tuple slicing is safe for short tuples — (4,)[:2] == (4,).
-        if cli_t[:2] != stored_t[:2]:
-            if cli_t > stored_t:
-                hint = "run 'nx upgrade' to apply pending migrations"
-            else:
-                hint = "DB was upgraded by a newer CLI version"
-            log.warning(
-                "version_mismatch",
-                cli_version=cli_ver,
-                stored_version=stored_ver,
-                hint=hint,
-            )
+        cli_ver = _pkg_version("conexus")
+
+        # ── (1) CLI ↔ T2 schema drift ────────────────────────────────────
+        db_path = default_db_path()
+        if db_path.exists():
+            conn = sqlite3.connect(str(db_path))
+            try:
+                row = conn.execute(
+                    "SELECT value FROM _nexus_version WHERE key='cli_version'"
+                ).fetchone()
+            except sqlite3.OperationalError:
+                row = None  # table doesn't exist yet — fresh install
+            finally:
+                conn.close()
+            if row is not None:
+                stored_ver = row[0]
+                cli_t = _parse_version(cli_ver)
+                stored_t = _parse_version(stored_ver)
+                # Warn on minor or major divergence, not patch.
+                # Tuple slicing is safe for short tuples — (4,)[:2] == (4,).
+                if cli_t[:2] != stored_t[:2]:
+                    if cli_t > stored_t:
+                        hint = "run 'nx upgrade' to apply pending migrations"
+                    else:
+                        hint = "DB was upgraded by a newer CLI version"
+                    log.warning(
+                        "version_mismatch",
+                        cli_version=cli_ver,
+                        stored_version=stored_ver,
+                        hint=hint,
+                    )
+
+        # ── (2) Plugin ↔ CLI version drift ──────────────────────────────
+        plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT")
+        if plugin_root:
+            manifest_path = Path(plugin_root) / ".claude-plugin" / "plugin.json"
+            try:
+                manifest = json.loads(manifest_path.read_text())
+                plugin_ver = manifest.get("version")
+            except (OSError, json.JSONDecodeError):
+                plugin_ver = None
+            if plugin_ver:
+                cli_t = _parse_version(cli_ver)
+                plugin_t = _parse_version(plugin_ver)
+                if cli_t[:2] != plugin_t[:2]:
+                    # Choose the actionable update for the lagging side.
+                    if cli_t > plugin_t:
+                        hint = "plugin is older — run '/plugin update nx@nexus-plugins' in Claude Code"
+                    else:
+                        hint = "CLI is older — run 'uv tool upgrade conexus'"
+                    log.warning(
+                        "plugin_cli_version_mismatch",
+                        cli_version=cli_ver,
+                        plugin_version=plugin_ver,
+                        hint=hint,
+                    )
     except Exception:
         pass  # never block MCP startup
 
