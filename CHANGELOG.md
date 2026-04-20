@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.9.1] - 2026-04-20
+
+### Fixed
+
+- **T1 ChromaDB child process leak** (`src/nexus/session.py`). The `SessionEnd` plugin hook removed in v1.10.1 with the reasoning *"T1 server stops with process tree; hook was a no-op"* was load-bearing — chroma is intentionally spawned with `start_new_session=True` (so `safe_killpg` reaches its multiprocessing workers and avoids POSIX-named-semaphore exhaustion; beads `nexus-dc57` / `nexus-ze2a`), which also detaches it from the terminal's process group, so OS-level reaping never collects it. Symptom on the maintainer's machine: 43 leaked `chroma run …nx_t1_*` processes accreting over 2+ days, plus 51 orphan tmp dirs in `/var/folders/.../T/nx_t1_*`. The plugin-side hook re-registration ships in the `nx` plugin (see `nx/CHANGELOG.md`). The `nexus` Python package adds an `atexit.register(stop_t1_server, pid)` fallback in `start_t1_server` for cases where the hook can't fire (harness teardown cancels the hook, OOM, terminal SIGHUP swallowed by the new-session boundary). Idempotent against already-dead PIDs. Two new regression tests pin both halves of the fix.
+
 ## [4.9.0] - 2026-04-19
 
 ### Added

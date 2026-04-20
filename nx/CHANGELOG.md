@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.9.1] - 2026-04-20
+
 ### Fixed
 - **`SessionEnd` hook re-registered in `hooks/hooks.json`** — retracts the
   v1.10.1 removal. The "T1 server stops with process tree" reasoning was
@@ -23,6 +25,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the SessionEnd hook never fires (harness teardown, OOM, terminal SIGHUP
   swallowed by the new-session boundary). Idempotent against already-dead
   PIDs.
+
+### Changed
+- **`using-nx-skills` SKILL.md trimmed by 110 lines** — removed the
+  `Process Flow` graphviz block (was rendering as a 13.5KB token wall in
+  the SessionStart hook output) and the `Skill Directory` table (was
+  re-enumerating skills the harness already dispatches from each skill's
+  description metadata, drifting out of sync over time). No behavioural
+  change.
 
 ## [4.9.0] - 2026-04-19
 
