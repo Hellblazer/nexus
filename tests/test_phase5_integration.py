@@ -142,6 +142,127 @@ class TestMcpVersionCheck:
             check_version_compatibility()  # should not raise
 
 
+class TestPluginCliVersionCheck:
+    """Plugin↔CLI drift detection at MCP server startup.
+
+    The MCP server is the single binding point between the Claude Code
+    plugin and the conexus CLI (``nx-mcp`` / ``nx-mcp-catalog`` are
+    conexus entry points). On startup, ``check_version_compatibility``
+    reads the plugin manifest at ``${CLAUDE_PLUGIN_ROOT}/.claude-plugin/
+    plugin.json`` and warns on minor or major divergence from the
+    installed CLI.
+    """
+
+    def _write_plugin_manifest(self, root: Path, version: str) -> None:
+        manifest_dir = root / ".claude-plugin"
+        manifest_dir.mkdir(parents=True, exist_ok=True)
+        (manifest_dir / "plugin.json").write_text(
+            json.dumps({"name": "nx", "version": version})
+        )
+
+    def test_no_plugin_root_silent(self, tmp_path: Path, monkeypatch) -> None:
+        """No CLAUDE_PLUGIN_ROOT env → plugin check is silent (CLI usage)."""
+        from nexus.mcp_infra import check_version_compatibility
+        monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+
+        with (
+            patch("nexus.mcp_infra.default_db_path", return_value=tmp_path / "no.db"),
+            patch("importlib.metadata.version", return_value="4.9.2"),
+            patch("structlog.get_logger") as mock_get_logger,
+        ):
+            check_version_compatibility()
+            mock_get_logger.return_value.warning.assert_not_called()
+
+    def test_plugin_version_matches_cli_no_warning(self, tmp_path: Path, monkeypatch) -> None:
+        from nexus.mcp_infra import check_version_compatibility
+
+        plugin_root = tmp_path / "plugin"
+        self._write_plugin_manifest(plugin_root, "4.9.2")
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+
+        with (
+            patch("nexus.mcp_infra.default_db_path", return_value=tmp_path / "no.db"),
+            patch("importlib.metadata.version", return_value="4.9.2"),
+            patch("structlog.get_logger") as mock_get_logger,
+        ):
+            check_version_compatibility()
+            mock_get_logger.return_value.warning.assert_not_called()
+
+    def test_patch_divergence_no_warning(self, tmp_path: Path, monkeypatch) -> None:
+        from nexus.mcp_infra import check_version_compatibility
+
+        plugin_root = tmp_path / "plugin"
+        self._write_plugin_manifest(plugin_root, "4.9.1")
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+
+        with (
+            patch("nexus.mcp_infra.default_db_path", return_value=tmp_path / "no.db"),
+            patch("importlib.metadata.version", return_value="4.9.2"),
+            patch("structlog.get_logger") as mock_get_logger,
+        ):
+            check_version_compatibility()
+            mock_get_logger.return_value.warning.assert_not_called()
+
+    def test_cli_newer_warns_with_plugin_update_hint(self, tmp_path: Path, monkeypatch) -> None:
+        """CLI is at a newer minor version → user should run /plugin update."""
+        from nexus.mcp_infra import check_version_compatibility
+
+        plugin_root = tmp_path / "plugin"
+        self._write_plugin_manifest(plugin_root, "4.9.0")
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+
+        with (
+            patch("nexus.mcp_infra.default_db_path", return_value=tmp_path / "no.db"),
+            patch("importlib.metadata.version", return_value="4.10.0"),
+            patch("structlog.get_logger") as mock_get_logger,
+        ):
+            check_version_compatibility()
+            mock_log = mock_get_logger.return_value
+            mock_log.warning.assert_called_once()
+            event, kwargs = mock_log.warning.call_args.args[0], mock_log.warning.call_args.kwargs
+            assert event == "plugin_cli_version_mismatch"
+            assert kwargs["cli_version"] == "4.10.0"
+            assert kwargs["plugin_version"] == "4.9.0"
+            assert "/plugin update" in kwargs["hint"]
+
+    def test_plugin_newer_warns_with_uv_upgrade_hint(self, tmp_path: Path, monkeypatch) -> None:
+        """Plugin is at a newer minor version → user should run uv tool upgrade conexus."""
+        from nexus.mcp_infra import check_version_compatibility
+
+        plugin_root = tmp_path / "plugin"
+        self._write_plugin_manifest(plugin_root, "4.10.0")
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+
+        with (
+            patch("nexus.mcp_infra.default_db_path", return_value=tmp_path / "no.db"),
+            patch("importlib.metadata.version", return_value="4.9.2"),
+            patch("structlog.get_logger") as mock_get_logger,
+        ):
+            check_version_compatibility()
+            mock_log = mock_get_logger.return_value
+            mock_log.warning.assert_called_once()
+            kwargs = mock_log.warning.call_args.kwargs
+            assert "uv tool upgrade conexus" in kwargs["hint"]
+
+    def test_corrupt_manifest_silent(self, tmp_path: Path, monkeypatch) -> None:
+        """Corrupt plugin.json must not crash MCP startup."""
+        from nexus.mcp_infra import check_version_compatibility
+
+        plugin_root = tmp_path / "plugin"
+        manifest_dir = plugin_root / ".claude-plugin"
+        manifest_dir.mkdir(parents=True)
+        (manifest_dir / "plugin.json").write_text("{not-json{{{")
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+
+        with (
+            patch("nexus.mcp_infra.default_db_path", return_value=tmp_path / "no.db"),
+            patch("importlib.metadata.version", return_value="4.9.2"),
+            patch("structlog.get_logger") as mock_get_logger,
+        ):
+            check_version_compatibility()  # must not raise
+            mock_get_logger.return_value.warning.assert_not_called()
+
+
 # ── doctor --check-schema tests ─────────────────────────────────────────────
 
 

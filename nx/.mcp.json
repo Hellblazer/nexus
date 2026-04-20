@@ -5,10 +5,16 @@
   },
   "nexus": {
     "command": "nx-mcp",
-    "args": []
+    "args": [],
+    "env": {
+      "CLAUDE_PLUGIN_ROOT": "${CLAUDE_PLUGIN_ROOT}"
+    }
   },
   "nexus-catalog": {
     "command": "nx-mcp-catalog",
-    "args": []
+    "args": [],
+    "env": {
+      "CLAUDE_PLUGIN_ROOT": "${CLAUDE_PLUGIN_ROOT}"
+    }
   }
 }
