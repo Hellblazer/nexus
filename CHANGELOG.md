@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.9.4] - 2026-04-20
+
 ### Fixed
 
 - **`nx store delete` left the catalog entry visible until the next `nx catalog gc`** (`src/nexus/commands/store.py`). The MCP `catalog_links` tool already filtered deleted-endpoint links immediately, so the eventual-consistency gap surprised users who expected delete to be atomic. After the T3 delete succeeds, look up each doc by `meta.doc_id`, tombstone the catalog row, and remove it from SQLite. Best-effort: silently skips when the catalog is uninitialised. (nexus-43pq)

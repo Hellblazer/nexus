@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.9.4] - 2026-04-20
+
+No plugin-side changes; version bumped for marketplace parity. See root `CHANGELOG.md` for the six CLI fixes (nexus-43pq) shipped in this release.
+
 ## [4.9.3] - 2026-04-20
 
 ### Added
