@@ -229,6 +229,10 @@ class CatalogEntry:
     meta: dict = field(default_factory=dict)
     # nexus-8luh: POSIX mtime at index time; 0.0 → not captured.
     source_mtime: float = 0.0
+    # nexus-s8yz: alias pointer to a canonical tumbler. '' means this
+    # entry is canonical. Populated by dedupe-owners (nexus-tmbh) when
+    # consolidating duplicate owner registrations.
+    alias_of: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -245,6 +249,7 @@ class CatalogEntry:
             "indexed_at": self.indexed_at,
             "meta": self.meta,
             "source_mtime": self.source_mtime,
+            "alias_of": self.alias_of,
         }
 
 
@@ -279,6 +284,22 @@ def _run_git(
     if check and result.returncode != 0:
         raise RuntimeError(f"git command failed: {result.stderr.strip()}")
     return result
+
+
+def _ensure_git_identity(cwd: Path) -> None:
+    """Set local git identity if none is configured (CI runners, fresh machines).
+
+    Why: Catalog.init runs ``git commit``, which fails with "Author identity
+    unknown" when neither global nor local user.name/user.email is set. Real
+    users with global git config see their own identity; environments without
+    one get a benign fallback so the initial commit succeeds.
+    """
+    name = _run_git(["git", "config", "user.name"], cwd=cwd, check=False)
+    if name.returncode != 0 or not name.stdout.strip():
+        _run_git(["git", "config", "user.name", "Nexus Catalog"], cwd=cwd)
+    email = _run_git(["git", "config", "user.email"], cwd=cwd, check=False)
+    if email.returncode != 0 or not email.stdout.strip():
+        _run_git(["git", "config", "user.email", "nexus@local"], cwd=cwd)
 
 
 class Catalog:
@@ -398,6 +419,7 @@ class Catalog:
         catalog_path.mkdir(parents=True, exist_ok=True)
         if not git_dir.exists():
             _run_git(["git", "init"], cwd=catalog_path)
+        _ensure_git_identity(catalog_path)
         # Create empty JSONL files if missing
         for name in ("documents.jsonl", "owners.jsonl", "links.jsonl"):
             p = catalog_path / name
@@ -496,6 +518,19 @@ class Catalog:
     def register_owner(
         self, name: str, owner_type: str, *, repo_hash: str = "", description: str = "", repo_root: str = ""
     ) -> Tumbler:
+        # nexus-zbne (part of nexus-b34f): owner_type="repo" without a
+        # repo_hash is the pathway that produced 83 orphan owners in the
+        # live catalog — callers skipped ``owner_for_repo(repo_hash)`` and
+        # fell straight through to register_owner(), accumulating one
+        # alias per (repo_root, indexing-run) pair. Refuse the call so the
+        # invariant is enforced at the API boundary: every repo owner
+        # must be keyed by a stable hash that ``owner_for_repo`` can find.
+        if owner_type == "repo" and not repo_hash.strip():
+            raise ValueError(
+                "register_owner(owner_type='repo') requires a non-empty repo_hash. "
+                "Use Catalog.owner_for_repo(repo_hash) to look up an existing owner "
+                "before falling through to register_owner()."
+            )
         if repo_root and not Path(repo_root).is_absolute():
             raise ValueError(f"repo_root must be an absolute path: {repo_root!r}")
         dir_fd = self._acquire_lock()
@@ -635,12 +670,22 @@ class Catalog:
         finally:
             self._release_lock(dir_fd)
 
-    def resolve(self, tumbler: Tumbler) -> CatalogEntry | None:
+    def resolve(self, tumbler: Tumbler, *, follow_alias: bool = True) -> CatalogEntry | None:
+        """Return the document entry for ``tumbler``.
+
+        With ``follow_alias=True`` (default), transparently dereferences
+        ``alias_of`` — external callers get the canonical entry even
+        when they asked by an old tumbler. Pass ``follow_alias=False`` to
+        see the raw entry (needed by dedupe tooling to inspect the alias
+        graph itself).
+        """
+        target = self.resolve_alias(tumbler) if follow_alias else tumbler
         row = self._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime "
+            "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
+            "metadata, source_mtime, alias_of "
             "FROM documents WHERE tumbler = ?",
-            (str(tumbler),),
+            (str(target),),
         ).fetchone()
         if not row:
             return None
@@ -658,7 +703,84 @@ class Catalog:
             indexed_at=row[10],
             meta=json.loads(row[11]) if row[11] else {},
             source_mtime=row[12] or 0.0,
+            alias_of=row[13] or "",
         )
+
+    def resolve_alias(self, tumbler: Tumbler, *, max_hops: int = 16) -> Tumbler:
+        """Walk the alias chain to its canonical terminus.
+
+        Returns ``tumbler`` itself when no alias is set (the common case
+        and the pre-nexus-s8yz behaviour). Walks at most ``max_hops``
+        links and bails on cycles — a broken chain is treated as
+        terminating at the last-seen tumbler rather than raising, so
+        reads stay available even in a pathological catalog.
+        """
+        seen: set[str] = set()
+        current = str(tumbler)
+        for _ in range(max_hops):
+            if current in seen:
+                _log.warning("catalog.alias_cycle", tumbler=str(tumbler), seen=sorted(seen))
+                break
+            seen.add(current)
+            row = self._db.execute(
+                "SELECT alias_of FROM documents WHERE tumbler = ?",
+                (current,),
+            ).fetchone()
+            if not row:
+                # Dangling alias — return the last valid hop. Callers that
+                # need to detect this can compare to the input tumbler.
+                break
+            target = (row[0] or "").strip()
+            if not target:
+                # Canonical — this is the terminus.
+                return Tumbler.parse(current)
+            current = target
+        return Tumbler.parse(current)
+
+    def set_alias(self, tumbler: Tumbler, canonical: Tumbler) -> None:
+        """Mark ``tumbler`` as an alias for ``canonical``.
+
+        Intended for ``nx catalog dedupe-owners`` (nexus-tmbh). The
+        aliased row stays in the catalog so external references continue
+        to resolve. Refuses to create a self-alias (which would be a
+        1-cycle). A pre-existing alias is overwritten — callers that
+        need to preserve the old pointer should snapshot it first.
+
+        No-op if ``tumbler`` is not a known document. JSONL truth is
+        updated by appending a new document record with the alias
+        populated so subsequent JSONL-driven rebuilds preserve the
+        pointer (last-line-wins).
+        """
+        if str(tumbler) == str(canonical):
+            raise ValueError(f"self-alias rejected: {tumbler} → {canonical}")
+        # Read current row (by raw tumbler — do not follow alias, we want
+        # to update THIS row specifically).
+        raw = self.resolve(tumbler, follow_alias=False)
+        if raw is None:
+            return
+        self._db.execute(
+            "UPDATE documents SET alias_of = ? WHERE tumbler = ?",
+            (str(canonical), str(tumbler)),
+        )
+        self._db.commit()
+        # Append updated JSONL record so a future rebuild sees the alias.
+        updated = DocumentRecord(
+            tumbler=str(tumbler),
+            title=raw.title,
+            author=raw.author,
+            year=raw.year,
+            content_type=raw.content_type,
+            file_path=raw.file_path,
+            corpus=raw.corpus,
+            physical_collection=raw.physical_collection,
+            chunk_count=raw.chunk_count,
+            head_hash=raw.head_hash,
+            indexed_at=raw.indexed_at,
+            meta=raw.meta,
+            source_mtime=raw.source_mtime,
+            alias_of=str(canonical),
+        )
+        self._append_jsonl(self._documents_path, updated.__dict__)
 
     def resolve_path(self, tumbler: Tumbler) -> Path | None:
         """Return absolute path for the document's file_path.

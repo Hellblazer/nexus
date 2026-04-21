@@ -161,6 +161,12 @@ class DocumentRecord:
     # registrations, synthesized docs). Used by stale-source detection
     # to flag documents whose source file has changed since last index.
     source_mtime: float = 0.0
+    # nexus-s8yz: alias pointer to a canonical tumbler. '' means this
+    # document is canonical. When dedupe-owners (nexus-tmbh) consolidates
+    # documents, the surplus copies are rewritten with alias_of=<canonical>
+    # so external references continue to resolve. Resolution is transitive
+    # with cycle protection — see Catalog.resolve_alias().
+    alias_of: str = ""
     _deleted: bool = False
 
 

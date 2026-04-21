@@ -40,7 +40,15 @@ CREATE TABLE IF NOT EXISTS documents (
     head_hash TEXT,
     indexed_at TEXT,
     metadata JSON,
-    source_mtime REAL NOT NULL DEFAULT 0
+    source_mtime REAL NOT NULL DEFAULT 0,
+    -- nexus-s8yz: permanent tumbler aliasing. When a document is
+    -- consolidated into a canonical owner (dedupe-owners, nexus-tmbh),
+    -- its row is kept and alias_of is set to the canonical tumbler.
+    -- External references (plan templates, prose citations, links
+    -- written by other systems) continue to resolve via alias_of —
+    -- that is the stability promise tumblers were chosen for.
+    -- '' (empty) means "this is the canonical document".
+    alias_of TEXT NOT NULL DEFAULT ''
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
@@ -127,6 +135,16 @@ class CatalogDB:
                     "ALTER TABLE documents ADD COLUMN source_mtime REAL NOT NULL DEFAULT 0"
                 )
 
+        # nexus-s8yz: add alias_of column to existing databases. '' means
+        # the document is canonical (not an alias).
+        try:
+            self._conn.execute("SELECT alias_of FROM documents LIMIT 0")
+        except sqlite3.OperationalError:
+            with self._conn:
+                self._conn.execute(
+                    "ALTER TABLE documents ADD COLUMN alias_of TEXT NOT NULL DEFAULT ''"
+                )
+
     def rebuild(
         self,
         owners: dict[str, OwnerRecord],
@@ -152,8 +170,8 @@ class CatalogDB:
                     "INSERT INTO documents "
                     "(tumbler, title, author, year, content_type, file_path, "
                     "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
-                    "metadata, source_mtime) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "metadata, source_mtime, alias_of) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         tumbler,
                         d.title,
@@ -168,6 +186,7 @@ class CatalogDB:
                         d.indexed_at,
                         json.dumps(d.meta),
                         d.source_mtime,
+                        d.alias_of,
                     ),
                 )
 
