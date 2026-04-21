@@ -36,8 +36,14 @@ def info_cmd(name: str) -> None:
     if match is None:
         raise click.ClickException(f"collection not found: {name!r} — use: nx collection list")
 
-    query_model = embedding_model_for_collection(name)
-    idx_model   = index_model_for_collection(name)
+    from nexus.config import is_local_mode
+    if is_local_mode():
+        from nexus.db.local_ef import LocalEmbeddingFunction
+        ef = LocalEmbeddingFunction()
+        query_model = idx_model = f"{ef.model_name} (local)"
+    else:
+        query_model = embedding_model_for_collection(name)
+        idx_model   = index_model_for_collection(name)
 
     info = db.collection_info(name)
 

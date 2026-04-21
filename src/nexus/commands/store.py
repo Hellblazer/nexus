@@ -41,7 +41,7 @@ def _t3() -> T3Database:
 
 @click.group()
 def store() -> None:
-    """Permanent semantic knowledge store (ChromaDB Cloud + Voyage AI)."""
+    """Permanent semantic knowledge store (local ChromaDB or Cloud + Voyage AI)."""
 
 
 @store.command("put")
@@ -275,6 +275,30 @@ def get_cmd(doc_id: str, collection: str, json_out: bool) -> None:
         click.echo(f"\n{entry.get('content', '')}")
 
 
+def _reap_catalog_for_doc_ids(doc_ids: list[str]) -> None:
+    """Best-effort: tombstone catalog entries for deleted T3 docs.
+
+    Why: ``nx store delete`` removed only the T3 doc, leaving the catalog
+    entry visible to ``nx catalog list`` until the next ``nx catalog gc``.
+    Eventual consistency surprised users who expected delete to be atomic.
+    Skipped silently when the catalog is uninitialised.
+    """
+    from nexus.catalog import Catalog
+    from nexus.config import catalog_path
+
+    cat_path = catalog_path()
+    if not Catalog.is_initialized(cat_path):
+        return
+    try:
+        cat = Catalog(cat_path, cat_path / ".catalog.db")
+        for doc_id in doc_ids:
+            entry = cat.by_doc_id(doc_id)
+            if entry is not None:
+                cat.delete_document(entry.tumbler)
+    except Exception:
+        _log.debug("catalog_reap_failed", exc_info=True, doc_ids=doc_ids)
+
+
 @store.command("delete")
 @click.option("--collection", "-c", required=True,
               help="Collection name (required)")
@@ -301,6 +325,7 @@ def delete_cmd(collection: str, doc_id: str | None, title: str | None, yes: bool
     if doc_id:
         if not db.delete_by_id(col_name, doc_id):
             raise click.ClickException(f"Entry {doc_id!r} not found in {col_name}")
+        _reap_catalog_for_doc_ids([doc_id])
         click.echo(f"Deleted: {doc_id}  from  {col_name}")
     else:
         ids = db.find_ids_by_title(col_name, title)
@@ -311,6 +336,7 @@ def delete_cmd(collection: str, doc_id: str | None, title: str | None, yes: bool
             click.echo(f"Found {len(ids)} {n} with title {title!r} in {col_name}.")
             click.confirm("Delete?", abort=True)
         db.batch_delete(col_name, ids)
+        _reap_catalog_for_doc_ids(ids)
         click.echo(f"Deleted {len(ids)} {'entry' if len(ids) == 1 else 'entries'} with title {title!r} from {col_name}.")
 
 @store.command("expire")

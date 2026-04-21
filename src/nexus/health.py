@@ -55,11 +55,13 @@ def format_health_for_cli(
         lines.append(msg)
 
         if r.fix_suggestions:
+            prefix = "Fix: " if not r.ok else "Suggest: "
+            cont_indent = " " * (4 + len(prefix))
             for i, fix_line in enumerate(r.fix_suggestions):
                 if i == 0:
-                    lines.append(f"    Fix: {fix_line}")
+                    lines.append(f"    {prefix}{fix_line}")
                 else:
-                    lines.append(f"         {fix_line}")
+                    lines.append(f"{cont_indent}{fix_line}")
 
         if r.fatal and not r.ok:
             failed = True
@@ -514,6 +516,11 @@ def _check_index_log() -> list[HealthResult]:
 
 
 def _check_orphan_t1() -> list[HealthResult]:
+    """Report on session files. An "orphan" here means the chroma server PID
+    in the file is no longer alive — that is the only state that warrants
+    cleanup. Live-but-unowned sessions (e.g. server still running after the
+    spawning Claude Code instance exited) are listed but not flagged.
+    """
     from nexus.session import SESSIONS_DIR
 
     if not SESSIONS_DIR.exists():
@@ -523,7 +530,9 @@ def _check_orphan_t1() -> list[HealthResult]:
     if not session_files:
         return [HealthResult(label="T1 sessions", ok=True, detail="no session files")]
 
+    now = time.time()
     orphans: list[str] = []
+    live_descriptors: list[str] = []
     for sf in session_files:
         try:
             record = json.loads(sf.read_text())
@@ -531,10 +540,14 @@ def _check_orphan_t1() -> list[HealthResult]:
             _log.debug("orphan_t1_session_corrupt", path=str(sf), error=str(exc))
             continue
         pid = record.get("server_pid")
+        age_s = max(0, int(now - sf.stat().st_mtime))
+        age_str = f"{age_s // 60}m" if age_s < 3600 else f"{age_s // 3600}h"
         if pid is None:
+            live_descriptors.append(f"{sf.name} (no pid, age {age_str})")
             continue
         try:
             os.kill(int(pid), 0)
+            live_descriptors.append(f"{sf.name} (pid {pid} alive, age {age_str})")
         except OSError:
             orphans.append(sf.name)
         except (ValueError, TypeError):
@@ -545,7 +558,7 @@ def _check_orphan_t1() -> list[HealthResult]:
         return [HealthResult(
             label="T1 sessions",
             ok=False,
-            detail=f"{len(orphans)} orphaned session file(s): {', '.join(orphans)}",
+            detail=f"{len(orphans)} orphaned session file(s) (chroma pid dead): {', '.join(orphans)}",
             fix_suggestions=[
                 "Remove stale files: rm ~/.config/nexus/sessions/*.session",
                 "Or run: nx doctor (sweep runs automatically on session start)",
@@ -554,7 +567,7 @@ def _check_orphan_t1() -> list[HealthResult]:
 
     return [HealthResult(
         label="T1 sessions", ok=True,
-        detail=f"{len(session_files)} session file(s), no orphans detected",
+        detail=f"{len(session_files)} session file(s), all chroma servers alive: {', '.join(live_descriptors)}",
     )]
 
 

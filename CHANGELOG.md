@@ -6,6 +6,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`nx store delete` left the catalog entry visible until the next `nx catalog gc`** (`src/nexus/commands/store.py`). The MCP `catalog_links` tool already filtered deleted-endpoint links immediately, so the eventual-consistency gap surprised users who expected delete to be atomic. After the T3 delete succeeds, look up each doc by `meta.doc_id`, tombstone the catalog row, and remove it from SQLite. Best-effort: silently skips when the catalog is uninitialised. (nexus-43pq)
+- **`nx scratch get` rejected the 8-char prefix that `nx scratch list` printed** (`src/nexus/commands/scratch.py`). `delete` already accepted the prefix; `get` required the full UUID, breaking the natural `list → get <prefix>` copy-paste flow. Extracted `_resolve_entry_id()` from `delete_cmd` and reused it in `get`. Ambiguous prefixes still error with the candidate count. (nexus-43pq)
+- **`nx collection info` reported the cloud Voyage model name in local mode** (`src/nexus/commands/collection.py`). `embedding_model_for_collection()` always returns the Voyage tag (its docstring even says "callers in local mode bypass this"); collection info forgot to. Now branches on `is_local_mode()` and reports `<minilm-or-bge> (local)` when local. Prevents callers from trusting the collection's self-reported model and reindexing with an incompatible embedder. (nexus-43pq)
+- **`nx search` printed `:0:<content>` for results without a `source_path`** (`src/nexus/formatters.py`). The `path:line:content` format gracefully degrades to empty path + line 0 for `knowledge__*` / `docs__*` entries that aren't file-backed. `format_plain` now falls back to the MCP-style `[distance] title\n  snippet` format when no source path is present. (nexus-43pq)
+- **`nx doctor` printed `Fix:` under passing (`✓`) checks** (`src/nexus/health.py`). The `Embedding model: all-MiniLM-L6-v2 (384d)` line carried `Fix: Upgrade: pip install conexus[local]…` even though nothing was broken. Renamed the prefix to `Suggest:` for `r.ok=True` results; `Fix:` is reserved for actual failures. (nexus-43pq)
+- **`nx doctor` reported `T1 sessions: N session file(s), no orphans detected` even when sessions belonged to dead Claude Code instances** (`src/nexus/health.py`). The orphan check only inspects whether the chroma server PID is alive; long-lived chroma servers from prior conversations are technically "live" by that definition. Output now lists each session file with `(pid <N> alive, age <H>m/h)` so the state is transparent — and the failure message clarifies that "orphan" means the chroma pid is dead. (nexus-43pq)
+
+### Changed
+
+- **`nx store --help` tagline** updated from `(ChromaDB Cloud + Voyage AI)` to `(local ChromaDB or Cloud + Voyage AI)`. Local mode is the zero-config default; the prior tagline misled fresh installs. (nexus-43pq)
+- **MCP `scratch` list / search** display now uses the same 8-character UUID prefix as the `nx scratch list` CLI (`src/nexus/mcp/core.py`). Previously the MCP surface showed 12 chars while the CLI showed 8, complicating copy-paste between the two. (nexus-43pq)
+
 ## [4.9.3] - 2026-04-20
 
 ### Fixed

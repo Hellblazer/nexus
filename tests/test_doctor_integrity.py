@@ -64,7 +64,9 @@ class TestCheckOrphanT1:
         d.mkdir()
         _make_session_file(d, "99999.session", os.getpid())
         ok, results = _run_orphan_t1(d)
-        assert ok is True and "no orphans detected" in results[0].detail
+        assert ok is True
+        assert "all chroma servers alive" in results[0].detail
+        assert f"pid {os.getpid()} alive" in results[0].detail
 
     def test_dead_pid_detected_as_orphan(self, tmp_path):
         d = tmp_path / "sessions"
