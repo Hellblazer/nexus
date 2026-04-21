@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import sys
+from typing import Any
 
 import click
 
@@ -41,11 +42,30 @@ def put_cmd(content: str, tags: str, persist: bool, project: str, title: str) ->
     click.echo(f"Stored: {doc_id}")
 
 
+def _resolve_entry_id(t1: Any, entry_id: str) -> str:
+    """Resolve an exact UUID or unique prefix (as printed by ``scratch list``)
+    to a full entry id. Raises ClickException on miss / ambiguity."""
+    entries = t1.list_entries()
+    matches = [e["id"] for e in entries if e["id"].startswith(entry_id)]
+    exact = [m for m in matches if m == entry_id]
+    if exact:
+        return exact[0]
+    if not matches:
+        raise click.ClickException(f"scratch entry {entry_id!r} not found — use: nx scratch list")
+    if len(matches) > 1:
+        raise click.ClickException(
+            f"ambiguous ID prefix {entry_id!r} — {len(matches)} entries match; be more specific"
+        )
+    return matches[0]
+
+
 @scratch.command("get")
 @click.argument("entry_id", metavar="ID")
 def get_cmd(entry_id: str) -> None:
-    """Retrieve a scratch entry by ID."""
-    result = _t1().get(entry_id)
+    """Retrieve a scratch entry by ID prefix (as shown by 'nx scratch list')."""
+    t1 = _t1()
+    full_id = _resolve_entry_id(t1, entry_id)
+    result = t1.get(full_id)
     if result is None:
         raise click.ClickException(f"scratch entry {entry_id!r} not found — use: nx scratch list")
     click.echo(result["content"])

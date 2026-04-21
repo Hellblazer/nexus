@@ -323,10 +323,22 @@ def format_json(results: list[SearchResult]) -> str:
 
 
 def format_plain(results: list[SearchResult]) -> list[str]:
-    """Default plain-text format: ./path/to/file.py:42:    content."""
+    """Default plain-text format: ./path/to/file.py:42:    content.
+
+    For results without a ``source_path`` (knowledge/docs entries from
+    ``store put``), falls back to the doc-style ``[distance] title\\n  snippet``
+    format that the MCP surface uses.
+    """
     lines: list[str] = []
     for r in results:
         source_path = r.metadata.get("source_path", "")
+        if not source_path:
+            title = r.metadata.get("title") or r.id
+            snippet = r.content.splitlines()[0] if r.content else ""
+            lines.append(f"[{r.distance:.4f}] {title}")
+            if snippet:
+                lines.append(f"  {snippet}")
+            continue
         line_start = r.metadata.get("line_start", 0)
         for i, content_line in enumerate(r.content.splitlines()):
             line_no = int(line_start) + i

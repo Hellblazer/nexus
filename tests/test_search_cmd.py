@@ -119,8 +119,10 @@ def test_m_flag_limits_results(runner: CliRunner, cloud_env) -> None:
             main, ["search", "query", "--no-rerank", "-m", "3", "--corpus", "knowledge"],
         )
     assert result.exit_code == 0, result.output
-    output_lines = [ln for ln in result.output.splitlines() if ln.strip()]
-    assert len(output_lines) <= 3
+    # Count results (each renders as "[dist] title" header + indented snippet
+    # for source_path-less hits) — -m caps the result count, not line count.
+    result_headers = [ln for ln in result.output.splitlines() if ln.startswith("[")]
+    assert len(result_headers) <= 3
 
 
 def test_reverse_flag_reverses_output_order(runner: CliRunner, cloud_env) -> None:

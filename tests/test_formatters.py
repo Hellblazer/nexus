@@ -88,8 +88,21 @@ def test_plain_variants(content, expected) -> None:
 
 
 def test_plain_missing_metadata() -> None:
+    """Without source_path, fall back to MCP-style [distance] title\\n  snippet."""
     r = SearchResult(id="r1", content="hello", distance=0.1, collection="c", metadata={})
-    assert format_plain([r]) == [":0:hello"]
+    assert format_plain([r]) == ["[0.1000] r1", "  hello"]
+
+
+def test_plain_uses_title_when_present() -> None:
+    """Source-path-less results prefer metadata title over the bare id."""
+    r = SearchResult(
+        id="abc123",
+        content="line one\nline two",
+        distance=0.5,
+        collection="knowledge__demo",
+        metadata={"title": "Demo Note"},
+    )
+    assert format_plain([r]) == ["[0.5000] Demo Note", "  line one"]
 
 
 # ── format_plain_with_context ───────────────────────────────────────────────

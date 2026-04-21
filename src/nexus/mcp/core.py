@@ -1082,7 +1082,7 @@ def scratch(
             lines: list[str] = []
             for r in results:
                 snippet = r["content"][:200].replace("\n", " ")
-                lines.append(f"{prefix}[{r['id'][:12]}] {snippet}")
+                lines.append(f"{prefix}[{r['id'][:8]}] {snippet}")
             if len(results) >= limit:
                 lines.append(f"\n--- showing {len(results)} results (limit={limit}). Increase limit to see more.")
             return "\n".join(lines)
@@ -1097,7 +1097,7 @@ def scratch(
             for e in entries:
                 snippet = e["content"][:80].replace("\n", " ")
                 tags_str = f"  [{e.get('tags', '')}]" if e.get("tags") else ""
-                lines.append(f"{prefix}[{e['id'][:12]}] {snippet}{tags_str}")
+                lines.append(f"{prefix}[{e['id'][:8]}] {snippet}{tags_str}")
             if total > limit:
                 lines.append(f"\n--- showing {limit} of {total} entries. Increase limit to see all.")
             return "\n".join(lines)
