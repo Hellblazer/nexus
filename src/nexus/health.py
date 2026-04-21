@@ -201,20 +201,25 @@ def _check_t3_local() -> list[HealthResult]:
         r.fix_suggestions = ["Upgrade: pip install conexus[local]  (768d bge-base, better quality)"]
     results.append(r)
 
-    # Collection count and disk usage
+    # Collection count and disk usage. Empty collections are kept on purpose
+    # (they preserve embedding-model metadata so the next store_put doesn't
+    # need to re-derive it) — surface the count so users aren't surprised by
+    # a 0-chunk collection lingering after `nx store delete` of every entry.
     if path_exists:
         try:
             client = chromadb.PersistentClient(path=str(local_path))
             cols = client.list_collections()
             col_count = len(cols)
+            empty_count = sum(1 for c in cols if c.count() == 0)
             total_bytes = sum(f.stat().st_size for f in local_path.rglob("*") if f.is_file())
             if total_bytes < 1024 * 1024:
                 size_str = f"{total_bytes / 1024:.1f} KB"
             else:
                 size_str = f"{total_bytes / (1024 * 1024):.1f} MB"
+            empty_note = f" (including {empty_count} empty)" if empty_count else ""
             results.append(HealthResult(
                 label="Local collections", ok=True,
-                detail=f"{col_count} collections, {size_str} on disk",
+                detail=f"{col_count} collections{empty_note}, {size_str} on disk",
             ))
         except Exception as exc:
             _log.debug("doctor_local_collections_failed", error=str(exc))
