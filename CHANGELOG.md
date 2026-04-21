@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **`nx doctor` `Local collections` line now reports the empty-collection count** (`src/nexus/health.py`). After deleting every doc from a collection, `nx collection list` continues to show the collection at `0 chunks` because the empty collection is intentionally retained — it preserves the embedding-model binding so the next `store_put` doesn't have to re-derive it. The absence of a doctor signal made this look like a leak. Output now reads `Local collections: N collections (including K empty), <size> on disk`; the `(including K empty)` clause is omitted when `K == 0`. Pure transparency — no behavior change. (nexus-obp2)
+
 ## [4.9.4] - 2026-04-20
 
 ### Fixed
