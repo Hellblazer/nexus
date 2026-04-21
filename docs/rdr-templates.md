@@ -31,15 +31,15 @@ related_tests: [test_indexer_chunk_flow.py]
 
 Every code chunk shows `Lines: 1-780` regardless of actual position.
 `CodeSplitter` returns empty metadata; the fallback assigns full-file extent.
-Result: context prefixes are useless — all chunks from a file look identical.
+Result: context prefixes are useless; all chunks from a file look identical.
 
 ## Research Findings
 
-**Root cause** (Verified — source search `chunker.py:210`):
+**Root cause** (Verified, source search `chunker.py:210`):
 `setdefault("line_start", 1)` / `setdefault("line_end", len(lines))` fires
 for every node. `CodeSplitter` never populates `line_start`/`line_end`.
 
-**Fix available** (Verified — llama-index source):
+**Fix available** (Verified, llama-index source):
 `TextNode.start_char_idx` / `end_char_idx` are populated.
 Convert: `content[:start_char_idx].count('\n') + 1` → exact 1-indexed line.
 
@@ -84,7 +84,7 @@ require at least one reviewer other than the author.
 `related_tests` lists test files or test names that validate this RDR's
 implementation. Populated at close time.
 
-`implementation_notes` captures deviations from the plan — filled in at close
+`implementation_notes` captures deviations from the plan, filled in at close
 time. Empty string if the implementation matched the RDR exactly.
 
 ### Sections
@@ -102,22 +102,23 @@ time. Empty string if the implementation matched the RDR exactly.
 | **Validation** | Testing strategy and performance expectations |
 | **Finalization Gate** | Contradiction check, assumption verification, scope check, cross-cutting concerns, proportionality |
 | **References** | Requirements, dependency docs, related issues |
-| **Revision History** | Gate findings appendix — keeps design sections clean |
+| **Revision History** | Gate findings appendix; keeps design sections clean |
 
 ### Critical Assumptions
 
 Each load-bearing assumption is a checkbox with verification status:
 
 ```markdown
-- [ ] [Assumption 1] — **Status**: Verified | Unverified
-  — **Method**: Source Search | Spike | Docs Only
+- [ ] [Assumption 1]
+  - **Status**: Verified | Unverified
+  - **Method**: Source Search | Spike | Docs Only
 ```
 
 | Method | Description |
 |--------|-------------|
 | **Source Search** | API verified against dependency source code |
 | **Spike** | Behavior verified by running code against a live service |
-| **Docs Only** | Documentation reading only — insufficient for load-bearing assumptions |
+| **Docs Only** | Documentation reading only; insufficient for load-bearing assumptions |
 
 ## Post-Mortem Template
 
@@ -159,9 +160,9 @@ Each category has a **Count**, **Examples**, and **Preventable?** column
 ### RDR Quality Assessment
 
 Three dimensions:
-- **What the RDR got right** — research and decisions worth repeating
-- **What the RDR missed** — wrong assumptions, overlooked constraints
-- **What the RDR over-specified** — code rewritten, features deferred, config never used
+- **What the RDR got right**: research and decisions worth repeating
+- **What the RDR missed**: wrong assumptions, overlooked constraints
+- **What the RDR over-specified**: code rewritten, features deferred, config never used
 
 ---
 

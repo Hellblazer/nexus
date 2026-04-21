@@ -30,7 +30,7 @@ This document covers the operational details of each lifecycle step. For backgro
 Terminal states: Reverted · Abandoned · Superseded
 ```
 
-Only **Create** and **Research** are required. Gate, Accept, and Close add formal validation and archival — use them when the decision is load-bearing.
+Only **Create** and **Research** are required. Gate, Accept, and Close add formal validation and archival; use them when the decision is load-bearing.
 
 ## Worked example
 
@@ -44,7 +44,7 @@ A bug fix RDR from create to close:
 
 /nx:rdr-research add 016
   Finding: CodeSplitter never populates line_start/line_end
-  Classification: Verified — Source Search (chunker.py:210)
+  Classification: Verified (Source Search, chunker.py:210)
 
 /nx:rdr-gate 016
   Structure ✓ · Assumptions ✓ · AI critique ✓ → PASSED
@@ -70,9 +70,9 @@ Adds structured findings to a Draft RDR. Each finding records a summary, evidenc
 
 Verification methods:
 
-- **Source Search** — API or behavior verified against dependency source code
-- **Spike** — behavior verified by running code against a live service
-- **Docs Only** — documentation reading only; insufficient for load-bearing assumptions
+- **Source Search**: API or behavior verified against dependency source code
+- **Spike**: behavior verified by running code against a live service
+- **Docs Only**: documentation reading only; insufficient for load-bearing assumptions
 
 For complex investigations, `/nx:rdr-research` can delegate to specialized agents (`deep-research-synthesizer` for web/document research, `codebase-deep-analyzer` for codebase exploration). Findings are written to both the markdown file and T2. The RDR stays Draft throughout.
 
@@ -80,13 +80,13 @@ For complex investigations, `/nx:rdr-research` can delegate to specialized agent
 
 Three-layer validation. Optional but recommended before committing to irreversible decisions.
 
-**Layer 1 — Structural**: Required sections filled, metadata complete, at least one research finding present.
+**Layer 1, Structural**: Required sections filled, metadata complete, at least one research finding present.
 
-**Layer 2 — Assumption audit**: Every Assumed finding must have a risk assessment. Each critical assumption must acknowledge what happens if it's wrong.
+**Layer 2, Assumption audit**: Every Assumed finding must have a risk assessment. Each critical assumption must acknowledge what happens if it's wrong.
 
-**Layer 3 — AI critique**: Delegates to the `substantive-critic` agent, which evaluates logical coherence, missing alternatives, unstated assumptions, and evidence gaps. Findings are appended to the RDR.
+**Layer 3, AI critique**: Delegates to the `substantive-critic` agent, which evaluates logical coherence, missing alternatives, unstated assumptions, and evidence gaps. Findings are appended to the RDR.
 
-The gate either **BLOCKS** (critical issues — fix and re-gate) or **PASSES** (no critical issues, may have observations). No conditional outcomes. The result is stored in T2 for `/nx:rdr-accept` to verify.
+The gate either **BLOCKS** (critical issues; fix and re-gate) or **PASSES** (no critical issues, may have observations). No conditional outcomes. The result is stored in T2 for `/nx:rdr-accept` to verify.
 
 ## Accept (`/nx:rdr-accept`)
 
@@ -102,7 +102,7 @@ Finalizes an Accepted RDR. Requires status Accepted (use `--force` to override).
 
 Close reasons: `implemented` · `reverted` · `abandoned` · `superseded`
 
-Closing creates a post-mortem template for drift analysis, indexes the RDR into the `rdr__` collection for permanent semantic retrieval, and updates T2 with the close date and reason. If beads were created during accept, their status is displayed as an advisory. If the [catalog](catalog.md) is initialized, closing also creates typed links — `supersedes` for superseded RDRs, `cites` for referenced research papers.
+Closing creates a post-mortem template for drift analysis, indexes the RDR into the `rdr__` collection for permanent semantic retrieval, and updates T2 with the close date and reason. If beads were created during accept, their status is displayed as an advisory. If the [catalog](catalog.md) is initialized, closing also creates typed links: `supersedes` for superseded RDRs, `cites` for referenced research papers.
 
 ## Querying RDRs
 
@@ -114,7 +114,7 @@ Closing creates a post-mortem template for drift analysis, indexes the RDR into 
 /nx:rdr-show 007                  # full detail: metadata, findings, gate status, linked beads
 ```
 
-Both commands read from T2 — no markdown parsing required.
+Both commands read from T2; no markdown parsing required.
 
 ## T2 synchronization
 
