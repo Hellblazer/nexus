@@ -286,6 +286,22 @@ def _run_git(
     return result
 
 
+def _ensure_git_identity(cwd: Path) -> None:
+    """Set local git identity if none is configured (CI runners, fresh machines).
+
+    Why: Catalog.init runs ``git commit``, which fails with "Author identity
+    unknown" when neither global nor local user.name/user.email is set. Real
+    users with global git config see their own identity; environments without
+    one get a benign fallback so the initial commit succeeds.
+    """
+    name = _run_git(["git", "config", "user.name"], cwd=cwd, check=False)
+    if name.returncode != 0 or not name.stdout.strip():
+        _run_git(["git", "config", "user.name", "Nexus Catalog"], cwd=cwd)
+    email = _run_git(["git", "config", "user.email"], cwd=cwd, check=False)
+    if email.returncode != 0 or not email.stdout.strip():
+        _run_git(["git", "config", "user.email", "nexus@local"], cwd=cwd)
+
+
 class Catalog:
     """Xanadu-inspired catalog: owners, documents, and links over JSONL + SQLite.
 
@@ -403,6 +419,7 @@ class Catalog:
         catalog_path.mkdir(parents=True, exist_ok=True)
         if not git_dir.exists():
             _run_git(["git", "init"], cwd=catalog_path)
+        _ensure_git_identity(catalog_path)
         # Create empty JSONL files if missing
         for name in ("documents.jsonl", "owners.jsonl", "links.jsonl"):
             p = catalog_path / name
