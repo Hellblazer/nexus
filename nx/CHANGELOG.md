@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.9.5] - 2026-04-21
+
+No plugin-side changes; version bumped for marketplace parity. See root `CHANGELOG.md` for the doctor empty-collection transparency change (nexus-obp2).
+
 ## [4.9.4] - 2026-04-20
 
 No plugin-side changes; version bumped for marketplace parity. See root `CHANGELOG.md` for the six CLI fixes (nexus-43pq) shipped in this release.
