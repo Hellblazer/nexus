@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from nexus.catalog.catalog import Catalog
-from nexus.catalog.link_generator import generate_rdr_filepath_links
+from nexus.catalog.link_generator import generate_citation_links, generate_rdr_filepath_links
 
 
 class TestRdrFilepathLinks:
@@ -160,3 +160,43 @@ class TestIncrementalRdrFilepathLinking:
         # Process rdr1 explicitly — should create 1 link
         count2 = generate_rdr_filepath_links(cat, new_tumblers=[rdr1])
         assert count2 == 1
+
+
+class TestCitationLinksNoneMeta:
+    """generate_citation_links must tolerate entries with meta=None (nexus-8d6e)."""
+
+    def _make_catalog(self, tmp_path: Path) -> Catalog:
+        cat_dir = tmp_path / "catalog"
+        cat_dir.mkdir()
+        (cat_dir / "owners.jsonl").touch()
+        (cat_dir / "documents.jsonl").touch()
+        (cat_dir / "links.jsonl").touch()
+        return Catalog(cat_dir, cat_dir / ".catalog.db")
+
+    def test_meta_none_does_not_crash(self, tmp_path: Path) -> None:
+        """Entries with meta=None (legacy rows) are skipped without crashing."""
+        from unittest.mock import patch
+
+        from nexus.catalog.catalog import CatalogEntry
+        from nexus.catalog.tumbler import Tumbler
+
+        cat = self._make_catalog(tmp_path)
+        # Construct a CatalogEntry with meta=None — the shape seen on legacy
+        # JSONL rows where the "meta" key was absent when parsed.
+        legacy = CatalogEntry(
+            tumbler=Tumbler.parse("1.1.1"),
+            title="legacy",
+            author="",
+            year=0,
+            content_type="code",
+            file_path="src/x.py",
+            corpus="default",
+            physical_collection="code__x",
+            chunk_count=1,
+            head_hash="",
+            indexed_at="",
+            meta=None,  # type: ignore[arg-type]
+        )
+        with patch.object(cat, "all_documents", return_value=[legacy]):
+            count = generate_citation_links(cat)
+        assert count == 0
