@@ -965,6 +965,28 @@ class CatalogTaxonomy:
                 ).fetchall()
         return [dict(zip(_TOPIC_COLUMNS, row)) for row in rows]
 
+    def get_projection_counts_by_collection(self) -> dict[str, int]:
+        """Return ``{source_collection: projection_assignment_count}``.
+
+        Counts rows in ``topic_assignments`` where ``assigned_by =
+        'projection'`` grouped by ``source_collection``. Collections not
+        present in the result have zero projection assignments; status
+        callers can detect "has topics but no projection" by cross-
+        referencing against the topics table.
+
+        GitHub #239 + bead nexus-gwhy: ``status`` now surfaces
+        zero-projection collections so the gap is visible without
+        running ``audit -c`` per collection.
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT source_collection, COUNT(*) FROM topic_assignments "
+                "WHERE assigned_by = 'projection' "
+                "AND source_collection IS NOT NULL AND source_collection != '' "
+                "GROUP BY source_collection"
+            ).fetchall()
+        return {row[0]: int(row[1]) for row in rows}
+
     def update_topic_label(self, topic_id: int, new_label: str) -> None:
         """Update a topic's label without touching ``review_status``.
 
@@ -1214,6 +1236,83 @@ class CatalogTaxonomy:
                 topic_ids + topic_ids,
             ).fetchall()
         return {(r[0], r[1]): r[2] for r in rows}
+
+    def refresh_projection_links(self) -> int:
+        """Rebuild projection entries in ``topic_links`` from per-chunk assignments.
+
+        Aggregates rows in ``topic_assignments`` where ``assigned_by =
+        'projection'`` against the source-collection's own topic
+        assignment for the same ``doc_id``, producing
+        ``(source_topic_id, target_topic_id, count)`` tuples in
+        canonical order. Each pair is upserted into ``topic_links``
+        with ``'projection'`` merged into the existing ``link_types``
+        set (so catalog-derived types like ``cites`` / ``implements``
+        written by :func:`compute_topic_links` survive).
+
+        GitHub #240 + bead nexus-gwhy: ``nx taxonomy project --persist``
+        writes to ``topic_assignments`` but not to ``topic_links``, so
+        the ``links`` view went stale after backfill while ``hubs``
+        (which queries live) reflected the new state. Calling this
+        helper at the end of the persist paths keeps the two views in
+        sync.
+
+        Returns the number of topic-pair rows written / updated.
+        """
+        # Single lock block: both the aggregate SELECT and the per-pair
+        # merge+upsert run under the same acquisition. Splitting them
+        # (earlier implementation) created a window where a concurrent
+        # ``assign_topic`` or ``taxonomy_assign_hook`` could change
+        # ``topic_assignments`` between the aggregate and the writes,
+        # yielding stale ``link_count`` values. Code-review finding C-1.
+        written = 0
+        with self._lock:
+            rows = self.conn.execute(
+                """
+                SELECT src.topic_id, tgt.topic_id, COUNT(*) AS cnt
+                FROM topic_assignments tgt
+                JOIN topic_assignments src
+                  ON src.doc_id = tgt.doc_id
+                 AND src.topic_id != tgt.topic_id
+                 AND src.assigned_by != 'projection'
+                WHERE tgt.assigned_by = 'projection'
+                GROUP BY src.topic_id, tgt.topic_id
+                HAVING cnt > 0
+                """
+            ).fetchall()
+
+            if not rows:
+                return 0
+
+            # Canonicalize pair ordering so (A, B) and (B, A) merge into one row.
+            aggregated: dict[tuple[int, int], int] = {}
+            for src_id, tgt_id, count in rows:
+                pair = (int(src_id), int(tgt_id)) if src_id < tgt_id else (int(tgt_id), int(src_id))
+                aggregated[pair] = aggregated.get(pair, 0) + int(count)
+
+            for (from_id, to_id), count in aggregated.items():
+                existing = self.conn.execute(
+                    "SELECT link_types FROM topic_links "
+                    "WHERE from_topic_id = ? AND to_topic_id = ?",
+                    (from_id, to_id),
+                ).fetchone()
+                if existing and existing[0]:
+                    try:
+                        types_set = set(json.loads(existing[0]))
+                    except json.JSONDecodeError:
+                        types_set = set()
+                else:
+                    types_set = set()
+                types_set.add("projection")
+
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO topic_links "
+                    "(from_topic_id, to_topic_id, link_count, link_types) "
+                    "VALUES (?, ?, ?, ?)",
+                    (from_id, to_id, count, json.dumps(sorted(types_set))),
+                )
+                written += 1
+            self.conn.commit()
+        return written
 
     def upsert_topic_links(
         self, links: list[dict[str, Any]],

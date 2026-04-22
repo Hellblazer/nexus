@@ -202,6 +202,18 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
         total_assigned = sum(r[2] for r in all_topics)
         total_pending = sum(r[3] for r in all_topics)
 
+        # GitHub #239 + bead nexus-gwhy: per-collection projection
+        # assignment counts so status can flag collections with topics
+        # but no cross-collection projection data. Computed over the
+        # full universe; the Action hint must not under-count when the
+        # user passes ``-n`` to truncate the display (code-review
+        # finding C-2).
+        projection_counts = db.taxonomy.get_projection_counts_by_collection()
+        missing_projection: list[str] = [
+            coll for coll, n_topics, *_ in all_topics
+            if n_topics > 0 and projection_counts.get(coll, 0) == 0
+        ]
+
         with db.taxonomy._lock:
             link_count = db.taxonomy.conn.execute(
                 "SELECT COUNT(*) FROM topic_links"
@@ -242,7 +254,10 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
                     status_parts.append(f"{n_pending} pending")
                 status_str = ", ".join(status_parts) if status_parts else "all pending"
 
-                click.echo(f"  {coll}")
+                proj_count = projection_counts.get(coll, 0)
+                proj_note = "  [no projection]" if (proj_count == 0 and n_topics > 0) else ""
+
+                click.echo(f"  {coll}{proj_note}")
                 click.echo(f"    {n_topics} topics, {n_docs} docs assigned ({status_str}){rebal}")
 
             click.echo("")
@@ -253,6 +268,13 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
         )
         if total_pending:
             click.echo(f"Action: {total_pending} topics need review. Run `nx taxonomy review`.")
+        if missing_projection:
+            example = missing_projection[0]
+            click.echo(
+                f"Action: {len(missing_projection)} collection(s) have no cross-collection "
+                f"projection. Run `nx taxonomy project {example} --persist` "
+                f"(or `nx taxonomy project --backfill --persist` for all)."
+            )
 
 
 @taxonomy.command("list")
@@ -613,15 +635,40 @@ def assign_cmd(doc_id: str, topic_label: str, collection: str) -> None:
 @click.argument("topic_label")
 @click.argument("new_label")
 @click.option("--collection", "-c", default="", help="Collection scope for label lookup")
-def rename_cmd(topic_label: str, new_label: str, collection: str) -> None:
-    """Rename a topic."""
+@click.option(
+    "--no-accept", is_flag=True,
+    help=(
+        "Rename without transitioning review_status to 'accepted'. "
+        "Default behaviour accepts the topic, consistent with the "
+        "interactive `review` rename path (typing the new label is "
+        "an acknowledgement). Use --no-accept to correct a typo on "
+        "a still-pending topic without advancing it through review."
+    ),
+)
+def rename_cmd(
+    topic_label: str, new_label: str, collection: str, no_accept: bool,
+) -> None:
+    """Rename a topic. By default, also transitions to 'accepted'.
+
+    Code-review finding M-1 + bead nexus-gwhy: the standalone rename
+    command previously always transitioned review_status to 'accepted'
+    as a side effect of ``rename_topic``. Default behaviour preserved
+    (the user typing a new label is an acknowledgement); ``--no-accept``
+    lets you fix a typo without forcing the topic through review.
+    """
     with _T2Database(_default_db_path()) as db:
         topic_id = db.taxonomy.resolve_label(topic_label, collection=collection)
         if topic_id is None:
             click.echo(f"Topic '{topic_label}' not found.")
             return
-        db.taxonomy.rename_topic(topic_id, new_label)
-        click.echo(f"Renamed '{topic_label}' -> '{new_label}'.")
+        if no_accept:
+            db.taxonomy.update_topic_label(topic_id, new_label)
+            click.echo(
+                f"Renamed '{topic_label}' -> '{new_label}' (review_status preserved)."
+            )
+        else:
+            db.taxonomy.rename_topic(topic_id, new_label)
+            click.echo(f"Renamed '{topic_label}' -> '{new_label}'.")
 
 
 @taxonomy.command("merge")
@@ -1163,19 +1210,25 @@ def project_cmd(
             click.echo("Specify a source collection or use --backfill.")
             return
 
-        # Determine target collections
+        # Determine target collections.
+        #
+        # GitHub #238 + bead nexus-gwhy: single-source defaults to
+        # every collection with topics minus the source, matching the
+        # backfill target set. Previously the single-source path tried
+        # ``list_sibling_collections`` first (same-repo, different-prefix
+        # collections) and fell back only if empty; users with multiple
+        # collections under one prefix family (e.g. several ``docs__*``
+        # from distinct repos) saw "against 1 collection(s)" while
+        # ``project --backfill`` on the same source targeted the full set.
+        # Use ``--against`` to scope explicitly when the default is too
+        # wide.
         if against:
             targets = [c.strip() for c in against.split(",") if c.strip()]
         else:
-            # Try sibling collections first (same repo, different prefix)
-            from nexus.registry import list_sibling_collections
-            targets = list_sibling_collections(source_collection, t3._client)
-            if not targets:
-                # Fall back to all collections with topics
-                targets = [
-                    c for c in db.taxonomy.get_distinct_collections()
-                    if c != source_collection
-                ]
+            targets = [
+                c for c in db.taxonomy.get_distinct_collections()
+                if c != source_collection
+            ]
             if not targets:
                 click.echo("No other collections have topics. Run 'nx taxonomy discover' first.")
                 return
@@ -1256,6 +1309,12 @@ def _persist_assignments(
             similarity=similarity,
             source_collection=source_collection,
         )
+    # GitHub #240 + bead nexus-gwhy: rebuild projection entries in
+    # topic_links so ``nx taxonomy links`` reflects the new assignments.
+    # Without this refresh, ``links`` stayed at the centroid-similarity
+    # pairs written at discover time while ``hubs`` (live query) moved
+    # ahead. Cost is one aggregate + upsert per persist call.
+    taxonomy.refresh_projection_links()
     if not quiet:
         click.echo(f"Persisted {len(chunk_assignments)} projection assignment(s).")
     return len(chunk_assignments)

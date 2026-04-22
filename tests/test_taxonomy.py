@@ -832,6 +832,126 @@ def test_cli_taxonomy_list(tmp_path: Path) -> None:
     assert "3 docs" in result.output
 
 
+def test_cli_taxonomy_status_warns_on_missing_projection(tmp_path: Path) -> None:
+    """status flags collections that have topics but zero projection data.
+
+    GitHub #239 + bead nexus-gwhy: a collection fresh from ``discover``
+    has own-collection topics but no cross-collection projection; the
+    status default output previously showed it as healthy.
+    """
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from nexus.commands.taxonomy_cmd import taxonomy
+
+    db_path = tmp_path / "memory.db"
+    with T2Database(db_path) as db:
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES ('t1', 'docs__alpha', 10, '2026-01-01T00:00:00Z')"
+        )
+        db.taxonomy.conn.commit()
+        # No topic_assignments with assigned_by='projection' exist.
+
+    runner = CliRunner()
+    with patch(
+        "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
+    ):
+        result = runner.invoke(taxonomy, ["status"])
+
+    assert result.exit_code == 0, result.output
+    assert "[no projection]" in result.output
+    assert "Action:" in result.output
+    assert "nx taxonomy project" in result.output
+
+
+def test_cli_taxonomy_status_missing_projection_count_not_truncated_by_limit(
+    tmp_path: Path,
+) -> None:
+    """The missing-projection Action count reflects the full universe,
+    not the ``--limit`` page (code-review finding C-2).
+
+    Previously the count could under-report when the user scoped the
+    display with ``-n N`` and the zero-projection collections were
+    ranked below the top-N by doc_count.
+    """
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from nexus.commands.taxonomy_cmd import taxonomy
+
+    db_path = tmp_path / "memory.db"
+    with T2Database(db_path) as db:
+        # Three collections, descending doc_count. The top-1 has a
+        # projection; the other two (below the -n 1 cut-off) do not.
+        db.taxonomy.conn.executescript(
+            """
+            INSERT INTO topics (label, collection, doc_count, created_at) VALUES
+                ('big',    'docs__big',    100, '2026-01-01T00:00:00Z'),
+                ('medium', 'docs__medium',  50, '2026-01-01T00:00:00Z'),
+                ('small',  'docs__small',   10, '2026-01-01T00:00:00Z');
+            """
+        )
+        big_id = db.taxonomy.conn.execute(
+            "SELECT id FROM topics WHERE label='big'"
+        ).fetchone()[0]
+        db.taxonomy.conn.commit()
+        db.taxonomy.assign_topic(
+            "doc-1", big_id, assigned_by="projection",
+            similarity=0.9, source_collection="docs__big",
+        )
+
+    runner = CliRunner()
+    with patch(
+        "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
+    ):
+        result = runner.invoke(taxonomy, ["status", "-n", "1"])
+
+    assert result.exit_code == 0, result.output
+    # Two collections (medium + small) are zero-projection; the Action
+    # line must name both even though only the top-1 was displayed.
+    assert "2 collection(s) have no cross-collection projection" in result.output, (
+        result.output
+    )
+
+
+def test_cli_taxonomy_status_quiet_when_projection_present(tmp_path: Path) -> None:
+    """status does NOT emit the projection-missing hint when every
+    collection with topics has at least one projection assignment."""
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from nexus.commands.taxonomy_cmd import taxonomy
+
+    db_path = tmp_path / "memory.db"
+    with T2Database(db_path) as db:
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at, "
+            "review_status) VALUES ('t1', 'docs__alpha', 10, "
+            "'2026-01-01T00:00:00Z', 'accepted')"
+        )
+        tid = db.taxonomy.conn.execute(
+            "SELECT id FROM topics WHERE label='t1'"
+        ).fetchone()[0]
+        db.taxonomy.conn.commit()
+        db.taxonomy.assign_topic(
+            "doc-1", tid, assigned_by="projection",
+            similarity=0.8, source_collection="docs__alpha",
+        )
+
+    runner = CliRunner()
+    with patch(
+        "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
+    ):
+        result = runner.invoke(taxonomy, ["status"])
+
+    assert result.exit_code == 0, result.output
+    assert "[no projection]" not in result.output
+
+
 def test_cli_taxonomy_list_shows_collection_at_root(tmp_path: Path) -> None:
     """CLI taxonomy list includes [collection] prefix on root topics.
 
@@ -1996,6 +2116,147 @@ class TestSplitTopic:
         ).fetchone()
         assert row == ("renamed", "accepted")
 
+    def test_get_projection_counts_by_collection(self, db: T2Database) -> None:
+        """get_projection_counts_by_collection groups by source_collection.
+
+        GitHub #239: status uses this to flag collections with topics
+        but zero projection assignments.
+        """
+        # Seed two topics (targets) in different collections
+        db.taxonomy.conn.executescript(
+            """
+            INSERT INTO topics (label, collection, doc_count, created_at) VALUES
+                ('tgt-a', 'c_target_a', 5, '2026-01-01T00:00:00Z'),
+                ('tgt-b', 'c_target_b', 3, '2026-01-01T00:00:00Z');
+            """
+        )
+        tgt_a = db.taxonomy.conn.execute(
+            "SELECT id FROM topics WHERE label='tgt-a'"
+        ).fetchone()[0]
+        tgt_b = db.taxonomy.conn.execute(
+            "SELECT id FROM topics WHERE label='tgt-b'"
+        ).fetchone()[0]
+
+        # Projection assignments originate from two different source collections.
+        db.taxonomy.assign_topic(
+            "doc-1", tgt_a, assigned_by="projection",
+            similarity=0.9, source_collection="c_src_1",
+        )
+        db.taxonomy.assign_topic(
+            "doc-2", tgt_a, assigned_by="projection",
+            similarity=0.8, source_collection="c_src_1",
+        )
+        db.taxonomy.assign_topic(
+            "doc-3", tgt_b, assigned_by="projection",
+            similarity=0.7, source_collection="c_src_2",
+        )
+        # A non-projection assignment must be ignored by the helper.
+        db.taxonomy.assign_topic(
+            "doc-4", tgt_a, assigned_by="hdbscan",
+        )
+
+        counts = db.taxonomy.get_projection_counts_by_collection()
+        assert counts == {"c_src_1": 2, "c_src_2": 1}
+
+    def test_refresh_projection_links_aggregates_per_chunk_pairs(
+        self, db: T2Database,
+    ) -> None:
+        """refresh_projection_links produces (src_topic, tgt_topic) pair counts.
+
+        GitHub #240: project --persist only wrote topic_assignments;
+        links view read topic_links which was stale. The refresh helper
+        aggregates per-chunk projection rows into topic-pair counts
+        and upserts them into topic_links.
+        """
+        db.taxonomy.conn.executescript(
+            """
+            INSERT INTO topics (label, collection, doc_count, created_at) VALUES
+                ('src-topic', 'c_src', 3, '2026-01-01T00:00:00Z'),
+                ('tgt-topic', 'c_tgt', 0, '2026-01-01T00:00:00Z');
+            """
+        )
+        src_id = db.taxonomy.conn.execute(
+            "SELECT id FROM topics WHERE label='src-topic'"
+        ).fetchone()[0]
+        tgt_id = db.taxonomy.conn.execute(
+            "SELECT id FROM topics WHERE label='tgt-topic'"
+        ).fetchone()[0]
+        db.taxonomy.conn.commit()
+
+        # Three docs assigned to src-topic via hdbscan, then projected to tgt-topic.
+        for doc_id in ("doc-1", "doc-2", "doc-3"):
+            db.taxonomy.assign_topic(doc_id, src_id, assigned_by="hdbscan")
+            db.taxonomy.assign_topic(
+                doc_id, tgt_id, assigned_by="projection",
+                similarity=0.8, source_collection="c_src",
+            )
+
+        written = db.taxonomy.refresh_projection_links()
+        assert written == 1
+
+        row = db.taxonomy.conn.execute(
+            "SELECT link_count, link_types FROM topic_links "
+            "WHERE from_topic_id = ? AND to_topic_id = ?",
+            (min(src_id, tgt_id), max(src_id, tgt_id)),
+        ).fetchone()
+        assert row is not None
+        assert row[0] == 3  # three per-chunk projection rows
+        assert "projection" in row[1]
+
+    def test_refresh_projection_links_merges_existing_types(
+        self, db: T2Database,
+    ) -> None:
+        """Existing link_types (e.g. 'cites') survive the projection refresh."""
+        import json as _json
+
+        db.taxonomy.conn.executescript(
+            """
+            INSERT INTO topics (label, collection, doc_count, created_at) VALUES
+                ('src', 'c1', 1, '2026-01-01T00:00:00Z'),
+                ('tgt', 'c2', 0, '2026-01-01T00:00:00Z');
+            """
+        )
+        src_id = db.taxonomy.conn.execute("SELECT id FROM topics WHERE label='src'").fetchone()[0]
+        tgt_id = db.taxonomy.conn.execute("SELECT id FROM topics WHERE label='tgt'").fetchone()[0]
+        from_id = min(src_id, tgt_id)
+        to_id = max(src_id, tgt_id)
+
+        # Seed an existing link_types entry (simulates prior compute_topic_links)
+        db.taxonomy.conn.execute(
+            "INSERT INTO topic_links (from_topic_id, to_topic_id, link_count, link_types) "
+            "VALUES (?, ?, ?, ?)",
+            (from_id, to_id, 5, _json.dumps(["cites"])),
+        )
+
+        # Assign a projection pair
+        db.taxonomy.assign_topic("doc-1", src_id, assigned_by="hdbscan")
+        db.taxonomy.assign_topic(
+            "doc-1", tgt_id, assigned_by="projection",
+            similarity=0.9, source_collection="c1",
+        )
+        db.taxonomy.conn.commit()
+
+        db.taxonomy.refresh_projection_links()
+
+        row = db.taxonomy.conn.execute(
+            "SELECT link_types FROM topic_links "
+            "WHERE from_topic_id = ? AND to_topic_id = ?",
+            (from_id, to_id),
+        ).fetchone()
+        types = _json.loads(row[0])
+        assert set(types) == {"cites", "projection"}
+
+    def test_refresh_projection_links_no_op_when_no_projections(
+        self, db: T2Database,
+    ) -> None:
+        """No projection rows → returns 0 and doesn't crash."""
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES ('t', 'c', 0, '2026-01-01T00:00:00Z')"
+        )
+        db.taxonomy.conn.commit()
+        assert db.taxonomy.refresh_projection_links() == 0
+
     def test_split_too_few_docs(self, db: T2Database) -> None:
         """Split with fewer docs than k returns 0."""
         db.taxonomy.conn.execute(
@@ -2110,6 +2371,49 @@ class TestManualOpsCLI:
                 "SELECT label FROM topics LIMIT 1"
             ).fetchone()
         assert row[0] == "new-name"
+
+    def test_rename_cli_no_accept_preserves_pending_status(
+        self, tmp_path: Path,
+    ) -> None:
+        """``rename --no-accept`` updates the label without transitioning
+        review_status (code-review finding M-1).
+
+        Default behaviour (which still transitions to 'accepted') is
+        already exercised by ``test_rename_cli``; this test pins the
+        explicit opt-out path for users fixing a typo on a still-pending
+        topic.
+        """
+        from unittest.mock import patch
+
+        from click.testing import CliRunner
+
+        from nexus.commands.taxonomy_cmd import taxonomy
+
+        db_path = tmp_path / "memory.db"
+        with T2Database(db_path) as db:
+            db.taxonomy.conn.execute(
+                "INSERT INTO topics (label, collection, doc_count, created_at, "
+                "review_status) VALUES ('old-label', 'proj', 5, "
+                "'2026-01-01T00:00:00Z', 'pending')"
+            )
+            db.taxonomy.conn.commit()
+
+        runner = CliRunner()
+        with patch(
+            "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
+        ):
+            result = runner.invoke(
+                taxonomy,
+                ["rename", "old-label", "fixed-typo", "-c", "proj", "--no-accept"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "review_status preserved" in result.output
+        with T2Database(db_path) as db:
+            row = db.taxonomy.conn.execute(
+                "SELECT label, review_status FROM topics LIMIT 1"
+            ).fetchone()
+        assert row == ("fixed-typo", "pending")
 
     def test_merge_cli(self, tmp_path: Path) -> None:
         """nx taxonomy merge moves docs and deletes source."""
@@ -3180,6 +3484,68 @@ class TestProjectCmd:
 
         assert result.exit_code == 0
         assert "persisted" in result.output.lower()
+
+    def test_project_single_source_default_matches_backfill_target_set(
+        self, db: T2Database, chroma_client: chromadb.ClientAPI, tmp_path: Path,
+    ) -> None:
+        """project <src> default targets every collection with topics minus src.
+
+        GitHub #238 + bead nexus-gwhy. Before the fix, single-source
+        project preferred same-hash siblings (via list_sibling_collections)
+        and fell back to all-collections only when siblings was empty.
+        For multi-repo families (e.g. three docs__<repo>-<hash> from
+        distinct projects), the heuristic silently narrowed the target
+        set. After the fix, the default matches backfill: all
+        collections with topics minus the source. Explicit --against
+        still overrides.
+        """
+        from unittest.mock import patch
+
+        from click.testing import CliRunner
+
+        from nexus.commands.taxonomy_cmd import taxonomy
+
+        # Seed four collections with topics by direct insertion. The
+        # CLI's get_distinct_collections() groups by topics.collection,
+        # so one INSERT per collection is enough.
+        src = "docs__alpha-11112222"
+        others = [
+            "docs__beta-33334444",
+            "docs__gamma-55556666",
+            # Same-hash sibling that the OLD heuristic would have
+            # preferred exclusively (non-docs prefix, same hash8).
+            # New behaviour includes it alongside the other docs__
+            # collections, not instead of them.
+            "code__alpha-11112222",
+        ]
+        for coll in [src, *others]:
+            db.taxonomy.conn.execute(
+                "INSERT INTO topics (label, collection, doc_count, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (f"t-{coll}", coll, 3, "2026-01-01T00:00:00Z"),
+            )
+        db.taxonomy.conn.commit()
+
+        # T3 still has to resolve the source collection for the
+        # project_against fetch; create it empty and short-circuit via
+        # --threshold so no real similarity math runs.
+        chroma_client.get_or_create_collection(src, embedding_function=None)
+
+        runner = CliRunner()
+        with (
+            patch("nexus.commands.taxonomy_cmd._default_db_path",
+                  return_value=tmp_path / "db.sqlite"),
+            patch("nexus.commands.taxonomy_cmd._T2Database", return_value=db),
+            patch("nexus.db.make_t3") as mock_t3,
+        ):
+            mock_t3.return_value._client = chroma_client
+            result = runner.invoke(taxonomy, ["project", src, "--threshold", "0.5"])
+
+        # The command may fail downstream (empty source has no chunks)
+        # but the progress line must show all three other collections
+        # as the resolved target set. That is what the unification fix
+        # is responsible for; the later numerical result is not.
+        assert "against 3 collection(s)" in result.output, result.output
 
 
 class TestListSiblingCollections:
