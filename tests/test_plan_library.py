@@ -313,6 +313,18 @@ def test_normalize_scope_string_empty_passthrough() -> None:
     assert _normalize_scope_string("") == ""
 
 
+def test_normalize_scope_string_strips_uppercase_hex_suffix() -> None:
+    """Real collection names carry mixed-case hex (code__Delos-5AF9BFE0).
+    Normalization must strip those just like lowercase variants
+    (nexus-yi7m)."""
+    from nexus.plans.scope import _normalize_scope_string
+
+    assert _normalize_scope_string("code__Delos-5AF9BFE0") == "code__Delos"
+    assert _normalize_scope_string("knowledge__Delos-5af9bfe0") == "knowledge__Delos"
+    # Mixed-case hex also stripped.
+    assert _normalize_scope_string("rdr__arcaneum-2Ad2825C") == "rdr__arcaneum"
+
+
 def test_normalize_scope_string_does_not_strip_short_or_nonhex() -> None:
     """Only 8-char lowercase hex suffixes are stripped; other trailing
     segments survive (collection-name hash convention is strict)."""
