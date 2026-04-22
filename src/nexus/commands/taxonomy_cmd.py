@@ -204,8 +204,15 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
 
         # GitHub #239 + bead nexus-gwhy: per-collection projection
         # assignment counts so status can flag collections with topics
-        # but no cross-collection projection data.
+        # but no cross-collection projection data. Computed over the
+        # full universe; the Action hint must not under-count when the
+        # user passes ``-n`` to truncate the display (code-review
+        # finding C-2).
         projection_counts = db.taxonomy.get_projection_counts_by_collection()
+        missing_projection: list[str] = [
+            coll for coll, n_topics, *_ in all_topics
+            if n_topics > 0 and projection_counts.get(coll, 0) == 0
+        ]
 
         with db.taxonomy._lock:
             link_count = db.taxonomy.conn.execute(
@@ -223,8 +230,6 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
             rows = [r for r in rows if r[3] > 0]
         if limit > 0:
             rows = rows[:limit]
-
-        missing_projection: list[str] = []
 
         if not summary:
             click.echo("Taxonomy Status\n")
@@ -250,22 +255,12 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
                 status_str = ", ".join(status_parts) if status_parts else "all pending"
 
                 proj_count = projection_counts.get(coll, 0)
-                proj_note = ""
-                if proj_count == 0 and n_topics > 0:
-                    proj_note = "  [no projection]"
-                    missing_projection.append(coll)
+                proj_note = "  [no projection]" if (proj_count == 0 and n_topics > 0) else ""
 
                 click.echo(f"  {coll}{proj_note}")
                 click.echo(f"    {n_topics} topics, {n_docs} docs assigned ({status_str}){rebal}")
 
             click.echo("")
-
-        # Collect missing-projection list even when --summary is set.
-        if summary:
-            missing_projection = [
-                coll for coll, n_topics, *_ in rows
-                if n_topics > 0 and projection_counts.get(coll, 0) == 0
-            ]
 
         click.echo(
             f"Total: {len(all_topics)} collections, {total_topics} topics, "
@@ -640,15 +635,40 @@ def assign_cmd(doc_id: str, topic_label: str, collection: str) -> None:
 @click.argument("topic_label")
 @click.argument("new_label")
 @click.option("--collection", "-c", default="", help="Collection scope for label lookup")
-def rename_cmd(topic_label: str, new_label: str, collection: str) -> None:
-    """Rename a topic."""
+@click.option(
+    "--no-accept", is_flag=True,
+    help=(
+        "Rename without transitioning review_status to 'accepted'. "
+        "Default behaviour accepts the topic, consistent with the "
+        "interactive `review` rename path (typing the new label is "
+        "an acknowledgement). Use --no-accept to correct a typo on "
+        "a still-pending topic without advancing it through review."
+    ),
+)
+def rename_cmd(
+    topic_label: str, new_label: str, collection: str, no_accept: bool,
+) -> None:
+    """Rename a topic. By default, also transitions to 'accepted'.
+
+    Code-review finding M-1 + bead nexus-gwhy: the standalone rename
+    command previously always transitioned review_status to 'accepted'
+    as a side effect of ``rename_topic``. Default behaviour preserved
+    (the user typing a new label is an acknowledgement); ``--no-accept``
+    lets you fix a typo without forcing the topic through review.
+    """
     with _T2Database(_default_db_path()) as db:
         topic_id = db.taxonomy.resolve_label(topic_label, collection=collection)
         if topic_id is None:
             click.echo(f"Topic '{topic_label}' not found.")
             return
-        db.taxonomy.rename_topic(topic_id, new_label)
-        click.echo(f"Renamed '{topic_label}' -> '{new_label}'.")
+        if no_accept:
+            db.taxonomy.update_topic_label(topic_id, new_label)
+            click.echo(
+                f"Renamed '{topic_label}' -> '{new_label}' (review_status preserved)."
+            )
+        else:
+            db.taxonomy.rename_topic(topic_id, new_label)
+            click.echo(f"Renamed '{topic_label}' -> '{new_label}'.")
 
 
 @taxonomy.command("merge")

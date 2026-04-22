@@ -866,6 +866,57 @@ def test_cli_taxonomy_status_warns_on_missing_projection(tmp_path: Path) -> None
     assert "nx taxonomy project" in result.output
 
 
+def test_cli_taxonomy_status_missing_projection_count_not_truncated_by_limit(
+    tmp_path: Path,
+) -> None:
+    """The missing-projection Action count reflects the full universe,
+    not the ``--limit`` page (code-review finding C-2).
+
+    Previously the count could under-report when the user scoped the
+    display with ``-n N`` and the zero-projection collections were
+    ranked below the top-N by doc_count.
+    """
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from nexus.commands.taxonomy_cmd import taxonomy
+
+    db_path = tmp_path / "memory.db"
+    with T2Database(db_path) as db:
+        # Three collections, descending doc_count. The top-1 has a
+        # projection; the other two (below the -n 1 cut-off) do not.
+        db.taxonomy.conn.executescript(
+            """
+            INSERT INTO topics (label, collection, doc_count, created_at) VALUES
+                ('big',    'docs__big',    100, '2026-01-01T00:00:00Z'),
+                ('medium', 'docs__medium',  50, '2026-01-01T00:00:00Z'),
+                ('small',  'docs__small',   10, '2026-01-01T00:00:00Z');
+            """
+        )
+        big_id = db.taxonomy.conn.execute(
+            "SELECT id FROM topics WHERE label='big'"
+        ).fetchone()[0]
+        db.taxonomy.conn.commit()
+        db.taxonomy.assign_topic(
+            "doc-1", big_id, assigned_by="projection",
+            similarity=0.9, source_collection="docs__big",
+        )
+
+    runner = CliRunner()
+    with patch(
+        "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
+    ):
+        result = runner.invoke(taxonomy, ["status", "-n", "1"])
+
+    assert result.exit_code == 0, result.output
+    # Two collections (medium + small) are zero-projection; the Action
+    # line must name both even though only the top-1 was displayed.
+    assert "2 collection(s) have no cross-collection projection" in result.output, (
+        result.output
+    )
+
+
 def test_cli_taxonomy_status_quiet_when_projection_present(tmp_path: Path) -> None:
     """status does NOT emit the projection-missing hint when every
     collection with topics has at least one projection assignment."""
@@ -2320,6 +2371,49 @@ class TestManualOpsCLI:
                 "SELECT label FROM topics LIMIT 1"
             ).fetchone()
         assert row[0] == "new-name"
+
+    def test_rename_cli_no_accept_preserves_pending_status(
+        self, tmp_path: Path,
+    ) -> None:
+        """``rename --no-accept`` updates the label without transitioning
+        review_status (code-review finding M-1).
+
+        Default behaviour (which still transitions to 'accepted') is
+        already exercised by ``test_rename_cli``; this test pins the
+        explicit opt-out path for users fixing a typo on a still-pending
+        topic.
+        """
+        from unittest.mock import patch
+
+        from click.testing import CliRunner
+
+        from nexus.commands.taxonomy_cmd import taxonomy
+
+        db_path = tmp_path / "memory.db"
+        with T2Database(db_path) as db:
+            db.taxonomy.conn.execute(
+                "INSERT INTO topics (label, collection, doc_count, created_at, "
+                "review_status) VALUES ('old-label', 'proj', 5, "
+                "'2026-01-01T00:00:00Z', 'pending')"
+            )
+            db.taxonomy.conn.commit()
+
+        runner = CliRunner()
+        with patch(
+            "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
+        ):
+            result = runner.invoke(
+                taxonomy,
+                ["rename", "old-label", "fixed-typo", "-c", "proj", "--no-accept"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "review_status preserved" in result.output
+        with T2Database(db_path) as db:
+            row = db.taxonomy.conn.execute(
+                "SELECT label, review_status FROM topics LIMIT 1"
+            ).fetchone()
+        assert row == ("fixed-typo", "pending")
 
     def test_merge_cli(self, tmp_path: Path) -> None:
         """nx taxonomy merge moves docs and deletes source."""

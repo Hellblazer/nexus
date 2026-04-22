@@ -1258,6 +1258,13 @@ class CatalogTaxonomy:
 
         Returns the number of topic-pair rows written / updated.
         """
+        # Single lock block: both the aggregate SELECT and the per-pair
+        # merge+upsert run under the same acquisition. Splitting them
+        # (earlier implementation) created a window where a concurrent
+        # ``assign_topic`` or ``taxonomy_assign_hook`` could change
+        # ``topic_assignments`` between the aggregate and the writes,
+        # yielding stale ``link_count`` values. Code-review finding C-1.
+        written = 0
         with self._lock:
             rows = self.conn.execute(
                 """
@@ -1273,17 +1280,15 @@ class CatalogTaxonomy:
                 """
             ).fetchall()
 
-        if not rows:
-            return 0
+            if not rows:
+                return 0
 
-        # Canonicalize pair ordering so (A, B) and (B, A) merge into one row.
-        aggregated: dict[tuple[int, int], int] = {}
-        for src_id, tgt_id, count in rows:
-            pair = (int(src_id), int(tgt_id)) if src_id < tgt_id else (int(tgt_id), int(src_id))
-            aggregated[pair] = aggregated.get(pair, 0) + int(count)
+            # Canonicalize pair ordering so (A, B) and (B, A) merge into one row.
+            aggregated: dict[tuple[int, int], int] = {}
+            for src_id, tgt_id, count in rows:
+                pair = (int(src_id), int(tgt_id)) if src_id < tgt_id else (int(tgt_id), int(src_id))
+                aggregated[pair] = aggregated.get(pair, 0) + int(count)
 
-        written = 0
-        with self._lock:
             for (from_id, to_id), count in aggregated.items():
                 existing = self.conn.execute(
                     "SELECT link_types FROM topic_links "

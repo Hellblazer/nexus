@@ -572,6 +572,32 @@ class TestOperatorCompare:
         assert "'name'" not in captured["prompt"]
 
     @pytest.mark.asyncio
+    async def test_triple_empty_items_falls_into_one_sided_empty_prompt(
+        self, monkeypatch,
+    ) -> None:
+        """All three item parameters empty produces a one-sided prompt with an
+        empty Items body. This pins the silent-empty contract documented in
+        the operator_compare docstring (code-review finding T-2); callers who
+        rely on ``items`` being required previously got a TypeError, and this
+        test makes the new default-empty behaviour explicit so a future change
+        to add an early-exit raise is caught here."""
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_compare
+
+        captured = {}
+
+        async def fake(prompt, schema, timeout):
+            captured["prompt"] = prompt
+            return {"comparison": ""}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        result = await operator_compare()
+        assert "comparison" in result
+        # One-sided format with empty Items body.
+        assert "Compare the following items" in captured["prompt"]
+        assert captured["prompt"].rstrip().endswith("Items:")
+
+    @pytest.mark.asyncio
     async def test_one_sided_fires_when_items_b_empty(self, monkeypatch) -> None:
         """Only one of items_a/items_b given falls back to one-sided on items."""
         import nexus.operators.dispatch as _mod
