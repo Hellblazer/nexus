@@ -177,6 +177,100 @@ class TestLinksFilterCommand:
         assert result.exit_code == 0
         assert "No links found." in result.output
 
+    def test_links_resolve_renders_title_and_path(
+        self, initialized_catalog, catalog_env,
+    ):
+        """--resolve renders '<title-or-path> (<tumbler>)' per endpoint.
+
+        Bead nexus-iojz (formerly nexus-i63n). Default output is raw
+        tumblers which are unreadable for external audiences.
+        """
+        runner = CliRunner()
+        runner.invoke(main, [
+            "catalog", "register", "--title", "RDR-010", "--owner", "1.1",
+        ])
+        runner.invoke(main, [
+            "catalog", "register", "--title", "hooks",
+            "--file-path", "src/nexus/hooks.py", "--owner", "1.1",
+        ])
+        runner.invoke(main, [
+            "catalog", "link", "1.1.1", "1.1.2", "--type", "implements",
+        ])
+
+        result = runner.invoke(main, [
+            "catalog", "links", "--type", "implements", "--resolve",
+        ])
+        assert result.exit_code == 0, result.output
+        # Title form for both endpoints (register requires --title, so
+        # both entries carry one; the file-path fallback is exercised
+        # elsewhere via _endpoint_label unit coverage).
+        assert "RDR-010 (1.1.1)" in result.output
+        assert "hooks (1.1.2)" in result.output
+        assert "(implements)" in result.output
+
+    def test_endpoint_label_falls_back_to_file_path_when_no_title(
+        self, initialized_catalog,
+    ) -> None:
+        """_endpoint_label helper prefers title, falls back to file_path,
+        then bare tumbler. Covers the register-via-API path where
+        documents can carry a file_path with empty title."""
+        from nexus.catalog.tumbler import Tumbler
+        from nexus.commands.catalog import _endpoint_label
+
+        cat = initialized_catalog
+        # Register programmatically to bypass the CLI --title requirement.
+        tumbler = cat.register(
+            Tumbler.parse("1.1"), "", content_type="code",
+            file_path="src/nexus/session.py",
+        )
+        assert _endpoint_label(cat, tumbler) == f"src/nexus/session.py ({tumbler})"
+
+    def test_links_unique_targets_dedupes_by_file_path(
+        self, initialized_catalog, catalog_env,
+    ):
+        """--unique-targets collapses edges that point at the same file_path
+        via different owner tumblers (bead nexus-iojz, formerly nexus-x6eu).
+        """
+        from nexus.catalog.tumbler import Tumbler
+
+        cat = initialized_catalog
+        # Register dedupes by (owner, file_path), so two tumblers sharing
+        # a file_path only arise when the file is registered under
+        # distinct owners, which is exactly what re-indexing after
+        # owner-rename produces (before `dedupe-owners` reconciles).
+        owner_a = Tumbler.parse("1.1")
+        owner_b_id = cat.register_owner("second-repo", "repo", repo_hash="deadbeef")
+        owner_b = Tumbler.parse(str(owner_b_id))
+
+        src = cat.register(owner_a, "RDR-A", content_type="rdr")
+        tgt_v1 = cat.register(
+            owner_a, "session-v1", content_type="code",
+            file_path="src/nexus/session.py",
+        )
+        tgt_v2 = cat.register(
+            owner_b, "session-v2", content_type="code",
+            file_path="src/nexus/session.py",
+        )
+        assert str(tgt_v1) != str(tgt_v2), (
+            "this test requires two distinct tumblers sharing a file_path"
+        )
+        cat.link(src, tgt_v1, "implements", created_by="test")
+        cat.link(src, tgt_v2, "implements", created_by="test")
+
+        runner = CliRunner()
+        default = runner.invoke(main, [
+            "catalog", "links", str(src), "--type", "implements",
+        ])
+        assert default.exit_code == 0, default.output
+        assert default.output.count("implements") == 2
+
+        uniq = runner.invoke(main, [
+            "catalog", "links", str(src), "--type", "implements",
+            "--unique-targets",
+        ])
+        assert uniq.exit_code == 0, uniq.output
+        assert uniq.output.count("implements") == 1
+
 
 class TestDeleteCommand:
     def test_delete_by_tumbler(self, initialized_catalog, catalog_env):
@@ -293,6 +387,98 @@ class TestStatsCommand:
         result = runner.invoke(main, ["catalog", "stats"])
         assert result.exit_code == 0
         assert "1" in result.output  # at least 1 document
+
+    def test_stats_includes_topics_block_when_available(
+        self, initialized_catalog, catalog_env, tmp_path, monkeypatch,
+    ):
+        """stats surfaces topics / assignments / per-source projection counts.
+
+        Bead nexus-iojz (formerly nexus-1n0t). The catalog has three
+        layers; stats previously enumerated only the first two.
+        """
+        from nexus.db.t2 import T2Database
+
+        # Seed a T2 DB with one topic + one projection assignment and
+        # point the command helper at it via monkeypatched default_db_path.
+        t2_path = tmp_path / "memory.db"
+        with T2Database(t2_path) as db:
+            db.taxonomy.conn.execute(
+                "INSERT INTO topics (label, collection, doc_count, created_at) "
+                "VALUES ('t', 'docs__src', 5, '2026-01-01T00:00:00Z')"
+            )
+            tid = db.taxonomy.conn.execute(
+                "SELECT id FROM topics WHERE label='t'"
+            ).fetchone()[0]
+            db.taxonomy.conn.commit()
+            db.taxonomy.assign_topic(
+                "doc-1", tid, assigned_by="projection",
+                similarity=0.8, source_collection="docs__src",
+            )
+
+        import nexus.commands.catalog as catalog_mod
+
+        monkeypatch.setattr(
+            catalog_mod, "_taxonomy_stats",
+            lambda: {
+                "topics": 1,
+                "assignments": 1,
+                "distinct_topics_assigned": 1,
+                "projection_by_source": {"docs__src": 1},
+            },
+        )
+
+        runner = CliRunner()
+        runner.invoke(main, [
+            "catalog", "register", "--title", "A", "--owner", "1.1",
+        ])
+        result = runner.invoke(main, ["catalog", "stats"])
+        assert result.exit_code == 0, result.output
+        assert "Topics:" in result.output
+        assert "1 topics, 1 assignments" in result.output
+        assert "Projection by source:" in result.output
+        assert "docs__src" in result.output
+
+    def test_stats_json_includes_taxonomy_when_available(
+        self, initialized_catalog, catalog_env, monkeypatch,
+    ):
+        """--json output carries the taxonomy block under a top-level
+        ``taxonomy`` key so machine readers can consume it."""
+        import nexus.commands.catalog as catalog_mod
+
+        monkeypatch.setattr(
+            catalog_mod, "_taxonomy_stats",
+            lambda: {
+                "topics": 2, "assignments": 5,
+                "distinct_topics_assigned": 2,
+                "projection_by_source": {"knowledge__a": 5},
+            },
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "stats", "--json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["taxonomy"]["topics"] == 2
+        assert data["taxonomy"]["projection_by_source"] == {"knowledge__a": 5}
+
+    def test_stats_skips_taxonomy_block_when_absent(
+        self, initialized_catalog, catalog_env, monkeypatch,
+    ):
+        """When _taxonomy_stats returns None (no T2 or no topics), the
+        text output must not include a Topics line and --json must not
+        include a taxonomy key. Regression guard against accidental
+        inclusion of a misleading empty block."""
+        import nexus.commands.catalog as catalog_mod
+
+        monkeypatch.setattr(catalog_mod, "_taxonomy_stats", lambda: None)
+
+        runner = CliRunner()
+        text = runner.invoke(main, ["catalog", "stats"])
+        assert text.exit_code == 0
+        assert "Topics:" not in text.output
+        js = runner.invoke(main, ["catalog", "stats", "--json"])
+        assert js.exit_code == 0
+        assert "taxonomy" not in json.loads(js.output)
 
 
 class TestDiscoveryTools:

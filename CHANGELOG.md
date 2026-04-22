@@ -8,7 +8,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [4.9.9] - 2026-04-22
 
-Rolls up the kxez (GitHub #243 + #241) and gwhy (#238 / #239 / #240 + review-response) taxonomy fixes that were merged to `main` after the v4.9.8 tag was cut; they did not ship in the 4.9.8 PyPI artifact. Plus two bugs found during the 4.9.8 shakeout (below).
+Rolls up the kxez (GitHub #243 + #241) and gwhy (#238 / #239 / #240 + review-response) taxonomy fixes that were merged to `main` after the v4.9.8 tag was cut; they did not ship in the 4.9.8 PyPI artifact. Plus two bugs found during the 4.9.8 shakeout, plus three small `nx catalog` CLI polish items that had been sitting as open beads since 2026-04-19 (below).
+
+### Added
+
+- **`nx catalog links --resolve`** (`src/nexus/commands/catalog.py`, bead `nexus-i63n` rolled into `nexus-iojz`). Default output is raw tumblers (`1.17.14 → 1.1.107`), which is unreadable for external audiences and still clunky when project-hacking. `--resolve` renders each endpoint inline as `<title-or-path> (<tumbler>)` using the existing `catalog.resolve()` entry lookup: prefer `title`, fall back to `file_path`, then bare tumbler.
+- **`nx catalog links --unique-targets`** (`src/nexus/commands/catalog.py`, bead `nexus-x6eu` rolled into `nexus-iojz`). Collapses edges that point at the same `file_path` via different owner tumblers (the shape re-indexing after owner-rename produces). Stable first-seen-wins; fails open to bare tumbler if the target does not resolve. Workaround for the deeper re-index dedup gap, not a replacement for it.
+- **`nx catalog stats` now includes a topics block** (`src/nexus/commands/catalog.py`, bead `nexus-1n0t` rolled into `nexus-iojz`). Previously reported owners / documents / links / by_type / by_link_type; the catalog's third layer (`CatalogTaxonomy`) was silent. New section shows total assignments, distinct topics assigned, and projection breakdown by source collection. `--json` carries the same data under a top-level `taxonomy` key. Skipped quietly when T2 is absent or carries no topic rows.
 
 ### Fixed
 
