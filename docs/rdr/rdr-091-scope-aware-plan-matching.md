@@ -12,7 +12,7 @@ related_issues:
   - "nexus-zs1d: Wire nx_answer scope through plan_match + plan_run"
 related_tests: [test_plan_match.py, test_plan_library.py, test_nx_answer.py]
 related: [RDR-078, RDR-079, RDR-080, RDR-084]
-implementation_notes: "scope_fit_weight=0.15 picked Phase 2c (nexus-svcg): motivating case (generic agnostic 0.82 vs specialized matching 0.79) break-even at w~0.038; 0.15 leaves 0.09 margin (specialized 0.79*1.15=0.9085 beats generic 0.82) without drowning genuinely higher-cosine agnostic plans. Formula is multiplicative per RDR spec."
+implementation_notes: "scope_fit_weight=0.15 picked Phase 2c (nexus-svcg): motivating case (generic agnostic 0.82 vs specialized matching 0.79) break-even at w~0.038; 0.15 leaves 0.09 margin (specialized 0.79*1.15=0.9085 beats generic 0.82) without drowning genuinely higher-cosine agnostic plans. Formula is multiplicative per RDR spec. Phase 2c regression gate is semantic (empty-scope no-op), not an arithmetic test count; current plan-subsystem suite runs ~200 tests post-091 including the new phase 2a-2c additions. Critic follow-up (nexus-dfok, 2026-04-22) fixed two silent bugs: (1) 'all' corpus sentinel was inferred as a concrete scope tag, filtering 7 of 9 builtins out of scoped nx_answer calls; (2) backfill migration overwrote explicit save_plan(scope_tags=...) values on every process restart. 4.8.1 rewash migration corrects pre-fix rows; grown-plan save now passes scope_tags=scope explicitly so grown plans are anchored to the retrieval space that produced them."
 ---
 
 # RDR-091: Scope-Aware Plan Matching (nexus-zs1d Phase 2)

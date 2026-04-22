@@ -29,10 +29,15 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from nexus.db.t2.plan_library import PlanLibrary, _normalize_scope_string
+import structlog
+
+from nexus.db.t2.plan_library import PlanLibrary
 from nexus.plans.match import Match
+from nexus.plans.scope import _normalize_scope_string
 
 __all__ = ["PlanCache", "plan_match"]
+
+_log = structlog.get_logger()
 
 
 # ── Scope-aware re-ranking (RDR-091 Phase 2b + 2c) ─────────────────────────
@@ -169,6 +174,7 @@ def plan_match(
         hits = cache.query(intent, _over)
         # Gather all admissible candidates with (adjusted_score, specificity).
         scored: list[tuple[float, int, Match]] = []
+        scope_conflict_drops = 0
         for plan_id, distance in hits:
             row = library.get_plan(plan_id)
             if row is None:
@@ -188,6 +194,7 @@ def plan_match(
                 continue
             fit = _scope_fit(m.scope_tags, scope_pref)
             if fit is None:
+                scope_conflict_drops += 1
                 continue  # scope conflict — drop from pool
             adjusted = confidence * (1.0 + _SCOPE_FIT_WEIGHT * fit)
             scored.append((adjusted, _specificity(m.scope_tags), m))
@@ -198,6 +205,18 @@ def plan_match(
             for m in matches:
                 library.increment_match_metrics(m.plan_id, confidence=m.confidence)
             return matches
+
+        # T1 returned hits but every admissible plan was scope-filtered.
+        # Log so operators can see when scope_preference is silently
+        # degrading matches to FTS5 / inline planner (RDR-091 code-review
+        # finding I-4).
+        if hits and scope_conflict_drops > 0:
+            _log.debug(
+                "plan_match_scope_conflict_fallthrough",
+                t1_hits=len(hits),
+                dropped=scope_conflict_drops,
+                scope_pref=scope_pref,
+            )
 
     # FTS5 fallback: either cache unavailable or T1 returned no hits.
     # Over-fetch so the dimension post-filter doesn't starve the caller.

@@ -402,6 +402,48 @@ def test_fts5_fallback_applies_scope_conflict_filter(library) -> None:
     assert result == [], "FTS5 path must also filter scope-conflicting plans"
 
 
+def test_scope_boost_formula_is_multiplicative_with_unequal_cosines(library) -> None:
+    """Formula-pinning regression guard (RDR-091 critic follow-up).
+
+    Phase 2b originally shipped an additive `confidence + weight * fit`
+    formula; the RDR specifies multiplicative
+    `confidence * (1 + weight * fit)`. The Phase 2b test suite used
+    equal-cosine fixtures so the bug was undetectable in unit coverage.
+    This case uses meaningfully unequal cosines so only the correct
+    multiplicative formula produces the expected ordering.
+
+    Numbers: specialized=0.79 matching, agnostic=0.82 neutral, w=0.15.
+      * multiplicative: 0.79 * 1.15 = 0.9085 > 0.82   (specialized wins)
+      * additive:       0.79 + 0.15 = 0.94   > 0.82   (also wins — so
+                        we instead use a tighter case below)
+
+    A tighter case exposes the difference: specialized=0.50 matching,
+    agnostic=0.60 neutral, w=0.15:
+      * multiplicative: 0.50 * 1.15 = 0.575  < 0.60   (agnostic wins)
+      * additive:       0.50 + 0.15 = 0.65   > 0.60   (specialized wins)
+    """
+    from nexus.plans.matcher import plan_match
+
+    specialized = _seed(library, query="q",
+                        dimensions={"verb": "research", "variant": "s"},
+                        scope_tags="rdr__arcaneum")
+    agnostic = _seed(library, query="q",
+                     dimensions={"verb": "research", "variant": "a"},
+                     scope_tags="")
+    # distance=0.50 → confidence=0.50 (specialized), distance=0.40 → 0.60 (agnostic).
+    cache = _FakeCache(hits=[(specialized, 0.50), (agnostic, 0.40)])
+    result = plan_match(
+        intent="q", library=library, cache=cache,
+        min_confidence=0.40, scope_preference="rdr__arcaneum",
+    )
+    # Multiplicative says agnostic (0.60) beats specialized (0.575).
+    # Additive would flip the order.
+    assert [m.plan_id for m in result][0] == agnostic, (
+        "formula must be multiplicative; a small boost does not override "
+        "a higher-cosine agnostic plan"
+    )
+
+
 def test_fts5_fallback_keeps_matching_and_agnostic(library) -> None:
     """FTS5 fallback keeps matching and agnostic plans when scope set."""
     from nexus.plans.matcher import plan_match
