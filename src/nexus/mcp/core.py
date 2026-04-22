@@ -611,12 +611,13 @@ def store_put(
 
 @mcp.tool()
 def store_get(doc_id: str, collection: str = "knowledge") -> str:
-    """Retrieve the full content and metadata of a T3 knowledge entry by document ID.
+    """Retrieve the full content and metadata of a T3 knowledge entry by document ID or title.
 
     Use after store_list or search to read the complete document.
 
     Args:
-        doc_id: Exact document ID (from store_list or store_put output)
+        doc_id: Exact 16-char content-hash document ID (from store_list / store_put / search),
+                OR an exact title (looked up via metadata).
         collection: Collection name or prefix (default: knowledge)
     """
     try:
@@ -626,7 +627,22 @@ def store_get(doc_id: str, collection: str = "knowledge") -> str:
         t3 = _get_t3()
         entry = t3.get_by_id(col_name, doc_id)
         if entry is None:
-            return f"Not found: {doc_id!r} in {col_name}"
+            # Title fallback: 16 lowercase hex chars looks like a hash;
+            # anything else, try treating it as an exact title (matches what
+            # store_list / search display, since hashes aren't surfaced there).
+            looks_like_hash = len(doc_id) == 16 and all(c in "0123456789abcdef" for c in doc_id)
+            if not looks_like_hash:
+                ids = t3.find_ids_by_title(col_name, doc_id)
+                if len(ids) == 1:
+                    entry = t3.get_by_id(col_name, ids[0])
+                elif len(ids) > 1:
+                    return (
+                        f"Multiple documents with title {doc_id!r} in {col_name}: "
+                        + ", ".join(ids[:5]) + (" …" if len(ids) > 5 else "")
+                        + " — pass a 16-char content-hash to disambiguate."
+                    )
+        if entry is None:
+            return f"Not found: {doc_id!r} in {col_name} (pass a 16-char content-hash from store_list/store_put/search, or an exact title)"
         title = entry.get("source_title") or entry.get("title", "")
         tags = entry.get("tags", "")
         indexed_at = (entry.get("indexed_at") or "")[:10]
@@ -787,8 +803,16 @@ def store_list(
 
 
 def _store_list_docs(t3, col_name: str, total: int) -> str:
-    """Document-level view: deduplicate chunks by content_hash."""
+    """Document-level view: deduplicate chunks by content_hash.
+
+    Per-doc chunk count is derived from the dedup pass — entries written by
+    ``store_put`` don't set a ``chunk_count`` metadata field (only the PDF
+    indexer does), so reading it from metadata produced ``?`` for everything.
+    The page-count column is omitted entirely when no document carries it,
+    rather than showing ``?p`` for non-PDF entries.
+    """
     seen: dict[str, dict] = {}
+    chunks_by_hash: dict[str, int] = {}
     offset = 0
     while offset < total:
         entries = t3.list_store(col_name, limit=300, offset=offset)
@@ -798,20 +822,29 @@ def _store_list_docs(t3, col_name: str, total: int) -> str:
             h = e.get("content_hash", e.get("id", ""))
             if h not in seen:
                 seen[h] = e
+            chunks_by_hash[h] = chunks_by_hash.get(h, 0) + 1
         offset += 300
 
     if not seen:
         return f"No documents in {col_name}."
 
-    docs = sorted(seen.values(), key=lambda d: d.get("source_title") or d.get("title") or "")
+    docs = sorted(seen.items(), key=lambda kv: kv[1].get("source_title") or kv[1].get("title") or "")
+    show_pages = any(d.get("page_count") for _, d in docs)
     lines = [f"{col_name}  ({len(docs)} documents, {total} chunks)"]
-    for i, d in enumerate(docs, 1):
-        title = (d.get("source_title") or d.get("title") or "untitled")[:60]
-        chunks = d.get("chunk_count", "?")
-        pages = d.get("page_count", "?")
+    for i, (h, d) in enumerate(docs, 1):
+        # 16-char content-hash prefix surfaces the doc_id store_get expects —
+        # without this column the natural list → get flow had no path from
+        # title to hash.
+        doc_id = (d.get("id") or h)[:16]
+        title = (d.get("source_title") or d.get("title") or "untitled")[:50]
+        chunks = chunks_by_hash.get(h, "?")
         method = d.get("extraction_method", "")
         indexed = (d.get("indexed_at") or "")[:10]
-        lines.append(f"  {i:3d}. {title:<60}  {chunks:>4} chunks  {pages:>3}p  {method:<8}  {indexed}")
+        if show_pages:
+            pages = d.get("page_count", "?")
+            lines.append(f"  {i:3d}. {doc_id}  {title:<50}  {chunks:>4} chunks  {pages:>3}p  {method:<8}  {indexed}")
+        else:
+            lines.append(f"  {i:3d}. {doc_id}  {title:<50}  {chunks:>4} chunks  {method:<8}  {indexed}")
     return "\n".join(lines)
 
 

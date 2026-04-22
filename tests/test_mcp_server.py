@@ -217,6 +217,32 @@ def test_store_get_no_ansi(t3):
     assert not ANSI_RE.search(result), f"ANSI codes found in: {result[:100]}"
 
 
+def test_store_get_by_title_fallback(t3):
+    """store_get accepts an exact title when the input doesn't look like a
+    16-char content hash — fixed in 4.9.6 follow-up (was silent Not found)."""
+    _put_id("findable by title", title="title-lookup-test")
+    result = store_get(doc_id="title-lookup-test", collection="knowledge")
+    assert not result.startswith("Error:")
+    assert "findable by title" in result
+
+
+def test_store_get_unknown_title_actionable_error(t3):
+    """The Not-found message hints at the hash-vs-title distinction."""
+    result = store_get(doc_id="totally-not-a-real-title", collection="knowledge")
+    assert "not found" in result.lower()
+    assert "content-hash" in result.lower() or "title" in result.lower()
+
+
+def test_store_list_docs_chunk_count_numeric(t3):
+    """--docs=true derives chunk count from the dedup pass; previously
+    showed `?` for every entry because metadata didn't carry chunk_count."""
+    store_put(content="single chunk doc", collection="knowledge", title="docs-count-test")
+    result = store_list(collection="knowledge", docs=True)
+    assert "?" not in result.split("\n")[1] if "\n" in result else True
+    # A 1-chunk doc should report `1 chunks` (or `1 chunk`)
+    assert "1 chunks" in result
+
+
 # ── Memory ───────────────────────────────────────────────────────────────────
 
 def test_memory_put(t2_path):

@@ -6,6 +6,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`catalog_search` rejected `content_type` as a sole filter** (`src/nexus/mcp/catalog.py`). The structured-filter trigger condition (`if owner or corpus or file_path or (author and not query)`) omitted `content_type`, so a sole `content_type` value fell through to the FTS5 path which requires a free-text query. Documented behaviour was wrong for callers asking "show me everything of type prose" without a search term. Added `content_type` to the trigger; pre-existing structured-filter SQL already handled `content_type = ?` correctly. (nexus-3o3t)
+- **`store_list --docs=true` showed `?` for chunk count on every entry** (`src/nexus/mcp/core.py`). Per-doc `chunk_count` was read from chunk metadata, but `store_put` doesn't set that field — only the PDF indexer does. The dedup pass now derives the chunk count per content-hash; the page-count column is omitted entirely when no document carries one (was always `?p` for non-PDF entries). (nexus-3o3t)
+- **`store_get` failed silently when given a title** (`src/nexus/mcp/core.py`). `store_list` displays titles; `store_put`/`search` return hashes; the MCP tool docstring promised hashes but the natural `list → get` copy-paste flow was broken. Now: try the input as a hash first; if not found and it doesn't look like a 16-char hex hash, fall back to `find_ids_by_title()`; on multi-match, list candidate hashes; on miss, error message names both the hash and title paths. Also surfaces the 16-char content-hash in the `--docs=true` listing so a hash is always within copy-paste reach. (nexus-3o3t)
+
+### Changed
+
+- **`T1Database.get` and `_reconnect` emit structured diagnostic logs** (`src/nexus/db/t1.py`). A user-reported `scratch put` → `scratch get` round-trip failure (`Not found` on the freshly-returned UUID) couldn't be reproduced in isolation. Added `t1_get_miss` (with requested_id, session_id, client_type, dead) and `t1_reconnect_to_different_server` (with prior + new session_id and host:port) so the next occurrence carries enough context to diagnose. No behaviour change. (nexus-3o3t)
+
 ## [4.9.6] - 2026-04-22
 
 ### Added

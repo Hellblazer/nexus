@@ -105,6 +105,17 @@ def test_search_requires_param(cat) -> None:
     assert "error" in catalog_search()[0]
 
 
+def test_search_by_content_type_alone(cat) -> None:
+    """content_type alone is a valid filter — fixed in 4.9.6 follow-up."""
+    catalog_register(title="alpha", owner="1.1", content_type="prose")
+    catalog_register(title="beta", owner="1.1", content_type="code")
+    catalog_register(title="gamma", owner="1.1", content_type="prose")
+    results = catalog_search(content_type="prose")
+    assert all("error" not in r for r in results)
+    titles = sorted(r["title"] for r in results if "title" in r)
+    assert titles == ["alpha", "gamma"]
+
+
 def test_list_all(cat) -> None:
     catalog_register(title="A", owner="1.1")
     catalog_register(title="B", owner="1.1")

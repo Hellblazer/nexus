@@ -193,6 +193,7 @@ class T1Database:
             return
         self._dead = True  # set before any I/O to prevent loops on re-entry
 
+        prior_session_id = self._session_id
         record = find_ancestor_session(SESSIONS_DIR)
         if record is not None:
             self._client = chromadb.HttpClient(
@@ -200,6 +201,13 @@ class T1Database:
                 port=record["server_port"],
             )
             self._session_id = record["session_id"]
+            _log.warning(
+                "t1_reconnect_to_different_server",
+                prior_session_id=prior_session_id,
+                new_session_id=record["session_id"],
+                new_host=record["server_host"],
+                new_port=record["server_port"],
+            )
         else:
             warnings.warn(
                 "T1 reconnect falling back to EphemeralClient — "
@@ -273,6 +281,19 @@ class T1Database:
         """Return the document dict for *id*, or None if not found."""
         result = self._exec(lambda: self._col.get(ids=[id], include=["documents", "metadatas"]))
         if not result["ids"]:
+            # Bug 1 (nexus-bug-report-2026-04-22): users hit Not-found on
+            # ids freshly returned by put(). The path is unreproducible in
+            # isolation; this log captures the state the next time it fires
+            # so the cause can be diagnosed (stale singleton after a silent
+            # _reconnect, dual MCP servers writing to different chroma
+            # collections, etc.).
+            _log.warning(
+                "t1_get_miss",
+                requested_id=id,
+                session_id=self._session_id,
+                client_type=type(self._client).__name__,
+                dead=self._dead,
+            )
             return None
         # Update access tracking (F-3: preserve existing metadata)
         existing = result["metadatas"][0] or {}
