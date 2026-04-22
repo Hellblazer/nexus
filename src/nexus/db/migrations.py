@@ -587,7 +587,7 @@ def _add_plan_scope_tags(conn: sqlite3.Connection) -> None:
     # Backfill only rows where scope_tags is still the default ''.
     # Explicit values survive; partial-failure retries pick up where
     # they left off.
-    from nexus.db.t2.plan_library import _infer_scope_tags
+    from nexus.plans.scope import _infer_scope_tags
 
     rows = conn.execute(
         "SELECT id, plan_json FROM plans WHERE scope_tags = ''"
@@ -633,7 +633,7 @@ def _rewash_plan_scope_tags_all_sentinel(conn: sqlite3.Connection) -> None:
     if "scope_tags" not in cols:
         return
 
-    from nexus.db.t2.plan_library import _infer_scope_tags
+    from nexus.plans.scope import _infer_scope_tags
 
     rows = conn.execute(
         """

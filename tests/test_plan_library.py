@@ -469,8 +469,9 @@ def test_save_plan_omitted_scope_tags_traverse_only(plan_db: T2Database) -> None
 
 def test_save_plan_scope_tags_column_default_empty(plan_db: T2Database) -> None:
     """The scope_tags column defaults to '' (load-bearing: pre-backfill rows)."""
-    # A low-level INSERT that omits scope_tags altogether mimics an
-    # unmigrated row. The column must still read as '', not NULL.
+    # The INSERT below omits scope_tags, so the SQL DEFAULT '' fires.
+    # This pins the load-bearing default: any INSERT path that forgets
+    # scope_tags produces '' (treated as agnostic), not NULL.
     plan_db.plans.conn.execute(
         """
         INSERT INTO plans (project, query, plan_json, outcome, tags, created_at)
@@ -739,6 +740,80 @@ def test_rewash_migration_no_op_when_no_all_rows(tmp_path: Path) -> None:
     )
     conn.commit()
     _rewash_plan_scope_tags_all_sentinel(conn)  # must not crash
+    conn.close()
+
+
+def test_save_plan_explicit_scope_tags_filters_all_sentinel(plan_db: T2Database) -> None:
+    """save_plan(scope_tags='all') must drop the sentinel — same contract as
+    the inference path. Without this filter the sentinel would reach storage
+    via the explicit path (RDR-091 code-review finding C-3)."""
+    row_id = plan_db.save_plan(
+        query="q",
+        plan_json='{"steps":[]}',
+        scope_tags="all",
+    )
+    row = plan_db.plans.conn.execute(
+        "SELECT scope_tags FROM plans WHERE id = ?", (row_id,)
+    ).fetchone()
+    assert row[0] == ""
+
+
+def test_save_plan_explicit_scope_tags_drops_all_mixed_with_specific(
+    plan_db: T2Database,
+) -> None:
+    """Mixed 'all' + specific tags drops the 'all' and keeps the rest."""
+    row_id = plan_db.save_plan(
+        query="q",
+        plan_json='{"steps":[]}',
+        scope_tags="all,rdr__arcaneum",
+    )
+    row = plan_db.plans.conn.execute(
+        "SELECT scope_tags FROM plans WHERE id = ?", (row_id,)
+    ).fetchone()
+    assert row[0] == "rdr__arcaneum"
+
+
+def test_rewash_migration_fixes_trailing_all_variant(tmp_path: Path) -> None:
+    """Rewash handles 'rdr__arcaneum,all' (trailing-all variant) — the LIKE
+    '%,all' branch (RDR-091 code-review finding I-7)."""
+    import sqlite3
+
+    from nexus.db.migrations import _rewash_plan_scope_tags_all_sentinel
+
+    db_path = tmp_path / "trailing_all.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE plans (
+            id INTEGER PRIMARY KEY,
+            project TEXT NOT NULL DEFAULT '',
+            query TEXT NOT NULL,
+            plan_json TEXT NOT NULL,
+            outcome TEXT DEFAULT 'success',
+            tags TEXT DEFAULT '',
+            created_at TEXT NOT NULL,
+            scope_tags TEXT NOT NULL DEFAULT ''
+        );
+        """
+    )
+    # Lexicographic sort puts 'all' first, so trailing-'all' cannot arise
+    # from inference. But manual/external writes can produce it; the
+    # rewash query must still handle it.
+    conn.execute(
+        "INSERT INTO plans (query, plan_json, created_at, scope_tags) "
+        "VALUES (?, ?, ?, ?)",
+        (
+            "q",
+            '{"steps":[{"tool":"search","args":{"corpus":"rdr__arcaneum"}},'
+            '{"tool":"search","args":{"corpus":"all"}}]}',
+            "2025-01-01T00:00:00Z",
+            "rdr__arcaneum,all",
+        ),
+    )
+    conn.commit()
+    _rewash_plan_scope_tags_all_sentinel(conn)
+    row = conn.execute("SELECT scope_tags FROM plans WHERE query='q'").fetchone()
+    assert row[0] == "rdr__arcaneum"
     conn.close()
 
 
