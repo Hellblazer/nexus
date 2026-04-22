@@ -544,6 +544,53 @@ def migrate_chash_index(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _add_plan_scope_tags(conn: sqlite3.Connection) -> None:
+    """Add the ``scope_tags`` column to ``plans`` and backfill existing rows.
+
+    RDR-091 Phase 2a (bead ``nexus-x6pr``). ``scope_tags`` captures which
+    corpora / collections a plan actually touched — a comma-separated,
+    sorted, deduplicated, hash-suffix-normalized string. Phase 2b consumes
+    this column during match-time re-ranking; this migration only ensures
+    the column exists and carries a best-effort value for every row.
+
+    Idempotent via a ``PRAGMA table_info`` column guard. The backfill is
+    re-run on every invocation because inference is deterministic — so a
+    partial migration that crashed mid-UPDATE is safe to retry.
+
+    No-op on a DB that has no ``plans`` table (fresh install without
+    :mod:`nexus.db.t2.plan_library` ever instantiated).
+
+    The ``DEFAULT ''`` at column-creation time is load-bearing: any code
+    path that inserts into ``plans`` without naming ``scope_tags`` (pre
+    the plan_library update in the same PR) produces ``""``, not ``NULL``,
+    which Phase 2b treats as the scope-agnostic marker.
+    """
+    has_table = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='plans'"
+    ).fetchone()
+    if not has_table:
+        return
+
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(plans)").fetchall()}
+    if "scope_tags" not in cols:
+        _log.info("Adding plans column", column="scope_tags")
+        conn.execute(
+            "ALTER TABLE plans ADD COLUMN scope_tags TEXT NOT NULL DEFAULT ''"
+        )
+
+    # Backfill: inference is deterministic and cheap; re-running is safe.
+    from nexus.db.t2.plan_library import _infer_scope_tags
+
+    rows = conn.execute("SELECT id, plan_json FROM plans").fetchall()
+    for row_id, plan_json in rows:
+        inferred = _infer_scope_tags(plan_json or "")
+        conn.execute(
+            "UPDATE plans SET scope_tags = ? WHERE id = ?",
+            (inferred, row_id),
+        )
+    conn.commit()
+
+
 MIGRATIONS: list[Migration] = [
     Migration("1.10.0", "Memory FTS rebuild with title", migrate_memory_fts),
     Migration("2.8.0", "Add plan project column", migrate_plan_project),
@@ -581,6 +628,11 @@ MIGRATIONS: list[Migration] = [
         "4.7.0",
         "Add chash_index table (RDR-086 Phase 1.1)",
         migrate_chash_index,
+    ),
+    Migration(
+        "4.8.0",
+        "Add plans.scope_tags column (RDR-091 Phase 2a)",
+        _add_plan_scope_tags,
     ),
 ]
 

@@ -25,6 +25,8 @@ seeding would break in production.
 
 from __future__ import annotations
 
+import json
+import re
 import sqlite3
 import threading
 from datetime import UTC, datetime
@@ -36,6 +38,81 @@ import structlog
 from nexus.db.t2.memory_store import _sanitize_fts5
 
 _log = structlog.get_logger()
+
+
+# ── Scope-tag helpers (RDR-091 Phase 2a) ──────────────────────────────────────
+#
+# ``scope_tags`` is a comma-separated, sorted, deduplicated, hash-suffix-
+# normalized string naming the corpora / collections a plan actually
+# touched. Phase 2a stores and infers; Phase 2b consumes during match-time
+# re-ranking. ``_normalize_scope_string`` is also shared with the matcher.
+
+_HASH_SUFFIX_RE = re.compile(r"-[0-9a-f]{8}$")
+
+
+def _normalize_scope_string(scope: str) -> str:
+    """Return *scope* in canonical scope-tag form.
+
+    Rules (RDR-091 §Proposed Solution → Normalization):
+      * Strip a trailing 8-char lowercase hex suffix (``-deadbeef``).
+        The collection-name convention is exactly 8 hex chars; shorter,
+        longer, or non-hex tails are preserved verbatim.
+      * Strip a trailing ``*`` or ``-*`` glob.
+      * Preserve a bare family prefix (``rdr__``) and tumbler addresses
+        (``1.16``) unchanged.
+      * Empty input is returned unchanged.
+    """
+    if not scope:
+        return scope
+    # Glob suffix first — a ``rdr__arcaneum-*`` has no hex tail to strip.
+    if scope.endswith("-*"):
+        return scope[:-2]
+    if scope.endswith("*"):
+        return scope[:-1]
+    return _HASH_SUFFIX_RE.sub("", scope)
+
+
+_RETRIEVAL_SCOPE_ARGS: tuple[str, ...] = ("corpus", "collection")
+
+
+def _infer_scope_tags(plan_json: str) -> str:
+    """Infer scope_tags from a plan by unioning retrieval-step scope args.
+
+    Walks the ``steps`` list in *plan_json*. For every step, collects any
+    ``args["corpus"]`` or ``args["collection"]`` value that is a literal
+    string (not a ``$var`` binding placeholder). Each collected value is
+    normalized via :func:`_normalize_scope_string`. The result is a
+    comma-separated, sorted, deduplicated string — ``""`` when the plan
+    names no literal retrieval scope (e.g. traverse-only plans).
+
+    Malformed ``plan_json`` yields ``""`` (fail-soft: scope inference is
+    best-effort and must never block a save).
+    """
+    try:
+        plan = json.loads(plan_json)
+    except (TypeError, json.JSONDecodeError):
+        return ""
+
+    steps = plan.get("steps") if isinstance(plan, dict) else None
+    if not isinstance(steps, list):
+        return ""
+
+    collected: set[str] = set()
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        args = step.get("args")
+        if not isinstance(args, dict):
+            continue
+        for key in _RETRIEVAL_SCOPE_ARGS:
+            value = args.get(key)
+            if not isinstance(value, str) or not value:
+                continue
+            if value.startswith("$"):
+                continue
+            collected.add(_normalize_scope_string(value))
+
+    return ",".join(sorted(tag for tag in collected if tag))
 
 
 # Per-domain migration guard (RDR-063 Open Question 3 — Phase 2 resolution).
@@ -74,7 +151,13 @@ CREATE TABLE IF NOT EXISTS plans (
     match_count     INTEGER NOT NULL DEFAULT 0,
     match_conf_sum  REAL NOT NULL DEFAULT 0.0,
     success_count   INTEGER NOT NULL DEFAULT 0,
-    failure_count   INTEGER NOT NULL DEFAULT 0
+    failure_count   INTEGER NOT NULL DEFAULT 0,
+    -- RDR-091 Phase 2a: scope_tags captures which corpora/collections a
+    -- plan actually touched. Comma-separated, sorted, deduplicated,
+    -- hash-suffix-normalized. DEFAULT '' is load-bearing — Phase 2b
+    -- treats '' as the scope-agnostic marker. Upgrade-in-place via the
+    -- 4.8.0 ``_add_plan_scope_tags`` migration.
+    scope_tags      TEXT NOT NULL DEFAULT ''
 );
 
 -- Indexes on the RDR-078 columns (verb/scope/dimensions) live in the
@@ -116,6 +199,8 @@ _PLAN_COLUMNS = (
     "name", "verb", "scope", "dimensions", "default_bindings", "parent_dims",
     "use_count", "last_used", "match_count", "match_conf_sum",
     "success_count", "failure_count",
+    # RDR-091 Phase 2a scope-tag column.
+    "scope_tags",
 )
 
 _PLAN_SELECT_COLS = ", ".join(_PLAN_COLUMNS)
@@ -168,6 +253,7 @@ class PlanLibrary:
                     return
                 self._migrate_plans_if_needed()
                 self._migrate_plans_ttl_if_needed()
+                self._migrate_plans_scope_tags_if_needed()
                 _migrated_paths.add(path_key)
 
     def _migrate_plans_if_needed(self) -> None:
@@ -190,6 +276,16 @@ class PlanLibrary:
 
         migrate_plan_ttl(self.conn)
 
+    def _migrate_plans_scope_tags_if_needed(self) -> None:
+        """Add the ``scope_tags`` column and backfill existing rows (RDR-091).
+
+        Lock-naive: caller must hold ``self._lock`` and ``_migrated_lock``.
+        Delegates to :func:`nexus.db.migrations._add_plan_scope_tags`.
+        """
+        from nexus.db.migrations import _add_plan_scope_tags
+
+        _add_plan_scope_tags(self.conn)
+
     # ── Public API ────────────────────────────────────────────────────────
 
     def save_plan(
@@ -207,6 +303,7 @@ class PlanLibrary:
         dimensions: str | None = None,
         default_bindings: str | None = None,
         parent_dims: str | None = None,
+        scope_tags: str | None = None,
     ) -> int:
         """Insert a plan record. Returns the new row ID.
 
@@ -214,20 +311,37 @@ class PlanLibrary:
             ttl: Time-to-live in days. None means permanent (no expiry).
             name, verb, scope, dimensions, default_bindings, parent_dims:
                 RDR-078 dimensional-identity / currying fields. All optional.
+            scope_tags: RDR-091 Phase 2a scope-tag string (comma-separated,
+                sorted, normalized). When ``None`` or ``""``, the value is
+                inferred from ``plan_json`` via :func:`_infer_scope_tags`.
+                An explicit value is normalized via
+                :func:`_normalize_scope_string` before storage.
         """
         created_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if scope_tags:
+            # Normalize each comma-separated entry and drop empties.
+            parts = [
+                _normalize_scope_string(p.strip())
+                for p in scope_tags.split(",")
+                if p.strip()
+            ]
+            stored_scope_tags = ",".join(sorted({p for p in parts if p}))
+        else:
+            stored_scope_tags = _infer_scope_tags(plan_json)
         with self._lock:
             cursor = self.conn.execute(
                 """
                 INSERT INTO plans (
                     project, query, plan_json, outcome, tags, created_at, ttl,
-                    name, verb, scope, dimensions, default_bindings, parent_dims
+                    name, verb, scope, dimensions, default_bindings, parent_dims,
+                    scope_tags
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project, query, plan_json, outcome, tags, created_at, ttl,
                     name, verb, scope, dimensions, default_bindings, parent_dims,
+                    stored_scope_tags,
                 ),
             )
             self.conn.commit()

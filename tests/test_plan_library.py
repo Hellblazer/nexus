@@ -265,3 +265,308 @@ def test_plan_exists_isolated_per_query(plan_db: T2Database) -> None:
 
     assert plan_db.plan_exists("query-a", "builtin-template") is True
     assert plan_db.plan_exists("query-b", "builtin-template") is False
+
+
+# ── Scope tags (RDR-091 Phase 2a) ───────────────────────────────────────────
+#
+# The ``scope_tags`` column captures which corpora / collections a plan
+# actually touched at save time. Phase 2a stores and infers; Phase 2b
+# consumes during match-time re-ranking.
+
+
+def test_normalize_scope_string_strips_hash_suffix() -> None:
+    """_normalize_scope_string strips an 8-char hex suffix like '-2ad2825c'."""
+    from nexus.db.t2.plan_library import _normalize_scope_string
+
+    assert _normalize_scope_string("rdr__arcaneum-2ad2825c") == "rdr__arcaneum"
+    assert _normalize_scope_string("knowledge__delos-deadbeef") == "knowledge__delos"
+
+
+def test_normalize_scope_string_strips_trailing_glob() -> None:
+    """_normalize_scope_string strips ``*`` and ``-*`` glob suffixes."""
+    from nexus.db.t2.plan_library import _normalize_scope_string
+
+    assert _normalize_scope_string("rdr__arcaneum-*") == "rdr__arcaneum"
+    assert _normalize_scope_string("rdr__arcaneum*") == "rdr__arcaneum"
+
+
+def test_normalize_scope_string_preserves_bare_family() -> None:
+    """_normalize_scope_string leaves a bare family prefix alone."""
+    from nexus.db.t2.plan_library import _normalize_scope_string
+
+    assert _normalize_scope_string("rdr__") == "rdr__"
+    assert _normalize_scope_string("code__nexus") == "code__nexus"
+
+
+def test_normalize_scope_string_preserves_tumbler_form() -> None:
+    """_normalize_scope_string passes tumbler addresses through untouched."""
+    from nexus.db.t2.plan_library import _normalize_scope_string
+
+    assert _normalize_scope_string("1.16") == "1.16"
+    assert _normalize_scope_string("2.5.3") == "2.5.3"
+
+
+def test_normalize_scope_string_empty_passthrough() -> None:
+    """_normalize_scope_string('') returns ''."""
+    from nexus.db.t2.plan_library import _normalize_scope_string
+
+    assert _normalize_scope_string("") == ""
+
+
+def test_normalize_scope_string_does_not_strip_short_or_nonhex() -> None:
+    """Only 8-char lowercase hex suffixes are stripped; other trailing
+    segments survive (collection-name hash convention is strict)."""
+    from nexus.db.t2.plan_library import _normalize_scope_string
+
+    # 7 hex chars — not stripped.
+    assert _normalize_scope_string("rdr__x-1234567") == "rdr__x-1234567"
+    # 9 hex chars — not stripped.
+    assert _normalize_scope_string("rdr__x-123456789") == "rdr__x-123456789"
+    # 8 chars but one non-hex — not stripped.
+    assert _normalize_scope_string("rdr__x-1234567z") == "rdr__x-1234567z"
+
+
+def test_infer_scope_tags_single_step_corpus() -> None:
+    """_infer_scope_tags pulls ``corpus`` out of a single retrieval step."""
+    from nexus.db.t2.plan_library import _infer_scope_tags
+
+    plan_json = '{"steps":[{"tool":"search","args":{"corpus":"rdr__arcaneum"}}]}'
+    assert _infer_scope_tags(plan_json) == "rdr__arcaneum"
+
+
+def test_infer_scope_tags_skips_var_placeholders() -> None:
+    """_infer_scope_tags skips ``$var`` bindings (not yet resolved)."""
+    from nexus.db.t2.plan_library import _infer_scope_tags
+
+    plan_json = (
+        '{"steps":[{"tool":"search","args":{"corpus":"$corpus"}},'
+        '{"tool":"search","args":{"corpus":"rdr__arcaneum"}}]}'
+    )
+    assert _infer_scope_tags(plan_json) == "rdr__arcaneum"
+
+
+def test_infer_scope_tags_union_across_steps() -> None:
+    """_infer_scope_tags unions corpus/collection across all retrieval steps."""
+    from nexus.db.t2.plan_library import _infer_scope_tags
+
+    plan_json = (
+        '{"steps":['
+        '{"tool":"search","args":{"corpus":"knowledge__delos"}},'
+        '{"tool":"search","args":{"corpus":"rdr__arcaneum"}}'
+        ']}'
+    )
+    result = _infer_scope_tags(plan_json)
+    assert result == "knowledge__delos,rdr__arcaneum"
+
+
+def test_infer_scope_tags_collection_arg() -> None:
+    """_infer_scope_tags reads a ``collection`` arg as well as ``corpus``."""
+    from nexus.db.t2.plan_library import _infer_scope_tags
+
+    plan_json = (
+        '{"steps":[{"tool":"search","args":{"collection":"rdr__arcaneum"}}]}'
+    )
+    assert _infer_scope_tags(plan_json) == "rdr__arcaneum"
+
+
+def test_infer_scope_tags_hash_suffix_normalized() -> None:
+    """Inferred tags are normalized at save time."""
+    from nexus.db.t2.plan_library import _infer_scope_tags
+
+    plan_json = (
+        '{"steps":[{"tool":"search","args":{"corpus":"rdr__arcaneum-2ad2825c"}}]}'
+    )
+    assert _infer_scope_tags(plan_json) == "rdr__arcaneum"
+
+
+def test_infer_scope_tags_traverse_only_agnostic() -> None:
+    """A plan that only traverses is scope-agnostic — empty tags."""
+    from nexus.db.t2.plan_library import _infer_scope_tags
+
+    plan_json = (
+        '{"steps":[{"tool":"traverse","args":{"start":"$doc_id","depth":2}}]}'
+    )
+    assert _infer_scope_tags(plan_json) == ""
+
+
+def test_infer_scope_tags_empty_steps() -> None:
+    """An empty steps list yields an empty scope string."""
+    from nexus.db.t2.plan_library import _infer_scope_tags
+
+    assert _infer_scope_tags('{"steps":[]}') == ""
+
+
+def test_infer_scope_tags_malformed_json_safe() -> None:
+    """_infer_scope_tags returns empty string when plan_json is not JSON."""
+    from nexus.db.t2.plan_library import _infer_scope_tags
+
+    assert _infer_scope_tags("not valid json{{{") == ""
+
+
+def test_infer_scope_tags_dedup_and_sort() -> None:
+    """Same corpus cited multiple times appears once, sorted."""
+    from nexus.db.t2.plan_library import _infer_scope_tags
+
+    plan_json = (
+        '{"steps":['
+        '{"tool":"search","args":{"corpus":"rdr__arcaneum"}},'
+        '{"tool":"search","args":{"corpus":"rdr__arcaneum"}},'
+        '{"tool":"search","args":{"corpus":"code__nexus"}}'
+        ']}'
+    )
+    assert _infer_scope_tags(plan_json) == "code__nexus,rdr__arcaneum"
+
+
+def test_save_plan_explicit_scope_tags_round_trip(plan_db: T2Database) -> None:
+    """save_plan(scope_tags=...) stores the value verbatim (after normalization)."""
+    row_id = plan_db.save_plan(
+        query="q",
+        plan_json='{"steps":[]}',
+        scope_tags="rdr__arcaneum",
+    )
+    row = plan_db.plans.conn.execute(
+        "SELECT scope_tags FROM plans WHERE id = ?", (row_id,)
+    ).fetchone()
+    assert row[0] == "rdr__arcaneum"
+
+
+def test_save_plan_explicit_scope_tags_normalized(plan_db: T2Database) -> None:
+    """Explicit scope_tags with a hash suffix is normalized at save time."""
+    row_id = plan_db.save_plan(
+        query="q",
+        plan_json='{"steps":[]}',
+        scope_tags="rdr__arcaneum-2ad2825c",
+    )
+    row = plan_db.plans.conn.execute(
+        "SELECT scope_tags FROM plans WHERE id = ?", (row_id,)
+    ).fetchone()
+    assert row[0] == "rdr__arcaneum"
+
+
+def test_save_plan_omitted_scope_tags_infers(plan_db: T2Database) -> None:
+    """save_plan() without scope_tags infers from plan_json."""
+    row_id = plan_db.save_plan(
+        query="q",
+        plan_json='{"steps":[{"tool":"search","args":{"corpus":"rdr__arcaneum"}}]}',
+    )
+    row = plan_db.plans.conn.execute(
+        "SELECT scope_tags FROM plans WHERE id = ?", (row_id,)
+    ).fetchone()
+    assert row[0] == "rdr__arcaneum"
+
+
+def test_save_plan_omitted_scope_tags_traverse_only(plan_db: T2Database) -> None:
+    """Traverse-only plans save with empty scope_tags (agnostic)."""
+    row_id = plan_db.save_plan(
+        query="q",
+        plan_json='{"steps":[{"tool":"traverse","args":{"start":"$d"}}]}',
+    )
+    row = plan_db.plans.conn.execute(
+        "SELECT scope_tags FROM plans WHERE id = ?", (row_id,)
+    ).fetchone()
+    assert row[0] == ""
+
+
+def test_save_plan_scope_tags_column_default_empty(plan_db: T2Database) -> None:
+    """The scope_tags column defaults to '' (load-bearing: pre-backfill rows)."""
+    # A low-level INSERT that omits scope_tags altogether mimics an
+    # unmigrated row. The column must still read as '', not NULL.
+    plan_db.plans.conn.execute(
+        """
+        INSERT INTO plans (project, query, plan_json, outcome, tags, created_at)
+        VALUES ('', 'q', '{}', 'success', '', '2025-01-01T00:00:00Z')
+        """
+    )
+    plan_db.plans.conn.commit()
+    row = plan_db.plans.conn.execute(
+        "SELECT scope_tags FROM plans WHERE query = 'q'"
+    ).fetchone()
+    assert row[0] == ""
+
+
+def test_migration_idempotent_on_populated_table(tmp_path: Path) -> None:
+    """Running the scope_tags migration twice is a no-op on the second run."""
+    import sqlite3
+
+    from nexus.db.migrations import _add_plan_scope_tags
+
+    db_path = tmp_path / "mig.db"
+    # Seed an older-schema plans table (pre-scope_tags).
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE plans (
+            id INTEGER PRIMARY KEY,
+            project TEXT NOT NULL DEFAULT '',
+            query TEXT NOT NULL,
+            plan_json TEXT NOT NULL,
+            outcome TEXT DEFAULT 'success',
+            tags TEXT DEFAULT '',
+            created_at TEXT NOT NULL,
+            ttl INTEGER
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO plans (query, plan_json, created_at) "
+        "VALUES (?, ?, ?)",
+        (
+            "q",
+            '{"steps":[{"tool":"search","args":{"corpus":"rdr__arcaneum"}}]}',
+            "2025-01-01T00:00:00Z",
+        ),
+    )
+    conn.commit()
+
+    _add_plan_scope_tags(conn)
+    first = conn.execute("SELECT scope_tags FROM plans WHERE query='q'").fetchone()
+    assert first[0] == "rdr__arcaneum"
+
+    # Second run is a no-op: column already present, backfill re-runs
+    # safely because inference is deterministic.
+    _add_plan_scope_tags(conn)
+    second = conn.execute("SELECT scope_tags FROM plans WHERE query='q'").fetchone()
+    assert second[0] == "rdr__arcaneum"
+
+    conn.close()
+
+
+def test_migration_no_op_on_missing_plans_table(tmp_path: Path) -> None:
+    """The migration is a safe no-op on a DB that has no plans table."""
+    import sqlite3
+
+    from nexus.db.migrations import _add_plan_scope_tags
+
+    db_path = tmp_path / "empty.db"
+    conn = sqlite3.connect(str(db_path))
+    # Do not create plans table; migration must not crash.
+    _add_plan_scope_tags(conn)
+    conn.close()
+
+
+def test_migration_adds_column_to_empty_plans_table(tmp_path: Path) -> None:
+    """Migration adds scope_tags column to an empty plans table."""
+    import sqlite3
+
+    from nexus.db.migrations import _add_plan_scope_tags
+
+    db_path = tmp_path / "emptyplans.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE plans (
+            id INTEGER PRIMARY KEY,
+            project TEXT NOT NULL DEFAULT '',
+            query TEXT NOT NULL,
+            plan_json TEXT NOT NULL,
+            outcome TEXT DEFAULT 'success',
+            tags TEXT DEFAULT '',
+            created_at TEXT NOT NULL
+        );
+        """
+    )
+    conn.commit()
+    _add_plan_scope_tags(conn)
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(plans)").fetchall()}
+    assert "scope_tags" in cols
+    conn.close()

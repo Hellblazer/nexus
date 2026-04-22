@@ -1184,6 +1184,7 @@ def plan_save(
     outcome: str = "success",
     tags: str = "",
     ttl: int | None = None,
+    scope_tags: str = "",
 ) -> str:
     """Save a query execution plan to the T2 plan library.
 
@@ -1194,9 +1195,13 @@ def plan_save(
         query: The original natural-language question
         plan_json: JSON string of the execution plan (see schema above)
         project: Project namespace for scoping (e.g. "nexus")
-        outcome: Plan outcome — "success" or "partial"
+        outcome: Plan outcome, "success" or "partial"
         tags: Comma-separated tags (e.g. operation types used)
         ttl: Time-to-live in days. None means permanent (no expiry).
+        scope_tags: RDR-091 Phase 2a comma-separated scope-tag string
+            (e.g. ``"rdr__arcaneum,code__nexus"``). When empty, inferred
+            from plan_json retrieval steps. Normalized at save time:
+            trailing 8-char hex suffix and ``*`` globs are stripped.
     """
     try:
         if not query or not plan_json:
@@ -1209,6 +1214,7 @@ def plan_save(
                 tags=tags,
                 project=project,
                 ttl=ttl,
+                scope_tags=scope_tags or None,
             )
         return f"Saved plan: [{row_id}] {query[:80]}"
     except Exception as e:

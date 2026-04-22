@@ -312,6 +312,7 @@ class T2Database:
         dimensions: str | None = None,
         default_bindings: str | None = None,
         parent_dims: str | None = None,
+        scope_tags: str | None = None,
     ) -> int:
         return self.plans.save_plan(
             query=query,
@@ -326,6 +327,7 @@ class T2Database:
             dimensions=dimensions,
             default_bindings=default_bindings,
             parent_dims=parent_dims,
+            scope_tags=scope_tags,
         )
 
     def search_plans(
