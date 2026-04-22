@@ -295,6 +295,72 @@ plan_match("author a new plan template", dimensions={verb: "plan-author"}, n=1)
 → plan_run(match, bindings={concept: "what the new plan does"})
 ```
 
+## `scope_tags` (matcher routing)
+
+`scope_tags` is a comma-separated string on the `plans` row that names
+the corpora or collections a plan actually touches. It is separate from
+the `scope` dimension, which names the plan's publication tier
+(`global`, `project`, `rdr-<slug>`, `personal`). The matcher uses
+`scope_tags` at match time to filter out plans whose retrieval space
+conflicts with the caller's `scope_preference`, and to boost plans whose
+space matches.
+
+### Inference vs explicit
+
+`plan_save` infers `scope_tags` from the plan JSON by walking retrieval
+steps and unioning the literal string values of each step's `corpus` and
+`collection` args. `$var` placeholders (e.g. `"corpus": "$corpus"`) are
+skipped, since the real routing is decided by the caller's bindings.
+`traverse`-only plans contribute nothing, so their `scope_tags` is `""`
+(agnostic).
+
+Pass an explicit `scope_tags="rdr__arcaneum,code__nexus"` kwarg to
+`plan_save` when inference would undershoot, the common case being a
+plan whose retrieval steps use `$var` placeholders but which you
+nonetheless know targets a specific corpus family. Explicit values
+override inference; they are normalized on the way in.
+
+### Normalization contract
+
+Both save-time and match-time normalization applies the same rules:
+
+- Trailing 8-char lowercase hex suffixes are stripped: `rdr__arcaneum-2ad2825c` → `rdr__arcaneum`. Shorter, longer, or non-hex tails are preserved verbatim (the collection hash convention is strict).
+- Trailing `*` or `-*` globs are stripped at match time only: caller scope `rdr__arcaneum-*` normalizes to `rdr__arcaneum`.
+- Bare family prefixes (`rdr__`) and tumbler addresses (`1.16`) pass through unchanged.
+
+### Matching semantics
+
+The matcher compares a plan's `scope_tags` to the caller's normalized
+`scope_preference` using `startswith` in either direction: tag
+`rdr__arcaneum` matches caller scope `rdr__` (bare family), and caller
+scope `rdr__arcaneum` matches tag `rdr__` (broader plan serving narrower
+query).
+
+- **Agnostic plan** (`scope_tags=""`) stays in the pool and competes on base cosine alone.
+- **Matching plan** gets a multiplicative boost `final_score = base_confidence * (1 + scope_fit_weight * 1.0)` with `scope_fit_weight = 0.15`.
+- **Conflicting plan** (non-empty `scope_tags`, no tag prefix-matches caller scope) is dropped from the candidate pool before scoring.
+
+### Multi-corpus bridging plans
+
+A plan tagged `scope_tags="knowledge__delos,knowledge__arcaneum"` passes
+when the caller scope prefix-matches *either* tag. Intersect semantics
+are the rule, so bridging plans that span a few corpora are not
+accidentally filtered out the moment the caller picks one of them.
+
+### Interaction with grown plans
+
+The `nx_answer` ad-hoc save path (RDR-084) infers `scope_tags` from the
+actual corpus used in that run. Running the same question against
+`knowledge__delos` and then against `knowledge__arcaneum` saves two
+grown plans with different `scope_tags`, which is the right answer:
+each plan is anchored to the retrieval space it actually explored.
+
+### Authoring guidance
+
+- Let inference do the work when your retrieval steps use literal corpus/collection names.
+- Pass explicit `scope_tags` when retrieval steps use `$var` placeholders but the plan targets a known corpus family.
+- For cross-corpus bridging plans, list every corpus the plan legitimately touches; inference already does this for you when the args are literals.
+
 ## Common mistakes
 
 - **Forgetting `scope`.** Every plan needs one; the validator

@@ -137,6 +137,50 @@ links between documents first-class operators in a plan.  Before, link
 traversal was a post-hoc step after retrieval; now the plan itself can
 say "starting from the search hits, walk `implements` edges to depth 2".
 
+## Scope-aware matching
+
+The matcher honors a `scope_preference` argument passed by
+`nx_answer` (and any direct `plan_match` caller). It shapes which plans
+clear the candidate gate and how the surviving plans rank. The mechanism
+lives on a per-plan `scope_tags` column populated either by inference
+from retrieval-step args or by an explicit kwarg to `plan_save`; see
+[Plan Authoring Guide §`scope_tags`](plan-authoring-guide.md#scope_tags-matcher-routing)
+for authoring specifics.
+
+### Filter, boost, tie-break
+
+After the existing T1 cosine + dimension post-filter, the matcher:
+
+1. **Drops scope-conflicting plans.** A plan whose `scope_tags` is non-empty and none of whose tags prefix-match the caller scope is removed from the candidate pool before scoring.
+2. **Boosts scope-matching plans.** Each surviving plan's rank score is `final_score = base_confidence * (1 + scope_fit_weight * scope_fit)` where `scope_fit ∈ {0.0, 1.0}` and `scope_fit_weight = 0.15`. `Match.confidence` keeps the raw cosine so `min_confidence` and downstream thresholds are unaffected.
+3. **Tie-breaks on specificity.** When two plans land at the same `final_score`, the plan with fewer entries in `scope_tags` wins. Ties are uncommon in practice (cosine scores are near-continuous); the tie-break is mostly defensive.
+
+Agnostic plans (`scope_tags=""`) remain in the pool with `scope_fit=0.0`
+and compete on base cosine alone.
+
+### Zero-candidate fallback
+
+When every plan in the pool conflicts with the caller's scope, the
+matcher returns `[]`. Upstream `nx_answer` treats this exactly like
+"no plan matched at all" and falls through to `_nx_answer_plan_miss`,
+which invokes the inline planner with the caller's `scope` as a prompt
+hint. Saved plans that don't fit the caller's scope never degrade the
+answer; they are simply absent from the selection.
+
+### Prefix semantics
+
+Scope strings are normalized before comparison (hash suffixes stripped
+at save time, trailing globs stripped at match time), then matched with
+`startswith` in either direction. Bare-family tags serve narrower
+queries: tag `rdr__` matches caller scope `rdr__arcaneum`. Specific
+tags are also reached by bare-family callers: tag `rdr__arcaneum`
+matches caller scope `rdr__`.
+
+Multi-corpus plans use intersect semantics: a plan tagged
+`knowledge__delos,knowledge__arcaneum` passes when the caller scope
+prefix-matches either tag, so bridging plans survive when the caller
+picks one of them.
+
 ## When to author a new plan
 
 Three signals that a class of questions needs its own plan template:
