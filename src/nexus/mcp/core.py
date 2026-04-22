@@ -2186,8 +2186,15 @@ async def nx_answer(
         pass
 
     # ── Step 4: execute plan ─────────────────────────────────────────────
+    # nexus-zs1d Phase 1: propagate caller-supplied scope as the
+    # ``_nx_scope`` binding so retrieval steps in library-matched plans
+    # honour the caller's corpus intent. Plans that pin their own corpus
+    # still win; this only fills in the gap when a plan is agnostic.
+    run_bindings: dict[str, Any] = {"intent": question}
+    if scope:
+        run_bindings["_nx_scope"] = scope
     try:
-        result = await _plan_run(best, {"intent": question})
+        result = await _plan_run(best, run_bindings)
     except Exception as exc:
         elapsed_ms = int((time.monotonic() - start) * 1000)
         _log.error("nx_answer_plan_run_error", plan_id=best.plan_id, error=str(exc))
