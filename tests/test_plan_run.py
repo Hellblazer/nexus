@@ -373,6 +373,169 @@ async def test_run_traverse_step_skips_embedding_check() -> None:
     await plan_run(_match(plan), {}, dispatcher=disp)
 
 
+# ── Caller-supplied scope override (nexus-zs1d Phase 1) ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_run_caller_scope_fills_unset_corpus_on_search() -> None:
+    """Caller's ``_nx_scope`` binding fills in ``corpus`` on a search step
+    that doesn't pin one. RDR-compatible with existing plans."""
+    from nexus.plans.runner import plan_run
+
+    plan = {"steps": [{"tool": "search", "args": {"query": "x"}}]}
+    disp = _FakeDispatcher([{"text": "ok", "ids": []}])
+    await plan_run(
+        _match(plan),
+        {"_nx_scope": "rdr__arcaneum-2ad2825c"},
+        dispatcher=disp,
+    )
+    _tool, args = disp.calls[0]
+    assert args["corpus"] == "rdr__arcaneum-2ad2825c"
+
+
+@pytest.mark.asyncio
+async def test_run_caller_scope_fills_unset_corpus_on_query() -> None:
+    """``query`` is a retrieval tool too — caller scope fills it in."""
+    from nexus.plans.runner import plan_run
+
+    plan = {"steps": [{"tool": "query", "args": {"question": "x"}}]}
+    disp = _FakeDispatcher([{"text": "ok"}])
+    await plan_run(
+        _match(plan),
+        {"_nx_scope": "rdr__nexus"},
+        dispatcher=disp,
+    )
+    _tool, args = disp.calls[0]
+    assert args["corpus"] == "rdr__nexus"
+
+
+@pytest.mark.asyncio
+async def test_run_caller_scope_does_not_override_plan_pinned_corpus() -> None:
+    """When the plan step already pins ``corpus``, caller scope does NOT
+    override. Plan authors win."""
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "search", "args": {"query": "x", "corpus": "code__delos"}},
+        ],
+    }
+    disp = _FakeDispatcher([{"text": "ok", "ids": []}])
+    await plan_run(
+        _match(plan),
+        {"_nx_scope": "rdr__arcaneum"},
+        dispatcher=disp,
+    )
+    _tool, args = disp.calls[0]
+    assert args["corpus"] == "code__delos"
+
+
+@pytest.mark.asyncio
+async def test_run_caller_scope_does_not_override_plan_collection() -> None:
+    """When the plan step pins a specific ``collection``, caller scope does
+    NOT inject a corpus."""
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {
+                "tool": "search",
+                "args": {"query": "x", "collection": "rdr__delos"},
+            },
+        ],
+    }
+    disp = _FakeDispatcher([{"text": "ok", "ids": []}])
+    await plan_run(
+        _match(plan),
+        {"_nx_scope": "rdr__arcaneum"},
+        dispatcher=disp,
+    )
+    _tool, args = disp.calls[0]
+    assert "corpus" not in args
+    assert args["collection"] == "rdr__delos"
+
+
+@pytest.mark.asyncio
+async def test_run_caller_scope_does_not_override_plan_taxonomy_domain() -> None:
+    """When the plan step declares ``scope.taxonomy_domain``, that populates
+    corpus first; caller scope does not clobber it."""
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {
+                "tool": "search",
+                "args": {"query": "x"},
+                "scope": {"taxonomy_domain": "code"},
+            },
+        ],
+    }
+    disp = _FakeDispatcher([{"text": "ok", "ids": []}])
+    await plan_run(
+        _match(plan),
+        {"_nx_scope": "rdr__arcaneum"},
+        dispatcher=disp,
+    )
+    _tool, args = disp.calls[0]
+    # taxonomy_domain=code → "code" corpus prefix (from _DOMAIN_TO_CORPUS)
+    assert args["corpus"] == "code"
+
+
+@pytest.mark.asyncio
+async def test_run_caller_scope_skips_non_retrieval_tools() -> None:
+    """Non-retrieval tools (summarize, extract, rank, compare, generate,
+    traverse) do not get ``corpus`` injected from caller scope."""
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "summarize", "args": {"text": "hello"}},
+            {"tool": "extract", "args": {"text": "hello", "schema": {}}},
+            {"tool": "traverse", "args": {"seeds": ["1.1"]}},
+        ],
+    }
+    disp = _FakeDispatcher([
+        {"text": "s"}, {"text": "e"}, {"tumblers": []},
+    ])
+    await plan_run(
+        _match(plan),
+        {"_nx_scope": "rdr__arcaneum"},
+        dispatcher=disp,
+    )
+    for _tool, args in disp.calls:
+        assert "corpus" not in args
+
+
+@pytest.mark.asyncio
+async def test_run_no_scope_binding_unchanged() -> None:
+    """When caller omits ``_nx_scope``, behavior is unchanged — the step
+    runs without any corpus injection."""
+    from nexus.plans.runner import plan_run
+
+    plan = {"steps": [{"tool": "search", "args": {"query": "x"}}]}
+    disp = _FakeDispatcher([{"text": "ok", "ids": []}])
+    await plan_run(_match(plan), {}, dispatcher=disp)
+    _tool, args = disp.calls[0]
+    assert "corpus" not in args
+
+
+@pytest.mark.asyncio
+async def test_run_caller_scope_binding_not_forwarded_to_tool() -> None:
+    """``_nx_scope`` is an internal binding; it must not leak into the
+    dispatched tool args."""
+    from nexus.plans.runner import plan_run
+
+    plan = {"steps": [{"tool": "search", "args": {"query": "x"}}]}
+    disp = _FakeDispatcher([{"text": "ok", "ids": []}])
+    await plan_run(
+        _match(plan),
+        {"_nx_scope": "rdr__arcaneum"},
+        dispatcher=disp,
+    )
+    _tool, args = disp.calls[0]
+    assert "_nx_scope" not in args
+
+
 # ── Result + step trace ────────────────────────────────────────────────────
 
 

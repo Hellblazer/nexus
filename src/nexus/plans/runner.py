@@ -259,6 +259,13 @@ _RETRIEVAL_TOOLS: frozenset[str] = frozenset(
 #: skips corpus injection when any of these are populated.
 _COLLECTION_ARG_KEYS: tuple[str, ...] = ("collection", "collections")
 
+#: Binding key used by ``nx_answer`` to propagate the caller-supplied
+#: ``scope`` parameter through ``plan_run``. Nexus-zs1d Phase 1: gives
+#: the runner a way to honour caller-supplied corpus intent without
+#: requiring plan-library schema changes. Plans that pin their own
+#: corpus still win; this binding only fills in the gap.
+_CALLER_SCOPE_BINDING: str = "_nx_scope"
+
 
 def _collections_in_args(args: dict[str, Any]) -> list[str]:
     """Pull every collection name out of the args dict for validation."""
@@ -458,6 +465,41 @@ def _apply_scope_to_args(
             topic, bindings=bindings, step_outputs=step_outputs,
         )
 
+    return out
+
+
+def _apply_caller_scope_to_args(
+    tool: str,
+    args: dict[str, Any],
+    *,
+    bindings: dict[str, Any],
+) -> dict[str, Any]:
+    """Return *args* with caller-supplied scope forwarded as ``corpus``
+    when the plan step is corpus-agnostic (nexus-zs1d Phase 1).
+
+    When ``nx_answer`` is invoked with a ``scope`` argument, it is
+    propagated as the ``_nx_scope`` binding. This helper reads that
+    binding and fills in ``args["corpus"]`` for retrieval tools that
+    haven't already pinned one. Behaviour:
+
+      * Only retrieval tools in :data:`_RETRIEVAL_TOOLS` are affected.
+      * Plan-declared ``corpus`` / ``collection`` / ``collections`` win
+        (``_collections_in_args`` covers the latter two); this helper
+        does not overwrite them.
+      * Plan-declared ``scope.taxonomy_domain`` still wins too, because
+        :func:`_apply_scope_to_args` runs first and populates ``corpus``
+        before this helper sees the args.
+      * Empty / missing binding → no-op, existing behaviour preserved.
+    """
+    if tool not in _RETRIEVAL_TOOLS:
+        return args
+    override = bindings.get(_CALLER_SCOPE_BINDING)
+    if not override:
+        return args
+    if "corpus" in args or _collections_in_args(args):
+        return args
+    out = dict(args)
+    out["corpus"] = override
     return out
 
 
@@ -749,6 +791,14 @@ async def plan_run(
         resolved = _apply_scope_to_args(
             tool, scope, resolved,
             bindings=merged, step_outputs=step_outputs,
+        )
+        # nexus-zs1d Phase 1: caller-supplied scope (from nx_answer's
+        # ``scope`` argument, propagated via the ``_nx_scope`` binding)
+        # fills in the corpus when the plan step is agnostic. Runs after
+        # _apply_scope_to_args so plan-declared corpus / taxonomy_domain
+        # always wins.
+        resolved = _apply_caller_scope_to_args(
+            tool, resolved, bindings=merged,
         )
 
         # Dispatcher may be async (default path, RDR-079 P4) or sync
