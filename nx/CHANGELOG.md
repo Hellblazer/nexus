@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.9.6] - 2026-04-22
+
+Plugin version aligned with Nexus CLI 4.9.6. No plugin-level functional changes. See root `CHANGELOG.md` for the RDR-091 scope-aware plan matching feature and critic / case follow-ups.
+
 ## [4.9.5] - 2026-04-21
 
 No plugin-side changes; version bumped for marketplace parity. See root `CHANGELOG.md` for the doctor empty-collection transparency change (nexus-obp2).

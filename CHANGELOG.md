@@ -6,6 +6,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.9.6] - 2026-04-22
+
+### Added
+
+- **RDR-091: Scope-Aware Plan Matching.** `nx_answer`'s `scope` parameter was accepted and documented but silently ignored on the library-match path: when `plan_match` hit a saved plan, the plan's own corpus arg (if any) was used verbatim, so scoped calls could end up searching unrelated corpora. Phase 1 (`src/nexus/plans/runner.py`) now injects the caller's scope into retrieval step args when the plan does not pin a corpus. Phase 2 (`src/nexus/plans/matcher.py`, `src/nexus/plans/scope.py`) adds a `plans.scope_tags` column (4.8.0 migration), inference from retrieval-step `corpus` / `collection` args, and a scope-conflict filter + scope-fit boost + specificity tie-break in the matcher. `plan_save` MCP tool gains an optional `scope_tags` kwarg; `plan_search` output now surfaces the stored scope tag. Score formula is multiplicative per RDR spec: `final_score = base_confidence * (1 + scope_fit_weight * scope_fit)` with `scope_fit_weight = 0.15`. Empty `scope_preference` is a hard no-op (no boost, no filter). See `docs/plan-authoring-guide.md` §`scope_tags` and `docs/plan-centric-retrieval.md` §Scope-aware matching. (nexus-zs1d, nexus-x6pr, nexus-bgs7, nexus-svcg, nexus-jvma)
+
+### Fixed
+
+- **`"all"` corpus sentinel was inferred as a concrete scope tag**, filtering the seven builtin plans that use `corpus: all` out of every scoped `nx_answer` call. `_infer_scope_tags` now skips the sentinel alongside `$var` placeholders. A 4.8.1 rewash migration cleans up rows contaminated by the pre-fix backfill. (`src/nexus/plans/scope.py`, `src/nexus/db/migrations.py`, nexus-dfok)
+- **`scope_tags` backfill overwrote explicit values on every process start.** The migration now guards `WHERE scope_tags = ''` so plans authored with `save_plan(scope_tags='rdr__arcaneum')` survive across MCP server / CLI restarts. (`src/nexus/db/migrations.py`, nexus-dfok)
+- **Grown plans from scoped `nx_answer` calls were always agnostic.** `_infer_scope_tags` cannot see the runtime `_nx_scope` corpus injection (that lives in bindings, not `plan_json`). The grown-plan save path now passes `scope_tags=scope` explicitly so each grown plan is anchored to the retrieval space that produced it. (`src/nexus/mcp/core.py`, nexus-dfok)
+- **Case-sensitive `scope_tags` prefix match surprised callers passing the ChromaDB-conventional lowercase scope** when real collections carried mixed case (`code__Delos-5af9bfe0` alongside `knowledge__delos`). `_scope_fit` now folds both sides before comparison; `_HASH_SUFFIX_RE` accepts upper-hex too. Stored values preserve original case; only the compare is case-folded. (`src/nexus/plans/matcher.py`, `src/nexus/plans/scope.py`, nexus-yi7m)
+
+### Changed
+
+- **`Match` dataclass gains a `scope_tags: str = ""` field** populated from the new column. All existing `Match(...)` callers keep working because the field is defaulted. (`src/nexus/plans/match.py`)
+- **Scope-tag helpers (`_normalize_scope_string`, `_infer_scope_tags`, `_SCOPE_AGNOSTIC_SENTINELS`) moved out of `plan_library.py`** into a standalone `src/nexus/plans/scope.py` module, breaking a `migrations -> plan_library -> migrations` circular import path. Re-exported from `plan_library` for backward compatibility. (code-review follow-up)
+
+### Docs
+
+- **`docs/plan-authoring-guide.md`** gains a `scope_tags (matcher routing)` section covering inference vs explicit, normalization contract, matching semantics, multi-corpus bridging plans, interaction with grown plans, and authoring guidance. Clearly distinguishes `scope_tags` (matcher routing) from the `scope` dimension (publication tier).
+- **`docs/plan-centric-retrieval.md`** gains a `Scope-aware matching` section covering filter / boost / tie-break mechanics, zero-candidate fallback to the inline planner, and prefix semantics (bidirectional `startswith`, intersect rules for multi-corpus plans). Quotes the final `scope_fit_weight=0.15` value.
+- **`docs/rdr/rdr-091-scope-aware-plan-matching.md`** is the design record. `implementation_notes:` frontmatter records the picked weight, the multiplicative-formula correction history, and the critic follow-up.
+
 ## [4.9.5] - 2026-04-21
 
 ### Changed
