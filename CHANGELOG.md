@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.9.7] - 2026-04-22
+
 ### Fixed
 
 - **`catalog_search` rejected `content_type` as a sole filter** (`src/nexus/mcp/catalog.py`). The structured-filter trigger condition (`if owner or corpus or file_path or (author and not query)`) omitted `content_type`, so a sole `content_type` value fell through to the FTS5 path which requires a free-text query. Documented behaviour was wrong for callers asking "show me everything of type prose" without a search term. Added `content_type` to the trigger; pre-existing structured-filter SQL already handled `content_type = ?` correctly. (nexus-3o3t)
