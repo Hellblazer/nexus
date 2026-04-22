@@ -1760,6 +1760,14 @@ THEY DO NOT RETURN CONTENT. To get text, chain into store_get_many.
         subtree="", follow_links="", depth=1)
       - Document-level retrieval with catalog-aware routing.
       - Output: {ids, tumblers, distances, collections}
+      - Scope filter guidance (bead nexus-sgrg): prefer `corpus=<collection>`
+        for project scoping. The `author` filter matches the catalog
+        `author` column, which is rarely populated for RDR/docs; setting
+        `author=<repo-name>` almost always returns zero rows. Only use
+        `author=` when you know the catalog has it (e.g. knowledge docs
+        where an explicit author tag was registered). The same caveat
+        applies to `content_type=`: it matches exact values like
+        `"rdr"`, `"code"`, `"prose"`, `"knowledge"`, not free-form tags.
 
   traverse(seeds, link_types=[...] OR purpose="<name>", depth=1, direction="both")
       - Walk catalog edges from seed tumblers.

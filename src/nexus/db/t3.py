@@ -370,10 +370,25 @@ class T3Database:
         documents: list[str],
         metadatas: list[dict],
         embeddings: list[list[float]] | None = None,
+        *,
+        fail_on_oversized: bool = False,
     ) -> None:
         """Split into ≤300-record chunks and upsert each.
 
         Acquires the per-collection write semaphore for the duration of all chunks.
+
+        *fail_on_oversized* selects between two contracts:
+
+        * ``False`` (default, indexer pipelines): drop-and-warn any
+          record over ``QUOTAS.MAX_DOCUMENT_BYTES``. The chunker should
+          never produce an oversized record; this is defense-in-depth
+          for pipeline bugs and we'd rather keep running.
+        * ``True`` (put path): raise :class:`PutOversizedError` for the
+          first oversized record encountered. The put path has no
+          chunker upstream, so silent-drop leaves the caller thinking
+          the write succeeded while producing a catalog ghost
+          (no row in ChromaDB despite a registered doc_id). GitHub
+          #244 + bead ``nexus-akof``.
         """
         # Defense-in-depth: drop any document that exceeds the hard ChromaDB limit.
         # The chunker-level SAFE_CHUNK_BYTES cap should prevent this from ever firing.
@@ -386,6 +401,15 @@ class T3Database:
             for i, doc in enumerate(documents):
                 if len(doc.encode()) > max_bytes:
                     source = metadatas[i].get("source_path", "<unknown>") if i < len(metadatas) else "<unknown>"
+                    if fail_on_oversized:
+                        from nexus.errors import PutOversizedError
+
+                        raise PutOversizedError(
+                            doc_id=ids[i],
+                            doc_bytes=len(doc.encode()),
+                            max_bytes=max_bytes,
+                            collection=collection_name,
+                        )
                     _log.warning(
                         "write_batch_oversized_document_dropped",
                         source_path=source,
@@ -540,9 +564,15 @@ class T3Database:
         col = self.get_or_create_collection(collection)
         if is_cce:
             vec = self._cce_embed(content)
-            self._write_batch(col, collection, [doc_id], [content], [metadata], embeddings=[vec])
+            self._write_batch(
+                col, collection, [doc_id], [content], [metadata],
+                embeddings=[vec], fail_on_oversized=True,
+            )
         else:
-            self._write_batch(col, collection, [doc_id], [content], [metadata])
+            self._write_batch(
+                col, collection, [doc_id], [content], [metadata],
+                fail_on_oversized=True,
+            )
         return doc_id
 
     def upsert_chunks(

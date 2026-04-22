@@ -38,3 +38,41 @@ class FormatVersionError(NexusError):
 
     Upgrade Nexus to import this file.
     """
+
+
+class PutOversizedError(NexusError):
+    """A ``put``-path write was refused because the document exceeds the
+    ChromaDB Cloud per-document byte cap.
+
+    The indexer pipeline tolerates oversized inputs via defense-in-depth
+    drop-and-warn (a chunker that produced an oversized record is the
+    real bug; the pipeline keeps running). The ``put`` path has no
+    chunker upstream, so dropping silently would leave the caller
+    believing the write succeeded while producing a catalog ghost
+    (no row in ChromaDB despite a registered ``doc_id``). See
+    GitHub #244 and bead ``nexus-akof``.
+
+    Attributes:
+        doc_id: The computed doc_id that did not make it to ChromaDB.
+        doc_bytes: Actual size of the serialized document in bytes.
+        max_bytes: The ChromaDB Cloud cap (``QUOTAS.MAX_DOCUMENT_BYTES``).
+        collection: Target collection name for clearer diagnostics.
+    """
+
+    def __init__(
+        self,
+        *,
+        doc_id: str,
+        doc_bytes: int,
+        max_bytes: int,
+        collection: str,
+    ) -> None:
+        self.doc_id = doc_id
+        self.doc_bytes = doc_bytes
+        self.max_bytes = max_bytes
+        self.collection = collection
+        super().__init__(
+            f"document {doc_id!r} is {doc_bytes} bytes, exceeds "
+            f"{max_bytes}-byte ChromaDB cap for collection {collection!r}. "
+            f"Shrink the content or chunk it before calling put()."
+        )
