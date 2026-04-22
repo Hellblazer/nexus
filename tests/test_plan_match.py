@@ -421,6 +421,115 @@ def test_fts5_fallback_keeps_matching_and_agnostic(library) -> None:
     assert agnostic in returned_ids
 
 
+# ── Phase 2c qualitative fixture pairs (RDR-091, nexus-svcg) ──────────────
+#
+# Five (scope, expected-plan) fixtures inspired by the RDR §Problem
+# Statement and §Phase 2c. Authored against realistic unequal cosines,
+# then the _SCOPE_FIT_WEIGHT constant was picked (0.15) so these pass
+# together with all pre-Phase-2b tests.
+
+
+def test_fixture_arcaneum_specialized_beats_generic_agnostic(library) -> None:
+    """RDR §Problem Statement: scope='rdr__arcaneum-*', specialized plan
+    at lower base cosine (0.79) should beat generic agnostic at higher
+    base cosine (0.82) after the multiplicative scope-fit boost."""
+    from nexus.plans.matcher import plan_match
+
+    specialized = _seed(library,
+                        query="arcaneum trade-off analysis",
+                        dimensions={"verb": "compare", "variant": "arcaneum"},
+                        scope_tags="rdr__arcaneum")
+    generic = _seed(library,
+                    query="decision lookup",
+                    dimensions={"verb": "research", "variant": "generic"},
+                    scope_tags="")
+    # Generic has HIGHER base cosine than specialized (problem statement).
+    cache = _FakeCache(hits=[(generic, 0.18), (specialized, 0.21)])
+    result = plan_match(
+        intent="arcaneum trade-offs", library=library, cache=cache,
+        min_confidence=0.5, scope_preference="rdr__arcaneum-2ad2825c",
+    )
+    # After multiplicative boost: specialized = 0.79 * 1.15 = 0.9085;
+    # generic stays 0.82. Specialized wins.
+    assert [m.plan_id for m in result][0] == specialized
+
+
+def test_fixture_code_plan_beats_cross_corpus_on_tie_break(library) -> None:
+    """scope='code__nexus', at equal base cosine a code-only plan
+    (1 tag) beats a cross-corpus plan (2 tags) via specificity tie-break."""
+    from nexus.plans.matcher import plan_match
+
+    code_only = _seed(library, query="q",
+                      dimensions={"verb": "index", "variant": "code"},
+                      scope_tags="code__nexus")
+    cross_corpus = _seed(library, query="q",
+                         dimensions={"verb": "index", "variant": "both"},
+                         scope_tags="code__nexus,rdr__nexus")
+    cache = _FakeCache(hits=[(cross_corpus, 0.12), (code_only, 0.12)])
+    result = plan_match(
+        intent="indexing", library=library, cache=cache,
+        min_confidence=0.5, scope_preference="code__nexus",
+    )
+    assert [m.plan_id for m in result] == [code_only, cross_corpus]
+
+
+def test_fixture_agnostic_fallback_unchanged_when_scope_empty(library) -> None:
+    """scope='' (empty) is a hard no-op. Ordering matches the pre-Phase-2b
+    behaviour (pure cosine rank). Regression guard for the empty path."""
+    from nexus.plans.matcher import plan_match
+
+    plan_a = _seed(library, query="q",
+                   dimensions={"verb": "research", "variant": "a"},
+                   scope_tags="rdr__arcaneum")
+    plan_b = _seed(library, query="q",
+                   dimensions={"verb": "research", "variant": "b"},
+                   scope_tags="knowledge__delos")
+    cache = _FakeCache(hits=[(plan_a, 0.10), (plan_b, 0.20)])
+    result = plan_match(
+        intent="q", library=library, cache=cache,
+        min_confidence=0.5, scope_preference="",
+    )
+    # Pure cosine: plan_a (confidence 0.9) before plan_b (confidence 0.8).
+    assert [m.plan_id for m in result] == [plan_a, plan_b]
+
+
+def test_fixture_bridging_plan_matches_via_intersect(library) -> None:
+    """scope='knowledge__delos', a bridging plan tagged
+    'knowledge__delos,knowledge__arcaneum' passes (intersect semantics):
+    caller scope prefix-matches at least one tag."""
+    from nexus.plans.matcher import plan_match
+
+    bridge = _seed(library, query="cross-paper synthesis",
+                   dimensions={"verb": "compare", "variant": "bridge"},
+                   scope_tags="knowledge__arcaneum,knowledge__delos")
+    cache = _FakeCache(hits=[(bridge, 0.15)])
+    result = plan_match(
+        intent="cross-paper", library=library, cache=cache,
+        min_confidence=0.5, scope_preference="knowledge__delos",
+    )
+    assert [m.plan_id for m in result] == [bridge]
+
+
+def test_fixture_zero_candidate_scope_returns_empty(library) -> None:
+    """scope='rdr__nonexistent', no plan with matching scope_tags:
+    matcher returns []. nx_answer falls through to inline planner."""
+    from nexus.plans.matcher import plan_match
+
+    _seed(library, query="q1",
+          dimensions={"verb": "research", "variant": "k"},
+          scope_tags="knowledge__delos")
+    _seed(library, query="q2",
+          dimensions={"verb": "research", "variant": "c"},
+          scope_tags="code__nexus")
+    # Every seeded plan conflicts with 'rdr__nonexistent'.
+    cache = _FakeCache(hits=[])
+    result = plan_match(
+        intent="q", library=library, cache=cache,
+        min_confidence=0.5, scope_preference="rdr__nonexistent",
+    )
+    assert result == []
+
+
 def test_context_parameter_is_a_no_op(library) -> None:
     """context dict is accepted but does not change results (Phase 2 stub)."""
     from nexus.plans.matcher import plan_match
