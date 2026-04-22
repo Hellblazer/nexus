@@ -34,7 +34,8 @@ def library(tmp_path: Path):
 
 
 def _seed(library, *, query: str, dimensions: dict | None = None,
-          tags: str = "", project: str = "nexus") -> int:
+          tags: str = "", project: str = "nexus",
+          scope_tags: str | None = None) -> int:
     """Insert one plan with the canonical dimensions JSON encoding."""
     from nexus.plans.schema import canonical_dimensions_json
 
@@ -48,6 +49,7 @@ def _seed(library, *, query: str, dimensions: dict | None = None,
         verb=(dimensions or {}).get("verb"),
         scope=(dimensions or {}).get("scope"),
         name=(dimensions or {}).get("strategy", "default"),
+        scope_tags=scope_tags,
     )
 
 
@@ -239,34 +241,184 @@ def test_fts5_fallback_increments_match_count_only(library) -> None:
 # ── Stub parameter pinning (SC-TODO: Phase 2) ────────────────────────────────
 
 
-def test_scope_preference_is_a_no_op(library) -> None:
-    """scope_preference is accepted but does not change results (Phase 2 stub).
+def test_scope_preference_empty_is_a_no_op(library) -> None:
+    """Empty scope_preference preserves pre-Phase-2b ordering exactly.
 
-    This test pins the current no-op contract so a future implementation
-    knows exactly what it needs to replace. When Phase 2 scope ranking
-    ships, this test must be updated to assert different behaviour.
+    Regression guard: existing callers that don't pass scope_preference
+    must see the same behaviour.
     """
     from nexus.plans.matcher import plan_match
 
     plan_id = _seed(library, query="research projection quality",
-                    dimensions={"verb": "research", "scope": "global"})
+                    dimensions={"verb": "research", "scope": "global"},
+                    scope_tags="rdr__arcaneum")
     cache = _FakeCache(hits=[(plan_id, 0.05)])
-
     without_scope = plan_match(
         intent="projection quality", library=library, cache=cache,
         min_confidence=0.5,
     )
-    # Reset cache so second call sees the same hits
     cache_b = _FakeCache(hits=[(plan_id, 0.05)])
-    with_scope = plan_match(
+    with_empty_scope = plan_match(
         intent="projection quality", library=library, cache=cache_b,
         min_confidence=0.5,
-        scope_preference="rdr-080",
+        scope_preference="",
     )
+    assert [m.plan_id for m in without_scope] == [m.plan_id for m in with_empty_scope]
 
-    assert [m.plan_id for m in without_scope] == [m.plan_id for m in with_scope], (
-        "scope_preference must be a no-op until Phase 2 ships"
+
+# ── Scope-aware re-ranking (RDR-091 Phase 2b, nexus-bgs7) ───────────────────
+
+
+def test_scope_conflict_filter_drops_mismatched_plans(library) -> None:
+    """A plan tagged only for 'knowledge__delos' is dropped when
+    the caller scope is 'rdr__arcaneum'. Zero-candidate outcome
+    returns no hits (nx_answer falls through to inline planner)."""
+    from nexus.plans.matcher import plan_match
+
+    plan_id = _seed(library, query="something",
+                    dimensions={"verb": "research", "variant": "a"},
+                    scope_tags="knowledge__delos")
+    cache = _FakeCache(hits=[(plan_id, 0.05)])
+    result = plan_match(
+        intent="something", library=library, cache=cache,
+        min_confidence=0.5, scope_preference="rdr__arcaneum",
     )
+    assert result == [], "conflict-only candidate must yield zero hits"
+
+
+def test_scope_fit_boost_lifts_matching_plan_over_agnostic(library) -> None:
+    """At equal base cosine, a plan whose scope_tags match the caller
+    scope ranks above an agnostic (scope_tags='') plan."""
+    from nexus.plans.matcher import plan_match
+
+    matching = _seed(library, query="traction",
+                     dimensions={"verb": "research", "variant": "m"},
+                     scope_tags="rdr__arcaneum")
+    agnostic = _seed(library, query="traction",
+                     dimensions={"verb": "research", "variant": "a"},
+                     scope_tags="")
+    # Same base cosine for both.
+    cache = _FakeCache(hits=[(agnostic, 0.10), (matching, 0.10)])
+    result = plan_match(
+        intent="traction", library=library, cache=cache,
+        min_confidence=0.5, scope_preference="rdr__arcaneum",
+    )
+    assert [m.plan_id for m in result] == [matching, agnostic]
+
+
+def test_scope_bare_family_prefix_matches_specific_tag(library) -> None:
+    """Caller scope 'rdr__' is a prefix of tag 'rdr__arcaneum' — matches."""
+    from nexus.plans.matcher import plan_match
+
+    plan_id = _seed(library, query="q",
+                    dimensions={"verb": "research"},
+                    scope_tags="rdr__arcaneum")
+    cache = _FakeCache(hits=[(plan_id, 0.10)])
+    result = plan_match(
+        intent="q", library=library, cache=cache,
+        min_confidence=0.5, scope_preference="rdr__",
+    )
+    assert [m.plan_id for m in result] == [plan_id]
+
+
+def test_scope_specific_caller_matches_bare_family_tag(library) -> None:
+    """Caller scope 'rdr__arcaneum' against plan tag 'rdr__' (broader
+    bare-family plan) still matches — broader plans serve narrower queries."""
+    from nexus.plans.matcher import plan_match
+
+    plan_id = _seed(library, query="q",
+                    dimensions={"verb": "research"},
+                    scope_tags="rdr__")
+    cache = _FakeCache(hits=[(plan_id, 0.10)])
+    result = plan_match(
+        intent="q", library=library, cache=cache,
+        min_confidence=0.5, scope_preference="rdr__arcaneum",
+    )
+    assert [m.plan_id for m in result] == [plan_id]
+
+
+def test_agnostic_plan_passes_through_when_scope_requested(library) -> None:
+    """A plan with empty scope_tags competes on base cosine alone when
+    scope_preference is set — it is NOT filtered out (neutral weight)."""
+    from nexus.plans.matcher import plan_match
+
+    plan_id = _seed(library, query="q",
+                    dimensions={"verb": "research"},
+                    scope_tags="")
+    cache = _FakeCache(hits=[(plan_id, 0.10)])
+    result = plan_match(
+        intent="q", library=library, cache=cache,
+        min_confidence=0.5, scope_preference="rdr__arcaneum",
+    )
+    assert [m.plan_id for m in result] == [plan_id]
+
+
+def test_specificity_tie_break_favors_narrower_plan(library) -> None:
+    """Two matching plans with identical base cosine: the plan with
+    fewer scope_tags (more specific) wins the tie-break."""
+    from nexus.plans.matcher import plan_match
+
+    narrow = _seed(library, query="q",
+                   dimensions={"verb": "research", "variant": "n"},
+                   scope_tags="rdr__arcaneum")
+    broad = _seed(library, query="q",
+                  dimensions={"verb": "research", "variant": "b"},
+                  scope_tags="rdr__arcaneum,rdr__delos,rdr__nexus")
+    cache = _FakeCache(hits=[(broad, 0.10), (narrow, 0.10)])
+    result = plan_match(
+        intent="q", library=library, cache=cache,
+        min_confidence=0.5, scope_preference="rdr__arcaneum",
+    )
+    assert [m.plan_id for m in result] == [narrow, broad]
+
+
+def test_multi_corpus_plan_matches_either_tag(library) -> None:
+    """A bridging plan tagged 'rdr__arcaneum,knowledge__delos' matches
+    when the caller scope prefix-matches EITHER tag (intersect semantics)."""
+    from nexus.plans.matcher import plan_match
+
+    bridge = _seed(library, query="q",
+                   dimensions={"verb": "research"},
+                   scope_tags="knowledge__delos,rdr__arcaneum")
+    cache = _FakeCache(hits=[(bridge, 0.10)])
+    result = plan_match(
+        intent="q", library=library, cache=cache,
+        min_confidence=0.5, scope_preference="rdr__arcaneum",
+    )
+    assert [m.plan_id for m in result] == [bridge]
+
+
+def test_fts5_fallback_applies_scope_conflict_filter(library) -> None:
+    """FTS5 fallback also drops conflicting plans when scope_preference is set."""
+    from nexus.plans.matcher import plan_match
+
+    _seed(library, query="something specific",
+          dimensions={"verb": "research"}, scope_tags="knowledge__delos")
+    # No cache → FTS5 fallback path.
+    result = plan_match(
+        intent="specific", library=library, cache=None,
+        min_confidence=0.5, scope_preference="rdr__arcaneum",
+    )
+    assert result == [], "FTS5 path must also filter scope-conflicting plans"
+
+
+def test_fts5_fallback_keeps_matching_and_agnostic(library) -> None:
+    """FTS5 fallback keeps matching and agnostic plans when scope set."""
+    from nexus.plans.matcher import plan_match
+
+    matching = _seed(library, query="pressing matter",
+                     dimensions={"verb": "research", "variant": "m"},
+                     scope_tags="rdr__arcaneum")
+    agnostic = _seed(library, query="pressing matter",
+                     dimensions={"verb": "research", "variant": "a"},
+                     scope_tags="")
+    result = plan_match(
+        intent="pressing", library=library, cache=None,
+        min_confidence=0.5, scope_preference="rdr__arcaneum",
+    )
+    returned_ids = {m.plan_id for m in result}
+    assert matching in returned_ids
+    assert agnostic in returned_ids
 
 
 def test_context_parameter_is_a_no_op(library) -> None:
