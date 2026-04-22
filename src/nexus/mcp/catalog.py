@@ -57,8 +57,11 @@ def catalog_search(
         from nexus.catalog.tumbler import Tumbler
         import json as _json
 
-        # Structured filters via SQL when provided
-        if owner or corpus or file_path or (author and not query):
+        # Structured filters via SQL when provided. content_type alone (no
+        # query/author/etc.) routes here too — the FTS5 path below requires
+        # a free-text query, but content_type is a perfectly valid sole filter
+        # ("show me everything of type prose") and the docstring promises it.
+        if owner or corpus or file_path or content_type or (author and not query):
             conditions = ["1=1"]
             params: list = []
             if owner:
