@@ -6,9 +6,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [4.9.7] - 2026-04-22
+## [4.9.8] - 2026-04-22
 
-No plugin-side changes; version bumped for marketplace parity. See root `CHANGELOG.md` for the three MCP fixes + scratch get diagnostics (nexus-3o3t) shipped in this release.
+No plugin-side changes; version bumped for marketplace parity. See root `CHANGELOG.md` for the three MCP fixes + scratch get diagnostics (nexus-3o3t) and two-sided `operator_compare` for cross-corpus DAGs (nexus-km5i) shipped in this release.
 
 ## [4.9.6] - 2026-04-22
 
