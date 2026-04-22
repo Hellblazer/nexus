@@ -2,12 +2,12 @@
 title: "RDR-091: Scope-Aware Plan Matching (nexus-zs1d Phase 2)"
 id: RDR-091
 type: Feature
-status: draft
+status: accepted
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-22
-accepted_date:
+accepted_date: 2026-04-22
 related_issues:
   - "nexus-zs1d: Wire nx_answer scope through plan_match + plan_run"
 related_tests: [test_plan_match.py, test_plan_library.py, test_nx_answer.py]

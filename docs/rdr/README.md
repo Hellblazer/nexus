@@ -113,6 +113,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-088](rdr-088-agenticscholar-operator-completion.md) | AgenticScholar Operator-Set Completion | Feature | Draft | 2026-04-17 |
 | [RDR-089](rdr-089-structured-aspect-extraction-at-ingest.md) | Structured Aspect Extraction at Ingest | Feature | Draft | 2026-04-17 |
 | [RDR-090](rdr-090-realistic-agenticscholar-benchmark.md) | Realistic AgenticScholar Benchmark | Feature | Draft | 2026-04-17 |
+| [RDR-091](rdr-091-scope-aware-plan-matching.md) | Scope-Aware Plan Matching (nexus-zs1d Phase 2) | Feature | Accepted | 2026-04-22 |
 
 ---
 
