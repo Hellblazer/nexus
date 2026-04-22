@@ -74,16 +74,26 @@ def _normalize_scope_string(scope: str) -> str:
 
 _RETRIEVAL_SCOPE_ARGS: tuple[str, ...] = ("corpus", "collection")
 
+# ``"all"`` is a sentinel the search/query MCP tools document as "search
+# every collection". It is scope-agnostic, not a concrete corpus name,
+# so it must never contribute to ``scope_tags`` — otherwise the seven
+# builtin plans that use ``corpus: all`` would be scope-filtered out of
+# the candidate pool whenever ``scope_preference`` is set (RDR-091
+# critic follow-up, nexus-dfok).
+_SCOPE_AGNOSTIC_SENTINELS: frozenset[str] = frozenset({"all"})
+
 
 def _infer_scope_tags(plan_json: str) -> str:
     """Infer scope_tags from a plan by unioning retrieval-step scope args.
 
     Walks the ``steps`` list in *plan_json*. For every step, collects any
     ``args["corpus"]`` or ``args["collection"]`` value that is a literal
-    string (not a ``$var`` binding placeholder). Each collected value is
-    normalized via :func:`_normalize_scope_string`. The result is a
-    comma-separated, sorted, deduplicated string — ``""`` when the plan
-    names no literal retrieval scope (e.g. traverse-only plans).
+    string (not a ``$var`` binding placeholder and not the ``"all"``
+    wildcard sentinel). Each collected value is normalized via
+    :func:`_normalize_scope_string`. The result is a comma-separated,
+    sorted, deduplicated string — ``""`` when the plan names no literal
+    retrieval scope (e.g. traverse-only plans or plans that search
+    everything).
 
     Malformed ``plan_json`` yields ``""`` (fail-soft: scope inference is
     best-effort and must never block a save).
@@ -109,6 +119,8 @@ def _infer_scope_tags(plan_json: str) -> str:
             if not isinstance(value, str) or not value:
                 continue
             if value.startswith("$"):
+                continue
+            if value in _SCOPE_AGNOSTIC_SENTINELS:
                 continue
             collected.add(_normalize_scope_string(value))
 
@@ -280,11 +292,17 @@ class PlanLibrary:
         """Add the ``scope_tags`` column and backfill existing rows (RDR-091).
 
         Lock-naive: caller must hold ``self._lock`` and ``_migrated_lock``.
-        Delegates to :func:`nexus.db.migrations._add_plan_scope_tags`.
+        Delegates to :func:`nexus.db.migrations._add_plan_scope_tags` and
+        the 4.8.1 critic-follow-up
+        :func:`nexus.db.migrations._rewash_plan_scope_tags_all_sentinel`.
         """
-        from nexus.db.migrations import _add_plan_scope_tags
+        from nexus.db.migrations import (
+            _add_plan_scope_tags,
+            _rewash_plan_scope_tags_all_sentinel,
+        )
 
         _add_plan_scope_tags(self.conn)
+        _rewash_plan_scope_tags_all_sentinel(self.conn)
 
     # ── Public API ────────────────────────────────────────────────────────
 

@@ -545,7 +545,7 @@ def migrate_chash_index(conn: sqlite3.Connection) -> None:
 
 
 def _add_plan_scope_tags(conn: sqlite3.Connection) -> None:
-    """Add the ``scope_tags`` column to ``plans`` and backfill existing rows.
+    """Add the ``scope_tags`` column to ``plans`` and backfill default rows.
 
     RDR-091 Phase 2a (bead ``nexus-x6pr``). ``scope_tags`` captures which
     corpora / collections a plan actually touched — a comma-separated,
@@ -553,9 +553,15 @@ def _add_plan_scope_tags(conn: sqlite3.Connection) -> None:
     this column during match-time re-ranking; this migration only ensures
     the column exists and carries a best-effort value for every row.
 
+    The backfill intentionally guards on ``WHERE scope_tags = ''`` so
+    explicitly-authored values (passed via ``save_plan(scope_tags=...)``)
+    survive process restarts. Without this guard (RDR-091 critic
+    follow-up, nexus-dfok), every process start would overwrite
+    explicit tags with inference output, defeating the explicit-override
+    path documented in the authoring guide.
+
     Idempotent via a ``PRAGMA table_info`` column guard. The backfill is
-    re-run on every invocation because inference is deterministic — so a
-    partial migration that crashed mid-UPDATE is safe to retry.
+    safe to re-run because inference is deterministic.
 
     No-op on a DB that has no ``plans`` table (fresh install without
     :mod:`nexus.db.t2.plan_library` ever instantiated).
@@ -578,17 +584,75 @@ def _add_plan_scope_tags(conn: sqlite3.Connection) -> None:
             "ALTER TABLE plans ADD COLUMN scope_tags TEXT NOT NULL DEFAULT ''"
         )
 
-    # Backfill: inference is deterministic and cheap; re-running is safe.
+    # Backfill only rows where scope_tags is still the default ''.
+    # Explicit values survive; partial-failure retries pick up where
+    # they left off.
     from nexus.db.t2.plan_library import _infer_scope_tags
 
-    rows = conn.execute("SELECT id, plan_json FROM plans").fetchall()
+    rows = conn.execute(
+        "SELECT id, plan_json FROM plans WHERE scope_tags = ''"
+    ).fetchall()
+    for row_id, plan_json in rows:
+        inferred = _infer_scope_tags(plan_json or "")
+        if inferred:
+            conn.execute(
+                "UPDATE plans SET scope_tags = ? WHERE id = ? AND scope_tags = ''",
+                (inferred, row_id),
+            )
+    conn.commit()
+
+
+def _rewash_plan_scope_tags_all_sentinel(conn: sqlite3.Connection) -> None:
+    """Rewash rows whose ``scope_tags`` contains ``'all'`` from pre-fix backfill.
+
+    RDR-091 critic follow-up (bead ``nexus-dfok``). The first-cut
+    ``_infer_scope_tags`` treated ``corpus: "all"`` as a concrete
+    scope tag, so the 4.8.0 backfill wrote ``scope_tags='all'`` onto
+    every builtin plan that uses ``corpus: all`` (7 of 9 builtins).
+    At match time those plans prefix-matched no real scope and were
+    filtered out of the candidate pool — inverting RDR-091's whole
+    purpose for any scoped ``nx_answer`` call.
+
+    The inference fix (``"all"`` is now a skipped sentinel) takes
+    effect on new saves, but existing rows carry the broken value.
+    This migration re-runs inference on any row whose ``scope_tags``
+    contains the token ``all``, replacing it with the corrected value
+    (typically ``""`` for agnostic plans, or the subset of real tags
+    when a multi-corpus plan mixed ``all`` with specific corpora).
+
+    No-op on fresh installs or on DBs where every row already has
+    clean tags. Idempotent: a second run finds no matching rows.
+    """
+    has_table = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='plans'"
+    ).fetchone()
+    if not has_table:
+        return
+
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(plans)").fetchall()}
+    if "scope_tags" not in cols:
+        return
+
+    from nexus.db.t2.plan_library import _infer_scope_tags
+
+    rows = conn.execute(
+        """
+        SELECT id, plan_json FROM plans
+        WHERE scope_tags = 'all'
+           OR scope_tags LIKE 'all,%'
+           OR scope_tags LIKE '%,all'
+           OR scope_tags LIKE '%,all,%'
+        """
+    ).fetchall()
     for row_id, plan_json in rows:
         inferred = _infer_scope_tags(plan_json or "")
         conn.execute(
             "UPDATE plans SET scope_tags = ? WHERE id = ?",
             (inferred, row_id),
         )
-    conn.commit()
+    if rows:
+        _log.info("Rewashed plan scope_tags 'all' sentinel", row_count=len(rows))
+        conn.commit()
 
 
 MIGRATIONS: list[Migration] = [
@@ -633,6 +697,11 @@ MIGRATIONS: list[Migration] = [
         "4.8.0",
         "Add plans.scope_tags column (RDR-091 Phase 2a)",
         _add_plan_scope_tags,
+    ),
+    Migration(
+        "4.8.1",
+        "Rewash plans.scope_tags 'all' sentinel (RDR-091 critic follow-up)",
+        _rewash_plan_scope_tags_all_sentinel,
     ),
 ]
 

@@ -349,11 +349,17 @@ accidentally filtered out the moment the caller picks one of them.
 
 ### Interaction with grown plans
 
-The `nx_answer` ad-hoc save path (RDR-084) infers `scope_tags` from the
-actual corpus used in that run. Running the same question against
-`knowledge__delos` and then against `knowledge__arcaneum` saves two
-grown plans with different `scope_tags`, which is the right answer:
-each plan is anchored to the retrieval space it actually explored.
+The `nx_answer` ad-hoc save path (RDR-084) passes the caller's `scope`
+argument through as the grown plan's `scope_tags`, so grown plans are
+anchored to the retrieval space that produced them. Running the same
+question against `knowledge__delos` and then against `knowledge__arcaneum`
+saves two grown plans with different `scope_tags`, each ready to serve
+future questions in the same scope.
+
+When `nx_answer` is called without a `scope` argument, the grown plan's
+`scope_tags` is inferred from literal corpus/collection args in the
+executed plan_json; plans whose retrieval steps use `$var` bindings or
+the `"all"` wildcard end up agnostic (`scope_tags=""`) in that case.
 
 ### Authoring guidance
 

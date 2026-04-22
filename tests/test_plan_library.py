@@ -570,3 +570,185 @@ def test_migration_adds_column_to_empty_plans_table(tmp_path: Path) -> None:
     cols = {row[1] for row in conn.execute("PRAGMA table_info(plans)").fetchall()}
     assert "scope_tags" in cols
     conn.close()
+
+
+# ── RDR-091 critic follow-up (nexus-dfok) ────────────────────────────────
+
+
+def test_infer_scope_tags_skips_all_sentinel() -> None:
+    """_infer_scope_tags treats ``corpus='all'`` as agnostic, not a concrete tag.
+
+    Regression guard for the nexus-dfok bug: without this rule, builtin
+    plans using ``corpus: all`` were filtered out of any scoped
+    ``nx_answer`` call, inverting RDR-091's entire purpose.
+    """
+    from nexus.db.t2.plan_library import _infer_scope_tags
+
+    assert _infer_scope_tags(
+        '{"steps":[{"tool":"search","args":{"corpus":"all"}}]}'
+    ) == ""
+
+
+def test_infer_scope_tags_mixes_all_with_specific_drops_all() -> None:
+    """Multi-step plans that mix ``corpus: all`` with a specific corpus keep
+    only the specific tag; ``all`` never contributes."""
+    from nexus.db.t2.plan_library import _infer_scope_tags
+
+    plan_json = (
+        '{"steps":['
+        '{"tool":"search","args":{"corpus":"all"}},'
+        '{"tool":"search","args":{"corpus":"rdr__arcaneum"}}'
+        ']}'
+    )
+    assert _infer_scope_tags(plan_json) == "rdr__arcaneum"
+
+
+def test_save_plan_explicit_scope_tags_survive_backfill(tmp_path: Path) -> None:
+    """Rows with explicit scope_tags must NOT be overwritten by the 4.8.0
+    backfill on subsequent process starts.
+
+    Regression guard for the nexus-dfok bug: the original backfill ran
+    an unconditional UPDATE, so plans authored with
+    ``save_plan(scope_tags='rdr__arcaneum')`` whose plan_json used
+    ``$var`` corpus bindings were reverted to agnostic on every restart.
+    """
+    import sqlite3
+
+    from nexus.db.migrations import _add_plan_scope_tags
+
+    db_path = tmp_path / "preserve.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE plans (
+            id INTEGER PRIMARY KEY,
+            project TEXT NOT NULL DEFAULT '',
+            query TEXT NOT NULL,
+            plan_json TEXT NOT NULL,
+            outcome TEXT DEFAULT 'success',
+            tags TEXT DEFAULT '',
+            created_at TEXT NOT NULL,
+            scope_tags TEXT NOT NULL DEFAULT ''
+        );
+        """
+    )
+    # An explicit-tagged plan whose plan_json uses $var bindings —
+    # inference would return '' if re-run, overwriting the explicit value.
+    conn.execute(
+        "INSERT INTO plans (query, plan_json, created_at, scope_tags) "
+        "VALUES (?, ?, ?, ?)",
+        (
+            "q",
+            '{"steps":[{"tool":"search","args":{"corpus":"$corpus"}}]}',
+            "2025-01-01T00:00:00Z",
+            "rdr__arcaneum",
+        ),
+    )
+    conn.commit()
+
+    _add_plan_scope_tags(conn)
+    row = conn.execute("SELECT scope_tags FROM plans WHERE query='q'").fetchone()
+    assert row[0] == "rdr__arcaneum", (
+        "explicit scope_tags value must survive the idempotent backfill"
+    )
+    conn.close()
+
+
+def test_rewash_migration_fixes_all_sentinel_rows(tmp_path: Path) -> None:
+    """The 4.8.1 rewash migration corrects rows stuck at 'all' from the
+    pre-fix backfill."""
+    import sqlite3
+
+    from nexus.db.migrations import _rewash_plan_scope_tags_all_sentinel
+
+    db_path = tmp_path / "rewash.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE plans (
+            id INTEGER PRIMARY KEY,
+            project TEXT NOT NULL DEFAULT '',
+            query TEXT NOT NULL,
+            plan_json TEXT NOT NULL,
+            outcome TEXT DEFAULT 'success',
+            tags TEXT DEFAULT '',
+            created_at TEXT NOT NULL,
+            scope_tags TEXT NOT NULL DEFAULT ''
+        );
+        """
+    )
+    # Simulate pre-fix state: three rows with stale 'all'-contaminated
+    # scope_tags alongside one already-clean row.
+    conn.executemany(
+        "INSERT INTO plans (query, plan_json, created_at, scope_tags) "
+        "VALUES (?, ?, ?, ?)",
+        [
+            # Plain 'all' → should become '' after rewash.
+            ("q1", '{"steps":[{"tool":"search","args":{"corpus":"all"}}]}',
+             "2025-01-01T00:00:00Z", "all"),
+            # Mixed 'all,specific' → should become 'rdr__arcaneum'.
+            ("q2", '{"steps":['
+                   '{"tool":"search","args":{"corpus":"all"}},'
+                   '{"tool":"search","args":{"corpus":"rdr__arcaneum"}}'
+                   ']}',
+             "2025-01-01T00:00:00Z", "all,rdr__arcaneum"),
+            # Clean row — should be untouched.
+            ("q3", '{"steps":[{"tool":"search","args":{"corpus":"rdr__delos"}}]}',
+             "2025-01-01T00:00:00Z", "rdr__delos"),
+        ],
+    )
+    conn.commit()
+
+    _rewash_plan_scope_tags_all_sentinel(conn)
+
+    q1 = conn.execute("SELECT scope_tags FROM plans WHERE query='q1'").fetchone()
+    q2 = conn.execute("SELECT scope_tags FROM plans WHERE query='q2'").fetchone()
+    q3 = conn.execute("SELECT scope_tags FROM plans WHERE query='q3'").fetchone()
+    assert q1[0] == "", "plain 'all' must rewash to agnostic"
+    assert q2[0] == "rdr__arcaneum", "mixed 'all,specific' must drop 'all'"
+    assert q3[0] == "rdr__delos", "clean row must be untouched"
+
+    # Idempotent: running again finds nothing to rewash.
+    _rewash_plan_scope_tags_all_sentinel(conn)
+    q1 = conn.execute("SELECT scope_tags FROM plans WHERE query='q1'").fetchone()
+    assert q1[0] == ""
+    conn.close()
+
+
+def test_rewash_migration_no_op_when_no_all_rows(tmp_path: Path) -> None:
+    """Rewash migration is a safe no-op when no row contains 'all'."""
+    import sqlite3
+
+    from nexus.db.migrations import _rewash_plan_scope_tags_all_sentinel
+
+    db_path = tmp_path / "clean.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE plans (
+            id INTEGER PRIMARY KEY,
+            project TEXT NOT NULL DEFAULT '',
+            query TEXT NOT NULL,
+            plan_json TEXT NOT NULL,
+            outcome TEXT DEFAULT 'success',
+            tags TEXT DEFAULT '',
+            created_at TEXT NOT NULL,
+            scope_tags TEXT NOT NULL DEFAULT ''
+        );
+        """
+    )
+    conn.commit()
+    _rewash_plan_scope_tags_all_sentinel(conn)  # must not crash
+    conn.close()
+
+
+def test_rewash_migration_no_op_without_plans_table(tmp_path: Path) -> None:
+    """Rewash migration is a safe no-op on a DB without a plans table."""
+    import sqlite3
+
+    from nexus.db.migrations import _rewash_plan_scope_tags_all_sentinel
+
+    db_path = tmp_path / "empty.db"
+    conn = sqlite3.connect(str(db_path))
+    _rewash_plan_scope_tags_all_sentinel(conn)  # must not crash
+    conn.close()

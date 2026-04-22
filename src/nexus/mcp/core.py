@@ -1246,9 +1246,11 @@ def plan_search(query: str, project: str = "", limit: int = 5, offset: int = 0) 
         lines: list[str] = []
         for r in results:
             plan_preview = r["plan_json"][:100].replace("\n", " ")
+            scope_display = r.get("scope_tags") or "(agnostic)"
             lines.append(
                 f"[{r['id']}] {r['query'][:60]}\n"
                 f"  outcome={r['outcome']}  tags={r['tags']}\n"
+                f"  scope={scope_display}\n"
                 f"  plan: {plan_preview}..."
             )
         shown_end = offset + len(results)
@@ -2277,6 +2279,12 @@ async def nx_answer(
                 from pathlib import Path as _Path
 
                 project_name = _Path.cwd().name
+                # RDR-091 critic follow-up (nexus-dfok): anchor the grown
+                # plan to the caller's scope. _infer_scope_tags cannot see
+                # the runtime corpus injection from ``_nx_scope`` because
+                # it only appears in bindings, not plan_json. Passing
+                # scope_tags=scope explicitly captures the retrieval space
+                # that produced this plan.
                 with _t2_ctx() as _save_db:
                     grown_id = _save_db.plans.save_plan(
                         query=question,
@@ -2286,6 +2294,7 @@ async def nx_answer(
                         project=project_name,
                         ttl=ttl_days,
                         scope="personal",
+                        scope_tags=scope or None,
                     )
                     # Feed the new plan into the T1 cosine cache so the next
                     # paraphrase can match without a SessionStart re-populate.
