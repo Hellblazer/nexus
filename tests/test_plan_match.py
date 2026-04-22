@@ -402,6 +402,81 @@ def test_fts5_fallback_applies_scope_conflict_filter(library) -> None:
     assert result == [], "FTS5 path must also filter scope-conflicting plans"
 
 
+def test_scope_fit_case_insensitive_prefix_match(library) -> None:
+    """_scope_fit matches across case on both sides (nexus-yi7m).
+
+    Live probe found a grown plan tagged ``knowledge__Delos`` (capital D,
+    from a real mixed-case collection namespace) that did NOT match a
+    caller scope ``knowledge__delos`` (lowercase, the ChromaDB
+    convention) because startswith is case-sensitive. ChromaDB's naming
+    convention doesn't use case to disambiguate, so the two should be
+    treated as the same keyspace."""
+    from nexus.plans.matcher import plan_match
+
+    # Plan tagged with mixed-case real-collection form.
+    plan_id = _seed(library, query="q",
+                    dimensions={"verb": "research", "variant": "d"},
+                    scope_tags="knowledge__Delos")
+    cache = _FakeCache(hits=[(plan_id, 0.10)])
+    # Caller uses the conventional lowercase form.
+    result = plan_match(
+        intent="q", library=library, cache=cache,
+        min_confidence=0.5, scope_preference="knowledge__delos",
+    )
+    assert [m.plan_id for m in result] == [plan_id]
+
+
+def test_scope_fit_case_insensitive_reverse_direction(library) -> None:
+    """Reverse: caller mixed-case, plan lowercase; still matches."""
+    from nexus.plans.matcher import plan_match
+
+    plan_id = _seed(library, query="q",
+                    dimensions={"verb": "research", "variant": "dl"},
+                    scope_tags="knowledge__delos")
+    cache = _FakeCache(hits=[(plan_id, 0.10)])
+    result = plan_match(
+        intent="q", library=library, cache=cache,
+        min_confidence=0.5, scope_preference="knowledge__Delos",
+    )
+    assert [m.plan_id for m in result] == [plan_id]
+
+
+def test_scope_fit_case_insensitive_bare_family_prefix(library) -> None:
+    """Bare-family prefix matching remains case-insensitive too:
+    caller ``knowledge__`` matches tag ``knowledge__Delos``."""
+    from nexus.plans.matcher import plan_match
+
+    plan_id = _seed(library, query="q",
+                    dimensions={"verb": "research", "variant": "bf"},
+                    scope_tags="knowledge__Delos")
+    cache = _FakeCache(hits=[(plan_id, 0.10)])
+    result = plan_match(
+        intent="q", library=library, cache=cache,
+        min_confidence=0.5, scope_preference="KNOWLEDGE__",
+    )
+    assert [m.plan_id for m in result] == [plan_id]
+
+
+def test_scope_fit_preserves_stored_case(library) -> None:
+    """Stored scope_tags value is untouched by case-insensitive compare.
+    The Match object reports the real mixed-case name so plan_search /
+    authoring output shows the actual collection reference."""
+    from nexus.plans.matcher import plan_match
+
+    plan_id = _seed(library, query="q",
+                    dimensions={"verb": "research", "variant": "preserve"},
+                    scope_tags="knowledge__Delos")
+    cache = _FakeCache(hits=[(plan_id, 0.10)])
+    result = plan_match(
+        intent="q", library=library, cache=cache,
+        min_confidence=0.5, scope_preference="knowledge__delos",
+    )
+    assert len(result) == 1
+    assert result[0].scope_tags == "knowledge__Delos", (
+        "stored case must be preserved; only comparison is folded"
+    )
+
+
 def test_scope_boost_formula_is_multiplicative_with_unequal_cosines(library) -> None:
     """Formula-pinning regression guard (RDR-091 critic follow-up).
 

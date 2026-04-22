@@ -65,14 +65,24 @@ def _scope_fit(plan_scope_tags: str, normalized_scope_pref: str) -> float | None
         either direction (``tag.startswith(scope) or scope.startswith(tag)``)
         → ``1.0`` (bare-family plans serve narrower queries and vice versa)
       * otherwise → ``None`` (conflict; caller filters out)
+
+    Prefix matching is **case-insensitive**. Real collection names in
+    nexus carry mixed case (e.g. ``code__Delos-5af9bfe0`` alongside
+    ``knowledge__delos``), but ChromaDB's naming convention doesn't use
+    case to disambiguate identity. A caller passing the conventional
+    lowercase scope should match plans tagged with the mixed-case form
+    found in the wild (nexus-yi7m). Stored values preserve original case
+    so authoring output (``plan_search``) still shows the real name.
     """
     if not normalized_scope_pref:
         return 0.0
     if not plan_scope_tags:
         return 0.0
+    scope_lower = normalized_scope_pref.lower()
     tags = [t for t in plan_scope_tags.split(",") if t]
     for tag in tags:
-        if tag.startswith(normalized_scope_pref) or normalized_scope_pref.startswith(tag):
+        tag_lower = tag.lower()
+        if tag_lower.startswith(scope_lower) or scope_lower.startswith(tag_lower):
             return 1.0
     return None
 

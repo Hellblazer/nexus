@@ -25,7 +25,7 @@ __all__ = [
     "_normalize_scope_string",
 ]
 
-_HASH_SUFFIX_RE = re.compile(r"-[0-9a-f]{8}$")
+_HASH_SUFFIX_RE = re.compile(r"-[0-9a-fA-F]{8}$")
 
 # Comma-separated ``scope_tags`` entries; also the keys ``_infer_scope_tags``
 # looks for in retrieval-step args.
@@ -44,12 +44,16 @@ def _normalize_scope_string(scope: str) -> str:
     """Return *scope* in canonical scope-tag form.
 
     Rules (RDR-091 §Proposed Solution → Normalization):
-      * Strip a trailing 8-char lowercase hex suffix (``-deadbeef``).
-        The collection-name convention is exactly 8 hex chars; shorter,
-        longer, or non-hex tails are preserved verbatim.
+      * Strip a trailing 8-char hex suffix in either case
+        (``-deadbeef`` or ``-5AF9BFE0``). Real collection names
+        (``code__Delos-5AF9BFE0``) use mixed case and must normalize
+        to the same family as their lowercase siblings.
       * Strip a trailing ``*`` or ``-*`` glob.
       * Preserve a bare family prefix (``rdr__``) and tumbler addresses
         (``1.16``) unchanged.
+      * Stored case is preserved; only the hex-suffix and glob tails
+        are removed. Case folding for comparison happens at match time
+        in :func:`nexus.plans.matcher._scope_fit`.
       * Empty input is returned unchanged.
     """
     if not scope:
