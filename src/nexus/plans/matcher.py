@@ -29,10 +29,49 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from nexus.db.t2.plan_library import PlanLibrary
+from nexus.db.t2.plan_library import PlanLibrary, _normalize_scope_string
 from nexus.plans.match import Match
 
 __all__ = ["PlanCache", "plan_match"]
+
+
+# ── Scope-aware re-ranking (RDR-091 Phase 2b) ──────────────────────────────
+#
+# Placeholder weight. Phase 2c (nexus-svcg) tunes this against 5 fixture
+# plan pairs; 0.10 is a small-but-nonzero starting guess that tips ties
+# toward scope-matched plans without overwhelming base cosine signal.
+_SCOPE_FIT_WEIGHT: float = 0.10
+
+
+def _scope_fit(plan_scope_tags: str, normalized_scope_pref: str) -> float | None:
+    """Return scope-fit in ``{0.0, 1.0}`` or ``None`` for a conflict.
+
+    Semantics (RDR-091 §Proposed Solution → scope-fit):
+      * empty caller scope → always ``0.0`` (no preference; no filter)
+      * empty plan scope_tags (agnostic plan) → ``0.0`` (neutral; stays)
+      * any tag in *plan_scope_tags* prefix-matches the caller scope in
+        either direction (``tag.startswith(scope) or scope.startswith(tag)``)
+        → ``1.0`` (bare-family plans serve narrower queries and vice versa)
+      * otherwise → ``None`` (conflict; caller filters out)
+    """
+    if not normalized_scope_pref:
+        return 0.0
+    if not plan_scope_tags:
+        return 0.0
+    tags = [t for t in plan_scope_tags.split(",") if t]
+    for tag in tags:
+        if tag.startswith(normalized_scope_pref) or normalized_scope_pref.startswith(tag):
+            return 1.0
+    return None
+
+
+def _specificity(plan_scope_tags: str) -> int:
+    """Tie-break key: fewer scope_tags means a more specific plan.
+
+    Returned as a negative count so higher values sort first under
+    Python's ``reverse=True`` sort.
+    """
+    return -len([t for t in plan_scope_tags.split(",") if t])
 
 
 class PlanCache(Protocol):
@@ -75,14 +114,31 @@ def plan_match(
     """Return plans ranked for *intent*.
 
     See module docstring for the two-path contract. ``scope_preference``
-    and ``context`` are accepted for forward compatibility with Phase 2
-    scoping + specificity ranking (PQ-14 / PQ-20) — unused at this
-    version. Every returned plan has its ``match_count`` bumped and, when
+    is the RDR-091 Phase 2b filter + re-ranker (was a no-op prior):
+
+      * A non-empty *scope_preference* is normalized (hash-suffix and
+        glob stripped) before comparison against each plan's
+        ``scope_tags``.
+      * **Scope-conflict filter**: a plan whose ``scope_tags`` is
+        non-empty and none of whose tags prefix-match the caller scope
+        (in either direction) is dropped from the candidate pool. Agnostic
+        plans (``scope_tags == ''``) are kept with neutral weight.
+      * **Scope-fit boost**: matching plans receive a small additive
+        boost ``_SCOPE_FIT_WEIGHT * 1.0`` on top of their base cosine
+        score, used only for ranking. ``Match.confidence`` still carries
+        the raw cosine, so ``min_confidence`` and downstream thresholds
+        are unchanged.
+      * **Specificity tie-break**: at equal adjusted score, the plan
+        with fewer scope_tags (more specific scope) ranks first.
+
+    ``context`` is still accepted for forward compatibility and currently
+    unused. Every returned plan has its ``match_count`` bumped and, when
     the confidence is numeric, ``match_conf_sum`` accumulates.
 
-    Always returns matches sorted by confidence descending (cosine
-    higher-is-better); FTS5-fallback matches preserve the rank order
-    returned by ``PlanLibrary.search_plans``.
+    Always returns matches sorted descending by the ranking key
+    (scope-adjusted for T1, FTS5 order preserved for the fallback).
+    Zero-candidate outcome (e.g. every candidate conflicts) returns
+    ``[]``; upstream ``nx_answer`` falls through to the inline planner.
 
     **Sentinel**: an FTS5-fallback match sets ``Match.confidence = None``.
     The ``plan_match`` MCP tool renders this as ``confidence=fts5`` in
@@ -91,16 +147,20 @@ def plan_match(
     ``min_confidence`` parameter does not apply to FTS5 hits.
     """
     filter_dims = dimensions or {}
+    scope_pref = _normalize_scope_string(scope_preference) if scope_preference else ""
 
     # T1 cosine path when cache available + has hits.
-    matches: list[Match] = []
-    # Over-fetch covers both (a) dimension post-filter attrition and (b)
-    # min_confidence threshold attrition. A fixed floor (n * 2) avoids the
-    # under-delivery case when filter_dims is empty — cost is bounded by the
-    # cache size, which is small (session-scoped plan descriptions).
+    # Over-fetch covers (a) dimension post-filter attrition, (b) min_confidence
+    # threshold attrition, and (c) RDR-091 scope-conflict attrition. A fixed
+    # floor (n * 2) avoids under-delivery when filter_dims is empty. Cost is
+    # bounded by cache size (session-scoped).
     _over = max(n * 2, n + len(filter_dims) * 2)
+    if scope_pref:
+        _over += n  # extra budget for potential conflict drops
     if cache is not None and cache.is_available:
         hits = cache.query(intent, _over)
+        # Gather all admissible candidates with (adjusted_score, specificity).
+        scored: list[tuple[float, int, Match]] = []
         for plan_id, distance in hits:
             row = library.get_plan(plan_id)
             if row is None:
@@ -118,24 +178,32 @@ def plan_match(
             m = Match.from_plan_row(row, confidence=confidence)
             if filter_dims and not _superset(m.dimensions, filter_dims):
                 continue
-            matches.append(m)
-            if len(matches) >= n:
-                break
+            fit = _scope_fit(m.scope_tags, scope_pref)
+            if fit is None:
+                continue  # scope conflict — drop from pool
+            adjusted = confidence + _SCOPE_FIT_WEIGHT * fit
+            scored.append((adjusted, _specificity(m.scope_tags), m))
 
-        if matches:
+        if scored:
+            scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+            matches = [m for _, _, m in scored[:n]]
             for m in matches:
                 library.increment_match_metrics(m.plan_id, confidence=m.confidence)
-            matches.sort(key=lambda x: x.confidence or 0.0, reverse=True)
             return matches
 
     # FTS5 fallback: either cache unavailable or T1 returned no hits.
     # Over-fetch so the dimension post-filter doesn't starve the caller.
     _fts_over = max(n * 2, n + len(filter_dims) * 3)
+    if scope_pref:
+        _fts_over += n
     rows = library.search_plans(intent, limit=_fts_over, project=project)
+    matches: list[Match] = []
     for row in rows:
         m = Match.from_plan_row(row, confidence=None)
         if filter_dims and not _superset(m.dimensions, filter_dims):
             continue
+        if _scope_fit(m.scope_tags, scope_pref) is None:
+            continue  # scope conflict on the fallback path too
         matches.append(m)
         if len(matches) >= n:
             break

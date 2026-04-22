@@ -65,6 +65,9 @@ class Match:
     optional_bindings: list[str]
     default_bindings: dict[str, Any]
     parent_dims: dict[str, Any] | None
+    # RDR-091 Phase 2a scope-tag column (comma-separated, normalized).
+    # Phase 2b matcher consumes this; ``""`` means agnostic.
+    scope_tags: str = ""
 
     @classmethod
     def from_plan_row(
@@ -105,4 +108,5 @@ class Match:
             optional_bindings=optional,
             default_bindings=_decode_json_dict(row.get("default_bindings")),
             parent_dims=parent or None,
+            scope_tags=row.get("scope_tags") or "",
         )
