@@ -30,6 +30,13 @@ doesn't pin a corpus. It does not help when the matcher picks the
 *wrong plan entirely* because the matcher can't tell a specialized
 plan from a generic template.
 
+Note on pre-existing wiring: `nx_answer` (`src/nexus/mcp/core.py:2033`)
+*already* passes `scope_preference=scope` into `plan_match`. It has
+since RDR-080 consolidated the retrieval layer. The matcher just drops
+the argument silently today. Phase 2 does not add new wiring between
+`nx_answer` and `plan_match`; it makes the matcher actually use the
+value that's already arriving.
+
 Concrete failure mode (observed while validating post 5's Arcaneum
 worked-example): a generic 2-step decision-retrieval plan at score
 0.82 outranks a specialized 5-step `arcaneum-tradeoffs-comparison`
@@ -142,15 +149,18 @@ Implications for Nexus's Phase 2:
   match is calibrated; intent-fit is LLM-expensive. A three-
   tier gate with cheap stages short-circuiting to expensive
   ones is the natural architecture.
-- Specificity ranking (tie-break by narrower `scope_tags`) in
-  the current RDR proposal is the Nexus analogue of the
-  paper's "demonstration-pair" retrieval: both prefer the
-  example most closely aligned with the query's shape, not
-  just its surface.
+- Specificity ranking (tie-break by fewer `scope_tags`
+  entries) is a much weaker signal than the paper's
+  demonstration-pair retrieval. The paper reasons about
+  query-plan intent alignment semantically; Nexus's
+  specificity is a structural preference for narrower scope
+  declarations. The tie-break exists mostly to prevent
+  surprising reshuffles at identical scores, not as an
+  intent-fit mechanism.
 - The paper's 90% threshold is against a different signal
-  (LLM-assessed intent fit). Our `scope_fit_weight`
-  calibration target stays at the cosine-confidence layer and
-  doesn't need to reach that bar.
+  (LLM-assessed intent fit). Our `scope_fit_weight` picks
+  stay at the cosine-confidence layer and don't need to reach
+  that bar.
 
 ### Critical Assumptions
 
@@ -194,6 +204,17 @@ string.
 Index on `scope_tags` is not needed: plan library is small enough
 that a full scan per match is cheap (O(10s-100s) rows).
 
+Inferred `scope_tags` are stored in normalized form: strip any
+trailing `-<hexhash>` suffix from collection names at save time
+(`rdr__arcaneum-2ad2825c` → `rdr__arcaneum`). This keeps tags
+stable across repo relocations that would otherwise produce new
+hash suffixes for the same logical corpus.
+
+Traverse-only plans: `traverse` operates on tumblers, not a
+corpus argument, and contributes nothing to the union. A plan
+whose only retrieval step is `traverse` is inferred as agnostic
+(empty `scope_tags`), which is the right default.
+
 ### 2. `plan_save`: capture scope at store time
 
 Two paths:
@@ -201,7 +222,26 @@ Two paths:
   `plan_json`. Authored plans with a specific target.
 - **Inferred**: when `scope_tags` is omitted, infer from
   `plan_json` by visiting retrieval steps and collecting every
-  `corpus` / `collection` value that isn't a `$var` placeholder.
+  `corpus` / `collection` value that isn't a `$var` placeholder,
+  then normalizing (strip trailing `-<hexhash>` suffix).
+
+The `plan_save` MCP tool signature (`src/nexus/mcp/core.py`) also
+gains an optional `scope_tags: str = ""` parameter so callers can
+override inference explicitly. Default-empty preserves the
+inference path for existing callers. Round-trip test verifies an
+explicit value flows through `plan_save` → `PlanLibrary.save_plan`
+→ `plans.scope_tags` column.
+
+**Interaction with RDR-084 grown plans:** the ad-hoc-save path in
+`nx_answer` (grown plans under `scope="personal"`, TTL=30) infers
+`scope_tags` from the actual corpus used in the run that produced
+the plan. If `_nx_scope` was passed and filled in the corpus, that
+becomes the plan's scope tag. If the same question is later asked
+against a different corpus, the matcher will filter out the first
+grown plan and the inline planner fires again, possibly growing a
+second plan with different tags. Two grown plans with different
+scopes is correct behaviour: they solve different shapes. TTL=30
+handles churn for plans that don't earn repeated matches.
 
 Authoring guide update (`docs/plan-authoring-guide.md`) documents
 the expectation.
@@ -211,35 +251,80 @@ the expectation.
 After the T1 cosine + dimension post-filter steps, apply scope
 matching:
 
-- When `scope_preference` is passed:
-  - Plans with `scope_tags == ""` (agnostic) stay in the pool
-    with a small neutral weight (no penalty, no boost).
-  - Plans whose `scope_tags` includes the caller's scope prefix
-    get a boost.
-  - Plans whose `scope_tags` is non-empty AND excludes the
-    caller's scope prefix get filtered out. A plan declared for
-    `code__*` does not match an `rdr__*` question.
-- When `scope_preference` is empty, scope_tags is ignored (current
-  behavior preserved).
+- When `scope_preference` is passed (non-empty after normalization,
+  see below):
+  - Plans with `scope_tags == ""` (agnostic) stay in the pool with
+    no boost and no penalty. Neutral baseline.
+  - Plans whose `scope_tags` contains at least one tag that
+    *prefix-matches* the normalized `scope_preference` stay in the
+    pool and receive a boost. Multi-corpus plans pass through: any overlap with the caller's scope is enough to match.
+    Rationale: bridging plans (e.g. a Luciferase→Delos
+    cross-corpus plan) should match a narrow Luciferase query,
+    because the plan covers that scope and more.
+  - Plans whose `scope_tags` is non-empty AND no tag
+    prefix-matches the caller's scope are *filtered out*. A plan
+    declared exclusively for `code__*` does not run against an
+    `rdr__*` question regardless of what else scores.
+- When `scope_preference` is empty, scope_tags is ignored. Current
+  behavior fully preserved on the no-scope path.
 
-Score formula (to be calibrated):
+**Normalization rules for comparison** (deterministic contract so
+implementation is unambiguous):
+
+- **Stored `scope_tags`**: normalized at save time by stripping
+  trailing `-<hexhash>` suffix (e.g. 8-char hex hash used for
+  repo-derived collection names). `rdr__arcaneum-2ad2825c` stored
+  as `rdr__arcaneum`.
+- **Caller `scope_preference`**: normalized at match time by
+  stripping trailing `*` or `-*` glob, then stripping trailing
+  `-<hexhash>` the same way.
+  - `rdr__arcaneum-*` → `rdr__arcaneum`
+  - `rdr__arcaneum-2ad2825c` → `rdr__arcaneum`
+  - `rdr__` → `rdr__` (bare family prefix, matches any
+    `rdr__*` tag)
+- **Match**: string `startswith` on normalized forms. A tag
+  `rdr__arcaneum` matches a caller scope `rdr__` (bare family)
+  *and* a caller scope `rdr__arcaneum-*` (specific project).
+- **Tumbler inputs** (e.g. `1.16`): deferred. Phase 2 accepts
+  string scope only; tumbler-to-collection resolution is
+  follow-up work if the need materialises.
+
+**Zero-candidate fallback**: when the scope filter removes every
+candidate, the matcher returns no hits. `nx_answer` already
+handles this path: it falls through to the inline planner
+(`_nx_answer_plan_miss`), which consults `scope` via its existing
+prompt hint. No new logic required in `plan_run`. This is the
+same behaviour as "no library plan matched at all", which is
+already tested and known-good.
+
+Score formula (the `scope_fit_weight` is picked by inspection,
+not statistics; see §Phase 2c):
 
 ```
 final_score = base_confidence * (1 + scope_fit_weight * scope_fit)
-where scope_fit ∈ {0.0 agnostic, 1.0 matching, -∞ conflicting}
+where scope_fit ∈ {0.0 agnostic, 1.0 prefix-matching}
 ```
 
-Specific `scope_fit_weight` value determined by calibration against
-existing match corpus (target: don't regress on no-scope queries,
-boost specialized plans by ~10-20% for matching-scope queries).
+Scope-conflicting plans don't appear in this formula because the
+filter removes them before scoring. Agnostic plans receive
+neutral weight so they still compete with scope-matching plans on
+base cosine confidence.
 
 ### 4. Specificity ranking tie-breaker
 
 When two plans have the same final score after scope boost, prefer
-the one with the narrower `scope_tags` (fewer collection prefixes).
-`arcaneum-tradeoffs-comparison` with `scope_tags="rdr__arcaneum"`
-beats a plan tagged with `scope_tags="rdr__arcaneum,rdr__delos,rdr__nexus"`
-for an Arcaneum query, all else equal.
+the one with fewer entries in `scope_tags`. A plan tagged
+`scope_tags="rdr__arcaneum"` beats one tagged
+`scope_tags="rdr__arcaneum,rdr__delos,rdr__nexus"` for an Arcaneum
+query on score ties.
+
+**Honest note about signal strength:** ties are uncommon in
+practice (cosine scores are near-continuous). The tie-break is
+mostly defensive: it prevents surprising reshuffles when two
+plans happen to land at identical scores after the boost. The
+motivating failure case (generic plan at 0.82 vs specialized at
+0.79) is actually resolved by the boost itself, not by the
+tie-break.
 
 ## Alternatives Considered
 
@@ -280,10 +365,13 @@ loop itself, not just a larger library.
 
 **Cost**:
 - Schema migration (one `ALTER TABLE ADD COLUMN` + backfill).
-- `plan_save` gains an inference step (~20 lines).
-- Matcher gains a filter + score adjustment (~30 lines).
-- Calibration run to pick `scope_fit_weight`.
-- ~10 new tests.
+- `plan_save` MCP tool + `PlanLibrary.save_plan` gain optional
+  `scope_tags` param (~10 lines).
+- Inference helper for the omit-scope path (~20 lines).
+- Matcher gains a normalized-prefix filter + score adjustment
+  (~40 lines).
+- Qualitative spot-check fixtures (~5 pairs, in tests).
+- ~12 new tests (library, matcher, end-to-end through nx_answer).
 
 **Risk**:
 - Mis-inference at backfill: plan's retrieval steps use a `$var`
@@ -293,20 +381,36 @@ loop itself, not just a larger library.
   filtered out for an `rdr__*` question even if the question
   happens to be about code. Acceptable: a question that's about
   code should pass `scope=code__*`, not rely on accidental
-  matches.
+  matches. Zero-candidate fallback keeps the plan-miss path
+  available.
 - Weight calibration: wrong `scope_fit_weight` could regress
-  no-scope behavior. Mitigated: fall-back case (scope_preference
-  empty) is a hard no-op; regression only possible when scope is
-  passed.
+  no-scope behavior. Mitigated: scope_preference-empty path is a
+  hard no-op; regression only possible when scope is passed,
+  and the no-regression test suite gates that.
+- Normalization edge cases: unexpected collection-name formats
+  that don't match the `-<hexhash>` suffix pattern (e.g.
+  manually-authored collection names without the suffix) stay
+  as-is through normalization. Acceptable: identical strings on
+  both sides still prefix-match correctly.
 
 **Failure modes**:
 - Plan authored with `scope_tags="rdr__arcaneum"` but deployed
   against a database where only `rdr__delos` exists → plan never
   matches. Surface via `nx doctor` check or an authoring-time
-  warning.
+  warning. Not a regression; plan simply doesn't fire.
 - Migration aborts mid-backfill. Idempotent: re-running picks up
   where it left off. `scope_tags DEFAULT ''` means unrun plans
   stay functional.
+- All library plans filter out on a narrow scope → inline planner
+  fires. Acceptable; same path as "no plan matched at all." User
+  sees inline-planned response, may optionally `plan_save` the
+  result to grow the library (RDR-084 discipline).
+- Tumbler-form `scope_preference` (e.g. `1.16`) passed: today
+  stripped of trailing glob but no tumbler-to-collection
+  resolution applied. It won't prefix-match any normalized
+  collection tag, so the filter eliminates all candidates →
+  inline planner fires. Degrades to plan-miss behaviour, not
+  broken. Proper tumbler support is follow-up work.
 
 ## Implementation Plan
 
@@ -321,40 +425,73 @@ loop itself, not just a larger library.
    via `src/nexus/db/migrations.py`. Version bump recorded in T2
    schema tracker.
 2. `PlanLibrary.save_plan` accepts optional `scope_tags` arg.
-3. Inference helper: `_infer_scope_tags(plan_json) -> str`. Walks
+3. `plan_save` MCP tool (`src/nexus/mcp/core.py`) gains
+   `scope_tags: str = ""` parameter, passes through to the
+   library. Default-empty preserves inference path for existing
+   callers.
+4. Inference helper: `_infer_scope_tags(plan_json) -> str`. Walks
    retrieval steps, unions `corpus` + `collection` values,
-   strips `$var` placeholders.
-4. Backfill migration: iterate existing rows, call inference,
+   strips `$var` placeholders, strips trailing `-<hexhash>`
+   suffix from each tag.
+5. Normalization helper: `_normalize_scope_string(scope) -> str`.
+   Strips trailing glob (`*`, `-*`), strips trailing `-<hexhash>`
+   suffix. Shared between plan_save inference and plan_match
+   normalization.
+6. Backfill migration: iterate existing rows, call inference,
    update. Idempotent.
-5. Tests: `test_plan_library.py` covers explicit tagging, inferred
-   tagging, empty-plan edge case, migration idempotence.
+7. Tests (`test_plan_library.py`): explicit tagging round-trips
+   through `plan_save`; inferred tagging on various plan shapes
+   including multi-corpus, traverse-only, `$var` corpora; empty
+   plan edge case; normalization (hash-suffix strip,
+   glob-trailing-strip, bare-family pass-through); migration
+   idempotence.
 
 ### Phase 2b: matcher re-ranking
 
-6. `plan_match` computes `scope_fit` per candidate when
-   `scope_preference` is non-empty.
-7. Scope-conflicting candidates filter out (`scope_tags` non-empty
-   and prefix doesn't match).
-8. Score adjustment applied to matching candidates.
-9. Specificity tie-breaker.
-10. Tests: `test_plan_match.py` covers scope-boost, scope-filter,
-    agnostic pass-through, no-scope no-op, specificity tie-break.
+8. `plan_match` computes `scope_fit` per candidate when
+   `scope_preference` is non-empty (after normalization).
+9. Scope-conflicting candidates filter out (`scope_tags` non-empty
+   and no tag prefix-matches normalized scope). Zero-candidate
+   outcome: return no hits; `nx_answer` already falls through to
+   the inline planner.
+10. Score adjustment applied to matching candidates:
+    `base_confidence * (1 + scope_fit_weight * scope_fit)`.
+11. Specificity tie-breaker: when two plans score equal, prefer
+    the one with fewer comma-separated entries in `scope_tags`.
+12. Remove or rewrite the "unused at this version" docstring
+    comment in `src/nexus/plans/matcher.py:77-80`. Update the
+    matcher docstring to describe the live behaviour.
+13. Tests (`test_plan_match.py`): scope-boost applies,
+    scope-filter removes conflicting, agnostic plans pass through
+    with neutral weight, no-scope no-op, specificity tie-break,
+    zero-candidate fallback.
 
-### Phase 2c: calibration
+### Phase 2c: qualitative validation (not statistical calibration)
 
-11. Run calibration against existing match corpus (same pattern as
-    RDR-079 P5).
-12. Pick `scope_fit_weight` that preserves no-scope precision/recall
-    and lifts specialized-plan recall by ≥10% for scope-passed
-    queries.
-13. Update RDR with calibrated value.
+14. Author ~5 (scope, expected-plan) fixture pairs as part of
+    Phase 2b test authoring. Each pair: a realistic question with
+    a scope hint and the specific plan that should match.
+15. Pick `scope_fit_weight` by inspection: a value that makes
+    the 5 fixture cases return the expected plan without
+    regressing the no-scope test suite. The existing `min_confidence=0.40`
+    (RDR-079 P5) is not touched; only the new `scope_fit_weight`
+    is tuned.
+16. Hard requirement: all 190 existing plan-subsystem tests still
+    pass with scope_preference empty (regression gate).
+17. Record the picked weight and rationale in an
+    `implementation_notes:` RDR update on close.
+
+**Note:** a quantitative lift measurement (e.g. NDCG@k vs a
+labelled scope-query corpus) is deferred to a future benchmark
+RDR. We don't have a labelled corpus today; authoring one is its
+own scope of work, likely a descendant of RDR-090.
 
 ### Phase 2d: docs
 
-14. Update `docs/plan-authoring-guide.md` with scope_tags field
-    description and inference behavior.
-15. Update `docs/plan-centric-retrieval.md` to reflect the
-    scope-aware matcher.
+18. Update `docs/plan-authoring-guide.md` with `scope_tags` field
+    description, inference rules, normalization contract.
+19. Update `docs/plan-centric-retrieval.md` to reflect the
+    scope-aware matcher and the zero-candidate fallback.
 
 ### Day-2 operations
 
@@ -364,18 +501,29 @@ loop itself, not just a larger library.
 ## Test Plan
 
 **Unit tests**:
-- `_infer_scope_tags`: corpus string, collection string, mixed,
-  `$var` placeholder skipped, no retrieval steps (agnostic), plan
-  with multiple retrieval steps (union).
+- `_infer_scope_tags`: single-corpus string, specific collection,
+  mixed corpus+collection, `$var` placeholder skipped, no
+  retrieval steps (agnostic), multi-step plan (union), `traverse`-
+  only plan (agnostic), hash-suffix normalized at save time.
+- `_normalize_scope_string`: trailing glob stripped, hash suffix
+  stripped, bare family prefix preserved, empty input preserved,
+  tumbler-form input degrades to plain-string no-match.
 - Migration: empty table, populated table, idempotent re-run.
-- Matcher: scope boost applied, scope filter applied, no-scope
-  no-op, specificity tie-break.
-- `plan_save` with explicit vs inferred scope_tags.
-- End-to-end via `test_nx_answer.py`: nx_answer with scope returns
-  scope-matching plan, not scope-conflicting one.
+- Matcher: scope boost applied when prefix matches, scope filter
+  removes conflicting plans (non-empty tags, no prefix match),
+  agnostic plans pass through with neutral weight, no-scope
+  no-op, specificity tie-break, zero-candidate fallback returns
+  no hits.
+- `plan_save` (library API and MCP tool): explicit `scope_tags`
+  round-trips through to the library; inferred path fires when
+  omitted.
+- Multi-corpus plan: passes when caller's scope prefix-matches
+  any one tag (intersect semantics).
 
 **Integration tests**:
-- nx_answer against `rdr__arcaneum-2ad2825c` (the original
+- End-to-end via `test_nx_answer.py`: `nx_answer` with scope
+  returns scope-matching plan, not scope-conflicting one.
+- `nx_answer` against `rdr__arcaneum-2ad2825c` (the original
   nexus-zs1d probe): confirm a saved `arcaneum-tradeoffs`
   specialized plan wins over a generic decision-retrieval plan
   when scope is passed.
@@ -383,10 +531,11 @@ loop itself, not just a larger library.
 ## Validation
 
 - Regression: all 190 existing plan-subsystem tests still pass
-  (same gate as Phase 1).
-- New: 10-15 new tests covering the four behaviors above.
-- Calibration target met (weight picks don't regress no-scope
-  queries, boost specialized recall ≥10% on scope-passed queries).
+  (same gate as Phase 1). Hard requirement.
+- New tests: ~12 new tests covering the behaviours above.
+- Qualitative spot-check (Phase 2c): 5 (scope, expected-plan)
+  fixture pairs return the expected plan with the picked
+  `scope_fit_weight`.
 - Probe: the Arcaneum worked-example from post 5 runs end-to-end
   with a matched specialized plan (not inline-planner miss path).
 
@@ -410,3 +559,17 @@ loop itself, not just a larger library.
 ## Revision History
 
 - 2026-04-22: drafted.
+- 2026-04-22: gate feedback addressed. Critical: score formula's
+  `-∞` conflicting-plan case removed (filtering handles it before
+  scoring; zero-candidate outcome falls through to the inline
+  planner). Significant: multi-corpus filter semantics specified
+  as prefix-overlap intersect (plan matches if any `scope_tags`
+  prefix-matches caller scope, so bridging plans aren't filtered
+  out); Phase 2c reframed as qualitative spot-check + no-regression
+  (quantitative lift deferred to future benchmark RDR); `plan_save`
+  MCP tool signature update added to Phase 2a; normalization
+  contract specified (hash-suffix strip, glob strip, bare-family
+  prefix, tumbler deferred). Observations: matcher comment
+  cleanup added to Phase 2b; RDR-084 grown-plan scope_tags
+  interaction documented; RDR-080 pre-existing scope_preference
+  wiring noted in Problem Statement; RF-6 analogy softened.
