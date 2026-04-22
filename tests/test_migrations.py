@@ -73,7 +73,7 @@ class TestMigrationDataclass:
         from nexus.db.migrations import MIGRATIONS
 
         assert isinstance(MIGRATIONS, list)
-        assert len(MIGRATIONS) == 13  # + RDR-086 Phase 1.1 chash_index
+        assert len(MIGRATIONS) == 14  # + RDR-091 Phase 2a plans.scope_tags
 
     def test_migrations_ordered_by_version(self) -> None:
         from nexus.db.migrations import MIGRATIONS, _parse_version
