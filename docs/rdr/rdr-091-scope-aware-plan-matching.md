@@ -12,7 +12,7 @@ related_issues:
   - "nexus-zs1d: Wire nx_answer scope through plan_match + plan_run"
 related_tests: [test_plan_match.py, test_plan_library.py, test_nx_answer.py]
 related: [RDR-078, RDR-079, RDR-080, RDR-084]
-implementation_notes: ""
+implementation_notes: "scope_fit_weight=0.15 picked Phase 2c (nexus-svcg): motivating case (generic agnostic 0.82 vs specialized matching 0.79) break-even at w~0.038; 0.15 leaves 0.09 margin (specialized 0.79*1.15=0.9085 beats generic 0.82) without drowning genuinely higher-cosine agnostic plans. Formula is multiplicative per RDR spec."
 ---
 
 # RDR-091: Scope-Aware Plan Matching (nexus-zs1d Phase 2)

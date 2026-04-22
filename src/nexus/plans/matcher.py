@@ -35,12 +35,19 @@ from nexus.plans.match import Match
 __all__ = ["PlanCache", "plan_match"]
 
 
-# ── Scope-aware re-ranking (RDR-091 Phase 2b) ──────────────────────────────
+# ── Scope-aware re-ranking (RDR-091 Phase 2b + 2c) ─────────────────────────
 #
-# Placeholder weight. Phase 2c (nexus-svcg) tunes this against 5 fixture
-# plan pairs; 0.10 is a small-but-nonzero starting guess that tips ties
-# toward scope-matched plans without overwhelming base cosine signal.
-_SCOPE_FIT_WEIGHT: float = 0.10
+# Score formula (RDR-091 §Proposed Solution → Score formula):
+#     final_score = base_confidence * (1 + _SCOPE_FIT_WEIGHT * scope_fit)
+# scope_fit is 0.0 (agnostic plan) or 1.0 (scope prefix match).
+#
+# 0.15 picked by inspection against 5 fixture pairs in test_plan_match.py
+# (Phase 2c, nexus-svcg). The motivating failure case (RDR §Problem
+# Statement, generic agnostic at 0.82 vs specialized matching at 0.79)
+# breaks even at weight ≈ 0.038; 0.15 leaves comfortable margin
+# (specialized 0.79 * 1.15 = 0.9085 beats generic 0.82) without so
+# much boost that a genuinely higher-cosine agnostic plan gets drowned.
+_SCOPE_FIT_WEIGHT: float = 0.15
 
 
 def _scope_fit(plan_scope_tags: str, normalized_scope_pref: str) -> float | None:
@@ -123,10 +130,11 @@ def plan_match(
         non-empty and none of whose tags prefix-match the caller scope
         (in either direction) is dropped from the candidate pool. Agnostic
         plans (``scope_tags == ''``) are kept with neutral weight.
-      * **Scope-fit boost**: matching plans receive a small additive
-        boost ``_SCOPE_FIT_WEIGHT * 1.0`` on top of their base cosine
-        score, used only for ranking. ``Match.confidence`` still carries
-        the raw cosine, so ``min_confidence`` and downstream thresholds
+      * **Scope-fit boost**: matching plans receive a small
+        multiplicative boost per the RDR-091 score formula
+        ``adjusted = confidence * (1 + _SCOPE_FIT_WEIGHT * scope_fit)``,
+        used only for ranking. ``Match.confidence`` still carries the
+        raw cosine, so ``min_confidence`` and downstream thresholds
         are unchanged.
       * **Specificity tie-break**: at equal adjusted score, the plan
         with fewer scope_tags (more specific scope) ranks first.
@@ -181,7 +189,7 @@ def plan_match(
             fit = _scope_fit(m.scope_tags, scope_pref)
             if fit is None:
                 continue  # scope conflict — drop from pool
-            adjusted = confidence + _SCOPE_FIT_WEIGHT * fit
+            adjusted = confidence * (1.0 + _SCOPE_FIT_WEIGHT * fit)
             scored.append((adjusted, _specificity(m.scope_tags), m))
 
         if scored:
