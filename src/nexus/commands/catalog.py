@@ -580,6 +580,55 @@ def unlink_cmd(from_tumbler: str, to_tumbler: str, link_type: str) -> None:
     click.echo(f"Removed {removed} link(s)")
 
 
+def _endpoint_label(cat: Any, tumbler: Any) -> str:
+    """Render a tumbler as ``'<title-or-path> (<tumbler>)'`` for human output.
+
+    Used by ``nx catalog links --resolve``. Prefers ``title`` for
+    documents that have one, falls back to ``file_path`` for code /
+    prose entries that carry a path, and finally to the bare tumbler
+    for entries without either. bead nexus-iojz (formerly nexus-i63n).
+    """
+    try:
+        entry = cat.resolve(tumbler)
+    except Exception:
+        return str(tumbler)
+    if entry is None:
+        return str(tumbler)
+    label = entry.title or entry.file_path or str(tumbler)
+    if label == str(tumbler):
+        return str(tumbler)
+    return f"{label} ({tumbler})"
+
+
+def _unique_edges_by_target(cat: Any, edges: list) -> list:
+    """Return a stable de-duplicated edge list keyed by ``(from_tumbler,
+    link_type, target.file_path or target.tumbler)``.
+
+    Re-indexing the same file under multiple owner tumblers leaves many
+    edges that point at the same source file via different tumblers.
+    The natural emission order surfaces the duplicate run first, so
+    the first copy wins and later aliases drop. Fails open: if a
+    target tumbler does not resolve, its bare string is the dedup key,
+    so orphan rows are preserved. bead nexus-iojz (formerly nexus-x6eu).
+    """
+    seen: set[tuple[str, str, str]] = set()
+    out: list = []
+    for edge in edges:
+        try:
+            target = cat.resolve(edge.to_tumbler)
+            target_key = (
+                target.file_path if target and target.file_path else str(edge.to_tumbler)
+            )
+        except Exception:
+            target_key = str(edge.to_tumbler)
+        key = (str(edge.from_tumbler), edge.link_type, target_key)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(edge)
+    return out
+
+
 @catalog.command("links")
 @click.argument("tumbler", default="")
 @click.option("--from", "from_t", default="", help="Filter by source tumbler or title")
@@ -591,10 +640,26 @@ def unlink_cmd(from_tumbler: str, to_tumbler: str, link_type: str) -> None:
 @click.option("--limit", "-n", default=50, type=int)
 @click.option("--offset", default=0, type=int)
 @click.option("--json", "as_json", is_flag=True)
+@click.option(
+    "--resolve", "resolve_labels", is_flag=True,
+    help=(
+        "Render each endpoint as '<title-or-path> (<tumbler>)' "
+        "instead of bare tumbler arrows."
+    ),
+)
+@click.option(
+    "--unique-targets", "unique_targets", is_flag=True,
+    help=(
+        "Collapse rows that point at the same file_path via "
+        "different owner tumblers (e.g. after re-indexing). Keeps "
+        "the first seen edge per target."
+    ),
+)
 def links_cmd(
     tumbler: str, from_t: str, to_t: str, direction: str,
     link_type: str, created_by: str, depth: int,
     limit: int, offset: int, as_json: bool,
+    resolve_labels: bool, unique_targets: bool,
 ) -> None:
     """Show or query links. TUMBLER (optional) accepts a tumbler or title.
 
@@ -604,24 +669,39 @@ def links_cmd(
       nx catalog links "auth module" --type cites
       nx catalog links --created-by bib_enricher # all links by creator
       nx catalog links --type cites --json       # all citation links
+      nx catalog links 1.17.14 --resolve         # inline titles / file paths
+      nx catalog links 1.17.14 --type implements --unique-targets
     """
     cat = _get_catalog()
+
+    def _render_edge(edge: Any) -> str:
+        if resolve_labels:
+            src = _endpoint_label(cat, edge.from_tumbler)
+            dst = _endpoint_label(cat, edge.to_tumbler)
+            return f"{src} → {dst} ({edge.link_type}) by {edge.created_by}"
+        return (
+            f"{edge.from_tumbler} → {edge.to_tumbler} "
+            f"({edge.link_type}) by {edge.created_by}"
+        )
 
     # If a positional tumbler is given, use graph traversal (the common case)
     if tumbler:
         t = _resolve_tumbler(cat, tumbler)
         result = cat.graph(t, depth=depth, direction=direction, link_type=link_type)
+        edges = result["edges"]
+        if unique_targets:
+            edges = _unique_edges_by_target(cat, edges)
         if as_json:
             click.echo(json.dumps({
                 "nodes": [n.to_dict() for n in result["nodes"]],
-                "edges": [e.to_dict() for e in result["edges"]],
+                "edges": [e.to_dict() for e in edges],
             }, indent=2))
         else:
-            if not result["edges"]:
+            if not edges:
                 click.echo("No links found.")
                 return
-            for edge in result["edges"]:
-                click.echo(f"{edge.from_tumbler} → {edge.to_tumbler} ({edge.link_type}) by {edge.created_by}")
+            for edge in edges:
+                click.echo(_render_edge(edge))
         return
 
     # No positional tumbler — flat filter query
@@ -634,6 +714,8 @@ def links_cmd(
     )
     has_more = len(links) > limit
     links = links[:limit]
+    if unique_targets:
+        links = _unique_edges_by_target(cat, links)
     if as_json:
         click.echo(json.dumps([lnk.to_dict() for lnk in links], indent=2))
     else:
@@ -641,7 +723,7 @@ def links_cmd(
             click.echo("No links found.")
             return
         for edge in links:
-            click.echo(f"{edge.from_tumbler} → {edge.to_tumbler} ({edge.link_type}) by {edge.created_by}")
+            click.echo(_render_edge(edge))
         if has_more:
             click.echo(f"\n  Next page: --offset {offset + limit}")
 
@@ -815,6 +897,62 @@ def pull_cmd() -> None:
     click.echo("Catalog pulled and rebuilt.")
 
 
+def _taxonomy_stats() -> dict | None:
+    """Return a taxonomy stats block for ``nx catalog stats`` or ``None``.
+
+    The catalog is three layers: nexus-catalog (owners / documents /
+    links), ChromaDB (the physical rows), and CatalogTaxonomy (topics
+    and projection assignments). ``stats`` previously enumerated only
+    the first layer; this helper adds the third. Returns ``None`` when
+    T2 is absent or carries no topic rows. Skips the block silently
+    for users who have not run discover / project yet. bead nexus-iojz
+    (formerly nexus-1n0t).
+    """
+    from nexus.commands._helpers import default_db_path
+    from nexus.db.t2 import T2Database
+
+    try:
+        db_path = default_db_path()
+    except Exception:
+        return None
+    if not db_path.exists():
+        return None
+
+    try:
+        with T2Database(db_path) as db:
+            conn = db.taxonomy.conn
+            with db.taxonomy._lock:
+                topic_total = conn.execute(
+                    "SELECT count(*) FROM topics"
+                ).fetchone()[0]
+                if not topic_total:
+                    return None
+                assignment_total = conn.execute(
+                    "SELECT count(*) FROM topic_assignments"
+                ).fetchone()[0]
+                distinct_topics = conn.execute(
+                    "SELECT count(DISTINCT topic_id) FROM topic_assignments"
+                ).fetchone()[0]
+                by_source_rows = conn.execute(
+                    "SELECT source_collection, count(*) "
+                    "FROM topic_assignments "
+                    "WHERE assigned_by = 'projection' "
+                    "AND source_collection IS NOT NULL "
+                    "AND source_collection != '' "
+                    "GROUP BY source_collection "
+                    "ORDER BY count(*) DESC"
+                ).fetchall()
+    except Exception:
+        return None
+
+    return {
+        "topics": int(topic_total),
+        "assignments": int(assignment_total),
+        "distinct_topics_assigned": int(distinct_topics),
+        "projection_by_source": {row[0]: int(row[1]) for row in by_source_rows},
+    }
+
+
 @catalog.command("stats")
 @click.option("--json", "as_json", is_flag=True)
 def stats_cmd(as_json: bool) -> None:
@@ -834,14 +972,18 @@ def stats_cmd(as_json: bool) -> None:
             "SELECT link_type, count(*) FROM links GROUP BY link_type"
         ).fetchall()
     )
+    tax = _taxonomy_stats()
     if as_json:
-        click.echo(json.dumps({
+        payload: dict = {
             "owners": owner_count,
             "documents": doc_count,
             "links": link_count,
             "by_type": type_counts,
             "by_link_type": link_type_counts,
-        }, indent=2))
+        }
+        if tax is not None:
+            payload["taxonomy"] = tax
+        click.echo(json.dumps(payload, indent=2))
     else:
         click.echo(f"Owners:    {owner_count}")
         click.echo(f"Documents: {doc_count}")
@@ -854,6 +996,19 @@ def stats_cmd(as_json: bool) -> None:
             click.echo("By link type:")
             for t, c in sorted(link_type_counts.items()):
                 click.echo(f"  {t:<12} {c}")
+        if tax is not None:
+            click.echo(
+                f"Topics:    {tax['topics']} topics, "
+                f"{tax['assignments']} assignments "
+                f"({tax['distinct_topics_assigned']} distinct topics assigned)"
+            )
+            by_source = tax["projection_by_source"]
+            if by_source:
+                click.echo("Projection by source:")
+                for src, count in sorted(
+                    by_source.items(), key=lambda kv: -kv[1],
+                ):
+                    click.echo(f"  {src:<40} {count}")
 
 
 @catalog.command("compact", hidden=True)
