@@ -9,7 +9,7 @@ reviewed-by: self
 created: 2026-04-22
 accepted_date:
 related_issues:
-  - "nexus-zs1d — Wire nx_answer scope through plan_match + plan_run"
+  - "nexus-zs1d: Wire nx_answer scope through plan_match + plan_run"
 related_tests: [test_plan_match.py, test_plan_library.py, test_nx_answer.py]
 related: [RDR-078, RDR-079, RDR-080, RDR-084]
 implementation_notes: ""
@@ -22,8 +22,7 @@ implementation_notes: ""
 `plan_match` today selects plans purely on question similarity. The
 `scope_preference` parameter is accepted and documented but unused
 (`src/nexus/plans/matcher.py:77-80`: *"accepted for forward
-compatibility with Phase 2 scoping + specificity ranking (PQ-14 /
-PQ-20) — unused at this version"*).
+compatibility with Phase 2 scoping + specificity ranking (PQ-14 / PQ-20), unused at this version"*).
 
 The nexus-zs1d Phase 1 runtime override (shipped in PR #229) propagates
 caller scope *into* a matched plan's retrieval steps when the plan
@@ -36,16 +35,14 @@ worked-example): a generic 2-step decision-retrieval plan at score
 0.82 outranks a specialized 5-step `arcaneum-tradeoffs-comparison`
 plan at 0.79 for an Arcaneum question, even when the caller passes
 `scope="rdr__arcaneum-*"`. Phase 1 puts the right corpus into the
-wrong-shape plan and returns thin output. The specialized plan —
-which is exactly the kind of investment post 4's "library grows by
-capture" argument depends on — never runs.
+wrong-shape plan and returns thin output. The specialized plan, which is exactly the kind of investment post 4's "library grows by capture" argument depends on, never runs.
 
 Four downstream consequences:
 
 1. **Plan library doesn't compound with use.** Saving specialized
    plans for specific corpora is mostly invisible to the matcher.
    Generic templates keep winning on surface similarity. `match_count`
-   metrics become noisy — heavily used templates look productive
+   metrics become noisy: heavily used templates look productive
    even when the matched shape is consistently suboptimal.
 
 2. **Corpus-incompatible plans still run.** A plan targeting
@@ -66,10 +63,10 @@ Four downstream consequences:
 
 ### Technical Environment
 
-- **Plan library**: `src/nexus/db/t2/plan_library.py` — SQLite table
+- **Plan library**: `src/nexus/db/t2/plan_library.py`, the SQLite table
   `plans` with columns including `plan_json`, `description`,
   `dimensions_json`, `match_count`, `match_conf_sum`, `tags`.
-- **Matcher**: `src/nexus/plans/matcher.py` — two-path match (T1
+- **Matcher**: `src/nexus/plans/matcher.py`, the two-path match (T1
   cosine + FTS5 fallback), dimension post-filter, confidence
   threshold.
 - **Plan save/execution**: `src/nexus/mcp/core.py::plan_save`
@@ -90,14 +87,14 @@ Phase 1's plumbing, which uses it purely to flow into runtime.
 
 **RF-2** (Verified, source search `src/nexus/db/t2/plan_library.py`):
 The `plans` table has no corpus/scope metadata column. Plans are
-schemaless with respect to what corpus they target — inferable from
+schemaless with respect to what corpus they target; inferable from
 the `plan_json` steps but not indexed for query.
 
 **RF-3** (Verified, probe 2026-04-22 against
 `rdr__arcaneum-2ad2825c`): the matcher returns `plan_id=38`
 (generic 2-step) for an Arcaneum-specific question. The plan's
 retrieval step has no corpus pinned, so Phase 1's runtime override
-would fill it — but the plan's DAG shape is still wrong (no extract
+would fill it, but the plan's DAG shape is still wrong (no extract
 or compare steps for the requested analytical query).
 
 **RF-4** (Verified, source search `src/nexus/plans/match.py`):
@@ -111,6 +108,49 @@ to change.
 in post 4) depends on plans being selected by shape-relevance to
 the query, not by question-surface similarity alone. Nexus has the
 scoring infrastructure but not the scope-fit input.
+
+**RF-6** (Documented, paper §3 and §5 via targeted probe
+2026-04-22 against `knowledge__agentic-scholar`): AgenticScholar's
+plan selection is richer than a single-signal threshold. The
+mechanism is three-stage:
+
+1. Semantic search retrieves candidate `(query, plan)` *demonstration
+   pairs* from an extensible library and injects them into the LLM
+   context. Retrieval is over paired examples, not over plan
+   descriptions alone.
+2. An LLM reasons about analytical intent alignment between the
+   incoming query and each candidate and assigns a confidence
+   score.
+3. A plan is selected only when the confidence score exceeds a
+   high threshold (the paper uses `> 90%` as its example);
+   otherwise the query is treated as ad-hoc and passed to the
+   planner.
+
+Implications for Nexus's Phase 2:
+
+- Nexus's matcher today is cosine-over-plan-description at
+  `min_confidence=0.40` (calibrated in RDR-079 P5). That maps to
+  stage 1 of the paper's flow, without stages 2–3.
+- The paper's stage 2 uses an LLM call per match to assess
+  intent fit. Cost: one subprocess per match. Nexus could add
+  this as an optional stage 3 (after scope-tag filtering)
+  behind a feature flag, but the per-match cost argues for
+  doing it only when the cheap-signal stages are ambiguous.
+- Phase 2's `scope_tags` mechanism is a cheap *structural*
+  pre-filter that sits between retrieval and any eventual
+  intent-fit LLM stage. Structural match is free; semantic
+  match is calibrated; intent-fit is LLM-expensive. A three-
+  tier gate with cheap stages short-circuiting to expensive
+  ones is the natural architecture.
+- Specificity ranking (tie-break by narrower `scope_tags`) in
+  the current RDR proposal is the Nexus analogue of the
+  paper's "demonstration-pair" retrieval: both prefer the
+  example most closely aligned with the query's shape, not
+  just its surface.
+- The paper's 90% threshold is against a different signal
+  (LLM-assessed intent fit). Our `scope_fit_weight`
+  calibration target stays at the cosine-confidence layer and
+  doesn't need to reach that bar.
 
 ### Critical Assumptions
 
@@ -151,7 +191,7 @@ Backfill existing plans via migration: parse `plan_json`, union
 result. Corpus-agnostic plans (no corpus hint anywhere) get empty
 string.
 
-Index on `scope_tags` is not needed — plan library is small enough
+Index on `scope_tags` is not needed: plan library is small enough
 that a full scan per match is cheap (O(10s-100s) rows).
 
 ### 2. `plan_save`: capture scope at store time
@@ -264,7 +304,7 @@ loop itself, not just a larger library.
   against a database where only `rdr__delos` exists → plan never
   matches. Surface via `nx doctor` check or an authoring-time
   warning.
-- Migration aborts mid-backfill. Idempotent — re-running picks up
+- Migration aborts mid-backfill. Idempotent: re-running picks up
   where it left off. `scope_tags DEFAULT ''` means unrun plans
   stay functional.
 
