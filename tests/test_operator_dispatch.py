@@ -503,6 +503,93 @@ class TestOperatorCompare:
         result = await operator_compare(items='["A", "B"]')
         assert "comparison" in result
 
+    @pytest.mark.asyncio
+    async def test_one_sided_prompt_uses_items(self, monkeypatch) -> None:
+        """One-sided compare (only items) keeps the original prompt shape."""
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_compare
+
+        captured = {}
+
+        async def fake(prompt, schema, timeout):
+            captured["prompt"] = prompt
+            return {"comparison": "ok"}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        await operator_compare(items='["A", "B"]', focus="hotness")
+        assert "Compare the following items" in captured["prompt"]
+        assert "Focus on: hotness" in captured["prompt"]
+        assert "Items:" in captured["prompt"]
+        # Two-sided markers must NOT appear in one-sided mode.
+        assert "Set A:" not in captured["prompt"]
+        assert "Shared axes" not in captured["prompt"]
+
+    @pytest.mark.asyncio
+    async def test_two_sided_prompt_when_both_items_ab_given(self, monkeypatch) -> None:
+        """items_a + items_b switches to the cross-corpus compare prompt."""
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_compare
+
+        captured = {}
+
+        async def fake(prompt, schema, timeout):
+            captured["prompt"] = prompt
+            return {"comparison": "cross"}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        await operator_compare(
+            items_a=[{"rdr": "A-001", "decision": "alpha"}],
+            items_b=[{"rdr": "B-001", "decision": "beta"}],
+            label_a="Arcaneum",
+            label_b="Nexus",
+            focus="bulk indexing",
+        )
+        p = captured["prompt"]
+        assert "Compare two sets of items" in p
+        assert "Set Arcaneum:" in p
+        assert "Set Nexus:" in p
+        assert "Shared axes" in p
+        assert "Divergent decisions" in p
+        assert "Philosophy difference" in p
+        assert "Focus on: bulk indexing" in p
+
+    @pytest.mark.asyncio
+    async def test_list_items_json_serialized_in_prompt(self, monkeypatch) -> None:
+        """List args render as clean JSON, not Python repr."""
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_compare
+
+        captured = {}
+
+        async def fake(prompt, schema, timeout):
+            captured["prompt"] = prompt
+            return {"comparison": "ok"}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        await operator_compare(items=[{"name": "A"}, {"name": "B"}])
+        # JSON double-quotes instead of Python single-quote repr.
+        assert '"name"' in captured["prompt"]
+        assert "'name'" not in captured["prompt"]
+
+    @pytest.mark.asyncio
+    async def test_one_sided_fires_when_items_b_empty(self, monkeypatch) -> None:
+        """Only one of items_a/items_b given falls back to one-sided on items."""
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_compare
+
+        captured = {}
+
+        async def fake(prompt, schema, timeout):
+            captured["prompt"] = prompt
+            return {"comparison": "ok"}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        # items_a provided but items_b empty → degrade to one-sided on items.
+        await operator_compare(items='["fallback"]', items_a="only-a", items_b="")
+        assert "Compare the following items" in captured["prompt"]
+        assert "fallback" in captured["prompt"]
+        assert "Set A:" not in captured["prompt"]
+
 
 class TestOperatorSummarize:
 

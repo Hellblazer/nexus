@@ -1443,21 +1443,81 @@ async def operator_rank(items: str, criterion: str, timeout: float = 300.0) -> d
 
 
 @mcp.tool()
-async def operator_compare(items: str, focus: str = "", timeout: float = 300.0) -> dict:
+async def operator_compare(
+    items: str = "",
+    focus: str = "",
+    timeout: float = 300.0,
+    *,
+    items_a: str = "",
+    items_b: str = "",
+    label_a: str = "A",
+    label_b: str = "B",
+) -> dict:
     """Compare items and return a structured comparison using claude -p.
 
+    Two modes:
+
+    * **One-sided** (original): pass *items* only. The comparison runs
+      across entries within a single set. Keyword-only ``items_a`` /
+      ``items_b`` may be omitted or empty.
+    * **Two-sided** (nexus-km5i): pass *items_a* and *items_b* together
+      for a cross-set compare. The prompt becomes "Compare set {label_a}
+      vs set {label_b}" and asks for shared axes, divergent decisions,
+      and philosophy differences. Useful for cross-corpus DAGs where a
+      plan needs to align extractions from two different collections
+      under one synthesis. ``focus`` scopes both modes.
+
+    List / dict values in ``items`` / ``items_a`` / ``items_b`` are
+    JSON-serialized before prompt interpolation so the LLM sees clean
+    JSON instead of Python ``repr`` output.
+
     Args:
-        items: Items to compare (plain text or JSON array string).
+        items: Items to compare (plain text or JSON array string). Used
+            in one-sided mode; ignored when both ``items_a`` and
+            ``items_b`` are provided.
         focus: Optional aspect to focus the comparison on.
-        timeout: Seconds before the subprocess is killed. Default 300s (5 min) — the claude -p substrate handles multi-step analytical workloads; 120s was hitting false timeouts on real input.
+        timeout: Seconds before the subprocess is killed. Default 300s
+            (5 min). The claude -p substrate handles multi-step
+            analytical workloads; 120s hit false timeouts on real input.
+        items_a: Side A items for two-sided compare.
+        items_b: Side B items for two-sided compare.
+        label_a: Human-readable label for side A (default "A").
+        label_b: Human-readable label for side B (default "B").
     """
+    import json as _json
+
     from nexus.operators.dispatch import claude_dispatch
 
+    def _fmt(v) -> str:
+        if isinstance(v, (list, dict)):
+            return _json.dumps(v, indent=2, default=str)
+        return v if isinstance(v, str) else str(v)
+
     focus_clause = f" Focus on: {focus}." if focus else ""
-    prompt = (
-        f"Compare the following items.{focus_clause}\n\n"
-        f"Items:\n{items}"
-    )
+    if items_a and items_b:
+        a_text = _fmt(items_a)
+        b_text = _fmt(items_b)
+        prompt = (
+            f"Compare two sets of items across corpora.{focus_clause}\n\n"
+            f"Set {label_a}:\n{a_text}\n\n"
+            f"Set {label_b}:\n{b_text}\n\n"
+            "Name:\n"
+            f"  * **Shared axes**: concerns both {label_a} and {label_b} "
+            "address with comparable intent (even if mechanism differs).\n"
+            f"  * **Divergent decisions**: places where {label_a} and {label_b} "
+            "take different approaches on the same question; attribute each "
+            "choice to its side.\n"
+            f"  * **Side-only axes**: concerns that appear in {label_a} or "
+            f"{label_b} but not both.\n"
+            "  * **Philosophy difference**: one or two sentences on the "
+            "underlying stance difference, if one emerges from the evidence."
+        )
+    else:
+        items_text = _fmt(items)
+        prompt = (
+            f"Compare the following items.{focus_clause}\n\n"
+            f"Items:\n{items_text}"
+        )
     schema = {
         "type": "object",
         "required": ["comparison"],
