@@ -556,6 +556,69 @@ def test_put_same_title_different_collection_different_ids(mock_db):
     assert id1 != id2
 
 
+# ── Oversized put raises (GH #244 + nexus-akof) ─────────────────────────────
+
+
+def test_put_raises_on_oversized_content(mock_db):
+    """``put()`` raises ``PutOversizedError`` instead of silently dropping
+    the write. Previously ``_write_batch`` logged a warning and returned,
+    but the caller (``store_put`` MCP tool) went on to register the
+    doc_id in the catalog, producing a ghost entry: catalog says the doc
+    exists, but ChromaDB has no row for the id."""
+    from nexus.db.chroma_quotas import QUOTAS
+    from nexus.errors import PutOversizedError
+
+    db, mock_col, _ = mock_db
+    oversized = "x" * (QUOTAS.MAX_DOCUMENT_BYTES + 1)
+
+    with pytest.raises(PutOversizedError) as exc_info:
+        db.put(collection="knowledge__sec", content=oversized, title="big.md")
+
+    assert exc_info.value.doc_bytes > QUOTAS.MAX_DOCUMENT_BYTES
+    assert exc_info.value.max_bytes == QUOTAS.MAX_DOCUMENT_BYTES
+    assert exc_info.value.collection == "knowledge__sec"
+    # Upsert must NOT have been called: no ChromaDB row written, so
+    # downstream catalog registration at the caller level would also be
+    # skipped.
+    mock_col.upsert.assert_not_called()
+
+
+def test_put_under_cap_still_succeeds(mock_db):
+    """Regression guard: documents under the cap write normally and
+    the cap check doesn't false-positive on ordinary content."""
+    db, mock_col, _ = mock_db
+    doc_id = db.put(
+        collection="knowledge__sec", content="small body", title="ok.md",
+    )
+    assert isinstance(doc_id, str) and len(doc_id) == 16
+    mock_col.upsert.assert_called_once()
+
+
+def test_write_batch_indexer_path_still_drops_oversized(mock_db):
+    """Indexer callers do not pass ``fail_on_oversized=True``; the
+    pipeline should keep running (drop-and-warn) because a chunker
+    upstream was supposed to guard against this and a pipeline-wide
+    raise is worse than dropping one record."""
+    from nexus.db.chroma_quotas import QUOTAS
+
+    db, mock_col, _ = mock_db
+    oversized = "x" * (QUOTAS.MAX_DOCUMENT_BYTES + 1)
+    good = "y" * 32
+
+    # No exception raised.
+    db._write_batch(
+        mock_col,
+        "knowledge__mixed",
+        ids=["a", "b"],
+        documents=[oversized, good],
+        metadatas=[{"title": "a"}, {"title": "b"}],
+    )
+    # Upsert was called with only the good record.
+    assert mock_col.upsert.call_count == 1
+    written_ids = mock_col.upsert.call_args.kwargs["ids"]
+    assert written_ids == ["b"]
+
+
 # ── Embedding function cache ────────────────────────────────────────────────
 
 
