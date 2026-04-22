@@ -291,8 +291,17 @@ def _tree_doc_count(node: dict) -> int:
 
 
 def _print_tree(node: dict, indent: int = 0) -> None:
+    # GitHub #241 Item 1: root nodes carry their collection name as a
+    # ``[coll]`` prefix column so ``nx taxonomy list`` without -c is
+    # immediately readable on multi-collection taxonomies. Children
+    # inherit their root's collection and don't need the tag.
     prefix = "  " * indent + ("├── " if indent > 0 else "")
-    click.echo(f"{prefix}{node['label']} ({node['doc_count']} docs)")
+    if indent == 0 and node.get("collection"):
+        click.echo(
+            f"[{node['collection']}]  {node['label']} ({node['doc_count']} docs)"
+        )
+    else:
+        click.echo(f"{prefix}{node['label']} ({node['doc_count']} docs)")
     for child in node.get("children", []):
         _print_tree(child, indent + 1)
 
@@ -978,7 +987,9 @@ def relabel_topics(
     if only_pending:
         topics = taxonomy.get_unreviewed_topics(collection=collection, limit=5000)
     else:
-        topics = taxonomy.get_topics_for_collection(collection) if collection else taxonomy.get_topics()
+        # GitHub #243: include split children on the relabel_all path.
+        # ``get_topics()`` returns only roots, which hid split sub-topics.
+        topics = taxonomy.get_all_topics(collection=collection)
 
     if not topics:
         return 0
@@ -1028,7 +1039,12 @@ def relabel_topics(
             batches_done += 1
             for tid, label in future.result():
                 if label:
-                    taxonomy.rename_topic(tid, label)
+                    # GitHub #241 Item 3: use update_topic_label rather than
+                    # rename_topic so review_status stays 'pending'. The
+                    # human-driven ``nx taxonomy review`` is where topics
+                    # transition pending → accepted; batch LLM labeling
+                    # should not short-circuit that step.
+                    taxonomy.update_topic_label(tid, label)
                     count += 1
             _progress(f"    batch {batches_done}/{len(batches)} done ({count} renamed)")
 
@@ -1045,12 +1061,18 @@ def label_cmd(collection: str, relabel_all: bool) -> None:
         return
 
     with _T2Database(_default_db_path()) as db:
-        topics = (
-            db.taxonomy.get_topics_for_collection(collection) if collection
-            else db.taxonomy.get_topics()
-        )
-        pending = [t for t in topics if t.get("review_status") == "pending"]
-        target = topics if relabel_all else pending
+        # GitHub #243: the pre-check must see split sub-topics (children
+        # with parent_id set); ``get_topics()`` only returns roots, so
+        # a post-split pending child would be silently skipped here.
+        # ``get_unreviewed_topics`` and ``get_all_topics`` both include
+        # children, which matches what ``relabel_topics`` actually
+        # iterates over.
+        if relabel_all:
+            target = db.taxonomy.get_all_topics(collection=collection)
+        else:
+            target = db.taxonomy.get_unreviewed_topics(
+                collection=collection, limit=5000,
+            )
 
         if not target:
             click.echo("No topics to label.")
@@ -1107,7 +1129,8 @@ def project_cmd(
 
     \b
     Threshold resolution (RDR-077 Phase 4a):
-      explicit --threshold → fallback to prefix default → 0.70
+      explicit --threshold overrides; otherwise the per-prefix default
+      applies (see --threshold option for the full table).
     \b
     Examples:
       nx taxonomy project docs__art-architecture --against knowledge__art

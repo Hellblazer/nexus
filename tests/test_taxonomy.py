@@ -832,6 +832,47 @@ def test_cli_taxonomy_list(tmp_path: Path) -> None:
     assert "3 docs" in result.output
 
 
+def test_cli_taxonomy_list_shows_collection_at_root(tmp_path: Path) -> None:
+    """CLI taxonomy list includes [collection] prefix on root topics.
+
+    GitHub #241 Item 1: without a per-topic collection tag, the flat
+    listing across multi-collection setups gives no way to tell which
+    topic belongs to which collection.
+    """
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from nexus.commands.taxonomy_cmd import taxonomy
+
+    db_path = tmp_path / "memory.db"
+    with T2Database(db_path) as db:
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("Alpha topic", "docs__alpha", 10, "2026-01-01T00:00:00Z"),
+        )
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("Beta topic", "docs__beta", 5, "2026-01-01T00:00:00Z"),
+        )
+        db.taxonomy.conn.commit()
+
+    runner = CliRunner()
+    with patch(
+        "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
+    ):
+        result = runner.invoke(taxonomy, ["list"])
+
+    assert result.exit_code == 0, result.output
+    # Each root's collection is shown in a [coll] prefix column.
+    assert "[docs__alpha]" in result.output
+    assert "Alpha topic" in result.output
+    assert "[docs__beta]" in result.output
+    assert "Beta topic" in result.output
+
+
 # ── discover_for_collection + CLI (RDR-070, nexus-2dq) ──────────────────────
 
 
@@ -1866,6 +1907,94 @@ class TestSplitTopic:
         # Parent centroid should be gone, child centroids should exist
         assert parent_id not in centroid_topic_ids
         assert child_ids == centroid_topic_ids
+
+    def test_get_all_topics_returns_roots_and_children(self, db: T2Database) -> None:
+        """get_all_topics returns every row; get_topics returns only roots.
+
+        GitHub #243 + bead nexus-kxez. label / relabel pre-check used
+        get_topics and therefore couldn't see split sub-topics.
+        """
+        db.taxonomy.conn.executescript(
+            """
+            INSERT INTO topics (label, parent_id, collection, doc_count, created_at)
+            VALUES
+                ('root-a',  NULL, 'c', 10, '2026-01-01T00:00:00Z'),
+                ('root-b',  NULL, 'c',  8, '2026-01-01T00:00:00Z');
+            """
+        )
+        parent_a = db.taxonomy.conn.execute(
+            "SELECT id FROM topics WHERE label='root-a'"
+        ).fetchone()[0]
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, parent_id, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("child-a1", parent_a, "c", 4, "2026-01-01T00:00:00Z"),
+        )
+        db.taxonomy.conn.commit()
+
+        roots = db.taxonomy.get_topics()
+        assert {t["label"] for t in roots} == {"root-a", "root-b"}
+
+        everything = db.taxonomy.get_all_topics()
+        assert {t["label"] for t in everything} == {"root-a", "root-b", "child-a1"}
+
+    def test_get_all_topics_filters_by_collection(self, db: T2Database) -> None:
+        """get_all_topics(collection=...) narrows to one collection."""
+        db.taxonomy.conn.executescript(
+            """
+            INSERT INTO topics (label, parent_id, collection, doc_count, created_at)
+            VALUES
+                ('a-root',  NULL, 'c1', 10, '2026-01-01T00:00:00Z'),
+                ('b-root',  NULL, 'c2',  5, '2026-01-01T00:00:00Z');
+            """
+        )
+        db.taxonomy.conn.commit()
+        assert {t["label"] for t in db.taxonomy.get_all_topics("c1")} == {"a-root"}
+        assert {t["label"] for t in db.taxonomy.get_all_topics("c2")} == {"b-root"}
+
+    def test_update_topic_label_preserves_review_status(
+        self, db: T2Database,
+    ) -> None:
+        """update_topic_label changes only the label, not review_status.
+
+        GitHub #241 Item 3: rename_topic sets review_status='accepted'
+        as a side effect, which is correct for the interactive review
+        path but wrong for batch LLM labeling. update_topic_label is
+        the label-only helper.
+        """
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at, "
+            "review_status) VALUES (?, ?, ?, ?, 'pending')",
+            ("old-label", "c", 5, "2026-01-01T00:00:00Z"),
+        )
+        tid = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.taxonomy.conn.commit()
+
+        db.taxonomy.update_topic_label(tid, "new-label")
+        row = db.taxonomy.conn.execute(
+            "SELECT label, review_status FROM topics WHERE id = ?", (tid,),
+        ).fetchone()
+        assert row == ("new-label", "pending")
+
+    def test_rename_topic_still_accepts(self, db: T2Database) -> None:
+        """rename_topic continues to transition review_status → accepted.
+
+        Used by the interactive ``nx taxonomy review`` rename path.
+        Regression guard: the #241 Item 3 fix does not touch rename_topic.
+        """
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at, "
+            "review_status) VALUES (?, ?, ?, ?, 'pending')",
+            ("old", "c", 5, "2026-01-01T00:00:00Z"),
+        )
+        tid = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db.taxonomy.conn.commit()
+
+        db.taxonomy.rename_topic(tid, "renamed")
+        row = db.taxonomy.conn.execute(
+            "SELECT label, review_status FROM topics WHERE id = ?", (tid,),
+        ).fetchone()
+        assert row == ("renamed", "accepted")
 
     def test_split_too_few_docs(self, db: T2Database) -> None:
         """Split with fewer docs than k returns 0."""

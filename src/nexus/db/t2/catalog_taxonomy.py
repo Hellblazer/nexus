@@ -931,6 +931,58 @@ class CatalogTaxonomy:
 
     # ── Review workflow (RDR-070, nexus-lbu) ─────────────────────────────
 
+    def get_all_topics(
+        self,
+        collection: str = "",
+    ) -> list[dict[str, Any]]:
+        """Return every topic (roots + children), ordered by doc_count DESC.
+
+        Contrast :meth:`get_topics` which returns only roots and
+        :meth:`get_topics_for_collection` which requires a collection
+        filter. This method is the "no tree structure, give me every
+        row" helper that the CLI needs for label / relabel --all paths.
+
+        GitHub #243 + bead nexus-kxez: previously ``label_cmd`` and
+        ``relabel_topics``'s --all branch used ``get_topics()`` which
+        hid every split sub-topic, so post-split pending children were
+        never passed to the LLM labeler even though ``status`` counted
+        them as pending.
+        """
+        with self._lock:
+            if collection:
+                rows = self.conn.execute(
+                    "SELECT id, label, parent_id, collection, centroid_hash, "
+                    "doc_count, created_at, review_status, terms "
+                    "FROM topics WHERE collection = ? "
+                    "ORDER BY doc_count DESC",
+                    (collection,),
+                ).fetchall()
+            else:
+                rows = self.conn.execute(
+                    "SELECT id, label, parent_id, collection, centroid_hash, "
+                    "doc_count, created_at, review_status, terms "
+                    "FROM topics ORDER BY doc_count DESC"
+                ).fetchall()
+        return [dict(zip(_TOPIC_COLUMNS, row)) for row in rows]
+
+    def update_topic_label(self, topic_id: int, new_label: str) -> None:
+        """Update a topic's label without touching ``review_status``.
+
+        Used by the batch LLM relabeler so topics stay ``pending`` until
+        a human runs ``nx taxonomy review``. Contrast :meth:`rename_topic`
+        which also transitions to ``accepted`` (correct for the
+        interactive review path where the human is acknowledging the new
+        label as they rename).
+
+        GitHub #241 Item 3 + bead nexus-kxez.
+        """
+        with self._lock:
+            self.conn.execute(
+                "UPDATE topics SET label = ? WHERE id = ?",
+                (new_label, topic_id),
+            )
+            self.conn.commit()
+
     def get_unreviewed_topics(
         self,
         collection: str = "",
