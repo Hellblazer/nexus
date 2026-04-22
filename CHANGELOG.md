@@ -8,6 +8,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [4.9.7] - 2026-04-22
 
+### Added
+
+- **`operator_compare` gains two-sided mode** (`src/nexus/mcp/core.py`). Plans that need to compare extractions from two separate corpora (a cross-corpus DAG like "how does project A frame X vs how does project B frame X") can now pass `items_a` / `items_b` / `label_a` / `label_b` as independent args. The resolver substitutes each `$stepN.<field>` reference at top level, which the previous one-sided `items` arg could not do (the no-inline-interpolation rule means references embedded in a `focus` string stay literal). The two-sided prompt asks for shared axes, divergent decisions, side-only axes, and philosophy difference. One-sided `items` mode preserved unchanged; list / dict values in any of the `items*` args are now JSON-serialized before prompt interpolation so the LLM sees clean JSON instead of Python repr. Live cross-corpus run against Arcaneum + Nexus RDR corpora produced a clean synthesis (shared-axes table, divergent-decisions table, philosophy paragraph) with zero training-data fill-in. (nexus-km5i)
+
 ### Fixed
 
 - **`catalog_search` rejected `content_type` as a sole filter** (`src/nexus/mcp/catalog.py`). The structured-filter trigger condition (`if owner or corpus or file_path or (author and not query)`) omitted `content_type`, so a sole `content_type` value fell through to the FTS5 path which requires a free-text query. Documented behaviour was wrong for callers asking "show me everything of type prose" without a search term. Added `content_type` to the trigger; pre-existing structured-filter SQL already handled `content_type = ?` correctly. (nexus-3o3t)
