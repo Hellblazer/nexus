@@ -570,12 +570,19 @@ def store_put(
             tags=tags,
             ttl_days=ttl_days,
         )
-        # Register in catalog (same hook the CLI uses)
+        # Register in catalog (same hook the CLI uses). Non-fatal — T3 row is
+        # source of truth — but log so #253 orphan shape is observable.
         try:
             from nexus.commands.store import _catalog_store_hook
             _catalog_store_hook(title=title, doc_id=doc_id, collection_name=col_name)
         except Exception:
-            pass  # catalog registration is non-fatal
+            import structlog
+            structlog.get_logger().warning(
+                "catalog_store_hook_failed",
+                doc_id=doc_id,
+                collection=col_name,
+                exc_info=True,
+            )
         # Auto-link from T1 scratch link-context
         try:
             n = _catalog_auto_link(doc_id)

@@ -289,3 +289,61 @@ def test_has_shebang_read_failed_logs_debug():
 
     assert result is False
     assert any(e["event"] == "has_shebang_read_failed" for e in cap)
+
+
+# ── Site 15: mcp/core.py store_put catalog hook failure (GH #253) ─────────────
+
+def test_catalog_store_hook_failed_logs_warning(tmp_path, monkeypatch):
+    """Site 15: _catalog_store_hook exception in MCP store_put emits warning-level log.
+
+    Previously a bare `try/except: pass` swallowed all catalog registration
+    failures, creating the inverse-of-#244 orphan shape (T3 row with no
+    catalog tumbler) with zero observability.
+    """
+    import chromadb
+
+    from nexus.db.t1 import T1Database
+    from nexus.db.t2 import T2Database
+    from nexus.db.t3 import T3Database
+    from nexus.mcp_server import (
+        _inject_t1,
+        _inject_t3,
+        _reset_singletons,
+        store_put,
+    )
+
+    _reset_singletons()
+    try:
+        import nexus.mcp.core as core_mod
+        t2_path = tmp_path / "t2.db"
+        monkeypatch.setattr(core_mod, "_t2_ctx", lambda: T2Database(t2_path))
+
+        t1_client = chromadb.EphemeralClient()
+        _inject_t1(T1Database(session_id="hook-fail", client=t1_client))
+
+        t3_client = chromadb.EphemeralClient()
+        ef = chromadb.utils.embedding_functions.DefaultEmbeddingFunction()
+        _inject_t3(T3Database(_client=t3_client, _ef_override=ef))
+
+        # Force the catalog hook to raise.
+        monkeypatch.setattr(
+            "nexus.commands.store._catalog_store_hook",
+            MagicMock(side_effect=RuntimeError("simulated catalog failure")),
+        )
+
+        with capture_logs() as cap:
+            result = store_put(
+                content="hook failure test",
+                collection="knowledge",
+                title="hook-fail-doc",
+            )
+
+        # store_put still reports success (non-fatal policy).
+        assert "Stored:" in result
+        # Failure is now observable.
+        assert any(
+            e["event"] == "catalog_store_hook_failed" and e["log_level"] == "warning"
+            for e in cap
+        )
+    finally:
+        _reset_singletons()
