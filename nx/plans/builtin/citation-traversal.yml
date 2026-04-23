@@ -1,0 +1,46 @@
+name: citation-traversal
+description: >-
+  Trace the citation chain surrounding a document. Resolve the seed by
+  title, walk the reference graph both inward (what cites this) and
+  outward (what this cites), hydrate the matched corpora, and summarise
+  the evidence so a downstream agent can characterise the document's
+  intellectual lineage. Uses the reference-chain purpose, which bundles
+  citation and quotation link types, so the traversal keeps pace as new
+  edge kinds enter the catalog.
+dimensions:
+  verb: research
+  scope: global
+  strategy: citation-traversal
+required_bindings:
+  - document
+optional_bindings:
+  - depth
+  - limit
+default_bindings:
+  depth: 2
+  limit: 10
+tags: builtin-template,rdr-092,catalog,citation
+plan_json:
+  steps:
+    - tool: query
+      args:
+        question: $document
+        limit: $limit
+        corpus: all
+    - tool: traverse
+      args:
+        seeds: $step1.tumblers
+        purpose: reference-chain
+        depth: $depth
+        direction: both
+    - tool: store_get_many
+      args:
+        ids:
+          - $step1.ids
+          - $step2.ids
+        collections:
+          - $step1.collections
+          - $step2.collections
+    - tool: summarize
+      args:
+        inputs: $step3.contents

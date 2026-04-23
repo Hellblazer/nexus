@@ -1,0 +1,35 @@
+name: find-by-author
+description: >-
+  Find documents attributed to a specific author. Routes through the
+  catalog's author index to locate every entry by that person, hydrates
+  the matching documents' content, and summarises their contribution
+  surface so a downstream agent can characterise what the author has
+  written and published. Useful for "who is X" and "what has X published"
+  lookups where the caller already has an author name but not a specific
+  title.
+dimensions:
+  verb: research
+  scope: global
+  strategy: find-by-author
+required_bindings:
+  - author
+optional_bindings:
+  - limit
+default_bindings:
+  limit: 10
+tags: builtin-template,rdr-092,catalog,author
+plan_json:
+  steps:
+    - tool: query
+      args:
+        question: $author research contributions
+        author: $author
+        limit: $limit
+        corpus: all
+    - tool: store_get_many
+      args:
+        ids: $step1.ids
+        collections: $step1.collections
+    - tool: summarize
+      args:
+        inputs: $step2.contents
