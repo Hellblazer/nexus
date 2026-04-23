@@ -2,11 +2,12 @@
 title: "RDR-092: Plan Match-Text from Dimensional Identity"
 id: RDR-092
 type: Feature
-status: draft
+status: accepted
 priority: medium
 author: Hal Hildebrand
-reviewed-by:
+reviewed-by: self
 created: 2026-04-22
+accepted_date: 2026-04-23
 related_issues: []
 related_tests: [test_plan_match.py, test_plan_library.py, test_plan_session_cache.py]
 related: [RDR-078, RDR-080, RDR-091]
