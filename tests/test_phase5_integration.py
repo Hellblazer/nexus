@@ -355,7 +355,9 @@ class TestDoctorCheckTaxonomy:
         assert "invariant holds" in result.output
 
     def test_drift_detected(self, runner: CliRunner, tmp_path: Path) -> None:
-        """Projection assignments without a matching topic_links row → exit 1."""
+        """Projection assignments with co-occurring projection partner but no
+        topic_links row → exit 1. nexus-346q: drift detection requires the
+        co-occurring partner since a link is structurally impossible without one."""
         db_path = self._setup_db(tmp_path)
         conn = sqlite3.connect(str(db_path))
         conn.execute(
@@ -364,9 +366,21 @@ class TestDoctorCheckTaxonomy:
             (42, "orphan-topic", "docs__test", 0, "2026-01-01T00:00:00Z"),
         )
         conn.execute(
+            "INSERT INTO topics (id, label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (43, "partner-topic", "docs__other", 0, "2026-01-01T00:00:00Z"),
+        )
+        # Two projection assignments on the same doc — a topic_links pair is
+        # structurally possible here, so the absence of topic_links is real drift.
+        conn.execute(
             "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by) "
             "VALUES (?, ?, ?)",
             ("doc-xyz", 42, "projection"),
+        )
+        conn.execute(
+            "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by) "
+            "VALUES (?, ?, ?)",
+            ("doc-xyz", 43, "projection"),
         )
         conn.commit()
         conn.close()
@@ -378,6 +392,77 @@ class TestDoctorCheckTaxonomy:
         assert "topic_links drift" in result.output
         assert "orphan-topic" in result.output
         assert "nx taxonomy project" in result.output
+
+    def test_isolated_projection_topic_not_flagged(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """nexus-346q: a topic whose doc has exactly ONE projection assignment
+        cannot structurally produce a topic_links row (a link needs from + to).
+        The check must not flag these as drift — the 4.9.10 shakeout found 15
+        such false positives out of 20 residual after a backfill.
+        """
+        db_path = self._setup_db(tmp_path)
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "INSERT INTO topics (id, label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (99, "solitary-topic", "docs__alone", 0, "2026-01-01T00:00:00Z"),
+        )
+        # Only ONE projection assignment for doc-solo — no pair possible.
+        conn.execute(
+            "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by) "
+            "VALUES (?, ?, ?)",
+            ("doc-solo", 99, "projection"),
+        )
+        conn.commit()
+        conn.close()
+
+        with patch("nexus.commands._helpers.default_db_path", return_value=db_path):
+            result = runner.invoke(main, ["doctor", "--check-taxonomy"])
+
+        assert result.exit_code == 0, result.output
+        assert "invariant holds" in result.output
+        assert "solitary-topic" not in result.output
+
+    def test_co_occurring_must_also_be_projection(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """nexus-346q: a projection assignment whose only co-occurring topic
+        was assigned via a non-projection path (centroid, bertopic) is still
+        structurally isolated from the projection perspective — no projection
+        pair means no aggregated topic_links row. Must not flag as drift.
+        """
+        db_path = self._setup_db(tmp_path)
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "INSERT INTO topics (id, label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (100, "projection-side", "docs__x", 0, "2026-01-01T00:00:00Z"),
+        )
+        conn.execute(
+            "INSERT INTO topics (id, label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (101, "centroid-side", "docs__y", 0, "2026-01-01T00:00:00Z"),
+        )
+        conn.execute(
+            "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by) "
+            "VALUES (?, ?, ?)",
+            ("doc-mix", 100, "projection"),
+        )
+        conn.execute(
+            "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by) "
+            "VALUES (?, ?, ?)",
+            ("doc-mix", 101, "centroid"),
+        )
+        conn.commit()
+        conn.close()
+
+        with patch("nexus.commands._helpers.default_db_path", return_value=db_path):
+            result = runner.invoke(main, ["doctor", "--check-taxonomy"])
+
+        assert result.exit_code == 0, result.output
+        assert "invariant holds" in result.output
+        assert "projection-side" not in result.output
 
     def test_invariant_holds_with_matching_link(
         self, runner: CliRunner, tmp_path: Path
