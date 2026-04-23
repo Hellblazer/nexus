@@ -1861,7 +1861,7 @@ def _nx_answer_match_is_hit(confidence: float | None) -> bool:
 
 
 #: Common English stop-words stripped when synthesizing a grown plan's
-#: ``name`` from the question. Kept narrow on purpose — aggressive
+#: ``name`` from the question. Kept narrow on purpose; aggressive
 #: filtering drops the content words R10 needs for match-text signal.
 _GROWN_PLAN_NAME_STOP_WORDS: frozenset[str] = frozenset({
     "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
