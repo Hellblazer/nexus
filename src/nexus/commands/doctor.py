@@ -163,6 +163,103 @@ def _run_check_schema() -> None:
         click.echo("\nAll checks passed.")
 
 
+#: Minimum number of global-tier builtin plan rows expected after
+#: ``nx catalog setup`` has run on a fresh install. RDR-078 shipped 9;
+#: RDR-092 Phase 0a brings that to 12, but the check only fails below 9
+#: so a partial install on an older plugin is still tolerated.
+_MIN_GLOBAL_BUILTIN_COUNT: int = 9
+
+
+def _run_check_plan_library() -> None:
+    """Report plan-library dimensional health. RDR-092 Phase 0c.2.
+
+    Categories counted:
+
+      * **authored** — rows whose ``dimensions`` column is populated
+        AND whose ``tags`` do not include ``backfill`` (shipped YAML
+        seeds or grown plans with full identity).
+      * **backfilled** — rows whose ``tags`` contain ``backfill`` /
+        ``backfill-low-conf`` (Phase 0d heuristic migration output).
+      * **non-dimensional** — rows with ``dimensions IS NULL``
+        (legacy / pre-RDR-078 seeds that need ``nx plan repair``).
+
+    Exits non-zero when the global-tier builtin count
+    (``project='' AND tags LIKE '%builtin-template%'``) falls below
+    :data:`_MIN_GLOBAL_BUILTIN_COUNT` — that state signals the scoped
+    loader never seeded (typically ``nx catalog setup`` was never
+    re-run after the RDR-078 loader landed).
+    """
+    import sqlite3
+
+    from nexus.commands._helpers import default_db_path
+
+    db_path = default_db_path()
+    if not db_path.exists():
+        click.echo("T2 database not found — nothing to check.")
+        click.echo("Fix: run 'nx catalog setup' to initialise the library.")
+        raise click.exceptions.Exit(1)
+
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA journal_mode=WAL")
+
+    def _count(where: str) -> int:
+        row = conn.execute(
+            f"SELECT COUNT(*) FROM plans WHERE {where}"
+        ).fetchone()
+        return int(row[0] or 0)
+
+    total = _count("1=1")
+    non_dimensional = _count("dimensions IS NULL")
+    backfilled = _count(
+        "dimensions IS NOT NULL AND "
+        "(tags LIKE '%backfill%' OR tags LIKE '%backfill-low-conf%')"
+    )
+    authored = _count(
+        "dimensions IS NOT NULL AND "
+        "NOT (tags LIKE '%backfill%' OR tags LIKE '%backfill-low-conf%')"
+    )
+    global_builtin = _count(
+        "project = '' AND tags LIKE '%builtin-template%'"
+    )
+
+    conn.close()
+
+    click.echo("Plan library check:")
+    click.echo(f"  total rows:         {total}")
+    click.echo(f"  authored:           {authored}")
+    click.echo(f"  backfilled:         {backfilled}")
+    click.echo(f"  non-dimensional:    {non_dimensional}")
+    click.echo(f"  global-tier builtin count: {global_builtin}")
+    click.echo("")
+
+    failed = False
+    if global_builtin < _MIN_GLOBAL_BUILTIN_COUNT:
+        click.echo(
+            f"  FAIL: global-tier builtin count {global_builtin} "
+            f"< expected {_MIN_GLOBAL_BUILTIN_COUNT}",
+            err=True,
+        )
+        click.echo("    Fix: run 'nx catalog setup'.", err=True)
+        failed = True
+    if non_dimensional:
+        click.echo(
+            f"  WARN: {non_dimensional} non-dimensional row(s) "
+            "(legacy / pre-RDR-078 seeds).",
+            err=True,
+        )
+        click.echo(
+            "    Fix: run 'nx plan repair' to backfill dimensions "
+            "heuristically.",
+            err=True,
+        )
+
+    if not failed:
+        click.echo("All checks passed.")
+    else:
+        raise click.exceptions.Exit(1)
+
+
 def _run_trim_telemetry(days: int) -> None:
     """Delete search_telemetry rows older than *days* (RDR-087 Phase 2.4)."""
     from nexus.commands._helpers import default_db_path
@@ -258,6 +355,16 @@ def _run_trim_telemetry(days: int) -> None:
          "(GH #252). Exits 1 on drift.",
 )
 @click.option(
+    "--check-plan-library",
+    "check_plan_library",
+    is_flag=True,
+    default=False,
+    help="Report plan-library dimensional health: authored vs "
+         "backfilled vs non-dimensional row counts, plus global-tier "
+         "builtin count. Exits 1 when builtin count < 9. RDR-092 "
+         "Phase 0c.2.",
+)
+@click.option(
     "--json",
     "json_out",
     is_flag=True,
@@ -283,7 +390,8 @@ def _run_trim_telemetry(days: int) -> None:
 def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                fix_paths: bool, dry_run: bool, check_schema: bool,
                check_search: bool, check_resources: bool,
-               check_quotas: bool, check_taxonomy: bool, json_out: bool,
+               check_quotas: bool, check_taxonomy: bool,
+               check_plan_library: bool, json_out: bool,
                trim_telemetry: bool, days: int) -> None:
     """Verify that all required services and credentials are available."""
     if check_schema:
@@ -305,6 +413,10 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
 
     if check_taxonomy:
         _run_check_taxonomy()
+        return
+
+    if check_plan_library:
+        _run_check_plan_library()
         return
 
     if trim_telemetry:

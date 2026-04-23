@@ -571,3 +571,121 @@ class TestCheckQuotas:
         assert "voyage-code-3" in data["voyage"]["models"]
         assert data["voyage"]["api_key_set"] is True
         assert data["retry"]["total_count"] == 0
+
+class TestCheckPlanLibrary:
+    """RDR-092 Phase 0c.2: nx doctor --check-plan-library. Reports
+    authored vs backfilled vs non-dimensional plan row counts; exits
+    non-zero when the global-tier builtin count falls below the 9 shipped
+    by RDR-078 + RDR-092 (12 as of Phase 0a).
+    """
+
+    def test_check_plan_library_flags_missing_dimensions(
+        self, runner: CliRunner, tmp_path: Path,
+    ) -> None:
+        """When the plans table carries rows with NULL dimensions
+        (legacy seeds pre-RDR-078), the check reports them as
+        non-dimensional and exits non-zero.
+        """
+        import sqlite3
+
+        from nexus.db.migrations import apply_pending
+        from nexus.commands.upgrade import _current_version
+
+        db_path = tmp_path / "memory.db"
+        conn = sqlite3.connect(str(db_path))
+        apply_pending(conn, _current_version())
+        # Insert one legacy-shape row (NULL dimensions) to trigger the flag.
+        conn.execute(
+            "INSERT INTO plans (query, plan_json, outcome, tags, created_at) "
+            "VALUES (?, ?, 'success', 'builtin-template,legacy', datetime('now'))",
+            ("legacy plan", '{"steps": []}'),
+        )
+        conn.commit()
+        conn.close()
+
+        with patch("nexus.commands._helpers.default_db_path", return_value=db_path):
+            result = runner.invoke(main, ["doctor", "--check-plan-library"])
+
+        # Non-zero exit because global builtin count is 0 (no YAMLs seeded).
+        assert result.exit_code != 0, result.output
+        # Output distinguishes the row categories.
+        assert "non-dimensional" in result.output.lower() or "no dimensions" in result.output.lower()
+
+    def test_check_plan_library_flags_zero_global_builtins(
+        self, runner: CliRunner, tmp_path: Path,
+    ) -> None:
+        """With an empty plans table, the check exits non-zero and calls
+        out that global-tier YAML builtins never seeded.
+        """
+        import sqlite3
+
+        from nexus.db.migrations import apply_pending
+        from nexus.commands.upgrade import _current_version
+
+        db_path = tmp_path / "memory.db"
+        conn = sqlite3.connect(str(db_path))
+        apply_pending(conn, _current_version())
+        conn.close()
+
+        with patch("nexus.commands._helpers.default_db_path", return_value=db_path):
+            result = runner.invoke(main, ["doctor", "--check-plan-library"])
+
+        assert result.exit_code != 0, result.output
+        assert "global" in result.output.lower()
+
+    def test_check_plan_library_passes_on_healthy_seed(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """Seeding the YAML builtins and re-running the check exits 0."""
+        import sqlite3
+
+        from nexus.db.migrations import apply_pending
+        from nexus.commands.upgrade import _current_version
+
+        db_path = tmp_path / "memory.db"
+        conn = sqlite3.connect(str(db_path))
+        apply_pending(conn, _current_version())
+        conn.close()
+
+        monkeypatch.setattr(
+            "nexus.commands._helpers.default_db_path", lambda: db_path,
+        )
+        from nexus.commands.catalog import _seed_plan_templates
+        _seed_plan_templates()
+
+        with patch("nexus.commands._helpers.default_db_path", return_value=db_path):
+            result = runner.invoke(main, ["doctor", "--check-plan-library"])
+
+        assert result.exit_code == 0, result.output
+        assert "global" in result.output.lower()
+
+    def test_check_plan_library_counts_backfilled_rows(
+        self, runner: CliRunner, tmp_path: Path,
+    ) -> None:
+        """Rows tagged 'backfill' are reported in a distinct bucket so
+        the operator can see day-2 heuristic rows without mistaking them
+        for freshly-authored dimensional seeds.
+        """
+        import sqlite3
+
+        from nexus.db.migrations import apply_pending
+        from nexus.commands.upgrade import _current_version
+
+        db_path = tmp_path / "memory.db"
+        conn = sqlite3.connect(str(db_path))
+        apply_pending(conn, _current_version())
+        conn.execute(
+            "INSERT INTO plans (query, plan_json, outcome, tags, verb, scope, dimensions, name, created_at) "
+            "VALUES (?, ?, 'success', 'builtin-template,backfill', 'research', 'global', ?, 'bf-one', datetime('now'))",
+            ("backfilled plan", '{"steps": []}', '{"scope":"global","verb":"research"}'),
+        )
+        conn.commit()
+        conn.close()
+
+        with patch("nexus.commands._helpers.default_db_path", return_value=db_path):
+            result = runner.invoke(main, ["doctor", "--check-plan-library"])
+
+        # Non-zero because global builtin count < 9, but the backfill
+        # count should appear in the report regardless.
+        assert "backfill" in result.output.lower()
+
