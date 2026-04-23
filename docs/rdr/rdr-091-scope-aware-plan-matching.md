@@ -2,12 +2,15 @@
 title: "RDR-091: Scope-Aware Plan Matching (nexus-zs1d Phase 2)"
 id: RDR-091
 type: Feature
-status: accepted
+status: closed
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-22
 accepted_date: 2026-04-22
+closed_date: 2026-04-23
+closed_reason: implemented
+closed_pointers: "Gap1=src/nexus/plans/matcher.py:77"
 related_issues:
   - "nexus-zs1d: Wire nx_answer scope through plan_match + plan_run"
 related_tests: [test_plan_match.py, test_plan_library.py, test_nx_answer.py]
@@ -18,6 +21,8 @@ implementation_notes: "scope_fit_weight=0.15 picked Phase 2c (nexus-svcg): motiv
 # RDR-091: Scope-Aware Plan Matching (nexus-zs1d Phase 2)
 
 ## Problem Statement
+
+#### Gap 1: plan_match silently drops `scope_preference`, so specialized plans lose to generic ones on scoped questions
 
 `plan_match` today selects plans purely on question similarity. The
 `scope_preference` parameter is accepted and documented but unused

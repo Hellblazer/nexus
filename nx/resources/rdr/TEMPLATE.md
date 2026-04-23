@@ -23,7 +23,7 @@ Refine as research deepens understanding.]
 
 ### Enumerated gaps to close
 
-*The close skill greps for `^#### Gap \d+:` headings in this section. Use exactly this format — one heading per gap.*
+*`/nx:rdr-gate` (Layer 1) and `/nx:rdr-close` (for `--reason implemented`) enforce this structure for post-65 RDRs. Missing or malformed headings will block the gate — not just the close. Use exactly the `#### Gap N: <title>` format (regex `^#{3,5} Gap \d+:`). One heading per distinct gap. Replacing the Problem Statement with free-form prose will fail the gate; prefer adding real gap headings, or override with `/nx:rdr-gate <id> --skip-gaps` only when the structure truly does not fit.*
 
 #### Gap 1: <gap title>
 

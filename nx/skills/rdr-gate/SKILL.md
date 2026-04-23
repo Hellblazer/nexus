@@ -41,6 +41,8 @@ Read the RDR markdown file. Check that these sections are present AND non-empty 
 
 **Heading matching**: RDRs use varied heading names. Match any of the variants listed above (separated by `/`). If none of the variants match, report the section as missing — do NOT silently skip it.
 
+**Gap-structure sub-check (post-65 RDRs only)**: the `## Problem Statement` (or `## Problem`) section must contain one or more `#### Gap N: <title>` headings (regex `^#{3,5} Gap \d+:`). The command preamble script emits a BLOCKED outcome automatically when this check fails — the gate skill should not attempt to run Layers 2 or 3 after that block. Legacy RDRs with `id < 65` are grandfathered and skip the gap check. Use `/nx:rdr-gate <id> --skip-gaps` to override for the rare RDR where the structure does not fit; the override is recorded in the gate audit trail.
+
 **If any section is missing or contains only placeholder text** (e.g., `[What is the specific challenge]`):
 - Report which sections are incomplete
 - STOP — do not proceed to Layer 2 or 3

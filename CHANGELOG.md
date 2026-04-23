@@ -6,6 +6,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.9.11] - 2026-04-23
+
+Plugin-side hardening. Shifts the `#### Gap N:` structural requirement in RDR Problem Statements from `/nx:rdr-close` (detected at close time) to `/nx:rdr-gate` (detected at gate time, before accept) so authors meet the rule before it bites. Closes the surprise-at-close pattern that bit RDR-091 on 2026-04-22: the RDR accepted cleanly without gap headings, then failed the close preamble, and the gap structure had to be retrofitted after the fact.
+
+### Added
+
+- **`/nx:rdr-gate` Layer 1 gap-structure check** (`nx/commands/rdr-gate.md`, `nx/skills/rdr-gate/SKILL.md`, `nexus-4qpb`). For RDRs with `id >= 65`, the preamble now validates the `## Problem Statement` section contains at least one `#### Gap N: <title>` heading. Missing headings emit a BLOCKED outcome with the same error and regex the close skill uses; the assistant stops at Layer 1 without running the assumption audit or AI critique. Legacy RDRs (`id < 65`) are grandfathered. `--skip-gaps` bypasses the check for rare RDRs where the structure does not fit; the override is recorded in the gate audit trail.
+
+### Changed
+
+- **`/nx:rdr-create` template and SKILL both reinforce the gap convention** (`nx/resources/rdr/TEMPLATE.md`, `nx/skills/rdr-create/SKILL.md`). Template comment now explicitly names both gate enforcement points (`/nx:rdr-gate` and `/nx:rdr-close`) so authors see "missing gaps will block the gate" at drafting time, not just at close. The Gap 1 + Gap 2 placeholders remain in place.
+
+### Fixed
+
+- **RDR-091 retrofitted with the gap heading it was drafted without** (`docs/rdr/rdr-091-scope-aware-plan-matching.md`). The RDR was drafted and accepted before gate-time enforcement landed, so the close skill flagged the missing structure after all the Phase 2a–2d work had already shipped. Added `#### Gap 1: plan_match silently drops scope_preference, so specialized plans lose to generic ones on scoped questions` to the Problem Statement and flipped frontmatter `status: accepted` → `status: closed` with `closed_pointers: Gap1=src/nexus/plans/matcher.py:77` for audit trail.
+
 ## [4.9.10] - 2026-04-23
 
 Post-4.9.9 hardening — five GitHub issues filed on 2026-04-23 from the 4.9.9 shakeout (#249–#253), all observability or UX fixes to the boundaries between the catalog, taxonomy, and storage tiers. No user-facing behaviour changes on the `store_put` / `taxonomy-assign` / `split` paths; they just leave evidence now when something goes sideways. Rolls up as PR #254.
