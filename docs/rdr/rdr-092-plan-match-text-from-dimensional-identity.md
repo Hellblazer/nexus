@@ -2,7 +2,7 @@
 title: "RDR-092: Plan Match-Text from Dimensional Identity"
 id: RDR-092
 type: Feature
-status: accepted
+status: closed
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
