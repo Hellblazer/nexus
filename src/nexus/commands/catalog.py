@@ -50,11 +50,43 @@ def _seed_plan_templates() -> int:
             repo_root=repo_root,
             library=db.plans,
         )
+
+        # RDR-092 Phase 0c.1: fail loud on an empty global tier. A
+        # missing or empty ``nx/plans/builtin`` is a deployment gap
+        # (plugin root misrouted, YAMLs deleted) that silently leaves
+        # the library without dimensional seeds. The loader normally
+        # logs this via ``_log.info("seed_directory_missing")``; the
+        # setup CLI needs a user-visible failure, not a structured
+        # info.
+        global_result = tier_results.get("global")
+        global_scanned = (
+            global_result.total_scanned if global_result is not None else 0
+        )
+        if global_scanned == 0:
+            raise click.ClickException(
+                "Plan library seed failed: global tier is empty (no "
+                f"YAML builtins found at {plugin_root / 'plans' / 'builtin'}). "
+                "This typically means the plugin root is misconfigured "
+                "or the shipped builtin YAMLs were removed. Re-install "
+                "the nx plugin or run 'nx doctor --check-plan-library' "
+                "for diagnostics."
+            )
+
         for scope, result in tier_results.items():
             for source, error in result.errors:
+                # Structured log for machine consumption.
                 _log.warning(
                     "rdr078_seed_load_error",
                     scope=scope, source=source, error=error,
+                )
+                # User-visible echo so setup output distinguishes
+                # 'files found but some malformed' from the quiet
+                # healthy case. Stays on stderr to preserve stdout
+                # for the success count.
+                click.echo(
+                    f"  warning: seed load error in {scope} tier "
+                    f"({source}): {error}",
+                    err=True,
                 )
             seeded += len(result.inserted)
 

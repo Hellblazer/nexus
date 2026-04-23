@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+import click
 import pytest
 from click.testing import CliRunner
 
@@ -373,6 +374,90 @@ class TestSeedPlanTemplates:
         for p in plans:
             assert "builtin-template" in p["tags"]
         db.close()
+
+    def test_setup_fails_loud_on_zero_global_tier(
+        self, tmp_path, monkeypatch,
+    ):
+        """RDR-092 Phase 0c.1: when the global-tier YAML directory is
+        empty or missing, _seed_plan_templates must raise a
+        ``click.ClickException`` rather than silently returning 0.
+
+        Rationale: an empty global tier signals a deployment gap
+        (plugin_root misrouted, YAMLs deleted, stale install). Silent
+        zero results are how RDR-092 discovered 0/52 live plans had
+        dimensional columns populated.
+        """
+        from nexus.plans.seed_loader import SeedLoadResult
+
+        db_path = tmp_path / "t2.db"
+        monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: db_path)
+        # Force the scoped loader to report an empty global tier.
+        monkeypatch.setattr(
+            "nexus.plans.loader.load_all_tiers",
+            lambda **_kw: {"global": SeedLoadResult()},
+        )
+
+        from nexus.commands.catalog import _seed_plan_templates
+        with pytest.raises(click.exceptions.ClickException) as excinfo:
+            _seed_plan_templates()
+        assert "global" in str(excinfo.value.message).lower()
+
+    def test_setup_fails_loud_when_global_tier_absent(
+        self, tmp_path, monkeypatch,
+    ):
+        """RDR-092 Phase 0c.1: when ``load_all_tiers`` returns no
+        ``global`` key at all (plugin_root path does not exist), the
+        seeder must also raise — not silently succeed with zero rows.
+        """
+        db_path = tmp_path / "t2.db"
+        monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: db_path)
+        monkeypatch.setattr(
+            "nexus.plans.loader.load_all_tiers",
+            lambda **_kw: {},
+        )
+
+        from nexus.commands.catalog import _seed_plan_templates
+        with pytest.raises(click.exceptions.ClickException) as excinfo:
+            _seed_plan_templates()
+        msg = str(excinfo.value.message).lower()
+        assert "global" in msg
+
+    def test_setup_surfaces_per_tier_errors_to_user(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        """RDR-092 Phase 0c.1: per-tier load errors must land on stderr
+        via ``click.echo`` (not only the structured log), so the setup
+        run visibly differentiates 'files found but some malformed'
+        from the quiet healthy case.
+        """
+        from nexus.plans.seed_loader import SeedLoadResult
+
+        db_path = tmp_path / "t2.db"
+        monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: db_path)
+
+        # Give the global tier one healthy insert so the fail-loud
+        # zero-guard does not fire; rdr-099 scope surfaces an error.
+        monkeypatch.setattr(
+            "nexus.plans.loader.load_all_tiers",
+            lambda **_kw: {
+                "global": SeedLoadResult(
+                    inserted=["ok.yml"],
+                    skipped_existing=[],
+                    errors=[],
+                ),
+                "rdr-099": SeedLoadResult(
+                    inserted=[],
+                    skipped_existing=[],
+                    errors=[("/path/broken.yml", "schema: missing verb")],
+                ),
+            },
+        )
+
+        from nexus.commands.catalog import _seed_plan_templates
+        _seed_plan_templates()
+        err = capsys.readouterr().err
+        assert "broken.yml" in err
+        assert "rdr-099" in err
 
     def test_seed_templates_no_ttl(self, tmp_path, monkeypatch):
         from nexus.db.t2 import T2Database
