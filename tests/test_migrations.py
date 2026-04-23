@@ -73,8 +73,12 @@ class TestMigrationDataclass:
         from nexus.db.migrations import MIGRATIONS
 
         assert isinstance(MIGRATIONS, list)
-        # +RDR-092 Phase 0d backfill migration (4.9.12).
-        assert len(MIGRATIONS) == 17
+        # Baseline 16 + RDR-092 Phase 0d backfill (4.9.12) +
+        # RDR-092 Phase 3.1 match_text column (4.9.13) = 18.
+        # Prefer the name-based checks in TestBackfillPlanDimensions
+        # and TestAddPlanMatchTextColumn for future guards; this
+        # count is a cheap sentinel only.
+        assert len(MIGRATIONS) == 18
 
     def test_migrations_ordered_by_version(self) -> None:
         from nexus.db.migrations import MIGRATIONS, _parse_version
@@ -1744,3 +1748,141 @@ class TestBackfillPlanDimensions:
         )
         # Collision row carries the row_id suffix on both runs.
         assert str(rid2) in first[0]
+# ── _add_plan_match_text_column (RDR-092 Phase 3.1) ─────────────────────────
+
+
+class TestAddPlanMatchTextColumn:
+    """RDR-092 Phase 3.1: add ``match_text`` column to plans + rebuild
+    ``plans_fts`` so the T2 FTS lane indexes the same hybrid shape the
+    T1 cosine cache uses.
+
+    Idempotent. Must run after ``_add_plan_dimensional_identity`` so
+    verb/name/scope are present to feed the backfill synthesiser.
+    """
+
+    def _base_schema(self, conn: sqlite3.Connection) -> None:
+        """Plans table + dimensional columns, no match_text yet."""
+        from nexus.db.migrations import _add_plan_dimensional_identity
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS plans (
+                id INTEGER PRIMARY KEY,
+                project TEXT NOT NULL DEFAULT '',
+                query TEXT NOT NULL,
+                plan_json TEXT NOT NULL,
+                outcome TEXT DEFAULT 'success',
+                tags TEXT DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+            CREATE VIRTUAL TABLE IF NOT EXISTS plans_fts USING fts5(
+                query, tags, project, content=plans, content_rowid='id'
+            );
+        """)
+        _add_plan_dimensional_identity(conn)
+        conn.commit()
+
+    def test_adds_column_idempotent(self) -> None:
+        from nexus.db.migrations import _add_plan_match_text_column
+
+        conn = sqlite3.connect(":memory:")
+        self._base_schema(conn)
+
+        _add_plan_match_text_column(conn)
+        _add_plan_match_text_column(conn)  # no raise
+
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(plans)").fetchall()}
+        assert "match_text" in cols
+
+    def test_fts_table_rebuilt_with_match_text(self) -> None:
+        from nexus.db.migrations import _add_plan_match_text_column
+
+        conn = sqlite3.connect(":memory:")
+        self._base_schema(conn)
+        _add_plan_match_text_column(conn)
+
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='plans_fts'"
+        ).fetchone()
+        assert row is not None
+        assert "match_text" in row[0], (
+            f"plans_fts must index match_text, got: {row[0]!r}"
+        )
+
+    def test_backfill_populates_dimensional_rows(self) -> None:
+        """Rows with verb/name/scope get a hybrid match_text; legacy
+        NULL-dimension rows keep the raw query text.
+        """
+        from nexus.db.migrations import _add_plan_match_text_column
+
+        conn = sqlite3.connect(":memory:")
+        self._base_schema(conn)
+
+        conn.execute(
+            "INSERT INTO plans "
+            "(query, plan_json, outcome, tags, created_at, "
+            "verb, scope, name) "
+            "VALUES (?, '{}', 'success', '', datetime('now'), ?, ?, ?)",
+            ("Find documents attributed to a specific author.",
+             "research", "global", "find-by-author"),
+        )
+        conn.execute(
+            "INSERT INTO plans "
+            "(query, plan_json, outcome, tags, created_at) "
+            "VALUES (?, '{}', 'success', '', datetime('now'))",
+            ("legacy plan text",),
+        )
+        conn.commit()
+
+        _add_plan_match_text_column(conn)
+
+        dimensional = conn.execute(
+            "SELECT match_text FROM plans WHERE name = 'find-by-author'"
+        ).fetchone()
+        assert dimensional is not None
+        assert "research find-by-author scope global" in dimensional[0]
+
+        legacy = conn.execute(
+            "SELECT match_text FROM plans WHERE query = 'legacy plan text'"
+        ).fetchone()
+        assert legacy is not None
+        assert legacy[0] == "legacy plan text"
+
+    def test_backfill_idempotent(self) -> None:
+        """Re-running the migration does not duplicate or corrupt
+        already-synthesised match_text values.
+        """
+        from nexus.db.migrations import _add_plan_match_text_column
+
+        conn = sqlite3.connect(":memory:")
+        self._base_schema(conn)
+        conn.execute(
+            "INSERT INTO plans "
+            "(query, plan_json, outcome, tags, created_at, "
+            "verb, scope, name) "
+            "VALUES (?, '{}', 'success', '', datetime('now'), ?, ?, ?)",
+            ("Analyze lineage across prose and code.",
+             "analyze", "global", "default"),
+        )
+        conn.commit()
+
+        _add_plan_match_text_column(conn)
+        first = conn.execute("SELECT match_text FROM plans").fetchone()[0]
+
+        _add_plan_match_text_column(conn)
+        second = conn.execute("SELECT match_text FROM plans").fetchone()[0]
+
+        assert first == second
+        assert "analyze default scope global" in first
+
+    def test_registered_in_migrations_list(self) -> None:
+        from nexus.db.migrations import MIGRATIONS
+
+        matches = [
+            (m.introduced, m.name) for m in MIGRATIONS
+            if "match_text" in m.name.lower()
+        ]
+        assert matches, (
+            "plan-match-text migration must be in MIGRATIONS"
+        )
+        assert matches[0][0] >= "4.9.13", (
+            f"must be introduced in >= 4.9.13, got {matches[0][0]!r}"
+        )

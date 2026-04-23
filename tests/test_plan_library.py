@@ -839,3 +839,79 @@ def test_rewash_migration_no_op_without_plans_table(tmp_path: Path) -> None:
     conn = sqlite3.connect(str(db_path))
     _rewash_plan_scope_tags_all_sentinel(conn)  # must not crash
     conn.close()
+
+
+# ── RDR-092 Phase 3.2: match_text wiring into save_plan + search_plans ──────
+
+
+def test_save_plan_computes_match_text_on_dimensional_insert(
+    plan_db: T2Database,
+) -> None:
+    """save_plan populates match_text using the hybrid synthesiser
+    whenever verb/name/scope are provided.
+    """
+    row_id = plan_db.save_plan(
+        query="Find documents attributed to a specific author.",
+        plan_json='{"steps":[]}',
+        verb="research",
+        scope="global",
+        name="find-by-author",
+    )
+    row = plan_db.plans.conn.execute(
+        "SELECT match_text FROM plans WHERE id = ?", (row_id,)
+    ).fetchone()
+    assert row is not None
+    assert "research find-by-author scope global" in row[0]
+
+
+def test_save_plan_match_text_falls_back_to_query_on_legacy_row(
+    plan_db: T2Database,
+) -> None:
+    """When verb/name are absent, match_text mirrors the raw query."""
+    row_id = plan_db.save_plan(
+        query="legacy plan about chunking",
+        plan_json='{"steps":[]}',
+    )
+    row = plan_db.plans.conn.execute(
+        "SELECT match_text FROM plans WHERE id = ?", (row_id,)
+    ).fetchone()
+    assert row[0] == "legacy plan about chunking"
+
+
+def test_search_plans_hits_on_dimensional_suffix(plan_db: T2Database) -> None:
+    """RDR-092 Phase 3.2: FTS now indexes match_text, so a probe
+    against the dimensional suffix hits the row even when the raw
+    query column doesn't mention the suffix tokens.
+    """
+    plan_db.save_plan(
+        query="Find documents attributed to a specific author.",
+        plan_json='{"steps":[]}',
+        verb="research",
+        scope="global",
+        name="find-by-author",
+        tags="builtin-template",
+    )
+    # Probe that only hits via the dimensional suffix, not the raw
+    # description.
+    results = plan_db.search_plans("find-by-author")
+    assert results, "match_text must expose the dimensional name to FTS"
+    assert results[0]["name"] == "find-by-author"
+
+
+def test_search_plans_still_matches_raw_description(
+    plan_db: T2Database,
+) -> None:
+    """Description text stays at the front of match_text so
+    existing callers that FTS-search on description tokens keep
+    working byte-for-byte.
+    """
+    plan_db.save_plan(
+        query="semantic search over code repositories",
+        plan_json='{"steps":[]}',
+        verb="research",
+        scope="global",
+        name="research-default",
+    )
+    results = plan_db.search_plans("semantic")
+    assert results, "description tokens still FTS-hit via match_text"
+    assert "semantic" in results[0]["query"]
