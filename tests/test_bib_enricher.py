@@ -104,14 +104,31 @@ def test_enrich_404():
 
 
 def test_enrich_rate_limit_429():
-    """HTTP 429 (rate-limit) returns empty dict."""
+    """HTTP 429 (rate-limit) returns empty dict.
+
+    ``enrich`` retries 3 times with exponential backoff
+    (5s / 10s / 20s = 35s) on persistent 429s. Patch ``time.sleep``
+    to a no-op so the test doesn't actually wait; we still verify
+    that the backoff was invoked the expected number of times
+    and with the documented durations.
+    """
     from nexus.bib_enricher import enrich
 
+    sleep_calls: list[float] = []
     mock_resp = _make_response(429, {"message": "Too Many Requests"})
-    with patch("httpx.get", return_value=mock_resp):
+    with (
+        patch("httpx.get", return_value=mock_resp),
+        patch("time.sleep", side_effect=sleep_calls.append),
+    ):
         result = enrich("Some Paper")
 
     assert result == {}
+    # Backoff schedule: attempt 0 waits 5s, attempt 1 waits 10s,
+    # attempt 2 waits 20s, attempt 3 is the last and raises-for-status
+    # without sleeping (429 without raise is the 4th attempt).
+    assert sleep_calls == [5.0, 10.0, 20.0], (
+        f"unexpected backoff schedule: {sleep_calls!r}"
+    )
 
 
 def test_enrich_network_error():
