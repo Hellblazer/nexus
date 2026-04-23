@@ -30,10 +30,14 @@ question
 [classify]  ─ single_query? / needs_operators? / multi-step?
   │
   ▼
-[plan_run]  execute steps: search, query, traverse, store_get_many, operator_*
+[plan_run]  execute steps: search / query / traverse / store_get_many
+            isolated; contiguous operator runs (extract/rank/compare/
+            summarize/generate) bundled into one claude -p call
   │
   ▼
 [record]  nx_answer_runs table — duration, cost, step count, final text
+          plus plans.use_count / success_count / failure_count on
+          matched library plans
   │
   ▼
 final text
@@ -41,6 +45,39 @@ final text
 
 No step here is optional.  The record step runs even on plan-miss + planner-
 failure paths so every invocation leaves a trace.
+
+### Operator bundling (v4.10.0)
+
+Contiguous runs of ≥2 operator steps collapse into a **single**
+`claude -p` subprocess instead of N. Measured wins on real corpora:
+`extract → summarize` ~55% faster, `extract → rank` on real RDRs ~28%
+faster and with materially better ranking quality, 4-op cross-repo
+compare 72% faster (192s → 54s). Retrieval steps stay isolated.
+
+Key mechanics:
+
+- **Contract**: `nexus.plans.bundle.segment_steps` is the sole bundle-
+  boundary detector. `compose_bundle_prompt` builds a single composite
+  prompt describing all N steps; `dispatch_bundle` issues one
+  `claude_dispatch`.
+- **Intra-bundle refs**: `$stepN.<field>` references that point inside
+  the bundle return a deferred-ref sentinel from `_resolve_value`; the
+  composer renders them as `"the <field> output from STEP M"` prose
+  using bundle-local step numbering.
+- **Parallel branches**: when a bundle has two extracts that hydrate
+  from different retrieval steps, the prompt emits a `source:` line
+  per extract with the pre-hydration collection name so the LLM can
+  attribute cross-corpus extractions correctly.
+- **Size guard**: `MAX_BUNDLE_PROMPT_CHARS = 200_000`. Oversized
+  bundles fall back to per-step dispatch.
+- **Opt-out**: `plan_run(..., bundle_operators=False)` recovers per-
+  step isolation for debugging.
+- **Dispatcher opt-in**: custom dispatchers need `supports_bundling=True`
+  as an attribute to be routed through the bundle path — the default
+  dispatcher carries it; wrappers inherit or declare their own.
+- **Eligibility**: only operators in `BUNDLEABLE_OPERATORS` bundle;
+  new operators opt in explicitly only if pure, cost-bounded, and
+  failure-meaningful at bundle granularity.
 
 Both lanes of `plan_match` (T1 cosine, T2 FTS5) key off the same
 `match_text` payload synthesised at save time; see

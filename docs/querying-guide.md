@@ -144,9 +144,41 @@ For questions that require multiple retrieval steps — comparing sources, extra
 `nx_answer` runs this sequence on every call:
 
 1. **`plan_match`** — semantic search against the T2 plan library (`plans` table) for an intent-similar plan.  T1 cosine cache is tried first; falls through to FTS5 when the cache is empty or unavailable.  A match with confidence ≥ 0.40 is a hit.
-2. **Classify + `plan_run`** — execute the matched plan's steps via the operator dispatcher.  Each step is an MCP tool call (`search`, `query`, `traverse`, `store_get_many`, or an `operator_*`).  Step outputs thread through as `$stepN.<field>` references for downstream steps.
+2. **Classify + `plan_run`** — execute the matched plan's steps via the operator dispatcher.  Retrieval steps (`search`, `query`, `traverse`, `store_get_many`) dispatch individually as MCP tool calls.  Contiguous runs of ≥2 operator steps (`extract`, `rank`, `compare`, `summarize`, `generate`) collapse into a single `claude -p` subprocess (v4.10.0 — [operator bundling](#operator-bundling)), cutting per-operator spawn overhead by 55-72% on real analytical queries.  Step outputs thread through as `$stepN.<field>` references for downstream steps — bundled-intermediate slots raise a specific error when referenced from outside the bundle (reference the bundle's final step instead).
 3. **Plan-miss path** — if no match clears the threshold, an inline planner (claude_dispatch to `claude -p`) decomposes the question into a DAG of ≤ `max_steps` steps and `plan_run` executes it.
-4. **Record** — every run is logged in `nx_answer_runs` (T2) with duration, step count, cost, matched plan id, and the final answer.
+4. **Record** — every run is logged in `nx_answer_runs` (T2) with duration, step count, cost, matched plan id, and the final answer.  Library-matched plans also bump `plans.use_count` / `success_count` / `failure_count` for long-term plan health telemetry.
+
+### Operator bundling
+
+When a plan has two or more operator steps in a row, they dispatch as a
+single `claude -p` call rather than N isolated subprocesses.  Measured
+latency reductions on real queries:
+
+| Plan shape | Bundled | Isolated | Saved |
+|---|---:|---:|---:|
+| 2-op `extract → summarize` (synthetic) | 15s | 34s | **-55%** |
+| 2-op `extract → rank` (Arcaneum RDRs) | 57s | 80s | **-28%** |
+| 4-op `extract → extract → compare → summarize` (cross-repo) | 54s | 192s | **-72%** |
+
+Bundling is transparent to plan authors — your existing YAML doesn't
+change.  Caveats:
+
+- **Retrieval steps stay isolated.**  Only LLM operators (extract /
+  rank / compare / summarize / generate) bundle; retrieval needs real
+  host-side outputs to feed the next step's input.
+- **Parallel-branch bundles get source attribution.**  Two extracts
+  that hydrate from different retrieval steps carry their source
+  collection into the composed prompt so cross-corpus compare can
+  attribute claims to the right side.
+- **`$stepN.<field>` works across the bundle's output.**  Referencing
+  a bundled *intermediate* (not the bundle's final step) raises a
+  clear error — the intermediate isn't exposed host-side.
+- **Escape hatch:** `plan_run(match, bundle_operators=False)` recovers
+  per-step dispatch for debugging or when you need per-operator
+  telemetry.
+- **Size guard:** composite prompts over 200k chars fall back
+  transparently to per-step dispatch (logged as
+  `bundle_oversized_fallback_to_per_step`).
 
 ### Builtin scenario plans (RDR-078 Phase 6)
 
