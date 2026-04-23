@@ -707,6 +707,196 @@ def _rewash_plan_scope_tags_all_sentinel(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 
+# ── RDR-092 Phase 0d.1 (plan-dimensions backfill) ──────────────────────────
+
+
+#: Verb-from-stem dictionary (29 stems across 5 verb families). Keyed
+#: on lowercased tokens that commonly appear in plan ``query`` text.
+#: A match is high-confidence (tagged ``backfill``); zero matches fall
+#: through to the wh-fallback and get tagged ``backfill-low-conf``.
+_BACKFILL_VERB_STEMS: dict[str, str] = {
+    # research family (8 stems)
+    "find": "research", "search": "research", "list": "research",
+    "get": "research", "show": "research", "enumerate": "research",
+    "fetch": "research", "retrieve": "research",
+    # analyze family (8 stems)
+    "analyze": "analyze", "analyse": "analyze",
+    "compare": "analyze", "contrast": "analyze",
+    "rank": "analyze", "synthesize": "analyze",
+    "summarize": "analyze", "summarise": "analyze",
+    # review family (5 stems)
+    "review": "review", "audit": "review",
+    "evaluate": "review", "critique": "review",
+    "assess": "review",
+    # debug family (5 stems)
+    "debug": "debug", "trace": "debug",
+    "investigate": "debug", "fix": "debug",
+    "troubleshoot": "debug",
+    # document family (3 stems)
+    "document": "document", "describe": "document",
+    "explain": "document",
+}
+
+#: Wh-fallback table. Low confidence because a wh-question can map to
+#: any verb; the best guess is research for explanatory questions,
+#: review for causal "why" questions.
+_BACKFILL_WH_FALLBACK: dict[str, str] = {
+    "how": "research", "what": "research",
+    "why": "review",
+    "when": "research", "where": "research", "who": "research",
+    "which": "research",
+}
+
+#: Stop-words skipped when deriving the plan ``name`` from query text.
+_BACKFILL_NAME_STOP_WORDS: frozenset[str] = frozenset({
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+    "to", "of", "for", "in", "on", "at", "by", "with", "from", "about",
+    "and", "or", "but", "so", "as",
+    "how", "what", "why", "when", "where", "who", "which",
+    "do", "does", "did", "can", "could", "should", "would", "will",
+    "this", "that", "these", "those",
+    "i", "we", "you", "they", "it", "he", "she",
+})
+
+
+def _infer_plan_verb_from_query(query: str) -> tuple[str, bool]:
+    """Heuristic verb classifier for RDR-092 plan-dimension backfill.
+
+    Returns ``(verb, is_confident)``. High-confidence matches come
+    from :data:`_BACKFILL_VERB_STEMS`; wh-fallback matches are
+    low-confidence; the ultimate default is ``("research", False)``.
+    """
+    import re
+
+    tokens = re.findall(r"[a-z][a-z-]+", (query or "").lower())
+    for token in tokens:
+        if token in _BACKFILL_VERB_STEMS:
+            return _BACKFILL_VERB_STEMS[token], True
+    for token in tokens:
+        if token in _BACKFILL_WH_FALLBACK:
+            return _BACKFILL_WH_FALLBACK[token], False
+    return "research", False
+
+
+def _derive_plan_name_from_query(query: str, *, max_words: int = 5) -> str:
+    """Kebab-case name from the first 3-5 content tokens of *query*."""
+    import re
+
+    tokens = re.findall(r"[a-zA-Z0-9][a-zA-Z0-9_]*", (query or "").lower())
+    content = [t for t in tokens if t not in _BACKFILL_NAME_STOP_WORDS]
+    take = content[:max_words] if content else tokens[:max_words]
+    return "-".join(take) or "backfilled-plan"
+
+
+def _backfill_plan_dimensions(conn: sqlite3.Connection) -> None:
+    """Backfill verb / name / dimensions on NULL-dimension plan rows.
+
+    RDR-092 Phase 0d.1. Touches only rows where ``dimensions IS NULL``;
+    authored rows (shipped YAML seeds, already-dimensional grown
+    plans, previously-backfilled rows) are left alone. The
+    :func:`_infer_plan_verb_from_query` heuristic decides the verb,
+    and :func:`_derive_plan_name_from_query` supplies the name. Rows
+    whose verb came from a stem match get tagged ``backfill``; rows
+    that fell through to the wh-fallback get tagged
+    ``backfill-low-conf`` so ``nx plan repair`` can prioritise them.
+
+    The canonical dimensions JSON is ``{"scope":<scope>,"strategy":
+    <name>,"verb":<verb>}`` where ``<scope>`` is ``"personal"`` for
+    tagged grown rows and ``"global"`` for everything else (legacy
+    builtin shapes pre-RDR-078). Idempotent: a second run skips rows
+    whose ``dimensions`` is no longer NULL.
+
+    **Collision handling (RDR-092 code-review C-1).** Two NULL-
+    dimension rows in the same project whose queries collapse to the
+    same kebab name produce identical canonical dimensions JSON and
+    would violate the partial UNIQUE ``(project, dimensions) WHERE
+    dimensions IS NOT NULL`` index on the second UPDATE. The loop
+    catches :class:`sqlite3.IntegrityError` and retries the row with
+    the strategy suffixed by the row id (which is monotonic + stable
+    within a DB, preserving idempotency across reruns).
+    """
+    has_table = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='plans'"
+    ).fetchone()
+    if not has_table:
+        return
+
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(plans)").fetchall()}
+    if "dimensions" not in cols:
+        return
+
+    rows = conn.execute(
+        "SELECT id, query, tags FROM plans WHERE dimensions IS NULL"
+    ).fetchall()
+    if not rows:
+        return
+
+    from nexus.plans.schema import canonical_dimensions_json
+
+    backfilled = 0
+    low_conf = 0
+    collisions = 0
+    # Track identities set during this run so within-loop collisions
+    # also get the row_id suffix treatment (the DB-level partial
+    # UNIQUE index would only catch cross-run collisions because the
+    # legacy rows all share dimensions IS NULL until we write).
+    claimed: set[tuple[str, str]] = set()
+    for row_id, query, tags in rows:
+        verb, confident = _infer_plan_verb_from_query(query or "")
+        base_name = _derive_plan_name_from_query(query or "")
+        scope = "personal" if (tags or "").find("grown") >= 0 else "global"
+        project = ""  # Backfill applies to the legacy global project.
+
+        def _dims(name_value: str) -> str:
+            return canonical_dimensions_json({
+                "scope": scope,
+                "strategy": name_value,
+                "verb": verb,
+            })
+
+        # Pre-check for collision against both already-persisted rows
+        # and rows we updated earlier in this same loop.
+        name = base_name
+        dims_json = _dims(name)
+        key = (project, dims_json)
+        db_hit = conn.execute(
+            "SELECT 1 FROM plans "
+            "WHERE project = ? AND dimensions = ? AND id != ? LIMIT 1",
+            (project, dims_json, row_id),
+        ).fetchone()
+        if db_hit or key in claimed:
+            # RDR-092 code-review C-1: resolve via a deterministic
+            # row-id suffix so reruns produce the same identity.
+            name = f"{base_name}-{row_id}"
+            dims_json = _dims(name)
+            key = (project, dims_json)
+            collisions += 1
+        claimed.add(key)
+
+        tag_flag = "backfill" if confident else "backfill-low-conf"
+        existing_tags = [t for t in (tags or "").split(",") if t]
+        if tag_flag not in existing_tags:
+            existing_tags.append(tag_flag)
+        new_tags = ",".join(existing_tags)
+
+        conn.execute(
+            "UPDATE plans SET verb = ?, scope = ?, name = ?, "
+            "dimensions = ?, tags = ? WHERE id = ?",
+            (verb, scope, name, dims_json, new_tags, row_id),
+        )
+        if confident:
+            backfilled += 1
+        else:
+            low_conf += 1
+
+    conn.commit()
+    _log.info(
+        "Backfilled plan dimensions",
+        backfilled=backfilled, low_conf=low_conf,
+        total_rows=len(rows), collisions=collisions,
+    )
+
+
 MIGRATIONS: list[Migration] = [
     Migration("1.10.0", "Memory FTS rebuild with title", migrate_memory_fts),
     Migration("2.8.0", "Add plan project column", migrate_plan_project),
@@ -759,6 +949,11 @@ MIGRATIONS: list[Migration] = [
         "4.9.10",
         "Add hook_failures table (GH #251)",
         migrate_hook_failures,
+    ),
+    Migration(
+        "4.9.12",
+        "Backfill plan dimensions (RDR-092 Phase 0d)",
+        _backfill_plan_dimensions,
     ),
 ]
 
