@@ -1849,15 +1849,21 @@ Pattern B (operator auto-hydration shortcut):
 """
 
 
-def _nx_answer_match_is_hit(confidence: float | None) -> bool:
+def _nx_answer_match_is_hit(
+    confidence: float | None,
+    threshold: float = _PLAN_MATCH_MIN_CONFIDENCE,
+) -> bool:
     """Return True when a plan_match confidence qualifies as a hit.
 
     ``confidence is None`` (FTS5 sentinel, RF-11) is always a hit.
-    Numeric confidence must be >= 0.40 (RDR-079 P5 calibration).
+    Numeric confidence must be >= *threshold*. RDR-092 Phase 2 Option A
+    makes the threshold caller-overridable: the default tracks the
+    RDR-079 P5 calibration (0.40), and verb skills that have validated
+    a stricter floor (0.50 per R9) can pin it per-call.
     """
     if confidence is None:
         return True
-    return confidence >= _PLAN_MATCH_MIN_CONFIDENCE
+    return confidence >= threshold
 
 
 def _nx_answer_classify_plan(match: Any) -> str:
@@ -2076,6 +2082,7 @@ async def nx_answer(
     trace: bool = True,
     dimensions: dict[str, Any] | None = None,
     structured: bool = False,
+    min_confidence: float | None = None,
 ) -> "str | dict":
     """Answer a knowledge question using plan-match-first retrieval. RDR-080 P1.
 
@@ -2109,6 +2116,14 @@ async def nx_answer(
             without a second fetch. The single-step guard path produces
             the same envelope shape — the guard logic itself is unchanged.
             On pure-generate plans or retrieval misses, ``chunks`` is ``[]``.
+        min_confidence: Per-call plan-match floor override (RDR-092 Phase
+            2 Option A). ``None`` (default) uses the global
+            :data:`_PLAN_MATCH_MIN_CONFIDENCE` (0.40, per RDR-079 P5).
+            Verb skills that have validated a stricter precision-first
+            floor (0.50 per R9 against a 5+5 probe corpus) pin the
+            tighter value per-call without moving the global knob —
+            the global default waits on Phase 5's larger-corpus
+            validation.
 
     Returns:
         The final step's output — a string by default, or the envelope
@@ -2138,6 +2153,12 @@ async def nx_answer(
         }
 
     # ── Step 1: plan-match gate ──────────────────────────────────────────
+    # RDR-092 Phase 2 Option A: effective floor is the caller's override
+    # when supplied, otherwise the RDR-079 P5 default (0.40).
+    effective_min_confidence = (
+        min_confidence if min_confidence is not None
+        else _PLAN_MATCH_MIN_CONFIDENCE
+    )
     try:
         with _t2_ctx() as db:
             cache = get_t1_plan_cache(populate_from=db.plans)
@@ -2148,13 +2169,15 @@ async def nx_answer(
                 dimensions=dimensions,
                 scope_preference=scope,
                 context={"user_context": context} if context else None,
-                min_confidence=_PLAN_MATCH_MIN_CONFIDENCE,
+                min_confidence=effective_min_confidence,
                 n=5,
             )
     except Exception as exc:
         return _result(f"Error during plan match: {exc}")
 
-    if not matches or not _nx_answer_match_is_hit(matches[0].confidence):
+    if not matches or not _nx_answer_match_is_hit(
+        matches[0].confidence, threshold=effective_min_confidence,
+    ):
         # Plan miss — inline LLM planner via claude_dispatch.
         _log.info(
             "nx_answer_plan_miss",

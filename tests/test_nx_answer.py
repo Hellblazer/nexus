@@ -136,6 +136,102 @@ class TestPlanMatchGate:
         assert _nx_answer_match_is_hit(0.0) is False
 
 
+# ── min_confidence override (RDR-092 Phase 2, Option A) ──────────────────────
+
+
+class TestMinConfidenceOverride:
+    """Per-call ``min_confidence`` override on ``nx_answer`` / the hit
+    helper. RDR-092 Phase 2 Option A: the global
+    ``_PLAN_MATCH_MIN_CONFIDENCE`` stays at 0.40 (RDR-079 calibration);
+    verb skills that validated a stricter floor (0.50 per R9) opt in
+    by passing it explicitly.
+    """
+
+    def test_hit_helper_accepts_threshold_arg(self):
+        from nexus.mcp.core import _nx_answer_match_is_hit
+        # Default threshold unchanged (0.40).
+        assert _nx_answer_match_is_hit(0.40) is True
+        assert _nx_answer_match_is_hit(0.45) is True
+        # Caller can pin 0.50.
+        assert _nx_answer_match_is_hit(0.45, threshold=0.50) is False
+        assert _nx_answer_match_is_hit(0.50, threshold=0.50) is True
+
+    def test_fts5_sentinel_ignores_threshold(self):
+        from nexus.mcp.core import _nx_answer_match_is_hit
+        # ``None`` sentinel is a hit at any threshold (RF-11).
+        assert _nx_answer_match_is_hit(None, threshold=0.99) is True
+
+    @pytest.mark.asyncio
+    async def test_nx_answer_accepts_min_confidence_kwarg(self):
+        """Override flows into plan_match *and* governs the hit check."""
+        from nexus.mcp.core import nx_answer
+
+        captured: dict = {}
+
+        def fake_match(question, **kwargs):
+            captured.update(kwargs)
+            # Return a confidence just above 0.40 but below the caller's
+            # override — the hit check must reject it and the planner
+            # miss path must kick in.
+            return [_make_match(plan_id=1, confidence=0.45)]
+
+        async def fake_miss(question, scope="", max_steps=6):
+            return _make_match(plan_id=0, confidence=None)
+
+        plan_run_result = MagicMock()
+        plan_run_result.steps = [{"text": "ok"}]
+
+        db_stub = MagicMock()
+        db_stub.plans.save_plan = MagicMock(return_value=1)
+        db_stub.plans.get_plan = MagicMock(return_value={"id": 1})
+
+        with patch("nexus.plans.matcher.plan_match", side_effect=fake_match), \
+             patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(side_effect=fake_miss)), \
+             patch("nexus.plans.runner.plan_run", AsyncMock(return_value=plan_run_result)), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            await nx_answer(question="q", min_confidence=0.50)
+
+        # plan_match saw the caller-supplied floor.
+        assert captured.get("min_confidence") == 0.50
+
+    @pytest.mark.asyncio
+    async def test_nx_answer_default_threshold_unchanged(self):
+        """With no override, the 0.40 floor still matches RDR-079."""
+        from nexus.mcp.core import nx_answer, _PLAN_MATCH_MIN_CONFIDENCE
+
+        assert _PLAN_MATCH_MIN_CONFIDENCE == 0.40
+
+        captured: dict = {}
+
+        def fake_match(question, **kwargs):
+            captured.update(kwargs)
+            return []
+
+        async def fake_miss(question, scope="", max_steps=6):
+            return _make_match(plan_id=0, confidence=None)
+
+        plan_run_result = MagicMock()
+        plan_run_result.steps = [{"text": "ok"}]
+
+        db_stub = MagicMock()
+        db_stub.plans.save_plan = MagicMock(return_value=1)
+        db_stub.plans.get_plan = MagicMock(return_value={"id": 1})
+
+        with patch("nexus.plans.matcher.plan_match", side_effect=fake_match), \
+             patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(side_effect=fake_miss)), \
+             patch("nexus.plans.runner.plan_run", AsyncMock(return_value=plan_run_result)), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            await nx_answer(question="q")
+
+        assert captured.get("min_confidence") == 0.40
+
+
 # ── Single-step guard ─────────────────────────────────────────────────────────
 
 
