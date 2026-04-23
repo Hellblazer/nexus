@@ -77,6 +77,18 @@ nx-mcp-catalog = "nexus.mcp.catalog:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/nexus"]
 
+# Exclude the editable-install symlink so hatch does not walk into
+# it via the packages= directive and then re-add the same files via
+# force-include below, which produces a wheel with duplicate local-
+# header filenames that PyPI rejects with a 400 "Duplicate filename
+# in local headers." The symlink exists for editable installs to
+# resolve ``importlib.resources.files('nexus') / '_resources'`` into
+# the repo's ``nx/plans`` tree; force-include is the wheel-install
+# path. Exactly one of the two should land files into the wheel.
+exclude = [
+    "src/nexus/_resources",
+]
+
 # RDR-092 nexus-b9f3: ship the nx plugin's plan YAMLs as package data
 # so installed CLIs can resolve them via ``importlib.resources.files
 # ("nexus") / "_resources"``. Without this, ``_seed_plan_templates``
