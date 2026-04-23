@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.9.10] - 2026-04-23
+
+Plugin version aligned with Nexus CLI 4.9.10. No plugin-level functional changes. See root `CHANGELOG.md` for the post-4.9.9 hardening arc (GitHub #249 / #250 / #251 / #252 / #253) shipped in this release — `nx catalog verify`, the `hook_failures` observability table, `nx doctor --check-taxonomy`, the `split → label` next-step hint, and the catalog-store-hook log fix.
+
 ## [4.9.9] - 2026-04-22
 
 Plugin version aligned with Nexus CLI 4.9.9. No plugin-level functional changes. See root `CHANGELOG.md` for the store_put oversized-raise fix (nexus-akof, GH #244), inline-planner `author=` hint (nexus-sgrg), and the kxez / gwhy taxonomy fixes that did not make the 4.9.8 PyPI artifact.
