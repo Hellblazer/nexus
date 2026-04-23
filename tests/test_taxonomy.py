@@ -2521,10 +2521,89 @@ class TestManualOpsCLI:
 
         assert result.exit_code == 0, result.output
         assert "2 sub-topics" in result.output
+        # GH #250: split echoes a next-step hint pointing at `label`.
+        assert "Action:" in result.output
+        assert "nx taxonomy label" in result.output
+        assert "-c test__split_cli" in result.output
         # Verify split_topic was called with correct topic_id and k
         mock_split.assert_called_once()
         call_args = mock_split.call_args
         assert call_args[1]["k"] == 2 or call_args[0][1] == 2
+
+    def test_split_cli_action_hint_without_collection_flag(self, tmp_path: Path) -> None:
+        """GH #250: split without --collection still emits a scoped hint.
+
+        The collection scope comes from the parent topic row, so the hint
+        reads `nx taxonomy label -c <parent-collection>` even when the
+        user did not pass --collection.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from click.testing import CliRunner
+
+        from nexus.commands.taxonomy_cmd import taxonomy
+
+        db_path = tmp_path / "memory.db"
+        with T2Database(db_path) as db:
+            db.taxonomy.conn.execute(
+                "INSERT INTO topics (label, collection, doc_count, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                ("lonely-topic", "test__parent_scope", 10, "2026-01-01T00:00:00Z"),
+            )
+            db.taxonomy.conn.commit()
+
+        mock_t3 = MagicMock()
+        runner = CliRunner()
+        with (
+            patch(
+                "nexus.commands.taxonomy_cmd._default_db_path",
+                return_value=db_path,
+            ),
+            patch("nexus.db.make_t3", return_value=mock_t3),
+            patch(
+                "nexus.db.t2.catalog_taxonomy.CatalogTaxonomy.split_topic",
+                MagicMock(return_value=3),
+            ),
+        ):
+            result = runner.invoke(taxonomy, ["split", "lonely-topic", "--k", "3"])
+
+        assert result.exit_code == 0, result.output
+        assert "Action:" in result.output
+        assert "-c test__parent_scope" in result.output
+
+    def test_split_cli_no_hint_when_child_count_zero(self, tmp_path: Path) -> None:
+        """GH #250: no-op split (child_count=0) must NOT print the action hint."""
+        from unittest.mock import MagicMock, patch
+
+        from click.testing import CliRunner
+
+        from nexus.commands.taxonomy_cmd import taxonomy
+
+        db_path = tmp_path / "memory.db"
+        with T2Database(db_path) as db:
+            db.taxonomy.conn.execute(
+                "INSERT INTO topics (label, collection, doc_count, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                ("noop-topic", "test__noop", 5, "2026-01-01T00:00:00Z"),
+            )
+            db.taxonomy.conn.commit()
+
+        runner = CliRunner()
+        with (
+            patch(
+                "nexus.commands.taxonomy_cmd._default_db_path",
+                return_value=db_path,
+            ),
+            patch("nexus.db.make_t3", return_value=MagicMock()),
+            patch(
+                "nexus.db.t2.catalog_taxonomy.CatalogTaxonomy.split_topic",
+                MagicMock(return_value=0),
+            ),
+        ):
+            result = runner.invoke(taxonomy, ["split", "noop-topic"])
+
+        assert result.exit_code == 0, result.output
+        assert "Action:" not in result.output
 
 
 # ── Rebalance trigger + merge strategy (RDR-070, nexus-1im) ───────────────

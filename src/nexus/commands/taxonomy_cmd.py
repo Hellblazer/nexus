@@ -706,6 +706,14 @@ def split_cmd(topic_label: str, k: int, collection: str) -> None:
         t3 = make_t3()
         child_count = db.taxonomy.split_topic(topic_id, k=k, chroma_client=t3._client)
         click.echo(f"Split '{topic_label}' into {child_count} sub-topics.")
+        if child_count:
+            parent = db.taxonomy.get_topic_by_id(topic_id)
+            coll = (parent or {}).get("collection") or collection
+            scope = f" -c {coll}" if coll else ""
+            click.echo(
+                f"Action: {child_count} new sub-topics have n-gram labels. "
+                f"Run `nx taxonomy label{scope}` to get human-readable labels."
+            )
 
 
 # ── Topic-aware links (RDR-070, nexus-40f) ──────────────────────────────────
