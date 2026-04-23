@@ -18,7 +18,7 @@ sequence:
 question
   │
   ▼
-[plan_match]  ─── T1 cosine (plans__session cache) ─► hit → Match(confidence≥0.40)
+[plan_match]  ─── T1 cosine (plans__session cache) ─► hit → Match(confidence≥min)
   │           └── FTS5 fallback (when T1 empty) ────► hit → Match(confidence=None)
   │
   │  (no match)
@@ -42,6 +42,16 @@ final text
 No step here is optional.  The record step runs even on plan-miss + planner-
 failure paths so every invocation leaves a trace.
 
+Both lanes of `plan_match` (T1 cosine, T2 FTS5) key off the same
+`match_text` payload synthesised at save time; see
+[§match_text synthesis](#match_text-synthesis) below.
+
+The default `min_confidence` floor is `0.40` (RDR-079 P5 calibration);
+callers can pass `min_confidence=<float>` to `nx_answer` for a
+per-call override (RDR-092 Phase 2 Option A). Verb skills that
+validated a stricter precision-first floor (0.50 per R9's 5+5 probe
+corpus) opt in this way without moving the global knob.
+
 ## Plans have dimensions
 
 Every plan in the library pins a **dimensional identity**:
@@ -59,26 +69,82 @@ dimensions in the same project will collide at seed time.  This is how
 the seed loader stays idempotent: a second run of `nx catalog setup` with
 unchanged templates produces zero inserts.
 
-## The 9 builtin scenario templates
+## The 12 builtin scenario templates
 
 `nx catalog setup` seeds these from `nx/plans/builtin/*.yml` as
 `scope:global` plans:
 
-| Template | Verb | What it does |
-|----------|------|--------------|
-| `research-default` | research | Walks prose corpus → `traverse` to implementing code → hydrate → summarise with citations |
-| `review-default` | review | Resolves changed files → walks `decision-evolution` edges → extracts decisions → compares vs proposed change |
-| `analyze-default` | analyze | Gathers prose + code → walks `reference-chain` → ranks by criterion → summarises |
-| `debug-default` | debug | Resolves failing path to catalog → hydrates authoring RDRs → summarises design context |
-| `document-default` | document | Prose search + code search → walks `documentation-for` → compares doc-coverage |
-| `plan-author-default` | plan-author | Fetches authoring guide + dimension registry → surveys prior art → generates plan template |
-| `plan-inspect-default` | plan-inspect | Looks up plan metrics (use_count, match_count, success/failure) |
-| `plan-inspect-dimensions` | plan-inspect (variant) | Enumerates the dimension registry + usage |
-| `plan-promote-propose` | plan-promote | Ranks plans worth promoting from personal → project → global |
+| Template | Verb + strategy | What it does |
+|----------|-----------------|--------------|
+| `research-default` | research / default | Walks prose corpus → `traverse` to implementing code → hydrate → summarise with citations |
+| `review-default` | review / default | Resolves changed files → walks `decision-evolution` edges → extracts decisions → compares vs proposed change |
+| `analyze-default` | analyze / default | Gathers prose + code → walks `reference-chain` → ranks by criterion → summarises |
+| `debug-default` | debug / default | Resolves failing path to catalog → hydrates authoring RDRs → summarises design context |
+| `document-default` | document / default | Prose search + code search → walks `documentation-for` → compares doc-coverage |
+| `plan-author-default` | plan-author / default | Fetches authoring guide + dimension registry → surveys prior art → generates plan template |
+| `plan-inspect-default` | plan-inspect / default | Looks up plan metrics (use_count, match_count, success/failure) |
+| `plan-inspect-dimensions` | plan-inspect / dimensions | Enumerates the dimension registry + usage |
+| `plan-promote-propose` | plan-promote / propose | Ranks plans worth promoting from personal → project → global |
+| `find-by-author` | research / find-by-author | Catalog author-index lookup → hydrate → summarise an author's contribution surface |
+| `citation-traversal` | research / citation-traversal | Resolve seed → walk `reference-chain` both directions → hydrate → summarise |
+| `type-scoped-search` | research / type-scoped | Catalog content-type filter → semantic query within that bucket → summarise |
 
-The first 5 are the "verb" scenarios — they correspond to the 5 RDR-078
-verb skills (`/nx:research`, `/nx:review`, …).  The last 4 are meta-seeds
-for the plan-library itself.
+The first 5 are the "verb" scenarios: they correspond to the 5
+RDR-078 verb skills (`/nx:research`, `/nx:review`, …). The next 4 are
+meta-seeds for the plan-library itself. The last 3 (RDR-092 Phase 0a
+migrations) replace the legacy `_PLAN_TEMPLATES` array retired from
+`src/nexus/commands/catalog.py`; two further legacy shapes (provenance
+and cross-corpus compare) were retired as redundant with
+`research-default` and `analyze-default` respectively.
+
+## match_text synthesis
+
+Both lanes of `plan_match` key off a single payload:
+
+- **T1 cosine:** the `plans__session` ChromaDB collection embeds each
+  plan's `match_text` via the local ONNX MiniLM function.
+- **T2 FTS5:** the `plans_fts` virtual table indexes `match_text`,
+  `tags`, and `project`.
+
+`match_text` is a hybrid string built from the plan's dimensional
+identity (RDR-092 Phase 1 + Phase 3):
+
+```
+<description>. <verb> <name> scope <scope>
+```
+
+Examples:
+
+| Row | match_text |
+|-----|------------|
+| `find-by-author` builtin | `Find documents attributed to a specific author... research find-by-author scope global` |
+| A grown research plan named `compare-ranker-outputs` | `compare ranker outputs. research compare-ranker-outputs scope personal` |
+| A legacy row whose `dimensions IS NULL` | raw `query` text only |
+
+Design rationale, in order of decreasing weight:
+
+1. **description-first keeps verb-accuracy honest.** The natural
+   language prefix is what R10 verified against a baseline of
+   raw-description embeddings: adding the suffix produced zero
+   verb-accuracy regression while lifting the cosine score for
+   queries that actually know the dimensional identity.
+2. **dimensional suffix gives the cosine lane a reliable hook.** A
+   caller that asks for `research find-by-author` hits the matching
+   plan even when their phrasing does not overlap the description.
+3. **scope appears only when populated.** `scope:personal` rows whose
+   scope column is set get the full suffix; `scope IS NULL` rows drop
+   `scope <…>` from the tail rather than emitting the literal word
+   `None`.
+4. **legacy fallback never breaks.** A row with `verb IS NULL` or
+   `name IS NULL` still embeds its raw `query` text, so no signal is
+   ever lost to an empty suffix.
+
+The synthesiser lives at `nexus.db.t2.plan_library._synthesize_match_text`
+and is called both from `save_plan` (so T2 FTS indexes the hybrid
+form on every insert) and from the T1 session cache's `_upsert_row`
+(so the cosine lane sees the same payload). Existing rows picked up
+from pre-RDR-092 databases are backfilled by the 4.9.13 migration
+`_add_plan_match_text_column`.
 
 ## Invocation patterns
 
@@ -106,9 +172,16 @@ mcp__plugin_nx_nexus__nx_answer(
     scope="global",
     context="recently changed: src/nexus/plans/, RDR-078",
     max_steps=6,
-    budget_usd=0.50,  # reserved for future enforcement
+    budget_usd=0.50,       # reserved for future enforcement
+    min_confidence=0.50,   # RDR-092 Phase 2 Option A, optional precision-first floor
 )
 ```
+
+The `min_confidence` kwarg defaults to `None`, which routes through
+the global `_PLAN_MATCH_MIN_CONFIDENCE` constant (`0.40`, set by
+RDR-079 P5). Passing an explicit float overrides both the `plan_match`
+gate and the `_nx_answer_match_is_hit` check so a tighter precision
+floor is honoured consistently.
 
 ### Via /nx:query
 
