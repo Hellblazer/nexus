@@ -15,6 +15,52 @@ from nexus.catalog.tumbler import Tumbler
 _log = structlog.get_logger(__name__)
 
 
+def _resolve_plugin_root(repo_root: Path) -> Path:
+    """Resolve the ``plugin_root`` for :func:`load_all_tiers`.
+
+    Returns the directory whose ``plans/builtin`` subtree contains
+    the shipped YAML plan templates. Tries three resolvers in order
+    and returns the first whose ``plans/builtin`` is a directory:
+
+    1. **Package-data resource** — ``importlib.resources.files
+       ("nexus") / "_resources"``. Resolves inside
+       ``<site-packages>/nexus/_resources`` for wheel installs (via
+       the ``[tool.hatch.build.targets.wheel.force-include]``
+       mapping in pyproject.toml) and inside
+       ``src/nexus/_resources`` for editable installs (via the
+       symlink back into ``nx/plans``).
+    2. **Repo-root relative** — ``<repo_root>/nx``. Works when the
+       caller runs ``nx catalog setup`` from a nexus checkout.
+    3. **Legacy ``__file__``-relative walk** — four levels up from
+       this module plus ``/nx``. Retained for unusual install
+       layouts that neither of the above covers.
+
+    If none of the three resolves, returns the resource candidate so
+    the caller's fail-loud guard surfaces a helpful error naming the
+    package-data location.
+    """
+    from importlib.resources import as_file, files
+
+    candidates: list[Path] = []
+    try:
+        resource = files("nexus") / "_resources"
+        with as_file(resource) as resolved:
+            candidates.append(Path(resolved))
+    except (ModuleNotFoundError, FileNotFoundError, TypeError):
+        # Importlib resources can raise for exotic loaders (e.g. zip
+        # imports without extraction). Fall through to the filesystem
+        # resolvers.
+        pass
+    candidates.extend([
+        repo_root / "nx",
+        Path(__file__).resolve().parent.parent.parent.parent / "nx",
+    ])
+    for candidate in candidates:
+        if (candidate / "plans" / "builtin").is_dir():
+            return candidate
+    return candidates[0]
+
+
 def _seed_plan_templates() -> int:
     """Seed pre-built plan templates into T2. Idempotent — skips existing.
 
@@ -42,9 +88,21 @@ def _seed_plan_templates() -> int:
         from nexus.plans.loader import load_all_tiers
 
         repo_root = find_repo_root(Path.cwd()) or Path.cwd()
-        plugin_root = (
-            Path(__file__).resolve().parent.parent.parent.parent / "nx"
-        )
+        # Plugin root resolution (RDR-092 nexus-b9f3). The nx/ plan
+        # YAMLs ship as wheel package data via hatch force-include
+        # (see pyproject.toml), landing at
+        # ``<site-packages>/nexus/_resources/plans/builtin/*.yml`` on
+        # installed builds. Editable installs get the same path via
+        # a ``src/nexus/_resources/plans`` symlink back into
+        # ``nx/plans``. Either way ``importlib.resources.files`` is
+        # the correct resolver; it handles both cases and MultiplexedPath
+        # from namespace packages transparently.
+        #
+        # The tiered fallback (repo root, legacy __file__ walk) is
+        # kept as a belt-and-braces measure for unusual install
+        # layouts, but real-world CLIs should always hit the
+        # ``importlib.resources`` branch.
+        plugin_root = _resolve_plugin_root(repo_root)
         tier_results = load_all_tiers(
             plugin_root=plugin_root,
             repo_root=repo_root,

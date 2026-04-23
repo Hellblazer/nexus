@@ -77,6 +77,28 @@ nx-mcp-catalog = "nexus.mcp.catalog:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/nexus"]
 
+# RDR-092 nexus-b9f3: ship the nx plugin's plan YAMLs as package data
+# so installed CLIs can resolve them via ``importlib.resources.files
+# ("nexus") / "_resources"``. Without this, ``_seed_plan_templates``
+# cannot find ``nx/plans/builtin/*.yml`` from a uv-tool install and
+# the Phase 0c fail-loud guard correctly surfaces the deployment gap.
+#
+# Only ``nx/plans/`` travels. The rest of ``nx/`` (agents, skills,
+# commands, hooks, .claude-plugin/plugin.json) is consumed by Claude
+# Code from the repo at plugin-install time, not from the Python
+# wheel.
+[tool.hatch.build.targets.wheel.force-include]
+"nx/plans" = "nexus/_resources/plans"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src",
+    "nx/plans",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 log_level = "WARNING"

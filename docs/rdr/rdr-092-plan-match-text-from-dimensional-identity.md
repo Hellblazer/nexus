@@ -27,12 +27,29 @@ Empirical evidence from the live `plan_library` on this repository (2026-04-22 s
 - *"just a random hello query"* probed against the current library lands plan #38 at rank 1 with cos=0.341, 6x above the unrelated-text background floor (~0.05). A nonsense probe can dominate a genuinely unrelated plan, and the dominant plan gets its counter bumped anyway.
 - The sum of `match_count` across the top ten plans is 662. Direct `plan_search` by hand over the same corpus: 37 calls. The matcher is the dominant consumer; it consumes an over-broad surface.
 
-The current matcher has two paths and both share this weakness:
-
-1. **T1 cosine path** (`src/nexus/plans/matcher.py:162`): embeds raw `query` into `plans__session` at session start, cosine-matches at runtime. Scope-aware re-ranking (RDR-091) is a post-filter over the cosine result, not a change to the embedding surface.
-2. **FTS5 fallback** (`plan_library.py:search_plans`): keyword-match over `query + tags + project`. Same prose column, same attractor problem, different retrieval math.
-
 The RDR-078 dimensional identity columns (`verb`, `scope`, `dimensions`, `scope_tags`, `name`) already exist on every plan in the schema (`plan_library.py:74-104`). They encode the plan's typed identity cleanly. They are not in the matching path.
+
+#### Gap 1: T1 cosine path embeds raw prose
+
+`src/nexus/plans/matcher.py:162` embeds the raw `query` string into `plans__session` at session start and cosine-matches at runtime. The dimensional identity columns already populated on every row never enter the embedding. Scope-aware re-ranking (RDR-091) is a post-filter over the cosine result, not a change to the embedding surface. Result: the T1 lane inherits the attractor-breadth problem above.
+
+#### Gap 2: T2 FTS5 fallback indexes the same raw prose
+
+`plan_library.py::search_plans` keyword-matches over `query + tags + project` via the `plans_fts` virtual table. Same prose column, same attractor surface, different retrieval math. Both matcher lanes key off the same under-discriminative payload.
+
+#### Gap 3: Dimensional columns empty in production
+
+R3 verified 0/52 live-DB plans have populated `verb` / `name` / `dimensions`. Three upstream causes:
+
+1. Legacy builtin seed at `src/nexus/commands/catalog.py:107` calls `db.save_plan(query, plan_json, tags)` without dimensional arguments.
+2. Grown-plan path at `src/nexus/mcp/core.py:2397` passes only `scope`, `scope_tags`, `tags` (all 5 grown plans non-dimensional).
+3. The RDR-078 scoped loader at `src/nexus/plans/seed_loader.py:158` is dimensional-correct but its 9 would-be rows are absent from the live DB — loader never re-ran after landing.
+
+Even a perfect embedding synthesiser can only project from what exists; populating the columns is the precondition for every downstream fix.
+
+#### Gap 4: Loader failures are silent
+
+The scoped loader's error path (`_seed_plan_templates` around `catalog.py:131`) logs via `_log.warning` only. A misrouted `plugin_root` or missing YAMLs produces no user-visible failure during `nx catalog setup`; the empty global tier state from R3 + R5 persists indefinitely. The close-time `nx doctor --check-plan-library` surface + fail-loud setup raise are the observability lever.
 
 ## Context
 
