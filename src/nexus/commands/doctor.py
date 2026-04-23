@@ -250,6 +250,14 @@ def _run_trim_telemetry(days: int) -> None:
          "(nexus-c590).",
 )
 @click.option(
+    "--check-taxonomy",
+    "check_taxonomy",
+    is_flag=True,
+    default=False,
+    help="Verify the topic_links ≡ projection-assignment invariant "
+         "(GH #252). Exits 1 on drift.",
+)
+@click.option(
     "--json",
     "json_out",
     is_flag=True,
@@ -275,7 +283,7 @@ def _run_trim_telemetry(days: int) -> None:
 def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                fix_paths: bool, dry_run: bool, check_schema: bool,
                check_search: bool, check_resources: bool,
-               check_quotas: bool, json_out: bool,
+               check_quotas: bool, check_taxonomy: bool, json_out: bool,
                trim_telemetry: bool, days: int) -> None:
     """Verify that all required services and credentials are available."""
     if check_schema:
@@ -293,6 +301,10 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
 
     if check_quotas:
         _run_check_quotas(json_out=json_out)
+        return
+
+    if check_taxonomy:
+        _run_check_taxonomy()
         return
 
     if trim_telemetry:
@@ -624,6 +636,90 @@ def _format_quota_report(report: dict) -> str:
         lines.append(f"  {_CHECK} Retry accumulator: no transient backoffs observed")
 
     return "\n".join(lines)
+
+
+def _run_check_taxonomy() -> None:
+    """Verify the topic_links ≡ projection-assignment invariant (GH #252).
+
+    ``topic_links`` is the materialized aggregate of ``topic_assignments``
+    rows with ``assigned_by='projection'``. Today a single caller
+    (``_persist_assignments``) maintains it via ``refresh_projection_links``.
+    Any future caller that writes projection assignments through
+    ``assign_topic`` directly — or a test fixture that seeds rows — will
+    silently re-break the invariant. This check detects the drift.
+    """
+    import sqlite3
+
+    from nexus.commands._helpers import default_db_path
+
+    db_path = default_db_path()
+    if not db_path.exists():
+        click.echo("T2 database not found — nothing to check.")
+        return
+
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA journal_mode=WAL")
+
+    tables = {
+        r[0]
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    required = {"topic_assignments", "topic_links", "topics"}
+    missing = required - tables
+    if missing:
+        click.echo(
+            "Taxonomy tables missing: "
+            f"{', '.join(sorted(missing))} — run `nx catalog setup` to initialise."
+        )
+        return
+
+    # Topics that have projection assignments but no row in topic_links
+    # (neither as source nor target) are drift — the materialized view
+    # is out of sync with the assignment table.
+    drift_rows = conn.execute(
+        """
+        SELECT DISTINCT ta.topic_id, t.label, t.collection
+          FROM topic_assignments ta
+          LEFT JOIN topics t ON t.id = ta.topic_id
+         WHERE ta.assigned_by = 'projection'
+           AND NOT EXISTS (
+               SELECT 1 FROM topic_links tl
+                WHERE tl.from_topic_id = ta.topic_id
+                   OR tl.to_topic_id   = ta.topic_id
+           )
+        """
+    ).fetchall()
+
+    projection_total = conn.execute(
+        "SELECT COUNT(DISTINCT topic_id) FROM topic_assignments "
+        "WHERE assigned_by = 'projection'"
+    ).fetchone()[0]
+
+    if not drift_rows:
+        click.echo(
+            f"✓ topic_links invariant holds ({projection_total} topic(s) "
+            "with projection assignments)."
+        )
+        return
+
+    click.echo(
+        f"✗ topic_links drift: {len(drift_rows)}/{projection_total} topic(s) "
+        "have projection assignments but no topic_links row."
+    )
+    for topic_id, label, coll in drift_rows[:10]:
+        pretty = label or f"(unlabelled id={topic_id})"
+        scope = f" [{coll}]" if coll else ""
+        click.echo(f"  - topic {topic_id}: {pretty}{scope}")
+    if len(drift_rows) > 10:
+        click.echo(f"  … {len(drift_rows) - 10} more")
+    click.echo(
+        "Fix: re-run `nx taxonomy project --backfill --persist` to rebuild "
+        "the materialized view."
+    )
+    raise click.exceptions.Exit(1)
 
 
 def _run_check_quotas(*, json_out: bool = False) -> None:

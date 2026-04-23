@@ -319,6 +319,102 @@ class TestDoctorCheckSchema:
         assert "search_telemetry" in result.output
 
 
+# ── GH #252: nx doctor --check-taxonomy ─────────────────────────────────────
+
+
+class TestDoctorCheckTaxonomy:
+    """``nx doctor --check-taxonomy`` validates the invariant
+    ``topic_links`` ≡ aggregate of ``topic_assignments(assigned_by='projection')``.
+    """
+
+    def _setup_db(self, tmp_path: Path) -> Path:
+        from nexus.commands.upgrade import _current_version
+        from nexus.db.migrations import apply_pending
+
+        db_path = tmp_path / "memory.db"
+        conn = sqlite3.connect(str(db_path))
+        apply_pending(conn, _current_version())
+        conn.close()
+        return db_path
+
+    def test_no_db_file(self, runner: CliRunner, tmp_path: Path) -> None:
+        db_path = tmp_path / "nonexistent" / "memory.db"
+        with patch("nexus.commands._helpers.default_db_path", return_value=db_path):
+            result = runner.invoke(main, ["doctor", "--check-taxonomy"])
+        assert result.exit_code == 0
+        assert "not found" in result.output.lower()
+
+    def test_clean_db_no_assignments(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """Empty taxonomy tables still satisfy the invariant vacuously."""
+        db_path = self._setup_db(tmp_path)
+        with patch("nexus.commands._helpers.default_db_path", return_value=db_path):
+            result = runner.invoke(main, ["doctor", "--check-taxonomy"])
+        assert result.exit_code == 0
+        assert "invariant holds" in result.output
+
+    def test_drift_detected(self, runner: CliRunner, tmp_path: Path) -> None:
+        """Projection assignments without a matching topic_links row → exit 1."""
+        db_path = self._setup_db(tmp_path)
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "INSERT INTO topics (id, label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (42, "orphan-topic", "docs__test", 0, "2026-01-01T00:00:00Z"),
+        )
+        conn.execute(
+            "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by) "
+            "VALUES (?, ?, ?)",
+            ("doc-xyz", 42, "projection"),
+        )
+        conn.commit()
+        conn.close()
+
+        with patch("nexus.commands._helpers.default_db_path", return_value=db_path):
+            result = runner.invoke(main, ["doctor", "--check-taxonomy"])
+
+        assert result.exit_code == 1
+        assert "topic_links drift" in result.output
+        assert "orphan-topic" in result.output
+        assert "nx taxonomy project" in result.output
+
+    def test_invariant_holds_with_matching_link(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """Projection assignment + topic_links row referencing it → pass."""
+        db_path = self._setup_db(tmp_path)
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "INSERT INTO topics (id, label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (7, "topic-a", "docs__a", 0, "2026-01-01T00:00:00Z"),
+        )
+        conn.execute(
+            "INSERT INTO topics (id, label, collection, doc_count, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (8, "topic-b", "docs__b", 0, "2026-01-01T00:00:00Z"),
+        )
+        conn.execute(
+            "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by) "
+            "VALUES (?, ?, ?)",
+            ("doc-1", 7, "projection"),
+        )
+        conn.execute(
+            "INSERT INTO topic_links (from_topic_id, to_topic_id, link_count) "
+            "VALUES (?, ?, ?)",
+            (7, 8, 1),
+        )
+        conn.commit()
+        conn.close()
+
+        with patch("nexus.commands._helpers.default_db_path", return_value=db_path):
+            result = runner.invoke(main, ["doctor", "--check-taxonomy"])
+
+        assert result.exit_code == 0
+        assert "invariant holds" in result.output
+
+
 # ── RDR-087 Phase 2.4: nx doctor --trim-telemetry ───────────────────────────
 
 
