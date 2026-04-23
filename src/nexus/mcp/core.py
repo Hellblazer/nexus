@@ -1860,6 +1860,77 @@ def _nx_answer_match_is_hit(confidence: float | None) -> bool:
     return confidence >= _PLAN_MATCH_MIN_CONFIDENCE
 
 
+#: Common English stop-words stripped when synthesizing a grown plan's
+#: ``name`` from the question. Kept narrow on purpose; aggressive
+#: filtering drops the content words R10 needs for match-text signal.
+_GROWN_PLAN_NAME_STOP_WORDS: frozenset[str] = frozenset({
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+    "to", "of", "for", "in", "on", "at", "by", "with", "from", "about",
+    "and", "or", "but", "so", "as",
+    "how", "what", "why", "when", "where", "who", "which",
+    "do", "does", "did", "can", "could", "should", "would", "will",
+    "this", "that", "these", "those",
+    "i", "we", "you", "they", "it", "he", "she",
+})
+
+
+def _infer_grown_plan_verb(
+    *,
+    caller_dimensions: dict[str, Any] | None,
+    plan_json: str,
+) -> str:
+    """Three-tier verb cascade for a grown plan. RDR-092 Phase 0b.
+
+    Tier 1: caller-supplied ``dimensions["verb"]``.
+    Tier 2: operator-shape inference from ``plan_json.steps``:
+        compare step → analyze; extract+rank → analyze;
+        traverse+search+summarize → research.
+    Tier 3: ``"research"`` fallback.
+    """
+    if caller_dimensions:
+        pinned = caller_dimensions.get("verb")
+        if isinstance(pinned, str) and pinned.strip():
+            return pinned.strip().lower()
+    try:
+        plan = json.loads(plan_json) if isinstance(plan_json, str) else plan_json
+    except (json.JSONDecodeError, TypeError):
+        return "research"
+    steps = plan.get("steps") if isinstance(plan, dict) else None
+    if not isinstance(steps, list):
+        return "research"
+    tools = {
+        step.get("tool", "").strip().lower()
+        for step in steps if isinstance(step, dict)
+    }
+    tools.discard("")
+    if "compare" in tools:
+        return "analyze"
+    if {"extract", "rank"}.issubset(tools):
+        return "analyze"
+    if {"traverse", "search", "summarize"}.issubset(tools):
+        return "research"
+    return "research"
+
+
+def _infer_grown_plan_name(
+    question: str, *, max_words: int = 5,
+) -> str:
+    """Kebab-case name from first 3-5 content words of *question*.
+
+    RDR-092 Phase 0b. Drops a narrow set of common English stop-words
+    (see :data:`_GROWN_PLAN_NAME_STOP_WORDS`), lowercases the rest, and
+    joins up to *max_words* tokens with ``-``. Empty / whitespace-only
+    input returns ``"grown-plan"`` so a grown row always has an
+    identifier.
+    """
+    import re
+
+    tokens = re.findall(r"[a-zA-Z0-9][a-zA-Z0-9_]*", question.lower())
+    content = [t for t in tokens if t not in _GROWN_PLAN_NAME_STOP_WORDS]
+    take = content[:max_words] if content else tokens[:max_words]
+    return "-".join(take) or "grown-plan"
+
+
 def _nx_answer_classify_plan(match: Any) -> str:
     """Classify a matched plan: ``"single_query"`` | ``"retrieval_only"`` | ``"needs_operators"``."""
     from nexus.plans.runner import _OPERATOR_TOOL_MAP
@@ -2393,6 +2464,22 @@ async def nx_answer(
                 # it only appears in bindings, not plan_json. Passing
                 # scope_tags=scope explicitly captures the retrieval space
                 # that produced this plan.
+                # RDR-092 Phase 0b: R6 three-tier verb cascade populates
+                # verb / name / dimensions so the grown row participates in
+                # the dimensional identity index instead of landing as a
+                # NULL-dimension legacy ghost.
+                from nexus.plans.schema import canonical_dimensions_json
+
+                grown_verb = _infer_grown_plan_verb(
+                    caller_dimensions=dimensions,
+                    plan_json=best.plan_json,
+                )
+                grown_name = _infer_grown_plan_name(question)
+                grown_dimensions = canonical_dimensions_json({
+                    "verb": grown_verb,
+                    "scope": "personal",
+                    "strategy": grown_name,
+                })
                 with _t2_ctx() as _save_db:
                     grown_id = _save_db.plans.save_plan(
                         query=question,
@@ -2403,6 +2490,9 @@ async def nx_answer(
                         ttl=ttl_days,
                         scope="personal",
                         scope_tags=scope or None,
+                        verb=grown_verb,
+                        name=grown_name,
+                        dimensions=grown_dimensions,
                     )
                     # Feed the new plan into the T1 cosine cache so the next
                     # paraphrase can match without a SessionStart re-populate.

@@ -364,6 +364,240 @@ class TestPlanMissPlanner:
         assert "nexus.mcp_infra" not in str(dispatch_calls), "pool path must not be taken"
 
 
+# ── Grown plan dimensional columns (RDR-092 Phase 0b) ─────────────────────────
+
+
+def _ad_hoc_match_for_grow(plan_json_steps: list[dict]) -> Match:
+    """Build an ad-hoc Match whose plan_json has the given steps shape."""
+    return Match(
+        plan_id=0,
+        name="ad-hoc",
+        description="what is the meaning of life",
+        confidence=None,
+        dimensions={},
+        tags="ad-hoc",
+        plan_json=json.dumps({"steps": plan_json_steps}),
+        required_bindings=["intent"],
+        optional_bindings=[],
+        default_bindings={"intent": "what is the meaning of life"},
+        parent_dims=None,
+    )
+
+
+def _plan_run_ok():
+    result = MagicMock()
+    result.steps = [{"text": "the answer is 42"}]
+    return result
+
+
+class TestGrownPlanDimensionalColumns:
+    """RDR-092 Phase 0b: grown plans pass verb/name/dimensions on save_plan.
+
+    The R6 three-tier cascade resolves verb:
+      1. caller-supplied ``dimensions["verb"]``
+      2. inferred from ``plan_json.steps`` operator shape
+      3. ``"research"`` fallback
+    """
+
+    @pytest.mark.asyncio
+    async def test_grown_plan_has_dimensional_columns(self):
+        """save_plan on an ad-hoc grow path receives verb, name, dimensions."""
+        from nexus.mcp.core import nx_answer
+
+        match = _ad_hoc_match_for_grow([
+            {"tool": "search", "args": {"query": "$intent"}},
+            {"tool": "summarize", "args": {"inputs": "$step1.ids"}},
+        ])
+        save_mock = MagicMock(return_value=999)
+        db_stub = MagicMock()
+        db_stub.plans.save_plan = save_mock
+        db_stub.plans.get_plan = MagicMock(return_value={"id": 999})
+
+        with patch("nexus.plans.matcher.plan_match", return_value=[]), \
+             patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(return_value=match)), \
+             patch("nexus.plans.runner.plan_run", AsyncMock(return_value=_plan_run_ok())), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            await nx_answer(question="what is the meaning of life")
+
+        assert save_mock.called, "save_plan must be called on ad-hoc success"
+        kwargs = save_mock.call_args.kwargs
+        assert kwargs.get("verb"), "grown plan must carry a verb"
+        assert kwargs.get("name"), "grown plan must carry a name"
+        assert kwargs.get("dimensions"), "grown plan must carry canonical dimensions"
+        # dimensions string is canonical JSON: sorted keys, lowercased strings
+        parsed = json.loads(kwargs["dimensions"])
+        assert parsed["verb"] == kwargs["verb"]
+        assert parsed["scope"] == "personal"
+        # name is kebab-case; strategy mirrors it so each grown plan is unique
+        assert "-" in kwargs["name"] or kwargs["name"].isalpha()
+        assert parsed.get("strategy") == kwargs["name"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "steps,expected_verb",
+        [
+            # Tier 2.1: compare step → analyze
+            (
+                [
+                    {"tool": "search", "args": {}},
+                    {"tool": "compare", "args": {}},
+                ],
+                "analyze",
+            ),
+            # Tier 2.2: extract + rank → analyze
+            (
+                [
+                    {"tool": "search", "args": {}},
+                    {"tool": "extract", "args": {}},
+                    {"tool": "rank", "args": {}},
+                ],
+                "analyze",
+            ),
+            # Tier 2.3: traverse + search + summarize → research
+            (
+                [
+                    {"tool": "search", "args": {}},
+                    {"tool": "traverse", "args": {}},
+                    {"tool": "summarize", "args": {}},
+                ],
+                "research",
+            ),
+            # Tier 3: flat shape falls back to research
+            (
+                [
+                    {"tool": "search", "args": {}},
+                    {"tool": "summarize", "args": {}},
+                ],
+                "research",
+            ),
+        ],
+        ids=["compare→analyze", "extract+rank→analyze",
+             "traverse+search+summarize→research", "flat→research"],
+    )
+    async def test_grown_plan_verb_inference_from_plan_json(
+        self, steps, expected_verb,
+    ):
+        from nexus.mcp.core import nx_answer
+
+        match = _ad_hoc_match_for_grow(steps)
+        save_mock = MagicMock(return_value=1)
+        db_stub = MagicMock()
+        db_stub.plans.save_plan = save_mock
+        db_stub.plans.get_plan = MagicMock(return_value={"id": 1})
+
+        with patch("nexus.plans.matcher.plan_match", return_value=[]), \
+             patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(return_value=match)), \
+             patch("nexus.plans.runner.plan_run", AsyncMock(return_value=_plan_run_ok())), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            await nx_answer(question="how does X behave")
+
+        assert save_mock.call_args.kwargs.get("verb") == expected_verb
+
+    @pytest.mark.asyncio
+    async def test_caller_dimensions_verb_wins(self):
+        """Tier 1: caller-supplied dimensions['verb'] overrides inference."""
+        from nexus.mcp.core import nx_answer
+
+        # Plan shape would otherwise infer as "analyze" (has compare step),
+        # but the caller pinned verb:debug.
+        match = _ad_hoc_match_for_grow([
+            {"tool": "search", "args": {}},
+            {"tool": "compare", "args": {}},
+        ])
+        save_mock = MagicMock(return_value=1)
+        db_stub = MagicMock()
+        db_stub.plans.save_plan = save_mock
+        db_stub.plans.get_plan = MagicMock(return_value={"id": 1})
+
+        with patch("nexus.plans.matcher.plan_match", return_value=[]), \
+             patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(return_value=match)), \
+             patch("nexus.plans.runner.plan_run", AsyncMock(return_value=_plan_run_ok())), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            await nx_answer(
+                question="test q",
+                dimensions={"verb": "debug"},
+            )
+
+        assert save_mock.call_args.kwargs.get("verb") == "debug"
+
+    @pytest.mark.asyncio
+    async def test_name_is_kebab_case_from_content_words(self):
+        """Name skips stop-words and kebab-cases 3-5 content tokens."""
+        from nexus.mcp.core import nx_answer
+
+        match = _ad_hoc_match_for_grow([
+            {"tool": "search", "args": {}},
+            {"tool": "summarize", "args": {}},
+        ])
+        save_mock = MagicMock(return_value=1)
+        db_stub = MagicMock()
+        db_stub.plans.save_plan = save_mock
+        db_stub.plans.get_plan = MagicMock(return_value={"id": 1})
+
+        with patch("nexus.plans.matcher.plan_match", return_value=[]), \
+             patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(return_value=match)), \
+             patch("nexus.plans.runner.plan_run", AsyncMock(return_value=_plan_run_ok())), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            await nx_answer(question="How does the chroma cache evict?")
+
+        name = save_mock.call_args.kwargs.get("name") or ""
+        # Stop-words ('how', 'does', 'the') are dropped; content words remain.
+        assert "how" not in name.split("-")
+        assert "does" not in name.split("-")
+        assert "chroma" in name or "cache" in name
+        # Kebab-case: lowercase, no spaces
+        assert name == name.lower()
+        assert " " not in name
+
+    def test_infer_grown_plan_verb_helper_exposed(self):
+        """The verb-inference helper is importable for direct unit tests
+        and docs examples.
+        """
+        from nexus.mcp.core import _infer_grown_plan_verb
+
+        plan = json.dumps({"steps": [
+            {"tool": "search"}, {"tool": "compare"},
+        ]})
+        assert _infer_grown_plan_verb(
+            caller_dimensions=None, plan_json=plan,
+        ) == "analyze"
+        # Caller override wins.
+        assert _infer_grown_plan_verb(
+            caller_dimensions={"verb": "review"}, plan_json=plan,
+        ) == "review"
+        # Unparseable plan → fallback.
+        assert _infer_grown_plan_verb(
+            caller_dimensions=None, plan_json="not-json",
+        ) == "research"
+
+    def test_infer_grown_plan_name_helper_exposed(self):
+        from nexus.mcp.core import _infer_grown_plan_name
+
+        # Drops common stop-words, keeps content tokens, joins with '-'.
+        name = _infer_grown_plan_name("How does the chroma cache evict entries?")
+        parts = name.split("-")
+        assert "how" not in parts and "does" not in parts
+        assert any(p in parts for p in ("chroma", "cache", "evict"))
+        # Max 5 content words.
+        long_q = "one two three four five six seven eight nine ten"
+        long_name = _infer_grown_plan_name(long_q)
+        assert len(long_name.split("-")) <= 5
+        # Empty / whitespace-only falls back to a sentinel.
+        assert _infer_grown_plan_name("") == "grown-plan"
+
+
 # ── nx_tidy ───────────────────────────────────────────────────────────────────
 
 
