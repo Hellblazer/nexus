@@ -30,7 +30,7 @@ import structlog
 from nexus.db.local_ef import LocalEmbeddingFunction
 from nexus.db.t2.plan_library import PlanLibrary
 
-__all__ = ["PlanSessionCache", "PLANS_COLLECTION"]
+__all__ = ["PlanSessionCache", "PLANS_COLLECTION", "_synthesize_match_text"]
 
 _log = structlog.get_logger(__name__)
 
@@ -175,8 +175,8 @@ class PlanSessionCache:
             return False
 
     def _upsert_row(self, row: dict[str, Any]) -> bool:
-        description = (row.get("query") or "").strip()
-        if not description:
+        match_text = _synthesize_match_text(row)
+        if not match_text:
             return False
         plan_id = row.get("id")
         if plan_id is None:
@@ -192,10 +192,43 @@ class PlanSessionCache:
         }
         try:
             self._col.upsert(
-                ids=[doc_id], documents=[description], metadatas=[meta],
+                ids=[doc_id], documents=[match_text], metadatas=[meta],
             )
         except Exception:
             _log.warning("plan_session_cache_upsert_failed",
                          plan_id=plan_id, exc_info=True)
             return False
         return True
+
+
+def _synthesize_match_text(row: dict[str, Any]) -> str:
+    """Hybrid description + dimensional suffix for T1 embedding. RDR-092 Phase 1.
+
+    Shape: ``"<description>. <verb> <name> scope <scope>"`` when the
+    row carries verb AND name (the identity signal the cosine lane
+    needs to differentiate otherwise-similar descriptions). Scope is
+    optional and only appended when present.
+
+    When verb or name is missing, falls back to the raw description
+    so legacy NULL-dimension rows still embed cleanly rather than
+    losing all signal to an empty suffix. R10 validates the hybrid
+    form: zero verb-accuracy regression vs raw-description, plus the
+    dimensional suffix gives the matcher a reliable verb hook.
+    """
+    description = (row.get("query") or "").strip()
+    verb = (row.get("verb") or "").strip()
+    name = (row.get("name") or "").strip()
+    scope = (row.get("scope") or "").strip()
+
+    if not verb or not name:
+        return description
+
+    suffix = f"{verb} {name}"
+    if scope:
+        suffix += f" scope {scope}"
+    if description:
+        # Collapse an existing trailing '.' so descriptions that already
+        # end with punctuation do not produce '..' in the match text.
+        core = description.rstrip(".").rstrip()
+        return f"{core}. {suffix}"
+    return suffix
