@@ -73,7 +73,15 @@ class TestMigrationDataclass:
         from nexus.db.migrations import MIGRATIONS
 
         assert isinstance(MIGRATIONS, list)
-        # +RDR-092 Phase 3.1 match_text column (4.9.13).
+        # This branch adds the Phase 3.1 match_text migration to the
+        # pre-RDR-092 baseline of 16: total 17. When PR #260 (Phase 0d
+        # backfill) lands first per the recommended merge order,
+        # rebasing this branch brings the total to 18 and this
+        # assertion must be bumped at merge time (code-review C-2).
+        # Prefer the name-based checks below (plus
+        # ``test_registered_in_migrations_list`` on the specific
+        # migrations) for future assertions; this count is a cheap
+        # sentinel only.
         assert len(MIGRATIONS) == 17
 
     def test_migrations_ordered_by_version(self) -> None:

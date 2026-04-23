@@ -171,7 +171,7 @@ def _synthesize_match_text(
     appended when present. A trailing ``.`` on *description* is
     collapsed so the output does not carry ``..``.
 
-    When verb or name is missing, returns the raw description —
+    When verb or name is missing, returns the raw description so
     legacy NULL-dimension rows still carry a usable FTS payload.
     R10 validates the hybrid form at zero verb-accuracy regression.
     """
@@ -315,7 +315,7 @@ class PlanLibrary:
         # RDR-092 Phase 3: synthesise the hybrid match_text alongside
         # the raw query so FTS5 indexes the same dimensional suffix the
         # T1 cosine cache embeds. Legacy NULL-dimension callers still
-        # get the raw query — no signal lost.
+        # get the raw query; no signal lost.
         match_text = _synthesize_match_text(
             description=query, verb=verb, name=name, scope=scope,
         )

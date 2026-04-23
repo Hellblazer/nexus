@@ -707,7 +707,7 @@ def _rewash_plan_scope_tags_all_sentinel(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 
-# ── RDR-092 Phase 3.1 — plans.match_text column + FTS rebuild ──────────────
+# ── RDR-092 Phase 3.1 (plans.match_text column + FTS rebuild) ──────────────
 
 
 def _add_plan_match_text_column(conn: sqlite3.Connection) -> None:
