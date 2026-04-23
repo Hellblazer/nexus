@@ -1,0 +1,36 @@
+name: type-scoped-search
+description: >-
+  Search within a single content type (code, paper, rdr, knowledge).
+  Routes through the catalog to resolve the content-type bucket, runs the
+  semantic query against only those collections, hydrates the matches,
+  and summarises the findings. Useful when the caller already knows the
+  artefact kind (for example, "search code for X" or "search RDRs for Y")
+  but not the specific document, and wants the answer scoped narrowly
+  enough that unrelated corpora do not dilute the ranking.
+dimensions:
+  verb: research
+  scope: global
+  strategy: type-scoped
+required_bindings:
+  - question
+  - content_type
+optional_bindings:
+  - limit
+default_bindings:
+  limit: 10
+tags: builtin-template,rdr-092,catalog,type-scoped
+plan_json:
+  steps:
+    - tool: query
+      args:
+        question: $question
+        content_type: $content_type
+        limit: $limit
+        corpus: all
+    - tool: store_get_many
+      args:
+        ids: $step1.ids
+        collections: $step1.collections
+    - tool: summarize
+      args:
+        inputs: $step2.contents

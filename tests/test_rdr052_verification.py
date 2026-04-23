@@ -141,9 +141,10 @@ class TestReferenceQuestions:
 
 class TestPlanTemplates:
     def test_seed_creates_five_idempotent(self, tmp_path, monkeypatch):
-        # 5 legacy RDR-063 plans + 9 RDR-078 YAML scenario templates = 14
+        # RDR-092 Phase 0a: 12 YAML builtins (9 RDR-078 + 3 RDR-092
+        # migrations). Legacy _PLAN_TEMPLATES retired.
         db_path, seed_fn = _seed_templates(tmp_path, monkeypatch)
-        assert seed_fn() == 14
+        assert seed_fn() == 12
         assert seed_fn() == 0  # idempotent
 
     @pytest.mark.parametrize("field,expected", [
@@ -154,7 +155,7 @@ class TestPlanTemplates:
         db_path, seed_fn = _seed_templates(tmp_path, monkeypatch)
         seed_fn()
         db = T2Database(db_path)
-        for p in db.list_plans(limit=10):
+        for p in db.list_plans(limit=20):
             assert expected(p[field])
         db.close()
 
@@ -227,16 +228,33 @@ class TestTemplateRetrieval:
         builtin = [r for r in results if "builtin-template" in r.get("tags", "")]
         assert len(builtin) >= 1
         plan = json.loads(builtin[0]["plan_json"])
-        assert any("operation" in step for step in plan["steps"])
+        # RDR-092 Phase 0a: dimensional YAML uses ``tool:`` step keys,
+        # not the legacy ``operation:`` key from the retired
+        # _PLAN_TEMPLATES shape.
+        assert any("tool" in step for step in plan["steps"])
         db.close()
 
-    def test_all_five_templates_searchable(self, tmp_path, monkeypatch):
+    def test_migrated_legacy_shapes_searchable(self, tmp_path, monkeypatch):
+        """The 3 legacy _PLAN_TEMPLATES shapes retained by RDR-092 Phase 0a
+        are discoverable by their natural-language description and by
+        their migrated strategy name.
+        """
         db_path, seed_fn = _seed_templates(tmp_path, monkeypatch)
         seed_fn()
-        from nexus.commands.catalog import _PLAN_TEMPLATES
         db = T2Database(db_path)
-        for tmpl in _PLAN_TEMPLATES:
-            assert db.search_plans(tmpl["query"]), f"Template not found: {tmpl['query']}"
+        # Natural-language probe text derived from the migrated YAML
+        # descriptions.
+        probes = [
+            "find documents attributed",   # find-by-author
+            "trace the citation chain",    # citation-traversal
+            "search within a single content type",  # type-scoped-search
+        ]
+        for probe in probes:
+            results = db.search_plans(probe, limit=10)
+            assert results, f"migrated template not searchable: {probe!r}"
+            assert any(
+                "builtin-template" in (r.get("tags") or "") for r in results
+            ), f"no builtin-tagged result for {probe!r}"
         db.close()
 
 
