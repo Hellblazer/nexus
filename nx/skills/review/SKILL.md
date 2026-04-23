@@ -6,11 +6,11 @@ effort: medium
 
 # review
 
-Pure verb skill. Routes through `nx_answer` with `dimensions={verb: "review"}`
-so the plan-match gate narrows to review templates and the full trunk runs
-in one tool call.
+**You MUST call `nx_answer` for critique/audit/review work. Direct
+`search` against RDRs or code skips the decision-evolution traversal
+and extract → compare pipeline that reviews actually need.**
 
-## Flow
+## The call
 
 ```
 mcp__plugin_nx_nexus__nx_answer(
@@ -20,9 +20,11 @@ mcp__plugin_nx_nexus__nx_answer(
 )
 ```
 
-`nx_answer` handles match → run → record. Plan-miss falls through to an
-inline `claude -p` planner; on total miss the tool returns an error string
-the caller can show to the user.
+One tool call. `nx_answer` handles match → run → record. Operator chains
+inside review plans (extract → compare) bundle into a single `claude -p`
+subprocess. Plan-miss falls through to an inline `claude -p` planner; on
+total miss the tool returns an error string the caller can show to the
+user.
 
 ## Required bindings
 
@@ -46,11 +48,22 @@ when it exists, falling back to `strategy:default` otherwise.
 - "did the auth middleware refactor drift from RDR-053?"
 - "critique the new taxonomy assignment logic"
 
-## Anti-patterns
+## When direct `search` is fine
 
+If you just need to find the RDR or chunk that defines something — e.g.
+"show me where RDR-053 states the auth middleware contract" —
+`mcp__plugin_nx_nexus__search` against `rdr__<repo>` is the right tool.
+This skill earns its cost when the review has to *align* multiple
+RDRs against a change set and extract drift claims.
+
+## Anti-patterns (do not do any of these)
+
+- **Calling `search` directly when the review requires aligning
+  multiple RDRs against a change.** You see current chunks, not the
+  decision-evolution traversal. If the critique needs drift analysis
+  across decision history, you need `nx_answer`.
 - **Calling `plan_match` directly instead of `nx_answer`.** You lose
-  the record step and the miss-path inline-planner fallback.  Let
-  `nx_answer` be the entry point; it's the MCP-level contract.
+  the record step, the inline-planner fallback, and use_count telemetry.
 - **Running `review` without changed_paths.** The review template
   has no sensible default — missing `changed_paths` raises
   `PlanRunBindingError(missing=["changed_paths"])`. Surface the

@@ -301,11 +301,22 @@ _VAR_RE = re.compile(r"^\$([A-Za-z_][A-Za-z0-9_]*)$")
 _STEPREF_RE = re.compile(r"^\$step(\d+)\.([A-Za-z_][A-Za-z0-9_]*)$")
 
 
+#: Sentinel returned when a ``$stepN.field`` reference is DEFERRED — the
+#: referenced step hasn't produced output yet because it's bundled
+#: alongside the step doing the referencing. The bundle prompt composer
+#: rewrites this into "the output from STEP M" in the prompt; the LLM
+#: carries the chain internally. The KEY string lives in
+#: :mod:`nexus.plans.bundle` (``DEFERRED_REF_KEY``) so a rename or typo
+#: on either side can't silently drop the sentinel (substantive-critic C2).
+from nexus.plans.bundle import DEFERRED_REF_KEY as _DEFERRED_REF_KEY  # noqa: E402
+
+
 def _resolve_value(
     value: Any,
     *,
     bindings: dict[str, Any],
     step_outputs: list[dict[str, Any]],
+    deferred_step_indices: set[int] | None = None,
 ) -> Any:
     """Substitute one arg value.
 
@@ -316,11 +327,21 @@ def _resolve_value(
     resolves independently, list-valued elements are flattened one
     level so the final ``seeds`` is a flat list of tumblers. Non-list,
     non-string values pass through unchanged.
+
+    *deferred_step_indices* names step indices (0-based) whose outputs
+    won't exist on the host side because they're bundled alongside the
+    step being resolved. ``$step{M+1}.field`` with ``M ∈ deferred``
+    returns a sentinel marker the bundle composer translates into
+    "from STEP (M+1)" prose. Non-deferred references resolve normally
+    or raise if the target hasn't run.
     """
     if isinstance(value, list):
         resolved: list[Any] = []
         for item in value:
-            r = _resolve_value(item, bindings=bindings, step_outputs=step_outputs)
+            r = _resolve_value(
+                item, bindings=bindings, step_outputs=step_outputs,
+                deferred_step_indices=deferred_step_indices,
+            )
             if isinstance(r, list):
                 resolved.extend(r)
             else:
@@ -334,12 +355,36 @@ def _resolve_value(
     if m is not None:
         step_idx = int(m.group(1)) - 1
         field_name = m.group(2)
+        if deferred_step_indices is not None and step_idx in deferred_step_indices:
+            # Preserve the intent — the bundle composer will describe
+            # this as chaining from STEP M's output in the prompt.
+            return {
+                _DEFERRED_REF_KEY: True,
+                "step_index": step_idx,         # 0-based; +1 for display
+                "field": field_name,
+            }
         if step_idx < 0 or step_idx >= len(step_outputs):
             raise PlanRunStepRefError(
                 ref=value,
                 reason=f"step {step_idx + 1} has not produced output yet",
             )
         prior = step_outputs[step_idx]
+        # Named error when the target slot is a bundled-intermediate
+        # sentinel. Without this check the generic "output has no field"
+        # message below surfaces the sentinel's internal keys
+        # (``_bundled_intermediate``, ``_note``) which most YAML authors
+        # will not recognize as a bundling artifact. (substantive-critic S6)
+        if prior.get("_bundled_intermediate"):
+            raise PlanRunStepRefError(
+                ref=value,
+                reason=(
+                    f"step {step_idx + 1} is an intermediate inside an operator "
+                    "bundle; its output is consumed inline by the next operator "
+                    "and is not exposed on the host side. Reference the FINAL "
+                    "step of the bundle instead, or pass `bundle_operators=False` "
+                    "to plan_run to disable bundling for this invocation."
+                ),
+            )
         if field_name not in prior:
             raise PlanRunStepRefError(
                 ref=value,
@@ -365,9 +410,13 @@ def _resolve_args(
     *,
     bindings: dict[str, Any],
     step_outputs: list[dict[str, Any]],
+    deferred_step_indices: set[int] | None = None,
 ) -> dict[str, Any]:
     return {
-        key: _resolve_value(val, bindings=bindings, step_outputs=step_outputs)
+        key: _resolve_value(
+            val, bindings=bindings, step_outputs=step_outputs,
+            deferred_step_indices=deferred_step_indices,
+        )
         for key, val in args.items()
     }
 
@@ -539,6 +588,75 @@ _OPERATOR_MAX_INPUTS: int = 100
 _OPERATOR_RESOLVED_TOOLS: frozenset[str] = frozenset(_OPERATOR_TOOL_MAP.values())
 
 
+def _hydrate_operator_args(
+    tool: str, args: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    """Run auto-hydration and arg-name translation for an operator call.
+
+    Shared between :func:`_default_dispatcher` (isolated operator steps)
+    and the bundle execution path. Takes the plan-step ``tool`` name
+    (bare or ``operator_*``) and returns ``(resolved_tool, prepared_args)``
+    ready for either ``claude_dispatch`` (bundled) or direct MCP-tool call
+    (isolated). Non-operator tools pass through untouched.
+
+    Hydration rules (RDR-080 Option C):
+      * operator tool + ``ids`` in args → call ``store_get_many``, replace
+        ``ids``/``collections`` with the operator's expected content arg
+      * ``_OPERATOR_MAX_INPUTS`` positional cap
+      * RF-13: ``template`` dict → ``fields`` CSV for extract
+      * list-valued ``content``/``context`` joined for summarize/generate
+    """
+    from nexus.mcp import core as mcp_core
+
+    resolved_tool = _OPERATOR_TOOL_MAP.get(tool, tool)
+
+    if resolved_tool in _OPERATOR_RESOLVED_TOOLS and "ids" in args:
+        ids = args["ids"]
+        collections = args.get("collections", "knowledge")
+        hydrated = mcp_core.store_get_many(
+            ids=ids, collections=collections, structured=True,
+        )
+        contents = hydrated.get("contents", []) if isinstance(hydrated, dict) else []
+        non_empty = [c for c in contents if c]
+        if len(non_empty) > _OPERATOR_MAX_INPUTS:
+            _log.warning(
+                "auto_hydration_overflow",
+                tool=tool, resolved_tool=resolved_tool,
+                input_count=len(non_empty), max_inputs=_OPERATOR_MAX_INPUTS,
+                action="positional truncation to max_inputs",
+            )
+            non_empty = non_empty[:_OPERATOR_MAX_INPUTS]
+        args = {k: v for k, v in args.items() if k not in ("ids", "collections")}
+        if resolved_tool == "operator_summarize":
+            args.setdefault("content", "\n\n".join(non_empty))
+        elif resolved_tool == "operator_generate":
+            args.setdefault("context", "\n\n".join(non_empty))
+        elif resolved_tool in ("operator_rank", "operator_compare"):
+            args.setdefault("items", json.dumps(non_empty))
+        else:
+            args.setdefault("inputs", json.dumps(non_empty))
+
+    if resolved_tool == "operator_extract" and "template" in args and "fields" not in args:
+        template = args.pop("template")
+        if isinstance(template, dict):
+            args["fields"] = ",".join(template.keys())
+
+    if resolved_tool == "operator_summarize" and isinstance(args.get("content"), list):
+        args["content"] = "\n\n".join(str(x) for x in args["content"] if x)
+    if resolved_tool == "operator_generate" and isinstance(args.get("context"), list):
+        args["context"] = "\n\n".join(str(x) for x in args["context"] if x)
+
+    return resolved_tool, args
+
+
+#: Attribute set on dispatchers that understand operator-bundle execution.
+#: The bundle path in :func:`plan_run` reads this via ``getattr(dispatch,
+#: _SUPPORTS_BUNDLING_ATTR, False)``. We don't want an ``is`` identity
+#: check because a decorator or timing-wrapper would silently disable
+#: bundling in production. (substantive-critic Obs D)
+_SUPPORTS_BUNDLING_ATTR: str = "supports_bundling"
+
+
 async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]:
     """Dispatch *tool* against the live MCP tool registry.
 
@@ -563,75 +681,8 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
     """
     from nexus.mcp import core as mcp_core
 
-    # RDR-079 P4: map plan-step operator names (bare) to their MCP-tool
-    # counterparts (operator_*).  Seed YAMLs use the bare name; the pool
-    # exposes operator_*.
-    resolved_tool = _OPERATOR_TOOL_MAP.get(tool, tool)
-
-    # RDR-080 Option C: auto-hydration for operator steps that receive
-    # IDs from a prior retrieval step. Intercept before dispatch.
-    if resolved_tool in _OPERATOR_RESOLVED_TOOLS and "ids" in args:
-        ids = args["ids"]
-        collections = args.get("collections", "knowledge")
-        hydrated = mcp_core.store_get_many(
-            ids=ids,
-            collections=collections,
-            structured=True,
-        )
-        contents = hydrated.get("contents", []) if isinstance(hydrated, dict) else []
-        # Filter out empty strings (missing docs).
-        non_empty = [c for c in contents if c]
-        if len(non_empty) > _OPERATOR_MAX_INPUTS:
-            # Spec deviation: RDR-080 §Design says auto-insert a synthetic
-            # rank winnow step here. Implementation truncates positionally
-            # instead — search results arrive distance-ordered, so the first
-            # N are already roughly relevance-ordered. The rank winnow would
-            # add a pool dispatch ($0.01-0.04 + 5-15s latency) for marginal
-            # quality improvement on a rare path (>100 docs from a single
-            # retrieval step). Accepted as pragmatic tradeoff.
-            _log.warning(
-                "auto_hydration_overflow",
-                tool=tool,
-                resolved_tool=resolved_tool,
-                input_count=len(non_empty),
-                max_inputs=_OPERATOR_MAX_INPUTS,
-                action="positional truncation to max_inputs",
-            )
-            non_empty = non_empty[:_OPERATOR_MAX_INPUTS]
-        # Replace ids/collections with the operator's expected content arg.
-        # Each operator takes a different parameter name for the hydrated
-        # content — match the tool signature so auto-hydration plugs in
-        # correctly regardless of whether the LLM planner emitted ids or
-        # explicit content.
-        args = {k: v for k, v in args.items() if k not in ("ids", "collections")}
-        if resolved_tool in ("operator_summarize",):
-            # summarize() takes a single string; join the hydrated chunks.
-            args.setdefault("content", "\n\n".join(non_empty))
-        elif resolved_tool in ("operator_generate",):
-            # generate() uses `context` for the backing material.
-            args.setdefault("context", "\n\n".join(non_empty))
-        elif resolved_tool in ("operator_rank", "operator_compare"):
-            # rank/compare take `items` as the list.
-            args.setdefault("items", json.dumps(non_empty))
-        else:
-            # extract (and any future list-consuming operator) uses `inputs`.
-            args.setdefault("inputs", json.dumps(non_empty))
-
-    # RF-13: translate extract template dict → fields CSV.
-    # Fires for ALL operator_extract calls, not just auto-hydrated ones.
-    if resolved_tool == "operator_extract" and "template" in args and "fields" not in args:
-        template = args.pop("template")
-        if isinstance(template, dict):
-            args["fields"] = ",".join(template.keys())
-
-    # Normalize list-valued args for summarize/generate when the LLM planner
-    # passes $stepN.contents (a list) directly instead of routing via
-    # auto-hydration.  Without this the operator errors with
-    # "content must be str, got list".
-    if resolved_tool == "operator_summarize" and isinstance(args.get("content"), list):
-        args["content"] = "\n\n".join(str(x) for x in args["content"] if x)
-    if resolved_tool == "operator_generate" and isinstance(args.get("context"), list):
-        args["context"] = "\n\n".join(str(x) for x in args["context"] if x)
+    # Auto-hydration + arg normalization: shared with the bundle path.
+    resolved_tool, args = _hydrate_operator_args(tool, args)
 
     fn = getattr(mcp_core, resolved_tool, None)
     if fn is None or not callable(fn):
@@ -737,6 +788,14 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
     )
 
 
+# Mark the default dispatcher as bundle-aware. Wrappers (timing decorator,
+# retry wrapper, …) that want bundling enabled can set this attribute
+# themselves. The plan_run bundle path gates on this attribute (not on
+# identity), so wrapping the dispatcher doesn't silently disable bundling.
+# (substantive-critic Obs D)
+setattr(_default_dispatcher, _SUPPORTS_BUNDLING_ATTR, True)
+
+
 # ── Public API ──────────────────────────────────────────────────────────────
 
 
@@ -745,6 +804,7 @@ async def plan_run(
     bindings: dict[str, Any] | None = None,
     *,
     dispatcher: ToolDispatcher | None = None,
+    bundle_operators: bool = True,
 ) -> PlanResult:
     """Execute the steps in *match* and return the captured outputs.
 
@@ -755,7 +815,35 @@ async def plan_run(
     ``plan_run`` tool also went async in the same change so FastMCP
     runs it natively on its event loop without the sync-legacy
     thread-bridge dance that broke loop continuity for pool workers.
+
+    ``bundle_operators`` (nexus-nxa-perf, default ``True``) collapses
+    contiguous runs of ≥2 operator steps (extract/rank/compare/summarize/
+    generate) into a single ``claude -p`` subprocess via
+    :func:`nexus.plans.bundle.dispatch_bundle`. Benchmark (2-op chain,
+    3-paper synthetic input): **~55% wall-clock reduction** vs per-step
+    isolation. Retrieval steps stay isolated — they're cheap and the
+    bundle needs their real host-side outputs as inputs. Pass ``False``
+    to recover the per-step dispatch path for debugging or plans that
+    need per-step telemetry.
     """
+    from nexus.plans.bundle import (
+        BUNDLED_INTERMEDIATE,
+        IsolatedStep,
+        MAX_BUNDLE_PROMPT_CHARS,
+        OperatorBundle,
+        OperatorBundleSlice,
+        OperatorBundleStep,
+        compose_bundle_prompt,
+        dispatch_bundle,
+        segment_steps,
+    )
+
+    def _extract_tool(step: dict[str, Any]) -> str:
+        t = step.get("tool") or step.get("op") or step.get("operation") or ""
+        if t.startswith("mcp__"):
+            t = t.rsplit("__", 1)[-1]
+        return t
+
     caller = bindings or {}
     merged: dict[str, Any] = {**match.default_bindings, **caller}
     _validate_bindings(match, merged)
@@ -766,16 +854,115 @@ async def plan_run(
     dispatch: ToolDispatcher = dispatcher or _default_dispatcher
     step_outputs: list[dict[str, Any]] = []
 
-    for index, step in enumerate(steps):
-        tool = step.get("tool") or step.get("op") or step.get("operation") or ""
-        # Strip any MCP prefix — planner workers see fully-qualified names
-        # from all MCP servers (nexus, serena, context7, etc.) and may
-        # generate plans using them. Only nexus tools are dispatchable.
-        if tool.startswith("mcp__"):
-            # mcp__plugin_nx_nexus__search → search
-            # mcp__plugin_sn_serena__find_symbol → find_symbol (will fail
-            #   at dispatch, but with a clear "unknown tool" error)
-            tool = tool.rsplit("__", 1)[-1]
+    # One authoritative segmentation. When bundling is off or the caller
+    # supplied a dispatcher that doesn't opt into bundling, flatten the
+    # slices back into isolated steps so the per-step path handles
+    # everything. Gate is attribute-based so decorator wrappers survive.
+    segments: list = segment_steps(steps)
+    use_bundle_path = bundle_operators and getattr(
+        dispatch, _SUPPORTS_BUNDLING_ATTR, False,
+    )
+    if not use_bundle_path:
+        flat: list = []
+        for seg in segments:
+            if isinstance(seg, OperatorBundleSlice):
+                for pi in seg.plan_indices:
+                    flat.append(IsolatedStep(plan_index=pi, step=steps[pi]))
+            else:
+                flat.append(seg)
+        segments = flat
+
+    for seg in segments:
+        if isinstance(seg, OperatorBundleSlice):
+            # ── Bundle path: ≥2 contiguous operator steps → single dispatch ──
+            deferred_indices = set(seg.plan_indices)
+            bundle_steps: list[OperatorBundleStep] = []
+            for bi in seg.plan_indices:
+                bstep = steps[bi]
+                btool = _extract_tool(bstep)
+                b_raw_args = bstep.get("args", {}) or {}
+                b_resolved = _resolve_args(
+                    b_raw_args, bindings=merged, step_outputs=step_outputs,
+                    deferred_step_indices=deferred_indices,
+                )
+                # Capture source collection(s) BEFORE hydration strips
+                # them from args, so the composer can attach a "source:"
+                # line to the prompt for parallel-branch attribution.
+                source_collections = (
+                    b_resolved.get("collections") if "ids" in b_resolved else None
+                )
+                # Operators skip _check_embedding_domain / scope / caller-
+                # scope injection — those are retrieval-tool concerns.
+                _, b_prepared = _hydrate_operator_args(btool, b_resolved)
+                bundle_steps.append(OperatorBundleStep(
+                    plan_index=bi, tool=btool, args=b_prepared,
+                    source_collections=source_collections,
+                ))
+            bundle = OperatorBundle(steps=tuple(bundle_steps))
+
+            # Pre-dispatch size guard. If the composite prompt would
+            # blow past the bundle budget, fall back to per-step
+            # dispatch for this segment so we don't overflow the
+            # claude -p context or produce truncated output. The
+            # fallback re-resolves each step's args WITHOUT deferred
+            # indices so intra-bundle $stepN refs resolve against real
+            # accumulated step_outputs. (substantive-critic Obs B)
+            prompt, _schema = compose_bundle_prompt(bundle)
+            if len(prompt) > MAX_BUNDLE_PROMPT_CHARS:
+                _log.warning(
+                    "bundle_oversized_fallback_to_per_step",
+                    prompt_chars=len(prompt),
+                    max_chars=MAX_BUNDLE_PROMPT_CHARS,
+                    bundle_plan_indices=list(seg.plan_indices),
+                )
+                for bi in seg.plan_indices:
+                    bstep = steps[bi]
+                    btool = _extract_tool(bstep)
+                    b_raw_args = bstep.get("args", {}) or {}
+                    b_resolved = _resolve_args(
+                        b_raw_args, bindings=merged,
+                        step_outputs=step_outputs,
+                    )
+                    raw = dispatch(btool, b_resolved)
+                    if inspect.iscoroutine(raw):
+                        result = await raw
+                    else:
+                        result = raw
+                    if not isinstance(result, dict):
+                        raise PlanRunStepRefError(
+                            ref=f"step{bi + 1}",
+                            reason=(
+                                f"tool {btool!r} returned "
+                                f"{type(result).__name__}; expected dict "
+                                "(bundle fallback path)"
+                            ),
+                        )
+                    step_outputs.append(result)
+                continue
+
+            bundle_result = await dispatch_bundle(bundle)
+            # Intermediate slots: sentinel. Terminal slot: the real
+            # output. Downstream $stepN.<field> refs to an intermediate
+            # raise a specific "inside a bundle" error via
+            # _resolve_value's sentinel-aware check.
+            for _ in range(len(seg.plan_indices) - 1):
+                step_outputs.append(dict(BUNDLED_INTERMEDIATE))
+            if not isinstance(bundle_result, dict):
+                raise PlanRunStepRefError(
+                    ref=f"step{seg.end_index + 1}",
+                    reason=(
+                        f"operator bundle returned {type(bundle_result).__name__}; "
+                        "expected dict"
+                    ),
+                )
+            step_outputs.append(bundle_result)
+            continue
+
+        # ── Isolated path: IsolatedStep → one dispatcher call ──
+        assert isinstance(seg, IsolatedStep)
+        index = seg.plan_index
+        step = seg.step
+        tool = _extract_tool(step)
         raw_args = step.get("args", {}) or {}
         scope = step.get("scope")
 

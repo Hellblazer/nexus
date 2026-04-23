@@ -6,16 +6,17 @@ effort: medium
 
 # debug
 
-Pure verb skill. Routes through `nx_answer` with `dimensions={verb: "debug"}`
-so the plan-match gate narrows to debug templates and the full trunk runs
-in one tool call.
+**You MUST call `nx_answer` when investigating *why* a code path was
+designed the way it is. Direct `search` on the failing file returns
+chunks; the debug plan surfaces the decision history behind those
+chunks. Skipping `nx_answer` skips the design intent.**
 
 **Note — the debug scenario is intentionally flat** (no `traverse`
 step). Dev work starts from a concrete failing path; the primary
 link walk is the catalog's per-file lookup (not multi-hop graph
 traversal). Serena handles symbol-level navigation separately.
 
-## Flow
+## The call
 
 ```
 mcp__plugin_nx_nexus__nx_answer(
@@ -25,8 +26,8 @@ mcp__plugin_nx_nexus__nx_answer(
 )
 ```
 
-`nx_answer` handles match → run → record. Plan-miss falls through to an
-inline `claude -p` planner.
+One tool call. `nx_answer` handles match → run → record. Plan-miss
+falls through to an inline `claude -p` planner.
 
 ## Required bindings
 
@@ -48,10 +49,25 @@ inline `claude -p` planner.
 - **`/nx:debugging`** — once the design context is known, the
   hypothesis-driven debugging skill guides the iterative fix loop.
 
-## Anti-patterns
+## When direct `search` is fine
 
+A single-corpus RDR lookup — e.g. "find the RDR that covers this
+module's error-handling approach" — is fine via
+`mcp__plugin_nx_nexus__search(query=..., corpus="rdr__<repo>")`. Fast,
+cheap, and the chunks often contain the design rationale directly.
+
+Use this skill when: the question needs to *walk* the catalog's
+per-file links (code → RDR → related RDRs) or synthesize across
+multiple design notes rather than surface a single chunk.
+
+## Anti-patterns (do not do any of these)
+
+- **Calling `search` directly when the question needs a catalog walk
+  across per-file links.** `search` returns top-K by cosine; it won't
+  traverse the "this code implements that RDR" typed links. If you
+  need the walk, you need `nx_answer`.
 - **Calling `plan_match` directly instead of `nx_answer`.** You lose
-  the record step and the miss-path inline-planner fallback.
+  the record step, the inline-planner fallback, and use_count telemetry.
 - **Expecting the debug plan to walk the full call graph.** It
   won't — that's Serena's job. The debug plan answers "what did we
   decide about this code?", not "what calls this function?".

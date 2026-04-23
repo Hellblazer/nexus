@@ -6,11 +6,14 @@ effort: medium
 
 # analyze
 
-Pure verb skill. Routes through `nx_answer` with `dimensions={verb: "analyze"}`
-so the plan-match gate narrows to analyze templates and the full trunk runs
-in one tool call.
+**You MUST call `nx_answer` for cross-corpus synthesis or ranking. Direct
+`search` returns unstructured chunks; analytical questions need the
+search → extract → rank → generate composition that the analyze plans
+provide.** This is the one verb where bundling gives the biggest wins:
+a 3-op chain collapses from ~45s of per-step spawns to ~15s in a single
+`claude -p` call.
 
-## Flow
+## The call
 
 ```
 mcp__plugin_nx_nexus__nx_answer(
@@ -20,8 +23,9 @@ mcp__plugin_nx_nexus__nx_answer(
 )
 ```
 
-`nx_answer` handles match → run → record. Plan-miss falls through to an
-inline `claude -p` planner.
+One tool call. `nx_answer` handles match → run → record, including the
+operator-bundle optimization. Plan-miss falls through to an inline
+`claude -p` planner.
 
 ## Required bindings
 
@@ -39,10 +43,22 @@ inline `claude -p` planner.
 - "survey approaches to Y"
 - "rank options for Z by cost"
 
-## Anti-patterns
+## When direct `search` is fine
 
+If the question is a single-corpus lookup — e.g. "find the chunks that
+mention algorithm X" — use `mcp__plugin_nx_nexus__search`. Analyze
+earns its latency cost when the question requires multi-corpus
+alignment, ranking by a semantic criterion, or structured extraction
+before synthesis.
+
+## Anti-patterns (do not do any of these)
+
+- **Calling `search` directly for a cross-corpus synthesis question.**
+  You get top-K chunks with no composition, no cross-corpus alignment,
+  no ranking. If the question requires ranking or comparing across
+  multiple collections, you need `nx_answer`'s full DAG.
 - **Calling `plan_match` directly instead of `nx_answer`.** You lose
-  the record step and the miss-path inline-planner fallback.
+  the record step, the inline-planner fallback, and use_count telemetry.
 - **Using `analyze` when `research` would suffice.** `research` is
   single-concept; `analyze` implies cross-corpus / cross-approach
   synthesis. If the caller only wants to understand one thing, use

@@ -6,11 +6,12 @@ effort: medium
 
 # document
 
-Pure verb skill. Routes through `nx_answer` with `dimensions={verb: "document"}`
-so the plan-match gate narrows to document templates and the full trunk runs
-in one tool call.
+**You MUST call `nx_answer` for documentation-coverage questions. Direct
+`search` calls against docs corpora skip the cross-reference traversal
+that produces coverage gaps — you will miss the structure the skill
+exists to surface.**
 
-## Flow
+## The call
 
 ```
 mcp__plugin_nx_nexus__nx_answer(
@@ -20,8 +21,10 @@ mcp__plugin_nx_nexus__nx_answer(
 )
 ```
 
-`nx_answer` handles match → run → record. Plan-miss falls through to an
-inline `claude -p` planner.
+One tool call. `nx_answer` handles match → run → record. Operator chains
+inside document-verb plans (extract + compare) bundle into a single
+`claude -p` subprocess — substantially faster than per-step isolation.
+Plan-miss falls through to an inline `claude -p` planner.
 
 ## Required bindings
 
@@ -38,10 +41,23 @@ inline `claude -p` planner.
 - "what existing RDRs should I cite when documenting X?"
 - "find doc-coverage gaps in the auth module"
 
-## Anti-patterns
+## When direct `search` is fine
 
+A simple "where is X documented" lookup — one corpus, one keyword
+query — is fine via `mcp__plugin_nx_nexus__search`. This skill earns
+its cost when the question requires a cites-graph walk (finding
+undocumented areas) or multi-corpus alignment (code + docs coverage
+comparison).
+
+## Anti-patterns (do not do any of these)
+
+- **Calling `search` directly for a coverage-gap question.** Coverage
+  questions need the cites-graph traversal (docs linking to code,
+  code linking to RDRs). `search` returns top-K chunks; it doesn't
+  walk the graph. For coverage, you need `nx_answer`.
 - **Calling `plan_match` directly instead of `nx_answer`.** You lose
-  the record step and the miss-path inline-planner fallback.
+  the record step, the miss-path inline-planner fallback, and the
+  use_count telemetry on the matched plan.
 - **Using `document` for new writing.** The plan surveys existing
   coverage and flags gaps; actually authoring new prose belongs to
   the user + the caller's downstream tool.

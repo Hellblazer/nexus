@@ -390,6 +390,217 @@ class TestRunRecording:
         assert row[5] == "[redacted]"   # final_text
 
 
+# ── Plan-run use_count / success_count / failure_count telemetry ──────────────
+
+
+class TestPlanRunTelemetry:
+    """nexus-use1: plan execution bumps use_count + success/failure counts.
+
+    The counters live on ``plans`` rows; prior to this fix, nothing in the
+    codebase called ``increment_run_started`` or ``increment_run_outcome``,
+    so every plan in production had ``use_count == 0`` regardless of how
+    many times nx_answer actually invoked it.
+    """
+
+    def test_record_outcome_noop_for_plan_id_zero(self):
+        """Synthetic inline-planner Match (plan_id=0) must not touch T2."""
+        from nexus.mcp.core import _nx_answer_record_outcome
+        # No _t2_ctx patch — a real T2 call would fail loudly if reached.
+        _nx_answer_record_outcome(0, success=True)
+        _nx_answer_record_outcome(0, success=False)
+
+    def test_record_outcome_bumps_success_for_library_plan(self):
+        """plan_id > 0 increments success_count on the real library row."""
+        from nexus.mcp import core as _core
+
+        library = MagicMock()
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=MagicMock(plans=library))
+        ctx.__exit__ = MagicMock(return_value=False)
+
+        with patch.object(_core, "_t2_ctx", return_value=ctx):
+            _core._nx_answer_record_outcome(42, success=True)
+
+        library.increment_run_outcome.assert_called_once_with(42, success=True)
+
+    def test_record_outcome_bumps_failure_for_library_plan(self):
+        """plan_id > 0 increments failure_count on the real library row."""
+        from nexus.mcp import core as _core
+
+        library = MagicMock()
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=MagicMock(plans=library))
+        ctx.__exit__ = MagicMock(return_value=False)
+
+        with patch.object(_core, "_t2_ctx", return_value=ctx):
+            _core._nx_answer_record_outcome(42, success=False)
+
+        library.increment_run_outcome.assert_called_once_with(42, success=False)
+
+    def test_record_outcome_swallows_library_errors(self):
+        """Telemetry must never break the user-facing flow."""
+        from nexus.mcp import core as _core
+
+        library = MagicMock()
+        library.increment_run_outcome.side_effect = RuntimeError("db gone")
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=MagicMock(plans=library))
+        ctx.__exit__ = MagicMock(return_value=False)
+
+        with patch.object(_core, "_t2_ctx", return_value=ctx):
+            _core._nx_answer_record_outcome(42, success=True)  # no raise
+
+    @pytest.mark.asyncio
+    async def test_nx_answer_bumps_use_count_and_success_for_library_plan(self):
+        """End-to-end integration: a library-matched plan that runs cleanly
+        must call ``increment_run_started`` once (use_count++ + last_used
+        timestamp) AND ``increment_run_outcome`` with success=True once.
+
+        This is the critical regression guard the substantive-critic flagged
+        — a refactor that moves ``increment_run_started`` under the wrong
+        conditional (e.g. inside the plan_id==0 branch) would pass every
+        other test while zeroing out use_count again.
+        """
+        from nexus.mcp.core import nx_answer
+
+        # Match returns a library plan (plan_id=1, confidence above 0.40).
+        def fake_match(question, **kwargs):
+            return [_make_match(plan_id=1, confidence=0.55)]
+
+        plan_run_result = MagicMock()
+        plan_run_result.steps = [{"text": "ok"}]
+
+        library = MagicMock()
+        db_stub = MagicMock(plans=library)
+        db_stub.conn = MagicMock()
+
+        with patch("nexus.plans.matcher.plan_match", side_effect=fake_match), \
+             patch("nexus.plans.runner.plan_run",
+                   AsyncMock(return_value=plan_run_result)), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            await nx_answer(question="does this wire telemetry?")
+
+        library.increment_run_started.assert_called_once_with(1)
+        library.increment_run_outcome.assert_called_once_with(1, success=True)
+
+    @pytest.mark.asyncio
+    async def test_nx_answer_skips_telemetry_for_synthetic_match(self):
+        """Inline-planner fallthrough produces a synthetic Match with
+        ``plan_id=0``. Library increments MUST NOT fire — there's no
+        library row to update."""
+        from nexus.mcp.core import nx_answer
+
+        # Match returns empty → triggers inline planner → synthetic match.
+        def fake_match(question, **kwargs):
+            return []
+
+        async def fake_miss(question, scope="", max_steps=6):
+            return _make_match(plan_id=0, confidence=None)
+
+        plan_run_result = MagicMock()
+        plan_run_result.steps = [{"text": "ok"}]
+
+        library = MagicMock()
+        db_stub = MagicMock(plans=library)
+        db_stub.conn = MagicMock()
+
+        with patch("nexus.plans.matcher.plan_match", side_effect=fake_match), \
+             patch("nexus.mcp.core._nx_answer_plan_miss",
+                   AsyncMock(side_effect=fake_miss)), \
+             patch("nexus.plans.runner.plan_run",
+                   AsyncMock(return_value=plan_run_result)), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            await nx_answer(question="something the library can't match")
+
+        library.increment_run_started.assert_not_called()
+        library.increment_run_outcome.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_nx_answer_records_failure_outcome_on_plan_run_exception(self):
+        """plan_run raising mid-execution must still fire ``increment_run_outcome``
+        with ``success=False`` — otherwise failure telemetry is lost and
+        success_count/failure_count drift from reality over time."""
+        from nexus.mcp.core import nx_answer
+
+        def fake_match(question, **kwargs):
+            return [_make_match(plan_id=7, confidence=0.60)]
+
+        library = MagicMock()
+        db_stub = MagicMock(plans=library)
+        db_stub.conn = MagicMock()
+
+        with patch("nexus.plans.matcher.plan_match", side_effect=fake_match), \
+             patch("nexus.plans.runner.plan_run",
+                   AsyncMock(side_effect=RuntimeError("exec blew up"))), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            result = await nx_answer(question="will fail")
+
+        # use_count bumped (the plan was STARTED, even if it didn't finish).
+        library.increment_run_started.assert_called_once_with(7)
+        # Failure recorded.
+        library.increment_run_outcome.assert_called_once_with(7, success=False)
+        # User-facing flow still returns an error string, not a raise.
+        assert "Error" in str(result)
+
+
+class TestPlanLibraryMetrics:
+    """Direct tests for the library-level metric increments.
+
+    These methods existed before nexus-use1 but had zero callers. We now
+    pin their behavior so the wiring cannot regress silently.
+    """
+
+    def _fresh_library(self):
+        """Return a PlanLibrary over an on-disk temp db + seed one plan."""
+        import tempfile
+        from pathlib import Path
+        from nexus.db.t2.plan_library import PlanLibrary
+
+        tmp = Path(tempfile.mkdtemp()) / "library.db"
+        lib = PlanLibrary(tmp)
+        plan_id = lib.save_plan(
+            query="anchor probe",
+            plan_json=json.dumps({"steps": []}),
+            tags="test",
+        )
+        return lib, plan_id
+
+    def test_increment_run_started_bumps_use_and_stamps_last_used(self):
+        lib, plan_id = self._fresh_library()
+        before = lib.get_plan(plan_id)
+        assert before["use_count"] == 0
+        assert before["last_used"] in (None, "")
+
+        lib.increment_run_started(plan_id)
+
+        after = lib.get_plan(plan_id)
+        assert after["use_count"] == 1
+        assert after["last_used"]  # ISO timestamp, non-empty
+
+    def test_increment_run_outcome_success(self):
+        lib, plan_id = self._fresh_library()
+        lib.increment_run_outcome(plan_id, success=True)
+        row = lib.get_plan(plan_id)
+        assert row["success_count"] == 1
+        assert row["failure_count"] == 0
+
+    def test_increment_run_outcome_failure(self):
+        lib, plan_id = self._fresh_library()
+        lib.increment_run_outcome(plan_id, success=False)
+        row = lib.get_plan(plan_id)
+        assert row["success_count"] == 0
+        assert row["failure_count"] == 1
+
+
 # ── Plan-miss planner (uses claude_dispatch, no pool) ─────────────────────────
 
 
