@@ -276,6 +276,27 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
                 f"(or `nx taxonomy project --backfill --persist` for all)."
             )
 
+        # GH #251: surface recent post-store hook failures. Reading the
+        # table is best-effort — if the migration hasn't been applied
+        # (e.g. an older DB opened read-only), skip the line silently.
+        try:
+            with db.taxonomy._lock:
+                rows = db.taxonomy.conn.execute(
+                    "SELECT hook_name, COUNT(*) FROM hook_failures "
+                    "WHERE occurred_at >= datetime('now', '-1 day') "
+                    "GROUP BY hook_name"
+                ).fetchall()
+        except Exception:
+            rows = []
+        if rows:
+            total_recent = sum(n for _, n in rows)
+            hook_summary = ", ".join(f"{name}={n}" for name, n in rows)
+            click.echo(
+                f"Action: {total_recent} post-store hook failure(s) in the last 24h "
+                f"({hook_summary}). Run `nx doctor --check-schema` and check "
+                "structlog output; tail `~/.config/nexus/logs/` for details."
+            )
+
 
 @taxonomy.command("list")
 @click.option("--collection", "-c", default="", help="Filter by collection/project")

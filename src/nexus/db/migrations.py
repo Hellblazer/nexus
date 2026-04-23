@@ -493,6 +493,58 @@ def migrate_review_columns(conn: sqlite3.Connection) -> None:
 # Ordered by introduced version.  Tags verified via ``git tag --contains``
 # for each migration commit.
 
+def migrate_hook_failures(conn: sqlite3.Connection) -> None:
+    """Create the ``hook_failures`` table for GH #251.
+
+    ``fire_post_store_hooks`` in ``mcp_infra.py`` wraps every post-store
+    hook in a per-hook ``try/except`` — a failing
+    ``taxonomy_assign_hook`` (e.g. missing centroids, Chroma timeout)
+    logs a warning and moves on so ``store_put`` never rolls back. The
+    dropped write is currently invisible outside structlog output.
+
+    This table captures each failure with enough context for ``status``
+    to surface an actionable Action line and (optional) ``nx doctor
+    hooks`` to propose retries.
+
+    Schema:
+      - id           INTEGER PRIMARY KEY
+      - doc_id       TEXT  (may be empty when the hook fails before the
+                            doc-level identifier is known)
+      - collection   TEXT
+      - hook_name    TEXT  (from getattr(hook, '__name__', '?'))
+      - error        TEXT  (str(exc) — the traceback stays in structlog)
+      - occurred_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+
+    Indexes:
+      - idx_hook_failures_occurred_at — `status` reads ``occurred_at >= ?``
+        with a 24h window
+      - idx_hook_failures_collection — scoped reports
+
+    Idempotent: no-op if the table already exists.
+    """
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='hook_failures'"
+    ).fetchone()
+    if row is not None:
+        return
+    conn.executescript("""
+        CREATE TABLE hook_failures (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            doc_id      TEXT NOT NULL DEFAULT '',
+            collection  TEXT NOT NULL DEFAULT '',
+            hook_name   TEXT NOT NULL,
+            error       TEXT NOT NULL DEFAULT '',
+            occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX idx_hook_failures_occurred_at
+            ON hook_failures(occurred_at);
+        CREATE INDEX idx_hook_failures_collection
+            ON hook_failures(collection);
+    """)
+    conn.commit()
+    _log.info("Migrated: created hook_failures table (GH #251)")
+
+
 def migrate_chash_index(conn: sqlite3.Connection) -> None:
     """Create the ``chash_index`` table for RDR-086 Phase 1.
 
@@ -702,6 +754,11 @@ MIGRATIONS: list[Migration] = [
         "4.8.1",
         "Rewash plans.scope_tags 'all' sentinel (RDR-091 critic follow-up)",
         _rewash_plan_scope_tags_all_sentinel,
+    ),
+    Migration(
+        "4.9.10",
+        "Add hook_failures table (GH #251)",
+        migrate_hook_failures,
     ),
 ]
 

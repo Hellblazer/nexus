@@ -917,6 +917,110 @@ def test_cli_taxonomy_status_missing_projection_count_not_truncated_by_limit(
     )
 
 
+def test_cli_taxonomy_status_surfaces_recent_hook_failures(tmp_path: Path) -> None:
+    """GH #251: status emits an Action line when hook_failures has recent rows.
+
+    The persist path is dormant until 4.9.10, but the read path is live
+    today — the table may exist in DBs upgraded by the migration test
+    harness, or once the next release ships.
+    """
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    import sqlite3
+
+    from nexus.commands.taxonomy_cmd import taxonomy
+    from nexus.db.migrations import migrate_hook_failures
+
+    db_path = tmp_path / "memory.db"
+    with T2Database(db_path) as db:
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES ('t1', 'docs__alpha', 10, '2026-01-01T00:00:00Z')"
+        )
+        tid = db.taxonomy.conn.execute(
+            "SELECT id FROM topics WHERE label='t1'"
+        ).fetchone()[0]
+        db.taxonomy.conn.commit()
+        db.taxonomy.assign_topic(
+            "doc-1", tid, assigned_by="projection",
+            similarity=0.9, source_collection="docs__alpha",
+        )
+
+    # Apply the dormant 4.9.10 migration manually, then seed recent failures.
+    conn = sqlite3.connect(str(db_path))
+    migrate_hook_failures(conn)
+    conn.execute(
+        "INSERT INTO hook_failures (hook_name, collection, error) "
+        "VALUES (?, ?, ?)",
+        ("taxonomy_assign_hook", "docs__alpha", "centroids missing"),
+    )
+    conn.execute(
+        "INSERT INTO hook_failures (hook_name, collection, error) "
+        "VALUES (?, ?, ?)",
+        ("taxonomy_assign_hook", "docs__alpha", "chroma timeout"),
+    )
+    # An old failure (35 days ago) must NOT count toward the 24h window.
+    conn.execute(
+        "INSERT INTO hook_failures (hook_name, occurred_at) VALUES (?, ?)",
+        ("some_old_hook", "2026-03-01T00:00:00"),
+    )
+    conn.commit()
+    conn.close()
+
+    runner = CliRunner()
+    with patch(
+        "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
+    ):
+        result = runner.invoke(taxonomy, ["status"])
+
+    assert result.exit_code == 0, result.output
+    assert "Action:" in result.output
+    assert "2 post-store hook failure(s) in the last 24h" in result.output, result.output
+    assert "taxonomy_assign_hook=2" in result.output
+    # The 35-day-old failure is outside the window, so its hook name must not
+    # appear in the Action line.
+    assert "some_old_hook" not in result.output
+
+
+def test_cli_taxonomy_status_silent_when_hook_failures_table_missing(
+    tmp_path: Path,
+) -> None:
+    """GH #251: a DB without hook_failures table (pre-4.9.10) must not blow up."""
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from nexus.commands.taxonomy_cmd import taxonomy
+
+    db_path = tmp_path / "memory.db"
+    with T2Database(db_path) as db:
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES ('t1', 'docs__alpha', 10, '2026-01-01T00:00:00Z')"
+        )
+        tid = db.taxonomy.conn.execute(
+            "SELECT id FROM topics WHERE label='t1'"
+        ).fetchone()[0]
+        db.taxonomy.conn.commit()
+        db.taxonomy.assign_topic(
+            "doc-1", tid, assigned_by="projection",
+            similarity=0.9, source_collection="docs__alpha",
+        )
+
+    runner = CliRunner()
+    with patch(
+        "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
+    ):
+        result = runner.invoke(taxonomy, ["status"])
+
+    assert result.exit_code == 0, result.output
+    # No Action line for hook failures; the base status still prints.
+    assert "post-store hook failure" not in result.output
+    assert "Total:" in result.output
+
+
 def test_cli_taxonomy_status_quiet_when_projection_present(tmp_path: Path) -> None:
     """status does NOT emit the projection-missing hint when every
     collection with topics has at least one projection assignment."""

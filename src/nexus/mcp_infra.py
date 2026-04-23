@@ -299,14 +299,67 @@ def register_post_store_hook(fn) -> None:
 
 
 def fire_post_store_hooks(doc_id: str, collection: str, content: str) -> None:
-    """Invoke all registered post-store hooks. Exceptions logged, never raised."""
+    """Invoke all registered post-store hooks. Exceptions logged, never raised.
+
+    Failures are additionally persisted to T2 ``hook_failures`` (GH #251) so
+    ``nx taxonomy status`` can surface them with an Action line. The persist
+    path is itself guarded — if the T2 write fails, the store_put still
+    succeeds and structlog still carries the original warning.
+    """
     import structlog
     _hook_log = structlog.get_logger()
     for hook in _post_store_hooks:
         try:
             hook(doc_id, collection, content)
-        except Exception:
-            _hook_log.warning("post_store_hook_failed", hook=getattr(hook, "__name__", "?"), exc_info=True)
+        except Exception as exc:
+            hook_name = getattr(hook, "__name__", "?")
+            _hook_log.warning(
+                "post_store_hook_failed",
+                hook=hook_name,
+                exc_info=True,
+            )
+            _record_hook_failure(
+                doc_id=doc_id,
+                collection=collection,
+                hook_name=hook_name,
+                error=str(exc),
+            )
+
+
+def _record_hook_failure(
+    *,
+    doc_id: str,
+    collection: str,
+    hook_name: str,
+    error: str,
+) -> None:
+    """Persist a post-store hook failure to T2 ``hook_failures`` (GH #251).
+
+    Secondary best-effort path: if the T2 write itself fails, swallow the
+    second failure (the primary warning already reached structlog) rather
+    than mask the original hook exception.
+    """
+    try:
+        with t2_ctx() as t2:
+            # ``hook_failures`` is cross-cutting — any domain's connection
+            # points at the same SQLite file. Use the taxonomy conn because
+            # the status line that surfaces these rows already reads there.
+            conn = t2.taxonomy.conn
+            with t2.taxonomy._lock:
+                conn.execute(
+                    "INSERT INTO hook_failures "
+                    "(doc_id, collection, hook_name, error) VALUES (?, ?, ?, ?)",
+                    (doc_id, collection, hook_name, error[:2000]),
+                )
+                conn.commit()
+    except Exception:
+        import structlog
+        structlog.get_logger().debug(
+            "hook_failure_persist_failed",
+            hook=hook_name,
+            collection=collection,
+            exc_info=True,
+        )
 
 
 def taxonomy_assign_hook(

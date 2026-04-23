@@ -66,6 +66,9 @@ def _run_check_schema() -> None:
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()
     }
+    # Note: ``hook_failures`` (GH #251) ships with 4.9.10 — doctor should
+    # not require it on 4.9.9 DBs. Add to this list when the package version
+    # reaches 4.9.10.
     for tbl in ("memory", "plans", "topics", "topic_assignments", "taxonomy_meta", "topic_links", "relevance_log", "search_telemetry", "chash_index"):
         ok = tbl in tables
         lines.append(_check_line(f"Table {tbl}", ok))
