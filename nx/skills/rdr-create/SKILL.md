@@ -53,7 +53,7 @@ If `$RDR_DIR` does not exist:
 
 If `$CLAUDE_PLUGIN_ROOT` is not available, use the templates inline (they are embedded below in the Templates section).
 
-> **Gap convention**: the Problem / Problem Statement section must use `#### Gap N: <title>` headings (regex: `^#{3,5} Gap \d+:`). The close skill uses this format to enumerate gaps and require per-gap closure pointers when `--reason implemented` is passed. Authors must fill in concrete gap headings before the RDR is accepted. Both `## Problem` and `## Problem Statement` are accepted as the section heading.
+> **Gap convention** (enforced at `/nx:rdr-gate` Layer 1 and `/nx:rdr-close` for post-65 RDRs): the `## Problem Statement` (or `## Problem`) section must contain one or more `#### Gap N: <title>` headings (regex: `^#{3,5} Gap \d+:`). Fill these in during drafting — the template scaffolds `Gap 1` and `Gap 2` placeholders. Replacing the Problem Statement with free-form prose and removing the gap headings will fail the gate at accept time, not just at close time. Authors can override with `/nx:rdr-gate <id> --skip-gaps` when the gap structure truly does not fit (audit-trail escape only; prefer adding real gap headings).
 
 ### Step 2: Assign ID
 

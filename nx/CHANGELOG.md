@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.9.11] - 2026-04-23
+
+Adds a Layer 1 gap-structure pre-check to `/nx:rdr-gate` so the `#### Gap N: <title>` requirement in Problem Statements is caught at gate time, not at close. Same regex and post-65 grandfathering the close skill already uses. `--skip-gaps` is the audit-trail override. Template and `rdr-create` SKILL both name both enforcement points so authors see "gate will block" during drafting. See root `CHANGELOG.md` for the RDR-091 retrofit that motivated the fix.
+
 ## [4.9.10] - 2026-04-23
 
 Plugin version aligned with Nexus CLI 4.9.10. No plugin-level functional changes. See root `CHANGELOG.md` for the post-4.9.9 hardening arc (GitHub #249 / #250 / #251 / #252 / #253) shipped in this release — `nx catalog verify`, the `hook_failures` observability table, `nx doctor --check-taxonomy`, the `split → label` next-step hint, and the catalog-store-hook log fix.

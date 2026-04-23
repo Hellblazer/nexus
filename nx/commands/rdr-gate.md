@@ -143,6 +143,50 @@ print()
 def strip_code_blocks(src):
     return re.sub(r'```.*?```', '', src, flags=re.DOTALL)
 
+
+# Gap-structure pre-check (nexus-4qpb): the close skill enforces
+# `#### Gap N: <title>` headings in Problem Statement for post-65 RDRs.
+# Enforcing it only at close meant authors could gate, accept, and
+# then discover the rule at the worst possible time. Shift left: block
+# the gate here so missing gaps can't survive to close. Matches the
+# close skill's regex and grandfathering threshold (id < 65).
+_skip_gaps = '--skip-gaps' in args
+_problem_idx = text.find('## Problem Statement')
+if _problem_idx == -1:
+    _problem_idx = text.find('## Problem')
+_problem_section = ''
+if _problem_idx != -1:
+    _rest = text[_problem_idx:]
+    _nxt = re.search(r'\n## ', _rest[1:])
+    _problem_section = _rest[:_nxt.start() + 1] if _nxt else _rest
+_gap_headings = re.findall(r'^#{3,5} Gap (\d+)([^\n:]*):\s*(.*)$', _problem_section, re.MULTILINE)
+try:
+    _rdr_id_int = int(t2_key)
+except ValueError:
+    _rdr_id_int = -1
+
+if _rdr_id_int >= 65 and len(_gap_headings) == 0 and not _skip_gaps:
+    print(f"> **BLOCKED** (Layer 1 — gap structure): RDR-{t2_key} has no `#### Gap N: <title>` "
+          f"headings in `## Problem Statement` or `## Problem`.")
+    print(r"> Expected format: `#### Gap 1: <gap title>` (regex: `^#{3,5} Gap \d+:`).")
+    print(">")
+    print("> The close skill enforces the same structure and will block `/nx:rdr-close "
+          "--reason implemented`. Add the headings now before accept, or re-run the gate "
+          "with `--skip-gaps` to record an intentional override in the audit trail.")
+    sys.exit(0)
+elif _rdr_id_int >= 65 and len(_gap_headings) > 0:
+    print(f"#### Gap structure: {len(_gap_headings)} gap heading(s) present")
+    print()
+    for _num, _qual, _title in _gap_headings:
+        _qual_str = _qual.strip()
+        _qual_disp = f" {_qual_str}" if _qual_str else ""
+        print(f"- Gap{_num}{_qual_disp}: {_title.strip()}")
+    print()
+elif _rdr_id_int < 65 and len(_gap_headings) == 0:
+    print(f"> **Note**: RDR-{t2_key} predates the gap-structure convention (id < 65) — "
+          "skipping the Layer 1 gap check.")
+    print()
+
 clean = strip_code_blocks(text)
 
 # Section headings (structural completeness check — Layer 1)
