@@ -677,14 +677,30 @@ def _run_check_taxonomy() -> None:
         return
 
     # Topics that have projection assignments but no row in topic_links
-    # (neither as source nor target) are drift — the materialized view
-    # is out of sync with the assignment table.
+    # (neither as source nor target) are drift — but only when a
+    # topic_links pair is structurally possible. A doc_id with exactly
+    # one projection assignment cannot produce a link (a link requires
+    # from + to), so flagging it as drift is a false positive. Same
+    # logic if the co-occurring topic was assigned via a non-projection
+    # path (centroid, bertopic) — refresh_projection_links only
+    # aggregates ``assigned_by='projection'`` rows, so a centroid
+    # partner does not contribute to topic_links. nexus-346q: require
+    # a co-occurring projection assignment on the same doc before
+    # flagging drift. Shakeout on live data: 15 of 20 residual drift
+    # rows after a backfill were isolated topics that could never
+    # produce a link.
     drift_rows = conn.execute(
         """
         SELECT DISTINCT ta.topic_id, t.label, t.collection
           FROM topic_assignments ta
           LEFT JOIN topics t ON t.id = ta.topic_id
          WHERE ta.assigned_by = 'projection'
+           AND EXISTS (
+               SELECT 1 FROM topic_assignments ta2
+                WHERE ta2.doc_id      = ta.doc_id
+                  AND ta2.topic_id    != ta.topic_id
+                  AND ta2.assigned_by = 'projection'
+           )
            AND NOT EXISTS (
                SELECT 1 FROM topic_links tl
                 WHERE tl.from_topic_id = ta.topic_id
