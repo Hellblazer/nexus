@@ -707,38 +707,38 @@ def _rewash_plan_scope_tags_all_sentinel(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 
-# ── RDR-092 Phase 0d.1 — plan-dimensions backfill ───────────────────────────
+# ── RDR-092 Phase 0d.1 (plan-dimensions backfill) ──────────────────────────
 
 
-#: 20-rule verb-from-stem dictionary. Keyed on lowercased tokens that
-#: commonly appear in plan ``query`` text. A match is high-confidence
-#: (tagged ``backfill``); zero matches fall through to the wh-fallback
-#: and get tagged ``backfill-low-conf``.
+#: Verb-from-stem dictionary (29 stems across 5 verb families). Keyed
+#: on lowercased tokens that commonly appear in plan ``query`` text.
+#: A match is high-confidence (tagged ``backfill``); zero matches fall
+#: through to the wh-fallback and get tagged ``backfill-low-conf``.
 _BACKFILL_VERB_STEMS: dict[str, str] = {
-    # research-family (8 stems)
+    # research family (8 stems)
     "find": "research", "search": "research", "list": "research",
     "get": "research", "show": "research", "enumerate": "research",
     "fetch": "research", "retrieve": "research",
-    # analyze-family (6 stems)
+    # analyze family (8 stems)
     "analyze": "analyze", "analyse": "analyze",
     "compare": "analyze", "contrast": "analyze",
     "rank": "analyze", "synthesize": "analyze",
     "summarize": "analyze", "summarise": "analyze",
-    # review-family (4 stems)
+    # review family (5 stems)
     "review": "review", "audit": "review",
     "evaluate": "review", "critique": "review",
     "assess": "review",
-    # debug-family (4 stems)
+    # debug family (5 stems)
     "debug": "debug", "trace": "debug",
     "investigate": "debug", "fix": "debug",
     "troubleshoot": "debug",
-    # document-family (3 stems)
+    # document family (3 stems)
     "document": "document", "describe": "document",
     "explain": "document",
 }
 
 #: Wh-fallback table. Low confidence because a wh-question can map to
-#: any verb — the best guess is research for explanatory questions,
+#: any verb; the best guess is research for explanatory questions,
 #: review for causal "why" questions.
 _BACKFILL_WH_FALLBACK: dict[str, str] = {
     "how": "research", "what": "research",
@@ -791,8 +791,8 @@ def _derive_plan_name_from_query(query: str, *, max_words: int = 5) -> str:
 def _backfill_plan_dimensions(conn: sqlite3.Connection) -> None:
     """Backfill verb / name / dimensions on NULL-dimension plan rows.
 
-    RDR-092 Phase 0d.1. Touches only rows where ``dimensions IS NULL``
-    — authored rows (shipped YAML seeds, already-dimensional grown
+    RDR-092 Phase 0d.1. Touches only rows where ``dimensions IS NULL``;
+    authored rows (shipped YAML seeds, already-dimensional grown
     plans, previously-backfilled rows) are left alone. The
     :func:`_infer_plan_verb_from_query` heuristic decides the verb,
     and :func:`_derive_plan_name_from_query` supplies the name. Rows
@@ -805,6 +805,15 @@ def _backfill_plan_dimensions(conn: sqlite3.Connection) -> None:
     tagged grown rows and ``"global"`` for everything else (legacy
     builtin shapes pre-RDR-078). Idempotent: a second run skips rows
     whose ``dimensions`` is no longer NULL.
+
+    **Collision handling (RDR-092 code-review C-1).** Two NULL-
+    dimension rows in the same project whose queries collapse to the
+    same kebab name produce identical canonical dimensions JSON and
+    would violate the partial UNIQUE ``(project, dimensions) WHERE
+    dimensions IS NOT NULL`` index on the second UPDATE. The loop
+    catches :class:`sqlite3.IntegrityError` and retries the row with
+    the strategy suffixed by the row id (which is monotonic + stable
+    within a DB, preserving idempotency across reruns).
     """
     has_table = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='plans'"
@@ -826,15 +835,43 @@ def _backfill_plan_dimensions(conn: sqlite3.Connection) -> None:
 
     backfilled = 0
     low_conf = 0
+    collisions = 0
+    # Track identities set during this run so within-loop collisions
+    # also get the row_id suffix treatment (the DB-level partial
+    # UNIQUE index would only catch cross-run collisions because the
+    # legacy rows all share dimensions IS NULL until we write).
+    claimed: set[tuple[str, str]] = set()
     for row_id, query, tags in rows:
         verb, confident = _infer_plan_verb_from_query(query or "")
-        name = _derive_plan_name_from_query(query or "")
+        base_name = _derive_plan_name_from_query(query or "")
         scope = "personal" if (tags or "").find("grown") >= 0 else "global"
-        dims_json = canonical_dimensions_json({
-            "scope": scope,
-            "strategy": name,
-            "verb": verb,
-        })
+        project = ""  # Backfill applies to the legacy global project.
+
+        def _dims(name_value: str) -> str:
+            return canonical_dimensions_json({
+                "scope": scope,
+                "strategy": name_value,
+                "verb": verb,
+            })
+
+        # Pre-check for collision against both already-persisted rows
+        # and rows we updated earlier in this same loop.
+        name = base_name
+        dims_json = _dims(name)
+        key = (project, dims_json)
+        db_hit = conn.execute(
+            "SELECT 1 FROM plans "
+            "WHERE project = ? AND dimensions = ? AND id != ? LIMIT 1",
+            (project, dims_json, row_id),
+        ).fetchone()
+        if db_hit or key in claimed:
+            # RDR-092 code-review C-1: resolve via a deterministic
+            # row-id suffix so reruns produce the same identity.
+            name = f"{base_name}-{row_id}"
+            dims_json = _dims(name)
+            key = (project, dims_json)
+            collisions += 1
+        claimed.add(key)
 
         tag_flag = "backfill" if confident else "backfill-low-conf"
         existing_tags = [t for t in (tags or "").split(",") if t]
@@ -856,7 +893,7 @@ def _backfill_plan_dimensions(conn: sqlite3.Connection) -> None:
     _log.info(
         "Backfilled plan dimensions",
         backfilled=backfilled, low_conf=low_conf,
-        total_rows=len(rows),
+        total_rows=len(rows), collisions=collisions,
     )
 
 

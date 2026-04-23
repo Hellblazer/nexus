@@ -1485,7 +1485,7 @@ class TestBackfillPlanDimensions:
 
     Contract:
       * Rows with ``dimensions IS NULL`` get verb/name/dimensions filled
-        by a 20-rule verb-from-stem heuristic + wh-fallback on the
+        by a 29-stem verb-from-stem heuristic + wh-fallback on the
         ``query`` column text.
       * High-confidence matches tag ``,backfill``; zero-score rows
         (wh-fallback) tag ``,backfill-low-conf`` so ``nx plan repair``
@@ -1615,4 +1615,60 @@ class TestBackfillPlanDimensions:
         # Must ship AFTER the dimensional-identity migration (4.4.0).
         assert matches[0][0] >= "4.9.12", (
             f"must be introduced in >= 4.9.12, got {matches[0][0]!r}"
+        )
+
+    def test_backfill_collision_resolves_via_row_id_suffix(self) -> None:
+        """RDR-092 code-review C-1: two NULL-dimension rows whose
+        queries collapse to the same kebab name must not crash the
+        migration on the UNIQUE(project, dimensions) partial index.
+        The second row lands with its strategy suffixed by row id
+        so both rows land with distinct, deterministic identities.
+        """
+        from nexus.db.migrations import _backfill_plan_dimensions
+
+        conn = sqlite3.connect(":memory:")
+        _make_plans_schema(conn)
+        # Two queries that reduce to the same content tokens after
+        # stop-word stripping.
+        rid1 = _insert_plan(conn, query="find the documents for author")
+        rid2 = _insert_plan(conn, query="find documents by author")
+
+        _backfill_plan_dimensions(conn)  # must not raise
+
+        rows = conn.execute(
+            "SELECT id, name, dimensions FROM plans ORDER BY id ASC"
+        ).fetchall()
+        assert len(rows) == 2
+        first_name, second_name = rows[0][1], rows[1][1]
+        first_dims, second_dims = rows[0][2], rows[1][2]
+        # Both rows got dimensions populated (no skipped rows).
+        assert first_dims, "first row must carry dimensions"
+        assert second_dims, "collision must not leave dimensions NULL"
+        # The colliding row carries the row_id suffix.
+        assert first_name != second_name
+        assert str(rid2) in second_name, (
+            f"collision row's name must include row_id={rid2}, got {second_name!r}"
+        )
+        # Dimensions JSON differs (unique partial-index satisfied).
+        assert first_dims != second_dims
+
+    def test_backfill_sentinel_name_does_not_collide(self) -> None:
+        """Queries that are pure stop-words fall to the sentinel name
+        ``backfilled-plan``; multiple such rows must each get a
+        deterministic unique identity via the row-id suffix path.
+        """
+        from nexus.db.migrations import _backfill_plan_dimensions
+
+        conn = sqlite3.connect(":memory:")
+        _make_plans_schema(conn)
+        rid1 = _insert_plan(conn, query="it is a the")  # only stop-words
+        rid2 = _insert_plan(conn, query="the and or but")  # only stop-words
+
+        _backfill_plan_dimensions(conn)
+
+        rows = conn.execute(
+            "SELECT dimensions FROM plans ORDER BY id ASC"
+        ).fetchall()
+        assert rows[0][0] != rows[1][0], (
+            "two sentinel-named rows must land with distinct dimensions"
         )
