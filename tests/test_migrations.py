@@ -73,7 +73,7 @@ class TestMigrationDataclass:
         from nexus.db.migrations import MIGRATIONS
 
         assert isinstance(MIGRATIONS, list)
-        assert len(MIGRATIONS) == 15  # + RDR-091 critic follow-up 4.8.1 rewash
+        assert len(MIGRATIONS) == 16  # +GH #251 hook_failures 4.9.10
 
     def test_migrations_ordered_by_version(self) -> None:
         from nexus.db.migrations import MIGRATIONS, _parse_version
@@ -1333,4 +1333,105 @@ class TestMigrateChashIndex:
         # RDR-086 lands in v4.7.0 (next minor release after v4.6.5).
         assert matches[0][0] >= "4.7.0", (
             f"chash_index migration must be introduced in >= 4.7.0, got {matches[0][0]!r}"
+        )
+
+
+class TestMigrateHookFailures:
+    """``migrate_hook_failures`` creates the T2 ``hook_failures`` table so
+    GH #251 can surface post-store hook failures in ``nx taxonomy status``.
+    """
+
+    def test_hook_failures_migration_fresh_apply(self) -> None:
+        from nexus.db.migrations import migrate_hook_failures
+
+        conn = sqlite3.connect(":memory:")
+        migrate_hook_failures(conn)
+
+        tables = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "hook_failures" in tables
+
+    def test_hook_failures_schema_columns(self) -> None:
+        from nexus.db.migrations import migrate_hook_failures
+
+        conn = sqlite3.connect(":memory:")
+        migrate_hook_failures(conn)
+
+        cols = {
+            r[1]: r[2]
+            for r in conn.execute(
+                "PRAGMA table_info(hook_failures)"
+            ).fetchall()
+        }
+        assert cols.keys() == {
+            "id", "doc_id", "collection", "hook_name", "error", "occurred_at",
+        }
+        assert cols["hook_name"] == "TEXT"
+        assert cols["occurred_at"] == "TEXT"
+
+    def test_hook_failures_default_occurred_at(self) -> None:
+        """INSERT without occurred_at auto-fills via DEFAULT CURRENT_TIMESTAMP."""
+        from nexus.db.migrations import migrate_hook_failures
+
+        conn = sqlite3.connect(":memory:")
+        migrate_hook_failures(conn)
+        conn.execute(
+            "INSERT INTO hook_failures (hook_name, error) VALUES (?, ?)",
+            ("taxonomy_assign_hook", "simulated"),
+        )
+        conn.commit()
+
+        row = conn.execute(
+            "SELECT hook_name, error, occurred_at FROM hook_failures"
+        ).fetchone()
+        assert row[0] == "taxonomy_assign_hook"
+        assert row[1] == "simulated"
+        assert row[2]  # non-empty timestamp
+
+    def test_hook_failures_indexes_exist(self) -> None:
+        from nexus.db.migrations import migrate_hook_failures
+
+        conn = sqlite3.connect(":memory:")
+        migrate_hook_failures(conn)
+
+        indices = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            ).fetchall()
+        }
+        assert "idx_hook_failures_occurred_at" in indices
+        assert "idx_hook_failures_collection" in indices
+
+    def test_hook_failures_migration_idempotent(self) -> None:
+        from nexus.db.migrations import migrate_hook_failures
+
+        conn = sqlite3.connect(":memory:")
+        migrate_hook_failures(conn)
+        conn.execute(
+            "INSERT INTO hook_failures (hook_name, error) VALUES (?, ?)",
+            ("x", "y"),
+        )
+        conn.commit()
+
+        migrate_hook_failures(conn)  # must not raise
+        row = conn.execute(
+            "SELECT hook_name, error FROM hook_failures"
+        ).fetchone()
+        assert row == ("x", "y")
+
+    def test_hook_failures_in_migrations_list(self) -> None:
+        from nexus.db.migrations import MIGRATIONS
+
+        matches = [
+            (m.introduced, m.name) for m in MIGRATIONS
+            if "hook_failures" in m.name
+        ]
+        assert matches, "hook_failures migration must be registered in MIGRATIONS"
+        assert matches[0][0] >= "4.9.10", (
+            f"hook_failures migration must be introduced in >= 4.9.10, got {matches[0][0]!r}"
         )

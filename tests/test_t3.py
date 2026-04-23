@@ -1078,3 +1078,44 @@ def test_verify_deep_nonexistent_collection(local_t3: T3Database):
     from nexus.db.t3 import verify_collection_deep
     with pytest.raises(KeyError):
         verify_collection_deep(local_t3, "knowledge__does_not_exist")
+
+
+# ── existing_ids (GH #249) ─────────────────────────────────────────────────
+
+
+def test_existing_ids_returns_present_subset(local_t3: T3Database):
+    """existing_ids filters the query list to the subset present in the collection."""
+    col = "knowledge__existing_ids_test"
+    doc1 = local_t3.put(collection=col, content="Document one", title="doc-one")
+    doc2 = local_t3.put(collection=col, content="Document two", title="doc-two")
+
+    found = local_t3.existing_ids(col, [doc1, doc2, "ghostghostghost0"])
+    assert found == {doc1, doc2}
+
+
+def test_existing_ids_empty_input_short_circuits(local_t3: T3Database):
+    """Empty id list → empty set without a network round trip."""
+    assert local_t3.existing_ids("knowledge__anything", []) == set()
+
+
+def test_existing_ids_missing_collection_is_empty(local_t3: T3Database):
+    """existing_ids on an unknown collection returns empty, not raises."""
+    assert local_t3.existing_ids(
+        "knowledge__never_created", ["aaaa", "bbbb"]
+    ) == set()
+
+
+def test_existing_ids_pagination_respects_300_cap(local_t3: T3Database):
+    """existing_ids pages at 300 ids per call (ChromaDB Cloud cap)."""
+    col = "knowledge__existing_ids_paging"
+    # Seed 305 entries so the sweep must page twice.
+    seeded: list[str] = []
+    for i in range(305):
+        doc_id = local_t3.put(
+            collection=col, content=f"body {i}", title=f"doc-{i}",
+        )
+        seeded.append(doc_id)
+
+    found = local_t3.existing_ids(col, seeded + ["nonexistent11111"])
+    assert found == set(seeded)
+    assert "nonexistent11111" not in found

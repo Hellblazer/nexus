@@ -507,6 +507,189 @@ class TestDiscoveryTools:
         assert result.exit_code == 0
         assert "No orphan" in result.output
 
+
+class TestVerifyCommand:
+    """GH #249: nx catalog verify reconciles tumblers against ChromaDB."""
+
+    @staticmethod
+    def _register_with_doc_id(
+        cat, owner_str, title, coll, doc_id, content_type="knowledge",
+    ):
+        from nexus.catalog.tumbler import Tumbler
+        return cat.register(
+            Tumbler.parse(owner_str), title,
+            content_type=content_type,
+            physical_collection=coll,
+            meta={"doc_id": doc_id},
+        )
+
+    def _patch_t3(self, monkeypatch, present_ids_by_collection):
+        """Patch _make_t3 in commands.catalog so existing_ids returns the seeded set."""
+        from unittest.mock import MagicMock
+
+        fake = MagicMock()
+
+        def _existing_ids(coll, ids):
+            present = set(present_ids_by_collection.get(coll, []))
+            return {i for i in ids if i in present}
+
+        fake.existing_ids.side_effect = _existing_ids
+        monkeypatch.setattr(
+            "nexus.commands.catalog._make_t3", lambda: fake,
+        )
+        return fake
+
+    def test_verify_clean(self, initialized_catalog, catalog_env, monkeypatch):
+        """All tumblers present in ChromaDB → '0 ghosts' summary, exit 0."""
+        self._register_with_doc_id(
+            initialized_catalog, "1.1", "Doc One",
+            "knowledge__thing", "abc123def456aaaa",
+        )
+        self._patch_t3(monkeypatch, {"knowledge__thing": ["abc123def456aaaa"]})
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "verify"])
+
+        assert result.exit_code == 0, result.output
+        assert "0 ghosts" in result.output
+
+    def test_verify_flags_ghosts(
+        self, initialized_catalog, catalog_env, monkeypatch,
+    ):
+        """Tumbler in catalog but missing from T3 → surfaced as ghost, summary non-zero."""
+        self._register_with_doc_id(
+            initialized_catalog, "1.1", "Present Doc",
+            "knowledge__thing", "aaaa111111111111",
+        )
+        self._register_with_doc_id(
+            initialized_catalog, "1.1", "Ghost Doc",
+            "knowledge__thing", "bbbb222222222222",
+        )
+        self._patch_t3(
+            monkeypatch, {"knowledge__thing": ["aaaa111111111111"]},
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "verify"])
+
+        assert result.exit_code == 0, result.output
+        assert "1 ghost(s) found" in result.output
+        assert "Ghost Doc" in result.output
+        assert "bbbb222222222222" in result.output
+        # The present doc must NOT be reported as a ghost.
+        assert "Present Doc" not in result.output
+
+    def test_verify_missing_collection_is_all_ghosts(
+        self, initialized_catalog, catalog_env, monkeypatch,
+    ):
+        """Collection absent from T3 (deleted/renamed) → every tumbler is a ghost."""
+        self._register_with_doc_id(
+            initialized_catalog, "1.1", "A",
+            "knowledge__gone", "cccc333333333333",
+        )
+        # T3 patch returns empty for any collection.
+        self._patch_t3(monkeypatch, {})
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "verify"])
+
+        assert result.exit_code == 0, result.output
+        assert "1 ghost(s) found" in result.output
+        assert "knowledge__gone" in result.output
+
+    def test_verify_collection_filter(
+        self, initialized_catalog, catalog_env, monkeypatch,
+    ):
+        """--collection scopes the sweep to a single physical_collection."""
+        self._register_with_doc_id(
+            initialized_catalog, "1.1", "In Scope",
+            "knowledge__foo", "dddd444444444444",
+        )
+        self._register_with_doc_id(
+            initialized_catalog, "1.1", "Out Of Scope",
+            "knowledge__bar", "eeee555555555555",
+        )
+        # Neither is present — both would ghost if unfiltered.
+        self._patch_t3(monkeypatch, {})
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["catalog", "verify", "--collection", "knowledge__foo"],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "In Scope" in result.output
+        assert "Out Of Scope" not in result.output
+
+    def test_verify_json_output(
+        self, initialized_catalog, catalog_env, monkeypatch,
+    ):
+        """--json emits a collection→ghosts map machine-parseable output."""
+        self._register_with_doc_id(
+            initialized_catalog, "1.1", "Ghost",
+            "knowledge__x", "ffff666666666666",
+        )
+        self._patch_t3(monkeypatch, {})
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "verify", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert "knowledge__x" in data
+        assert data["knowledge__x"][0]["doc_id"] == "ffff666666666666"
+        assert data["knowledge__x"][0]["title"] == "Ghost"
+
+    def test_verify_skips_tumblers_without_doc_id(
+        self, initialized_catalog, catalog_env, monkeypatch,
+    ):
+        """Tumblers with no meta.doc_id (e.g. raw catalog register with no indexer
+        hook) are unverifiable and must be skipped silently — not reported as ghosts."""
+        from nexus.catalog.tumbler import Tumbler
+
+        # Register without the doc_id meta field.
+        initialized_catalog.register(
+            Tumbler.parse("1.1"), "Unverifiable",
+            content_type="knowledge",
+            physical_collection="knowledge__thing",
+        )
+        self._patch_t3(monkeypatch, {})
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "verify"])
+
+        assert result.exit_code == 0, result.output
+        assert "Unverifiable" not in result.output
+        # No tumblers to verify, since doc_id was missing.
+        assert "nothing to verify" in result.output.lower()
+
+    def test_verify_heal_drops_ghost(
+        self, initialized_catalog, catalog_env, monkeypatch,
+    ):
+        """--heal with `d` (drop) removes the ghost tumbler from the catalog."""
+        self._register_with_doc_id(
+            initialized_catalog, "1.1", "Ghost",
+            "knowledge__thing", "7777aaaaaaaaaaaa",
+        )
+        self._patch_t3(monkeypatch, {})
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["catalog", "verify", "--heal"],
+            input="d\n",
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "dropped" in result.output.lower()
+
+        # Reopen the catalog and confirm the tumbler is gone.
+        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+        row = cat._db.execute(
+            "SELECT tumbler FROM documents WHERE title = 'Ghost'"
+        ).fetchone()
+        assert row is None
+
     def test_coverage_report(self, initialized_catalog, catalog_env):
         """Coverage shows linked vs total count per content type."""
         runner = CliRunner()

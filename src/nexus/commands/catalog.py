@@ -1059,6 +1059,167 @@ def orphans_cmd(no_links: bool) -> None:
         click.echo(f"  {tumbler:<12} {content_type:<10} {title}{loc}")
 
 
+@catalog.command("verify")
+@click.option(
+    "--heal",
+    is_flag=True,
+    default=False,
+    help="For each ghost, prompt to drop the tumbler or print the "
+         "`nx store put` invocation that would repopulate it.",
+)
+@click.option(
+    "--collection",
+    "-c",
+    default="",
+    help="Restrict verification to a single physical_collection name.",
+)
+@click.option(
+    "--json",
+    "json_out",
+    is_flag=True,
+    default=False,
+    help="Emit machine-readable JSON: {collection: [{tumbler, title, doc_id}]}.",
+)
+def verify_cmd(heal: bool, collection: str, json_out: bool) -> None:
+    """Reconcile catalog tumblers against their T3 collection.
+
+    Reports *ghost* tumblers — entries in the catalog with no matching
+    row in ChromaDB. Ghosts most commonly survive from 4.9.7 / 4.9.8
+    installs where an oversize `store_put` silently truncated before
+    #244's guard landed. Fresh 4.9.9+ writes can no longer create new
+    ghosts.
+
+    The sweep is cheap: one `col.get(ids=[...], include=[])` per 300-id
+    page — no ANN, no payload. Collections missing from T3 (deleted,
+    renamed) are treated the same as missing ids.
+
+    \b
+    Examples:
+      nx catalog verify                                  # full sweep
+      nx catalog verify --collection knowledge__foo      # one collection
+      nx catalog verify --heal                           # interactive fix
+      nx catalog verify --json                           # CI-friendly output
+    """
+    import json as _json
+
+    cat = _get_catalog()
+    db = cat._db
+
+    sql = (
+        "SELECT tumbler, title, physical_collection, "
+        "json_extract(metadata, '$.doc_id') AS doc_id "
+        "FROM documents "
+        "WHERE alias_of = '' "
+        "  AND physical_collection IS NOT NULL "
+        "  AND physical_collection != '' "
+        "  AND doc_id IS NOT NULL "
+    )
+    params: tuple = ()
+    if collection:
+        sql += "  AND physical_collection = ? "
+        params = (collection,)
+    sql += "ORDER BY physical_collection, tumbler"
+    rows = db.execute(sql, params).fetchall()
+
+    if not rows:
+        if collection:
+            click.echo(f"No catalog tumblers with doc_id in {collection}.")
+        else:
+            click.echo("No catalog tumblers with doc_id metadata — nothing to verify.")
+        return
+
+    # Group by physical_collection → list[(tumbler, title, doc_id)]
+    by_collection: dict[str, list[tuple[str, str, str]]] = {}
+    for tumbler_str, title, coll, doc_id in rows:
+        by_collection.setdefault(coll, []).append((tumbler_str, title, doc_id))
+
+    total_tumblers = sum(len(v) for v in by_collection.values())
+    if not json_out:
+        click.echo(
+            f"Verifying {total_tumblers} catalog tumbler(s) across "
+            f"{len(by_collection)} collection(s)..."
+        )
+
+    t3 = _make_t3()
+    ghosts_by_collection: dict[str, list[dict]] = {}
+    for coll, tumblers in sorted(by_collection.items()):
+        expected_ids = [doc_id for _, _, doc_id in tumblers]
+        present = t3.existing_ids(coll, expected_ids)
+        ghosts = [
+            {"tumbler": t, "title": title, "doc_id": doc_id}
+            for t, title, doc_id in tumblers
+            if doc_id not in present
+        ]
+        if ghosts:
+            ghosts_by_collection[coll] = ghosts
+
+    if json_out:
+        click.echo(_json.dumps(ghosts_by_collection, indent=2))
+        return
+
+    total_ghosts = sum(len(v) for v in ghosts_by_collection.values())
+    if not ghosts_by_collection:
+        click.echo(f"Summary: 0 ghosts / {total_tumblers} tumblers. All good.")
+        return
+
+    for coll, ghosts in sorted(ghosts_by_collection.items()):
+        click.echo(f"  {coll}: {len(ghosts)} ghost(s) found")
+        for g in ghosts:
+            click.echo(f"    {g['tumbler']:<12} {g['title']}  (doc_id {g['doc_id']})")
+
+    pct = (total_ghosts * 100.0) / max(total_tumblers, 1)
+    click.echo(
+        f"Summary: {total_ghosts} ghosts / {total_tumblers} tumblers ({pct:.1f}%)."
+    )
+    if not heal:
+        click.echo("Run with --heal for remediation options.")
+        return
+
+    _heal_ghosts(cat, ghosts_by_collection)
+
+
+def _heal_ghosts(
+    cat: Catalog,
+    ghosts_by_collection: dict[str, list[dict]],
+) -> None:
+    """Interactive heal loop for `nx catalog verify --heal`.
+
+    Per ghost, prompt for one of:
+      d  drop the tumbler (catalog.delete_document)
+      p  print the `nx store put` invocation that would repopulate it
+      s  skip
+      q  quit the heal loop
+    """
+    dropped = 0
+    for coll, ghosts in sorted(ghosts_by_collection.items()):
+        click.echo(f"\nHealing {coll}:")
+        for g in ghosts:
+            click.echo(f"  {g['tumbler']} — {g['title']} (doc_id {g['doc_id']})")
+            choice = click.prompt(
+                "    [d]rop tumbler / [p]rint put cmd / [s]kip / [q]uit",
+                default="s",
+                show_default=False,
+            ).strip().lower()
+            if choice == "q":
+                click.echo(f"\nHealed: {dropped} tumbler(s) dropped.")
+                return
+            if choice == "d":
+                if cat.delete_document(Tumbler.parse(g["tumbler"])):
+                    dropped += 1
+                    click.echo("    dropped.")
+                else:
+                    click.echo("    already gone.")
+            elif choice == "p":
+                # The put command needs the original content. We emit a
+                # template so the user can paste their source material.
+                click.echo(
+                    f"    nx store put --collection {coll} "
+                    f"--title {g['title']!r} < source.md"
+                )
+            # anything else = skip
+    click.echo(f"\nHealed: {dropped} tumbler(s) dropped.")
+
+
 @catalog.command("links-for-file")
 @click.argument("file_path")
 def links_for_file_cmd(file_path: str) -> None:

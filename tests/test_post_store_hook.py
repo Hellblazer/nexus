@@ -56,6 +56,89 @@ def test_fire_post_store_hooks_exception_nonfatal(
     fire_post_store_hooks("doc-1", "test__coll", "content")
 
 
+def test_fire_post_store_hooks_persists_failure_to_t2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GH #251: hook failures are persisted to T2 hook_failures for status surfacing.
+
+    The migration is registered at 4.9.10; the running package is still 4.9.9
+    so T2Database's automatic ``apply_pending`` does not create the table.
+    We apply the migration directly so the write path has a target.
+    """
+    import sqlite3
+
+    import nexus.mcp_infra as mod
+    from nexus.db.migrations import migrate_hook_failures
+    from nexus.mcp_infra import fire_post_store_hooks, register_post_store_hook
+
+    db_path = tmp_path / "hook_failures.db"
+    T2Database(db_path).close()  # run base migrations first
+
+    conn = sqlite3.connect(str(db_path))
+    migrate_hook_failures(conn)
+    conn.close()
+
+    monkeypatch.setattr(mod, "t2_ctx", lambda: T2Database(db_path))
+
+    def bad_hook(doc_id, collection, content):
+        raise RuntimeError("simulated centroid failure")
+
+    register_post_store_hook(bad_hook)
+    fire_post_store_hooks("doc-xyz", "knowledge__thing", "content")
+
+    with T2Database(db_path) as db:
+        rows = db.taxonomy.conn.execute(
+            "SELECT doc_id, collection, hook_name, error FROM hook_failures"
+        ).fetchall()
+
+    assert len(rows) == 1
+    doc_id, coll, hook_name, error = rows[0]
+    assert doc_id == "doc-xyz"
+    assert coll == "knowledge__thing"
+    assert hook_name == "bad_hook"
+    assert "simulated centroid failure" in error
+
+
+def test_fire_post_store_hooks_persist_swallowed_when_table_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GH #251: if hook_failures table is absent (pre-4.9.10 DB), store_put
+    is never blocked — the insert failure is caught silently."""
+    import nexus.mcp_infra as mod
+    from nexus.mcp_infra import fire_post_store_hooks, register_post_store_hook
+
+    db_path = tmp_path / "no_hook_table.db"
+    T2Database(db_path).close()  # base schema only — no hook_failures table
+    monkeypatch.setattr(mod, "t2_ctx", lambda: T2Database(db_path))
+
+    def bad_hook(doc_id, collection, content):
+        raise RuntimeError("primary failure")
+
+    register_post_store_hook(bad_hook)
+    # Must not raise even though the persist path will hit "no such table".
+    fire_post_store_hooks("d", "c", "content")
+
+
+def test_fire_post_store_hooks_persist_failure_is_best_effort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GH #251: if the persist path itself raises, the hook contract still holds."""
+    import nexus.mcp_infra as mod
+    from nexus.mcp_infra import fire_post_store_hooks, register_post_store_hook
+
+    def _broken_ctx():
+        raise RuntimeError("t2 offline")
+
+    monkeypatch.setattr(mod, "t2_ctx", _broken_ctx)
+
+    def bad_hook(doc_id, collection, content):
+        raise RuntimeError("original failure")
+
+    register_post_store_hook(bad_hook)
+    # Must not raise even though both the hook AND the persist path failed.
+    fire_post_store_hooks("d", "c", "content")
+
+
 # ── Taxonomy assignment hook ─────────────────────────────────────────────────
 
 
