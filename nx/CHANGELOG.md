@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.9.13] - 2026-04-23
+
+Plugin version aligned with Nexus CLI 4.9.13. No plugin-level functional changes. See root `CHANGELOG.md` for the RDR-092 match-text rollup, the wheel-packaging fix that now ships `nx/plans/*.yml` as importable package data (so installed CLIs find the YAMLs from any cwd), and the test-suite tightening that cut the unit run from 12:31 to 8:02.
+
 ## [4.9.11] - 2026-04-23
 
 Adds a Layer 1 gap-structure pre-check to `/nx:rdr-gate` so the `#### Gap N: <title>` requirement in Problem Statements is caught at gate time, not at close. Same regex and post-65 grandfathering the close skill already uses. `--skip-gaps` is the audit-trail override. Template and `rdr-create` SKILL both name both enforcement points so authors see "gate will block" during drafting. See root `CHANGELOG.md` for the RDR-091 retrofit that motivated the fix.
