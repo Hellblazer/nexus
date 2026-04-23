@@ -100,7 +100,13 @@ CREATE TABLE IF NOT EXISTS plans (
     -- hash-suffix-normalized. DEFAULT '' is load-bearing — Phase 2b
     -- treats '' as the scope-agnostic marker. Upgrade-in-place via the
     -- 4.8.0 ``_add_plan_scope_tags`` migration.
-    scope_tags      TEXT NOT NULL DEFAULT ''
+    scope_tags      TEXT NOT NULL DEFAULT '',
+    -- RDR-092 Phase 3: hybrid match_text. Fresh installs get this
+    -- column in the create; existing DBs pick it up via the 4.9.13
+    -- ``_add_plan_match_text_column`` migration (which also rebuilds
+    -- ``plans_fts`` so the FTS lane indexes match_text instead of
+    -- query).
+    match_text      TEXT NOT NULL DEFAULT ''
 );
 
 -- Indexes on the RDR-078 columns (verb/scope/dimensions) live in the
@@ -112,7 +118,7 @@ CREATE TABLE IF NOT EXISTS plans (
 -- migration that would add them has a chance to run. Issue #190.
 
 CREATE VIRTUAL TABLE IF NOT EXISTS plans_fts USING fts5(
-    query,
+    match_text,
     tags,
     project,
     content=plans,
@@ -120,18 +126,20 @@ CREATE VIRTUAL TABLE IF NOT EXISTS plans_fts USING fts5(
 );
 
 CREATE TRIGGER IF NOT EXISTS plans_ai AFTER INSERT ON plans BEGIN
-    INSERT INTO plans_fts(rowid, query, tags, project) VALUES (new.id, new.query, new.tags, new.project);
+    INSERT INTO plans_fts(rowid, match_text, tags, project)
+        VALUES (new.id, new.match_text, new.tags, new.project);
 END;
 
 CREATE TRIGGER IF NOT EXISTS plans_ad AFTER DELETE ON plans BEGIN
-    INSERT INTO plans_fts(plans_fts, rowid, query, tags, project)
-        VALUES ('delete', old.id, old.query, old.tags, old.project);
+    INSERT INTO plans_fts(plans_fts, rowid, match_text, tags, project)
+        VALUES ('delete', old.id, old.match_text, old.tags, old.project);
 END;
 
 CREATE TRIGGER IF NOT EXISTS plans_au AFTER UPDATE ON plans BEGIN
-    INSERT INTO plans_fts(plans_fts, rowid, query, tags, project)
-        VALUES ('delete', old.id, old.query, old.tags, old.project);
-    INSERT INTO plans_fts(rowid, query, tags, project) VALUES (new.id, new.query, new.tags, new.project);
+    INSERT INTO plans_fts(plans_fts, rowid, match_text, tags, project)
+        VALUES ('delete', old.id, old.match_text, old.tags, old.project);
+    INSERT INTO plans_fts(rowid, match_text, tags, project)
+        VALUES (new.id, new.match_text, new.tags, new.project);
 END;
 """
 
@@ -144,7 +152,50 @@ _PLAN_COLUMNS = (
     "success_count", "failure_count",
     # RDR-091 Phase 2a scope-tag column.
     "scope_tags",
+    # RDR-092 Phase 3 hybrid match-text column.
+    "match_text",
 )
+
+
+def _synthesize_match_text(
+    *,
+    description: str | None,
+    verb: str | None,
+    name: str | None,
+    scope: str | None,
+) -> str:
+    """Hybrid match-text synthesiser. RDR-092 Phase 3 / Phase 1.
+
+    Shape: ``"<description>. <verb> <name> scope <scope>"`` when both
+    *verb* and *name* are provided. Scope is optional and only
+    appended when present. A trailing ``.`` on *description* is
+    collapsed so the output does not carry ``..``.
+
+    When verb or name is missing, returns the raw description so
+    legacy NULL-dimension rows still carry a usable FTS payload.
+    R10 validates the hybrid form at zero verb-accuracy regression.
+
+    This is the single source of truth for match-text synthesis;
+    :func:`nexus.plans.session_cache._synthesize_match_text` is a
+    thin dict-unpacking adapter around this function so the T1
+    cosine embedding and the T2 FTS payload cannot drift
+    (nexus-w98c).
+    """
+    desc = (description or "").strip()
+    v = (verb or "").strip()
+    n = (name or "").strip()
+    s = (scope or "").strip()
+
+    if not v or not n:
+        return desc
+
+    suffix = f"{v} {n}"
+    if s:
+        suffix += f" scope {s}"
+    if desc:
+        core = desc.rstrip(".").rstrip()
+        return f"{core}. {suffix}"
+    return suffix
 
 _PLAN_SELECT_COLS = ", ".join(_PLAN_COLUMNS)
 
@@ -267,6 +318,13 @@ class PlanLibrary:
                 :func:`_normalize_scope_string` before storage.
         """
         created_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        # RDR-092 Phase 3: synthesise the hybrid match_text alongside
+        # the raw query so FTS5 indexes the same dimensional suffix the
+        # T1 cosine cache embeds. Legacy NULL-dimension callers still
+        # get the raw query; no signal lost.
+        match_text = _synthesize_match_text(
+            description=query, verb=verb, name=name, scope=scope,
+        )
         if scope_tags:
             # Normalize each comma-separated entry, drop empties, and
             # drop scope-agnostic sentinels (``"all"``). Without the
@@ -289,14 +347,14 @@ class PlanLibrary:
                 INSERT INTO plans (
                     project, query, plan_json, outcome, tags, created_at, ttl,
                     name, verb, scope, dimensions, default_bindings, parent_dims,
-                    scope_tags
+                    scope_tags, match_text
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project, query, plan_json, outcome, tags, created_at, ttl,
                     name, verb, scope, dimensions, default_bindings, parent_dims,
-                    stored_scope_tags,
+                    stored_scope_tags, match_text,
                 ),
             )
             self.conn.commit()

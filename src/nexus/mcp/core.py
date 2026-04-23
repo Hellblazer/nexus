@@ -1849,15 +1849,92 @@ Pattern B (operator auto-hydration shortcut):
 """
 
 
-def _nx_answer_match_is_hit(confidence: float | None) -> bool:
+def _nx_answer_match_is_hit(
+    confidence: float | None,
+    threshold: float = _PLAN_MATCH_MIN_CONFIDENCE,
+) -> bool:
     """Return True when a plan_match confidence qualifies as a hit.
 
     ``confidence is None`` (FTS5 sentinel, RF-11) is always a hit.
-    Numeric confidence must be >= 0.40 (RDR-079 P5 calibration).
+    Numeric confidence must be >= *threshold*. RDR-092 Phase 2 Option A
+    makes the threshold caller-overridable: the default tracks the
+    RDR-079 P5 calibration (0.40), and verb skills that have validated
+    a stricter floor (0.50 per R9) can pin it per-call.
     """
     if confidence is None:
         return True
-    return confidence >= _PLAN_MATCH_MIN_CONFIDENCE
+    return confidence >= threshold
+
+
+#: Common English stop-words stripped when synthesizing a grown plan's
+#: ``name`` from the question. Kept narrow on purpose; aggressive
+#: filtering drops the content words R10 needs for match-text signal.
+_GROWN_PLAN_NAME_STOP_WORDS: frozenset[str] = frozenset({
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+    "to", "of", "for", "in", "on", "at", "by", "with", "from", "about",
+    "and", "or", "but", "so", "as",
+    "how", "what", "why", "when", "where", "who", "which",
+    "do", "does", "did", "can", "could", "should", "would", "will",
+    "this", "that", "these", "those",
+    "i", "we", "you", "they", "it", "he", "she",
+})
+
+
+def _infer_grown_plan_verb(
+    *,
+    caller_dimensions: dict[str, Any] | None,
+    plan_json: str,
+) -> str:
+    """Three-tier verb cascade for a grown plan. RDR-092 Phase 0b.
+
+    Tier 1: caller-supplied ``dimensions["verb"]``.
+    Tier 2: operator-shape inference from ``plan_json.steps``:
+        compare step → analyze; extract+rank → analyze;
+        traverse+search+summarize → research.
+    Tier 3: ``"research"`` fallback.
+    """
+    if caller_dimensions:
+        pinned = caller_dimensions.get("verb")
+        if isinstance(pinned, str) and pinned.strip():
+            return pinned.strip().lower()
+    try:
+        plan = json.loads(plan_json) if isinstance(plan_json, str) else plan_json
+    except (json.JSONDecodeError, TypeError):
+        return "research"
+    steps = plan.get("steps") if isinstance(plan, dict) else None
+    if not isinstance(steps, list):
+        return "research"
+    tools = {
+        step.get("tool", "").strip().lower()
+        for step in steps if isinstance(step, dict)
+    }
+    tools.discard("")
+    if "compare" in tools:
+        return "analyze"
+    if {"extract", "rank"}.issubset(tools):
+        return "analyze"
+    if {"traverse", "search", "summarize"}.issubset(tools):
+        return "research"
+    return "research"
+
+
+def _infer_grown_plan_name(
+    question: str, *, max_words: int = 5,
+) -> str:
+    """Kebab-case name from first 3-5 content words of *question*.
+
+    RDR-092 Phase 0b. Drops a narrow set of common English stop-words
+    (see :data:`_GROWN_PLAN_NAME_STOP_WORDS`), lowercases the rest, and
+    joins up to *max_words* tokens with ``-``. Empty / whitespace-only
+    input returns ``"grown-plan"`` so a grown row always has an
+    identifier.
+    """
+    import re
+
+    tokens = re.findall(r"[a-zA-Z0-9][a-zA-Z0-9_]*", question.lower())
+    content = [t for t in tokens if t not in _GROWN_PLAN_NAME_STOP_WORDS]
+    take = content[:max_words] if content else tokens[:max_words]
+    return "-".join(take) or "grown-plan"
 
 
 def _nx_answer_classify_plan(match: Any) -> str:
@@ -2076,6 +2153,7 @@ async def nx_answer(
     trace: bool = True,
     dimensions: dict[str, Any] | None = None,
     structured: bool = False,
+    min_confidence: float | None = None,
 ) -> "str | dict":
     """Answer a knowledge question using plan-match-first retrieval. RDR-080 P1.
 
@@ -2109,6 +2187,14 @@ async def nx_answer(
             without a second fetch. The single-step guard path produces
             the same envelope shape — the guard logic itself is unchanged.
             On pure-generate plans or retrieval misses, ``chunks`` is ``[]``.
+        min_confidence: Per-call plan-match floor override (RDR-092 Phase
+            2 Option A). ``None`` (default) uses the global
+            :data:`_PLAN_MATCH_MIN_CONFIDENCE` (0.40, per RDR-079 P5).
+            Verb skills that have validated a stricter precision-first
+            floor (0.50 per R9 against a 5+5 probe corpus) pin the
+            tighter value per-call without moving the global knob; the
+            global default waits on Phase 5's larger-corpus
+            validation. Must be in ``[0.0, 1.0]`` when supplied.
 
     Returns:
         The final step's output — a string by default, or the envelope
@@ -2138,6 +2224,19 @@ async def nx_answer(
         }
 
     # ── Step 1: plan-match gate ──────────────────────────────────────────
+    # RDR-092 Phase 2 Option A: effective floor is the caller's override
+    # when supplied, otherwise the RDR-079 P5 default (0.40). Bounds-
+    # check the override so an agent caller passing a degenerate value
+    # fails loudly (code-review S-4) instead of silently admitting
+    # every match (negative) or rejecting every cosine match (> 1.0).
+    if min_confidence is not None and not (0.0 <= min_confidence <= 1.0):
+        return _result(
+            f"min_confidence must be in [0.0, 1.0], got {min_confidence!r}"
+        )
+    effective_min_confidence = (
+        min_confidence if min_confidence is not None
+        else _PLAN_MATCH_MIN_CONFIDENCE
+    )
     try:
         with _t2_ctx() as db:
             cache = get_t1_plan_cache(populate_from=db.plans)
@@ -2148,13 +2247,15 @@ async def nx_answer(
                 dimensions=dimensions,
                 scope_preference=scope,
                 context={"user_context": context} if context else None,
-                min_confidence=_PLAN_MATCH_MIN_CONFIDENCE,
+                min_confidence=effective_min_confidence,
                 n=5,
             )
     except Exception as exc:
         return _result(f"Error during plan match: {exc}")
 
-    if not matches or not _nx_answer_match_is_hit(matches[0].confidence):
+    if not matches or not _nx_answer_match_is_hit(
+        matches[0].confidence, threshold=effective_min_confidence,
+    ):
         # Plan miss — inline LLM planner via claude_dispatch.
         _log.info(
             "nx_answer_plan_miss",
@@ -2393,6 +2494,22 @@ async def nx_answer(
                 # it only appears in bindings, not plan_json. Passing
                 # scope_tags=scope explicitly captures the retrieval space
                 # that produced this plan.
+                # RDR-092 Phase 0b: R6 three-tier verb cascade populates
+                # verb / name / dimensions so the grown row participates in
+                # the dimensional identity index instead of landing as a
+                # NULL-dimension legacy ghost.
+                from nexus.plans.schema import canonical_dimensions_json
+
+                grown_verb = _infer_grown_plan_verb(
+                    caller_dimensions=dimensions,
+                    plan_json=best.plan_json,
+                )
+                grown_name = _infer_grown_plan_name(question)
+                grown_dimensions = canonical_dimensions_json({
+                    "verb": grown_verb,
+                    "scope": "personal",
+                    "strategy": grown_name,
+                })
                 with _t2_ctx() as _save_db:
                     grown_id = _save_db.plans.save_plan(
                         query=question,
@@ -2403,6 +2520,9 @@ async def nx_answer(
                         ttl=ttl_days,
                         scope="personal",
                         scope_tags=scope or None,
+                        verb=grown_verb,
+                        name=grown_name,
+                        dimensions=grown_dimensions,
                     )
                     # Feed the new plan into the T1 cosine cache so the next
                     # paraphrase can match without a SessionStart re-populate.

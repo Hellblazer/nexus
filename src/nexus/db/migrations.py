@@ -707,6 +707,316 @@ def _rewash_plan_scope_tags_all_sentinel(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 
+# ── RDR-092 Phase 0d.1 (plan-dimensions backfill) ──────────────────────────
+
+
+#: Verb-from-stem dictionary (29 stems across 5 verb families). Keyed
+#: on lowercased tokens that commonly appear in plan ``query`` text.
+#: A match is high-confidence (tagged ``backfill``); zero matches fall
+#: through to the wh-fallback and get tagged ``backfill-low-conf``.
+_BACKFILL_VERB_STEMS: dict[str, str] = {
+    # research family (8 stems)
+    "find": "research", "search": "research", "list": "research",
+    "get": "research", "show": "research", "enumerate": "research",
+    "fetch": "research", "retrieve": "research",
+    # analyze family (8 stems)
+    "analyze": "analyze", "analyse": "analyze",
+    "compare": "analyze", "contrast": "analyze",
+    "rank": "analyze", "synthesize": "analyze",
+    "summarize": "analyze", "summarise": "analyze",
+    # review family (5 stems)
+    "review": "review", "audit": "review",
+    "evaluate": "review", "critique": "review",
+    "assess": "review",
+    # debug family (5 stems)
+    "debug": "debug", "trace": "debug",
+    "investigate": "debug", "fix": "debug",
+    "troubleshoot": "debug",
+    # document family (3 stems)
+    "document": "document", "describe": "document",
+    "explain": "document",
+}
+
+#: Wh-fallback table. Low confidence because a wh-question can map to
+#: any verb; the best guess is research for explanatory questions,
+#: review for causal "why" questions.
+_BACKFILL_WH_FALLBACK: dict[str, str] = {
+    "how": "research", "what": "research",
+    "why": "review",
+    "when": "research", "where": "research", "who": "research",
+    "which": "research",
+}
+
+#: Stop-words skipped when deriving the plan ``name`` from query text.
+_BACKFILL_NAME_STOP_WORDS: frozenset[str] = frozenset({
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+    "to", "of", "for", "in", "on", "at", "by", "with", "from", "about",
+    "and", "or", "but", "so", "as",
+    "how", "what", "why", "when", "where", "who", "which",
+    "do", "does", "did", "can", "could", "should", "would", "will",
+    "this", "that", "these", "those",
+    "i", "we", "you", "they", "it", "he", "she",
+})
+
+
+def _infer_plan_verb_from_query(query: str) -> tuple[str, bool]:
+    """Heuristic verb classifier for RDR-092 plan-dimension backfill.
+
+    Returns ``(verb, is_confident)``. High-confidence matches come
+    from :data:`_BACKFILL_VERB_STEMS`; wh-fallback matches are
+    low-confidence; the ultimate default is ``("research", False)``.
+    """
+    import re
+
+    tokens = re.findall(r"[a-z][a-z-]+", (query or "").lower())
+    for token in tokens:
+        if token in _BACKFILL_VERB_STEMS:
+            return _BACKFILL_VERB_STEMS[token], True
+    for token in tokens:
+        if token in _BACKFILL_WH_FALLBACK:
+            return _BACKFILL_WH_FALLBACK[token], False
+    return "research", False
+
+
+def _derive_plan_name_from_query(query: str, *, max_words: int = 5) -> str:
+    """Kebab-case name from the first 3-5 content tokens of *query*."""
+    import re
+
+    tokens = re.findall(r"[a-zA-Z0-9][a-zA-Z0-9_]*", (query or "").lower())
+    content = [t for t in tokens if t not in _BACKFILL_NAME_STOP_WORDS]
+    take = content[:max_words] if content else tokens[:max_words]
+    return "-".join(take) or "backfilled-plan"
+
+
+def _backfill_plan_dimensions(conn: sqlite3.Connection) -> None:
+    """Backfill verb / name / dimensions on NULL-dimension plan rows.
+
+    RDR-092 Phase 0d.1. Touches only rows where ``dimensions IS NULL``;
+    authored rows (shipped YAML seeds, already-dimensional grown
+    plans, previously-backfilled rows) are left alone. The
+    :func:`_infer_plan_verb_from_query` heuristic decides the verb,
+    and :func:`_derive_plan_name_from_query` supplies the name. Rows
+    whose verb came from a stem match get tagged ``backfill``; rows
+    that fell through to the wh-fallback get tagged
+    ``backfill-low-conf`` so ``nx plan repair`` can prioritise them.
+
+    The canonical dimensions JSON is ``{"scope":<scope>,"strategy":
+    <name>,"verb":<verb>}`` where ``<scope>`` is ``"personal"`` for
+    tagged grown rows and ``"global"`` for everything else (legacy
+    builtin shapes pre-RDR-078). Idempotent: a second run skips rows
+    whose ``dimensions`` is no longer NULL.
+
+    **Collision handling (RDR-092 code-review C-1).** Two NULL-
+    dimension rows in the same project whose queries collapse to the
+    same kebab name produce identical canonical dimensions JSON and
+    would violate the partial UNIQUE ``(project, dimensions) WHERE
+    dimensions IS NOT NULL`` index on the second UPDATE. The loop
+    catches :class:`sqlite3.IntegrityError` and retries the row with
+    the strategy suffixed by the row id (which is monotonic + stable
+    within a DB, preserving idempotency across reruns).
+    """
+    has_table = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='plans'"
+    ).fetchone()
+    if not has_table:
+        return
+
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(plans)").fetchall()}
+    if "dimensions" not in cols:
+        return
+
+    rows = conn.execute(
+        "SELECT id, query, tags FROM plans WHERE dimensions IS NULL"
+    ).fetchall()
+    if not rows:
+        return
+
+    from nexus.plans.schema import canonical_dimensions_json
+
+    backfilled = 0
+    low_conf = 0
+    collisions = 0
+    # Track identities set during this run so within-loop collisions
+    # also get the row_id suffix treatment (the DB-level partial
+    # UNIQUE index would only catch cross-run collisions because the
+    # legacy rows all share dimensions IS NULL until we write).
+    claimed: set[tuple[str, str]] = set()
+    for row_id, query, tags in rows:
+        verb, confident = _infer_plan_verb_from_query(query or "")
+        base_name = _derive_plan_name_from_query(query or "")
+        scope = "personal" if (tags or "").find("grown") >= 0 else "global"
+        project = ""  # Backfill applies to the legacy global project.
+
+        def _dims(name_value: str) -> str:
+            return canonical_dimensions_json({
+                "scope": scope,
+                "strategy": name_value,
+                "verb": verb,
+            })
+
+        # Pre-check for collision against both already-persisted rows
+        # and rows we updated earlier in this same loop.
+        name = base_name
+        dims_json = _dims(name)
+        key = (project, dims_json)
+        db_hit = conn.execute(
+            "SELECT 1 FROM plans "
+            "WHERE project = ? AND dimensions = ? AND id != ? LIMIT 1",
+            (project, dims_json, row_id),
+        ).fetchone()
+        if db_hit or key in claimed:
+            # RDR-092 code-review C-1: resolve via a deterministic
+            # row-id suffix so reruns produce the same identity.
+            name = f"{base_name}-{row_id}"
+            dims_json = _dims(name)
+            key = (project, dims_json)
+            collisions += 1
+        claimed.add(key)
+
+        tag_flag = "backfill" if confident else "backfill-low-conf"
+        existing_tags = [t for t in (tags or "").split(",") if t]
+        if tag_flag not in existing_tags:
+            existing_tags.append(tag_flag)
+        new_tags = ",".join(existing_tags)
+
+        conn.execute(
+            "UPDATE plans SET verb = ?, scope = ?, name = ?, "
+            "dimensions = ?, tags = ? WHERE id = ?",
+            (verb, scope, name, dims_json, new_tags, row_id),
+        )
+        if confident:
+            backfilled += 1
+        else:
+            low_conf += 1
+
+    conn.commit()
+    _log.info(
+        "Backfilled plan dimensions",
+        backfilled=backfilled, low_conf=low_conf,
+        total_rows=len(rows), collisions=collisions,
+    )
+
+
+# ── RDR-092 Phase 3.1 (plans.match_text column + FTS rebuild) ──────────────
+
+
+def _add_plan_match_text_column(conn: sqlite3.Connection) -> None:
+    """Add ``match_text`` column to plans and rebuild ``plans_fts``.
+
+    RDR-092 Phase 3.1. The hybrid match-text synthesiser's output
+    becomes the FTS payload so the T2 FTS lane indexes the same
+    dimensional signal the T1 cosine cache embeds (R10 hybrid form).
+
+    Steps:
+      1. ``ALTER TABLE plans ADD COLUMN match_text TEXT NOT NULL
+         DEFAULT ''`` when the column is absent.
+      2. Drop the three ``plans_ai`` / ``plans_ad`` / ``plans_au``
+         triggers and the ``plans_fts`` virtual table (FTS5 does not
+         support ``ALTER COLUMN``; the only upgrade path is
+         drop+recreate).
+      3. Recreate ``plans_fts`` indexing
+         ``(match_text, tags, project)`` instead of
+         ``(query, tags, project)``.
+      4. Recreate triggers targeting ``match_text``.
+      5. Backfill existing rows: synthesise match_text from
+         ``query`` / ``verb`` / ``name`` / ``scope`` via the same
+         hybrid shape ``_synthesize_match_text`` ships with.
+      6. Rebuild the FTS index from the populated rows.
+
+    Idempotent: re-running on a DB that already has the column and
+    the new FTS shape is a no-op (the column guard short-circuits).
+    Must run AFTER :func:`_add_plan_dimensional_identity` and
+    :func:`_backfill_plan_dimensions` so the match_text backfill has
+    verb/name/scope to read.
+    """
+    has_plans = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='plans'"
+    ).fetchone()
+    if not has_plans:
+        return
+
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(plans)").fetchall()}
+    has_fts = conn.execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE type='table' AND name='plans_fts'"
+    ).fetchone()
+    if "match_text" in cols and has_fts:
+        # Already on the new schema with the FTS table present;
+        # nothing to do.
+        return
+
+    # RDR-092 code-review S-1 guard: a process killed between the
+    # ALTER TABLE below and the FTS rebuild executescript leaves the
+    # column present but plans_fts missing. Without the has_fts check
+    # above, the column guard would short-circuit on retry and the
+    # legacy rows would silently land with empty match_text. Falling
+    # through here is safe: the ALTER is skipped when the column
+    # already exists, the DROP statements tolerate missing objects,
+    # and the backfill UPDATE is idempotent against already-
+    # populated rows.
+    _log.info("Adding plans.match_text column + rebuilding plans_fts")
+    if "match_text" not in cols:
+        conn.execute(
+            "ALTER TABLE plans ADD COLUMN match_text TEXT NOT NULL DEFAULT ''"
+        )
+
+    # Drop the legacy triggers + FTS table up-front so the backfill
+    # UPDATE below does not fan out into an external-content FTS that
+    # is about to be rebuilt anyway.
+    conn.executescript("""
+        DROP TRIGGER IF EXISTS plans_ai;
+        DROP TRIGGER IF EXISTS plans_ad;
+        DROP TRIGGER IF EXISTS plans_au;
+        DROP TABLE  IF EXISTS plans_fts;
+    """)
+
+    # Backfill existing rows from query / verb / name / scope using the
+    # same hybrid shape save_plan produces on new inserts.
+    from nexus.db.t2.plan_library import _synthesize_match_text
+
+    rows = conn.execute(
+        "SELECT id, query, verb, name, scope FROM plans"
+    ).fetchall()
+    for row_id, query, verb, name, scope in rows:
+        synthesised = _synthesize_match_text(
+            description=query, verb=verb, name=name, scope=scope,
+        )
+        conn.execute(
+            "UPDATE plans SET match_text = ? WHERE id = ?",
+            (synthesised, row_id),
+        )
+
+    # Recreate plans_fts + triggers on the populated match_text column
+    # and rebuild the FTS index from existing rows.
+    conn.executescript("""
+        CREATE VIRTUAL TABLE plans_fts USING fts5(
+            match_text, tags, project,
+            content=plans, content_rowid='id'
+        );
+
+        CREATE TRIGGER plans_ai AFTER INSERT ON plans BEGIN
+            INSERT INTO plans_fts(rowid, match_text, tags, project)
+                VALUES (new.id, new.match_text, new.tags, new.project);
+        END;
+        CREATE TRIGGER plans_ad AFTER DELETE ON plans BEGIN
+            INSERT INTO plans_fts(plans_fts, rowid, match_text, tags, project)
+                VALUES ('delete', old.id, old.match_text, old.tags, old.project);
+        END;
+        CREATE TRIGGER plans_au AFTER UPDATE ON plans BEGIN
+            INSERT INTO plans_fts(plans_fts, rowid, match_text, tags, project)
+                VALUES ('delete', old.id, old.match_text, old.tags, old.project);
+            INSERT INTO plans_fts(rowid, match_text, tags, project)
+                VALUES (new.id, new.match_text, new.tags, new.project);
+        END;
+    """)
+    conn.execute("INSERT INTO plans_fts(plans_fts) VALUES('rebuild')")
+    conn.commit()
+    _log.info(
+        "plans.match_text migration complete",
+        backfilled=len(rows),
+    )
+
+
 MIGRATIONS: list[Migration] = [
     Migration("1.10.0", "Memory FTS rebuild with title", migrate_memory_fts),
     Migration("2.8.0", "Add plan project column", migrate_plan_project),
@@ -759,6 +1069,16 @@ MIGRATIONS: list[Migration] = [
         "4.9.10",
         "Add hook_failures table (GH #251)",
         migrate_hook_failures,
+    ),
+    Migration(
+        "4.9.12",
+        "Backfill plan dimensions (RDR-092 Phase 0d)",
+        _backfill_plan_dimensions,
+    ),
+    Migration(
+        "4.9.13",
+        "Add plans.match_text column + rebuild plans_fts (RDR-092 Phase 3)",
+        _add_plan_match_text_column,
     ),
 ]
 

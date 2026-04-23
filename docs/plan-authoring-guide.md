@@ -75,8 +75,9 @@ plan_json:
 
 ### What makes a good description
 
-`plan_match` is a cosine retrieval against the description text. Rule
-of thumb: write what would come out of the mouth of an agent that
+`plan_match` is a cosine / FTS5 retrieval against the synthesised
+`match_text` payload, whose prefix is the description text. Rule of
+thumb: write what would come out of the mouth of an agent that
 should invoke this plan.
 
 **Bad:** `"research plan"` — no discriminative signal.
@@ -85,6 +86,15 @@ should invoke this plan.
 The description should name the verb, the objects, and the outcome.
 Two plans whose descriptions differ only by paraphrase will compete
 for matches; the better-worded one wins.
+
+RDR-092 Phase 1 + Phase 3 appended a dimensional suffix to the
+embedded payload. The description still does the heavy lifting; the
+matcher now also sees `<verb> <name> scope <scope>` so queries that
+know the identity (e.g. `research find-by-author`) hit even when
+their phrasing does not overlap the description. Authoring guidance
+is unchanged: write a crisp description; the suffix is automatic.
+See [Plan-Centric Retrieval § match_text synthesis](plan-centric-retrieval.md#match_text-synthesis)
+for the full shape.
 
 ### Dimension conventions
 
@@ -385,6 +395,17 @@ the `"all"` wildcard end up agnostic (`scope_tags=""`) in that case.
   dedup will reject the second. Differentiate on `strategy`, or
   publish at a different scope.
 
+## Day-2 operations
+
+- `nx doctor --check-plan-library` (RDR-092 Phase 0c) reports plan
+  rows by bucket (authored vs backfilled vs non-dimensional) and
+  flags a stale global tier. Run after any plugin install to
+  confirm `nx catalog setup` seeded the 12 builtins.
+- `nx plan repair` (RDR-092 Phase 0d) backfills `verb` / `name` /
+  `dimensions` on legacy NULL-dimension rows using a 20-rule stem
+  dictionary + wh-fallback, and lists `backfill-low-conf` rows for
+  manual review. Idempotent.
+
 ## See also
 
 - `nx/plans/dimensions.yml` — registered dimension keys.
@@ -392,3 +413,5 @@ the `"all"` wildcard end up agnostic (`scope_tags=""`) in that case.
 - `src/nexus/plans/schema.py` — the validator enforcing this schema.
 - `src/nexus/plans/runner.py` — `plan_run` implementation.
 - `src/nexus/plans/matcher.py` — `plan_match` (T1 cosine + FTS5 fallback).
+- `src/nexus/db/t2/plan_library.py::_synthesize_match_text`, the
+  hybrid match-text synthesiser (RDR-092 Phase 1 + Phase 3).

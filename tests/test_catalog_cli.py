@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+import click
 import pytest
 from click.testing import CliRunner
 
@@ -331,18 +332,24 @@ class TestOwnersCommand:
 
 class TestSeedPlanTemplates:
     def test_seed_creates_legacy_templates(self, tmp_path, monkeypatch):
-        """5 legacy RDR-063 plans + 9 RDR-078 YAML templates = 14 total inserts."""
+        """All 12 RDR-078/092 YAML templates seed on first run.
+
+        RDR-092 Phase 0a retired the legacy ``_PLAN_TEMPLATES`` array:
+        three entries migrated to dimensional YAML (find-by-author,
+        citation-traversal, type-scoped-search); two were retired as
+        redundant with research-default / analyze-default. Pre-existing
+        9 YAML plus 3 new = 12 total.
+        """
         from nexus.db.t2 import T2Database
         db_path = tmp_path / "t2.db"
         monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: db_path)
         from nexus.commands.catalog import _seed_plan_templates
         count = _seed_plan_templates()
-        # 5 legacy builtin plans + 9 RDR-078 YAML scenario templates.
-        assert count == 14
+        assert count == 12
         db = T2Database(db_path)
-        # Legacy plans carry the 'builtin-template' tag.
-        results = db.search_plans("builtin-template")
-        assert len(results) == 5
+        # Every seeded template carries the builtin-template tag.
+        results = db.search_plans("builtin-template", limit=20)
+        assert len(results) == 12
         db.close()
 
     def test_seed_idempotent(self, tmp_path, monkeypatch):
@@ -352,7 +359,7 @@ class TestSeedPlanTemplates:
         from nexus.commands.catalog import _seed_plan_templates
         first = _seed_plan_templates()
         second = _seed_plan_templates()
-        assert first == 14
+        assert first == 12
         assert second == 0
 
     def test_seed_templates_have_builtin_tag(self, tmp_path, monkeypatch):
@@ -362,10 +369,95 @@ class TestSeedPlanTemplates:
         from nexus.commands.catalog import _seed_plan_templates
         _seed_plan_templates()
         db = T2Database(db_path)
-        plans = db.list_plans(limit=10)
+        plans = db.list_plans(limit=20)
+        assert len(plans) == 12
         for p in plans:
             assert "builtin-template" in p["tags"]
         db.close()
+
+    def test_setup_fails_loud_on_zero_global_tier(
+        self, tmp_path, monkeypatch,
+    ):
+        """RDR-092 Phase 0c.1: when the global-tier YAML directory is
+        empty or missing, _seed_plan_templates must raise a
+        ``click.ClickException`` rather than silently returning 0.
+
+        Rationale: an empty global tier signals a deployment gap
+        (plugin_root misrouted, YAMLs deleted, stale install). Silent
+        zero results are how RDR-092 discovered 0/52 live plans had
+        dimensional columns populated.
+        """
+        from nexus.plans.seed_loader import SeedLoadResult
+
+        db_path = tmp_path / "t2.db"
+        monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: db_path)
+        # Force the scoped loader to report an empty global tier.
+        monkeypatch.setattr(
+            "nexus.plans.loader.load_all_tiers",
+            lambda **_kw: {"global": SeedLoadResult()},
+        )
+
+        from nexus.commands.catalog import _seed_plan_templates
+        with pytest.raises(click.exceptions.ClickException) as excinfo:
+            _seed_plan_templates()
+        assert "global" in str(excinfo.value.message).lower()
+
+    def test_setup_fails_loud_when_global_tier_absent(
+        self, tmp_path, monkeypatch,
+    ):
+        """RDR-092 Phase 0c.1: when ``load_all_tiers`` returns no
+        ``global`` key at all (plugin_root path does not exist), the
+        seeder must also raise — not silently succeed with zero rows.
+        """
+        db_path = tmp_path / "t2.db"
+        monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: db_path)
+        monkeypatch.setattr(
+            "nexus.plans.loader.load_all_tiers",
+            lambda **_kw: {},
+        )
+
+        from nexus.commands.catalog import _seed_plan_templates
+        with pytest.raises(click.exceptions.ClickException) as excinfo:
+            _seed_plan_templates()
+        msg = str(excinfo.value.message).lower()
+        assert "global" in msg
+
+    def test_setup_surfaces_per_tier_errors_to_user(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        """RDR-092 Phase 0c.1: per-tier load errors must land on stderr
+        via ``click.echo`` (not only the structured log), so the setup
+        run visibly differentiates 'files found but some malformed'
+        from the quiet healthy case.
+        """
+        from nexus.plans.seed_loader import SeedLoadResult
+
+        db_path = tmp_path / "t2.db"
+        monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: db_path)
+
+        # Give the global tier one healthy insert so the fail-loud
+        # zero-guard does not fire; rdr-099 scope surfaces an error.
+        monkeypatch.setattr(
+            "nexus.plans.loader.load_all_tiers",
+            lambda **_kw: {
+                "global": SeedLoadResult(
+                    inserted=["ok.yml"],
+                    skipped_existing=[],
+                    errors=[],
+                ),
+                "rdr-099": SeedLoadResult(
+                    inserted=[],
+                    skipped_existing=[],
+                    errors=[("/path/broken.yml", "schema: missing verb")],
+                ),
+            },
+        )
+
+        from nexus.commands.catalog import _seed_plan_templates
+        _seed_plan_templates()
+        err = capsys.readouterr().err
+        assert "broken.yml" in err
+        assert "rdr-099" in err
 
     def test_seed_templates_no_ttl(self, tmp_path, monkeypatch):
         from nexus.db.t2 import T2Database
@@ -374,10 +466,70 @@ class TestSeedPlanTemplates:
         from nexus.commands.catalog import _seed_plan_templates
         _seed_plan_templates()
         db = T2Database(db_path)
-        plans = db.list_plans(limit=10)
+        plans = db.list_plans(limit=20)
         for p in plans:
             assert p["ttl"] is None
         db.close()
+
+    def test_setup_produces_dimensional_rows(self, tmp_path, monkeypatch):
+        """RDR-092 Phase 0a regression: every seeded plan carries the
+        dimensional identity columns (verb/name/dimensions) populated
+        with no ``dimensions=NULL`` legacy leakage remaining after
+        retiring ``_PLAN_TEMPLATES``.
+        """
+        from nexus.db.t2 import T2Database
+        db_path = tmp_path / "t2.db"
+        monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: db_path)
+        from nexus.commands.catalog import _seed_plan_templates
+        _seed_plan_templates()
+        db = T2Database(db_path)
+        plans = db.list_plans(limit=20)
+        assert len(plans) == 12
+        for p in plans:
+            assert p["verb"], f"missing verb on {p['query']!r}"
+            assert p["name"], f"missing name on {p['query']!r}"
+            assert p["dimensions"], f"missing dimensions on {p['query']!r}"
+            assert p["scope"] == "global"
+        db.close()
+
+    def test_legacy_templates_no_longer_ingested_non_dimensionally(
+        self, tmp_path, monkeypatch,
+    ):
+        """RDR-092 Phase 0a regression: the three migrated legacy
+        shapes (find-by-author, citation-traversal, type-scoped-search)
+        now enter the DB from YAML with full dimensional columns, not
+        from the retired ``_PLAN_TEMPLATES`` array with NULLs.
+        """
+        from nexus.db.t2 import T2Database
+        db_path = tmp_path / "t2.db"
+        monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: db_path)
+        from nexus.commands.catalog import _seed_plan_templates
+        _seed_plan_templates()
+        db = T2Database(db_path)
+        # Each migrated shape is identified by {strategy, expected name}.
+        expected = [
+            ("find-by-author", "find-by-author"),
+            ("citation-traversal", "citation-traversal"),
+            ("type-scoped", "type-scoped-search"),
+        ]
+        for strategy, name in expected:
+            rows = [
+                p for p in db.list_plans(limit=20)
+                if (p["dimensions"] or "").find(f'"strategy":"{strategy}"') >= 0
+            ]
+            assert rows, f"no YAML plan carries strategy={strategy!r}"
+            assert rows[0]["verb"] == "research"
+            assert rows[0]["scope"] == "global"
+            assert rows[0]["name"] == name
+        db.close()
+
+    def test_plan_templates_module_attr_is_retired(self):
+        """RDR-092 Phase 0a: the ``_PLAN_TEMPLATES`` array was deleted;
+        re-importing it must raise ``ImportError`` so any rogue caller
+        fails loudly rather than silently ingesting NULL-dimension rows.
+        """
+        import nexus.commands.catalog as mod
+        assert not hasattr(mod, "_PLAN_TEMPLATES")
 
 
 class TestStatsCommand:

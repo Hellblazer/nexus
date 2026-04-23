@@ -14,87 +14,22 @@ from nexus.catalog.tumbler import Tumbler
 
 _log = structlog.get_logger(__name__)
 
-# -- Pre-built plan templates (seeded at `nx catalog setup`) --
-
-_PLAN_TEMPLATES: list[dict[str, str]] = [
-    {
-        "query": "find documents by author",
-        "plan_json": json.dumps({
-            "query": "find documents by {author_name}",
-            "steps": [
-                {"step": 1, "operation": "catalog_search", "params": {"author": "{author_name}"}},
-                {"step": 2, "operation": "search", "search_query": "{author_name} research contributions", "corpus": "$step_1.collections"},
-                {"step": 3, "operation": "summarize", "inputs": "$step_2", "params": {"mode": "short"}},
-            ],
-        }),
-        "tags": "builtin-template,catalog,author",
-    },
-    {
-        "query": "trace citation chain from document",
-        "plan_json": json.dumps({
-            "query": "what cites {document_title}",
-            "steps": [
-                {"step": 1, "operation": "catalog_search", "params": {"query": "{document_title}"}},
-                {"step": 2, "operation": "catalog_links", "inputs": "$step_1", "params": {"direction": "in", "link_type": "cites", "depth": 2}},
-                {"step": 3, "operation": "search", "search_query": "{document_title} contributions", "corpus": "$step_2.collections"},
-                {"step": 4, "operation": "summarize", "inputs": "$step_3", "params": {"mode": "evidence"}},
-            ],
-        }),
-        "tags": "builtin-template,catalog,citation",
-    },
-    {
-        "query": "trace provenance chain for document",
-        "plan_json": json.dumps({
-            "query": "what research informed {document_title}",
-            "steps": [
-                {"step": 1, "operation": "catalog_search", "params": {"query": "{document_title}"}},
-                {"step": 2, "operation": "catalog_links", "inputs": "$step_1", "params": {"direction": "both", "depth": 2}},
-                {"step": 3, "operation": "search", "search_query": "provenance origins influence", "corpus": "$step_2.collections"},
-                {"step": 4, "operation": "summarize", "inputs": "$step_3", "params": {"mode": "evidence"}},
-            ],
-        }),
-        "tags": "builtin-template,catalog,provenance",
-    },
-    {
-        "query": "compare documents across corpora",
-        "plan_json": json.dumps({
-            "query": "compare {topic} across {corpus_a} and {corpus_b}",
-            "steps": [
-                {"step": 1, "operation": "search", "search_query": "{topic}", "corpus": "{corpus_a}"},
-                {"step": 2, "operation": "search", "search_query": "{topic}", "corpus": "{corpus_b}"},
-                {"step": 3, "operation": "compare", "inputs": ["$step_1", "$step_2"], "params": {"criterion": "{topic}"}},
-            ],
-        }),
-        "tags": "builtin-template,catalog,cross-corpus",
-    },
-    {
-        "query": "search within content type",
-        "plan_json": json.dumps({
-            "query": "{question} in {type} documents",
-            "steps": [
-                {"step": 1, "operation": "catalog_search", "params": {"content_type": "{type}"}},
-                {"step": 2, "operation": "search", "search_query": "{question}", "corpus": "$step_1.collections"},
-                {"step": 3, "operation": "summarize", "inputs": "$step_2", "params": {"mode": "short"}},
-            ],
-        }),
-        "tags": "builtin-template,catalog,type-scoped",
-    },
-]
-
 
 def _seed_plan_templates() -> int:
     """Seed pre-built plan templates into T2. Idempotent — skips existing.
 
-    Two seed sources coexist:
+    All templates are shipped as YAML files under ``nx/plans/builtin/``
+    and loaded via the four-tier loader, which deduplicates on the
+    ``UNIQUE (project, dimensions)`` partial index (nexus-05i.6).
 
-    * The RDR-063 :data:`_PLAN_TEMPLATES` list — legacy builtin plans keyed by
-      ``query + 'builtin-template'`` tag. These rows carry ``dimensions=NULL``
-      so they don't collide with the new RDR-078 scope:global seeds.
-    * The RDR-078 P4b scenario templates shipped as YAML files under
-      ``nx/plans/builtin/`` — loaded via the four-tier loader and deduplicated
-      via the ``UNIQUE (project, dimensions)`` partial index (nexus-05i.6).
+    The legacy :data:`_PLAN_TEMPLATES` array retired in RDR-092 Phase 0a:
+    three of its entries migrated to dimensional YAML builtins
+    (``find-by-author``, ``citation-traversal``, ``type-scoped-search``);
+    the other two were retired as redundant with existing defaults
+    (``research-default`` covers the provenance shape,
+    ``analyze-default`` covers the multi-corpus compare shape).
 
-    Returns the total number of newly-inserted rows across both sources.
+    Returns the total number of newly-inserted rows.
     """
     from pathlib import Path
 
@@ -103,19 +38,6 @@ def _seed_plan_templates() -> int:
 
     seeded = 0
     with T2Database(default_db_path()) as db:
-        # Legacy builtin plans (RDR-063).
-        for tmpl in _PLAN_TEMPLATES:
-            if db.plan_exists(tmpl["query"], "builtin-template"):
-                continue
-            db.save_plan(
-                query=tmpl["query"],
-                plan_json=tmpl["plan_json"],
-                tags=tmpl["tags"],
-            )
-            seeded += 1
-
-        # RDR-078 scoped plan loader — four tiers:
-        # plugin builtin → per-RDR plans → project → repo umbrella.
         from nexus.indexer_utils import find_repo_root
         from nexus.plans.loader import load_all_tiers
 
@@ -128,11 +50,43 @@ def _seed_plan_templates() -> int:
             repo_root=repo_root,
             library=db.plans,
         )
+
+        # RDR-092 Phase 0c.1: fail loud on an empty global tier. A
+        # missing or empty ``nx/plans/builtin`` is a deployment gap
+        # (plugin root misrouted, YAMLs deleted) that silently leaves
+        # the library without dimensional seeds. The loader normally
+        # logs this via ``_log.info("seed_directory_missing")``; the
+        # setup CLI needs a user-visible failure, not a structured
+        # info.
+        global_result = tier_results.get("global")
+        global_scanned = (
+            global_result.total_scanned if global_result is not None else 0
+        )
+        if global_scanned == 0:
+            raise click.ClickException(
+                "Plan library seed failed: global tier is empty (no "
+                f"YAML builtins found at {plugin_root / 'plans' / 'builtin'}). "
+                "This typically means the plugin root is misconfigured "
+                "or the shipped builtin YAMLs were removed. Re-install "
+                "the nx plugin or run 'nx doctor --check-plan-library' "
+                "for diagnostics."
+            )
+
         for scope, result in tier_results.items():
             for source, error in result.errors:
+                # Structured log for machine consumption.
                 _log.warning(
                     "rdr078_seed_load_error",
                     scope=scope, source=source, error=error,
+                )
+                # User-visible echo so setup output distinguishes
+                # 'files found but some malformed' from the quiet
+                # healthy case. Stays on stderr to preserve stdout
+                # for the success count.
+                click.echo(
+                    f"  warning: seed load error in {scope} tier "
+                    f"({source}): {error}",
+                    err=True,
                 )
             seeded += len(result.inserted)
 

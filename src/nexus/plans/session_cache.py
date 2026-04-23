@@ -28,9 +28,12 @@ from typing import Any
 import structlog
 
 from nexus.db.local_ef import LocalEmbeddingFunction
-from nexus.db.t2.plan_library import PlanLibrary
+from nexus.db.t2.plan_library import (
+    PlanLibrary,
+    _synthesize_match_text as _plan_library_synthesize_match_text,
+)
 
-__all__ = ["PlanSessionCache", "PLANS_COLLECTION"]
+__all__ = ["PlanSessionCache", "PLANS_COLLECTION", "_synthesize_match_text"]
 
 _log = structlog.get_logger(__name__)
 
@@ -175,8 +178,8 @@ class PlanSessionCache:
             return False
 
     def _upsert_row(self, row: dict[str, Any]) -> bool:
-        description = (row.get("query") or "").strip()
-        if not description:
+        match_text = _synthesize_match_text(row)
+        if not match_text:
             return False
         plan_id = row.get("id")
         if plan_id is None:
@@ -192,10 +195,39 @@ class PlanSessionCache:
         }
         try:
             self._col.upsert(
-                ids=[doc_id], documents=[description], metadatas=[meta],
+                ids=[doc_id], documents=[match_text], metadatas=[meta],
             )
         except Exception:
             _log.warning("plan_session_cache_upsert_failed",
                          plan_id=plan_id, exc_info=True)
             return False
         return True
+
+
+def _synthesize_match_text(row: dict[str, Any]) -> str:
+    """Adapter around
+    :func:`nexus.db.t2.plan_library._synthesize_match_text` that
+    unpacks a plan row dict into the kwargs the shared synthesiser
+    expects. RDR-092 Phase 1 / Phase 3 / nexus-w98c.
+
+    The T1 cache upserts plan rows in dict form (via the schema
+    that :data:`nexus.db.t2.plan_library._PLAN_COLUMNS` stamps on
+    :func:`_row_to_dict`); the shared synthesiser lives in
+    ``plan_library`` because that module also calls it from
+    :meth:`PlanLibrary.save_plan` on every insert. This adapter
+    keeps the dict signature on the cache side (no caller
+    disruption) while guaranteeing the T1 cosine embedding and the
+    T2 FTS payload are derived from the same bytes.
+
+    Contract: the returned string is the hybrid
+    ``"<description>. <verb> <name> scope <scope>"`` when verb AND
+    name are both populated; otherwise falls back to the raw
+    description. See the shared implementation for the full shape
+    rationale (R10 hybrid form validation).
+    """
+    return _plan_library_synthesize_match_text(
+        description=row.get("query"),
+        verb=row.get("verb"),
+        name=row.get("name"),
+        scope=row.get("scope"),
+    )

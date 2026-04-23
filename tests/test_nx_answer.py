@@ -136,6 +136,172 @@ class TestPlanMatchGate:
         assert _nx_answer_match_is_hit(0.0) is False
 
 
+# ── min_confidence override (RDR-092 Phase 2, Option A) ──────────────────────
+
+
+class TestMinConfidenceOverride:
+    """Per-call ``min_confidence`` override on ``nx_answer`` / the hit
+    helper. RDR-092 Phase 2 Option A: the global
+    ``_PLAN_MATCH_MIN_CONFIDENCE`` stays at 0.40 (RDR-079 calibration);
+    verb skills that validated a stricter floor (0.50 per R9) opt in
+    by passing it explicitly.
+    """
+
+    def test_hit_helper_accepts_threshold_arg(self):
+        from nexus.mcp.core import _nx_answer_match_is_hit
+        # Default threshold unchanged (0.40).
+        assert _nx_answer_match_is_hit(0.40) is True
+        assert _nx_answer_match_is_hit(0.45) is True
+        # Caller can pin 0.50.
+        assert _nx_answer_match_is_hit(0.45, threshold=0.50) is False
+        assert _nx_answer_match_is_hit(0.50, threshold=0.50) is True
+
+    def test_fts5_sentinel_ignores_threshold(self):
+        from nexus.mcp.core import _nx_answer_match_is_hit
+        # ``None`` sentinel is a hit at any threshold (RF-11).
+        assert _nx_answer_match_is_hit(None, threshold=0.99) is True
+
+    @pytest.mark.asyncio
+    async def test_nx_answer_accepts_min_confidence_kwarg(self):
+        """Override flows into plan_match *and* governs the hit check."""
+        from nexus.mcp.core import nx_answer
+
+        captured: dict = {}
+
+        def fake_match(question, **kwargs):
+            captured.update(kwargs)
+            # Return a confidence just above 0.40 but below the caller's
+            # override — the hit check must reject it and the planner
+            # miss path must kick in.
+            return [_make_match(plan_id=1, confidence=0.45)]
+
+        async def fake_miss(question, scope="", max_steps=6):
+            return _make_match(plan_id=0, confidence=None)
+
+        plan_run_result = MagicMock()
+        plan_run_result.steps = [{"text": "ok"}]
+
+        db_stub = MagicMock()
+        db_stub.plans.save_plan = MagicMock(return_value=1)
+        db_stub.plans.get_plan = MagicMock(return_value={"id": 1})
+
+        with patch("nexus.plans.matcher.plan_match", side_effect=fake_match), \
+             patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(side_effect=fake_miss)), \
+             patch("nexus.plans.runner.plan_run", AsyncMock(return_value=plan_run_result)), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            await nx_answer(question="q", min_confidence=0.50)
+
+        # plan_match saw the caller-supplied floor.
+        assert captured.get("min_confidence") == 0.50
+
+    @pytest.mark.asyncio
+    async def test_nx_answer_default_threshold_unchanged(self):
+        """With no override, the 0.40 floor still matches RDR-079."""
+        from nexus.mcp.core import nx_answer, _PLAN_MATCH_MIN_CONFIDENCE
+
+        assert _PLAN_MATCH_MIN_CONFIDENCE == 0.40
+
+        captured: dict = {}
+
+        def fake_match(question, **kwargs):
+            captured.update(kwargs)
+            return []
+
+        async def fake_miss(question, scope="", max_steps=6):
+            return _make_match(plan_id=0, confidence=None)
+
+        plan_run_result = MagicMock()
+        plan_run_result.steps = [{"text": "ok"}]
+
+        db_stub = MagicMock()
+        db_stub.plans.save_plan = MagicMock(return_value=1)
+        db_stub.plans.get_plan = MagicMock(return_value={"id": 1})
+
+        with patch("nexus.plans.matcher.plan_match", side_effect=fake_match), \
+             patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(side_effect=fake_miss)), \
+             patch("nexus.plans.runner.plan_run", AsyncMock(return_value=plan_run_result)), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            await nx_answer(question="q")
+
+        assert captured.get("min_confidence") == 0.40
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad_value", [-0.01, -1.0, 1.01, 2.0])
+    async def test_nx_answer_rejects_out_of_range_min_confidence(
+        self, bad_value: float,
+    ):
+        """RDR-092 code-review S-4: values outside [0, 1] must fail
+        loudly rather than silently admitting (negative) or rejecting
+        (> 1.0) every match.
+        """
+        from nexus.mcp.core import nx_answer
+
+        match_called = MagicMock()
+
+        def fake_match(question, **kwargs):
+            match_called()
+            return []
+
+        with patch("nexus.plans.matcher.plan_match", side_effect=fake_match), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+            t2_ctx.return_value.__enter__.return_value = MagicMock()
+            result = await nx_answer(
+                question="q", min_confidence=bad_value,
+            )
+
+        assert "min_confidence must be in [0.0, 1.0]" in result
+        assert str(bad_value) in result
+        assert not match_called.called, (
+            "plan_match must never be reached with an invalid floor"
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("ok_value", [0.0, 0.25, 0.5, 1.0])
+    async def test_nx_answer_accepts_boundary_min_confidence(
+        self, ok_value: float,
+    ):
+        """The validator accepts both endpoints (0.0 and 1.0) plus
+        anything in between so verb skills can pin the most permissive
+        and most restrictive floors without hitting the guard.
+        """
+        from nexus.mcp.core import nx_answer
+
+        captured: dict = {}
+
+        def fake_match(question, **kwargs):
+            captured.update(kwargs)
+            return []
+
+        async def fake_miss(question, scope="", max_steps=6):
+            return _make_match(plan_id=0, confidence=None)
+
+        plan_run_result = MagicMock()
+        plan_run_result.steps = [{"text": "ok"}]
+
+        db_stub = MagicMock()
+        db_stub.plans.save_plan = MagicMock(return_value=1)
+        db_stub.plans.get_plan = MagicMock(return_value={"id": 1})
+
+        with patch("nexus.plans.matcher.plan_match", side_effect=fake_match), \
+             patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(side_effect=fake_miss)), \
+             patch("nexus.plans.runner.plan_run", AsyncMock(return_value=plan_run_result)), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            await nx_answer(question="q", min_confidence=ok_value)
+
+        assert captured.get("min_confidence") == ok_value
+
+
 # ── Single-step guard ─────────────────────────────────────────────────────────
 
 
@@ -362,6 +528,240 @@ class TestPlanMissPlanner:
 
         assert dispatch_calls, "claude_dispatch must be called (not pool)"
         assert "nexus.mcp_infra" not in str(dispatch_calls), "pool path must not be taken"
+
+
+# ── Grown plan dimensional columns (RDR-092 Phase 0b) ─────────────────────────
+
+
+def _ad_hoc_match_for_grow(plan_json_steps: list[dict]) -> Match:
+    """Build an ad-hoc Match whose plan_json has the given steps shape."""
+    return Match(
+        plan_id=0,
+        name="ad-hoc",
+        description="what is the meaning of life",
+        confidence=None,
+        dimensions={},
+        tags="ad-hoc",
+        plan_json=json.dumps({"steps": plan_json_steps}),
+        required_bindings=["intent"],
+        optional_bindings=[],
+        default_bindings={"intent": "what is the meaning of life"},
+        parent_dims=None,
+    )
+
+
+def _plan_run_ok():
+    result = MagicMock()
+    result.steps = [{"text": "the answer is 42"}]
+    return result
+
+
+class TestGrownPlanDimensionalColumns:
+    """RDR-092 Phase 0b: grown plans pass verb/name/dimensions on save_plan.
+
+    The R6 three-tier cascade resolves verb:
+      1. caller-supplied ``dimensions["verb"]``
+      2. inferred from ``plan_json.steps`` operator shape
+      3. ``"research"`` fallback
+    """
+
+    @pytest.mark.asyncio
+    async def test_grown_plan_has_dimensional_columns(self):
+        """save_plan on an ad-hoc grow path receives verb, name, dimensions."""
+        from nexus.mcp.core import nx_answer
+
+        match = _ad_hoc_match_for_grow([
+            {"tool": "search", "args": {"query": "$intent"}},
+            {"tool": "summarize", "args": {"inputs": "$step1.ids"}},
+        ])
+        save_mock = MagicMock(return_value=999)
+        db_stub = MagicMock()
+        db_stub.plans.save_plan = save_mock
+        db_stub.plans.get_plan = MagicMock(return_value={"id": 999})
+
+        with patch("nexus.plans.matcher.plan_match", return_value=[]), \
+             patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(return_value=match)), \
+             patch("nexus.plans.runner.plan_run", AsyncMock(return_value=_plan_run_ok())), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            await nx_answer(question="what is the meaning of life")
+
+        assert save_mock.called, "save_plan must be called on ad-hoc success"
+        kwargs = save_mock.call_args.kwargs
+        assert kwargs.get("verb"), "grown plan must carry a verb"
+        assert kwargs.get("name"), "grown plan must carry a name"
+        assert kwargs.get("dimensions"), "grown plan must carry canonical dimensions"
+        # dimensions string is canonical JSON: sorted keys, lowercased strings
+        parsed = json.loads(kwargs["dimensions"])
+        assert parsed["verb"] == kwargs["verb"]
+        assert parsed["scope"] == "personal"
+        # name is kebab-case; strategy mirrors it so each grown plan is unique
+        assert "-" in kwargs["name"] or kwargs["name"].isalpha()
+        assert parsed.get("strategy") == kwargs["name"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "steps,expected_verb",
+        [
+            # Tier 2.1: compare step → analyze
+            (
+                [
+                    {"tool": "search", "args": {}},
+                    {"tool": "compare", "args": {}},
+                ],
+                "analyze",
+            ),
+            # Tier 2.2: extract + rank → analyze
+            (
+                [
+                    {"tool": "search", "args": {}},
+                    {"tool": "extract", "args": {}},
+                    {"tool": "rank", "args": {}},
+                ],
+                "analyze",
+            ),
+            # Tier 2.3: traverse + search + summarize → research
+            (
+                [
+                    {"tool": "search", "args": {}},
+                    {"tool": "traverse", "args": {}},
+                    {"tool": "summarize", "args": {}},
+                ],
+                "research",
+            ),
+            # Tier 3: flat shape falls back to research
+            (
+                [
+                    {"tool": "search", "args": {}},
+                    {"tool": "summarize", "args": {}},
+                ],
+                "research",
+            ),
+        ],
+        ids=["compare→analyze", "extract+rank→analyze",
+             "traverse+search+summarize→research", "flat→research"],
+    )
+    async def test_grown_plan_verb_inference_from_plan_json(
+        self, steps, expected_verb,
+    ):
+        from nexus.mcp.core import nx_answer
+
+        match = _ad_hoc_match_for_grow(steps)
+        save_mock = MagicMock(return_value=1)
+        db_stub = MagicMock()
+        db_stub.plans.save_plan = save_mock
+        db_stub.plans.get_plan = MagicMock(return_value={"id": 1})
+
+        with patch("nexus.plans.matcher.plan_match", return_value=[]), \
+             patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(return_value=match)), \
+             patch("nexus.plans.runner.plan_run", AsyncMock(return_value=_plan_run_ok())), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            await nx_answer(question="how does X behave")
+
+        assert save_mock.call_args.kwargs.get("verb") == expected_verb
+
+    @pytest.mark.asyncio
+    async def test_caller_dimensions_verb_wins(self):
+        """Tier 1: caller-supplied dimensions['verb'] overrides inference."""
+        from nexus.mcp.core import nx_answer
+
+        # Plan shape would otherwise infer as "analyze" (has compare step),
+        # but the caller pinned verb:debug.
+        match = _ad_hoc_match_for_grow([
+            {"tool": "search", "args": {}},
+            {"tool": "compare", "args": {}},
+        ])
+        save_mock = MagicMock(return_value=1)
+        db_stub = MagicMock()
+        db_stub.plans.save_plan = save_mock
+        db_stub.plans.get_plan = MagicMock(return_value={"id": 1})
+
+        with patch("nexus.plans.matcher.plan_match", return_value=[]), \
+             patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(return_value=match)), \
+             patch("nexus.plans.runner.plan_run", AsyncMock(return_value=_plan_run_ok())), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            await nx_answer(
+                question="test q",
+                dimensions={"verb": "debug"},
+            )
+
+        assert save_mock.call_args.kwargs.get("verb") == "debug"
+
+    @pytest.mark.asyncio
+    async def test_name_is_kebab_case_from_content_words(self):
+        """Name skips stop-words and kebab-cases 3-5 content tokens."""
+        from nexus.mcp.core import nx_answer
+
+        match = _ad_hoc_match_for_grow([
+            {"tool": "search", "args": {}},
+            {"tool": "summarize", "args": {}},
+        ])
+        save_mock = MagicMock(return_value=1)
+        db_stub = MagicMock()
+        db_stub.plans.save_plan = save_mock
+        db_stub.plans.get_plan = MagicMock(return_value={"id": 1})
+
+        with patch("nexus.plans.matcher.plan_match", return_value=[]), \
+             patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(return_value=match)), \
+             patch("nexus.plans.runner.plan_run", AsyncMock(return_value=_plan_run_ok())), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            await nx_answer(question="How does the chroma cache evict?")
+
+        name = save_mock.call_args.kwargs.get("name") or ""
+        # Stop-words ('how', 'does', 'the') are dropped; content words remain.
+        assert "how" not in name.split("-")
+        assert "does" not in name.split("-")
+        assert "chroma" in name or "cache" in name
+        # Kebab-case: lowercase, no spaces
+        assert name == name.lower()
+        assert " " not in name
+
+    def test_infer_grown_plan_verb_helper_exposed(self):
+        """The verb-inference helper is importable for direct unit tests
+        and docs examples.
+        """
+        from nexus.mcp.core import _infer_grown_plan_verb
+
+        plan = json.dumps({"steps": [
+            {"tool": "search"}, {"tool": "compare"},
+        ]})
+        assert _infer_grown_plan_verb(
+            caller_dimensions=None, plan_json=plan,
+        ) == "analyze"
+        # Caller override wins.
+        assert _infer_grown_plan_verb(
+            caller_dimensions={"verb": "review"}, plan_json=plan,
+        ) == "review"
+        # Unparseable plan → fallback.
+        assert _infer_grown_plan_verb(
+            caller_dimensions=None, plan_json="not-json",
+        ) == "research"
+
+    def test_infer_grown_plan_name_helper_exposed(self):
+        from nexus.mcp.core import _infer_grown_plan_name
+
+        # Drops common stop-words, keeps content tokens, joins with '-'.
+        name = _infer_grown_plan_name("How does the chroma cache evict entries?")
+        parts = name.split("-")
+        assert "how" not in parts and "does" not in parts
+        assert any(p in parts for p in ("chroma", "cache", "evict"))
+        # Max 5 content words.
+        long_q = "one two three four five six seven eight nine ten"
+        long_name = _infer_grown_plan_name(long_q)
+        assert len(long_name.split("-")) <= 5
+        # Empty / whitespace-only falls back to a sentinel.
+        assert _infer_grown_plan_name("") == "grown-plan"
 
 
 # ── nx_tidy ───────────────────────────────────────────────────────────────────

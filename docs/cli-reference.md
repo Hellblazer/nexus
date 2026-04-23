@@ -824,6 +824,21 @@ nx doctor --check-schema          # Validate T2 database schema and report pendi
 ```
 
 ```
+nx doctor --check-plan-library    # Report plan-library dimensional health (RDR-092 Phase 0c)
+```
+
+The `--check-plan-library` flag (introduced 4.9.13, nexus-4x9q) buckets
+every row in the `plans` table into **authored** (dimensions populated,
+not `backfill`-tagged), **backfilled** (dimensions populated, tagged
+`backfill` or `backfill-low-conf` by the Phase 0d migration), and
+**non-dimensional** (`dimensions IS NULL`, legacy pre-RDR-078 seeds).
+Also reports the global-tier builtin count. Exits 1 when that count
+falls below 9 (the RDR-078 builtin floor, which signals that
+`nx catalog setup` was never run against the current plugin install).
+Non-dimensional rows surface a `nx plan repair` hint pointing to the
+day-2 command that drains them.
+
+```
 nx doctor --trim-telemetry              # Delete search_telemetry rows older than 30 days (RDR-087)
 nx doctor --trim-telemetry --days 7     # Aggressive retention (minimum 1 day)
 ```
@@ -840,6 +855,36 @@ The `--check-quotas` flag (introduced 4.9.0, nexus-c590) emits a three-section p
 Exit codes:
 - `0` — reachable cloud tenant or local-mode (limits are reference-only).
 - `1` — cloud tenant unreachable in cloud mode; the report is not actionable without a working client. Suitable as a CI gate.
+
+---
+
+## nx plan
+
+Plan library maintenance commands (RDR-092 Phase 0d).
+
+```
+nx plan repair                   # Backfill dimensions on legacy rows + list low-conf entries
+```
+
+The `repair` subcommand (introduced 4.9.12, nexus-1kvj) re-runs the
+RDR-092 Phase 0d.1 plan-dimension backfill heuristic against the live
+T2 DB. On every run it:
+
+- backfills `verb` / `name` / `dimensions` on any row where
+  `dimensions IS NULL`, using a 20-rule verb-from-stem dictionary
+  over the `query` column;
+- falls back to a wh-question heuristic (`how` / `what` → research;
+  `why` → review) for rows that miss every stem rule;
+- tags confident matches with `backfill` and low-confidence
+  wh-fallback rows with `backfill-low-conf`;
+- prints the backfill count, then lists each `backfill-low-conf`
+  row with its id, inferred verb, and original query text so an
+  operator can correct edge cases by hand (direct SQL, or a future
+  editor command).
+
+Idempotent: a second run reports `0 backfilled` and exits cleanly.
+When the T2 DB is absent, exits 0 with "nothing to do" rather than a
+traceback.
 
 ---
 
