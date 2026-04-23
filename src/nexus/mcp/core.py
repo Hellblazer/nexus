@@ -1988,6 +1988,25 @@ def _nx_answer_record_run(
     conn.commit()
 
 
+def _nx_answer_record_outcome(plan_id: int, *, success: bool) -> None:
+    """Bump ``success_count`` or ``failure_count`` for a library-matched plan.
+
+    No-op for ``plan_id == 0`` (synthetic inline-planner Match). Swallows
+    library errors — telemetry must never break the user-facing path.
+    """
+    if not plan_id:
+        return
+    try:
+        with _t2_ctx() as db:
+            db.plans.increment_run_outcome(plan_id, success=success)
+    except Exception:
+        import structlog as _slog
+        _slog.get_logger().warning(
+            "nx_answer_plan_outcome_increment_failed",
+            plan_id=plan_id, success=success, exc_info=True,
+        )
+
+
 async def _nx_answer_plan_miss(
     question: str,
     *,
@@ -2294,6 +2313,21 @@ async def nx_answer(
     else:
         conf_str = f"{best.confidence:.3f}"
 
+    # nexus-use1: plan execution telemetry. Bump ``use_count`` + stamp
+    # ``last_used`` before any execution path (single-step fast path OR
+    # _plan_run). Skip plan_id=0 (synthetic inline-planner Match — no
+    # library row to update). Downstream paths bump success/failure via
+    # ``_nx_answer_record_outcome`` after their try/except completes.
+    if best.plan_id:
+        try:
+            with _t2_ctx() as db:
+                db.plans.increment_run_started(best.plan_id)
+        except Exception:
+            _log.warning(
+                "nx_answer_plan_use_increment_failed",
+                plan_id=best.plan_id, exc_info=True,
+            )
+
     # ── Step 2: single-step guard ────────────────────────────────────────
     plan_class = _nx_answer_classify_plan(best)
 
@@ -2368,6 +2402,7 @@ async def nx_answer(
                     )
             except Exception:
                 pass
+            _nx_answer_record_outcome(best.plan_id, success=True)
             return _result(
                 str(result_text),
                 plan_id=best.plan_id,
@@ -2386,6 +2421,7 @@ async def nx_answer(
                     )
             except Exception:
                 pass
+            _nx_answer_record_outcome(best.plan_id, success=False)
             return _result(
                 f"Error in single-step query: {exc}",
                 plan_id=best.plan_id,
@@ -2425,10 +2461,12 @@ async def nx_answer(
                 )
         except Exception:
             pass
+        _nx_answer_record_outcome(best.plan_id, success=False)
         return _result(
             f"Error during plan execution: {exc}",
             plan_id=best.plan_id,
         )
+    _nx_answer_record_outcome(best.plan_id, success=True)
 
     # ── Step 5: extract final answer ─────────────────────────────────────
     elapsed_ms = int((time.monotonic() - start) * 1000)
