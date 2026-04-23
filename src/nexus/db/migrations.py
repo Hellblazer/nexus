@@ -707,6 +707,110 @@ def _rewash_plan_scope_tags_all_sentinel(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 
+# ── RDR-092 Phase 3.1 — plans.match_text column + FTS rebuild ──────────────
+
+
+def _add_plan_match_text_column(conn: sqlite3.Connection) -> None:
+    """Add ``match_text`` column to plans and rebuild ``plans_fts``.
+
+    RDR-092 Phase 3.1. The hybrid match-text synthesiser's output
+    becomes the FTS payload so the T2 FTS lane indexes the same
+    dimensional signal the T1 cosine cache embeds (R10 hybrid form).
+
+    Steps:
+      1. ``ALTER TABLE plans ADD COLUMN match_text TEXT NOT NULL
+         DEFAULT ''`` when the column is absent.
+      2. Drop the three ``plans_ai`` / ``plans_ad`` / ``plans_au``
+         triggers and the ``plans_fts`` virtual table (FTS5 does not
+         support ``ALTER COLUMN``; the only upgrade path is
+         drop+recreate).
+      3. Recreate ``plans_fts`` indexing
+         ``(match_text, tags, project)`` instead of
+         ``(query, tags, project)``.
+      4. Recreate triggers targeting ``match_text``.
+      5. Backfill existing rows: synthesise match_text from
+         ``query`` / ``verb`` / ``name`` / ``scope`` via the same
+         hybrid shape ``_synthesize_match_text`` ships with.
+      6. Rebuild the FTS index from the populated rows.
+
+    Idempotent: re-running on a DB that already has the column and
+    the new FTS shape is a no-op (the column guard short-circuits).
+    Must run AFTER :func:`_add_plan_dimensional_identity` so the
+    backfill has verb/name/scope to read.
+    """
+    has_plans = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='plans'"
+    ).fetchone()
+    if not has_plans:
+        return
+
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(plans)").fetchall()}
+    if "match_text" in cols:
+        # Already on the new schema; nothing to do.
+        return
+
+    _log.info("Adding plans.match_text column + rebuilding plans_fts")
+    conn.execute(
+        "ALTER TABLE plans ADD COLUMN match_text TEXT NOT NULL DEFAULT ''"
+    )
+
+    # Drop the legacy triggers + FTS table up-front so the backfill
+    # UPDATE below does not fan out into an external-content FTS that
+    # is about to be rebuilt anyway.
+    conn.executescript("""
+        DROP TRIGGER IF EXISTS plans_ai;
+        DROP TRIGGER IF EXISTS plans_ad;
+        DROP TRIGGER IF EXISTS plans_au;
+        DROP TABLE  IF EXISTS plans_fts;
+    """)
+
+    # Backfill existing rows from query / verb / name / scope using the
+    # same hybrid shape save_plan produces on new inserts.
+    from nexus.db.t2.plan_library import _synthesize_match_text
+
+    rows = conn.execute(
+        "SELECT id, query, verb, name, scope FROM plans"
+    ).fetchall()
+    for row_id, query, verb, name, scope in rows:
+        synthesised = _synthesize_match_text(
+            description=query, verb=verb, name=name, scope=scope,
+        )
+        conn.execute(
+            "UPDATE plans SET match_text = ? WHERE id = ?",
+            (synthesised, row_id),
+        )
+
+    # Recreate plans_fts + triggers on the populated match_text column
+    # and rebuild the FTS index from existing rows.
+    conn.executescript("""
+        CREATE VIRTUAL TABLE plans_fts USING fts5(
+            match_text, tags, project,
+            content=plans, content_rowid='id'
+        );
+
+        CREATE TRIGGER plans_ai AFTER INSERT ON plans BEGIN
+            INSERT INTO plans_fts(rowid, match_text, tags, project)
+                VALUES (new.id, new.match_text, new.tags, new.project);
+        END;
+        CREATE TRIGGER plans_ad AFTER DELETE ON plans BEGIN
+            INSERT INTO plans_fts(plans_fts, rowid, match_text, tags, project)
+                VALUES ('delete', old.id, old.match_text, old.tags, old.project);
+        END;
+        CREATE TRIGGER plans_au AFTER UPDATE ON plans BEGIN
+            INSERT INTO plans_fts(plans_fts, rowid, match_text, tags, project)
+                VALUES ('delete', old.id, old.match_text, old.tags, old.project);
+            INSERT INTO plans_fts(rowid, match_text, tags, project)
+                VALUES (new.id, new.match_text, new.tags, new.project);
+        END;
+    """)
+    conn.execute("INSERT INTO plans_fts(plans_fts) VALUES('rebuild')")
+    conn.commit()
+    _log.info(
+        "plans.match_text migration complete",
+        backfilled=len(rows),
+    )
+
+
 MIGRATIONS: list[Migration] = [
     Migration("1.10.0", "Memory FTS rebuild with title", migrate_memory_fts),
     Migration("2.8.0", "Add plan project column", migrate_plan_project),
@@ -759,6 +863,11 @@ MIGRATIONS: list[Migration] = [
         "4.9.10",
         "Add hook_failures table (GH #251)",
         migrate_hook_failures,
+    ),
+    Migration(
+        "4.9.13",
+        "Add plans.match_text column + rebuild plans_fts (RDR-092 Phase 3)",
+        _add_plan_match_text_column,
     ),
 ]
 
