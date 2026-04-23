@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.10.0] - 2026-04-23
+
+Verb-skill wording rewrite: the five verb skills (`/nx:research`, `/nx:review`, `/nx:analyze`, `/nx:debug`, `/nx:document`) and `/nx:query` flip from descriptive ("Routes through `nx_answer`") to imperative ("You MUST call `nx_answer`"), matching the existing `brainstorming-gate` pattern agents already respect. Each skill gains a "When direct `search` is fine" carve-out for single-corpus keyword lookups so the imperative doesn't push retrieval-only questions through the slower path. Anti-patterns in every verb skill now cite composition (not a blanket "analytical") as the deciding factor. `using-nx-skills`'s common-mistakes table adds three mappings from `mcp__plugin_nx_nexus__search(analytical-question)` anti-patterns to correct `mcp__plugin_nx_nexus__nx_answer` shapes — full MCP prefix throughout, no short-form syntax. Combined with the operator-bundling latency work shipped in the root `CHANGELOG.md`, `nx_answer` is now fast enough (and loudly enough routed) to close the 6,537:0 usage deficit between direct `search` calls and `nx_answer` invocations observed over the prior 6 days. See root `CHANGELOG.md` for the operator-bundle feature and the `plans.use_count` telemetry wiring.
+
 ## [4.9.13] - 2026-04-23
 
 Plugin version aligned with Nexus CLI 4.9.13. No plugin-level functional changes. See root `CHANGELOG.md` for the RDR-092 match-text rollup, the wheel-packaging fix that now ships `nx/plans/*.yml` as importable package data (so installed CLIs find the YAMLs from any cwd), and the test-suite tightening that cut the unit run from 12:31 to 8:02.
