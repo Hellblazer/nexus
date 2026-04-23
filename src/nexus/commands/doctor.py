@@ -175,17 +175,17 @@ def _run_check_plan_library() -> None:
 
     Categories counted:
 
-      * **authored** — rows whose ``dimensions`` column is populated
+      * **authored**: rows whose ``dimensions`` column is populated
         AND whose ``tags`` do not include ``backfill`` (shipped YAML
         seeds or grown plans with full identity).
-      * **backfilled** — rows whose ``tags`` contain ``backfill`` /
+      * **backfilled**: rows whose ``tags`` contain ``backfill`` /
         ``backfill-low-conf`` (Phase 0d heuristic migration output).
-      * **non-dimensional** — rows with ``dimensions IS NULL``
+      * **non-dimensional**: rows with ``dimensions IS NULL``
         (legacy / pre-RDR-078 seeds that need ``nx plan repair``).
 
     Exits non-zero when the global-tier builtin count
     (``project='' AND tags LIKE '%builtin-template%'``) falls below
-    :data:`_MIN_GLOBAL_BUILTIN_COUNT` — that state signals the scoped
+    :data:`_MIN_GLOBAL_BUILTIN_COUNT`; that state signals the scoped
     loader never seeded (typically ``nx catalog setup`` was never
     re-run after the RDR-078 loader landed).
     """
@@ -195,35 +195,38 @@ def _run_check_plan_library() -> None:
 
     db_path = default_db_path()
     if not db_path.exists():
-        click.echo("T2 database not found — nothing to check.")
+        click.echo("T2 database not found; nothing to check.")
         click.echo("Fix: run 'nx catalog setup' to initialise the library.")
         raise click.exceptions.Exit(1)
 
+    # Context manager guards against a raise inside the count loop
+    # leaking the connection (RDR-092 code-review S-3).
     conn = sqlite3.connect(str(db_path))
-    conn.execute("PRAGMA busy_timeout=5000")
-    conn.execute("PRAGMA journal_mode=WAL")
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA journal_mode=WAL")
 
-    def _count(where: str) -> int:
-        row = conn.execute(
-            f"SELECT COUNT(*) FROM plans WHERE {where}"
-        ).fetchone()
-        return int(row[0] or 0)
+        def _count(where: str) -> int:
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM plans WHERE {where}"
+            ).fetchone()
+            return int(row[0] or 0)
 
-    total = _count("1=1")
-    non_dimensional = _count("dimensions IS NULL")
-    backfilled = _count(
-        "dimensions IS NOT NULL AND "
-        "(tags LIKE '%backfill%' OR tags LIKE '%backfill-low-conf%')"
-    )
-    authored = _count(
-        "dimensions IS NOT NULL AND "
-        "NOT (tags LIKE '%backfill%' OR tags LIKE '%backfill-low-conf%')"
-    )
-    global_builtin = _count(
-        "project = '' AND tags LIKE '%builtin-template%'"
-    )
-
-    conn.close()
+        total = _count("1=1")
+        non_dimensional = _count("dimensions IS NULL")
+        backfilled = _count(
+            "dimensions IS NOT NULL AND "
+            "(tags LIKE '%backfill%' OR tags LIKE '%backfill-low-conf%')"
+        )
+        authored = _count(
+            "dimensions IS NOT NULL AND "
+            "NOT (tags LIKE '%backfill%' OR tags LIKE '%backfill-low-conf%')"
+        )
+        global_builtin = _count(
+            "project = '' AND tags LIKE '%builtin-template%'"
+        )
+    finally:
+        conn.close()
 
     click.echo("Plan library check:")
     click.echo(f"  total rows:         {total}")

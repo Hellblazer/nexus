@@ -129,8 +129,8 @@ def _seed_plan_templates() -> int:
             library=db.plans,
         )
 
-        # RDR-092 Phase 0c.1 — fail loud on an empty global tier. A
-        # missing / empty ``nx/plans/builtin`` is a deployment gap
+        # RDR-092 Phase 0c.1: fail loud on an empty global tier. A
+        # missing or empty ``nx/plans/builtin`` is a deployment gap
         # (plugin root misrouted, YAMLs deleted) that silently leaves
         # the library without dimensional seeds. The loader normally
         # logs this via ``_log.info("seed_directory_missing")``; the
@@ -142,8 +142,8 @@ def _seed_plan_templates() -> int:
         )
         if global_scanned == 0:
             raise click.ClickException(
-                "Plan library seed failed: global tier is empty — no "
-                f"YAML builtins found at {plugin_root / 'plans' / 'builtin'}. "
+                "Plan library seed failed: global tier is empty (no "
+                f"YAML builtins found at {plugin_root / 'plans' / 'builtin'}). "
                 "This typically means the plugin root is misconfigured "
                 "or the shipped builtin YAMLs were removed. Re-install "
                 "the nx plugin or run 'nx doctor --check-plan-library' "
