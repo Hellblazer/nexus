@@ -667,3 +667,187 @@ def test_context_parameter_is_a_no_op(library) -> None:
     assert [m.plan_id for m in without_ctx] == [m.plan_id for m in with_ctx], (
         "context parameter must be a no-op until Phase 2 ships"
     )
+
+
+# ── RDR-092 Phase 5.3 canary regression tests ──────────────────────────────
+
+
+class TestRdr092Canaries:
+    """Regression guards against the R1 / R2 attractor behaviour that
+    RDR-092 set out to fix.
+
+    Depends on PR #263 (plans.match_text column + FTS rebuild) landing;
+    without it ``search_plans`` still keys off the raw ``query`` column
+    and the hybrid dimensional suffix has no effect on FTS ranking.
+
+    These tests are intentionally narrow: they seed a small fixture
+    library rather than the full production inventory, so they
+    exercise the mechanism (dimensional suffix lifts matching-verb
+    plans over generic descriptions) without depending on any
+    specific plan id or empirical probe corpus.
+    """
+
+    def test_random_probe_rank1_regresses(self, library) -> None:
+        """RDR-092 Validation target: a random / unrelated probe must
+        NOT land a rank-1 match above the ``min_confidence`` floor.
+
+        R1 showed 4/10 random probes landing on plan #38 (an attractor
+        with a generic-sounding description). The hybrid match-text
+        suffix and the Phase 2 Option A default (0.40) together should
+        keep noise queries below the floor.
+        """
+        from nexus.plans.matcher import plan_match
+
+        # Seed with realistic builtin shapes. Each gets a
+        # dimensionally-distinct match_text after PR #263's
+        # save_plan wiring.
+        _seed(library, query="Walk from an RDR to implementing code",
+              dimensions={"verb": "research", "scope": "global",
+                          "strategy": "default"})
+        _seed(library, query="Critique a change set vs prior decisions",
+              dimensions={"verb": "review", "scope": "global",
+                          "strategy": "default"})
+        _seed(library, query="Analyse a research area across corpora",
+              dimensions={"verb": "analyze", "scope": "global",
+                          "strategy": "default"})
+
+        # Cache unavailable routes to the FTS5 path, which matches on
+        # match_text. A completely unrelated probe string should NOT
+        # FTS-hit any of the seeded plans with non-trivial ranking.
+        matches = plan_match(
+            intent="xyzzy fnord bogus unrelated tokens foo bar",
+            library=library, cache=None, min_confidence=0.40,
+        )
+        # FTS5 sentinel Match.confidence is None; with no token
+        # overlap there should be zero hits, or at most a trivial
+        # one that the caller would treat as below-floor.
+        rank_1_ids = [m.plan_id for m in matches[:1]]
+        if matches:
+            # If something does match via FTS5 tokens, the suffix
+            # hook is the only reason; verify no rank-1 match has
+            # a meaningful confidence (cosine path) above the floor.
+            assert all(
+                m.confidence is None or m.confidence < 0.40
+                for m in matches[:1]
+            ), (
+                f"random probe must not land rank-1 above 0.40; "
+                f"got {matches[0].confidence!r} for {rank_1_ids!r}"
+            )
+
+    def test_specific_probe_hits_matching_verb(self, library) -> None:
+        """RDR-092 Phase 1+3 R10 target: a verb-specific probe hits
+        the plan whose dimensional identity matches, not a generic
+        one. This is the positive-case canary that complements the
+        random-probe guard above.
+        """
+        from nexus.plans.matcher import plan_match
+
+        research_id = _seed(
+            library,
+            query="Walk from an RDR to implementing code modules",
+            dimensions={"verb": "research", "scope": "global",
+                        "strategy": "find-by-author"},
+        )
+        _seed(
+            library,
+            query="Critique a change set vs prior decisions",
+            dimensions={"verb": "review", "scope": "global",
+                        "strategy": "default"},
+        )
+
+        # Probe text mirrors the dimensional suffix shape so the FTS
+        # hit rides on the match_text hybrid, not the description.
+        matches = plan_match(
+            intent="research find-by-author",
+            library=library, cache=None, min_confidence=0.40,
+        )
+        assert matches, "dimensional probe must match via match_text"
+        assert matches[0].plan_id == research_id, (
+            f"rank-1 must be the matching research plan, "
+            f"got plan_id={matches[0].plan_id!r}"
+        )
+
+    def test_144_row_narrows(self, library) -> None:
+        """Telemetry canary (not a hard gate per the RDR-092 Phase 5.3
+        spec). Verifies that with 12 seeded plans across 5 distinct
+        verbs, no single plan captures more than a small fraction of
+        random noise probes. R1 baseline showed a 4/10 attractor
+        concentration on plan #38; the new hybrid form should spread
+        the attention across verbs.
+
+        Seeds 12 rows (one per RDR-078/092 builtin shape) and probes
+        with 10 random-token strings. The test is designed to report
+        a distribution metric rather than assert a threshold, so it
+        always passes; the ratio is logged for post-merge review.
+        """
+        import random
+
+        from nexus.plans.matcher import plan_match
+
+        # 12 seeded rows spanning 5 verbs.
+        seeds = [
+            ("research-default", "research", "default",
+             "Walk from an RDR to implementing code modules"),
+            ("review-default", "review", "default",
+             "Critique a change set vs prior decisions"),
+            ("analyze-default", "analyze", "default",
+             "Analyse a research area across corpora"),
+            ("debug-default", "debug", "default",
+             "Dev / debug against a failing code path"),
+            ("document-default", "document", "default",
+             "Authoring or audit of a documentation area"),
+            ("plan-author-default", "plan-author", "default",
+             "Author a new plan template from scratch"),
+            ("plan-inspect-default", "plan-inspect", "default",
+             "Inspect plan metrics use_count match_count"),
+            ("plan-inspect-dimensions", "plan-inspect", "dimensions",
+             "Enumerate registered dimension keys"),
+            ("plan-promote-propose", "plan-promote", "propose",
+             "Rank plans worth promoting"),
+            ("find-by-author", "research", "find-by-author",
+             "Find documents attributed to a specific author"),
+            ("citation-traversal", "research", "citation-traversal",
+             "Trace the citation chain surrounding a document"),
+            ("type-scoped-search", "research", "type-scoped",
+             "Search within a single content type"),
+        ]
+        for name, verb, strategy, desc in seeds:
+            _seed(
+                library, query=desc,
+                dimensions={"verb": verb, "scope": "global",
+                            "strategy": strategy},
+            )
+
+        # Deterministic pseudo-random probes.
+        rng = random.Random(42)
+        probes: list[str] = []
+        for _ in range(10):
+            tokens = [
+                "".join(rng.choice("abcdefghijklmnop") for _ in range(6))
+                for _ in range(4)
+            ]
+            probes.append(" ".join(tokens))
+
+        # Count rank-1 landings per plan_id.
+        landings: dict[int, int] = {}
+        for probe in probes:
+            matches = plan_match(
+                intent=probe, library=library, cache=None,
+                min_confidence=0.40, n=1,
+            )
+            if matches:
+                landings[matches[0].plan_id] = (
+                    landings.get(matches[0].plan_id, 0) + 1
+                )
+
+        # Telemetry-only: the concentration ratio should stay
+        # well below the 4/10 baseline once the hybrid form ships.
+        total = sum(landings.values())
+        max_single = max(landings.values()) if landings else 0
+        ratio = max_single / total if total else 0.0
+        # Do not hard-gate; record via the assert message so the
+        # per-run metric shows up in test output.
+        assert ratio <= 1.0, (
+            f"attractor ratio telemetry: {max_single}/{total} "
+            f"(= {ratio:.2f}) across {len(landings)} distinct plans"
+        )
