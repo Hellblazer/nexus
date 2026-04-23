@@ -2121,9 +2121,9 @@ async def nx_answer(
             :data:`_PLAN_MATCH_MIN_CONFIDENCE` (0.40, per RDR-079 P5).
             Verb skills that have validated a stricter precision-first
             floor (0.50 per R9 against a 5+5 probe corpus) pin the
-            tighter value per-call without moving the global knob —
-            the global default waits on Phase 5's larger-corpus
-            validation.
+            tighter value per-call without moving the global knob; the
+            global default waits on Phase 5's larger-corpus
+            validation. Must be in ``[0.0, 1.0]`` when supplied.
 
     Returns:
         The final step's output — a string by default, or the envelope
@@ -2154,7 +2154,14 @@ async def nx_answer(
 
     # ── Step 1: plan-match gate ──────────────────────────────────────────
     # RDR-092 Phase 2 Option A: effective floor is the caller's override
-    # when supplied, otherwise the RDR-079 P5 default (0.40).
+    # when supplied, otherwise the RDR-079 P5 default (0.40). Bounds-
+    # check the override so an agent caller passing a degenerate value
+    # fails loudly (code-review S-4) instead of silently admitting
+    # every match (negative) or rejecting every cosine match (> 1.0).
+    if min_confidence is not None and not (0.0 <= min_confidence <= 1.0):
+        return _result(
+            f"min_confidence must be in [0.0, 1.0], got {min_confidence!r}"
+        )
     effective_min_confidence = (
         min_confidence if min_confidence is not None
         else _PLAN_MATCH_MIN_CONFIDENCE
