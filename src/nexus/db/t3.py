@@ -1041,6 +1041,33 @@ class T3Database:
                 break
         return ids
 
+    def existing_ids(self, collection: str, ids: list[str]) -> set[str]:
+        """Return the subset of *ids* that exist in *collection*.
+
+        Batched at ``QUOTAS.MAX_RECORDS_PER_WRITE`` (300) per page to stay
+        inside ChromaDB Cloud's free-tier per-call cap. Missing collections
+        resolve to an empty set rather than raising — the caller ``nx
+        catalog verify`` (GH #249) treats a missing collection the same as
+        missing ids.
+
+        Cheap: ``include=[]`` skips documents/embeddings/metadatas entirely,
+        so the server-side work is a pure ANN-less presence check.
+        """
+        if not ids:
+            return set()
+        try:
+            col = self._client_for(collection).get_collection(collection)
+        except _ChromaNotFoundError:
+            return set()
+        found: set[str] = set()
+        page = QUOTAS.MAX_RECORDS_PER_WRITE
+        with self._read_sem(collection):
+            for i in range(0, len(ids), page):
+                batch = ids[i : i + page]
+                result = _chroma_with_retry(col.get, ids=batch, include=[])
+                found.update(result["ids"])
+        return found
+
     def batch_delete(self, collection: str, ids: list[str]) -> None:
         """Delete *ids* from *collection* in write-semaphore-bounded batches."""
         if not ids:
