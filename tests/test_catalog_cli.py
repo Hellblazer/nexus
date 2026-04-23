@@ -388,9 +388,9 @@ class TestSeedPlanTemplates:
 
     def test_setup_produces_dimensional_rows(self, tmp_path, monkeypatch):
         """RDR-092 Phase 0a regression: every seeded plan carries the
-        dimensional identity columns (verb/name/dimensions) populated —
-        no ``dimensions=NULL`` legacy leakage remains after retiring
-        ``_PLAN_TEMPLATES``.
+        dimensional identity columns (verb/name/dimensions) populated
+        with no ``dimensions=NULL`` legacy leakage remaining after
+        retiring ``_PLAN_TEMPLATES``.
         """
         from nexus.db.t2 import T2Database
         db_path = tmp_path / "t2.db"
