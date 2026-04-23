@@ -1653,22 +1653,94 @@ class TestBackfillPlanDimensions:
         assert first_dims != second_dims
 
     def test_backfill_sentinel_name_does_not_collide(self) -> None:
-        """Queries that are pure stop-words fall to the sentinel name
-        ``backfilled-plan``; multiple such rows must each get a
-        deterministic unique identity via the row-id suffix path.
+        """Queries with no alphanumeric tokens fall to the sentinel
+        ``backfilled-plan`` name; multiple such rows must each get a
+        deterministic unique identity via the row-id suffix path
+        (test-validator note: earlier fixture used stop-word-only
+        queries whose raw-token fallback still differed; replace with
+        queries whose ``tokens`` list is actually empty).
         """
         from nexus.db.migrations import _backfill_plan_dimensions
 
         conn = sqlite3.connect(":memory:")
         _make_plans_schema(conn)
-        rid1 = _insert_plan(conn, query="it is a the")  # only stop-words
-        rid2 = _insert_plan(conn, query="the and or but")  # only stop-words
+        # Queries with no regex-matched tokens trigger the
+        # 'backfilled-plan' sentinel in _derive_plan_name_from_query.
+        rid1 = _insert_plan(conn, query="!!!")
+        rid2 = _insert_plan(conn, query="...")
+        rid3 = _insert_plan(conn, query="???")
+
+        _backfill_plan_dimensions(conn)
+
+        rows = conn.execute(
+            "SELECT id, name, dimensions FROM plans ORDER BY id ASC"
+        ).fetchall()
+        names = [row[1] for row in rows]
+        dims = [row[2] for row in rows]
+        # All three rows land with unique names and unique dimensions.
+        assert len(set(names)) == 3, f"names should all differ, got {names!r}"
+        assert len(set(dims)) == 3, "dimensions JSON must be unique per row"
+        # First row keeps the plain sentinel; 2nd and 3rd carry row_id
+        # suffixes (the in-memory ``claimed`` set catches them because
+        # the 1st row's UPDATE has not been persisted at 2nd row's
+        # pre-check time).
+        assert names[0] == "backfilled-plan"
+        assert str(rid2) in names[1]
+        assert str(rid3) in names[2]
+
+    def test_backfill_within_loop_claimed_set_fires(self) -> None:
+        """Three queries that derive to the same kebab name exercise
+        the in-memory ``claimed`` fallback: the 2nd and 3rd rows both
+        collide, and only the 1st has been persisted when the 2nd's
+        SELECT pre-check runs, so the ``key in claimed`` branch is
+        the one that catches the 3rd.
+        """
+        from nexus.db.migrations import _backfill_plan_dimensions
+
+        conn = sqlite3.connect(":memory:")
+        _make_plans_schema(conn)
+        # All three strip down to 'find-documents-author' after stop-
+        # word filter on the first 5 content tokens.
+        _insert_plan(conn, query="find the documents for author")
+        _insert_plan(conn, query="find documents by author")
+        _insert_plan(conn, query="find documents about author")
 
         _backfill_plan_dimensions(conn)
 
         rows = conn.execute(
             "SELECT dimensions FROM plans ORDER BY id ASC"
         ).fetchall()
-        assert rows[0][0] != rows[1][0], (
-            "two sentinel-named rows must land with distinct dimensions"
+        dims = [r[0] for r in rows]
+        assert len(set(dims)) == 3, (
+            f"all three rows must land with distinct dimensions, got {dims!r}"
         )
+
+    def test_backfill_collision_idempotent_on_rerun(self) -> None:
+        """A second run against a DB that already contains a
+        collision-resolved row must leave the suffixed identity
+        unchanged: the NULL-dimension filter skips it entirely.
+        """
+        from nexus.db.migrations import _backfill_plan_dimensions
+
+        conn = sqlite3.connect(":memory:")
+        _make_plans_schema(conn)
+        _insert_plan(conn, query="find the documents for author")
+        rid2 = _insert_plan(conn, query="find documents by author")
+
+        _backfill_plan_dimensions(conn)
+        first = conn.execute(
+            "SELECT name, dimensions, tags FROM plans WHERE id = ?",
+            (rid2,),
+        ).fetchone()
+
+        _backfill_plan_dimensions(conn)
+        second = conn.execute(
+            "SELECT name, dimensions, tags FROM plans WHERE id = ?",
+            (rid2,),
+        ).fetchone()
+
+        assert first == second, (
+            "collision-resolved row must be stable across reruns"
+        )
+        # Collision row carries the row_id suffix on both runs.
+        assert str(rid2) in first[0]
