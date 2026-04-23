@@ -164,15 +164,14 @@ class TestUpsertEmbedsMatchText:
 
 
 class TestSynthesizerParityWithPlanLibrary:
-    """RDR-092 code-review S-2: the ``session_cache`` synthesiser and
-    the ``plan_library`` synthesiser MUST produce byte-identical
-    strings for the same inputs. Drift between the two means the T1
-    cosine embedding decorrelates from the T2 FTS payload for the
-    same plan.
-
-    When the ``nexus-w98c`` follow-up collapses the two into a single
-    implementation, this test becomes trivially true and can either
-    stay as a smoke-test or be deleted.
+    """Smoke-test that the ``session_cache`` delegator produces the
+    same output as the shared ``plan_library`` synthesiser for every
+    row shape. RDR-092 code-review S-2 was resolved by nexus-w98c
+    (``session_cache._synthesize_match_text`` now unpacks the row
+    dict and forwards to ``plan_library._synthesize_match_text``),
+    so this test is trivially true as long as the delegation stays
+    in place. Kept as a regression guard against an accidental
+    re-implementation of the dict-side logic.
     """
 
     @pytest.mark.parametrize("row", [

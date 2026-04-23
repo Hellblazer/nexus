@@ -175,17 +175,11 @@ def _synthesize_match_text(
     legacy NULL-dimension rows still carry a usable FTS payload.
     R10 validates the hybrid form at zero verb-accuracy regression.
 
-    Parity contract (RDR-092 code-review S-2): this function's
-    output MUST stay byte-identical with
-    :func:`nexus.plans.session_cache._synthesize_match_text` for the
-    same inputs. The T1 version uses a dict signature; the mapping
-    is ``description=row["query"]``, ``verb=row["verb"]``,
-    ``name=row["name"]``, ``scope=row["scope"]``. Any change to the
-    shape here MUST be mirrored there, otherwise the T2 FTS payload
-    will drift from the T1 cosine embedding for the same plan and
-    search ranking will decorrelate between the two lanes. The
-    ``nexus-w98c`` follow-up collapses the two into a single
-    implementation post-merge.
+    This is the single source of truth for match-text synthesis;
+    :func:`nexus.plans.session_cache._synthesize_match_text` is a
+    thin dict-unpacking adapter around this function so the T1
+    cosine embedding and the T2 FTS payload cannot drift
+    (nexus-w98c).
     """
     desc = (description or "").strip()
     v = (verb or "").strip()

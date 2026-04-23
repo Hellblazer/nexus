@@ -28,7 +28,10 @@ from typing import Any
 import structlog
 
 from nexus.db.local_ef import LocalEmbeddingFunction
-from nexus.db.t2.plan_library import PlanLibrary
+from nexus.db.t2.plan_library import (
+    PlanLibrary,
+    _synthesize_match_text as _plan_library_synthesize_match_text,
+)
 
 __all__ = ["PlanSessionCache", "PLANS_COLLECTION", "_synthesize_match_text"]
 
@@ -202,46 +205,29 @@ class PlanSessionCache:
 
 
 def _synthesize_match_text(row: dict[str, Any]) -> str:
-    """Hybrid description + dimensional suffix for T1 embedding. RDR-092 Phase 1.
+    """Adapter around
+    :func:`nexus.db.t2.plan_library._synthesize_match_text` that
+    unpacks a plan row dict into the kwargs the shared synthesiser
+    expects. RDR-092 Phase 1 / Phase 3 / nexus-w98c.
 
-    Shape: ``"<description>. <verb> <name> scope <scope>"`` when the
-    row carries verb AND name (the identity signal the cosine lane
-    needs to differentiate otherwise-similar descriptions). Scope is
-    optional and only appended when present.
+    The T1 cache upserts plan rows in dict form (via the schema
+    that :data:`nexus.db.t2.plan_library._PLAN_COLUMNS` stamps on
+    :func:`_row_to_dict`); the shared synthesiser lives in
+    ``plan_library`` because that module also calls it from
+    :meth:`PlanLibrary.save_plan` on every insert. This adapter
+    keeps the dict signature on the cache side (no caller
+    disruption) while guaranteeing the T1 cosine embedding and the
+    T2 FTS payload are derived from the same bytes.
 
-    When verb or name is missing, falls back to the raw description
-    so legacy NULL-dimension rows still embed cleanly rather than
-    losing all signal to an empty suffix. R10 validates the hybrid
-    form: zero verb-accuracy regression vs raw-description, plus the
-    dimensional suffix gives the matcher a reliable verb hook.
-
-    Parity contract (RDR-092 code-review S-2): this function's output
-    MUST stay byte-identical with
-    :func:`nexus.db.t2.plan_library._synthesize_match_text` for the
-    same inputs. The T2 version uses explicit kwargs
-    ``(description=..., verb=..., name=..., scope=...)``; the mapping
-    from this dict signature is ``description=row["query"]``,
-    ``verb=row["verb"]``, ``name=row["name"]``, ``scope=row["scope"]``.
-    Any change to the shape here MUST be mirrored there, otherwise
-    the T1 cosine embedding will drift from the T2 FTS payload for
-    the same plan and search ranking will decorrelate between the
-    two lanes. The ``nexus-w98c`` follow-up collapses the two into a
-    single implementation post-merge.
+    Contract: the returned string is the hybrid
+    ``"<description>. <verb> <name> scope <scope>"`` when verb AND
+    name are both populated; otherwise falls back to the raw
+    description. See the shared implementation for the full shape
+    rationale (R10 hybrid form validation).
     """
-    description = (row.get("query") or "").strip()
-    verb = (row.get("verb") or "").strip()
-    name = (row.get("name") or "").strip()
-    scope = (row.get("scope") or "").strip()
-
-    if not verb or not name:
-        return description
-
-    suffix = f"{verb} {name}"
-    if scope:
-        suffix += f" scope {scope}"
-    if description:
-        # Collapse an existing trailing '.' so descriptions that already
-        # end with punctuation do not produce '..' in the match text.
-        core = description.rstrip(".").rstrip()
-        return f"{core}. {suffix}"
-    return suffix
+    return _plan_library_synthesize_match_text(
+        description=row.get("query"),
+        verb=row.get("verb"),
+        name=row.get("name"),
+        scope=row.get("scope"),
+    )
