@@ -291,6 +291,36 @@ Unknown `$var` names fall through as literal strings (since
 required-binding validation runs upfront, any unmatched `$var` past
 that point is deliberate).
 
+### `$stepN` inside operator bundles (v4.10.0)
+
+When a plan has two or more consecutive operator steps (extract / rank /
+compare / summarize / generate), those steps execute as a **single**
+`claude -p` call rather than separate subprocess invocations. This
+changes how `$stepN.<field>` references behave:
+
+- **Ref from a bundled step → another bundled step's output** is
+  preserved. The matcher produces a deferred-ref sentinel at resolve
+  time and the composed prompt tells the LLM to carry the chain
+  internally (`"the extractions output from STEP M"`). Your YAML
+  doesn't change.
+- **Ref from a non-bundled step → a bundled intermediate** raises
+  `PlanRunStepRefError` with an explicit message calling out bundling
+  as the cause and pointing at the bundle's final step as the correct
+  reference target. Plans that worked under per-step dispatch should
+  already reference the last operator in a chain (not an intermediate)
+  because intermediates never had exposed fields anyway; the error is
+  there to surface buggy plans clearly.
+- **Parallel-branch shape** (two extracts hydrating from different
+  retrieval steps, then a compare) works transparently because the
+  composer inlines each extract's concrete hydrated content with a
+  `source: <collection>` attribution line so the LLM can distinguish
+  branches.
+
+If a plan hits an edge case where bundling breaks its contract, opt
+out with `plan_run(match, bundle_operators=False)`. The size-guard
+also auto-falls-back when the composite prompt would exceed 200k
+characters — logged as `bundle_oversized_fallback_to_per_step`.
+
 ## Pointer: `verb:plan-author`
 
 The `verb:plan-author, scope:global, strategy:default` meta-seed

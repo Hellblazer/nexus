@@ -28,6 +28,17 @@ hypothesis after gathering evidence, or planning a multi-step retrieval from
 an ambiguous intent.  Those don't compress into a single `claude -p`
 invocation without losing their essence.
 
+**Operator bundling is the middle ground** (v4.10.0). A fixed-shape
+operator *pipeline* — extract → rank → summarise, where each step has
+a known contract and the downstream step feeds on the upstream step's
+output — *does* compress into one `claude -p` call. The LLM carries
+the intermediate state in its reasoning window; the host side only
+sees the terminal output. This isn't multi-turn reasoning getting
+crushed into one turn; it's a deterministic DAG running in one
+subprocess instead of N. Measured win on real corpora: 55-72% latency
+reduction on plans with multiple consecutive operators. See
+[plan-centric-retrieval.md §Operator bundling](plan-centric-retrieval.md#operator-bundling-v4100).
+
 ## Classification table (RDR-080)
 
 | Capability | Before RDR-080 | After RDR-080 |

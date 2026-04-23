@@ -81,9 +81,18 @@ Full tool names follow Claude Code's convention: `mcp__plugin_nx_nexus__<tool>`.
 
 ### Operators (RDR-079 — LLM-backed via `claude -p` subprocess)
 
-Each operator spawns a `claude -p --output-format json --json-schema …`
-subprocess with a task-specific system prompt.  Structured output is
-unwrapped from claude's wrapper and returned as a plain dict.
+Each operator, when called directly as an MCP tool, spawns a
+`claude -p --output-format json --json-schema …` subprocess with a
+task-specific system prompt.  Structured output is unwrapped from
+claude's wrapper and returned as a plain dict.
+
+**Inside `nx_answer` / `plan_run`** (v4.10.0), consecutive operator
+steps in a plan collapse into a single `claude -p` subprocess via
+[operator bundling](plan-centric-retrieval.md#operator-bundling-v4100).
+The LLM executes the whole pipeline in one reasoning window; the host
+side receives only the terminal step's output. This doesn't change
+the per-operator MCP tool contract — direct calls still spawn per-
+operator subprocesses.
 
 | Tool | Purpose |
 |---|---|
