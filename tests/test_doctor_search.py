@@ -143,10 +143,19 @@ class TestRunProbe:
 
 
 class TestDoctorCheckSearchCli:
+    @pytest.mark.slow
     def test_flag_invokes_probe(
         self, runner: CliRunner, tmp_path, monkeypatch,
     ) -> None:
-        """``nx doctor --check-search`` runs the probe and exits 0 on no errors."""
+        """``nx doctor --check-search`` runs the probe and exits 0 on no errors.
+
+        Marked ``slow`` — the full CLI invocation through
+        ``CliRunner`` loads the complete nexus import graph (the T3
+        ChromaDB client + Voyage + MinerU + FastAPI + all CLI
+        command modules) from cold, which costs ~2 minutes on a dev
+        machine. Deselected from the default pytest run; nightly
+        CI and pre-release runs opt in with ``-m slow``.
+        """
         from nexus.cli import main
 
         # Point rdr_dir at a temp dir so RdrResolver has a stable root.

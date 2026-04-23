@@ -145,11 +145,26 @@ class TestQueryStructuredChashSurface:
 
 
 class TestNxAnswerStructuredEnvelope:
-    def test_nx_answer_structured_default_returns_string(self, t3, t1):
-        """Backward compat: default behavior must return a plain string."""
+    def test_nx_answer_structured_default_returns_string(self, t3, t1, monkeypatch):
+        """Backward compat: default behavior must return a plain string.
+
+        The plan-miss path spawns a ``claude -p`` subprocess via
+        ``claude_dispatch`` which adds ~45s of cold-start latency
+        per call. Mock the dispatcher to a cheap stub plan so the
+        test verifies the envelope-vs-string return shape without
+        the subprocess roundtrip.
+        """
         import asyncio
 
+        import nexus.operators.dispatch as _dispatch_mod
         from nexus.mcp.core import nx_answer
+
+        async def fake_dispatch(prompt, schema, timeout=60.0):
+            return {"steps": [
+                {"tool": "search", "args": {"query": "$intent"}},
+                {"tool": "summarize", "args": {"inputs": "$step1.ids"}},
+            ]}
+        monkeypatch.setattr(_dispatch_mod, "claude_dispatch", fake_dispatch)
 
         # No plan in library → inline planner miss path; result must be str.
         result = asyncio.run(nx_answer(
@@ -207,12 +222,26 @@ class TestNxAnswerStructuredEnvelope:
             assert "collection" in ch
 
     def test_nx_answer_structured_true_empty_results_has_chunks_key(
-        self, t3, t1,
+        self, t3, t1, monkeypatch,
     ):
-        """When retrieval yields nothing, envelope's chunks list is [] — not error."""
+        """When retrieval yields nothing, envelope's chunks list is [] — not error.
+
+        Mocks ``claude_dispatch`` for the same reason as
+        ``test_nx_answer_structured_default_returns_string``: the
+        subprocess roundtrip costs ~35s and does not need to run for
+        this envelope-shape assertion.
+        """
         import asyncio
 
+        import nexus.operators.dispatch as _dispatch_mod
         from nexus.mcp.core import nx_answer
+
+        async def fake_dispatch(prompt, schema, timeout=60.0):
+            return {"steps": [
+                {"tool": "search", "args": {"query": "$intent"}},
+                {"tool": "summarize", "args": {"inputs": "$step1.ids"}},
+            ]}
+        monkeypatch.setattr(_dispatch_mod, "claude_dispatch", fake_dispatch)
 
         result = asyncio.run(nx_answer(
             question="completely unknown topic that matches nothing",
