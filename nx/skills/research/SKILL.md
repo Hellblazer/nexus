@@ -6,11 +6,13 @@ effort: medium
 
 # research
 
-Pure verb skill. Routes through `nx_answer` with `dimensions={verb: "research"}`
-so the plan-match gate narrows to research-verb templates and the full
-trunk (match → run → record) runs in one tool call.
+**You MUST call `nx_answer` for research questions. Direct `search`/`query`
+calls for design/architecture/planning work are an anti-pattern.** The
+plan library contains research-shape templates that compose retrieval +
+extract + synthesis; direct search skips the composition and returns
+chunks without the structure a research question needs.
 
-## Flow
+## The call
 
 ```
 mcp__plugin_nx_nexus__nx_answer(
@@ -20,26 +22,47 @@ mcp__plugin_nx_nexus__nx_answer(
 )
 ```
 
-`nx_answer` internally:
+That's it. One tool call. `nx_answer` internally:
 
-1. `plan_match(intent=question, dimensions={verb: "research"})` — narrowed
-   to the research scenario templates.
-2. On hit: `plan_run` the matched template with bindings from `context`.
+1. Matches the question against the plan library, narrowed to
+   research-verb templates via the dimensional filter.
+2. On hit: executes the matched template. Contiguous operator chains
+   (extract → summarize, extract → rank → summarize) collapse into a
+   single `claude -p` subprocess — 55-72% faster than the old per-step
+   isolation while preserving or improving output quality.
 3. On miss: inline `claude -p` planner decomposes the question into a DAG,
    then `plan_run` executes it.
-4. Records the run to `nx_answer_runs` for observability.
+4. Records the run to `nx_answer_runs` for observability and bumps
+   `plans.use_count`/`success_count`/`failure_count` on matched plans.
 
 ## Typical intent shapes
 
 - "how does X work"
 - "design context for Y"
 - "trace Z from spec to code"
+- cross-project comparisons ("how does X in project A compare to X in project B")
 
-## Anti-patterns
+## When direct `search` is fine
 
+If the question is a single-corpus keyword lookup and you only need the
+raw chunks — e.g. "find the RDR that defines the Voyage quota limits" —
+`mcp__plugin_nx_nexus__search` is the right tool. It returns in ~1s;
+`nx_answer` would pay a plan-match + execution tax for no added
+composition value.
+
+Use this skill when: the question needs *composition* across steps
+(retrieve + extract + synthesize), multi-corpus alignment, or decision-
+history walking through typed catalog links.
+
+## Anti-patterns (do not do any of these)
+
+- **Calling `search` directly for a composition-requiring research
+  question.** If the answer needs extract-then-synthesize or multi-corpus
+  alignment, you need `nx_answer`. (For simple single-corpus lookups,
+  see "When direct `search` is fine" above — that's not an anti-pattern.)
 - **Calling `plan_match` directly instead of `nx_answer`.** You lose the
-  record step and the miss-path inline-planner fallback.  Let `nx_answer`
-  be the entry point; it's the MCP-level contract.
+  run recording, the plan-miss inline-planner fallback, and the use_count
+  telemetry that tells us whether plans are actually useful.
 - **Passing a narrower `dimensions` filter than `{verb: "research"}`.**
   Research plans are `scope:global` and don't pin a domain; narrowing
   further will miss.

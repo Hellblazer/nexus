@@ -57,11 +57,21 @@ Plan reuse is opportunistic — the skill functions normally when the plan libra
 - Want logic/structure critique? → `/nx:substantive-critique` (reasoning soundness)
 - Tests written? → `/nx:test-validate`
 
-**Research and knowledge:**
-- Analytical question over nx knowledge (compare, extract, synthesize) → `/nx:query`
-- Unfamiliar topic or technology comparison → `/nx:research`
+**Research and knowledge — ALL analytical questions go through `nx_answer`:**
+- Any "how does…", "what tradeoffs…", "compare X vs Y", "why was this designed…" question → `/nx:query` (calls `nx_answer`)
+- Design/architecture walks from concept to code → `/nx:research` (verb-scoped `nx_answer`)
+- Critiquing or auditing a change set → `/nx:review`
+- Cross-corpus synthesis or ranking → `/nx:analyze`
+- Debugging-by-design-intent (why was this written this way?) → `/nx:debug`
+- Documentation coverage gaps → `/nx:document`
 - 3+ validated findings worth keeping → `/nx:knowledge-tidy`
 - PDF to index → `/nx:pdf-process`
+
+**Direct `search` / `query` MCP calls are for:** keyword retrieval with
+no composition required ("find X in collection Y"). If the question has
+a verb shape, route it through `nx_answer` — the plan library and
+operator bundling make composed retrieval strictly more useful than
+raw chunks.
 
 **RDR lifecycle:** `/nx:rdr-create` → `/nx:rdr-research` → `/nx:rdr-gate` → `/nx:rdr-accept` → `/nx:rdr-close`
 - List: `/nx:rdr-list` | Show: `/nx:rdr-show NNN`
@@ -108,6 +118,9 @@ When multiple skills could apply:
 
 | Mistake | Correct Action |
 |---------|---------------|
+| `mcp__plugin_nx_nexus__search(query="how does X work", …)` for an analytical question | `mcp__plugin_nx_nexus__nx_answer(question="how does X work", …)` via `/nx:query` or a verb skill |
+| `mcp__plugin_nx_nexus__search(query="tradeoffs in Y")` | `mcp__plugin_nx_nexus__nx_answer` via `/nx:analyze` — `search` returns chunks, you need composition |
+| `mcp__plugin_nx_nexus__search(query="compare X across projects")` | `mcp__plugin_nx_nexus__nx_answer` via `/nx:analyze` — cross-corpus compare is exactly what plan operators do |
 | Test fails → try a different fix | Test fails → `/nx:debug` |
 | "Simple" feature → start coding | Any feature → `brainstorming-gate` first |
 | Complex feature → `/nx:create-plan` | Complex feature → `/nx:architecture` THEN `/nx:create-plan` |
