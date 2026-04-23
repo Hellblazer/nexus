@@ -214,6 +214,19 @@ def _synthesize_match_text(row: dict[str, Any]) -> str:
     losing all signal to an empty suffix. R10 validates the hybrid
     form: zero verb-accuracy regression vs raw-description, plus the
     dimensional suffix gives the matcher a reliable verb hook.
+
+    Parity contract (RDR-092 code-review S-2): this function's output
+    MUST stay byte-identical with
+    :func:`nexus.db.t2.plan_library._synthesize_match_text` for the
+    same inputs. The T2 version uses explicit kwargs
+    ``(description=..., verb=..., name=..., scope=...)``; the mapping
+    from this dict signature is ``description=row["query"]``,
+    ``verb=row["verb"]``, ``name=row["name"]``, ``scope=row["scope"]``.
+    Any change to the shape here MUST be mirrored there, otherwise
+    the T1 cosine embedding will drift from the T2 FTS payload for
+    the same plan and search ranking will decorrelate between the
+    two lanes. The ``nexus-w98c`` follow-up collapses the two into a
+    single implementation post-merge.
     """
     description = (row.get("query") or "").strip()
     verb = (row.get("verb") or "").strip()

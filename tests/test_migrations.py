@@ -1886,3 +1886,73 @@ class TestAddPlanMatchTextColumn:
         assert matches[0][0] >= "4.9.13", (
             f"must be introduced in >= 4.9.13, got {matches[0][0]!r}"
         )
+
+    def test_interrupted_upgrade_recovers(self) -> None:
+        """RDR-092 code-review S-1: if a process dies between the
+        ALTER TABLE (column add) and the FTS rebuild executescript,
+        the column exists but ``plans_fts`` is gone. The migration's
+        guard must detect this mid-state on retry and re-run the
+        backfill + FTS rebuild rather than short-circuiting on the
+        ``match_text in cols`` check.
+        """
+        from nexus.db.migrations import _add_plan_match_text_column
+
+        conn = sqlite3.connect(":memory:")
+        self._base_schema(conn)
+
+        # Seed one dimensional row so the backfill has something to do.
+        conn.execute(
+            "INSERT INTO plans "
+            "(query, plan_json, outcome, tags, created_at, "
+            "verb, scope, name) "
+            "VALUES (?, '{}', 'success', '', datetime('now'), ?, ?, ?)",
+            ("Trace the citation chain surrounding a document.",
+             "research", "global", "citation-traversal"),
+        )
+        conn.commit()
+
+        # Simulate the interrupted state: column added (ALTER
+        # succeeded) but plans_fts dropped and not yet recreated.
+        conn.execute(
+            "ALTER TABLE plans ADD COLUMN match_text TEXT "
+            "NOT NULL DEFAULT ''"
+        )
+        conn.executescript("""
+            DROP TRIGGER IF EXISTS plans_ai;
+            DROP TRIGGER IF EXISTS plans_ad;
+            DROP TRIGGER IF EXISTS plans_au;
+            DROP TABLE  IF EXISTS plans_fts;
+        """)
+        conn.commit()
+        # Confirm the setup: column present, FTS gone, match_text empty.
+        cols = {r[1] for r in conn.execute(
+            "PRAGMA table_info(plans)"
+        ).fetchall()}
+        assert "match_text" in cols
+        fts_row = conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name='plans_fts'"
+        ).fetchone()
+        assert fts_row is None
+        row = conn.execute(
+            "SELECT match_text FROM plans"
+        ).fetchone()
+        assert row[0] == "", "setup invariant: match_text must be ''"
+
+        # Re-run the migration. The has_fts guard should detect the
+        # mid-state and fall through to rebuild FTS + backfill.
+        _add_plan_match_text_column(conn)
+
+        fts_row = conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name='plans_fts'"
+        ).fetchone()
+        assert fts_row is not None, (
+            "plans_fts must be recreated after interrupted-upgrade retry"
+        )
+        row = conn.execute(
+            "SELECT match_text FROM plans"
+        ).fetchone()
+        assert "research citation-traversal scope global" in row[0], (
+            f"backfill must synthesize match_text on retry, got {row[0]!r}"
+        )

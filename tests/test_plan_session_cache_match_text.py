@@ -158,3 +158,81 @@ class TestUpsertEmbedsMatchText:
         docs = spy.call_args.kwargs.get("documents") or spy.call_args.args[1]
         assert isinstance(docs, list) and len(docs) == 1
         assert "analyze default scope global" in docs[0]
+
+
+# ── S-2 parity contract regression guard ────────────────────────────────────
+
+
+class TestSynthesizerParityWithPlanLibrary:
+    """RDR-092 code-review S-2: the ``session_cache`` synthesiser and
+    the ``plan_library`` synthesiser MUST produce byte-identical
+    strings for the same inputs. Drift between the two means the T1
+    cosine embedding decorrelates from the T2 FTS payload for the
+    same plan.
+
+    When the ``nexus-w98c`` follow-up collapses the two into a single
+    implementation, this test becomes trivially true and can either
+    stay as a smoke-test or be deleted.
+    """
+
+    @pytest.mark.parametrize("row", [
+        # Full dimensional row.
+        {
+            "query": "Find documents attributed to a specific author.",
+            "verb": "research", "name": "find-by-author",
+            "scope": "global",
+        },
+        # Missing scope.
+        {
+            "query": "Some plan",
+            "verb": "analyze", "name": "default", "scope": None,
+        },
+        # Missing verb (falls back to description).
+        {
+            "query": "Legacy plan",
+            "verb": None, "name": "default", "scope": "global",
+        },
+        # Missing name (falls back to description).
+        {
+            "query": "Legacy plan",
+            "verb": "research", "name": None, "scope": "global",
+        },
+        # Trailing period on description.
+        {
+            "query": "Plan ends with a period.",
+            "verb": "research", "name": "default", "scope": "global",
+        },
+        # Empty description with populated dimensions.
+        {
+            "query": "", "verb": "research",
+            "name": "default", "scope": "global",
+        },
+        # Whitespace-only description.
+        {
+            "query": "   ", "verb": "analyze",
+            "name": "default", "scope": "global",
+        },
+        # Completely empty row.
+        {},
+    ])
+    def test_session_cache_and_plan_library_synthesisers_agree(
+        self, row: dict,
+    ) -> None:
+        from nexus.db.t2.plan_library import (
+            _synthesize_match_text as _lib_synth,
+        )
+        from nexus.plans.session_cache import (
+            _synthesize_match_text as _cache_synth,
+        )
+
+        cache_out = _cache_synth(row)
+        lib_out = _lib_synth(
+            description=row.get("query"),
+            verb=row.get("verb"),
+            name=row.get("name"),
+            scope=row.get("scope"),
+        )
+        assert cache_out == lib_out, (
+            f"synthesiser drift on row={row!r}: "
+            f"session_cache→{cache_out!r}, plan_library→{lib_out!r}"
+        )

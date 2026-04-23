@@ -845,8 +845,15 @@ class TestRdr092Canaries:
         total = sum(landings.values())
         max_single = max(landings.values()) if landings else 0
         ratio = max_single / total if total else 0.0
-        # Do not hard-gate; record via the assert message so the
-        # per-run metric shows up in test output.
+        # The ``ratio <= 1.0`` bound is intentional and tautological
+        # (a ratio is always <= 1.0 by definition). The test's value
+        # is the assert-message payload, which records the
+        # concentration ratio on every run so post-deploy review can
+        # compare against R1's 4/10 baseline. A future tightening to
+        # ``<= 0.3`` would turn this into a hard gate; do not apply
+        # without running the empirical Phase 5.1 probes first
+        # (nexus-l5sp) to confirm the threshold is robust on real
+        # data.
         assert ratio <= 1.0, (
             f"attractor ratio telemetry: {max_single}/{total} "
             f"(= {ratio:.2f}) across {len(landings)} distinct plans"

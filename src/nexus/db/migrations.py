@@ -936,14 +936,29 @@ def _add_plan_match_text_column(conn: sqlite3.Connection) -> None:
         return
 
     cols = {row[1] for row in conn.execute("PRAGMA table_info(plans)").fetchall()}
-    if "match_text" in cols:
-        # Already on the new schema; nothing to do.
+    has_fts = conn.execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE type='table' AND name='plans_fts'"
+    ).fetchone()
+    if "match_text" in cols and has_fts:
+        # Already on the new schema with the FTS table present;
+        # nothing to do.
         return
 
+    # RDR-092 code-review S-1 guard: a process killed between the
+    # ALTER TABLE below and the FTS rebuild executescript leaves the
+    # column present but plans_fts missing. Without the has_fts check
+    # above, the column guard would short-circuit on retry and the
+    # legacy rows would silently land with empty match_text. Falling
+    # through here is safe: the ALTER is skipped when the column
+    # already exists, the DROP statements tolerate missing objects,
+    # and the backfill UPDATE is idempotent against already-
+    # populated rows.
     _log.info("Adding plans.match_text column + rebuilding plans_fts")
-    conn.execute(
-        "ALTER TABLE plans ADD COLUMN match_text TEXT NOT NULL DEFAULT ''"
-    )
+    if "match_text" not in cols:
+        conn.execute(
+            "ALTER TABLE plans ADD COLUMN match_text TEXT NOT NULL DEFAULT ''"
+        )
 
     # Drop the legacy triggers + FTS table up-front so the backfill
     # UPDATE below does not fan out into an external-content FTS that
