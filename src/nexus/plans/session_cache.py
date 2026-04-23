@@ -210,7 +210,7 @@ def _synthesize_match_text(row: dict[str, Any]) -> str:
     optional and only appended when present.
 
     When verb or name is missing, falls back to the raw description
-    — legacy NULL-dimension rows still embed cleanly rather than
+    so legacy NULL-dimension rows still embed cleanly rather than
     losing all signal to an empty suffix. R10 validates the hybrid
     form: zero verb-accuracy regression vs raw-description, plus the
     dimensional suffix gives the matcher a reliable verb hook.
