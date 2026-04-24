@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.10.1] - 2026-04-23
+
+Plugin version aligned with Nexus CLI 4.10.1. No plugin-level functional changes. See root `CHANGELOG.md` for the 4.10.0 shakeout fixes: the `nx_answer_runs` telemetry write path, the seed-loader binding-list gap, and the `_retire_legacy_operation_shape_plans` migration that retires the legacy `operation` / `params` shape rows RDR-092 Phase 0a left in place.
+
 ## [4.10.0] - 2026-04-23
 
 Verb-skill wording rewrite: the five verb skills (`/nx:research`, `/nx:review`, `/nx:analyze`, `/nx:debug`, `/nx:document`) and `/nx:query` flip from descriptive ("Routes through `nx_answer`") to imperative ("You MUST call `nx_answer`"), matching the existing `brainstorming-gate` pattern agents already respect. Each skill gains a "When direct `search` is fine" carve-out for single-corpus keyword lookups so the imperative doesn't push retrieval-only questions through the slower path. Anti-patterns in every verb skill now cite composition (not a blanket "analytical") as the deciding factor. `using-nx-skills`'s common-mistakes table adds three mappings from `mcp__plugin_nx_nexus__search(analytical-question)` anti-patterns to correct `mcp__plugin_nx_nexus__nx_answer` shapes — full MCP prefix throughout, no short-form syntax. Combined with the operator-bundling latency work shipped in the root `CHANGELOG.md`, `nx_answer` is now fast enough (and loudly enough routed) to close the 6,537:0 usage deficit between direct `search` calls and `nx_answer` invocations observed over the prior 6 days. See root `CHANGELOG.md` for the operator-bundle feature and the `plans.use_count` telemetry wiring.
