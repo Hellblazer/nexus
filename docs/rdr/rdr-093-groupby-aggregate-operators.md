@@ -106,6 +106,25 @@ metadata. GroupBy / Aggregate become the operators that make that
 store composable — without them, the aspect store is a query-time
 lookup table, not an analytical substrate.
 
+#### Bar for reversing a scope deferral
+
+RDR-088's deferral note committed to a follow-up RDR *if demand
+surfaces*. RDR-093 reopens that decision on a stronger posture
+than "demand surfaced" — it reopens because a **known architectural
+consumer lands in the same release cycle** (MatrixConstruct per
+paper §5, enabled by RDR-089's aspect store). The distinction
+matters because a looser standard — "reopen any deferral when
+someone imagines a use" — would hollow out the deferral mechanism
+that lets RDRs bound scope tightly.
+
+The bar this RDR sets for future deferral reversals: the reopening
+RDR must identify an architectural consumer (a paper-described
+pipeline, a concrete user workflow, or a sibling RDR whose
+acceptance is already decided) that is itself load-bearing in the
+current planning horizon — not anticipated, hypothetical, or
+"worth considering". When the bar is not met, the deferral holds
+until it is.
+
 ### Technical Environment
 
 - `src/nexus/mcp/core.py:1399–1745` — current operator_* implementations
