@@ -1017,6 +1017,68 @@ def _add_plan_match_text_column(conn: sqlite3.Connection) -> None:
     )
 
 
+def _retire_legacy_operation_shape_plans(conn: sqlite3.Connection) -> None:
+    """Delete plans whose plan_json uses the pre-RDR-078 ``operation`` shape.
+
+    RDR-092 Phase 0a retired the ``_PLAN_TEMPLATES`` seed array but did
+    not migrate the rows it had previously seeded. Those rows — plus
+    user ad-hoc plans saved before the RDR-078 runner landed — carry
+    step dicts like ``{"step": 1, "operation": "search", "params":
+    {...}}`` rather than the current ``{"tool": "search", "args":
+    {...}}``. ``plan_run`` cannot dispatch them; they exist only to
+    pollute plan-match results and mask modern replacements (e.g.
+    legacy ``find-documents-author`` beating the YAML builtin
+    ``find-by-author``).
+
+    Idempotent: after the first run, no legacy-shape rows remain; the
+    guarded SELECT returns 0 rows on retry.
+    """
+    import json as _json
+
+    candidates = conn.execute(
+        "SELECT id, plan_json FROM plans WHERE plan_json LIKE '%\"operation\"%'"
+    ).fetchall()
+    if not candidates:
+        return
+
+    legacy_ids: list[int] = []
+    for row_id, plan_json_text in candidates:
+        try:
+            parsed = _json.loads(plan_json_text or "{}")
+        except _json.JSONDecodeError:
+            continue
+        steps = parsed.get("steps") if isinstance(parsed, dict) else None
+        if not isinstance(steps, list) or not steps:
+            continue
+        # Legacy shape: any step has "operation" key AND no step has
+        # "tool" key. A plan_json that happens to mention "operation"
+        # inside an args payload but uses "tool" correctly is not
+        # legacy — the check above (LIKE) is a pre-filter only.
+        has_operation = any(
+            isinstance(s, dict) and "operation" in s for s in steps
+        )
+        has_tool = any(
+            isinstance(s, dict) and "tool" in s for s in steps
+        )
+        if has_operation and not has_tool:
+            legacy_ids.append(int(row_id))
+
+    if not legacy_ids:
+        return
+
+    placeholders = ",".join("?" * len(legacy_ids))
+    conn.execute(
+        f"DELETE FROM plans WHERE id IN ({placeholders})",
+        legacy_ids,
+    )
+    conn.commit()
+    _log.info(
+        "retired_legacy_operation_shape_plans",
+        deleted=len(legacy_ids),
+        ids=legacy_ids,
+    )
+
+
 MIGRATIONS: list[Migration] = [
     Migration("1.10.0", "Memory FTS rebuild with title", migrate_memory_fts),
     Migration("2.8.0", "Add plan project column", migrate_plan_project),
@@ -1079,6 +1141,11 @@ MIGRATIONS: list[Migration] = [
         "4.9.13",
         "Add plans.match_text column + rebuild plans_fts (RDR-092 Phase 3)",
         _add_plan_match_text_column,
+    ),
+    Migration(
+        "4.10.1",
+        "Retire legacy operation-shape plans (nexus-4m9b)",
+        _retire_legacy_operation_shape_plans,
     ),
 ]
 

@@ -155,9 +155,24 @@ def load_seed_directory(
             continue
 
         dimensions = template["dimensions"]
+        # Carry binding declarations into the stored plan_json so
+        # ``Match.from_plan_row`` can recover them (nexus-80tk). The
+        # YAML author declares required_bindings/optional_bindings at
+        # the top level; without this merge they never reach the DB,
+        # and ``_validate_bindings`` sees an empty list and lets
+        # unfilled ``$var`` placeholders leak into operator prompts.
+        plan_json_payload: dict[str, Any] = dict(template["plan_json"])
+        if template.get("required_bindings"):
+            plan_json_payload["required_bindings"] = list(
+                template["required_bindings"]
+            )
+        if template.get("optional_bindings"):
+            plan_json_payload["optional_bindings"] = list(
+                template["optional_bindings"]
+            )
         library.save_plan(
             query=template["description"],
-            plan_json=json.dumps(template["plan_json"]),
+            plan_json=json.dumps(plan_json_payload),
             outcome=outcome,
             tags=template.get("tags", "") or "",
             project=project,

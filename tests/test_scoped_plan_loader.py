@@ -341,6 +341,40 @@ def test_ci_schema_check_fails_on_invalid_plan(fs, library) -> None:
     assert rc != 0
 
 
+def test_seed_loader_carries_required_bindings_into_plan_json(fs, library) -> None:
+    """Regression for nexus-80tk: required/optional bindings declared at
+    YAML top level must land inside the stored plan_json so
+    ``Match.from_plan_row`` can recover them. Without this, unfilled
+    ``$var`` placeholders leak into operator prompts instead of failing
+    upfront with ``PlanRunBindingError``.
+    """
+    from nexus.plans.loader import load_all_tiers
+    from nexus.plans.match import Match
+
+    plugin_root, repo_root = fs
+    template = _plan_yaml("analyze", strategy="bindings-check")
+    template["required_bindings"] = ["area", "criterion"]
+    template["optional_bindings"] = ["limit"]
+    template["default_bindings"] = {"limit": 10}
+    (plugin_root / "plans" / "builtin" / "bindings-check.yml").write_text(
+        yaml.safe_dump(template)
+    )
+
+    load_all_tiers(
+        plugin_root=plugin_root, repo_root=repo_root, library=library,
+    )
+
+    rows = library.list_plans()
+    hit = next(r for r in rows if r.get("name") == "bindings-check")
+    stored = json.loads(hit["plan_json"])
+    assert stored["required_bindings"] == ["area", "criterion"]
+    assert stored["optional_bindings"] == ["limit"]
+
+    match = Match.from_plan_row(hit, confidence=0.9)
+    assert match.required_bindings == ["area", "criterion"]
+    assert match.optional_bindings == ["limit"]
+
+
 def test_ci_workflow_file_present() -> None:
     """GitHub Actions workflow shipping the CI check exists."""
     workflow = (

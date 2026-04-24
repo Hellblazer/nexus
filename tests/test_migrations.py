@@ -6,6 +6,7 @@ They will fail until migrations.py is implemented (nexus-6cn).
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from pathlib import Path
@@ -74,11 +75,12 @@ class TestMigrationDataclass:
 
         assert isinstance(MIGRATIONS, list)
         # Baseline 16 + RDR-092 Phase 0d backfill (4.9.12) +
-        # RDR-092 Phase 3.1 match_text column (4.9.13) = 18.
+        # RDR-092 Phase 3.1 match_text column (4.9.13) +
+        # legacy operation-shape retirement (4.10.1) = 19.
         # Prefer the name-based checks in TestBackfillPlanDimensions
         # and TestAddPlanMatchTextColumn for future guards; this
         # count is a cheap sentinel only.
-        assert len(MIGRATIONS) == 18
+        assert len(MIGRATIONS) == 19
 
     def test_migrations_ordered_by_version(self) -> None:
         from nexus.db.migrations import MIGRATIONS, _parse_version
@@ -1955,4 +1957,118 @@ class TestAddPlanMatchTextColumn:
         ).fetchone()
         assert "research citation-traversal scope global" in row[0], (
             f"backfill must synthesize match_text on retry, got {row[0]!r}"
+        )
+
+
+# ── _retire_legacy_operation_shape_plans (nexus-4m9b) ────────────────────────
+
+
+class TestRetireLegacyOperationShapePlans:
+    """nexus-4m9b: RDR-092 Phase 0a retired the ``_PLAN_TEMPLATES`` seed
+    array but did not migrate the rows it had previously seeded. Those
+    rows, plus pre-RDR-078 user ad-hoc plans, carry step entries shaped
+    like ``{"operation": "X", "params": {...}}`` that ``plan_run``
+    cannot dispatch. The migration deletes them so modern replacements
+    win during plan-match routing.
+    """
+
+    def _schema(self, conn: sqlite3.Connection) -> None:
+        conn.executescript("""
+            CREATE TABLE plans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                query TEXT NOT NULL,
+                plan_json TEXT NOT NULL,
+                outcome TEXT DEFAULT 'success',
+                tags TEXT DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+        """)
+        conn.commit()
+
+    def test_deletes_legacy_operation_shape(self) -> None:
+        from nexus.db.migrations import _retire_legacy_operation_shape_plans
+
+        conn = sqlite3.connect(":memory:")
+        self._schema(conn)
+        legacy = json.dumps({
+            "steps": [
+                {"step": 1, "operation": "catalog_search", "params": {"author": "x"}},
+            ],
+        })
+        modern = json.dumps({
+            "steps": [{"tool": "search", "args": {"query": "x"}}],
+        })
+        conn.execute(
+            "INSERT INTO plans (query, plan_json) VALUES (?, ?)",
+            ("legacy", legacy),
+        )
+        conn.execute(
+            "INSERT INTO plans (query, plan_json) VALUES (?, ?)",
+            ("modern", modern),
+        )
+        conn.commit()
+
+        _retire_legacy_operation_shape_plans(conn)
+
+        remaining = [r[0] for r in conn.execute(
+            "SELECT query FROM plans ORDER BY id"
+        ).fetchall()]
+        assert remaining == ["modern"]
+
+    def test_idempotent(self) -> None:
+        from nexus.db.migrations import _retire_legacy_operation_shape_plans
+
+        conn = sqlite3.connect(":memory:")
+        self._schema(conn)
+        conn.execute(
+            "INSERT INTO plans (query, plan_json) VALUES (?, ?)",
+            ("legacy",
+             '{"steps": [{"operation": "search", "params": {}}]}'),
+        )
+        conn.commit()
+
+        _retire_legacy_operation_shape_plans(conn)
+        _retire_legacy_operation_shape_plans(conn)  # no raise
+
+        count = conn.execute("SELECT COUNT(*) FROM plans").fetchone()[0]
+        assert count == 0
+
+    def test_preserves_rows_that_mention_operation_in_args(self) -> None:
+        """A modern plan whose args payload happens to contain the word
+        ``operation`` (e.g. a ``purpose: reference-operation`` string)
+        must not be retired. The post-parse ``has_tool`` check decides.
+        """
+        from nexus.db.migrations import _retire_legacy_operation_shape_plans
+
+        conn = sqlite3.connect(":memory:")
+        self._schema(conn)
+        plan_json = json.dumps({
+            "steps": [{
+                "tool": "traverse",
+                "args": {"purpose": "reference-operation"},
+            }],
+        })
+        conn.execute(
+            "INSERT INTO plans (query, plan_json) VALUES (?, ?)",
+            ("false-positive guard", plan_json),
+        )
+        conn.commit()
+
+        _retire_legacy_operation_shape_plans(conn)
+
+        count = conn.execute("SELECT COUNT(*) FROM plans").fetchone()[0]
+        assert count == 1
+
+    def test_registered_in_migrations_list(self) -> None:
+        from nexus.db.migrations import MIGRATIONS
+
+        matches = [
+            (m.introduced, m.name) for m in MIGRATIONS
+            if "legacy" in m.name.lower() and "operation" in m.name.lower()
+        ]
+        assert matches, (
+            "retire-legacy-operation-shape migration must be in MIGRATIONS"
+        )
+        assert matches[0][0] >= "4.10.1", (
+            f"must be introduced at >= 4.10.1, got {matches[0][0]!r}"
         )
