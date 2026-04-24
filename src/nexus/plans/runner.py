@@ -578,6 +578,7 @@ _OPERATOR_TOOL_MAP: dict[str, str] = {
     "compare": "operator_compare",
     "summarize": "operator_summarize",
     "generate": "operator_generate",
+    "filter": "operator_filter",
 }
 
 #: Maximum inputs to pass to an operator before auto-inserting a rank
@@ -633,6 +634,8 @@ def _hydrate_operator_args(
             args.setdefault("context", "\n\n".join(non_empty))
         elif resolved_tool in ("operator_rank", "operator_compare"):
             args.setdefault("items", json.dumps(non_empty))
+        elif resolved_tool == "operator_filter":
+            args.setdefault("items", json.dumps(non_empty))
         else:
             args.setdefault("inputs", json.dumps(non_empty))
 
@@ -654,18 +657,22 @@ def _hydrate_operator_args(
         "operator_generate": "context",
         "operator_rank": "items",
         "operator_compare": "items",
+        "operator_filter": "items",
     }
     target_key = _INPUTS_TARGET.get(resolved_tool)
     if target_key and "inputs" in args and target_key not in args:
-        args[target_key] = args.pop("inputs")
+        value = args.pop("inputs")
+        if target_key == "items" and isinstance(value, list):
+            value = json.dumps(value)
+        args[target_key] = value
 
     if resolved_tool == "operator_summarize" and isinstance(args.get("content"), list):
         args["content"] = "\n\n".join(str(x) for x in args["content"] if x)
     if resolved_tool == "operator_generate" and isinstance(args.get("context"), list):
         args["context"] = "\n\n".join(str(x) for x in args["context"] if x)
-    if resolved_tool in ("operator_rank", "operator_compare") and isinstance(
-        args.get("items"), list
-    ):
+    if resolved_tool in (
+        "operator_rank", "operator_compare", "operator_filter",
+    ) and isinstance(args.get("items"), list):
         args["items"] = json.dumps(args["items"])
 
     return resolved_tool, args

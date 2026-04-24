@@ -734,3 +734,78 @@ class TestHydrateInputsTranslation:
         )
         assert tool == "operator_extract"
         assert args == {"inputs": "item list", "fields": "a,b"}
+
+    def test_filter_bare_name_resolves_to_operator_filter(self):
+        """RDR-088 nexus-ac40.1: plan YAML using ``tool: filter`` must
+        resolve through ``_OPERATOR_TOOL_MAP`` to ``operator_filter``."""
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(
+            "filter", {"items": '[]', "criterion": "relevance"},
+        )
+        assert tool == "operator_filter"
+        assert args == {"items": '[]', "criterion": "relevance"}
+
+    def test_filter_renames_inputs_to_items(self):
+        """RDR-088 nexus-ac40.1 audit carry-over: pre-hydrated step passing
+        ``$stepN.contents`` via ``inputs:`` must be renamed to
+        ``items`` so the filter operator's positional arg is populated.
+        Without this translation, a plan step hits the nexus-yis0 TypeError
+        class."""
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(
+            "filter", {"inputs": ["a", "b"], "criterion": "keep"},
+        )
+        assert tool == "operator_filter"
+        assert args == {
+            "items": json.dumps(["a", "b"]),
+            "criterion": "keep",
+        }
+
+    def test_filter_coerces_list_items_to_json(self):
+        """List-valued ``items`` must be json-encoded so the operator
+        prompt sees clean JSON rather than Python repr. Mirrors the
+        existing rank/compare coercion at runner.py:666."""
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(
+            "filter",
+            {"items": [{"id": "a"}, {"id": "b"}], "criterion": "x"},
+        )
+        assert tool == "operator_filter"
+        assert args["items"] == json.dumps([{"id": "a"}, {"id": "b"}])
+
+    def test_filter_preserves_string_items(self):
+        """Already-stringified ``items`` must pass through untouched
+        to avoid double-JSON-encoding."""
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(
+            "filter",
+            {"items": '["already", "json"]', "criterion": "x"},
+        )
+        assert tool == "operator_filter"
+        assert args["items"] == '["already", "json"]'
+
+    def test_filter_ids_hydrates_to_items(self):
+        """When a filter step declares ``ids:`` and the auto-hydration
+        path runs ``store_get_many``, the fetched content list must
+        land on the ``items`` arg (not ``inputs``), so the filter's
+        positional arg is populated."""
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _hydrate_operator_args
+
+        fake_contents = {"contents": ["doc-a body", "doc-b body"]}
+        with patch(
+            "nexus.mcp.core.store_get_many", return_value=fake_contents,
+        ):
+            tool, args = _hydrate_operator_args(
+                "filter",
+                {"ids": ["doc-a", "doc-b"], "criterion": "on-topic"},
+            )
+        assert tool == "operator_filter"
+        assert "ids" not in args and "collections" not in args
+        assert args["items"] == json.dumps(["doc-a body", "doc-b body"])
+        assert args["criterion"] == "on-topic"

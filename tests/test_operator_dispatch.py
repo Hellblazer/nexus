@@ -676,3 +676,126 @@ class TestOperatorGenerate:
         await operator_generate(template="executive-summary", context="sentinel ctx abc")
         assert "sentinel ctx abc" in captured[0]
         assert "executive-summary" in captured[0]
+
+
+class TestOperatorFilter:
+    """RDR-088 Phase 1: operator_filter returns a subset of input items
+    with per-item rationale explaining the keep/reject decision."""
+
+    @pytest.mark.asyncio
+    async def test_returns_items_and_rationale_keys(self, monkeypatch) -> None:
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_filter
+
+        async def fake(*a, **kw):
+            return {
+                "items": [{"id": "a", "title": "Alpha"}],
+                "rationale": [
+                    {"id": "a", "reason": "satisfies criterion"},
+                    {"id": "b", "reason": "rejected: off-topic"},
+                ],
+            }
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        result = await operator_filter(
+            items='[{"id": "a"}, {"id": "b"}]',
+            criterion="on-topic",
+        )
+        assert "items" in result
+        assert "rationale" in result
+        assert isinstance(result["items"], list)
+        assert isinstance(result["rationale"], list)
+
+    @pytest.mark.asyncio
+    async def test_prompt_contains_criterion(self, monkeypatch) -> None:
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_filter
+
+        captured: list[str] = []
+
+        async def fake(prompt, schema, timeout=60.0):
+            captured.append(prompt)
+            return {"items": [], "rationale": []}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        await operator_filter(items='[]', criterion="peer-reviewed-only-sentinel")
+        assert "peer-reviewed-only-sentinel" in captured[0]
+
+    @pytest.mark.asyncio
+    async def test_prompt_contains_items(self, monkeypatch) -> None:
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_filter
+
+        captured: list[str] = []
+
+        async def fake(prompt, schema, timeout=60.0):
+            captured.append(prompt)
+            return {"items": [], "rationale": []}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        await operator_filter(
+            items='[{"id": "sentinel-item-xyz789"}]',
+            criterion="relevant",
+        )
+        assert "sentinel-item-xyz789" in captured[0]
+
+    @pytest.mark.asyncio
+    async def test_schema_declares_items_and_rationale(self, monkeypatch) -> None:
+        """Schema must declare both ``items`` and ``rationale`` so the
+        substrate enforces the output shape before returning to the caller.
+        Without schema declaration, malformed LLM output slips through
+        and plan_run downstream steps trip on missing keys."""
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_filter
+
+        captured_schemas: list[dict] = []
+
+        async def fake(prompt, schema, timeout=60.0):
+            captured_schemas.append(schema)
+            return {"items": [], "rationale": []}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        await operator_filter(items='[]', criterion="x")
+
+        schema = captured_schemas[0]
+        assert schema["type"] == "object"
+        assert "items" in schema["required"]
+        assert "rationale" in schema["required"]
+        assert "items" in schema["properties"]
+        assert "rationale" in schema["properties"]
+        rationale_item_schema = schema["properties"]["rationale"]["items"]
+        assert "id" in rationale_item_schema["required"]
+        assert "reason" in rationale_item_schema["required"]
+
+    @pytest.mark.asyncio
+    async def test_ten_item_input_returns_subset_not_larger(self, monkeypatch) -> None:
+        """RDR-088 Test Plan scenario 1: with 10 inputs, the returned
+        items list must be <= input length. Mocked dispatch returns a
+        realistic subset; asserting the contract makes future regressions
+        (e.g. LLM returns duplicates, amplifies input) trip the test."""
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_filter
+
+        inputs = [{"id": f"item-{i}", "title": f"Item {i}"} for i in range(10)]
+
+        async def fake(prompt, schema, timeout=60.0):
+            kept = inputs[:4]
+            rationale = [
+                {"id": it["id"], "reason": "keeps criterion"} for it in kept
+            ] + [
+                {"id": it["id"], "reason": "rejects criterion"} for it in inputs[4:]
+            ]
+            return {"items": kept, "rationale": rationale}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        result = await operator_filter(
+            items=json.dumps(inputs), criterion="even index",
+        )
+        assert len(result["items"]) <= len(inputs)
+        assert len(result["rationale"]) == len(inputs)
+        output_ids = {it["id"] for it in result["items"]}
+        input_ids = {it["id"] for it in inputs}
+        assert output_ids.issubset(input_ids), (
+            f"operator_filter must return subset of input ids; "
+            f"got extras {output_ids - input_ids}"
+        )

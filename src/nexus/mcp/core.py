@@ -1596,6 +1596,69 @@ async def operator_generate(
     return await claude_dispatch(prompt, schema, timeout=timeout)
 
 
+@mcp.tool()
+async def operator_filter(
+    items: str,
+    criterion: str,
+    timeout: float = 300.0,
+) -> dict:
+    """Filter items by a criterion using claude -p, returning a subset with rationale.
+
+    RDR-088 Phase 1. Paper §D.4 Filter operator: given a prior-step's
+    output list and a natural-language criterion, return the items that
+    satisfy the criterion plus a per-item reason for the keep / reject
+    decision. Composable with ``operator_extract``, ``operator_rank``,
+    and retrieval tools via ``plan_run``. Distinct from ChromaDB's
+    metadata ``where=`` filter which operates at retrieval time over
+    structured fields; ``operator_filter`` operates over arbitrary
+    prior-step results with natural-language predicates.
+
+    Args:
+        items: Items to filter (plain text or JSON array string). Each
+            element should carry an ``id`` field when rationale round-
+            tripping matters; downstream plan steps key on ``id``.
+        criterion: Natural-language predicate describing the keep
+            condition (e.g. "peer-reviewed only", "published after 2023").
+        timeout: Seconds before the subprocess is killed. Default 300s
+            (5 min) — the claude -p substrate handles multi-step
+            analytical workloads; 120s was hitting false timeouts on
+            real input.
+    """
+    from nexus.operators.dispatch import claude_dispatch
+
+    prompt = (
+        f"Filter the following items by this criterion: {criterion}\n"
+        f"Return only the items that satisfy the criterion in the 'items' "
+        f"array. Populate 'rationale' with one entry per input item, "
+        f"keyed by the item's id, giving the reason each item was kept "
+        f"or rejected. The output 'items' array must be a subset of the "
+        f"input; never add synthetic items.\n\n"
+        f"Items:\n{items}"
+    )
+    schema: dict = {
+        "type": "object",
+        "required": ["items", "rationale"],
+        "properties": {
+            "items": {
+                "type": "array",
+                "items": {"type": "object"},
+            },
+            "rationale": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["id", "reason"],
+                    "properties": {
+                        "id": {"type": "string"},
+                        "reason": {"type": "string"},
+                    },
+                },
+            },
+        },
+    }
+    return await claude_dispatch(prompt, schema, timeout=timeout)
+
+
 # ── traverse (RDR-078 P3) ─────────────────────────────────────────────────────
 
 #: Depth cap for traverse steps (SC-4).
