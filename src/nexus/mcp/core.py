@@ -1596,6 +1596,24 @@ async def operator_generate(
     return await claude_dispatch(prompt, schema, timeout=timeout)
 
 
+#: Shared evidence-item schema for ``operator_check`` (RDR-088 Phase 2).
+#: Each entry is a citation-like record grounding the verdict across a
+#: multi-item consistency probe. ``role`` is enum-restricted so downstream
+#: plan steps can branch on the trichotomy without parsing free text.
+_CHECK_EVIDENCE_ITEM_SCHEMA: dict = {
+    "type": "object",
+    "required": ["item_id", "quote", "role"],
+    "properties": {
+        "item_id": {"type": "string"},
+        "quote": {"type": "string"},
+        "role": {
+            "type": "string",
+            "enum": ["supports", "contradicts", "neutral"],
+        },
+    },
+}
+
+
 @mcp.tool()
 async def operator_filter(
     items: str,
@@ -1653,6 +1671,112 @@ async def operator_filter(
                         "reason": {"type": "string"},
                     },
                 },
+            },
+        },
+    }
+    return await claude_dispatch(prompt, schema, timeout=timeout)
+
+
+@mcp.tool()
+async def operator_check(
+    items: str,
+    check_instruction: str,
+    timeout: float = 300.0,
+) -> dict:
+    """Check a claim's consistency across peer items using claude -p.
+
+    RDR-088 Phase 2. Paper §D.2 Check operator: validate a claim across
+    N peer items (papers, documents, extracted records) and return a
+    structured boolean plus grounding evidence. Unlike ``operator_compare``
+    which returns free-text, ``operator_check`` returns a composable
+    ``{ok: bool, evidence: list[{item_id, quote, role}]}`` payload so
+    plan steps can branch deterministically.
+
+    Evidence role is one of ``supports``, ``contradicts``, ``neutral``.
+    Populate at least one entry per item unless ``ok=True`` trivially
+    (every item agrees with no nuance to report).
+
+    Args:
+        items: Items to check for consistency (plain text or JSON array
+            string). Each entry should carry an ``id`` field; evidence
+            entries key ``item_id`` against these ids.
+        check_instruction: Natural-language claim or consistency
+            question to evaluate across the items (e.g. "do all papers
+            agree on the baseline numbers?").
+        timeout: Seconds before the subprocess is killed. Default 300s.
+    """
+    from nexus.operators.dispatch import claude_dispatch
+
+    prompt = (
+        f"Check whether the following items are consistent with this "
+        f"claim or question: {check_instruction}\n"
+        f"Set ok=true when every item supports the claim, false when at "
+        f"least one item contradicts it. Populate 'evidence' with a "
+        f"record per item containing a short grounding 'quote' and a "
+        f"'role' of 'supports', 'contradicts', or 'neutral'. Keep quotes "
+        f"short enough to be verifiable against the source item.\n\n"
+        f"Items:\n{items}"
+    )
+    schema: dict = {
+        "type": "object",
+        "required": ["ok", "evidence"],
+        "properties": {
+            "ok": {"type": "boolean"},
+            "evidence": {
+                "type": "array",
+                "items": _CHECK_EVIDENCE_ITEM_SCHEMA,
+            },
+        },
+    }
+    return await claude_dispatch(prompt, schema, timeout=timeout)
+
+
+@mcp.tool()
+async def operator_verify(
+    claim: str,
+    evidence: str,
+    timeout: float = 300.0,
+) -> dict:
+    """Verify a single claim against a single evidence source using claude -p.
+
+    RDR-088 Phase 2. Paper §D.2 Verify operator: targeted single-claim
+    variant of ``operator_check``. Returns ``{verified: bool, reason: str,
+    citations: list[str]}`` where citations are span anchors or locators
+    pulled from the evidence text that ground the verdict.
+
+    Distinct from ``operator_check`` by cardinality: verify is 1-claim to
+    1-evidence; check is 1-claim to N-items.
+
+    Args:
+        claim: A single assertion to verify (e.g. "the paper reports 2048
+            GPU-hours for training").
+        evidence: The source material to verify the claim against.
+            Typically a section text, extracted passage, or document
+            body. Not a collection of items.
+        timeout: Seconds before the subprocess is killed. Default 300s.
+    """
+    from nexus.operators.dispatch import claude_dispatch
+
+    prompt = (
+        f"Verify whether the following claim is grounded in the evidence "
+        f"provided.\n\n"
+        f"Claim: {claim}\n\n"
+        f"Evidence:\n{evidence}\n\n"
+        f"Set verified=true only when the claim is directly supported by "
+        f"the evidence. Provide a concise 'reason' explaining the "
+        f"verdict. Populate 'citations' with locators (section, page, "
+        f"table, or quoted span snippets) that pinpoint the supporting "
+        f"or contradicting passages."
+    )
+    schema: dict = {
+        "type": "object",
+        "required": ["verified", "reason", "citations"],
+        "properties": {
+            "verified": {"type": "boolean"},
+            "reason": {"type": "string"},
+            "citations": {
+                "type": "array",
+                "items": {"type": "string"},
             },
         },
     }

@@ -85,13 +85,16 @@ MAX_BUNDLE_PROMPT_CHARS: int = 200_000
 #:    Don't bundle an operator whose failure must be retried in
 #:    isolation.
 #:
-#: Today the six AgenticScholar operators (extract / rank / compare /
-#: summarize / generate / filter) all satisfy (1), (2), and (3). Bare
-#: and resolved forms are both accepted because plan YAMLs use either.
+#: Today the eight AgenticScholar operators (extract / rank / compare /
+#: summarize / generate / filter / check / verify) all satisfy (1),
+#: (2), and (3). Bare and resolved forms are both accepted because
+#: plan YAMLs use either.
 BUNDLEABLE_OPERATORS: frozenset[str] = frozenset({
-    "extract", "rank", "compare", "summarize", "generate", "filter",
+    "extract", "rank", "compare", "summarize", "generate",
+    "filter", "check", "verify",
     "operator_extract", "operator_rank", "operator_compare",
     "operator_summarize", "operator_generate", "operator_filter",
+    "operator_check", "operator_verify",
 })
 
 #: Legacy alias — older call sites / docs may reference the prior name.
@@ -442,6 +445,39 @@ def _describe_step(
             "never synthesize new entries."
         )
 
+    elif verb == "check":
+        instruction = step.args.get("check_instruction", "")
+        lines.append(f"  check_instruction: {instruction!r}")
+        lines.extend(_render_input_line(
+            label="items", value=step.args.get("items"),
+            first=first, position=position,
+            default_prose=f"the output list from STEP {position - 1}",
+            plan_to_local=plan_to_local,
+        ))
+        lines.append(
+            "  Emit a JSON object with keys `ok` (boolean: true when "
+            "every item supports the claim, false when at least one "
+            "contradicts) and `evidence` (array of `{item_id, quote, "
+            "role}` records where role is one of `supports`, "
+            "`contradicts`, `neutral`)."
+        )
+
+    elif verb == "verify":
+        claim = step.args.get("claim", "")
+        lines.append(f"  claim: {claim!r}")
+        lines.extend(_render_input_line(
+            label="evidence", value=step.args.get("evidence"),
+            first=first, position=position,
+            default_prose=f"the output text from STEP {position - 1}",
+            plan_to_local=plan_to_local,
+        ))
+        lines.append(
+            "  Emit a JSON object with keys `verified` (boolean), "
+            "`reason` (short string explaining the verdict), and "
+            "`citations` (array of locator strings pinpointing the "
+            "passages that ground the verdict)."
+        )
+
     else:
         # Unknown operator — fall back to a verbose dump of args. This
         # should not fire in practice since segment_steps gates on
@@ -516,6 +552,44 @@ def _terminal_schema(tool: str) -> dict[str, Any]:
                             "reason": {"type": "string"},
                         },
                     },
+                },
+            },
+        }
+    if verb == "check":
+        return {
+            "type": "object",
+            "required": ["ok", "evidence"],
+            "properties": {
+                "ok": {"type": "boolean"},
+                "evidence": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["item_id", "quote", "role"],
+                        "properties": {
+                            "item_id": {"type": "string"},
+                            "quote": {"type": "string"},
+                            "role": {
+                                "type": "string",
+                                "enum": [
+                                    "supports", "contradicts", "neutral",
+                                ],
+                            },
+                        },
+                    },
+                },
+            },
+        }
+    if verb == "verify":
+        return {
+            "type": "object",
+            "required": ["verified", "reason", "citations"],
+            "properties": {
+                "verified": {"type": "boolean"},
+                "reason": {"type": "string"},
+                "citations": {
+                    "type": "array",
+                    "items": {"type": "string"},
                 },
             },
         }

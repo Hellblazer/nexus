@@ -799,3 +799,235 @@ class TestOperatorFilter:
             f"operator_filter must return subset of input ids; "
             f"got extras {output_ids - input_ids}"
         )
+
+
+class TestOperatorCheck:
+    """RDR-088 Phase 2: operator_check returns a structured boolean plus
+    grounding evidence across multiple items (paper §D.2 Check)."""
+
+    @pytest.mark.asyncio
+    async def test_returns_ok_and_evidence_keys(self, monkeypatch) -> None:
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_check
+
+        async def fake(*a, **kw):
+            return {
+                "ok": True,
+                "evidence": [
+                    {"item_id": "p1", "quote": "A B", "role": "supports"},
+                ],
+            }
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        result = await operator_check(
+            items='[{"id": "p1"}]', check_instruction="claim X holds",
+        )
+        assert "ok" in result
+        assert "evidence" in result
+        assert isinstance(result["ok"], bool)
+        assert isinstance(result["evidence"], list)
+
+    @pytest.mark.asyncio
+    async def test_prompt_contains_instruction_and_items(self, monkeypatch) -> None:
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_check
+
+        captured: list[str] = []
+
+        async def fake(prompt, schema, timeout=60.0):
+            captured.append(prompt)
+            return {"ok": True, "evidence": []}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        await operator_check(
+            items='[{"id": "sentinel-paper-abc"}]',
+            check_instruction="consistency-probe-xyz",
+        )
+        assert "sentinel-paper-abc" in captured[0]
+        assert "consistency-probe-xyz" in captured[0]
+
+    @pytest.mark.asyncio
+    async def test_schema_declares_ok_evidence_and_role_enum(self, monkeypatch) -> None:
+        """Schema must pin the {item_id, quote, role} evidence shape
+        and role must be restricted to the enum {supports, contradicts,
+        neutral} per the RDR Technical Design. Without enum enforcement
+        the LLM can emit a role like 'partial' that breaks downstream
+        branching."""
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_check
+
+        captured_schemas: list[dict] = []
+
+        async def fake(prompt, schema, timeout=60.0):
+            captured_schemas.append(schema)
+            return {"ok": True, "evidence": []}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        await operator_check(items='[]', check_instruction="x")
+
+        schema = captured_schemas[0]
+        assert "ok" in schema["required"]
+        assert "evidence" in schema["required"]
+        assert schema["properties"]["ok"]["type"] == "boolean"
+        evidence_item = schema["properties"]["evidence"]["items"]
+        assert set(evidence_item["required"]) == {"item_id", "quote", "role"}
+        assert set(evidence_item["properties"]["role"]["enum"]) == {
+            "supports", "contradicts", "neutral",
+        }
+
+    @pytest.mark.asyncio
+    async def test_three_agreeing_papers_yield_ok_true(self, monkeypatch) -> None:
+        """RDR-088 Test Plan scenario 2: 3 papers that agree on a claim
+        yield ok=True with >=1 supporting quote per paper, no contradicts."""
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_check
+
+        async def fake(prompt, schema, timeout=60.0):
+            return {
+                "ok": True,
+                "evidence": [
+                    {"item_id": "p1", "quote": "agrees-1",
+                     "role": "supports"},
+                    {"item_id": "p2", "quote": "agrees-2",
+                     "role": "supports"},
+                    {"item_id": "p3", "quote": "agrees-3",
+                     "role": "supports"},
+                ],
+            }
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        result = await operator_check(
+            items='[{"id": "p1"}, {"id": "p2"}, {"id": "p3"}]',
+            check_instruction="papers agree on baseline",
+        )
+        assert result["ok"] is True
+        paper_ids = {e["item_id"] for e in result["evidence"]}
+        assert paper_ids == {"p1", "p2", "p3"}
+        roles = {e["role"] for e in result["evidence"]}
+        assert "contradicts" not in roles
+
+    @pytest.mark.asyncio
+    async def test_contradicting_paper_yields_ok_false(self, monkeypatch) -> None:
+        """RDR-088 Test Plan scenario 3: when 1 of 3 papers contradicts
+        the claim, ok=False and the contradicting quote must be surfaced
+        with role=contradicts."""
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_check
+
+        async def fake(prompt, schema, timeout=60.0):
+            return {
+                "ok": False,
+                "evidence": [
+                    {"item_id": "p1", "quote": "supports-1",
+                     "role": "supports"},
+                    {"item_id": "p2", "quote": "supports-2",
+                     "role": "supports"},
+                    {"item_id": "p3", "quote": "contradicts-sentinel",
+                     "role": "contradicts"},
+                ],
+            }
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        result = await operator_check(
+            items='[{"id": "p1"}, {"id": "p2"}, {"id": "p3"}]',
+            check_instruction="all papers report same numbers",
+        )
+        assert result["ok"] is False
+        contradicts = [
+            e for e in result["evidence"] if e["role"] == "contradicts"
+        ]
+        assert len(contradicts) == 1
+        assert contradicts[0]["item_id"] == "p3"
+        assert contradicts[0]["quote"] == "contradicts-sentinel"
+
+
+class TestOperatorVerify:
+    """RDR-088 Phase 2: operator_verify targets a single claim against
+    a single evidence blob (paper §D.2 Verify)."""
+
+    @pytest.mark.asyncio
+    async def test_returns_verified_reason_citations(self, monkeypatch) -> None:
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_verify
+
+        async def fake(*a, **kw):
+            return {
+                "verified": True,
+                "reason": "grounded in §2.1",
+                "citations": ["§2.1, p.3"],
+            }
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        result = await operator_verify(
+            claim="X is a transformer variant",
+            evidence="Section 2.1: X is built on transformer layers...",
+        )
+        assert result["verified"] is True
+        assert isinstance(result["reason"], str)
+        assert isinstance(result["citations"], list)
+
+    @pytest.mark.asyncio
+    async def test_prompt_contains_claim_and_evidence(self, monkeypatch) -> None:
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_verify
+
+        captured: list[str] = []
+
+        async def fake(prompt, schema, timeout=60.0):
+            captured.append(prompt)
+            return {"verified": False, "reason": "", "citations": []}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        await operator_verify(
+            claim="claim-sentinel-abc",
+            evidence="evidence-sentinel-xyz",
+        )
+        assert "claim-sentinel-abc" in captured[0]
+        assert "evidence-sentinel-xyz" in captured[0]
+
+    @pytest.mark.asyncio
+    async def test_schema_declares_verified_reason_citations(
+        self, monkeypatch,
+    ) -> None:
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_verify
+
+        captured_schemas: list[dict] = []
+
+        async def fake(prompt, schema, timeout=60.0):
+            captured_schemas.append(schema)
+            return {"verified": False, "reason": "", "citations": []}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        await operator_verify(claim="c", evidence="e")
+
+        schema = captured_schemas[0]
+        assert schema["properties"]["verified"]["type"] == "boolean"
+        assert {"verified", "reason", "citations"}.issubset(
+            set(schema["required"]),
+        )
+        assert schema["properties"]["citations"]["type"] == "array"
+
+    @pytest.mark.asyncio
+    async def test_grounded_claim_verified_with_citations(
+        self, monkeypatch,
+    ) -> None:
+        """RDR-088 Test Plan scenario 4: a claim that IS grounded in the
+        evidence returns verified=True with at least one citation span."""
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_verify
+
+        async def fake(prompt, schema, timeout=60.0):
+            return {
+                "verified": True,
+                "reason": "quote-at-p3-matches-claim",
+                "citations": ["p.3, §2", "Table 1"],
+            }
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        result = await operator_verify(
+            claim="X uses attention",
+            evidence="Table 1 compares attention variants...",
+        )
+        assert result["verified"] is True
+        assert len(result["citations"]) >= 1

@@ -915,3 +915,107 @@ class TestHydrateInputsTranslation:
         assert "ids" not in args and "collections" not in args
         assert args["items"] == json.dumps(["doc-a body", "doc-b body"])
         assert args["criterion"] == "on-topic"
+
+    # ── operator_check hydration (RDR-088 nexus-ac40.4) ─────────────────
+
+    def test_check_bare_name_resolves_to_operator_check(self):
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(
+            "check",
+            {"items": '[]', "check_instruction": "consistent"},
+        )
+        assert tool == "operator_check"
+        assert args == {"items": '[]', "check_instruction": "consistent"}
+
+    def test_check_renames_inputs_to_items(self):
+        """Pre-hydrated step passing ``$stepN.contents`` via ``inputs:`` must
+        be renamed to ``items`` so the check operator's positional arg is
+        populated. Same class as the nexus-yis0 TypeError for rank/compare."""
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(
+            "check",
+            {"inputs": ["doc-a", "doc-b"], "check_instruction": "agree"},
+        )
+        assert tool == "operator_check"
+        assert args == {
+            "items": json.dumps(["doc-a", "doc-b"]),
+            "check_instruction": "agree",
+        }
+
+    def test_check_coerces_list_items_to_json(self):
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(
+            "check",
+            {"items": [{"id": "p1"}, {"id": "p2"}],
+             "check_instruction": "consistent"},
+        )
+        assert tool == "operator_check"
+        assert args["items"] == json.dumps([{"id": "p1"}, {"id": "p2"}])
+
+    def test_check_ids_hydrates_to_items(self):
+        """check + ids: auto-hydration pulls document bodies and lands
+        them on ``items`` so the operator prompt sees concrete content."""
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _hydrate_operator_args
+
+        fake_contents = {"contents": ["body-a", "body-b"]}
+        with patch(
+            "nexus.mcp.core.store_get_many", return_value=fake_contents,
+        ):
+            tool, args = _hydrate_operator_args(
+                "check",
+                {"ids": ["doc-a", "doc-b"],
+                 "check_instruction": "claim holds"},
+            )
+        assert tool == "operator_check"
+        assert args["items"] == json.dumps(["body-a", "body-b"])
+        assert args["check_instruction"] == "claim holds"
+        assert "ids" not in args and "collections" not in args
+
+    # ── operator_verify hydration (RDR-088 nexus-ac40.4) ────────────────
+
+    def test_verify_bare_name_resolves_to_operator_verify(self):
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(
+            "verify",
+            {"claim": "X is true", "evidence": "see §2"},
+        )
+        assert tool == "operator_verify"
+        assert args == {"claim": "X is true", "evidence": "see §2"}
+
+    def test_verify_passes_scalar_args_untouched(self):
+        """operator_verify takes two scalars (claim + evidence); there is
+        no list-to-scalar translation to perform. The audit carry-over is
+        explicit: skip _INPUTS_TARGET for verify."""
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(
+            "verify",
+            {"claim": "nuclear reactor runs on fusion",
+             "evidence": "raw-evidence-text"},
+        )
+        assert tool == "operator_verify"
+        assert args["claim"] == "nuclear reactor runs on fusion"
+        assert args["evidence"] == "raw-evidence-text"
+
+    def test_verify_inputs_arg_is_not_translated(self):
+        """A stray ``inputs`` arg on a verify step must NOT be silently
+        renamed — verify's contract is two scalar args. Translating would
+        mask an authoring bug. The step should either raise or drop the
+        unknown arg downstream; _hydrate_operator_args must leave
+        ``inputs`` in place so the downstream TypeError is attributable."""
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(
+            "verify",
+            {"inputs": "stray", "claim": "c", "evidence": "e"},
+        )
+        assert tool == "operator_verify"
+        assert args.get("inputs") == "stray"
+        assert args["claim"] == "c"
+        assert args["evidence"] == "e"

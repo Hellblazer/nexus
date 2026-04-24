@@ -579,6 +579,8 @@ _OPERATOR_TOOL_MAP: dict[str, str] = {
     "summarize": "operator_summarize",
     "generate": "operator_generate",
     "filter": "operator_filter",
+    "check": "operator_check",
+    "verify": "operator_verify",
 }
 
 #: Maximum inputs to pass to an operator before auto-inserting a rank
@@ -634,7 +636,7 @@ def _hydrate_operator_args(
             args.setdefault("context", "\n\n".join(non_empty))
         elif resolved_tool in ("operator_rank", "operator_compare"):
             args.setdefault("items", json.dumps(non_empty))
-        elif resolved_tool == "operator_filter":
+        elif resolved_tool in ("operator_filter", "operator_check"):
             args.setdefault("items", json.dumps(non_empty))
         else:
             args.setdefault("inputs", json.dumps(non_empty))
@@ -658,6 +660,12 @@ def _hydrate_operator_args(
         "operator_rank": "items",
         "operator_compare": "items",
         "operator_filter": "items",
+        "operator_check": "items",
+        # operator_verify intentionally omitted: it takes scalar claim +
+        # evidence args. Translating a stray ``inputs`` to one of them
+        # would mask an authoring bug; leave ``inputs`` in place and let
+        # the dispatcher surface the unknown-arg path. (RDR-088 audit
+        # carry-over, nexus-ac40.4.)
     }
     target_key = _INPUTS_TARGET.get(resolved_tool)
     if target_key and "inputs" in args and target_key not in args:
@@ -672,6 +680,7 @@ def _hydrate_operator_args(
         args["context"] = "\n\n".join(str(x) for x in args["context"] if x)
     if resolved_tool in (
         "operator_rank", "operator_compare", "operator_filter",
+        "operator_check",
     ) and isinstance(args.get("items"), list):
         args["items"] = json.dumps(args["items"])
 
