@@ -6,6 +6,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.11.1] - 2026-04-24
+
+Shakeout patch for 4.11.0: the 4.10.3 SessionEnd detach path was still producing `Hook cancelled` at session close on the reference install. Root-caused in under an hour: `nx hook session-end-detach` forks the detach daemon only AFTER Click has parsed argv and after ~2 seconds of `nexus.*` imports on a cold cache. Claude Code's shutdown SIGTERM arrives faster than 2 seconds on this machine, so the first `os.fork()` never runs and the whole hook chain dies. The 4.11.0 `uuid_mismatch` sweep was catching the orphans at next SessionStart, so the leak was bounded — but the graceful cleanup (flush pending scratch entries to T2, expire memory entries) was being skipped and the error message appeared on every session close.
+
+### Added
+
+- **`nx-session-end-launcher` console script** (`src/nexus/_session_end_launcher.py`, nexus-2u7o). Dedicated entry point whose top-level imports are `os` and `sys` only. `main()` immediately double-forks + `setsid`s + redirects stdio before any `nexus.*` module is loaded; the grandchild then imports `nexus.hooks` and runs `session_end()` normally. Wall-clock time to return control to Claude Code: ~256ms on cold cache (8x faster than the 2.0s `nx hook session-end-detach` measured in the field). Tests pin the fork-first invariant (module must not import any `nexus.*` submodule at top level) and the daemonization flow.
+
+### Changed
+
+- **`nx/hooks/hooks.json` SessionEnd command** — `nx hook session-end-detach || true` replaced with `nx-session-end-launcher 2>/dev/null || nx hook session-end-detach || true`. The chained fallback handles mixed-version installs where the plugin upgrades ahead of the conexus CLI: if the new launcher binary isn't on PATH yet, the old detach subcommand runs as before. Once both sides are on 4.11.1, the fallback never fires.
+
+### Fixed
+
+- **`Hook cancelled` noise at session close** — with the fast launcher, the hook returns to Claude Code before its shutdown SIGTERM can cancel anything. Graceful cleanup (stop chroma, flush pending scratch, expire memory entries) now actually runs instead of getting skipped and deferred to the next-session sweep.
+
 ## [4.11.0] - 2026-04-24
 
 Closes the three missing AgenticScholar paper operators (RDR-088 Phases 1+2) with full `plan_run` and operator-bundle integration, plus two ergonomics / correctness follow-ups that surfaced during the RDR-088 arc. Paper operator coverage goes from 9/13 composable tools to 11/13 (`GroupBy` and `Aggregate` from §D.4 remain explicitly deferred per the accepted RDR's scope subsection). The optional Phase 3 LLM rerank for `plan_match` was spiked against the full 50-row plan library and closed without landing — the rerank cleared the precision-delta threshold (+0.1212) but missed the recall-delta floor (-0.20 vs -0.15 allowed), so Gap 4 closes as "already addressed by RDR-092" per the pre-agreed dual-threshold gate.
