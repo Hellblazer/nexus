@@ -106,6 +106,25 @@ metadata. GroupBy / Aggregate become the operators that make that
 store composable — without them, the aspect store is a query-time
 lookup table, not an analytical substrate.
 
+#### Bar for reversing a scope deferral
+
+RDR-088's deferral note committed to a follow-up RDR *if demand
+surfaces*. RDR-093 reopens that decision on a stronger posture
+than "demand surfaced" — it reopens because a **known architectural
+consumer lands in the same release cycle** (MatrixConstruct per
+paper §5, enabled by RDR-089's aspect store). The distinction
+matters because a looser standard — "reopen any deferral when
+someone imagines a use" — would hollow out the deferral mechanism
+that lets RDRs bound scope tightly.
+
+The bar this RDR sets for future deferral reversals: the reopening
+RDR must identify an architectural consumer (a paper-described
+pipeline, a concrete user workflow, or a sibling RDR whose
+acceptance is already decided) that is itself load-bearing in the
+current planning horizon — not anticipated, hypothetical, or
+"worth considering". When the bar is not met, the deferral holds
+until it is.
+
 ### Technical Environment
 
 - `src/nexus/mcp/core.py:1399–1745` — current operator_* implementations
@@ -187,7 +206,7 @@ verify (four edits in `runner.py`, four branches in `bundle.py`).
 
 **`operator_groupby`** — signature:
 
-`groupby(items: str, key: str, timeout: float = 300.0) → {groups: list[{key_value, item_ids}]}`
+`groupby(items: str, key: str, timeout: float = 300.0) → {groups: list[{key_value, items: list[dict]}]}`
 
 `items` is a JSON array string of prior-step outputs (each item
 expected to carry an `id` field for round-trip composability).
@@ -195,8 +214,16 @@ expected to carry an `id` field for round-trip composability).
 structured field ("experimental_dataset"), an inferred property
 ("method family"), or a derived attribute ("publication year
 bucket"). Output schema binds `key_value` (the group's label) to
-an ordered list of input `id` values that belong to the group. No
-item is assigned to more than one group; items the LLM cannot
+the actual items that belong to the group. **Items are carried
+inline, not as ID references.** Each emitted item preserves the
+input's `id` field for round-trip composability, so callers that
+only need the ID structure can derive it via `[i["id"] for g in
+groups for i in g["items"]]`. Carrying items inline is load-
+bearing for the bundled `groupby → aggregate` path — the bundle
+dispatch is a single `claude -p` call with no host-side retrieval,
+so aggregate must receive resolvable content inside the bundle
+prompt (see Gate finding C-1, resolved in this design). No item
+is assigned to more than one group; items the LLM cannot
 confidently assign land in a `key_value="unassigned"` group.
 
 ```python
@@ -208,10 +235,13 @@ schema: dict = {
             "type": "array",
             "items": {
                 "type": "object",
-                "required": ["key_value", "item_ids"],
+                "required": ["key_value", "items"],
                 "properties": {
                     "key_value": {"type": "string"},
-                    "item_ids": {"type": "array", "items": {"type": "string"}},
+                    "items": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                    },
                 },
             },
         },
@@ -223,9 +253,11 @@ schema: dict = {
 
 `aggregate(groups: str, reducer: str, timeout: float = 300.0) → {aggregates: list[{key_value, summary}]}`
 
-`groups` is a JSON-serialized `list[{key_value, item_ids, items}]`
-from a prior groupby step (the runner hydrates `items` content via
-`store_get_many` if the caller passed only ids). `reducer` is a
+`groups` is a JSON-serialized `list[{key_value, items: list[dict]}]`
+from a prior groupby step. Items arrive pre-hydrated in the groups
+payload (carried inline by `operator_groupby`'s output contract),
+so both the bundled and isolated dispatch paths see the same shape
+and no runner-side nested-id hydration is required. `reducer` is a
 natural-language reduction instruction ("winning baseline by
 reported metric", "most cited method", "earliest publication").
 Output preserves the `key_value` label so downstream operators can
@@ -409,6 +441,16 @@ default contract.
   value that's not grounded in the items). Mitigated by the
   `key_value="unassigned"` convention; low-confidence callers can
   inspect `unassigned` group size as a quality signal.
+- **Silent (resolved in design)**: bundled `groupby → aggregate`
+  content-resolution failure. The first-pass design carried only
+  `item_ids` in groupby's output, which would have left aggregate
+  with id references it cannot resolve inside a single bundled
+  `claude -p` dispatch (no host-side retrieval in a bundle). Gate
+  finding C-1 flagged this; the output contract now carries items
+  inline so both bundled and isolated paths see the same resolvable
+  payload. The bundle content-resolution test scenario is a
+  regression guard against a future change that reverts to
+  id-references.
 
 ## Implementation Plan
 
@@ -472,11 +514,12 @@ None. Same `claude_dispatch` substrate as the existing operator family.
 
 ## Test Plan
 
-- **Scenario**: `operator_groupby` called with 10 items and the key "publication year" — **Verify**: output partitions items into year buckets, every input id lands in exactly one group, no item id invented.
+- **Scenario**: `operator_groupby` called with 10 items and the key "publication year" — **Verify**: output partitions items into year buckets, every input item's `id` lands in exactly one group's `items` array, no item id invented, items carry their original content (not just id).
 - **Scenario**: `operator_groupby` with an ambiguous key (items lacking the field) — **Verify**: ambiguous items land in `key_value="unassigned"`, confidence signal surfaced via group size.
 - **Scenario**: `operator_aggregate` called with 3 groups totalling 9 items and the reducer "most-cited method" — **Verify**: output has exactly 3 aggregates, each `key_value` preserved, each summary references only items in its group (adversarial cross-group test).
 - **Scenario**: `plan_run` chain `search → filter → groupby → aggregate` bundled into one dispatch — **Verify**: terminal step output is the aggregate list; intermediate steps are `BUNDLED_INTERMEDIATE` sentinels; no per-step claude -p subprocess spawned for the three operators.
-- **Scenario**: Cardinality cap (150 items passed) — **Verify**: `_OPERATOR_MAX_INPUTS` auto-hydration cap kicks in, groupby receives 100 items, runner logs the truncation.
+- **Scenario** (bundle content-resolution, Gate finding C-1 regression guard): `plan_run` chain `search → groupby → aggregate` bundled end-to-end, with a fixture whose aggregate summary must reference content that only exists in each item's body (not in the id). **Verify**: aggregate summaries include content-specific terms from each group's items — proves groupby's inline-items contract is plumbed correctly through the bundle prompt, not a reference-only shape that would leave aggregate guessing.
+- **Scenario**: Cardinality cap (150 items passed) — **Verify**: `_OPERATOR_MAX_INPUTS` auto-hydration cap kicks in, groupby receives 100 items, runner logs the truncation, **and the tool's return envelope carries a `truncated: true, original_count: 150, kept_count: 100` metadata block** so plan authors see the limit hit rather than silently losing 50 items. (The metadata-surface enhancement is scoped to `operator_groupby` in this RDR; a follow-up should generalise the pattern across the operator family.)
 
 ## Validation
 
@@ -495,7 +538,57 @@ against `knowledge__delos` with shape-based assertions.
 
 ## Finalization Gate
 
-_To be completed during /nx:rdr-gate._
+Gated 2026-04-24 via `/nx:rdr-gate 093`. First pass surfaced one
+critical issue plus two significant issues — all resolvable in
+design, no code changes required pre-accept. Fixed in-place
+before the re-gate:
+
+1. **Critical (C-1) — bundle content-resolution gap.** Original
+   `operator_groupby` output was `{groups: [{key_value, item_ids}]}`.
+   Inside a bundled `groupby → aggregate` dispatch, aggregate
+   receives groups from groupby's output contract; with
+   id-references only, aggregate cannot resolve ids to content
+   because a single `claude -p` dispatch has no host-side retrieval
+   (store_get_many is not callable inside the LLM's reasoning).
+   Fix: change groupby's output to
+   `{groups: [{key_value, items: list[dict]}]}` with items carried
+   inline. Bundle path now works (items visible in the LLM's
+   context alongside groupby's output). Isolated path now works
+   (aggregate receives pre-hydrated groups directly). Added a
+   regression-guard test scenario and a Failure Modes entry
+   documenting the historical shape so future reverts trip the
+   test.
+2. **Significant — silent cardinality truncation.** The
+   `_OPERATOR_MAX_INPUTS = 100` cap was mentioned in Consequences
+   but the cap's firing was invisible to callers (only a structlog
+   warning). Fix: `operator_groupby`'s return envelope carries a
+   `truncated: true, original_count: N, kept_count: 100` metadata
+   block when the cap fires. Scoped to this operator in this RDR;
+   a follow-up RDR should generalise the pattern across the full
+   operator family.
+3. **Significant — test gap for bundle wiring.** The first-pass
+   Test Plan verified `BUNDLED_INTERMEDIATE` sentinels and process
+   counts but did not exercise the content-reference path that the
+   C-1 fix protects. Fix: added an end-to-end bundle content-
+   resolution scenario whose fixture's aggregate summaries must
+   reference item-body content (not just ids) to pass.
+
+Observations addressed (recorded, not code-change):
+
+- **Deferral-reversal precedent.** The RDR's reopening of
+  GroupBy/Aggregate could set a loose bar for future reversals.
+  Context section already documents the bar ("known architectural
+  consumer in the same release cycle — MatrixConstruct, RDR-089")
+  so the reversal is principled rather than ad-hoc.
+- **Paper parity deviations.** All five deviations (short param
+  names, string summary, explicit schema, `key_value` naming,
+  `unassigned` convention) verified intentional and defensible in
+  `nexus_rdr/093-research-1: paper-signature-parity-check`.
+
+Re-gate result: PASSED. No critical issues outstanding; all
+significant issues resolved; observations converted to either RDR
+content (deferral-reversal bar, paper-parity reference) or
+follow-up scope (cross-operator truncation metadata).
 
 ## References
 
