@@ -389,6 +389,34 @@ class TestRunRecording:
         assert row[1] == "[redacted]"   # question
         assert row[5] == "[redacted]"   # final_text
 
+    def test_record_run_lands_via_t2_telemetry_conn(self, tmp_path):
+        """Regression for nexus-598n: the MCP call sites write through
+        ``db.telemetry.conn``, not a nonexistent ``db.conn``.
+
+        Prior to this fix, every ``_nx_answer_record_run`` call in
+        ``mcp/core.py`` passed ``db.conn`` to this function; after the
+        RDR-063 T2Database split removed the facade-level ``.conn``
+        attribute, those writes raised ``AttributeError`` under
+        ``except Exception: pass`` — silently dropping every run
+        record. Asserting the lookup here locks the contract.
+        """
+        from nexus.db.t2 import T2Database
+        from nexus.mcp.core import _nx_answer_record_run
+
+        path = tmp_path / "mem.db"
+        with T2Database(path) as db:
+            assert hasattr(db, "telemetry") and hasattr(db.telemetry, "conn")
+            _nx_answer_record_run(
+                db.telemetry.conn, question="integration-probe",
+                plan_id=7, matched_confidence=0.8, step_count=2,
+                final_text="ok", cost_usd=0.0, duration_ms=42,
+                trace=True,
+            )
+            row = db.telemetry.conn.execute(
+                "SELECT question, plan_id, step_count FROM nx_answer_runs"
+            ).fetchone()
+            assert row == ("integration-probe", 7, 2)
+
 
 # ── Plan-run use_count / success_count / failure_count telemetry ──────────────
 

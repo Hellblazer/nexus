@@ -2288,7 +2288,7 @@ async def nx_answer(
             try:
                 with _t2_ctx() as db:
                     _nx_answer_record_run(
-                        db.conn, question=question, plan_id=None,
+                        db.telemetry.conn, question=question, plan_id=None,
                         matched_confidence=matches[0].confidence if matches else None,
                         step_count=0, final_text=f"Planner error: {exc}",
                         cost_usd=0.0, duration_ms=elapsed_ms, trace=trace,
@@ -2395,7 +2395,7 @@ async def nx_answer(
             try:
                 with _t2_ctx() as db:
                     _nx_answer_record_run(
-                        db.conn, question=question, plan_id=best.plan_id,
+                        db.telemetry.conn, question=question, plan_id=best.plan_id,
                         matched_confidence=best.confidence, step_count=1,
                         final_text=str(result_text)[:2000], cost_usd=0.0,
                         duration_ms=elapsed_ms, trace=trace,
@@ -2414,7 +2414,7 @@ async def nx_answer(
             try:
                 with _t2_ctx() as db:
                     _nx_answer_record_run(
-                        db.conn, question=question, plan_id=best.plan_id,
+                        db.telemetry.conn, question=question, plan_id=best.plan_id,
                         matched_confidence=best.confidence, step_count=1,
                         final_text=f"Error: {exc}", cost_usd=0.0,
                         duration_ms=elapsed_ms, trace=trace,
@@ -2454,7 +2454,7 @@ async def nx_answer(
         try:
             with _t2_ctx() as db:
                 _nx_answer_record_run(
-                    db.conn, question=question, plan_id=best.plan_id,
+                    db.telemetry.conn, question=question, plan_id=best.plan_id,
                     matched_confidence=best.confidence, step_count=0,
                     final_text=f"Error: {exc}", cost_usd=0.0,
                     duration_ms=elapsed_ms, trace=trace,
@@ -2585,7 +2585,7 @@ async def nx_answer(
     try:
         with _t2_ctx() as db:
             _nx_answer_record_run(
-                db.conn, question=question, plan_id=best.plan_id,
+                db.telemetry.conn, question=question, plan_id=best.plan_id,
                 matched_confidence=best.confidence, step_count=len(result.steps),
                 final_text=final_text[:2000], cost_usd=0.0,
                 duration_ms=elapsed_ms, trace=trace,
