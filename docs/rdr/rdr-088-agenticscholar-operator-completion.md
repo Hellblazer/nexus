@@ -2,12 +2,15 @@
 title: "RDR-088: AgenticScholar Operator-Set Completion"
 id: RDR-088
 type: Feature
-status: accepted
+status: closed
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-17
 accepted_date: 2026-04-24
+closed_date: 2026-04-24
+close_reason: implemented
+post_mortem: post-mortem/088-agenticscholar-operator-completion.md
 related_issues: []
 related_tests: [test_operators.py, test_plan_matcher.py]
 related: [RDR-042, RDR-078, RDR-079, RDR-080, RDR-092]
