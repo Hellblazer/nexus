@@ -11,7 +11,7 @@ Nexus provides MCP tools for semantic search, persistent memory, and knowledge m
 
 Core tools are prefixed `mcp__plugin_nx_nexus__`; catalog tools are prefixed `mcp__plugin_nx_nexus-catalog__`.
 
-There are 26 core tools: `search`, `query`, `store_put`, `store_get`, `store_get_many`, `store_list`, `memory_put`, `memory_get`, `memory_delete`, `memory_search`, `memory_consolidate`, `scratch`, `scratch_manage`, `collection_list`, `plan_save`, `plan_search`, `traverse`, `nx_answer`, `nx_tidy`, `nx_enrich_beads`, `nx_plan_audit`, `operator_summarize`, `operator_extract`, `operator_rank`, `operator_compare`, `operator_generate`.
+There are 29 core tools: `search`, `query`, `store_put`, `store_get`, `store_get_many`, `store_list`, `memory_put`, `memory_get`, `memory_delete`, `memory_search`, `memory_consolidate`, `scratch`, `scratch_manage`, `collection_list`, `plan_save`, `plan_search`, `traverse`, `nx_answer`, `nx_tidy`, `nx_enrich_beads`, `nx_plan_audit`, `operator_summarize`, `operator_extract`, `operator_rank`, `operator_compare`, `operator_generate`, `operator_filter`, `operator_check`, `operator_verify`.
 There are 10 catalog tools (nexus-catalog server): `search`, `show`, `list`, `register`, `update`, `link`, `links`, `link_query`, `resolve`, `stats`.
 
 ### search
@@ -165,6 +165,36 @@ mcp__plugin_nx_nexus__operator_generate(template="..", context="..", cited=True
 ```
 
 Returns `{"output": "<generated>"}`.
+
+### operator_filter
+
+Narrow items by a natural-language criterion (RDR-088 §D.4). `items` is a JSON array of prior-step outputs; `criterion` is the keep predicate. Output `items` is a subset of the input; `rationale` carries one `{id, reason}` per input explaining the keep / reject decision.
+
+```
+mcp__plugin_nx_nexus__operator_filter(items='[{"id": "a", ...}, ...]', criterion="peer-reviewed only")
+```
+
+Returns `{"items": [...], "rationale": [{"id": str, "reason": str}, ...]}`.
+
+### operator_check
+
+Cross-item consistency probe (RDR-088 §D.2). Given N peer items and a claim, returns a composable boolean plus grounding evidence. Downstream plan steps can branch on `ok`.
+
+```
+mcp__plugin_nx_nexus__operator_check(items='[{"id": "p1", ...}, ...]', check_instruction="do the papers agree on the baseline?")
+```
+
+Returns `{"ok": bool, "evidence": [{"item_id": str, "quote": str, "role": "supports" | "contradicts" | "neutral"}, ...]}`.
+
+### operator_verify
+
+Single-claim verification against an evidence source (RDR-088 §D.2). 1-claim / 1-evidence cardinality (distinct from `operator_check`'s 1-claim / N-items shape). Citations are span anchors in the evidence text that ground the verdict.
+
+```
+mcp__plugin_nx_nexus__operator_verify(claim="X uses attention", evidence="Section 2.1: X builds on transformer layers...")
+```
+
+Returns `{"verified": bool, "reason": str, "citations": [str, ...]}`.
 
 ### nx_tidy / nx_enrich_beads / nx_plan_audit
 

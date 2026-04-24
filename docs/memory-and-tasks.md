@@ -17,6 +17,14 @@ nx memory search "JWT" --project myrepo
 That's the whole model. Store whatever context you need — design notes,
 active decisions, working state — and retrieve it by project and title.
 
+**Title resolution is exact-then-prefix (4.11.0, nexus-e59o).** If
+`--title` does not match any entry exactly, a unique prefix match is
+returned. Ambiguous prefixes list the candidates and fail rather than
+silently picking one. So `nx memory get --project nexus_rdr --title
+088-research-1` resolves to the full
+`088-research-1: RDR-092 baseline for Gap 4 spike` entry as long as
+only one entry in the project starts with that prefix.
+
 **Access tracking (RDR-057)**: `memory_get` and `memory_search` hits
 increment `access_count` and update `last_accessed` on the returned rows.
 This drives heat-weighted TTL — frequently-accessed entries survive longer

@@ -58,7 +58,7 @@ Full tool names follow Claude Code's convention: `mcp__plugin_nx_nexus__<tool>`.
 | Tool | Purpose |
 |---|---|
 | `memory_put` | Write a per-project persistent note |
-| `memory_get` | Retrieve a note by `(project, title)` or by id |
+| `memory_get` | Retrieve a note by `(project, title)` or by id. Title resolution is exact-then-prefix (nexus-e59o): if `title` does not match any entry exactly, a unique prefix match is returned. Ambiguous prefixes return a candidate list rather than silently picking one. |
 | `memory_search` | FTS5 keyword search over T2 memory |
 | `memory_delete` | Delete a single note |
 | `memory_consolidate` | Find overlaps, merge, or flag stale entries (see [Memory and Tasks § Consolidation](memory-and-tasks.md#consolidation-rdr-061-e6)) |
@@ -101,6 +101,9 @@ operator subprocesses.
 | `operator_compare` | Compare items focused on a specific axis |
 | `operator_summarize` | Summarize content (citation-aware via `cited=True`) |
 | `operator_generate` | Generate text following a template, grounded in `context` |
+| `operator_filter` | Narrow items by a natural-language criterion (RDR-088 §D.4). Returns `{items, rationale[{id, reason}]}`; items is a strict subset of input ids with a reason per keep / reject decision. |
+| `operator_check` | Cross-item consistency probe (RDR-088 §D.2). Returns `{ok: bool, evidence[{item_id, quote, role}]}` where role ∈ `supports` / `contradicts` / `neutral`. Composable — downstream plan steps can branch on `ok`. |
+| `operator_verify` | Single-claim verification against an evidence source (RDR-088 §D.2). Returns `{verified: bool, reason, citations[]}` with span anchors grounding the verdict. 1-claim/1-evidence cardinality; distinct from `operator_check`'s 1-claim/N-items shape. |
 
 ### Orchestration (RDR-080 — consolidated from deleted agents)
 
