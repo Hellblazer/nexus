@@ -10,7 +10,7 @@ created: 2026-04-17
 accepted_date:
 related_issues: []
 related_tests: [test_aspect_extractor.py]
-related: [RDR-042, RDR-044, RDR-078, RDR-088]
+related: [RDR-042, RDR-044, RDR-078, RDR-088, RDR-093]
 ---
 
 # RDR-089: Structured Aspect Extraction at Ingest
@@ -34,18 +34,27 @@ proposes implementing that extraction pass for `knowledge__*` and
 
 `bib_enricher.py` fetches author/venue/year/abstract from Semantic
 Scholar — a handful of bibliographic fields, no content attributes.
-`operator_extract` (`src/nexus/mcp/core.py:1318`) does structured
+`operator_extract` (`src/nexus/mcp/core.py:1399`) does structured
 extraction at *query time*, one call per query per paper. This is
 slow (N×M calls where N=papers, M=queries) and non-cumulative (each
-query re-extracts rather than consulting a shared index).
+query re-extracts rather than consulting a shared index). The
+4.10.0 operator-bundling path collapses consecutive operator steps
+within a single query into one dispatch, which softens the per-
+query overhead somewhat, but does not amortise across queries —
+the O(N×M) asymptote remains unchanged.
 
-#### Gap 2: Composable filters cannot operate on aspect content
+#### Gap 2: Composable analytics cannot operate on aspect content
 
-RDR-088 adds `operator_filter`, `operator_groupby`, `operator_aggregate`
-(GroupBy/Aggregate scoped as future work). Without indexed aspects
-these operators must LLM-extract on each call — prohibitive cost for
-operations over hundreds of documents. A structured attribute store
-turns a 500-paper group-by from a 500-LLM-call scan into a SQL query.
+RDR-088 (closed 2026-04-24) shipped `operator_filter` but
+**explicitly deferred** `operator_groupby` and `operator_aggregate`
+on the rationale that no concrete compositional query class had
+yet surfaced. RDR-093 reopens that decision and scopes those two
+operators as a forward-positioned follow-up. Either way, even with
+the full §D.4 quartet (`filter` + `groupby` + `aggregate`), the
+operators must LLM-extract per-paper content on every call unless
+the aspect store pre-extracts ingest-side — prohibitive cost at
+hundreds of documents. A structured attribute store turns a 500-
+paper group-by from a 500-LLM-call scan into a SQL query.
 
 #### Gap 3: `MatrixConstruct` is not supportable
 
@@ -116,7 +125,7 @@ problem-statement + method + evaluation structure.
 
 ### Critical Assumptions
 
-- [ ] Haiku produces schema-conformant output with ≥95% success rate across `knowledge__delos` (1397 chunks, ~200 papers) — **Status**: Unverified — **Method**: Spike
+- [x] Haiku produces schema-conformant output with ≥95% success rate across `knowledge__delos` — **Status**: Partially verified — RDR-088 Spike A measured 95% fully-stable / 99% micro-stable / 0% schema-validation errors across 100 `operator_check` dispatches on the same corpus. Same `claude_dispatch` substrate, same Haiku model. A targeted aspect-schema spike on 10 papers is still recommended to confirm the field-level shape, but the substrate reliability budget is known good. **Method**: small confirmation spike.
 - [ ] Aspect extraction adds &lt;2s per paper to ingest time — **Status**: Unverified — **Method**: Spike
 - [ ] T2 write contention under concurrent indexing is acceptable (aspect upserts during ingest) — **Status**: Unverified — **Method**: Source Search + spike
 
@@ -131,7 +140,7 @@ paper with fixed schema. Hook into indexing pipeline for
 
 ### Technical Design
 
-**Extraction schema**:
+**Extraction schema** (core five, open-ended extras):
 
 ```text
 {
@@ -140,12 +149,44 @@ paper with fixed schema. Hook into indexing pipeline for
   "experimental_datasets": ["string", ...],
   "experimental_baselines": ["string", ...],
   "experimental_results": "string (key metric + value + any delta)",
+  "extras": {                                 # optional, extractor-specific
+    "<aspect_name>": <string | array | object>
+  },
   "confidence": "number in [0,1]"
 }
 ```
 
+The five core fields track the paper's ExtractTemplate algorithm
+verbatim so MatrixConstruct-class consumers get the same structure
+AgenticScholar assumes. `extras` is an extensibility anchor — new
+aspect fields ("ablations", "code_release", "benchmark_suite",
+"datasheet_issues") land in the JSON blob without a schema
+migration. When a new field promotes to "queryable enough to
+warrant SQL indexing", it moves from `extras` into a fixed column
+via an additive migration and the extractor prompt is updated; old
+rows stay valid until re-extracted against the new `model_version`.
+
 `confidence` is self-reported by the extractor; low-confidence
 extractions are stored but flagged for human review.
+
+**Pluggable extractor** (`src/nexus/aspect_extractor.py`):
+
+One core entry point `extract_aspects(doc_text, doc_id, collection)`
+dispatches to a collection-scoped extractor config — prompt, schema,
+and `extras` key set — selected by collection prefix. Initial
+registrations:
+
+- `knowledge__*` → scholarly-paper extractor (the five core fields
+  plus paper-specific `extras` like `ablations`, `code_release`).
+- `rdr__*` → decision-doc extractor (mapped: `problem_formulation`,
+  `proposed_method` → "approach", `experimental_datasets` → null,
+  `experimental_results` → "acceptance_criteria"; `extras` carries
+  RDR-specific fields like `rdr_number`, `supersedes`,
+  `dependencies`).
+
+Adding a new domain (`docs__release-notes`, `knowledge__conference-
+proceedings`) is one extractor config registration plus a prompt;
+no change to the pipeline stage, the T2 store, or consumer operators.
 
 **T2 store** (`src/nexus/db/t2/document_aspects.py`):
 
@@ -158,12 +199,20 @@ CREATE TABLE document_aspects (
   experimental_datasets TEXT,  -- JSON array
   experimental_baselines TEXT, -- JSON array
   experimental_results TEXT,
+  extras TEXT,                 -- JSON object; extensibility anchor
   confidence REAL,
   extracted_at TEXT NOT NULL,
   model_version TEXT NOT NULL,
+  extractor_name TEXT NOT NULL,  -- which registered extractor ran
   PRIMARY KEY (collection, doc_id)
 );
 ```
+
+`extractor_name` is the registered key (e.g. `"scholarly-paper-v1"`,
+`"rdr-decision-v1"`) — paired with `model_version`, it gives
+re-extraction a precise filter (`WHERE extractor_name = ? AND
+model_version < ?`) so a schema or prompt change can be rolled out
+incrementally rather than all-or-nothing.
 
 No FTS5 index initially — queries go through `operator_filter` and
 `operator_groupby` (RDR-088 Phase 1 + future). Add FTS5 if usage
@@ -191,13 +240,32 @@ extraction inline when collection is in-scope.
 
 Ingest-time extraction is the only approach that amortizes cost
 across many queries. Per-query extraction (`operator_extract`) costs
-O(N×M) LLM calls; ingest-time is O(N). Storing in T2 (not T3) because
-aspects are structured metadata, not semantic content — queried by
-field equality, not similarity.
+O(N×M) LLM calls; ingest-time is O(N). The 4.10.0 operator-
+bundling path fuses consecutive operators within a single query
+into one dispatch, which amortises operator overhead inside the
+query but does not change the per-query extraction count — the
+asymptote is still O(N×M). Storing in T2 (not T3) because aspects
+are structured metadata, not semantic content — queried by field
+equality, not similarity.
 
-Scoping to `knowledge__*` and `rdr__*` keeps the change bounded.
-Expanding to `docs__*` later is cheap (same pipeline, different
-collection filter).
+Scoping to `knowledge__*` and `rdr__*` keeps the change bounded
+while targeting the two corpora whose query workloads (general
+research and design-intent respectively) most benefit from
+pre-extracted structure. Expanding to `docs__*` or additional
+`knowledge__*` sub-domains later is cheap: one extractor
+registration in the pluggable layer, no change to the pipeline
+stage, the T2 schema, or consumer operators. The `extras` JSON
+column absorbs domain-specific fields without a migration, so
+each new extractor can evolve its own schema without disturbing
+existing rows.
+
+The aspect store is built **forward-positioned** — we do not
+gate on a blocking concrete query. RDR-093 (GroupBy / Aggregate
+operators) pairs naturally with this store for per-field
+analytics, but the store lands on its own merits: `operator_filter`
+over aspect fields works today, and ad-hoc SQL queries over T2
+are available immediately for researchers who know what they want
+before an operator-composed plan exists.
 
 ## Alternatives Considered
 
@@ -343,4 +411,5 @@ _To be completed during /nx:rdr-gate._
 - `src/nexus/db/t2/` — T2 domain store pattern
 - RDR-042 — original call-out (unpicked bead nexus-erim)
 - RDR-076 — T2 migration framework
-- RDR-088 — operator_filter (consumer of this store)
+- RDR-088 — `operator_filter` (consumer of this store; also source of the Spike A reliability data partial-verifying Assumption #1)
+- RDR-093 — `operator_groupby` / `operator_aggregate` (paired analytical consumers; reopen of the GroupBy/Aggregate deferral)
