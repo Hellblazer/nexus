@@ -645,3 +645,92 @@ class TestLegacyToolKeyAliases:
         disp = _FakeDispatcher()
         await plan_run(_match(plan), {}, dispatcher=disp)
         assert disp.calls[0][0] == "query"
+
+
+# ── _hydrate_operator_args: inputs-arg translation (nexus-yis0) ───────────────
+
+
+class TestHydrateInputsTranslation:
+    """nexus-yis0: when a prior explicit ``store_get_many`` step feeds an
+    operator via ``inputs: $stepN.contents`` (no ``ids`` key on the
+    operator step), ``_hydrate_operator_args`` must still rename
+    ``inputs`` to the operator's expected positional arg. Otherwise
+    the unknown-kwarg drop in ``_default_dispatcher`` strips the arg
+    and the operator fires with no positional, raising TypeError.
+    """
+
+    def test_summarize_renames_inputs_to_content(self):
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(
+            "summarize", {"inputs": "hydrated text"},
+        )
+        assert tool == "operator_summarize"
+        assert args == {"content": "hydrated text"}
+
+    def test_summarize_inputs_list_joined_to_content_string(self):
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(
+            "summarize", {"inputs": ["a", "b", "c"]},
+        )
+        assert tool == "operator_summarize"
+        assert args == {"content": "a\n\nb\n\nc"}
+
+    def test_generate_renames_inputs_to_context(self):
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(
+            "generate", {"template": "report", "inputs": ["x", "y"]},
+        )
+        assert tool == "operator_generate"
+        assert args == {"template": "report", "context": "x\n\ny"}
+
+    def test_rank_renames_inputs_to_items_json_encoded(self):
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(
+            "rank", {"inputs": ["first", "second"], "criterion": "relevance"},
+        )
+        assert tool == "operator_rank"
+        assert args == {
+            "items": json.dumps(["first", "second"]),
+            "criterion": "relevance",
+        }
+
+    def test_compare_renames_inputs_to_items(self):
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(
+            "compare", {"inputs": ["a", "b"], "focus": "diffs"},
+        )
+        assert tool == "operator_compare"
+        assert args == {
+            "items": json.dumps(["a", "b"]),
+            "focus": "diffs",
+        }
+
+    def test_rename_skipped_when_target_already_set(self):
+        """If the plan author correctly passes ``content`` already,
+        ``inputs`` is left untouched (no silent overwrite).
+        """
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(
+            "summarize", {"content": "keep me", "inputs": "ignored"},
+        )
+        assert tool == "operator_summarize"
+        assert args["content"] == "keep me"
+        assert args["inputs"] == "ignored"
+
+    def test_extract_keeps_inputs_unchanged(self):
+        """``operator_extract`` natively takes ``inputs`` so no rename
+        should happen.
+        """
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(
+            "extract", {"inputs": "item list", "fields": "a,b"},
+        )
+        assert tool == "operator_extract"
+        assert args == {"inputs": "item list", "fields": "a,b"}

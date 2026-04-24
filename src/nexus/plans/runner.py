@@ -641,10 +641,32 @@ def _hydrate_operator_args(
         if isinstance(template, dict):
             args["fields"] = ",".join(template.keys())
 
+    # nexus-yis0: translate step-passed ``inputs`` to the operator's
+    # expected arg name when a prior explicit ``store_get_many`` step
+    # already materialized content. The auto-hydration branch above
+    # handles the ``ids in args`` case; this handles the pre-hydrated
+    # case where the operator's args reference ``$stepN.contents``.
+    # Without this, isolated dispatch of summarize / rank / compare /
+    # generate fires with no positional arg and raises TypeError
+    # (plan 57 ``find-by-author`` is the canonical repro).
+    _INPUTS_TARGET: dict[str, str] = {
+        "operator_summarize": "content",
+        "operator_generate": "context",
+        "operator_rank": "items",
+        "operator_compare": "items",
+    }
+    target_key = _INPUTS_TARGET.get(resolved_tool)
+    if target_key and "inputs" in args and target_key not in args:
+        args[target_key] = args.pop("inputs")
+
     if resolved_tool == "operator_summarize" and isinstance(args.get("content"), list):
         args["content"] = "\n\n".join(str(x) for x in args["content"] if x)
     if resolved_tool == "operator_generate" and isinstance(args.get("context"), list):
         args["context"] = "\n\n".join(str(x) for x in args["context"] if x)
+    if resolved_tool in ("operator_rank", "operator_compare") and isinstance(
+        args.get("items"), list
+    ):
+        args["items"] = json.dumps(args["items"])
 
     return resolved_tool, args
 
