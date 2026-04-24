@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.10.3] - 2026-04-23
+
+Plugin's `SessionEnd` hook now calls `nx hook session-end-detach` (timeout 5s) instead of `nx hook session-end` (timeout 10s). The detach variant double-forks into a daemonized grandchild that survives Claude Code's shutdown SIGTERM, so per-session ChromaDB servers and tmpdirs actually get cleaned up. See root `CHANGELOG.md` for the full three-layer defense (watchdog sidecar + detached SessionEnd + liveness-based SessionStart sweep) that closes the leak, and for the upstream bug context (anthropics/claude-code #41577 / #17885) that motivated userspace daemonization.
+
 ## [4.10.2] - 2026-04-23
 
 Plugin version aligned with Nexus CLI 4.10.2. No plugin-level functional changes. See root `CHANGELOG.md` for the 4.10.1 shakeout follow-ups: the operator-input arg rename for pre-hydrated steps and the builtin-bindings backfill migration for upgraded installs.

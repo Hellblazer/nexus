@@ -6,6 +6,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.10.3] - 2026-04-23
+
+Fixes a long-running leak in the per-session ChromaDB server lifecycle. On the reference install 103 orphaned chroma processes and 183 leftover tmpdirs had accumulated over 3 days because Claude Code SIGTERMs hook subprocesses at session close without waiting for them to finish. The `SessionEnd` hook was never completing its `stop_t1_server` call; the `|| true` safety valve never ran because the whole subprocess was killed, not exited non-zero. Documented upstream as [anthropics/claude-code#41577](https://github.com/anthropics/claude-code/issues/41577) (closed wont-fix). Related: [#17885](https://github.com/anthropics/claude-code/issues/17885) — SessionEnd doesn't fire at all on `/exit`. Three independent defense-in-depth layers land in this release; any one of them closes the leak on its own.
+
+### Added
+
+- **Self-watchdog sidecar** (`src/nexus/t1_watchdog.py`, new). Spawned detached alongside each per-session chroma server from `session_start()`. Polls the Claude Code root PID and the chroma PID every 5s via `os.kill(pid, 0)`. On `ProcessLookupError` for the claude root, triggers the existing `stop_t1_server` graceful-SIGTERM path (preserving the pgrp-wide signal that lets chroma's multiprocessing workers `sem_unlink` their POSIX named semaphores, which is the invariant from nexus-dc57 / nexus-ze2a). Independent of hooks firing at all, so it covers both the `/exit` path (#17885) and the `Hook cancelled` path (#41577). Worst-case leak window: 5s. Written using only stdlib so the hot loop has no import overhead.
+- **`find_claude_root_pid`** (`src/nexus/session.py`). Walks the PPID chain looking for a command whose basename starts with `claude` (case-insensitive; covers `claude`, `claude-code`, future renames). Falls back to the immediate PPID when no match so the watchdog always watches something meaningful.
+- **`spawn_t1_watchdog`** (`src/nexus/session.py`). Launches the watchdog via `python -m nexus.t1_watchdog` with `start_new_session=True` so it survives the SessionStart hook's exit. Failure is non-fatal; the other two layers pick up the slack.
+- **`nx hook session-end-detach`** (`src/nexus/commands/hook.py`). Fire-and-forget SessionEnd runner using the canonical double-fork daemon pattern. First fork exits the hook in <50ms (Claude Code sees success and moves on). The child calls `os.setsid` to leave Claude Code's process group; the grandchild (second fork) redirects stdio to `/dev/null` and runs `session_end` synchronously. By the time Claude Code's shutdown SIGTERM arrives, the grandchild has been reparented to init and is no longer in the hook's pgrp, so the signal misses it. On platforms without `os.fork` (Windows), falls through to the synchronous path so behaviour degrades gracefully. This is the workaround the #41577 maintainers documented as the escape hatch.
+- **Liveness-based reap in `sweep_stale_sessions`** (`src/nexus/session.py`). On SessionStart, a session record is now reaped when any of three triggers fires: legacy 24h age cutoff, `server_pid` no longer alive, or `claude_root_pid` anchor no longer alive. Previously only the age cutoff fired, which is why orphans could accumulate in the first place. With this in place, even a cold-start after days of drift cleans everything up on first session boot. The age fallback is retained for records that lack the new PID metadata.
+
+### Changed
+
+- **`write_session_record_by_id`** now optionally stores `claude_root_pid` and `watchdog_pid` alongside `server_pid`. Old records without these fields are still accepted — the reaper falls back to age-based sweep for them.
+- **`nx/hooks/hooks.json`** SessionEnd command rewired from `nx hook session-end || true` (timeout 10s) to `nx hook session-end-detach || true` (timeout 5s). The lower timeout is correct because the hook returns fast by construction; the `|| true` is kept defensively.
+
+### Fixed
+
+- **Two existing `sweep_stale_sessions` tests** updated to use `os.getpid()` as the fake `server_pid` so the liveness check sees a live anchor and the tests exercise the intended age-only path.
+
 ## [4.10.2] - 2026-04-23
 
 Shakeout patch for 4.10.1. The 4.10.1 release fixed three headline bugs; the shakeout against the reference install surfaced two more gaps in the operator-dispatch + plan-library path. Both fixed in PR #274.
