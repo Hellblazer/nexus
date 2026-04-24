@@ -218,6 +218,86 @@ class TestComposeBundlePrompt:
         assert "STEP 1 — extract" in prompt  # not "operator_extract"
         assert "STEP 2 — summarize" in prompt
 
+    def test_filter_step_renders_criterion_and_subset_guidance(self):
+        """RDR-088 Phase 1 Step 2: a bundled filter step must render its
+        criterion verbatim, inherit the prior step's output list, and
+        carry the 'subset, never synthesize' invariant into the prompt."""
+        bundle = OperatorBundle(steps=(
+            OperatorBundleStep(
+                1, "extract", {"fields": "id,title",
+                               "inputs": "corpus-payload"},
+            ),
+            OperatorBundleStep(
+                2, "filter",
+                {"criterion": "peer-reviewed-only-sentinel"},
+            ),
+        ))
+        prompt, schema = compose_bundle_prompt(bundle)
+        assert "STEP 2 — filter" in prompt
+        assert "peer-reviewed-only-sentinel" in prompt
+        assert "output list from STEP 1" in prompt
+        assert "subset" in prompt.lower()
+        assert "never synthesize" in prompt.lower()
+        # Terminal schema covers filter's {items, rationale} contract.
+        assert "items" in schema["required"]
+        assert "rationale" in schema["required"]
+        rationale_schema = schema["properties"]["rationale"]["items"]
+        assert "id" in rationale_schema["required"]
+        assert "reason" in rationale_schema["required"]
+
+    def test_check_step_renders_instruction_and_evidence_schema(self):
+        """RDR-088 Phase 2: a bundled check step must render its
+        check_instruction verbatim and the terminal schema must pin the
+        {item_id, quote, role} evidence shape with role enum."""
+        bundle = OperatorBundle(steps=(
+            OperatorBundleStep(
+                1, "extract", {"fields": "id,body",
+                               "inputs": "papers-payload"},
+            ),
+            OperatorBundleStep(
+                2, "check",
+                {"check_instruction": "all-papers-agree-baseline-xyz"},
+            ),
+        ))
+        prompt, schema = compose_bundle_prompt(bundle)
+        assert "STEP 2 — check" in prompt
+        assert "all-papers-agree-baseline-xyz" in prompt
+        assert "output list from STEP 1" in prompt
+        # Terminal schema covers check's {ok, evidence} contract.
+        assert "ok" in schema["required"]
+        assert "evidence" in schema["required"]
+        evidence_item_schema = schema["properties"]["evidence"]["items"]
+        assert {"item_id", "quote", "role"}.issubset(
+            set(evidence_item_schema["required"]),
+        )
+        assert set(evidence_item_schema["properties"]["role"]["enum"]) == {
+            "supports", "contradicts", "neutral",
+        }
+
+    def test_verify_step_renders_claim_and_verification_schema(self):
+        """RDR-088 Phase 2: a bundled verify step must render its claim
+        verbatim and the terminal schema must declare verified + reason +
+        citations as required keys."""
+        bundle = OperatorBundle(steps=(
+            OperatorBundleStep(
+                1, "extract", {"fields": "passage",
+                               "inputs": "doc-payload"},
+            ),
+            OperatorBundleStep(
+                2, "verify",
+                {"claim": "claim-sentinel-verify-abc"},
+            ),
+        ))
+        prompt, schema = compose_bundle_prompt(bundle)
+        assert "STEP 2 — verify" in prompt
+        assert "claim-sentinel-verify-abc" in prompt
+        # The downstream input for verify is evidence, not items.
+        assert "output text from STEP 1" in prompt
+        assert {"verified", "reason", "citations"}.issubset(
+            set(schema["required"]),
+        )
+        assert schema["properties"]["verified"]["type"] == "boolean"
+
 
 # ── Dispatch wrapper ──────────────────────────────────────────────────────────
 
