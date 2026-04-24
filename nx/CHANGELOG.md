@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.11.0] - 2026-04-24
+
+Plugin version aligned with Nexus CLI 4.11.0. No plugin-level skill or hook changes. See root `CHANGELOG.md` for the three new `operator_*` tools shipped under RDR-088 Phases 1+2 (`filter`, `check`, `verify`) plus the `nx memory get` prefix-match ergonomics fix and the T1 chroma leak fix for session-UUID rollover (nexus-886w) that closes the last gap in the 4.10.3 three-layer defense.
+
 ## [4.10.3] - 2026-04-23
 
 Plugin's `SessionEnd` hook now calls `nx hook session-end-detach` (timeout 5s) instead of `nx hook session-end` (timeout 10s). The detach variant double-forks into a daemonized grandchild that survives Claude Code's shutdown SIGTERM, so per-session ChromaDB servers and tmpdirs actually get cleaned up. See root `CHANGELOG.md` for the full three-layer defense (watchdog sidecar + detached SessionEnd + liveness-based SessionStart sweep) that closes the leak, and for the upstream bug context (anthropics/claude-code #41577 / #17885) that motivated userspace daemonization.
