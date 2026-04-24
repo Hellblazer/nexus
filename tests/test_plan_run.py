@@ -581,6 +581,112 @@ async def test_run_passes_through_static_args_unchanged() -> None:
     assert disp.calls[0][1] == {"limit": 10, "flag": True}
 
 
+# ── operator_filter DAG-registry integration (RDR-088 nexus-ac40.2) ──────────
+
+
+@pytest.mark.asyncio
+async def test_run_filter_step_after_search_narrows_results() -> None:
+    """Search then filter: the filter step receives the search output via
+    a step reference and dispatches with the resolved items payload. This
+    pins the bead's 'plan with filter step after search narrows results'
+    acceptance contract — the runner wires filter as an operator, and
+    downstream can read the rationale back off the step output."""
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "search", "args": {"query": "concept", "limit": 10}},
+            {
+                "tool": "filter",
+                "args": {
+                    "items": "$step1.ids",
+                    "criterion": "published-after-2023",
+                },
+            },
+        ],
+    }
+    disp = _FakeDispatcher([
+        {"ids": ["a", "b", "c"], "tumblers": ["1.1", "1.2", "1.3"]},
+        {
+            "items": [{"id": "a"}, {"id": "c"}],
+            "rationale": [
+                {"id": "a", "reason": "published 2024"},
+                {"id": "b", "reason": "rejected: published 2022"},
+                {"id": "c", "reason": "published 2025"},
+            ],
+        },
+    ])
+    result = await plan_run(_match(plan), {}, dispatcher=disp)
+
+    # Custom dispatchers receive the bare tool name (verb). Operator name
+    # translation to ``operator_filter`` is the default-dispatcher's job;
+    # we verify resolution via _OPERATOR_TOOL_MAP separately in
+    # TestHydrateInputsTranslation.
+    tool, args = disp.calls[1]
+    assert tool == "filter"
+    assert args["criterion"] == "published-after-2023"
+    # $step1.ids resolved to the search output's id list.
+    assert args["items"] == ["a", "b", "c"]
+
+    filter_output = result.steps[1]
+    # The core narrowing contract: output length <= input length (subset).
+    # A valid all-pass filter returns every input; the assertion must not
+    # over-reach the bead's stated contract.
+    assert len(filter_output["items"]) <= len(result.steps[0]["ids"])
+    # This specific fake-dispatcher scripts 2 of 3 kept — pin that so the
+    # test is sensitive to regressions in the narrowing pipe.
+    assert len(filter_output["items"]) == 2
+    assert len(filter_output["rationale"]) == 3
+    output_ids = {it["id"] for it in filter_output["items"]}
+    rationale_ids = {r["id"] for r in filter_output["rationale"]}
+    assert output_ids.issubset(rationale_ids), (
+        "kept items must appear in rationale"
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_filter_rationale_accessible_via_step_ref() -> None:
+    """Downstream plan steps must be able to read filter's rationale via
+    ``$stepN.rationale`` — the per-item reasons are first-class output for
+    plans that need to surface filter decisions (audits, UI)."""
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "search", "args": {"query": "x"}},
+            {
+                "tool": "filter",
+                "args": {"items": "$step1.ids", "criterion": "fresh"},
+            },
+            {
+                "tool": "summarize",
+                "args": {"content": "$step2.rationale"},
+            },
+        ],
+    }
+    disp = _FakeDispatcher([
+        {"ids": ["a", "b"], "tumblers": []},
+        {
+            "items": [{"id": "a"}],
+            "rationale": [
+                {"id": "a", "reason": "kept-sentinel"},
+                {"id": "b", "reason": "rejected-sentinel"},
+            ],
+        },
+        {"summary": "done"},
+    ])
+    await plan_run(_match(plan), {}, dispatcher=disp)
+
+    summarize_tool, summarize_args = disp.calls[2]
+    # Custom dispatcher sees the bare verb; translation is default-dispatcher-only.
+    assert summarize_tool == "summarize"
+    passed = summarize_args.get("content")
+    assert passed is not None, "summarize must receive rationale content"
+    flattened = json.dumps(passed) if not isinstance(passed, str) else passed
+    assert "kept-sentinel" in flattened
+    assert "rejected-sentinel" in flattened
+
+
 # ── MCP prefix stripping + legacy key aliases ────────────────────────────────
 
 

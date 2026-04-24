@@ -85,13 +85,13 @@ MAX_BUNDLE_PROMPT_CHARS: int = 200_000
 #:    Don't bundle an operator whose failure must be retried in
 #:    isolation.
 #:
-#: Today the five AgenticScholar operators (extract / rank / compare /
-#: summarize / generate) all satisfy (1), (2), and (3). Bare and
-#: resolved forms are both accepted because plan YAMLs use either.
+#: Today the six AgenticScholar operators (extract / rank / compare /
+#: summarize / generate / filter) all satisfy (1), (2), and (3). Bare
+#: and resolved forms are both accepted because plan YAMLs use either.
 BUNDLEABLE_OPERATORS: frozenset[str] = frozenset({
-    "extract", "rank", "compare", "summarize", "generate",
+    "extract", "rank", "compare", "summarize", "generate", "filter",
     "operator_extract", "operator_rank", "operator_compare",
-    "operator_summarize", "operator_generate",
+    "operator_summarize", "operator_generate", "operator_filter",
 })
 
 #: Legacy alias — older call sites / docs may reference the prior name.
@@ -425,6 +425,23 @@ def _describe_step(
         lines.append("  Emit a JSON object with key `output` holding the "
                      "rendered content.")
 
+    elif verb == "filter":
+        criterion = step.args.get("criterion", "")
+        lines.append(f"  criterion: {criterion!r}")
+        lines.extend(_render_input_line(
+            label="items", value=step.args.get("items"),
+            first=first, position=position,
+            default_prose=f"the output list from STEP {position - 1}",
+            plan_to_local=plan_to_local,
+        ))
+        lines.append(
+            "  Emit a JSON object with keys `items` (subset of the input "
+            "items that satisfy the criterion) and `rationale` (one "
+            "`{id, reason}` record per input explaining the keep/reject "
+            "decision). The `items` array must be a subset of the input; "
+            "never synthesize new entries."
+        )
+
     else:
         # Unknown operator — fall back to a verbose dump of args. This
         # should not fire in practice since segment_steps gates on
@@ -482,6 +499,25 @@ def _terminal_schema(tool: str) -> dict[str, Any]:
             "type": "object",
             "required": ["output"],
             "properties": {"output": {"type": "string"}},
+        }
+    if verb == "filter":
+        return {
+            "type": "object",
+            "required": ["items", "rationale"],
+            "properties": {
+                "items": {"type": "array", "items": {"type": "object"}},
+                "rationale": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["id", "reason"],
+                        "properties": {
+                            "id": {"type": "string"},
+                            "reason": {"type": "string"},
+                        },
+                    },
+                },
+            },
         }
     # Generic fallback.
     return {"type": "object"}
