@@ -1805,6 +1805,89 @@ async def operator_verify(
     return await claude_dispatch(prompt, schema, timeout=timeout)
 
 
+@mcp.tool()
+async def operator_groupby(
+    items: str,
+    key: str,
+    timeout: float = 300.0,
+) -> dict:
+    """Partition items by a natural-language key using claude -p.
+
+    RDR-093 Phase 1. Paper §D.4 GroupBy operator: take a flat list of
+    items + a partition expression and return a structured grouping.
+    Each group carries its label (``key_value``) and the items that
+    belong to the group, with **items carried inline** (full dicts,
+    not id-only references). Pairs with ``operator_aggregate`` to form
+    the canonical ``filter → groupby → aggregate`` pipeline.
+
+    The inline-items contract is load-bearing for the bundled
+    ``groupby → aggregate`` path: a single ``claude -p`` dispatch has
+    no host-side retrieval, so aggregate must see resolvable content
+    inside the bundle prompt. Reverting to id-references would break
+    the bundle path. (RDR-093 Gate finding C-1.)
+
+    Items the operator cannot confidently assign land in a group
+    with ``key_value="unassigned"``. Plan authors can inspect the
+    unassigned group's size as a quality signal.
+
+    Cardinality cap: ``_OPERATOR_MAX_INPUTS=100`` enforced by the
+    plan runner's auto-hydration. When the cap fires the runner
+    attaches a ``{truncated, original_count, kept_count}`` block to
+    this operator's return envelope so callers see the truncation
+    rather than silently losing items. Scoped to ``operator_groupby``
+    in RDR-093; cross-operator generalisation tracked as nexus-3j6b.
+
+    Args:
+        items: Items to partition (plain text or JSON array string).
+            Each element should carry an ``id`` field for round-trip
+            composability; downstream operators (e.g. ``aggregate``)
+            key on ``id``.
+        key: Natural-language partition expression. May name a
+            structured field ("publication_year", "method family"),
+            an inferred property, or a derived attribute. The
+            operator does NOT require the key to surface verbatim
+            in the items; inference is fine.
+        timeout: Seconds before the subprocess is killed. Default 300s.
+    """
+    from nexus.operators.dispatch import claude_dispatch
+
+    prompt = (
+        f"Partition the following items by this key: {key}\n"
+        f"Output a list of groups. Each group has a string `key_value` "
+        f"(the partition label, e.g. a year, a fault model, a system "
+        f"property) and an `items` array carrying each item's full "
+        f"content INLINE — preserve the original `id` field and any "
+        f"other fields verbatim. Every input item appears in exactly "
+        f"one group's `items`. Items the partition cannot confidently "
+        f"assign go in a group with `key_value` of \"unassigned\".\n\n"
+        f"Do not reference items by id-only — carry the full item "
+        f"dicts in each group's `items` array so downstream operators "
+        f"see the content without a separate lookup.\n\n"
+        f"Items:\n{items}"
+    )
+    schema: dict = {
+        "type": "object",
+        "required": ["groups"],
+        "properties": {
+            "groups": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["key_value", "items"],
+                    "properties": {
+                        "key_value": {"type": "string"},
+                        "items": {
+                            "type": "array",
+                            "items": {"type": "object"},
+                        },
+                    },
+                },
+            },
+        },
+    }
+    return await claude_dispatch(prompt, schema, timeout=timeout)
+
+
 # ── traverse (RDR-078 P3) ─────────────────────────────────────────────────────
 
 #: Depth cap for traverse steps (SC-4).

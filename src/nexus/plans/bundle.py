@@ -91,10 +91,10 @@ MAX_BUNDLE_PROMPT_CHARS: int = 200_000
 #: plan YAMLs use either.
 BUNDLEABLE_OPERATORS: frozenset[str] = frozenset({
     "extract", "rank", "compare", "summarize", "generate",
-    "filter", "check", "verify",
+    "filter", "check", "verify", "groupby",
     "operator_extract", "operator_rank", "operator_compare",
     "operator_summarize", "operator_generate", "operator_filter",
-    "operator_check", "operator_verify",
+    "operator_check", "operator_verify", "operator_groupby",
 })
 
 #: Legacy alias — older call sites / docs may reference the prior name.
@@ -478,6 +478,33 @@ def _describe_step(
             "passages that ground the verdict)."
         )
 
+    elif verb == "groupby":
+        key = step.args.get("key", "")
+        lines.append(f"  key: {key!r}")
+        lines.extend(_render_input_line(
+            label="items", value=step.args.get("items"),
+            first=first, position=position,
+            default_prose=f"the output list from STEP {position - 1}",
+            plan_to_local=plan_to_local,
+        ))
+        # RDR-093 C-1: the inline-items contract is load-bearing for
+        # bundled groupby → aggregate. The aggregate step runs inside
+        # the same `claude -p` dispatch with no host-side retrieval,
+        # so groupby must carry full item dicts (not id-only refs)
+        # so aggregate can read resolvable content. The wording here
+        # mirrors operator_groupby's standalone prompt so a future
+        # change that drops the inline-items invariant in core.py
+        # also has to update this prompt — keeping the two in sync.
+        lines.append(
+            "  Emit a JSON object with key `groups` holding a list "
+            "of `{key_value, items}` records. Carry each item INLINE "
+            "in its group's `items` array (preserve `id` and any "
+            "other fields verbatim) — do NOT reference items by id-"
+            "only. Every input item appears in exactly one group; "
+            "items that cannot be confidently assigned go in a group "
+            "with `key_value` of \"unassigned\"."
+        )
+
     else:
         # Unknown operator — fall back to a verbose dump of args. This
         # should not fire in practice since segment_steps gates on
@@ -582,6 +609,32 @@ def _terminal_schema(tool: str) -> dict[str, Any]:
                 "citations": {
                     "type": "array",
                     "items": {"type": "string"},
+                },
+            },
+        }
+    if verb == "groupby":
+        # RDR-093 C-1: the `items` field on each group is a list of
+        # OBJECTS (full input dicts inline), not strings (id-only).
+        # The terminal schema MUST pin this so the bundle's final
+        # `claude -p` enforcement rejects an id-only revert before
+        # downstream consumers see it.
+        return {
+            "type": "object",
+            "required": ["groups"],
+            "properties": {
+                "groups": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["key_value", "items"],
+                        "properties": {
+                            "key_value": {"type": "string"},
+                            "items": {
+                                "type": "array",
+                                "items": {"type": "object"},
+                            },
+                        },
+                    },
                 },
             },
         }

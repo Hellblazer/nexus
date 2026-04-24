@@ -581,6 +581,7 @@ _OPERATOR_TOOL_MAP: dict[str, str] = {
     "filter": "operator_filter",
     "check": "operator_check",
     "verify": "operator_verify",
+    "groupby": "operator_groupby",
 }
 
 #: Maximum inputs to pass to an operator before auto-inserting a rank
@@ -604,6 +605,7 @@ _INPUTS_TARGET: dict[str, str] = {
     "operator_compare": "items",
     "operator_filter": "items",
     "operator_check": "items",
+    "operator_groupby": "items",
 }
 
 
@@ -637,13 +639,31 @@ def _hydrate_operator_args(
         )
         contents = hydrated.get("contents", []) if isinstance(hydrated, dict) else []
         non_empty = [c for c in contents if c]
-        if len(non_empty) > _OPERATOR_MAX_INPUTS:
+        original_count = len(non_empty)
+        truncation_metadata: dict[str, Any] | None = None
+        if original_count > _OPERATOR_MAX_INPUTS:
             _log.warning(
                 "auto_hydration_overflow",
                 tool=tool, resolved_tool=resolved_tool,
-                input_count=len(non_empty), max_inputs=_OPERATOR_MAX_INPUTS,
+                input_count=original_count, max_inputs=_OPERATOR_MAX_INPUTS,
                 action="positional truncation to max_inputs",
             )
+            # RDR-093 S-1: when the cap fires for operator_groupby,
+            # surface a {truncated, original_count, kept_count} block
+            # on the return envelope so plan authors see the cap hit
+            # rather than silently losing items. Scoped to groupby in
+            # this RDR; nexus-3j6b tracks cross-operator generalisation.
+            # Attachment chosen: runner-attaches (option a) — the
+            # operator's JSON schema is unchanged; the dispatcher
+            # (and bundle path) merge this metadata into the operator's
+            # return dict post-dispatch via the _truncation_metadata
+            # private marker.
+            if resolved_tool == "operator_groupby":
+                truncation_metadata = {
+                    "truncated": True,
+                    "original_count": original_count,
+                    "kept_count": _OPERATOR_MAX_INPUTS,
+                }
             non_empty = non_empty[:_OPERATOR_MAX_INPUTS]
         args = {k: v for k, v in args.items() if k not in ("ids", "collections")}
         if resolved_tool == "operator_summarize":
@@ -652,10 +672,14 @@ def _hydrate_operator_args(
             args.setdefault("context", "\n\n".join(non_empty))
         elif resolved_tool in ("operator_rank", "operator_compare"):
             args.setdefault("items", json.dumps(non_empty))
-        elif resolved_tool in ("operator_filter", "operator_check"):
+        elif resolved_tool in (
+            "operator_filter", "operator_check", "operator_groupby",
+        ):
             args.setdefault("items", json.dumps(non_empty))
         else:
             args.setdefault("inputs", json.dumps(non_empty))
+        if truncation_metadata is not None:
+            args["_truncation_metadata"] = truncation_metadata
 
     if resolved_tool == "operator_extract" and "template" in args and "fields" not in args:
         template = args.pop("template")
@@ -683,7 +707,7 @@ def _hydrate_operator_args(
         args["context"] = "\n\n".join(str(x) for x in args["context"] if x)
     if resolved_tool in (
         "operator_rank", "operator_compare", "operator_filter",
-        "operator_check",
+        "operator_check", "operator_groupby",
     ) and isinstance(args.get("items"), list):
         args["items"] = json.dumps(args["items"])
 
@@ -724,6 +748,13 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
 
     # Auto-hydration + arg normalization: shared with the bundle path.
     resolved_tool, args = _hydrate_operator_args(tool, args)
+
+    # RDR-093 S-1: pop runner-attached truncation metadata before the
+    # kwargs-drop pass so the operator never sees the marker (it's not
+    # part of any operator's signature) and the warn-on-drop log doesn't
+    # fire for an intentional runner-internal arg. The metadata gets
+    # merged onto the operator's return dict post-dispatch.
+    truncation_metadata = args.pop("_truncation_metadata", None)
 
     fn = getattr(mcp_core, resolved_tool, None)
     if fn is None or not callable(fn):
@@ -817,6 +848,12 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
             }
         return {"text": result}
     if isinstance(result, dict):
+        # RDR-093 S-1: merge runner-attached truncation metadata onto
+        # the operator's return dict so plan authors see when the
+        # _OPERATOR_MAX_INPUTS cap fired. Scoped to operator_groupby
+        # in this RDR; nexus-3j6b tracks cross-operator generalisation.
+        if truncation_metadata is not None:
+            result = {**result, **truncation_metadata}
         return result
     # Anything else (list, None, …) — surface explicitly rather than
     # let downstream step-ref resolution silently fail.
@@ -935,6 +972,13 @@ async def plan_run(
                 # Operators skip _check_embedding_domain / scope / caller-
                 # scope injection — those are retrieval-tool concerns.
                 _, b_prepared = _hydrate_operator_args(btool, b_resolved)
+                # RDR-093 S-1: strip the runner-internal truncation
+                # marker so it never leaks into the bundled prompt.
+                # Surface-on-bundle is out of scope for this RDR
+                # (nexus-3j6b tracks cross-operator generalisation
+                # including bundle-aware metadata propagation); the
+                # structlog warning still fires from _hydrate.
+                b_prepared.pop("_truncation_metadata", None)
                 bundle_steps.append(OperatorBundleStep(
                     plan_index=bi, tool=btool, args=b_prepared,
                     source_collections=source_collections,

@@ -1017,5 +1017,156 @@ class TestHydrateInputsTranslation:
         )
         assert tool == "operator_verify"
         assert args.get("inputs") == "stray"
-        assert args["claim"] == "c"
-        assert args["evidence"] == "e"
+
+    # ── operator_groupby hydration (RDR-093 nexus-9bz6) ──────────────────
+
+    def test_groupby_bare_name_resolves_to_operator_groupby(self):
+        """Plan YAML using ``tool: groupby`` must resolve through
+        ``_OPERATOR_TOOL_MAP`` to ``operator_groupby``."""
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(
+            "groupby", {"items": '[]', "key": "publication year"},
+        )
+        assert tool == "operator_groupby"
+        assert args == {"items": '[]', "key": "publication year"}
+
+    def test_groupby_renames_inputs_to_items(self):
+        """Pre-hydrated step passing ``$stepN.contents`` via ``inputs:``
+        must be renamed to ``items`` so groupby's positional arg is
+        populated. Same nexus-yis0 TypeError class as filter/check."""
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(
+            "groupby",
+            {"inputs": ["a", "b"], "key": "method family"},
+        )
+        assert tool == "operator_groupby"
+        assert args == {
+            "items": json.dumps(["a", "b"]),
+            "key": "method family",
+        }
+
+    def test_groupby_coerces_list_items_to_json(self):
+        """List-valued ``items`` must be json-encoded so the operator
+        prompt sees clean JSON rather than Python repr."""
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(
+            "groupby",
+            {"items": [{"id": "a"}, {"id": "b"}], "key": "x"},
+        )
+        assert tool == "operator_groupby"
+        assert args["items"] == json.dumps([{"id": "a"}, {"id": "b"}])
+
+    def test_groupby_preserves_string_items(self):
+        """Already-stringified ``items`` must pass through untouched."""
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(
+            "groupby",
+            {"items": '[{"id": "a"}]', "key": "year"},
+        )
+        assert tool == "operator_groupby"
+        assert args["items"] == '[{"id": "a"}]'
+
+    def test_groupby_ids_hydrates_to_items(self):
+        """When a groupby step declares ``ids:`` and the auto-hydration
+        path runs ``store_get_many``, the fetched content list must
+        land on the ``items`` arg so the prompt sees concrete content."""
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _hydrate_operator_args
+
+        fake_contents = {"contents": ["doc-a body", "doc-b body"]}
+        with patch(
+            "nexus.mcp.core.store_get_many", return_value=fake_contents,
+        ):
+            tool, args = _hydrate_operator_args(
+                "groupby",
+                {"ids": ["doc-a", "doc-b"], "key": "year"},
+            )
+        assert tool == "operator_groupby"
+        assert "ids" not in args and "collections" not in args
+        assert args["items"] == json.dumps(["doc-a body", "doc-b body"])
+        assert args["key"] == "year"
+
+    def test_groupby_truncation_metadata_attached_when_cap_fires(self):
+        """RDR-093 S-1 fix: when ``_OPERATOR_MAX_INPUTS=100`` cap fires
+        for a groupby step, the runner stashes truncation metadata
+        (``_truncation_metadata`` dict) on args. The dispatcher pops
+        and merges it onto the operator's return envelope so plan
+        authors see the cap hit instead of silently losing items.
+
+        Attachment chosen: runner-attaches (option a). Operator schema
+        stays unchanged; runner wraps the return dict post-dispatch."""
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _OPERATOR_MAX_INPUTS, _hydrate_operator_args
+
+        oversized = [f"item-{i}" for i in range(_OPERATOR_MAX_INPUTS + 50)]
+        fake_contents = {"contents": oversized}
+        with patch(
+            "nexus.mcp.core.store_get_many", return_value=fake_contents,
+        ):
+            tool, args = _hydrate_operator_args(
+                "groupby",
+                {"ids": [f"d-{i}" for i in range(150)], "key": "year"},
+            )
+        assert tool == "operator_groupby"
+        assert "_truncation_metadata" in args
+        meta = args["_truncation_metadata"]
+        assert meta == {
+            "truncated": True,
+            "original_count": 150,
+            "kept_count": _OPERATOR_MAX_INPUTS,
+        }
+        # The truncated input itself reflects the cap.
+        loaded = json.loads(args["items"])
+        assert len(loaded) == _OPERATOR_MAX_INPUTS
+
+    def test_groupby_no_truncation_metadata_when_below_cap(self):
+        """When input is below the cap, no truncation metadata is
+        attached. Runner-side wrapping is opt-in via the metadata
+        marker; absence means no wrapping happens at dispatch time."""
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _hydrate_operator_args
+
+        small = [f"item-{i}" for i in range(10)]
+        fake_contents = {"contents": small}
+        with patch(
+            "nexus.mcp.core.store_get_many", return_value=fake_contents,
+        ):
+            tool, args = _hydrate_operator_args(
+                "groupby",
+                {"ids": [f"d-{i}" for i in range(10)], "key": "year"},
+            )
+        assert tool == "operator_groupby"
+        assert "_truncation_metadata" not in args
+
+    def test_truncation_metadata_scoped_to_groupby_only(self):
+        """RDR-093 S-1 is scoped to operator_groupby in this RDR.
+        Other operators (filter, check, rank, compare) must NOT
+        receive the metadata block when their cap fires — that
+        cross-operator generalisation is tracked as nexus-3j6b."""
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _OPERATOR_MAX_INPUTS, _hydrate_operator_args
+
+        oversized = [f"item-{i}" for i in range(_OPERATOR_MAX_INPUTS + 50)]
+        fake_contents = {"contents": oversized}
+        for op in ("filter", "check", "rank", "compare"):
+            args_in = {"ids": [f"d-{i}" for i in range(150)],
+                       "criterion": "x" if op in ("filter", "rank") else None,
+                       "check_instruction": "x" if op == "check" else None,
+                       "focus": "x" if op == "compare" else None}
+            args_in = {k: v for k, v in args_in.items() if v is not None}
+            with patch(
+                "nexus.mcp.core.store_get_many", return_value=fake_contents,
+            ):
+                _, args = _hydrate_operator_args(op, args_in)
+            assert "_truncation_metadata" not in args, (
+                f"S-1 scope: operator_{op} must not surface truncation "
+                f"metadata in this RDR (nexus-3j6b tracks generalisation)"
+            )

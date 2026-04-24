@@ -298,6 +298,53 @@ class TestComposeBundlePrompt:
         )
         assert schema["properties"]["verified"]["type"] == "boolean"
 
+    def test_groupby_step_renders_key_and_inline_items_schema(self):
+        """RDR-093 Phase 1: a bundled groupby step must render its
+        partition ``key`` verbatim, chain from a prior step's output,
+        and the terminal schema must declare the C-1 inline-items
+        contract (groups[].items as array of objects, NOT id strings)."""
+        bundle = OperatorBundle(steps=(
+            OperatorBundleStep(
+                1, "filter", {"criterion": "peer-reviewed",
+                              "inputs": "papers-payload"},
+            ),
+            OperatorBundleStep(
+                2, "groupby",
+                {"key": "publication-year-sentinel-key"},
+            ),
+        ))
+        prompt, schema = compose_bundle_prompt(bundle)
+        assert "STEP 2 — groupby" in prompt
+        assert "publication-year-sentinel-key" in prompt
+        assert "output list from STEP 1" in prompt
+        # C-1 inline-items contract: groups carry items inline.
+        assert "inline" in prompt.lower() or "carry" in prompt.lower()
+        # Terminal schema covers groupby's {groups: [{key_value, items}]}
+        # contract, with items as array of OBJECTS (not strings).
+        assert "groups" in schema["required"]
+        groups_item_schema = schema["properties"]["groups"]["items"]
+        assert {"key_value", "items"}.issubset(set(groups_item_schema["required"]))
+        assert groups_item_schema["properties"]["key_value"]["type"] == "string"
+        assert groups_item_schema["properties"]["items"]["type"] == "array"
+        # The C-1 inline-items regression guard at the bundle scope.
+        assert (
+            groups_item_schema["properties"]["items"]["items"]["type"]
+            == "object"
+        ), "C-1 contract: bundled groupby's terminal schema must require " \
+           "items as array of objects (inline), not strings (id-only)"
+
+    def test_operator_groupby_resolved_form_renders_as_groupby(self):
+        """``operator_groupby`` should render as bare ``groupby`` in the
+        prompt, mirroring the existing prefix-stripping for the other
+        operators (per ``test_operator_prefix_stripped_in_prompt``)."""
+        bundle = OperatorBundle(steps=(
+            OperatorBundleStep(1, "operator_filter",
+                               {"criterion": "x", "inputs": "p"}),
+            OperatorBundleStep(2, "operator_groupby", {"key": "year"}),
+        ))
+        prompt, _ = compose_bundle_prompt(bundle)
+        assert "STEP 2 — groupby" in prompt
+
 
 # ── Dispatch wrapper ──────────────────────────────────────────────────────────
 
