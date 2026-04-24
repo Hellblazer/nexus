@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.11.1] - 2026-04-24
+
+Plugin's SessionEnd hook switched from `nx hook session-end-detach` to `nx-session-end-launcher` (with a fallback to the old path for mixed-version installs). The launcher double-forks before any `nexus.*` module loads — cold-start time 256ms vs the 2s `nx hook session-end-detach` took, closing the race against Claude Code's shutdown SIGTERM that surfaced in the 4.11.0 shakeout. Graceful session cleanup now runs on close instead of being deferred to the next SessionStart's sweep. See root `CHANGELOG.md` for the full post-mortem.
+
 ## [4.11.0] - 2026-04-24
 
 Plugin version aligned with Nexus CLI 4.11.0. No plugin-level skill or hook changes. See root `CHANGELOG.md` for the three new `operator_*` tools shipped under RDR-088 Phases 1+2 (`filter`, `check`, `verify`) plus the `nx memory get` prefix-match ergonomics fix and the T1 chroma leak fix for session-UUID rollover (nexus-886w) that closes the last gap in the 4.10.3 three-layer defense.

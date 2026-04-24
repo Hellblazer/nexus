@@ -38,7 +38,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "nx hook session-end-detach || true",
+            "command": "nx-session-end-launcher 2>/dev/null || nx hook session-end-detach || true",
             "timeout": 5
           }
         ]
