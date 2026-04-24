@@ -1180,3 +1180,164 @@ class TestOperatorGroupby:
                     "not id-only strings"
                 )
                 assert "id" in it
+
+
+class TestOperatorAggregate:
+    """RDR-093 Phase 2: operator_aggregate reduces each group of items
+    into a per-group summary keyed by the group's key_value. Receives
+    groups pre-hydrated from operator_groupby's inline-items output
+    (no runner-side nested-id hydration). Pairs with operator_groupby
+    for the canonical filter -> groupby -> aggregate pipeline."""
+
+    @pytest.mark.asyncio
+    async def test_returns_aggregates_with_key_value_and_summary(
+        self, monkeypatch,
+    ) -> None:
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_aggregate
+
+        async def fake(*a, **kw):
+            return {
+                "aggregates": [
+                    {"key_value": "GroupA", "summary": "Method-A wins"},
+                    {"key_value": "GroupB", "summary": "Method-B wins"},
+                    {"key_value": "GroupC", "summary": "Method-C wins"},
+                ],
+            }
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        groups_in = json.dumps([
+            {"key_value": "GroupA",
+             "items": [{"id": "a1"}, {"id": "a2"}, {"id": "a3"}]},
+            {"key_value": "GroupB",
+             "items": [{"id": "b1"}, {"id": "b2"}, {"id": "b3"}]},
+            {"key_value": "GroupC",
+             "items": [{"id": "c1"}, {"id": "c2"}, {"id": "c3"}]},
+        ])
+        result = await operator_aggregate(
+            groups=groups_in,
+            reducer="most-cited method",
+        )
+        assert "aggregates" in result
+        assert isinstance(result["aggregates"], list)
+        assert len(result["aggregates"]) == 3
+        for a in result["aggregates"]:
+            assert "key_value" in a and "summary" in a
+            assert isinstance(a["key_value"], str)
+            assert isinstance(a["summary"], str)
+
+    @pytest.mark.asyncio
+    async def test_prompt_contains_reducer_and_groups(
+        self, monkeypatch,
+    ) -> None:
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_aggregate
+
+        captured: list[str] = []
+
+        async def fake(prompt, schema, timeout=60.0):
+            captured.append(prompt)
+            return {"aggregates": []}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        groups_in = json.dumps([
+            {"key_value": "GroupSentinelABC", "items": []},
+        ])
+        await operator_aggregate(
+            groups=groups_in,
+            reducer="reducer-sentinel-xyz",
+        )
+        assert "reducer-sentinel-xyz" in captured[0]
+        assert "GroupSentinelABC" in captured[0]
+
+    @pytest.mark.asyncio
+    async def test_schema_pins_aggregates_shape(self, monkeypatch) -> None:
+        """Schema must declare {aggregates: [{key_value, summary}]}
+        with both required fields. The flat schema (per RDR-093
+        §Technical Design) is what makes the bundled groupby ->
+        aggregate path composable."""
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_aggregate
+
+        captured_schemas: list[dict] = []
+
+        async def fake(prompt, schema, timeout=60.0):
+            captured_schemas.append(schema)
+            return {"aggregates": []}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        await operator_aggregate(groups='[]', reducer="x")
+
+        schema = captured_schemas[0]
+        assert schema["type"] == "object"
+        assert "aggregates" in schema["required"]
+        agg_item = schema["properties"]["aggregates"]["items"]
+        assert {"key_value", "summary"}.issubset(set(agg_item["required"]))
+        assert agg_item["properties"]["key_value"]["type"] == "string"
+        assert agg_item["properties"]["summary"]["type"] == "string"
+
+    @pytest.mark.asyncio
+    async def test_prompt_isolates_each_group_explicitly(
+        self, monkeypatch,
+    ) -> None:
+        """RDR-093 §Risks and Mitigations: the prompt framing must
+        explicitly isolate each group ('USING ONLY this group's items'
+        or equivalent). Spike B (nexus-rojs) PASSED with this framing;
+        future prompt edits that drop the isolation directive should
+        trip this test."""
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_aggregate
+
+        captured: list[str] = []
+
+        async def fake(prompt, schema, timeout=60.0):
+            captured.append(prompt)
+            return {"aggregates": []}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        await operator_aggregate(groups='[]', reducer="x")
+
+        prompt = captured[0].lower()
+        # Group-isolation directive must be present in some recognisable form.
+        assert (
+            "only" in prompt and "group" in prompt
+        ), (
+            "RDR-093 §Risks and Mitigations: aggregate prompt must "
+            "carry a per-group isolation directive ('USING ONLY this "
+            "group's items' or equivalent) per Spike B's validated "
+            "framing"
+        )
+
+    @pytest.mark.asyncio
+    async def test_three_groups_yields_three_aggregates(
+        self, monkeypatch,
+    ) -> None:
+        """RDR-093 Test Plan scenario 3: operator_aggregate with 3 groups
+        x 3 items + reducer 'most-cited method' returns exactly 3
+        aggregates, each key_value preserved. Cross-group leakage is
+        checked separately (Spike B and integration tests)."""
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_aggregate
+
+        async def fake(prompt, schema, timeout=60.0):
+            return {
+                "aggregates": [
+                    {"key_value": "alpha", "summary": "alpha-wins-method"},
+                    {"key_value": "beta", "summary": "beta-wins-method"},
+                    {"key_value": "gamma", "summary": "gamma-wins-method"},
+                ],
+            }
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        groups_in = json.dumps([
+            {"key_value": "alpha", "items": [{"id": "a1"}]},
+            {"key_value": "beta", "items": [{"id": "b1"}]},
+            {"key_value": "gamma", "items": [{"id": "c1"}]},
+        ])
+        result = await operator_aggregate(
+            groups=groups_in,
+            reducer="most-cited method",
+        )
+        assert len(result["aggregates"]) == 3
+        keys = {a["key_value"] for a in result["aggregates"]}
+        assert keys == {"alpha", "beta", "gamma"}

@@ -1888,6 +1888,74 @@ async def operator_groupby(
     return await claude_dispatch(prompt, schema, timeout=timeout)
 
 
+@mcp.tool()
+async def operator_aggregate(
+    groups: str,
+    reducer: str,
+    timeout: float = 300.0,
+) -> dict:
+    """Reduce each group of items to a per-group summary using claude -p.
+
+    RDR-093 Phase 2. Paper §D.4 Aggregate operator: take a keyed
+    grouping (typically from a prior ``operator_groupby`` step) plus a
+    natural-language reducer instruction, return one summary per
+    group with the group's ``key_value`` preserved verbatim. Pairs
+    with ``operator_groupby`` to form the canonical
+    ``filter -> groupby -> aggregate`` analytic pipeline.
+
+    Items arrive pre-hydrated inside each group's ``items`` array per
+    ``operator_groupby``'s C-1 inline-items contract. No runner-side
+    nested-id hydration is required; both bundled and isolated paths
+    see the same shape.
+
+    Group isolation: the prompt explicitly instructs the model to
+    summarise USING ONLY the items in each group. Spike B (bead
+    nexus-rojs) verified this framing produces 0% cross-group
+    leakage even on adversarial fixtures with vocabulary heavily
+    overlapping across groups.
+
+    Args:
+        groups: A JSON-serialised ``list[{key_value, items: list[dict]}]``
+            from a prior groupby step. Items are dicts (inline), not
+            id references.
+        reducer: Natural-language reduction instruction
+            (e.g. "winning baseline by reported metric",
+            "most-cited method", "earliest publication").
+        timeout: Seconds before the subprocess is killed. Default 300s.
+    """
+    from nexus.operators.dispatch import claude_dispatch
+
+    prompt = (
+        f"Reduce each group of items into a per-group summary using "
+        f"this reducer instruction: {reducer}\n\n"
+        f"Output one aggregate per input group, preserving the group's "
+        f"`key_value` verbatim. Each `summary` MUST reference only the "
+        f"items in that group's `items` array. Do NOT pull content "
+        f"from items in other groups, even when vocabulary overlaps "
+        f"across groups. The summary is a short paragraph answering "
+        f"the reducer instruction USING ONLY this group's items.\n\n"
+        f"Groups:\n{groups}"
+    )
+    schema: dict = {
+        "type": "object",
+        "required": ["aggregates"],
+        "properties": {
+            "aggregates": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["key_value", "summary"],
+                    "properties": {
+                        "key_value": {"type": "string"},
+                        "summary": {"type": "string"},
+                    },
+                },
+            },
+        },
+    }
+    return await claude_dispatch(prompt, schema, timeout=timeout)
+
+
 # ── traverse (RDR-078 P3) ─────────────────────────────────────────────────────
 
 #: Depth cap for traverse steps (SC-4).

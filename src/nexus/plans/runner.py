@@ -582,6 +582,7 @@ _OPERATOR_TOOL_MAP: dict[str, str] = {
     "check": "operator_check",
     "verify": "operator_verify",
     "groupby": "operator_groupby",
+    "aggregate": "operator_aggregate",
 }
 
 #: Maximum inputs to pass to an operator before auto-inserting a rank
@@ -594,10 +595,20 @@ _OPERATOR_RESOLVED_TOOLS: frozenset[str] = frozenset(_OPERATOR_TOOL_MAP.values()
 #: Translation table for the ``inputs`` → operator-specific positional arg
 #: rename (nexus-yis0). Pre-hydrated steps that passed ``$stepN.contents``
 #: through ``inputs:`` get their value remapped to the operator's expected
-#: arg name. ``operator_verify`` is intentionally omitted: it takes scalar
-#: ``claim`` and ``evidence`` args, and a stray ``inputs`` should surface
-#: as an authoring bug rather than be silently renamed. Hoisted to module
-#: scope per nexus-4o2z (RDR-088 Phase 1 gate review observation).
+#: arg name.
+#:
+#: Deliberately omitted (a stray ``inputs:`` on these operators must
+#: surface as an authoring bug rather than be silently renamed):
+#:
+#: - ``operator_verify`` (RDR-088): takes scalar ``claim`` and ``evidence``.
+#: - ``operator_aggregate`` (RDR-093): takes ``groups`` (a JSON-serialised
+#:   list[{key_value, items}] from a prior groupby step), not ``items``.
+#:   Renaming inputs->items here would silently dispatch with the wrong
+#:   arg shape and make the resulting TypeError much harder to attribute.
+#:   nexus-3j6b is the proper place to revisit cross-operator inputs.
+#:
+#: Hoisted to module scope per nexus-4o2z (RDR-088 Phase 1 gate
+#: review observation).
 _INPUTS_TARGET: dict[str, str] = {
     "operator_summarize": "content",
     "operator_generate": "context",

@@ -1170,3 +1170,71 @@ class TestHydrateInputsTranslation:
                 f"S-1 scope: operator_{op} must not surface truncation "
                 f"metadata in this RDR (nexus-3j6b tracks generalisation)"
             )
+
+    # ── operator_aggregate hydration (RDR-093 nexus-o7u2) ────────────────
+
+    def test_aggregate_bare_name_resolves_to_operator_aggregate(self):
+        """Plan YAML using ``tool: aggregate`` must resolve through
+        ``_OPERATOR_TOOL_MAP`` to ``operator_aggregate``."""
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(
+            "aggregate",
+            {"groups": '[]', "reducer": "most-cited method"},
+        )
+        assert tool == "operator_aggregate"
+        assert args == {"groups": '[]', "reducer": "most-cited method"}
+
+    def test_aggregate_stray_inputs_is_not_translated(self):
+        """RDR-093 Phase 2 verify-style test (load-bearing for the
+        deliberate _INPUTS_TARGET omission). operator_aggregate's
+        positional arg is ``groups``, not ``items``. A stray
+        ``inputs:`` key on an aggregate step MUST surface as an
+        authoring bug at dispatch time (TypeError on the operator's
+        signature) rather than being silently renamed.
+
+        Mirrors the operator_verify omission rationale at
+        runner.py:_INPUTS_TARGET. Without this guard, plan YAML
+        copy-paste from rank/filter/check (whose inputs DO get
+        renamed) would silently dispatch with the wrong arg name and
+        make debugging the resulting TypeError much harder."""
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(
+            "aggregate",
+            {"inputs": "stray-payload",
+             "groups": '[]',
+             "reducer": "most-cited method"},
+        )
+        assert tool == "operator_aggregate"
+        # The stray inputs MUST persist verbatim — no rename.
+        assert args.get("inputs") == "stray-payload"
+        # The legitimate groups arg must pass through untouched.
+        assert args["groups"] == '[]'
+        # And the operator's expected positional arg must NOT have
+        # been synthesised from inputs.
+        assert "items" not in args, (
+            "RDR-093 Phase 2 audit carry-over: aggregate's stray "
+            "inputs must NOT silently synthesize an items key — that "
+            "would mask an authoring bug. nexus-3j6b is the proper "
+            "place to revisit cross-operator inputs handling."
+        )
+
+    def test_aggregate_pre_hydrated_groups_pass_through(self):
+        """The canonical aggregate input is a pre-hydrated groups
+        JSON string. _hydrate_operator_args must not touch it."""
+        from nexus.plans.runner import _hydrate_operator_args
+
+        groups_json = json.dumps([
+            {"key_value": "x",
+             "items": [{"id": "a", "body": "a-body"}]},
+            {"key_value": "y",
+             "items": [{"id": "b", "body": "b-body"}]},
+        ])
+        tool, args = _hydrate_operator_args(
+            "aggregate",
+            {"groups": groups_json, "reducer": "most cited"},
+        )
+        assert tool == "operator_aggregate"
+        assert args["groups"] == groups_json
+        assert args["reducer"] == "most cited"
