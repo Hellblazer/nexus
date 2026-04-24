@@ -40,6 +40,70 @@ def test_memory_get_missing_returns_none(db: T2Database) -> None:
     assert db.get(project="no", title="such.md") is None
 
 
+# ── resolve_title: exact-then-prefix fallback (nexus-e59o) ─────────────────
+
+
+def test_resolve_title_exact_match_wins(db: T2Database) -> None:
+    """Exact (project, title) match returns the entry with no candidates."""
+    db.put(project="p", title="088-research-1", content="short")
+    db.put(project="p", title="088-research-1: full-suffix", content="long")
+    entry, candidates = db.resolve_title(project="p", title="088-research-1")
+    # Exact match wins even though a prefix-only collision exists.
+    assert entry is not None and entry["content"] == "short"
+    assert candidates == []
+
+
+def test_resolve_title_unique_prefix_match(db: T2Database) -> None:
+    """No exact match + exactly one prefix candidate returns that candidate."""
+    db.put(
+        project="p", title="088-research-1: RDR-092 baseline", content="body",
+    )
+    entry, candidates = db.resolve_title(project="p", title="088-research-1")
+    assert entry is not None
+    assert entry["title"] == "088-research-1: RDR-092 baseline"
+    assert candidates == []
+
+
+def test_resolve_title_ambiguous_prefix_returns_candidates(
+    db: T2Database,
+) -> None:
+    """Multiple prefix matches returns (None, [candidates]) for UX surfacing."""
+    db.put(project="p", title="088-research-1: first", content="a")
+    db.put(project="p", title="088-research-1b: other", content="b")
+    entry, candidates = db.resolve_title(project="p", title="088-research-1")
+    assert entry is None
+    titles = sorted(c["title"] for c in candidates)
+    assert titles == ["088-research-1: first", "088-research-1b: other"]
+
+
+def test_resolve_title_no_match_returns_empty(db: T2Database) -> None:
+    """Nothing matches returns (None, [])."""
+    entry, candidates = db.resolve_title(project="p", title="no-such-prefix")
+    assert entry is None
+    assert candidates == []
+
+
+def test_resolve_title_escapes_like_wildcards(db: T2Database) -> None:
+    """A literal '%' or '_' in the title prefix must not become a wildcard."""
+    db.put(project="p", title="a_b_c", content="underscore-literal")
+    db.put(project="p", title="axb", content="not-a-match-for-underscore")
+    entry, candidates = db.resolve_title(project="p", title="a_")
+    # Only the literal 'a_' prefix matches 'a_b_c', not 'axb'.
+    assert entry is not None
+    assert entry["title"] == "a_b_c"
+    assert candidates == []
+
+
+def test_resolve_title_scoped_to_project(db: T2Database) -> None:
+    """Prefix fallback honours the project boundary."""
+    db.put(project="p1", title="088-research-1: in-p1", content="one")
+    db.put(project="p2", title="088-research-1: in-p2", content="two")
+    entry, candidates = db.resolve_title(project="p1", title="088-research-1")
+    assert entry is not None
+    assert entry["project"] == "p1"
+    assert candidates == []
+
+
 def test_memory_search_fts5(db: T2Database) -> None:
     db.put(project="p", title="alpha.md", content="The quick brown fox")
     db.put(project="p", title="beta.md", content="A lazy dog sleeping")
@@ -301,3 +365,83 @@ def test_delete_cmd_not_found(runner: CliRunner, mem_home: Path, db: T2Database)
     with patch("nexus.commands.memory.T2Database", return_value=_t2_cm(db)):
         result = runner.invoke(main, ["memory", "delete", "--project", "no", "--title", "such.md", "--yes"])
     assert result.exit_code != 0 and "not found" in result.output
+
+
+# ── Get CLI command: prefix-match UX (nexus-e59o) ───────────────────────────
+
+
+def test_get_cmd_exact_title_match(
+    runner: CliRunner, mem_home: Path, db: T2Database,
+) -> None:
+    """Exact title match returns the content (regression guard — baseline)."""
+    db.put(project="p", title="note.md", content="content-body-sentinel")
+    with patch("nexus.commands.memory.T2Database", return_value=_t2_cm(db)):
+        result = runner.invoke(
+            main, ["memory", "get", "--project", "p", "--title", "note.md"],
+        )
+    assert result.exit_code == 0
+    assert "content-body-sentinel" in result.output
+
+
+def test_get_cmd_unique_prefix_match_resolves(
+    runner: CliRunner, mem_home: Path, db: T2Database,
+) -> None:
+    """Short-form --title resolves to the unique full title (e59o main case)."""
+    db.put(
+        project="nexus_rdr",
+        title="088-research-1: RDR-092 baseline for Gap 4 spike",
+        content="baseline-body-xyz",
+    )
+    with patch("nexus.commands.memory.T2Database", return_value=_t2_cm(db)):
+        result = runner.invoke(
+            main, ["memory", "get", "--project", "nexus_rdr",
+                   "--title", "088-research-1"],
+        )
+    assert result.exit_code == 0
+    assert "baseline-body-xyz" in result.output
+
+
+def test_get_cmd_ambiguous_prefix_lists_candidates(
+    runner: CliRunner, mem_home: Path, db: T2Database,
+) -> None:
+    """Multiple prefix matches must list candidates and fail loud (not silent-pick)."""
+    db.put(project="p", title="088-research-1: first", content="one")
+    db.put(project="p", title="088-research-1b: second", content="two")
+    with patch("nexus.commands.memory.T2Database", return_value=_t2_cm(db)):
+        result = runner.invoke(
+            main, ["memory", "get", "--project", "p",
+                   "--title", "088-research-1"],
+        )
+    assert result.exit_code != 0
+    out = result.output
+    assert "Ambiguous" in out
+    assert "088-research-1: first" in out
+    assert "088-research-1b: second" in out
+
+
+def test_get_cmd_no_match_still_fails_loud(
+    runner: CliRunner, mem_home: Path, db: T2Database,
+) -> None:
+    """Zero-match continues to fail — behaviour preserved from baseline."""
+    with patch("nexus.commands.memory.T2Database", return_value=_t2_cm(db)):
+        result = runner.invoke(
+            main, ["memory", "get", "--project", "none", "--title", "missing"],
+        )
+    assert result.exit_code != 0
+    assert "not found" in result.output
+
+
+def test_get_cmd_exact_wins_over_prefix(
+    runner: CliRunner, mem_home: Path, db: T2Database,
+) -> None:
+    """When an exact entry exists alongside a longer-title match, exact wins."""
+    db.put(project="p", title="088-research-1", content="short-entry")
+    db.put(project="p", title="088-research-1: full-suffix", content="long-entry")
+    with patch("nexus.commands.memory.T2Database", return_value=_t2_cm(db)):
+        result = runner.invoke(
+            main, ["memory", "get", "--project", "p",
+                   "--title", "088-research-1"],
+        )
+    assert result.exit_code == 0
+    assert "short-entry" in result.output
+    assert "long-entry" not in result.output

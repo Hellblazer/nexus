@@ -427,6 +427,51 @@ class MemoryStore:
                 result["last_accessed"] = now
             return result
 
+    def resolve_title(
+        self,
+        project: str,
+        title: str,
+    ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+        """Exact-then-prefix title resolution (nexus-e59o).
+
+        Ergonomic wrapper around :meth:`get`. Semantics:
+
+        * Exact ``(project, title)`` match found: returns ``(entry, [])``.
+        * No exact match, exactly one entry whose title starts with
+          ``title``: returns ``(entry, [])``.
+        * No exact match, multiple prefix candidates: returns
+          ``(None, candidates)`` so the caller can surface the list.
+        * Nothing matches: returns ``(None, [])``.
+
+        Exact match always wins, so a caller passing a complete title
+        keeps the strict semantics. The prefix fallback covers the
+        common ergonomic case where a subagent records an entry under a
+        descriptive title (``088-research-1: <suffix>``) and a later
+        caller retrieves by the short form (``088-research-1``).
+
+        Access tracking runs only when a unique entry is returned, to
+        avoid skewing the staleness signal on ambiguous-match attempts.
+        """
+        exact = self.get(project=project, title=title)
+        if exact is not None:
+            return exact, []
+
+        candidates: list[dict[str, Any]] = []
+        prefix_like = title.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT * FROM memory WHERE project = ? AND title LIKE ? ESCAPE '\\' "
+                "ORDER BY title ASC",
+                (project, prefix_like),
+            ).fetchall()
+        for row in rows:
+            candidates.append(dict(zip(_COLUMNS, row)))
+        if len(candidates) == 1:
+            only = candidates[0]
+            resolved = self.get(project=project, title=only["title"])
+            return resolved or only, []
+        return None, candidates
+
     def search(
         self,
         query: str,

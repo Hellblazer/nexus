@@ -892,25 +892,47 @@ def memory_put(
 def memory_get(project: str, title: str = "") -> str:
     """Retrieve a memory entry by project and title.
 
+    Title resolution is exact-then-prefix (nexus-e59o): if ``title`` does
+    not match any entry exactly, a unique prefix match is returned. A
+    caller passing ``"088-research-1"`` gets the full
+    ``"088-research-1: <suffix>"`` entry as long as only one entry
+    starts with that prefix in the project. Ambiguous prefixes are
+    reported as a list so the caller can disambiguate rather than
+    silently pick one.
+
     When title is empty, lists all entries for the project (titles only — use
     a second call with the specific title to get content).
 
     Args:
         project: Project namespace
-        title: Entry title. Leave empty to LIST all entries (titles only).
+        title: Entry title, exact or unique prefix. Leave empty to LIST
+            all entries (titles only).
     """
     try:
         with _t2_ctx() as db:
             if title:
-                entry = db.get(project=project, title=title)
-                if entry is None:
-                    return f"Not found: {project}/{title}"
-                return (
-                    f"[{entry['id']}] {entry['project']}/{entry['title']}\n"
-                    f"Tags: {entry.get('tags', '')}\n"
-                    f"Updated: {entry.get('timestamp', '')}\n\n"
-                    f"{entry['content']}"
+                entry, candidates = db.resolve_title(
+                    project=project, title=title,
                 )
+                if entry is not None:
+                    return (
+                        f"[{entry['id']}] {entry['project']}/{entry['title']}\n"
+                        f"Tags: {entry.get('tags', '')}\n"
+                        f"Updated: {entry.get('timestamp', '')}\n\n"
+                        f"{entry['content']}"
+                    )
+                if candidates:
+                    lines = [
+                        f"Ambiguous title prefix: {len(candidates)} entries "
+                        f"match {title!r} in project {project!r}",
+                    ]
+                    for c in candidates:
+                        lines.append(f"  [{c['id']}] {c['title']}")
+                    lines.append(
+                        "Re-call with the full title or a longer prefix.",
+                    )
+                    return "\n".join(lines)
+                return f"Not found: {project}/{title}"
             else:
                 entries = db.list_entries(project=project)
                 if not entries:
