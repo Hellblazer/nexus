@@ -2,12 +2,12 @@
 title: "RDR-093: GroupBy and Aggregate Operators"
 id: RDR-093
 type: Feature
-status: draft
+status: accepted
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-24
-accepted_date:
+accepted_date: 2026-04-24
 related_issues: []
 related_tests: [test_operator_dispatch.py, test_plan_run.py, test_plan_bundle.py]
 related: [RDR-042, RDR-078, RDR-079, RDR-088, RDR-089]
