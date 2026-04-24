@@ -18,8 +18,10 @@ from nexus.session import (
     SESSIONS_DIR,
     _ppid_of,
     find_ancestor_session,
+    find_claude_root_pid,
     find_session_by_id,
     generate_session_id,
+    spawn_t1_watchdog,
     start_t1_server,
     stop_t1_server,
     sweep_stale_sessions,
@@ -120,8 +122,23 @@ def session_start(claude_session_id: str | None = None) -> str:
             if existing is None:
                 try:
                     host, port, server_pid, tmpdir = start_t1_server()
+                    # nexus-99jb Layer 1: spawn a detached watchdog that
+                    # watches the Claude Code root PID + the chroma PID
+                    # and triggers graceful shutdown when Claude Code
+                    # disappears. Independent of SessionEnd firing, so
+                    # covers /exit (#17885) and Hook cancelled (#41577).
+                    claude_root_pid = find_claude_root_pid()
+                    session_file = SESSIONS_DIR / f"{session_id}.session"
+                    watchdog_pid = spawn_t1_watchdog(
+                        claude_pid=claude_root_pid,
+                        chroma_pid=server_pid,
+                        session_file=session_file,
+                        tmpdir=tmpdir,
+                    ) if claude_root_pid else 0
                     write_session_record_by_id(
-                        SESSIONS_DIR, session_id, host, port, server_pid, tmpdir
+                        SESSIONS_DIR, session_id, host, port, server_pid,
+                        tmpdir, claude_root_pid=claude_root_pid,
+                        watchdog_pid=watchdog_pid,
                     )
                 except Exception as exc:
                     _log.warning(

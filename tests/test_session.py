@@ -184,11 +184,16 @@ def test_sweep_stale_sessions_keeps_fresh_records(tmp_path: Path) -> None:
     NB: Numeric-stem files are now swept *unconditionally* as a migration
     from the legacy PID-keyed scheme — see
     test_sweep_stale_sessions_removes_legacy_numeric_stem_unconditionally
-    for that path.
+    for that path. nexus-99jb added a liveness-based reap: records whose
+    ``server_pid`` is dead are reaped regardless of age. Use the test's
+    own PID as the stand-in so the record looks live.
     """
+    import os as _os
     sessions = tmp_path / "sessions"
-    path = write_session_record_by_id(sessions, "fresh-uuid",
-                                      host="127.0.0.1", port=51004, server_pid=102)
+    path = write_session_record_by_id(
+        sessions, "fresh-uuid",
+        host="127.0.0.1", port=51004, server_pid=_os.getpid(),
+    )
 
     sweep_stale_sessions(sessions_dir=sessions)
     assert path.exists()
@@ -335,13 +340,16 @@ def test_sweep_stale_sessions_removes_legacy_numeric_stem_unconditionally(
         "tmpdir": "",
     }))
 
-    # UUID-keyed file in the new format — should survive.
+    # UUID-keyed file in the new format — should survive. Use this
+    # process's own PID as server_pid so the nexus-99jb liveness-based
+    # reap path sees a live anchor and leaves the record alone.
+    import os as _os
     valid = sessions / "valid-uuid.session"
     valid.write_text(json.dumps({
         "session_id": "valid-uuid",
         "server_host": "127.0.0.1",
         "server_port": 66666,
-        "server_pid": 99998,
+        "server_pid": _os.getpid(),
         "created_at": _time.time(),
         "tmpdir": "",
     }))
@@ -353,3 +361,135 @@ def test_sweep_stale_sessions_removes_legacy_numeric_stem_unconditionally(
 
     assert not legacy.exists(), "legacy PID-keyed file should be swept regardless of age"
     assert valid.exists(), "UUID-keyed file should survive the sweep"
+
+
+# ── nexus-99jb Layer 3: aggressive liveness-based reap ───────────────────────
+
+
+def test_sweep_reaps_when_server_pid_is_dead(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fresh record whose ``server_pid`` is no longer alive must be reaped
+    regardless of age. This covers the canonical leak path: chroma process
+    died, SessionEnd didn't fire, the record + tmpdir stayed behind.
+    """
+    sessions = tmp_path / "sessions"
+    # Port any PID we know is dead. 1 is launchd/init on macOS — always
+    # alive — so we use a synthetic large PID that the kernel will refuse
+    # with ESRCH. Linux treats ``kill(99999999, 0)`` as ProcessLookupError
+    # on an unused PID, and we monkeypatch _is_pid_alive to be certain.
+    from nexus.session import write_session_record_by_id
+    monkeypatch.setattr("nexus.session._is_pid_alive", lambda pid: False)
+    monkeypatch.setattr("nexus.session.stop_t1_server", lambda _pid: None)
+
+    path = write_session_record_by_id(
+        sessions, "dead-server-uuid",
+        host="127.0.0.1", port=57999, server_pid=7777,
+    )
+    assert path.exists()
+
+    sweep_stale_sessions(sessions_dir=sessions)
+    assert not path.exists(), "record with dead server_pid must be reaped eagerly"
+
+
+def test_sweep_reaps_when_claude_root_pid_is_dead(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A record whose ``claude_root_pid`` anchor is dead gets reaped even if
+    the chroma ``server_pid`` is still alive — the anchor loss means the
+    session is effectively over (belt-and-braces for the case where
+    Claude Code died hard and the watchdog also missed).
+    """
+    sessions = tmp_path / "sessions"
+    from nexus.session import write_session_record_by_id
+
+    # Live server_pid (us) but dead claude_root_pid (synthetic). Only the
+    # anchor-dead liveness arm should fire.
+    own = os.getpid()
+    calls: list[int] = []
+    def _fake_alive(pid: int) -> bool:
+        calls.append(pid)
+        return pid == own
+    monkeypatch.setattr("nexus.session._is_pid_alive", _fake_alive)
+    monkeypatch.setattr("nexus.session.stop_t1_server", lambda _pid: None)
+
+    path = write_session_record_by_id(
+        sessions, "dead-anchor-uuid",
+        host="127.0.0.1", port=58001, server_pid=own,
+        claude_root_pid=7654321,
+    )
+    assert path.exists()
+
+    sweep_stale_sessions(sessions_dir=sessions)
+    assert not path.exists(), "anchor-dead record must be reaped regardless of server liveness"
+
+
+def test_write_session_record_persists_claude_root_pid_and_watchdog_pid(
+    tmp_path: Path,
+) -> None:
+    """The record serializer carries both the claude_root_pid anchor and
+    the watchdog's PID when the caller supplies them.
+    """
+    from nexus.session import write_session_record_by_id
+
+    sessions = tmp_path / "sessions"
+    path = write_session_record_by_id(
+        sessions, "pid-roundtrip-uuid",
+        host="127.0.0.1", port=58002, server_pid=1234,
+        claude_root_pid=5678, watchdog_pid=9012,
+    )
+    record = json.loads(path.read_text())
+    assert record["claude_root_pid"] == 5678
+    assert record["watchdog_pid"] == 9012
+    assert record["server_pid"] == 1234
+
+
+def test_find_claude_root_pid_returns_ppid_fallback_when_no_claude_ancestor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When no ancestor has a 'claude*' command name, the function returns
+    the immediate PPID so the watchdog at least watches something.
+    """
+    from nexus.session import find_claude_root_pid
+
+    monkeypatch.setattr("nexus.session._ppid_of", lambda pid: 42 if pid != 42 else 1)
+    monkeypatch.setattr("nexus.session._command_name_of", lambda pid: "bash")
+
+    # Our "ppid chain" is start_pid → 42 → 1 (init), none of which are named
+    # claude, so we expect the immediate PPID (42) as the fallback.
+    result = find_claude_root_pid(start_pid=100)
+    assert result == 42
+
+
+def test_find_claude_root_pid_prefers_claude_ancestor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When an ancestor's command name starts with 'claude', return it."""
+    from nexus.session import find_claude_root_pid
+
+    # Chain: 100 → 200 (bash) → 300 (claude) → 1 (init)
+    parents = {100: 200, 200: 300, 300: 1}
+    names = {200: "bash", 300: "claude"}
+    monkeypatch.setattr("nexus.session._ppid_of", lambda pid: parents.get(pid))
+    monkeypatch.setattr(
+        "nexus.session._command_name_of",
+        lambda pid: names.get(pid, ""),
+    )
+
+    assert find_claude_root_pid(start_pid=100) == 300
+
+
+def test_find_claude_root_pid_case_insensitive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Command-name match is case-insensitive (``Claude`` on some platforms)."""
+    from nexus.session import find_claude_root_pid
+
+    parents = {100: 200, 200: 1}
+    names = {200: "Claude"}
+    monkeypatch.setattr("nexus.session._ppid_of", lambda pid: parents.get(pid))
+    monkeypatch.setattr(
+        "nexus.session._command_name_of",
+        lambda pid: names.get(pid, ""),
+    )
+    assert find_claude_root_pid(start_pid=100) == 200
