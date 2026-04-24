@@ -6,6 +6,7 @@ import socket
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import structlog
@@ -186,6 +187,25 @@ def find_ancestor_session(
     return None
 
 
+def _is_pid_alive(pid: int) -> bool:
+    """Return True if *pid* names a running process (liveness probe).
+
+    Uses ``os.kill(pid, 0)`` — raises ``ProcessLookupError`` when the
+    process is gone, ``PermissionError`` when it exists but is owned
+    by a different uid (treated as alive). Invalid pids (<=0) are
+    treated as dead.
+    """
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def sweep_stale_sessions(
     sessions_dir: Path | None = None,
     max_age_hours: float = _SESSION_MAX_AGE_SECONDS / 3600.0,
@@ -194,6 +214,12 @@ def sweep_stale_sessions(
 
     For each stale record: sends SIGTERM → SIGKILL to server_pid, removes the
     backing tmpdir, and deletes the session file. Non-JSON files are ignored.
+
+    nexus-99jb Layer 3 extension: a record is also reaped eagerly (regardless
+    of age) when its ``server_pid`` is no longer alive OR its
+    ``claude_root_pid`` has disappeared. The age-based threshold is retained
+    as a final safety net for records that lack PID metadata (legacy schema)
+    or point at a PID namespace the current user can't probe.
     """
     if sessions_dir is None:
         sessions_dir = SESSIONS_DIR
@@ -226,15 +252,36 @@ def sweep_stale_sessions(
             record = json.loads(f.read_text())
             if not isinstance(record, dict):
                 continue
-            if record.get("created_at", time.time()) < cutoff:
-                server_pid = record.get("server_pid")
-                if server_pid:
+            server_pid = record.get("server_pid")
+            claude_root_pid = record.get("claude_root_pid", 0)
+            # Reap triggers (any one is sufficient):
+            #   1. Age-based: created_at older than cutoff (legacy path).
+            #   2. Liveness: server_pid is no longer alive — process
+            #      already gone but the file + tmpdir were left behind.
+            #   3. Anchor loss: claude_root_pid known and dead — Claude
+            #      Code exited but SessionEnd didn't fire (/exit path,
+            #      hook cancelled, etc). Watchdog normally covers this
+            #      within 5s; this is belt-and-braces on SessionStart.
+            age_expired = record.get("created_at", time.time()) < cutoff
+            server_dead = server_pid and not _is_pid_alive(int(server_pid))
+            anchor_dead = claude_root_pid and not _is_pid_alive(int(claude_root_pid))
+            if age_expired or server_dead or anchor_dead:
+                if server_pid and not server_dead:
                     stop_t1_server(server_pid)
                 tmpdir = record.get("tmpdir", "")
                 if tmpdir:
                     import shutil
                     shutil.rmtree(tmpdir, ignore_errors=True)
                 _try_remove_path(f)
+                _log.info(
+                    "sweep_reaped_session",
+                    session_id=record.get("session_id", "?"),
+                    reason=(
+                        "age" if age_expired
+                        else "server_dead" if server_dead
+                        else "anchor_dead"
+                    ),
+                )
         except (json.JSONDecodeError, OSError) as exc:
             _log.debug("sweep_corrupt_session_file", path=str(f), error=str(exc))
 
@@ -434,16 +481,24 @@ def write_session_record_by_id(
     port: int,
     server_pid: int,
     tmpdir: str = "",
+    claude_root_pid: int = 0,
+    watchdog_pid: int = 0,
 ) -> Path:
     """Write a JSON session record at *sessions_dir*/{session_id}.session.
 
     The UUID-keyed counterpart of :func:`write_session_record`. Always use
     this in new code so T1 is scoped to a Claude conversation rather than
     a terminal session.
+
+    ``claude_root_pid`` and ``watchdog_pid`` (nexus-99jb) are optional
+    metadata used by the orphan reaper and the self-watchdog sidecar.
+    Legacy records without these fields are still accepted by callers —
+    reap logic treats them as "no liveness anchor available, fall back
+    to age-based sweep".
     """
     sessions_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     path = sessions_dir / f"{session_id}.session"
-    record = {
+    record: dict[str, Any] = {
         "session_id": session_id,
         "server_host": host,
         "server_port": port,
@@ -451,12 +506,103 @@ def write_session_record_by_id(
         "created_at": time.time(),
         "tmpdir": tmpdir,
     }
+    if claude_root_pid:
+        record["claude_root_pid"] = claude_root_pid
+    if watchdog_pid:
+        record["watchdog_pid"] = watchdog_pid
     fd = os.open(str(path), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
     try:
         os.write(fd, json.dumps(record).encode())
     finally:
         os.close(fd)
     return path
+
+
+def _command_name_of(pid: int) -> str:
+    """Return the command name (argv[0] basename) of *pid*, or "" if unknown.
+
+    Used by :func:`find_claude_root_pid` to identify which ancestor is
+    Claude Code. Falls back to an empty string on any error — caller
+    treats that as "not a match" and keeps walking.
+    """
+    try:
+        out = subprocess.check_output(
+            ["ps", "-o", "comm=", "-p", str(pid)],
+            stderr=subprocess.DEVNULL, text=True, timeout=2,
+        ).strip()
+        return Path(out).name if out else ""
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+            OSError):
+        return ""
+
+
+def find_claude_root_pid(start_pid: int | None = None) -> int:
+    """Walk the PPID chain looking for the Claude Code process.
+
+    Returns the topmost ancestor PID whose command name starts with
+    ``claude`` (matches ``claude``, ``claude-code``, and future CLI
+    renames). When no Claude ancestor is found — e.g. the caller isn't
+    actually under Claude Code — returns the immediate PPID as a
+    fallback so the watchdog at least watches *something* rather than
+    nothing.
+
+    Returns 0 only when the PPID chain can't be walked at all.
+    """
+    pid = start_pid if start_pid is not None else os.getpid()
+    seen: set[int] = set()
+    best: int = 0
+    # Walk upward. Remember the topmost "claude*" ancestor; fall back to
+    # the immediate PPID if none matches.
+    cur = _ppid_of(pid)
+    immediate_ppid = cur or 0
+    while cur and cur not in seen and cur > 1:
+        seen.add(cur)
+        name = _command_name_of(cur)
+        if name.lower().startswith("claude"):
+            best = cur
+            # Keep walking — in theory a "claude" shell could itself be
+            # under another "claude" (agent spawning). Prefer topmost.
+        cur = _ppid_of(cur)
+    return best or immediate_ppid
+
+
+def spawn_t1_watchdog(
+    *,
+    claude_pid: int,
+    chroma_pid: int,
+    session_file: Path,
+    tmpdir: str,
+) -> int:
+    """Launch the T1 watchdog sidecar as a detached process.
+
+    Returns the watchdog's PID. The watchdog runs under ``python -m
+    nexus.t1_watchdog`` in its own session (``start_new_session=True``)
+    so it survives the SessionStart hook's exit and can reap the
+    chroma server when Claude Code dies. See ``t1_watchdog.py`` for
+    the polling loop.
+
+    Failure is non-fatal: returns 0 and logs a warning. Layer 3
+    (SessionStart orphan reaper) + the legacy age-based sweep cover
+    the case where the watchdog couldn't start.
+    """
+    import sys as _sys
+    try:
+        proc = subprocess.Popen(
+            [
+                _sys.executable, "-m", "nexus.t1_watchdog",
+                "--claude-pid", str(claude_pid),
+                "--chroma-pid", str(chroma_pid),
+                "--session-file", str(session_file),
+                "--tmpdir", tmpdir,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return proc.pid
+    except OSError as exc:
+        _log.warning("spawn_t1_watchdog_failed", error=str(exc))
+        return 0
 
 
 def find_session_by_id(
