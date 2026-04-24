@@ -590,6 +590,22 @@ _OPERATOR_MAX_INPUTS: int = 100
 #: Set of resolved operator tool names for auto-hydration detection.
 _OPERATOR_RESOLVED_TOOLS: frozenset[str] = frozenset(_OPERATOR_TOOL_MAP.values())
 
+#: Translation table for the ``inputs`` → operator-specific positional arg
+#: rename (nexus-yis0). Pre-hydrated steps that passed ``$stepN.contents``
+#: through ``inputs:`` get their value remapped to the operator's expected
+#: arg name. ``operator_verify`` is intentionally omitted: it takes scalar
+#: ``claim`` and ``evidence`` args, and a stray ``inputs`` should surface
+#: as an authoring bug rather than be silently renamed. Hoisted to module
+#: scope per nexus-4o2z (RDR-088 Phase 1 gate review observation).
+_INPUTS_TARGET: dict[str, str] = {
+    "operator_summarize": "content",
+    "operator_generate": "context",
+    "operator_rank": "items",
+    "operator_compare": "items",
+    "operator_filter": "items",
+    "operator_check": "items",
+}
+
 
 def _hydrate_operator_args(
     tool: str, args: dict[str, Any],
@@ -654,19 +670,6 @@ def _hydrate_operator_args(
     # Without this, isolated dispatch of summarize / rank / compare /
     # generate fires with no positional arg and raises TypeError
     # (plan 57 ``find-by-author`` is the canonical repro).
-    _INPUTS_TARGET: dict[str, str] = {
-        "operator_summarize": "content",
-        "operator_generate": "context",
-        "operator_rank": "items",
-        "operator_compare": "items",
-        "operator_filter": "items",
-        "operator_check": "items",
-        # operator_verify intentionally omitted: it takes scalar claim +
-        # evidence args. Translating a stray ``inputs`` to one of them
-        # would mask an authoring bug; leave ``inputs`` in place and let
-        # the dispatcher surface the unknown-arg path. (RDR-088 audit
-        # carry-over, nexus-ac40.4.)
-    }
     target_key = _INPUTS_TARGET.get(resolved_tool)
     if target_key and "inputs" in args and target_key not in args:
         value = args.pop("inputs")
