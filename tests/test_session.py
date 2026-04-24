@@ -392,6 +392,144 @@ def test_sweep_reaps_when_server_pid_is_dead(
     assert not path.exists(), "record with dead server_pid must be reaped eagerly"
 
 
+def test_sweep_reaps_on_uuid_mismatch_with_live_claude(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-886w: record's session_id doesn't match the current_session
+    pointer AND claude_root_pid is alive → reap as 'uuid_mismatch'.
+
+    This closes the same-claude-different-UUID leak the earlier
+    nexus-99jb defense-in-depth layers did not cover (watchdog keeps
+    seeing the parent PID alive, anchor_dead false, server_dead false,
+    age below threshold → no reap trigger).
+    """
+    sessions = tmp_path / "sessions"
+    from nexus.session import write_session_record_by_id
+
+    # Both PIDs 'alive' via monkeypatch. The old session's UUID differs
+    # from the current-session pointer — the only reap arm that should
+    # fire is uuid_mismatch.
+    own = os.getpid()
+    monkeypatch.setattr("nexus.session._is_pid_alive", lambda _pid: True)
+    monkeypatch.setattr("nexus.session.stop_t1_server", lambda _pid: None)
+    monkeypatch.setattr(
+        "nexus.session.read_claude_session_id",
+        lambda: "current-uuid-after-clear",
+    )
+
+    path = write_session_record_by_id(
+        sessions, "stale-uuid-pre-clear",
+        host="127.0.0.1", port=58010, server_pid=own,
+        claude_root_pid=own,
+    )
+    assert path.exists()
+
+    sweep_stale_sessions(sessions_dir=sessions)
+    assert not path.exists(), (
+        "record with session_id != current_session must be reaped "
+        "when claude_root_pid is alive (uuid_mismatch trigger)"
+    )
+
+
+def test_sweep_keeps_record_matching_current_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-886w: the current session's own record must NOT be reaped by
+    the uuid_mismatch arm — the whole point of the trigger is to spare
+    live sessions.
+    """
+    sessions = tmp_path / "sessions"
+    from nexus.session import write_session_record_by_id
+
+    own = os.getpid()
+    monkeypatch.setattr("nexus.session._is_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(
+        "nexus.session.read_claude_session_id",
+        lambda: "active-uuid",
+    )
+
+    path = write_session_record_by_id(
+        sessions, "active-uuid",
+        host="127.0.0.1", port=58011, server_pid=own,
+        claude_root_pid=own,
+    )
+    sweep_stale_sessions(sessions_dir=sessions)
+    assert path.exists(), "active session must survive sweep"
+
+
+def test_sweep_keeps_record_when_current_session_pointer_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-886w: when read_claude_session_id returns None (flat file
+    absent or unreadable), the uuid_mismatch arm must not fire — that
+    would regress the pre-change behaviour to reap every session.
+    """
+    sessions = tmp_path / "sessions"
+    from nexus.session import write_session_record_by_id
+
+    own = os.getpid()
+    monkeypatch.setattr("nexus.session._is_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(
+        "nexus.session.read_claude_session_id", lambda: None,
+    )
+
+    path = write_session_record_by_id(
+        sessions, "some-uuid",
+        host="127.0.0.1", port=58012, server_pid=own,
+        claude_root_pid=own,
+    )
+    sweep_stale_sessions(sessions_dir=sessions)
+    assert path.exists(), (
+        "missing current_session pointer must not trigger uuid_mismatch"
+    )
+
+
+def test_sweep_uuid_mismatch_deferred_to_anchor_dead_when_claude_exited(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-886w: when claude_root_pid is dead AND uuid also mismatches,
+    the reap should be attributed to ``anchor_dead`` (the more specific
+    reason), not ``uuid_mismatch``. Observability contract: logs must
+    pin the primary failure mode.
+    """
+    sessions = tmp_path / "sessions"
+    from nexus.session import write_session_record_by_id
+
+    own = os.getpid()
+    # server alive, anchor dead, uuid also mismatches.
+    def _alive(pid: int) -> bool:
+        return pid == own
+
+    monkeypatch.setattr("nexus.session._is_pid_alive", _alive)
+    monkeypatch.setattr("nexus.session.stop_t1_server", lambda _pid: None)
+    monkeypatch.setattr(
+        "nexus.session.read_claude_session_id", lambda: "new-uuid",
+    )
+
+    logged: list[dict] = []
+    def _fake_info(event: str, **kw):  # noqa: ANN001
+        kw["event"] = event
+        logged.append(kw)
+
+    monkeypatch.setattr("nexus.session._log.info", _fake_info)
+
+    path = write_session_record_by_id(
+        sessions, "old-uuid",
+        host="127.0.0.1", port=58013, server_pid=own,
+        claude_root_pid=999_999_999,  # dead
+    )
+    sweep_stale_sessions(sessions_dir=sessions)
+    assert not path.exists()
+    reasons = [e.get("reason") for e in logged if e.get("event") == "sweep_reaped_session"]
+    assert "anchor_dead" in reasons, (
+        "anchor_dead must win when both triggers apply; got "
+        f"{reasons}"
+    )
+    assert "uuid_mismatch" not in reasons, (
+        "specific reason (anchor_dead) must win over uuid_mismatch"
+    )
+
+
 def test_sweep_reaps_when_claude_root_pid_is_dead(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

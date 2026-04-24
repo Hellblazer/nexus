@@ -220,12 +220,21 @@ def sweep_stale_sessions(
     ``claude_root_pid`` has disappeared. The age-based threshold is retained
     as a final safety net for records that lack PID metadata (legacy schema)
     or point at a PID namespace the current user can't probe.
+
+    nexus-886w extension: a record whose ``session_id`` does not match the
+    ``current_session`` pointer is reaped even when both PIDs are alive.
+    Covers the same-claude-different-UUID case (``/clear`` or ``/resume``
+    rollover within a single live claude process) where the watchdog
+    keeps seeing the parent PID alive and never fires. The previous
+    fourth gap in the GC coverage: bounded to 24h via the age threshold,
+    but not closed.
     """
     if sessions_dir is None:
         sessions_dir = SESSIONS_DIR
     if not sessions_dir.exists():
         return
     cutoff = time.time() - max_age_hours * 3600.0
+    current_uuid = read_claude_session_id()
     for f in sessions_dir.glob("*.session"):
         # Migration: numeric-stem files come from the legacy PID-keyed scheme
         # that bound T1 to the terminal session instead of the Claude
@@ -265,7 +274,22 @@ def sweep_stale_sessions(
             age_expired = record.get("created_at", time.time()) < cutoff
             server_dead = server_pid and not _is_pid_alive(int(server_pid))
             anchor_dead = claude_root_pid and not _is_pid_alive(int(claude_root_pid))
-            if age_expired or server_dead or anchor_dead:
+            # nexus-886w: same claude process rolled to a different
+            # conversation UUID (``/clear`` or ``/resume``). The record is
+            # for a UUID that no longer matches ``current_session`` even
+            # though claude itself is still alive, so the watchdog never
+            # fires. Requires claude_root_pid to be alive — otherwise the
+            # anchor_dead arm owns the reap and reports the more specific
+            # reason.
+            record_uuid = record.get("session_id", "")
+            uuid_stale = bool(
+                current_uuid
+                and record_uuid
+                and record_uuid != current_uuid
+                and claude_root_pid
+                and not anchor_dead
+            )
+            if age_expired or server_dead or anchor_dead or uuid_stale:
                 if server_pid and not server_dead:
                     stop_t1_server(server_pid)
                 tmpdir = record.get("tmpdir", "")
@@ -279,7 +303,8 @@ def sweep_stale_sessions(
                     reason=(
                         "age" if age_expired
                         else "server_dead" if server_dead
-                        else "anchor_dead"
+                        else "anchor_dead" if anchor_dead
+                        else "uuid_mismatch"
                     ),
                 )
         except (json.JSONDecodeError, OSError) as exc:
