@@ -556,6 +556,11 @@ def _terminal_schema(tool: str) -> dict[str, Any]:
             },
         }
     if verb == "check":
+        # Share the evidence-item schema with operator_check's standalone
+        # definition so a role-enum or required-key change only lands
+        # once. Local import avoids a module-load cycle between runner /
+        # bundle / mcp.core.
+        from nexus.mcp.core import _CHECK_EVIDENCE_ITEM_SCHEMA
         return {
             "type": "object",
             "required": ["ok", "evidence"],
@@ -563,20 +568,7 @@ def _terminal_schema(tool: str) -> dict[str, Any]:
                 "ok": {"type": "boolean"},
                 "evidence": {
                     "type": "array",
-                    "items": {
-                        "type": "object",
-                        "required": ["item_id", "quote", "role"],
-                        "properties": {
-                            "item_id": {"type": "string"},
-                            "quote": {"type": "string"},
-                            "role": {
-                                "type": "string",
-                                "enum": [
-                                    "supports", "contradicts", "neutral",
-                                ],
-                            },
-                        },
-                    },
+                    "items": _CHECK_EVIDENCE_ITEM_SCHEMA,
                 },
             },
         }
