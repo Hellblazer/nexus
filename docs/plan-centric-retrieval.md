@@ -241,6 +241,9 @@ reference earlier output via `$stepK.<field>`.
 | `operator_compare` | schema-conforming dict |
 | `operator_summarize` | schema-conforming dict (or `{summary: str}`) |
 | `operator_generate` | schema-conforming dict (or `{text: str}`) |
+| `operator_filter` | `{items: [...], rationale: [{id, reason}]}` — items is a subset of the input, one rationale row per input |
+| `operator_check` | `{ok: bool, evidence: [{item_id, quote, role}]}` — role ∈ `supports` / `contradicts` / `neutral` |
+| `operator_verify` | `{verified: bool, reason: str, citations: [str]}` — citations are span anchors in the evidence |
 
 `traverse` is the load-bearing addition from RDR-078 — it makes typed
 links between documents first-class operators in a plan.  Before, link

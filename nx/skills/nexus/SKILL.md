@@ -42,6 +42,9 @@ mcp__plugin_nx_nexus__operator_extract(inputs=["doc1","doc2"], fields="title,yea
 mcp__plugin_nx_nexus__operator_rank(items=["a","b","c"], criterion="relevance to X"
 mcp__plugin_nx_nexus__operator_compare(items=["x","y"], focus="scalability"
 mcp__plugin_nx_nexus__operator_generate(template="release note", context="..."
+mcp__plugin_nx_nexus__operator_filter(items='[{"id":"a", ...}, ...]', criterion="peer-reviewed only"
+mcp__plugin_nx_nexus__operator_check(items='[{"id":"p1"}, ...]', check_instruction="do the papers agree?"
+mcp__plugin_nx_nexus__operator_verify(claim="X uses attention", evidence="Section 2.1: ..."
 
 # Background hygiene — call and let run (long-lived claude -p subprocesses)
 mcp__plugin_nx_nexus__nx_tidy()                                     # T2 memory consolidation
@@ -50,7 +53,7 @@ mcp__plugin_nx_nexus__nx_plan_audit()                               # plan libra
 
 # Memory (T2)
 mcp__plugin_nx_nexus__memory_put(content="content", project="{repo}", title="file.md"
-mcp__plugin_nx_nexus__memory_get(project="{repo}", title="file.md"
+mcp__plugin_nx_nexus__memory_get(project="{repo}", title="file.md"       # exact-then-unique-prefix match
 mcp__plugin_nx_nexus__memory_search(query="query", project="{repo}"
 
 # Knowledge (T3)

@@ -112,8 +112,9 @@ structured calls in disguise.
 ## How the MCP tools run under the hood
 
 The RDR-080 tools (`nx_tidy`, `nx_enrich_beads`, `nx_plan_audit`) and the
-five operator tools (`operator_extract`, `operator_rank`, `operator_compare`,
-`operator_summarize`, `operator_generate`) use a single primitive:
+eight operator tools (`operator_extract`, `operator_rank`, `operator_compare`,
+`operator_summarize`, `operator_generate`, `operator_filter`,
+`operator_check`, `operator_verify`) use a single primitive:
 `nexus.operators.dispatch.claude_dispatch`.
 
 `claude_dispatch` spawns `claude -p --output-format json --json-schema <schema>`,
