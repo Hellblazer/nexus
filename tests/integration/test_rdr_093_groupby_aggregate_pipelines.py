@@ -103,31 +103,6 @@ def _match_for_plan(plan: dict):
     )
 
 
-def _assert_groupby_shape(groupby_out: Any) -> None:
-    """RDR-093 §Technical Design: groupby output must be
-    ``{groups: [{key_value, items: list[dict]}]}`` with items inline."""
-    assert isinstance(groupby_out, dict), (
-        f"groupby output must be a dict, got {type(groupby_out).__name__}"
-    )
-    groups = groupby_out.get("groups")
-    assert isinstance(groups, list), (
-        f"groupby output must carry `groups` as a list, got {type(groups).__name__}"
-    )
-    for g in groups:
-        assert isinstance(g, dict)
-        assert isinstance(g.get("key_value"), str), (
-            "each group must have a string key_value"
-        )
-        items = g.get("items")
-        assert isinstance(items, list), (
-            "each group must have an items list (C-1: inline)"
-        )
-        for it in items:
-            assert isinstance(it, dict), (
-                "C-1 contract: each item is a dict (inline), NOT a string id"
-            )
-
-
 def _assert_aggregate_shape(aggregate_out: Any) -> None:
     """RDR-093 §Technical Design: aggregate output must be
     ``{aggregates: [{key_value, summary}]}``."""
@@ -223,11 +198,19 @@ class TestPhase3MVVPipeline:
         assert isinstance(search_out, dict)
         for key in ("ids", "tumblers", "distances", "collections"):
             assert key in search_out, f"search output missing {key!r}"
-        if not search_out["ids"]:
-            pytest.skip(
-                "knowledge__delos returned zero ids for MVV seed; "
-                "corpus may have drifted",
-            )
+        # Corpus-integrity check (NOT a skip): if knowledge__delos
+        # returns zero hits for a query as broad as "consensus
+        # protocols byzantine fault tolerance", the corpus is empty
+        # or seriously degraded — that is a data-integrity failure,
+        # not an environment skip. Auth + T3 reachability are
+        # checked at the class fixture; data presence is asserted
+        # here as a hard failure.
+        assert len(search_out["ids"]) >= 2, (
+            "knowledge__delos returned <2 hits for the MVV seed query "
+            f"({len(search_out.get('ids', []))} ids). The corpus "
+            "should reliably surface multiple BFT/consensus papers; "
+            "investigate corpus health before re-running."
+        )
 
         # Step 2 (filter) and Step 3 (groupby) are bundled intermediates.
         # Step 4 (aggregate) is the terminal bundled step and carries the
@@ -248,10 +231,24 @@ class TestPhase3MVVPipeline:
         # Step 4 — terminal aggregate output.
         aggregate_out = result.steps[3]
         _assert_aggregate_shape(aggregate_out)
-        # Sanity: at least one aggregate emitted (LLM may produce 1+
-        # depending on how it partitions Byzantine vs crash).
-        assert len(aggregate_out["aggregates"]) >= 1, (
-            "expected at least one aggregate from the bundled pipeline"
+        # Weak partition pin: the seed query targets the canonical
+        # crash-vs-Byzantine split that runs through the Delos /
+        # PBFT / HotStuff lineage. We expect at least 2 groups → at
+        # least 2 aggregates. Asserting >= 2 (rather than the
+        # previous >= 1) catches a regression where aggregate
+        # collapses all groups into one summary, which is a real
+        # failure mode the bundled-intermediate sentinels prevent
+        # us from observing at the groupby step.
+        # Structural caveat: bundled intermediates make per-step
+        # group counts unobservable from the host side; this is the
+        # closest pin we can apply downstream. nexus-3j6b is the
+        # natural place to revisit if the operator family later
+        # exposes intermediate counts via cross-operator metadata.
+        assert len(aggregate_out["aggregates"]) >= 2, (
+            "expected >=2 aggregates from the canonical Byzantine-vs-"
+            "crash partition over knowledge__delos; got "
+            f"{len(aggregate_out['aggregates'])}. Possible regression: "
+            "aggregate collapsed multiple groups into one summary."
         )
 
 
@@ -329,11 +326,13 @@ class TestC1InlineItemsRegressionGuard:
         result = await plan_run(_match_for_plan(plan), {}, dispatcher=None)
 
         search_out = result.steps[0]
-        if not search_out.get("ids"):
-            pytest.skip(
-                "knowledge__delos returned zero ids for C-1 seed; "
-                "corpus may have drifted",
-            )
+        # Corpus-integrity check (hard fail, not skip): see Test 1.
+        assert len(search_out.get("ids", [])) >= 2, (
+            "knowledge__delos returned <2 hits for the C-1 seed "
+            f"({len(search_out.get('ids', []))} ids). The seed query "
+            "is broad enough that <2 hits indicates a corpus health "
+            "issue, not a transient miss. Investigate before re-running."
+        )
 
         # Bundled intermediate for groupby.
         assert result.steps[1] == BUNDLED_INTERMEDIATE
@@ -353,6 +352,19 @@ class TestC1InlineItemsRegressionGuard:
         # robust to which corpus chunks the search returns, but every
         # term IS something the LLM could only mention if body content
         # reached it via the inline-items contract.
+        #
+        # Known limitation (Phase 3 review observation): this guard
+        # catches HARD regressions (id-only output where aggregate
+        # produces empty / trivial summaries) reliably. It is weaker
+        # against SOFT regressions where an LLM hallucinates plausible
+        # BFT-domain terms from id strings alone (e.g. ids like
+        # `hotstuff-bft.pdf:chunk-3` could prime parametric memory).
+        # The mockable-scope unit tests
+        # (test_inline_items_contract_dicts_not_id_strings,
+        # test_groupby_step_renders_key_and_inline_items_schema) pin
+        # the schema at object-not-string and are the structural
+        # regression guards. This test adds end-to-end evidence on
+        # top of those, not in place of them.
         c1_vocab = {
             "quorum", "view", "signature", "leader", "byzantine",
             "consensus", "replica", "fault", "vote", "phase",
