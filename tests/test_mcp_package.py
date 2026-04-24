@@ -34,6 +34,7 @@ def test_core_registered_tools():
         "operator_extract", "operator_rank", "operator_compare",
         "operator_summarize", "operator_generate",
         "operator_filter", "operator_check", "operator_verify",
+        "operator_groupby", "operator_aggregate",
         "nx_answer", "nx_tidy", "nx_enrich_beads", "nx_plan_audit",
     }
     assert expected == tool_names, f"Missing: {expected - tool_names}, Extra: {tool_names - expected}"
@@ -82,6 +83,7 @@ def test_init_reexports_all():
         "operator_extract", "operator_rank", "operator_compare",
         "operator_summarize", "operator_generate",
         "operator_filter", "operator_check", "operator_verify",
+        "operator_groupby", "operator_aggregate",
         "nx_answer", "nx_tidy", "nx_enrich_beads", "nx_plan_audit",
         # demoted
         "store_delete", "collection_info", "collection_verify",

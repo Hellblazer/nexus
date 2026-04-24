@@ -721,6 +721,16 @@ def _hydrate_operator_args(
         "operator_check", "operator_groupby",
     ) and isinstance(args.get("items"), list):
         args["items"] = json.dumps(args["items"])
+    # RDR-093 Phase 2 follow-up (code-review S-2): operator_aggregate's
+    # positional arg is `groups`, not `items`, so it doesn't share the
+    # coercion path above. When a plan step resolves `$stepN.groups`
+    # from a prior groupby's output, the runner-side $stepN reference
+    # resolution may hand a Python list to this hydration step. Coerce
+    # to JSON so the operator_aggregate prompt sees clean JSON rather
+    # than a Python repr (which would silently malform via the
+    # f-string in claude_dispatch).
+    if resolved_tool == "operator_aggregate" and isinstance(args.get("groups"), list):
+        args["groups"] = json.dumps(args["groups"])
 
     return resolved_tool, args
 

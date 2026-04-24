@@ -1238,3 +1238,84 @@ class TestHydrateInputsTranslation:
         assert tool == "operator_aggregate"
         assert args["groups"] == groups_json
         assert args["reducer"] == "most cited"
+
+    def test_aggregate_coerces_list_groups_to_json(self):
+        """RDR-093 Phase 2 follow-up (code-review S-2): when a plan
+        step resolves $stepN.groups from a prior groupby's output, the
+        runner-side reference resolution may hand a Python list to
+        hydration. The asymmetry with operator_groupby's `items`
+        list-coercion path was a real gap; aggregate's `groups` list
+        must be coerced to JSON so the prompt sees clean JSON rather
+        than a Python repr."""
+        from nexus.plans.runner import _hydrate_operator_args
+
+        groups_list = [
+            {"key_value": "alpha", "items": [{"id": "a1"}]},
+            {"key_value": "beta", "items": [{"id": "b1"}]},
+        ]
+        tool, args = _hydrate_operator_args(
+            "aggregate",
+            {"groups": groups_list, "reducer": "most cited"},
+        )
+        assert tool == "operator_aggregate"
+        # Coerced to JSON string, not left as a Python list.
+        assert isinstance(args["groups"], str)
+        assert args["groups"] == json.dumps(groups_list)
+
+
+@pytest.mark.asyncio
+async def test_default_dispatcher_groupby_truncation_pop_and_merge(monkeypatch) -> None:
+    """RDR-093 Phase 1 follow-up (code-review S-1): end-to-end test
+    that the truncation metadata flows through the full dispatcher
+    path — _hydrate_operator_args attaches the marker, the dispatcher
+    pops it BEFORE the kwargs-drop pass (so the operator never sees
+    it and no spurious dropped-kwarg warning fires), and merges the
+    metadata onto the operator's return dict post-dispatch.
+
+    The hydration-scope tests (TestHydrateInputsTranslation) verify
+    each piece in isolation; this test guards the contract that the
+    full path holds. If a future refactor moves the pop after the
+    kwargs-drop pass, no hydration test catches it."""
+    from unittest.mock import patch
+
+    from nexus.mcp import core as mcp_core
+    from nexus.plans.runner import _OPERATOR_MAX_INPUTS, _default_dispatcher
+
+    captured_args: list[dict] = []
+
+    async def fake_groupby(**kwargs):
+        captured_args.append(kwargs)
+        return {"groups": [
+            {"key_value": "x", "items": [{"id": "i-0"}]},
+        ]}
+
+    oversized_contents = {
+        "contents": [f"item-body-{i}"
+                     for i in range(_OPERATOR_MAX_INPUTS + 50)],
+    }
+
+    monkeypatch.setattr(mcp_core, "operator_groupby", fake_groupby)
+    with patch(
+        "nexus.mcp.core.store_get_many", return_value=oversized_contents,
+    ):
+        result = await _default_dispatcher(
+            "groupby",
+            {"ids": [f"d-{i}" for i in range(150)], "key": "year"},
+        )
+
+    # The operator must NOT receive the runner-internal marker.
+    assert len(captured_args) == 1
+    assert "_truncation_metadata" not in captured_args[0], (
+        "S-1 guard: operator must never see the runner-internal "
+        "truncation marker; pop must happen before kwargs forwarding"
+    )
+
+    # The dispatcher must merge the truncation metadata onto the result.
+    assert isinstance(result, dict)
+    assert "groups" in result, "operator's native output preserved"
+    assert result.get("truncated") is True, (
+        "S-1 guard: dispatcher must merge truncation metadata onto the "
+        "return dict post-dispatch"
+    )
+    assert result.get("original_count") == 150
+    assert result.get("kept_count") == _OPERATOR_MAX_INPUTS
