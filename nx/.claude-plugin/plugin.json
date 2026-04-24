@@ -1,6 +1,6 @@
 {
   "name": "nx",
-  "version": "4.10.1",
+  "version": "4.10.2",
   "description": "Self-hosted three-tier knowledge management with plan-centric retrieval (nx_answer), specialized agents, semantic search, and RDR decision tracking for Claude Code.",
   "author": {
     "name": "Hal Hildebrand",

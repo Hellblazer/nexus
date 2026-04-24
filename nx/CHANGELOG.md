@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.10.2] - 2026-04-23
+
+Plugin version aligned with Nexus CLI 4.10.2. No plugin-level functional changes. See root `CHANGELOG.md` for the 4.10.1 shakeout follow-ups: the operator-input arg rename for pre-hydrated steps and the builtin-bindings backfill migration for upgraded installs.
+
 ## [4.10.1] - 2026-04-23
 
 Plugin version aligned with Nexus CLI 4.10.1. No plugin-level functional changes. See root `CHANGELOG.md` for the 4.10.0 shakeout fixes: the `nx_answer_runs` telemetry write path, the seed-loader binding-list gap, and the `_retire_legacy_operation_shape_plans` migration that retires the legacy `operation` / `params` shape rows RDR-092 Phase 0a left in place.

@@ -6,6 +6,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.10.2] - 2026-04-23
+
+Shakeout patch for 4.10.1. The 4.10.1 release fixed three headline bugs; the shakeout against the reference install surfaced two more gaps in the operator-dispatch + plan-library path. Both fixed in PR #274.
+
+### Fixed
+
+- **Operator steps that consume pre-hydrated content via `inputs:` failed with `TypeError: missing 1 required positional argument`** (`src/nexus/plans/runner.py`, nexus-yis0). `_hydrate_operator_args` only renamed `inputs` to the operator's positional arg name (`content` for summarize, `context` for generate, `items` for rank/compare) inside the auto-hydration branch that fires when the operator step's args contain `ids`. Plans with an explicit `store_get_many` step followed by an operator that reads `$stepN.contents` (canonical repro: builtin plan 57 `find-by-author`) skipped the rename, `_default_dispatcher`'s unknown-kwarg drop stripped `inputs`, and the operator fired with no positional. Fix adds a dedicated rename pass after auto-hydration, with list-to-string normalization for summarize/generate and list-to-JSON for rank/compare. `operator_extract` keeps `inputs` unchanged (native arg). Bundle path uses a separate arg-presentation mechanism and was unaffected. Seven regression tests cover every rename direction plus the no-overwrite and extract-unchanged guards.
+
+### Added
+
+- **`_backfill_builtin_bindings` migration at 4.10.2** (`src/nexus/db/migrations.py`, nexus-uyc6). The 4.10.1 `seed_loader` fix merged YAML `required_bindings` / `optional_bindings` into `plan_json` at save time, but the seed loader short-circuits via `get_plan_by_dimensions` on existing rows. So every install that carried a builtin row seeded before 4.10.1 kept the old `plan_json` without binding declarations, and `_validate_bindings` still saw an empty list on upgraded installs. The migration selects `plans` rows tagged `builtin` whose `plan_json` does not contain `required_bindings`, resolves the shipping YAML directory via `importlib.resources` (wheel + editable install paths both covered, with a repo-root walk as fallback), indexes the YAMLs by `(verb, scope, strategy)` to match the stored dimensional identity, and patches the binding lists into the stored JSON. Idempotent via the `NOT LIKE '%required_bindings%'` pre-filter. Non-builtin rows (user ad-hoc plans) are untouched. Silent no-op when YAMLs are unreachable — `nx catalog setup`'s fail-loud guard is the escalation path for that case. Four regression tests cover dimensional match, idempotency, non-builtin skip, and registry presence at ≥ 4.10.2.
+
 ## [4.10.1] - 2026-04-23
 
 Shakeout patch against 4.10.0, run live on the reference install immediately after tag. Three issues surfaced and all three fixed in one arc (PR #273): one pre-existing silent failure that 4.10.0's new telemetry surface made visible, one wiring gap the shakeout forced, and one cleanup migration that closes the gap RDR-092 Phase 0a left behind.
