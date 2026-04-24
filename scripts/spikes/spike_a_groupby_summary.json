@@ -1,0 +1,780 @@
+{
+  "per_fixture": [
+    {
+      "fixture_id": "g-01",
+      "topic": "publication year buckets (verbatim)",
+      "expected_modal_hint": "most-likely-stable",
+      "runs_total": 5,
+      "runs_with_partition": 5,
+      "modal_loose": [
+        [
+          "A",
+          "C"
+        ],
+        [
+          "B"
+        ]
+      ],
+      "modal_strict": [
+        [
+          "2018",
+          [
+            "A",
+            "C"
+          ]
+        ],
+        [
+          "2020",
+          [
+            "B"
+          ]
+        ]
+      ],
+      "agreement_loose": 5,
+      "agreement_strict": 5,
+      "stability_loose": 1.0,
+      "stability_strict": 1.0,
+      "errored_runs": 0
+    },
+    {
+      "fixture_id": "g-02",
+      "topic": "fault model (Byzantine vs crash)",
+      "expected_modal_hint": "most-likely-stable",
+      "runs_total": 5,
+      "runs_with_partition": 5,
+      "modal_loose": [
+        [
+          "A",
+          "C"
+        ],
+        [
+          "B"
+        ]
+      ],
+      "modal_strict": [
+        [
+          "Byzantine",
+          [
+            "A",
+            "C"
+          ]
+        ],
+        [
+          "Crash",
+          [
+            "B"
+          ]
+        ]
+      ],
+      "agreement_loose": 5,
+      "agreement_strict": 2,
+      "stability_loose": 1.0,
+      "stability_strict": 0.4,
+      "errored_runs": 0
+    },
+    {
+      "fixture_id": "g-03",
+      "topic": "synchrony assumption (sync / partial / async)",
+      "expected_modal_hint": "most-likely-stable",
+      "runs_total": 5,
+      "runs_with_partition": 5,
+      "modal_loose": [
+        [
+          "A",
+          "C"
+        ],
+        [
+          "B"
+        ]
+      ],
+      "modal_strict": [
+        [
+          "asynchronous",
+          [
+            "B"
+          ]
+        ],
+        [
+          "partial synchrony",
+          [
+            "A",
+            "C"
+          ]
+        ]
+      ],
+      "agreement_loose": 5,
+      "agreement_strict": 5,
+      "stability_loose": 1.0,
+      "stability_strict": 1.0,
+      "errored_runs": 0
+    },
+    {
+      "fixture_id": "g-04",
+      "topic": "consensus family (Paxos vs BFT)",
+      "expected_modal_hint": "most-likely-stable",
+      "runs_total": 5,
+      "runs_with_partition": 5,
+      "modal_loose": [
+        [
+          "A",
+          "C"
+        ],
+        [
+          "B"
+        ]
+      ],
+      "modal_strict": [
+        [
+          "PBFT",
+          [
+            "B"
+          ]
+        ],
+        [
+          "Paxos",
+          [
+            "A",
+            "C"
+          ]
+        ]
+      ],
+      "agreement_loose": 5,
+      "agreement_strict": 4,
+      "stability_loose": 1.0,
+      "stability_strict": 0.8,
+      "errored_runs": 0
+    },
+    {
+      "fixture_id": "g-05",
+      "topic": "topology (leader-based vs leaderless)",
+      "expected_modal_hint": "most-likely-stable",
+      "runs_total": 5,
+      "runs_with_partition": 5,
+      "modal_loose": [
+        [
+          "A",
+          "C"
+        ],
+        [
+          "B"
+        ]
+      ],
+      "modal_strict": [
+        [
+          "leader-based",
+          [
+            "A",
+            "C"
+          ]
+        ],
+        [
+          "leaderless",
+          [
+            "B"
+          ]
+        ]
+      ],
+      "agreement_loose": 5,
+      "agreement_strict": 5,
+      "stability_loose": 1.0,
+      "stability_strict": 1.0,
+      "errored_runs": 0
+    },
+    {
+      "fixture_id": "g-06",
+      "topic": "quorum-size threshold (3f+1 vs 2f+1 vs >3f+1)",
+      "expected_modal_hint": "most-likely-stable",
+      "runs_total": 5,
+      "runs_with_partition": 5,
+      "modal_loose": [
+        [
+          "A"
+        ],
+        [
+          "B"
+        ],
+        [
+          "C"
+        ]
+      ],
+      "modal_strict": [
+        [
+          "2f+1",
+          [
+            "A"
+          ]
+        ],
+        [
+          "f+1",
+          [
+            "B"
+          ]
+        ],
+        [
+          "unassigned",
+          [
+            "C"
+          ]
+        ]
+      ],
+      "agreement_loose": 5,
+      "agreement_strict": 5,
+      "stability_loose": 1.0,
+      "stability_strict": 1.0,
+      "errored_runs": 0
+    },
+    {
+      "fixture_id": "g-07",
+      "topic": "deployment regime (geo vs datacenter)",
+      "expected_modal_hint": "most-likely-stable",
+      "runs_total": 5,
+      "runs_with_partition": 5,
+      "modal_loose": [
+        [
+          "A",
+          "C"
+        ],
+        [
+          "B"
+        ]
+      ],
+      "modal_strict": [
+        [
+          "datacenter / single-region",
+          [
+            "B"
+          ]
+        ],
+        [
+          "wide-area / geo-distributed",
+          [
+            "A",
+            "C"
+          ]
+        ]
+      ],
+      "agreement_loose": 5,
+      "agreement_strict": 3,
+      "stability_loose": 1.0,
+      "stability_strict": 0.6,
+      "errored_runs": 0
+    },
+    {
+      "fixture_id": "g-08",
+      "topic": "primary metric (latency vs throughput)",
+      "expected_modal_hint": "most-likely-stable",
+      "runs_total": 5,
+      "runs_with_partition": 5,
+      "modal_loose": [
+        [
+          "A",
+          "C"
+        ],
+        [
+          "B"
+        ]
+      ],
+      "modal_strict": [
+        [
+          "latency",
+          [
+            "B"
+          ]
+        ],
+        [
+          "throughput",
+          [
+            "A",
+            "C"
+          ]
+        ]
+      ],
+      "agreement_loose": 5,
+      "agreement_strict": 5,
+      "stability_loose": 1.0,
+      "stability_strict": 1.0,
+      "errored_runs": 0
+    },
+    {
+      "fixture_id": "g-09",
+      "topic": "method family (Paxos-shape vs BFT-shape, no names)",
+      "expected_modal_hint": "stable-under-noise",
+      "runs_total": 5,
+      "runs_with_partition": 5,
+      "modal_loose": [
+        [
+          "A",
+          "C"
+        ],
+        [
+          "B"
+        ]
+      ],
+      "modal_strict": [
+        [
+          "PBFT",
+          [
+            "B"
+          ]
+        ],
+        [
+          "Paxos",
+          [
+            "A",
+            "C"
+          ]
+        ]
+      ],
+      "agreement_loose": 5,
+      "agreement_strict": 5,
+      "stability_loose": 1.0,
+      "stability_strict": 1.0,
+      "errored_runs": 0
+    },
+    {
+      "fixture_id": "g-10",
+      "topic": "fault assumption (inferred from adversary behavior)",
+      "expected_modal_hint": "stable-under-noise",
+      "runs_total": 5,
+      "runs_with_partition": 5,
+      "modal_loose": [
+        [
+          "A",
+          "C"
+        ],
+        [
+          "B"
+        ]
+      ],
+      "modal_strict": [
+        [
+          "Byzantine",
+          [
+            "A",
+            "C"
+          ]
+        ],
+        [
+          "crash-stop",
+          [
+            "B"
+          ]
+        ]
+      ],
+      "agreement_loose": 5,
+      "agreement_strict": 4,
+      "stability_loose": 1.0,
+      "stability_strict": 0.8,
+      "errored_runs": 0
+    },
+    {
+      "fixture_id": "g-11",
+      "topic": "synchrony (inferred from algorithmic behavior)",
+      "expected_modal_hint": "stable-under-noise",
+      "runs_total": 5,
+      "runs_with_partition": 5,
+      "modal_loose": [
+        [
+          "A",
+          "C"
+        ],
+        [
+          "B"
+        ]
+      ],
+      "modal_strict": [
+        [
+          "asynchrony",
+          [
+            "B"
+          ]
+        ],
+        [
+          "partial synchrony",
+          [
+            "A",
+            "C"
+          ]
+        ]
+      ],
+      "agreement_loose": 5,
+      "agreement_strict": 4,
+      "stability_loose": 1.0,
+      "stability_strict": 0.8,
+      "errored_runs": 0
+    },
+    {
+      "fixture_id": "g-12",
+      "topic": "convergence semantics (consensus vs CRDT)",
+      "expected_modal_hint": "stable-under-noise",
+      "runs_total": 5,
+      "runs_with_partition": 5,
+      "modal_loose": [
+        [
+          "A"
+        ],
+        [
+          "B"
+        ],
+        [
+          "C"
+        ]
+      ],
+      "modal_strict": [
+        [
+          "single-decree agreement per ballot (Paxos-style)",
+          [
+            "B"
+          ]
+        ],
+        [
+          "strong eventual consistency via join-semilattice merge (CRDT)",
+          [
+            "C"
+          ]
+        ],
+        [
+          "total-order via chained BFT consensus",
+          [
+            "A"
+          ]
+        ]
+      ],
+      "agreement_loose": 5,
+      "agreement_strict": 1,
+      "stability_loose": 1.0,
+      "stability_strict": 0.2,
+      "errored_runs": 0
+    },
+    {
+      "fixture_id": "g-13",
+      "topic": "communication topology (inferred from message pattern)",
+      "expected_modal_hint": "stable-under-noise",
+      "runs_total": 5,
+      "runs_with_partition": 5,
+      "modal_loose": [
+        [
+          "A"
+        ],
+        [
+          "B"
+        ],
+        [
+          "C"
+        ]
+      ],
+      "modal_strict": [
+        [
+          "all-to-all broadcast",
+          [
+            "A"
+          ]
+        ],
+        [
+          "gossip / random peer",
+          [
+            "C"
+          ]
+        ],
+        [
+          "leader-follower",
+          [
+            "B"
+          ]
+        ]
+      ],
+      "agreement_loose": 5,
+      "agreement_strict": 2,
+      "stability_loose": 1.0,
+      "stability_strict": 0.4,
+      "errored_runs": 0
+    },
+    {
+      "fixture_id": "g-14",
+      "topic": "fault tolerance bound (arithmetic from descriptions)",
+      "expected_modal_hint": "stable-under-noise",
+      "runs_total": 5,
+      "runs_with_partition": 5,
+      "modal_loose": [
+        [
+          "A",
+          "C"
+        ],
+        [
+          "B"
+        ]
+      ],
+      "modal_strict": [
+        [
+          "Byzantine",
+          [
+            "A",
+            "C"
+          ]
+        ],
+        [
+          "Crash",
+          [
+            "B"
+          ]
+        ]
+      ],
+      "agreement_loose": 5,
+      "agreement_strict": 1,
+      "stability_loose": 1.0,
+      "stability_strict": 0.2,
+      "errored_runs": 0
+    },
+    {
+      "fixture_id": "g-15",
+      "topic": "deployment scale (inferred from latencies)",
+      "expected_modal_hint": "stable-under-noise",
+      "runs_total": 5,
+      "runs_with_partition": 5,
+      "modal_loose": [
+        [
+          "A"
+        ],
+        [
+          "B"
+        ],
+        [
+          "C"
+        ]
+      ],
+      "modal_strict": [
+        [
+          "cross-continent",
+          [
+            "C"
+          ]
+        ],
+        [
+          "cross-datacenter",
+          [
+            "A"
+          ]
+        ],
+        [
+          "single-rack",
+          [
+            "B"
+          ]
+        ]
+      ],
+      "agreement_loose": 5,
+      "agreement_strict": 5,
+      "stability_loose": 1.0,
+      "stability_strict": 1.0,
+      "errored_runs": 0
+    },
+    {
+      "fixture_id": "g-16",
+      "topic": "primary contribution (latency vs throughput, paraphrased)",
+      "expected_modal_hint": "stable-under-noise",
+      "runs_total": 5,
+      "runs_with_partition": 5,
+      "modal_loose": [
+        [
+          "A",
+          "C"
+        ],
+        [
+          "B"
+        ]
+      ],
+      "modal_strict": [
+        [
+          "latency reduction (single round-trip commit)",
+          [
+            "A",
+            "C"
+          ]
+        ],
+        [
+          "throughput / scalability",
+          [
+            "B"
+          ]
+        ]
+      ],
+      "agreement_loose": 5,
+      "agreement_strict": 2,
+      "stability_loose": 1.0,
+      "stability_strict": 0.4,
+      "errored_runs": 0
+    },
+    {
+      "fixture_id": "g-17",
+      "topic": "method family with hybrid overlap",
+      "expected_modal_hint": "genuinely-ambiguous",
+      "runs_total": 5,
+      "runs_with_partition": 5,
+      "modal_loose": [
+        [
+          "A"
+        ],
+        [
+          "B"
+        ],
+        [
+          "C"
+        ]
+      ],
+      "modal_strict": [
+        [
+          "CRDT",
+          [
+            "B"
+          ]
+        ],
+        [
+          "Gossip + BFT certificate rounds",
+          [
+            "C"
+          ]
+        ],
+        [
+          "Hybrid CRDT + BFT",
+          [
+            "A"
+          ]
+        ]
+      ],
+      "agreement_loose": 5,
+      "agreement_strict": 2,
+      "stability_loose": 1.0,
+      "stability_strict": 0.4,
+      "errored_runs": 0
+    },
+    {
+      "fixture_id": "g-18",
+      "topic": "novelty assessment (subjective)",
+      "expected_modal_hint": "genuinely-ambiguous",
+      "runs_total": 5,
+      "runs_with_partition": 5,
+      "modal_loose": [
+        [
+          "A",
+          "C"
+        ],
+        [
+          "B"
+        ]
+      ],
+      "modal_strict": [
+        [
+          "high novelty",
+          [
+            "B"
+          ]
+        ],
+        [
+          "incremental novelty",
+          [
+            "A",
+            "C"
+          ]
+        ]
+      ],
+      "agreement_loose": 5,
+      "agreement_strict": 2,
+      "stability_loose": 1.0,
+      "stability_strict": 0.4,
+      "errored_runs": 0
+    },
+    {
+      "fixture_id": "g-19",
+      "topic": "domain (theory and systems mixed)",
+      "expected_modal_hint": "genuinely-ambiguous",
+      "runs_total": 5,
+      "runs_with_partition": 5,
+      "modal_loose": [
+        [
+          "A"
+        ],
+        [
+          "B"
+        ],
+        [
+          "C"
+        ]
+      ],
+      "modal_strict": [
+        [
+          "systems implementation + formal verification",
+          [
+            "B"
+          ]
+        ],
+        [
+          "theory + experimental validation",
+          [
+            "A"
+          ]
+        ],
+        [
+          "theory + experimental validation",
+          [
+            "C"
+          ]
+        ]
+      ],
+      "agreement_loose": 2,
+      "agreement_strict": 1,
+      "stability_loose": 0.4,
+      "stability_strict": 0.2,
+      "errored_runs": 0
+    },
+    {
+      "fixture_id": "g-20",
+      "topic": "primary metric improved (multi-objective)",
+      "expected_modal_hint": "genuinely-ambiguous",
+      "runs_total": 5,
+      "runs_with_partition": 5,
+      "modal_loose": [
+        [
+          "A",
+          "C"
+        ],
+        [
+          "B"
+        ]
+      ],
+      "modal_strict": [
+        [
+          "latency",
+          [
+            "A",
+            "C"
+          ]
+        ],
+        [
+          "throughput",
+          [
+            "B"
+          ]
+        ]
+      ],
+      "agreement_loose": 5,
+      "agreement_strict": 5,
+      "stability_loose": 1.0,
+      "stability_strict": 1.0,
+      "errored_runs": 0
+    }
+  ],
+  "aggregate": {
+    "fixtures_total": 20,
+    "fixtures_fully_stable_loose": 19,
+    "fixtures_fully_stable_strict": 8,
+    "fully_stable_rate_loose": 0.95,
+    "fully_stable_rate_strict": 0.4,
+    "micro_stability_rate_loose": 0.97,
+    "micro_stability_rate_strict": 0.68,
+    "total_runs": 100,
+    "schema_ok_runs": 100,
+    "schema_ok_rate": 1.0,
+    "errored_runs": 0,
+    "error_rate": 0.0
+  }
+}
