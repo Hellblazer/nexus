@@ -42,19 +42,42 @@ def put_cmd(content: str, project: str, title: str, tags: str, ttl: str) -> None
 @memory.command("get")
 @click.argument("entry_id", metavar="ID", required=False, type=int)
 @click.option("--project", "-p", default=None, help="Project namespace")
-@click.option("--title", "-t", default=None, help="Entry title")
+@click.option("--title", "-t", default=None, help="Entry title (exact match, or unique prefix)")
 def get_cmd(entry_id: int | None, project: str | None, title: str | None) -> None:
-    """Retrieve a memory entry by ID or by --project + --title."""
+    """Retrieve a memory entry by ID or by --project + --title.
+
+    Title resolution is exact-then-prefix (nexus-e59o): if no entry matches
+    --title exactly, a unique prefix match is returned. Ambiguous prefixes
+    list the candidates and fail rather than picking silently.
+    """
     if entry_id is None and not (project and title):
         raise click.UsageError("provide an ID or --project and --title")
     with T2Database(_default_db_path()) as db:
         if entry_id is not None:
             result = db.get(id=entry_id)
-        else:
-            result = db.get(project=project, title=title)
-    if result is None:
-        raise click.ClickException("entry not found — use: nx memory list to see available entries")
-    click.echo(result["content"])
+            if result is None:
+                raise click.ClickException(
+                    f"entry not found — id={entry_id}. "
+                    "Use: nx memory list to see available entries",
+                )
+            click.echo(result["content"])
+            return
+        resolved, candidates = db.resolve_title(project=project, title=title)
+    if resolved is not None:
+        click.echo(resolved["content"])
+        return
+    if candidates:
+        lines = [
+            f"Ambiguous title prefix — {len(candidates)} entries match "
+            f"{title!r} in project {project!r}:",
+        ]
+        for c in candidates:
+            lines.append(f"  [{c['id']}] {c['title']}")
+        lines.append("Re-run with the full title or pass --id.")
+        raise click.ClickException("\n".join(lines))
+    raise click.ClickException(
+        "entry not found — use: nx memory list to see available entries",
+    )
 
 
 @memory.command("search")

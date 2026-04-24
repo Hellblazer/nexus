@@ -194,6 +194,20 @@ class T2Database:
     ) -> dict[str, Any] | None:
         return self.memory.get(project=project, title=title, id=id)
 
+    def resolve_title(
+        self,
+        project: str,
+        title: str,
+    ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+        """Resolve an entry by exact title, falling back to unique prefix match.
+
+        Delegates to :meth:`MemoryStore.resolve_title` (nexus-e59o). Exact
+        match always wins; prefix fallback fires only when no exact match
+        exists. Ambiguous prefix returns ``(None, candidates)`` so the
+        caller can surface a clear error listing the matches.
+        """
+        return self.memory.resolve_title(project=project, title=title)
+
     def search(
         self,
         query: str,
