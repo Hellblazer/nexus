@@ -38,8 +38,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "nx hook session-end || true",
-            "timeout": 10
+            "command": "nx hook session-end-detach || true",
+            "timeout": 5
           }
         ]
       }
