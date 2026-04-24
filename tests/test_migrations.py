@@ -76,11 +76,12 @@ class TestMigrationDataclass:
         assert isinstance(MIGRATIONS, list)
         # Baseline 16 + RDR-092 Phase 0d backfill (4.9.12) +
         # RDR-092 Phase 3.1 match_text column (4.9.13) +
-        # legacy operation-shape retirement (4.10.1) = 19.
+        # legacy operation-shape retirement (4.10.1) +
+        # builtin-bindings backfill (4.10.2) = 20.
         # Prefer the name-based checks in TestBackfillPlanDimensions
         # and TestAddPlanMatchTextColumn for future guards; this
         # count is a cheap sentinel only.
-        assert len(MIGRATIONS) == 19
+        assert len(MIGRATIONS) == 20
 
     def test_migrations_ordered_by_version(self) -> None:
         from nexus.db.migrations import MIGRATIONS, _parse_version
@@ -2071,4 +2072,206 @@ class TestRetireLegacyOperationShapePlans:
         )
         assert matches[0][0] >= "4.10.1", (
             f"must be introduced at >= 4.10.1, got {matches[0][0]!r}"
+        )
+
+
+# ── _backfill_builtin_bindings (nexus-uyc6) ──────────────────────────────────
+
+
+class TestBackfillBuiltinBindings:
+    """nexus-uyc6: the seed_loader fix merges binding declarations into
+    plan_json at save_plan time, but existing rows short-circuit via
+    ``get_plan_by_dimensions`` on re-seed. This migration patches the
+    declarations into pre-existing builtin rows by matching
+    ``(verb, scope, strategy)`` against the shipping YAMLs.
+    """
+
+    def _schema(self, conn: sqlite3.Connection) -> None:
+        conn.executescript("""
+            CREATE TABLE plans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                query TEXT NOT NULL,
+                plan_json TEXT NOT NULL,
+                outcome TEXT DEFAULT 'success',
+                tags TEXT DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                project TEXT NOT NULL DEFAULT '',
+                verb TEXT,
+                scope TEXT,
+                dimensions TEXT,
+                name TEXT
+            );
+        """)
+        conn.commit()
+
+    def _write_yaml(self, path, name, verb, scope, strategy,
+                    required, optional):
+        import yaml as _yaml
+        doc = {
+            "name": name,
+            "description": f"{verb} / {strategy} test template",
+            "dimensions": {"verb": verb, "scope": scope, "strategy": strategy},
+            "plan_json": {"steps": [{"tool": "search", "args": {}}]},
+        }
+        if required:
+            doc["required_bindings"] = required
+        if optional:
+            doc["optional_bindings"] = optional
+        path.write_text(_yaml.safe_dump(doc))
+
+    def test_backfills_matching_row_by_dimensions(self, tmp_path, monkeypatch):
+        from nexus.db.migrations import _backfill_builtin_bindings
+
+        yaml_dir = tmp_path / "nx" / "plans" / "builtin"
+        yaml_dir.mkdir(parents=True)
+        self._write_yaml(
+            yaml_dir / "analyze.yml",
+            name="default", verb="analyze", scope="global",
+            strategy="default", required=["area", "criterion"],
+            optional=["limit"],
+        )
+
+        # Point the migration's repo-root fallback at our tmp layout.
+        # Migration walks __file__.parents[3]/nx/plans/builtin; a monkeypatch
+        # of the module-level ``Path`` lookup in the migration is brittle,
+        # so instead pivot on ``importlib.resources`` by setting up a
+        # resource stub. Simpler: mock ``importlib.resources.files`` to
+        # return an object whose ``joinpath`` chain resolves to tmp_path.
+        monkeypatch.chdir(tmp_path)
+
+        class _FakeResource:
+            def __init__(self, root):
+                self._root = root
+            def __truediv__(self, segment):
+                return _FakeResource(self._root / segment)
+            def is_dir(self):
+                return self._root.is_dir()
+            def iterdir(self):
+                return self._root.iterdir()
+
+        def fake_files(_pkg):
+            # Mirror the migration's expected layout: <pkg> / _resources
+            # / plans / builtin. We ship the YAMLs at tmp_path/nx/plans/
+            # builtin, so route _resources/plans/builtin to tmp_path/nx/
+            # plans/builtin via the FakeResource chain.
+            root = tmp_path / "nx"
+            # Eat the leading "_resources" segment by returning a resource
+            # rooted at tmp_path/nx so the subsequent / "plans" / "builtin"
+            # lands correctly. Requires a small shim: intercept the first
+            # / and redirect.
+            class _RedirectingFakeResource(_FakeResource):
+                def __truediv__(self, segment):
+                    if segment == "_resources":
+                        return _FakeResource(root)
+                    return _FakeResource(self._root / segment)
+            return _RedirectingFakeResource(root)
+
+        class _FakeAsFile:
+            def __init__(self, resource):
+                self._resource = resource
+            def __enter__(self):
+                return self._resource._root
+            def __exit__(self, *a):
+                return False
+
+        monkeypatch.setattr(
+            "importlib.resources.files", fake_files,
+        )
+        monkeypatch.setattr(
+            "importlib.resources.as_file",
+            lambda resource: _FakeAsFile(resource),
+        )
+
+        conn = sqlite3.connect(":memory:")
+        self._schema(conn)
+        conn.execute(
+            "INSERT INTO plans "
+            "(query, plan_json, tags, verb, scope, dimensions, name) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "Analysis and synthesis",
+                '{"steps": [{"tool": "search", "args": {}}]}',
+                "builtin-template,rdr-078,analyze",
+                "analyze", "global",
+                '{"scope":"global","strategy":"default","verb":"analyze"}',
+                "default",
+            ),
+        )
+        conn.commit()
+
+        _backfill_builtin_bindings(conn)
+
+        row = conn.execute(
+            "SELECT plan_json FROM plans WHERE name='default'"
+        ).fetchone()
+        parsed = json.loads(row[0])
+        assert parsed["required_bindings"] == ["area", "criterion"]
+        assert parsed["optional_bindings"] == ["limit"]
+
+    def test_idempotent_when_row_already_has_bindings(self, tmp_path, monkeypatch):
+        from nexus.db.migrations import _backfill_builtin_bindings
+
+        conn = sqlite3.connect(":memory:")
+        self._schema(conn)
+        already = json.dumps({
+            "steps": [{"tool": "search", "args": {}}],
+            "required_bindings": ["area"],
+        })
+        conn.execute(
+            "INSERT INTO plans "
+            "(query, plan_json, tags, verb, scope, dimensions, name) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("x", already, "builtin-template", "analyze", "global",
+             '{"verb":"analyze","scope":"global","strategy":"default"}',
+             "default"),
+        )
+        conn.commit()
+
+        _backfill_builtin_bindings(conn)
+
+        row = conn.execute(
+            "SELECT plan_json FROM plans WHERE name='default'"
+        ).fetchone()
+        assert row[0] == already
+
+    def test_skips_non_builtin_rows(self, tmp_path, monkeypatch):
+        """User ad-hoc rows (no ``builtin`` in tags) must not be touched
+        even if a dimension match exists in the shipping YAMLs.
+        """
+        from nexus.db.migrations import _backfill_builtin_bindings
+
+        conn = sqlite3.connect(":memory:")
+        self._schema(conn)
+        conn.execute(
+            "INSERT INTO plans "
+            "(query, plan_json, tags, verb, scope, dimensions, name) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("ad-hoc", '{"steps": []}', "ad-hoc,grown",
+             "analyze", "global",
+             '{"verb":"analyze","scope":"global","strategy":"default"}',
+             "default"),
+        )
+        conn.commit()
+
+        # Even with missing YAMLs the migration should no-op cleanly
+        # on non-builtin rows. Call it without fixture YAMLs.
+        _backfill_builtin_bindings(conn)
+
+        row = conn.execute(
+            "SELECT plan_json FROM plans WHERE name='default'"
+        ).fetchone()
+        assert row[0] == '{"steps": []}'
+
+    def test_registered_in_migrations_list(self):
+        from nexus.db.migrations import MIGRATIONS
+
+        matches = [
+            (m.introduced, m.name) for m in MIGRATIONS
+            if "backfill" in m.name.lower() and "binding" in m.name.lower()
+        ]
+        assert matches, (
+            "backfill-builtin-bindings migration must be in MIGRATIONS"
+        )
+        assert matches[0][0] >= "4.10.2", (
+            f"must be introduced at >= 4.10.2, got {matches[0][0]!r}"
         )

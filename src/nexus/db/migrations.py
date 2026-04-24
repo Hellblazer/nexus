@@ -1079,6 +1079,120 @@ def _retire_legacy_operation_shape_plans(conn: sqlite3.Connection) -> None:
     )
 
 
+def _backfill_builtin_bindings(conn: sqlite3.Connection) -> None:
+    """Patch required_bindings/optional_bindings into existing builtin rows.
+
+    The 4.10.1 seed_loader fix (nexus-80tk) merges YAML binding
+    declarations into plan_json at save_plan time, but rows seeded
+    before 4.10.1 short-circuit the seed loader on re-run because
+    their ``(project, dimensions)`` pair already exists. Without
+    this backfill, ``_validate_bindings`` still sees an empty list
+    on upgraded installs and unresolved ``$var`` literals leak into
+    operator prompts.
+
+    For each builtin row whose plan_json lacks a ``required_bindings``
+    key, resolve the shipping YAML by ``(verb, scope, strategy)``
+    and patch the binding lists into the stored JSON. Idempotent
+    via the ``NOT LIKE '%required_bindings%'`` pre-filter.
+
+    Silent no-op when the shipping YAMLs are unreachable (exotic
+    install layouts) — the seed loader's fail-loud guard at
+    ``nx catalog setup`` is the escalation path for that case.
+    """
+    import json as _json
+
+    try:
+        import yaml as _yaml
+        from importlib.resources import as_file, files
+    except ModuleNotFoundError:
+        return
+
+    rows = conn.execute(
+        "SELECT id, plan_json, dimensions FROM plans "
+        "WHERE tags LIKE '%builtin%' "
+        "AND plan_json NOT LIKE '%required_bindings%'"
+    ).fetchall()
+    if not rows:
+        return
+
+    # Resolve the shipping YAML directory via package resources, with
+    # a repo-root fallback for dev-mode runs. Mirrors
+    # ``catalog._resolve_plugin_root`` but inlined so this migration
+    # stays in the db layer.
+    yaml_dir = None
+    try:
+        resource = files("nexus") / "_resources" / "plans" / "builtin"
+        with as_file(resource) as resolved:
+            from pathlib import Path as _Path
+            if _Path(resolved).is_dir():
+                yaml_dir = _Path(resolved)
+    except (ModuleNotFoundError, FileNotFoundError, TypeError):
+        pass
+    if yaml_dir is None:
+        from pathlib import Path as _Path
+        repo_candidate = _Path(__file__).resolve().parents[3] / "nx" / "plans" / "builtin"
+        if repo_candidate.is_dir():
+            yaml_dir = repo_candidate
+    if yaml_dir is None:
+        _log.warning(
+            "backfill_builtin_bindings_skip",
+            reason="shipping YAMLs unreachable; run 'nx catalog setup' to re-seed",
+        )
+        return
+
+    bindings_index: dict[tuple[str, str, str], tuple[list, list]] = {}
+    for entry in yaml_dir.iterdir():
+        if not entry.is_file() or entry.suffix not in (".yml", ".yaml"):
+            continue
+        try:
+            template = _yaml.safe_load(entry.read_text()) or {}
+        except Exception:
+            continue
+        dims = template.get("dimensions") or {}
+        key = (
+            str(dims.get("verb", "")),
+            str(dims.get("scope", "")),
+            str(dims.get("strategy", "")),
+        )
+        required = list(template.get("required_bindings") or [])
+        optional = list(template.get("optional_bindings") or [])
+        if required or optional:
+            bindings_index[key] = (required, optional)
+
+    if not bindings_index:
+        return
+
+    backfilled = 0
+    for row_id, plan_json_text, dims_text in rows:
+        try:
+            parsed = _json.loads(plan_json_text or "{}")
+            dims = _json.loads(dims_text or "{}")
+        except _json.JSONDecodeError:
+            continue
+        key = (
+            str(dims.get("verb", "")),
+            str(dims.get("scope", "")),
+            str(dims.get("strategy", "")),
+        )
+        bindings = bindings_index.get(key)
+        if not bindings:
+            continue
+        required, optional = bindings
+        if required:
+            parsed["required_bindings"] = required
+        if optional:
+            parsed["optional_bindings"] = optional
+        conn.execute(
+            "UPDATE plans SET plan_json = ? WHERE id = ?",
+            (_json.dumps(parsed), row_id),
+        )
+        backfilled += 1
+
+    if backfilled:
+        conn.commit()
+        _log.info("backfill_builtin_bindings", rows=backfilled)
+
+
 MIGRATIONS: list[Migration] = [
     Migration("1.10.0", "Memory FTS rebuild with title", migrate_memory_fts),
     Migration("2.8.0", "Add plan project column", migrate_plan_project),
@@ -1146,6 +1260,11 @@ MIGRATIONS: list[Migration] = [
         "4.10.1",
         "Retire legacy operation-shape plans (nexus-4m9b)",
         _retire_legacy_operation_shape_plans,
+    ),
+    Migration(
+        "4.10.2",
+        "Backfill required/optional bindings on builtin plans (nexus-uyc6)",
+        _backfill_builtin_bindings,
     ),
 ]
 
