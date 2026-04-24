@@ -110,7 +110,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-085](rdr-085-glossary-aware-labeler.md) | Glossary-Aware Topic Labeler — Project Vocabulary via `claude_dispatch` | Feature | Closed (implemented) | 2026-04-16 |
 | [RDR-086](rdr-086-chash-span-resolution.md) | Chash Span Surface — Authoring, Resolution, and Verification | Feature | Closed (shipped in v4.7.0) | 2026-04-16 |
 | [RDR-087](rdr-087-collection-observability-surfaces.md) | Collection Observability and Curation Surfaces | Feature | Accepted | 2026-04-17 |
-| [RDR-088](rdr-088-agenticscholar-operator-completion.md) | AgenticScholar Operator-Set Completion | Feature | Draft | 2026-04-17 |
+| [RDR-088](rdr-088-agenticscholar-operator-completion.md) | AgenticScholar Operator-Set Completion | Feature | Closed (Phases 1+2 implemented; Phase 3 closed by spike) | 2026-04-17 |
 | [RDR-089](rdr-089-structured-aspect-extraction-at-ingest.md) | Structured Aspect Extraction at Ingest | Feature | Draft | 2026-04-17 |
 | [RDR-090](rdr-090-realistic-agenticscholar-benchmark.md) | Realistic AgenticScholar Benchmark | Feature | Draft | 2026-04-17 |
 | [RDR-091](rdr-091-scope-aware-plan-matching.md) | Scope-Aware Plan Matching (nexus-zs1d Phase 2) | Feature | Closed (implemented) | 2026-04-23 |

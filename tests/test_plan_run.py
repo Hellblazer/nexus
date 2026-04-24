@@ -581,6 +581,112 @@ async def test_run_passes_through_static_args_unchanged() -> None:
     assert disp.calls[0][1] == {"limit": 10, "flag": True}
 
 
+# ── operator_filter DAG-registry integration (RDR-088 nexus-ac40.2) ──────────
+
+
+@pytest.mark.asyncio
+async def test_run_filter_step_after_search_narrows_results() -> None:
+    """Search then filter: the filter step receives the search output via
+    a step reference and dispatches with the resolved items payload. This
+    pins the bead's 'plan with filter step after search narrows results'
+    acceptance contract — the runner wires filter as an operator, and
+    downstream can read the rationale back off the step output."""
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "search", "args": {"query": "concept", "limit": 10}},
+            {
+                "tool": "filter",
+                "args": {
+                    "items": "$step1.ids",
+                    "criterion": "published-after-2023",
+                },
+            },
+        ],
+    }
+    disp = _FakeDispatcher([
+        {"ids": ["a", "b", "c"], "tumblers": ["1.1", "1.2", "1.3"]},
+        {
+            "items": [{"id": "a"}, {"id": "c"}],
+            "rationale": [
+                {"id": "a", "reason": "published 2024"},
+                {"id": "b", "reason": "rejected: published 2022"},
+                {"id": "c", "reason": "published 2025"},
+            ],
+        },
+    ])
+    result = await plan_run(_match(plan), {}, dispatcher=disp)
+
+    # Custom dispatchers receive the bare tool name (verb). Operator name
+    # translation to ``operator_filter`` is the default-dispatcher's job;
+    # we verify resolution via _OPERATOR_TOOL_MAP separately in
+    # TestHydrateInputsTranslation.
+    tool, args = disp.calls[1]
+    assert tool == "filter"
+    assert args["criterion"] == "published-after-2023"
+    # $step1.ids resolved to the search output's id list.
+    assert args["items"] == ["a", "b", "c"]
+
+    filter_output = result.steps[1]
+    # The core narrowing contract: output length <= input length (subset).
+    # A valid all-pass filter returns every input; the assertion must not
+    # over-reach the bead's stated contract.
+    assert len(filter_output["items"]) <= len(result.steps[0]["ids"])
+    # This specific fake-dispatcher scripts 2 of 3 kept — pin that so the
+    # test is sensitive to regressions in the narrowing pipe.
+    assert len(filter_output["items"]) == 2
+    assert len(filter_output["rationale"]) == 3
+    output_ids = {it["id"] for it in filter_output["items"]}
+    rationale_ids = {r["id"] for r in filter_output["rationale"]}
+    assert output_ids.issubset(rationale_ids), (
+        "kept items must appear in rationale"
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_filter_rationale_accessible_via_step_ref() -> None:
+    """Downstream plan steps must be able to read filter's rationale via
+    ``$stepN.rationale`` — the per-item reasons are first-class output for
+    plans that need to surface filter decisions (audits, UI)."""
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "search", "args": {"query": "x"}},
+            {
+                "tool": "filter",
+                "args": {"items": "$step1.ids", "criterion": "fresh"},
+            },
+            {
+                "tool": "summarize",
+                "args": {"content": "$step2.rationale"},
+            },
+        ],
+    }
+    disp = _FakeDispatcher([
+        {"ids": ["a", "b"], "tumblers": []},
+        {
+            "items": [{"id": "a"}],
+            "rationale": [
+                {"id": "a", "reason": "kept-sentinel"},
+                {"id": "b", "reason": "rejected-sentinel"},
+            ],
+        },
+        {"summary": "done"},
+    ])
+    await plan_run(_match(plan), {}, dispatcher=disp)
+
+    summarize_tool, summarize_args = disp.calls[2]
+    # Custom dispatcher sees the bare verb; translation is default-dispatcher-only.
+    assert summarize_tool == "summarize"
+    passed = summarize_args.get("content")
+    assert passed is not None, "summarize must receive rationale content"
+    flattened = json.dumps(passed) if not isinstance(passed, str) else passed
+    assert "kept-sentinel" in flattened
+    assert "rejected-sentinel" in flattened
+
+
 # ── MCP prefix stripping + legacy key aliases ────────────────────────────────
 
 
@@ -734,3 +840,182 @@ class TestHydrateInputsTranslation:
         )
         assert tool == "operator_extract"
         assert args == {"inputs": "item list", "fields": "a,b"}
+
+    def test_filter_bare_name_resolves_to_operator_filter(self):
+        """RDR-088 nexus-ac40.1: plan YAML using ``tool: filter`` must
+        resolve through ``_OPERATOR_TOOL_MAP`` to ``operator_filter``."""
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(
+            "filter", {"items": '[]', "criterion": "relevance"},
+        )
+        assert tool == "operator_filter"
+        assert args == {"items": '[]', "criterion": "relevance"}
+
+    def test_filter_renames_inputs_to_items(self):
+        """RDR-088 nexus-ac40.1 audit carry-over: pre-hydrated step passing
+        ``$stepN.contents`` via ``inputs:`` must be renamed to
+        ``items`` so the filter operator's positional arg is populated.
+        Without this translation, a plan step hits the nexus-yis0 TypeError
+        class."""
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(
+            "filter", {"inputs": ["a", "b"], "criterion": "keep"},
+        )
+        assert tool == "operator_filter"
+        assert args == {
+            "items": json.dumps(["a", "b"]),
+            "criterion": "keep",
+        }
+
+    def test_filter_coerces_list_items_to_json(self):
+        """List-valued ``items`` must be json-encoded so the operator
+        prompt sees clean JSON rather than Python repr. Mirrors the
+        existing rank/compare coercion at runner.py:666."""
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(
+            "filter",
+            {"items": [{"id": "a"}, {"id": "b"}], "criterion": "x"},
+        )
+        assert tool == "operator_filter"
+        assert args["items"] == json.dumps([{"id": "a"}, {"id": "b"}])
+
+    def test_filter_preserves_string_items(self):
+        """Already-stringified ``items`` must pass through untouched
+        to avoid double-JSON-encoding."""
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(
+            "filter",
+            {"items": '["already", "json"]', "criterion": "x"},
+        )
+        assert tool == "operator_filter"
+        assert args["items"] == '["already", "json"]'
+
+    def test_filter_ids_hydrates_to_items(self):
+        """When a filter step declares ``ids:`` and the auto-hydration
+        path runs ``store_get_many``, the fetched content list must
+        land on the ``items`` arg (not ``inputs``), so the filter's
+        positional arg is populated."""
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _hydrate_operator_args
+
+        fake_contents = {"contents": ["doc-a body", "doc-b body"]}
+        with patch(
+            "nexus.mcp.core.store_get_many", return_value=fake_contents,
+        ):
+            tool, args = _hydrate_operator_args(
+                "filter",
+                {"ids": ["doc-a", "doc-b"], "criterion": "on-topic"},
+            )
+        assert tool == "operator_filter"
+        assert "ids" not in args and "collections" not in args
+        assert args["items"] == json.dumps(["doc-a body", "doc-b body"])
+        assert args["criterion"] == "on-topic"
+
+    # ── operator_check hydration (RDR-088 nexus-ac40.4) ─────────────────
+
+    def test_check_bare_name_resolves_to_operator_check(self):
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(
+            "check",
+            {"items": '[]', "check_instruction": "consistent"},
+        )
+        assert tool == "operator_check"
+        assert args == {"items": '[]', "check_instruction": "consistent"}
+
+    def test_check_renames_inputs_to_items(self):
+        """Pre-hydrated step passing ``$stepN.contents`` via ``inputs:`` must
+        be renamed to ``items`` so the check operator's positional arg is
+        populated. Same class as the nexus-yis0 TypeError for rank/compare."""
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(
+            "check",
+            {"inputs": ["doc-a", "doc-b"], "check_instruction": "agree"},
+        )
+        assert tool == "operator_check"
+        assert args == {
+            "items": json.dumps(["doc-a", "doc-b"]),
+            "check_instruction": "agree",
+        }
+
+    def test_check_coerces_list_items_to_json(self):
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(
+            "check",
+            {"items": [{"id": "p1"}, {"id": "p2"}],
+             "check_instruction": "consistent"},
+        )
+        assert tool == "operator_check"
+        assert args["items"] == json.dumps([{"id": "p1"}, {"id": "p2"}])
+
+    def test_check_ids_hydrates_to_items(self):
+        """check + ids: auto-hydration pulls document bodies and lands
+        them on ``items`` so the operator prompt sees concrete content."""
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _hydrate_operator_args
+
+        fake_contents = {"contents": ["body-a", "body-b"]}
+        with patch(
+            "nexus.mcp.core.store_get_many", return_value=fake_contents,
+        ):
+            tool, args = _hydrate_operator_args(
+                "check",
+                {"ids": ["doc-a", "doc-b"],
+                 "check_instruction": "claim holds"},
+            )
+        assert tool == "operator_check"
+        assert args["items"] == json.dumps(["body-a", "body-b"])
+        assert args["check_instruction"] == "claim holds"
+        assert "ids" not in args and "collections" not in args
+
+    # ── operator_verify hydration (RDR-088 nexus-ac40.4) ────────────────
+
+    def test_verify_bare_name_resolves_to_operator_verify(self):
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(
+            "verify",
+            {"claim": "X is true", "evidence": "see §2"},
+        )
+        assert tool == "operator_verify"
+        assert args == {"claim": "X is true", "evidence": "see §2"}
+
+    def test_verify_passes_scalar_args_untouched(self):
+        """operator_verify takes two scalars (claim + evidence); there is
+        no list-to-scalar translation to perform. The audit carry-over is
+        explicit: skip _INPUTS_TARGET for verify."""
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(
+            "verify",
+            {"claim": "nuclear reactor runs on fusion",
+             "evidence": "raw-evidence-text"},
+        )
+        assert tool == "operator_verify"
+        assert args["claim"] == "nuclear reactor runs on fusion"
+        assert args["evidence"] == "raw-evidence-text"
+
+    def test_verify_inputs_arg_is_not_translated(self):
+        """A stray ``inputs`` arg on a verify step must NOT be silently
+        renamed — verify's contract is two scalar args. Translating would
+        mask an authoring bug. The step should either raise or drop the
+        unknown arg downstream; _hydrate_operator_args must leave
+        ``inputs`` in place so the downstream TypeError is attributable."""
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(
+            "verify",
+            {"inputs": "stray", "claim": "c", "evidence": "e"},
+        )
+        assert tool == "operator_verify"
+        assert args.get("inputs") == "stray"
+        assert args["claim"] == "c"
+        assert args["evidence"] == "e"
