@@ -32,6 +32,28 @@ def pytest_configure(config):
 
 
 @pytest.fixture(autouse=True)
+def _restore_structlog_after_test():
+    """Save and restore structlog config around every test so any test
+    that calls ``structlog.configure(...)`` (directly or via
+    ``nexus.logging_setup.configure_logging``) does not leak its
+    config to downstream tests.
+
+    Background: tests that swap ``logger_factory`` from the default
+    ``PrintLoggerFactory`` to ``LoggerFactory(stdlib)`` reroute every
+    structlog event from stderr to stdlib logging. ``capsys``-based
+    assertions in unrelated tests then read empty strings while the
+    event sits in caplog. The originally-affected test was
+    ``test_plan_audit_logs_warning_on_clamp``, which fails when run
+    after any test that pollutes structlog. Solving it per-file via
+    individual autouse fixtures drifted; a global one is cheap and
+    closes the door for new tests too.
+    """
+    saved = structlog.get_config()
+    yield
+    structlog.configure(**saved)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_t1_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Redirect T1 SESSIONS_DIR so tests never discover real live server records.
 
