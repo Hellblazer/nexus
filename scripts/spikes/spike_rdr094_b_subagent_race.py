@@ -105,21 +105,36 @@ class RunRecord:
     elapsed_ms: float
     setup_failed: bool
     error: Optional[str]
+    # Diagnostic tail when the probe failed to produce a parseable
+    # outcome line. Empty string when the cycle classified cleanly.
+    child_stderr_tail: str = ""
+
+
+#: Substring that appears in T1Database.__init__'s warning when the
+#: subagent falls through to chromadb.EphemeralClient(). The warning
+#: is the canonical signal for the silent-downgrade because both
+#: HttpClient and EphemeralClient are factory functions returning
+#: ``chromadb.api.client.Client``; ``type(client).__name__`` cannot
+#: distinguish them.
+_DOWNGRADE_WARNING = "falling back to local EphemeralClient"
 
 
 def _classify_outcome(child_stdout: str, setup_failed: bool) -> str:
     """Classify a cycle outcome from the child's reported state.
 
     Vocabulary:
-      * ``connected_to_parent`` -- child's ``T1Database._client`` is a
-        ``HttpClient`` pointed at the parent's chroma.
-      * ``ephemeral_downgrade`` -- child's ``_client`` is an
-        ``EphemeralClient`` (the silent-downgrade signature).
+      * ``connected_to_parent`` -- the subagent's
+        :class:`T1Database` resolved a session record and connected
+        via ``HttpClient``. Probe records this as
+        ``outcome=connected_to_parent``.
+      * ``ephemeral_downgrade`` -- the subagent fell through to
+        ``chromadb.EphemeralClient`` (the silent-downgrade signature).
+        Probe records this as ``outcome=ephemeral_downgrade``.
       * ``setup_failed`` -- the harness could not get nx-mcp +
         chroma up at all; CA-2 cannot be tested in this cycle.
       * ``unknown`` -- the child never printed a parseable outcome
-        line. Treated as a hard failure (probably nx-mcp crash or
-        child timeout).
+        line. Treated as inconclusive (probably nx-mcp crash, child
+        import error, or timeout).
     """
     if setup_failed:
         return "setup_failed"
@@ -131,11 +146,17 @@ def _classify_outcome(child_stdout: str, setup_failed: bool) -> str:
             obj = json.loads(line)
         except json.JSONDecodeError:
             continue
-        client_kind = obj.get("client_class", "")
-        if "HttpClient" in client_kind:
-            return "connected_to_parent"
-        if "Ephemeral" in client_kind:
-            return "ephemeral_downgrade"
+        # Probe-side classification (preferred): the child computed
+        # the outcome directly from the warnings stream.
+        outcome = obj.get("outcome", "")
+        if outcome in ("connected_to_parent", "ephemeral_downgrade"):
+            return outcome
+        # Fallback for older harness output: warnings inspection.
+        for w in obj.get("warnings", []) or []:
+            if _DOWNGRADE_WARNING in str(w):
+                return "ephemeral_downgrade"
+        # Probe ran but produced no diagnostic signal -- keep as unknown
+        # rather than silently classifying as connected_to_parent.
     return "unknown"
 
 
@@ -143,14 +164,16 @@ _SUBAGENT_PROBE = """
 # Subagent T1 race probe.
 #
 # Inherits NX_SESSION_ID + NEXUS_CONFIG_DIR from parent. Constructs a
-# fresh T1Database and prints {client_class, session_id} on stdout.
+# fresh T1Database; computes the outcome directly from the captured
+# warning stream (chromadb.HttpClient and chromadb.EphemeralClient
+# both return chromadb.api.client.Client, so type() cannot
+# distinguish them; the T1Database fallback warning is the canonical
+# signal).
 import json
 import os
 import sys
 import warnings
 
-# Capture downgrade warning for diagnostic context (not for outcome
-# classification -- the client class is the authoritative signal).
 warnings.simplefilter("always")
 captured: list[str] = []
 
@@ -162,7 +185,9 @@ warnings.showwarning = _capture
 from nexus.db.t1 import T1Database
 
 t1 = T1Database()
+downgraded = any("falling back to local EphemeralClient" in str(w) for w in captured)
 print(json.dumps({
+    "outcome": "ephemeral_downgrade" if downgraded else "connected_to_parent",
     "client_class": type(t1._client).__name__,
     "session_id": t1._session_id,
     "warnings": captured,
@@ -232,7 +257,7 @@ def _run_cycle(timing_variant_ms: int, run_id: int) -> RunRecord:
             time.sleep(timing_variant_ms / 1000.0)
 
         try:
-            stdout, _stderr, _rc = _spawn_subagent_probe(env, CHILD_TIMEOUT_S)
+            stdout, stderr, _rc = _spawn_subagent_probe(env, CHILD_TIMEOUT_S)
         except subprocess.TimeoutExpired:
             elapsed_ms = (time.monotonic() - t0) * 1000.0
             return RunRecord(
@@ -251,12 +276,19 @@ def _run_cycle(timing_variant_ms: int, run_id: int) -> RunRecord:
         record_path = cycle_dir / "sessions" / f"{session_id}.session"
         record_present = record_path.exists()
         outcome = _classify_outcome(stdout, setup_failed=not record_present and stdout == "")
+        # Capture child stderr tail when classification couldn't read
+        # a positive signal -- gives the operator something to debug
+        # without spelunking through 40 cycles of tmpdirs.
+        stderr_tail = ""
+        if outcome == "unknown" and stderr:
+            stderr_tail = stderr.strip().splitlines()[-1][:300] if stderr.strip() else ""
         return RunRecord(
             timing_variant_ms=timing_variant_ms,
             run_id=run_id, outcome=outcome,
             elapsed_ms=round(elapsed_ms, 2),
             setup_failed=outcome == "setup_failed",
             error=None,
+            child_stderr_tail=stderr_tail,
         )
     finally:
         if parent is not None and parent.poll() is None:
@@ -303,14 +335,15 @@ def _aggregate(records: list[RunRecord]) -> dict[str, Any]:
         "ephemeral_downgrade": grand_downgrade,
         "setup_failed": grand_setup_failed,
     }
-    usable = grand_total - grand_setup_failed
+    # Verification needs POSITIVE evidence (>=1 connected_to_parent) AND
+    # zero downgrades. All-unknown / all-setup-failed is inconclusive,
+    # not verified -- otherwise a probe that always crashes would
+    # falsely confirm CA-2.
     if grand_downgrade > 0:
         summary["interpretation"] = "ca2_failed_race_reproducible"
-    elif usable > 0:
+    elif grand_connected > 0:
         summary["interpretation"] = "ca2_verified_race_not_reproducible"
     else:
-        # Every cycle setup-failed: no usable data points, cannot
-        # conclude either way.
         summary["interpretation"] = "inconclusive"
     return summary
 
