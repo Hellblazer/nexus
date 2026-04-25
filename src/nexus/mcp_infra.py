@@ -362,6 +362,115 @@ def _record_hook_failure(
         )
 
 
+# ── Post-store batch hooks (RDR-095, nexus-wxcb) ─────────────────────────────
+# Parallel batch-shape contract for bulk-ingest enrichment. Single-document
+# hooks above fire from MCP store_put; batch hooks fire from CLI indexing
+# paths where N docs land in one operation and consumers benefit from
+# batched dependency calls (e.g. one ChromaDB query for N centroids vs N
+# sequential queries). Same per-hook failure-isolation pattern: exceptions
+# captured, persisted to T2 hook_failures, never propagated.
+
+_post_store_batch_hooks: list = []
+
+
+def register_post_store_batch_hook(fn) -> None:
+    """Register a callable(doc_ids, collection, contents, embeddings, metadatas)
+    to fire after batch CLI ingest."""
+    _post_store_batch_hooks.append(fn)
+
+
+def fire_post_store_batch_hooks(
+    doc_ids: list[str],
+    collection: str,
+    contents: list[str],
+    embeddings: list[list[float]] | None = None,
+    metadatas: list[dict] | None = None,
+) -> None:
+    """Invoke all registered batch hooks. Per-hook failures captured and
+    persisted to T2 hook_failures, never raised.
+
+    Empty doc_ids returns early — no hooks fire on empty batches.
+
+    Different consumers read different payload fields:
+    chash_dual_write_batch_hook reads metadatas, taxonomy_assign_batch_hook
+    reads embeddings. Hooks ignore parameters they don't need.
+    """
+    if not doc_ids:
+        return
+    import structlog
+    _hook_log = structlog.get_logger()
+    for hook in _post_store_batch_hooks:
+        try:
+            hook(doc_ids, collection, contents, embeddings, metadatas)
+        except Exception as exc:
+            hook_name = getattr(hook, "__name__", "?")
+            _hook_log.warning(
+                "post_store_batch_hook_failed",
+                hook=hook_name,
+                exc_info=True,
+            )
+            _record_batch_hook_failure(
+                doc_ids=doc_ids,
+                collection=collection,
+                hook_name=hook_name,
+                error=str(exc),
+            )
+
+
+def _record_batch_hook_failure(
+    *,
+    doc_ids: list[str],
+    collection: str,
+    hook_name: str,
+    error: str,
+) -> None:
+    """Persist a batch-shape post-store hook failure to T2 ``hook_failures``.
+
+    Writes the JSON-encoded doc_id list to ``batch_doc_ids`` and sets
+    ``is_batch=1``; stores a representative scalar (first doc_id) in the
+    legacy ``doc_id`` column so existing scalar readers continue to render
+    something meaningful (RDR-095 schema migration adds the two new columns
+    in 4.14.1).
+
+    Falls back to scalar-only insert if the new columns don't exist yet
+    (P1.1 merged before P1.2 migration ran). Same secondary best-effort
+    semantics as ``_record_hook_failure``: persistence failure cannot
+    break ingest.
+    """
+    import json
+    import sqlite3
+    representative = doc_ids[0] if doc_ids else ""
+    payload = json.dumps(doc_ids)
+    truncated = error[:2000]
+    try:
+        with t2_ctx() as t2:
+            conn = t2.taxonomy.conn
+            with t2.taxonomy._lock:
+                try:
+                    conn.execute(
+                        "INSERT INTO hook_failures "
+                        "(doc_id, collection, hook_name, error, "
+                        " batch_doc_ids, is_batch) VALUES (?, ?, ?, ?, ?, 1)",
+                        (representative, collection, hook_name, truncated, payload),
+                    )
+                except sqlite3.OperationalError:
+                    # Pre-4.14.1 schema: new columns not yet migrated.
+                    conn.execute(
+                        "INSERT INTO hook_failures "
+                        "(doc_id, collection, hook_name, error) VALUES (?, ?, ?, ?)",
+                        (representative, collection, hook_name, truncated),
+                    )
+                conn.commit()
+    except Exception:
+        import structlog
+        structlog.get_logger().debug(
+            "batch_hook_failure_persist_failed",
+            hook=hook_name,
+            collection=collection,
+            exc_info=True,
+        )
+
+
 def taxonomy_assign_hook(
     doc_id: str,
     collection: str,

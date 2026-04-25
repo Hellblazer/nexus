@@ -572,6 +572,36 @@ def migrate_hook_failures(conn: sqlite3.Connection) -> None:
     _log.info("Migrated: created hook_failures table (GH #251)")
 
 
+def migrate_hook_failures_batch_columns(conn: sqlite3.Connection) -> None:
+    """Add ``batch_doc_ids`` + ``is_batch`` columns to ``hook_failures``
+    for RDR-095 batch-shape failure capture.
+
+    Additive only: existing scalar-doc_id rows are untouched. New batch
+    failures populate ``batch_doc_ids`` (JSON-encoded list) and set
+    ``is_batch=1``; the legacy ``doc_id`` column carries a representative
+    scalar (first id in the batch) so existing scalar readers continue to
+    render something meaningful. The reader update for batch shape lands
+    in Phase 3 (``nx taxonomy status``).
+
+    Idempotent: no-op when columns already exist or when ``hook_failures``
+    has not yet been created (4.9.10 migration runs first in the chain).
+    """
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='hook_failures'"
+    ).fetchone()
+    if row is None:
+        return
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(hook_failures)").fetchall()}
+    if "batch_doc_ids" not in cols:
+        conn.execute("ALTER TABLE hook_failures ADD COLUMN batch_doc_ids TEXT")
+    if "is_batch" not in cols:
+        conn.execute(
+            "ALTER TABLE hook_failures ADD COLUMN is_batch INTEGER NOT NULL DEFAULT 0"
+        )
+    conn.commit()
+    _log.info("Migrated: hook_failures.batch_doc_ids + is_batch (RDR-095)")
+
+
 def migrate_chash_index(conn: sqlite3.Connection) -> None:
     """Create the ``chash_index`` table for RDR-086 Phase 1.
 
@@ -1297,6 +1327,11 @@ MIGRATIONS: list[Migration] = [
         "4.14.0",
         "Add hook_telemetry table (nexus-ntbg — Claude Code v2.1.119+ duration_ms capture)",
         migrate_hook_telemetry,
+    ),
+    Migration(
+        "4.14.1",
+        "Add hook_failures.batch_doc_ids + is_batch (RDR-095)",
+        migrate_hook_failures_batch_columns,
     ),
 ]
 

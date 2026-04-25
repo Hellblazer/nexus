@@ -19,10 +19,12 @@ def chroma_client() -> chromadb.ClientAPI:
 @pytest.fixture(autouse=True)
 def _reset_hooks():
     """Clear post_store_hooks between tests to prevent cross-test leakage."""
-    from nexus.mcp_infra import _post_store_hooks
+    from nexus.mcp_infra import _post_store_batch_hooks, _post_store_hooks
     _post_store_hooks.clear()
+    _post_store_batch_hooks.clear()
     yield
     _post_store_hooks.clear()
+    _post_store_batch_hooks.clear()
 
 
 # ── Hook mechanism ───────────────────────────────────────────────────────────
@@ -137,6 +139,237 @@ def test_fire_post_store_hooks_persist_failure_is_best_effort(
     register_post_store_hook(bad_hook)
     # Must not raise even though both the hook AND the persist path failed.
     fire_post_store_hooks("d", "c", "content")
+
+
+# ── Batch hook mechanism (RDR-095, nexus-wxcb) ───────────────────────────────
+
+
+def test_fire_post_store_batch_hooks_calls_registered() -> None:
+    """fire_post_store_batch_hooks invokes all registered callables in order."""
+    from nexus.mcp_infra import (
+        fire_post_store_batch_hooks,
+        register_post_store_batch_hook,
+    )
+
+    calls: list[tuple] = []
+
+    def hook_a(doc_ids, collection, contents, embeddings, metadatas):
+        calls.append(("a", tuple(doc_ids), collection))
+
+    def hook_b(doc_ids, collection, contents, embeddings, metadatas):
+        calls.append(("b", tuple(doc_ids), collection))
+
+    register_post_store_batch_hook(hook_a)
+    register_post_store_batch_hook(hook_b)
+
+    fire_post_store_batch_hooks(
+        ["d1", "d2"], "code__nexus", ["c1", "c2"], None, None,
+    )
+
+    assert calls == [
+        ("a", ("d1", "d2"), "code__nexus"),
+        ("b", ("d1", "d2"), "code__nexus"),
+    ]
+
+
+def test_fire_post_store_batch_hooks_empty_doc_ids_early_return() -> None:
+    """Empty doc_ids returns early — no hooks fire on empty batches."""
+    from nexus.mcp_infra import (
+        fire_post_store_batch_hooks,
+        register_post_store_batch_hook,
+    )
+
+    calls: list = []
+    register_post_store_batch_hook(
+        lambda doc_ids, collection, contents, embeddings, metadatas: calls.append(1)
+    )
+
+    fire_post_store_batch_hooks([], "x", [], None, None)
+    assert calls == []
+
+
+def test_fire_post_store_batch_hooks_isolation(tmp_path: Path, monkeypatch) -> None:
+    """First hook raising must not block the second hook from firing.
+
+    Uses a synthetic raising probe — the real taxonomy_assign_batch_hook
+    body wraps everything in its own try/except and so cannot exercise the
+    framework's failure-capture path.
+    """
+    import nexus.mcp_infra as mod
+    from nexus.db.migrations import (
+        migrate_hook_failures,
+        migrate_hook_failures_batch_columns,
+    )
+    from nexus.mcp_infra import (
+        fire_post_store_batch_hooks,
+        register_post_store_batch_hook,
+    )
+    import sqlite3
+
+    db_path = tmp_path / "batch_hook_failures.db"
+    T2Database(db_path).close()
+    conn = sqlite3.connect(str(db_path))
+    migrate_hook_failures(conn)
+    migrate_hook_failures_batch_columns(conn)
+    conn.close()
+    monkeypatch.setattr(mod, "t2_ctx", lambda: T2Database(db_path))
+
+    second_calls: list = []
+
+    def raising_probe(doc_ids, collection, contents, embeddings, metadatas):
+        raise RuntimeError("simulated batch failure")
+
+    def survivor(doc_ids, collection, contents, embeddings, metadatas):
+        second_calls.append(tuple(doc_ids))
+
+    register_post_store_batch_hook(raising_probe)
+    register_post_store_batch_hook(survivor)
+
+    fire_post_store_batch_hooks(
+        ["doc-1", "doc-2", "doc-3"], "code__nexus", ["c1", "c2", "c3"], None, None,
+    )
+
+    assert second_calls == [("doc-1", "doc-2", "doc-3")]
+
+    with T2Database(db_path) as db:
+        row = db.taxonomy.conn.execute(
+            "SELECT doc_id, collection, hook_name, error, batch_doc_ids, is_batch "
+            "FROM hook_failures"
+        ).fetchone()
+
+    assert row is not None
+    doc_id, collection, hook_name, error, batch_doc_ids, is_batch = row
+    assert doc_id == "doc-1"  # representative scalar
+    assert collection == "code__nexus"
+    assert hook_name == "raising_probe"
+    assert "simulated batch failure" in error
+    assert batch_doc_ids == '["doc-1", "doc-2", "doc-3"]'
+    assert is_batch == 1
+
+
+def test_fire_post_store_batch_hooks_partial_commit_failure_mode(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """A batch hook may commit sub-step A, then raise on sub-step B.
+
+    Validates the documented contract: framework writes one hook_failures
+    row capturing the full doc_id list and exception text. Per-sub-step
+    capture is hook-internal, not framework-level.
+    """
+    import nexus.mcp_infra as mod
+    from nexus.db.migrations import (
+        migrate_hook_failures,
+        migrate_hook_failures_batch_columns,
+    )
+    from nexus.mcp_infra import (
+        fire_post_store_batch_hooks,
+        register_post_store_batch_hook,
+    )
+    import sqlite3
+
+    db_path = tmp_path / "partial_commit.db"
+    T2Database(db_path).close()
+    conn = sqlite3.connect(str(db_path))
+    migrate_hook_failures(conn)
+    migrate_hook_failures_batch_columns(conn)
+    conn.close()
+    monkeypatch.setattr(mod, "t2_ctx", lambda: T2Database(db_path))
+
+    sub_step_log: list[str] = []
+
+    def two_step_hook(doc_ids, collection, contents, embeddings, metadatas):
+        sub_step_log.append("step_a_committed")
+        # Simulate cross-collection projection failure after same-collection
+        # assignment landed.
+        raise RuntimeError("cross_collection_projection_failed")
+
+    register_post_store_batch_hook(two_step_hook)
+
+    fire_post_store_batch_hooks(
+        ["doc-a", "doc-b"], "knowledge__delos", ["c1", "c2"], None, None,
+    )
+
+    assert sub_step_log == ["step_a_committed"]
+
+    with T2Database(db_path) as db:
+        rows = db.taxonomy.conn.execute(
+            "SELECT batch_doc_ids, is_batch, error FROM hook_failures"
+        ).fetchall()
+
+    assert len(rows) == 1
+    batch_doc_ids, is_batch, error = rows[0]
+    assert batch_doc_ids == '["doc-a", "doc-b"]'
+    assert is_batch == 1
+    assert "cross_collection_projection_failed" in error
+
+
+def test_fire_post_store_batch_hooks_falls_back_to_scalar_when_columns_absent(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """If batch_doc_ids/is_batch columns aren't migrated yet (P1.1 merged
+    before P1.2), the failure capture writes a scalar-only row rather than
+    crashing."""
+    import nexus.mcp_infra as mod
+    from nexus.db.migrations import migrate_hook_failures
+    from nexus.mcp_infra import (
+        fire_post_store_batch_hooks,
+        register_post_store_batch_hook,
+    )
+    import sqlite3
+
+    db_path = tmp_path / "pre_migration.db"
+    T2Database(db_path).close()
+    conn = sqlite3.connect(str(db_path))
+    migrate_hook_failures(conn)  # but NOT migrate_hook_failures_batch_columns
+    conn.close()
+    monkeypatch.setattr(mod, "t2_ctx", lambda: T2Database(db_path))
+
+    def raising(doc_ids, collection, contents, embeddings, metadatas):
+        raise RuntimeError("kaboom")
+
+    register_post_store_batch_hook(raising)
+    fire_post_store_batch_hooks(
+        ["d1", "d2"], "code__nexus", ["c1", "c2"], None, None,
+    )
+
+    with T2Database(db_path) as db:
+        cols = {
+            r[1] for r in db.taxonomy.conn.execute(
+                "PRAGMA table_info(hook_failures)"
+            ).fetchall()
+        }
+        rows = db.taxonomy.conn.execute(
+            "SELECT doc_id, hook_name, error FROM hook_failures"
+        ).fetchall()
+
+    assert "batch_doc_ids" not in cols  # confirm the pre-migration shape
+    assert len(rows) == 1
+    assert rows[0][0] == "d1"
+    assert rows[0][1] == "raising"
+    assert "kaboom" in rows[0][2]
+
+
+def test_fire_post_store_batch_hooks_persist_failure_is_best_effort(
+    monkeypatch,
+) -> None:
+    """If the persist path itself raises, fire_post_store_batch_hooks
+    still returns and ingest continues."""
+    import nexus.mcp_infra as mod
+    from nexus.mcp_infra import (
+        fire_post_store_batch_hooks,
+        register_post_store_batch_hook,
+    )
+
+    monkeypatch.setattr(mod, "t2_ctx", lambda: (_ for _ in ()).throw(
+        RuntimeError("t2 offline"),
+    ))
+
+    def raising(doc_ids, collection, contents, embeddings, metadatas):
+        raise RuntimeError("primary failure")
+
+    register_post_store_batch_hook(raising)
+    # Must not raise even though both hook AND persist path fail.
+    fire_post_store_batch_hooks(["d1"], "c", ["x"], None, None)
 
 
 # ── Taxonomy assignment hook ─────────────────────────────────────────────────
