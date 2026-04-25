@@ -6,6 +6,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.13.0] - 2026-04-25
+
+Closes RDR-094 Phase F (final phase of the MCP-Owned T1 Chroma Lifecycle epic). The `NEXUS_MCP_OWNS_T1` env-var gate from 4.12.0 is removed entirely; nx-mcp's lifespan unconditionally owns chroma's lifecycle. Net source diff: **-283 lines** (deletion of dead-but-gated code paths).
+
+This release is structurally a simplification: 4.12.0 already shipped the MCP-owned-T1 path as default-on; 4.12.1 fixed the stdin-EOF + SIGTERM signal-handler race that surfaced in the shakeout. 4.13.0 deletes the opt-out machinery now that the path is empirically validated. Same observable behaviour as 4.12.1 unless an operator was explicitly setting `NEXUS_MCP_OWNS_T1=0` to opt out: the env var is now silently ignored and the MCP-owned path runs anyway.
+
+### Removed
+
+- **`NEXUS_MCP_OWNS_T1` env-var gate** (`src/nexus/mcp/core.py`, `src/nexus/hooks.py`). Module-scope `_MCP_OWNS_T1` constant, `_flag_enabled` helper in `mcp/core.py`, and `_mcp_owns_t1_enabled` helper in `hooks.py` all deleted. FastMCP's `lifespan` kwarg is unconditionally `_t1_chroma_lifespan`; `main()` unconditionally registers atexit + SIGTERM/SIGINT handlers. Tests gain regression sentinels (`test_no_mcp_owns_t1_module_attr`) asserting the module attrs are gone.
+
+- **Hook-side chroma-spawn block** (`src/nexus/hooks.py:session_start`). The session.lock acquisition, `start_t1_server` call, `write_session_record_by_id` call, and `spawn_t1_watchdog` call are all deleted. nx-mcp's lifespan owns spawn; the hook now only runs the orphan-tmpdir sweep, resolves the session UUID (env > stdin > fresh), and writes `current_session` when this is a top-level session. Imports of `fcntl`, `shutil`, `find_ancestor_session`, `find_claude_root_pid`, `spawn_t1_watchdog`, `start_t1_server`, `stop_t1_server`, `write_session_record`, `write_session_record_by_id`, `_ppid_of` are dropped.
+
+- **Hook-side chroma-stop block** (`src/nexus/hooks.py:session_end`). `session_end` is now a thin pass-through to `session_end_flush` (`return session_end_flush()`). Chroma teardown is owned by nx-mcp's lifespan + signal handler + atexit chain (with the watchdog as the safety net), never by the hook.
+
+### Changed
+
+- **RDR-094 §Phase 4 marked COMPLETE** (`docs/rdr/rdr-094-mcp-owned-t1-chroma-lifecycle.md`). The Phase 4 prerequisites enumeration is replaced with a record of how each was cleared: CA-2 verified post-mitigation (Spike B 40/40 connected_to_parent, T2 id=983); Phase B+C shipped (PRs #306, #307); canary served by the v4.12.0 → v4.12.1 shakeout cycle (PR #314 fixed the stdin-EOF + SIGTERM signal-handler race that surfaced).
+
+- **RDR-093 closed as implemented** (`docs/rdr/rdr-093-groupby-aggregate-operators.md`). `operator_groupby` and `operator_aggregate` shipped in RDR-088's wake; per-gap pointers validated against the codebase. Ride-along close in this release.
+
 ## [4.12.1] - 2026-04-25
 
 Shakeout patch for 4.12.0. Production sessions on Hal's reference install showed `mcp_server_crashed` events in `mcp.log` on every clean shutdown after the default-on flag flip. Root cause: stdin-EOF + SIGTERM race. Claude Code closes the MCP client's stdio pipe and sends SIGTERM near-simultaneously; the lifespan finally fires (clean-exit path) and starts running `_t1_chroma_shutdown` → `stop_t1_server`'s 100ms poll loop; the SIGTERM signal handler then runs on top of the paused frame, calls `sys.exit(0)`, and the resulting `SystemExit` propagates through anyio's TaskGroup as an unhandled error. Chroma was always cleaned up correctly (the watchdog confirmed via `chroma_cleanup_complete` events; `nx doctor --check-tmpdirs` was clean), but every clean shutdown logged a misleading multi-thousand-character traceback as a "crash".
