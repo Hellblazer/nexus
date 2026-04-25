@@ -3,7 +3,7 @@
 """RDR-094 Critical Assumption #1 + #3 lifecycle probe.
 
 Spike A from RDR-094 §Implementation Plan > Prerequisites. Validates
-the chroma-cleanup completion rate by source for four phases:
+the chroma-cleanup completion rate by source for five phases:
 
   1. Clean shutdown via SIGTERM to nx-mcp.
        Expect: FastMCP lifespan finally fires (anyio cancellation
@@ -28,6 +28,22 @@ the chroma-cleanup completion rate by source for four phases:
        SIGTERM to mcp_pid, mcp's lifespan finally runs, chroma exits
        within MCP_GRACE_SECS=2s + POLL_INTERVAL=5s.
        Target: claude-crash path covers >=95% of runs.
+
+  5. stdio pipe break (nexus-sawb / fifth failure mode).
+       The harness closes nx-mcp's stdin abruptly without sending any
+       signal. Tests the silent-death pattern observed 2026-04-25
+       (nx-mcp pid 94433 went idle for 25 minutes with NO
+       mcp_server_stopping AND NO mcp_server_crashed event). Lifespan
+       finally + signal handlers + atexit are all bypassed if the
+       stdio reader hangs on EOF.
+       Expect: dual-watch watchdog (--mcp-pid trigger) catches the
+       mcp_pid death and cleans chroma. cleanup_path of
+       ``watchdog_mcp`` (crash event recorded) or ``watchdog_unknown``
+       (no mcp lifecycle event at all) signals the fifth mode is
+       reachable; ``mcp_owned_lifespan`` would mean stdin EOF cleanly
+       drove lifespan and the wild observation has another root cause.
+       Target: chroma cleanup at 100% (any path acceptable for now;
+       the diagnostic is which path).
 
 Each run records: phase, run_id, mcp_pid, chroma_pid, signal sent,
 chroma_alive_after_grace (bool), cleanup_path (one of: lifespan,
@@ -246,6 +262,18 @@ def _classify_cleanup_path(
     if signal_sent in ("SIGKILL", "SIGSEGV"):
         # Direct kill; lifespan + signal handler bypassed.
         return "watchdog_mcp"
+    if signal_sent == "stdin_close":
+        # Phase 5 (nexus-sawb): no signal delivered. saw_signal_stop is
+        # impossible by construction. saw_clean_exit means the stdio
+        # EOF reached lifespan finally cleanly; saw_crash means anyio
+        # raised through to the crash hook. No event with chroma dead
+        # is the "fifth-mode" silent-death signature: watchdog cleaned
+        # chroma without any mcp lifecycle event at all.
+        if saw_clean_exit:
+            return "mcp_owned_lifespan"
+        if saw_crash:
+            return "watchdog_mcp"
+        return "watchdog_unknown"
     # SIGTERM phase. If the signal-stop event made it to the log,
     # nx-mcp's signal handler ran (mcp-owned). If only the clean-
     # exit event fired (rare on stdio), it's the lifespan path.
@@ -551,6 +579,88 @@ def _run_phase_claude_crash(run_id: int) -> RunRecord:
     )
 
 
+def _run_phase_stdio_pipe_break(run_id: int) -> RunRecord:
+    """Phase 5 (nexus-sawb): close nx-mcp's stdin without any signal.
+
+    Tests the fifth failure mode observed 2026-04-25 (nx-mcp pid 94433
+    went silent for 25 minutes with NO mcp_server_stopping and NO
+    mcp_server_crashed events). The hypothesis is that Claude Code's
+    MCP client broke the stdio pipe rather than delivering SIGTERM,
+    so the FastMCP stdio reader hit EOF and either exited cleanly
+    via lifespan (which would mean the wild observation has a
+    different root cause) or hung silently (only the watchdog's
+    --mcp-pid trigger catches it).
+
+    Steps:
+      1. Spawn nx-mcp the same way the other phases do.
+      2. Wait for chroma to come up.
+      3. ``proc.stdin.close()`` -- no signal sent.
+      4. Wait CLEANUP_TIMEOUT_S; classify the cleanup path.
+      5. Belt-and-braces SIGKILL of any leak so the next run starts clean.
+    """
+    log_start = _log_size()
+    proc = _spawn_nx_mcp()
+    chroma_pid = _wait_for_chroma_pid(SPAWN_TIMEOUT_S)
+    if chroma_pid is None:
+        try:
+            proc.kill()
+            proc.wait(timeout=2)
+        except Exception:
+            pass
+        return RunRecord(
+            phase="stdio_pipe_break", run_id=run_id, mcp_pid=proc.pid,
+            chroma_pid=0, signal_sent="stdin_close",
+            chroma_alive_after_grace=False, cleanup_path="setup_failed",
+            elapsed_until_cleanup_s=0.0, setup_failed=True,
+            error="chroma_pid not observed within SPAWN_TIMEOUT_S",
+        )
+
+    t0 = time.monotonic()
+    if proc.stdin is not None:
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+
+    # Wait for either lifespan-driven exit OR watchdog --mcp-pid trigger.
+    # CLEANUP_TIMEOUT_S = 10s covers the 5s poll + 2s grace + slack.
+    try:
+        proc.wait(timeout=CLEANUP_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        # nx-mcp didn't exit on its own: stdio handler is wedged on
+        # EOF. The watchdog still cleans chroma when we SIGKILL below
+        # so the next run starts clean; the "no exit on stdin EOF"
+        # signal is captured in chroma_alive_after_grace + cleanup_path.
+        pass
+
+    elapsed = time.monotonic() - t0
+    chroma_alive = _is_alive(chroma_pid)
+    log_lines = _read_log_tail_after(log_start)
+    cleanup_path = _classify_cleanup_path(
+        log_lines, chroma_alive, "stdin_close",
+    )
+    if chroma_alive:
+        try:
+            os.kill(chroma_pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    if _is_alive(proc.pid):
+        try:
+            proc.kill()
+            proc.wait(timeout=2)
+        except Exception:
+            pass
+    return RunRecord(
+        phase="stdio_pipe_break", run_id=run_id, mcp_pid=proc.pid,
+        chroma_pid=chroma_pid,
+        signal_sent="stdin_close",
+        chroma_alive_after_grace=chroma_alive,
+        cleanup_path=cleanup_path,
+        elapsed_until_cleanup_s=round(elapsed, 2),
+        setup_failed=False, error=None,
+    )
+
+
 def _aggregate(records: list[RunRecord]) -> dict[str, Any]:
     by_phase: dict[str, list[RunRecord]] = {}
     for r in records:
@@ -611,10 +721,11 @@ def main() -> int:
     )
     parser.add_argument(
         "--phases", type=str,
-        default="clean,mcp_sigkill,mcp_oom,claude_crash",
+        default="clean,mcp_sigkill,mcp_oom,claude_crash,stdio_pipe_break",
         help=(
-            "Comma-separated phase list. Default runs all four. "
-            "Use --phases clean for a quick lifespan-only smoke."
+            "Comma-separated phase list. Default runs all five. "
+            "Use --phases clean for a quick lifespan-only smoke; "
+            "use --phases stdio_pipe_break for the fifth-mode probe."
         ),
     )
     parser.add_argument(
@@ -666,6 +777,8 @@ def main() -> int:
                     rec = _run_phase_kill(run_id, signal.SIGSEGV, "mcp_oom")
                 elif phase == "claude_crash":
                     rec = _run_phase_claude_crash(run_id)
+                elif phase == "stdio_pipe_break":
+                    rec = _run_phase_stdio_pipe_break(run_id)
                 else:
                     print(f"unknown phase: {phase}", file=sys.stderr)
                     continue
