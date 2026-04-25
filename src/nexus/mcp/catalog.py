@@ -576,13 +576,46 @@ def catalog_link_bulk(
 
 
 def main():
-    """Run the catalog MCP server on stdio transport."""
+    """Run the catalog MCP server on stdio transport.
+
+    Lifecycle logging: emits ``mcp_server_starting``,
+    ``mcp_server_stopping``, and ``mcp_server_crashed`` events to
+    ``<config>/logs/mcp.log`` (shared file with the core server; the
+    ``server`` field discriminates).
+    """
+    import os
+
+    import structlog
+
     from nexus.logging_setup import configure_logging
     from nexus.mcp_infra import check_version_compatibility
 
     configure_logging("mcp")
-    check_version_compatibility()
-    mcp.run(transport="stdio")
+    log = structlog.get_logger("nexus.mcp.catalog")
+    log.info(
+        "mcp_server_starting",
+        server="nx-mcp-catalog",
+        transport="stdio",
+        pid=os.getpid(),
+        ppid=os.getppid(),
+    )
+    try:
+        check_version_compatibility()
+        mcp.run(transport="stdio")
+    except (KeyboardInterrupt, SystemExit):
+        log.info(
+            "mcp_server_stopping", server="nx-mcp-catalog", reason="signal",
+        )
+        raise
+    except BaseException as exc:
+        log.exception(
+            "mcp_server_crashed",
+            server="nx-mcp-catalog",
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        raise
+    else:
+        log.info("mcp_server_stopping", server="nx-mcp-catalog", reason="exit")
 
 
 if __name__ == "__main__":

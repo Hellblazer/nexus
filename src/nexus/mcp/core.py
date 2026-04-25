@@ -3142,13 +3142,46 @@ async def nx_plan_audit(
 
 
 def main():
-    """Run the core MCP server on stdio transport."""
+    """Run the core MCP server on stdio transport.
+
+    Lifecycle logging: emits ``mcp_server_starting``,
+    ``mcp_server_stopping``, and ``mcp_server_crashed`` events to
+    ``<config>/logs/mcp.log``. Without these, a silent crash leaves
+    no on-disk trace and makes diagnosis dependent on Claude Code's
+    captured stderr (which is not surfaced through any user-visible
+    path).
+    """
+    import os
+
+    import structlog
+
     from nexus.logging_setup import configure_logging
     from nexus.mcp_infra import check_version_compatibility
 
     configure_logging("mcp")
-    check_version_compatibility()
-    mcp.run(transport="stdio")
+    log = structlog.get_logger("nexus.mcp.core")
+    log.info(
+        "mcp_server_starting",
+        server="nx-mcp",
+        transport="stdio",
+        pid=os.getpid(),
+        ppid=os.getppid(),
+    )
+    try:
+        check_version_compatibility()
+        mcp.run(transport="stdio")
+    except (KeyboardInterrupt, SystemExit):
+        log.info("mcp_server_stopping", server="nx-mcp", reason="signal")
+        raise
+    except BaseException as exc:
+        log.exception(
+            "mcp_server_crashed",
+            server="nx-mcp",
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        raise
+    else:
+        log.info("mcp_server_stopping", server="nx-mcp", reason="exit")
 
 
 if __name__ == "__main__":
