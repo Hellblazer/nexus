@@ -185,21 +185,13 @@ def session_start(claude_session_id: str | None = None) -> str:
 
 # -- SessionEnd ---------------------------------------------------------------
 
-def session_end() -> str:
-    """Execute the SessionEnd hook.
 
-    1. Check whether this process owns the session (its parent wrote the record).
-    2. Flush flagged T1 entries to T2 (using whatever session is reachable via
-       PPID chain — works for both parent and child agents).
-    3. Run T2 expire().
-    4. If owner: stop the ChromaDB server and delete the session record + tmpdir.
-       Child agents skip the server-stop step.
+def _resolve_session_records() -> tuple[str | None, dict | None, Path | None, dict | None]:
+    """Resolve session id + owned record + flush record for the SessionEnd path.
 
-    Returns a summary string.
+    Shared between ``session_end_flush`` and the chroma-stop block in
+    ``session_end``. Returns ``(session_id, own_record, own_file, flush_record)``.
     """
-    # Resolve the Claude conversation UUID from the env var the SessionStart
-    # hook exported, or from the legacy ``current_session`` flat file as
-    # fallback for processes launched outside the SessionStart's child tree.
     session_id = os.environ.get("NX_SESSION_ID")
     if not session_id:
         from nexus.session import read_claude_session_id
@@ -210,7 +202,7 @@ def session_end() -> str:
     if session_id:
         own_file = SESSIONS_DIR / f"{session_id}.session"
         # Safe read: the file is written once at session_start by this
-        # process and only deleted later in this function — no external
+        # process and only deleted later in this function -- no external
         # writer can modify it between the exists() check and read_text().
         if own_file.exists():
             try:
@@ -224,9 +216,25 @@ def session_end() -> str:
                     error=str(exc),
                 )
 
-    # For T1 flush: prefer the owned record; otherwise look up by UUID
-    # (child-agent scenario where the env var was inherited).
     flush_record = own_record or find_session_by_id(SESSIONS_DIR, session_id)
+    return session_id, own_record, own_file, flush_record
+
+
+def session_end_flush() -> str:
+    """Run the storage-only portion of SessionEnd: T1 flush + T2 expire.
+
+    Splits cleanly out of ``session_end`` so Phase 4 (RDR-094) can wire
+    hooks.json directly at this entry point: it does no chroma teardown,
+    so it cannot race the MCP server's own lifespan/atexit/signal
+    cleanup. ``session_end`` keeps the chroma-stop block for the
+    feature-flag-off rollout window and is the legacy entry point.
+
+    Importantly: this function is fork-safe. It only opens T1/T2
+    SQLite handles (each call gets a fresh connection) and does not
+    touch any module-level state acquired before fork. Phase C
+    (nexus-l828) imports it post-fork in the launcher's grandchild.
+    """
+    _, _, _, flush_record = _resolve_session_records()
     if flush_record is None:
         _log.warning(
             "session_end: no T1 session record found; flagged scratch entries may not have been flushed"
@@ -255,15 +263,27 @@ def session_end() -> str:
     except (sqlite3.Error, OSError) as exc:
         _log.warning("session_end: storage error during flush/expire", error=str(exc))
 
-    # Stop server and clean up only if this process owns the session.
-    # Skip the chroma-stop block when NEXUS_MCP_OWNS_T1 is active: the
-    # MCP server's signal handler / lifespan / atexit owns shutdown,
-    # and a hook-side stop_t1_server + tmpdir-rm here races MCP's own
-    # cleanup. The flag-on path is chroma-owned-by-MCP exclusively;
-    # this hook degrades to scratch-flush + memory-expire only (which
-    # already ran above). RDR-094 Phase 2 Step 2's session_end_flush
-    # split is deferred to a follow-up bead; this gate is the in-place
-    # mitigation that prevents the double-stop in the meantime.
+    return f"Session ended. Flushed {flushed} scratch entries. Expired {expired} memory entries."
+
+
+def session_end() -> str:
+    """Execute the SessionEnd hook (legacy entry point).
+
+    Calls :func:`session_end_flush` for storage work, then -- when this
+    process owns the session record AND ``NEXUS_MCP_OWNS_T1`` is not
+    set -- stops the ChromaDB server and removes the session record +
+    tmpdir.
+
+    The ``NEXUS_MCP_OWNS_T1`` gate is the in-place mitigation from
+    PR #300: when the MCP server owns chroma, hook-side teardown
+    races the lifespan/atexit/signal-handler cleanup. Phase C
+    (nexus-l828) swaps hooks.json's internal call to
+    :func:`session_end_flush` directly so the gate becomes redundant;
+    it stays here for the flag-off rollout window.
+    """
+    _, own_record, own_file, _ = _resolve_session_records()
+    summary = session_end_flush()
+
     mcp_owns_t1 = os.environ.get(
         "NEXUS_MCP_OWNS_T1", "",
     ).strip().lower() in ("1", "true", "yes")
@@ -279,4 +299,4 @@ def session_end() -> str:
         if tmpdir:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    return f"Session ended. Flushed {flushed} scratch entries. Expired {expired} memory entries."
+    return summary

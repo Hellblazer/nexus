@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from nexus.hooks import session_end, session_start
+from nexus.hooks import session_end, session_end_flush, session_start
 
 
 # ── session_start ────────────────────────────────────────────────────────────
@@ -328,6 +328,156 @@ def test_session_end_db_error_doesnt_crash(tmp_path: Path) -> None:
         output = session_end()
 
     assert "Session ended" in output
+
+
+# ── session_end_flush (RDR-094 Phase B / nexus-2b9r) ────────────────────────
+
+
+class TestSessionEndFlush:
+    """The split-out flush function does T1 flush + T2 expire and never
+    touches chroma. Phase 4's hooks.json swap (Phase C / nexus-l828)
+    points at this function so the SessionEnd path cannot race the
+    MCP-owned chroma teardown."""
+
+    def test_flush_returns_summary_when_no_record(self, tmp_path, monkeypatch):
+        sessions = tmp_path / "sessions"
+        sessions.mkdir()
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+
+        with (
+            patch("nexus.hooks.SESSIONS_DIR", sessions),
+            patch("nexus.hooks.find_session_by_id", return_value=None),
+            patch("nexus.hooks._default_db_path", return_value=tmp_path / "memory.db"),
+        ):
+            output = session_end_flush()
+
+        assert "Flushed 0" in output
+        assert "Expired 0" in output
+
+    def test_flush_drains_flagged_entries_to_t2(self, tmp_path, monkeypatch):
+        from nexus.db.t2 import T2Database
+
+        sessions = tmp_path / "sessions"
+        _make_session_record(sessions, session_id="flush-only-uuid")
+        monkeypatch.setenv("NX_SESSION_ID", "flush-only-uuid")
+
+        mock_t1 = MagicMock()
+        mock_t1.flagged_entries.return_value = [
+            {
+                "content": "evidence A",
+                "flush_project": "p",
+                "flush_title": "a.md",
+                "tags": "",
+            },
+        ]
+        db_path = tmp_path / "memory.db"
+
+        with (
+            patch("nexus.hooks.SESSIONS_DIR", sessions),
+            patch("nexus.hooks._default_db_path", return_value=db_path),
+            patch("nexus.hooks._open_t1", return_value=mock_t1),
+            patch("nexus.hooks.stop_t1_server") as mock_stop,
+        ):
+            output = session_end_flush()
+
+        assert "Flushed 1" in output
+        mock_t1.clear.assert_called_once()
+        # The flush function MUST NOT touch chroma -- this is the
+        # whole point of the split.
+        mock_stop.assert_not_called()
+        # ...and must NOT delete the session record.
+        assert (sessions / "flush-only-uuid.session").exists()
+
+        with T2Database(db_path) as db:
+            entry = db.get(project="p", title="a.md")
+        assert entry is not None
+        assert entry["content"] == "evidence A"
+
+    def test_flush_does_not_touch_chroma_even_when_record_owned(
+        self, tmp_path, monkeypatch,
+    ):
+        """Owner-detection lives in session_end, not in session_end_flush."""
+        sessions = tmp_path / "sessions"
+        _make_session_record(
+            sessions, session_id="owner-uuid", server_pid=12345,
+        )
+        monkeypatch.setenv("NX_SESSION_ID", "owner-uuid")
+
+        mock_t1 = MagicMock()
+        mock_t1.flagged_entries.return_value = []
+
+        with (
+            patch("nexus.hooks.SESSIONS_DIR", sessions),
+            patch("nexus.hooks._default_db_path", return_value=tmp_path / "memory.db"),
+            patch("nexus.hooks._open_t1", return_value=mock_t1),
+            patch("nexus.hooks.stop_t1_server") as mock_stop,
+        ):
+            session_end_flush()
+
+        mock_stop.assert_not_called()
+        # Session file must survive a flush-only run.
+        assert (sessions / "owner-uuid.session").exists()
+
+
+def test_session_end_skips_chroma_when_mcp_owns_t1(
+    tmp_path, monkeypatch,
+):
+    """The PR #300 in-place gate stays in session_end (legacy path).
+
+    With NEXUS_MCP_OWNS_T1 set, session_end must flush + expire but
+    skip stop_t1_server + session-file unlink. Pinned here so the
+    refactor doesn't accidentally drop the gate before Phase C / F
+    take over.
+    """
+    sessions = tmp_path / "sessions"
+    _make_session_record(sessions, session_id="mcp-owned-uuid", server_pid=42)
+    monkeypatch.setenv("NX_SESSION_ID", "mcp-owned-uuid")
+    monkeypatch.setenv("NEXUS_MCP_OWNS_T1", "1")
+
+    mock_t1 = MagicMock()
+    mock_t1.flagged_entries.return_value = []
+
+    with (
+        patch("nexus.hooks.SESSIONS_DIR", sessions),
+        patch("nexus.hooks._default_db_path", return_value=tmp_path / "memory.db"),
+        patch("nexus.hooks._open_t1", return_value=mock_t1),
+        patch("nexus.hooks.stop_t1_server") as mock_stop,
+    ):
+        output = session_end()
+
+    assert "Session ended" in output
+    mock_stop.assert_not_called()
+    # Session file must survive when MCP owns T1.
+    assert (sessions / "mcp-owned-uuid.session").exists()
+
+
+# ── nx hook session-end-flush CLI subcommand ────────────────────────────────
+
+
+def test_session_end_flush_cli_subcommand(tmp_path, monkeypatch):
+    """The new CLI subcommand routes to session_end_flush, not session_end."""
+    from click.testing import CliRunner
+
+    from nexus.commands.hook import hook_group
+
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    monkeypatch.delenv("NX_SESSION_ID", raising=False)
+
+    with (
+        patch("nexus.hooks.SESSIONS_DIR", sessions),
+        patch("nexus.hooks.find_session_by_id", return_value=None),
+        patch("nexus.hooks._default_db_path", return_value=tmp_path / "memory.db"),
+        patch("nexus.hooks.stop_t1_server") as mock_stop,
+    ):
+        runner = CliRunner()
+        result = runner.invoke(hook_group, ["session-end-flush"])
+
+    assert result.exit_code == 0
+    assert "Flushed 0" in result.output
+    assert "Expired 0" in result.output
+    # Critical: the flush subcommand never calls stop_t1_server.
+    mock_stop.assert_not_called()
 
 
 # ── session lock stale cleanup ───────────────────────────────────────────────
