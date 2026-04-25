@@ -2,12 +2,12 @@
 title: "RDR-094: MCP-Owned T1 Chroma Lifecycle"
 id: RDR-094
 type: Architecture
-status: draft
+status: accepted
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-24
-accepted_date:
+accepted_date: 2026-04-25
 related_issues: []
 related_tests: [test_session.py, test_hooks.py, test_mcp_server.py, test_session_end_launcher.py]
 related: [RDR-010, RDR-034, RDR-062, RDR-078]
