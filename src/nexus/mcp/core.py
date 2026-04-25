@@ -39,8 +39,7 @@ from nexus.ttl import parse_ttl
 
 # ── T1 chroma lifecycle (RDR-094, feature-flagged) ──────────────────────────
 #
-# Phase 1 + Phase 2 of RDR-094 land here under the NEXUS_MCP_OWNS_T1 flag.
-# When set, this module:
+# RDR-094 Phase 4 (default-on as of 4.12.0). This module:
 #   1. Spawns chroma in the FastMCP lifespan __aenter__. Three cleanup
 #      paths run on shutdown, all calling the same idempotent
 #      _t1_chroma_shutdown:
@@ -64,14 +63,33 @@ from nexus.ttl import parse_ttl
 #      cleared issue #40207 not applicable to nx-mcp, so this path is
 #      cheap insurance against future Claude Code behaviour changes).
 #
-# Default off. Existing installs see no behaviour change. Spike work
-# already validated CA-1, CA-3, CA-4 (RDR-094 §Critical Assumptions).
+# Default ON (4.12.0). Set ``NEXUS_MCP_OWNS_T1=0`` (or ``false``/``no``)
+# as an emergency opt-out if the MCP-owned path ever needs to be
+# disabled in production. Spike A (40/40), Spike B (CA-2 verified
+# post-mitigation), and Spike C (issue #40207 verified-negative for
+# stdio) all clear; the gate stays as a safety hatch only.
 
 import os as _os
 
-_MCP_OWNS_T1: bool = _os.environ.get(
-    "NEXUS_MCP_OWNS_T1", "",
-).strip().lower() in ("1", "true", "yes")
+
+def _flag_enabled(name: str, default: bool) -> bool:
+    """Read a tri-state env flag with a default.
+
+    Truthy: ``1`` / ``true`` / ``yes`` / ``on`` (case-insensitive).
+    Falsy:  ``0`` / ``false`` / ``no`` / ``off``.
+    Anything else (including empty string) returns ``default``.
+    """
+    raw = _os.environ.get(name, "").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return default
+
+
+# Default ON (RDR-094 Phase 4 default-on, 4.12.0). NEXUS_MCP_OWNS_T1=0
+# (or false / no / off) is the emergency opt-out.
+_MCP_OWNS_T1: bool = _flag_enabled("NEXUS_MCP_OWNS_T1", default=True)
 
 #: Module-scope state for the owned chroma. Populated by
 #: ``_t1_chroma_init_if_owner`` and consumed by ``_t1_chroma_shutdown``.
