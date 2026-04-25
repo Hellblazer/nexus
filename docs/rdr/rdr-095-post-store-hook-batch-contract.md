@@ -2,12 +2,14 @@
 title: "RDR-095: Post-Store Hook Framework: Batch Contract"
 id: RDR-095
 type: Architecture
-status: accepted
+status: closed
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-25
 accepted_date: 2026-04-25
+closed_date: 2026-04-25
+close_reason: implemented
 related_issues: []
 related_tests: [test_mcp_infra.py, test_taxonomy_assign.py, test_chash_index_store.py]
 related: [RDR-060, RDR-070, RDR-075, RDR-077, RDR-086, RDR-089]
