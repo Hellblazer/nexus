@@ -178,14 +178,19 @@ case "$MODE" in
         # against the wheel install. Uses the smaller PDF fixture (tc-sql)
         # for speed. T1 sniff at the start + end catches lifecycle bugs
         # (orphan tmpdirs, leaked session files).
-        echo "[3/3] Shakedown: full pipeline ensemble (running from /tmp)"
+        #
+        # Force local mode so the shakedown does not contact ChromaDB Cloud
+        # even if the parent shell has CHROMA_* set. Mirrors tests/e2e/run.sh.
+        export NX_LOCAL=1
+        unset CHROMA_API_KEY CHROMA_TENANT CHROMA_DATABASE
+        echo "[3/3] Shakedown: full pipeline ensemble (running from /tmp, NX_LOCAL=1)"
         cd /tmp
 
         echo
         echo "── T1 sniff: BEFORE ──"
         T1_DIR_PARENT="${TMPDIR%/}"; [[ -z "$T1_DIR_PARENT" ]] && T1_DIR_PARENT=/tmp
-        BEFORE_SESSIONS=$(ls "$HOME/.config/nexus/sessions/" 2>/dev/null | wc -l | tr -d ' ')
-        BEFORE_TMPDIRS=$(ls -d "$T1_DIR_PARENT"/nx_t1_* 2>/dev/null | wc -l | tr -d ' ')
+        BEFORE_SESSIONS=$( { ls "$HOME/.config/nexus/sessions/" 2>/dev/null || true; } | wc -l | tr -d ' ')
+        BEFORE_TMPDIRS=$( { ls -d "$T1_DIR_PARENT"/nx_t1_* 2>/dev/null || true; } | wc -l | tr -d ' ')
         echo "  session files: $BEFORE_SESSIONS  | tmpdirs: $BEFORE_TMPDIRS"
 
         echo
@@ -212,7 +217,7 @@ case "$MODE" in
 
         echo
         echo "── 5/9 cross-corpus search ──"
-        nx search "catalog link graph" --limit 3 2>&1 | tail -10 | sed 's/^/  /' || true
+        nx search "catalog link graph" -m 3 2>&1 | tail -10 | sed 's/^/  /' || true
 
         echo
         echo "── 6/9 T2 memory roundtrip ──"
@@ -224,19 +229,23 @@ case "$MODE" in
 
         echo
         echo "── 7/9 T1 scratch use (write + readback) ──"
-        SCRATCH_OUT=$(nx scratch put "shakedown probe $SHAKE_TS" --tags=shakedown 2>&1)
-        echo "  put: $(echo \"$SCRATCH_OUT\" | tail -1)"
-        SCRATCH_HIT=$(nx scratch list 2>&1 | grep -c "shakedown" || true)
-        if (( SCRATCH_HIT > 0 )); then
-            echo "  list: scratch entry visible (T1 alive)"
+        # Note: outside a Claude Code session, no SessionStart hook fires to
+        # spawn the per-session ChromaDB HTTP server, so each `nx scratch *`
+        # invocation falls back to its own EphemeralClient. Cross-invocation
+        # readback is only possible inside a real Claude Code session. This
+        # shakedown verifies put returns a doc id; cross-process visibility
+        # is tested separately by the cc-validation harness.
+        SCRATCH_OUT=$(nx scratch put "shakedown probe $SHAKE_TS" --tags=shakedown 2>&1 | tail -1)
+        if echo "$SCRATCH_OUT" | grep -qE "Stored:"; then
+            echo "  put: ok ($SCRATCH_OUT)"
         else
-            echo "  list: [WARN] scratch entry NOT visible — T1 may not be wired"
+            echo "  put: [WARN] unexpected output — $SCRATCH_OUT"
         fi
+        echo "  note: cross-invocation readback only works inside a Claude Code session"
 
         echo
-        echo "── 8/9 catalog link readback ──"
-        nx catalog links-for-file "$REPO_ROOT/src/nexus/catalog/catalog.py" 2>&1 \
-            | head -10 | sed 's/^/  /' || true
+        echo "── 8/9 catalog stats (registry + link graph readback) ──"
+        nx catalog stats 2>&1 | head -15 | sed 's/^/  /' || true
 
         echo
         echo "── 9/9 nx doctor (all checks, post-activity) ──"
@@ -248,8 +257,8 @@ case "$MODE" in
 
         echo
         echo "── T1 sniff: AFTER ──"
-        AFTER_SESSIONS=$(ls "$HOME/.config/nexus/sessions/" 2>/dev/null | wc -l | tr -d ' ')
-        AFTER_TMPDIRS=$(ls -d "$T1_DIR_PARENT"/nx_t1_* 2>/dev/null | wc -l | tr -d ' ')
+        AFTER_SESSIONS=$( { ls "$HOME/.config/nexus/sessions/" 2>/dev/null || true; } | wc -l | tr -d ' ')
+        AFTER_TMPDIRS=$( { ls -d "$T1_DIR_PARENT"/nx_t1_* 2>/dev/null || true; } | wc -l | tr -d ' ')
         echo "  session files: $AFTER_SESSIONS (was $BEFORE_SESSIONS)"
         echo "  tmpdirs:       $AFTER_TMPDIRS (was $BEFORE_TMPDIRS)"
         DELTA_S=$((AFTER_SESSIONS - BEFORE_SESSIONS))
