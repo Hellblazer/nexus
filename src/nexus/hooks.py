@@ -256,7 +256,18 @@ def session_end() -> str:
         _log.warning("session_end: storage error during flush/expire", error=str(exc))
 
     # Stop server and clean up only if this process owns the session.
-    if own_record and own_file is not None:
+    # Skip the chroma-stop block when NEXUS_MCP_OWNS_T1 is active: the
+    # MCP server's signal handler / lifespan / atexit owns shutdown,
+    # and a hook-side stop_t1_server + tmpdir-rm here races MCP's own
+    # cleanup. The flag-on path is chroma-owned-by-MCP exclusively;
+    # this hook degrades to scratch-flush + memory-expire only (which
+    # already ran above). RDR-094 Phase 2 Step 2's session_end_flush
+    # split is deferred to a follow-up bead; this gate is the in-place
+    # mitigation that prevents the double-stop in the meantime.
+    mcp_owns_t1 = os.environ.get(
+        "NEXUS_MCP_OWNS_T1", "",
+    ).strip().lower() in ("1", "true", "yes")
+    if own_record and own_file is not None and not mcp_owns_t1:
         server_pid = own_record.get("server_pid", 0)
         if server_pid:
             stop_t1_server(server_pid)

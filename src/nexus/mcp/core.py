@@ -41,19 +41,31 @@ from nexus.ttl import parse_ttl
 #
 # Phase 1 + Phase 2 of RDR-094 land here under the NEXUS_MCP_OWNS_T1 flag.
 # When set, this module:
-#   1. Spawns chroma in the FastMCP lifespan __aenter__ (primary cleanup
-#      via async finally in the lifespan exit). The hook's chroma-spawn
-#      block becomes a no-op (gated on the same env flag in hooks.py).
-#   2. Registers atexit + SIGTERM/SIGINT handlers as belt-and-braces for
-#      kill paths where lifespan does not fire (research RQ2).
-#   3. Spawns the watchdog with both --mcp-pid and --claude-pid so the
+#   1. Spawns chroma in the FastMCP lifespan __aenter__. Three cleanup
+#      paths run on shutdown, all calling the same idempotent
+#      _t1_chroma_shutdown:
+#        * signal handler (SIGTERM/SIGINT) -- PRIMARY on stdio transport
+#          (Spike A 2026-04-25: 10/10 SIGTERM cycles on stdio attributed
+#          to mcp_owned_signal). anyio does not install a SIGTERM
+#          handler under FastMCP stdio, so the explicit handler IS the
+#          path that runs.
+#        * lifespan async finally -- PRIMARY on HTTP/SSE transports.
+#          anyio installs SIGTERM there and propagates cancellation
+#          through async finally. Skipped on stdio (no anyio handler).
+#        * atexit -- belt-and-braces for clean stdin EOF / SystemExit
+#          paths that arrive without a signal.
+#      The hook's chroma-spawn block becomes a no-op (gated on the same
+#      env flag in hooks.py); the SessionEnd hook also skips its chroma-
+#      stop block under the flag (one-line gate in hooks.py:session_end).
+#   2. Spawns the watchdog with both --mcp-pid and --claude-pid so the
 #      Claude-crash-orphan failure mode (issue #1935, FM-NEW-1) is covered.
-#   4. TCP-probes any existing session record at startup; if reachable,
-#      reuses the existing chroma (FM-NEW-2 mitigation for the Claude Code
-#      issue #40207 mid-session SIGTERM-restart cycle).
+#   3. TCP-probes any existing session record at startup; if reachable,
+#      reuses the existing chroma (FM-NEW-2 mitigation; Spike C 2026-04-25
+#      cleared issue #40207 not applicable to nx-mcp, so this path is
+#      cheap insurance against future Claude Code behaviour changes).
 #
-# Default off. Existing installs see no behaviour change. Spike work flips
-# the flag to validate the design (RDR-094 §Critical Assumptions).
+# Default off. Existing installs see no behaviour change. Spike work
+# already validated CA-1, CA-3, CA-4 (RDR-094 §Critical Assumptions).
 
 import os as _os
 
@@ -260,12 +272,24 @@ from contextlib import asynccontextmanager
 async def _t1_chroma_lifespan(_app: Any):
     """FastMCP lifespan that owns chroma's lifecycle.
 
-    Primary cleanup path (research RQ2): anyio installs a SIGTERM
-    handler that cancels the running task group; cancellation
-    propagates through this ``async finally`` block so
+    Primary cleanup path on **HTTP / SSE transports**: anyio installs
+    a SIGTERM handler that cancels the running task group;
+    cancellation propagates through this ``async finally`` block so
     ``_t1_chroma_shutdown`` runs without a manual SIGTERM handler.
-    The atexit + signal handlers in ``main()`` are the secondary
-    path for kills where lifespan doesn't fire.
+
+    On **stdio transport** the lifespan ``async finally`` does NOT
+    fire under SIGTERM. anyio does not install a SIGTERM handler in
+    that mode (Spike A 2026-04-25 evidence: 10/10 SIGTERM cycles
+    attributed to ``mcp_owned_signal``, zero to lifespan). The
+    explicit signal handler registered in ``main()`` is the primary
+    cleanup path on stdio. The lifespan still runs on clean stdin
+    EOF (the ``async finally`` block fires when ``mcp.run()``
+    returns normally), which keeps the lifespan path live for
+    that exit shape.
+
+    ``_t1_chroma_shutdown`` is idempotent so any combination of
+    paths firing is safe: lifespan finally on HTTP/SSE, signal
+    handler on stdio SIGTERM, atexit on clean exit.
     """
     _t1_chroma_init_if_owner()
     try:
