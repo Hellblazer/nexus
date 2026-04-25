@@ -2,7 +2,28 @@
 import logging
 import logging.handlers
 
+import pytest
+import structlog
+
 from nexus.logging_setup import configure_logging
+
+
+@pytest.fixture(autouse=True)
+def _restore_structlog_after_test():
+    """configure_logging swaps structlog's logger_factory and processor
+    chain. Without restore, downstream tests that depend on structlog's
+    default PrintLoggerFactory (captured via capsys) would see nothing
+    because LoggerFactory(stdlib) routes through stdlib logging instead.
+
+    Save-and-restore lets each test in this file freely call
+    configure_logging without polluting the rest of the suite. The
+    save uses ``structlog.get_config()`` (returns a dict copy) and the
+    restore re-applies via ``structlog.configure(**saved)``.
+    """
+    saved = structlog.get_config()
+    yield
+    # structlog.get_config() returns a dict; pass back to configure as kwargs.
+    structlog.configure(**saved)
 
 
 def test_cli_mode_no_file_handler():

@@ -103,7 +103,14 @@ def configure_logging(
         ],
         wrapper_class=structlog.make_filtering_bound_logger(level),
         logger_factory=structlog.stdlib.LoggerFactory(),
-        cache_logger_on_first_use=True,
+        # cache_logger_on_first_use is deliberately False: tests that
+        # re-configure structlog (conftest.pytest_configure, individual
+        # test fixtures) need the new config to take effect, otherwise
+        # the first cached logger sticks for the entire pytest session
+        # and breaks downstream tests that rely on a different
+        # logger_factory (e.g. capsys-based capture of structlog's
+        # default PrintLoggerFactory output).
+        cache_logger_on_first_use=False,
     )
 
     if mode == "cli":
