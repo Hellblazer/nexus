@@ -70,13 +70,20 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 RESULTS_PATH = SCRIPT_DIR / "spike_rdr094_results.jsonl"
 SUMMARY_PATH = SCRIPT_DIR / "spike_rdr094_summary.json"
 
-#: Where nx-mcp writes its lifecycle log. Honors NEXUS_CONFIG_DIR.
-MCP_LOG_PATH = Path(
-    os.environ.get(
-        "NEXUS_CONFIG_DIR",
-        os.path.expanduser("~/.config/nexus"),
-    )
-) / "logs" / "mcp.log"
+
+def _resolve_mcp_log_path() -> Path:
+    """Resolve mcp.log path lazily so harness-isolation overrides land.
+
+    main() sets NEXUS_CONFIG_DIR to a per-run tmpdir before any phase
+    runs; reading the env var here (not at import time) means the
+    harness's spike sees the isolated log, not the user's live one.
+    """
+    return Path(
+        os.environ.get(
+            "NEXUS_CONFIG_DIR",
+            os.path.expanduser("~/.config/nexus"),
+        )
+    ) / "logs" / "mcp.log"
 
 #: Time the harness gives the system to spawn chroma after starting
 #: nx-mcp before the harness considers the run a setup failure.
@@ -114,6 +121,18 @@ def _is_alive(pid: int) -> bool:
     return True
 
 
+def _fresh_session_id() -> str:
+    """Generate a unique session_id for this spike run.
+
+    Each nx-mcp spawn gets a fresh UUID so the child's
+    ``_t1_chroma_init_if_owner`` sees no existing session record
+    under that id, skips the FM-NEW-2 reuse short-circuit, and
+    actually spawns fresh chroma (the path the spike measures).
+    """
+    import uuid
+    return str(uuid.uuid4())
+
+
 def _spawn_nx_mcp(env_overrides: Optional[dict] = None) -> subprocess.Popen:
     """Spawn nx-mcp as a child process under this harness.
 
@@ -121,11 +140,17 @@ def _spawn_nx_mcp(env_overrides: Optional[dict] = None) -> subprocess.Popen:
     Each run gets its own process group via ``start_new_session=True``
     so we can kill nx-mcp without affecting the harness when needed.
 
-    Inherits the harness's stdio so any pre-lifespan errors are visible.
-    Overrides ``NEXUS_MCP_OWNS_T1=1`` (forced) and merges any caller
-    overrides.
+    Forces ``NEXUS_MCP_OWNS_T1=1`` and assigns a fresh ``NX_SESSION_ID``
+    per spawn so the child's ``_t1_chroma_init_if_owner`` always takes
+    the spawn path, never the FM-NEW-2 TCP-reuse short-circuit.
+    Inherits NEXUS_CONFIG_DIR from the harness (set in main() to a
+    per-run tmpdir).
     """
-    env = {**os.environ, "NEXUS_MCP_OWNS_T1": "1"}
+    env = {
+        **os.environ,
+        "NEXUS_MCP_OWNS_T1": "1",
+        "NX_SESSION_ID": _fresh_session_id(),
+    }
     if env_overrides:
         env.update(env_overrides)
     return subprocess.Popen(
@@ -145,7 +170,15 @@ def _wait_for_chroma_pid(timeout: float) -> Optional[int]:
     yielding from the lifespan; we tail the sessions directory for a
     record whose write mtime is newer than the harness start.
     """
-    from nexus.db.t1 import SESSIONS_DIR
+    # Resolve SESSIONS_DIR from the (possibly-overridden) NEXUS_CONFIG_DIR
+    # rather than importing from nexus.session, whose module-level
+    # SESSIONS_DIR constant was frozen at import time before the
+    # harness's env override landed.
+    SESSIONS_DIR = Path(
+        os.environ.get(
+            "NEXUS_CONFIG_DIR", os.path.expanduser("~/.config/nexus"),
+        )
+    ) / "sessions"
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -172,36 +205,57 @@ def _classify_cleanup_path(
     """Inspect mcp.log lines emitted after the kill signal and
     attribute the cleanup path.
 
-    Heuristics in priority order:
-      * mcp_server_stopping reason='exit' => lifespan fired (graceful).
-      * mcp_server_crashed => fatal signal, lifespan did not fire.
-        If chroma is dead anyway, watchdog covered it.
-      * No relevant log line + chroma dead => watchdog (no-emit path).
-      * No relevant log line + chroma alive => none (regression).
-
-    Watchdog mcp-pid vs claude-pid trigger discrimination is
-    inferred from signal_sent (if SIGTERM came from harness, the
-    harness was the "Claude" so claude-pid trigger; if SIGKILL or
-    SIGSEGV against nx-mcp directly, mcp-pid trigger).
+    Vocabulary:
+      * ``mcp_owned_signal``: SIGTERM / SIGINT signal handler ran;
+        chroma cleaned by the MCP process via the signal-handler
+        belt-and-braces path. ``reason='signal'`` on the
+        mcp_server_stopping event.
+      * ``mcp_owned_lifespan``: clean exit through stdin EOF; the
+        FastMCP lifespan finally fired and cleaned chroma. Reaches
+        the main()'s ``else:`` branch and logs ``reason='exit'``.
+      * ``watchdog_mcp``: nx-mcp died on SIGKILL / SIGSEGV; lifespan
+        and signal handlers never ran. Watchdog's --mcp-pid trigger
+        cleaned chroma.
+      * ``watchdog_claude``: harness killed the fake Claude parent;
+        watchdog's --claude-pid trigger sent SIGTERM to nx-mcp
+        (signal-handler path runs in nx-mcp), then cleaned chroma
+        as belt-and-braces.
+      * ``none``: chroma is still alive (regression).
     """
-    saw_lifespan_exit = any(
+    saw_signal_stop = any(
+        "mcp_server_stopping" in line and "reason='signal'" in line
+        for line in log_lines_after
+    )
+    saw_clean_exit = any(
         "mcp_server_stopping" in line and "reason='exit'" in line
         for line in log_lines_after
     )
     saw_crash = any(
         "mcp_server_crashed" in line for line in log_lines_after
     )
-    if saw_lifespan_exit:
-        return "lifespan"
-    if not chroma_alive:
-        if saw_crash:
-            return "watchdog_mcp"
-        if signal_sent in ("SIGKILL", "SIGSEGV"):
-            return "watchdog_mcp"
-        if signal_sent == "harness_SIGKILL":
-            return "watchdog_claude"
-        return "watchdog_unknown"
-    return "none"
+
+    if chroma_alive:
+        return "none"
+
+    # Chroma is gone. Attribute the path that ran.
+    if signal_sent == "harness_SIGKILL":
+        # Claude-crash phase. The orphaned nx-mcp's signal handler
+        # would have fired on the watchdog's SIGTERM; the watchdog
+        # also runs its belt-and-braces cleanup afterwards.
+        return "watchdog_claude" if not saw_signal_stop else "watchdog_claude_via_signal"
+    if signal_sent in ("SIGKILL", "SIGSEGV"):
+        # Direct kill; lifespan + signal handler bypassed.
+        return "watchdog_mcp"
+    # SIGTERM phase. If the signal-stop event made it to the log,
+    # nx-mcp's signal handler ran (mcp-owned). If only the clean-
+    # exit event fired (rare on stdio), it's the lifespan path.
+    if saw_signal_stop:
+        return "mcp_owned_signal"
+    if saw_clean_exit:
+        return "mcp_owned_lifespan"
+    if saw_crash:
+        return "watchdog_mcp"
+    return "watchdog_unknown"
 
 
 def _read_log_tail_after(start_pos: int) -> list[str]:
@@ -210,10 +264,10 @@ def _read_log_tail_after(start_pos: int) -> list[str]:
     Best-effort: file may not exist (logging not configured) or may
     have rotated; in either case return [].
     """
-    if not MCP_LOG_PATH.exists():
+    if not _resolve_mcp_log_path().exists():
         return []
     try:
-        with MCP_LOG_PATH.open("r") as f:
+        with _resolve_mcp_log_path().open("r") as f:
             f.seek(start_pos)
             return f.readlines()
     except OSError:
@@ -222,7 +276,7 @@ def _read_log_tail_after(start_pos: int) -> list[str]:
 
 def _log_size() -> int:
     try:
-        return MCP_LOG_PATH.stat().st_size
+        return _resolve_mcp_log_path().stat().st_size
     except OSError:
         return 0
 
@@ -356,10 +410,12 @@ def _spawn_fake_claude_intermediate() -> subprocess.Popen:
     the intermediate, the watchdog gets the intermediate's PID
     automatically without any rename trickery.
     """
+    fresh_id = _fresh_session_id()
     bootstrap = (
         "import json, os, subprocess, sys, time;\n"
         "env = dict(os.environ);\n"
         "env['NEXUS_MCP_OWNS_T1'] = '1';\n"
+        f"env['NX_SESSION_ID'] = {fresh_id!r};\n"
         "p = subprocess.Popen(\n"
         "    [sys.executable, '-m', 'nexus.mcp.core'],\n"
         "    stdin=subprocess.PIPE, stdout=subprocess.PIPE,\n"
@@ -561,9 +617,41 @@ def main() -> int:
             "Use --phases clean for a quick lifespan-only smoke."
         ),
     )
+    parser.add_argument(
+        "--config-dir", type=str, default="",
+        help=(
+            "NEXUS_CONFIG_DIR override. Default creates a fresh "
+            "tmpdir per invocation so the spike's nx-mcp processes "
+            "do NOT collide with the live Claude session's chroma "
+            "(otherwise the FM-NEW-2 TCP-reuse path would short-"
+            "circuit every spawn into a no-op)."
+        ),
+    )
     args = parser.parse_args()
 
     phases = [p.strip() for p in args.phases.split(",") if p.strip()]
+
+    # Isolate NEXUS_CONFIG_DIR for this run. Without isolation, the
+    # spike's nx-mcp processes would TCP-probe the user's live session
+    # record, find a reachable chroma, and reuse it; cleanup paths
+    # never fire and the spike measures nothing. The env var is
+    # exported into the harness's own environment AND inherited by
+    # _spawn_nx_mcp's subprocess.Popen children.
+    import tempfile as _tempfile
+    if args.config_dir:
+        config_dir = Path(args.config_dir)
+        config_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        config_dir = Path(_tempfile.mkdtemp(prefix="nx_spike_rdr094_"))
+    os.environ["NEXUS_CONFIG_DIR"] = str(config_dir)
+    (config_dir / "logs").mkdir(parents=True, exist_ok=True)
+    (config_dir / "sessions").mkdir(parents=True, exist_ok=True)
+    print(
+        f"NEXUS_CONFIG_DIR for this spike run: {config_dir}\n"
+        f"  mcp.log: {config_dir / 'logs' / 'mcp.log'}\n"
+        f"  sessions: {config_dir / 'sessions'}",
+        flush=True,
+    )
 
     results: list[RunRecord] = []
     RESULTS_PATH.parent.mkdir(parents=True, exist_ok=True)
