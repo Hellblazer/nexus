@@ -426,14 +426,18 @@ def test_search_cce_collection_uses_query_embeddings(mock_chromadb):
     }
     mock_client.get_collection.return_value = mock_col
 
-    with patch("nexus.db.t3.voyageai") as mock_vo_mod:
+    # voyageai.Client is constructed lazily inside T3Database.__init__
+    # now (PR #293 cold-start fix); patch the canonical voyageai.Client
+    # rather than the nexus.db.t3 module attribute (which no longer
+    # exists at module scope).
+    with patch("voyageai.Client") as mock_vo_ctor:
         mock_vo_inst = MagicMock()
-        mock_vo_mod.Client.return_value = mock_vo_inst
+        mock_vo_ctor.return_value = mock_vo_inst
         mock_vo_inst.contextualized_embed.return_value = MagicMock()
         db = T3Database(tenant="t", database="d", api_key="k", voyage_api_key="vkey")
         results = db.search("four store t3 architecture", ["rdr__nexus-abc123"], n_results=5)
 
-    mock_vo_mod.Client.assert_called_once_with(api_key="vkey", timeout=120.0, max_retries=0)
+    mock_vo_ctor.assert_called_once_with(api_key="vkey", timeout=120.0, max_retries=0)
     mock_vo_inst.contextualized_embed.assert_called_once_with(
         inputs=[["four store t3 architecture"]], model="voyage-context-3", input_type="query",
     )
@@ -474,9 +478,10 @@ def test_put_cce_collection_uses_document_input_type(mock_chromadb):
     mock_col = MagicMock()
     mock_client.get_or_create_collection.return_value = mock_col
 
-    with patch("nexus.db.t3.voyageai") as mock_vo_mod:
+    # See PR #293 cold-start note above.
+    with patch("voyageai.Client") as mock_vo_ctor:
         mock_vo_inst = MagicMock()
-        mock_vo_mod.Client.return_value = mock_vo_inst
+        mock_vo_ctor.return_value = mock_vo_inst
         mock_vo_inst.contextualized_embed.return_value = MagicMock()
         db = T3Database(tenant="t", database="d", api_key="k", voyage_api_key="vkey")
         db.put(collection="knowledge__security", content="some document text about security findings", title="finding.md")
