@@ -195,19 +195,18 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
             metadatas=metadatas,
         )
 
-        # Chash dual-write (RDR-086 Phase 1.2): global chash → (collection, doc_id).
-        try:
-            from nexus.mcp_infra import chash_dual_write_batch
-            chash_dual_write_batch(ids, ctx.corpus, metadatas)
-        except Exception:
-            _log.debug("chash_dual_write_failed", exc_info=True)
-
-        # Incremental taxonomy: assign chunks to nearest existing topics.
-        try:
-            from nexus.mcp_infra import taxonomy_assign_batch
-            taxonomy_assign_batch(ids, ctx.corpus, embeddings)
-        except Exception:
-            _log.debug("taxonomy_incremental_assign_failed", exc_info=True)
+        # Post-store hook chains (RDR-095). Both single-doc and batch
+        # chains fire from every storage event; the per-doc loop covers
+        # single-shape consumers on CLI ingest.
+        from nexus.mcp_infra import (
+            fire_post_store_batch_hooks,
+            fire_post_store_hooks,
+        )
+        fire_post_store_batch_hooks(
+            ids, ctx.corpus, documents, embeddings, metadatas,
+        )
+        for _did, _doc in zip(ids, documents):
+            fire_post_store_hooks(_did, ctx.corpus, _doc)
 
     return len(ids)
 

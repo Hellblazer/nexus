@@ -78,11 +78,12 @@ class TestMigrationDataclass:
         # RDR-092 Phase 3.1 match_text column (4.9.13) +
         # legacy operation-shape retirement (4.10.1) +
         # builtin-bindings backfill (4.10.2) +
-        # hook_telemetry table (4.14.0, nexus-ntbg) = 21.
+        # hook_telemetry table (4.14.0, nexus-ntbg) +
+        # hook_failures batch columns (4.14.1, RDR-095) = 22.
         # Prefer the name-based checks in TestBackfillPlanDimensions
         # and TestAddPlanMatchTextColumn for future guards; this
         # count is a cheap sentinel only.
-        assert len(MIGRATIONS) == 21
+        assert len(MIGRATIONS) == 22
 
     def test_migrations_ordered_by_version(self) -> None:
         from nexus.db.migrations import MIGRATIONS, _parse_version
@@ -1390,14 +1391,14 @@ class TestMigrateHookFailures:
         migrate_hook_failures(conn)
         conn.execute(
             "INSERT INTO hook_failures (hook_name, error) VALUES (?, ?)",
-            ("taxonomy_assign_hook", "simulated"),
+            ("taxonomy_assign_batch_hook", "simulated"),
         )
         conn.commit()
 
         row = conn.execute(
             "SELECT hook_name, error, occurred_at FROM hook_failures"
         ).fetchone()
-        assert row[0] == "taxonomy_assign_hook"
+        assert row[0] == "taxonomy_assign_batch_hook"
         assert row[1] == "simulated"
         assert row[2]  # non-empty timestamp
 
@@ -1443,6 +1444,130 @@ class TestMigrateHookFailures:
         assert matches, "hook_failures migration must be registered in MIGRATIONS"
         assert matches[0][0] >= "4.9.10", (
             f"hook_failures migration must be introduced in >= 4.9.10, got {matches[0][0]!r}"
+        )
+
+
+class TestMigrateHookFailuresBatchColumns:
+    """``migrate_hook_failures_batch_columns`` adds RDR-095 batch shape columns
+    to ``hook_failures`` without disturbing existing scalar rows."""
+
+    def _fresh_db_with_hook_failures(self) -> sqlite3.Connection:
+        from nexus.db.migrations import migrate_hook_failures
+        conn = sqlite3.connect(":memory:")
+        migrate_hook_failures(conn)
+        return conn
+
+    def test_adds_both_columns(self) -> None:
+        from nexus.db.migrations import migrate_hook_failures_batch_columns
+
+        conn = self._fresh_db_with_hook_failures()
+        migrate_hook_failures_batch_columns(conn)
+
+        cols = {
+            r[1]: (r[2], r[3], r[4])  # name -> (type, notnull, default)
+            for r in conn.execute("PRAGMA table_info(hook_failures)").fetchall()
+        }
+        assert "batch_doc_ids" in cols
+        assert cols["batch_doc_ids"][0] == "TEXT"
+        assert cols["batch_doc_ids"][1] == 0  # nullable
+
+        assert "is_batch" in cols
+        assert cols["is_batch"][0] == "INTEGER"
+        assert cols["is_batch"][1] == 1  # NOT NULL
+        assert cols["is_batch"][2] == "0"  # default 0
+
+    def test_preserves_scalar_rows(self) -> None:
+        """Existing scalar-doc_id rows survive migration unchanged."""
+        from nexus.db.migrations import migrate_hook_failures_batch_columns
+
+        conn = self._fresh_db_with_hook_failures()
+        conn.execute(
+            "INSERT INTO hook_failures (doc_id, collection, hook_name, error) "
+            "VALUES (?, ?, ?, ?)",
+            ("doc-pre", "knowledge__delos", "taxonomy_assign_batch_hook", "boom"),
+        )
+        conn.commit()
+
+        migrate_hook_failures_batch_columns(conn)
+
+        row = conn.execute(
+            "SELECT doc_id, collection, hook_name, error, batch_doc_ids, is_batch "
+            "FROM hook_failures"
+        ).fetchone()
+        assert row[0] == "doc-pre"
+        assert row[1] == "knowledge__delos"
+        assert row[2] == "taxonomy_assign_batch_hook"
+        assert row[3] == "boom"
+        assert row[4] is None  # batch_doc_ids unset for legacy rows
+        assert row[5] == 0  # is_batch default
+
+    def test_idempotent(self) -> None:
+        from nexus.db.migrations import migrate_hook_failures_batch_columns
+
+        conn = self._fresh_db_with_hook_failures()
+        migrate_hook_failures_batch_columns(conn)
+        # Second call must not raise.
+        migrate_hook_failures_batch_columns(conn)
+
+        cols = {
+            r[1]
+            for r in conn.execute("PRAGMA table_info(hook_failures)").fetchall()
+        }
+        assert "batch_doc_ids" in cols
+        assert "is_batch" in cols
+
+    def test_noop_when_table_missing(self) -> None:
+        """Runs cleanly even if hook_failures has not been created yet."""
+        from nexus.db.migrations import migrate_hook_failures_batch_columns
+
+        conn = sqlite3.connect(":memory:")
+        # No hook_failures table at all.
+        migrate_hook_failures_batch_columns(conn)  # must not raise
+
+        tables = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "hook_failures" not in tables
+
+    def test_batch_insert_after_migration(self) -> None:
+        """After migration, a batch-shape failure row writes cleanly."""
+        from nexus.db.migrations import migrate_hook_failures_batch_columns
+
+        conn = self._fresh_db_with_hook_failures()
+        migrate_hook_failures_batch_columns(conn)
+
+        conn.execute(
+            "INSERT INTO hook_failures "
+            "(doc_id, collection, hook_name, error, batch_doc_ids, is_batch) "
+            "VALUES (?, ?, ?, ?, ?, 1)",
+            ("doc-1", "code__nexus", "chash_dual_write_batch_hook", "boom",
+             '["doc-1","doc-2","doc-3"]'),
+        )
+        conn.commit()
+
+        row = conn.execute(
+            "SELECT doc_id, batch_doc_ids, is_batch FROM hook_failures"
+        ).fetchone()
+        assert row[0] == "doc-1"
+        assert row[1] == '["doc-1","doc-2","doc-3"]'
+        assert row[2] == 1
+
+    def test_in_migrations_list(self) -> None:
+        from nexus.db.migrations import MIGRATIONS
+
+        matches = [
+            (m.introduced, m.name) for m in MIGRATIONS
+            if "hook_failures.batch_doc_ids" in m.name
+        ]
+        assert matches, (
+            "hook_failures batch columns migration must be registered in MIGRATIONS"
+        )
+        assert matches[0][0] >= "4.14.1", (
+            "hook_failures batch columns must be introduced in >= 4.14.1, "
+            f"got {matches[0][0]!r}"
         )
 
 

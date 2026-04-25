@@ -984,6 +984,140 @@ def test_cli_taxonomy_status_surfaces_recent_hook_failures(tmp_path: Path) -> No
     assert "some_old_hook" not in result.output
 
 
+def test_cli_taxonomy_status_surfaces_batch_doc_count(tmp_path: Path) -> None:
+    """RDR-095: batch-shape hook_failures rows surface their full
+    doc-affected count (one row representing N documents) in the
+    Action line. Per-hook breakdown still counts rows, but the
+    parenthetical 'affecting M document(s)' shows the blast radius
+    when M > N.
+    """
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    import json
+    import sqlite3
+
+    from nexus.commands.taxonomy_cmd import taxonomy
+    from nexus.db.migrations import (
+        migrate_hook_failures,
+        migrate_hook_failures_batch_columns,
+    )
+
+    db_path = tmp_path / "memory.db"
+    with T2Database(db_path) as db:
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES ('t1', 'docs__alpha', 10, '2026-01-01T00:00:00Z')"
+        )
+        tid = db.taxonomy.conn.execute(
+            "SELECT id FROM topics WHERE label='t1'"
+        ).fetchone()[0]
+        db.taxonomy.conn.commit()
+        db.taxonomy.assign_topic(
+            "doc-1", tid, assigned_by="projection",
+            similarity=0.9, source_collection="docs__alpha",
+        )
+
+    conn = sqlite3.connect(str(db_path))
+    migrate_hook_failures(conn)
+    migrate_hook_failures_batch_columns(conn)
+    # One scalar row + one batch row covering 50 docs + one batch row
+    # covering 25 docs. Total rows = 3, total docs affected = 76.
+    conn.execute(
+        "INSERT INTO hook_failures (hook_name, collection, error) "
+        "VALUES (?, ?, ?)",
+        ("taxonomy_assign_hook", "docs__alpha", "scalar fail"),
+    )
+    conn.execute(
+        "INSERT INTO hook_failures "
+        "(hook_name, collection, error, batch_doc_ids, is_batch) "
+        "VALUES (?, ?, ?, ?, 1)",
+        ("chash_dual_write_batch_hook", "docs__alpha", "batch fail",
+         json.dumps([f"doc-{i}" for i in range(50)])),
+    )
+    conn.execute(
+        "INSERT INTO hook_failures "
+        "(hook_name, collection, error, batch_doc_ids, is_batch) "
+        "VALUES (?, ?, ?, ?, 1)",
+        ("taxonomy_assign_batch_hook", "docs__alpha", "batch fail 2",
+         json.dumps([f"doc-{i}" for i in range(25)])),
+    )
+    conn.commit()
+    conn.close()
+
+    runner = CliRunner()
+    with patch(
+        "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
+    ):
+        result = runner.invoke(taxonomy, ["status"])
+
+    assert result.exit_code == 0, result.output
+    assert "3 post-store hook failure(s) affecting 76 document(s)" in result.output
+    assert "chash_dual_write_batch_hook=1" in result.output
+    assert "taxonomy_assign_batch_hook=1" in result.output
+    assert "taxonomy_assign_hook=1" in result.output
+
+
+def test_cli_taxonomy_status_handles_malformed_batch_doc_ids(
+    tmp_path: Path,
+) -> None:
+    """RDR-095: a batch row with malformed JSON in batch_doc_ids must
+    not crash the reader. The malformed row falls back to counting as
+    one document affected.
+    """
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    import sqlite3
+
+    from nexus.commands.taxonomy_cmd import taxonomy
+    from nexus.db.migrations import (
+        migrate_hook_failures,
+        migrate_hook_failures_batch_columns,
+    )
+
+    db_path = tmp_path / "memory.db"
+    with T2Database(db_path) as db:
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES ('t1', 'docs__alpha', 5, '2026-01-01T00:00:00Z')"
+        )
+        tid = db.taxonomy.conn.execute(
+            "SELECT id FROM topics WHERE label='t1'"
+        ).fetchone()[0]
+        db.taxonomy.conn.commit()
+        db.taxonomy.assign_topic(
+            "doc-1", tid, assigned_by="projection",
+            similarity=0.9, source_collection="docs__alpha",
+        )
+
+    conn = sqlite3.connect(str(db_path))
+    migrate_hook_failures(conn)
+    migrate_hook_failures_batch_columns(conn)
+    conn.execute(
+        "INSERT INTO hook_failures "
+        "(hook_name, collection, error, batch_doc_ids, is_batch) "
+        "VALUES (?, ?, ?, ?, 1)",
+        ("chash_dual_write_batch_hook", "docs__alpha", "garbage payload",
+         "not valid json"),
+    )
+    conn.commit()
+    conn.close()
+
+    runner = CliRunner()
+    with patch(
+        "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
+    ):
+        result = runner.invoke(taxonomy, ["status"])
+
+    assert result.exit_code == 0, result.output
+    # Row count = 1, fallback doc count = 1, so no "affecting M" branch.
+    assert "1 post-store hook failure(s) in the last 24h" in result.output
+    assert "chash_dual_write_batch_hook=1" in result.output
+
+
 def test_cli_taxonomy_status_silent_when_hook_failures_table_missing(
     tmp_path: Path,
 ) -> None:

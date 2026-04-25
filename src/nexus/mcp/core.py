@@ -22,6 +22,7 @@ from nexus.filters import parse_where_str as _parse_where_str
 from nexus.config import load_config
 from nexus.mcp_infra import (
     catalog_auto_link as _catalog_auto_link,
+    fire_post_store_batch_hooks as _fire_post_store_batch_hooks,
     fire_post_store_hooks as _fire_post_store_hooks,
     get_catalog as _get_catalog,
     get_collection_names as _get_collection_names,
@@ -361,10 +362,28 @@ def _clamp_subagent_timeout(requested: float, tool_name: str) -> float:
     return requested
 
 # ── Post-store hooks (register once at import) ──────────────────────────────
+#
+# RDR-095 + symmetric-fire follow-up: every storage event (MCP store_put or
+# CLI bulk ingest) fires BOTH chains. Hooks pick exactly one shape based on
+# their work pattern. Taxonomy registers batch-only because its dependency
+# call (assign_batch) collapses N ChromaDB queries into one; the hook handles
+# 1-element batches from MCP store_put by fetching the embedding inline.
+# Future single-doc-only consumers (e.g. RDR-089 aspect extraction with one
+# Haiku call per doc) register via register_post_store_hook and fire from
+# every path automatically.
+#
+# Registration order within the batch chain is load-bearing: chash dual-write
+# must precede taxonomy assignment so chash rows exist before topic assignment
+# runs (mirroring the legacy chash-before-taxonomy CLI invariant).
 
-from nexus.mcp_infra import register_post_store_hook, taxonomy_assign_hook
+from nexus.mcp_infra import (
+    chash_dual_write_batch_hook,
+    register_post_store_batch_hook,
+    taxonomy_assign_batch_hook,
+)
 
-register_post_store_hook(taxonomy_assign_hook)
+register_post_store_batch_hook(chash_dual_write_batch_hook)
+register_post_store_batch_hook(taxonomy_assign_batch_hook)
 
 # ── Registered tools ─────────────────────────────────────────────────────────
 
@@ -883,8 +902,15 @@ def store_put(
                 structlog.get_logger().debug("store_put_auto_linked", doc_id=doc_id, link_count=n)
         except Exception:
             pass  # auto-linking is non-fatal
-        # RDR-070: post-store hooks (taxonomy assignment, etc.)
+        # Both post-store chains fire from every storage event (RDR-095
+        # symmetric-fire follow-up). Single-doc chain runs registered
+        # per-doc consumers; batch chain runs with a 1-element list so
+        # batch-shape consumers (taxonomy, chash) see MCP store_put as
+        # a single-document batch.
         _fire_post_store_hooks(doc_id, col_name, content)
+        _fire_post_store_batch_hooks(
+            [doc_id], col_name, [content], None, None,
+        )
         # RDR-061 E2: log relevance correlation for the most recent search in
         # this session. Only the newest trace is used to minimize noise —
         # older traces are unlikely to have driven this store_put.

@@ -362,124 +362,166 @@ def _record_hook_failure(
         )
 
 
-def taxonomy_assign_hook(
-    doc_id: str,
+# ── Post-store batch hooks (RDR-095, nexus-wxcb) ─────────────────────────────
+# Parallel batch-shape contract for bulk-ingest enrichment. Single-document
+# hooks above fire from MCP store_put; batch hooks fire from CLI indexing
+# paths where N docs land in one operation and consumers benefit from
+# batched dependency calls (e.g. one ChromaDB query for N centroids vs N
+# sequential queries). Same per-hook failure-isolation pattern: exceptions
+# captured, persisted to T2 hook_failures, never propagated.
+
+_post_store_batch_hooks: list = []
+
+
+def register_post_store_batch_hook(fn) -> None:
+    """Register a callable(doc_ids, collection, contents, embeddings, metadatas)
+    to fire after batch CLI ingest."""
+    _post_store_batch_hooks.append(fn)
+
+
+def fire_post_store_batch_hooks(
+    doc_ids: list[str],
     collection: str,
-    content: str,
-    *,
-    taxonomy=None,
-    chroma_client=None,
+    contents: list[str],
+    embeddings: list[list[float]] | None = None,
+    metadatas: list[dict] | None = None,
 ) -> None:
-    """Assign a newly stored document to its nearest topic via centroid ANN.
+    """Invoke all registered batch hooks. Per-hook failures captured and
+    persisted to T2 hook_failures, never raised.
 
-    Re-embeds ``content`` with local MiniLM 384d, queries
-    ``taxonomy__centroids`` for the nearest cluster, and writes a
-    ``topic_assignments`` row with ``assigned_by='centroid'``.
+    Empty doc_ids returns early: no hooks fire on empty batches.
 
-    No-op when centroids don't exist (no discover run yet), or when
-    the collection matches ``taxonomy.local_exclude_collections`` and
-    running in local mode (MiniLM clusters poorly on code).
-    Keyword args ``taxonomy`` and ``chroma_client`` are injection points
-    for testing; production path resolves them from singletons.
+    Different consumers read different payload fields:
+    chash_dual_write_batch_hook reads metadatas, taxonomy_assign_batch_hook
+    reads embeddings. Hooks ignore parameters they don't need.
     """
-    from fnmatch import fnmatch
+    if not doc_ids:
+        return
+    import structlog
+    _hook_log = structlog.get_logger()
+    for hook in _post_store_batch_hooks:
+        try:
+            hook(doc_ids, collection, contents, embeddings, metadatas)
+        except Exception as exc:
+            hook_name = getattr(hook, "__name__", "?")
+            _hook_log.warning(
+                "post_store_batch_hook_failed",
+                hook=hook_name,
+                exc_info=True,
+            )
+            _record_batch_hook_failure(
+                doc_ids=doc_ids,
+                collection=collection,
+                hook_name=hook_name,
+                error=str(exc),
+            )
 
-    from nexus.config import is_local_mode, load_config
 
-    if is_local_mode():
-        exclude = load_config().get("taxonomy", {}).get("local_exclude_collections", [])
-        if any(fnmatch(collection, pat) for pat in exclude):
-            return
+def _record_batch_hook_failure(
+    *,
+    doc_ids: list[str],
+    collection: str,
+    hook_name: str,
+    error: str,
+) -> None:
+    """Persist a batch-shape post-store hook failure to T2 ``hook_failures``.
 
-    if taxonomy is None:
-        with t2_ctx() as db:
-            taxonomy = db.taxonomy
-            _run_taxonomy_assign(doc_id, collection, content, taxonomy, chroma_client)
-            return
+    Writes the JSON-encoded doc_id list to ``batch_doc_ids`` and sets
+    ``is_batch=1``; stores a representative scalar (first doc_id) in the
+    legacy ``doc_id`` column so existing scalar readers continue to render
+    something meaningful (RDR-095 schema migration adds the two new columns
+    in 4.14.1).
 
-    _run_taxonomy_assign(doc_id, collection, content, taxonomy, chroma_client)
-
-
-def _run_taxonomy_assign(doc_id, collection, content, taxonomy, chroma_client):
-    """Inner logic for taxonomy_assign_hook (avoids double context-manager).
-
-    Fetches the doc's existing T3 embedding (Voyage on cloud, MiniLM on
-    local) rather than re-embedding with MiniLM. Falls back to MiniLM
-    if the T3 embedding isn't available (e.g., race condition).
+    Falls back to scalar-only insert if the new columns don't exist yet
+    (P1.1 merged before P1.2 migration ran). Same secondary best-effort
+    semantics as ``_record_hook_failure``: persistence failure cannot
+    break ingest.
     """
-    import numpy as np
-
-    if chroma_client is None:
-        chroma_client = get_t3()._client
-
-    # Try to fetch the doc's existing T3 embedding (already stored by store_put)
-    embedding = None
+    import json
+    import sqlite3
+    representative = doc_ids[0] if doc_ids else ""
+    payload = json.dumps(doc_ids)
+    truncated = error[:2000]
     try:
-        coll = chroma_client.get_collection(collection, embedding_function=None)
-        result = coll.get(ids=[doc_id], include=["embeddings"])
-        if result["embeddings"] is not None and len(result["embeddings"]) > 0:
-            emb = result["embeddings"][0]
-            if emb is not None and len(emb) > 0:
-                embedding = np.array(emb, dtype=np.float32)
+        with t2_ctx() as t2:
+            conn = t2.taxonomy.conn
+            with t2.taxonomy._lock:
+                try:
+                    conn.execute(
+                        "INSERT INTO hook_failures "
+                        "(doc_id, collection, hook_name, error, "
+                        " batch_doc_ids, is_batch) VALUES (?, ?, ?, ?, ?, 1)",
+                        (representative, collection, hook_name, truncated, payload),
+                    )
+                except sqlite3.OperationalError as exc:
+                    # Pre-4.14.1 schema: new columns not yet migrated.
+                    # Narrow catch to schema errors so transient lock or I/O
+                    # failures bubble up to the outer guard rather than
+                    # silently degrading the captured row.
+                    msg = str(exc)
+                    if "no column named" not in msg and "no such column" not in msg:
+                        raise
+                    conn.execute(
+                        "INSERT INTO hook_failures "
+                        "(doc_id, collection, hook_name, error) VALUES (?, ?, ?, ?)",
+                        (representative, collection, hook_name, truncated),
+                    )
+                conn.commit()
     except Exception:
         import structlog
-        structlog.get_logger().debug("taxonomy_t3_embedding_fetch_failed", doc_id=doc_id, exc_info=True)
-
-    if embedding is None:
-        from nexus.db.local_ef import LocalEmbeddingFunction
-
-        ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-        embedding = np.array(ef([content])[0], dtype=np.float32)
-
-    # Same-collection assignment (existing behavior).
-    same = taxonomy.assign_single(collection, embedding, chroma_client)
-    if same is not None:
-        taxonomy.assign_topic(doc_id, same.topic_id, assigned_by="centroid")
-
-    # Cross-collection projection (RDR-075 SC-4, SC-6 + RDR-077 RF-3/RF-5).
-    cross = taxonomy.assign_single(
-        collection, embedding, chroma_client, cross_collection=True,
-    )
-    if cross is not None and (same is None or cross.topic_id != same.topic_id):
-        taxonomy.assign_topic(
-            doc_id,
-            cross.topic_id,
-            assigned_by="projection",
-            similarity=cross.similarity,
-            source_collection=collection,
+        structlog.get_logger().debug(
+            "batch_hook_failure_persist_failed",
+            hook=hook_name,
+            collection=collection,
+            exc_info=True,
         )
 
 
-def taxonomy_assign_batch(
+def taxonomy_assign_batch_hook(
     doc_ids: list[str],
     collection: str,
-    embeddings: list[list[float]],
-) -> int:
-    """Assign a batch of indexed docs to their nearest topics.
+    contents: list[str],
+    embeddings: list[list[float]] | None,
+    metadatas: list[dict] | None,
+) -> None:
+    """Registered batch hook: assign indexed docs to their nearest topics.
 
-    Called by CLI indexing paths after chunk upsert.  Uses existing T3
-    embeddings (already in *embeddings*) — no re-fetch or re-embed needed.
+    Called via ``fire_post_store_batch_hooks`` from every storage event:
+    CLI bulk ingest passes the embeddings already computed by the upsert;
+    MCP ``store_put`` passes ``embeddings=None`` and the hook fetches them
+    from T3 inline (one ChromaDB get per doc). The fetch falls back to
+    local MiniLM embedding when T3 is unavailable, matching the legacy
+    single-doc shim behaviour.
 
-    Returns the number of docs assigned, or 0 when centroids don't exist
-    (no discover run yet) or the collection is excluded.
+    Reads ``embeddings`` and ``contents``; ignores ``metadatas``.
+    No-op when centroids don't exist (no discover run yet) or the
+    collection is excluded.
+
+    Registered once via ``register_post_store_batch_hook`` in
+    ``mcp/core.py``.
     """
     from fnmatch import fnmatch
 
     from nexus.config import is_local_mode, load_config
 
-    if not doc_ids or not embeddings:
-        return 0
+    if not doc_ids:
+        return
 
     if is_local_mode():
         exclude = load_config().get("taxonomy", {}).get("local_exclude_collections", [])
         if any(fnmatch(collection, pat) for pat in exclude):
-            return 0
+            return
+
+    if not embeddings:
+        embeddings = _fetch_or_embed(doc_ids, collection, contents)
+        if not embeddings:
+            return
 
     try:
         with t2_ctx() as db:
             chroma_client = get_t3()._client
             # Same-collection assignment
-            assigned = db.taxonomy.assign_batch(
+            db.taxonomy.assign_batch(
                 collection, doc_ids, embeddings, chroma_client,
             )
             # Cross-collection projection (RDR-075 SC-6)
@@ -494,29 +536,95 @@ def taxonomy_assign_batch(
                     collection=collection,
                     cross_assigned=cross_assigned,
                 )
-            return assigned
     except Exception:
         import structlog
         structlog.get_logger().debug("taxonomy_assign_batch_failed", exc_info=True)
-        return 0
 
 
-# ── Chash dual-write (RDR-086 Phase 1.2) ──────────────────────────────────────
-
-
-def chash_dual_write_batch(
+def _fetch_or_embed(
     doc_ids: list[str],
     collection: str,
-    metadatas: list[dict],
-) -> None:
-    """Best-effort dual-write of ``chash_index`` rows after a T3 upsert.
+    contents: list[str],
+) -> list[list[float]] | None:
+    """Fetch existing T3 embeddings for *doc_ids* in *collection*.
 
-    Called from each of the six indexing write sites immediately after
-    ``t3.upsert_chunks_with_embeddings(...)``. Opens a fresh T2Database
-    (matching ``taxonomy_assign_batch``'s lifecycle), delegates to the
-    store-level ``dual_write_chash_index`` helper, and closes. Logs at
-    debug level on any outer failure — a T2 failure must never abort
-    the enclosing T3 write path.
+    Falls back to local MiniLM embedding of *contents* when T3 is
+    unavailable or returns no embedding for a given id. Returns None
+    if no embeddings can be produced (callers no-op in that case).
+    Used by ``taxonomy_assign_batch_hook`` when called from MCP
+    ``store_put`` with ``embeddings=None``.
+    """
+    import numpy as np
+
+    fetched: list[list[float] | None] = [None] * len(doc_ids)
+    try:
+        chroma_client = get_t3()._client
+        coll = chroma_client.get_collection(collection, embedding_function=None)
+        result = coll.get(ids=doc_ids, include=["embeddings"])
+        result_ids = result.get("ids", [])
+        result_embs = result.get("embeddings")
+        if result_embs is not None:
+            id_index = {d: i for i, d in enumerate(doc_ids)}
+            for j, rid in enumerate(result_ids):
+                idx = id_index.get(rid)
+                if idx is None:
+                    continue
+                emb = result_embs[j]
+                if emb is not None and len(emb) > 0:
+                    fetched[idx] = list(emb)
+    except Exception:
+        import structlog
+        structlog.get_logger().debug(
+            "taxonomy_t3_embedding_fetch_failed",
+            collection=collection,
+            exc_info=True,
+        )
+
+    missing = [i for i, e in enumerate(fetched) if e is None]
+    if missing and contents:
+        try:
+            from nexus.db.local_ef import LocalEmbeddingFunction
+            ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+            local_inputs = [contents[i] for i in missing if i < len(contents)]
+            local_embs = ef(local_inputs)
+            for k, i in enumerate(missing):
+                if i < len(contents) and k < len(local_embs):
+                    fetched[i] = list(np.array(local_embs[k], dtype=np.float32))
+        except Exception:
+            import structlog
+            structlog.get_logger().debug(
+                "taxonomy_local_embed_fallback_failed", exc_info=True,
+            )
+
+    if any(e is None for e in fetched):
+        return None
+    return [e for e in fetched if e is not None]
+
+
+# ── Chash dual-write (RDR-086 Phase 1.2; migrated to batch hook in RDR-095) ──
+
+
+def chash_dual_write_batch_hook(
+    doc_ids: list[str],
+    collection: str,
+    contents: list[str],
+    embeddings: list[list[float]] | None,
+    metadatas: list[dict] | None,
+) -> None:
+    """Registered batch hook (RDR-095): best-effort dual-write of
+    ``chash_index`` rows after a T3 upsert.
+
+    Called via ``fire_post_store_batch_hooks`` from every CLI indexing
+    path immediately after ``t3.upsert_chunks_with_embeddings(...)``.
+    Reads ``metadatas``; ignores ``contents`` and ``embeddings``. Opens a
+    fresh T2Database (matching ``taxonomy_assign_batch_hook``'s
+    lifecycle), delegates to the store-level
+    ``dual_write_chash_index`` helper, and closes. Logs at debug level
+    on any outer failure: a T2 failure must never abort the enclosing
+    T3 write path.
+
+    Registered via ``register_post_store_batch_hook`` in
+    ``mcp/core.py``.
     """
     if not doc_ids or not metadatas:
         return

@@ -445,29 +445,32 @@ class TestDualWriteHelper:
             store.close()
 
 
-# ── chash_dual_write_batch — mcp_infra entry point (RDR-086 Phase 1.2) ───────
+# ── chash_dual_write_batch_hook (RDR-086 Phase 1.2; renamed in RDR-095) ──────
 
 
 class TestChashDualWriteBatchEntryPoint:
-    """``mcp_infra.chash_dual_write_batch`` is what each of the seven
-    indexing write sites actually calls. It opens a fresh T2Database
-    (matching ``taxonomy_assign_batch``'s lifecycle) and delegates.
+    """``mcp_infra.chash_dual_write_batch_hook`` is the registered batch
+    hook fired by ``fire_post_store_batch_hooks`` from every CLI indexing
+    write site. It opens a fresh T2Database (matching
+    ``taxonomy_assign_batch_hook``'s lifecycle) and delegates.
     """
 
     def test_chash_dual_write_batch_populates_real_t2(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from nexus.db.t2 import T2Database
-        from nexus.mcp_infra import chash_dual_write_batch
+        from nexus.mcp_infra import chash_dual_write_batch_hook
 
         db_path = tmp_path / "t2.db"
         monkeypatch.setattr(
             "nexus.mcp_infra.default_db_path", lambda: db_path
         )
 
-        chash_dual_write_batch(
+        chash_dual_write_batch_hook(
             ["doc1", "doc2"],
             "code__example",
+            [],  # contents (ignored by this hook)
+            None,  # embeddings (ignored by this hook)
             [
                 {"chunk_text_hash": "aa11"},
                 {"chunk_text_hash": "bb22"},
@@ -484,15 +487,19 @@ class TestChashDualWriteBatchEntryPoint:
     def test_chash_dual_write_batch_empty_is_noop(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from nexus.mcp_infra import chash_dual_write_batch
+        from nexus.mcp_infra import chash_dual_write_batch_hook
 
         db_path = tmp_path / "t2.db"
         monkeypatch.setattr(
             "nexus.mcp_infra.default_db_path", lambda: db_path
         )
         # Neither call should raise; both short-circuit before opening T2.
-        chash_dual_write_batch([], "coll", [{"chunk_text_hash": "x"}])
-        chash_dual_write_batch(["doc1"], "coll", [])
+        chash_dual_write_batch_hook(
+            [], "coll", [], None, [{"chunk_text_hash": "x"}],
+        )
+        chash_dual_write_batch_hook(
+            ["doc1"], "coll", [], None, [],
+        )
 
     def test_chash_dual_write_batch_swallows_outer_failures(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -505,6 +512,6 @@ class TestChashDualWriteBatchEntryPoint:
 
         monkeypatch.setattr(mcp_infra, "t2_ctx", _boom)
         # Must not raise.
-        mcp_infra.chash_dual_write_batch(
-            ["doc1"], "coll", [{"chunk_text_hash": "hash1"}]
+        mcp_infra.chash_dual_write_batch_hook(
+            ["doc1"], "coll", [], None, [{"chunk_text_hash": "hash1"}],
         )

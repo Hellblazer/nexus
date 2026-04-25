@@ -802,19 +802,21 @@ def _index_pdf_file(
             metadatas=metadatas,
         )
 
-        # Chash dual-write (RDR-086 Phase 1.2): global chash → (collection, doc_id).
-        try:
-            from nexus.mcp_infra import chash_dual_write_batch
-            chash_dual_write_batch(ids, collection_name, metadatas)
-        except Exception:
-            _log.debug("chash_dual_write_failed", exc_info=True)
-
-        # Incremental taxonomy: assign chunks to nearest existing topics.
-        try:
-            from nexus.mcp_infra import taxonomy_assign_batch
-            taxonomy_assign_batch(ids, collection_name, embeddings)
-        except Exception:
-            _log.debug("taxonomy_incremental_assign_failed", exc_info=True)
+        # Post-store hook chains (RDR-095). Both single-doc and batch
+        # chains fire from every storage event; consumers register in
+        # whichever shape fits their work. Single-doc fire iterates the
+        # batch one document at a time so per-doc hooks (e.g. RDR-089
+        # aspect extraction) cover CLI ingest the same way they cover
+        # MCP store_put.
+        from nexus.mcp_infra import (
+            fire_post_store_batch_hooks,
+            fire_post_store_hooks,
+        )
+        fire_post_store_batch_hooks(
+            ids, collection_name, documents, embeddings, metadatas,
+        )
+        for _did, _doc in zip(ids, documents):
+            fire_post_store_hooks(_did, collection_name, _doc)
 
     return len(prepared)
 
