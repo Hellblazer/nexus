@@ -565,36 +565,46 @@ def _run_taxonomy_assign(doc_id, collection, content, taxonomy, chroma_client):
         )
 
 
-def taxonomy_assign_batch(
+def taxonomy_assign_batch_hook(
     doc_ids: list[str],
     collection: str,
-    embeddings: list[list[float]],
-) -> int:
-    """Assign a batch of indexed docs to their nearest topics.
+    contents: list[str],
+    embeddings: list[list[float]] | None,
+    metadatas: list[dict] | None,
+) -> None:
+    """Registered batch hook (RDR-095): assign a batch of indexed docs to
+    their nearest topics.
 
-    Called by CLI indexing paths after chunk upsert.  Uses existing T3
-    embeddings (already in *embeddings*) — no re-fetch or re-embed needed.
+    Called via ``fire_post_store_batch_hooks`` from every CLI indexing
+    path after chunk upsert. Reads ``embeddings``; ignores ``contents``
+    and ``metadatas``. Uses existing T3 embeddings (already in
+    *embeddings*) so no re-fetch or re-embed is needed.
 
-    Returns the number of docs assigned, or 0 when centroids don't exist
-    (no discover run yet) or the collection is excluded.
+    No-op when centroids don't exist (no discover run yet) or the
+    collection is excluded. Body parity with the pre-RDR-095
+    ``taxonomy_assign_batch`` direct-call function: identical inner
+    logic, return value narrowed to None (callers never read it).
+
+    Registered via ``register_post_store_batch_hook`` in
+    ``mcp/core.py``.
     """
     from fnmatch import fnmatch
 
     from nexus.config import is_local_mode, load_config
 
     if not doc_ids or not embeddings:
-        return 0
+        return
 
     if is_local_mode():
         exclude = load_config().get("taxonomy", {}).get("local_exclude_collections", [])
         if any(fnmatch(collection, pat) for pat in exclude):
-            return 0
+            return
 
     try:
         with t2_ctx() as db:
             chroma_client = get_t3()._client
             # Same-collection assignment
-            assigned = db.taxonomy.assign_batch(
+            db.taxonomy.assign_batch(
                 collection, doc_ids, embeddings, chroma_client,
             )
             # Cross-collection projection (RDR-075 SC-6)
@@ -609,29 +619,35 @@ def taxonomy_assign_batch(
                     collection=collection,
                     cross_assigned=cross_assigned,
                 )
-            return assigned
     except Exception:
         import structlog
         structlog.get_logger().debug("taxonomy_assign_batch_failed", exc_info=True)
-        return 0
 
 
-# ── Chash dual-write (RDR-086 Phase 1.2) ──────────────────────────────────────
+# ── Chash dual-write (RDR-086 Phase 1.2; migrated to batch hook in RDR-095) ──
 
 
-def chash_dual_write_batch(
+def chash_dual_write_batch_hook(
     doc_ids: list[str],
     collection: str,
-    metadatas: list[dict],
+    contents: list[str],
+    embeddings: list[list[float]] | None,
+    metadatas: list[dict] | None,
 ) -> None:
-    """Best-effort dual-write of ``chash_index`` rows after a T3 upsert.
+    """Registered batch hook (RDR-095): best-effort dual-write of
+    ``chash_index`` rows after a T3 upsert.
 
-    Called from each of the six indexing write sites immediately after
-    ``t3.upsert_chunks_with_embeddings(...)``. Opens a fresh T2Database
-    (matching ``taxonomy_assign_batch``'s lifecycle), delegates to the
-    store-level ``dual_write_chash_index`` helper, and closes. Logs at
-    debug level on any outer failure — a T2 failure must never abort
-    the enclosing T3 write path.
+    Called via ``fire_post_store_batch_hooks`` from every CLI indexing
+    path immediately after ``t3.upsert_chunks_with_embeddings(...)``.
+    Reads ``metadatas``; ignores ``contents`` and ``embeddings``. Opens a
+    fresh T2Database (matching ``taxonomy_assign_batch_hook``'s
+    lifecycle), delegates to the store-level
+    ``dual_write_chash_index`` helper, and closes. Logs at debug level
+    on any outer failure: a T2 failure must never abort the enclosing
+    T3 write path.
+
+    Registered via ``register_post_store_batch_hook`` in
+    ``mcp/core.py``.
     """
     if not doc_ids or not metadatas:
         return

@@ -368,19 +368,12 @@ def _index_document(
             m["embedding_model"] = actual_model
     db.upsert_chunks_with_embeddings(collection_name, ids, documents, embeddings, metadatas)
 
-    # Chash dual-write (RDR-086 Phase 1.2): global chash → (collection, doc_id).
-    try:
-        from nexus.mcp_infra import chash_dual_write_batch
-        chash_dual_write_batch(ids, collection_name, metadatas)
-    except Exception:
-        _log.debug("chash_dual_write_failed", exc_info=True)
-
-    # Incremental taxonomy: assign chunks to nearest existing topics.
-    try:
-        from nexus.mcp_infra import taxonomy_assign_batch
-        taxonomy_assign_batch(ids, collection_name, embeddings)
-    except Exception:
-        _log.debug("taxonomy_incremental_assign_failed", exc_info=True)
+    # Post-store batch hook chain (RDR-095): chash dual-write +
+    # taxonomy incremental assignment, registered in mcp/core.py.
+    from nexus.mcp_infra import fire_post_store_batch_hooks
+    fire_post_store_batch_hooks(
+        ids, collection_name, documents, embeddings, metadatas,
+    )
 
     # Prune stale chunks from a previous (larger) version of this file.
     # Paginate: ChromaDB Cloud returns at most 300 records per get() call.
@@ -494,19 +487,12 @@ def _index_pdf_incremental(
         # Upsert
         t3.upsert_chunks_with_embeddings(collection_name, batch_ids, batch_docs, embeddings, batch_metas)
 
-        # Chash dual-write (RDR-086 Phase 1.2): global chash → (collection, doc_id).
-        try:
-            from nexus.mcp_infra import chash_dual_write_batch
-            chash_dual_write_batch(batch_ids, collection_name, batch_metas)
-        except Exception:
-            _log.debug("chash_dual_write_failed", exc_info=True)
-
-        # Incremental taxonomy: assign this batch to nearest existing topics.
-        try:
-            from nexus.mcp_infra import taxonomy_assign_batch
-            taxonomy_assign_batch(batch_ids, collection_name, embeddings)
-        except Exception:
-            _log.debug("taxonomy_incremental_assign_failed", exc_info=True)
+        # Post-store batch hook chain (RDR-095): chash dual-write +
+        # taxonomy incremental assignment, registered in mcp/core.py.
+        from nexus.mcp_infra import fire_post_store_batch_hooks
+        fire_post_store_batch_hooks(
+            batch_ids, collection_name, batch_docs, embeddings, batch_metas,
+        )
 
         # Checkpoint
         write_checkpoint(CheckpointData(
@@ -897,19 +883,12 @@ def index_pdf(
             m["embedding_model"] = actual_model
     db.upsert_chunks_with_embeddings(col_name, ids, documents, embeddings, metadatas_list)
 
-    # Chash dual-write (RDR-086 Phase 1.2): global chash → (collection, doc_id).
-    try:
-        from nexus.mcp_infra import chash_dual_write_batch
-        chash_dual_write_batch(ids, col_name, metadatas_list)
-    except Exception:
-        _log.debug("chash_dual_write_failed", exc_info=True)
-
-    # Incremental taxonomy: assign chunks to nearest existing topics.
-    try:
-        from nexus.mcp_infra import taxonomy_assign_batch
-        taxonomy_assign_batch(ids, col_name, embeddings)
-    except Exception:
-        _log.debug("taxonomy_incremental_assign_failed", exc_info=True)
+    # Post-store batch hook chain (RDR-095): chash dual-write +
+    # taxonomy incremental assignment, registered in mcp/core.py.
+    from nexus.mcp_infra import fire_post_store_batch_hooks
+    fire_post_store_batch_hooks(
+        ids, col_name, documents, embeddings, metadatas_list,
+    )
 
     # Prune stale chunks
     current_ids_set = set(ids)

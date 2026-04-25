@@ -430,19 +430,12 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
             metadatas=metadatas,
         )
 
-        # Chash dual-write (RDR-086 Phase 1.2): global chash → (collection, doc_id).
-        try:
-            from nexus.mcp_infra import chash_dual_write_batch
-            chash_dual_write_batch(ids, ctx.corpus, metadatas)
-        except Exception:
-            _log.debug("chash_dual_write_failed", exc_info=True)
-
-        # Incremental taxonomy: assign chunks to nearest existing topics.
-        try:
-            from nexus.mcp_infra import taxonomy_assign_batch
-            taxonomy_assign_batch(ids, ctx.corpus, embeddings)
-        except Exception:
-            _log.debug("taxonomy_incremental_assign_failed", exc_info=True)
+        # Post-store batch hook chain (RDR-095): chash dual-write +
+        # taxonomy incremental assignment, registered in mcp/core.py.
+        from nexus.mcp_infra import fire_post_store_batch_hooks
+        fire_post_store_batch_hooks(
+            ids, ctx.corpus, documents, embeddings, metadatas,
+        )
 
     return len(ids)
 

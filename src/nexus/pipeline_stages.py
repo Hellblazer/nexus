@@ -403,19 +403,12 @@ def uploader_loop(
 
                 t3.upsert_chunks_with_embeddings(collection, ids, documents, embeddings, metadatas)
 
-                # Chash dual-write (RDR-086 Phase 1.2): global chash → (collection, doc_id).
-                try:
-                    from nexus.mcp_infra import chash_dual_write_batch
-                    chash_dual_write_batch(ids, collection, metadatas)
-                except Exception:
-                    pass  # non-fatal; logging handled inside
-
-                # Incremental taxonomy: assign chunks to nearest existing topics.
-                try:
-                    from nexus.mcp_infra import taxonomy_assign_batch
-                    taxonomy_assign_batch(ids, collection, embeddings)
-                except Exception:
-                    pass  # non-fatal; logging handled inside
+                # Post-store batch hook chain (RDR-095): chash dual-write +
+                # taxonomy incremental assignment, registered in mcp/core.py.
+                from nexus.mcp_infra import fire_post_store_batch_hooks
+                fire_post_store_batch_hooks(
+                    ids, collection, documents, embeddings, metadatas,
+                )
 
                 indices = [row["chunk_index"] for row in batch]
                 db.mark_uploaded(content_hash, indices)

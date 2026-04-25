@@ -362,9 +362,24 @@ def _clamp_subagent_timeout(requested: float, tool_name: str) -> float:
 
 # ── Post-store hooks (register once at import) ──────────────────────────────
 
-from nexus.mcp_infra import register_post_store_hook, taxonomy_assign_hook
+from nexus.mcp_infra import (
+    chash_dual_write_batch_hook,
+    register_post_store_batch_hook,
+    register_post_store_hook,
+    taxonomy_assign_batch_hook,
+    taxonomy_assign_hook,
+)
 
 register_post_store_hook(taxonomy_assign_hook)
+
+# RDR-095: registration order is load-bearing. chash dual-write must run
+# before taxonomy assignment because that mirrors the legacy CLI call-site
+# ordering (chash_dual_write_batch was always invoked before
+# taxonomy_assign_batch at every site) and preserves the dual-write-first
+# invariant for any reader that expects chash rows present before topic
+# assignment runs.
+register_post_store_batch_hook(chash_dual_write_batch_hook)
+register_post_store_batch_hook(taxonomy_assign_batch_hook)
 
 # ── Registered tools ─────────────────────────────────────────────────────────
 
