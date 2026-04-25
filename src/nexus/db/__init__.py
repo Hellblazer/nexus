@@ -10,11 +10,24 @@ tests can pass a fake client without hitting ChromaDB Cloud.
 """
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from nexus.config import get_credential
-from nexus.db.t3 import T3Database
+
+if TYPE_CHECKING:
+    # Type-only import. T3Database transitively pulls voyageai ->
+    # transformers -> torch at module load. With this import at
+    # runtime, every `from nexus.db.<sub> import ...` triggers
+    # nexus.db.__init__ which fires the torch import (multi-second).
+    # The CLI hits this path via nexus.cli -> nexus.commands.catalog
+    # -> nexus.catalog.catalog -> nexus.catalog.catalog_db ->
+    # `from nexus.db.t2 import _sanitize_fts5`. Lazy-loading the
+    # T3Database import inside make_t3() removes torch from the cold-
+    # start cost of `nx <subcommand>` invocations.
+    from nexus.db.t3 import T3Database
 
 
-def make_t3(*, _client=None, _ef_override=None) -> T3Database:
+def make_t3(*, _client=None, _ef_override=None) -> "T3Database":
     """Return a :class:`T3Database` built from the current credentials.
 
     In local mode (``is_local_mode()`` returns True), returns a T3Database
@@ -32,6 +45,9 @@ def make_t3(*, _client=None, _ef_override=None) -> T3Database:
       ``DefaultEmbeddingFunction()``) to avoid Voyage AI API calls.
     """
     from nexus.config import is_local_mode, load_config, _default_local_path
+    # Runtime import of T3Database (was moved out of module-scope to
+    # break the eager torch-import chain during CLI startup).
+    from nexus.db.t3 import T3Database
 
     if is_local_mode() and _client is None:
         from nexus.db.local_ef import LocalEmbeddingFunction

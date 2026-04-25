@@ -18,7 +18,14 @@ from chromadb.errors import (
 )
 import structlog
 
-import voyageai
+# voyageai is imported lazily inside ``__init__`` only when cloud mode
+# is selected. The eager import here was pulling
+# voyageai -> langchain_text_splitters -> transformers -> torch
+# (multi-second cold start) into every CLI invocation through the
+# nexus.commands.store -> nexus.db.t3 chain. Type annotations using
+# ``voyageai.Client`` are stringified by ``from __future__ import
+# annotations`` at the top of this file so the lazy import does not
+# break static type checkers.
 
 from nexus.config import get_credential
 from nexus.corpus import embedding_model_for_collection, index_model_for_collection
@@ -227,10 +234,18 @@ class T3Database:
             return
 
         # ── Cloud mode ───────────────────────────────────────────────────
-        self._voyage_client: voyageai.Client | None = (
-            voyageai.Client(api_key=voyage_api_key, timeout=read_timeout_seconds, max_retries=0)
-            if voyage_api_key else None
-        )
+        # Lazy voyageai import: only loaded when cloud mode is actually
+        # used (the eager top-level import was multi-second cold-start
+        # cost on every CLI invocation through the indirect import chain).
+        if voyage_api_key:
+            import voyageai  # noqa: PLC0415
+            self._voyage_client = voyageai.Client(
+                api_key=voyage_api_key,
+                timeout=read_timeout_seconds,
+                max_retries=0,
+            )
+        else:
+            self._voyage_client = None
         if _client is not None:
             self._client = _client
         else:

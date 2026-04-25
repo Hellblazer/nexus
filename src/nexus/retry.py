@@ -146,24 +146,40 @@ def _chroma_with_retry(
 
 
 # ── Voyage AI transient-error retry ──────────────────────────────────────────
+#
+# voyageai.error is imported lazily by ``_get_voyage_error_types()`` rather
+# than at module load. The eager import was pulling
+# voyageai -> langchain_text_splitters -> transformers -> torch into every
+# CLI invocation that touches retry.py (which is the entire indexer / scoring
+# / pipeline_stages graph). Lazy-init keeps ``nx <subcommand>`` cold-start
+# free of torch.
 
-import voyageai.error as _voyageai_error
+_VOYAGE_ERROR_TYPES: tuple[type, ...] | None = None
 
-#: Voyage errors we handle in ``_voyage_with_retry``. All transient classes
-#: are listed — ``voyageai.Client`` is constructed with ``max_retries=0`` at
-#: every nexus call site, so this wrapper is the sole retry authority and
-#: every retry decision surfaces through ``_log.warning`` (nexus-vatx Gap 1).
-#:
-#: Excluded: ``AuthenticationError``, ``InvalidRequestError``,
-#: ``MalformedRequestError`` (user/config errors — never transient).
-_VOYAGE_ERROR_TYPES: tuple[type, ...] = (
-    _voyageai_error.APIConnectionError,
-    _voyageai_error.TryAgain,
-    _voyageai_error.RateLimitError,
-    _voyageai_error.ServiceUnavailableError,
-    _voyageai_error.ServerError,
-    _voyageai_error.Timeout,
-)
+
+def _get_voyage_error_types() -> tuple[type, ...]:
+    """Return the voyage-error tuple, importing voyageai.error on first use.
+
+    All transient classes are listed; ``voyageai.Client`` is constructed
+    with ``max_retries=0`` at every nexus call site, so this wrapper is
+    the sole retry authority and every retry decision surfaces through
+    ``_log.warning`` (nexus-vatx Gap 1).
+
+    Excluded: ``AuthenticationError``, ``InvalidRequestError``,
+    ``MalformedRequestError`` (user/config errors, never transient).
+    """
+    global _VOYAGE_ERROR_TYPES
+    if _VOYAGE_ERROR_TYPES is None:
+        import voyageai.error as _voyageai_error  # noqa: PLC0415
+        _VOYAGE_ERROR_TYPES = (
+            _voyageai_error.APIConnectionError,
+            _voyageai_error.TryAgain,
+            _voyageai_error.RateLimitError,
+            _voyageai_error.ServiceUnavailableError,
+            _voyageai_error.ServerError,
+            _voyageai_error.Timeout,
+        )
+    return _VOYAGE_ERROR_TYPES
 
 
 def _is_retryable_voyage_error(exc: BaseException) -> bool:
@@ -175,7 +191,7 @@ def _is_retryable_voyage_error(exc: BaseException) -> bool:
     stalled." The two error spaces are disjoint; do not add Voyage AI types
     to :func:`_is_retryable_chroma_error`.
     """
-    return isinstance(exc, _VOYAGE_ERROR_TYPES)
+    return isinstance(exc, _get_voyage_error_types())
 
 
 def _voyage_with_retry(

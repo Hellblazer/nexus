@@ -190,7 +190,9 @@ def test_retry_warn_log_fires_on_backoff(capsys) -> None:
 
 def test_t3_database_voyage_client_has_timeout() -> None:
     from nexus.db.t3 import T3Database
-    with patch("nexus.db.t3.voyageai.Client") as mock_ctor:
+    # Patch the voyageai module directly; nexus.db.t3 imports it lazily
+    # inside __init__ now (cold-start fix that breaks the torch chain).
+    with patch("voyageai.Client") as mock_ctor:
         mock_ctor.return_value = MagicMock()
         T3Database(voyage_api_key="test-key", read_timeout_seconds=60.0, _client=MagicMock())
         mock_ctor.assert_called_once_with(api_key="test-key", timeout=60.0, max_retries=0)
@@ -245,7 +247,13 @@ def test_retry_at_call_site(test_id: str) -> None:
         mock_voyage.contextualized_embed.side_effect = [
             _ve.APIConnectionError("down"), _make_cce_success(),
         ]
-        with patch("nexus.db.t3.voyageai.Client", return_value=mock_voyage), \
+        # Patch the voyageai module directly. The previous patch target
+        # was ``nexus.db.t3.voyageai.Client`` which depended on
+        # ``import voyageai`` being at module scope of ``nexus.db.t3``.
+        # That import is now lazy (loaded inside __init__) to break the
+        # CLI-cold-start torch chain, so the patch routes via the real
+        # voyageai module instead.
+        with patch("voyageai.Client", return_value=mock_voyage), \
              patch("nexus.retry.time.sleep"):
             db = T3Database(voyage_api_key="test-key", _client=MagicMock())
             result = db._cce_embed("hello world")
