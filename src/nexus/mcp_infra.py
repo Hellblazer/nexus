@@ -389,7 +389,7 @@ def fire_post_store_batch_hooks(
     """Invoke all registered batch hooks. Per-hook failures captured and
     persisted to T2 hook_failures, never raised.
 
-    Empty doc_ids returns early — no hooks fire on empty batches.
+    Empty doc_ids returns early: no hooks fire on empty batches.
 
     Different consumers read different payload fields:
     chash_dual_write_batch_hook reads metadatas, taxonomy_assign_batch_hook
@@ -453,8 +453,14 @@ def _record_batch_hook_failure(
                         " batch_doc_ids, is_batch) VALUES (?, ?, ?, ?, ?, 1)",
                         (representative, collection, hook_name, truncated, payload),
                     )
-                except sqlite3.OperationalError:
+                except sqlite3.OperationalError as exc:
                     # Pre-4.14.1 schema: new columns not yet migrated.
+                    # Narrow catch to schema errors so transient lock or I/O
+                    # failures bubble up to the outer guard rather than
+                    # silently degrading the captured row.
+                    msg = str(exc)
+                    if "no column named" not in msg and "no such column" not in msg:
+                        raise
                     conn.execute(
                         "INSERT INTO hook_failures "
                         "(doc_id, collection, hook_name, error) VALUES (?, ?, ?, ?)",

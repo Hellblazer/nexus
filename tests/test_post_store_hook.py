@@ -189,7 +189,7 @@ def test_fire_post_store_batch_hooks_invokes_registered() -> None:
 
 
 def test_fire_post_store_batch_hooks_empty_doc_ids_early_return() -> None:
-    """Empty doc_ids returns early — no hooks fire on empty batches."""
+    """Empty doc_ids returns early: no hooks fire on empty batches."""
     from nexus.mcp_infra import (
         fire_post_store_batch_hooks,
         register_post_store_batch_hook,
@@ -207,9 +207,9 @@ def test_fire_post_store_batch_hooks_empty_doc_ids_early_return() -> None:
 def test_fire_post_store_batch_hooks_isolation(tmp_path: Path, monkeypatch) -> None:
     """First hook raising must not block the second hook from firing.
 
-    Uses a synthetic raising probe — the real taxonomy_assign_batch_hook
+    Uses a synthetic raising probe (the real taxonomy_assign_batch_hook
     body wraps everything in its own try/except and so cannot exercise the
-    framework's failure-capture path.
+    framework's failure-capture path).
     """
     import nexus.mcp_infra as mod
     from nexus.db.migrations import (
@@ -363,6 +363,74 @@ def test_fire_post_store_batch_hooks_falls_back_to_scalar_when_columns_absent(
     assert rows[0][0] == "d1"
     assert rows[0][1] == "raising"
     assert "kaboom" in rows[0][2]
+
+
+def test_record_batch_hook_failure_non_schema_operational_error_propagates(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """A transient OperationalError that is NOT a schema-missing-column
+    error must NOT silently fall through to the scalar-only insert path.
+
+    The outer try/except on _record_batch_hook_failure still swallows it
+    so ingest is unaffected, but the scalar fallback row must NOT be
+    written for unrelated lock/IO failures.
+    """
+    import nexus.mcp_infra as mod
+    from nexus.db.migrations import (
+        migrate_hook_failures,
+        migrate_hook_failures_batch_columns,
+    )
+    from nexus.mcp_infra import _record_batch_hook_failure
+    import sqlite3
+
+    db_path = tmp_path / "lock_propagate.db"
+    T2Database(db_path).close()
+    conn = sqlite3.connect(str(db_path))
+    migrate_hook_failures(conn)
+    migrate_hook_failures_batch_columns(conn)
+    conn.close()
+
+    class _LockingT2:
+        """Stub T2 ctx whose execute always raises a transient lock error."""
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+        class _Taxonomy:
+            class _ConnRaisesLock:
+                def execute(self, *a, **kw):
+                    raise sqlite3.OperationalError("database is locked")
+                def commit(self):
+                    pass
+            conn = _ConnRaisesLock()
+            class _Lock:
+                def __enter__(self):
+                    return None
+                def __exit__(self, *a):
+                    return False
+            _lock = _Lock()
+        taxonomy = _Taxonomy()
+
+    monkeypatch.setattr(mod, "t2_ctx", lambda: _LockingT2())
+
+    # Must not raise: the outer try/except in _record_batch_hook_failure
+    # swallows the propagated lock error.
+    _record_batch_hook_failure(
+        doc_ids=["d1", "d2"],
+        collection="code__nexus",
+        hook_name="probe",
+        error="boom",
+    )
+
+    # Confirm the scalar-only fallback path did NOT write a row to the
+    # real DB (the locking stub never reaches a real connection, but
+    # this test pins the contract that the narrow except clause does
+    # not silently coerce a lock error into a degraded row).
+    real = sqlite3.connect(str(db_path))
+    rows = real.execute("SELECT COUNT(*) FROM hook_failures").fetchone()
+    real.close()
+    assert rows == (0,)
 
 
 def test_fire_post_store_batch_hooks_persist_failure_is_best_effort(
