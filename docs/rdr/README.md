@@ -117,6 +117,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-092](rdr-092-plan-match-text-from-dimensional-identity.md) | Plan Match-Text from Dimensional Identity | Feature | Closed (implemented) | 2026-04-23 |
 | [RDR-093](rdr-093-groupby-aggregate-operators.md) | GroupBy and Aggregate Operators | Feature | Accepted | 2026-04-24 |
 | [RDR-094](rdr-094-mcp-owned-t1-chroma-lifecycle.md) | MCP-Owned T1 Chroma Lifecycle | Architecture | Accepted | 2026-04-24 |
+| [RDR-095](rdr-095-post-store-hook-batch-contract.md) | Post-Store Hook Framework: Batch Contract | Architecture | Accepted | 2026-04-25 |
 
 ---
 
