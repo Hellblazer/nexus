@@ -1805,6 +1805,159 @@ async def operator_verify(
     return await claude_dispatch(prompt, schema, timeout=timeout)
 
 
+@mcp.tool()
+async def operator_groupby(
+    items: str,
+    key: str,
+    timeout: float = 300.0,
+) -> dict:
+    """Partition items by a natural-language key using claude -p.
+
+    RDR-093 Phase 1. Paper §D.4 GroupBy operator: take a flat list of
+    items + a partition expression and return a structured grouping.
+    Each group carries its label (``key_value``) and the items that
+    belong to the group, with **items carried inline** (full dicts,
+    not id-only references). Pairs with ``operator_aggregate`` to form
+    the canonical ``filter → groupby → aggregate`` pipeline.
+
+    The inline-items contract is load-bearing for the bundled
+    ``groupby → aggregate`` path: a single ``claude -p`` dispatch has
+    no host-side retrieval, so aggregate must see resolvable content
+    inside the bundle prompt. Reverting to id-references would break
+    the bundle path. (RDR-093 Gate finding C-1.)
+
+    Items the operator cannot confidently assign land in a group
+    with ``key_value="unassigned"``. Plan authors can inspect the
+    unassigned group's size as a quality signal.
+
+    Cardinality cap: ``_OPERATOR_MAX_INPUTS=100`` enforced by the
+    plan runner's auto-hydration. When the cap fires the runner
+    attaches a ``{truncated, original_count, kept_count}`` block to
+    this operator's return envelope so callers see the truncation
+    rather than silently losing items. Originally scoped to
+    ``operator_groupby`` in RDR-093 S-1; generalised to every
+    operator that runs through the ids-branch auto-hydration in
+    nexus-3j6b.
+
+    Args:
+        items: Items to partition (plain text or JSON array string).
+            Each element should carry an ``id`` field for round-trip
+            composability; downstream operators (e.g. ``aggregate``)
+            key on ``id``.
+        key: Natural-language partition expression. May name a
+            structured field ("publication_year", "method family"),
+            an inferred property, or a derived attribute. The
+            operator does NOT require the key to surface verbatim
+            in the items; inference is fine.
+        timeout: Seconds before the subprocess is killed. Default 300s.
+    """
+    from nexus.operators.dispatch import claude_dispatch
+
+    prompt = (
+        f"Partition the following items by this key: {key}\n"
+        f"Output a list of groups. Each group has a string `key_value` "
+        f"(the partition label, e.g. a year, a fault model, a system "
+        f"property) and an `items` array carrying each item's full "
+        f"content INLINE — preserve the original `id` field and any "
+        f"other fields verbatim. Every input item appears in exactly "
+        f"one group's `items`. Items the partition cannot confidently "
+        f"assign go in a group with `key_value` of \"unassigned\".\n\n"
+        f"Do not reference items by id-only — carry the full item "
+        f"dicts in each group's `items` array so downstream operators "
+        f"see the content without a separate lookup.\n\n"
+        f"Items:\n{items}"
+    )
+    schema: dict = {
+        "type": "object",
+        "required": ["groups"],
+        "properties": {
+            "groups": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["key_value", "items"],
+                    "properties": {
+                        "key_value": {"type": "string"},
+                        "items": {
+                            "type": "array",
+                            "items": {"type": "object"},
+                        },
+                    },
+                },
+            },
+        },
+    }
+    return await claude_dispatch(prompt, schema, timeout=timeout)
+
+
+@mcp.tool()
+async def operator_aggregate(
+    groups: str,
+    reducer: str,
+    timeout: float = 300.0,
+) -> dict:
+    """Reduce each group of items to a per-group summary using claude -p.
+
+    RDR-093 Phase 2. Paper §D.4 Aggregate operator: take a keyed
+    grouping (typically from a prior ``operator_groupby`` step) plus a
+    natural-language reducer instruction, return one summary per
+    group with the group's ``key_value`` preserved verbatim. Pairs
+    with ``operator_groupby`` to form the canonical
+    ``filter -> groupby -> aggregate`` analytic pipeline.
+
+    Items arrive pre-hydrated inside each group's ``items`` array per
+    ``operator_groupby``'s C-1 inline-items contract. No runner-side
+    nested-id hydration is required; both bundled and isolated paths
+    see the same shape.
+
+    Group isolation: the prompt explicitly instructs the model to
+    summarise USING ONLY the items in each group. Spike B (bead
+    nexus-rojs) verified this framing produces 0% cross-group
+    leakage even on adversarial fixtures with vocabulary heavily
+    overlapping across groups.
+
+    Args:
+        groups: A JSON-serialised ``list[{key_value, items: list[dict]}]``
+            from a prior groupby step. Items are dicts (inline), not
+            id references.
+        reducer: Natural-language reduction instruction
+            (e.g. "winning baseline by reported metric",
+            "most-cited method", "earliest publication").
+        timeout: Seconds before the subprocess is killed. Default 300s.
+    """
+    from nexus.operators.dispatch import claude_dispatch
+
+    prompt = (
+        f"Reduce each group of items into a per-group summary using "
+        f"this reducer instruction: {reducer}\n\n"
+        f"Output one aggregate per input group, preserving the group's "
+        f"`key_value` verbatim. Each `summary` MUST reference only the "
+        f"items in that group's `items` array. Do NOT pull content "
+        f"from items in other groups, even when vocabulary overlaps "
+        f"across groups. The summary is a short paragraph answering "
+        f"the reducer instruction USING ONLY this group's items.\n\n"
+        f"Groups:\n{groups}"
+    )
+    schema: dict = {
+        "type": "object",
+        "required": ["aggregates"],
+        "properties": {
+            "aggregates": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["key_value", "summary"],
+                    "properties": {
+                        "key_value": {"type": "string"},
+                        "summary": {"type": "string"},
+                    },
+                },
+            },
+        },
+    }
+    return await claude_dispatch(prompt, schema, timeout=timeout)
+
+
 # ── traverse (RDR-078 P3) ─────────────────────────────────────────────────────
 
 #: Depth cap for traverse steps (SC-4).

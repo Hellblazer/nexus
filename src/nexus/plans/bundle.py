@@ -91,10 +91,11 @@ MAX_BUNDLE_PROMPT_CHARS: int = 200_000
 #: plan YAMLs use either.
 BUNDLEABLE_OPERATORS: frozenset[str] = frozenset({
     "extract", "rank", "compare", "summarize", "generate",
-    "filter", "check", "verify",
+    "filter", "check", "verify", "groupby", "aggregate",
     "operator_extract", "operator_rank", "operator_compare",
     "operator_summarize", "operator_generate", "operator_filter",
-    "operator_check", "operator_verify",
+    "operator_check", "operator_verify", "operator_groupby",
+    "operator_aggregate",
 })
 
 #: Legacy alias — older call sites / docs may reference the prior name.
@@ -478,6 +479,56 @@ def _describe_step(
             "passages that ground the verdict)."
         )
 
+    elif verb == "groupby":
+        key = step.args.get("key", "")
+        lines.append(f"  key: {key!r}")
+        lines.extend(_render_input_line(
+            label="items", value=step.args.get("items"),
+            first=first, position=position,
+            default_prose=f"the output list from STEP {position - 1}",
+            plan_to_local=plan_to_local,
+        ))
+        # RDR-093 C-1: the inline-items contract is load-bearing for
+        # bundled groupby → aggregate. The aggregate step runs inside
+        # the same `claude -p` dispatch with no host-side retrieval,
+        # so groupby must carry full item dicts (not id-only refs)
+        # so aggregate can read resolvable content. The wording here
+        # mirrors operator_groupby's standalone prompt so a future
+        # change that drops the inline-items invariant in core.py
+        # also has to update this prompt — keeping the two in sync.
+        lines.append(
+            "  Emit a JSON object with key `groups` holding a list "
+            "of `{key_value, items}` records. Carry each item INLINE "
+            "in its group's `items` array (preserve `id` and any "
+            "other fields verbatim) — do NOT reference items by id-"
+            "only. Every input item appears in exactly one group; "
+            "items that cannot be confidently assigned go in a group "
+            "with `key_value` of \"unassigned\"."
+        )
+
+    elif verb == "aggregate":
+        reducer = step.args.get("reducer", "")
+        lines.append(f"  reducer: {reducer!r}")
+        lines.extend(_render_input_line(
+            label="groups", value=step.args.get("groups"),
+            first=first, position=position,
+            default_prose=f"the `groups` output from STEP {position - 1}",
+            plan_to_local=plan_to_local,
+        ))
+        # RDR-093 §Risks and Mitigations: explicit per-group isolation
+        # directive. Spike B (nexus-rojs) verified this framing
+        # produces 0% cross-group leakage on adversarial fixtures.
+        # Mirror the standalone operator_aggregate prompt so a future
+        # change keeps the two in sync.
+        lines.append(
+            "  Emit a JSON object with key `aggregates` holding one "
+            "record per input group as `{key_value, summary}`, "
+            "preserving each group's `key_value` verbatim. Each "
+            "`summary` MUST reference ONLY the items in that group's "
+            "`items` array — do NOT pull content from items in other "
+            "groups, even when vocabulary overlaps across groups."
+        )
+
     else:
         # Unknown operator — fall back to a verbose dump of args. This
         # should not fire in practice since segment_steps gates on
@@ -582,6 +633,50 @@ def _terminal_schema(tool: str) -> dict[str, Any]:
                 "citations": {
                     "type": "array",
                     "items": {"type": "string"},
+                },
+            },
+        }
+    if verb == "groupby":
+        # RDR-093 C-1: the `items` field on each group is a list of
+        # OBJECTS (full input dicts inline), not strings (id-only).
+        # The terminal schema MUST pin this so the bundle's final
+        # `claude -p` enforcement rejects an id-only revert before
+        # downstream consumers see it.
+        return {
+            "type": "object",
+            "required": ["groups"],
+            "properties": {
+                "groups": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["key_value", "items"],
+                        "properties": {
+                            "key_value": {"type": "string"},
+                            "items": {
+                                "type": "array",
+                                "items": {"type": "object"},
+                            },
+                        },
+                    },
+                },
+            },
+        }
+    if verb == "aggregate":
+        return {
+            "type": "object",
+            "required": ["aggregates"],
+            "properties": {
+                "aggregates": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["key_value", "summary"],
+                        "properties": {
+                            "key_value": {"type": "string"},
+                            "summary": {"type": "string"},
+                        },
+                    },
                 },
             },
         }

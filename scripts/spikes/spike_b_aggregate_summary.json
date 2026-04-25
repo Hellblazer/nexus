@@ -1,0 +1,88 @@
+{
+  "summary": {
+    "runs": 10,
+    "schema_ok_runs": 10,
+    "schema_ok_rate": 1.0,
+    "runs_with_leak": 0,
+    "runs_zero_leak": 10,
+    "leak_free_rate": 1.0,
+    "leak_rate": 0.0,
+    "per_group_runs_with_leak": {
+      "GroupAlpha": 0,
+      "GroupBravo": 0,
+      "GroupCharlie": 0
+    },
+    "per_group_total_hits": {
+      "GroupAlpha": 0,
+      "GroupBravo": 0,
+      "GroupCharlie": 0
+    },
+    "own_method_present_runs": {
+      "GroupAlpha": 10,
+      "GroupBravo": 10,
+      "GroupCharlie": 10
+    },
+    "errored_runs": 0
+  },
+  "fixture": {
+    "groups": [
+      {
+        "key_value": "GroupAlpha",
+        "items": [
+          {
+            "id": "A1",
+            "quote": "We compare our system against PaxosClassic on the YCSB-A workload at three replicas; PaxosClassic reaches 12k transactions per second."
+          },
+          {
+            "id": "A2",
+            "quote": "Following Lamport-style consensus, our PaxosClassic baseline reports 12k transactions per second on YCSB-A."
+          },
+          {
+            "id": "A3",
+            "quote": "PaxosClassic remains the dominant baseline for crash-fault-tolerant SMR; we use YCSB-A and three replicas."
+          }
+        ]
+      },
+      {
+        "key_value": "GroupBravo",
+        "items": [
+          {
+            "id": "B1",
+            "quote": "We compare our system against ZyzzyvaBFT on the YCSB-A workload at three replicas; ZyzzyvaBFT reaches 8k transactions per second."
+          },
+          {
+            "id": "B2",
+            "quote": "ZyzzyvaBFT achieves 8k transactions per second on YCSB-A under crash-only conditions with three replicas."
+          },
+          {
+            "id": "B3",
+            "quote": "Our ZyzzyvaBFT baseline runs YCSB-A across three replicas and is the protocol we measure ourselves against."
+          }
+        ]
+      },
+      {
+        "key_value": "GroupCharlie",
+        "items": [
+          {
+            "id": "C1",
+            "quote": "We compare our system against HotStuffMod on the YCSB-A workload at three replicas; HotStuffMod reaches 15k transactions per second."
+          },
+          {
+            "id": "C2",
+            "quote": "HotStuffMod is our baseline for chained BFT consensus, evaluated on YCSB-A with three replicas."
+          },
+          {
+            "id": "C3",
+            "quote": "Building on HotStuffMod we use YCSB-A and observe 15k transactions per second across three replicas."
+          }
+        ]
+      }
+    ],
+    "reducer": "the most-cited baseline method"
+  },
+  "distinguishing_methods": {
+    "GroupAlpha": "PaxosClassic",
+    "GroupBravo": "ZyzzyvaBFT",
+    "GroupCharlie": "HotStuffMod"
+  }
+}

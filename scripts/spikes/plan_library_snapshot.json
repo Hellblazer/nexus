@@ -1,0 +1,506 @@
+{
+  "count": 50,
+  "date": "2026-04-24",
+  "plans": [
+    {
+      "id": 66,
+      "name": "weather-tokyo-right-now",
+      "project": "nexus",
+      "verb": "research",
+      "scope": "personal",
+      "description": "",
+      "dimensions": "{\"scope\":\"personal\",\"strategy\":\"weather-tokyo-right-now\",\"verb\":\"research\"}",
+      "match_text": "What is the weather in Tokyo right now?. research weather-tokyo-right-now scope personal"
+    },
+    {
+      "id": 65,
+      "name": "compare-fagin-s-chase-procedure",
+      "project": "nexus",
+      "verb": "analyze",
+      "scope": "personal",
+      "description": "",
+      "dimensions": "{\"scope\":\"personal\",\"strategy\":\"compare-fagin-s-chase-procedure\",\"verb\":\"analyze\"}",
+      "match_text": "Compare how Fagin's chase procedure differs from Deutsch's 2001 optimization approach to query composition. analyze compare-fagin-s-chase-procedure scope personal"
+    },
+    {
+      "id": 53,
+      "name": "default",
+      "project": "",
+      "verb": "analyze",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"default\",\"verb\":\"analyze\"}",
+      "match_text": "Analysis and synthesis of a research area across prose and code corpora. Gather from both sides, walk reference chains to find supporting work, hydrate the candidates' content, rank against the caller's criterion, then summarise the top-ranked eviden"
+    },
+    {
+      "id": 54,
+      "name": "citation-traversal",
+      "project": "",
+      "verb": "research",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"citation-traversal\",\"verb\":\"research\"}",
+      "match_text": "Trace the citation chain surrounding a document. Resolve the seed by title, walk the reference graph both inward (what cites this) and outward (what this cites), hydrate the matched corpora, and summarise the evidence so a downstream agent can charac"
+    },
+    {
+      "id": 55,
+      "name": "default",
+      "project": "",
+      "verb": "debug",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"default\",\"verb\":\"debug\"}",
+      "match_text": "Dev / debug against a failing code path. Intentionally flat: dev work starts from a concrete failure and the primary link walk is the catalog's per-file lookup (not multi-hop graph traversal \u2014 Serena handles symbol- level navigation separately). Surf"
+    },
+    {
+      "id": 56,
+      "name": "default",
+      "project": "",
+      "verb": "document",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"default\",\"verb\":\"document\"}",
+      "match_text": "Documentation authoring or audit. Gather existing prose and code that touches the area, walk documentation-for edges so anything that should already be documented surfaces, hydrate both corpora's content, and compare the current docs against the code"
+    },
+    {
+      "id": 57,
+      "name": "find-by-author",
+      "project": "",
+      "verb": "research",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"find-by-author\",\"verb\":\"research\"}",
+      "match_text": "Find documents attributed to a specific author. Routes through the catalog's author index to locate every entry by that person, hydrates the matching documents' content, and summarises their contribution surface so a downstream agent can characterise"
+    },
+    {
+      "id": 58,
+      "name": "default",
+      "project": "",
+      "verb": "plan-author",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"default\",\"verb\":\"plan-author\"}",
+      "match_text": "Author a new plan template from scratch. Fetches the plan-authoring guide and the dimension registry, surveys the existing library for prior art on the target verb, and drafts a candidate plan_json which the caller saves via plan_save. Self-referenti"
+    },
+    {
+      "id": 59,
+      "name": "default",
+      "project": "",
+      "verb": "plan-inspect",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"default\",\"verb\":\"plan-inspect\"}",
+      "match_text": "Inspect a single plan's runtime metrics and match history. Given a plan identifier (id or verb+scope dimensions), surfaces use_count, last_used, match_count, match_conf_sum, success_count, failure_count, plus recent match traces so the operator can j"
+    },
+    {
+      "id": 60,
+      "name": "dimensions",
+      "project": "",
+      "verb": "plan-inspect",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"dimensions\",\"verb\":\"plan-inspect\"}",
+      "match_text": "Enumerate the registered dimensions from nx/plans/dimensions.yml and count how many plans pin each one. Surfaces the dimension registry so an authoring agent can see which axes are canonical (verb, scope, strategy) versus which are specialisation axe"
+    },
+    {
+      "id": 61,
+      "name": "propose",
+      "project": "",
+      "verb": "plan-promote",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"propose\",\"verb\":\"plan-promote\"}",
+      "match_text": "Survey the plan library's runtime metrics and rank promotion candidates. Reads the plans table (use_count, match_count, match_conf_sum, success/failure counts) and applies the default thresholds from RDR-078 Phase 4c to identify plans whose usage pat"
+    },
+    {
+      "id": 62,
+      "name": "default",
+      "project": "",
+      "verb": "research",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"default\",\"verb\":\"research\"}",
+      "match_text": "Design / architecture / planning. Walk from a concept into the prose corpus (RDRs, docs, knowledge), traverse to the modules that implement it, then surface concrete code context. Hydrate the candidates' actual content and summarise with citations so"
+    },
+    {
+      "id": 63,
+      "name": "default",
+      "project": "",
+      "verb": "review",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"default\",\"verb\":\"review\"}",
+      "match_text": "Critique / audit / review of a change set. Resolve the changed files to their catalog entries, walk decision-evolution history (which RDRs superseded or cited what touches this code), hydrate the RDR content, extract the decisions, and compare agains"
+    },
+    {
+      "id": 64,
+      "name": "type-scoped-search",
+      "project": "",
+      "verb": "research",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"type-scoped\",\"verb\":\"research\"}",
+      "match_text": "Search within a single content type (code, paper, rdr, knowledge). Routes through the catalog to resolve the content-type bucket, runs the semantic query against only those collections, hydrates the matches, and summarises the findings. Useful when t"
+    },
+    {
+      "id": 52,
+      "name": "across-arcaneum-s-rdrs-collection",
+      "project": "nexus",
+      "verb": "research",
+      "scope": "personal",
+      "description": "",
+      "dimensions": "{\"scope\":\"personal\",\"strategy\":\"across-arcaneum-s-rdrs-collection\",\"verb\":\"research\"}",
+      "match_text": "Across Arcaneum's RDRs on collection creation and bulk indexing, what tradeoffs are called out and how do they stack up?. research across-arcaneum-s-rdrs-collection scope personal"
+    },
+    {
+      "id": 51,
+      "name": "tradeoffs-called-out-across-arcaneum",
+      "project": "nexus",
+      "verb": "research",
+      "scope": "personal",
+      "description": "",
+      "dimensions": "{\"scope\":\"personal\",\"strategy\":\"tradeoffs-called-out-across-arcaneum\",\"verb\":\"research\"}",
+      "match_text": "What tradeoffs are called out across Arcaneum's RDRs on collection creation and bulk indexing?. research tradeoffs-called-out-across-arcaneum scope personal"
+    },
+    {
+      "id": 50,
+      "name": "different-approaches-membership-churn-described",
+      "project": "nexus",
+      "verb": "research",
+      "scope": "personal",
+      "description": "",
+      "dimensions": "{\"scope\":\"personal\",\"strategy\":\"different-approaches-membership-churn-described\",\"verb\":\"research\"}",
+      "match_text": "What different approaches to membership churn are described across the Delos papers?. research different-approaches-membership-churn-described scope personal"
+    },
+    {
+      "id": 49,
+      "name": "papers-handle-membership-churn-differently",
+      "project": "nexus",
+      "verb": "research",
+      "scope": "personal",
+      "description": "",
+      "dimensions": "{\"scope\":\"personal\",\"strategy\":\"papers-handle-membership-churn-differently\",\"verb\":\"research\"}",
+      "match_text": "How do these papers handle membership churn differently?. research papers-handle-membership-churn-differently scope personal"
+    },
+    {
+      "id": 48,
+      "name": "nexus-retrieval",
+      "project": "nexus",
+      "verb": "research",
+      "scope": "personal",
+      "description": "",
+      "dimensions": "{\"scope\":\"personal\",\"strategy\":\"nexus-retrieval\",\"verb\":\"research\"}",
+      "match_text": "what is nexus retrieval. research nexus-retrieval scope personal"
+    },
+    {
+      "id": 47,
+      "name": "nx_answer-plan-match-gate-decide",
+      "project": "",
+      "verb": "research",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"nx_answer-plan-match-gate-decide\",\"verb\":\"research\"}",
+      "match_text": "How does the nx_answer plan-match gate decide between using a plan from the library and falling back to the inline claude-p planner?. research nx_answer-plan-match-gate-decide scope global"
+    },
+    {
+      "id": 45,
+      "name": "rdr-080-say-boundary-between-45",
+      "project": "",
+      "verb": "research",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"rdr-080-say-boundary-between-45\",\"verb\":\"research\"}",
+      "match_text": "What does RDR-080 say about the boundary between MCP tools and agents?. research rdr-080-say-boundary-between-45 scope global"
+    },
+    {
+      "id": 44,
+      "name": "explain-nx_answer-trunk-plan_match-plan_run",
+      "project": "",
+      "verb": "document",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"explain-nx_answer-trunk-plan_match-plan_run\",\"verb\":\"document\"}",
+      "match_text": "Explain the nx_answer trunk: what does plan_match do, plan_run do, what gets recorded. document explain-nx_answer-trunk-plan_match-plan_run scope global"
+    },
+    {
+      "id": 41,
+      "name": "explain-nx_answer-trunk-records-runs",
+      "project": "",
+      "verb": "document",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"explain-nx_answer-trunk-records-runs\",\"verb\":\"document\"}",
+      "match_text": "Explain the nx_answer trunk and how it records runs. document explain-nx_answer-trunk-records-runs scope global"
+    },
+    {
+      "id": 38,
+      "name": "plan-match-first-retrieval-work",
+      "project": "",
+      "verb": "research",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"plan-match-first-retrieval-work\",\"verb\":\"research\"}",
+      "match_text": "How does plan-match-first retrieval work in RDR-078?. research plan-match-first-retrieval-work scope global"
+    },
+    {
+      "id": 37,
+      "name": "plan-runner-work",
+      "project": "",
+      "verb": "research",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"plan-runner-work\",\"verb\":\"research\"}",
+      "match_text": "how does the plan runner work. research plan-runner-work scope global"
+    },
+    {
+      "id": 36,
+      "name": "create-phased-execution-plan-rdr",
+      "project": "ART",
+      "verb": "research",
+      "scope": "global",
+      "description": "s. IMPL-08 G3 end-to-end chain + G6 grep assertion captured. Next step: plan-auditor.\"}",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"create-phased-execution-plan-rdr\",\"verb\":\"research\"}",
+      "match_text": "Create phased execution plan for RDR-072 CogEM Credit Assignment \u2014 Attentional Blocking and Unblocking for Language. research create-phased-execution-plan-rdr scope global"
+    },
+    {
+      "id": 35,
+      "name": "rdr-075-semantic-learning-generalization",
+      "project": "ART",
+      "verb": "research",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"rdr-075-semantic-learning-generalization\",\"verb\":\"research\"}",
+      "match_text": "RDR-075 Semantic Learning and Generalization \u2014 Instar Rule, Held-Out Gate, Collision Guard execution plan. research rdr-075-semantic-learning-generalization scope global"
+    },
+    {
+      "id": 29,
+      "name": "code-review-validate-tests-review",
+      "project": "nexus",
+      "verb": "review",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"code-review-validate-tests-review\",\"verb\":\"review\"}",
+      "match_text": "code review and validate tests: review implemented code then verify test coverage. review code-review-validate-tests-review scope global"
+    },
+    {
+      "id": 28,
+      "name": "research-synthesize-knowledge-research-topic",
+      "project": "nexus",
+      "verb": "analyze",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"research-synthesize-knowledge-research-topic\",\"verb\":\"analyze\"}",
+      "match_text": "research synthesize knowledge: research a topic, gather findings, and store in knowledge base. analyze research-synthesize-knowledge-research-topic scope global"
+    },
+    {
+      "id": 27,
+      "name": "rdr-chain-research-design-review",
+      "project": "nexus",
+      "verb": "review",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"rdr-chain-research-design-review\",\"verb\":\"review\"}",
+      "match_text": "rdr chain: research design review lifecycle from research through gate accept plan implement. review rdr-chain-research-design-review scope global"
+    },
+    {
+      "id": 26,
+      "name": "debug-failing-tests-broken-behavior",
+      "project": "nexus",
+      "verb": "debug",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"debug-failing-tests-broken-behavior\",\"verb\":\"debug\"}",
+      "match_text": "debug failing tests or broken behavior. debug debug-failing-tests-broken-behavior scope global"
+    },
+    {
+      "id": 25,
+      "name": "review-validate-implemented-code",
+      "project": "nexus",
+      "verb": "review",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"review-validate-implemented-code\",\"verb\":\"review\"}",
+      "match_text": "review and validate implemented code. review review-validate-implemented-code scope global"
+    },
+    {
+      "id": 24,
+      "name": "research-topic-store-findings",
+      "project": "nexus",
+      "verb": "research",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"research-topic-store-findings\",\"verb\":\"research\"}",
+      "match_text": "research a topic and store findings. research research-topic-store-findings scope global"
+    },
+    {
+      "id": 23,
+      "name": "plan-then-audit-then-implement",
+      "project": "nexus",
+      "verb": "review",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"plan-then-audit-then-implement\",\"verb\":\"review\"}",
+      "match_text": "plan then audit then implement a feature. review plan-then-audit-then-implement scope global"
+    },
+    {
+      "id": 22,
+      "name": "research-design-review-research-gate",
+      "project": "nexus",
+      "verb": "review",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"research-design-review-research-gate\",\"verb\":\"review\"}",
+      "match_text": "research design review: research, gate, accept, plan, enrich, implement. review research-design-review-research-gate scope global"
+    },
+    {
+      "id": 17,
+      "name": "rdr-049-git-backed-xanadu",
+      "project": "nexus",
+      "verb": "research",
+      "scope": "global",
+      "description": "s. Phase 5 deferred (P3 priority).\"}",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"rdr-049-git-backed-xanadu\",\"verb\":\"research\"}",
+      "match_text": "RDR-049 Git-Backed Xanadu-Inspired Catalog implementation plan. research rdr-049-git-backed-xanadu scope global"
+    },
+    {
+      "id": 16,
+      "name": "minimum-viable-system-blimp-morphological",
+      "project": "ART",
+      "verb": "research",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"minimum-viable-system-blimp-morphological\",\"verb\":\"research\"}",
+      "match_text": "What is the minimum viable system for BLiMP morphological SVA?. research minimum-viable-system-blimp-morphological scope global"
+    },
+    {
+      "id": 15,
+      "name": "resonance-feedback-loops-grossberg-s",
+      "project": "ART",
+      "verb": "research",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"resonance-feedback-loops-grossberg-s\",\"verb\":\"research\"}",
+      "match_text": "What are the resonance feedback loops in Grossberg's language architecture?. research resonance-feedback-loops-grossberg-s scope global"
+    },
+    {
+      "id": 14,
+      "name": "signals-cross-artphone-store2-boundary",
+      "project": "ART",
+      "verb": "research",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"signals-cross-artphone-store2-boundary\",\"verb\":\"research\"}",
+      "match_text": "What signals cross the ARTPHONE\u2192STORE2 boundary in Grossberg's language architecture?. research signals-cross-artphone-store2-boundary scope global"
+    },
+    {
+      "id": 13,
+      "name": "chatsome-emotion-chatsome-cortex-align",
+      "project": "ART",
+      "verb": "research",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"chatsome-emotion-chatsome-cortex-align\",\"verb\":\"research\"}",
+      "match_text": "How does chatsome-emotion and chatsome-cortex align with Grossberg's CogEM/MOTIVATOR architecture?. research chatsome-emotion-chatsome-cortex-align scope global"
+    },
+    {
+      "id": 12,
+      "name": "chatsome-language-art-laminar-align",
+      "project": "ART",
+      "verb": "research",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"chatsome-language-art-laminar-align\",\"verb\":\"research\"}",
+      "match_text": "How does chatsome-language and art-laminar align with Grossberg's cARTWORD/DIVA/LIST PARSE architecture?. research chatsome-language-art-laminar-align scope global"
+    },
+    {
+      "id": 11,
+      "name": "chatsome-vision-align-grossberg-s",
+      "project": "ART",
+      "verb": "research",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"chatsome-vision-align-grossberg-s\",\"verb\":\"research\"}",
+      "match_text": "How does chatsome-vision align with Grossberg's published ARTSCENE/LAMINART architecture?. research chatsome-vision-align-grossberg-s scope global"
+    },
+    {
+      "id": 3,
+      "name": "papers-circuits-cover-vision-module",
+      "project": "ART",
+      "verb": "research",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"papers-circuits-cover-vision-module\",\"verb\":\"research\"}",
+      "match_text": "What papers and circuits cover the Vision module in Grossberg's ChatSOME architecture?. research papers-circuits-cover-vision-module scope global"
+    },
+    {
+      "id": 4,
+      "name": "papers-circuits-cover-language-module",
+      "project": "ART",
+      "verb": "research",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"papers-circuits-cover-language-module\",\"verb\":\"research\"}",
+      "match_text": "What papers and circuits cover the Language module in Grossberg's ChatSOME architecture?. research papers-circuits-cover-language-module scope global"
+    },
+    {
+      "id": 5,
+      "name": "papers-circuits-cover-emotion-module",
+      "project": "ART",
+      "verb": "research",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"papers-circuits-cover-emotion-module\",\"verb\":\"research\"}",
+      "match_text": "What papers and circuits cover the Emotion module (CogEM/MOTIVATOR) in Grossberg's ChatSOME architecture?. research papers-circuits-cover-emotion-module scope global"
+    },
+    {
+      "id": 6,
+      "name": "papers-circuits-cover-motor-module",
+      "project": "ART",
+      "verb": "research",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"papers-circuits-cover-motor-module\",\"verb\":\"research\"}",
+      "match_text": "What papers and circuits cover the Motor module (VITE/MODE) in Grossberg's ChatSOME architecture?. research papers-circuits-cover-motor-module scope global"
+    },
+    {
+      "id": 7,
+      "name": "papers-circuits-cover-temporal-module",
+      "project": "ART",
+      "verb": "research",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"papers-circuits-cover-temporal-module\",\"verb\":\"research\"}",
+      "match_text": "What papers and circuits cover the Temporal module (LIST PARSE/STORE 2) in Grossberg's ChatSOME architecture?. research papers-circuits-cover-temporal-module scope global"
+    },
+    {
+      "id": 8,
+      "name": "papers-circuits-cover-spatial-navigation",
+      "project": "ART",
+      "verb": "research",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"papers-circuits-cover-spatial-navigation\",\"verb\":\"research\"}",
+      "match_text": "What papers and circuits cover the Spatial/Navigation module in Grossberg's ChatSOME architecture?. research papers-circuits-cover-spatial-navigation scope global"
+    },
+    {
+      "id": 9,
+      "name": "core-art-computational-primitives-appear",
+      "project": "ART",
+      "verb": "research",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"core-art-computational-primitives-appear\",\"verb\":\"research\"}",
+      "match_text": "What are the core ART computational primitives that appear across all Grossberg modules?. research core-art-computational-primitives-appear scope global"
+    },
+    {
+      "id": 10,
+      "name": "cmrb-chapter-index-each-chapter",
+      "project": "ART",
+      "verb": "research",
+      "scope": "global",
+      "description": "",
+      "dimensions": "{\"scope\":\"global\",\"strategy\":\"cmrb-chapter-index-each-chapter\",\"verb\":\"research\"}",
+      "match_text": "CMRB chapter index \u2014 what does each chapter of Conscious Mind Resonant Brain cover?. research cmrb-chapter-index-each-chapter scope global"
+    }
+  ]
+}

@@ -298,6 +298,124 @@ class TestComposeBundlePrompt:
         )
         assert schema["properties"]["verified"]["type"] == "boolean"
 
+    def test_groupby_step_renders_key_and_inline_items_schema(self):
+        """RDR-093 Phase 1: a bundled groupby step must render its
+        partition ``key`` verbatim, chain from a prior step's output,
+        and the terminal schema must declare the C-1 inline-items
+        contract (groups[].items as array of objects, NOT id strings)."""
+        bundle = OperatorBundle(steps=(
+            OperatorBundleStep(
+                1, "filter", {"criterion": "peer-reviewed",
+                              "inputs": "papers-payload"},
+            ),
+            OperatorBundleStep(
+                2, "groupby",
+                {"key": "publication-year-sentinel-key"},
+            ),
+        ))
+        prompt, schema = compose_bundle_prompt(bundle)
+        assert "STEP 2 — groupby" in prompt
+        assert "publication-year-sentinel-key" in prompt
+        assert "output list from STEP 1" in prompt
+        # C-1 inline-items contract: groups carry items inline.
+        assert "inline" in prompt.lower() or "carry" in prompt.lower()
+        # Terminal schema covers groupby's {groups: [{key_value, items}]}
+        # contract, with items as array of OBJECTS (not strings).
+        assert "groups" in schema["required"]
+        groups_item_schema = schema["properties"]["groups"]["items"]
+        assert {"key_value", "items"}.issubset(set(groups_item_schema["required"]))
+        assert groups_item_schema["properties"]["key_value"]["type"] == "string"
+        assert groups_item_schema["properties"]["items"]["type"] == "array"
+        # The C-1 inline-items regression guard at the bundle scope.
+        assert (
+            groups_item_schema["properties"]["items"]["items"]["type"]
+            == "object"
+        ), "C-1 contract: bundled groupby's terminal schema must require " \
+           "items as array of objects (inline), not strings (id-only)"
+
+    def test_operator_groupby_resolved_form_renders_as_groupby(self):
+        """``operator_groupby`` should render as bare ``groupby`` in the
+        prompt, mirroring the existing prefix-stripping for the other
+        operators (per ``test_operator_prefix_stripped_in_prompt``)."""
+        bundle = OperatorBundle(steps=(
+            OperatorBundleStep(1, "operator_filter",
+                               {"criterion": "x", "inputs": "p"}),
+            OperatorBundleStep(2, "operator_groupby", {"key": "year"}),
+        ))
+        prompt, _ = compose_bundle_prompt(bundle)
+        assert "STEP 2 — groupby" in prompt
+
+    def test_aggregate_step_renders_reducer_and_per_group_schema(self):
+        """RDR-093 Phase 2: a bundled aggregate step must render its
+        reducer expression verbatim, chain from the prior groupby step,
+        carry the per-group isolation directive, and the terminal
+        schema must declare {aggregates: [{key_value, summary}]}."""
+        bundle = OperatorBundle(steps=(
+            OperatorBundleStep(
+                1, "groupby", {"key": "method-family",
+                               "inputs": "papers-payload"},
+            ),
+            OperatorBundleStep(
+                2, "aggregate",
+                {"reducer": "most-cited-method-sentinel"},
+            ),
+        ))
+        prompt, schema = compose_bundle_prompt(bundle)
+        assert "STEP 2 — aggregate" in prompt
+        assert "most-cited-method-sentinel" in prompt
+        assert "from STEP 1" in prompt
+        # Per-group isolation directive must be present (mirrors the
+        # standalone operator_aggregate prompt).
+        prompt_lower = prompt.lower()
+        assert "only" in prompt_lower and "group" in prompt_lower, (
+            "RDR-093 §Risks and Mitigations: bundled aggregate must "
+            "carry the same group-isolation directive as the standalone "
+            "operator_aggregate prompt"
+        )
+        # Terminal schema covers aggregate's {aggregates: [{key_value, summary}]}.
+        assert "aggregates" in schema["required"]
+        agg_item = schema["properties"]["aggregates"]["items"]
+        assert {"key_value", "summary"}.issubset(set(agg_item["required"]))
+        assert agg_item["properties"]["key_value"]["type"] == "string"
+        assert agg_item["properties"]["summary"]["type"] == "string"
+
+    def test_operator_aggregate_resolved_form_renders_as_aggregate(self):
+        """``operator_aggregate`` should render as bare ``aggregate``
+        in the bundled prompt, mirroring the prefix-stripping pattern
+        used by the other operators."""
+        bundle = OperatorBundle(steps=(
+            OperatorBundleStep(1, "operator_groupby",
+                               {"key": "year", "inputs": "papers-payload"}),
+            OperatorBundleStep(2, "operator_aggregate",
+                               {"reducer": "most cited"}),
+        ))
+        prompt, _ = compose_bundle_prompt(bundle)
+        assert "STEP 2 — aggregate" in prompt
+
+    def test_groupby_aggregate_pair_bundles_into_one_dispatch(self):
+        """RDR-093 §Decision Rationale: the canonical ``... -> groupby
+        -> aggregate`` chain bundles into a single ``claude -p``
+        dispatch. Verify both operators appear in the prompt and the
+        terminal schema is aggregate's (not groupby's). The C-1
+        contract makes this work — groupby's inline-items output is
+        consumed by aggregate inside the same dispatch with no host-
+        side retrieval."""
+        bundle = OperatorBundle(steps=(
+            OperatorBundleStep(1, "filter",
+                               {"criterion": "peer-reviewed",
+                                "inputs": "papers-payload"}),
+            OperatorBundleStep(2, "groupby", {"key": "method family"}),
+            OperatorBundleStep(3, "aggregate", {"reducer": "best baseline"}),
+        ))
+        prompt, schema = compose_bundle_prompt(bundle)
+        assert "STEP 1 — filter" in prompt
+        assert "STEP 2 — groupby" in prompt
+        assert "STEP 3 — aggregate" in prompt
+        # Terminal schema is the LAST step's = aggregate's.
+        assert "aggregates" in schema["required"]
+        # NOT the intermediate groupby's schema.
+        assert "groups" not in schema.get("required", [])
+
 
 # ── Dispatch wrapper ──────────────────────────────────────────────────────────
 

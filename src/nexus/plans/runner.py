@@ -581,6 +581,8 @@ _OPERATOR_TOOL_MAP: dict[str, str] = {
     "filter": "operator_filter",
     "check": "operator_check",
     "verify": "operator_verify",
+    "groupby": "operator_groupby",
+    "aggregate": "operator_aggregate",
 }
 
 #: Maximum inputs to pass to an operator before auto-inserting a rank
@@ -593,10 +595,20 @@ _OPERATOR_RESOLVED_TOOLS: frozenset[str] = frozenset(_OPERATOR_TOOL_MAP.values()
 #: Translation table for the ``inputs`` → operator-specific positional arg
 #: rename (nexus-yis0). Pre-hydrated steps that passed ``$stepN.contents``
 #: through ``inputs:`` get their value remapped to the operator's expected
-#: arg name. ``operator_verify`` is intentionally omitted: it takes scalar
-#: ``claim`` and ``evidence`` args, and a stray ``inputs`` should surface
-#: as an authoring bug rather than be silently renamed. Hoisted to module
-#: scope per nexus-4o2z (RDR-088 Phase 1 gate review observation).
+#: arg name.
+#:
+#: Deliberately omitted (a stray ``inputs:`` on these operators must
+#: surface as an authoring bug rather than be silently renamed):
+#:
+#: - ``operator_verify`` (RDR-088): takes scalar ``claim`` and ``evidence``.
+#: - ``operator_aggregate`` (RDR-093): takes ``groups`` (a JSON-serialised
+#:   list[{key_value, items}] from a prior groupby step), not ``items``.
+#:   Renaming inputs->items here would silently dispatch with the wrong
+#:   arg shape and make the resulting TypeError much harder to attribute.
+#:   nexus-3j6b is the proper place to revisit cross-operator inputs.
+#:
+#: Hoisted to module scope per nexus-4o2z (RDR-088 Phase 1 gate
+#: review observation).
 _INPUTS_TARGET: dict[str, str] = {
     "operator_summarize": "content",
     "operator_generate": "context",
@@ -604,6 +616,7 @@ _INPUTS_TARGET: dict[str, str] = {
     "operator_compare": "items",
     "operator_filter": "items",
     "operator_check": "items",
+    "operator_groupby": "items",
 }
 
 
@@ -637,13 +650,38 @@ def _hydrate_operator_args(
         )
         contents = hydrated.get("contents", []) if isinstance(hydrated, dict) else []
         non_empty = [c for c in contents if c]
-        if len(non_empty) > _OPERATOR_MAX_INPUTS:
+        original_count = len(non_empty)
+        truncation_metadata: dict[str, Any] | None = None
+        if original_count > _OPERATOR_MAX_INPUTS:
             _log.warning(
                 "auto_hydration_overflow",
                 tool=tool, resolved_tool=resolved_tool,
-                input_count=len(non_empty), max_inputs=_OPERATOR_MAX_INPUTS,
+                input_count=original_count, max_inputs=_OPERATOR_MAX_INPUTS,
                 action="positional truncation to max_inputs",
             )
+            # RDR-093 S-1 + nexus-3j6b: when the cap fires the runner
+            # surfaces a {truncated, original_count, kept_count} block
+            # on the operator's return envelope so plan authors see
+            # the cap hit rather than silently losing items. Originally
+            # scoped to operator_groupby in RDR-093; generalised in
+            # nexus-3j6b to every operator that runs through this
+            # auto-hydration branch (extract / rank / compare /
+            # summarize / generate / filter / check / verify / groupby
+            # — any operator with `ids in args`).
+            #
+            # Attachment chosen: runner-attaches (option a) — the
+            # operator's JSON schema is unchanged; the dispatcher
+            # (and bundle path) merge this metadata into the operator's
+            # return dict post-dispatch via the _truncation_metadata
+            # private marker. Operators whose return shape collides
+            # with one of the metadata keys (truncated, original_count,
+            # kept_count) would have an issue; the existing operator
+            # family does not collide.
+            truncation_metadata = {
+                "truncated": True,
+                "original_count": original_count,
+                "kept_count": _OPERATOR_MAX_INPUTS,
+            }
             non_empty = non_empty[:_OPERATOR_MAX_INPUTS]
         args = {k: v for k, v in args.items() if k not in ("ids", "collections")}
         if resolved_tool == "operator_summarize":
@@ -652,10 +690,14 @@ def _hydrate_operator_args(
             args.setdefault("context", "\n\n".join(non_empty))
         elif resolved_tool in ("operator_rank", "operator_compare"):
             args.setdefault("items", json.dumps(non_empty))
-        elif resolved_tool in ("operator_filter", "operator_check"):
+        elif resolved_tool in (
+            "operator_filter", "operator_check", "operator_groupby",
+        ):
             args.setdefault("items", json.dumps(non_empty))
         else:
             args.setdefault("inputs", json.dumps(non_empty))
+        if truncation_metadata is not None:
+            args["_truncation_metadata"] = truncation_metadata
 
     if resolved_tool == "operator_extract" and "template" in args and "fields" not in args:
         template = args.pop("template")
@@ -683,9 +725,19 @@ def _hydrate_operator_args(
         args["context"] = "\n\n".join(str(x) for x in args["context"] if x)
     if resolved_tool in (
         "operator_rank", "operator_compare", "operator_filter",
-        "operator_check",
+        "operator_check", "operator_groupby",
     ) and isinstance(args.get("items"), list):
         args["items"] = json.dumps(args["items"])
+    # RDR-093 Phase 2 follow-up (code-review S-2): operator_aggregate's
+    # positional arg is `groups`, not `items`, so it doesn't share the
+    # coercion path above. When a plan step resolves `$stepN.groups`
+    # from a prior groupby's output, the runner-side $stepN reference
+    # resolution may hand a Python list to this hydration step. Coerce
+    # to JSON so the operator_aggregate prompt sees clean JSON rather
+    # than a Python repr (which would silently malform via the
+    # f-string in claude_dispatch).
+    if resolved_tool == "operator_aggregate" and isinstance(args.get("groups"), list):
+        args["groups"] = json.dumps(args["groups"])
 
     return resolved_tool, args
 
@@ -724,6 +776,13 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
 
     # Auto-hydration + arg normalization: shared with the bundle path.
     resolved_tool, args = _hydrate_operator_args(tool, args)
+
+    # RDR-093 S-1: pop runner-attached truncation metadata before the
+    # kwargs-drop pass so the operator never sees the marker (it's not
+    # part of any operator's signature) and the warn-on-drop log doesn't
+    # fire for an intentional runner-internal arg. The metadata gets
+    # merged onto the operator's return dict post-dispatch.
+    truncation_metadata = args.pop("_truncation_metadata", None)
 
     fn = getattr(mcp_core, resolved_tool, None)
     if fn is None or not callable(fn):
@@ -817,6 +876,12 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
             }
         return {"text": result}
     if isinstance(result, dict):
+        # RDR-093 S-1: merge runner-attached truncation metadata onto
+        # the operator's return dict so plan authors see when the
+        # _OPERATOR_MAX_INPUTS cap fired. Scoped to operator_groupby
+        # in this RDR; nexus-3j6b tracks cross-operator generalisation.
+        if truncation_metadata is not None:
+            result = {**result, **truncation_metadata}
         return result
     # Anything else (list, None, …) — surface explicitly rather than
     # let downstream step-ref resolution silently fail.
@@ -935,6 +1000,13 @@ async def plan_run(
                 # Operators skip _check_embedding_domain / scope / caller-
                 # scope injection — those are retrieval-tool concerns.
                 _, b_prepared = _hydrate_operator_args(btool, b_resolved)
+                # RDR-093 S-1: strip the runner-internal truncation
+                # marker so it never leaks into the bundled prompt.
+                # Surface-on-bundle is out of scope for this RDR
+                # (nexus-3j6b tracks cross-operator generalisation
+                # including bundle-aware metadata propagation); the
+                # structlog warning still fires from _hydrate.
+                b_prepared.pop("_truncation_metadata", None)
                 bundle_steps.append(OperatorBundleStep(
                     plan_index=bi, tool=btool, args=b_prepared,
                     source_collections=source_collections,

@@ -1,0 +1,213 @@
+{
+  "per_fixture": [
+    {
+      "fixture_id": "q-01",
+      "topic": "Classical Paxos requires majority quorum",
+      "modal_verdict": true,
+      "agreeing": 5,
+      "runs_with_ok_verdict": 5,
+      "runs_total": 5,
+      "stability": 1.0,
+      "expected_verdict_hint": "most-likely-true"
+    },
+    {
+      "fixture_id": "q-02",
+      "topic": "PBFT tolerates f faults with 3f+1 replicas",
+      "modal_verdict": true,
+      "agreeing": 5,
+      "runs_with_ok_verdict": 5,
+      "runs_total": 5,
+      "stability": 1.0,
+      "expected_verdict_hint": "most-likely-true"
+    },
+    {
+      "fixture_id": "q-03",
+      "topic": "FLP impossibility in async networks",
+      "modal_verdict": true,
+      "agreeing": 5,
+      "runs_with_ok_verdict": 5,
+      "runs_total": 5,
+      "stability": 1.0,
+      "expected_verdict_hint": "most-likely-true"
+    },
+    {
+      "fixture_id": "q-04",
+      "topic": "Safety vs liveness distinction",
+      "modal_verdict": true,
+      "agreeing": 5,
+      "runs_with_ok_verdict": 5,
+      "runs_total": 5,
+      "stability": 1.0,
+      "expected_verdict_hint": "most-likely-true"
+    },
+    {
+      "fixture_id": "q-05",
+      "topic": "Leader-based BFT uses view changes on timeout",
+      "modal_verdict": true,
+      "agreeing": 5,
+      "runs_with_ok_verdict": 5,
+      "runs_total": 5,
+      "stability": 1.0,
+      "expected_verdict_hint": "most-likely-true"
+    },
+    {
+      "fixture_id": "q-06",
+      "topic": "Digital signatures unforgeable under standard model",
+      "modal_verdict": true,
+      "agreeing": 5,
+      "runs_with_ok_verdict": 5,
+      "runs_total": 5,
+      "stability": 1.0,
+      "expected_verdict_hint": "most-likely-true"
+    },
+    {
+      "fixture_id": "q-07",
+      "topic": "CRDT/PRDT state convergence via join semilattice",
+      "modal_verdict": true,
+      "agreeing": 5,
+      "runs_with_ok_verdict": 5,
+      "runs_total": 5,
+      "stability": 1.0,
+      "expected_verdict_hint": "most-likely-true"
+    },
+    {
+      "fixture_id": "q-08",
+      "topic": "Partial synchrony: bounded delay after GST",
+      "modal_verdict": true,
+      "agreeing": 5,
+      "runs_with_ok_verdict": 5,
+      "runs_total": 5,
+      "stability": 1.0,
+      "expected_verdict_hint": "most-likely-true"
+    },
+    {
+      "fixture_id": "q-09",
+      "topic": "All consensus requires a leader",
+      "modal_verdict": false,
+      "agreeing": 5,
+      "runs_with_ok_verdict": 5,
+      "runs_total": 5,
+      "stability": 1.0,
+      "expected_verdict_hint": "most-likely-false"
+    },
+    {
+      "fixture_id": "q-10",
+      "topic": "Synchronous model sufficient for consensus",
+      "modal_verdict": false,
+      "agreeing": 5,
+      "runs_with_ok_verdict": 5,
+      "runs_total": 5,
+      "stability": 1.0,
+      "expected_verdict_hint": "most-likely-false"
+    },
+    {
+      "fixture_id": "q-11",
+      "topic": "2f+1 replicas suffice for Byzantine fault tolerance",
+      "modal_verdict": false,
+      "agreeing": 5,
+      "runs_with_ok_verdict": 5,
+      "runs_total": 5,
+      "stability": 1.0,
+      "expected_verdict_hint": "most-likely-false"
+    },
+    {
+      "fixture_id": "q-12",
+      "topic": "Paxos always commits in a single round-trip",
+      "modal_verdict": false,
+      "agreeing": 5,
+      "runs_with_ok_verdict": 5,
+      "runs_total": 5,
+      "stability": 1.0,
+      "expected_verdict_hint": "most-likely-false"
+    },
+    {
+      "fixture_id": "q-13",
+      "topic": "Faulty leaders can silently forge decisions",
+      "modal_verdict": false,
+      "agreeing": 4,
+      "runs_with_ok_verdict": 5,
+      "runs_total": 5,
+      "stability": 0.8,
+      "expected_verdict_hint": "most-likely-false"
+    },
+    {
+      "fixture_id": "q-14",
+      "topic": "Lightweight SMR requires a leader",
+      "modal_verdict": false,
+      "agreeing": 5,
+      "runs_with_ok_verdict": 5,
+      "runs_total": 5,
+      "stability": 1.0,
+      "expected_verdict_hint": "most-likely-false"
+    },
+    {
+      "fixture_id": "q-15",
+      "topic": "Zanzibar reads reflect userset rewrite rules",
+      "modal_verdict": false,
+      "agreeing": 5,
+      "runs_with_ok_verdict": 5,
+      "runs_total": 5,
+      "stability": 1.0,
+      "expected_verdict_hint": "most-likely-false"
+    },
+    {
+      "fixture_id": "q-16",
+      "topic": "BeeGees commits every certified block immediately",
+      "modal_verdict": false,
+      "agreeing": 5,
+      "runs_with_ok_verdict": 5,
+      "runs_total": 5,
+      "stability": 1.0,
+      "expected_verdict_hint": "most-likely-false"
+    },
+    {
+      "fixture_id": "q-17",
+      "topic": "Leader-based vs decentralized near-optimal",
+      "modal_verdict": true,
+      "agreeing": 5,
+      "runs_with_ok_verdict": 5,
+      "runs_total": 5,
+      "stability": 1.0,
+      "expected_verdict_hint": "genuinely-ambiguous"
+    },
+    {
+      "fixture_id": "q-18",
+      "topic": "Gossip protocols 'always' reach every node",
+      "modal_verdict": false,
+      "agreeing": 5,
+      "runs_with_ok_verdict": 5,
+      "runs_total": 5,
+      "stability": 1.0,
+      "expected_verdict_hint": "genuinely-ambiguous"
+    },
+    {
+      "fixture_id": "q-19",
+      "topic": "Paxos guarantees single decision across rounds",
+      "modal_verdict": true,
+      "agreeing": 5,
+      "runs_with_ok_verdict": 5,
+      "runs_total": 5,
+      "stability": 1.0,
+      "expected_verdict_hint": "genuinely-ambiguous"
+    },
+    {
+      "fixture_id": "q-20",
+      "topic": "Aleph-BFT achieves bounded latency in async",
+      "modal_verdict": false,
+      "agreeing": 5,
+      "runs_with_ok_verdict": 5,
+      "runs_total": 5,
+      "stability": 1.0,
+      "expected_verdict_hint": "genuinely-ambiguous"
+    }
+  ],
+  "aggregate": {
+    "fixtures_total": 20,
+    "fixtures_fully_stable": 19,
+    "fully_stable_rate": 0.95,
+    "micro_stability_rate": 0.99,
+    "total_runs": 100,
+    "runs_with_ok_verdict": 100,
+    "error_rate": 0.0
+  }
+}

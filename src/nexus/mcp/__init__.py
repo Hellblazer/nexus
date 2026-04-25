@@ -27,6 +27,8 @@ from nexus.mcp.core import (  # noqa: F401
     operator_filter,
     operator_check,
     operator_verify,
+    operator_groupby,
+    operator_aggregate,
     nx_answer,
     nx_tidy,
     nx_enrich_beads,
