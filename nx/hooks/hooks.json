@@ -115,6 +115,16 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PLUGIN_ROOT/hooks/scripts/_run_python_hook.sh $CLAUDE_PLUGIN_ROOT/hooks/scripts/hook_telemetry.py",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "PermissionRequest": [

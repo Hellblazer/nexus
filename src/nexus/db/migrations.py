@@ -373,6 +373,33 @@ def migrate_search_telemetry(conn: sqlite3.Connection) -> None:
     _log.info("Migrated: created search_telemetry table (RDR-087)")
 
 
+def migrate_hook_telemetry(conn: sqlite3.Connection) -> None:
+    """Create the ``hook_telemetry`` table for nexus-ntbg slow-hook capture.
+
+    Schema duplicated from telemetry._TELEMETRY_SCHEMA_SQL so existing T2
+    databases get the table on upgrade. Idempotent — no-op if already present.
+    """
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='hook_telemetry'"
+    ).fetchone()
+    if row is not None:
+        return
+    conn.executescript("""
+        CREATE TABLE hook_telemetry (
+            ts               TEXT    NOT NULL,
+            hook_event_name  TEXT    NOT NULL,
+            tool_name        TEXT,
+            duration_ms      INTEGER NOT NULL,
+            session_id       TEXT,
+            cwd              TEXT
+        );
+        CREATE INDEX idx_hook_tel_ts        ON hook_telemetry(ts);
+        CREATE INDEX idx_hook_tel_duration  ON hook_telemetry(duration_ms);
+    """)
+    conn.commit()
+    _log.info("Migrated: created hook_telemetry table (nexus-ntbg)")
+
+
 def migrate_rename_dropped_to_kept(conn: sqlite3.Connection) -> None:
     """Rename ``search_telemetry.dropped_count`` → ``kept_count`` and flip values.
 
@@ -1265,6 +1292,11 @@ MIGRATIONS: list[Migration] = [
         "4.10.2",
         "Backfill required/optional bindings on builtin plans (nexus-uyc6)",
         _backfill_builtin_bindings,
+    ),
+    Migration(
+        "4.14.0",
+        "Add hook_telemetry table (nexus-ntbg — Claude Code v2.1.119+ duration_ms capture)",
+        migrate_hook_telemetry,
     ),
 ]
 
