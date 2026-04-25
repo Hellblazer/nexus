@@ -219,12 +219,33 @@ exist as a stable per-session subprocess to inherit from.
       knowledge__nexus 9f1c77b683a9f429.
 - [ ] Moving chroma spawn from the SessionStart hook to MCP-server
       startup does not regress subagent T1 sharing. **Status**:
-      Unverified. **Method**: integration test dispatching a subagent
-      chain and asserting scratch read/write across the tree.
-      Note: not exercised by Spike A; subagent path is structurally
-      identical to the top-level path through the `nested=True`
-      short-circuit and the existing `find_ancestor_session` walk.
-      Worth a focused integration test before Phase 4 flag removal.
+      Unverified (Spike B scope). **Hard prerequisite for Phase 4
+      flag removal.** **Method**: integration test dispatching a
+      subagent chain and asserting scratch read/write across the
+      tree.
+
+      **Specific race the spike must rule out** (substantive-critic
+      finding, 2026-04-25): the new code path has one structural
+      difference vs the hook-era code that warrants direct
+      verification. The hook writes the session record synchronously
+      before any subagent dispatch. The MCP server's lifespan is
+      async and may not have completed the
+      `write_session_record_by_id` call by the time Claude Code
+      dispatches the first subagent. If a subagent observes
+      `NX_SESSION_ID` set but the parent's session record absent,
+      its `_t1_chroma_init_if_owner` falls through the ancestor-
+      record check, lands on `_resolve_top_level_session_id`, which
+      reads `current_session`. If that's also unwritten at that
+      moment, the subagent gets `own_id = None` and skips spawn
+      entirely (silent EphemeralClient downgrade with no log
+      that would identify the cause).
+
+      Spike B protocol: dispatch a subagent within milliseconds of
+      top-level MCP startup (before
+      `write_session_record_by_id` completes); assert the
+      subagent's T1 client connects to the parent's chroma. If the
+      race is reproducible, add a retry-with-backoff loop in
+      `_resolve_top_level_session_id` before Phase 4 lands.
 - [x] The dual-watch watchdog (`--mcp-pid` + `--claude-pid` with
       OR-trigger logic) preserves coverage of BOTH the "MCP dies
       without atexit firing" case AND the "Claude Code crashes and
@@ -578,15 +599,22 @@ async def _t1_chroma_lifespan(_app):
     try:
         yield
     finally:
-        _t1_chroma_shutdown()      # PRIMARY cleanup path
+        _t1_chroma_shutdown()      # PRIMARY on HTTP/SSE
+                                   # (anyio cancels task group on SIGTERM
+                                   #  there); skipped on stdio because
+                                   #  anyio does not install a SIGTERM
+                                   #  handler under the stdio transport.
 
 mcp = FastMCP("nexus", lifespan=_t1_chroma_lifespan)
 
 main():
     configure_logging("mcp")
-    atexit.register(_t1_chroma_shutdown)              # SECONDARY
-    signal.signal(SIGTERM, _sigterm_handler)          # SECONDARY
-    signal.signal(SIGINT, _sigterm_handler)           # SECONDARY
+    atexit.register(_t1_chroma_shutdown)              # BELT-AND-BRACES
+    signal.signal(SIGTERM, _sigterm_handler)          # PRIMARY on stdio
+    signal.signal(SIGINT, _sigterm_handler)           # PRIMARY on stdio
+    # Spike A 2026-04-25 evidence: 10/10 SIGTERM cycles on stdio
+    # attributed to `mcp_owned_signal` path. atexit covers clean
+    # stdin EOF + SystemExit paths that arrive without a signal.
     log.info("mcp_server_starting", server="nx-mcp")
     try:
         mcp.run(transport="stdio")
@@ -986,15 +1014,30 @@ crash failure mode that issue #1935 documents.
 
 #### Step 2: Split `hooks.session_end` into `session_end_flush`
 
-Extract scratch-flush + memory-expire into a new function. The
-chroma-stop path is conditional on MCP ownership: if MCP owns,
-skip; if hook-era ownership (fallback), run.
+**Status: deferred to a pre-Phase-4 follow-up bead.** Extract
+scratch-flush + memory-expire into a new function and retire the
+chroma-stop block from the hook entirely. Tracked separately
+because the in-place gate below is sufficient for Phase 1+2+3 to
+ship behind the flag without the double-stop race.
+
+**In-place mitigation that landed in PR #289 follow-up**:
+`hooks.session_end()` checks `NEXUS_MCP_OWNS_T1` and skips its
+chroma-stop block when the flag is active. The MCP server's
+shutdown path (signal handler / lifespan / atexit) owns chroma
+cleanup exclusively under the flag. The hook still flushes scratch
+and runs memory-expire, which are hook-native tasks unaffected by
+chroma ownership.
 
 #### Step 3: Update `nx/hooks/hooks.json`
 
-SessionEnd command swaps `nx-session-end-launcher` for
-`nx hook session-end-flush`. Timeout reduced from 5s to 3s (flush
-is sub-second).
+**Status: deferred to a pre-Phase-4 follow-up bead.** SessionEnd
+command swaps `nx-session-end-launcher` for `nx hook session-end-
+flush` and timeout reduces from 5s to 3s. Currently the launcher
+still wires through and runs the gated `session_end()` (Step 2
+mitigation above keeps the chroma-stop side of that call inert
+under the flag), so functional correctness holds; the hook just
+runs more code than it needs to. Phase 4 cannot retire the
+launcher cleanly until both Step 2 and Step 3 land.
 
 ### Phase 3: Tmpdir-scan sweep + one-time cleanup
 
@@ -1010,9 +1053,54 @@ Clean up the 10 orphan tmpdirs from 2026-04-23. One-shot.
 
 ### Phase 4: Feature-flag removal
 
-After Phase 1–3 land and one release of canary evidence, remove
-`NEXUS_MCP_OWNS_T1` gate. MCP-owned chroma becomes the default
-path. Hook-era chroma-spawn block deleted from `session_start()`.
+Phase 4 is gated on three prerequisites, not just code-level flag
+removal:
+
+1. **Spike B (CA-2 subagent T1 sharing) verified.** This is a hard
+   prerequisite. The specific race the spike must rule out: a
+   subagent dispatched within milliseconds of the top-level MCP
+   server starting can observe `NX_SESSION_ID` set but the parent's
+   session record not yet written by `write_session_record_by_id`
+   (the MCP lifespan is async and may not have completed by the
+   time Claude Code dispatches the first subagent). If the
+   subagent's `_t1_chroma_init_if_owner` falls through the
+   ancestor-record check it lands on `_resolve_top_level_session_id`
+   which reads `current_session`. If `current_session` is also
+   unwritten at that moment, `own_id = None` and the subagent has
+   no T1 at all (silent EphemeralClient downgrade). This race is
+   absent in the hook-based code because the hook writes the
+   session record synchronously. Spike B test: dispatch a subagent
+   within milliseconds of MCP startup; assert subagent's T1 is
+   connected to the parent's chroma. If the race is reproducible,
+   add a retry loop in the subagent's session resolution path
+   before Phase 4 lands.
+2. **Phase 2 Steps 2 + 3 shipped.** `session_end_flush` split,
+   hooks.json swapped from `nx-session-end-launcher` to `nx hook
+   session-end-flush`, and `_session_end_launcher.py` unwired (it
+   stays in the codebase as fallback code but no hook references
+   it). Without these, Phase 4 cannot cleanly remove the
+   `NEXUS_MCP_OWNS_T1` gate inside `session_end()`.
+3. **One release cycle of canary evidence under the flag.** Operators
+   running with `NEXUS_MCP_OWNS_T1=1` for at least one full release
+   without observable regressions (orphan chroma, T1 unavailable
+   warnings, watchdog mis-fires). Spike A + C cover the ~5 min
+   workload; canary covers the long-tail of real-world session
+   shapes.
+
+When all three are met, Phase 4 lands:
+
+- Remove `NEXUS_MCP_OWNS_T1` conditionals in `src/nexus/mcp/core.py`
+  (module-scope flag check + main() registrations) and
+  `src/nexus/hooks.py` (session_start chroma-spawn skip,
+  session_end chroma-stop skip).
+- Delete the hook-era chroma-spawn block from `session_start()`.
+- Retire `nx-session-end-launcher` from hooks.json (Phase 2 Step 3
+  prerequisite).
+- Update RDR-094 to record Phase 4 as complete.
+
+The TCP-probe-and-reuse path in `_t1_chroma_init_if_owner` stays
+(Spike C cleared CA-4 negative; the path is cheap insurance against
+future Claude Code behaviour changes).
 
 ### Day 2 Operations
 
