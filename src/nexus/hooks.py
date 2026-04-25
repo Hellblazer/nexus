@@ -92,13 +92,21 @@ def session_start(claude_session_id: str | None = None) -> str:
     inherited = os.environ.get("NX_SESSION_ID", "").strip() or None
     session_id = inherited or claude_session_id or generate_session_id()
 
-    # Honor NEXUS_SKIP_T1 — set by ``claude_dispatch`` (and any caller of
-    # ``claude -p`` where T1 inheritance is undesirable) so short-lived
-    # operator subprocesses don't pay the chroma startup cost or pollute
-    # session bookkeeping. The T1 client (``db/t1.py``) falls back to
-    # EphemeralClient when this env is set, so skipping the server start
-    # here yields the right "no T1" semantics automatically.
+    # Honor NEXUS_SKIP_T1, set by ``claude_dispatch`` (and any caller
+    # of ``claude -p`` where T1 inheritance is undesirable) so short-
+    # lived operator subprocesses don't pay the chroma startup cost
+    # or pollute session bookkeeping. The T1 client (``db/t1.py``)
+    # falls back to EphemeralClient when this env is set.
+    #
+    # Honor NEXUS_MCP_OWNS_T1 (RDR-094 Phase 1, feature-flagged opt-in)
+    # so chroma spawn moves to the nx-mcp lifespan. When set, the hook
+    # leaves chroma to the MCP server; the hook still runs the sweep
+    # and writes ``current_session`` so other tools (legacy CLI usage,
+    # subagent T1 inheritance) keep working.
     skip_t1 = os.environ.get("NEXUS_SKIP_T1", "").strip().lower() in ("1", "true", "yes")
+    mcp_owns_t1 = os.environ.get("NEXUS_MCP_OWNS_T1", "").strip().lower() in ("1", "true", "yes")
+    if mcp_owns_t1:
+        skip_t1 = True
 
     if not skip_t1:
         # Acquire an exclusive lock before the find+write sequence to prevent

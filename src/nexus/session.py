@@ -597,6 +597,7 @@ def spawn_t1_watchdog(
     chroma_pid: int,
     session_file: Path,
     tmpdir: str,
+    mcp_pid: int = 0,
 ) -> int:
     """Launch the T1 watchdog sidecar as a detached process.
 
@@ -606,20 +607,30 @@ def spawn_t1_watchdog(
     chroma server when Claude Code dies. See ``t1_watchdog.py`` for
     the polling loop.
 
+    When ``mcp_pid`` is non-zero, the watchdog is launched in
+    dual-watch mode (RDR-094 FM-NEW-1): it fires on EITHER mcp_pid
+    death (clean chroma directly because the MCP server's lifespan
+    did not run) OR claude_pid death (orphaned MCP, signal SIGTERM
+    to mcp_pid then clean chroma). Default 0 preserves the single-
+    watch claude-only mode for hook-spawned watchdogs.
+
     Failure is non-fatal: returns 0 and logs a warning. Layer 3
     (SessionStart orphan reaper) + the legacy age-based sweep cover
     the case where the watchdog couldn't start.
     """
     import sys as _sys
+    cmd: list[str] = [
+        _sys.executable, "-m", "nexus.t1_watchdog",
+        "--claude-pid", str(claude_pid),
+        "--chroma-pid", str(chroma_pid),
+        "--session-file", str(session_file),
+        "--tmpdir", tmpdir,
+    ]
+    if mcp_pid > 0:
+        cmd.extend(["--mcp-pid", str(mcp_pid)])
     try:
         proc = subprocess.Popen(
-            [
-                _sys.executable, "-m", "nexus.t1_watchdog",
-                "--claude-pid", str(claude_pid),
-                "--chroma-pid", str(chroma_pid),
-                "--session-file", str(session_file),
-                "--tmpdir", tmpdir,
-            ],
+            cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
