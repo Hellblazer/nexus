@@ -334,44 +334,164 @@ def _run_phase_kill(run_id: int, kill_signal: int, label: str) -> RunRecord:
     )
 
 
-def _run_phase_claude_crash(run_id: int) -> RunRecord:
-    """Phase 4 (FM-NEW-1): kill the harness's grandparent simulation.
+_INTERMEDIATE_HANDOFF = SCRIPT_DIR / "_spike_intermediate_handoff.json"
 
-    The harness fork-and-exit pattern: we spawn an intermediate "fake
-    Claude" process that itself spawns nx-mcp, then kill the
-    intermediate. The dual-watch watchdog should observe claude_pid
-    gone (the intermediate is what's recorded in the watchdog spawn
-    via find_claude_root_pid).
 
-    Note: find_claude_root_pid walks the PPID chain looking for a
-    'claude' or 'Claude' command name. Our intermediate runs python,
-    so it will not be detected as the Claude root. To work around
-    this for the spike, we set NEXUS_FAKE_CLAUDE_PID env so the
-    nx-mcp records our intermediate's PID as the claude_root_pid.
-    The spike harness reads this env in nx-mcp's
-    find_claude_root_pid override; absent the override, this phase
-    skips with setup_failed.
+def _spawn_fake_claude_intermediate() -> subprocess.Popen:
+    """Spawn an intermediate "fake claude" process that owns nx-mcp.
+
+    The intermediate process:
+      1. Spawns nx-mcp with NEXUS_MCP_OWNS_T1=1.
+      2. Writes its own PID + nx-mcp's PID to a handoff file so the
+         outer harness can read them.
+      3. Sleeps forever (waiting to be killed).
+
+    When the outer harness SIGKILLs the intermediate, the dual-watch
+    watchdog (which has --claude-pid pointing at the intermediate)
+    sees claude_root_pid disappear, sends SIGTERM to mcp_pid, and
+    chroma is cleaned up by the lifespan finally inside nx-mcp.
+
+    find_claude_root_pid uses the immediate-PPID fallback when no
+    'claude' command-name ancestor is found. Since nx-mcp's PPID is
+    the intermediate, the watchdog gets the intermediate's PID
+    automatically without any rename trickery.
     """
-    # The override hook is intentionally not implemented in the
-    # production code path (don't pollute the production claude
-    # detection for a spike). For the spike, mark this phase as
-    # "needs harness-side hook" and document the manual-test
-    # alternative below.
+    bootstrap = (
+        "import json, os, subprocess, sys, time;\n"
+        "env = dict(os.environ);\n"
+        "env['NEXUS_MCP_OWNS_T1'] = '1';\n"
+        "p = subprocess.Popen(\n"
+        "    [sys.executable, '-m', 'nexus.mcp.core'],\n"
+        "    stdin=subprocess.PIPE, stdout=subprocess.PIPE,\n"
+        "    stderr=subprocess.PIPE, env=env,\n"
+        ");\n"
+        f"open({str(_INTERMEDIATE_HANDOFF)!r}, 'w').write(\n"
+        "    json.dumps({'mcp_pid': p.pid, 'intermediate_pid': os.getpid()})\n"
+        ");\n"
+        "while True:\n"
+        "    time.sleep(60)\n"
+    )
+    return subprocess.Popen(
+        [sys.executable, "-c", bootstrap],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+def _run_phase_claude_crash(run_id: int) -> RunRecord:
+    """Phase 4 (RDR-094 FM-NEW-1, issue #1935): SIGKILL a "fake claude"
+    intermediate that owns nx-mcp, observe whether the dual-watch
+    watchdog's claude-pid trigger cleans chroma.
+
+    Steps:
+      1. Spawn an intermediate process that itself spawns nx-mcp
+         (nx-mcp's PPID is the intermediate, so
+         find_claude_root_pid's PPID-fallback resolves to the
+         intermediate's PID even without a 'claude' command name).
+      2. Wait for the intermediate to write nx-mcp's PID to a handoff
+         file, then for nx-mcp to publish chroma's PID via the session
+         record.
+      3. SIGKILL the intermediate (simulates Claude Code crash with
+         nx-mcp orphaned).
+      4. Wait CLEANUP_TIMEOUT_S for the watchdog: claude-pid trigger
+         fires within POLL_INTERVAL=5s, sends SIGTERM to nx-mcp,
+         lifespan finally runs (~MCP_GRACE_SECS=2s), chroma exits.
+      5. Check chroma liveness; classify cleanup path.
+    """
+    log_start = _log_size()
+    if _INTERMEDIATE_HANDOFF.exists():
+        _INTERMEDIATE_HANDOFF.unlink()
+
+    intermediate = _spawn_fake_claude_intermediate()
+    intermediate_pid = intermediate.pid
+
+    # Wait for the intermediate to publish nx-mcp's PID.
+    deadline = time.monotonic() + SPAWN_TIMEOUT_S
+    handoff: dict[str, int] | None = None
+    while time.monotonic() < deadline and handoff is None:
+        if _INTERMEDIATE_HANDOFF.exists():
+            try:
+                handoff = json.loads(_INTERMEDIATE_HANDOFF.read_text())
+            except (OSError, json.JSONDecodeError):
+                pass
+        if handoff is None:
+            time.sleep(0.1)
+    if handoff is None:
+        try:
+            intermediate.kill()
+            intermediate.wait(timeout=2)
+        except Exception:
+            pass
+        return RunRecord(
+            phase="claude_crash", run_id=run_id,
+            mcp_pid=0, chroma_pid=0, signal_sent="(setup-failed)",
+            chroma_alive_after_grace=False, cleanup_path="setup_failed",
+            elapsed_until_cleanup_s=0.0, setup_failed=True,
+            error="intermediate handoff file never appeared",
+        )
+
+    mcp_pid = int(handoff.get("mcp_pid", 0))
+    chroma_pid = _wait_for_chroma_pid(SPAWN_TIMEOUT_S)
+    if chroma_pid is None or mcp_pid == 0:
+        try:
+            intermediate.kill()
+            intermediate.wait(timeout=2)
+        except Exception:
+            pass
+        if mcp_pid and _is_alive(mcp_pid):
+            try:
+                os.kill(mcp_pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+        return RunRecord(
+            phase="claude_crash", run_id=run_id,
+            mcp_pid=mcp_pid, chroma_pid=0,
+            signal_sent="(setup-failed)",
+            chroma_alive_after_grace=False, cleanup_path="setup_failed",
+            elapsed_until_cleanup_s=0.0, setup_failed=True,
+            error="chroma_pid not observed within SPAWN_TIMEOUT_S",
+        )
+
+    t0 = time.monotonic()
+    # SIGKILL the intermediate (simulates Claude Code crash).
+    try:
+        os.kill(intermediate_pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    intermediate.wait(timeout=2)
+
+    # Wait for the watchdog's claude-pid trigger:
+    #   POLL_INTERVAL=5s + MCP_GRACE_SECS=2s + slack = CLEANUP_TIMEOUT_S
+    time.sleep(CLEANUP_TIMEOUT_S)
+    elapsed = time.monotonic() - t0
+    chroma_alive = _is_alive(chroma_pid)
+    log_lines = _read_log_tail_after(log_start)
+    cleanup_path = _classify_cleanup_path(
+        log_lines, chroma_alive, "harness_SIGKILL",
+    )
+    # Belt-and-braces cleanup of any leak so the next run starts clean.
+    if chroma_alive:
+        try:
+            os.kill(chroma_pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    if mcp_pid and _is_alive(mcp_pid):
+        try:
+            os.kill(mcp_pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    if _INTERMEDIATE_HANDOFF.exists():
+        _INTERMEDIATE_HANDOFF.unlink()
+
     return RunRecord(
-        phase="claude_crash", run_id=run_id, mcp_pid=0, chroma_pid=0,
+        phase="claude_crash", run_id=run_id,
+        mcp_pid=mcp_pid, chroma_pid=chroma_pid,
         signal_sent="harness_SIGKILL",
-        chroma_alive_after_grace=False, cleanup_path="not_implemented",
-        elapsed_until_cleanup_s=0.0, setup_failed=True,
-        error=(
-            "Phase 4 requires either (a) the harness to be started "
-            "from a process whose name is 'claude'/'Claude' so "
-            "find_claude_root_pid resolves to it, or (b) a "
-            "NEXUS_FAKE_CLAUDE_PID hook in find_claude_root_pid. "
-            "Run manually instead: spawn `claude` with "
-            "NEXUS_MCP_OWNS_T1=1, kill the claude process with -9, "
-            "and observe whether watchdog cleans chroma within ~7s "
-            "(5s poll + 2s grace). Capture mcp.log for evidence."
-        ),
+        chroma_alive_after_grace=chroma_alive,
+        cleanup_path=cleanup_path,
+        elapsed_until_cleanup_s=round(elapsed, 2),
+        setup_failed=False, error=None,
     )
 
 
@@ -434,19 +554,16 @@ def main() -> int:
         help="Runs per phase (default 5; RDR target is 10).",
     )
     parser.add_argument(
-        "--phases", type=str, default="clean,mcp_sigkill,mcp_oom",
+        "--phases", type=str,
+        default="clean,mcp_sigkill,mcp_oom,claude_crash",
         help=(
-            "Comma-separated phase list. Defaults skip "
-            "claude_crash because it requires manual setup; pass "
-            "--phases all to include it as a not-implemented record."
+            "Comma-separated phase list. Default runs all four. "
+            "Use --phases clean for a quick lifespan-only smoke."
         ),
     )
     args = parser.parse_args()
 
-    if args.phases == "all":
-        phases = ["clean", "mcp_sigkill", "mcp_oom", "claude_crash"]
-    else:
-        phases = [p.strip() for p in args.phases.split(",") if p.strip()]
+    phases = [p.strip() for p in args.phases.split(",") if p.strip()]
 
     results: list[RunRecord] = []
     RESULTS_PATH.parent.mkdir(parents=True, exist_ok=True)
