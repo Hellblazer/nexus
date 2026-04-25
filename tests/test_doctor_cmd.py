@@ -689,3 +689,103 @@ class TestCheckPlanLibrary:
         # count should appear in the report regardless.
         assert "backfill" in result.output.lower()
 
+
+
+# ── --check-tmpdirs (RDR-094 Phase 3) ───────────────────────────────────────
+
+
+class TestCheckTmpdirs:
+    """``nx doctor --check-tmpdirs`` surfaces orphan ``nx_t1_*``
+    tmpdirs (no session record reference, mtime > 24h). Read-only
+    by default; ``--reap-tmpdirs`` actually deletes."""
+
+    def test_no_candidates_exits_zero(
+        self, runner: CliRunner, tmp_path: Path,
+    ) -> None:
+        # Empty tmproot => zero candidates.
+        empty_root = tmp_path / "empty"
+        empty_root.mkdir()
+        with patch(
+            "tempfile.gettempdir", return_value=str(empty_root),
+        ):
+            result = runner.invoke(main, ["doctor", "--check-tmpdirs"])
+        assert result.exit_code == 0, result.output
+        assert "No orphan" in result.output
+
+    def test_lists_candidates_without_reap(
+        self, runner: CliRunner, tmp_path: Path,
+    ) -> None:
+        import os as _os
+        import time as _time
+
+        tmproot = tmp_path / "tmp"
+        tmproot.mkdir()
+        sessions = tmp_path / "sessions"
+        sessions.mkdir()
+        old_orphan = tmproot / "nx_t1_old"
+        old_orphan.mkdir()
+        backdate = _time.time() - 30 * 3600
+        _os.utime(old_orphan, (backdate, backdate))
+
+        with patch(
+            "tempfile.gettempdir", return_value=str(tmproot),
+        ), patch("nexus.db.t1.SESSIONS_DIR", sessions):
+            result = runner.invoke(main, ["doctor", "--check-tmpdirs"])
+        assert result.exit_code == 0, result.output
+        assert "nx_t1_old" in result.output
+        # Read-only mode: candidate still on disk.
+        assert old_orphan.exists()
+
+    def test_reap_actually_deletes(
+        self, runner: CliRunner, tmp_path: Path,
+    ) -> None:
+        import os as _os
+        import time as _time
+
+        tmproot = tmp_path / "tmp"
+        tmproot.mkdir()
+        sessions = tmp_path / "sessions"
+        sessions.mkdir()
+        old_orphan = tmproot / "nx_t1_old"
+        old_orphan.mkdir()
+        backdate = _time.time() - 30 * 3600
+        _os.utime(old_orphan, (backdate, backdate))
+
+        with patch(
+            "tempfile.gettempdir", return_value=str(tmproot),
+        ), patch("nexus.db.t1.SESSIONS_DIR", sessions):
+            result = runner.invoke(
+                main, ["doctor", "--check-tmpdirs", "--reap-tmpdirs"],
+            )
+        assert result.exit_code == 0, result.output
+        assert "Reaped: 1" in result.output
+        assert not old_orphan.exists()
+
+    def test_json_out_emits_machine_parseable(
+        self, runner: CliRunner, tmp_path: Path,
+    ) -> None:
+        import json as _json
+        import os as _os
+        import time as _time
+
+        tmproot = tmp_path / "tmp"
+        tmproot.mkdir()
+        sessions = tmp_path / "sessions"
+        sessions.mkdir()
+        orphan = tmproot / "nx_t1_x"
+        orphan.mkdir()
+        backdate = _time.time() - 30 * 3600
+        _os.utime(orphan, (backdate, backdate))
+
+        with patch(
+            "tempfile.gettempdir", return_value=str(tmproot),
+        ), patch("nexus.db.t1.SESSIONS_DIR", sessions):
+            result = runner.invoke(
+                main, ["doctor", "--check-tmpdirs", "--json"],
+            )
+        assert result.exit_code == 0, result.output
+        payload = _json.loads(result.output)
+        assert payload["cutoff_hours"] == 24.0
+        assert len(payload["candidates"]) == 1
+        assert payload["candidates"][0]["path"].endswith("nx_t1_x")
+        assert payload["reaped"] == 0
