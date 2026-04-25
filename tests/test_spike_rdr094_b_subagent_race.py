@@ -39,33 +39,52 @@ def harness():
 
 
 class TestClassifyOutcome:
-    """Three diagnostic verdicts encode CA-2's pass/fail rule:
+    """Four diagnostic verdicts encode CA-2's pass/fail rule:
 
-    * ``connected_to_parent`` -- subagent's T1Database._client is an
-      HttpClient pointing at the parent's chroma. CA-2 holds.
-    * ``ephemeral_downgrade`` -- _client is an EphemeralClient. The
-      silent-downgrade signature; CA-2 fails for this cycle.
+    * ``connected_to_parent`` -- subagent's T1Database resolved a
+      session record and connected via HttpClient. CA-2 holds.
+    * ``ephemeral_downgrade`` -- T1Database fell through to
+      chromadb.EphemeralClient (the silent-downgrade signature).
     * ``setup_failed`` -- harness couldn't get nx-mcp + chroma up.
-      Excluded from the pass/fail tally.
+    * ``unknown`` -- probe ran but gave no parseable signal.
+
+    chromadb.HttpClient and chromadb.EphemeralClient are factory
+    functions that BOTH return ``chromadb.api.client.Client``, so
+    ``type(client).__name__`` cannot distinguish them. The probe
+    inspects the warnings stream and emits ``outcome`` directly;
+    classifier reads that field with a warnings-fallback for
+    robustness.
     """
 
-    def test_http_client_classifies_as_connected(self, harness):
-        stdout = json.dumps({
-            "client_class": "HttpClient",
-            "session_id": "abc",
-        }) + "\n"
+    def test_explicit_outcome_connected(self, harness):
+        stdout = json.dumps({"outcome": "connected_to_parent"}) + "\n"
         assert harness._classify_outcome(stdout, setup_failed=False) == "connected_to_parent"
 
-    def test_ephemeral_client_classifies_as_downgrade(self, harness):
+    def test_explicit_outcome_downgrade(self, harness):
+        stdout = json.dumps({"outcome": "ephemeral_downgrade"}) + "\n"
+        assert harness._classify_outcome(stdout, setup_failed=False) == "ephemeral_downgrade"
+
+    def test_warnings_fallback_classifies_downgrade(self, harness):
+        """Old harness output without explicit outcome: warnings inspection."""
         stdout = json.dumps({
-            "client_class": "EphemeralClient",
-            "session_id": "abc",
+            "warnings": [
+                "No T1 server found; falling back to local EphemeralClient. "
+                "Cross-agent scratch sharing is unavailable for this session.",
+            ],
         }) + "\n"
         assert harness._classify_outcome(stdout, setup_failed=False) == "ephemeral_downgrade"
 
+    def test_no_outcome_no_warnings_is_unknown(self, harness):
+        """Probe ran but produced neither explicit outcome nor downgrade
+        warning. Conservative: return unknown, do NOT silently classify
+        as connected_to_parent (otherwise a probe with broken warning
+        capture would falsely confirm CA-2)."""
+        stdout = json.dumps({"client_class": "Client"}) + "\n"
+        assert harness._classify_outcome(stdout, setup_failed=False) == "unknown"
+
     def test_setup_failed_short_circuits(self, harness):
-        """Harness-detected setup failure outranks any client output."""
-        stdout = json.dumps({"client_class": "HttpClient"}) + "\n"
+        """Harness-detected setup failure outranks any probe output."""
+        stdout = json.dumps({"outcome": "connected_to_parent"}) + "\n"
         assert harness._classify_outcome(stdout, setup_failed=True) == "setup_failed"
 
     def test_blank_stdout_is_unknown(self, harness):
@@ -79,18 +98,9 @@ class TestClassifyOutcome:
         stdout = (
             "warning: something happened\n"
             "more text\n"
-            + json.dumps({"client_class": "HttpClient"})
+            + json.dumps({"outcome": "connected_to_parent"})
             + "\n"
         )
-        assert harness._classify_outcome(stdout, setup_failed=False) == "connected_to_parent"
-
-    def test_persistent_client_class_classifies_as_connected(self, harness):
-        """Some chromadb versions name the http client variant slightly
-        differently; substring 'HttpClient' is the load-bearing token."""
-        stdout = json.dumps({
-            "client_class": "FastAPIHttpClient",
-            "session_id": "abc",
-        }) + "\n"
         assert harness._classify_outcome(stdout, setup_failed=False) == "connected_to_parent"
 
 
@@ -138,6 +148,24 @@ class TestAggregate:
         # Without any usable cycles, we cannot conclude either way.
         assert summary["interpretation"] == "inconclusive"
 
+    def test_all_unknown_is_inconclusive_not_verified(self, harness):
+        """Regression sentinel for the bug found on the first 40-cycle
+        run: every cycle classified as 'unknown' (probe never produced
+        a parseable signal) was wrongly interpreted as
+        ca2_verified_race_not_reproducible. Verification must require
+        positive evidence (>=1 connected_to_parent), not merely zero
+        downgrades.
+        """
+        records = [_make_record(harness, t, i, "unknown")
+                   for t in (0, 5, 50, 200)
+                   for i in range(10)]
+        summary = harness._aggregate(records)
+        assert summary["totals"]["ephemeral_downgrade"] == 0
+        assert summary["totals"]["connected_to_parent"] == 0
+        assert summary["interpretation"] == "inconclusive", (
+            "All-unknown must NOT verify CA-2 -- positive evidence required"
+        )
+
     def test_per_timing_breakdown_includes_all_outcomes(self, harness):
         records = [
             _make_record(harness, 0, 0, "connected_to_parent"),
@@ -182,6 +210,16 @@ class TestSpikeStructure:
         assert "T1Database" in harness._SUBAGENT_PROBE
         assert "T1Database()" in harness._SUBAGENT_PROBE
         assert "client_class" in harness._SUBAGENT_PROBE
+
+    def test_subagent_probe_emits_explicit_outcome(self, harness):
+        """Probe must emit an explicit outcome field (not rely on
+        type(client).__name__ which collapses HttpClient and
+        EphemeralClient to 'Client')."""
+        assert '"outcome"' in harness._SUBAGENT_PROBE
+        assert "ephemeral_downgrade" in harness._SUBAGENT_PROBE
+        assert "connected_to_parent" in harness._SUBAGENT_PROBE
+        # The decision predicate must inspect the warnings stream.
+        assert "falling back to local EphemeralClient" in harness._SUBAGENT_PROBE
 
     def test_run_cycle_function_exists(self, harness):
         assert callable(harness._run_cycle)
