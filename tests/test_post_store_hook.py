@@ -144,31 +144,47 @@ def test_fire_post_store_hooks_persist_failure_is_best_effort(
 # ── Batch hook mechanism (RDR-095, nexus-wxcb) ───────────────────────────────
 
 
-def test_fire_post_store_batch_hooks_calls_registered() -> None:
-    """fire_post_store_batch_hooks invokes all registered callables in order."""
+def test_register_post_store_batch_hook_appends() -> None:
+    """register_post_store_batch_hook appends to the module-level list."""
+    from nexus.mcp_infra import _post_store_batch_hooks, register_post_store_batch_hook
+
+    def probe(doc_ids, collection, contents, embeddings, metadatas):
+        return None
+
+    assert _post_store_batch_hooks == []
+    register_post_store_batch_hook(probe)
+    assert _post_store_batch_hooks == [probe]
+
+
+def test_fire_post_store_batch_hooks_invokes_registered() -> None:
+    """fire forwards all five parameters unchanged to each registered hook."""
     from nexus.mcp_infra import (
         fire_post_store_batch_hooks,
         register_post_store_batch_hook,
     )
 
-    calls: list[tuple] = []
+    seen: list[tuple] = []
 
     def hook_a(doc_ids, collection, contents, embeddings, metadatas):
-        calls.append(("a", tuple(doc_ids), collection))
+        seen.append(("a", tuple(doc_ids), collection,
+                     tuple(contents), embeddings, metadatas))
 
     def hook_b(doc_ids, collection, contents, embeddings, metadatas):
-        calls.append(("b", tuple(doc_ids), collection))
+        seen.append(("b", tuple(doc_ids), collection,
+                     tuple(contents), embeddings, metadatas))
 
     register_post_store_batch_hook(hook_a)
     register_post_store_batch_hook(hook_b)
 
+    embeddings = [[0.1, 0.2], [0.3, 0.4]]
+    metadatas = [{"k": "v1"}, {"k": "v2"}]
     fire_post_store_batch_hooks(
-        ["d1", "d2"], "code__nexus", ["c1", "c2"], None, None,
+        ["d1", "d2"], "code__nexus", ["c1", "c2"], embeddings, metadatas,
     )
 
-    assert calls == [
-        ("a", ("d1", "d2"), "code__nexus"),
-        ("b", ("d1", "d2"), "code__nexus"),
+    assert seen == [
+        ("a", ("d1", "d2"), "code__nexus", ("c1", "c2"), embeddings, metadatas),
+        ("b", ("d1", "d2"), "code__nexus", ("c1", "c2"), embeddings, metadatas),
     ]
 
 
