@@ -1,0 +1,53 @@
+{
+  "phases": {
+    "clean": {
+      "runs": 10,
+      "setup_failed": 0,
+      "usable": 10,
+      "chroma_cleaned": 10,
+      "cleanup_rate": 1.0,
+      "path_counts": {
+        "mcp_owned_signal": 10
+      },
+      "median_elapsed_s": 11.01
+    },
+    "mcp_sigkill": {
+      "runs": 10,
+      "setup_failed": 0,
+      "usable": 10,
+      "chroma_cleaned": 10,
+      "cleanup_rate": 1.0,
+      "path_counts": {
+        "watchdog_mcp": 10
+      },
+      "median_elapsed_s": 10.01
+    },
+    "mcp_oom": {
+      "runs": 10,
+      "setup_failed": 0,
+      "usable": 10,
+      "chroma_cleaned": 10,
+      "cleanup_rate": 1.0,
+      "path_counts": {
+        "watchdog_mcp": 10
+      },
+      "median_elapsed_s": 10.0
+    },
+    "claude_crash": {
+      "runs": 10,
+      "setup_failed": 0,
+      "usable": 10,
+      "chroma_cleaned": 10,
+      "cleanup_rate": 1.0,
+      "path_counts": {
+        "watchdog_claude": 10
+      },
+      "median_elapsed_s": 10.0
+    }
+  },
+  "totals": {
+    "runs": 40,
+    "chroma_cleaned": 40,
+    "overall_cleanup_rate": 1.0
+  }
+}
