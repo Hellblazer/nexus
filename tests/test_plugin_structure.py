@@ -493,7 +493,7 @@ class TestHooks:
         assert "3.12" in py_req, f"engines.python should require >=3.12, got {py_req!r}"
 
     def test_session_end_hook_registered(self) -> None:
-        """Regression guard: SessionEnd must invoke ``nx hook session-end``.
+        """Regression guard: SessionEnd must run a nexus cleanup entry point.
 
         The hook was removed in v1.10.1 with the (incorrect) reasoning that
         the T1 chroma server stops with the parent process tree. It does not:
@@ -503,19 +503,26 @@ class TestHooks:
         reaping never collects it. Removing this hook leaks one chroma child
         per Claude Code session indefinitely. This test fails loudly if
         anyone drops the hook again.
+
+        RDR-094 Phase C (nexus-l828) swapped the dispatch from
+        ``nx hook session-end-detach`` to ``nx-session-end-launcher`` to
+        preserve the fork-first cold-start race fix. Either name is
+        acceptable as a SessionEnd entry; what matters is that *some*
+        nexus cleanup entry is registered.
         """
         data = json.loads(HOOKS_PATH.read_text())
         events = data.get("hooks", data)
         session_end = events.get("SessionEnd")
-        assert session_end, "SessionEnd hook is missing — see test docstring for why it must stay"
+        assert session_end, "SessionEnd hook is missing -- see test docstring for why it must stay"
         commands = [
             sub.get("command", "")
             for entry in session_end
             for sub in entry.get("hooks", [])
         ]
-        assert any("nx hook session-end" in cmd for cmd in commands), (
-            f"SessionEnd registered but does not invoke 'nx hook session-end'; "
-            f"found commands: {commands}"
+        valid_entries = ("nx hook session-end", "nx-session-end-launcher")
+        assert any(any(v in cmd for v in valid_entries) for cmd in commands), (
+            f"SessionEnd registered but does not invoke a nexus cleanup entry "
+            f"({valid_entries}); found commands: {commands}"
         )
 
 

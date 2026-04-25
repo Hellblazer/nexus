@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Fork-first SessionEnd daemonizer (nexus-2u7o).
+"""Fork-first SessionEnd daemonizer (nexus-2u7o, RDR-094 Phase C).
 
 The 4.10.3 double-fork path in ``nexus.commands.hook.session_end_detach_cmd``
 waits for Click to parse argv and for ``nexus.hooks`` + friends to import
@@ -12,14 +12,30 @@ cleanup.
 This module flips the order: the ``__main__`` block uses only ``os``
 and ``sys`` from the standard library (both are preloaded by the
 interpreter, so no import cost), forks, ``setsid``s, forks again, and
-redirects stdio to ``/dev/null`` — all before touching a single nexus
+redirects stdio to ``/dev/null`` -- all before touching a single nexus
 module. Then in the fully detached grandchild it imports
-``nexus.hooks`` and runs ``session_end()`` normally. Wall-clock cost
+``nexus.hooks`` and runs ``session_end_flush()``. Wall-clock cost
 to return control to Claude Code: ~17ms.
+
+RDR-094 Phase C swap: the launcher now dispatches to
+``hooks.session_end_flush`` (storage-only path, fork-safe) instead of
+``hooks.session_end``. With the MCP server owning chroma's lifecycle
+under ``NEXUS_MCP_OWNS_T1`` (Phase 4), a hook-side
+``stop_t1_server`` raced the MCP lifespan/atexit/signal-handler
+cleanup. Pointing the launcher at the flush-only entry retires that
+race entirely. The legacy ``hooks.session_end`` chroma-stop block is
+still reachable via ``nx hook session-end`` for the flag-off rollout
+window and as a manual-debug entry point.
+
+**BANNED invariant**: this module must never import any ``nexus.*``
+module before ``os.fork()``. The whole point is that the parent
+process pays no nexus-import cost before forking off the daemon.
+Imports happen only inside ``_run_session_end_synchronously`` which
+runs in the grandchild.
 
 Shell invocation (wired into ``nx/hooks/hooks.json``)::
 
-    python3 -m nexus._session_end_launcher || true
+    nx-session-end-launcher
 
 On platforms without ``os.fork`` (Windows), falls through to the
 synchronous path so cleanup still happens, at the cost of the hook
@@ -32,16 +48,23 @@ import sys
 
 
 def _run_session_end_synchronously() -> None:
-    """Import nexus.hooks and call session_end(); swallow exceptions.
+    """Import nexus.hooks and call session_end_flush; swallow exceptions.
 
     Runs in the fully detached grandchild, so exceptions are no longer
-    observable by Claude Code — they must not escape and crash the
+    observable by Claude Code -- they must not escape and crash the
     daemon. Logging goes through the structlog pipeline nexus.hooks
     already configures (RotatingFileHandler under ~/.config/nexus/logs).
+
+    RDR-094 Phase C: dispatches to ``session_end_flush`` (storage-only)
+    rather than ``session_end`` (storage + chroma teardown). The
+    chroma teardown is owned by the MCP server's lifespan/atexit/
+    signal handlers under ``NEXUS_MCP_OWNS_T1``; calling it here
+    races those paths and was the documented source of double-stop
+    failures.
     """
     try:
         from nexus import hooks
-        hooks.session_end()
+        hooks.session_end_flush()
     except Exception:
         # Fully detached; nothing upstream can observe us. Swallow.
         pass

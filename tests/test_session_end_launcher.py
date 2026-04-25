@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for nexus._session_end_launcher (nexus-2u7o).
+"""Tests for nexus._session_end_launcher (nexus-2u7o, RDR-094 Phase C).
 
 Contract pins:
-  * Module top-level must NOT import anything from ``nexus`` — only
+  * Module top-level must NOT import anything from ``nexus`` -- only
     ``os`` and ``sys``. Keeps the fork-first guarantee intact on
-    cold-cache Python startup.
+    cold-cache Python startup (BANNED invariant per nexus-l828).
   * ``main()`` returns to the caller via the first-fork parent path
-    (in the real world ~100ms; here we simulate the fork).
-  * ``_run_session_end_synchronously`` calls ``nexus.hooks.session_end``
-    and swallows exceptions.
+    (in the real world ~17ms; here we simulate the fork).
+  * ``_run_session_end_synchronously`` calls
+    ``nexus.hooks.session_end_flush`` (Phase C swap from
+    ``session_end`` to drop the chroma-stop race against
+    NEXUS_MCP_OWNS_T1) and swallows exceptions.
   * Platform-without-fork fallback runs synchronously.
 """
 from __future__ import annotations
@@ -39,23 +41,47 @@ def test_module_does_not_import_nexus_submodules_at_top_level() -> None:
     )
 
 
-def test_run_session_end_synchronously_invokes_hooks_session_end() -> None:
-    """The grandchild path must dispatch to ``nexus.hooks.session_end``."""
+def test_run_session_end_synchronously_invokes_session_end_flush() -> None:
+    """RDR-094 Phase C: grandchild path dispatches to session_end_flush.
+
+    The pre-Phase-C contract was ``session_end`` which both flushes and
+    stops chroma. Under NEXUS_MCP_OWNS_T1 (Phase 4) the MCP server owns
+    chroma teardown, so the launcher must use the storage-only entry.
+    """
     import nexus._session_end_launcher as launcher
 
     call_count = 0
-    def fake_session_end() -> str:
+    def fake_flush() -> str:
         nonlocal call_count
         call_count += 1
         return "stub"
 
-    with patch("nexus.hooks.session_end", side_effect=fake_session_end):
+    with patch("nexus.hooks.session_end_flush", side_effect=fake_flush):
         launcher._run_session_end_synchronously()
     assert call_count == 1
 
 
+def test_run_session_end_synchronously_does_not_call_session_end() -> None:
+    """Regression sentinel: launcher must NOT route through session_end.
+
+    session_end runs the chroma-stop block when NEXUS_MCP_OWNS_T1 is
+    unset, which races MCP-owned cleanup. The Phase C contract is to
+    point the launcher at session_end_flush exclusively; the legacy
+    session_end path stays only for nx hook session-end (manual debug)
+    and for the flag-off rollout window.
+    """
+    import nexus._session_end_launcher as launcher
+
+    with (
+        patch("nexus.hooks.session_end") as mock_full,
+        patch("nexus.hooks.session_end_flush", return_value="stub"),
+    ):
+        launcher._run_session_end_synchronously()
+    mock_full.assert_not_called()
+
+
 def test_run_session_end_synchronously_swallows_exceptions() -> None:
-    """The grandchild is detached — exceptions must not propagate up or
+    """The grandchild is detached -- exceptions must not propagate up or
     we'd drop the ``os._exit(0)`` and leave a zombie.
     """
     import nexus._session_end_launcher as launcher
@@ -63,7 +89,7 @@ def test_run_session_end_synchronously_swallows_exceptions() -> None:
     def boom() -> str:
         raise RuntimeError("intentional failure from test")
 
-    with patch("nexus.hooks.session_end", side_effect=boom):
+    with patch("nexus.hooks.session_end_flush", side_effect=boom):
         launcher._run_session_end_synchronously()  # must not raise
 
 
@@ -126,3 +152,84 @@ def test_daemonize_falls_through_to_sync_on_oserror() -> None:
     ):
         launcher._daemonize_and_run()
     assert calls == ["sync"]
+
+
+# ── nx/hooks/hooks.json contract (RDR-094 Phase C / nexus-l828) ─────────────
+
+
+def _read_plugin_hooks_json() -> dict:
+    import json
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parent.parent
+    return json.loads((repo_root / "nx" / "hooks" / "hooks.json").read_text())
+
+
+def test_hooks_json_session_end_uses_launcher_not_flush_directly() -> None:
+    """The hooks.json SessionEnd entry MUST dispatch through
+    nx-session-end-launcher, never directly to ``nx hook session-end-flush``.
+
+    Reason: pointing hooks.json at the Click-routed entry reopens the
+    256ms-vs-2s cold-start race that the launcher exists to solve
+    (Click parses argv + nexus.hooks imports BEFORE os.fork). The
+    launcher's __main__ block forks first using only stdlib, then
+    imports nexus.hooks in the grandchild.
+    """
+    cfg = _read_plugin_hooks_json()
+    session_end = cfg["hooks"]["SessionEnd"]
+    assert session_end, "SessionEnd block must not be empty"
+
+    commands = [
+        h["command"]
+        for entry in session_end
+        for h in entry.get("hooks", [])
+    ]
+    assert any("nx-session-end-launcher" in c for c in commands), (
+        f"SessionEnd must invoke nx-session-end-launcher; got {commands!r}"
+    )
+    # The Click entry stays as a manual-debug entry point only -- it
+    # must NOT appear in hooks.json.
+    assert not any(
+        "nx hook session-end-flush" in c or "nx hook session-end" in c
+        for c in commands
+    ), (
+        "SessionEnd in hooks.json must not invoke 'nx hook session-end*' "
+        "directly -- the launcher is the only fork-first-safe entry. "
+        f"Got: {commands!r}"
+    )
+
+
+def test_hooks_json_session_end_timeout_is_three_seconds() -> None:
+    """Phase C reduces SessionEnd timeout from 5s to 3s.
+
+    Storage-only flush is sub-second on a typical install; the previous
+    5s window covered chroma teardown which the launcher no longer
+    triggers. Tighter timeout means a wedged hook is reaped faster.
+    """
+    cfg = _read_plugin_hooks_json()
+    timeouts = [
+        h["timeout"]
+        for entry in cfg["hooks"]["SessionEnd"]
+        for h in entry.get("hooks", [])
+    ]
+    assert timeouts == [3], f"expected SessionEnd timeout 3s; got {timeouts!r}"
+
+
+def test_hooks_json_session_end_drops_detach_fallback() -> None:
+    """Phase C drops the ``|| nx hook session-end-detach`` fallback.
+
+    The detach Click command imports nexus.hooks before forking and
+    has the same 2s cold-start race the launcher fixes. Falling back
+    to it on launcher failure was a footgun: a slow launcher that
+    reached the inner fork would still skip the SIGTERM -- the
+    fallback runs against the same race.
+    """
+    cfg = _read_plugin_hooks_json()
+    commands = [
+        h["command"]
+        for entry in cfg["hooks"]["SessionEnd"]
+        for h in entry.get("hooks", [])
+    ]
+    assert not any("session-end-detach" in c for c in commands), (
+        f"detach fallback must be removed from SessionEnd; got {commands!r}"
+    )
