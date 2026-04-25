@@ -37,7 +37,247 @@ from nexus.mcp_infra import (
 )
 from nexus.ttl import parse_ttl
 
-mcp = FastMCP("nexus")
+# ── T1 chroma lifecycle (RDR-094, feature-flagged) ──────────────────────────
+#
+# Phase 1 + Phase 2 of RDR-094 land here under the NEXUS_MCP_OWNS_T1 flag.
+# When set, this module:
+#   1. Spawns chroma in the FastMCP lifespan __aenter__ (primary cleanup
+#      via async finally in the lifespan exit). The hook's chroma-spawn
+#      block becomes a no-op (gated on the same env flag in hooks.py).
+#   2. Registers atexit + SIGTERM/SIGINT handlers as belt-and-braces for
+#      kill paths where lifespan does not fire (research RQ2).
+#   3. Spawns the watchdog with both --mcp-pid and --claude-pid so the
+#      Claude-crash-orphan failure mode (issue #1935, FM-NEW-1) is covered.
+#   4. TCP-probes any existing session record at startup; if reachable,
+#      reuses the existing chroma (FM-NEW-2 mitigation for the Claude Code
+#      issue #40207 mid-session SIGTERM-restart cycle).
+#
+# Default off. Existing installs see no behaviour change. Spike work flips
+# the flag to validate the design (RDR-094 §Critical Assumptions).
+
+import os as _os
+
+_MCP_OWNS_T1: bool = _os.environ.get(
+    "NEXUS_MCP_OWNS_T1", "",
+).strip().lower() in ("1", "true", "yes")
+
+#: Module-scope state for the owned chroma. Populated by
+#: ``_t1_chroma_init_if_owner`` and consumed by ``_t1_chroma_shutdown``.
+#: ``reused=True`` when the TCP-probe path detected a still-alive chroma
+#: from an earlier MCP server in the same session: that chroma is shared,
+#: and we must not stop it on our own shutdown.
+_OWNED_CHROMA: dict[str, Any] = {}
+
+
+def _tcp_probe_alive(host: str, port: int, timeout: float = 0.5) -> bool:
+    """Return True if a TCP connection to ``(host, port)`` succeeds.
+
+    Used by the FM-NEW-2 reuse path: at MCP startup, probe any existing
+    session record's chroma before spawning a new one. If the previous
+    MCP server's chroma is still listening (e.g. the prior server was
+    killed by issue #40207's mid-session SIGTERM but its chroma sidecar
+    survives because the lifespan finally was interrupted), connect to
+    it instead of starting a duplicate.
+    """
+    import socket
+
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except (OSError, socket.timeout):
+        return False
+
+
+def _t1_chroma_init_if_owner() -> None:
+    """Spawn (or reuse) chroma for this MCP server's session.
+
+    Subagent detection: if ``NX_SESSION_ID`` is set AND an ancestor's
+    session record is reachable, this is a nested MCP server and we
+    skip spawn entirely (chroma is the parent's). Top-level MCP servers
+    fall through to the spawn-or-reuse path.
+
+    Reuse path (FM-NEW-2): probe any existing session record for the
+    same session_id; if the address is reachable, mark
+    ``_OWNED_CHROMA["reused"] = True`` and return. The shutdown path
+    skips cleanup of reused chroma.
+
+    Spawn path: starts a new chroma server, writes the session record
+    with both ``server_pid`` and ``claude_root_pid``, and spawns the
+    watchdog in dual-watch mode (--mcp-pid + --claude-pid).
+    """
+    if _OWNED_CHROMA:
+        return  # idempotent: lifespan + atexit may both call this
+    from pathlib import Path
+
+    from nexus.db.t1 import SESSIONS_DIR
+    from nexus.session import (
+        find_claude_root_pid,
+        find_session_by_id,
+        spawn_t1_watchdog,
+        start_t1_server,
+        write_session_record_by_id,
+    )
+
+    # Subagent: a nested MCP server (claude_dispatch sets NX_SESSION_ID
+    # on the child env) inherits the parent's chroma via PPID walk. The
+    # T1 client handles the lookup; we just must not spawn a sibling.
+    inherited = _os.environ.get("NX_SESSION_ID", "").strip()
+    if inherited:
+        ancestor = find_session_by_id(SESSIONS_DIR, inherited)
+        if ancestor and _tcp_probe_alive(
+            ancestor.get("server_host", ""), int(ancestor.get("server_port", 0)),
+        ):
+            _OWNED_CHROMA["nested"] = True
+            return
+
+    own_id = inherited or _resolve_top_level_session_id()
+    if not own_id:
+        # No session id resolvable: skip; T1 falls back to EphemeralClient.
+        return
+
+    # FM-NEW-2: TCP-probe an existing record before spawning. If the
+    # prior chroma is still listening, reuse it.
+    existing = find_session_by_id(SESSIONS_DIR, own_id)
+    if existing and _tcp_probe_alive(
+        existing.get("server_host", ""), int(existing.get("server_port", 0)),
+    ):
+        _OWNED_CHROMA["reused"] = True
+        _OWNED_CHROMA["session_id"] = own_id
+        return
+
+    # Spawn fresh chroma + dual-watch watchdog.
+    try:
+        host, port, server_pid, tmpdir = start_t1_server()
+    except Exception as exc:
+        import structlog
+
+        structlog.get_logger().warning(
+            "t1_chroma_spawn_failed",
+            error=str(exc),
+            session_id=own_id,
+        )
+        return
+
+    claude_root_pid = find_claude_root_pid()
+    session_file = SESSIONS_DIR / f"{own_id}.session"
+    watchdog_pid = spawn_t1_watchdog(
+        claude_pid=claude_root_pid or 0,
+        chroma_pid=server_pid,
+        session_file=session_file,
+        tmpdir=tmpdir,
+        mcp_pid=_os.getpid(),  # FM-NEW-1: dual-watch
+    ) if claude_root_pid else 0
+
+    write_session_record_by_id(
+        SESSIONS_DIR, own_id, host, port, server_pid, tmpdir,
+        claude_root_pid=claude_root_pid,
+        watchdog_pid=watchdog_pid,
+    )
+    _OWNED_CHROMA.update({
+        "session_id": own_id,
+        "server_pid": server_pid,
+        "tmpdir": str(tmpdir),
+        "session_file": str(session_file),
+    })
+
+
+def _resolve_top_level_session_id() -> str | None:
+    """Return the conversation UUID from current_session, or None.
+
+    The SessionStart hook writes the UUID via ``write_claude_session_id``
+    before any MCP tool call. Reading it here lets the lifespan match the
+    record key the hook (or a previous MCP run) wrote.
+    """
+    try:
+        from nexus.session import read_claude_session_id
+
+        sid = read_claude_session_id()
+        return sid if sid else None
+    except Exception:
+        return None
+
+
+def _t1_chroma_shutdown() -> None:
+    """Stop chroma + remove the session record. Idempotent.
+
+    Called from the lifespan finally (primary), atexit (secondary), and
+    SIGTERM/SIGINT handlers (also secondary). The first to fire performs
+    the cleanup; the rest are no-ops because ``_OWNED_CHROMA`` is cleared
+    on completion.
+    """
+    if not _OWNED_CHROMA:
+        return
+    if _OWNED_CHROMA.get("nested") or _OWNED_CHROMA.get("reused"):
+        # Nested: parent owns chroma. Reused: another MCP server in the
+        # same session owns it. We must not stop it on our exit.
+        _OWNED_CHROMA.clear()
+        return
+
+    from pathlib import Path
+    import shutil
+
+    from nexus.session import stop_t1_server
+
+    server_pid = _OWNED_CHROMA.get("server_pid")
+    tmpdir = _OWNED_CHROMA.get("tmpdir")
+    session_file = _OWNED_CHROMA.get("session_file")
+
+    try:
+        if server_pid:
+            stop_t1_server(int(server_pid))
+    except Exception:
+        pass
+    if tmpdir:
+        try:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        except OSError:
+            pass
+    if session_file:
+        try:
+            Path(session_file).unlink(missing_ok=True)
+        except OSError:
+            pass
+    _OWNED_CHROMA.clear()
+
+
+def _sigterm_handler(_signo: int, _frame: Any) -> None:
+    """Run the shutdown path then exit cleanly.
+
+    Belt-and-braces for the cancellation paths where the FastMCP
+    lifespan does not fire. ``sys.exit(0)`` lets atexit handlers run,
+    so the second-pass _t1_chroma_shutdown call is a no-op.
+    """
+    import sys as _sys
+
+    _t1_chroma_shutdown()
+    _sys.exit(0)
+
+
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def _t1_chroma_lifespan(_app: Any):
+    """FastMCP lifespan that owns chroma's lifecycle.
+
+    Primary cleanup path (research RQ2): anyio installs a SIGTERM
+    handler that cancels the running task group; cancellation
+    propagates through this ``async finally`` block so
+    ``_t1_chroma_shutdown`` runs without a manual SIGTERM handler.
+    The atexit + signal handlers in ``main()`` are the secondary
+    path for kills where lifespan doesn't fire.
+    """
+    _t1_chroma_init_if_owner()
+    try:
+        yield
+    finally:
+        _t1_chroma_shutdown()
+
+
+mcp = FastMCP(
+    "nexus",
+    lifespan=_t1_chroma_lifespan if _MCP_OWNS_T1 else None,
+)
 
 _DEFAULT_PAGE_SIZE = 10
 
@@ -3151,7 +3391,9 @@ def main():
     captured stderr (which is not surfaced through any user-visible
     path).
     """
+    import atexit
     import os
+    import signal
 
     import structlog
 
@@ -3166,7 +3408,17 @@ def main():
         transport="stdio",
         pid=os.getpid(),
         ppid=os.getppid(),
+        mcp_owns_t1=_MCP_OWNS_T1,
     )
+    if _MCP_OWNS_T1:
+        # Belt-and-braces for the kill paths where the FastMCP lifespan
+        # finally does not fire. The lifespan is the primary cleanup path
+        # (anyio cancellation through ``async finally``); these handlers
+        # cover SIGTERM-without-cancellation and the abrupt-exit case.
+        # _t1_chroma_shutdown is idempotent so double-firing is safe.
+        atexit.register(_t1_chroma_shutdown)
+        signal.signal(signal.SIGTERM, _sigterm_handler)
+        signal.signal(signal.SIGINT, _sigterm_handler)
     try:
         check_version_compatibility()
         mcp.run(transport="stdio")

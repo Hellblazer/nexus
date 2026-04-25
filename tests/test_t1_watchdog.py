@@ -137,3 +137,154 @@ class TestMain:
         kwargs = mock_cleanup.call_args.kwargs
         assert kwargs["chroma_pid"] == 200
         assert str(kwargs["session_file"]).endswith("s.session")
+
+
+# ── Dual-watch (RDR-094 FM-NEW-1) ───────────────────────────────────────────
+
+
+class TestDualWatch:
+    """RDR-094 FM-NEW-1: when --mcp-pid is set, the watchdog OR-triggers
+    on either MCP server death (clean chroma directly) or Claude Code
+    death (signal SIGTERM to mcp_pid then clean chroma)."""
+
+    def test_mcp_pid_death_triggers_cleanup_directly(self, monkeypatch, tmp_path):
+        """Dual-watch: chroma alive + claude alive + mcp dead → cleanup
+        fires immediately (lifespan/atexit did not run on the dead MCP
+        server, so the watchdog cleans chroma)."""
+        from nexus import t1_watchdog
+
+        monkeypatch.setattr(t1_watchdog.time, "sleep", lambda _s: None)
+
+        def _fake_alive(pid: int) -> bool:
+            if pid == 200:  # chroma
+                return True
+            if pid == 100:  # claude
+                return True
+            if pid == 300:  # mcp_pid
+                return False
+            return False
+
+        monkeypatch.setattr(t1_watchdog, "_is_alive", _fake_alive)
+
+        with patch.object(t1_watchdog, "_cleanup") as mock_cleanup, \
+             patch.object(t1_watchdog, "_signal_then_kill") as mock_signal:
+            rc = t1_watchdog.main([
+                "--claude-pid", "100",
+                "--chroma-pid", "200",
+                "--mcp-pid", "300",
+                "--session-file", str(tmp_path / "s.session"),
+                "--tmpdir", str(tmp_path / "tmpdir"),
+            ])
+
+        assert rc == 0
+        mock_cleanup.assert_called_once()
+        # MCP death path does NOT signal mcp_pid (it's already dead).
+        mock_signal.assert_not_called()
+
+    def test_claude_pid_death_signals_mcp_then_cleans(self, monkeypatch, tmp_path):
+        """Dual-watch: chroma alive + mcp alive + claude dead → SIGTERM
+        the orphaned MCP server (giving its lifespan finally a chance to
+        run), then fall through to cleanup as belt-and-braces."""
+        from nexus import t1_watchdog
+
+        monkeypatch.setattr(t1_watchdog.time, "sleep", lambda _s: None)
+
+        def _fake_alive(pid: int) -> bool:
+            if pid == 200:  # chroma alive
+                return True
+            if pid == 100:  # claude DEAD
+                return False
+            if pid == 300:  # mcp alive
+                return True
+            return False
+
+        monkeypatch.setattr(t1_watchdog, "_is_alive", _fake_alive)
+
+        with patch.object(t1_watchdog, "_cleanup") as mock_cleanup, \
+             patch.object(t1_watchdog, "_signal_then_kill") as mock_signal:
+            rc = t1_watchdog.main([
+                "--claude-pid", "100",
+                "--chroma-pid", "200",
+                "--mcp-pid", "300",
+                "--session-file", str(tmp_path / "s.session"),
+                "--tmpdir", str(tmp_path / "tmpdir"),
+            ])
+
+        assert rc == 0
+        mock_signal.assert_called_once_with(300)
+        mock_cleanup.assert_called_once()
+
+    def test_single_watch_mode_unchanged_when_no_mcp_pid(self, monkeypatch, tmp_path):
+        """Backwards compat: omitting --mcp-pid preserves the old
+        single-watch claude-only behaviour for hook-spawned watchdogs."""
+        from nexus import t1_watchdog
+
+        monkeypatch.setattr(t1_watchdog.time, "sleep", lambda _s: None)
+
+        def _fake_alive(pid: int) -> bool:
+            return pid == 200  # only chroma alive
+
+        monkeypatch.setattr(t1_watchdog, "_is_alive", _fake_alive)
+
+        with patch.object(t1_watchdog, "_cleanup") as mock_cleanup, \
+             patch.object(t1_watchdog, "_signal_then_kill") as mock_signal:
+            rc = t1_watchdog.main([
+                "--claude-pid", "100",
+                "--chroma-pid", "200",
+                "--session-file", str(tmp_path / "s.session"),
+                "--tmpdir", str(tmp_path / "tmpdir"),
+            ])
+
+        assert rc == 0
+        mock_cleanup.assert_called_once()
+        mock_signal.assert_not_called()
+
+    def test_signal_then_kill_sigterm_first(self, monkeypatch):
+        """_signal_then_kill sends SIGTERM, sleeps grace, SIGKILL
+        only if still alive afterwards."""
+        import signal as _signal
+
+        from nexus import t1_watchdog
+
+        sleeps: list[float] = []
+        kills: list[tuple[int, int]] = []
+
+        def _fake_kill(pid: int, sig: int) -> None:
+            kills.append((pid, sig))
+            if sig == 0:  # liveness check inside _is_alive
+                return
+
+        def _fake_sleep(s: float) -> None:
+            sleeps.append(s)
+
+        monkeypatch.setattr(t1_watchdog.os, "kill", _fake_kill)
+        monkeypatch.setattr(t1_watchdog.time, "sleep", _fake_sleep)
+        monkeypatch.setattr(t1_watchdog, "_is_alive", lambda pid: False)
+
+        t1_watchdog._signal_then_kill(300)
+
+        assert kills[0] == (300, _signal.SIGTERM)
+        assert sleeps == [t1_watchdog.MCP_GRACE_SECS]
+        # Process is dead by the time we re-check, so no SIGKILL.
+        assert _signal.SIGKILL not in {s for _, s in kills}
+
+    def test_signal_then_kill_falls_through_to_sigkill(self, monkeypatch):
+        """If process is still alive after grace, SIGKILL fires."""
+        import signal as _signal
+
+        from nexus import t1_watchdog
+
+        kills: list[tuple[int, int]] = []
+        monkeypatch.setattr(
+            t1_watchdog.os, "kill",
+            lambda pid, sig: kills.append((pid, sig)),
+        )
+        monkeypatch.setattr(t1_watchdog.time, "sleep", lambda _s: None)
+        monkeypatch.setattr(t1_watchdog, "_is_alive", lambda pid: True)
+
+        t1_watchdog._signal_then_kill(300)
+
+        # Both SIGTERM and SIGKILL should have been sent.
+        sigs = {s for _, s in kills}
+        assert _signal.SIGTERM in sigs
+        assert _signal.SIGKILL in sigs

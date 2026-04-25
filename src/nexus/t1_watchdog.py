@@ -84,14 +84,56 @@ def _cleanup(
             pass
 
 
+#: Grace period for the MCP server's lifespan finally / atexit to
+#: clean chroma after we send SIGTERM on Claude crash. Long enough
+#: for anyio cancellation to propagate through the async context
+#: manager but short enough that the watchdog reaps quickly if the
+#: MCP server is wedged.
+MCP_GRACE_SECS: float = 2.0
+
+
+def _signal_then_kill(pid: int) -> None:
+    """SIGTERM the pid, wait MCP_GRACE_SECS, SIGKILL if still alive.
+
+    Used on Claude-crash trigger to give the orphaned MCP server a
+    chance to run its lifespan finally block before we fall through
+    to the chroma-pgrp belt-and-braces cleanup.
+    """
+    import signal
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        return
+    time.sleep(MCP_GRACE_SECS)
+    if _is_alive(pid):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="T1 ChromaDB server watchdog (nexus-99jb).",
+        description="T1 ChromaDB server watchdog (nexus-99jb / RDR-094).",
     )
     parser.add_argument("--claude-pid", type=int, required=True,
                         help="Root Claude Code PID to watch.")
     parser.add_argument("--chroma-pid", type=int, required=True,
                         help="PID of the chroma server to supervise.")
+    parser.add_argument(
+        "--mcp-pid", type=int, default=0,
+        help=(
+            "Optional MCP server PID for dual-watch mode (RDR-094 "
+            "FM-NEW-1). When set, OR-trigger logic fires: mcp_pid "
+            "death cleans chroma directly (lifespan/atexit did not "
+            "run); claude_pid death sends SIGTERM to mcp_pid (giving "
+            "lifespan finally a chance to run), waits MCP_GRACE_SECS, "
+            "then SIGKILLs and cleans chroma. When 0 (default), "
+            "single-watch claude-only mode is preserved for backwards "
+            "compat with the hook-spawned watchdog."
+        ),
+    )
     parser.add_argument("--session-file", default="",
                         help="Session record file to remove on cleanup.")
     parser.add_argument("--tmpdir", default="",
@@ -100,16 +142,29 @@ def main(argv: list[str] | None = None) -> int:
 
     session_file = Path(args.session_file) if args.session_file else None
     tmpdir = Path(args.tmpdir) if args.tmpdir else None
+    dual_watch = args.mcp_pid > 0
 
     while True:
         time.sleep(POLL_INTERVAL)
-        # Chroma crashed or was stopped by SessionEnd — nothing to
-        # watch anymore. Exit silently; the SessionEnd path owns the
-        # on-disk cleanup when it was responsible for the stop.
+        # Chroma crashed or was stopped by some other path (lifespan,
+        # atexit, SessionEnd in legacy mode) -- nothing to watch
+        # anymore. Exit silently; whoever stopped chroma owns the
+        # on-disk cleanup.
         if not _is_alive(args.chroma_pid):
             return 0
-        # Claude Code is gone. Trigger graceful shutdown.
+        # Dual-watch mode (RDR-094 FM-NEW-1): MCP server died without
+        # its lifespan/atexit firing (SIGKILL, segfault). Clean chroma
+        # directly via the chroma-pgrp belt-and-braces path.
+        if dual_watch and not _is_alive(args.mcp_pid):
+            break
+        # Claude Code is gone.
         if not _is_alive(args.claude_pid):
+            # Dual-watch + Claude crash: signal mcp_pid first so its
+            # lifespan finally runs (cleans chroma cleanly), then fall
+            # through to the chroma-pgrp belt-and-braces in case the
+            # MCP server's finally is wedged or already ran.
+            if dual_watch and _is_alive(args.mcp_pid):
+                _signal_then_kill(args.mcp_pid)
             break
 
     _cleanup(
