@@ -72,6 +72,7 @@ Summary (json):
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
 import json
 import os
 import re
@@ -101,6 +102,12 @@ _PATTERN_STOPPING = re.compile(
 )
 _PATTERN_CRASHED = re.compile(r"event='mcp_server_crashed'")
 _PATTERN_PID = re.compile(r"\bpid=(\d+)")
+#: Structlog ``TimeStamper(fmt='iso', utc=True)`` field. Used to skip
+#: log entries that predate the observer start so historical content
+#: in mcp.log isn't replayed as if it occurred during the window
+#: (the original Spike C run mis-classified pre-existing entries as
+#: +0.0s mcp_events because pos was initialised to 0).
+_PATTERN_EVENT_TIMESTAMP = re.compile(r"timestamp='([^']+)'")
 
 #: Process-state poll cadence (seconds).
 PROC_POLL_S: float = 30.0
@@ -109,8 +116,25 @@ PROC_POLL_S: float = 30.0
 RESTART_WINDOW_S: float = 90.0
 
 
+def _extract_event_timestamp(line: str) -> float | None:
+    """Return epoch seconds from the structlog ``timestamp=...`` field, or None.
+
+    The MCP server's structlog chain emits ``timestamp='<ISO>'`` via
+    ``TimeStamper(fmt='iso', utc=True)``. Both ``Z`` and ``+00:00``
+    suffixes are accepted; missing or malformed fields return None.
+    """
+    m = _PATTERN_EVENT_TIMESTAMP.search(line)
+    if not m:
+        return None
+    raw = m.group(1).replace("Z", "+00:00")
+    try:
+        return _dt.datetime.fromisoformat(raw).timestamp()
+    except ValueError:
+        return None
+
+
 def _parse_log_line(line: str) -> dict[str, Any] | None:
-    """Return a {event_type, raw, fields} dict for nx-mcp events, or None."""
+    """Return a {event_type, pid, event_ts, raw} dict for nx-mcp events, or None."""
     if _PATTERN_STARTING.search(line):
         ev = "starting"
     elif (m := _PATTERN_STOPPING.search(line)):
@@ -121,7 +145,25 @@ def _parse_log_line(line: str) -> dict[str, Any] | None:
         return None
     pid_match = _PATTERN_PID.search(line)
     pid = int(pid_match.group(1)) if pid_match else 0
-    return {"event_type": ev, "pid": pid, "raw": line.rstrip()}
+    return {
+        "event_type": ev,
+        "pid": pid,
+        "event_ts": _extract_event_timestamp(line),
+        "raw": line.rstrip(),
+    }
+
+
+def _is_historical(parsed: dict[str, Any], observer_started: float) -> bool:
+    """True if the parsed event's structlog timestamp predates the observer.
+
+    Entries without a parseable ``timestamp=...`` field are NOT classified
+    as historical: better to over-emit one event with a missing timestamp
+    than to silently drop live activity.
+    """
+    ts = parsed.get("event_ts")
+    if ts is None:
+        return False
+    return ts < observer_started
 
 
 def _list_nx_mcp_pids() -> list[tuple[int, int, int]]:
@@ -269,6 +311,10 @@ def main() -> int:
         for line in _follow_log(MCP_LOG_PATH, deadline):
             if line:
                 parsed = _parse_log_line(line)
+                if parsed and _is_historical(parsed, started):
+                    # Pre-existing mcp.log content; do not replay as if
+                    # it occurred during the observation window.
+                    parsed = None
                 if parsed:
                     _emit(out, {
                         "event_type": "mcp_event",
