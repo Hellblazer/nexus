@@ -1,15 +1,18 @@
 ---
 title: "RDR-087: Collection Observability and Curation Surfaces"
 id: RDR-087
-status: accepted
+status: closed
 type: Feature
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-17
 accepted_date: 2026-04-17
+closed_date: 2026-04-25
+closed_reason: implemented
 related_issues: [154, 161]
 related: [RDR-070, RDR-075, RDR-077, RDR-085, nexus-vatx]
+followup_beads: [nexus-0x6b]
 ---
 
 # RDR-087: Collection Observability and Curation Surfaces
