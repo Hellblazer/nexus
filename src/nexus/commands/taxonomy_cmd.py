@@ -276,23 +276,63 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
                 f"(or `nx taxonomy project --backfill --persist` for all)."
             )
 
-        # GH #251: surface recent post-store hook failures. Reading the
-        # table is best-effort — if the migration hasn't been applied
-        # (e.g. an older DB opened read-only), skip the line silently.
+        # GH #251 + RDR-095: surface recent post-store hook failures. The
+        # table may carry batch-shape rows (one row representing N
+        # documents) since RDR-095, so the affected-document count can
+        # exceed the row count. Reading is best-effort: pre-4.9.10 DBs
+        # have no table; pre-4.14.1 DBs have no batch columns. Each path
+        # falls back without crashing.
+        rows: list[tuple[str, int, int, str | None]] = []
         try:
             with db.taxonomy._lock:
-                rows = db.taxonomy.conn.execute(
-                    "SELECT hook_name, COUNT(*) FROM hook_failures "
-                    "WHERE occurred_at >= datetime('now', '-1 day') "
-                    "GROUP BY hook_name"
-                ).fetchall()
+                try:
+                    rows = db.taxonomy.conn.execute(
+                        "SELECT hook_name, is_batch, "
+                        "       COALESCE(batch_doc_ids, '') "
+                        "FROM hook_failures "
+                        "WHERE occurred_at >= datetime('now', '-1 day')"
+                    ).fetchall()
+                    rows = [(r[0], 1, r[1], r[2]) for r in rows]
+                except Exception:
+                    # Pre-4.14.1 schema: batch columns absent. Read with
+                    # legacy shape and treat every row as scalar.
+                    legacy = db.taxonomy.conn.execute(
+                        "SELECT hook_name FROM hook_failures "
+                        "WHERE occurred_at >= datetime('now', '-1 day')"
+                    ).fetchall()
+                    rows = [(r[0], 1, 0, None) for r in legacy]
         except Exception:
             rows = []
+
         if rows:
-            total_recent = sum(n for _, n in rows)
-            hook_summary = ", ".join(f"{name}={n}" for name, n in rows)
+            import json as _json
+            from collections import Counter
+
+            total_recent = sum(n for _, n, _, _ in rows)
+            per_hook: Counter[str] = Counter()
+            docs_affected = 0
+            for name, _count, is_batch, batch_payload in rows:
+                per_hook[name] += 1
+                if is_batch and batch_payload:
+                    try:
+                        docs_affected += len(_json.loads(batch_payload))
+                    except (ValueError, TypeError):
+                        docs_affected += 1
+                else:
+                    docs_affected += 1
+
+            hook_summary = ", ".join(
+                f"{name}={n}" for name, n in sorted(per_hook.items())
+            )
+            if docs_affected > total_recent:
+                affected_note = (
+                    f" affecting {docs_affected} document(s)"
+                )
+            else:
+                affected_note = ""
             click.echo(
-                f"Action: {total_recent} post-store hook failure(s) in the last 24h "
+                f"Action: {total_recent} post-store hook failure(s)"
+                f"{affected_note} in the last 24h "
                 f"({hook_summary}). Run `nx doctor --check-schema` and check "
                 "structlog output; tail `~/.config/nexus/logs/` for details."
             )

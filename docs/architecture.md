@@ -209,6 +209,30 @@ threshold calibration, ICF rationale, upsert semantics, troubleshooting.
 | `auto_label` | `true` | Run Claude haiku labeling after `discover` |
 | `local_exclude_collections` | `["code__*"]` | Skip these collections in local mode |
 
+## Post-Store Hooks
+
+Two parallel hook contracts in `src/nexus/mcp_infra.py` cover the two real workload shapes for per-document enrichment that fires after a write. Single-document hooks land single rows from MCP; batch hooks land N rows from CLI ingest. Both use the same per-hook failure-isolation pattern (capture, persist to T2 `hook_failures`, never propagate).
+
+| Shape | Register | Fire | Where it fires from | Current consumers |
+|-------|----------|------|---------------------|-------------------|
+| Single-document (RDR-070) | `register_post_store_hook(fn)` | `fire_post_store_hooks(doc_id, collection, content)` | `mcp/core.py:887` (MCP `store_put` tool) | `taxonomy_assign_hook` |
+| Batch (RDR-095) | `register_post_store_batch_hook(fn)` | `fire_post_store_batch_hooks(doc_ids, collection, contents, embeddings, metadatas)` | `indexer.py`, `code_indexer.py`, `prose_indexer.py`, `pipeline_stages.py`, `doc_indexer.py` (3 sites) | `chash_dual_write_batch_hook` (RDR-086), `taxonomy_assign_batch_hook` (RDR-070) |
+
+The batch contract exists because some enrichments collapse N dependency calls into one batched call (e.g., `taxonomy.assign_batch` issues one ChromaDB Cloud `query()` for N nearest-centroid lookups; the per-doc path issues N sequential queries). For corpus-scale ingest the difference is roughly 1000x. The single-document chain stays in place; both shapes are first-class because both workloads are real.
+
+**Registration order is load-bearing.** In `mcp/core.py`, `chash_dual_write_batch_hook` is registered before `taxonomy_assign_batch_hook`. This mirrors the legacy CLI call-site ordering (chash dual-write always preceded taxonomy assignment at every site) and preserves the invariant that chash rows exist before topic assignment runs.
+
+**Failure capture.** Per-hook exceptions are caught in the fire function, logged via structlog, and persisted to T2 `hook_failures`. Single-document failures store the scalar `doc_id` in the legacy column. Batch failures store a representative scalar (first id) in `doc_id`, the JSON-encoded list in `batch_doc_ids`, and `is_batch=1`. The `nx taxonomy status` reader surfaces both shapes: scalar rows count as one document; batch rows count as `len(batch_doc_ids)`. The Action line shows `affecting M document(s)` whenever a batch row is present, alongside the row count.
+
+**Drift guard.** `tests/test_hook_drift_guard.py` uses `ast.walk` to detect any ImportFrom, Attribute, or bare-Name reference to `taxonomy_assign_batch_hook` or `chash_dual_write_batch_hook` outside the explicit allowlist (`src/nexus/mcp_infra.py` for definitions, `src/nexus/mcp/core.py` for registration). String literals, comments, and docstrings are ignored. Adding a new per-document batch enrichment registers via `register_post_store_batch_hook`; a regression where a new module imports a hook directly fails CI.
+
+**Out of scope by design** (RDR-095 Decision Rationale, intentional non-twins of the batch-hook pattern):
+
+- Three catalog-registration mechanisms (`_catalog_store_hook` in `commands/store.py`, `_catalog_pdf_hook` in `pipeline_stages.py`, `indexer.py:250` ad-hoc registration) each capture different per-domain metadata: knowledge curator + doc_id for ad-hoc store; corpus curator + file_path + author + year + chunk_count for PDFs; repo owner + rel_path + source_mtime + file_hash for repo files. Consolidating would either lose information or branch internally on origin. Three legitimate per-domain registrations, not three copies of the same hook.
+- `_catalog_auto_link` reads T1 scratch entries tagged `link-context` that agents seed before calling MCP `store_put`. CLI bulk ingest has no equivalent pre-declaration semantics; it uses entirely separate post-hoc linkers in `catalog/link_generator.py` (`generate_citation_links`, `generate_code_rdr_links`, `generate_rdr_filepath_links`). MCP-only auto-linking is intentional path-shape coupling.
+
+The partial-commit failure mode (a batch hook commits an early sub-step then raises before completing) is documented in RDR-095 Failure Modes. The framework captures the doc_id list and exception per hook invocation; per-sub-step capture is hook-internal, not framework-level. A future RDR can introduce a `record_partial_progress` helper if a consumer needs it.
+
 ## T2 Domain Stores
 
 `src/nexus/db/t2/` is a Python package split into four domain-specific
