@@ -8,9 +8,9 @@ Contract pins:
   * ``main()`` returns to the caller via the first-fork parent path
     (in the real world ~17ms; here we simulate the fork).
   * ``_run_session_end_synchronously`` calls
-    ``nexus.hooks.session_end_flush`` (Phase C swap from
-    ``session_end`` to drop the chroma-stop race against
-    NEXUS_MCP_OWNS_T1) and swallows exceptions.
+    ``nexus.hooks.session_end_flush`` (storage-only path; chroma
+    teardown is owned by nx-mcp's lifespan + signal handler + atexit
+    chain, unconditional as of 4.13.0) and swallows exceptions.
   * Platform-without-fork fallback runs synchronously.
 """
 from __future__ import annotations
@@ -44,9 +44,11 @@ def test_module_does_not_import_nexus_submodules_at_top_level() -> None:
 def test_run_session_end_synchronously_invokes_session_end_flush() -> None:
     """RDR-094 Phase C: grandchild path dispatches to session_end_flush.
 
-    The pre-Phase-C contract was ``session_end`` which both flushes and
-    stops chroma. Under NEXUS_MCP_OWNS_T1 (Phase 4) the MCP server owns
-    chroma teardown, so the launcher must use the storage-only entry.
+    The pre-Phase-C contract was ``session_end`` which both flushed
+    and stopped chroma. nx-mcp owns chroma teardown via its lifespan
+    + signal handler + atexit chain (unconditional as of 4.13.0), so
+    the launcher uses the storage-only entry to avoid racing the
+    MCP-owned cleanup paths.
     """
     import nexus._session_end_launcher as launcher
 
@@ -62,13 +64,14 @@ def test_run_session_end_synchronously_invokes_session_end_flush() -> None:
 
 
 def test_run_session_end_synchronously_does_not_call_session_end() -> None:
-    """Regression sentinel: launcher must NOT route through session_end.
+    """Regression sentinel: launcher must call session_end_flush by name.
 
-    session_end runs the chroma-stop block when NEXUS_MCP_OWNS_T1 is
-    unset, which races MCP-owned cleanup. The Phase C contract is to
-    point the launcher at session_end_flush exclusively; the legacy
-    session_end path stays only for nx hook session-end (manual debug)
-    and for the flag-off rollout window.
+    ``session_end`` is now a thin pass-through (4.13.0 / Phase F), so
+    routing through it would still produce the right result. But
+    pinning the launcher to ``session_end_flush`` directly preserves
+    the explicit "no chroma teardown here" contract -- if a future
+    refactor adds anything to ``session_end``, the launcher's
+    fork-first guarantee stays unaffected.
     """
     import nexus._session_end_launcher as launcher
 

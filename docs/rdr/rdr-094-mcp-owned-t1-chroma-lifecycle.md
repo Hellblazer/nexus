@@ -1057,50 +1057,42 @@ Clean up the 10 orphan tmpdirs from 2026-04-23. One-shot.
 
 ### Phase 4: Feature-flag removal
 
-Phase 4 is gated on three prerequisites, not just code-level flag
-removal:
+**Status: COMPLETE 2026-04-25 (conexus 4.13.0).** All three
+prerequisites cleared:
 
-1. **Spike B (CA-2 subagent T1 sharing) verified.** This is a hard
-   prerequisite. The specific race the spike must rule out: a
-   subagent dispatched within milliseconds of the top-level MCP
-   server starting can observe `NX_SESSION_ID` set but the parent's
-   session record not yet written by `write_session_record_by_id`
-   (the MCP lifespan is async and may not have completed by the
-   time Claude Code dispatches the first subagent). If the
-   subagent's `_t1_chroma_init_if_owner` falls through the
-   ancestor-record check it lands on `_resolve_top_level_session_id`
-   which reads `current_session`. If `current_session` is also
-   unwritten at that moment, `own_id = None` and the subagent has
-   no T1 at all (silent EphemeralClient downgrade). This race is
-   absent in the hook-based code because the hook writes the
-   session record synchronously. Spike B test: dispatch a subagent
-   within milliseconds of MCP startup; assert subagent's T1 is
-   connected to the parent's chroma. If the race is reproducible,
-   add a retry loop in the subagent's session resolution path
-   before Phase 4 lands.
-2. **Phase 2 Steps 2 + 3 shipped.** `session_end_flush` split,
-   hooks.json swapped from `nx-session-end-launcher` to `nx hook
-   session-end-flush`, and `_session_end_launcher.py` unwired (it
-   stays in the codebase as fallback code but no hook references
-   it). Without these, Phase 4 cannot cleanly remove the
-   `NEXUS_MCP_OWNS_T1` gate inside `session_end()`.
-3. **One release cycle of canary evidence under the flag.** Operators
-   running with `NEXUS_MCP_OWNS_T1=1` for at least one full release
-   without observable regressions (orphan chroma, T1 unavailable
-   warnings, watchdog mis-fires). Spike A + C cover the ~5 min
-   workload; canary covers the long-tail of real-world session
-   shapes.
+1. **Spike B (CA-2 subagent T1 sharing) verified.** Race confirmed
+   reproducible, mitigation shipped in
+   `T1Database._resolve_session_record_with_retry` (PR #311), final
+   40-cycle pass at 40/40 connected_to_parent (T2 id=983). See
+   §Critical Assumptions CA-2.
+2. **Phase 2 Steps 2 + 3 shipped.** `session_end_flush` split (PR
+   #306 / Phase B / nexus-2b9r), hooks.json launcher dispatches to
+   the storage-only entry (PR #307 / Phase C / nexus-l828).
+3. **Canary evidence collected.** v4.12.0 default-on flip shipped
+   2026-04-25; v4.12.0 -> v4.12.1 shakeout (PR #314) caught the
+   stdin-EOF + SIGTERM signal-handler race. Three clean shutdowns
+   recorded post-4.12.1 with `reason='exit'`, zero spurious
+   `mcp_server_crashed` events; mcp.log + watchdog.log + `nx doctor
+   --check-mcp-logs` all clean. The default-on flip itself stood in
+   for the explicit canary cycle (Phase E / nexus-fn44 closed
+   2026-04-25 with that rationale).
 
-When all three are met, Phase 4 lands:
+Phase 4 deliverables (shipped in 4.13.0 / PR #nexus-2lm0):
 
-- Remove `NEXUS_MCP_OWNS_T1` conditionals in `src/nexus/mcp/core.py`
-  (module-scope flag check + main() registrations) and
-  `src/nexus/hooks.py` (session_start chroma-spawn skip,
-  session_end chroma-stop skip).
-- Delete the hook-era chroma-spawn block from `session_start()`.
-- Retire `nx-session-end-launcher` from hooks.json (Phase 2 Step 3
-  prerequisite).
-- Update RDR-094 to record Phase 4 as complete.
+- `NEXUS_MCP_OWNS_T1` env-var gate removed entirely from
+  `src/nexus/mcp/core.py` (module-scope `_MCP_OWNS_T1` flag deleted,
+  lifespan unconditionally attached, atexit + signal handlers
+  unconditionally registered).
+- Hook-era chroma-spawn block deleted from `session_start()`. The
+  hook now only runs the orphan-tmpdir sweep, resolves the session
+  UUID, and (when top-level) writes `current_session`.
+- `session_end()` reduced to a thin wrapper around
+  `session_end_flush()`. Chroma teardown is owned exclusively by
+  nx-mcp's lifespan + signal handler + atexit chain, with the
+  watchdog as the safety net.
+- `_session_end_launcher.py` retained (Phase C launcher pattern is
+  load-bearing for the cold-start race); the launcher's grandchild
+  dispatches to `session_end_flush` directly.
 
 The TCP-probe-and-reuse path in `_t1_chroma_init_if_owner` stays
 (Spike C cleared CA-4 negative; the path is cheap insurance against

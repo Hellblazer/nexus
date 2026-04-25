@@ -130,8 +130,7 @@ def test_session_end_flushes_flagged_t1_entries(
     with patch("nexus.hooks.SESSIONS_DIR", sessions):
         with patch("nexus.hooks._open_t1", return_value=mock_t1):
             with patch("nexus.hooks.T2Database", return_value=_t2_cm):
-                with patch("nexus.hooks.stop_t1_server"):
-                    result = runner.invoke(main, ["hook", "session-end"])
+                result = runner.invoke(main, ["hook", "session-end"])
 
     assert result.exit_code == 0, result.output
     mock_t2.put.assert_called_once_with(
@@ -143,17 +142,16 @@ def test_session_end_flushes_flagged_t1_entries(
     )
 
 
-def test_session_end_clears_t1_and_removes_session_file(
+def test_session_end_clears_t1_and_keeps_session_file(
     runner: CliRunner, fake_home: Path, tmp_path: Path, monkeypatch
 ) -> None:
-    """SessionEnd clears T1 and removes the UUID-keyed session file
-    under the legacy hook-owned chroma path.
+    """SessionEnd clears T1 and leaves the session file intact.
 
-    Default-on (4.12.0) routes chroma teardown to nx-mcp; the hook
-    no longer removes the session file. This test pins the legacy
-    flag-off behaviour with explicit ``NEXUS_MCP_OWNS_T1=0``.
+    Phase F (RDR-094 / nexus-2lm0, unconditional as of 4.13.0):
+    nx-mcp's lifespan owns chroma teardown AND session-file unlink.
+    The hook does flush + expire only; the session file MUST survive
+    a hook invocation (lifespan/watchdog removes it on actual exit).
     """
-    monkeypatch.setenv("NEXUS_MCP_OWNS_T1", "0")
     sessions = tmp_path / "sessions"
     session_id = "test-session-id"
     session_file = sessions / f"{session_id}.session"
@@ -175,12 +173,13 @@ def test_session_end_clears_t1_and_removes_session_file(
     with patch("nexus.hooks.SESSIONS_DIR", sessions):
         with patch("nexus.hooks._open_t1", return_value=mock_t1):
             with patch("nexus.hooks.T2Database", return_value=_t2_cm):
-                with patch("nexus.hooks.stop_t1_server"):
-                    result = runner.invoke(main, ["hook", "session-end"])
+                result = runner.invoke(main, ["hook", "session-end"])
 
     assert result.exit_code == 0, result.output
     mock_t1.clear.assert_called_once()
-    assert not session_file.exists()
+    # Phase F: session file MUST survive a hook invocation; nx-mcp's
+    # lifespan owns the unlink on actual process exit.
+    assert session_file.exists()
 
 
 def test_session_end_runs_expire(runner: CliRunner, fake_home: Path) -> None:

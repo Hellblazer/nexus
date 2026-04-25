@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Unit tests for the MCP-owned T1 chroma lifecycle (RDR-094 Phase 1+2).
+"""Unit tests for the MCP-owned T1 chroma lifecycle (RDR-094 Phase 4).
 
-Covers the feature-flagged path under ``NEXUS_MCP_OWNS_T1=1``:
+Covers the unconditional MCP-owns-chroma path (the 4.12.0-era
+``NEXUS_MCP_OWNS_T1`` opt-out gate was removed in Phase F / 4.13.0):
 
   * ``_t1_chroma_init_if_owner`` spawn / reuse / nested-skip branches.
   * ``_t1_chroma_shutdown`` idempotency + skip-on-reuse / skip-on-nested.
@@ -411,25 +412,51 @@ class TestLifespan:
                 mock_shutdown.assert_called_once()
 
 
-# ── Feature flag wiring ─────────────────────────────────────────────────────
+# ── Lifespan wiring (Phase F / 4.13.0: unconditional) ──────────────────────
 
 
-class TestFeatureFlag:
+class TestLifespanWiring:
+    """The 4.12.0-era ``NEXUS_MCP_OWNS_T1`` opt-out gate was removed
+    in Phase F / 4.13.0. The lifespan is now unconditionally attached
+    to the FastMCP instance; there is no env-var path to disable it.
+    """
 
-    def test_lifespan_attached_by_default(self):
-        """Default-on as of conexus 4.12.0: the lifespan kwarg is
-        attached unless NEXUS_MCP_OWNS_T1 is explicitly opted out
-        via 0/false/no/off. The env var is read once at module
-        import; this test asserts the resolved bool matches the
-        active env."""
-        import os
-
+    def test_lifespan_unconditionally_attached(self):
+        """``mcp.run`` always uses ``_t1_chroma_lifespan`` -- there is
+        no flag-off path that constructs FastMCP with ``lifespan=None``.
+        """
         from nexus.mcp import core as core_mod
 
-        raw = os.environ.get("NEXUS_MCP_OWNS_T1", "").strip().lower()
-        if raw in ("0", "false", "no", "off"):
-            expected = False
-        else:
-            # Empty string OR explicit truthy values -> default-on.
-            expected = True
-        assert core_mod._MCP_OWNS_T1 is expected
+        # FastMCP's ``settings`` carries the lifespan it was constructed
+        # with. Verify it points at our async cm, not None.
+        # The ``_lifespan_cm`` attribute is the canonical store for the
+        # callable across FastMCP versions; fall back to ``settings``
+        # for older minor releases.
+        lifespan = (
+            getattr(core_mod.mcp, "_lifespan", None)
+            or getattr(core_mod.mcp, "_lifespan_cm", None)
+            or getattr(getattr(core_mod.mcp, "settings", None), "lifespan", None)
+        )
+        assert lifespan is not None, (
+            "FastMCP must have a lifespan attached after Phase F"
+        )
+        # Whichever attribute carried it, the function name must match.
+        # The lifespan stored may be the function itself or a wrapper;
+        # checking the qualname covers both shapes.
+        qualname = getattr(lifespan, "__qualname__", repr(lifespan))
+        assert "_t1_chroma_lifespan" in qualname, (
+            f"Expected _t1_chroma_lifespan; got {qualname}"
+        )
+
+    def test_no_mcp_owns_t1_module_attr(self):
+        """Regression sentinel: the ``_MCP_OWNS_T1`` module attribute
+        was removed in Phase F. Any reference to it in production
+        code or tests is a stale gate from 4.12.x."""
+        from nexus.mcp import core as core_mod
+
+        assert not hasattr(core_mod, "_MCP_OWNS_T1"), (
+            "_MCP_OWNS_T1 was removed in Phase F (RDR-094 / nexus-2lm0)"
+        )
+        assert not hasattr(core_mod, "_flag_enabled"), (
+            "_flag_enabled was removed with the gate"
+        )

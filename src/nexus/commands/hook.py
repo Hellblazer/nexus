@@ -42,10 +42,10 @@ def session_end_cmd() -> None:
 def session_end_flush_cmd() -> None:
     """Run only the storage-flush portion of SessionEnd (RDR-094 Phase B).
 
-    Runs T1 scratch flush + T2 expire; does NOT touch chroma. Used by
-    Phase C (nexus-l828) once hooks.json swaps the launcher's internal
-    dispatch to this entry point under the MCP-owned-T1 default-on
-    rollout. Safe to invoke whether NEXUS_MCP_OWNS_T1 is set or not.
+    Runs T1 scratch flush + T2 expire; does NOT touch chroma. The
+    nx-session-end-launcher's grandchild dispatches to this entry
+    point (Phase C / nexus-l828); the chroma teardown is owned by
+    nx-mcp's lifespan + signal handler + atexit chain.
     """
     output = hooks.session_end_flush()
     click.echo(output)

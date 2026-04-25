@@ -39,7 +39,7 @@ from nexus.ttl import parse_ttl
 
 # ── T1 chroma lifecycle (RDR-094, feature-flagged) ──────────────────────────
 #
-# RDR-094 Phase 4 (default-on as of 4.12.0). This module:
+# RDR-094 Phase 4 (unconditional as of 4.13.0). This module:
 #   1. Spawns chroma in the FastMCP lifespan __aenter__. Three cleanup
 #      paths run on shutdown, all calling the same idempotent
 #      _t1_chroma_shutdown:
@@ -53,9 +53,6 @@ from nexus.ttl import parse_ttl
 #          through async finally. Skipped on stdio (no anyio handler).
 #        * atexit -- belt-and-braces for clean stdin EOF / SystemExit
 #          paths that arrive without a signal.
-#      The hook's chroma-spawn block becomes a no-op (gated on the same
-#      env flag in hooks.py); the SessionEnd hook also skips its chroma-
-#      stop block under the flag (one-line gate in hooks.py:session_end).
 #   2. Spawns the watchdog with both --mcp-pid and --claude-pid so the
 #      Claude-crash-orphan failure mode (issue #1935, FM-NEW-1) is covered.
 #   3. TCP-probes any existing session record at startup; if reachable,
@@ -63,33 +60,16 @@ from nexus.ttl import parse_ttl
 #      cleared issue #40207 not applicable to nx-mcp, so this path is
 #      cheap insurance against future Claude Code behaviour changes).
 #
-# Default ON (4.12.0). Set ``NEXUS_MCP_OWNS_T1=0`` (or ``false``/``no``)
-# as an emergency opt-out if the MCP-owned path ever needs to be
-# disabled in production. Spike A (40/40), Spike B (CA-2 verified
+# The 4.12.0-era ``NEXUS_MCP_OWNS_T1`` opt-out gate was removed in
+# Phase F (4.13.0): Spike A (40/40), Spike B (CA-2 verified
 # post-mitigation), and Spike C (issue #40207 verified-negative for
-# stdio) all clear; the gate stays as a safety hatch only.
+# stdio) all cleared, plus a clean v4.12.0 -> v4.12.1 shakeout cycle
+# in production confirmed no regression. The hook-era chroma-spawn
+# path was already disconnected by Phase B (session_end split) and
+# Phase C (hooks.json launcher swap), so deletion was a pure
+# simplification with no behavioural delta.
 
 import os as _os
-
-
-def _flag_enabled(name: str, default: bool) -> bool:
-    """Read a tri-state env flag with a default.
-
-    Truthy: ``1`` / ``true`` / ``yes`` / ``on`` (case-insensitive).
-    Falsy:  ``0`` / ``false`` / ``no`` / ``off``.
-    Anything else (including empty string) returns ``default``.
-    """
-    raw = _os.environ.get(name, "").strip().lower()
-    if raw in ("1", "true", "yes", "on"):
-        return True
-    if raw in ("0", "false", "no", "off"):
-        return False
-    return default
-
-
-# Default ON (RDR-094 Phase 4 default-on, 4.12.0). NEXUS_MCP_OWNS_T1=0
-# (or false / no / off) is the emergency opt-out.
-_MCP_OWNS_T1: bool = _flag_enabled("NEXUS_MCP_OWNS_T1", default=True)
 
 #: Module-scope state for the owned chroma. Populated by
 #: ``_t1_chroma_init_if_owner`` and consumed by ``_t1_chroma_shutdown``.
@@ -349,10 +329,7 @@ async def _t1_chroma_lifespan(_app: Any):
         _t1_chroma_shutdown()
 
 
-mcp = FastMCP(
-    "nexus",
-    lifespan=_t1_chroma_lifespan if _MCP_OWNS_T1 else None,
-)
+mcp = FastMCP("nexus", lifespan=_t1_chroma_lifespan)
 
 _DEFAULT_PAGE_SIZE = 10
 
@@ -3483,27 +3460,25 @@ def main():
         transport="stdio",
         pid=os.getpid(),
         ppid=os.getppid(),
-        mcp_owns_t1=_MCP_OWNS_T1,
     )
-    if _MCP_OWNS_T1:
-        # The FastMCP lifespan finally is the design's primary cleanup
-        # path; the signal handlers below are belt-and-braces for the
-        # cases where the lifespan does not fire. Empirically, FastMCP's
-        # stdio transport on macOS does NOT have anyio install a
-        # SIGTERM handler that propagates cancellation through the
-        # lifespan async finally (RDR-094 spike, 2026-04-25). Without
-        # our explicit handlers, SIGTERM kills the process silently,
-        # atexit does NOT run (Python only fires atexit on clean exit),
-        # and chroma orphans. The watchdog covers it eventually but
-        # the MCP-owned cleanup path simply doesn't run. So we install
-        # the signal handlers for SIGTERM and SIGINT to call
-        # _t1_chroma_shutdown directly. atexit stays as the third
-        # belt-and-braces for clean exits via stdin EOF / SystemExit.
-        # _t1_chroma_shutdown is idempotent so all three paths can fire
-        # without double-cleaning.
-        atexit.register(_t1_chroma_shutdown)
-        signal.signal(signal.SIGTERM, _sigterm_handler)
-        signal.signal(signal.SIGINT, _sigterm_handler)
+    # The FastMCP lifespan finally is the design's primary cleanup
+    # path; the signal handlers below are belt-and-braces for the
+    # cases where the lifespan does not fire. Empirically, FastMCP's
+    # stdio transport on macOS does NOT have anyio install a
+    # SIGTERM handler that propagates cancellation through the
+    # lifespan async finally (RDR-094 spike, 2026-04-25). Without
+    # our explicit handlers, SIGTERM kills the process silently,
+    # atexit does NOT run (Python only fires atexit on clean exit),
+    # and chroma orphans. The watchdog covers it eventually but
+    # the MCP-owned cleanup path simply doesn't run. So we install
+    # the signal handlers for SIGTERM and SIGINT to call
+    # _t1_chroma_shutdown directly. atexit stays as the third
+    # belt-and-braces for clean exits via stdin EOF / SystemExit.
+    # _t1_chroma_shutdown is idempotent so all three paths can fire
+    # without double-cleaning.
+    atexit.register(_t1_chroma_shutdown)
+    signal.signal(signal.SIGTERM, _sigterm_handler)
+    signal.signal(signal.SIGINT, _sigterm_handler)
     try:
         check_version_compatibility()
         mcp.run(transport="stdio")
