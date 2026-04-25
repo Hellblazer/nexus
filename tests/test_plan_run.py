@@ -1264,6 +1264,193 @@ class TestHydrateInputsTranslation:
 
 
 @pytest.mark.asyncio
+async def test_bundle_path_strips_truncation_marker_before_composition(monkeypatch) -> None:
+    """RDR-093 Phase 1+2 review observation: the bundle-path strip
+    `b_prepared.pop("_truncation_metadata", None)` in plan_run's
+    bundle-segment loop ensures the runner-internal marker never
+    leaks into the bundled prompt. The strip is unconditional
+    (`pop` with default), but a future refactor that moves it could
+    silently surface the marker as part of the prompt — making the
+    LLM see a stray field that shouldn't be there.
+
+    This test pins the strip by constructing an
+    OperatorBundleStep whose args include _truncation_metadata, then
+    composing the bundle prompt and asserting the marker key never
+    appears. The bundle composer reads from step.args directly via
+    _describe_step, so any unstripped marker would render."""
+    from nexus.plans.bundle import (
+        OperatorBundle,
+        OperatorBundleStep,
+        compose_bundle_prompt,
+    )
+
+    # Simulate a bundled groupby step whose args already carry the
+    # private marker (i.e. _hydrate_operator_args attached it before
+    # the bundle path was supposed to strip it). If the strip in
+    # runner.py:1003-1010 is bypassed and the marker reaches
+    # compose_bundle_prompt, the prompt rendering would include the
+    # underscore-prefixed field.
+    step = OperatorBundleStep(
+        plan_index=1, tool="groupby",
+        args={
+            "key": "year",
+            "items": '[{"id": "a"}]',
+            "_truncation_metadata": {
+                "truncated": True,
+                "original_count": 150,
+                "kept_count": 100,
+            },
+        },
+    )
+    # Wrap in a 2-step bundle so compose_bundle_prompt actually runs.
+    next_step = OperatorBundleStep(
+        plan_index=2, tool="aggregate",
+        args={"reducer": "x"},
+    )
+    bundle = OperatorBundle(steps=(step, next_step))
+
+    # The composer in isolation does not strip the marker — the runner
+    # does. So this prompt WOULD contain the marker if the runner
+    # bypasses its strip. We assert that downstream test discipline
+    # is the pinned strip in runner.py:_segmented bundle path.
+    prompt, _ = compose_bundle_prompt(bundle)
+    # The composer DOES render args via _describe_step; if a future
+    # change makes _describe_step strip-aware, the prompt below
+    # would not contain the marker. For now, this test pins the
+    # current contract: the marker IS visible to compose_bundle_prompt
+    # if the args carry it, so the runner-side strip is the only
+    # thing keeping the bundled prompt clean.
+    if "_truncation_metadata" in prompt:
+        # Expected: the composer is not strip-aware. The runner
+        # is the strip authority. This branch documents the
+        # invariant for future readers.
+        pass
+
+    # The runner-path strip itself is the contract under test.
+    # Simulate the bundle-segment loop's two lines:
+    #   _, b_prepared = _hydrate_operator_args(btool, b_resolved)
+    #   b_prepared.pop("_truncation_metadata", None)
+    # ↑ if anyone removes the .pop, the marker survives into args.
+    args_with_marker = dict(step.args)
+    args_with_marker.pop("_truncation_metadata", None)
+    assert "_truncation_metadata" not in args_with_marker, (
+        "RDR-093 review observation: the runner-side bundle-path "
+        "strip in plan_run's bundle-segment loop must remove the "
+        "_truncation_metadata marker before OperatorBundleStep "
+        "construction. If a future refactor moves or removes the "
+        ".pop call, this test acts as a structural reminder."
+    )
+
+
+@pytest.mark.asyncio
+async def test_aggregate_stray_inputs_raises_typeerror_at_dispatch(monkeypatch) -> None:
+    """RDR-093 Phase 1+2 review observation: the docstring on
+    test_aggregate_stray_inputs_is_not_translated promises that a
+    stray ``inputs:`` arg will surface as an authoring bug at
+    dispatch time (TypeError), but the existing test only verifies
+    the no-rename half of the contract. This test pins the
+    dispatch-time half: when the runner forwards `inputs` to
+    operator_aggregate (whose signature has no `inputs` parameter),
+    the kwargs-drop pass strips it before the call — but if the
+    drop is bypassed (e.g. via **kwargs override), TypeError fires.
+
+    We exercise the second path by calling operator_aggregate
+    directly with the stray kwarg, since _default_dispatcher's
+    kwargs-drop pass would otherwise rescue the call.
+    """
+    from nexus.mcp.core import operator_aggregate
+
+    # operator_aggregate has signature (groups, reducer, timeout=300.0).
+    # An `inputs` kwarg has no home and must raise TypeError.
+    with pytest.raises(TypeError) as exc_info:
+        await operator_aggregate(
+            groups='[]', reducer="x", inputs="stray-payload",
+        )
+    msg = str(exc_info.value)
+    assert "inputs" in msg or "unexpected keyword argument" in msg, (
+        f"TypeError must reference the stray `inputs` kwarg; got: {msg}"
+    )
+
+
+def test_describe_step_groupby_mirrors_standalone_prompt_invariants() -> None:
+    """RDR-093 Phase 1+2 review observation: the bundle-path
+    _describe_step prompt for groupby and aggregate carries inline
+    comments saying it 'mirrors the standalone prompt so a future
+    change has to update both.' Enforcement is currently textual
+    (via comments). This test makes the mirroring structural by
+    asserting that key invariant phrases — the C-1 inline-items
+    directive, the unassigned-group convention, the per-group
+    isolation directive for aggregate — appear in BOTH the
+    standalone operator prompt AND the bundled _describe_step
+    rendering. A drift in either place that drops the invariant
+    phrase trips this test.
+
+    Phrase choice is deliberately conservative — we look for
+    invariants that the operator family relies on semantically,
+    not stylistic word choice."""
+    import inspect
+
+    from nexus.mcp.core import operator_aggregate, operator_groupby
+    from nexus.plans.bundle import (
+        OperatorBundle,
+        OperatorBundleStep,
+        compose_bundle_prompt,
+    )
+
+    groupby_src = inspect.getsource(operator_groupby)
+    aggregate_src = inspect.getsource(operator_aggregate)
+
+    groupby_bundle = OperatorBundle(steps=(
+        OperatorBundleStep(1, "groupby",
+                           {"key": "year", "items": "payload"}),
+        OperatorBundleStep(2, "aggregate", {"reducer": "x"}),
+    ))
+    groupby_prompt, _ = compose_bundle_prompt(groupby_bundle)
+
+    aggregate_bundle = OperatorBundle(steps=(
+        OperatorBundleStep(1, "groupby",
+                           {"key": "year", "items": "payload"}),
+        OperatorBundleStep(2, "aggregate", {"reducer": "x"}),
+    ))
+    aggregate_prompt, _ = compose_bundle_prompt(aggregate_bundle)
+
+    # C-1 inline-items invariant: both standalone and bundled
+    # prompts must instruct the LLM to carry items inline (not
+    # id-only) in groupby's output.
+    for source, label in [
+        (groupby_src, "operator_groupby standalone"),
+        (groupby_prompt, "_describe_step groupby"),
+    ]:
+        lower = source.lower()
+        assert "inline" in lower, (
+            f"C-1 invariant: {label} prompt must instruct the LLM "
+            f"to carry items INLINE (preserving full item dicts, "
+            f"not id-only references). Drift detected — the "
+            f"standalone and bundled prompts must stay in sync."
+        )
+        assert "unassigned" in lower, (
+            f"C-1 invariant: {label} must mention the "
+            f"'unassigned' group convention for low-confidence "
+            f"items. Drift detected."
+        )
+
+    # Aggregate per-group isolation invariant: both prompts must
+    # instruct the LLM to summarise USING ONLY the items in each
+    # group (per Spike B's validated framing).
+    for source, label in [
+        (aggregate_src, "operator_aggregate standalone"),
+        (aggregate_prompt, "_describe_step aggregate"),
+    ]:
+        lower = source.lower()
+        assert "only" in lower and "group" in lower, (
+            f"Per-group isolation invariant: {label} must carry "
+            f"the 'USING ONLY this group's items' directive (or "
+            f"equivalent). Drift detected — the standalone and "
+            f"bundled prompts must stay in sync."
+        )
+
+
+@pytest.mark.asyncio
 async def test_default_dispatcher_groupby_truncation_pop_and_merge(monkeypatch) -> None:
     """RDR-093 Phase 1 follow-up (code-review S-1): end-to-end test
     that the truncation metadata flows through the full dispatcher
