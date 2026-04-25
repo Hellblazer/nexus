@@ -322,9 +322,18 @@ def test_fire_post_store_batch_hooks_partial_commit_failure_mode(
 def test_fire_post_store_batch_hooks_falls_back_to_scalar_when_columns_absent(
     tmp_path: Path, monkeypatch,
 ) -> None:
-    """If batch_doc_ids/is_batch columns aren't migrated yet (P1.1 merged
-    before P1.2), the failure capture writes a scalar-only row rather than
-    crashing."""
+    """If batch_doc_ids/is_batch columns aren't present on the live DB
+    (mixed-version operator scenario: a write path running fresh code
+    against an older T2 schema), the failure capture writes a scalar-
+    only row rather than crashing.
+
+    Bypasses ``T2Database`` because at this package version the auto-
+    migration would create the new columns immediately. Builds a raw
+    sqlite connection at the pre-4.14.1 schema and mocks ``t2_ctx``
+    to expose just the surface ``_record_batch_hook_failure`` reads
+    (``taxonomy.conn`` + ``taxonomy._lock``).
+    """
+    import threading
     import nexus.mcp_infra as mod
     from nexus.db.migrations import migrate_hook_failures
     from nexus.mcp_infra import (
@@ -334,11 +343,30 @@ def test_fire_post_store_batch_hooks_falls_back_to_scalar_when_columns_absent(
     import sqlite3
 
     db_path = tmp_path / "pre_migration.db"
-    T2Database(db_path).close()
-    conn = sqlite3.connect(str(db_path))
-    migrate_hook_failures(conn)  # but NOT migrate_hook_failures_batch_columns
-    conn.close()
-    monkeypatch.setattr(mod, "t2_ctx", lambda: T2Database(db_path))
+    raw = sqlite3.connect(str(db_path), isolation_level=None)
+    migrate_hook_failures(raw)  # only 4.9.10; NOT 4.14.1
+
+    cols = {
+        r[1] for r in raw.execute("PRAGMA table_info(hook_failures)").fetchall()
+    }
+    assert "batch_doc_ids" not in cols, (
+        "pre-condition: hook_failures must lack batch_doc_ids before the test runs"
+    )
+
+    class _FakeTaxonomy:
+        def __init__(self, conn: sqlite3.Connection) -> None:
+            self.conn = conn
+            self._lock = threading.RLock()
+
+    class _FakeT2:
+        def __init__(self, conn: sqlite3.Connection) -> None:
+            self.taxonomy = _FakeTaxonomy(conn)
+        def __enter__(self) -> "_FakeT2":
+            return self
+        def __exit__(self, *_: object) -> None:
+            return None
+
+    monkeypatch.setattr(mod, "t2_ctx", lambda: _FakeT2(raw))
 
     def raising(doc_ids, collection, contents, embeddings, metadatas):
         raise RuntimeError("kaboom")
@@ -348,17 +376,11 @@ def test_fire_post_store_batch_hooks_falls_back_to_scalar_when_columns_absent(
         ["d1", "d2"], "code__nexus", ["c1", "c2"], None, None,
     )
 
-    with T2Database(db_path) as db:
-        cols = {
-            r[1] for r in db.taxonomy.conn.execute(
-                "PRAGMA table_info(hook_failures)"
-            ).fetchall()
-        }
-        rows = db.taxonomy.conn.execute(
-            "SELECT doc_id, hook_name, error FROM hook_failures"
-        ).fetchall()
+    rows = raw.execute(
+        "SELECT doc_id, hook_name, error FROM hook_failures"
+    ).fetchall()
+    raw.close()
 
-    assert "batch_doc_ids" not in cols  # confirm the pre-migration shape
     assert len(rows) == 1
     assert rows[0][0] == "d1"
     assert rows[0][1] == "raising"
