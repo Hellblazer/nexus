@@ -79,6 +79,16 @@ def session_start(claude_session_id: str | None = None) -> str:
     # handles the migration: legacy numeric-stem session files written by
     # the old PID-keyed scheme are reaped unconditionally here.
     sweep_stale_sessions(SESSIONS_DIR)
+    # RDR-094 Phase 3: sweep orphan nx_t1_* tmpdirs that have no live
+    # session record and are older than 24h. The 24h cutoff protects
+    # in-flight tmpdirs (mkdtemp -> write_session_record_by_id has a
+    # small window; legitimate tmpdirs from active sessions never reach
+    # the cutoff because their record reaches the filter first).
+    try:
+        from nexus.session import sweep_orphan_tmpdirs
+        sweep_orphan_tmpdirs(SESSIONS_DIR)
+    except Exception as exc:
+        _log.debug("sweep_orphan_tmpdirs_failed", error=str(exc))
 
     # Resolve session_id with this precedence:
     #   1. ``NX_SESSION_ID`` env  — we're a nested subprocess our parent

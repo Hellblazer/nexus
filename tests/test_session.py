@@ -631,3 +631,172 @@ def test_find_claude_root_pid_case_insensitive(
         lambda pid: names.get(pid, ""),
     )
     assert find_claude_root_pid(start_pid=100) == 200
+
+
+# ── RDR-094 Phase 3: sweep_orphan_tmpdirs ───────────────────────────────────
+
+
+class TestSweepOrphanTmpdirs:
+    """RDR-094 Phase 3: reap nx_t1_* tmpdirs that no session record
+    points at AND are older than max_age_hours. Closes Gap 3 (orphan
+    tmpdirs from chroma crashes that the record-based sweep cannot
+    see)."""
+
+    def test_reaps_old_orphan_with_no_record(self, tmp_path: Path) -> None:
+        from nexus.session import sweep_orphan_tmpdirs
+
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+        tmpdir_root = tmp_path / "tmproot"
+        tmpdir_root.mkdir()
+        orphan = tmpdir_root / "nx_t1_orphan_xyz"
+        orphan.mkdir()
+        (orphan / "chroma.sqlite3").write_bytes(b"data")
+        # Backdate 30 hours.
+        old = time.time() - 30 * 3600
+        os.utime(orphan, (old, old))
+
+        reaped = sweep_orphan_tmpdirs(
+            sessions_dir=sessions_dir, tmpdir_root=tmpdir_root,
+        )
+        assert reaped == 1
+        assert not orphan.exists()
+
+    def test_skips_recent_tmpdir(self, tmp_path: Path) -> None:
+        """In-flight tmpdir (created moments ago, no record yet) must
+        not be reaped. The 24h cutoff is the protection."""
+        from nexus.session import sweep_orphan_tmpdirs
+
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+        tmpdir_root = tmp_path / "tmproot"
+        tmpdir_root.mkdir()
+        recent = tmpdir_root / "nx_t1_recent"
+        recent.mkdir()
+        # mtime is now, well within the cutoff.
+
+        reaped = sweep_orphan_tmpdirs(
+            sessions_dir=sessions_dir, tmpdir_root=tmpdir_root,
+        )
+        assert reaped == 0
+        assert recent.exists()
+
+    def test_skips_tmpdir_referenced_by_session_record(
+        self, tmp_path: Path,
+    ) -> None:
+        """A tmpdir mentioned in any session record must not be reaped
+        even if its mtime is old."""
+        from nexus.session import sweep_orphan_tmpdirs
+
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+        tmpdir_root = tmp_path / "tmproot"
+        tmpdir_root.mkdir()
+        live = tmpdir_root / "nx_t1_live"
+        live.mkdir()
+        # Backdate; the record protects it regardless.
+        old = time.time() - 48 * 3600
+        os.utime(live, (old, old))
+
+        record = {
+            "session_id": "abc",
+            "server_host": "127.0.0.1",
+            "server_port": 1,
+            "server_pid": 1,
+            "tmpdir": str(live),
+            "created_at": time.time(),
+        }
+        (sessions_dir / "abc.session").write_text(json.dumps(record))
+
+        reaped = sweep_orphan_tmpdirs(
+            sessions_dir=sessions_dir, tmpdir_root=tmpdir_root,
+        )
+        assert reaped == 0
+        assert live.exists()
+
+    def test_handles_corrupt_session_files(self, tmp_path: Path) -> None:
+        """A corrupt session file must not abort the sweep; the orphan
+        next to it should still be reaped."""
+        from nexus.session import sweep_orphan_tmpdirs
+
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+        (sessions_dir / "broken.session").write_text("{not-json")
+        tmpdir_root = tmp_path / "tmproot"
+        tmpdir_root.mkdir()
+        orphan = tmpdir_root / "nx_t1_orphan"
+        orphan.mkdir()
+        old = time.time() - 30 * 3600
+        os.utime(orphan, (old, old))
+
+        reaped = sweep_orphan_tmpdirs(
+            sessions_dir=sessions_dir, tmpdir_root=tmpdir_root,
+        )
+        assert reaped == 1
+        assert not orphan.exists()
+
+    def test_handles_missing_tmpdir_root(self, tmp_path: Path) -> None:
+        from nexus.session import sweep_orphan_tmpdirs
+
+        reaped = sweep_orphan_tmpdirs(
+            sessions_dir=tmp_path,
+            tmpdir_root=tmp_path / "does-not-exist",
+        )
+        assert reaped == 0
+
+    def test_ignores_non_nx_t1_directories(self, tmp_path: Path) -> None:
+        """Only nx_t1_* prefixed dirs are candidates. Other tmpdirs
+        from other tools are safe."""
+        from nexus.session import sweep_orphan_tmpdirs
+
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+        tmpdir_root = tmp_path / "tmproot"
+        tmpdir_root.mkdir()
+        unrelated = tmpdir_root / "tmpXYZ_other"
+        unrelated.mkdir()
+        old = time.time() - 30 * 3600
+        os.utime(unrelated, (old, old))
+
+        reaped = sweep_orphan_tmpdirs(
+            sessions_dir=sessions_dir, tmpdir_root=tmpdir_root,
+        )
+        assert reaped == 0
+        assert unrelated.exists()
+
+    def test_reaps_multiple_old_orphans(self, tmp_path: Path) -> None:
+        from nexus.session import sweep_orphan_tmpdirs
+
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+        tmpdir_root = tmp_path / "tmproot"
+        tmpdir_root.mkdir()
+        old = time.time() - 48 * 3600
+        for n in range(3):
+            d = tmpdir_root / f"nx_t1_o{n}"
+            d.mkdir()
+            os.utime(d, (old, old))
+
+        reaped = sweep_orphan_tmpdirs(
+            sessions_dir=sessions_dir, tmpdir_root=tmpdir_root,
+        )
+        assert reaped == 3
+
+    def test_uses_system_tempdir_when_root_unspecified(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When tmpdir_root is None, fall back to tempfile.gettempdir()."""
+        import tempfile as _tempfile
+
+        from nexus.session import sweep_orphan_tmpdirs
+
+        monkeypatch.setattr(_tempfile, "gettempdir", lambda: str(tmp_path))
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+        orphan = tmp_path / "nx_t1_o"
+        orphan.mkdir()
+        old = time.time() - 30 * 3600
+        os.utime(orphan, (old, old))
+
+        reaped = sweep_orphan_tmpdirs(sessions_dir=sessions_dir)
+        assert reaped == 1

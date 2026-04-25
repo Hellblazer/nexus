@@ -4,6 +4,7 @@ import os
 import signal
 import socket
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -309,6 +310,86 @@ def sweep_stale_sessions(
                 )
         except (json.JSONDecodeError, OSError) as exc:
             _log.debug("sweep_corrupt_session_file", path=str(f), error=str(exc))
+
+
+def sweep_orphan_tmpdirs(
+    sessions_dir: Path | None = None,
+    tmpdir_root: Path | None = None,
+    max_age_hours: float = 24.0,
+) -> int:
+    """RDR-094 Phase 3: reap orphan ``nx_t1_*`` tmpdirs.
+
+    Scans *tmpdir_root* (defaults to the system tempdir) for
+    directories matching ``nx_t1_*`` (the prefix used by
+    :func:`start_t1_server`). For each:
+
+    * If a session record in *sessions_dir* points at the tmpdir,
+      skip (live; some other code path owns this tmpdir's lifecycle).
+    * If the tmpdir's mtime is younger than *max_age_hours*, skip
+      (might be in active spawn between :func:`tempfile.mkdtemp` and
+      the session-record write, or actively used by an MCP server
+      that hasn't written its record yet).
+    * Otherwise, ``rmtree`` with ``ignore_errors``.
+
+    Returns the count of directories reaped. Closes RDR-094 Gap 3:
+    tmpdirs whose session record was deleted but whose chroma
+    server crashed before the cleanup path completed had no other
+    reap trigger; the existing ``sweep_stale_sessions`` operates on
+    records, not on the filesystem itself.
+
+    Cheap on every-startup invocation: glob + stat per directory,
+    no I/O beyond rmtree on confirmed orphans. The 24h cutoff
+    prevents accidental reap of legitimate in-flight tmpdirs.
+    """
+    import shutil
+
+    if sessions_dir is None:
+        sessions_dir = SESSIONS_DIR
+    if tmpdir_root is None:
+        tmpdir_root = Path(tempfile.gettempdir())
+    if not tmpdir_root.exists():
+        return 0
+
+    # Collect every tmpdir path referenced by a current session record
+    # so we never reap a directory another component still owns.
+    referenced: set[str] = set()
+    if sessions_dir.exists():
+        for f in sessions_dir.glob("*.session"):
+            try:
+                rec = json.loads(f.read_text())
+                if isinstance(rec, dict):
+                    td = rec.get("tmpdir", "")
+                    if td:
+                        referenced.add(str(Path(td).resolve()))
+            except (json.JSONDecodeError, OSError):
+                continue
+
+    cutoff = time.time() - max_age_hours * 3600.0
+    reaped = 0
+    for d in tmpdir_root.glob("nx_t1_*"):
+        if not d.is_dir():
+            continue
+        try:
+            resolved = str(d.resolve())
+        except OSError:
+            continue
+        if resolved in referenced:
+            continue
+        try:
+            mtime = d.stat().st_mtime
+        except OSError:
+            continue
+        if mtime >= cutoff:
+            continue
+        shutil.rmtree(d, ignore_errors=True)
+        if not d.exists():
+            reaped += 1
+            _log.info(
+                "sweep_reaped_orphan_tmpdir",
+                path=str(d),
+                age_hours=round((time.time() - mtime) / 3600.0, 2),
+            )
+    return reaped
 
 
 def _find_chroma() -> str | None:
