@@ -29,6 +29,10 @@ import sys
 import time
 from pathlib import Path
 
+import structlog
+
+from nexus.logging_setup import configure_logging
+
 #: Seconds between liveness checks. Trade-off: lower value means faster
 #: reap when Claude Code dies; higher value means less CPU. 5s keeps
 #: the observable leak window small without adding meaningful load.
@@ -140,38 +144,67 @@ def main(argv: list[str] | None = None) -> int:
                         help="ChromaDB tmpdir to remove on cleanup.")
     args = parser.parse_args(argv)
 
+    configure_logging("watchdog")
+    log = structlog.get_logger("nexus.t1_watchdog")
+
     session_file = Path(args.session_file) if args.session_file else None
     tmpdir = Path(args.tmpdir) if args.tmpdir else None
     dual_watch = args.mcp_pid > 0
 
+    log.info(
+        "watchdog_started",
+        claude_pid=args.claude_pid,
+        chroma_pid=args.chroma_pid,
+        mcp_pid=args.mcp_pid,
+        dual_watch=dual_watch,
+        poll_interval_s=POLL_INTERVAL,
+    )
+
     while True:
         time.sleep(POLL_INTERVAL)
+        log.debug(
+            "poll_tick",
+            chroma_pid=args.chroma_pid,
+            claude_pid=args.claude_pid,
+            mcp_pid=args.mcp_pid,
+        )
         # Chroma crashed or was stopped by some other path (lifespan,
         # atexit, SessionEnd in legacy mode) -- nothing to watch
         # anymore. Exit silently; whoever stopped chroma owns the
         # on-disk cleanup.
         if not _is_alive(args.chroma_pid):
+            log.info(
+                "watchdog_exiting",
+                reason="chroma_died_externally",
+                chroma_pid=args.chroma_pid,
+            )
             return 0
         # Dual-watch mode (RDR-094 FM-NEW-1): MCP server died without
         # its lifespan/atexit firing (SIGKILL, segfault). Clean chroma
         # directly via the chroma-pgrp belt-and-braces path.
         if dual_watch and not _is_alive(args.mcp_pid):
+            log.info("mcp_pid_disappeared", mcp_pid=args.mcp_pid)
             break
         # Claude Code is gone.
         if not _is_alive(args.claude_pid):
+            log.info("claude_pid_disappeared", claude_pid=args.claude_pid)
             # Dual-watch + Claude crash: signal mcp_pid first so its
             # lifespan finally runs (cleans chroma cleanly), then fall
             # through to the chroma-pgrp belt-and-braces in case the
             # MCP server's finally is wedged or already ran.
             if dual_watch and _is_alive(args.mcp_pid):
+                log.info("signalling_mcp_pid", mcp_pid=args.mcp_pid)
                 _signal_then_kill(args.mcp_pid)
             break
 
+    log.info("chroma_cleanup_started", chroma_pid=args.chroma_pid)
     _cleanup(
         chroma_pid=args.chroma_pid,
         session_file=session_file,
         tmpdir=tmpdir,
     )
+    log.info("chroma_cleanup_complete", chroma_pid=args.chroma_pid)
+    log.info("watchdog_exiting", reason="cleanup_complete")
     return 0
 
 

@@ -5,6 +5,9 @@ from __future__ import annotations
 import os
 from unittest.mock import patch
 
+import pytest
+import structlog
+
 
 # ── _is_alive ─────────────────────────────────────────────────────────────────
 
@@ -288,3 +291,199 @@ class TestDualWatch:
         sigs = {s for _, s in kills}
         assert _signal.SIGTERM in sigs
         assert _signal.SIGKILL in sigs
+
+
+# ── Lifecycle logging (RDR-094 Phase G / nexus-aqna) ─────────────────────────
+
+
+@pytest.fixture
+def captured_events(monkeypatch):
+    """Capture every structlog event emitted by t1_watchdog.
+
+    Routes ``structlog.get_logger("nexus.t1_watchdog")`` to a recording
+    bound logger so tests can assert on event names + kwargs without
+    touching the real RotatingFileHandler. The ``configure_logging``
+    call inside ``main()`` is also stubbed so it does not reset the
+    capture wrapper.
+    """
+    events: list[dict] = []
+
+    def _capture_processor(logger, method_name, event_dict):
+        events.append({"_method": method_name, **event_dict})
+        raise structlog.DropEvent
+
+    structlog.configure(
+        processors=[_capture_processor],
+        wrapper_class=structlog.make_filtering_bound_logger(0),  # DEBUG
+        logger_factory=structlog.PrintLoggerFactory(),
+        cache_logger_on_first_use=False,
+    )
+
+    from nexus import t1_watchdog
+
+    monkeypatch.setattr(t1_watchdog, "configure_logging", lambda _mode: None)
+    return events
+
+
+class TestLifecycleLogging:
+    """The watchdog must emit structlog events at every lifecycle
+    transition so Spike B (Phase D) and the Phase E canary can attribute
+    chroma cleanups to the right trigger."""
+
+    def test_emits_watchdog_started_with_pid_args(
+        self, monkeypatch, tmp_path, captured_events,
+    ):
+        from nexus import t1_watchdog
+
+        monkeypatch.setattr(t1_watchdog.time, "sleep", lambda _s: None)
+        monkeypatch.setattr(t1_watchdog, "_is_alive", lambda pid: False)
+
+        t1_watchdog.main([
+            "--claude-pid", "100",
+            "--chroma-pid", "200",
+            "--mcp-pid", "300",
+            "--session-file", str(tmp_path / "s.session"),
+            "--tmpdir", str(tmp_path / "tmpdir"),
+        ])
+
+        started = next(
+            e for e in captured_events if e.get("event") == "watchdog_started"
+        )
+        assert started["claude_pid"] == 100
+        assert started["chroma_pid"] == 200
+        assert started["mcp_pid"] == 300
+        assert started["dual_watch"] is True
+
+    def test_chroma_dies_externally_path_emits_exit_event(
+        self, monkeypatch, tmp_path, captured_events,
+    ):
+        from nexus import t1_watchdog
+
+        monkeypatch.setattr(t1_watchdog.time, "sleep", lambda _s: None)
+        monkeypatch.setattr(t1_watchdog, "_is_alive", lambda pid: False)
+
+        with patch.object(t1_watchdog, "_cleanup") as mock_cleanup:
+            t1_watchdog.main([
+                "--claude-pid", "100", "--chroma-pid", "200",
+                "--session-file", str(tmp_path / "s"),
+                "--tmpdir", str(tmp_path / "td"),
+            ])
+
+        mock_cleanup.assert_not_called()
+        exit_events = [
+            e for e in captured_events if e.get("event") == "watchdog_exiting"
+        ]
+        assert len(exit_events) == 1
+        assert exit_events[0]["reason"] == "chroma_died_externally"
+
+    def test_mcp_pid_disappeared_path_logs_full_sequence(
+        self, monkeypatch, tmp_path, captured_events,
+    ):
+        from nexus import t1_watchdog
+
+        monkeypatch.setattr(t1_watchdog.time, "sleep", lambda _s: None)
+
+        def _alive(pid: int) -> bool:
+            return pid != 300  # mcp dead, others alive
+
+        monkeypatch.setattr(t1_watchdog, "_is_alive", _alive)
+        with patch.object(t1_watchdog, "_cleanup"):
+            t1_watchdog.main([
+                "--claude-pid", "100", "--chroma-pid", "200",
+                "--mcp-pid", "300",
+                "--session-file", str(tmp_path / "s"),
+                "--tmpdir", str(tmp_path / "td"),
+            ])
+
+        names = [e.get("event") for e in captured_events]
+        assert "watchdog_started" in names
+        assert "mcp_pid_disappeared" in names
+        assert "chroma_cleanup_started" in names
+        assert "chroma_cleanup_complete" in names
+        assert names.count("watchdog_exiting") == 1
+        # Ordering invariant: started → mcp_disappeared → cleanup_started
+        # → cleanup_complete → exiting.
+        assert names.index("mcp_pid_disappeared") < names.index(
+            "chroma_cleanup_started",
+        )
+        assert names.index("chroma_cleanup_started") < names.index(
+            "chroma_cleanup_complete",
+        )
+
+    def test_claude_pid_disappeared_path_logs_signal_then_cleanup(
+        self, monkeypatch, tmp_path, captured_events,
+    ):
+        from nexus import t1_watchdog
+
+        monkeypatch.setattr(t1_watchdog.time, "sleep", lambda _s: None)
+
+        def _alive(pid: int) -> bool:
+            return pid != 100  # claude dead, mcp + chroma alive
+
+        monkeypatch.setattr(t1_watchdog, "_is_alive", _alive)
+        with patch.object(t1_watchdog, "_cleanup"), \
+             patch.object(t1_watchdog, "_signal_then_kill"):
+            t1_watchdog.main([
+                "--claude-pid", "100", "--chroma-pid", "200",
+                "--mcp-pid", "300",
+                "--session-file", str(tmp_path / "s"),
+                "--tmpdir", str(tmp_path / "td"),
+            ])
+
+        names = [e.get("event") for e in captured_events]
+        assert "claude_pid_disappeared" in names
+        assert "signalling_mcp_pid" in names
+        assert "chroma_cleanup_complete" in names
+
+    def test_single_watch_mode_does_not_emit_signalling_event(
+        self, monkeypatch, tmp_path, captured_events,
+    ):
+        """With no --mcp-pid, claude-death must skip the signalling step."""
+        from nexus import t1_watchdog
+
+        monkeypatch.setattr(t1_watchdog.time, "sleep", lambda _s: None)
+
+        def _alive(pid: int) -> bool:
+            return pid == 200  # only chroma alive
+
+        monkeypatch.setattr(t1_watchdog, "_is_alive", _alive)
+        with patch.object(t1_watchdog, "_cleanup"):
+            t1_watchdog.main([
+                "--claude-pid", "100", "--chroma-pid", "200",
+                "--session-file", str(tmp_path / "s"),
+                "--tmpdir", str(tmp_path / "td"),
+            ])
+
+        names = [e.get("event") for e in captured_events]
+        assert "claude_pid_disappeared" in names
+        assert "signalling_mcp_pid" not in names
+
+
+class TestWatchdogLogConfiguration:
+    """``configure_logging('watchdog')`` must produce a real rotating
+    file handler at ``<config>/logs/watchdog.log``. We only check the
+    file appears + structlog events flow through; rotation is covered
+    by the stdlib RotatingFileHandler tests upstream."""
+
+    def test_watchdog_log_file_created_under_nexus_config_dir(
+        self, monkeypatch, tmp_path,
+    ):
+        cfg_dir = tmp_path / "nexus_config"
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg_dir))
+
+        from nexus.logging_setup import configure_logging
+
+        configure_logging("watchdog")
+        log = structlog.get_logger("nexus.t1_watchdog")
+        log.info("watchdog_started", claude_pid=1, chroma_pid=2, mcp_pid=0)
+
+        # Force the handler to flush.
+        import logging
+        for h in logging.getLogger().handlers:
+            h.flush()
+
+        log_file = cfg_dir / "logs" / "watchdog.log"
+        assert log_file.exists()
+        body = log_file.read_text()
+        assert "watchdog_started" in body
+        assert "claude_pid=1" in body
