@@ -215,7 +215,7 @@ Two parallel hook contracts in `src/nexus/mcp_infra.py` cover the two real workl
 
 | Shape | Register | Fire | Where it fires from | Current consumers |
 |-------|----------|------|---------------------|-------------------|
-| Single-document (RDR-070) | `register_post_store_hook(fn)` | `fire_post_store_hooks(doc_id, collection, content)` | `mcp/core.py:887` (MCP `store_put` tool) | `taxonomy_assign_hook` |
+| Single-document (RDR-070) | `register_post_store_hook(fn)` | `fire_post_store_hooks(doc_id, collection, content)` | `mcp/core.py:902` (MCP `store_put` tool) | `taxonomy_assign_hook` |
 | Batch (RDR-095) | `register_post_store_batch_hook(fn)` | `fire_post_store_batch_hooks(doc_ids, collection, contents, embeddings, metadatas)` | `indexer.py`, `code_indexer.py`, `prose_indexer.py`, `pipeline_stages.py`, `doc_indexer.py` (3 sites) | `chash_dual_write_batch_hook` (RDR-086), `taxonomy_assign_batch_hook` (RDR-070) |
 
 The batch contract exists because some enrichments collapse N dependency calls into one batched call (e.g., `taxonomy.assign_batch` issues one ChromaDB Cloud `query()` for N nearest-centroid lookups; the per-doc path issues N sequential queries). For corpus-scale ingest the difference is roughly 1000x. The single-document chain stays in place; both shapes are first-class because both workloads are real.
