@@ -659,22 +659,29 @@ def _hydrate_operator_args(
                 input_count=original_count, max_inputs=_OPERATOR_MAX_INPUTS,
                 action="positional truncation to max_inputs",
             )
-            # RDR-093 S-1: when the cap fires for operator_groupby,
-            # surface a {truncated, original_count, kept_count} block
-            # on the return envelope so plan authors see the cap hit
-            # rather than silently losing items. Scoped to groupby in
-            # this RDR; nexus-3j6b tracks cross-operator generalisation.
+            # RDR-093 S-1 + nexus-3j6b: when the cap fires the runner
+            # surfaces a {truncated, original_count, kept_count} block
+            # on the operator's return envelope so plan authors see
+            # the cap hit rather than silently losing items. Originally
+            # scoped to operator_groupby in RDR-093; generalised in
+            # nexus-3j6b to every operator that runs through this
+            # auto-hydration branch (extract / rank / compare /
+            # summarize / generate / filter / check / verify / groupby
+            # — any operator with `ids in args`).
+            #
             # Attachment chosen: runner-attaches (option a) — the
             # operator's JSON schema is unchanged; the dispatcher
             # (and bundle path) merge this metadata into the operator's
             # return dict post-dispatch via the _truncation_metadata
-            # private marker.
-            if resolved_tool == "operator_groupby":
-                truncation_metadata = {
-                    "truncated": True,
-                    "original_count": original_count,
-                    "kept_count": _OPERATOR_MAX_INPUTS,
-                }
+            # private marker. Operators whose return shape collides
+            # with one of the metadata keys (truncated, original_count,
+            # kept_count) would have an issue; the existing operator
+            # family does not collide.
+            truncation_metadata = {
+                "truncated": True,
+                "original_count": original_count,
+                "kept_count": _OPERATOR_MAX_INPUTS,
+            }
             non_empty = non_empty[:_OPERATOR_MAX_INPUTS]
         args = {k: v for k, v in args.items() if k not in ("ids", "collections")}
         if resolved_tool == "operator_summarize":

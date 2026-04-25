@@ -1145,31 +1145,99 @@ class TestHydrateInputsTranslation:
         assert tool == "operator_groupby"
         assert "_truncation_metadata" not in args
 
-    def test_truncation_metadata_scoped_to_groupby_only(self):
-        """RDR-093 S-1 is scoped to operator_groupby in this RDR.
-        Other operators (filter, check, rank, compare) must NOT
-        receive the metadata block when their cap fires — that
-        cross-operator generalisation is tracked as nexus-3j6b."""
+    def test_truncation_metadata_attaches_to_all_operators(self):
+        """nexus-3j6b: the truncation-metadata mechanism originally
+        scoped to operator_groupby (RDR-093 S-1) is generalised to
+        every operator that runs through the ids-branch auto-
+        hydration. Plan authors using filter / check / rank / compare
+        with >100 hydrated inputs now see the cap hit on the
+        operator's return envelope — same contract as groupby.
+
+        Previously this test asserted the inverse (operators MUST NOT
+        receive the metadata) under RDR-093's scoped fix; nexus-3j6b
+        flips the assertion."""
         from unittest.mock import patch
 
         from nexus.plans.runner import _OPERATOR_MAX_INPUTS, _hydrate_operator_args
 
         oversized = [f"item-{i}" for i in range(_OPERATOR_MAX_INPUTS + 50)]
         fake_contents = {"contents": oversized}
-        for op in ("filter", "check", "rank", "compare"):
+        for op in ("filter", "check", "rank", "compare", "groupby"):
             args_in = {"ids": [f"d-{i}" for i in range(150)],
                        "criterion": "x" if op in ("filter", "rank") else None,
                        "check_instruction": "x" if op == "check" else None,
-                       "focus": "x" if op == "compare" else None}
+                       "focus": "x" if op == "compare" else None,
+                       "key": "year" if op == "groupby" else None}
             args_in = {k: v for k, v in args_in.items() if v is not None}
             with patch(
                 "nexus.mcp.core.store_get_many", return_value=fake_contents,
             ):
                 _, args = _hydrate_operator_args(op, args_in)
-            assert "_truncation_metadata" not in args, (
-                f"S-1 scope: operator_{op} must not surface truncation "
-                f"metadata in this RDR (nexus-3j6b tracks generalisation)"
+            assert "_truncation_metadata" in args, (
+                f"nexus-3j6b: operator_{op} must receive truncation "
+                f"metadata when the cap fires"
             )
+            meta = args["_truncation_metadata"]
+            assert meta == {
+                "truncated": True,
+                "original_count": 150,
+                "kept_count": _OPERATOR_MAX_INPUTS,
+            }, (
+                f"operator_{op} truncation metadata shape must match "
+                f"the canonical {{truncated, original_count, kept_count}} "
+                f"contract"
+            )
+
+    def test_filter_truncation_metadata_attached_when_cap_fires(self):
+        """nexus-3j6b acceptance criterion: filter must surface
+        truncation metadata. Tracks the same shape as groupby's
+        original RDR-093 S-1 fix."""
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _OPERATOR_MAX_INPUTS, _hydrate_operator_args
+
+        oversized = [f"item-{i}" for i in range(_OPERATOR_MAX_INPUTS + 50)]
+        fake_contents = {"contents": oversized}
+        with patch(
+            "nexus.mcp.core.store_get_many", return_value=fake_contents,
+        ):
+            tool, args = _hydrate_operator_args(
+                "filter",
+                {"ids": [f"d-{i}" for i in range(150)],
+                 "criterion": "on-topic"},
+            )
+        assert tool == "operator_filter"
+        assert args["_truncation_metadata"] == {
+            "truncated": True,
+            "original_count": 150,
+            "kept_count": _OPERATOR_MAX_INPUTS,
+        }
+
+    def test_extract_truncation_metadata_attached_when_cap_fires(self):
+        """nexus-3j6b acceptance criterion: extract must surface
+        truncation metadata. Extract uses the catch-all `inputs`
+        target rather than `items`; the metadata attachment runs
+        independent of which positional arg gets populated."""
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _OPERATOR_MAX_INPUTS, _hydrate_operator_args
+
+        oversized = [f"item-{i}" for i in range(_OPERATOR_MAX_INPUTS + 50)]
+        fake_contents = {"contents": oversized}
+        with patch(
+            "nexus.mcp.core.store_get_many", return_value=fake_contents,
+        ):
+            tool, args = _hydrate_operator_args(
+                "extract",
+                {"ids": [f"d-{i}" for i in range(150)],
+                 "fields": "id,title"},
+            )
+        assert tool == "operator_extract"
+        assert args["_truncation_metadata"] == {
+            "truncated": True,
+            "original_count": 150,
+            "kept_count": _OPERATOR_MAX_INPUTS,
+        }
 
     # ── operator_aggregate hydration (RDR-093 nexus-o7u2) ────────────────
 

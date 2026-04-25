@@ -1834,8 +1834,10 @@ async def operator_groupby(
     plan runner's auto-hydration. When the cap fires the runner
     attaches a ``{truncated, original_count, kept_count}`` block to
     this operator's return envelope so callers see the truncation
-    rather than silently losing items. Scoped to ``operator_groupby``
-    in RDR-093; cross-operator generalisation tracked as nexus-3j6b.
+    rather than silently losing items. Originally scoped to
+    ``operator_groupby`` in RDR-093 S-1; generalised to every
+    operator that runs through the ids-branch auto-hydration in
+    nexus-3j6b.
 
     Args:
         items: Items to partition (plain text or JSON array string).
