@@ -211,14 +211,16 @@ threshold calibration, ICF rationale, upsert semantics, troubleshooting.
 
 ## Post-Store Hooks
 
-Two parallel hook contracts in `src/nexus/mcp_infra.py` cover the two real workload shapes for per-document enrichment that fires after a write. Single-document hooks land single rows from MCP; batch hooks land N rows from CLI ingest. Both use the same per-hook failure-isolation pattern (capture, persist to T2 `hook_failures`, never propagate).
+Two parallel hook contracts in `src/nexus/mcp_infra.py` cover the two real workload shapes for per-document enrichment that fires after a write. Both chains fire from every storage event, MCP `store_put` and CLI bulk ingest alike; consumers register in exactly one shape based on whether their work benefits from batched dependency calls. Both use the same per-hook failure-isolation pattern (capture, persist to T2 `hook_failures`, never propagate).
 
 | Shape | Register | Fire | Where it fires from | Current consumers |
 |-------|----------|------|---------------------|-------------------|
-| Single-document (RDR-070) | `register_post_store_hook(fn)` | `fire_post_store_hooks(doc_id, collection, content)` | `mcp/core.py:902` (MCP `store_put` tool) | `taxonomy_assign_hook` |
-| Batch (RDR-095) | `register_post_store_batch_hook(fn)` | `fire_post_store_batch_hooks(doc_ids, collection, contents, embeddings, metadatas)` | `indexer.py`, `code_indexer.py`, `prose_indexer.py`, `pipeline_stages.py`, `doc_indexer.py` (3 sites) | `chash_dual_write_batch_hook` (RDR-086), `taxonomy_assign_batch_hook` (RDR-070) |
+| Single-document (RDR-070) | `register_post_store_hook(fn)` | `fire_post_store_hooks(doc_id, collection, content)` | MCP `store_put` (once per call) and every CLI ingest path (once per doc in the batch) | empty by default; future single-doc-only consumers register here (e.g. RDR-089 aspect extraction) |
+| Batch (RDR-095) | `register_post_store_batch_hook(fn)` | `fire_post_store_batch_hooks(doc_ids, collection, contents, embeddings, metadatas)` | every CLI ingest path with the full batch; MCP `store_put` with a 1-element batch | `chash_dual_write_batch_hook` (RDR-086), `taxonomy_assign_batch_hook` (RDR-070) |
 
-The batch contract exists because some enrichments collapse N dependency calls into one batched call (e.g., `taxonomy.assign_batch` issues one ChromaDB Cloud `query()` for N nearest-centroid lookups; the per-doc path issues N sequential queries). For corpus-scale ingest the difference is roughly 1000x. The single-document chain stays in place; both shapes are first-class because both workloads are real.
+The batch contract exists because some enrichments collapse N dependency calls into one batched call (e.g. `taxonomy.assign_batch` issues one ChromaDB Cloud `query()` for N nearest-centroid lookups; the per-doc path issues N sequential queries). For corpus-scale ingest the difference is roughly 1000x. The single-document chain serves work that does not benefit from batching (one Haiku call per doc, one HTTP probe per doc, one cheap-but-not-batchable lookup per doc).
+
+`taxonomy_assign_batch_hook` accepts `embeddings=None` from the MCP path and fetches them from T3 inline (with a local-MiniLM fallback when the T3 row is unavailable). One hook body covers both the bulk path and the single-document path; there is no separate single-doc taxonomy hook to keep in sync.
 
 **Registration order is load-bearing.** In `mcp/core.py`, `chash_dual_write_batch_hook` is registered before `taxonomy_assign_batch_hook`. This mirrors the legacy CLI call-site ordering (chash dual-write always preceded taxonomy assignment at every site) and preserves the invariant that chash rows exist before topic assignment runs.
 

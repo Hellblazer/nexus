@@ -368,12 +368,18 @@ def _index_document(
             m["embedding_model"] = actual_model
     db.upsert_chunks_with_embeddings(collection_name, ids, documents, embeddings, metadatas)
 
-    # Post-store batch hook chain (RDR-095): chash dual-write +
-    # taxonomy incremental assignment, registered in mcp/core.py.
-    from nexus.mcp_infra import fire_post_store_batch_hooks
+    # Post-store hook chains (RDR-095). Both single-doc and batch chains
+    # fire from every storage event; the per-doc loop covers single-shape
+    # consumers on CLI ingest.
+    from nexus.mcp_infra import (
+        fire_post_store_batch_hooks,
+        fire_post_store_hooks,
+    )
     fire_post_store_batch_hooks(
         ids, collection_name, documents, embeddings, metadatas,
     )
+    for _did, _doc in zip(ids, documents):
+        fire_post_store_hooks(_did, collection_name, _doc)
 
     # Prune stale chunks from a previous (larger) version of this file.
     # Paginate: ChromaDB Cloud returns at most 300 records per get() call.
@@ -487,12 +493,18 @@ def _index_pdf_incremental(
         # Upsert
         t3.upsert_chunks_with_embeddings(collection_name, batch_ids, batch_docs, embeddings, batch_metas)
 
-        # Post-store batch hook chain (RDR-095): chash dual-write +
-        # taxonomy incremental assignment, registered in mcp/core.py.
-        from nexus.mcp_infra import fire_post_store_batch_hooks
+        # Post-store hook chains (RDR-095). Both single-doc and batch
+        # chains fire from every storage event; the per-doc loop covers
+        # single-shape consumers on CLI ingest.
+        from nexus.mcp_infra import (
+            fire_post_store_batch_hooks,
+            fire_post_store_hooks,
+        )
         fire_post_store_batch_hooks(
             batch_ids, collection_name, batch_docs, embeddings, batch_metas,
         )
+        for _did, _doc in zip(batch_ids, batch_docs):
+            fire_post_store_hooks(_did, collection_name, _doc)
 
         # Checkpoint
         write_checkpoint(CheckpointData(
@@ -883,12 +895,18 @@ def index_pdf(
             m["embedding_model"] = actual_model
     db.upsert_chunks_with_embeddings(col_name, ids, documents, embeddings, metadatas_list)
 
-    # Post-store batch hook chain (RDR-095): chash dual-write +
-    # taxonomy incremental assignment, registered in mcp/core.py.
-    from nexus.mcp_infra import fire_post_store_batch_hooks
+    # Post-store hook chains (RDR-095). Both single-doc and batch chains
+    # fire from every storage event; the per-doc loop covers single-shape
+    # consumers on CLI ingest.
+    from nexus.mcp_infra import (
+        fire_post_store_batch_hooks,
+        fire_post_store_hooks,
+    )
     fire_post_store_batch_hooks(
         ids, col_name, documents, embeddings, metadatas_list,
     )
+    for _did, _doc in zip(ids, documents):
+        fire_post_store_hooks(_did, col_name, _doc)
 
     # Prune stale chunks
     current_ids_set = set(ids)

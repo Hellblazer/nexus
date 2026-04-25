@@ -131,3 +131,65 @@ def test_drift_guard_ignores_docstring_mentions(tmp_path: pathlib.Path) -> None:
     assert refs == [], (
         "scanner must ignore docstring/comment/string-literal mentions"
     )
+
+
+# ── Symmetric-fire invariant: every CLI ingest site calls BOTH chains ────────
+
+
+CLI_SITE_FILES = [
+    "src/nexus/indexer.py",
+    "src/nexus/code_indexer.py",
+    "src/nexus/prose_indexer.py",
+    "src/nexus/pipeline_stages.py",
+    "src/nexus/doc_indexer.py",
+]
+
+
+def test_every_cli_ingest_site_fires_both_chains() -> None:
+    """Both `fire_post_store_batch_hooks` AND `fire_post_store_hooks` must
+    be invoked from every CLI indexer module. Pins the symmetric-fire
+    coverage: a single-doc consumer registered via
+    register_post_store_hook (e.g. RDR-089 aspect extraction) is visible
+    from MCP store_put AND from every CLI ingest path.
+
+    The test asserts a Call node count rather than text presence so
+    docstring or comment mentions do not satisfy the invariant. A future
+    contributor who removes either fire on a CLI site fails CI here.
+    """
+    offenders: dict[str, list[str]] = {}
+    for rel in CLI_SITE_FILES:
+        path = PROJECT_ROOT / rel
+        tree = ast.parse(path.read_text(), filename=str(path))
+        batch_calls = 0
+        single_calls = 0
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn_name = None
+            if isinstance(node.func, ast.Name):
+                fn_name = node.func.id
+            elif isinstance(node.func, ast.Attribute):
+                fn_name = node.func.attr
+            if fn_name == "fire_post_store_batch_hooks":
+                batch_calls += 1
+            elif fn_name == "fire_post_store_hooks":
+                single_calls += 1
+        problems: list[str] = []
+        if batch_calls == 0:
+            problems.append("missing fire_post_store_batch_hooks call")
+        if single_calls == 0:
+            problems.append("missing fire_post_store_hooks call")
+        if batch_calls != single_calls:
+            problems.append(
+                f"chain-call mismatch: {batch_calls} batch fires vs "
+                f"{single_calls} single-doc fires (must match)"
+            )
+        if problems:
+            offenders[rel] = problems
+
+    assert not offenders, (
+        "RDR-095 symmetric-fire invariant: every CLI indexer site must "
+        "call both fire_post_store_batch_hooks and fire_post_store_hooks "
+        "the same number of times. Offenders:\n  "
+        + "\n  ".join(f"{p}: {ps}" for p, ps in sorted(offenders.items()))
+    )

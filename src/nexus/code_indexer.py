@@ -430,12 +430,18 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
             metadatas=metadatas,
         )
 
-        # Post-store batch hook chain (RDR-095): chash dual-write +
-        # taxonomy incremental assignment, registered in mcp/core.py.
-        from nexus.mcp_infra import fire_post_store_batch_hooks
+        # Post-store hook chains (RDR-095). Both single-doc and batch
+        # chains fire from every storage event; the per-doc loop covers
+        # single-shape consumers on CLI ingest.
+        from nexus.mcp_infra import (
+            fire_post_store_batch_hooks,
+            fire_post_store_hooks,
+        )
         fire_post_store_batch_hooks(
             ids, ctx.corpus, documents, embeddings, metadatas,
         )
+        for _did, _doc in zip(ids, documents):
+            fire_post_store_hooks(_did, ctx.corpus, _doc)
 
     return len(ids)
 

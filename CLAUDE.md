@@ -173,7 +173,7 @@ src/nexus/           # Core package
   logging_setup.py   # Structured logging configuration (cli/console/mcp/hook modes, rotating file handler)
   taxonomy.py        # Deprecation shim — imports forwarded to db.t2.catalog_taxonomy (RDR-070)
   mcp_server.py      # Backward-compat shim — re-exports all MCP tools from nexus.mcp package
-  mcp_infra.py       # MCP server infrastructure: singletons, caching, test injection, post-store hook framework (single-doc + batch shapes, see "Post-Store Hooks" section), taxonomy_assign_hook + taxonomy_assign_batch_hook + chash_dual_write_batch_hook, check_version_compatibility (RDR-076)
+  mcp_infra.py       # MCP server infrastructure: singletons, caching, test injection, post-store hook framework (single-doc + batch shapes, see "Post-Store Hooks" section), taxonomy_assign_batch_hook + chash_dual_write_batch_hook, check_version_compatibility (RDR-076)
 nx/                  # Claude Code plugin (skills, agents, hooks, slash commands)
 tests/               # pytest suite (unit + integration + e2e/)
 docs/                # Documentation (architecture.md is the module map)
@@ -181,10 +181,12 @@ docs/                # Documentation (architecture.md is the module map)
 
 ## Post-Store Hooks
 
-Two parallel hook contracts let modules register per-document enrichment that fires after every write, no matter which path stored the document. Both live in `src/nexus/mcp_infra.py`.
+Two parallel hook contracts let modules register per-document enrichment that fires on every storage event, MCP `store_put` and CLI bulk ingest alike. Both live in `src/nexus/mcp_infra.py`. Consumers register in exactly one shape based on whether they benefit from batched dependency calls; the framework fires both chains from both paths so coverage is symmetric.
 
-- **Single-document hook chain** (RDR-070). Register with `register_post_store_hook(fn)`; fired by `fire_post_store_hooks(doc_id, collection, content)` at `src/nexus/mcp/core.py:902` inside the MCP `store_put` tool. For ad-hoc / agent-triggered enrichment that lands one document at a time. Current consumer: `taxonomy_assign_hook` (incremental topic assignment).
-- **Batch hook chain** (RDR-095). Register with `register_post_store_batch_hook(fn)`; fired by `fire_post_store_batch_hooks(doc_ids, collection, contents, embeddings, metadatas)` from every CLI ingest path (`indexer.py`, `code_indexer.py`, `prose_indexer.py`, `pipeline_stages.py`, `doc_indexer.py`). For per-document enrichment with batched dependency calls (one ChromaDB query for N centroids, one batched T2 upsert). Current consumers: `chash_dual_write_batch_hook` (RDR-086), `taxonomy_assign_batch_hook` (RDR-070). Registration order is load-bearing: chash first, taxonomy second, preserving the legacy invariant that chash rows exist before topic assignment runs.
+- **Single-document hook chain** (RDR-070). Register with `register_post_store_hook(fn)`; fired by `fire_post_store_hooks(doc_id, collection, content)` from MCP `store_put` once per call and from every CLI ingest path once per document in the batch. For per-document work that does not collapse into a batched dependency call (e.g. one Haiku per doc for aspect extraction). The single-doc chain is currently empty by default; future single-doc-only consumers register here.
+- **Batch hook chain** (RDR-095). Register with `register_post_store_batch_hook(fn)`; fired by `fire_post_store_batch_hooks(doc_ids, collection, contents, embeddings, metadatas)` from every CLI ingest path with the full batch and from MCP `store_put` with a 1-element batch. For enrichment that benefits from batched dependency calls (one ChromaDB query for N centroids, one batched T2 upsert). Current consumers: `chash_dual_write_batch_hook` (RDR-086), `taxonomy_assign_batch_hook` (RDR-070). Registration order is load-bearing: chash first, taxonomy second, preserving the invariant that chash rows exist before topic assignment runs.
+
+`taxonomy_assign_batch_hook` accepts `embeddings=None` from the MCP path and fetches them from T3 inline (with a local-MiniLM fallback). Batch-shape consumers therefore handle both the bulk path and the single-document path via one body without double-firing the per-doc chain.
 
 Both chains capture per-hook exceptions, persist them to T2 `hook_failures`, and never propagate to the caller. The batch chain stores the JSON-encoded doc_id list in `hook_failures.batch_doc_ids` and sets `is_batch=1`; readers (`nx taxonomy status`) render batch rows with an "affecting M document(s)" parenthetical alongside the row count.
 

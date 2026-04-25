@@ -456,99 +456,92 @@ def test_fire_post_store_batch_hooks_persist_failure_is_best_effort(
     fire_post_store_batch_hooks(["d1"], "c", ["x"], None, None)
 
 
-# ── Taxonomy assignment hook ─────────────────────────────────────────────────
+# ── Taxonomy batch hook fallback (MCP path with embeddings=None) ─────────────
+#
+# End-to-end taxonomy assignment behaviour (centroid lookup, cross-collection
+# projection) is covered in tests/test_taxonomy.py via the underlying
+# assign_batch path. The tests here cover only the new ``embeddings=None``
+# fallback that the MCP store_put path relies on (taxonomy_assign_batch_hook
+# previously had no embedding-fetch path; the legacy single-doc shim handled
+# it via taxonomy_assign_hook).
 
 
-def test_taxonomy_assign_hook_assigns_nearest_topic(
-    tmp_path: Path, chroma_client: chromadb.ClientAPI,
+def test_fetch_or_embed_returns_t3_embedding_when_present(
+    monkeypatch,
 ) -> None:
-    """taxonomy_assign_hook assigns doc to nearest centroid topic."""
-    from nexus.mcp_infra import taxonomy_assign_hook
-
-    db = T2Database(tmp_path / "hook.db")
-    try:
-        rng = np.random.default_rng(42)
-        embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
-        embeddings[:30, 0] += 3.0
-        embeddings[30:, 1] += 3.0
-        doc_ids = [f"doc-{i}" for i in range(60)]
-        texts = (
-            [f"machine learning neural {i}" for i in range(30)]
-            + [f"database query sql {i}" for i in range(30)]
-        )
-
-        # Discover topics to populate centroids
-        db.taxonomy.discover_topics(
-            "test__coll", doc_ids, embeddings, texts, chroma_client,
-        )
-
-        # Fire the hook for a new doc near cluster A
-        taxonomy_assign_hook(
-            "new-doc-1", "test__coll", "machine learning neural network",
-            taxonomy=db.taxonomy, chroma_client=chroma_client,
-        )
-
-        # Check same-collection centroid assignment exists in T2.
-        # RDR-075: the hook may also create cross-collection projection
-        # assignments (assigned_by='projection') if centroids exist in
-        # other collections — we only assert the centroid assignment here.
-        row = db.taxonomy.conn.execute(
-            "SELECT topic_id FROM topic_assignments "
-            "WHERE doc_id = 'new-doc-1' AND assigned_by = 'centroid'"
-        ).fetchone()
-        assert row is not None, "Same-collection centroid assignment missing"
-
-        # Verify the assigned topic exists and is a real topic
-        # (discover uses random vectors so centroid-text correlation is
-        # not guaranteed — we verify a valid topic was chosen)
-        assigned_topic_id = row[0]
-        topic = db.taxonomy.get_topic_by_id(assigned_topic_id)
-        assert topic is not None, f"Assigned topic_id {assigned_topic_id} does not exist"
-        assert topic["collection"] == "test__coll"
-        assert topic["doc_count"] > 0
-    finally:
-        db.close()
-
-
-def test_taxonomy_assign_hook_noop_no_centroids(
-    tmp_path: Path,
-) -> None:
-    """taxonomy_assign_hook is a no-op when taxonomy__centroids doesn't exist.
-
-    RDR-075: when cross-collection projection is active, centroids from any
-    collection would trigger assignment. This test uses a first-in-process
-    client state to verify the no-centroids path. When run after other tests
-    that populate centroids via the shared ephemeral-client process state,
-    it correctly assigns via cross-collection projection (tested separately
-    in tests/test_taxonomy.py::test_assign_single_cross_collection_finds_foreign_topic).
+    """_fetch_or_embed returns the doc's existing T3 embedding without
+    hitting the local-MiniLM fallback when the row is present.
     """
-    from nexus.mcp_infra import taxonomy_assign_hook
+    import nexus.mcp_infra as mod
+    from nexus.mcp_infra import _fetch_or_embed
 
-    # Use a dedicated chroma client created fresh for this test only.
-    # If a prior test has already created the shared "ephemeral" instance,
-    # skip — this test's semantics only hold on a truly empty state.
-    try:
-        client = chromadb.EphemeralClient()
-    except ValueError:
-        pytest.skip("EphemeralClient already initialized by prior test")
+    stored_emb = [0.1] * 384
+    stored_emb[0] = 0.9
 
-    db = T2Database(tmp_path / "hook_empty.db")
-    try:
-        # Delete any pre-existing taxonomy__centroids to ensure clean state
-        try:
-            client.delete_collection("taxonomy__centroids")
-        except Exception:
-            pass
+    class _Coll:
+        def get(self, ids, include):
+            return {"ids": list(ids), "embeddings": [stored_emb]}
 
-        taxonomy_assign_hook(
-            "orphan-doc", "nonexistent__coll", "some content",
-            taxonomy=db.taxonomy, chroma_client=client,
-        )
+    class _Client:
+        def get_collection(self, name, embedding_function):
+            return _Coll()
 
-        # No assignment created (no centroids exist at all)
-        row = db.taxonomy.conn.execute(
-            "SELECT COUNT(*) FROM topic_assignments WHERE doc_id = 'orphan-doc'"
-        ).fetchone()[0]
-        assert row == 0
-    finally:
-        db.close()
+    class _T3Stub:
+        _client = _Client()
+
+    monkeypatch.setattr(mod, "get_t3", lambda: _T3Stub())
+
+    result = _fetch_or_embed(["doc-1"], "fetch__coll", ["payload"])
+    assert result is not None
+    assert len(result) == 1
+    assert result[0][0] == 0.9
+
+
+def test_fetch_or_embed_falls_back_to_local_minilm(
+    monkeypatch,
+) -> None:
+    """When T3 returns no embedding for a doc id, _fetch_or_embed falls
+    back to local MiniLM embedding of the supplied content. Keeps MCP
+    store_put working when the just-upserted row is not yet retrievable
+    (race condition with t3 visibility).
+    """
+    import nexus.mcp_infra as mod
+    from nexus.mcp_infra import _fetch_or_embed
+
+    class _EmptyColl:
+        def get(self, ids, include):
+            return {"ids": [], "embeddings": []}
+
+    class _Client:
+        def get_collection(self, name, embedding_function):
+            return _EmptyColl()
+
+    class _T3Stub:
+        _client = _Client()
+
+    monkeypatch.setattr(mod, "get_t3", lambda: _T3Stub())
+
+    result = _fetch_or_embed(["doc-x"], "fetch__coll", ["hello world"])
+    assert result is not None
+    assert len(result) == 1
+    assert len(result[0]) == 384  # MiniLM dim
+
+
+def test_fetch_or_embed_returns_none_when_no_t3_no_content(
+    monkeypatch,
+) -> None:
+    """If T3 fetch raises AND contents is empty, the fallback has no input;
+    the function returns None and the caller no-ops cleanly.
+    """
+    import nexus.mcp_infra as mod
+    from nexus.mcp_infra import _fetch_or_embed
+
+    class _T3Boom:
+        @property
+        def _client(self):
+            raise RuntimeError("t3 unreachable")
+
+    monkeypatch.setattr(mod, "get_t3", lambda: _T3Boom())
+
+    result = _fetch_or_embed(["doc-y"], "any__coll", [])
+    assert result is None

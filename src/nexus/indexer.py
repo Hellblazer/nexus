@@ -802,12 +802,21 @@ def _index_pdf_file(
             metadatas=metadatas,
         )
 
-        # Post-store batch hook chain (RDR-095): chash dual-write +
-        # taxonomy incremental assignment, registered in mcp/core.py.
-        from nexus.mcp_infra import fire_post_store_batch_hooks
+        # Post-store hook chains (RDR-095). Both single-doc and batch
+        # chains fire from every storage event; consumers register in
+        # whichever shape fits their work. Single-doc fire iterates the
+        # batch one document at a time so per-doc hooks (e.g. RDR-089
+        # aspect extraction) cover CLI ingest the same way they cover
+        # MCP store_put.
+        from nexus.mcp_infra import (
+            fire_post_store_batch_hooks,
+            fire_post_store_hooks,
+        )
         fire_post_store_batch_hooks(
             ids, collection_name, documents, embeddings, metadatas,
         )
+        for _did, _doc in zip(ids, documents):
+            fire_post_store_hooks(_did, collection_name, _doc)
 
     return len(prepared)
 

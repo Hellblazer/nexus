@@ -66,13 +66,28 @@ def test_taxonomy_subcommands_exist():
     assert not missing, f"Missing taxonomy subcommands: {missing}"
 
 
-def test_mcp_hook_registered():
-    """taxonomy_assign_hook must be in _post_store_hooks after core import."""
-    import nexus.mcp.core  # noqa: F401 — triggers registration
-    from nexus.mcp_infra import _post_store_hooks
+def test_mcp_hooks_registered():
+    """Post-store hooks land in their declared chains after core import.
 
-    hook_names = [h.__name__ for h in _post_store_hooks]
-    assert "taxonomy_assign_hook" in hook_names
+    RDR-095 + symmetric-fire follow-up: taxonomy + chash dual-write are
+    batch-only registrations (the batch hook handles single-document MCP
+    events via 1-element batches). Single-doc chain is empty by default;
+    future single-doc-only consumers (RDR-089 aspect extraction) will
+    add themselves here.
+    """
+    import nexus.mcp.core  # noqa: F401 — triggers registration
+    from nexus.mcp_infra import _post_store_batch_hooks, _post_store_hooks
+
+    batch_names = [h.__name__ for h in _post_store_batch_hooks]
+    assert batch_names == [
+        "chash_dual_write_batch_hook",
+        "taxonomy_assign_batch_hook",
+    ], f"unexpected batch chain order: {batch_names}"
+
+    single_names = [h.__name__ for h in _post_store_hooks]
+    # Single-doc chain may be empty or carry only future hooks; assert
+    # the legacy taxonomy_assign_hook is gone.
+    assert "taxonomy_assign_hook" not in single_names
 
 
 def test_nexus_mcp_tools_registered():

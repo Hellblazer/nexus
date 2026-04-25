@@ -477,94 +477,6 @@ def _record_batch_hook_failure(
         )
 
 
-def taxonomy_assign_hook(
-    doc_id: str,
-    collection: str,
-    content: str,
-    *,
-    taxonomy=None,
-    chroma_client=None,
-) -> None:
-    """Assign a newly stored document to its nearest topic via centroid ANN.
-
-    Re-embeds ``content`` with local MiniLM 384d, queries
-    ``taxonomy__centroids`` for the nearest cluster, and writes a
-    ``topic_assignments`` row with ``assigned_by='centroid'``.
-
-    No-op when centroids don't exist (no discover run yet), or when
-    the collection matches ``taxonomy.local_exclude_collections`` and
-    running in local mode (MiniLM clusters poorly on code).
-    Keyword args ``taxonomy`` and ``chroma_client`` are injection points
-    for testing; production path resolves them from singletons.
-    """
-    from fnmatch import fnmatch
-
-    from nexus.config import is_local_mode, load_config
-
-    if is_local_mode():
-        exclude = load_config().get("taxonomy", {}).get("local_exclude_collections", [])
-        if any(fnmatch(collection, pat) for pat in exclude):
-            return
-
-    if taxonomy is None:
-        with t2_ctx() as db:
-            taxonomy = db.taxonomy
-            _run_taxonomy_assign(doc_id, collection, content, taxonomy, chroma_client)
-            return
-
-    _run_taxonomy_assign(doc_id, collection, content, taxonomy, chroma_client)
-
-
-def _run_taxonomy_assign(doc_id, collection, content, taxonomy, chroma_client):
-    """Inner logic for taxonomy_assign_hook (avoids double context-manager).
-
-    Fetches the doc's existing T3 embedding (Voyage on cloud, MiniLM on
-    local) rather than re-embedding with MiniLM. Falls back to MiniLM
-    if the T3 embedding isn't available (e.g., race condition).
-    """
-    import numpy as np
-
-    if chroma_client is None:
-        chroma_client = get_t3()._client
-
-    # Try to fetch the doc's existing T3 embedding (already stored by store_put)
-    embedding = None
-    try:
-        coll = chroma_client.get_collection(collection, embedding_function=None)
-        result = coll.get(ids=[doc_id], include=["embeddings"])
-        if result["embeddings"] is not None and len(result["embeddings"]) > 0:
-            emb = result["embeddings"][0]
-            if emb is not None and len(emb) > 0:
-                embedding = np.array(emb, dtype=np.float32)
-    except Exception:
-        import structlog
-        structlog.get_logger().debug("taxonomy_t3_embedding_fetch_failed", doc_id=doc_id, exc_info=True)
-
-    if embedding is None:
-        from nexus.db.local_ef import LocalEmbeddingFunction
-
-        ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-        embedding = np.array(ef([content])[0], dtype=np.float32)
-
-    # Same-collection assignment (existing behavior).
-    same = taxonomy.assign_single(collection, embedding, chroma_client)
-    if same is not None:
-        taxonomy.assign_topic(doc_id, same.topic_id, assigned_by="centroid")
-
-    # Cross-collection projection (RDR-075 SC-4, SC-6 + RDR-077 RF-3/RF-5).
-    cross = taxonomy.assign_single(
-        collection, embedding, chroma_client, cross_collection=True,
-    )
-    if cross is not None and (same is None or cross.topic_id != same.topic_id):
-        taxonomy.assign_topic(
-            doc_id,
-            cross.topic_id,
-            assigned_by="projection",
-            similarity=cross.similarity,
-            source_collection=collection,
-        )
-
-
 def taxonomy_assign_batch_hook(
     doc_ids: list[str],
     collection: str,
@@ -572,32 +484,37 @@ def taxonomy_assign_batch_hook(
     embeddings: list[list[float]] | None,
     metadatas: list[dict] | None,
 ) -> None:
-    """Registered batch hook (RDR-095): assign a batch of indexed docs to
-    their nearest topics.
+    """Registered batch hook: assign indexed docs to their nearest topics.
 
-    Called via ``fire_post_store_batch_hooks`` from every CLI indexing
-    path after chunk upsert. Reads ``embeddings``; ignores ``contents``
-    and ``metadatas``. Uses existing T3 embeddings (already in
-    *embeddings*) so no re-fetch or re-embed is needed.
+    Called via ``fire_post_store_batch_hooks`` from every storage event:
+    CLI bulk ingest passes the embeddings already computed by the upsert;
+    MCP ``store_put`` passes ``embeddings=None`` and the hook fetches them
+    from T3 inline (one ChromaDB get per doc). The fetch falls back to
+    local MiniLM embedding when T3 is unavailable, matching the legacy
+    single-doc shim behaviour.
 
+    Reads ``embeddings`` and ``contents``; ignores ``metadatas``.
     No-op when centroids don't exist (no discover run yet) or the
-    collection is excluded. Body parity with the pre-RDR-095
-    ``taxonomy_assign_batch`` direct-call function: identical inner
-    logic, return value narrowed to None (callers never read it).
+    collection is excluded.
 
-    Registered via ``register_post_store_batch_hook`` in
+    Registered once via ``register_post_store_batch_hook`` in
     ``mcp/core.py``.
     """
     from fnmatch import fnmatch
 
     from nexus.config import is_local_mode, load_config
 
-    if not doc_ids or not embeddings:
+    if not doc_ids:
         return
 
     if is_local_mode():
         exclude = load_config().get("taxonomy", {}).get("local_exclude_collections", [])
         if any(fnmatch(collection, pat) for pat in exclude):
+            return
+
+    if not embeddings:
+        embeddings = _fetch_or_embed(doc_ids, collection, contents)
+        if not embeddings:
             return
 
     try:
@@ -622,6 +539,66 @@ def taxonomy_assign_batch_hook(
     except Exception:
         import structlog
         structlog.get_logger().debug("taxonomy_assign_batch_failed", exc_info=True)
+
+
+def _fetch_or_embed(
+    doc_ids: list[str],
+    collection: str,
+    contents: list[str],
+) -> list[list[float]] | None:
+    """Fetch existing T3 embeddings for *doc_ids* in *collection*.
+
+    Falls back to local MiniLM embedding of *contents* when T3 is
+    unavailable or returns no embedding for a given id. Returns None
+    if no embeddings can be produced (callers no-op in that case).
+    Used by ``taxonomy_assign_batch_hook`` when called from MCP
+    ``store_put`` with ``embeddings=None``.
+    """
+    import numpy as np
+
+    fetched: list[list[float] | None] = [None] * len(doc_ids)
+    try:
+        chroma_client = get_t3()._client
+        coll = chroma_client.get_collection(collection, embedding_function=None)
+        result = coll.get(ids=doc_ids, include=["embeddings"])
+        result_ids = result.get("ids", [])
+        result_embs = result.get("embeddings")
+        if result_embs is not None:
+            id_index = {d: i for i, d in enumerate(doc_ids)}
+            for j, rid in enumerate(result_ids):
+                idx = id_index.get(rid)
+                if idx is None:
+                    continue
+                emb = result_embs[j]
+                if emb is not None and len(emb) > 0:
+                    fetched[idx] = list(emb)
+    except Exception:
+        import structlog
+        structlog.get_logger().debug(
+            "taxonomy_t3_embedding_fetch_failed",
+            collection=collection,
+            exc_info=True,
+        )
+
+    missing = [i for i, e in enumerate(fetched) if e is None]
+    if missing and contents:
+        try:
+            from nexus.db.local_ef import LocalEmbeddingFunction
+            ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+            local_inputs = [contents[i] for i in missing if i < len(contents)]
+            local_embs = ef(local_inputs)
+            for k, i in enumerate(missing):
+                if i < len(contents) and k < len(local_embs):
+                    fetched[i] = list(np.array(local_embs[k], dtype=np.float32))
+        except Exception:
+            import structlog
+            structlog.get_logger().debug(
+                "taxonomy_local_embed_fallback_failed", exc_info=True,
+            )
+
+    if any(e is None for e in fetched):
+        return None
+    return [e for e in fetched if e is not None]
 
 
 # ── Chash dual-write (RDR-086 Phase 1.2; migrated to batch hook in RDR-095) ──
