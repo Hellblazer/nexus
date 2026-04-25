@@ -3411,11 +3411,21 @@ def main():
         mcp_owns_t1=_MCP_OWNS_T1,
     )
     if _MCP_OWNS_T1:
-        # Belt-and-braces for the kill paths where the FastMCP lifespan
-        # finally does not fire. The lifespan is the primary cleanup path
-        # (anyio cancellation through ``async finally``); these handlers
-        # cover SIGTERM-without-cancellation and the abrupt-exit case.
-        # _t1_chroma_shutdown is idempotent so double-firing is safe.
+        # The FastMCP lifespan finally is the design's primary cleanup
+        # path; the signal handlers below are belt-and-braces for the
+        # cases where the lifespan does not fire. Empirically, FastMCP's
+        # stdio transport on macOS does NOT have anyio install a
+        # SIGTERM handler that propagates cancellation through the
+        # lifespan async finally (RDR-094 spike, 2026-04-25). Without
+        # our explicit handlers, SIGTERM kills the process silently,
+        # atexit does NOT run (Python only fires atexit on clean exit),
+        # and chroma orphans. The watchdog covers it eventually but
+        # the MCP-owned cleanup path simply doesn't run. So we install
+        # the signal handlers for SIGTERM and SIGINT to call
+        # _t1_chroma_shutdown directly. atexit stays as the third
+        # belt-and-braces for clean exits via stdin EOF / SystemExit.
+        # _t1_chroma_shutdown is idempotent so all three paths can fire
+        # without double-cleaning.
         atexit.register(_t1_chroma_shutdown)
         signal.signal(signal.SIGTERM, _sigterm_handler)
         signal.signal(signal.SIGINT, _sigterm_handler)
