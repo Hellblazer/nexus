@@ -558,9 +558,9 @@ real twins: identical call-site shape, identical seven sites,
 identical batch-perf-optimization motivation.
 
 The single-document chain stays. The MCP `store_put` tool still
-uses it; future single-shape consumers (small, cheap, MCP-only
-hooks) still register through it. We are not removing a contract,
-we are adding the missing one.
+fires it; future single-shape consumers (small, cheap, per-doc
+hooks like RDR-089 aspect extraction) register through it. We are
+not removing a contract, we are adding the missing one.
 
 The narrow batch-perf optimizations are preserved because each
 migrated hook wraps its existing function body verbatim:
@@ -568,6 +568,38 @@ migrated hook wraps its existing function body verbatim:
 ChromaDB call, `chash_dual_write_batch_hook` keeps the
 single-batched T2 SQL upsert. No regression on bulk ingest for
 either consumer.
+
+### Symmetric-fire follow-up (post-acceptance, commit 4a912f9)
+
+Closure review surfaced an asymmetry the RDR shipped intentionally:
+the single-document chain fired only from MCP `store_put`, the batch
+chain fired only from CLI ingest. Future single-shape consumers
+(RDR-089 aspect extraction with one Haiku per doc) had no clean way
+to fire from CLI without re-introducing the hardcoded-call debt
+RDR-095 dismantled. The follow-up commit makes both chains fire from
+every storage event:
+
+- `taxonomy_assign_hook` was deleted as redundant with
+  `taxonomy_assign_batch_hook`. The batch hook now accepts
+  `embeddings=None` from MCP `store_put` and fetches embeddings via
+  a new `_fetch_or_embed` helper (one ChromaDB get plus local-MiniLM
+  fallback), preserving the legacy single-doc shim's round-trip cost.
+- MCP `store_put` fires both chains: single-doc once, batch with a
+  1-element list.
+- All seven CLI ingest sites fire the batch chain with the full
+  payload PLUS a per-doc `fire_post_store_hooks` loop. Loop overhead
+  is microseconds when the single-doc chain is empty (current state)
+  and meaningful only once a single-doc consumer registers.
+- `tests/test_hook_drift_guard.py` adds
+  `test_every_cli_ingest_site_fires_both_chains` which uses
+  `ast.walk` to verify every CLI indexer module has matching counts
+  of both fire calls. Symmetric coverage is now CI-enforced.
+
+The symmetric-fire commit closes the unattended-mess concern raised
+during closure review: any consumer registers in exactly one shape
+based on whether its work benefits from batched dependency calls,
+and the framework guarantees coverage from every storage path
+without per-path duplication.
 
 ## Alternatives Considered
 
@@ -585,7 +617,14 @@ queries turns a 50ms operation into ~50s for 1000 documents. Not
 acceptable.
 
 **Reason for rejection**: Eats a real perf optimization for no
-gain. The two-shape reality is intrinsic, not avoidable.
+gain. The two-shape reality is intrinsic, not avoidable. Note: the
+post-acceptance symmetric-fire follow-up (see Decision Rationale)
+plumbs `fire_post_store_hooks` into CLI sites in a per-doc loop,
+but only after collapsing taxonomy into the batch chain so the
+loop iterates an empty single-doc chain by default. The perf cliff
+this alternative described is therefore avoided: only consumers
+that explicitly register single-shape pay the per-doc cost, and
+consumers that register batch keep the one-batched-query cost.
 
 ### Alternative 2: Pass embeddings through a single-document context dict
 

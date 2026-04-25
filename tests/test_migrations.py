@@ -1391,14 +1391,14 @@ class TestMigrateHookFailures:
         migrate_hook_failures(conn)
         conn.execute(
             "INSERT INTO hook_failures (hook_name, error) VALUES (?, ?)",
-            ("taxonomy_assign_hook", "simulated"),
+            ("taxonomy_assign_batch_hook", "simulated"),
         )
         conn.commit()
 
         row = conn.execute(
             "SELECT hook_name, error, occurred_at FROM hook_failures"
         ).fetchone()
-        assert row[0] == "taxonomy_assign_hook"
+        assert row[0] == "taxonomy_assign_batch_hook"
         assert row[1] == "simulated"
         assert row[2]  # non-empty timestamp
 
@@ -1484,7 +1484,7 @@ class TestMigrateHookFailuresBatchColumns:
         conn.execute(
             "INSERT INTO hook_failures (doc_id, collection, hook_name, error) "
             "VALUES (?, ?, ?, ?)",
-            ("doc-pre", "knowledge__delos", "taxonomy_assign_hook", "boom"),
+            ("doc-pre", "knowledge__delos", "taxonomy_assign_batch_hook", "boom"),
         )
         conn.commit()
 
@@ -1496,7 +1496,7 @@ class TestMigrateHookFailuresBatchColumns:
         ).fetchone()
         assert row[0] == "doc-pre"
         assert row[1] == "knowledge__delos"
-        assert row[2] == "taxonomy_assign_hook"
+        assert row[2] == "taxonomy_assign_batch_hook"
         assert row[3] == "boom"
         assert row[4] is None  # batch_doc_ids unset for legacy rows
         assert row[5] == 0  # is_batch default

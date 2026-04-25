@@ -523,11 +523,13 @@ def migrate_review_columns(conn: sqlite3.Connection) -> None:
 def migrate_hook_failures(conn: sqlite3.Connection) -> None:
     """Create the ``hook_failures`` table for GH #251.
 
-    ``fire_post_store_hooks`` in ``mcp_infra.py`` wraps every post-store
-    hook in a per-hook ``try/except`` — a failing
-    ``taxonomy_assign_hook`` (e.g. missing centroids, Chroma timeout)
-    logs a warning and moves on so ``store_put`` never rolls back. The
-    dropped write is currently invisible outside structlog output.
+    ``fire_post_store_hooks`` and ``fire_post_store_batch_hooks`` in
+    ``mcp_infra.py`` wrap every post-store hook in a per-hook
+    ``try/except`` — a failing hook (e.g.
+    ``taxonomy_assign_batch_hook`` raising on missing centroids or a
+    ChromaDB timeout) logs a warning and moves on so the enclosing
+    write path never rolls back. The dropped failure is currently
+    invisible outside structlog output.
 
     This table captures each failure with enough context for ``status``
     to surface an actionable Action line and (optional) ``nx doctor

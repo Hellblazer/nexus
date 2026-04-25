@@ -1261,9 +1261,10 @@ class CatalogTaxonomy:
         # Single lock block: both the aggregate SELECT and the per-pair
         # merge+upsert run under the same acquisition. Splitting them
         # (earlier implementation) created a window where a concurrent
-        # ``assign_topic`` or ``taxonomy_assign_hook`` could change
-        # ``topic_assignments`` between the aggregate and the writes,
-        # yielding stale ``link_count`` values. Code-review finding C-1.
+        # ``assign_topic`` or ``taxonomy_assign_batch_hook`` could
+        # change ``topic_assignments`` between the aggregate and the
+        # writes, yielding stale ``link_count`` values. Code-review
+        # finding C-1.
         written = 0
         with self._lock:
             rows = self.conn.execute(
