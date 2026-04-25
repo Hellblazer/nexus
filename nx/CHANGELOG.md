@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.12.1] - 2026-04-25
+
+Plugin version aligned with conexus 4.12.1. No plugin-level functional changes. See root `CHANGELOG.md` for the 4.12.0 shakeout fix: `mcp_server_crashed` events on clean shutdowns were a SystemExit race between stdin EOF and SIGTERM, fixed by switching the signal handler to `os._exit` and adding a sticky in-flight flag that short-circuits re-entrant shutdown calls.
+
 ## [4.12.0] - 2026-04-25
 
 Plugin version aligned with conexus 4.12.0. Two SessionEnd changes ship from RDR-094 Phase C: the `nx hook session-end-detach` fallback is dropped from `hooks.json` (it raced the same cold-start window the `nx-session-end-launcher` exists to solve, so falling back to it on launcher failure was a footgun), and the launcher's grandchild now dispatches to `hooks.session_end_flush` instead of `hooks.session_end`. Storage-only flush stays in the hook path; chroma teardown is owned by the t1_watchdog sidecar (dual-watch under the new default `NEXUS_MCP_OWNS_T1=on`). SessionEnd timeout drops from 5s to 3s: sub-second flush means a wedged hook is reaped faster. See root `CHANGELOG.md` for the full RDR-094 Phase 4 surface (default-on flag flip, T1 race retry, watchdog logging, `nx doctor --check-mcp-logs`).

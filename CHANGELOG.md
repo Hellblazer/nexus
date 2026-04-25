@@ -6,6 +6,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.12.1] - 2026-04-25
+
+Shakeout patch for 4.12.0. Production sessions on Hal's reference install showed `mcp_server_crashed` events in `mcp.log` on every clean shutdown after the default-on flag flip. Root cause: stdin-EOF + SIGTERM race. Claude Code closes the MCP client's stdio pipe and sends SIGTERM near-simultaneously; the lifespan finally fires (clean-exit path) and starts running `_t1_chroma_shutdown` → `stop_t1_server`'s 100ms poll loop; the SIGTERM signal handler then runs on top of the paused frame, calls `sys.exit(0)`, and the resulting `SystemExit` propagates through anyio's TaskGroup as an unhandled error. Chroma was always cleaned up correctly (the watchdog confirmed via `chroma_cleanup_complete` events; `nx doctor --check-tmpdirs` was clean), but every clean shutdown logged a misleading multi-thousand-character traceback as a "crash".
+
+Spike A's 40-cycle SIGTERM evidence didn't surface this because the spike sent only SIGTERM (no stdin EOF); only one cleanup path fired per cycle. Production has BOTH paths firing simultaneously.
+
+### Fixed
+
+- **`_sigterm_handler` no longer races the lifespan finally** (`src/nexus/mcp/core.py`). Two coordinated changes:
+  - New module-scope `_SHUTDOWN_IN_FLIGHT` flag — set by `_t1_chroma_shutdown` on first entry, never cleared. Re-entrant calls (signal handler firing during in-flight cleanup) short-circuit at the top of `_t1_chroma_shutdown` before touching `_OWNED_CHROMA`. Catches the case where the lifespan finally is paused inside `stop_t1_server`'s poll loop and SIGTERM arrives.
+  - `_sigterm_handler` checks `_SHUTDOWN_IN_FLIGHT` first: returns immediately when the lifespan owns the exit path. When it's the first signal (SIGTERM-only path with no prior stdin EOF), it drives the shutdown then calls `os._exit(0)` instead of `sys.exit(0)`. `os._exit` terminates the process without raising `SystemExit`, so anyio doesn't see a TaskGroup error and `mcp.log` no longer records spurious crash events on clean shutdowns.
+
+Tests: `tests/test_mcp_chroma_lifecycle.py` 15 → 19, with explicit regression sentinels (`test_in_flight_flag_blocks_reentrant_call`, `test_returns_silently_when_shutdown_in_flight`, `test_drives_shutdown_and_os_exit_when_first_signal`, `test_does_not_use_sys_exit`).
+
 ## [4.12.0] - 2026-04-25
 
 Closes RDR-094 Phase 4 (MCP-Owned T1 Chroma Lifecycle) end-to-end and **flips the `NEXUS_MCP_OWNS_T1` flag default-on**. The chroma server's lifecycle is now owned by nx-mcp's lifespan / atexit / signal handlers by default, and the watchdog sidecar dual-watches both the MCP and Claude Code root PIDs so any failure mode (clean SIGTERM, SIGKILL, SIGSEGV, Claude crash, stdio pipe break) gets cleaned up within ~10s. Spike A (40/40), Spike B (CA-2 race verified after the retry mitigation), and Spike C (issue #40207 verified-negative for vanilla stdio) all pass at full sample size.
