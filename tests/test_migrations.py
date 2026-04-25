@@ -77,11 +77,12 @@ class TestMigrationDataclass:
         # Baseline 16 + RDR-092 Phase 0d backfill (4.9.12) +
         # RDR-092 Phase 3.1 match_text column (4.9.13) +
         # legacy operation-shape retirement (4.10.1) +
-        # builtin-bindings backfill (4.10.2) = 20.
+        # builtin-bindings backfill (4.10.2) +
+        # hook_telemetry table (4.14.0, nexus-ntbg) = 21.
         # Prefer the name-based checks in TestBackfillPlanDimensions
         # and TestAddPlanMatchTextColumn for future guards; this
         # count is a cheap sentinel only.
-        assert len(MIGRATIONS) == 20
+        assert len(MIGRATIONS) == 21
 
     def test_migrations_ordered_by_version(self) -> None:
         from nexus.db.migrations import MIGRATIONS, _parse_version
