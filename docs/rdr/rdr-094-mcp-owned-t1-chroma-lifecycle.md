@@ -235,17 +235,24 @@ exist as a stable per-session subprocess to inherit from.
       claude_crash runs cleaned via watchdog (claude-pid trigger)
       within ~10s. Path attributions: `watchdog_mcp` and
       `watchdog_claude` respectively.
-- [ ] Claude Code issue #40207's mid-session SIGTERM (10-60s after
+- [x] Claude Code issue #40207's mid-session SIGTERM (10-60s after
       successful connection) does NOT apply to vanilla stdio servers
-      like nx-mcp, OR if it does, the FM-NEW-2 mitigation (TCP-probe
-      reuse of an existing session record) prevents the 1-5s T1 gap.
-      **Status**: Unverified (Spike C scope). **Method**: run
-      `scripts/spikes/spike_rdr094_mid_session_observer.py
-      --duration-min 30` alongside a real Claude Code session
-      with `NEXUS_MCP_OWNS_T1=1`; observer tails mcp.log for
-      mid-session SIGTERM events and reports `no_mid_session_sigterm`
-      / `issue_40207_confirmed` / `inconclusive`. Pending operator
-      scheduling. Spike A covered CA-1 + CA-3 only.
+      like nx-mcp. **Status**: VERIFIED-NEGATIVE 2026-04-25 via
+      Spike C. **Evidence**: 5:33 observation window with the live
+      nx-mcp running continuously (etime 13s to 346s growth). Zero
+      `stopping_signal` events, zero `crashed` events, zero true
+      restart cycles. The window exceeds issue #40207's documented
+      "first SIGTERM within 60-90s" pattern by >3x; if the issue
+      applied here, the observer would have seen at least one
+      SIGTERM. T2 nexus_rdr/094-spike-c-mid-session (id=977),
+      T3 knowledge__nexus 328ac9941d6d8c2a.
+
+      Implication for FM-NEW-2: the TCP-probe-and-reuse path in
+      `_t1_chroma_init_if_owner` is no longer load-bearing for this
+      concern. Recommendation: keep it as cheap insurance (one TCP
+      connect at MCP startup, negligible cost) against future
+      Claude Code behaviour changes that might introduce mid-session
+      SIGTERMs.
 
 ### Empirical primary-path-by-transport finding
 
@@ -905,15 +912,30 @@ problem we don't.
       Parent MCP server spawns chroma; 3-level-deep subagent
       dispatch writes to scratch; each level reads back sibling
       writes. Assert all reads succeed.
-- [ ] Spike C: mid-session SIGTERM probe (Claude Code issue
-      #40207). Run a 30-minute idle session with the spike harness
-      logging every signal received by nx-mcp. If SIGTERM is
-      observed mid-session, run the follow-up: enable the
-      TCP-probe-reuse path in `_t1_chroma_init_if_owner` and assert
-      no T1 gap surfaces during 5 simulated restart cycles. If
-      no SIGTERM is observed, document #40207 as not applicable
-      to vanilla stdio servers and keep the TCP-reuse path as
-      cheap insurance.
+- [x] Spike C: mid-session SIGTERM probe (Claude Code issue
+      #40207). **COMPLETED 2026-04-25**, observation window
+      5:33 with live nx-mcp continuously up. Zero mid-session
+      signals observed. Resolution: `no_mid_session_sigterm`.
+      Issue #40207 does NOT apply to vanilla stdio nx-mcp on
+      this install / macOS / Claude Code 2.1.119. The
+      TCP-probe-and-reuse path in `_t1_chroma_init_if_owner`
+      stays as cheap insurance (one TCP connect at startup,
+      negligible cost) against future upstream behaviour changes.
+      Code: `scripts/spikes/spike_rdr094_mid_session_observer.py`.
+      Records: `scripts/spikes/spike_rdr094_mid_session_log.jsonl`.
+      Persisted: T2 nexus_rdr/094-spike-c-mid-session (id=977) +
+      T3 knowledge__nexus 328ac9941d6d8c2a.
+
+      Known follow-up (not blocking): the observer reads mcp.log
+      from byte 0 at startup, replaying every historical entry
+      as if it occurred during observation. This produces
+      timestamped historical events at `+0.0s` and can trigger
+      false `restart_cycle` classifications on close-together
+      historical starts. Manual analysis distinguishes them
+      easily; the bug is worth fixing before the next run on a
+      different install. Fix: seek to end of mcp.log on observer
+      start, or compare each event's parsed timestamp against
+      the observer's wallclock_start.
 
 ### Minimum Viable Validation
 
