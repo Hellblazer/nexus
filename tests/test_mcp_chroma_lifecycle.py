@@ -22,17 +22,22 @@ import pytest
 
 @contextmanager
 def _clean_owned_chroma():
-    """Reset _OWNED_CHROMA before and after each test so module-scope
-    state from one test does not leak into the next."""
+    """Reset _OWNED_CHROMA + _SHUTDOWN_IN_FLIGHT before and after each
+    test so module-scope state from one test does not leak into the
+    next. Both are sticky module globals; tests that exercise
+    _t1_chroma_shutdown must start from a clean slate."""
     from nexus.mcp import core as core_mod
 
     saved = dict(core_mod._OWNED_CHROMA)
+    saved_in_flight = core_mod._SHUTDOWN_IN_FLIGHT
     core_mod._OWNED_CHROMA.clear()
+    core_mod._SHUTDOWN_IN_FLIGHT = False
     try:
         yield
     finally:
         core_mod._OWNED_CHROMA.clear()
         core_mod._OWNED_CHROMA.update(saved)
+        core_mod._SHUTDOWN_IN_FLIGHT = saved_in_flight
 
 
 # ── _tcp_probe_alive ────────────────────────────────────────────────────────
@@ -270,6 +275,98 @@ class TestShutdown:
                 core_mod._t1_chroma_shutdown()
                 core_mod._t1_chroma_shutdown()
             assert mock_stop.call_count == 1
+
+    def test_in_flight_flag_blocks_reentrant_call(self):
+        """Regression sentinel for the production stdin-EOF + SIGTERM
+        race that produced spurious mcp_server_crashed events on every
+        clean shutdown post-4.12.0. When the lifespan finally is in
+        the middle of running stop_t1_server (Python is paused inside
+        ``time.sleep``), a SIGTERM-driven re-entrant call to
+        _t1_chroma_shutdown must short-circuit instead of running
+        cleanup again from the signal handler frame."""
+        from nexus.mcp import core as core_mod
+
+        with _clean_owned_chroma():
+            core_mod._OWNED_CHROMA.update({
+                "session_id": "y", "server_pid": 12345,
+                "tmpdir": "", "session_file": "",
+            })
+            # Simulate "lifespan finally is in flight": the flag is
+            # set but _OWNED_CHROMA has not yet been cleared.
+            core_mod._SHUTDOWN_IN_FLIGHT = True
+            with patch("nexus.session.stop_t1_server") as mock_stop:
+                core_mod._t1_chroma_shutdown()
+            mock_stop.assert_not_called(), (
+                "Re-entrant call must short-circuit while shutdown "
+                "is in flight to avoid double-execute / SystemExit "
+                "race through anyio TaskGroup."
+            )
+
+
+# ── _sigterm_handler (4.12.1 race fix) ──────────────────────────────────────
+
+
+class TestSigtermHandler:
+    """Pin the production race fix: stdin-EOF + SIGTERM must NOT log
+    mcp_server_crashed when the lifespan finally is already running
+    cleanup."""
+
+    def test_returns_silently_when_shutdown_in_flight(self):
+        """Lifespan finally has entered _t1_chroma_shutdown; signal
+        handler must return without sys.exit so the in-flight teardown
+        completes without SystemExit propagating through anyio."""
+        from nexus.mcp import core as core_mod
+
+        with _clean_owned_chroma():
+            core_mod._SHUTDOWN_IN_FLIGHT = True
+            with (
+                patch.object(core_mod, "_t1_chroma_shutdown") as mock_shutdown,
+                patch("os._exit") as mock_exit,
+            ):
+                core_mod._sigterm_handler(15, None)  # SIGTERM
+            mock_shutdown.assert_not_called(), (
+                "In-flight handler must not re-call shutdown"
+            )
+            mock_exit.assert_not_called(), (
+                "In-flight handler must not os._exit -- lifespan "
+                "owns the exit path"
+            )
+
+    def test_drives_shutdown_and_os_exit_when_first_signal(self):
+        """SIGTERM-only path (no prior stdin EOF): handler runs the
+        shutdown then os._exit(0). Critically uses os._exit rather
+        than sys.exit -- the latter raises SystemExit which anyio's
+        TaskGroup logs as mcp_server_crashed."""
+        from nexus.mcp import core as core_mod
+
+        with _clean_owned_chroma():
+            with (
+                patch.object(core_mod, "_t1_chroma_shutdown") as mock_shutdown,
+                patch("os._exit") as mock_exit,
+            ):
+                core_mod._sigterm_handler(15, None)
+            mock_shutdown.assert_called_once()
+            mock_exit.assert_called_once_with(0)
+
+    def test_does_not_use_sys_exit(self):
+        """Regression sentinel: sys.exit raises SystemExit which
+        propagates through anyio's TaskGroup as 'unhandled error',
+        logged as mcp_server_crashed. The handler must use os._exit
+        to exit the process without raising."""
+        import sys
+        from nexus.mcp import core as core_mod
+
+        with _clean_owned_chroma():
+            with (
+                patch.object(core_mod, "_t1_chroma_shutdown"),
+                patch("os._exit"),
+                patch.object(sys, "exit") as mock_sys_exit,
+            ):
+                core_mod._sigterm_handler(15, None)
+            mock_sys_exit.assert_not_called(), (
+                "sys.exit raises SystemExit through anyio TaskGroup; "
+                "must use os._exit instead"
+            )
 
 
 # ── _t1_chroma_lifespan async cm ────────────────────────────────────────────

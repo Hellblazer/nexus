@@ -227,21 +227,39 @@ def _resolve_top_level_session_id() -> str | None:
         return None
 
 
+#: Sticky flag set by :func:`_t1_chroma_shutdown` on first entry so a
+#: signal arriving mid-cleanup (the production stdin-EOF + SIGTERM
+#: race that produced spurious ``mcp_server_crashed`` events on every
+#: clean shutdown post-4.12.0) can short-circuit instead of racing
+#: the in-flight teardown. Once set, never cleared: shutdown is
+#: one-shot per process.
+_SHUTDOWN_IN_FLIGHT: bool = False
+
+
 def _t1_chroma_shutdown() -> None:
     """Stop chroma + remove the session record. Idempotent.
 
-    Called from the lifespan finally (primary), atexit (secondary), and
-    SIGTERM/SIGINT handlers (also secondary). The first to fire performs
-    the cleanup; the rest are no-ops because ``_OWNED_CHROMA`` is cleared
-    on completion.
+    Called from the lifespan finally (primary on clean stdin EOF),
+    atexit (belt-and-braces for SystemExit / clean Python exit), and
+    SIGTERM/SIGINT handlers (primary on stdio under SIGTERM).
+    The first to fire performs the cleanup; the rest short-circuit
+    via ``_SHUTDOWN_IN_FLIGHT`` (set on entry, never cleared) so a
+    re-entrant call from a signal handler that interrupted an
+    in-flight ``stop_t1_server`` doesn't double-execute.
     """
+    global _SHUTDOWN_IN_FLIGHT
+    if _SHUTDOWN_IN_FLIGHT:
+        return
     if not _OWNED_CHROMA:
         return
     if _OWNED_CHROMA.get("nested") or _OWNED_CHROMA.get("reused"):
         # Nested: parent owns chroma. Reused: another MCP server in the
         # same session owns it. We must not stop it on our exit.
+        _SHUTDOWN_IN_FLIGHT = True
         _OWNED_CHROMA.clear()
         return
+
+    _SHUTDOWN_IN_FLIGHT = True
 
     from pathlib import Path
     import shutil
@@ -271,16 +289,31 @@ def _t1_chroma_shutdown() -> None:
 
 
 def _sigterm_handler(_signo: int, _frame: Any) -> None:
-    """Run the shutdown path then exit cleanly.
+    """Run the shutdown path then exit.
 
-    Belt-and-braces for the cancellation paths where the FastMCP
-    lifespan does not fire. ``sys.exit(0)`` lets atexit handlers run,
-    so the second-pass _t1_chroma_shutdown call is a no-op.
+    When invoked while the lifespan finally is already running cleanup
+    (stdin-EOF + SIGTERM race observed in production after 4.12.0
+    default-on shipped), ``_SHUTDOWN_IN_FLIGHT`` is already True and
+    we return immediately so the in-flight teardown completes cleanly.
+    Otherwise (SIGTERM-only path with no prior stdin EOF) we drive the
+    shutdown ourselves and ``os._exit(0)`` to terminate.
+
+    Why ``os._exit`` instead of ``sys.exit``: ``sys.exit`` raises
+    ``SystemExit``, which propagates through anyio's TaskGroup and
+    gets logged as ``mcp_server_crashed`` even though the actual
+    shutdown succeeded. ``os._exit`` terminates the process
+    immediately without raising; chroma is already cleaned up at
+    this point so there is nothing left to coordinate.
     """
-    import sys as _sys
+    if _SHUTDOWN_IN_FLIGHT:
+        # Lifespan / atexit is already running shutdown. Don't
+        # interfere -- they hold the cleanup contract for this exit.
+        return
+
+    import os as _os
 
     _t1_chroma_shutdown()
-    _sys.exit(0)
+    _os._exit(0)
 
 
 from contextlib import asynccontextmanager
