@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.14.1] - 2026-04-25
+
+Plugin version aligned with conexus 4.14.1. No plugin-level functional changes. See root `CHANGELOG.md` for the RDR-095 deliverable: post-store hook framework batch contract, symmetric fire on every storage event, and T2 schema migration adding `batch_doc_ids` + `is_batch` columns to `hook_failures`.
+
 ## [4.13.0] - 2026-04-25
 
 Plugin version aligned with conexus 4.13.0. No plugin-level functional changes. See root `CHANGELOG.md` for the RDR-094 Phase F deliverable: the `NEXUS_MCP_OWNS_T1` env-var gate is removed entirely, nx-mcp's lifespan unconditionally owns chroma's lifecycle. Net source diff -283 lines.

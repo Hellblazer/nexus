@@ -6,6 +6,31 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.14.1] - 2026-04-25
+
+Closes RDR-095 (Post-Store Hook Framework: Batch Contract). Adds a parallel batch-shape post-store hook chain alongside the existing single-document chain, migrates the two hardcoded batch enrichments (`taxonomy_assign_batch` from RDR-070, `chash_dual_write_batch` from RDR-086) into registered hooks, and collapses seven hardcoded CLI ingest call sites into single `fire_post_store_batch_hooks` invocations. A closure-handoff follow-up makes both chains fire from every storage event so future single-doc consumers (RDR-089 aspect extraction with one Haiku call per doc) cover MCP and CLI paths uniformly.
+
+Skips 4.14.0 as a public version: the `4.14.0` migration (`migrate_hook_telemetry`, nexus-ntbg) landed in code under PR #318 but was never released; this release fires both `4.14.0` and `4.14.1` migrations under the same upgrade.
+
+### Added
+
+- **Batch-shape post-store hook contract** (`src/nexus/mcp_infra.py`). New primitives `register_post_store_batch_hook(fn)` and `fire_post_store_batch_hooks(doc_ids, collection, contents, embeddings, metadatas)`. Same per-hook failure-isolation semantics as the existing single-document chain: exceptions captured, persisted to T2 `hook_failures`, never propagated to the caller.
+- **`hook_failures` schema migration** (T2 4.14.1, `src/nexus/db/migrations.py`). Additive `batch_doc_ids TEXT` and `is_batch INTEGER NOT NULL DEFAULT 0` columns. Existing scalar rows are untouched. Idempotent; no-op when `hook_failures` table is absent (4.9.10 migration runs first in the chain).
+- **`hook_telemetry` table migration** (T2 4.14.0, nexus-ntbg, PR #318). Surfaced via `nx doctor --check-hooks` for slow-hook investigation; ships in this release alongside the RDR-095 migration.
+- **`taxonomy_assign_batch_hook` embedding-fetch fallback** (`src/nexus/mcp_infra.py:_fetch_or_embed`). When the hook is invoked with `embeddings=None` (the MCP `store_put` path), it fetches embeddings from T3 inline and falls back to local MiniLM embedding when T3 is unavailable. Same total round-trip cost as the legacy single-doc shim on the MCP path.
+- **AST-based drift guard** (`tests/test_hook_drift_guard.py`). Asserts no source file outside `src/nexus/mcp_infra.py` (definitions) and `src/nexus/mcp/core.py` (registration) references the batch hooks directly. Symmetric-fire invariant test asserts every CLI indexer module has matching counts of both fire calls.
+- **Batch-shape failure rendering in `nx taxonomy status`** (`src/nexus/commands/taxonomy_cmd.py`). Action line now reports `<N> post-store hook failure(s) affecting <M> document(s)` when any batch row is present (M > N). Scalar-only output preserves the legacy phrasing.
+
+### Changed
+
+- **Symmetric post-store fire** (post-acceptance closure follow-up). Both chains now fire from every storage event: MCP `store_put` fires single-doc once and batch with a 1-element list; CLI ingest fires batch with the full payload and single-doc per doc. Drops the legacy `taxonomy_assign_hook` (its embedding-fetch fallback folded into the batch hook).
+- **Seven CLI ingest call sites** (`indexer.py`, `code_indexer.py`, `prose_indexer.py`, `pipeline_stages.py`, `doc_indexer.py` x3) collapse the legacy chash + taxonomy hardcoded pair into one `fire_post_store_batch_hooks` invocation plus a per-doc `fire_post_store_hooks` loop.
+- **Documentation**: new "Post-Store Hooks" sections in `CLAUDE.md` and `docs/architecture.md`. Out-of-scope decisions (catalog-registration mechanisms, auto-linker) documented inline so future RDRs do not silently re-include them.
+
+### Fixed
+
+- **`migrate_hook_failures` docstring** (`src/nexus/db/migrations.py`). References both `fire_post_store_hooks` AND `fire_post_store_batch_hooks` rather than the legacy single-shape only.
+
 ## [4.13.0] - 2026-04-25
 
 Closes RDR-094 Phase F (final phase of the MCP-Owned T1 Chroma Lifecycle epic). The `NEXUS_MCP_OWNS_T1` env-var gate from 4.12.0 is removed entirely; nx-mcp's lifespan unconditionally owns chroma's lifecycle. Net source diff: **-283 lines** (deletion of dead-but-gated code paths).
