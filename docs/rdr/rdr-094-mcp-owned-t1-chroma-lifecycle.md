@@ -1110,6 +1110,45 @@ future Claude Code behaviour changes).
 | Session records | `ls ~/.config/nexus/sessions/` | cat `<uuid>.session` | removed by MCP atexit | `nx doctor` T1 section | N/A |
 | Tmpdir scan | `find /var/folders -name 'nx_t1_*'` | `du -sh` | sweep pass | `nx doctor --check-tmpdirs` | N/A |
 
+#### Diagnosing nx-mcp silent death (Phase H / nexus-3f95)
+
+When nx-mcp dies without emitting `mcp_server_stopping` or
+`mcp_server_crashed` (the fifth failure mode probed by Phase I /
+nexus-sawb), three log surfaces must be correlated to find the trigger:
+
+1. **nexus side -- mcp.log** at `~/.config/nexus/logs/mcp.log`. This
+   is nx-mcp's own structlog output. If the fifth mode triggered, the
+   server had no chance to flush a stopping event before the transport
+   broke; the gap in the log is the diagnostic.
+2. **nexus side -- watchdog.log** at `~/.config/nexus/logs/watchdog.log`
+   (PR #303 / nexus-aqna). The watchdog records `mcp_pid_disappeared`
+   the moment it observes nx-mcp's PID gone. Compare the timestamp
+   against the gap in mcp.log to confirm "the server was alive a
+   moment ago, then the PID vanished without a lifecycle event".
+3. **Claude Code side -- per-server mcp-logs JSONL** at
+   `~/Library/Caches/claude-cli-nodejs/<project-slug>/mcp-logs-<server>/`.
+   Claude Code records every MCP-client-side transport event. The
+   silent-death signatures are:
+   - `"debug":"STDIO connection dropped after Ns uptime"`
+   - `"debug":"Closing transport (stdio transport error: <Type>)"`
+
+   These events fire even when nx-mcp itself logged nothing -- the
+   MCP client observed the transport break from its own side.
+
+The 2026-04-25 reference incident (session
+`0c700072-0841-4bd6-9fd7-f2933e33a065`, nx-mcp pid 94433) recorded
+both signatures at `2026-04-25T00:20:34Z` after 23092s of uptime,
+followed by an auto-reconnect at `00:22:40`. nexus-side logs from
+that span show the gap directly: the last event before the drop was
+a normal `Tool 'query' failed after 9s: MCP error -32001:
+AbortError` (client-side abort), then nothing until the new
+connection attempt.
+
+The follow-up bead (filed) wires this correlation into
+`nx doctor --check-mcp-logs`. T2 entry
+`nexus_rdr/094-claude-mcp-log-investigation` (id 981, permanent)
+holds the full event-signature catalogue.
+
 ### New Dependencies
 
 None. Python `atexit`, `signal`, `socket` (TCP probe) are stdlib.
