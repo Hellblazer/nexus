@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """nx doctor — health check for all required services."""
+from __future__ import annotations
+
 import hashlib
 from pathlib import Path
+from typing import Any
 
 import click
 import structlog
@@ -168,6 +171,223 @@ def _run_check_schema() -> None:
 #: RDR-092 Phase 0a brings that to 12, but the check only fails below 9
 #: so a partial install on an older plugin is still tolerated.
 _MIN_GLOBAL_BUILTIN_COUNT: int = 9
+
+
+def _resolve_claude_cache_dir(cwd: Path | None = None) -> Path:
+    """Return the Claude Code per-project MCP-log cache directory.
+
+    Slug rule (observed on macOS 2026-04-25): cwd with both ``/`` and
+    ``.`` replaced by ``-``. Example for cwd
+    ``/Users/hal.hildebrand/git/nexus``:
+    ``-Users-hal-hildebrand-git-nexus``.
+
+    Empty slug means cwd was the filesystem root (very unusual);
+    returns the cache parent so callers can detect the platform.
+    """
+    if cwd is None:
+        cwd = Path.cwd()
+    slug = str(cwd).replace("/", "-").replace(".", "-")
+    if not slug or slug == "-":
+        # Edge case: cwd is the root path. Return the cache parent so
+        # caller's exists() check still does the right thing.
+        return Path.home() / "Library" / "Caches" / "claude-cli-nodejs"
+    return Path.home() / "Library" / "Caches" / "claude-cli-nodejs" / slug
+
+
+#: Silent-death signatures from RDR-094 §Day 2 Operations §Diagnosing
+#: nx-mcp silent death. Each signature is a substring matched against
+#: the cache JSONL line's "debug" or "error" field.
+_MCP_SILENT_DEATH_SIGNATURES: tuple[str, ...] = (
+    "STDIO connection dropped after",
+    "stdio transport error",
+)
+
+#: Tool-failure signatures (less severe; surfaced as info, not warning).
+_MCP_TOOL_FAILURE_SIGNATURES: tuple[str, ...] = (
+    "MCP error -32001: AbortError",
+)
+
+
+def _scan_mcp_log_jsonl(
+    path: Path,
+    cutoff_epoch: float,
+) -> tuple[list[dict], list[dict]]:
+    """Return (silent_deaths, tool_failures) found in *path*.
+
+    Each match dict carries ``timestamp``, ``signature``, ``message``,
+    ``session_id``, and ``log_file`` for cross-referencing against
+    mcp.log + watchdog.log.
+    """
+    import json as _json
+    import datetime as _dt
+
+    silent_deaths: list[dict] = []
+    tool_failures: list[dict] = []
+
+    try:
+        with path.open("r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = _json.loads(line)
+                except _json.JSONDecodeError:
+                    continue
+                ts_raw = rec.get("timestamp", "")
+                try:
+                    ts_epoch = _dt.datetime.fromisoformat(
+                        ts_raw.replace("Z", "+00:00"),
+                    ).timestamp()
+                except (ValueError, AttributeError):
+                    continue
+                if ts_epoch < cutoff_epoch:
+                    continue
+                msg = rec.get("debug", "") or rec.get("error", "")
+                if not isinstance(msg, str):
+                    continue
+                hit = {
+                    "timestamp": ts_raw,
+                    "session_id": rec.get("sessionId", ""),
+                    "message": msg[:200],
+                    "log_file": str(path.name),
+                }
+                for sig in _MCP_SILENT_DEATH_SIGNATURES:
+                    if sig in msg:
+                        hit["signature"] = sig
+                        silent_deaths.append(hit)
+                        break
+                else:
+                    for sig in _MCP_TOOL_FAILURE_SIGNATURES:
+                        if sig in msg:
+                            hit["signature"] = sig
+                            tool_failures.append(hit)
+                            break
+    except OSError:
+        pass
+    return silent_deaths, tool_failures
+
+
+def _run_check_mcp_logs(*, json_out: bool, hours: int = 24) -> None:
+    """Surface nx-mcp silent-death evidence from Claude Code's MCP cache.
+
+    Per RDR-094 §Day 2 Operations §Diagnosing nx-mcp silent death
+    (nexus-3f95 + nexus-50u5).
+
+    Walks Claude Code's per-server log cache at
+    ``~/Library/Caches/claude-cli-nodejs/<cwd-slug>/mcp-logs-*`` for
+    files modified within the last *hours* window and greps for the
+    silent-death signatures Claude Code emits when nx-mcp's stdio
+    transport breaks before structlog can flush:
+
+      * "STDIO connection dropped after Ns uptime"
+      * "stdio transport error"
+
+    Tool-failure events ("AbortError" client-side aborts) are surfaced
+    as info entries; they may indicate user-cancelled tool calls
+    rather than crashes.
+
+    On non-macOS platforms (no ``~/Library/Caches/claude-cli-nodejs``)
+    the check exits cleanly with "not present on this platform" --
+    the cache is a Claude Code CLI implementation detail, not part
+    of the MCP protocol.
+    """
+    import json as _json
+    import time
+
+    cache_dir = _resolve_claude_cache_dir()
+    cutoff_epoch = time.time() - hours * 3600.0
+
+    payload: dict[str, Any] = {
+        "cache_dir": str(cache_dir),
+        "hours_window": hours,
+        "platform_supported": False,
+        "silent_deaths": [],
+        "tool_failures": [],
+        "log_dirs_scanned": 0,
+        "log_files_scanned": 0,
+    }
+
+    if not cache_dir.exists():
+        if json_out:
+            click.echo(_json.dumps(payload, indent=2))
+        else:
+            click.echo(
+                f"MCP log surface not present at {cache_dir} "
+                f"(macOS-only path; nothing to check on this platform)."
+            )
+        return
+
+    payload["platform_supported"] = True
+
+    log_dirs = sorted(cache_dir.glob("mcp-logs-*"))
+    payload["log_dirs_scanned"] = len(log_dirs)
+
+    for log_dir in log_dirs:
+        if not log_dir.is_dir():
+            continue
+        for jsonl in log_dir.glob("*.jsonl"):
+            try:
+                if jsonl.stat().st_mtime < cutoff_epoch:
+                    continue
+            except OSError:
+                continue
+            payload["log_files_scanned"] += 1
+            sd, tf = _scan_mcp_log_jsonl(jsonl, cutoff_epoch)
+            for hit in sd:
+                hit["server"] = log_dir.name
+                payload["silent_deaths"].append(hit)
+            for hit in tf:
+                hit["server"] = log_dir.name
+                payload["tool_failures"].append(hit)
+
+    if json_out:
+        click.echo(_json.dumps(payload, indent=2))
+        return
+
+    click.echo(
+        f"Scanned {payload['log_files_scanned']} JSONL files across "
+        f"{payload['log_dirs_scanned']} mcp-logs-* dirs under "
+        f"{cache_dir} (last {hours}h)."
+    )
+    if not payload["silent_deaths"] and not payload["tool_failures"]:
+        click.echo("No silent-death or tool-failure signatures found.")
+        return
+
+    if payload["silent_deaths"]:
+        click.echo(
+            f"\n[WARNING] Silent-death signatures: "
+            f"{len(payload['silent_deaths'])}"
+        )
+        click.echo(
+            "  Cross-reference these timestamps against "
+            "~/.config/nexus/logs/mcp.log + ~/.config/nexus/logs/watchdog.log"
+        )
+        click.echo(
+            "  to identify the gap. See RDR-094 §Day 2 Operations."
+        )
+        for hit in payload["silent_deaths"]:
+            click.echo(
+                f"  {hit['timestamp']}  {hit['signature']}  "
+                f"server={hit['server']}  session={hit['session_id'][:8]}..."
+            )
+
+    if payload["tool_failures"]:
+        click.echo(
+            f"\n[INFO] Tool-failure signatures: "
+            f"{len(payload['tool_failures'])} "
+            f"(may be user-cancelled aborts, not crashes)"
+        )
+        for hit in payload["tool_failures"][:5]:
+            click.echo(
+                f"  {hit['timestamp']}  {hit['signature']}  "
+                f"server={hit['server']}"
+            )
+        if len(payload["tool_failures"]) > 5:
+            click.echo(
+                f"  ... and {len(payload['tool_failures']) - 5} more "
+                "(use --json for full list)"
+            )
 
 
 def _run_check_tmpdirs(*, reap: bool, json_out: bool) -> None:
@@ -483,6 +703,24 @@ def _run_trim_telemetry(days: int) -> None:
          "--reap-tmpdirs to actually delete them.",
 )
 @click.option(
+    "--check-mcp-logs",
+    "check_mcp_logs",
+    is_flag=True,
+    default=False,
+    help="Scan Claude Code's per-server MCP cache for nx-mcp "
+         "silent-death signatures ('STDIO connection dropped', "
+         "'stdio transport error'). macOS only; skips cleanly on "
+         "Linux/Windows. RDR-094 Phase H (nexus-50u5).",
+)
+@click.option(
+    "--mcp-log-hours",
+    "mcp_log_hours",
+    default=24,
+    type=click.IntRange(min=1),
+    show_default=True,
+    help="Lookback window in hours for --check-mcp-logs.",
+)
+@click.option(
     "--reap-tmpdirs",
     "reap_tmpdirs",
     is_flag=True,
@@ -520,6 +758,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                check_quotas: bool, check_taxonomy: bool,
                check_plan_library: bool,
                check_tmpdirs: bool, reap_tmpdirs: bool,
+               check_mcp_logs: bool, mcp_log_hours: int,
                json_out: bool,
                trim_telemetry: bool, days: int) -> None:
     """Verify that all required services and credentials are available."""
@@ -542,6 +781,10 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
 
     if check_tmpdirs:
         _run_check_tmpdirs(reap=reap_tmpdirs, json_out=json_out)
+        return
+
+    if check_mcp_logs:
+        _run_check_mcp_logs(json_out=json_out, hours=mcp_log_hours)
         return
 
     if check_taxonomy:
