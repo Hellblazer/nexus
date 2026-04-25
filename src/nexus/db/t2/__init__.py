@@ -55,35 +55,73 @@ extend the tier.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import sqlite3
 
 import structlog
 
-from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
-from nexus.db.t2.chash_index import ChashIndex
-from nexus.db.t2.memory_store import (
-    AccessPolicy,
-    MemoryStore,
-    _sanitize_fts5,  # re-exported for nexus.catalog.catalog_db
-)
-from nexus.db.t2.plan_library import PlanLibrary
-from nexus.db.t2.telemetry import Telemetry
+# Cheap import only: ``_sanitize_fts5`` is needed by
+# ``nexus.catalog.catalog_db`` at module import time, and the
+# memory_store module's top-level imports are stdlib + structlog only
+# (no sklearn/scipy/numpy). Heavy submodule imports are deferred via
+# the module __getattr__ at the bottom of this file.
+from nexus.db.t2.memory_store import _sanitize_fts5
+
+if TYPE_CHECKING:
+    # Type-only: re-exposed for static type checking. The runtime
+    # bindings come from ``__getattr__`` below, which lazy-loads each
+    # submodule on first attribute access. The CLI cold-start path
+    # (nexus.cli -> nexus.commands.catalog -> nexus.catalog.catalog ->
+    # nexus.catalog.catalog_db -> from nexus.db.t2 import _sanitize_fts5)
+    # therefore stops here without pulling sklearn -> scipy -> numpy
+    # via CatalogTaxonomy.
+    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+    from nexus.db.t2.chash_index import ChashIndex
+    from nexus.db.t2.memory_store import AccessPolicy, MemoryStore
+    from nexus.db.t2.plan_library import PlanLibrary
+    from nexus.db.t2.telemetry import Telemetry
 
 _log = structlog.get_logger()
 
-# Re-export for backward compatibility — ``catalog/catalog_db.py`` and
-# ``tests/test_t2.py`` still ``from nexus.db.t2 import _sanitize_fts5``.
+# Re-export surface for backward compatibility. Resolution happens
+# lazily through the module-level ``__getattr__`` below; the eager
+# imports were pulling sklearn/scipy/numpy through CatalogTaxonomy on
+# every CLI invocation that touched any nexus.db.t2 symbol.
 __all__ = [
     "AccessPolicy",
     "CatalogTaxonomy",
+    "ChashIndex",
     "MemoryStore",
     "PlanLibrary",
     "T2Database",
     "Telemetry",
     "_sanitize_fts5",
 ]
+
+
+def __getattr__(name: str) -> Any:  # PEP 562
+    """Lazy resolver for heavy re-exports.
+
+    Map each public name to its owning submodule and import on demand.
+    Only fires the first time a name is accessed (Python caches the
+    attribute on the module after a successful resolve).
+    """
+    _MAP = {
+        "AccessPolicy":     "nexus.db.t2.memory_store",
+        "MemoryStore":      "nexus.db.t2.memory_store",
+        "CatalogTaxonomy":  "nexus.db.t2.catalog_taxonomy",
+        "ChashIndex":       "nexus.db.t2.chash_index",
+        "PlanLibrary":      "nexus.db.t2.plan_library",
+        "Telemetry":        "nexus.db.t2.telemetry",
+    }
+    if name in _MAP:
+        import importlib
+        mod = importlib.import_module(_MAP[name])
+        value = getattr(mod, name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 # ── Database facade ───────────────────────────────────────────────────────────
@@ -100,6 +138,16 @@ class T2Database:
     """
 
     def __init__(self, path: Path) -> None:
+        # Lazy-load the four store classes here rather than at module
+        # import time so the CLI cold-start path (which only needs
+        # ``_sanitize_fts5``) does not pull sklearn/scipy/numpy through
+        # CatalogTaxonomy.
+        from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+        from nexus.db.t2.chash_index import ChashIndex
+        from nexus.db.t2.memory_store import MemoryStore
+        from nexus.db.t2.plan_library import PlanLibrary
+        from nexus.db.t2.telemetry import Telemetry
+
         path.parent.mkdir(parents=True, exist_ok=True)
 
         # ── Transient connection: run pending migrations (RDR-076) ────
