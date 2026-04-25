@@ -217,35 +217,39 @@ exist as a stable per-session subprocess to inherit from.
       chroma within ~11s, attributed to `mcp_owned_signal` path.
       T2 nexus_rdr/094-spike-a-lifecycle (id=976), T3
       knowledge__nexus 9f1c77b683a9f429.
-- [ ] Moving chroma spawn from the SessionStart hook to MCP-server
+- [x] Moving chroma spawn from the SessionStart hook to MCP-server
       startup does not regress subagent T1 sharing. **Status**:
-      Unverified (Spike B scope). **Hard prerequisite for Phase 4
-      flag removal.** **Method**: integration test dispatching a
-      subagent chain and asserting scratch read/write across the
-      tree.
+      VERIFIED 2026-04-25 via Spike B (after retry mitigation in
+      PR #311). **Evidence**: 40/40 cycles across 4 timing variants
+      (0/5/50/200 ms dispatch delay) connect to parent's chroma
+      with zero `ephemeral_downgrade` events. T2
+      `nexus_rdr/094-spike-b-subagent-race-verified` (id=983);
+      pre-mitigation evidence at id=982.
 
-      **Specific race the spike must rule out** (substantive-critic
-      finding, 2026-04-25): the new code path has one structural
-      difference vs the hook-era code that warrants direct
-      verification. The hook writes the session record synchronously
-      before any subagent dispatch. The MCP server's lifespan is
-      async and may not have completed the
-      `write_session_record_by_id` call by the time Claude Code
-      dispatches the first subagent. If a subagent observes
-      `NX_SESSION_ID` set but the parent's session record absent,
-      its `_t1_chroma_init_if_owner` falls through the ancestor-
-      record check, lands on `_resolve_top_level_session_id`, which
-      reads `current_session`. If that's also unwritten at that
-      moment, the subagent gets `own_id = None` and skips spawn
-      entirely (silent EphemeralClient downgrade with no log
-      that would identify the cause).
+      **The race was reproducible at the spike's timings** (40/40
+      `ephemeral_downgrade` before the mitigation): a subagent
+      dispatched within chroma's cold-start window (~1.1-1.7 s on
+      the reference install) observes `NX_SESSION_ID` set but finds
+      `find_session_by_id` returning None. `T1Database.__init__`
+      falls through to `EphemeralClient` silently because the
+      fallback `warnings.warn` is invisible under stdio transport.
 
-      Spike B protocol: dispatch a subagent within milliseconds of
-      top-level MCP startup (before
-      `write_session_record_by_id` completes); assert the
-      subagent's T1 client connects to the parent's chroma. If the
-      race is reproducible, add a retry-with-backoff loop in
-      `_resolve_top_level_session_id` before Phase 4 lands.
+      **Mitigation shipped in PR #311**:
+      `_resolve_session_record_with_retry` in
+      `src/nexus/db/t1.py` retries `find_session_by_id` on a
+      100/200/400/800/1500 ms exponential backoff (~3 s total max
+      wait) when `NX_SESSION_ID` is set in env. Top-level callers
+      without a parent session pay no wait (env-var gate);
+      `NEXUS_SKIP_T1=1` (stateless-operator path) bypasses the
+      retry entirely.
+
+      The retry placement deviates from the bead's original
+      prescription (`_resolve_top_level_session_id` with
+      50/100/200 ms × 3 = 350 ms): the subagent's race lives in
+      the T1 client's record lookup (not the parent's resolver),
+      and chroma's empirical 1.1-1.7 s cold-start required a
+      longer schedule than 350 ms. Both decisions were validated
+      by single-cycle and 40-cycle smokes.
 - [x] The dual-watch watchdog (`--mcp-pid` + `--claude-pid` with
       OR-trigger logic) preserves coverage of BOTH the "MCP dies
       without atexit firing" case AND the "Claude Code crashes and
