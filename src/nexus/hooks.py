@@ -3,10 +3,8 @@
 """SessionStart and SessionEnd hook logic for Claude Code integration."""
 from __future__ import annotations
 
-import fcntl
 import json
 import os
-import shutil
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -16,18 +14,10 @@ import structlog
 from nexus.db.t2 import T2Database
 from nexus.session import (
     SESSIONS_DIR,
-    _ppid_of,
-    find_ancestor_session,
-    find_claude_root_pid,
     find_session_by_id,
     generate_session_id,
-    spawn_t1_watchdog,
-    start_t1_server,
-    stop_t1_server,
     sweep_stale_sessions,
     write_claude_session_id,
-    write_session_record,
-    write_session_record_by_id,
 )
 
 
@@ -48,20 +38,6 @@ def _open_t2() -> T2Database:
 def _open_t1():
     from nexus.db.t1 import T1Database
     return T1Database()
-
-
-def _mcp_owns_t1_enabled() -> bool:
-    """Return True when nx-mcp owns the chroma lifecycle (RDR-094 Phase 4).
-
-    Default ON as of conexus 4.12.0. ``NEXUS_MCP_OWNS_T1=0`` (or
-    ``false`` / ``no`` / ``off``) is the emergency opt-out; absence
-    of the env var means ON.
-    """
-    raw = os.environ.get("NEXUS_MCP_OWNS_T1", "").strip().lower()
-    if raw in ("0", "false", "no", "off"):
-        return False
-    # Default ON: empty string OR explicit truthy values.
-    return True
 
 
 def _infer_repo() -> str:
@@ -116,70 +92,13 @@ def session_start(claude_session_id: str | None = None) -> str:
     inherited = os.environ.get("NX_SESSION_ID", "").strip() or None
     session_id = inherited or claude_session_id or generate_session_id()
 
-    # Honor NEXUS_SKIP_T1, set by ``claude_dispatch`` (and any caller
-    # of ``claude -p`` where T1 inheritance is undesirable) so short-
-    # lived operator subprocesses don't pay the chroma startup cost
-    # or pollute session bookkeeping. The T1 client (``db/t1.py``)
-    # falls back to EphemeralClient when this env is set.
-    #
-    # NEXUS_MCP_OWNS_T1 (RDR-094 Phase 4, default-on as of 4.12.0)
-    # moves chroma spawn to the nx-mcp lifespan. The hook leaves chroma
-    # to the MCP server; we still run the sweep and write
-    # ``current_session`` so other tools (legacy CLI usage, subagent
-    # T1 inheritance) keep working. Set ``NEXUS_MCP_OWNS_T1=0`` (or
-    # false / no / off) as the emergency opt-out.
-    skip_t1 = os.environ.get("NEXUS_SKIP_T1", "").strip().lower() in ("1", "true", "yes")
-    mcp_owns_t1 = _mcp_owns_t1_enabled()
-    if mcp_owns_t1:
-        skip_t1 = True
-
-    if not skip_t1:
-        # Acquire an exclusive lock before the find+write sequence to prevent
-        # two sibling agents (same UUID, both see record-absent simultaneously)
-        # from each starting their own ChromaDB server and orphaning the first.
-        SESSIONS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-        _session_lock = SESSIONS_DIR / "session.lock"
-        from nexus.indexer import _clear_stale_lock
-        _clear_stale_lock(_session_lock)
-        lock_fd = os.open(str(_session_lock), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
-        try:
-            os.write(lock_fd, str(os.getpid()).encode())
-            os.fsync(lock_fd)
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
-            # UUID-keyed lookup: T1 is scoped to a Claude conversation, not a
-            # terminal session. Two ``claude`` invocations in the same shell
-            # get distinct UUIDs → distinct session files → distinct T1
-            # servers. Subagents within one conversation share via the
-            # ``current_session`` flat file written below.
-            existing = find_session_by_id(SESSIONS_DIR, session_id)
-            if existing is None:
-                try:
-                    host, port, server_pid, tmpdir = start_t1_server()
-                    # nexus-99jb Layer 1: spawn a detached watchdog that
-                    # watches the Claude Code root PID + the chroma PID
-                    # and triggers graceful shutdown when Claude Code
-                    # disappears. Independent of SessionEnd firing, so
-                    # covers /exit (#17885) and Hook cancelled (#41577).
-                    claude_root_pid = find_claude_root_pid()
-                    session_file = SESSIONS_DIR / f"{session_id}.session"
-                    watchdog_pid = spawn_t1_watchdog(
-                        claude_pid=claude_root_pid,
-                        chroma_pid=server_pid,
-                        session_file=session_file,
-                        tmpdir=tmpdir,
-                    ) if claude_root_pid else 0
-                    write_session_record_by_id(
-                        SESSIONS_DIR, session_id, host, port, server_pid,
-                        tmpdir, claude_root_pid=claude_root_pid,
-                        watchdog_pid=watchdog_pid,
-                    )
-                except Exception as exc:
-                    _log.warning(
-                        "session_start: T1 server unavailable; T1 will be local-only",
-                        error=str(exc),
-                    )
-        finally:
-            os.close(lock_fd)  # closing the fd releases the flock automatically
+    # nx-mcp owns chroma's lifecycle (RDR-094 Phase 4, unconditional as
+    # of 4.13.0). The hook no longer spawns chroma or the watchdog; the
+    # MCP server does both via its FastMCP lifespan. We only persist the
+    # session UUID below so child agents and shell-side tools can find
+    # the parent's record. ``NEXUS_SKIP_T1`` is still honoured downstream
+    # by ``T1Database.__init__`` (db/t1.py) for the stateless-operator
+    # path; the hook itself does no T1 work.
 
     # Persist the UUID via ``current_session`` flat file — only when this is
     # a TOP-LEVEL session. Nested subprocesses (operator ``claude -p`` calls,
@@ -282,34 +201,12 @@ def session_end_flush() -> str:
 
 
 def session_end() -> str:
-    """Execute the SessionEnd hook (legacy entry point).
+    """Execute the SessionEnd hook.
 
-    Calls :func:`session_end_flush` for storage work, then -- when this
-    process owns the session record AND ``NEXUS_MCP_OWNS_T1`` is not
-    set -- stops the ChromaDB server and removes the session record +
-    tmpdir.
-
-    The ``NEXUS_MCP_OWNS_T1`` gate is the in-place mitigation from
-    PR #300: when the MCP server owns chroma, hook-side teardown
-    races the lifespan/atexit/signal-handler cleanup. Phase C
-    (nexus-l828) swaps hooks.json's internal call to
-    :func:`session_end_flush` directly so the gate becomes redundant;
-    it stays here for the flag-off rollout window.
+    Thin wrapper around :func:`session_end_flush`. nx-mcp owns chroma
+    teardown via its FastMCP lifespan + signal handler + atexit chain
+    (RDR-094 Phase 4, unconditional as of 4.13.0); the watchdog is the
+    safety net if all three of those paths fail. The hook does T1
+    flush + T2 expire only.
     """
-    _, own_record, own_file, _ = _resolve_session_records()
-    summary = session_end_flush()
-
-    mcp_owns_t1 = _mcp_owns_t1_enabled()
-    if own_record and own_file is not None and not mcp_owns_t1:
-        server_pid = own_record.get("server_pid", 0)
-        if server_pid:
-            stop_t1_server(server_pid)
-        try:
-            own_file.unlink(missing_ok=True)
-        except OSError:
-            pass  # intentional: best-effort session file deletion
-        tmpdir = own_record.get("tmpdir", "")
-        if tmpdir:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
-    return summary
+    return session_end_flush()

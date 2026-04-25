@@ -17,15 +17,12 @@ module. Then in the fully detached grandchild it imports
 ``nexus.hooks`` and runs ``session_end_flush()``. Wall-clock cost
 to return control to Claude Code: ~17ms.
 
-RDR-094 Phase C swap: the launcher now dispatches to
-``hooks.session_end_flush`` (storage-only path, fork-safe) instead of
-``hooks.session_end``. With the MCP server owning chroma's lifecycle
-under ``NEXUS_MCP_OWNS_T1`` (Phase 4), a hook-side
-``stop_t1_server`` raced the MCP lifespan/atexit/signal-handler
-cleanup. Pointing the launcher at the flush-only entry retires that
-race entirely. The legacy ``hooks.session_end`` chroma-stop block is
-still reachable via ``nx hook session-end`` for the flag-off rollout
-window and as a manual-debug entry point.
+RDR-094 Phase C swap: the launcher dispatches to
+``hooks.session_end_flush`` (storage-only path, fork-safe). nx-mcp
+owns chroma teardown via its FastMCP lifespan + signal handler +
+atexit chain (Phase 4, unconditional as of 4.13.0); the watchdog
+sidecar is the safety net if all three of those paths fail. The
+hook does T1 flush + T2 expire only, which is fork-safe.
 
 **BANNED invariant**: this module must never import any ``nexus.*``
 module before ``os.fork()``. The whole point is that the parent
@@ -56,11 +53,10 @@ def _run_session_end_synchronously() -> None:
     already configures (RotatingFileHandler under ~/.config/nexus/logs).
 
     RDR-094 Phase C: dispatches to ``session_end_flush`` (storage-only)
-    rather than ``session_end`` (storage + chroma teardown). The
-    chroma teardown is owned by the MCP server's lifespan/atexit/
-    signal handlers under ``NEXUS_MCP_OWNS_T1``; calling it here
-    races those paths and was the documented source of double-stop
-    failures.
+    rather than ``session_end``. Chroma teardown is owned by the MCP
+    server's lifespan/atexit/signal handlers (Phase 4, unconditional
+    as of 4.13.0); calling stop_t1_server here would race those paths
+    and was the documented source of double-stop failures.
     """
     try:
         from nexus import hooks
