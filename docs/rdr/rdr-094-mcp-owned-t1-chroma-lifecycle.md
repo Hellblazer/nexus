@@ -211,32 +211,59 @@ exist as a stable per-session subprocess to inherit from.
 
 ### Critical Assumptions
 
-- [ ] Claude Code's MCP-server shutdown ordering delivers SIGTERM
-      with enough time for the FastMCP lifespan `finally` block (or
-      atexit fallback) to run chroma cleanup. **Status**: Unverified
-      **Method**: 30-run spike across graceful / SIGKILL / OOM paths.
+- [x] Claude Code's MCP-server shutdown ordering delivers SIGTERM
+      with enough time for cleanup. **Status**: VERIFIED 2026-04-25
+      via Spike A. **Evidence**: 10/10 SIGTERM cycles cleaned
+      chroma within ~11s, attributed to `mcp_owned_signal` path.
+      T2 nexus_rdr/094-spike-a-lifecycle (id=976), T3
+      knowledge__nexus 9f1c77b683a9f429.
 - [ ] Moving chroma spawn from the SessionStart hook to MCP-server
       startup does not regress subagent T1 sharing. **Status**:
       Unverified. **Method**: integration test dispatching a subagent
       chain and asserting scratch read/write across the tree.
-- [ ] The dual-watch watchdog (`--mcp-pid` + `--claude-pid` with
+      Note: not exercised by Spike A; subagent path is structurally
+      identical to the top-level path through the `nested=True`
+      short-circuit and the existing `find_ancestor_session` walk.
+      Worth a focused integration test before Phase 4 flag removal.
+- [x] The dual-watch watchdog (`--mcp-pid` + `--claude-pid` with
       OR-trigger logic) preserves coverage of BOTH the "MCP dies
       without atexit firing" case AND the "Claude Code crashes and
       orphans the MCP server" case (Claude Code issue #1935).
-      **Status**: Unverified. **Method**: controlled `kill -9` of the
-      MCP server in a test harness asserts watchdog reaps chroma
-      within 5s; controlled `kill -9` of Claude Code asserts the
-      watchdog signals SIGTERM to mcp_pid, lifespan finally runs,
-      chroma stops within 7s (5s poll + 2s grace).
+      **Status**: VERIFIED 2026-04-25 via Spike A. **Evidence**:
+      10/10 mcp_sigkill runs cleaned chroma via watchdog (mcp-pid
+      trigger) within ~10s; 10/10 mcp_oom (SIGSEGV) same. 10/10
+      claude_crash runs cleaned via watchdog (claude-pid trigger)
+      within ~10s. Path attributions: `watchdog_mcp` and
+      `watchdog_claude` respectively.
 - [ ] Claude Code issue #40207's mid-session SIGTERM (10-60s after
       successful connection) does NOT apply to vanilla stdio servers
       like nx-mcp, OR if it does, the FM-NEW-2 mitigation (TCP-probe
       reuse of an existing session record) prevents the 1-5s T1 gap.
-      **Status**: Unverified. **Method**: instrument the spike harness
-      to log every SIGTERM received by the MCP server during a
-      30-minute idle session; if observed, run a follow-up probe with
-      the TCP-reuse code path enabled and assert no T1 gap surfaces
-      to the runner.
+      **Status**: Unverified (Spike C scope). **Method**: run
+      `scripts/spikes/spike_rdr094_mid_session_observer.py
+      --duration-min 30` alongside a real Claude Code session
+      with `NEXUS_MCP_OWNS_T1=1`; observer tails mcp.log for
+      mid-session SIGTERM events and reports `no_mid_session_sigterm`
+      / `issue_40207_confirmed` / `inconclusive`. Pending operator
+      scheduling. Spike A covered CA-1 + CA-3 only.
+
+### Empirical primary-path-by-transport finding
+
+Spike A surfaced one design clarification (no design change): on
+macOS stdio transport, FastMCP's lifespan async finally is NOT the
+primary cleanup path under SIGTERM, despite the original RDR
+assumption. anyio does not install a SIGTERM handler that
+propagates cancellation through the lifespan on stdio. The
+`signal.signal(SIGTERM, _sigterm_handler)` registration in
+`main()` IS the path that runs (10/10 attributions to
+`mcp_owned_signal`).
+
+The lifespan path remains primary on HTTP / SSE transports where
+anyio installs the handler (per python-sdk #514). Both code
+locations call the same idempotent `_t1_chroma_shutdown`, so
+correctness is unaffected; only the documentation's primary /
+secondary nomenclature changes. §Approach and §Technical Design
+above reflect the empirical behaviour.
 
 ## Research Appendix (2026-04-24)
 
@@ -474,14 +501,32 @@ essential gate prerequisite.
 
 ### Approach
 
-Move chroma spawn to `nx-mcp` server startup and chroma teardown
-to a FastMCP `lifespan` context manager (anyio cancellation
-propagation through `async finally`) backed by `atexit` + a
-`SIGTERM` handler as belt-and-braces for the cancellation paths
-where lifespan does not fire (research RQ2: anyio installs its
-own SIGTERM handler that cancels the running task group, making
-the lifespan finally block fire on SIGTERM without a manual
-handler; raw atexit + signal handler are the secondary path).
+Move chroma spawn to `nx-mcp` server startup. Cleanup runs through
+three paths, with the primary path differing by transport:
+
+- **stdio transport (the deployed path on macOS)**: `signal.signal
+  (SIGTERM, _sigterm_handler)` registered in `core.py:main()` is
+  the primary cleanup path. anyio does NOT install a SIGTERM
+  handler under FastMCP stdio (Spike A 2026-04-25 evidence,
+  T2 nexus_rdr/094-spike-a-lifecycle id=976), so the FastMCP
+  lifespan async finally never fires from a signal alone. The
+  explicit signal handler calls `_t1_chroma_shutdown` directly.
+- **HTTP / SSE transports**: the FastMCP `lifespan` context manager
+  is the primary path. anyio does install a SIGTERM handler there
+  (research RQ2 + python-sdk #514 reference), and cancellation
+  propagates through the `async finally`. The signal handler is
+  redundant on those transports but harmless.
+- **Always belt-and-braces**: `atexit.register(_t1_chroma_shutdown)`
+  covers clean stdin EOF and SystemExit paths that arrive without
+  going through a signal. `_t1_chroma_shutdown` is idempotent so
+  any combination of paths firing is safe.
+
+The empirical primary-path-by-transport split was a Spike A
+finding, not the original design assumption. The pre-Spike design
+called the lifespan path primary and the signal handler belt-and-
+braces; that ordering is correct for HTTP/SSE but inverted for
+stdio. Cleanup correctness was unaffected (idempotent shutdown)
+but the documentation now reflects the empirical behaviour.
 
 Pivot the `t1_watchdog` sidecar to watch BOTH `--mcp-pid` AND
 `--claude-pid` with OR-trigger logic. This is required to cover
@@ -502,10 +547,22 @@ flush and memory-expire which remain hook-native tasks.
 
 **`nx-mcp` server lifecycle** (`src/nexus/mcp/core.py`):
 
-Primary path: FastMCP `lifespan=` context manager (research RQ2,
-recommended over raw atexit). Secondary: `atexit` + a `SIGTERM`
-signal handler as belt-and-braces for kill paths where lifespan
-does not fire.
+Three cleanup paths run, all calling the same idempotent
+`_t1_chroma_shutdown`:
+
+1. `signal.signal(SIGTERM, _sigterm_handler)` and SIGINT registered
+   in `main()`. **Primary on stdio transport** (Spike A 2026-04-25
+   evidence, 10/10 SIGTERM cycles attributed to `mcp_owned_signal`
+   path). On HTTP / SSE transports anyio's own SIGTERM handler
+   beats this and cancels the task group via the lifespan instead;
+   the explicit handler is redundant there but harmless.
+2. `lifespan=_t1_chroma_lifespan` async context manager passed to
+   `FastMCP(...)`. **Primary on HTTP / SSE transports** via anyio
+   cancellation through `async finally`. Skipped on stdio because
+   anyio does not install a SIGTERM handler there.
+3. `atexit.register(_t1_chroma_shutdown)`. Belt-and-braces for
+   clean stdin EOF and SystemExit paths that arrive without going
+   through a signal. Always registered.
 
 ```text
 @asynccontextmanager
@@ -832,16 +889,18 @@ problem we don't.
 
 ### Prerequisites
 
-- [ ] Spike A: instrumented 40-run lifecycle probe. Phases: 10
-      clean shutdowns, 10 `kill -9` of Claude Code (FM-NEW-1
-      regression-guard, watchdog dual-watch), 10 simulated OOM,
-      10 `kill -9` of the MCP server. Measure chroma-cleanup
-      completion rate by source (lifespan, atexit, watchdog,
-      sweep, none). Targets:
-      - lifespan finally covers >=90% of clean shutdowns
-      - watchdog (mcp-pid trigger) covers >=95% of MCP SIGKILL / OOM
-      - watchdog (claude-pid trigger) covers >=95% of Claude SIGKILL,
-        with chroma stopped within 7s (5s poll + 2s grace)
+- [x] Spike A: instrumented 40-run lifecycle probe. **COMPLETED
+      2026-04-25**, all four phases at 100% cleanup rate, all
+      targets exceeded. Path attribution: `mcp_owned_signal` for
+      clean (the empirical primary on stdio; see §Critical
+      Assumptions for the lifespan-vs-signal-handler clarification),
+      `watchdog_mcp` for SIGKILL + OOM, `watchdog_claude` for
+      Claude crash. Median walls 10-11s per phase.
+      Code: `scripts/spikes/spike_rdr094_lifecycle.py`.
+      Records: `scripts/spikes/spike_rdr094_results.jsonl` (40
+      lines), `spike_rdr094_summary.json`.
+      Persisted: T2 nexus_rdr/094-spike-a-lifecycle (id=976) +
+      T3 knowledge__nexus 9f1c77b683a9f429.
 - [ ] Spike B: subagent chain scratch-sharing integration test.
       Parent MCP server spawns chroma; 3-level-deep subagent
       dispatch writes to scratch; each level reads back sibling
