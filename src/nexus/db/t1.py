@@ -25,6 +25,58 @@ _T = TypeVar("_T")
 
 _COLLECTION = "scratch"
 
+#: Backoff schedule for the subagent-race retry (RDR-094 CA-2 /
+#: nexus-zsqf). Total max wait ~3 s covers chroma's empirically
+#: measured 1.1-1.7 s cold-start window with slack for system jitter
+#: (Spike B observed downgrade through 1500 ms+; 350 ms retry from
+#: the bead's original prescription was insufficient). The retry only
+#: fires when ``NX_SESSION_ID`` is set in env -- the canonical signal
+#: that the caller is a subagent inheriting from a parent that should
+#: have a session record. Top-level callers without a parent session
+#: have no record by design; retrying would just delay startup.
+#:
+#: Typical hit happens on the 2nd-3rd retry (~700 ms wait) when
+#: chroma takes 1.2-1.5 s to come up. The exponential schedule keeps
+#: the first miss cheap (100 ms) for the rare benign-miss case.
+_T1_RACE_BACKOFF_MS: tuple[int, ...] = (100, 200, 400, 800, 1500)
+
+
+def _resolve_session_record_with_retry(sessions_dir) -> dict | None:
+    """Look up the T1 session record, with backoff retry for CA-2 race.
+
+    The race (verified empirically by Spike B / nexus-zsqf): a subagent
+    dispatched within ~1-2 s of top-level MCP startup observes
+    ``NX_SESSION_ID`` set in env but finds the parent's session record
+    not yet written, because the parent's
+    :func:`nexus.mcp.core._t1_chroma_init_if_owner` is still inside
+    ``start_t1_server`` (chroma cold-start dominates).
+    :func:`find_session_by_id` returns None and the caller falls through
+    to ``EphemeralClient`` -- silently, because the warning is invisible
+    under stdio transport.
+
+    Mitigation: when the first lookup misses AND the env var is set,
+    retry on a 50/100/200 ms schedule (~350 ms total wait) before
+    giving up. The env-var gate prevents wasted retries in top-level
+    callers that genuinely have no parent session.
+    """
+    import time as _time
+
+    record = find_session_by_id(sessions_dir)
+    if record is not None:
+        return record
+
+    # Retry only when the caller looks like a subagent: NX_SESSION_ID
+    # is set in env, meaning a parent process expects a record.
+    if not os.environ.get("NX_SESSION_ID", "").strip():
+        return None
+
+    for delay_ms in _T1_RACE_BACKOFF_MS:
+        _time.sleep(delay_ms / 1000.0)
+        record = find_session_by_id(sessions_dir)
+        if record is not None:
+            return record
+    return None
+
 # Common English stopwords — shared with MemoryStore._STOPWORDS for
 # consistency across the two overlap-detection helpers.
 _PROMOTE_STOPWORDS = frozenset(
@@ -149,12 +201,19 @@ class T1Database:
             record = None
             if not skip_t1:
                 # UUID-keyed lookup (T1 scoped to Claude conversation, not
-                # terminal session). find_session_by_id resolves the UUID
-                # from NX_SESSION_ID env or current_session flat file.
-                # Falls back to find_ancestor_session for any legacy session
-                # files written by older nexus versions still living in
+                # terminal session). _resolve_session_record_with_retry
+                # wraps find_session_by_id with a 50/100/200 ms backoff
+                # when NX_SESSION_ID is set in env (the subagent
+                # inheritance signal) -- covers the CA-2 race where a
+                # subagent dispatches inside the parent's chroma
+                # cold-start window. Falls back to find_ancestor_session
+                # for any legacy session files written by older nexus
+                # versions still living in
                 # ~/.config/nexus/sessions/{ppid}.session.
-                record = find_session_by_id(SESSIONS_DIR) or find_ancestor_session(SESSIONS_DIR)
+                record = (
+                    _resolve_session_record_with_retry(SESSIONS_DIR)
+                    or find_ancestor_session(SESSIONS_DIR)
+                )
             if record is not None:
                 self._client = chromadb.HttpClient(
                     host=record["server_host"],

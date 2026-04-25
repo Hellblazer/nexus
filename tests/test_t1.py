@@ -35,14 +35,15 @@ class TestT1DatabaseConstructor:
         record = {"session_id": "parent-session-uuid", "server_host": "127.0.0.1", "server_port": 51234}
         mock_http = MagicMock()
         mock_http.get_or_create_collection.return_value = MagicMock()
-        with patch("nexus.db.t1.find_ancestor_session", return_value=record), \
+        with patch("nexus.db.t1._resolve_session_record_with_retry", return_value=record), \
              patch("chromadb.HttpClient", return_value=mock_http):
             t1 = T1Database()
         assert t1._session_id == "parent-session-uuid"
         assert t1._client is mock_http
 
     def test_falls_back_to_ephemeral_when_no_record(self) -> None:
-        with patch("nexus.db.t1.find_ancestor_session", return_value=None), \
+        with patch("nexus.db.t1._resolve_session_record_with_retry", return_value=None), \
+             patch("nexus.db.t1.find_ancestor_session", return_value=None), \
              warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             t1 = T1Database(session_id="fallback-id")
@@ -117,6 +118,114 @@ class TestT1DatabaseConstructor:
         cls.assert_called_once_with(host="127.0.0.1", port=54321)
         assert t1._session_id == "http-path-test-session"
         assert t1._client is mock_http
+
+
+# ---------------------------------------------------------------------------
+# _resolve_session_record_with_retry (RDR-094 CA-2 / nexus-zsqf)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveSessionRecordWithRetry:
+    """Spike B verified empirically: a subagent dispatched within the
+    parent's chroma cold-start window (~1-2s) inherits NX_SESSION_ID
+    but finds no session record yet, falling through to
+    EphemeralClient silently. This wrapper retries on a 50/100/200 ms
+    schedule (~350 ms total) only when NX_SESSION_ID is set, so
+    top-level callers without a parent session don't pay the wait."""
+
+    def test_returns_record_on_first_hit_without_sleeping(self, monkeypatch):
+        from nexus.db import t1 as _t1
+        record = {"session_id": "abc"}
+        sleeps: list[float] = []
+        with (
+            patch.object(_t1, "find_session_by_id", return_value=record),
+            patch("time.sleep", side_effect=lambda s: sleeps.append(s)),
+        ):
+            result = _t1._resolve_session_record_with_retry(None)
+        assert result is record
+        assert sleeps == [], "Successful first lookup must not sleep"
+
+    def test_does_not_retry_when_env_var_absent(self, monkeypatch):
+        """Top-level caller without parent session: don't waste time."""
+        from nexus.db import t1 as _t1
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        sleeps: list[float] = []
+        with (
+            patch.object(_t1, "find_session_by_id", return_value=None) as mock_find,
+            patch("time.sleep", side_effect=lambda s: sleeps.append(s)),
+        ):
+            result = _t1._resolve_session_record_with_retry(None)
+        assert result is None
+        assert mock_find.call_count == 1, "Must call exactly once when no env var"
+        assert sleeps == []
+
+    def test_retries_with_backoff_when_env_var_set(self, monkeypatch):
+        """The race-affected path: NX_SESSION_ID is set but record
+        not yet written. Retry on the exponential backoff schedule."""
+        from nexus.db import t1 as _t1
+        monkeypatch.setenv("NX_SESSION_ID", "subagent-uuid")
+
+        # Always-miss sequence: should exhaust the schedule.
+        sleeps: list[float] = []
+        with (
+            patch.object(_t1, "find_session_by_id", return_value=None),
+            patch("time.sleep", side_effect=lambda s: sleeps.append(s)),
+        ):
+            result = _t1._resolve_session_record_with_retry(None)
+        assert result is None
+        # Sleeps must match the backoff schedule (in seconds).
+        expected = [ms / 1000.0 for ms in _t1._T1_RACE_BACKOFF_MS]
+        assert sleeps == expected
+
+    def test_retries_succeed_on_second_attempt(self, monkeypatch):
+        """Race resolves before all retries exhausted."""
+        from nexus.db import t1 as _t1
+        monkeypatch.setenv("NX_SESSION_ID", "subagent-uuid")
+
+        record = {"session_id": "subagent-uuid"}
+        # Miss first, then hit on the second call.
+        outcomes = [None, record, record, record]
+        sleeps: list[float] = []
+        with (
+            patch.object(_t1, "find_session_by_id",
+                         side_effect=lambda *a, **k: outcomes.pop(0)),
+            patch("time.sleep", side_effect=lambda s: sleeps.append(s)),
+        ):
+            result = _t1._resolve_session_record_with_retry(None)
+        assert result is record
+        # Slept once (first backoff window) before the successful retry.
+        assert sleeps == [_t1._T1_RACE_BACKOFF_MS[0] / 1000.0]
+
+    def test_t1database_uses_retry_in_constructor(self, monkeypatch):
+        """Pin the wiring: T1Database.__init__ goes through the retry
+        helper, not the raw find_session_by_id call."""
+        from nexus.db import t1 as _t1
+        record = {
+            "session_id": "wired-test", "server_host": "127.0.0.1",
+            "server_port": 51823,
+        }
+        mock_http = MagicMock()
+        mock_http.get_or_create_collection.return_value = MagicMock()
+        with (
+            patch.object(_t1, "_resolve_session_record_with_retry",
+                         return_value=record) as mock_retry,
+            patch("chromadb.HttpClient", return_value=mock_http),
+        ):
+            t1 = _t1.T1Database()
+        mock_retry.assert_called_once()
+        assert t1._client is mock_http
+
+    def test_skip_t1_bypasses_retry_helper(self, monkeypatch):
+        """NEXUS_SKIP_T1=1 must skip the retry path entirely; the
+        stateless-operator path takes EphemeralClient directly without
+        paying the 350ms wait."""
+        from nexus.db import t1 as _t1
+        monkeypatch.setenv("NEXUS_SKIP_T1", "1")
+        monkeypatch.setenv("NX_SESSION_ID", "parent-uuid")
+
+        with patch.object(_t1, "_resolve_session_record_with_retry") as mock_retry:
+            t1 = _t1.T1Database()
+        mock_retry.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
