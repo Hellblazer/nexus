@@ -146,7 +146,14 @@ def test_session_end_flushes_flagged_t1_entries(
 def test_session_end_clears_t1_and_removes_session_file(
     runner: CliRunner, fake_home: Path, tmp_path: Path, monkeypatch
 ) -> None:
-    """SessionEnd clears T1 and removes the UUID-keyed session file."""
+    """SessionEnd clears T1 and removes the UUID-keyed session file
+    under the legacy hook-owned chroma path.
+
+    Default-on (4.12.0) routes chroma teardown to nx-mcp; the hook
+    no longer removes the session file. This test pins the legacy
+    flag-off behaviour with explicit ``NEXUS_MCP_OWNS_T1=0``.
+    """
+    monkeypatch.setenv("NEXUS_MCP_OWNS_T1", "0")
     sessions = tmp_path / "sessions"
     session_id = "test-session-id"
     session_file = sessions / f"{session_id}.session"

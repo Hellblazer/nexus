@@ -319,15 +319,20 @@ class TestLifespan:
 
 class TestFeatureFlag:
 
-    def test_lifespan_only_attached_when_flag_set(self):
-        """The lifespan kwarg passed to FastMCP() at module import depends
-        on the env var. Verify the helper variable matches reality. (The
-        env var is read once at module import, so this test is asserting
-        the read happened correctly under the active env.)"""
+    def test_lifespan_attached_by_default(self):
+        """Default-on as of conexus 4.12.0: the lifespan kwarg is
+        attached unless NEXUS_MCP_OWNS_T1 is explicitly opted out
+        via 0/false/no/off. The env var is read once at module
+        import; this test asserts the resolved bool matches the
+        active env."""
         import os
 
         from nexus.mcp import core as core_mod
 
-        flag = os.environ.get("NEXUS_MCP_OWNS_T1", "").strip().lower()
-        expected = flag in ("1", "true", "yes")
+        raw = os.environ.get("NEXUS_MCP_OWNS_T1", "").strip().lower()
+        if raw in ("0", "false", "no", "off"):
+            expected = False
+        else:
+            # Empty string OR explicit truthy values -> default-on.
+            expected = True
         assert core_mod._MCP_OWNS_T1 is expected

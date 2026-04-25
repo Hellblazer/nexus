@@ -50,6 +50,20 @@ def _open_t1():
     return T1Database()
 
 
+def _mcp_owns_t1_enabled() -> bool:
+    """Return True when nx-mcp owns the chroma lifecycle (RDR-094 Phase 4).
+
+    Default ON as of conexus 4.12.0. ``NEXUS_MCP_OWNS_T1=0`` (or
+    ``false`` / ``no`` / ``off``) is the emergency opt-out; absence
+    of the env var means ON.
+    """
+    raw = os.environ.get("NEXUS_MCP_OWNS_T1", "").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return False
+    # Default ON: empty string OR explicit truthy values.
+    return True
+
+
 def _infer_repo() -> str:
     """Detect current repo name from git, or fall back to cwd name."""
     try:
@@ -108,13 +122,14 @@ def session_start(claude_session_id: str | None = None) -> str:
     # or pollute session bookkeeping. The T1 client (``db/t1.py``)
     # falls back to EphemeralClient when this env is set.
     #
-    # Honor NEXUS_MCP_OWNS_T1 (RDR-094 Phase 1, feature-flagged opt-in)
-    # so chroma spawn moves to the nx-mcp lifespan. When set, the hook
-    # leaves chroma to the MCP server; the hook still runs the sweep
-    # and writes ``current_session`` so other tools (legacy CLI usage,
-    # subagent T1 inheritance) keep working.
+    # NEXUS_MCP_OWNS_T1 (RDR-094 Phase 4, default-on as of 4.12.0)
+    # moves chroma spawn to the nx-mcp lifespan. The hook leaves chroma
+    # to the MCP server; we still run the sweep and write
+    # ``current_session`` so other tools (legacy CLI usage, subagent
+    # T1 inheritance) keep working. Set ``NEXUS_MCP_OWNS_T1=0`` (or
+    # false / no / off) as the emergency opt-out.
     skip_t1 = os.environ.get("NEXUS_SKIP_T1", "").strip().lower() in ("1", "true", "yes")
-    mcp_owns_t1 = os.environ.get("NEXUS_MCP_OWNS_T1", "").strip().lower() in ("1", "true", "yes")
+    mcp_owns_t1 = _mcp_owns_t1_enabled()
     if mcp_owns_t1:
         skip_t1 = True
 
@@ -284,9 +299,7 @@ def session_end() -> str:
     _, own_record, own_file, _ = _resolve_session_records()
     summary = session_end_flush()
 
-    mcp_owns_t1 = os.environ.get(
-        "NEXUS_MCP_OWNS_T1", "",
-    ).strip().lower() in ("1", "true", "yes")
+    mcp_owns_t1 = _mcp_owns_t1_enabled()
     if own_record and own_file is not None and not mcp_owns_t1:
         server_pid = own_record.get("server_pid", 0)
         if server_pid:

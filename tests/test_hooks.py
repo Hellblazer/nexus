@@ -217,10 +217,16 @@ def test_session_end_no_session_record(tmp_path: Path, monkeypatch: pytest.Monke
 
 
 def test_session_end_with_session_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """When this process owns the session record, T1 is flushed and server stopped."""
+    """When this process owns the session record AND the MCP-owned-T1
+    opt-out is set, T1 is flushed and server stopped via the legacy
+    hook path. Default-on (4.12.0) leaves chroma teardown to nx-mcp;
+    this test pins the opt-out fallback path."""
     sessions = tmp_path / "sessions"
     _make_session_record(sessions, session_id="end-test-uuid", server_pid=9900)
     monkeypatch.setenv("NX_SESSION_ID", "end-test-uuid")
+    # Explicit opt-out of MCP-ownership so session_end's chroma-stop
+    # block runs (the flag is default-on as of 4.12.0).
+    monkeypatch.setenv("NEXUS_MCP_OWNS_T1", "0")
 
     mock_t1 = MagicMock()
     mock_t1.flagged_entries.return_value = []
@@ -419,15 +425,40 @@ class TestSessionEndFlush:
         assert (sessions / "owner-uuid.session").exists()
 
 
+def test_session_end_default_on_skips_chroma_without_env_var(
+    tmp_path, monkeypatch,
+):
+    """RDR-094 Phase 4 default-on (4.12.0): absence of
+    NEXUS_MCP_OWNS_T1 means MCP owns chroma. session_end must NOT
+    call stop_t1_server even when this process owns the record."""
+    sessions = tmp_path / "sessions"
+    _make_session_record(sessions, session_id="default-on-uuid", server_pid=42)
+    monkeypatch.setenv("NX_SESSION_ID", "default-on-uuid")
+    monkeypatch.delenv("NEXUS_MCP_OWNS_T1", raising=False)
+
+    mock_t1 = MagicMock()
+    mock_t1.flagged_entries.return_value = []
+
+    with (
+        patch("nexus.hooks.SESSIONS_DIR", sessions),
+        patch("nexus.hooks._default_db_path", return_value=tmp_path / "memory.db"),
+        patch("nexus.hooks._open_t1", return_value=mock_t1),
+        patch("nexus.hooks.stop_t1_server") as mock_stop,
+    ):
+        output = session_end()
+
+    assert "Session ended" in output
+    mock_stop.assert_not_called(), "default-on: hook must not stop chroma"
+    # Session file must survive when MCP owns T1.
+    assert (sessions / "default-on-uuid.session").exists()
+
+
 def test_session_end_skips_chroma_when_mcp_owns_t1(
     tmp_path, monkeypatch,
 ):
-    """The PR #300 in-place gate stays in session_end (legacy path).
-
-    With NEXUS_MCP_OWNS_T1 set, session_end must flush + expire but
-    skip stop_t1_server + session-file unlink. Pinned here so the
-    refactor doesn't accidentally drop the gate before Phase C / F
-    take over.
+    """Explicit NEXUS_MCP_OWNS_T1=1 still gates correctly under
+    default-on (back-compat sentinel for callers that set the flag
+    explicitly even though it's the new default).
     """
     sessions = tmp_path / "sessions"
     _make_session_record(sessions, session_id="mcp-owned-uuid", server_pid=42)
@@ -483,8 +514,15 @@ def test_session_end_flush_cli_subcommand(tmp_path, monkeypatch):
 # ── session lock stale cleanup ───────────────────────────────────────────────
 
 
-def test_session_start_writes_pid_to_lock(tmp_path: Path) -> None:
-    """session_start writes its PID into session.lock for stale detection."""
+def test_session_start_writes_pid_to_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """session_start writes its PID into session.lock for stale detection.
+
+    Default-on (4.12.0) routes the hook through skip_t1, which bypasses
+    the lock acquisition because nx-mcp owns chroma. Opt out explicitly
+    so this test exercises the legacy lock-creation path that's still
+    relevant when ``NEXUS_MCP_OWNS_T1=0``.
+    """
+    monkeypatch.setenv("NEXUS_MCP_OWNS_T1", "0")
     sessions = tmp_path / "sessions"
     sessions.mkdir()
 
@@ -505,8 +543,13 @@ def test_session_start_writes_pid_to_lock(tmp_path: Path) -> None:
     assert pid_text == str(os.getpid())
 
 
-def test_session_start_clears_stale_lock(tmp_path: Path) -> None:
-    """session_start removes a stale session.lock before acquiring."""
+def test_session_start_clears_stale_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """session_start removes a stale session.lock before acquiring.
+
+    Same opt-out as ``test_session_start_writes_pid_to_lock``: default-on
+    bypasses the lock entirely.
+    """
+    monkeypatch.setenv("NEXUS_MCP_OWNS_T1", "0")
     from nexus.indexer import _LOCK_STALE_SECONDS
 
     sessions = tmp_path / "sessions"
