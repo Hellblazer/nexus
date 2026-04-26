@@ -31,12 +31,31 @@ ALLOWED_FILES = frozenset({
 })
 
 
-def _scan_file_for_hook_refs(path: pathlib.Path) -> list[str]:
+# RDR-089 follow-up (nexus-qeo8): the aspect-extraction enqueue hook
+# is the document-grain analogue of the batch-chain guard above. The
+# hook lives in `nexus.aspect_worker` (not in mcp_infra, to keep the
+# infra module dependency-light), so the allow-list differs.
+DOCUMENT_HOOK_GUARDED_NAMES = frozenset({
+    "aspect_extraction_enqueue_hook",
+})
+
+DOCUMENT_HOOK_ALLOWED_FILES = frozenset({
+    "src/nexus/aspect_worker.py",  # the definition
+    "src/nexus/mcp/core.py",       # the single registration site
+})
+
+
+def _scan_file_for_hook_refs(
+    path: pathlib.Path,
+    *,
+    guarded_names: frozenset[str] = GUARDED_NAMES,
+    source_module: str = "nexus.mcp_infra",
+) -> list[str]:
     """Return semantic references to guarded hook names in *path*.
 
     Counts:
-      * ``from nexus.mcp_infra import <hook>``
-      * ``import nexus.mcp_infra ... ; mcp_infra.<hook>`` attribute access
+      * ``from <source_module> import <hook>``
+      * ``import <source_module> ... ; <source_module>.<hook>`` attribute access
       * Bare-name references where the hook was already imported
 
     Excludes docstrings, comments, and string literals (which can mention
@@ -54,18 +73,18 @@ def _scan_file_for_hook_refs(path: pathlib.Path) -> list[str]:
     refs: list[str] = []
 
     for node in ast.walk(tree):
-        # from nexus.mcp_infra import taxonomy_assign_batch_hook[, ...]
-        if isinstance(node, ast.ImportFrom) and node.module == "nexus.mcp_infra":
+        # from <source_module> import <hook>[, ...]
+        if isinstance(node, ast.ImportFrom) and node.module == source_module:
             for alias in node.names:
-                if alias.name in GUARDED_NAMES:
+                if alias.name in guarded_names:
                     refs.append(
-                        f"line {node.lineno}: from nexus.mcp_infra import {alias.name}"
+                        f"line {node.lineno}: from {source_module} import {alias.name}"
                     )
-        # mcp_infra.taxonomy_assign_batch_hook attribute access
-        elif isinstance(node, ast.Attribute) and node.attr in GUARDED_NAMES:
+        # <module>.<hook> attribute access
+        elif isinstance(node, ast.Attribute) and node.attr in guarded_names:
             refs.append(f"line {node.lineno}: ...{node.attr} attribute access")
-        # Bare-name reference (e.g. after `import taxonomy_assign_batch_hook`)
-        elif isinstance(node, ast.Name) and node.id in GUARDED_NAMES:
+        # Bare-name reference (e.g. after `import <hook>`)
+        elif isinstance(node, ast.Name) and node.id in guarded_names:
             refs.append(f"line {node.lineno}: bare reference to {node.id}")
 
     return refs
@@ -341,3 +360,69 @@ def test_mcp_store_put_calls_document_hook_synchronously() -> None:
         "drops the dispatch (store_put is `def`, not `async def`). "
         "Offenders:\n  " + "\n  ".join(offending_calls)
     )
+
+
+# ── Document-chain GUARDED_NAMES wave 2 (nexus-qeo8) ─────────────────────────
+
+
+def test_document_hook_not_called_outside_aspect_worker_and_core() -> None:
+    """RDR-089 follow-up drift guard: the document-grain hook
+    ``aspect_extraction_enqueue_hook`` may only be referenced inside
+    its definition module (``src/nexus/aspect_worker.py``) and the
+    single registration site (``src/nexus/mcp/core.py``). Every
+    other module fires through ``fire_post_document_hooks`` — the
+    framework dispatches.
+
+    The same anti-pattern caught by the batch-chain guard above:
+    a future contributor who imports the hook directly to call it
+    inline (e.g. to "make extraction synchronous in this one path")
+    re-introduces the synchronous-extraction bottleneck the P1.3
+    spike specifically retired. The fix is always to fire through
+    the chain dispatcher, not to import the hook.
+    """
+    offenders: dict[str, list[str]] = {}
+    for py in SRC_ROOT.rglob("*.py"):
+        rel = py.relative_to(PROJECT_ROOT).as_posix()
+        if rel in DOCUMENT_HOOK_ALLOWED_FILES:
+            continue
+        refs = _scan_file_for_hook_refs(
+            py,
+            guarded_names=DOCUMENT_HOOK_GUARDED_NAMES,
+            source_module="nexus.aspect_worker",
+        )
+        if refs:
+            offenders[rel] = refs
+
+    if offenders:
+        formatted = "\n".join(
+            f"  {path}:\n    " + "\n    ".join(refs)
+            for path, refs in sorted(offenders.items())
+        )
+        raise AssertionError(
+            "RDR-089 follow-up drift guard: "
+            "aspect_extraction_enqueue_hook may only be referenced "
+            "inside src/nexus/aspect_worker.py (definition) and "
+            "src/nexus/mcp/core.py (registration). New consumers "
+            "should fire through fire_post_document_hooks. "
+            "Offenders:\n" + formatted
+        )
+
+
+def test_document_hook_drift_guard_catches_synthetic_offender(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The drift-guard scanner correctly flags an ImportFrom of the
+    aspect-worker hook in an arbitrary file. Pinned so this guard
+    cannot regress to a no-op."""
+    offender = tmp_path / "offender.py"
+    offender.write_text(
+        "from nexus.aspect_worker import aspect_extraction_enqueue_hook\n"
+        "aspect_extraction_enqueue_hook('/p', 'knowledge__delos', '')\n"
+    )
+    refs = _scan_file_for_hook_refs(
+        offender,
+        guarded_names=DOCUMENT_HOOK_GUARDED_NAMES,
+        source_module="nexus.aspect_worker",
+    )
+    assert refs, "scanner must flag a direct ImportFrom of the guarded hook"
+    assert any("aspect_extraction_enqueue_hook" in r for r in refs)
