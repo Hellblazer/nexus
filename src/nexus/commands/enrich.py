@@ -694,3 +694,98 @@ def enrich_aspects_delete(
             f"No aspect row for ({collection!r}, "
             f"{source_path!r}) — nothing to delete."
         )
+
+
+# ── extras → fixed-column promotion (RDR-089 Phase E) ───────────────────────
+
+
+@enrich.command(name="aspects-promote-field")
+@click.argument("field_name")
+@click.option(
+    "--type", "sql_type",
+    type=click.Choice(["TEXT", "INTEGER", "REAL"], case_sensitive=False),
+    default="TEXT",
+    show_default=True,
+    help="SQL type for the new column.",
+)
+@click.option(
+    "--prune",
+    is_flag=True,
+    help=(
+        "After backfilling, remove the key from extras. Only run "
+        "after every reader has been updated to consume the typed "
+        "column."
+    ),
+)
+@click.option(
+    "--history",
+    is_flag=True,
+    help="Print the promotion audit log and exit (no promotion).",
+)
+def enrich_aspects_promote_field(
+    field_name: str, sql_type: str, prune: bool, history: bool,
+) -> None:
+    """Promote ``extras['<FIELD_NAME>']`` to its own typed column.
+
+    Three-phase mechanic (see ``src/nexus/aspect_promotion.py`` for
+    the full contract):
+
+      1. ALTER TABLE document_aspects ADD COLUMN <field_name> <type>
+         (idempotent)
+      2. Backfill the new column from ``extras[<field_name>]`` for
+         rows where the column is currently NULL and the extras
+         key is set
+      3. If ``--prune``: remove the key from ``extras`` so future
+         readers always go to the typed column
+
+    Phase 3 is opt-in. The default (no --prune) leaves ``extras``
+    untouched, supporting a dual-read cutover where readers are
+    updated incrementally.
+
+    Each invocation logs to T2 ``aspect_promotion_log``; the
+    promotion history is queryable via ``--history``.
+    """
+    from nexus.aspect_promotion import (
+        list_promotions, promote_extras_field,
+    )
+    from nexus.commands._helpers import default_db_path
+    from nexus.db.t2 import T2Database
+
+    if history:
+        with T2Database(default_db_path()) as db:
+            entries = list_promotions(db)
+        if not entries:
+            click.echo("No promotion history.")
+            return
+        for e in entries:
+            note = " (pruned)" if e["pruned"] else ""
+            click.echo(
+                f"  {e['promoted_at']}  {e['field_name']:32s} "
+                f"{e['sql_type']:8s} +{e['rows_backfilled']:>4d} rows"
+                f"{note}"
+            )
+        return
+
+    with T2Database(default_db_path()) as db:
+        try:
+            result = promote_extras_field(
+                db, field_name,
+                sql_type=sql_type.upper(),
+                prune=prune,
+            )
+        except ValueError as exc:
+            click.echo(f"Error: {exc}", err=True)
+            raise click.exceptions.Exit(2)
+
+    if result.column_added:
+        click.echo(
+            f"Added column {result.field_name} {result.sql_type}."
+        )
+    else:
+        click.echo(
+            f"Column {result.field_name} already exists "
+            f"(promotion is idempotent)."
+        )
+    click.echo(f"Backfilled {result.rows_backfilled} row(s).")
+    if result.pruned:
+        click.echo(f"Pruned {result.rows_pruned} extras key(s).")
