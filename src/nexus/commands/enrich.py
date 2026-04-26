@@ -572,3 +572,125 @@ async def _verify(claim_json: str, evidence: str) -> dict:
         evidence=evidence,
         timeout=60.0,
     )
+
+
+# ── Day 2 Operations: list / info / delete ──────────────────────────────────
+
+
+@enrich.command(name="list")
+@click.argument("collection")
+@click.option(
+    "--limit",
+    type=int,
+    default=0,
+    help="Maximum rows to print (0 = unlimited).",
+)
+def enrich_aspects_list(collection: str, limit: int) -> None:
+    """List source paths with extracted aspects in COLLECTION.
+
+    One row per source document, deterministic order
+    (``source_path ASC``). For each row prints
+    ``<source_path>  <fields_populated>/5  <model_version>``
+    so an operator can spot null-fields rows quickly.
+    """
+    from nexus.commands._helpers import default_db_path
+    from nexus.db.t2 import T2Database
+
+    with T2Database(default_db_path()) as db:
+        records = db.document_aspects.list_by_collection(
+            collection, limit=limit if limit > 0 else None,
+        )
+
+    if not records:
+        click.echo(f"No aspect rows for '{collection}'.")
+        return
+
+    for r in records:
+        populated = sum(
+            1 for v in (
+                r.problem_formulation, r.proposed_method,
+                r.experimental_results,
+            ) if v
+        ) + (1 if r.experimental_datasets else 0) \
+          + (1 if r.experimental_baselines else 0)
+        click.echo(
+            f"  {r.source_path}  {populated}/5  {r.model_version}"
+        )
+    click.echo(f"\n{len(records)} row(s) in '{collection}'.")
+
+
+@enrich.command(name="info")
+@click.argument("collection")
+@click.argument("source_path")
+def enrich_aspects_info(collection: str, source_path: str) -> None:
+    """Show the AspectRecord JSON for one document in COLLECTION."""
+    import json
+
+    from nexus.commands._helpers import default_db_path
+    from nexus.db.t2 import T2Database
+
+    with T2Database(default_db_path()) as db:
+        record = db.document_aspects.get(collection, source_path)
+
+    if record is None:
+        click.echo(
+            f"No aspect row for ({collection!r}, {source_path!r})."
+        )
+        return
+
+    click.echo(json.dumps({
+        "collection": record.collection,
+        "source_path": record.source_path,
+        "problem_formulation": record.problem_formulation,
+        "proposed_method": record.proposed_method,
+        "experimental_datasets": record.experimental_datasets,
+        "experimental_baselines": record.experimental_baselines,
+        "experimental_results": record.experimental_results,
+        "extras": record.extras,
+        "confidence": record.confidence,
+        "extracted_at": record.extracted_at,
+        "model_version": record.model_version,
+        "extractor_name": record.extractor_name,
+    }, indent=2))
+
+
+@enrich.command(name="delete")
+@click.argument("collection")
+@click.argument("source_path")
+@click.option(
+    "--yes", "-y",
+    is_flag=True,
+    help="Skip the confirmation prompt.",
+)
+def enrich_aspects_delete(
+    collection: str, source_path: str, yes: bool,
+) -> None:
+    """Remove one aspect row by (COLLECTION, SOURCE_PATH).
+
+    Idempotent: deleting a non-existent row prints a notice and
+    exits 0. Re-extraction (``nx enrich aspects --re-extract``)
+    will repopulate the row when run.
+    """
+    from nexus.commands._helpers import default_db_path
+    from nexus.db.t2 import T2Database
+
+    if not yes:
+        click.confirm(
+            f"Delete aspect row for ({collection!r}, "
+            f"{source_path!r})?",
+            abort=True,
+        )
+
+    with T2Database(default_db_path()) as db:
+        deleted = db.document_aspects.delete(collection, source_path)
+
+    if deleted:
+        click.echo(
+            f"Deleted aspect row for ({collection!r}, "
+            f"{source_path!r})."
+        )
+    else:
+        click.echo(
+            f"No aspect row for ({collection!r}, "
+            f"{source_path!r}) — nothing to delete."
+        )

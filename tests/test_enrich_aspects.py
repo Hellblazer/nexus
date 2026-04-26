@@ -403,3 +403,156 @@ class TestGroupStructure:
         assert result.exit_code == 0
         assert "bib" in result.output
         assert "aspects" in result.output
+
+
+# ── Day 2 Operations: list / info / delete ──────────────────────────────────
+
+
+class TestDay2Ops:
+    """RDR-089 §Day 2 Operations: list, info, delete."""
+
+    def test_list_prints_rows_with_population_count(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from nexus.db.t2 import T2Database
+
+        _, db_path, _ = env
+        with T2Database(db_path) as db:
+            db.document_aspects.upsert(_make_record(
+                source_path="/p1.pdf", problem_formulation="P1",
+            ))
+            db.document_aspects.upsert(_make_record(
+                source_path="/p2.pdf",
+                problem_formulation=None, proposed_method=None,
+            ))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            enrich, ["list", "knowledge__delos"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "/p1.pdf" in result.output
+        assert "/p2.pdf" in result.output
+        assert "5/5" in result.output  # p1 fully populated
+        assert "3/5" in result.output  # p2 with two None scalars
+        assert "2 row(s)" in result.output
+
+    def test_list_empty_collection(self, env) -> None:
+        runner = CliRunner()
+        result = runner.invoke(
+            enrich, ["list", "knowledge__nope"],
+        )
+        assert result.exit_code == 0
+        assert "No aspect rows" in result.output
+
+    def test_list_respects_limit(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from nexus.db.t2 import T2Database
+
+        _, db_path, _ = env
+        with T2Database(db_path) as db:
+            for i in range(5):
+                db.document_aspects.upsert(_make_record(
+                    source_path=f"/p{i}.pdf",
+                ))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            enrich, ["list", "knowledge__delos", "--limit", "2"],
+        )
+        assert result.exit_code == 0
+        assert "2 row(s)" in result.output
+
+    def test_info_prints_full_record_json(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import json
+        from nexus.db.t2 import T2Database
+
+        _, db_path, _ = env
+        with T2Database(db_path) as db:
+            db.document_aspects.upsert(_make_record(
+                source_path="/p1.pdf",
+            ))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            enrich, ["info", "knowledge__delos", "/p1.pdf"],
+        )
+        assert result.exit_code == 0, result.output
+        parsed = json.loads(result.output)
+        assert parsed["collection"] == "knowledge__delos"
+        assert parsed["source_path"] == "/p1.pdf"
+        assert parsed["problem_formulation"] == "P"
+        assert parsed["experimental_datasets"] == ["d1"]
+        assert parsed["extras"] == {"venue": "V"}
+        assert parsed["extractor_name"] == "scholarly-paper-v1"
+
+    def test_info_missing_row_prints_notice(self, env) -> None:
+        runner = CliRunner()
+        result = runner.invoke(
+            enrich, ["info", "knowledge__delos", "/missing.pdf"],
+        )
+        assert result.exit_code == 0
+        assert "No aspect row" in result.output
+
+    def test_delete_removes_row(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from nexus.db.t2 import T2Database
+
+        _, db_path, _ = env
+        with T2Database(db_path) as db:
+            db.document_aspects.upsert(_make_record(
+                source_path="/p1.pdf",
+            ))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            enrich,
+            ["delete", "knowledge__delos", "/p1.pdf", "--yes"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Deleted" in result.output
+
+        with T2Database(db_path) as db:
+            assert db.document_aspects.get(
+                "knowledge__delos", "/p1.pdf",
+            ) is None
+
+    def test_delete_idempotent_on_missing_row(self, env) -> None:
+        runner = CliRunner()
+        result = runner.invoke(
+            enrich,
+            ["delete", "knowledge__delos", "/missing.pdf", "--yes"],
+        )
+        assert result.exit_code == 0
+        assert "nothing to delete" in result.output
+
+    def test_delete_requires_confirmation_without_yes(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Without --yes, delete prompts for confirmation. Aborting at
+        the prompt leaves the row in place."""
+        from nexus.db.t2 import T2Database
+
+        _, db_path, _ = env
+        with T2Database(db_path) as db:
+            db.document_aspects.upsert(_make_record(
+                source_path="/p1.pdf",
+            ))
+
+        runner = CliRunner()
+        # Send "n\n" to the prompt to abort.
+        result = runner.invoke(
+            enrich,
+            ["delete", "knowledge__delos", "/p1.pdf"],
+            input="n\n",
+        )
+        assert result.exit_code != 0  # click.confirm abort -> non-zero
+
+        with T2Database(db_path) as db:
+            assert db.document_aspects.get(
+                "knowledge__delos", "/p1.pdf",
+            ) is not None
