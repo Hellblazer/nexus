@@ -277,28 +277,30 @@ class TestWorkerLifecycle:
 
 class TestEnqueueHook:
     def test_hook_enqueues_supported_collection(
-        self, _isolate_t2: Path,
+        self, _isolate_t2: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The registered hook writes a pending row for knowledge__*
-        collections."""
-        from nexus.aspect_worker import (
-            aspect_extraction_enqueue_hook,
-            stop_worker,
-        )
+        collections.
 
-        try:
-            aspect_extraction_enqueue_hook(
-                source_path="/p1.pdf",
-                collection="knowledge__delos",
-                content="some text",
-            )
-            with T2Database(_isolate_t2) as db:
-                rows = db.aspect_queue.list_pending()
-            assert len(rows) == 1
-            assert rows[0].source_path == "/p1.pdf"
-            assert rows[0].collection == "knowledge__delos"
-        finally:
-            stop_worker(timeout=2.0)
+        Patches out ``ensure_worker_started`` so the worker doesn't
+        race the test thread and drain the row before the assertion
+        can see it. Worker-side behaviour is covered by the
+        ``TestWorkerDrain`` suite above."""
+        import nexus.aspect_worker as mod
+        from nexus.aspect_worker import aspect_extraction_enqueue_hook
+
+        monkeypatch.setattr(mod, "ensure_worker_started", lambda: None)
+
+        aspect_extraction_enqueue_hook(
+            source_path="/p1.pdf",
+            collection="knowledge__delos",
+            content="some text",
+        )
+        with T2Database(_isolate_t2) as db:
+            rows = db.aspect_queue.list_pending()
+        assert len(rows) == 1
+        assert rows[0].source_path == "/p1.pdf"
+        assert rows[0].collection == "knowledge__delos"
 
     def test_hook_skips_unsupported_collection(
         self, _isolate_t2: Path,

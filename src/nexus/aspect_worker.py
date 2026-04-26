@@ -80,6 +80,13 @@ class AspectExtractionWorker:
     ``stale_timeout`` for tests; defaults are tuned for production.
     """
 
+    # Reclaim runs every N polls rather than every poll: at the
+    # default poll_interval=2s and reclaim_every=15, stale-row
+    # reclamation fires every ~30s. Suppresses the O(N) UPDATE
+    # storm a large stuck queue would otherwise see, while still
+    # recovering crashed-worker rows within one reclaim cycle.
+    _RECLAIM_EVERY_N_POLLS = 15
+
     def __init__(
         self,
         *,
@@ -91,6 +98,7 @@ class AspectExtractionWorker:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._poll_count = 0
 
     def start(self) -> None:
         """Spawn the daemon thread. Idempotent — calling twice does
@@ -136,8 +144,9 @@ class AspectExtractionWorker:
         """Drain loop. Runs until ``_stop_event`` is set.
 
         Each iteration:
-          1. Reclaim stale ``in_progress`` rows (cheap O(N) UPDATE
-             once per poll — bounded by the indexed status filter).
+          1. Reclaim stale ``in_progress`` rows (every
+             ``_RECLAIM_EVERY_N_POLLS`` iterations — frequency guard
+             on the O(N) UPDATE for large stuck queues).
           2. Claim the next pending row.
           3. If no row: sleep ``poll_interval``.
           4. If row: invoke extract_aspects, dispatch on the result.
@@ -149,10 +158,12 @@ class AspectExtractionWorker:
         while not self._stop_event.is_set():
             try:
                 with t2_ctx() as t2:
-                    t2.aspect_queue.reclaim_stale(
-                        timeout_seconds=self._stale_timeout_seconds,
-                    )
+                    if self._poll_count % self._RECLAIM_EVERY_N_POLLS == 0:
+                        t2.aspect_queue.reclaim_stale(
+                            timeout_seconds=self._stale_timeout_seconds,
+                        )
                     row = t2.aspect_queue.claim_next()
+                self._poll_count += 1
             except Exception:
                 _log.warning("aspect_worker_claim_failed", exc_info=True)
                 self._stop_event.wait(self._poll_interval)
@@ -266,7 +277,13 @@ def ensure_worker_started(
 
 
 def stop_worker(timeout: float = 10.0) -> None:
-    """Stop the singleton worker if running. Idempotent."""
+    """Stop the singleton worker if running. Idempotent.
+
+    Note: leaves the singleton instance in place (stopped) so a
+    subsequent ``ensure_worker_started`` call rebuilds the daemon
+    thread on the existing instance. Tests that need a fresh
+    instance should call ``reset_worker_for_tests`` instead.
+    """
     global _worker
     with _worker_lock:
         worker = _worker

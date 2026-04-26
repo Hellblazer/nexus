@@ -716,6 +716,14 @@ class Catalog:
         like ``nx enrich aspects`` need to drive a per-document
         operation. Ordered by ``tumbler ASC`` for deterministic
         iteration. ``limit=None`` returns every match.
+
+        Reads the SQLite cache without acquiring the JSONL-truth
+        flock — consistent with ``resolve``, ``find``, and
+        ``by_file_path``. Callers driving downstream writes (e.g.
+        ``nx enrich aspects``) should treat the result as a
+        best-effort sweep; a document registered concurrently may
+        be missed and can be picked up by a subsequent run or by
+        ``--re-extract`` re-sweeps.
         """
         sql = (
             "SELECT tumbler, title, author, year, content_type, file_path, "

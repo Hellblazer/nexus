@@ -552,7 +552,17 @@ def _run_validation_sample(
 
 async def _verify(claim_json: str, evidence: str) -> dict:
     """Async wrapper around operator_verify so the CLI can call it
-    from synchronous click code via ``asyncio.run``."""
+    from synchronous click code via ``asyncio.run``.
+
+    Caveat: ``asyncio.run`` raises ``RuntimeError`` if invoked
+    inside a running event loop (e.g. if ``nx`` were ever wrapped
+    as an MCP tool body, or invoked from pytest-asyncio with
+    ``asyncio_mode='auto'``). The current production path
+    (``nx enrich aspects`` from a plain shell) is purely synchronous,
+    so this caveat is forward-risk only. If the CLI ever gets
+    invoked from inside an event loop, restructure this helper
+    to run the coroutine in a dedicated thread.
+    """
     from nexus.mcp.core import operator_verify
     return await operator_verify(
         claim=claim_json,
