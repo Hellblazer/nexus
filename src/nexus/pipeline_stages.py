@@ -725,6 +725,12 @@ def pipeline_index_pdf(
         chunk_count=total_chunks,
     )
 
+    # RDR-089 document-grain chain — once per PDF boundary at the streaming
+    # pipeline tail. content="" (PDF text streamed not retained); the hook
+    # reads source_path itself per the P0.1 content-sourcing contract.
+    from nexus.mcp_infra import fire_post_document_hooks
+    fire_post_document_hooks(str(pdf_path), collection, "")
+
     return total_chunks
 
 

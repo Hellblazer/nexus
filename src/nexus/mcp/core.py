@@ -22,6 +22,7 @@ from nexus.filters import parse_where_str as _parse_where_str
 from nexus.config import load_config
 from nexus.mcp_infra import (
     catalog_auto_link as _catalog_auto_link,
+    fire_post_document_hooks as _fire_post_document_hooks,
     fire_post_store_batch_hooks as _fire_post_store_batch_hooks,
     fire_post_store_hooks as _fire_post_store_hooks,
     get_catalog as _get_catalog,
@@ -911,6 +912,15 @@ def store_put(
         _fire_post_store_batch_hooks(
             [doc_id], col_name, [content], None, None,
         )
+        # RDR-089 document-grain chain — plain sync call (FastMCP wraps
+        # this @mcp.tool() body in a thread pool at the framework level;
+        # store_put is `def`, not `async def`, so no await/to_thread).
+        # content is the full document text already in scope; pass it
+        # through literally per the P0.1 content-sourcing contract.
+        # source_path is doc_id here — there is no on-disk file at the
+        # MCP boundary, so the doc_id serves as the stable identifier
+        # the hook uses for failure attribution.
+        _fire_post_document_hooks(doc_id, col_name, content)
         # RDR-061 E2: log relevance correlation for the most recent search in
         # this session. Only the newest trace is used to minimize noise —
         # older traces are unlikely to have driven this store_put.

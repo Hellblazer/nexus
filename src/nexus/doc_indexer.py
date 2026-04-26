@@ -372,6 +372,7 @@ def _index_document(
     # fire from every storage event; the per-doc loop covers single-shape
     # consumers on CLI ingest.
     from nexus.mcp_infra import (
+        fire_post_document_hooks,
         fire_post_store_batch_hooks,
         fire_post_store_hooks,
     )
@@ -380,6 +381,10 @@ def _index_document(
     )
     for _did, _doc in zip(ids, documents):
         fire_post_store_hooks(_did, collection_name, _doc)
+    # RDR-089 document-grain chain — fires once per file boundary.
+    # content="" because only chunk text is in scope here; the hook
+    # reads source_path itself per the P0.1 content-sourcing contract.
+    fire_post_document_hooks(sp, collection_name, "")
 
     # Prune stale chunks from a previous (larger) version of this file.
     # Paginate: ChromaDB Cloud returns at most 300 records per get() call.
@@ -867,6 +872,12 @@ def index_pdf(
         )
         metadatas = [p[2] for p in prepared]
         _register_in_catalog(metadatas, len(metadatas))
+        # RDR-089 document-grain chain — fires once per PDF boundary at the
+        # incremental-branch tail. content="" (chunks already paginated
+        # through T3); the hook reads source_path itself per the P0.1
+        # content-sourcing contract.
+        from nexus.mcp_infra import fire_post_document_hooks
+        fire_post_document_hooks(str(pdf_path), col_name, "")
         if return_metadata:
             return {
                 "chunks": len(metadatas),
@@ -899,6 +910,7 @@ def index_pdf(
     # fire from every storage event; the per-doc loop covers single-shape
     # consumers on CLI ingest.
     from nexus.mcp_infra import (
+        fire_post_document_hooks,
         fire_post_store_batch_hooks,
         fire_post_store_hooks,
     )
@@ -907,6 +919,10 @@ def index_pdf(
     )
     for _did, _doc in zip(ids, documents):
         fire_post_store_hooks(_did, col_name, _doc)
+    # RDR-089 document-grain chain — fires once per small-doc PDF boundary.
+    # content="" (full document text not retained in this path); the hook
+    # reads source_path itself.
+    fire_post_document_hooks(str(pdf_path), col_name, "")
 
     # Prune stale chunks
     current_ids_set = set(ids)
