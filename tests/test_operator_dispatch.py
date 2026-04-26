@@ -718,7 +718,14 @@ class TestOperatorFilter:
             return {"items": [], "rationale": []}
 
         monkeypatch.setattr(_mod, "claude_dispatch", fake)
-        await operator_filter(items='[]', criterion="peer-reviewed-only-sentinel")
+        # source="llm" forces the LLM substrate; default "auto" would
+        # short-circuit on empty items via the RDR-089 SQL fast path
+        # before ever reaching dispatch.
+        await operator_filter(
+            items='[]',
+            criterion="peer-reviewed-only-sentinel",
+            source="llm",
+        )
         assert "peer-reviewed-only-sentinel" in captured[0]
 
     @pytest.mark.asyncio
@@ -755,7 +762,10 @@ class TestOperatorFilter:
             return {"items": [], "rationale": []}
 
         monkeypatch.setattr(_mod, "claude_dispatch", fake)
-        await operator_filter(items='[]', criterion="x")
+        # source="llm" — this test pins the LLM substrate's schema; the
+        # RDR-089 SQL fast path short-circuits empty-items inputs and
+        # would never reach dispatch under default "auto".
+        await operator_filter(items='[]', criterion="x", source="llm")
 
         schema = captured_schemas[0]
         assert schema["type"] == "object"
@@ -1101,7 +1111,10 @@ class TestOperatorGroupby:
             return {"groups": []}
 
         monkeypatch.setattr(_mod, "claude_dispatch", fake)
-        await operator_groupby(items='[]', key="x")
+        # source="llm" — this test pins the LLM substrate's schema; the
+        # RDR-089 SQL fast path short-circuits empty-items inputs and
+        # would never reach dispatch under default "auto".
+        await operator_groupby(items='[]', key="x", source="llm")
 
         schema = captured_schemas[0]
         assert schema["type"] == "object"
