@@ -978,6 +978,17 @@ What still belongs to a separate operations RDR is **policy** (not mechanism): w
 
 The consistency model is now documented in the operator docstrings and the SQL fast path docstring (`nexus.operators.aspect_sql` module): operators querying `document_aspects` for a queue-pending document treat the missing row as a non-match (filter), `unassigned` (groupby), or excluded (aggregate). Callers needing eventual consistency re-run after the queue drains, or pass `source="llm"` to bypass T2 entirely.
 
+**Second-pass substantive-critique findings (post-Phase F)**:
+
+A second `/nx:substantive-critique` pass after Phases A–F shipped found four critical correctness defects that survived the first review because the reviewer was checking the implementation against itself; this round checked it against the LLM-path contracts and the documented invariants. All four are resolved in-place:
+
+1. `operator_groupby` SQL path on JSON-array columns (`experimental_datasets`, `experimental_baselines`) would unroll a multi-value item across multiple groups, violating the LLM path's one-group-per-item invariant (RDR-093 §C-1). Now: under `source="auto"` the SQL path detects json_array fields and returns `None` so the operator falls back to LLM (which respects the invariant); under `source="aspects"` the divergence is surfaced as a `_meta` group with rationale rather than silently emitting wrong-shape output. Callers who specifically want unrolled multi-membership must construct a different operator.
+2. `count distinct` returned `0 distinct item(s)` when input items lacked an explicit `id` field — a misleading-rather-than-obviously-wrong result that would hide silently in any pipeline driven by `operator_groupby`'s SQL path (which does not synthesize `id`). Now: falls back to dedup by `(collection, source_path)` tuple when `id` is absent on every item, with annotation `"id field absent; deduped by (collection, source_path)"`. Truly identity-less items report `len(items) item(s) (no id or identity field; cannot dedup)`.
+3. `_query_confidence_aggregate` silently truncated groups larger than 300 to compute `avg/min/max(confidence)` over an arbitrary first-300 subset. Now: paginates in 300-id batches, accumulates `sum`/`count`/`min`/`max` in Python, returns the exact aggregate over the full group.
+4. `_parse_simple_yaml` (Phase F RDR frontmatter parser) corrupted real-world RDR frontmatter on two patterns confirmed in this repo: `note: |` was stored as the literal `|` character; `related:` followed by indented `- item` lines was parsed as the empty string and the items silently dropped. Now: block scalar indicators (`|`, `>`, `|-`, `>-`, `|+`, `>+`) store `None` and skip indented continuations; block lists accumulate stripped items into a Python list.
+
+Plus three significant items: `select_config` docstring updated to reflect the Phase F `rdr__*` registration; `aspect_promotion_log` migrated into the registry (was lazy-only, missed by `nx doctor --check-schema` audits); confidence-aggregate pagination now logs nothing extra because the exact path replaces the truncation entirely.
+
 ## References
 
 - Paper: `knowledge__agentic-scholar` Algorithm ExtractTemplate, §D.3 (MatrixConstruct consumption)

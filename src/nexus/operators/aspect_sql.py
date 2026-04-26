@@ -273,12 +273,29 @@ def try_groupby(
     ``None`` to signal LLM fallback (mode ``"auto"`` only).
 
     Group cardinality semantics: scalar-column groupby is direct
-    (e.g. ``proposed_method`` produces one group per unique value —
-    typically high cardinality and not very useful for free text).
-    JSON-array column groupby unrolls each item across its array
-    values (a paper with two datasets appears in two groups).
-    JSON-object groupby uses ``json_extract`` on the
-    ``extras.<key>`` form.
+    (one group per unique value — typically high cardinality for
+    free-text columns). JSON-object groupby uses ``json_extract``
+    on the ``extras.<key>`` form.
+
+    JSON-array semantics — invariant divergence (substantive
+    critic finding): the LLM path's ``operator_groupby`` contract
+    requires every input item to appear in EXACTLY ONE group
+    (RDR-093 §C-1 inline-items contract). The SQL path on a JSON-
+    array column would naturally unroll a multi-value item across
+    multiple groups (a paper with ``["TPC-C", "YCSB"]`` would join
+    both groups), violating the invariant. Downstream consumers
+    that count items across groups, deduplicate, or pipe through
+    ``operator_aggregate`` with a ``count`` reducer would silently
+    receive double-counted results.
+
+    Resolution: under ``source="auto"`` the SQL path REJECTS
+    JSON-array fields and returns ``None`` so the operator falls
+    back to LLM (which respects the one-group invariant). Under
+    ``source="aspects"`` the SQL path emits a stub group with the
+    rejection reason. Callers who specifically want unrolled
+    multi-membership semantics must pass ``source="llm"`` and
+    rely on LLM partitioning, OR construct a different operator
+    (the unroll behaviour does not belong in groupby).
 
     Items whose aspect row is missing land in
     ``key_value="unassigned"`` (matching the LLM path's fallback
@@ -307,6 +324,23 @@ def try_groupby(
             source,
             f"could not infer aspect field from key {key!r}; "
             f"pass aspect_field=<column> explicitly",
+        )
+
+    # JSON-array fields would violate the LLM path's one-group-per-
+    # item invariant if unrolled. Reject so the operator falls back
+    # to LLM semantics in auto mode, or stubs the divergence in
+    # aspects mode. Detection mirrors _ASPECT_COLUMN_TYPES.
+    is_json_array = (
+        not field.startswith("extras.")
+        and _ASPECT_COLUMN_TYPES.get(field) == "json_array"
+    )
+    if is_json_array:
+        return _aspects_only_or_none_grouped(
+            source,
+            f"groupby on json_array column {field!r} would unroll "
+            f"each item across multiple groups, violating the LLM "
+            f"path's one-group-per-item contract; falling back to "
+            f"LLM (source='auto') or pass source='llm' explicitly",
         )
 
     try:
@@ -381,9 +415,41 @@ def try_aggregate(
         if reducer_kind == "count":
             summary = f"{len(items)} item(s)"
         elif reducer_kind == "count_distinct":
-            seen_ids = {item.get("id") for item in items if isinstance(item, dict)}
-            seen_ids.discard(None)
-            summary = f"{len(seen_ids)} distinct item(s)"
+            # Prefer ``id`` field for dedup; fall back to (collection,
+            # source_path) tuple when ``id`` is absent on every item
+            # in the group. Items from operator_groupby's SQL path
+            # carry collection + source_path but may not have id; the
+            # fallback prevents a silent 0 (which would be wrong but
+            # plausible-looking).
+            ids = {
+                item.get("id") for item in items if isinstance(item, dict)
+            }
+            ids.discard(None)
+            if ids:
+                summary = f"{len(ids)} distinct item(s)"
+            else:
+                identities = {
+                    (item.get("collection") or item.get("physical_collection"),
+                     item.get("source_path"))
+                    for item in items if isinstance(item, dict)
+                }
+                # Drop tuples where both halves are None (truly
+                # identity-less items).
+                identities = {
+                    t for t in identities
+                    if t != (None, None)
+                }
+                if identities:
+                    summary = (
+                        f"{len(identities)} distinct item(s) "
+                        f"(deduped by (collection, source_path); "
+                        f"id field absent)"
+                    )
+                else:
+                    summary = (
+                        f"{len(items)} item(s) (no id or identity "
+                        f"field; cannot dedup)"
+                    )
         elif reducer_kind in ("avg_confidence", "max_confidence", "min_confidence"):
             idents = [_resolve_identity(item) for item in items if isinstance(item, dict)]
             idents = [i for i in idents if i is not None]
@@ -521,7 +587,14 @@ def _query_groupby(
 def _query_confidence_aggregate(
     idents: list[tuple[str, str]], reducer_kind: str,
 ) -> float | None:
-    """Run the SQL aggregate (AVG / MIN / MAX) over confidence."""
+    """Run the SQL aggregate (AVG / MIN / MAX) over confidence.
+
+    Paginates over the input identities at 300-id batches (SQLite
+    parameter cap). MIN / MAX accumulate by Python folding (still
+    O(N) wall-clock but exact). AVG accumulates the sum and count
+    across batches and divides at the end (single pass, exact
+    arithmetic on floats).
+    """
     from nexus.commands._helpers import default_db_path
     from nexus.db.t2 import T2Database
 
@@ -530,27 +603,43 @@ def _query_confidence_aggregate(
         "max_confidence": "MAX",
         "min_confidence": "MIN",
     }
-    op = op_map[reducer_kind]
+    if reducer_kind not in op_map:
+        return None
+
+    sum_acc = 0.0
+    count_acc = 0
+    min_acc: float | None = None
+    max_acc: float | None = None
+
     with T2Database(default_db_path()) as db:
         conn = db.document_aspects.conn
-        # Single batch up to 300 (the ID-set fits inside SQL's
-        # parameter cap; the caller is iterating per group, so the
-        # group size is the constraint).
-        if len(idents) > 300:
-            idents = idents[:300]
-        placeholders = ",".join(["(?, ?)"] * len(idents))
-        params: list[Any] = []
-        for c, sp in idents:
-            params.extend([c, sp])
-        sql = (
-            f"SELECT {op}(confidence) FROM document_aspects "
-            f"WHERE (collection, source_path) IN ({placeholders}) "
-            f"  AND confidence IS NOT NULL"
-        )
-        row = conn.execute(sql, params).fetchone()
-    if row is None or row[0] is None:
+        for chunk_start in range(0, len(idents), 300):
+            batch = idents[chunk_start:chunk_start + 300]
+            placeholders = ",".join(["(?, ?)"] * len(batch))
+            params: list[Any] = []
+            for c, sp in batch:
+                params.extend([c, sp])
+            sql = (
+                f"SELECT confidence FROM document_aspects "
+                f"WHERE (collection, source_path) IN ({placeholders}) "
+                f"  AND confidence IS NOT NULL"
+            )
+            for (value,) in conn.execute(sql, params).fetchall():
+                if value is None:
+                    continue
+                v = float(value)
+                sum_acc += v
+                count_acc += 1
+                min_acc = v if min_acc is None else min(min_acc, v)
+                max_acc = v if max_acc is None else max(max_acc, v)
+
+    if count_acc == 0:
         return None
-    return float(row[0])
+    if reducer_kind == "avg_confidence":
+        return sum_acc / count_acc
+    if reducer_kind == "min_confidence":
+        return min_acc
+    return max_acc  # max_confidence
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────

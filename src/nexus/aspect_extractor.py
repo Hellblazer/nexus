@@ -329,23 +329,100 @@ def _split_rdr_frontmatter(content: str) -> tuple[dict, str]:
 def _parse_simple_yaml(text: str) -> dict:
     """Minimal YAML reader for the keys an RDR frontmatter uses.
 
-    Each line is ``key: value`` or ``key: [a, b, c]``. Values are
-    stripped; surrounding double-quotes are removed; bracketed
-    lists are split on commas. Unsupported shapes (block lists,
-    nested mappings) yield string values verbatim.
+    Supported shapes:
+
+    * ``key: value`` — scalar string. Surrounding double-quotes
+      are stripped.
+    * ``key: 42`` — integer scalar.
+    * ``key: [a, b, c]`` — inline list, comma-split, quotes
+      stripped per item.
+    * ``key:\\n  - foo\\n  - bar`` — block list, accumulated as a
+      Python list of stripped strings (with quote / bracket
+      stripping per item).
+    * ``key: |`` or ``key: >`` — block scalar indicator stored as
+      ``None`` (the multi-line content is not preserved; the
+      indicator alone is not useful and the previous version
+      stored the literal ``|`` character which was misleading).
+
+    Unsupported shapes (nested mappings, anchor references, the
+    full set of YAML's quirks) yield string values verbatim or
+    ``None`` rather than raising. Out-of-spec frontmatter degrades
+    gracefully — callers should use the ``extras`` field for
+    informational use only, not as a typed contract.
+
+    Substantive critic finding: previous version corrupted block
+    scalars to the indicator character and dropped block lists
+    silently. Both are fixed here.
     """
     out: dict = {}
-    for raw_line in text.splitlines():
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        raw_line = lines[i]
         line = raw_line.rstrip()
         if not line or line.lstrip().startswith("#"):
+            i += 1
             continue
         if ":" not in line:
+            i += 1
             continue
         key, _, value = line.partition(":")
         key = key.strip()
         value = value.strip()
         if not key:
+            i += 1
             continue
+
+        # Block scalar indicator: ``key: |`` or ``key: >``. Real YAML
+        # would consume the indented continuation lines as the scalar
+        # content; we store ``None`` and skip indented continuations
+        # so they do not get misparsed as separate keys.
+        if value in ("|", ">", "|-", ">-", "|+", ">+"):
+            out[key] = None
+            j = i + 1
+            while j < len(lines):
+                nxt = lines[j]
+                # Continuation: blank or starts with whitespace.
+                if nxt == "" or (nxt and nxt[0] in (" ", "\t")):
+                    j += 1
+                    continue
+                break
+            i = j
+            continue
+
+        # Empty value after colon: possibly the head of a block list.
+        # Look ahead for ``  - <item>`` lines.
+        if value == "":
+            j = i + 1
+            block_items: list[str] = []
+            while j < len(lines):
+                nxt = lines[j]
+                stripped = nxt.lstrip()
+                if not stripped:
+                    j += 1
+                    continue
+                if not nxt.startswith((" ", "\t")):
+                    break
+                if stripped.startswith("- "):
+                    item = stripped[2:].strip()
+                    item = item.strip('"').strip("'")
+                    if item:
+                        block_items.append(item)
+                    j += 1
+                    continue
+                # Indented but not a list item — treat as end of
+                # block list (could be a nested mapping which we
+                # do not support).
+                break
+            if block_items:
+                out[key] = block_items
+                i = j
+                continue
+            # Empty value with no block list → store empty string.
+            out[key] = ""
+            i += 1
+            continue
+
         # Strip wrapping double-quotes
         if len(value) >= 2 and value[0] == value[-1] == '"':
             value = value[1:-1]
@@ -360,15 +437,18 @@ def _parse_simple_yaml(text: str) -> dict:
                     for s in inner.split(",")
                 ]
                 out[key] = [s for s in items if s]
+            i += 1
             continue
         # Numeric scalar
         if value.lstrip("-").isdigit():
             try:
                 out[key] = int(value)
+                i += 1
                 continue
             except ValueError:
                 pass
         out[key] = value
+        i += 1
     return out
 
 
@@ -440,10 +520,15 @@ def select_config(collection: str) -> ExtractorConfig | None:
     """Return the registered ``ExtractorConfig`` whose prefix matches
     ``collection``, or ``None`` if no prefix matches.
 
-    Phase 1 ships only the ``knowledge__`` prefix; any other
-    collection (including ``docs__``, ``code__``, ``rdr__``, and
-    bare ``knowledge`` without the double-underscore separator)
-    returns ``None``.
+    Two prefixes ship:
+
+    * ``knowledge__*`` → ``scholarly-paper-v1`` (Claude-CLI subprocess
+      path, RDR-089 Phase 1).
+    * ``rdr__*`` → ``rdr-frontmatter-v1`` (deterministic markdown +
+      frontmatter parser, RDR-089 Phase F; zero API cost).
+
+    Other prefixes (``docs__``, ``code__``, bare ``knowledge``
+    without the double-underscore separator, etc.) return ``None``.
     """
     for prefix, config in _REGISTRY.items():
         if collection.startswith(prefix):

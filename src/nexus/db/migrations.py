@@ -758,6 +758,46 @@ def migrate_aspect_extraction_queue_table(conn: sqlite3.Connection) -> None:
     _log.info("Migrated: created aspect_extraction_queue table (RDR-089 follow-up)")
 
 
+def migrate_aspect_promotion_log_table(conn: sqlite3.Connection) -> None:
+    """Create the ``aspect_promotion_log`` audit table for RDR-089
+    Phase E (extras → fixed-column promotion).
+
+    Replaces lazy ``CREATE IF NOT EXISTS`` in
+    ``nexus.aspect_promotion._ensure_audit_table`` with a registered
+    migration so ``nx doctor --check-schema`` can audit the table's
+    presence and operators restoring T2 from backup get the table
+    even before a first promotion call.
+
+    Substantive critic finding: lazy table creation was breaking
+    the auditability claim — a backup-restored DB had no record of
+    the table's existence in the migration registry, and
+    ``check-schema`` did not surface the gap.
+
+    Idempotent: ``CREATE IF NOT EXISTS`` makes re-application a
+    no-op. The lazy ``_ensure_audit_table`` call in the promotion
+    module continues to exist as a defensive guard for any
+    extreme-legacy DB that bypassed migrations entirely.
+    """
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS aspect_promotion_log (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            field_name      TEXT NOT NULL,
+            sql_type        TEXT NOT NULL,
+            column_added    INTEGER NOT NULL,
+            rows_backfilled INTEGER NOT NULL DEFAULT 0,
+            rows_pruned     INTEGER NOT NULL DEFAULT 0,
+            pruned          INTEGER NOT NULL DEFAULT 0,
+            promoted_at     TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_aspect_promotion_log_field
+            ON aspect_promotion_log(field_name);
+    """)
+    conn.commit()
+    _log.info(
+        "Migrated: created aspect_promotion_log table (RDR-089 Phase E)"
+    )
+
+
 def migrate_chash_index(conn: sqlite3.Connection) -> None:
     """Create the ``chash_index`` table for RDR-086 Phase 1.
 
@@ -1503,6 +1543,11 @@ MIGRATIONS: list[Migration] = [
         "4.14.2",
         "Create aspect_extraction_queue table (RDR-089 follow-up nexus-qeo8)",
         migrate_aspect_extraction_queue_table,
+    ),
+    Migration(
+        "4.14.2",
+        "Create aspect_promotion_log table (RDR-089 Phase E)",
+        migrate_aspect_promotion_log_table,
     ),
 ]
 

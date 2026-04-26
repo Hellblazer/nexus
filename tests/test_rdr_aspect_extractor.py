@@ -85,6 +85,58 @@ class TestFrontmatter:
         fm = _parse_simple_yaml("priority: 1")
         assert fm["priority"] == 1
 
+    def test_block_scalar_indicator_stored_as_none(self) -> None:
+        """Substantive critic Significant #6: previously stored the
+        literal ``|`` character (corruption); now stores None and
+        skips indented continuation lines."""
+        text = (
+            "title: Foo\n"
+            "note: |\n"
+            "  multi-line content\n"
+            "  more content\n"
+            "status: draft\n"
+        )
+        fm = _parse_simple_yaml(text)
+        assert fm["title"] == "Foo"
+        assert fm["note"] is None  # not the literal "|"
+        assert fm["status"] == "draft"
+
+    def test_block_list_accumulates_items(self) -> None:
+        """Substantive critic Significant #6: previously parsed
+        ``related:`` (no inline value) as the empty string and
+        silently dropped the ``- foo`` continuation lines. Now
+        accumulates them into a list."""
+        text = (
+            "title: Foo\n"
+            "related:\n"
+            "  - nexus-abc\n"
+            "  - nexus-def\n"
+            "status: draft\n"
+        )
+        fm = _parse_simple_yaml(text)
+        assert fm["title"] == "Foo"
+        assert fm["related"] == ["nexus-abc", "nexus-def"]
+        assert fm["status"] == "draft"
+
+    def test_quoted_block_list_items_stripped(self) -> None:
+        text = (
+            "tags:\n"
+            '  - "first"\n'
+            "  - 'second'\n"
+            "  - third\n"
+        )
+        fm = _parse_simple_yaml(text)
+        assert fm["tags"] == ["first", "second", "third"]
+
+    def test_block_scalar_indicator_variants(self) -> None:
+        """All block scalar indicators (``|``, ``>``, ``|-``, ``>+``)
+        store None and skip continuation lines."""
+        for indicator in ("|", ">", "|-", ">-", "|+", ">+"):
+            text = f"key: {indicator}\n  content\nnext: ok\n"
+            fm = _parse_simple_yaml(text)
+            assert fm["key"] is None, f"failed for indicator {indicator!r}"
+            assert fm["next"] == "ok"
+
 
 # ── Section splitter ────────────────────────────────────────────────────────
 

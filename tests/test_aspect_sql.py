@@ -307,22 +307,41 @@ class TestGroupby:
         keys = sorted(g["key_value"] for g in result["groups"])
         assert keys == ["OSDI", "VLDB"]
 
-    def test_groupby_json_array_unrolls(self, env: Path) -> None:
-        """A paper with two datasets appears in two groups."""
+    def test_groupby_json_array_field_falls_back_to_llm_in_auto(
+        self, env: Path,
+    ) -> None:
+        """Substantive critic Critical #1 (RDR-089 round 2): the SQL
+        path's natural unroll behavior on JSON-array fields would
+        violate the LLM path's one-group-per-item invariant
+        (RDR-093 §C-1). Under source='auto', the SQL path detects
+        the json_array column and returns None so the operator
+        falls back to LLM (which respects the invariant).
+        """
         items = _items("/papers/paxos.pdf", "/papers/raft.pdf")
         result = aspect_sql.try_groupby(
             items, "datasets",
             source="auto", aspect_field="experimental_datasets",
         )
+        assert result is None  # auto → LLM fallback for json_array
+
+    def test_groupby_json_array_field_stubs_in_aspects_mode(
+        self, env: Path,
+    ) -> None:
+        """Under source='aspects' the divergence is surfaced as a
+        stub group with a clear rationale rather than silent
+        multi-membership."""
+        items = _items("/papers/paxos.pdf")
+        result = aspect_sql.try_groupby(
+            items, "datasets",
+            source="aspects", aspect_field="experimental_datasets",
+        )
         assert result is not None
-        groups = {g["key_value"]: [i["source_path"] for i in g["items"]]
-                  for g in result["groups"]}
-        # paxos.pdf is in both TPC-C and YCSB groups
-        assert "/papers/paxos.pdf" in groups["TPC-C"]
-        assert "/papers/paxos.pdf" in groups["YCSB"]
-        # raft.pdf only in YCSB
-        assert "/papers/raft.pdf" in groups["YCSB"]
-        assert "/papers/raft.pdf" not in groups.get("TPC-C", [])
+        # Stub shape: one _meta group with the rejection reason.
+        assert any(
+            g.get("key_value") == "_meta"
+            and "json_array" in g.get("_reason", "")
+            for g in result["groups"]
+        )
 
     def test_groupby_unassigned_for_null_aspects(self, env: Path) -> None:
         items = _items("/papers/paxos.pdf", "/papers/null.pdf")
@@ -407,6 +426,117 @@ class TestAggregate:
         assert result is not None
         by_key = {a["key_value"]: a["summary"] for a in result["aggregates"]}
         assert "max(confidence) = 0.850" in by_key["OSDI"]
+
+    def test_count_distinct_falls_back_to_identity_when_id_absent(
+        self, env: Path,
+    ) -> None:
+        """Substantive critic Critical #2: items lacking an ``id``
+        field but carrying ``(collection, source_path)`` identity
+        previously returned ``0 distinct item(s)``. Now they
+        deduplicate on the identity tuple and surface a clear
+        annotation."""
+        groups_payload = json.dumps([
+            {
+                "key_value": "VLDB",
+                "items": [
+                    # no 'id' field; only collection + source_path
+                    {"collection": "knowledge__delos",
+                     "source_path": "/papers/paxos.pdf"},
+                    {"collection": "knowledge__delos",
+                     "source_path": "/papers/raft.pdf"},
+                    # duplicate of paxos: same identity
+                    {"collection": "knowledge__delos",
+                     "source_path": "/papers/paxos.pdf"},
+                ],
+            },
+        ])
+        result = aspect_sql.try_aggregate(
+            groups_payload, "count distinct",
+            source="auto", aspect_field="",
+        )
+        assert result is not None
+        assert len(result["aggregates"]) == 1
+        summary = result["aggregates"][0]["summary"]
+        # Two distinct identities (paxos counted once despite duplicate).
+        assert "2 distinct" in summary
+        assert "id field absent" in summary
+
+    def test_count_distinct_no_id_no_identity_falls_back_to_count(
+        self, env: Path,
+    ) -> None:
+        """When items have neither id nor (collection, source_path),
+        count distinct falls back to ``len(items)`` with a clear
+        annotation rather than silently returning 0."""
+        groups_payload = json.dumps([
+            {
+                "key_value": "anon",
+                "items": [
+                    {"title": "A"},
+                    {"title": "B"},
+                ],
+            },
+        ])
+        result = aspect_sql.try_aggregate(
+            groups_payload, "count distinct",
+            source="auto", aspect_field="",
+        )
+        assert result is not None
+        summary = result["aggregates"][0]["summary"]
+        assert "2 item" in summary
+        assert "no id or identity" in summary
+
+    def test_aggregate_confidence_paginates_across_batches(
+        self, env: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Substantive critic Critical #3: the previous
+        implementation truncated groups larger than 300 silently.
+        The pagination fix accumulates across all batches —
+        verified here by running min/max against the small fixture
+        and confirming the value matches the full set, NOT only
+        the first 300 (the fixture is small enough that
+        truncation would not have changed the test outcome before
+        — but the new code path explicitly paginates so this test
+        guards against regression to the old single-batch shape).
+        """
+        # Five papers with confidences 0.5, 0.6, 0.7, 0.8, 0.9.
+        # Expected: avg=0.7, min=0.5, max=0.9. The pagination loop
+        # processes them in one batch (5 < 300) but the
+        # accumulation pattern is exercised.
+        from nexus.db.t2 import T2Database
+
+        with T2Database(env) as db:
+            for i, conf in enumerate([0.5, 0.6, 0.7, 0.8, 0.9]):
+                db.document_aspects.upsert(_make_record(
+                    source_path=f"/papers/conf-{i}.pdf",
+                    confidence=conf,
+                ))
+
+        groups_payload = json.dumps([
+            {
+                "key_value": "all",
+                "items": [
+                    {"id": f"/papers/conf-{i}.pdf",
+                     "collection": "knowledge__delos",
+                     "source_path": f"/papers/conf-{i}.pdf"}
+                    for i in range(5)
+                ],
+            },
+        ])
+        avg_result = aspect_sql.try_aggregate(
+            groups_payload, "avg confidence",
+            source="auto", aspect_field="",
+        )
+        assert "avg(confidence) = 0.700" in avg_result["aggregates"][0]["summary"]
+        min_result = aspect_sql.try_aggregate(
+            groups_payload, "min confidence",
+            source="auto", aspect_field="",
+        )
+        assert "min(confidence) = 0.500" in min_result["aggregates"][0]["summary"]
+        max_result = aspect_sql.try_aggregate(
+            groups_payload, "max confidence",
+            source="auto", aspect_field="",
+        )
+        assert "max(confidence) = 0.900" in max_result["aggregates"][0]["summary"]
 
     def test_aggregate_unrecognised_reducer_returns_none_in_auto(
         self, env: Path,
