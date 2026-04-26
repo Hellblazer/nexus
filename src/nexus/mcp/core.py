@@ -1980,8 +1980,10 @@ async def operator_filter(
     items: str,
     criterion: str,
     timeout: float = 300.0,
+    source: str = "auto",
+    aspect_field: str = "",
 ) -> dict:
-    """Filter items by a criterion using claude -p, returning a subset with rationale.
+    """Filter items by a criterion, returning a subset with rationale.
 
     RDR-088 Phase 1. Paper §D.4 Filter operator: given a prior-step's
     output list and a natural-language criterion, return the items that
@@ -1992,18 +1994,48 @@ async def operator_filter(
     structured fields; ``operator_filter`` operates over arbitrary
     prior-step results with natural-language predicates.
 
+    Two execution paths (RDR-089 follow-up):
+
+    - **SQL fast path** (default ``source="auto"``): when items carry
+      ``collection`` + ``source_path`` identity AND an aspect column
+      can be resolved (either explicitly via ``aspect_field`` or by
+      heuristic inference from the criterion), filter via a SQLite
+      query against ``document_aspects``. Returns in milliseconds.
+    - **LLM path** (``source="llm"`` or fallback): dispatches the
+      criterion to ``claude -p`` per call. The original behavior;
+      kicks in when SQL prerequisites do not hold.
+
     Args:
         items: Items to filter (plain text or JSON array string). Each
             element should carry an ``id`` field when rationale round-
-            tripping matters; downstream plan steps key on ``id``.
+            tripping matters; downstream plan steps key on ``id``. For
+            the SQL path each item additionally needs ``collection``
+            and ``source_path``.
         criterion: Natural-language predicate describing the keep
-            condition (e.g. "peer-reviewed only", "published after 2023").
+            condition (e.g. "peer-reviewed only", "published after 2023",
+            "uses TPC-C dataset"). For the SQL path the keyword cues
+            in this string drive aspect-field inference unless
+            ``aspect_field`` overrides.
         timeout: Seconds before the subprocess is killed. Default 300s
-            (5 min) — the claude -p substrate handles multi-step
-            analytical workloads; 120s was hitting false timeouts on
-            real input.
+            (LLM path only; SQL path is bounded by SQLite query time).
+        source: Execution mode. ``"auto"`` (default) tries SQL first,
+            falls back to LLM on prerequisite failure. ``"aspects"``
+            forces SQL — failing prerequisites yield an empty result
+            with rationale rather than a silent LLM dispatch.
+            ``"llm"`` skips SQL entirely.
+        aspect_field: Explicit ``document_aspects`` column when the
+            caller knows which field to filter on (e.g.
+            ``"experimental_datasets"``, ``"extras.venue"``). Disables
+            heuristic inference for this call.
     """
+    from nexus.operators.aspect_sql import try_filter
     from nexus.operators.dispatch import claude_dispatch
+
+    sql_result = try_filter(
+        items, criterion, source=source, aspect_field=aspect_field,
+    )
+    if sql_result is not None:
+        return sql_result
 
     prompt = (
         f"Filter the following items by this criterion: {criterion}\n"
@@ -2149,8 +2181,23 @@ async def operator_groupby(
     items: str,
     key: str,
     timeout: float = 300.0,
+    source: str = "auto",
+    aspect_field: str = "",
 ) -> dict:
-    """Partition items by a natural-language key using claude -p.
+    """Partition items by a natural-language key.
+
+    Two execution paths (RDR-089 follow-up): ``source="auto"`` (default)
+    runs the SQL fast path against ``document_aspects`` when items
+    carry ``collection`` + ``source_path`` identity; falls back to
+    ``claude -p`` dispatch otherwise. ``source="aspects"`` forces SQL
+    and surfaces prerequisite failures as a stub group. ``source="llm"``
+    skips SQL. ``aspect_field`` overrides the heuristic inference.
+
+    Group cardinality on the SQL path: scalar columns produce one
+    group per unique value (high cardinality for free-text fields).
+    JSON-array columns unroll across array values — a paper with
+    two datasets appears in two groups. ``extras.<key>`` form maps
+    via ``json_extract``.
 
     RDR-093 Phase 1. Paper §D.4 GroupBy operator: take a flat list of
     items + a partition expression and return a structured grouping.
@@ -2189,8 +2236,17 @@ async def operator_groupby(
             operator does NOT require the key to surface verbatim
             in the items; inference is fine.
         timeout: Seconds before the subprocess is killed. Default 300s.
+        source: ``"auto"`` (default) | ``"aspects"`` | ``"llm"``.
+        aspect_field: explicit ``document_aspects`` column override.
     """
+    from nexus.operators.aspect_sql import try_groupby
     from nexus.operators.dispatch import claude_dispatch
+
+    sql_result = try_groupby(
+        items, key, source=source, aspect_field=aspect_field,
+    )
+    if sql_result is not None:
+        return sql_result
 
     prompt = (
         f"Partition the following items by this key: {key}\n"
@@ -2234,8 +2290,20 @@ async def operator_aggregate(
     groups: str,
     reducer: str,
     timeout: float = 300.0,
+    source: str = "auto",
+    aspect_field: str = "",
 ) -> dict:
-    """Reduce each group of items to a per-group summary using claude -p.
+    """Reduce each group of items to a per-group summary.
+
+    Two execution paths (RDR-089 follow-up). The SQL fast path
+    (default ``source="auto"``) recognises a small reducer
+    vocabulary backed by SQLite aggregates: ``count``, ``count
+    distinct``, and ``avg`` / ``min`` / ``max confidence``. The
+    ``avg/min/max confidence`` reducers query
+    ``document_aspects.confidence`` per group. Anything outside the
+    recognised vocabulary falls back to ``claude -p`` dispatch
+    automatically. ``source="aspects"`` forces SQL and stubs
+    out unrecognised reducers; ``source="llm"`` skips SQL entirely.
 
     RDR-093 Phase 2. Paper §D.4 Aggregate operator: take a keyed
     grouping (typically from a prior ``operator_groupby`` step) plus a
@@ -2263,8 +2331,20 @@ async def operator_aggregate(
             (e.g. "winning baseline by reported metric",
             "most-cited method", "earliest publication").
         timeout: Seconds before the subprocess is killed. Default 300s.
+        source: ``"auto"`` (default) | ``"aspects"`` | ``"llm"``.
+        aspect_field: explicit ``document_aspects`` column override.
+            Currently unused by the aggregate fast path (the
+            recognised reducer vocabulary already disambiguates the
+            target column); reserved for forward extensions.
     """
+    from nexus.operators.aspect_sql import try_aggregate
     from nexus.operators.dispatch import claude_dispatch
+
+    sql_result = try_aggregate(
+        groups, reducer, source=source, aspect_field=aspect_field,
+    )
+    if sql_result is not None:
+        return sql_result
 
     prompt = (
         f"Reduce each group of items into a per-group summary using "
