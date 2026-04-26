@@ -457,3 +457,131 @@ def _row_status(db_path: Path, source_path: str) -> str | None:
             (source_path,),
         ).fetchone()
     return row[0] if row else None
+
+
+# ── Batch path (RDR-089 Phase D) ────────────────────────────────────────────
+
+
+class TestBatchPath:
+    """Worker drains in batches when queue depth allows it."""
+
+    def test_worker_drains_batch_in_one_extract_call(
+        self, _isolate_t2: Path,
+    ) -> None:
+        """Five enqueues, batch_size=5: the worker calls
+        extract_aspects_batch ONCE for all five, not five times."""
+        from nexus.aspect_extractor import AspectRecord
+        from nexus.aspect_worker import AspectExtractionWorker
+
+        # Enqueue directly to T2 (bypass the hook so no worker is
+        # lazy-spawned before the patches are in place).
+        with T2Database(_isolate_t2) as db:
+            for i in range(5):
+                db.aspect_queue.enqueue(
+                    "knowledge__delos",
+                    f"/papers/p{i}.pdf",
+                    content=f"content {i}",
+                )
+
+        batch_calls: list[int] = []
+        single_calls: list[int] = []
+
+        def fake_batch(items):
+            batch_calls.append(len(items))
+            return [
+                AspectRecord(
+                    collection=c, source_path=sp,
+                    problem_formulation=f"P-{sp}",
+                    proposed_method="M",
+                    experimental_datasets=["d"],
+                    experimental_baselines=["b"],
+                    experimental_results="R",
+                    extras={}, confidence=0.9,
+                    extracted_at="2026-04-26T00:00:00+00:00",
+                    model_version="claude-haiku-4-5-20251001",
+                    extractor_name="scholarly-paper-v1",
+                )
+                for c, sp, _content in items
+            ]
+
+        def fake_single(content, source_path, collection):
+            single_calls.append(source_path)
+            raise AssertionError("single path should not fire on batch>=2")
+
+        with patch("nexus.aspect_worker._extract_aspects_batch", fake_batch), \
+             patch("nexus.aspect_worker._extract_aspects", fake_single):
+            worker = AspectExtractionWorker(
+                poll_interval=0.05, batch_size=5,
+            )
+            worker.start()
+            try:
+                _wait_until(
+                    lambda: _queue_size(_isolate_t2) == 0, timeout=5.0,
+                )
+            finally:
+                worker.stop(timeout=5.0)
+
+        # Exactly one batch call covering all 5 papers.
+        assert batch_calls == [5]
+        assert single_calls == []
+
+        # All five aspect rows landed.
+        with T2Database(_isolate_t2) as db:
+            count = db.document_aspects.conn.execute(
+                "SELECT COUNT(*) FROM document_aspects"
+            ).fetchone()[0]
+        assert count == 5
+
+    def test_worker_uses_single_path_when_only_one_row(
+        self, _isolate_t2: Path,
+    ) -> None:
+        """One enqueue, batch_size=5: worker's single-row path fires
+        rather than the batch path (no overhead amortisation
+        benefit for one paper)."""
+        from nexus.aspect_extractor import AspectRecord
+        from nexus.aspect_worker import AspectExtractionWorker
+
+        # Enqueue directly to T2 (bypass the hook).
+        with T2Database(_isolate_t2) as db:
+            db.aspect_queue.enqueue(
+                "knowledge__delos", "/p1.pdf",
+                content="content 1",
+            )
+
+        batch_calls: list[int] = []
+        single_calls: list[str] = []
+
+        def fake_batch(items):
+            batch_calls.append(len(items))
+            raise AssertionError("batch path should not fire for 1 row")
+
+        def fake_single(content, source_path, collection):
+            single_calls.append(source_path)
+            return AspectRecord(
+                collection=collection, source_path=source_path,
+                problem_formulation="P",
+                proposed_method="M",
+                experimental_datasets=["d"],
+                experimental_baselines=["b"],
+                experimental_results="R",
+                extras={}, confidence=0.9,
+                extracted_at="2026-04-26T00:00:00+00:00",
+                model_version="claude-haiku-4-5-20251001",
+                extractor_name="scholarly-paper-v1",
+            )
+
+        with patch("nexus.aspect_worker._extract_aspects_batch", fake_batch), \
+             patch("nexus.aspect_worker._extract_aspects", fake_single):
+            worker = AspectExtractionWorker(
+                poll_interval=0.05, batch_size=5,
+            )
+            worker.start()
+            try:
+                _wait_until(
+                    lambda: _queue_size(_isolate_t2) == 0, timeout=5.0,
+                )
+            finally:
+                worker.stop(timeout=5.0)
+
+        assert batch_calls == []
+        assert single_calls == ["/p1.pdf"]

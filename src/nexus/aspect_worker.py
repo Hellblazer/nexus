@@ -60,7 +60,10 @@ import structlog
 # Re-export by module-qualified name so test patches at
 # ``nexus.aspect_worker._extract_aspects`` swap the worker's
 # extraction call cleanly without touching the public entrypoint.
-from nexus.aspect_extractor import extract_aspects as _extract_aspects
+from nexus.aspect_extractor import (
+    extract_aspects as _extract_aspects,
+    extract_aspects_batch as _extract_aspects_batch,
+)
 
 _log = structlog.get_logger(__name__)
 
@@ -87,14 +90,23 @@ class AspectExtractionWorker:
     # recovering crashed-worker rows within one reclaim cycle.
     _RECLAIM_EVERY_N_POLLS = 15
 
+    # Batch-extraction threshold (RDR-089 Phase D). When the queue
+    # has at least this many pending rows, drain them in a single
+    # ``extract_aspects_batch`` call rather than per-row. Below this,
+    # use the single-paper path so small queues don't pay the
+    # batch-overhead tax for one-or-two-paper drains.
+    _DEFAULT_BATCH_SIZE = 5
+
     def __init__(
         self,
         *,
         poll_interval: float = 2.0,
         stale_timeout_seconds: int = 300,
+        batch_size: int = _DEFAULT_BATCH_SIZE,
     ) -> None:
         self._poll_interval = poll_interval
         self._stale_timeout_seconds = stale_timeout_seconds
+        self._batch_size = batch_size
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -147,12 +159,17 @@ class AspectExtractionWorker:
           1. Reclaim stale ``in_progress`` rows (every
              ``_RECLAIM_EVERY_N_POLLS`` iterations — frequency guard
              on the O(N) UPDATE for large stuck queues).
-          2. Claim the next pending row.
-          3. If no row: sleep ``poll_interval``.
-          4. If row: invoke extract_aspects, dispatch on the result.
+          2. Claim a batch of up to ``batch_size`` pending rows.
+          3. If empty: sleep ``poll_interval``.
+          4. If batch_size >= 2: invoke extract_aspects_batch (one
+             Claude call extracts all rows). RDR-089 Phase D path —
+             cost-amortises across rows.
+          5. If batch_size == 1: invoke single-paper extract_aspects
+             (existing path). Small-queue case where batch overhead
+             is not worth it.
 
-        All exceptions inside the loop are caught and recorded;
-        the worker thread itself never dies from a row's failure.
+        All exceptions inside the loop are caught and recorded; the
+        worker thread itself never dies from a row's failure.
         """
         from nexus.mcp_infra import t2_ctx
         while not self._stop_event.is_set():
@@ -162,18 +179,98 @@ class AspectExtractionWorker:
                         t2.aspect_queue.reclaim_stale(
                             timeout_seconds=self._stale_timeout_seconds,
                         )
-                    row = t2.aspect_queue.claim_next()
+                    rows = t2.aspect_queue.claim_batch(self._batch_size)
                 self._poll_count += 1
             except Exception:
                 _log.warning("aspect_worker_claim_failed", exc_info=True)
                 self._stop_event.wait(self._poll_interval)
                 continue
 
-            if row is None:
+            if not rows:
                 self._stop_event.wait(self._poll_interval)
                 continue
 
-            self._process_row(row)
+            if len(rows) == 1:
+                self._process_row(rows[0])
+            else:
+                self._process_batch(rows)
+
+    def _process_batch(self, rows: list) -> None:
+        """Run batch extraction on multiple queue rows in one
+        Claude call. RDR-089 Phase D — cost-amortised drain.
+
+        Each row's content was captured at enqueue time when in scope.
+        CLI rows with empty content get a per-row source-path read
+        before the batch call (the batch extractor itself does NOT
+        do disk reads — that responsibility lives here so the
+        extractor stays a pure function of its inputs).
+        """
+        from pathlib import Path
+
+        from nexus.aspect_extractor import extract_aspects_batch
+        from nexus.mcp_infra import t2_ctx
+
+        # Per-row content source: prefer queued content, fall back to
+        # disk read for CLI rows where content was not in scope.
+        items: list[tuple[str, str, str]] = []
+        for row in rows:
+            content = row.content
+            if not content:
+                try:
+                    content = Path(row.source_path).read_text(
+                        encoding="utf-8", errors="replace",
+                    )
+                except (OSError, UnicodeDecodeError) as exc:
+                    _log.warning(
+                        "aspect_worker_batch_source_path_unreadable",
+                        source_path=row.source_path,
+                        error=str(exc),
+                    )
+                    # Push through with empty content; the batch
+                    # extractor will null-field this entry.
+                    content = ""
+            items.append((row.collection, row.source_path, content))
+
+        try:
+            records = _extract_aspects_batch(items)
+        except Exception as exc:
+            _log.warning(
+                "aspect_worker_batch_extract_raised",
+                row_count=len(rows),
+                exc_info=True,
+            )
+            try:
+                with t2_ctx() as t2:
+                    for row in rows:
+                        t2.aspect_queue.mark_failed(
+                            row.collection, row.source_path,
+                            error=str(exc),
+                        )
+            except Exception:
+                _log.warning(
+                    "aspect_worker_batch_mark_failed_persist_failed",
+                    exc_info=True,
+                )
+            return
+
+        try:
+            with t2_ctx() as t2:
+                for row, record in zip(rows, records):
+                    if record is None:
+                        # Unsupported collection — drop silently.
+                        t2.aspect_queue.mark_done(
+                            row.collection, row.source_path,
+                        )
+                        continue
+                    t2.document_aspects.upsert(record)
+                    t2.aspect_queue.mark_done(
+                        row.collection, row.source_path,
+                    )
+        except Exception:
+            _log.warning(
+                "aspect_worker_batch_persist_failed",
+                exc_info=True,
+            )
 
     def _process_row(self, row) -> None:
         """Run extraction on one queue row and dispatch on the result."""

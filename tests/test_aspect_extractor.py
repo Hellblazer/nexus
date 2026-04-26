@@ -487,3 +487,309 @@ class TestSyncContract:
 
         assert not inspect.iscoroutinefunction(extract_aspects)
         assert not inspect.isasyncgenfunction(extract_aspects)
+
+
+# ── Phase D: extract_aspects_batch ──────────────────────────────────────────
+
+
+class TestBatchExtraction:
+    """RDR-089 Phase D: one Claude call extracts N papers."""
+
+    def test_batch_invokes_subprocess_once_for_n_papers(
+        self, monkeypatch,
+    ) -> None:
+        """A batch of 3 papers triggers exactly one subprocess.run."""
+        from nexus.aspect_extractor import extract_aspects_batch
+
+        captured: list[dict] = []
+
+        def fake_run(args, **kwargs):
+            captured.append({"args": args, "kwargs": kwargs})
+            inner = json.dumps({
+                "papers": [
+                    {
+                        "source_path": "/p1.pdf",
+                        "problem_formulation": "P1",
+                        "proposed_method": "M1",
+                        "experimental_datasets": ["d1"],
+                        "experimental_baselines": ["b1"],
+                        "experimental_results": "R1",
+                        "extras": {},
+                        "confidence": 0.9,
+                    },
+                    {
+                        "source_path": "/p2.pdf",
+                        "problem_formulation": "P2",
+                        "proposed_method": "M2",
+                        "experimental_datasets": [],
+                        "experimental_baselines": [],
+                        "experimental_results": "R2",
+                        "extras": {},
+                        "confidence": 0.8,
+                    },
+                    {
+                        "source_path": "/p3.pdf",
+                        "problem_formulation": "P3",
+                        "proposed_method": "M3",
+                        "experimental_datasets": ["d3"],
+                        "experimental_baselines": ["b3"],
+                        "experimental_results": "R3",
+                        "extras": {"venue": "V"},
+                        "confidence": 0.95,
+                    },
+                ],
+            })
+            return _make_completed(_wrap_inner(inner))
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        records = extract_aspects_batch([
+            ("knowledge__delos", "/p1.pdf", "content 1"),
+            ("knowledge__delos", "/p2.pdf", "content 2"),
+            ("knowledge__delos", "/p3.pdf", "content 3"),
+        ])
+
+        assert len(captured) == 1, "batch must use a single subprocess call"
+        assert len(records) == 3
+        assert records[0].source_path == "/p1.pdf"
+        assert records[0].problem_formulation == "P1"
+        assert records[1].source_path == "/p2.pdf"
+        assert records[1].problem_formulation == "P2"
+        assert records[2].source_path == "/p3.pdf"
+        assert records[2].problem_formulation == "P3"
+
+    def test_batch_demuxes_by_source_path_not_position(
+        self, monkeypatch,
+    ) -> None:
+        """If the model returns papers in a different order than the
+        input, the demux still aligns by source_path."""
+        from nexus.aspect_extractor import extract_aspects_batch
+
+        def fake_run(args, **kwargs):
+            inner = json.dumps({
+                "papers": [
+                    {
+                        "source_path": "/p2.pdf",  # reversed order
+                        "problem_formulation": "P2",
+                        "proposed_method": "M2",
+                        "experimental_datasets": [],
+                        "experimental_baselines": [],
+                        "experimental_results": "R2",
+                        "extras": {},
+                        "confidence": 0.8,
+                    },
+                    {
+                        "source_path": "/p1.pdf",
+                        "problem_formulation": "P1",
+                        "proposed_method": "M1",
+                        "experimental_datasets": ["d1"],
+                        "experimental_baselines": ["b1"],
+                        "experimental_results": "R1",
+                        "extras": {},
+                        "confidence": 0.9,
+                    },
+                ],
+            })
+            return _make_completed(_wrap_inner(inner))
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        records = extract_aspects_batch([
+            ("knowledge__delos", "/p1.pdf", "content 1"),
+            ("knowledge__delos", "/p2.pdf", "content 2"),
+        ])
+
+        # Output order matches input order despite reversed response.
+        assert records[0].source_path == "/p1.pdf"
+        assert records[0].problem_formulation == "P1"
+        assert records[1].source_path == "/p2.pdf"
+        assert records[1].problem_formulation == "P2"
+
+    def test_batch_missing_entry_yields_null_fields(
+        self, monkeypatch,
+    ) -> None:
+        """If the batch response omits one paper, that paper gets
+        null-fields in its slot; the others extract normally."""
+        from nexus.aspect_extractor import extract_aspects_batch
+
+        def fake_run(args, **kwargs):
+            inner = json.dumps({
+                "papers": [
+                    {
+                        "source_path": "/p1.pdf",
+                        "problem_formulation": "P1",
+                        "proposed_method": "M1",
+                        "experimental_datasets": [],
+                        "experimental_baselines": [],
+                        "experimental_results": "R1",
+                        "extras": {},
+                        "confidence": 0.9,
+                    },
+                    # /p2.pdf omitted
+                ],
+            })
+            return _make_completed(_wrap_inner(inner))
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        records = extract_aspects_batch([
+            ("knowledge__delos", "/p1.pdf", "content 1"),
+            ("knowledge__delos", "/p2.pdf", "content 2"),
+        ])
+
+        assert records[0].problem_formulation == "P1"
+        # /p2.pdf got null-fields fallback
+        assert records[1].source_path == "/p2.pdf"
+        assert records[1].problem_formulation is None
+
+    def test_batch_per_entry_schema_validation_failure_isolated(
+        self, monkeypatch,
+    ) -> None:
+        """A malformed entry (missing required field) yields null-fields
+        for that paper without affecting the others."""
+        from nexus.aspect_extractor import extract_aspects_batch
+
+        def fake_run(args, **kwargs):
+            inner = json.dumps({
+                "papers": [
+                    {
+                        "source_path": "/p1.pdf",
+                        "problem_formulation": "P1",
+                        # missing proposed_method (required)
+                        "experimental_datasets": [],
+                        "experimental_baselines": [],
+                        "experimental_results": "R1",
+                        "extras": {},
+                        "confidence": 0.9,
+                    },
+                    {
+                        "source_path": "/p2.pdf",
+                        "problem_formulation": "P2",
+                        "proposed_method": "M2",
+                        "experimental_datasets": [],
+                        "experimental_baselines": [],
+                        "experimental_results": "R2",
+                        "extras": {},
+                        "confidence": 0.8,
+                    },
+                ],
+            })
+            return _make_completed(_wrap_inner(inner))
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        records = extract_aspects_batch([
+            ("knowledge__delos", "/p1.pdf", "content 1"),
+            ("knowledge__delos", "/p2.pdf", "content 2"),
+        ])
+
+        # /p1.pdf failed schema validation → null-fields
+        assert records[0].source_path == "/p1.pdf"
+        assert records[0].problem_formulation is None
+        # /p2.pdf is fine
+        assert records[1].problem_formulation == "P2"
+
+    def test_batch_empty_input_returns_empty(self, monkeypatch) -> None:
+        from nexus.aspect_extractor import extract_aspects_batch
+
+        with patch("subprocess.run", side_effect=AssertionError(
+            "must not call subprocess on empty input",
+        )):
+            records = extract_aspects_batch([])
+        assert records == []
+
+    def test_batch_unsupported_collection_yields_none(
+        self, monkeypatch,
+    ) -> None:
+        from nexus.aspect_extractor import extract_aspects_batch
+
+        # Unsupported collection only → no subprocess call.
+        with patch("subprocess.run", side_effect=AssertionError(
+            "must not call subprocess for unsupported-only batch",
+        )):
+            records = extract_aspects_batch([
+                ("docs__handbook", "/p1.md", "content"),
+            ])
+        assert records == [None]
+
+    def test_batch_mixed_supported_and_unsupported(
+        self, monkeypatch,
+    ) -> None:
+        """Mixed: supported collection rows extract together; the
+        unsupported row gets None in its slot without disrupting
+        the others."""
+        from nexus.aspect_extractor import extract_aspects_batch
+
+        def fake_run(args, **kwargs):
+            inner = json.dumps({
+                "papers": [
+                    {
+                        "source_path": "/p1.pdf",
+                        "problem_formulation": "P1",
+                        "proposed_method": "M1",
+                        "experimental_datasets": [],
+                        "experimental_baselines": [],
+                        "experimental_results": "R1",
+                        "extras": {},
+                        "confidence": 0.9,
+                    },
+                ],
+            })
+            return _make_completed(_wrap_inner(inner))
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        records = extract_aspects_batch([
+            ("docs__handbook", "/skip.md", "content"),  # unsupported
+            ("knowledge__delos", "/p1.pdf", "content 1"),
+        ])
+
+        assert records[0] is None  # docs__handbook → unsupported
+        assert records[1].source_path == "/p1.pdf"
+        assert records[1].problem_formulation == "P1"
+
+    def test_batch_strips_null_bytes_from_content(
+        self, monkeypatch,
+    ) -> None:
+        """The null-byte defense from single-paper extends to batch."""
+        from nexus.aspect_extractor import extract_aspects_batch
+
+        captured_prompt: list[str] = []
+
+        def fake_run(args, **kwargs):
+            captured_prompt.append(args[2])
+            inner = json.dumps({
+                "papers": [
+                    {
+                        "source_path": "/p1.pdf",
+                        "problem_formulation": "P1",
+                        "proposed_method": "M1",
+                        "experimental_datasets": [],
+                        "experimental_baselines": [],
+                        "experimental_results": "R1",
+                        "extras": {},
+                        "confidence": 0.9,
+                    },
+                ],
+            })
+            return _make_completed(_wrap_inner(inner))
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        extract_aspects_batch([
+            ("knowledge__delos", "/p1.pdf", "content with\x00null bytes"),
+        ])
+        assert "\x00" not in captured_prompt[0]
+
+    def test_batch_mixed_extractor_configs_raises(self) -> None:
+        """A batch must come from a single ExtractorConfig. Mixed
+        configs are a caller bug; raise rather than dispatch
+        silently."""
+        from nexus.aspect_extractor import extract_aspects_batch
+
+        # Only one config exists today (knowledge__*); construct a
+        # synthetic mixed batch by patching the registry briefly.
+        # This test pins the contract; with one config in the
+        # registry the only achievable mismatch is via two configs
+        # that share no prefix. Skip when only one config is
+        # registered.
+        from nexus.aspect_extractor import _REGISTRY
+        if len(_REGISTRY) < 2:
+            pytest.skip(
+                "only one ExtractorConfig registered; mixed-config "
+                "test is vacuous"
+            )

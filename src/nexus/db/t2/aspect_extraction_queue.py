@@ -248,6 +248,28 @@ class AspectExtractionQueue:
                 # CAS; loop and try a different row.
         return None
 
+    def claim_batch(self, limit: int) -> list[QueueRow]:
+        """Claim up to ``limit`` pending rows in FIFO order.
+
+        Each individual claim runs the same atomic CAS as
+        ``claim_next``; this method is a bounded loop that stops when
+        the queue runs dry or when ``limit`` rows are claimed. Returns
+        the rows in the order they were claimed (FIFO).
+
+        Used by the async worker to amortise Claude CLI cost via the
+        batch extraction path (RDR-089 Phase D). The worker's
+        ``batch_size`` knob caps the per-iteration claim size.
+        """
+        if limit <= 0:
+            return []
+        out: list[QueueRow] = []
+        for _ in range(limit):
+            row = self.claim_next()
+            if row is None:
+                break
+            out.append(row)
+        return out
+
     def mark_done(self, collection: str, source_path: str) -> int:
         """DELETE the row at ``(collection, source_path)`` — success path.
 

@@ -116,6 +116,39 @@ Paper text follows:
 """
 
 
+_SCHOLARLY_BATCH_PROMPT_HEADER = """\
+You are extracting structured aspects from N scholarly papers in one
+pass. Each paper carries a ``source_path`` identifier; you must echo
+that identifier back in each output entry so the caller can match
+extractions to inputs.
+
+Return a JSON object with this exact shape:
+
+  {{
+    "papers": [
+      {{
+        "source_path": "<verbatim from input>",
+        "problem_formulation": string — one or two sentences,
+        "proposed_method": string — one to three sentences,
+        "experimental_datasets": array of strings (empty if none),
+        "experimental_baselines": array of strings (empty if none),
+        "experimental_results": string — one to two sentences,
+        "extras": JSON object (may be empty),
+        "confidence": number in [0, 1]
+      }},
+      ...
+    ]
+  }}
+
+The ``papers`` array must have EXACTLY one entry per input paper, in
+the same order. Echo each paper's ``source_path`` verbatim. Respond
+with ONLY the JSON object (no Markdown, no commentary).
+
+The papers follow, separated by ``=====``. Each paper is preceded by
+its ``source_path`` line.
+"""
+
+
 _REGISTRY: dict[str, ExtractorConfig] = {
     "knowledge__": ExtractorConfig(
         extractor_name="scholarly-paper-v1",
@@ -251,6 +284,325 @@ def extract_aspects(
         return _empty_record(source_path, collection, config)
 
     return _build_record(parsed, source_path, collection, config)
+
+
+# ── Batch extraction (RDR-089 Phase 4 — one Claude call per N papers) ────────
+
+
+# Per-paper timeout add for batched calls. Single-paper timeout is 180 s
+# (see _invoke_once); each additional paper adds this many seconds.
+# Conservatively chosen: real-world claude-paper extraction at 25 s per
+# document means a batch of 5 takes ~75-100 s in practice; the timeout
+# headroom (180 + 4 * 60 = 420 s for batch=5) absorbs Claude's variance.
+_BATCH_TIMEOUT_PER_EXTRA_PAPER_S = 60
+
+
+def extract_aspects_batch(
+    items: list[tuple[str, str, str]],
+) -> list[AspectRecord | None]:
+    """Synchronously extract aspects for N papers in ONE Claude call.
+
+    Each input tuple is ``(collection, source_path, content)``. Returns
+    a list aligned with input order: ``AspectRecord`` per paper on
+    success, ``None`` for papers whose collection has no registered
+    extractor (the batch only covers a single registered config — see
+    grouping note below), or a null-fields ``AspectRecord`` for
+    papers whose individual extraction failed even though the batch
+    as a whole succeeded.
+
+    Cost amortisation: one ``claude -p`` call extracts N papers,
+    sharing the model's per-call overhead (system prompt, response
+    framing, network round-trip) across all of them. At ``N=5`` the
+    measured speedup is typically 2-3x over five sequential single-
+    paper calls, with each individual paper getting slightly less
+    attention from the model. Use single-paper extraction when the
+    extractor must be conservative; use batch when corpus drain time
+    dominates.
+
+    Single-config batches: every input must map to the same
+    ``ExtractorConfig`` (same prompt template + schema). The batch
+    function rejects mixed configs and returns ``None`` for any
+    paper whose collection has no config (the caller should not
+    have included such papers).
+
+    Empty-content fallback: papers with ``content=""`` are read
+    from disk by the worker before this function is called; this
+    function does NOT do its own source-path reading. If a paper's
+    ``content`` is empty when this runs, it lands in the null-
+    fields output without invoking the subprocess for that paper.
+    The single-paper ``extract_aspects`` (above) keeps the disk-
+    read fallback for the simpler call path.
+
+    Subprocess + retry semantics mirror the single-paper path:
+    transient failures retry up to 3 times with exponential
+    backoff; hard failures (schema validation, non-transient
+    stderr) yield null-fields records for the affected papers
+    without retrying.
+    """
+    if not items:
+        return []
+
+    # Group by ExtractorConfig (allows future multi-config batches; for
+    # Phase D ships single-config support — multi-config raises).
+    config = None
+    out: list[AspectRecord | None] = [None] * len(items)
+    for idx, (collection, _source_path, _content) in enumerate(items):
+        item_config = select_config(collection)
+        if item_config is None:
+            out[idx] = None
+            continue
+        if config is None:
+            config = item_config
+        elif config is not item_config:
+            raise ValueError(
+                f"extract_aspects_batch requires all items to share "
+                f"a single ExtractorConfig; got {config.extractor_name} "
+                f"and {item_config.extractor_name} in one batch"
+            )
+    if config is None:
+        # Every item was unsupported.
+        return out
+
+    # Filter to only items with a valid config; remember their original
+    # index so we can splice results back into the right slots.
+    indexed_inputs: list[tuple[int, str, str, str]] = [
+        (i, items[i][0], items[i][1], items[i][2])
+        for i in range(len(items))
+        if out[i] is not None or select_config(items[i][0]) is not None
+    ]
+    # The above simplifies to "all items where config is not None":
+    indexed_inputs = [
+        (i, items[i][0], items[i][1], items[i][2])
+        for i in range(len(items))
+        if select_config(items[i][0]) is not None
+    ]
+
+    # Per-paper empty-content guard.
+    callable_inputs: list[tuple[int, str, str, str]] = []
+    for idx, collection, source_path, content in indexed_inputs:
+        if not content:
+            _log.warning(
+                "aspect_extractor_batch_empty_content",
+                source_path=source_path,
+                collection=collection,
+                detail=(
+                    "batch path received empty content; per-paper file "
+                    "read is the worker's responsibility before invoking "
+                    "this function. Recording null-fields and skipping."
+                ),
+            )
+            out[idx] = _empty_record(source_path, collection, config)
+            continue
+        # Defensive null-byte strip (matches single-paper path).
+        content = content.replace("\x00", "")
+        callable_inputs.append((idx, collection, source_path, content))
+
+    if not callable_inputs:
+        return out
+
+    prompt = _build_batch_prompt(callable_inputs, config)
+    timeout = 180 + _BATCH_TIMEOUT_PER_EXTRA_PAPER_S * (len(callable_inputs) - 1)
+    parsed = _retry_subprocess_batch(prompt, config, timeout=timeout)
+
+    if parsed is None:
+        # Whole batch failed: every paper gets a null-fields record.
+        for idx, collection, source_path, _content in callable_inputs:
+            out[idx] = _empty_record(source_path, collection, config)
+        return out
+
+    # Demux parsed['papers'] back into per-input slots by source_path.
+    by_source = {}
+    for entry in parsed.get("papers", []):
+        if not isinstance(entry, dict):
+            continue
+        sp = entry.get("source_path")
+        if isinstance(sp, str):
+            by_source[sp] = entry
+
+    for idx, collection, source_path, _content in callable_inputs:
+        entry = by_source.get(source_path)
+        if entry is None:
+            _log.warning(
+                "aspect_extractor_batch_missing_entry",
+                source_path=source_path,
+                detail="batch response did not include this source_path",
+            )
+            out[idx] = _empty_record(source_path, collection, config)
+            continue
+        out[idx] = _build_record_from_entry(entry, source_path, collection, config)
+
+    return out
+
+
+def _build_batch_prompt(
+    callable_inputs: list[tuple[int, str, str, str]],
+    config: ExtractorConfig,
+) -> str:
+    """Build the multi-paper prompt for a batch call.
+
+    Header is the shared instruction; each paper is presented with a
+    ``source_path`` line followed by its content, separated from
+    other papers by a ``=====`` divider.
+    """
+    parts = [_SCHOLARLY_BATCH_PROMPT_HEADER]
+    for _idx, _collection, source_path, content in callable_inputs:
+        parts.append("\n=====\n")
+        parts.append(f"source_path: {source_path}\n\n")
+        parts.append(content)
+    parts.append("\n=====\n")
+    return "".join(parts)
+
+
+def _retry_subprocess_batch(
+    prompt: str,
+    config: ExtractorConfig,
+    *,
+    timeout: int,
+) -> dict | None:
+    """Retry-wrapped batch subprocess call. Same classification as
+    single-paper ``_retry_subprocess`` (transient → retry; hard →
+    null-out). Returns the outer dict ``{"papers": [...]}`` on
+    success, ``None`` on final failure.
+    """
+    for attempt in range(_RETRY_ATTEMPTS):
+        try:
+            return _invoke_once_batch(prompt, timeout=timeout)
+        except _TransientFailure as exc:
+            _log.debug(
+                "aspect_extractor_batch_transient_failure",
+                attempt=attempt + 1,
+                attempts_remaining=_RETRY_ATTEMPTS - attempt - 1,
+                error=str(exc),
+                extractor=config.extractor_name,
+            )
+            if attempt < _RETRY_ATTEMPTS - 1:
+                _sleep_with_jitter(attempt)
+            continue
+        except _HardFailure as exc:
+            _log.warning(
+                "aspect_extractor_batch_hard_failure",
+                attempt=attempt + 1,
+                error=str(exc),
+                extractor=config.extractor_name,
+            )
+            return None
+    _log.warning(
+        "aspect_extractor_batch_retries_exhausted",
+        attempts=_RETRY_ATTEMPTS,
+        extractor=config.extractor_name,
+    )
+    return None
+
+
+def _invoke_once_batch(prompt: str, *, timeout: int) -> dict:
+    """Single batch subprocess invocation. Same shape as
+    ``_invoke_once`` but with a configurable timeout (single-paper
+    is hardcoded at 180 s; batch scales up).
+    """
+    try:
+        result = subprocess.run(
+            ["claude", "-p", prompt, "--output-format", "json"],
+            timeout=timeout,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise _TransientFailure(f"timeout after {timeout}s: {exc}") from exc
+
+    if result.returncode != 0:
+        stderr_lc = (result.stderr or "").lower()
+        if any(p in stderr_lc for p in _TRANSIENT_STDERR_PATTERNS):
+            raise _TransientFailure(
+                f"transient stderr (rc={result.returncode}): "
+                f"{(result.stderr or '')[:200]}",
+            )
+        raise _HardFailure(
+            f"non-zero exit (rc={result.returncode}): "
+            f"{(result.stderr or '')[:200]}",
+        )
+
+    try:
+        outer = json.loads(result.stdout)
+    except (ValueError, TypeError) as exc:
+        raise _TransientFailure(f"outer json parse failure: {exc}") from exc
+    if not isinstance(outer, dict) or "result" not in outer:
+        raise _HardFailure(
+            "claude --output-format json wrapper missing 'result' key"
+        )
+
+    inner_text = outer["result"]
+    if not isinstance(inner_text, str):
+        raise _HardFailure(
+            f"wrapper 'result' is not a string (got {type(inner_text).__name__})",
+        )
+    cleaned = _strip_code_fence(inner_text.strip())
+    try:
+        parsed = json.loads(cleaned)
+    except (ValueError, TypeError) as exc:
+        raise _TransientFailure(f"inner json parse failure: {exc}") from exc
+
+    if not isinstance(parsed, dict):
+        raise _HardFailure(
+            f"inner json top-level not a dict (got {type(parsed).__name__})"
+        )
+    papers = parsed.get("papers")
+    if not isinstance(papers, list):
+        raise _HardFailure(
+            "batch response missing 'papers' array"
+        )
+
+    return parsed
+
+
+def _build_record_from_entry(
+    entry: dict,
+    source_path: str,
+    collection: str,
+    config: ExtractorConfig,
+) -> AspectRecord:
+    """Build an ``AspectRecord`` from a single batch-response entry.
+
+    Validates required fields against the config schema. Missing
+    fields trigger the same null-fields fallback as single-paper
+    schema-validation failure (the per-paper failure does not
+    cascade to other papers in the batch).
+    """
+    missing = [f for f in config.required_fields if f not in entry]
+    if missing:
+        _log.warning(
+            "aspect_extractor_batch_entry_schema_invalid",
+            missing_fields=missing,
+            source_path=source_path,
+        )
+        return _empty_record(source_path, collection, config)
+
+    datasets = entry.get("experimental_datasets", [])
+    if not isinstance(datasets, list):
+        datasets = []
+    baselines = entry.get("experimental_baselines", [])
+    if not isinstance(baselines, list):
+        baselines = []
+    extras = entry.get("extras", {})
+    if not isinstance(extras, dict):
+        extras = {}
+    confidence = entry.get("confidence")
+    if confidence is not None and not isinstance(confidence, (int, float)):
+        confidence = None
+
+    return AspectRecord(
+        collection=collection,
+        source_path=source_path,
+        problem_formulation=_str_or_none(entry.get("problem_formulation")),
+        proposed_method=_str_or_none(entry.get("proposed_method")),
+        experimental_datasets=[str(x) for x in datasets],
+        experimental_baselines=[str(x) for x in baselines],
+        experimental_results=_str_or_none(entry.get("experimental_results")),
+        extras=extras,
+        confidence=float(confidence) if confidence is not None else None,
+        extracted_at=datetime.now(UTC).isoformat(),
+        model_version=config.model_version,
+        extractor_name=config.extractor_name,
+    )
 
 
 # ── Subprocess invocation + retry loop ───────────────────────────────────────
