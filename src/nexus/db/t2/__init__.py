@@ -92,6 +92,7 @@ __all__ = [
     "AccessPolicy",
     "CatalogTaxonomy",
     "ChashIndex",
+    "DocumentAspects",
     "MemoryStore",
     "PlanLibrary",
     "T2Database",
@@ -112,6 +113,7 @@ def __getattr__(name: str) -> Any:  # PEP 562
         "MemoryStore":      "nexus.db.t2.memory_store",
         "CatalogTaxonomy":  "nexus.db.t2.catalog_taxonomy",
         "ChashIndex":       "nexus.db.t2.chash_index",
+        "DocumentAspects":  "nexus.db.t2.document_aspects",
         "PlanLibrary":      "nexus.db.t2.plan_library",
         "Telemetry":        "nexus.db.t2.telemetry",
     }
@@ -144,6 +146,7 @@ class T2Database:
         # CatalogTaxonomy.
         from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
         from nexus.db.t2.chash_index import ChashIndex
+        from nexus.db.t2.document_aspects import DocumentAspects
         from nexus.db.t2.memory_store import MemoryStore
         from nexus.db.t2.plan_library import PlanLibrary
         from nexus.db.t2.telemetry import Telemetry
@@ -188,6 +191,10 @@ class T2Database:
         # populated by the six indexing write sites via best-effort
         # dual-write after each T3 upsert.
         self.chash_index: ChashIndex = ChashIndex(path)
+        # RDR-089 Phase 1: per-document structured aspect table
+        # populated by the document-grain hook chain at every CLI
+        # ingest site (knowledge__* only in Phase 1).
+        self.document_aspects: DocumentAspects = DocumentAspects(path)
 
     def __enter__(self) -> "T2Database":
         return self
@@ -196,12 +203,14 @@ class T2Database:
         self.close()
 
     def close(self) -> None:
-        """Close all four domain connections.
+        """Close all six domain connections.
 
         Each store closes its own connection under its own lock. The
         close order is reverse of construction so that the most
-        recently opened connection (telemetry) is released first.
+        recently opened connection (document_aspects) is released
+        first.
         """
+        self.document_aspects.close()
         self.chash_index.close()
         self.telemetry.close()
         self.taxonomy.close()

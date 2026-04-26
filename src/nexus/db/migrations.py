@@ -653,6 +653,62 @@ def migrate_hook_failures_chain_column(conn: sqlite3.Connection) -> None:
     _log.info("Migrated: hook_failures.chain enum column (RDR-089)")
 
 
+def migrate_document_aspects_table(conn: sqlite3.Connection) -> None:
+    """Create the ``document_aspects`` table for RDR-089 P1.1.
+
+    Schema (locked by RDR — see ``docs/rdr/rdr-089-structured-aspect-
+    extraction-at-ingest.md``):
+
+      - collection             TEXT NOT NULL
+      - source_path            TEXT NOT NULL
+      - problem_formulation    TEXT
+      - proposed_method        TEXT
+      - experimental_datasets  TEXT     -- JSON array (may be NULL)
+      - experimental_baselines TEXT     -- JSON array (may be NULL)
+      - experimental_results   TEXT
+      - extras                 TEXT     -- JSON object (may be NULL)
+      - confidence             REAL
+      - extracted_at           TEXT NOT NULL
+      - model_version          TEXT NOT NULL
+      - extractor_name         TEXT NOT NULL
+      - PRIMARY KEY (collection, source_path)
+
+    Compound PK rationale: per-chunk doc_id is intentionally not in
+    schema. Multiple chunks of the same source document map to a
+    single aspect row. The store's upsert semantics are COMPLETE
+    OVERWRITE — each new extraction replaces the previous row
+    verbatim (no diff/merge, no per-field stability check).
+
+    Secondary index ``idx_document_aspects_extractor`` supports the
+    ``list_by_extractor_version(name, max_version)`` query used by
+    re-extraction logic to find rows whose ``extractor_name`` matches
+    AND whose ``model_version`` is strictly below a threshold.
+
+    Idempotent: ``CREATE IF NOT EXISTS`` makes re-application a no-op.
+    """
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS document_aspects (
+            collection             TEXT NOT NULL,
+            source_path            TEXT NOT NULL,
+            problem_formulation    TEXT,
+            proposed_method        TEXT,
+            experimental_datasets  TEXT,
+            experimental_baselines TEXT,
+            experimental_results   TEXT,
+            extras                 TEXT,
+            confidence             REAL,
+            extracted_at           TEXT NOT NULL,
+            model_version          TEXT NOT NULL,
+            extractor_name         TEXT NOT NULL,
+            PRIMARY KEY (collection, source_path)
+        );
+        CREATE INDEX IF NOT EXISTS idx_document_aspects_extractor
+            ON document_aspects(extractor_name, model_version);
+    """)
+    conn.commit()
+    _log.info("Migrated: created document_aspects table (RDR-089)")
+
+
 def migrate_chash_index(conn: sqlite3.Connection) -> None:
     """Create the ``chash_index`` table for RDR-086 Phase 1.
 
@@ -1388,6 +1444,11 @@ MIGRATIONS: list[Migration] = [
         "4.14.2",
         "Add hook_failures.chain enum column + backfill batch rows (RDR-089)",
         migrate_hook_failures_chain_column,
+    ),
+    Migration(
+        "4.14.3",
+        "Create document_aspects table (RDR-089 P1.1)",
+        migrate_document_aspects_table,
     ),
 ]
 
