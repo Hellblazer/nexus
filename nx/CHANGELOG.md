@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.15.0] - 2026-04-26
+
+Plugin version aligned with conexus 4.15.0. No plugin-level functional changes. See root `CHANGELOG.md` for the metadata schema rationalisation arc: `make_chunk_metadata` factory unifying every indexer's chunk-metadata write, `section_type` populated on PDFs (was hardcoded empty since the chunker was written), `source_title -> title` collapse, `expires_at -> indexed_at + ttl_days` swap with new `is_expired` helper, the new `nx catalog remediate-paths` command for repairing basename and ghost file_paths in production catalogs, and the cargo cleanup that restored `bib_semantic_scholar_id` to the schema after discovering normalize() had been silently dropping the marker that drives `nx enrich`'s skip-already-enriched logic.
+
 ## [4.14.2] - 2026-04-26
 
 Plugin version aligned with conexus 4.14.2. The SessionStart hook output line for the enrichment surface is updated for the new `nx enrich` subcommand structure: `nx enrich bib COLLECTION` (Semantic Scholar) | `nx enrich aspects COLLECTION` (RDR-089 structured aspects). See root `CHANGELOG.md` for the RDR-089 deliverable: document-grain post-store hook chain, async aspect-extraction worker, T2 `document_aspects` + `aspect_extraction_queue` stores, the new `nx enrich aspects` CLI, and the retirement of the RDR-037 four-database migration probe.

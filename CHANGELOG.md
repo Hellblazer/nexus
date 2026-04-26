@@ -6,6 +6,60 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.15.0] - 2026-04-26
+
+Metadata schema rationalisation arc plus a new catalog repair tool. Three landed PRs (#324, #325, #326) merged in sequence: the chunk-metadata factory + section_type-on-PDFs refactor, the `nx catalog remediate-paths` command for fixing basename and ghost file_paths in production catalogs, and a follow-up cargo cleanup that restored `bib_semantic_scholar_id` to the schema after discovering normalize() had been silently dropping the marker that drives `nx enrich`'s skip-already-enriched logic.
+
+The aspect extractor (RDR-089, shipped in 4.14.2) was broken end-to-end on every paper after release because the section-type filter dropped chunks with empty `section_type`, and PDFs had `section_type` hardcoded to `""` since the original PDF chunker was written. SAGE (arxiv 2604.15583) was the canary: indexed cleanly, extracted nothing. This release fixes the root cause (PDFChunker now detects markdown / numbered academic / bare-word headings and tags every chunk) and the downstream enrich idempotency hole.
+
+### Added
+
+- **`nx catalog remediate-paths <SOURCE_DIR>`** (`src/nexus/commands/catalog.py`). Repairs catalog entries whose `file_path` is a basename or points to a no-longer-existing path. Walks SOURCE_DIR for candidates by basename, builds an index, updates each broken entry to the matching absolute path. Idempotent. Options: `--dry-run`, `--collection`, `--owner`, `--prefer-deepest`, `--mark-missing`, `--extensions`. Workflow: user moves loose ingested papers from `~/Downloads` into a git-backed papers archive, points the command at the archive root, gets every catalog entry's `file_path` repaired in one pass.
+- **`make_chunk_metadata` factory** (`src/nexus/metadata_schema.py`). Single chunk-metadata builder every chunked-write indexer routes through: every `ALLOWED_TOP_LEVEL` key gets a documented default; bib_* placeholders drop together when all-empty; git_* short and long key shapes both pack to `git_meta` JSON. Indexers used to build metadata dicts by hand and each accumulated their own subset of fields; new fields had to be added in seven separate places. Now one edit in the factory.
+- **PDF section detection** (`src/nexus/pdf_chunker.py`). PDFChunker grows heading detection (markdown / numbered academic / bare-word) and tags every chunk with `section_title` (hierarchical `Outer > Inner` path matching `SemanticMarkdownChunker` convention) and `section_type` via `classify_section_type`. Subsections inherit `section_type` from the dotted-numeral parent (`3.1 Approach` inherits from `3 METHODOLOGY`).
+- **Section pattern coverage** (`src/nexus/md_chunker.py`). `SECTION_PATTERNS` recognises evaluation / experiments / approach / algorithm / related work / future work / summary alongside the pre-existing methods / results / discussion / conclusion. New `related_work` section_type so subsection inheritance does not collapse it into `other`. SAGE's `4 EVALUATION` subsections now classify as `results`.
+- **`is_expired(metadata, now_iso)` helper** (`src/nexus/metadata_schema.py`). Replaces the dropped `expires_at` field; computes expiry from `indexed_at + ttl_days` Python-side. `ttl_days == 0` is the permanent sentinel.
+- **Cross-indexer drift guard test** (`tests/test_metadata_consistency.py`). Pins the contract that every chunked-write indexer routes through the factory and emits the full `ALLOWED_TOP_LEVEL` keyset.
+- **Production-data remediation plan** documented in `docs/metadata-consistency-matrix.md`.
+
+### Changed
+
+- **Schema rationalisation:**
+  - `source_title` collapsed into `title` (consumers used the chain `r.metadata.get("source_title") or r.metadata.get("title")` everywhere; one canonical field replaces the fallback).
+  - `expires_at` removed; expiry derived from `indexed_at + ttl_days` via `is_expired`. `indexed_at` promoted from silently-dropped to allow-listed.
+  - `bib_semantic_scholar_id` re-added to `ALLOWED_TOP_LEVEL` (had been mistakenly classified as cargo; it is the load-bearing "this title was enriched" marker for `commands/enrich.py:89` and `catalog/link_generator.py:38`).
+  - Net: `ALLOWED_TOP_LEVEL` ends at 31 keys with one slot of safety margin under Chroma's 32-key cap.
+- **All seven indexer paths** (`code_indexer.py`, `prose_indexer.py` markdown branch + line-fallback, `doc_indexer.py:_pdf_chunks` + `_markdown_chunks`, `pipeline_stages.py:_build_chunk_metadata` + `_enrich_metadata_from_extraction`, `db/t3.py:put` for MCP `store_put`) retrofitted through `make_chunk_metadata`.
+- **MCP `store_put` (`db/t3.py:put`)** now produces full chunk identity including `content_hash` + `chunk_text_hash` + `chunk_index=0` + `chunk_count=1` + `corpus`. Closes the RDR-086 chash coverage hole for MCP-stored docs (previously they had no chash row, so `chash:<hex>` link spans could not resolve them).
+- **PDF catalog hook** (`pipeline_stages._catalog_pdf_hook`): file_path is now stored as an absolute path (was basename, blocked aspect extractor's disk fallback when reading process cwd differed from the original ingest cwd).
+- **Aspect extractor** (`src/nexus/aspect_extractor.py`):
+  - New `_source_content_from_t3` helper reassembles document text from T3 chunks, filters to scholarly sections, caps at 80 KB. Sources from T3 first, falls back to disk on T3 miss.
+  - `_invoke_once` and `_invoke_once_batch` now feed the prompt via stdin instead of argv. Removes ARG_MAX as a runtime crash class for long papers.
+  - `aspect_worker` batch path uses the same T3-then-disk precedence.
+- **Read-side migrations:** every `r.metadata.get("source_title") or r.metadata.get("title")` chain in `mcp/core.py`, `commands/store.py`, `commands/catalog.py`, `commands/enrich.py`, `commands/index.py`, `indexer.py` collapsed to direct `title` reads. T3 expire-guard moved from `where=expires_at < now` to `is_expired` Python-side check.
+- **Cargo cleanup** (post-factory follow-up):
+  - `chunker.py` stops emitting `filename` / `file_extension` / `ast_chunked` per code chunk (the factory ignored them; normalize() would have dropped them anyway).
+  - `mcp/core.py` and `commands/store.py` stop reading `extraction_method` / `page_count` / `has_formulas` from search-result display paths (those fields are not in `ALLOWED_TOP_LEVEL`, so the reads always returned empty since the factory landed).
+
+### Fixed
+
+- **Aspect extraction was broken end-to-end** for every PDF since 4.14.2. Two compounding causes: PDFs had `section_type=""` hardcoded, so the extractor's section filter dropped every chunk; the catalog stored basename `file_path` for PDFs, so the extractor's disk-fallback resolved against cwd and failed. Both root causes fixed; SAGE paper (arxiv 2604.15583) extracts cleanly with confidence 0.78 in end-to-end verification.
+- **`nx enrich` was non-idempotent** since the `bib_semantic_scholar_id` field stopped surviving normalize(). Every enrich run re-enriched every title because the marker write at `commands/enrich.py:145` was silently dropped at storage. Restoring the field to `ALLOWED_TOP_LEVEL` re-enables the skip-already-enriched check.
+- **MCP-stored docs were invisible to chash-based features** (RDR-086 spans, `chash_index` coverage audits) because `db/t3.py:put` was producing only 10 metadata keys, missing `content_hash` and `chunk_text_hash`.
+
+### Removed
+
+- `source_title` from `ALLOWED_TOP_LEVEL` (collapsed into `title`).
+- `expires_at` from `ALLOWED_TOP_LEVEL` (derived via `is_expired`).
+- `filename` / `file_extension` / `ast_chunked` from the chunker's per-chunk metadata dict.
+
+### Migration
+
+Production catalogs and T3 collections indexed before this release carry the old schema (`source_title` instead of `title`, `expires_at` instead of derived expiry, empty `section_type` on PDFs, basename `file_path` for PDFs). Remediation:
+
+1. **Path repair**: `nx catalog remediate-paths <SOURCE_DIR>` against your papers archive resolves basename and ghost `file_path` values.
+2. **T3 metadata backfill**: not yet automated; the matrix doc (`docs/metadata-consistency-matrix.md`) sketches a `backfill-metadata` command that pages through every chunk and re-derives `section_type` from chunk text + collapses `source_title` into `title` + drops the dropped fields. Until that ships, old chunks read with empty `title` if they only had `source_title` (consumer fallbacks were removed in this release for simplicity).
+
 ## [4.14.2] - 2026-04-26
 
 Closes RDR-089 (Structured Aspect Extraction at Ingest). Ships ingest-time per-document structured aspect extraction for `knowledge__*` collections via a new third post-store hook chain (`fire_post_document_hooks`), a synchronous extractor calling the Claude CLI, and an async-queue worker that decouples extraction from the ingest path. Also retires the RDR-037 four-database migration probe (transitional safety net from 2026-03-14 — its job is done).
