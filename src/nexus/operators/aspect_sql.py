@@ -185,6 +185,21 @@ def _build_filter_predicate(field: str, query: str) -> tuple[str, list]:
 # ── Operator entry points ───────────────────────────────────────────────────
 
 
+_VALID_SOURCES = ("auto", "aspects", "llm")
+
+
+def _validate_source(source: str) -> None:
+    """Reject silent typos like ``"LLM"`` or ``"auto "``. Without this
+    guard the unrecognised value falls through to the SQL path and the
+    caller silently loses the LLM fallback they thought they were
+    invoking.
+    """
+    if source not in _VALID_SOURCES:
+        raise ValueError(
+            f"source must be one of {_VALID_SOURCES}; got {source!r}",
+        )
+
+
 def try_filter(
     items: str,
     criterion: str,
@@ -210,6 +225,7 @@ def try_filter(
       the caller specifically wants the SQL semantic and does not
       want a silent re-route to the LLM substrate.
     """
+    _validate_source(source)
     if source == "llm":
         return None
 
@@ -238,7 +254,10 @@ def try_filter(
     # Strip the heuristic stop-words off the criterion so the SQL
     # LIKE matches the topical token. Pragmatic: take the longest
     # alphanumeric token from the criterion as the search term.
-    search_token = aspect_field and criterion or _extract_search_token(criterion, field)
+    # Both inferred and explicit `aspect_field` paths must tokenize:
+    # passing the full natural-language criterion as a LIKE pattern
+    # silently zero-matches against stored values.
+    search_token = _extract_search_token(criterion, field)
     if not search_token:
         return _aspects_only_or_none(
             source,
@@ -301,6 +320,7 @@ def try_groupby(
     ``key_value="unassigned"`` (matching the LLM path's fallback
     semantic).
     """
+    _validate_source(source)
     if source == "llm":
         return None
 
@@ -382,6 +402,7 @@ def try_aggregate(
     ``operator_groupby`` (whether SQL or LLM path): a list of
     ``{key_value, items}`` dicts where ``items`` is a list of dicts.
     """
+    _validate_source(source)
     if source == "llm":
         return None
 

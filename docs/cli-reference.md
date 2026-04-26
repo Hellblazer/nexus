@@ -202,6 +202,51 @@ nx enrich aspects knowledge__delos --re-extract --extractor-version claude-haiku
 | `--re-extract` | Re-run only on rows whose `model_version` is strictly less than `--extractor-version` (and rows that are missing entirely) |
 | `--extractor-version v` | Threshold for `--re-extract` (lexicographic STRICT-less-than) |
 
+### nx enrich list
+
+```
+nx enrich list COLLECTION [--limit N] [--json]
+```
+
+Day 2 Ops: list extracted aspect rows for a collection. One row per source document (not per chunk). Returns source path, extractor name, model version, extracted-at timestamp, and a confidence indicator. Useful for triaging "what got extracted?" before running `--re-extract` against a model upgrade.
+
+### nx enrich info
+
+```
+nx enrich info COLLECTION SOURCE_PATH [--json]
+```
+
+Day 2 Ops: show the full aspect record for a single document. Includes the five fixed columns (problem_formulation, proposed_method, experimental_datasets, experimental_baselines, experimental_results), the `extras` JSON object, confidence, extracted_at, model_version, and extractor_name.
+
+### nx enrich delete
+
+```
+nx enrich delete COLLECTION SOURCE_PATH [--yes]
+```
+
+Day 2 Ops: remove a single aspect row. Use when re-indexing a document with a content change that should drop the prior aspects rather than overwrite. Requires `--yes` for confirmation. Safe: the underlying chunks in T3 are untouched.
+
+### nx enrich aspects-promote-field
+
+```
+nx enrich aspects-promote-field NAME [--type {TEXT|INTEGER|REAL}] [--prune] [--history]
+```
+
+Promote a recurring `extras.<name>` key into a fixed column on `document_aspects` (RDR-089 Phase E). Three-phase mechanic:
+
+1. `ALTER TABLE document_aspects ADD COLUMN <name> <type>` (idempotent — re-running on an already-promoted field is a no-op).
+2. Backfill: copy the value of `extras.<name>` into the new column for every existing row via `json_extract`.
+3. (Optional) `--prune` removes the `extras.<name>` key after backfill so the source of truth is the new column.
+
+The promotion is logged to `aspect_promotion_log` (registry-managed) for audit. `--history` lists past promotions instead of running a new one. Reserved names (the 12 RDR-locked column names) and unsafe identifiers (digit prefix, hyphen, quote, semicolon, SQL-injection patterns, empty) are rejected before any DDL runs.
+
+| Flag | Description |
+|------|-------------|
+| `NAME` (positional) | The `extras.<name>` key to promote into a fixed column. Validated against an alphanumeric+underscore identifier rule |
+| `--type {TEXT|INTEGER|REAL}` | SQL column type. Default `TEXT`. `BLOB`, `JSON`, and other types are rejected |
+| `--prune` | After backfill, remove the `extras.<name>` key from every row. Use when the new column should replace the extras key as the source of truth. **Destructive** — re-running with `--prune` after data has been written to the new column has no effect, but rolling back requires reverting the schema change manually |
+| `--history` | List prior promotions from the audit log instead of running a new promotion |
+
 ---
 
 ## nx catalog

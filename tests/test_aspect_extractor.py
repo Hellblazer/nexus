@@ -472,6 +472,35 @@ class TestRetry:
         assert record is not None
         assert record.problem_formulation is None
 
+    def test_oserror_from_subprocess_yields_null_fields_no_retry(
+        self, monkeypatch,
+    ) -> None:
+        """Round-3 review Critical #1: ``OSError`` (e.g. ``E2BIG`` for
+        argv > ARG_MAX) leaked out of the retry loop pre-fix, propagated
+        out of ``extract_aspects``, and got swallowed only by the
+        worker's broad except — silently marking the row failed without
+        the documented null-fields fallback. Post-fix the OSError is
+        classified as a hard failure and yields a null-fields record on
+        the first attempt with no retries.
+        """
+        from nexus.aspect_extractor import extract_aspects
+
+        calls: list[int] = []
+
+        def fake_run(*a, **kw):
+            calls.append(1)
+            raise OSError(7, "Argument list too long")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        record = extract_aspects(
+            content="x", source_path="/p1.pdf",
+            collection="knowledge__delos",
+        )
+        # Hard failure → no retries, single call, null-fields record.
+        assert len(calls) == 1
+        assert record is not None
+        assert record.problem_formulation is None
+
 
 # ── Sync-only contract ───────────────────────────────────────────────────────
 

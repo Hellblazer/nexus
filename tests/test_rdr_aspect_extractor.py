@@ -167,6 +167,35 @@ class TestSections:
         assert "Foo description" in text
         assert "Bar description" in text
 
+    def test_h2_inside_fenced_code_block_is_not_a_section_boundary(
+        self,
+    ) -> None:
+        """Round-3 review Critical #2: shell snippets and quoted markdown
+        inside ``` fences must not be matched as ``## section`` headings.
+
+        Without code-fence stripping the shell-comment line below
+        truncates ``Problem Statement`` early, leaving
+        ``"## This is a shell comment"`` as a phantom section.
+        """
+        body = (
+            "## Problem Statement\n\n"
+            "Quorum invariants matter. See the shell example:\n\n"
+            "```bash\n"
+            "## This is a shell comment\n"
+            "echo hello\n"
+            "```\n\n"
+            "More problem text.\n\n"
+            "## Proposed Solution\n\nThe solution.\n"
+        )
+        sections = _parse_rdr_sections(body)
+        assert "Problem Statement" in sections
+        assert "Proposed Solution" in sections
+        assert "This is a shell comment" not in sections
+        # The full Problem Statement body is preserved through the fence.
+        text = sections["Problem Statement"]
+        assert "Quorum invariants matter" in text
+        assert "More problem text" in text
+
 
 # ── Alternatives parser ─────────────────────────────────────────────────────
 

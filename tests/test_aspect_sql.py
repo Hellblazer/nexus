@@ -277,6 +277,48 @@ class TestFilter:
         )
         assert result == {"items": [], "rationale": []}
 
+    def test_filter_explicit_field_tokenizes_multi_word_criterion(
+        self, env: Path,
+    ) -> None:
+        """Round-3 review Critical #1 (aspect_sql.py:241): when
+        ``aspect_field`` was set the previous short-circuit
+        ``aspect_field and criterion or _extract_search_token(...)``
+        used the full natural-language criterion as the LIKE pattern,
+        silently zero-matching against stored tokens. The fix calls
+        ``_extract_search_token`` on the explicit-field path too, so a
+        criterion like ``"TPC-C dataset"`` reduces to ``"TPC-C"`` and
+        matches the stored JSON-array entry.
+        """
+        items = _items("/papers/paxos.pdf")
+        # Explicit aspect_field + multi-word criterion containing a
+        # trigger keyword ("dataset"). Pre-fix the full pattern
+        # ``%"TPC-C dataset"%`` does not match ``["TPC-C", "YCSB"]``;
+        # post-fix the stripped token "TPC-C" matches via
+        # ``%"TPC-C"%``.
+        result = aspect_sql.try_filter(
+            items,
+            "TPC-C dataset",
+            source="aspects",
+            aspect_field="experimental_datasets",
+        )
+        assert result is not None
+        assert len(result["items"]) == 1
+        assert result["items"][0]["source_path"] == "/papers/paxos.pdf"
+
+    def test_filter_rejects_unknown_source_value(
+        self, env: Path,
+    ) -> None:
+        """Round-3 review Important #2: silent typo fallback. Pre-fix
+        ``source="LLM"`` (wrong case) silently routed to SQL. Post-fix
+        a ValueError surfaces the typo at the boundary."""
+        items = _items("/papers/paxos.pdf")
+        with pytest.raises(ValueError, match="source must be"):
+            aspect_sql.try_filter(
+                items, "paxos",
+                source="LLM",  # wrong case
+                aspect_field="proposed_method",
+            )
+
 
 # ── try_groupby ─────────────────────────────────────────────────────────────
 

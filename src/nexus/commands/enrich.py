@@ -426,40 +426,40 @@ def _run_extraction(entries: list, collection: str) -> list[tuple[str, object]]:
     skipped = 0
 
     db_path = default_db_path()
-    for i, entry in enumerate(entries, 1):
-        source_path = entry.file_path or entry.title
-        if not source_path:
-            skipped += 1
-            click.echo(f"  [{i}/{len(entries)}] (no source_path) — skipped")
-            continue
+    with T2Database(db_path) as db:
+        for i, entry in enumerate(entries, 1):
+            source_path = entry.file_path or entry.title
+            if not source_path:
+                skipped += 1
+                click.echo(f"  [{i}/{len(entries)}] (no source_path) — skipped")
+                continue
 
-        record = extract_aspects(
-            content="",
-            source_path=source_path,
-            collection=collection,
-        )
-        if record is None:
-            # Defensive — select_config already passed at the parent
-            # level, so this branch should not fire under Phase 1.
-            skipped += 1
-            click.echo(f"  [{i}/{len(entries)}] {Path(source_path).name}: no extractor — skipped")
-            continue
+            record = extract_aspects(
+                content="",
+                source_path=source_path,
+                collection=collection,
+            )
+            if record is None:
+                # Defensive — select_config already passed at the parent
+                # level, so this branch should not fire under Phase 1.
+                skipped += 1
+                click.echo(f"  [{i}/{len(entries)}] {Path(source_path).name}: no extractor — skipped")
+                continue
 
-        with T2Database(db_path) as db:
             db.document_aspects.upsert(record)
 
-        if record.problem_formulation is None:
-            null_fields += 1
-            click.echo(
-                f"  [{i}/{len(entries)}] {Path(source_path).name}: "
-                f"null-fields (extractor failed 3x)"
-            )
-        else:
-            success += 1
-            extracted.append((source_path, record))
-            click.echo(
-                f"  [{i}/{len(entries)}] {Path(source_path).name}: extracted"
-            )
+            if record.problem_formulation is None:
+                null_fields += 1
+                click.echo(
+                    f"  [{i}/{len(entries)}] {Path(source_path).name}: "
+                    f"null-fields (extractor failed 3x)"
+                )
+            else:
+                success += 1
+                extracted.append((source_path, record))
+                click.echo(
+                    f"  [{i}/{len(entries)}] {Path(source_path).name}: extracted"
+                )
 
     click.echo(
         f"Done: {success} extracted, {null_fields} null-fields, "
@@ -484,7 +484,11 @@ def _run_validation_sample(
 
     sample_count = max(1, len(extracted) * sample_pct // 100)
     sample_count = min(sample_count, len(extracted))
-    rng = random.Random()
+    # Deterministic seed so a re-run of validation produces the same
+    # sample. Operators investigating a failure can reproduce by
+    # rerunning. The seed is a stable hash of the extraction set so
+    # different collections sample differently.
+    rng = random.Random(len(extracted))
     sample = rng.sample(extracted, sample_count)
     click.echo(
         f"Validating {sample_count} of {len(extracted)} extractions "

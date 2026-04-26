@@ -138,6 +138,33 @@ class TestEnqueue:
             store.close()
         assert row == ("pending", 0, "new")
 
+    def test_enqueue_with_content_round_trips_via_claim(
+        self, tmp_path: Path,
+    ) -> None:
+        """The MCP path captures full document text at enqueue and the
+        worker reads it back via ``claim_next``.``content``. Regression
+        guard for the round-1 substantive critic Critical #1: without
+        the ``content`` column in the queue, MCP-path extractions
+        silently produced null-fields records.
+        """
+        from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
+
+        body = "## Problem\nQuorum systems...\n## Method\nPaxos.\n" * 10
+        store = AspectExtractionQueue(tmp_path / "t2.db")
+        try:
+            store.enqueue(
+                "knowledge__delos",
+                "abc1234567890def",  # 16-char doc_id, the MCP shape
+                content_hash="hashabc",
+                content=body,
+            )
+            row = store.claim_next()
+        finally:
+            store.close()
+        assert row is not None
+        assert row.content == body
+        assert row.content_hash == "hashabc"
+
 
 # ── Claim / mark_done / mark_failed / mark_retry ─────────────────────────────
 

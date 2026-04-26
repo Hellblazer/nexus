@@ -139,15 +139,17 @@ def __getattr__(name: str) -> Any:  # PEP 562
 class T2Database:
     """T2 SQLite memory bank with FTS5 full-text search.
 
-    Pure composition over the four domain stores. Each store owns its
-    own connection, lock, schema init, and migration guard; the facade
+    Pure composition over the seven domain stores (``memory``,
+    ``plans``, ``taxonomy``, ``telemetry``, ``chash_index``,
+    ``document_aspects``, ``aspect_queue``). Each store owns its own
+    connection, lock, schema init, and migration guard; the facade
     forwards legacy public methods to the appropriate store and owns
     only the cross-domain ``expire()`` composition and the context
     manager.
     """
 
     def __init__(self, path: Path) -> None:
-        # Lazy-load the four store classes here rather than at module
+        # Lazy-load the seven store classes here rather than at module
         # import time so the CLI cold-start path (which only needs
         # ``_sanitize_fts5``) does not pull sklearn/scipy/numpy through
         # CatalogTaxonomy.

@@ -22,6 +22,7 @@ Schema (locked):
     collection      TEXT NOT NULL,
     source_path     TEXT NOT NULL,
     content_hash    TEXT NOT NULL DEFAULT '',
+    content         TEXT NOT NULL DEFAULT '',
     status          TEXT NOT NULL DEFAULT 'pending',
     retry_count     INTEGER NOT NULL DEFAULT 0,
     enqueued_at     TEXT NOT NULL,
@@ -29,6 +30,12 @@ Schema (locked):
     last_error      TEXT,
     PRIMARY KEY (collection, source_path)
   );
+
+The ``content`` column carries the full document body (or its
+fallback path) on the MCP single-doc path where the ingest pathway
+does not have on-disk content for the worker to re-fetch. CLI batch
+ingest paths leave it empty; the worker re-reads from disk via
+``source_path``.
 
 State transitions:
 

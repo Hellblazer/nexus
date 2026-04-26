@@ -173,6 +173,11 @@ class AspectExtractionWorker:
         """
         from nexus.mcp_infra import t2_ctx
         while not self._stop_event.is_set():
+            # Increment unconditionally so a sustained T2 unavailability
+            # does not pin _poll_count at a multiple of
+            # _RECLAIM_EVERY_N_POLLS and amplify the reclaim UPDATE
+            # against an already-stressed database.
+            self._poll_count += 1
             try:
                 with t2_ctx() as t2:
                     if self._poll_count % self._RECLAIM_EVERY_N_POLLS == 0:
@@ -180,7 +185,6 @@ class AspectExtractionWorker:
                             timeout_seconds=self._stale_timeout_seconds,
                         )
                     rows = t2.aspect_queue.claim_batch(self._batch_size)
-                self._poll_count += 1
             except Exception:
                 _log.warning("aspect_worker_claim_failed", exc_info=True)
                 self._stop_event.wait(self._poll_interval)

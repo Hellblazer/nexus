@@ -453,6 +453,23 @@ def _parse_simple_yaml(text: str) -> dict:
 
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*$", re.MULTILINE)
+_FENCE_RE = re.compile(r"^```.*?^```", re.MULTILINE | re.DOTALL)
+
+
+def _mask_code_fences(body: str) -> str:
+    """Replace fenced-code-block content with a same-length string of
+    non-heading characters (newlines preserved verbatim, every other
+    char becomes a space). Result has identical character offsets and
+    line breaks as ``body`` so heading regex matches against the
+    masked string can index back into ``body`` directly.
+
+    Prevents shell ``## comment`` lines or quoted markdown snippets
+    inside ``` fences from being mis-detected as section headings.
+    """
+    def _mask(m: re.Match) -> str:
+        chunk = m.group(0)
+        return "".join("\n" if c == "\n" else " " for c in chunk)
+    return _FENCE_RE.sub(_mask, body)
 
 
 def _parse_rdr_sections(body: str) -> dict[str, str]:
@@ -463,14 +480,21 @@ def _parse_rdr_sections(body: str) -> dict[str, str]:
     section's text. The text of each section is everything from
     the heading line up to the next ``##`` heading (exclusive),
     stripped of the heading line itself.
+
+    Headings inside fenced code blocks (e.g. shell ``## comment``
+    lines or quoted markdown samples) are not treated as section
+    delimiters.
     """
+    masked = _mask_code_fences(body)
     sections: dict[str, str] = {}
-    matches = list(_HEADING_RE.finditer(body))
+    matches = list(_HEADING_RE.finditer(masked))
     h2_matches = [m for m in matches if len(m.group(1)) == 2]
     for i, m in enumerate(h2_matches):
         name = m.group(2).strip()
         start = m.end()
         end = h2_matches[i + 1].start() if i + 1 < len(h2_matches) else len(body)
+        # Mask preserves offsets, so body[start:end] yields the
+        # original section text including the (now-quoted) fenced code.
         text = body[start:end].strip()
         sections[name] = text
     return sections
@@ -883,6 +907,10 @@ def _invoke_once_batch(prompt: str, *, timeout: int) -> dict:
         )
     except subprocess.TimeoutExpired as exc:
         raise _TransientFailure(f"timeout after {timeout}s: {exc}") from exc
+    except OSError as exc:
+        # E2BIG (argument list too long), ENOMEM, etc. — non-retriable
+        # at this prompt size. Caller may fall back to per-paper.
+        raise _HardFailure(f"subprocess exec failed: {exc}") from exc
 
     if result.returncode != 0:
         stderr_lc = (result.stderr or "").lower()
@@ -1034,6 +1062,8 @@ def _invoke_once(prompt: str) -> dict:
         )
     except subprocess.TimeoutExpired as exc:
         raise _TransientFailure(f"timeout after 180s: {exc}") from exc
+    except OSError as exc:
+        raise _HardFailure(f"subprocess exec failed: {exc}") from exc
 
     if result.returncode != 0:
         stderr_lc = (result.stderr or "").lower()
