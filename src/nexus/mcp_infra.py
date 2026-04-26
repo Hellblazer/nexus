@@ -335,10 +335,14 @@ def _record_hook_failure(
 ) -> None:
     """Persist a post-store hook failure to T2 ``hook_failures`` (GH #251).
 
-    Secondary best-effort path: if the T2 write itself fails, swallow the
-    second failure (the primary warning already reached structlog) rather
-    than mask the original hook exception.
+    Populates ``chain='single'`` (RDR-089 4.14.2 schema) when the column
+    is present, falling back to a chain-less insert on pre-4.14.2 DBs.
+    Secondary best-effort path: if the T2 write itself fails, swallow
+    the second failure (the primary warning already reached structlog)
+    rather than mask the original hook exception.
     """
+    import sqlite3
+    truncated = error[:2000]
     try:
         with t2_ctx() as t2:
             # ``hook_failures`` is cross-cutting — any domain's connection
@@ -346,11 +350,23 @@ def _record_hook_failure(
             # the status line that surfaces these rows already reads there.
             conn = t2.taxonomy.conn
             with t2.taxonomy._lock:
-                conn.execute(
-                    "INSERT INTO hook_failures "
-                    "(doc_id, collection, hook_name, error) VALUES (?, ?, ?, ?)",
-                    (doc_id, collection, hook_name, error[:2000]),
-                )
+                try:
+                    conn.execute(
+                        "INSERT INTO hook_failures "
+                        "(doc_id, collection, hook_name, error, chain) "
+                        "VALUES (?, ?, ?, ?, 'single')",
+                        (doc_id, collection, hook_name, truncated),
+                    )
+                except sqlite3.OperationalError as exc:
+                    msg = str(exc)
+                    if "no column named" not in msg and "no such column" not in msg:
+                        raise
+                    # Pre-4.14.2 schema: chain column absent.
+                    conn.execute(
+                        "INSERT INTO hook_failures "
+                        "(doc_id, collection, hook_name, error) VALUES (?, ?, ?, ?)",
+                        (doc_id, collection, hook_name, truncated),
+                    )
                 conn.commit()
     except Exception:
         import structlog
@@ -447,25 +463,43 @@ def _record_batch_hook_failure(
             conn = t2.taxonomy.conn
             with t2.taxonomy._lock:
                 try:
+                    # 4.14.2 schema: dual-write chain alongside is_batch
+                    # so RDR-089 readers can classify rows by chain while
+                    # legacy readers still see is_batch=1.
                     conn.execute(
                         "INSERT INTO hook_failures "
                         "(doc_id, collection, hook_name, error, "
-                        " batch_doc_ids, is_batch) VALUES (?, ?, ?, ?, ?, 1)",
+                        " batch_doc_ids, is_batch, chain) "
+                        "VALUES (?, ?, ?, ?, ?, 1, 'batch')",
                         (representative, collection, hook_name, truncated, payload),
                     )
                 except sqlite3.OperationalError as exc:
-                    # Pre-4.14.1 schema: new columns not yet migrated.
-                    # Narrow catch to schema errors so transient lock or I/O
-                    # failures bubble up to the outer guard rather than
-                    # silently degrading the captured row.
+                    # Pre-4.14.x schema: chain and/or batch columns may be
+                    # absent. Narrow catch to schema errors so transient
+                    # lock or I/O failures bubble up to the outer guard
+                    # rather than silently degrading the captured row.
                     msg = str(exc)
                     if "no column named" not in msg and "no such column" not in msg:
                         raise
-                    conn.execute(
-                        "INSERT INTO hook_failures "
-                        "(doc_id, collection, hook_name, error) VALUES (?, ?, ?, ?)",
-                        (representative, collection, hook_name, truncated),
-                    )
+                    # Try the 4.14.1 shape (is_batch + batch_doc_ids, no chain)
+                    # before falling back to scalar-only.
+                    try:
+                        conn.execute(
+                            "INSERT INTO hook_failures "
+                            "(doc_id, collection, hook_name, error, "
+                            " batch_doc_ids, is_batch) VALUES (?, ?, ?, ?, ?, 1)",
+                            (representative, collection, hook_name, truncated, payload),
+                        )
+                    except sqlite3.OperationalError as exc2:
+                        msg2 = str(exc2)
+                        if "no column named" not in msg2 and "no such column" not in msg2:
+                            raise
+                        conn.execute(
+                            "INSERT INTO hook_failures "
+                            "(doc_id, collection, hook_name, error) "
+                            "VALUES (?, ?, ?, ?)",
+                            (representative, collection, hook_name, truncated),
+                        )
                 conn.commit()
     except Exception:
         import structlog
@@ -636,6 +670,142 @@ def chash_dual_write_batch_hook(
     except Exception:
         import structlog
         structlog.get_logger().debug("chash_dual_write_batch_failed", exc_info=True)
+
+
+# ── Post-store document hooks (RDR-089, nexus-yyev) ──────────────────────────
+# Third hook chain — fires once per *document* after every storage event
+# (MCP store_put and every CLI ingest path). Signature is
+# ``fn(source_path, collection, content)`` rather than the doc_id-keyed
+# single chain or the doc_ids-list batch chain — document-grain enrichment
+# (e.g. RDR-089 aspect extraction) needs the full document text and a
+# stable on-disk identifier, not chunk-level references.
+#
+# Content-sourcing contract (audit F4):
+#   * MCP store_put has the full doc text in scope and passes ``content=<text>``.
+#   * CLI sites accumulate chunks rather than full documents and pass
+#     ``content=""`` as the contract signal that the hook may need to
+#     read source_path itself.
+#   * Hooks treat ``content`` as primary, falling back to file read when empty.
+#
+# Synchronous all the way down — zero asyncio in the dispatcher (RDR-089
+# load-bearing contract: routing through async operator_extract from this
+# sync chain silently drops the coroutine). Hooks registered here MUST be
+# synchronous callables; async hooks are explicitly unsupported.
+#
+# Per-hook failures are captured, logged, and persisted to T2
+# ``hook_failures`` with ``chain='document'``. Failures never propagate.
+
+_post_document_hooks: list = []
+
+
+def register_post_document_hook(fn) -> None:
+    """Register a callable(source_path, collection, content) to fire after
+    every document-level storage event.
+
+    The callable MUST be synchronous. Async callables are silently
+    unsupported — the dispatcher would drop the returned coroutine.
+    """
+    _post_document_hooks.append(fn)
+
+
+def fire_post_document_hooks(
+    source_path: str, collection: str, content: str,
+) -> None:
+    """Invoke all registered document-grain hooks. Per-hook failures are
+    captured, logged, and persisted to T2 ``hook_failures`` with
+    ``chain='document'`` — never raised to the caller.
+
+    Synchronous dispatch: no ``asyncio.to_thread``, no ``await``. Hooks
+    that need async work must run their own event loop internally.
+
+    Content-sourcing contract:
+
+    * ``content`` non-empty (MCP path) — passed through to the hook
+      verbatim; the hook reads ``content`` directly.
+    * ``content == ""`` (CLI path) — the contract signal that the hook
+      may need to read ``source_path`` itself. The framework forwards
+      both arguments unchanged; content-sourcing is the hook's
+      responsibility, not the framework's.
+    """
+    import structlog
+    _hook_log = structlog.get_logger()
+    for hook in _post_document_hooks:
+        try:
+            hook(source_path, collection, content)
+        except Exception as exc:
+            hook_name = getattr(hook, "__name__", "?")
+            _hook_log.warning(
+                "post_document_hook_failed",
+                hook=hook_name,
+                source_path=source_path,
+                collection=collection,
+                exc_info=True,
+            )
+            _record_document_hook_failure(
+                source_path=source_path,
+                collection=collection,
+                hook_name=hook_name,
+                error=str(exc),
+            )
+
+
+def _record_document_hook_failure(
+    *,
+    source_path: str,
+    collection: str,
+    hook_name: str,
+    error: str,
+) -> None:
+    """Persist a document-grain hook failure to T2 ``hook_failures``.
+
+    Stores ``source_path`` in the legacy ``doc_id`` column (the column
+    carries 'subject of failure' regardless of chain shape) and sets
+    ``chain='document'`` so readers can render the row appropriately.
+
+    Falls back to a chain-less insert when the 4.14.2 migration has not
+    yet run (mixed-version operator scenario): the outer guard
+    propagates schema errors to the secondary ``except`` only, so
+    transient lock or I/O failures bubble up where the outer
+    best-effort wrapper can swallow them. Same secondary best-effort
+    semantics as ``_record_hook_failure`` and
+    ``_record_batch_hook_failure``: persistence failure cannot break
+    ingest.
+    """
+    import sqlite3
+    truncated = error[:2000]
+    try:
+        with t2_ctx() as t2:
+            conn = t2.taxonomy.conn
+            with t2.taxonomy._lock:
+                try:
+                    conn.execute(
+                        "INSERT INTO hook_failures "
+                        "(doc_id, collection, hook_name, error, chain) "
+                        "VALUES (?, ?, ?, ?, 'document')",
+                        (source_path, collection, hook_name, truncated),
+                    )
+                except sqlite3.OperationalError as exc:
+                    msg = str(exc)
+                    if "no column named" not in msg and "no such column" not in msg:
+                        raise
+                    # Pre-4.14.2 schema: chain column absent. Persist
+                    # without the chain marker — the row is still useful
+                    # for triage even if it cannot be classified by chain.
+                    conn.execute(
+                        "INSERT INTO hook_failures "
+                        "(doc_id, collection, hook_name, error) "
+                        "VALUES (?, ?, ?, ?)",
+                        (source_path, collection, hook_name, truncated),
+                    )
+                conn.commit()
+    except Exception:
+        import structlog
+        structlog.get_logger().debug(
+            "document_hook_failure_persist_failed",
+            hook=hook_name,
+            collection=collection,
+            exc_info=True,
+        )
 
 
 # ── Version compatibility check (RDR-076) ─────────────────────────────────────

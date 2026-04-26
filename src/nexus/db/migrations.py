@@ -604,6 +604,52 @@ def migrate_hook_failures_batch_columns(conn: sqlite3.Connection) -> None:
     _log.info("Migrated: hook_failures.batch_doc_ids + is_batch (RDR-095)")
 
 
+def migrate_hook_failures_chain_column(conn: sqlite3.Connection) -> None:
+    """Add ``chain`` TEXT column to ``hook_failures`` for RDR-089 P0.1.
+
+    Replaces the previous ``is_batch`` boolean encoding with an enum-like
+    text column that is forward-compatible as new chain shapes land.
+    Values:
+
+    * ``'single'`` — the original single-document chain (RDR-070).
+    * ``'batch'`` — the batch chain (RDR-095).
+    * ``'document'`` — the document-grain chain introduced by RDR-089.
+
+    Additive only: ``is_batch`` and ``batch_doc_ids`` are retained for
+    back-compat with pre-4.14.2 readers. Existing write paths dual-write
+    ``chain`` alongside ``is_batch`` (see ``_record_batch_hook_failure``);
+    new readers may prefer ``chain``. A future migration may drop
+    ``is_batch`` once all readers consume ``chain``.
+
+    Data backfill: ``UPDATE hook_failures SET chain='batch' WHERE
+    is_batch=1`` so historical RDR-095 rows are correctly classified
+    after this migration runs. Rows with ``is_batch=0`` keep the column
+    default ``'single'`` — no UPDATE needed.
+
+    Idempotent: no-op when the column already exists or when
+    ``hook_failures`` has not yet been created (4.9.10 migration runs
+    first in the chain).
+    """
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='hook_failures'"
+    ).fetchone()
+    if row is None:
+        return
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(hook_failures)").fetchall()}
+    if "chain" not in cols:
+        conn.execute(
+            "ALTER TABLE hook_failures "
+            "ADD COLUMN chain TEXT NOT NULL DEFAULT 'single'"
+        )
+        # Backfill historical batch rows captured at the 4.14.1 schema.
+        if "is_batch" in cols:
+            conn.execute(
+                "UPDATE hook_failures SET chain='batch' WHERE is_batch=1"
+            )
+    conn.commit()
+    _log.info("Migrated: hook_failures.chain enum column (RDR-089)")
+
+
 def migrate_chash_index(conn: sqlite3.Connection) -> None:
     """Create the ``chash_index`` table for RDR-086 Phase 1.
 
@@ -1334,6 +1380,11 @@ MIGRATIONS: list[Migration] = [
         "4.14.1",
         "Add hook_failures.batch_doc_ids + is_batch (RDR-095)",
         migrate_hook_failures_batch_columns,
+    ),
+    Migration(
+        "4.14.2",
+        "Add hook_failures.chain enum column + backfill batch rows (RDR-089)",
+        migrate_hook_failures_chain_column,
     ),
 ]
 
