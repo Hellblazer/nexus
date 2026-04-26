@@ -251,6 +251,27 @@ Use beads (`/beads:*` skills) for task tracking and T2 memory (`nx memory`) for 
 Branch naming: `feature/<bead-id>-<short-description>`
 Never push directly to `main` — all changes via PR.
 
+## Sandbox Testing
+
+Editable installs (`uv sync`) and wheel installs (`uv tool install`) resolve package data and version-gated migrations differently. Pytest runs the editable shape; users run the wheel shape. Bugs that pass tests and ship broken usually live in that gap.
+
+`tests/e2e/release-sandbox.sh` mirrors the wheel shape locally + runs the canary surface. **Required before merging any PR that touches:**
+
+- `pyproject.toml`, `uv.lock`
+- `src/nexus/db/migrations.py` (T2 migrations are version-gated)
+- `src/nexus/mcp/**`
+- `nx/**` (plugin manifest, hooks, agents, skills)
+- `.claude-plugin/**`
+- `src/nexus/commands/{doctor,upgrade}.py`
+
+```bash
+./tests/e2e/release-sandbox.sh smoke    # ~2 min, all checks must pass
+```
+
+Modes: `smoke` (canary), `shell` (manual nx exercise), `tmux` (Claude Code against sandbox), `reset`. Manual: `tests/e2e/release-sandbox.md`.
+
+If `smoke` fails: stop, fix on the same PR. Do not merge intending to fix on main.
+
 ## Release
 
 See `docs/contributing.md` for the full release checklist. Files that change every release: `pyproject.toml`, `uv.lock` (must be committed), `CHANGELOG.md`, `nx/CHANGELOG.md`, `.claude-plugin/marketplace.json`.
