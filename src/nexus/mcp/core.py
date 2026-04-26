@@ -379,12 +379,23 @@ def _clamp_subagent_timeout(requested: float, tool_name: str) -> float:
 
 from nexus.mcp_infra import (
     chash_dual_write_batch_hook,
+    register_post_document_hook,
     register_post_store_batch_hook,
     taxonomy_assign_batch_hook,
 )
 
 register_post_store_batch_hook(chash_dual_write_batch_hook)
 register_post_store_batch_hook(taxonomy_assign_batch_hook)
+
+# RDR-089 follow-up (nexus-qeo8): document-grain hook chain consumer.
+# The synchronous-inline shape was invalidated by the P1.3 spike
+# (median 26.5 s / p95 38.1 s per document). The enqueue hook writes
+# to aspect_extraction_queue (microsecond-scale) and lazy-spawns a
+# background worker that drains the queue and invokes the existing
+# synchronous extract_aspects.
+from nexus.aspect_worker import aspect_extraction_enqueue_hook
+
+register_post_document_hook(aspect_extraction_enqueue_hook)
 
 # ── Registered tools ─────────────────────────────────────────────────────────
 

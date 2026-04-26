@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""T2 SQLite memory bank — six domain stores behind a composing facade.
+"""T2 SQLite memory bank — seven domain stores behind a composing facade.
 
-The T2 tier is split into six domain stores, each owning its own set
-of tables in a shared SQLite file:
+The T2 tier is split into seven domain stores, each owning its own
+set of tables in a shared SQLite file:
 
 =========================  ==========================  =================================================================
 Attribute                  Class                       Responsibility
@@ -14,6 +14,7 @@ Attribute                  Class                       Responsibility
 ``db.telemetry``           ``Telemetry``               Relevance log (query/chunk/action), retention-based expiry
 ``db.chash_index``         ``ChashIndex``              chash → (collection, doc_id) global lookup (RDR-086)
 ``db.document_aspects``    ``DocumentAspects``         Per-document structured aspects table (RDR-089)
+``db.aspect_queue``        ``AspectExtractionQueue``   Async queue feeding the aspect-extraction worker (nexus-qeo8)
 =========================  ==========================  =================================================================
 
 ``T2Database`` is a facade: it constructs the six stores and re-exposes
@@ -94,6 +95,7 @@ _log = structlog.get_logger()
 # every CLI invocation that touched any nexus.db.t2 symbol.
 __all__ = [
     "AccessPolicy",
+    "AspectExtractionQueue",
     "CatalogTaxonomy",
     "ChashIndex",
     "DocumentAspects",
@@ -113,13 +115,14 @@ def __getattr__(name: str) -> Any:  # PEP 562
     attribute on the module after a successful resolve).
     """
     _MAP = {
-        "AccessPolicy":     "nexus.db.t2.memory_store",
-        "MemoryStore":      "nexus.db.t2.memory_store",
-        "CatalogTaxonomy":  "nexus.db.t2.catalog_taxonomy",
-        "ChashIndex":       "nexus.db.t2.chash_index",
-        "DocumentAspects":  "nexus.db.t2.document_aspects",
-        "PlanLibrary":      "nexus.db.t2.plan_library",
-        "Telemetry":        "nexus.db.t2.telemetry",
+        "AccessPolicy":          "nexus.db.t2.memory_store",
+        "AspectExtractionQueue": "nexus.db.t2.aspect_extraction_queue",
+        "MemoryStore":           "nexus.db.t2.memory_store",
+        "CatalogTaxonomy":       "nexus.db.t2.catalog_taxonomy",
+        "ChashIndex":            "nexus.db.t2.chash_index",
+        "DocumentAspects":       "nexus.db.t2.document_aspects",
+        "PlanLibrary":           "nexus.db.t2.plan_library",
+        "Telemetry":             "nexus.db.t2.telemetry",
     }
     if name in _MAP:
         import importlib
@@ -148,6 +151,7 @@ class T2Database:
         # import time so the CLI cold-start path (which only needs
         # ``_sanitize_fts5``) does not pull sklearn/scipy/numpy through
         # CatalogTaxonomy.
+        from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
         from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
         from nexus.db.t2.chash_index import ChashIndex
         from nexus.db.t2.document_aspects import DocumentAspects
@@ -199,6 +203,10 @@ class T2Database:
         # populated by the document-grain hook chain at every CLI
         # ingest site (knowledge__* only in Phase 1).
         self.document_aspects: DocumentAspects = DocumentAspects(path)
+        # RDR-089 follow-up (nexus-qeo8): durable queue feeding the
+        # async aspect-extraction worker. The hook fires fast (just
+        # an enqueue); the worker drains in a background thread.
+        self.aspect_queue: AspectExtractionQueue = AspectExtractionQueue(path)
 
     def __enter__(self) -> "T2Database":
         return self
@@ -207,13 +215,13 @@ class T2Database:
         self.close()
 
     def close(self) -> None:
-        """Close all six domain connections.
+        """Close all seven domain connections.
 
         Each store closes its own connection under its own lock. The
         close order is reverse of construction so that the most
-        recently opened connection (document_aspects) is released
-        first.
+        recently opened connection (aspect_queue) is released first.
         """
+        self.aspect_queue.close()
         self.document_aspects.close()
         self.chash_index.close()
         self.telemetry.close()

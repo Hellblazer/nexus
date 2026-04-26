@@ -709,6 +709,54 @@ def migrate_document_aspects_table(conn: sqlite3.Connection) -> None:
     _log.info("Migrated: created document_aspects table (RDR-089)")
 
 
+def migrate_aspect_extraction_queue_table(conn: sqlite3.Connection) -> None:
+    """Create the ``aspect_extraction_queue`` table for RDR-089
+    follow-up (nexus-qeo8).
+
+    Durable WAL buffer feeding the async aspect-extraction worker. The
+    P1.3 spike invalidated Critical Assumption #2 (per-doc <3 s);
+    inline synchronous extraction is replaced by the
+    enqueue→worker→upsert pattern.
+
+    Schema:
+
+      - collection      TEXT NOT NULL
+      - source_path     TEXT NOT NULL
+      - content_hash    TEXT NOT NULL DEFAULT ''  (hint for downstream)
+      - status          TEXT NOT NULL DEFAULT 'pending'
+                                       (pending | in_progress | failed)
+      - retry_count     INTEGER NOT NULL DEFAULT 0
+      - enqueued_at     TEXT NOT NULL
+      - last_attempt_at TEXT
+      - last_error      TEXT
+      - PRIMARY KEY (collection, source_path)
+
+    PRIMARY KEY mirrors ``document_aspects`` so re-enqueue at the same
+    key replaces the row in place. Secondary index on ``status``
+    keeps the worker's per-poll SELECT an index seek (the worker
+    polls every 2 s by default).
+
+    Idempotent: ``CREATE IF NOT EXISTS`` makes re-application a no-op.
+    """
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS aspect_extraction_queue (
+            collection      TEXT NOT NULL,
+            source_path     TEXT NOT NULL,
+            content_hash    TEXT NOT NULL DEFAULT '',
+            status          TEXT NOT NULL DEFAULT 'pending',
+            retry_count     INTEGER NOT NULL DEFAULT 0,
+            enqueued_at     TEXT NOT NULL,
+            last_attempt_at TEXT,
+            last_error      TEXT,
+            PRIMARY KEY (collection, source_path)
+        );
+        CREATE INDEX IF NOT EXISTS idx_aspect_queue_status
+            ON aspect_extraction_queue(status);
+    """)
+    conn.commit()
+    _log.info("Migrated: created aspect_extraction_queue table (RDR-089 follow-up)")
+
+
 def migrate_chash_index(conn: sqlite3.Connection) -> None:
     """Create the ``chash_index`` table for RDR-086 Phase 1.
 
@@ -1449,6 +1497,11 @@ MIGRATIONS: list[Migration] = [
         "4.14.3",
         "Create document_aspects table (RDR-089 P1.1)",
         migrate_document_aspects_table,
+    ),
+    Migration(
+        "4.14.4",
+        "Create aspect_extraction_queue table (RDR-089 follow-up nexus-qeo8)",
+        migrate_aspect_extraction_queue_table,
     ),
 ]
 
