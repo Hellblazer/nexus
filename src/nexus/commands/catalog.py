@@ -1883,3 +1883,254 @@ def backfill_cmd(dry_run: bool) -> None:
     click.echo(f"  Knowledge: {knowledge_count}")
     if not dry_run:
         click.echo(f"  Hash:      {hash_updated} chunks updated")
+
+
+# ── nx catalog remediate-paths ──────────────────────────────────────────────
+
+
+# Default file extensions the remediator considers candidates. Mirrors the
+# set of types the catalog tracks: PDFs (papers / docs__), markdown (RDR /
+# docs__ prose). Code files are excluded by design — code ingest stores
+# absolute paths from a registered repo root, not loose basenames.
+_REMEDIATE_DEFAULT_EXTENSIONS: frozenset[str] = frozenset({
+    ".pdf", ".md", ".markdown",
+})
+
+
+def _build_basename_index(
+    source_dir: Path,
+    extensions: frozenset[str] | None = _REMEDIATE_DEFAULT_EXTENSIONS,
+) -> dict[str, list[Path]]:
+    """Walk *source_dir* and return ``{basename: [absolute_path, ...]}``.
+
+    Symlinks are followed; hidden directories (``.git``, ``.venv``) are
+    pruned because they don't carry curated source documents and they
+    would dominate the walk on large repos. ``extensions=None`` matches
+    every file regardless of suffix (used by ``--extensions *``).
+    """
+    import os as _os
+    index: dict[str, list[Path]] = {}
+    for root, dirs, files in _os.walk(
+        str(source_dir.resolve()), followlinks=True,
+    ):
+        # Prune hidden dirs in-place so os.walk doesn't descend into them.
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        root_path = Path(root)
+        for fname in files:
+            if extensions is not None and Path(fname).suffix.lower() not in extensions:
+                continue
+            index.setdefault(fname, []).append(root_path / fname)
+    return index
+
+
+def _entry_needs_remediation(entry: object) -> tuple[bool, str]:
+    """Return ``(needs_fix, reason)`` for a catalog entry.
+
+    Reasons:
+    * ``"basename"`` — file_path has no slash; resolves against cwd.
+    * ``"missing"`` — file_path is absolute but does not exist on disk.
+    * ``""`` — file_path is fine.
+
+    Empty file_path entries (MCP-stored knowledge with no source file)
+    are not remediable here — they return ``(False, "no-file-path")``.
+    """
+    fp = getattr(entry, "file_path", "") or ""
+    if not fp:
+        return (False, "no-file-path")
+    if "/" not in fp:
+        return (True, "basename")
+    if not Path(fp).exists():
+        return (True, "missing")
+    return (False, "")
+
+
+def _resolve_candidate(
+    entry: object,
+    candidates: list[Path],
+    *,
+    prefer_deepest: bool = False,
+) -> tuple[Path | None, str]:
+    """Pick a single candidate path for *entry*, or ``None``.
+
+    Returns ``(path, note)`` where *note* explains the choice:
+      * ``"unique"`` — exactly one candidate
+      * ``"deepest"`` — multiple, picked the longest path
+      * ``"ambiguous"`` — multiple and no resolution strategy applied
+      * ``"none"`` — no candidates
+    """
+    if not candidates:
+        return (None, "none")
+    if len(candidates) == 1:
+        return (candidates[0], "unique")
+    if prefer_deepest:
+        return (max(candidates, key=lambda p: len(str(p))), "deepest")
+    return (None, "ambiguous")
+
+
+@catalog.command("remediate-paths")
+@click.argument(
+    "source_dir",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.option(
+    "--dry-run", is_flag=True,
+    help="Show the transition table without writing.",
+)
+@click.option(
+    "--collection", default="",
+    help="Limit remediation to entries in this physical collection.",
+)
+@click.option(
+    "--owner", default="",
+    help="Limit remediation to entries under this owner tumbler prefix.",
+)
+@click.option(
+    "--prefer-deepest", is_flag=True,
+    help="When multiple candidates share a basename, pick the deepest path "
+         "(longest absolute path string). Default: skip ambiguous entries.",
+)
+@click.option(
+    "--mark-missing", is_flag=True,
+    help="For entries with no candidate found in SOURCE_DIR, set "
+         "meta.status='missing' so 'nx catalog gc' can sweep them.",
+)
+@click.option(
+    "--extensions", default="",
+    help="Comma-separated extensions to scan (default: .pdf,.md,.markdown). "
+         "Use '*' to scan every file regardless of extension.",
+)
+def remediate_paths_cmd(
+    source_dir: Path,
+    dry_run: bool,
+    collection: str,
+    owner: str,
+    prefer_deepest: bool,
+    mark_missing: bool,
+    extensions: str,
+) -> None:
+    """Repair catalog entries whose file_path is a basename or has gone missing.
+
+    Walks SOURCE_DIR and matches catalog entries by basename. For each
+    remediable entry, updates file_path to an absolute path under
+    SOURCE_DIR. Use this after moving PDFs from ~/Downloads into a
+    git-backed papers archive, or any time the original ingest paths
+    no longer exist on disk.
+
+    \b
+    Examples:
+      nx catalog remediate-paths ~/papers-archive --dry-run
+      nx catalog remediate-paths ~/papers --collection knowledge__hybridrag
+      nx catalog remediate-paths ~/papers --prefer-deepest --mark-missing
+
+    Strategy:
+      * Catalog entries with file_path = basename only (no slash) → look up
+        by basename, update on unique match.
+      * Catalog entries with file_path = absolute path that doesn't exist
+        on disk → same lookup; treat as moved/recovered.
+      * Multiple basename matches in SOURCE_DIR → ambiguous, skip
+        (use --prefer-deepest to break ties by path length).
+      * No basename match → leave alone, optionally mark with --mark-missing.
+
+    Idempotent: re-running on the same SOURCE_DIR is a no-op once entries
+    are resolved.
+    """
+    ext_filter: frozenset[str] | None
+    if extensions == "*":
+        ext_filter = None  # match every file
+    elif extensions:
+        ext_filter = frozenset(
+            e if e.startswith(".") else f".{e}"
+            for e in (s.strip().lower() for s in extensions.split(","))
+            if e
+        )
+    else:
+        ext_filter = _REMEDIATE_DEFAULT_EXTENSIONS
+
+    cat = _get_catalog()
+
+    click.echo(f"Scanning {source_dir.resolve()}…")
+    index = _build_basename_index(source_dir, ext_filter)
+    click.echo(f"Indexed {sum(len(v) for v in index.values())} files "
+               f"({len(index)} unique basenames).")
+
+    # Select entries to consider.
+    entries: list = []
+    if owner:
+        entries = cat.by_owner(Tumbler.parse(owner))
+    elif collection:
+        # CatalogTaxonomy doesn't expose by_physical_collection directly;
+        # walk all_documents and filter.
+        entries = [
+            e for e in cat.all_documents()
+            if e.physical_collection == collection
+        ]
+    else:
+        entries = cat.all_documents()
+
+    if not entries:
+        click.echo("No catalog entries to consider.")
+        return
+
+    # Categorise.
+    transitions: list[tuple[object, str, str, Path | None, str]] = []
+    skipped_ok = 0
+    skipped_no_file_path = 0
+    for entry in entries:
+        needs, reason = _entry_needs_remediation(entry)
+        if not needs:
+            if reason == "no-file-path":
+                skipped_no_file_path += 1
+            else:
+                skipped_ok += 1
+            continue
+        basename = Path(entry.file_path).name
+        candidates = index.get(basename, [])
+        chosen, note = _resolve_candidate(
+            entry, candidates, prefer_deepest=prefer_deepest,
+        )
+        transitions.append((entry, reason, note, chosen, basename))
+
+    # Report.
+    n_total = len(transitions)
+    n_resolved = sum(1 for _, _, _, p, _ in transitions if p is not None)
+    n_ambiguous = sum(1 for _, _, n, _, _ in transitions if n == "ambiguous")
+    n_missing = sum(1 for _, _, n, _, _ in transitions if n == "none")
+
+    click.echo(
+        f"\n{n_total} entries need remediation "
+        f"(skipped {skipped_ok} already-good, {skipped_no_file_path} no-file-path):"
+    )
+    click.echo(f"  {n_resolved:4d} resolvable")
+    click.echo(f"  {n_ambiguous:4d} ambiguous (multiple basename matches)")
+    click.echo(f"  {n_missing:4d} no candidate found in SOURCE_DIR")
+
+    if not transitions:
+        return
+
+    # Show first ~20 transitions for visibility.
+    click.echo("\nSample (first 20):")
+    for entry, why, note, chosen, basename in transitions[:20]:
+        old = entry.file_path or "(empty)"
+        new = str(chosen) if chosen else f"<{note}>"
+        click.echo(f"  [{why:8s}] {entry.tumbler}  {basename}\n    {old}\n  → {new}")
+
+    if dry_run:
+        click.echo("\n(dry-run — no catalog writes performed.)")
+        return
+
+    # Apply.
+    n_updated = 0
+    n_marked = 0
+    for entry, _why, _note, chosen, _basename in transitions:
+        if chosen is not None:
+            cat.update(entry.tumbler, file_path=str(chosen))
+            n_updated += 1
+        elif mark_missing:
+            cat.update(entry.tumbler, meta={"status": "missing"})
+            n_marked += 1
+
+    click.echo(
+        f"\nDone: updated {n_updated} file_paths"
+        + (f", marked {n_marked} as missing" if mark_missing else "")
+        + "."
+    )
