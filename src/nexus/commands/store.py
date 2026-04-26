@@ -234,13 +234,13 @@ def _list_documents(db: T3Database, col_name: str) -> None:
 
     docs = sorted(seen.values(), key=lambda d: d.get("title") or "")
     click.echo(f"{col_name}  ({len(docs)} documents, {total_chunks} chunks)\n")
+    # extraction_method / page_count not in ALLOWED_TOP_LEVEL — normalize()
+    # drops them so the reads always returned empty. Removed in nexus-59j0.
     for i, d in enumerate(docs, 1):
         title = (d.get("title") or "untitled")[:60]
         chunks = d.get("chunk_count", "?")
-        pages = d.get("page_count", "?")
-        method = d.get("extraction_method", "")
         indexed = (d.get("indexed_at") or "")[:10]
-        click.echo(f"  {i:3d}. {title:<60}  {chunks:>4} chunks  {pages:>3}p  {method:<8}  {indexed}")
+        click.echo(f"  {i:3d}. {title:<60}  {chunks:>4} chunks  {indexed}")
 
 
 

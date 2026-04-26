@@ -12,8 +12,7 @@ def test_python_function_extraction():
     src = "def hello(name: str) -> str:\n    return f'Hello {name}'\n\ndef goodbye():\n    pass\n"
     chunks = chunk_file(Path("example.py"), src)
     assert len(chunks) >= 1
-    assert chunks[0]["file_extension"] == ".py"
-    assert chunks[0]["ast_chunked"] is True
+    assert chunks[0]["file_path"].endswith(".py")
     assert any("hello" in c["text"] for c in chunks)
 
 
@@ -59,7 +58,7 @@ def test_javascript_function_extraction():
     )
     chunks = chunk_file(Path("app.js"), src)
     assert len(chunks) >= 1
-    assert chunks[0]["file_extension"] == ".js"
+    assert chunks[0]["file_path"].endswith(".js")
     assert any("greet" in c["text"] or "Animal" in c["text"] for c in chunks)
 
 
@@ -79,7 +78,7 @@ def test_typescript_function_extraction():
     )
     chunks = chunk_file(Path("server.ts"), src)
     assert len(chunks) >= 1
-    assert chunks[0]["file_extension"] == ".ts"
+    assert chunks[0]["file_path"].endswith(".ts")
 
 
 # ── Go ──────────────────────────────────────────────────────────────────────────
@@ -104,7 +103,7 @@ def test_go_function_extraction():
     )
     chunks = chunk_file(Path("main.go"), src)
     assert len(chunks) >= 1
-    assert chunks[0]["file_extension"] == ".go"
+    assert chunks[0]["file_path"].endswith(".go")
     assert any("Server" in c["text"] for c in chunks)
 
 
@@ -130,7 +129,7 @@ def test_rust_function_extraction():
     )
     chunks = chunk_file(Path("main.rs"), src)
     assert len(chunks) >= 1
-    assert chunks[0]["file_extension"] == ".rs"
+    assert chunks[0]["file_path"].endswith(".rs")
 
 
 # ── Java ────────────────────────────────────────────────────────────────────────
@@ -153,20 +152,27 @@ def test_java_class_extraction():
     )
     chunks = chunk_file(Path("Calculator.java"), src)
     assert len(chunks) >= 1
-    assert chunks[0]["file_extension"] == ".java"
+    assert chunks[0]["file_path"].endswith(".java")
     assert any("Calculator" in c["text"] for c in chunks)
 
 
 # ── Metadata fields ─────────────────────────────────────────────────────────────
 
 def test_chunk_metadata_fields():
-    """Every chunk has the required metadata keys."""
+    """Every chunk carries the keys the indexer factory consumes.
+
+    nexus-59j0 dropped ``filename`` / ``file_extension`` / ``ast_chunked``
+    (cargo — the indexer factory ignored them, normalize() dropped them
+    from T3 storage)."""
     src = "def foo():\n    pass\n\ndef bar():\n    pass\n"
     chunks = chunk_file(Path("meta.py"), src)
-    required = {"file_path", "filename", "file_extension", "ast_chunked",
+    required = {"file_path",
                 "chunk_index", "chunk_count", "line_start", "line_end", "text"}
     for chunk in chunks:
         assert required.issubset(chunk.keys()), f"Missing keys: {required - set(chunk.keys())}"
+        assert "filename" not in chunk
+        assert "file_extension" not in chunk
+        assert "ast_chunked" not in chunk
 
 
 def test_chunk_line_numbers_are_valid():

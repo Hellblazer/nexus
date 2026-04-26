@@ -800,10 +800,10 @@ def query(
                     "bib_authors": meta.get("bib_authors", ""),
                     "bib_citation_count": meta.get("bib_citation_count", ""),
                     "bib_venue": meta.get("bib_venue", ""),
-                    "page_count": meta.get("page_count", ""),
                     "chunk_count": meta.get("chunk_count", ""),
-                    "extraction_method": meta.get("extraction_method", ""),
-                    "has_formulas": meta.get("has_formulas", ""),
+                    # page_count / extraction_method / has_formulas are not in
+                    # ALLOWED_TOP_LEVEL — normalize() drops them, so the read
+                    # always returned "". Removed in nexus-59j0 cleanup.
                     "source_path": meta.get("source_path", ""),
                 }
             elif r.distance < docs[doc_key]["distance"]:
@@ -836,14 +836,8 @@ def query(
                 bib_parts.append(f"{d['bib_citation_count']} citations")
             # Technical metadata
             tech_parts: list[str] = []
-            if d["page_count"]:
-                tech_parts.append(f"{d['page_count']}p")
             if d["chunk_count"]:
                 tech_parts.append(f"{d['chunk_count']} chunks")
-            if d["extraction_method"]:
-                tech_parts.append(d["extraction_method"])
-            if d["has_formulas"]:
-                tech_parts.append("formulas")
 
             lines.append(f"{i}. {' | '.join(header_parts)}")
             if bib_parts:
@@ -992,14 +986,13 @@ def store_get(doc_id: str, collection: str = "knowledge") -> str:
         title = entry.get("title", "")
         tags = entry.get("tags", "")
         indexed_at = (entry.get("indexed_at") or "")[:10]
-        method = entry.get("extraction_method", "")
+        # extraction_method dropped — never made it past normalize() so the
+        # display always read empty. Cleaned up in nexus-59j0.
         lines: list[str] = [f"ID:         {entry['id']}", f"Collection: {col_name}"]
         if title:
             lines.append(f"Title:      {title}")
         if tags:
             lines.append(f"Tags:       {tags}")
-        if method:
-            lines.append(f"Extractor:  {method}")
         if indexed_at:
             lines.append(f"Indexed:    {indexed_at}")
         lines.append("")
@@ -1181,22 +1174,17 @@ def _store_list_docs(t3, col_name: str, total: int) -> str:
         return f"No documents in {col_name}."
 
     docs = sorted(seen.items(), key=lambda kv: kv[1].get("title") or "")
-    show_pages = any(d.get("page_count") for _, d in docs)
+    # extraction_method / page_count not in ALLOWED_TOP_LEVEL — dropped by
+    # normalize() so the read always returned empty. Removed in nexus-59j0.
     lines = [f"{col_name}  ({len(docs)} documents, {total} chunks)"]
     for i, (h, d) in enumerate(docs, 1):
-        # 16-char content-hash prefix surfaces the doc_id store_get expects —
-        # without this column the natural list → get flow had no path from
-        # title to hash.
+        # 16-char content-hash prefix surfaces the doc_id store_get expects;
+        # without it the natural list → get flow had no path from title to hash.
         doc_id = (d.get("id") or h)[:16]
         title = (d.get("title") or "untitled")[:50]
         chunks = chunks_by_hash.get(h, "?")
-        method = d.get("extraction_method", "")
         indexed = (d.get("indexed_at") or "")[:10]
-        if show_pages:
-            pages = d.get("page_count", "?")
-            lines.append(f"  {i:3d}. {doc_id}  {title:<50}  {chunks:>4} chunks  {pages:>3}p  {method:<8}  {indexed}")
-        else:
-            lines.append(f"  {i:3d}. {doc_id}  {title:<50}  {chunks:>4} chunks  {method:<8}  {indexed}")
+        lines.append(f"  {i:3d}. {doc_id}  {title:<50}  {chunks:>4} chunks  {indexed}")
     return "\n".join(lines)
 
 

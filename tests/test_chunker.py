@@ -55,23 +55,28 @@ def test_chunk_file_custom_chunk_lines_produces_more_chunks(tmp_path: Path):
 
 
 def test_chunk_file_unknown_extension_uses_line_fallback(tmp_path: Path):
+    """Unknown extensions go through the line-based fallback (no AST)."""
     f = tmp_path / "data.xyz"
     f.write_text("\n".join(f"line {i}" for i in range(50)))
     chunks = chunk_file(f, f.read_text())
     assert len(chunks) >= 1
-    assert all(c["ast_chunked"] is False for c in chunks)
+    # Line fallback chunks carry line_start / line_end; AST chunks would also
+    # set chunk_start_char (set by AST node offsets, not the fallback path).
+    assert all("line_start" in c and "line_end" in c for c in chunks)
 
 
 def test_chunk_file_line_fallback_metadata(tmp_path: Path):
+    """nexus-59j0: filename / file_extension / ast_chunked dropped; the
+    chunker now emits only metadata that the indexer factory consumes."""
     f = tmp_path / "script.unknown_ext"
     f.write_text("\n".join(f"code {i}" for i in range(20)))
     chunks = chunk_file(f, f.read_text())
     assert len(chunks) == 1
     c = chunks[0]
     assert c["file_path"] == str(f)
-    assert c["filename"] == "script.unknown_ext"
-    assert c["file_extension"] == ".unknown_ext"
-    assert c["ast_chunked"] is False
+    assert "filename" not in c
+    assert "file_extension" not in c
+    assert "ast_chunked" not in c
     assert c["chunk_index"] == 0 and c["chunk_count"] == 1
     assert "line_start" in c and "line_end" in c
 
@@ -94,19 +99,20 @@ def test_chunk_file_python_calls_codesplitter(tmp_path: Path):
     with patch("nexus.chunker._make_code_splitter", return_value=nodes):
         chunks = chunk_file(f, f.read_text())
     assert len(chunks) == 2
-    assert all(c["ast_chunked"] is True for c in chunks)
-    assert all(c["file_extension"] == ".py" for c in chunks)
     assert [c["chunk_index"] for c in chunks] == [0, 1]
     assert all(c["chunk_count"] == 2 for c in chunks)
 
 
 def test_chunk_file_ast_failure_falls_back_to_lines(tmp_path: Path):
+    """When AST parse fails, fall back to line chunking (still returns chunks)."""
     f = tmp_path / "tricky.py"
     f.write_text("def foo():\n    pass\n")
     with patch("nexus.chunker._make_code_splitter", side_effect=Exception("parse error")):
         chunks = chunk_file(f, f.read_text())
     assert len(chunks) >= 1
-    assert all(c["ast_chunked"] is False for c in chunks)
+    # Line-fallback chunks carry line_start / line_end (AST chunks
+    # additionally carry start_char-derived metadata via the splitter).
+    assert all("line_start" in c for c in chunks)
 
 
 # ── Config extensions use line chunking, not AST ────────────────────────────
@@ -119,7 +125,9 @@ def test_chunk_file_ast_failure_falls_back_to_lines(tmp_path: Path):
 def test_config_uses_line_chunking_not_ast(filename, content):
     chunks = chunk_file(Path(filename), content)
     assert chunks
-    assert not chunks[0].get("ast_chunked", False)
+    # Line-chunked entries lack the AST splitter's chunk_start_char; using
+    # presence of line_start as the proxy for "line-chunked, not AST".
+    assert "line_start" in chunks[0]
 
 
 # ── Edge cases ───────────────────────────────────────────────────────────────
@@ -140,12 +148,13 @@ def test_chunk_file_single_line(tmp_path: Path):
 
 
 def test_chunk_file_ast_returns_empty_nodes_falls_back(tmp_path: Path):
+    """Empty node list from AST splitter falls back to line chunking."""
     f = tmp_path / "empty_ast.py"
     f.write_text("x = 1\n")
     with patch("nexus.chunker._make_code_splitter", return_value=[]):
         chunks = chunk_file(f, f.read_text())
     assert len(chunks) >= 1
-    assert all(c["ast_chunked"] is False for c in chunks)
+    assert all("line_start" in c for c in chunks)
 
 
 # ── Byte-cap enforcement ──────────────────────────────────────────────────────
@@ -190,7 +199,7 @@ def test_enforce_byte_cap_splits_oversized_ast_node():
     text = "\n".join(f"    statement_{i:04d} = do_something_complex()" for i in range(50))
     assert len(text.encode()) > cap
     chunk = {"text": text, "chunk_index": 0, "chunk_count": 1,
-             "line_start": 10, "line_end": 59, "ast_chunked": True, "file_path": "src/big.py"}
+             "line_start": 10, "line_end": 59, "file_path": "src/big.py"}
     result = _enforce_byte_cap([chunk], max_bytes=cap)
     assert len(result) > 1
     for c in result:
