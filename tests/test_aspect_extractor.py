@@ -113,7 +113,7 @@ class TestCollectionRouting:
 
         assert select_config("docs__handbook") is None
         assert select_config("code__nexus") is None
-        assert select_config("rdr__nexus") is None
+        # rdr__* now has its own config (RDR-089 Phase F).
 
     def test_extract_aspects_returns_none_for_unsupported_collection(
         self, tmp_path: Path,

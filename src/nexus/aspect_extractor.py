@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -71,18 +72,34 @@ _log = structlog.get_logger(__name__)
 class ExtractorConfig:
     """A collection-prefix-keyed extractor recipe.
 
+    Two extractor shapes are supported:
+
+    * **Claude-CLI extractor** (default): ``parser_fn`` is None and
+      ``extract_aspects`` invokes the Claude subprocess with
+      ``prompt_template.format(content=...)``. Used by
+      ``scholarly-paper-v1`` for scholarly papers — fields
+      require LLM-grade prose understanding.
+    * **Pure-Python extractor** (``parser_fn`` set): the function
+      receives ``(content, source_path, collection)`` and returns
+      a dict matching the aspect schema. Used by ``rdr-frontmatter-v1``
+      for RDR documents — the structure is deterministic
+      (YAML frontmatter + labelled markdown sections), so a
+      markdown parser handles it more reliably and at zero API
+      cost.
+
     ``prompt_template`` is interpolated at call time with the
-    document content. ``required_fields`` is the list of keys that
-    must be present in the parsed JSON for the response to validate;
-    missing or wrong-typed fields trigger the non-retriable
-    schema-validation path (the Claude CLI cannot make the response
-    shape correct by retrying with the same prompt).
+    document content (Claude-CLI path only). ``required_fields``
+    lists keys that must be present in the parsed JSON for the
+    response to validate. ``parser_fn`` if non-None is the
+    deterministic alternative — when set, the Claude subprocess
+    path is bypassed entirely.
     """
 
     extractor_name: str
     model_version: str
     prompt_template: str
     required_fields: tuple[str, ...]
+    parser_fn: object = None  # Optional[Callable[[str, str, str], dict]]
 
 
 _SCHOLARLY_PAPER_PROMPT = """\
@@ -168,7 +185,255 @@ _REGISTRY: dict[str, ExtractorConfig] = {
             "experimental_results",
         ),
     ),
+    # rdr__* — pure-Python extractor (RDR-089 Phase F). RDRs carry
+    # YAML frontmatter + labelled markdown sections; a deterministic
+    # parser is more reliable and zero-cost compared to forcing the
+    # 5-field LLM extraction shape onto the document.
+    "rdr__": ExtractorConfig(
+        extractor_name="rdr-frontmatter-v1",
+        model_version="rdr-frontmatter-v1",  # not a real model — pinned to recipe id
+        prompt_template="",  # unused (parser_fn shortcut)
+        required_fields=(
+            "problem_formulation",
+            "proposed_method",
+            "experimental_datasets",
+            "experimental_baselines",
+            "experimental_results",
+        ),
+        parser_fn=lambda content, source_path, collection: _parse_rdr_aspects(content),
+    ),
 }
+
+
+# ── RDR markdown + frontmatter parser (Phase F) ─────────────────────────────
+
+
+# Section-name aliases. RDR template evolution has produced slight
+# variations in the canonical heading text; tolerate them so the
+# parser does not silently drop fields when authors stray from the
+# template (e.g. "Problem" instead of "Problem Statement").
+_RDR_SECTION_ALIASES = {
+    "problem_formulation": (
+        "Problem Statement", "Problem", "Context", "Motivation",
+    ),
+    "proposed_method": (
+        "Proposed Solution", "Approach", "Design", "Solution",
+    ),
+    "experimental_results": (
+        "Validation", "Results", "Outcomes", "Test Plan",
+    ),
+    "alternatives": (
+        "Alternatives Considered", "Alternatives",
+    ),
+}
+
+# Cap on per-section text persisted to document_aspects. RDR sections
+# can be multi-page; the aspect column is meant for summaries, not
+# full reproduction. 800 chars is enough for a few paragraphs of
+# context.
+_RDR_SECTION_TEXT_CAP = 800
+
+
+def _parse_rdr_aspects(content: str) -> dict:
+    """Deterministic RDR aspect parser. No LLM call.
+
+    Maps RDR structure to the 5-field aspect schema:
+
+      * problem_formulation ← "Problem Statement" (or alias) text
+      * proposed_method     ← "Proposed Solution" (or alias) text
+      * experimental_datasets ← always [] for RDRs
+      * experimental_baselines ← list of "Alternative N: <title>"
+                                 headers from "Alternatives Considered"
+      * experimental_results ← "Validation" / "Results" text
+      * extras              ← frontmatter dict (rdr_id, rdr_type,
+                                 rdr_status, rdr_priority, title,
+                                 related_issues), plus parsed
+                                 ``related_rdrs`` extracted from
+                                 the frontmatter ``related_issues``
+                                 list
+
+    Returns a dict matching the same schema ``extract_aspects``
+    returns. ``confidence`` is 1.0 (deterministic parse).
+
+    Failures (unparseable frontmatter, missing sections) yield
+    empty / null fields rather than raising; the caller's
+    ``_build_record`` schema validation catches required-field
+    omissions and the standard null-fields fallback applies.
+    """
+    frontmatter, body = _split_rdr_frontmatter(content)
+    sections = _parse_rdr_sections(body)
+
+    extras = {}
+    for key in (
+        "id", "type", "status", "priority",
+        "title", "author", "accepted_date", "closed_date", "created",
+    ):
+        if key in frontmatter and frontmatter[key] is not None:
+            extras[f"rdr_{key}"] = frontmatter[key]
+    if "related_issues" in frontmatter:
+        related = frontmatter["related_issues"]
+        if isinstance(related, list):
+            extras["related_issues"] = [str(x) for x in related]
+        elif isinstance(related, str) and related:
+            extras["related_issues"] = [related]
+
+    problem = _select_section(sections, _RDR_SECTION_ALIASES["problem_formulation"])
+    method = _select_section(sections, _RDR_SECTION_ALIASES["proposed_method"])
+    results = _select_section(sections, _RDR_SECTION_ALIASES["experimental_results"])
+    alternatives_text = _select_section(sections, _RDR_SECTION_ALIASES["alternatives"])
+
+    baselines = _parse_rdr_alternatives(alternatives_text) if alternatives_text else []
+
+    return {
+        "problem_formulation": _truncate(problem, _RDR_SECTION_TEXT_CAP),
+        "proposed_method": _truncate(method, _RDR_SECTION_TEXT_CAP),
+        "experimental_datasets": [],
+        "experimental_baselines": baselines,
+        "experimental_results": _truncate(results, _RDR_SECTION_TEXT_CAP),
+        "extras": extras,
+        "confidence": 1.0,
+    }
+
+
+def _split_rdr_frontmatter(content: str) -> tuple[dict, str]:
+    """Split YAML frontmatter from the markdown body.
+
+    RDR frontmatter is delimited by ``---`` lines at file start;
+    parsed best-effort with a minimal YAML reader to avoid pulling
+    pyyaml into the extractor's dependency footprint. Supports the
+    keys actually used in the project's RDR template: scalar
+    strings, integers, dates (treated as strings), and inline
+    JSON-like lists ``[a, b, c]``.
+
+    Returns ``({}, content)`` when frontmatter is absent or
+    unparseable.
+    """
+    if not content.lstrip().startswith("---"):
+        return {}, content
+    # Find the opening fence.
+    lines = content.splitlines(keepends=True)
+    if not lines or lines[0].rstrip() != "---":
+        return {}, content
+    end_idx = None
+    for idx in range(1, len(lines)):
+        if lines[idx].rstrip() == "---":
+            end_idx = idx
+            break
+    if end_idx is None:
+        return {}, content
+    fm_text = "".join(lines[1:end_idx])
+    body = "".join(lines[end_idx + 1:])
+    return _parse_simple_yaml(fm_text), body
+
+
+def _parse_simple_yaml(text: str) -> dict:
+    """Minimal YAML reader for the keys an RDR frontmatter uses.
+
+    Each line is ``key: value`` or ``key: [a, b, c]``. Values are
+    stripped; surrounding double-quotes are removed; bracketed
+    lists are split on commas. Unsupported shapes (block lists,
+    nested mappings) yield string values verbatim.
+    """
+    out: dict = {}
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+        if not line or line.lstrip().startswith("#"):
+            continue
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+        # Strip wrapping double-quotes
+        if len(value) >= 2 and value[0] == value[-1] == '"':
+            value = value[1:-1]
+        # Inline list: [a, b, c]
+        if value.startswith("[") and value.endswith("]"):
+            inner = value[1:-1].strip()
+            if not inner:
+                out[key] = []
+            else:
+                items = [
+                    s.strip().strip('"').strip("'")
+                    for s in inner.split(",")
+                ]
+                out[key] = [s for s in items if s]
+            continue
+        # Numeric scalar
+        if value.lstrip("-").isdigit():
+            try:
+                out[key] = int(value)
+                continue
+            except ValueError:
+                pass
+        out[key] = value
+    return out
+
+
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*$", re.MULTILINE)
+
+
+def _parse_rdr_sections(body: str) -> dict[str, str]:
+    """Slice the markdown body into a {section_name: section_text} dict.
+
+    Recognises ``## Section Name`` headings as section delimiters.
+    Subsections (``###`` and below) are kept inside the parent
+    section's text. The text of each section is everything from
+    the heading line up to the next ``##`` heading (exclusive),
+    stripped of the heading line itself.
+    """
+    sections: dict[str, str] = {}
+    matches = list(_HEADING_RE.finditer(body))
+    h2_matches = [m for m in matches if len(m.group(1)) == 2]
+    for i, m in enumerate(h2_matches):
+        name = m.group(2).strip()
+        start = m.end()
+        end = h2_matches[i + 1].start() if i + 1 < len(h2_matches) else len(body)
+        text = body[start:end].strip()
+        sections[name] = text
+    return sections
+
+
+def _select_section(sections: dict[str, str], aliases: tuple[str, ...]) -> str:
+    """Return the text of the first matching section name in ``aliases``,
+    or '' when none of the aliases is present."""
+    for alias in aliases:
+        if alias in sections:
+            return sections[alias]
+    return ""
+
+
+_ALTERNATIVE_HEADER_RE = re.compile(
+    r"^###\s+(?:Alternative\s+\d+\s*:?\s*)?(.+?)\s*$",
+    re.MULTILINE,
+)
+
+
+def _parse_rdr_alternatives(text: str) -> list[str]:
+    """Extract alternative titles from the "Alternatives Considered"
+    section. RDR templates use ``### Alternative N: <title>`` headers
+    (the 'Alternative N:' prefix is optional / sometimes ``### <title>``
+    plain). Returns the title list, or an empty list when no
+    sub-headings are present.
+    """
+    titles: list[str] = []
+    for m in _ALTERNATIVE_HEADER_RE.finditer(text):
+        title = m.group(1).strip()
+        if title:
+            titles.append(title)
+    return titles
+
+
+def _truncate(text: str, cap: int) -> str:
+    """Cap a long section to ``cap`` characters; append an ellipsis
+    when truncation occurs. Empty strings pass through unchanged."""
+    if not text:
+        return text
+    if len(text) <= cap:
+        return text
+    return text[:cap].rstrip() + "..."
 
 
 def select_config(collection: str) -> ExtractorConfig | None:
@@ -277,6 +542,31 @@ def extract_aspects(
     # POSIX argv entries are C strings. Strip them before prompting; they
     # carry no semantic content for the extractor.
     content = content.replace("\x00", "")
+
+    if config.parser_fn is not None:
+        # Pure-Python parser path (RDR-089 Phase F: rdr-frontmatter-v1).
+        # No subprocess, no retry budget, no Claude API cost. Errors
+        # surface as null-fields records.
+        try:
+            parsed = config.parser_fn(content, source_path, collection)
+        except Exception as exc:
+            _log.warning(
+                "aspect_extractor_parser_fn_raised",
+                extractor=config.extractor_name,
+                source_path=source_path,
+                error=str(exc),
+                exc_info=True,
+            )
+            return _empty_record(source_path, collection, config)
+        if not isinstance(parsed, dict):
+            _log.warning(
+                "aspect_extractor_parser_fn_wrong_shape",
+                extractor=config.extractor_name,
+                source_path=source_path,
+                got=type(parsed).__name__,
+            )
+            return _empty_record(source_path, collection, config)
+        return _build_record(parsed, source_path, collection, config)
 
     prompt = config.prompt_template.format(content=content)
     parsed = _retry_subprocess(prompt, config)

@@ -304,8 +304,11 @@ def enrich_aspects(
     documents already triggered at ingest), and upserts AspectRecords
     to ``document_aspects``.
 
-    Phase 1 supports ``knowledge__*`` collections only. Other
-    collections error out at the config-selection step.
+    Two extractor configs ship: ``knowledge__*`` routes to the
+    Claude-CLI scholarly-paper-v1 extractor; ``rdr__*`` routes to
+    the deterministic markdown + frontmatter parser
+    (rdr-frontmatter-v1; zero API cost). Other collection prefixes
+    error out at the config-selection step.
     """
     from nexus.aspect_extractor import select_config
 
@@ -313,8 +316,8 @@ def enrich_aspects(
     if config is None:
         click.echo(
             f"No extractor config registered for collection "
-            f"'{collection}'. Phase 1 (RDR-089) supports knowledge__* "
-            f"only. Aborting."
+            f"'{collection}'. Supported prefixes: knowledge__*, "
+            f"rdr__*. Aborting."
         )
         return
 
