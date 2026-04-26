@@ -961,13 +961,22 @@ This section captures audit-driven and spike-driven divergences between the spec
 | `validation_failures.jsonl` written to corpus directory | Written to current working directory | Pragmatic simplification — the catalog-derived corpus directory is not always present (e.g. when `nx enrich aspects` runs in a sandbox or against a remote-only collection). CWD-relative is context-free; users can `cd` into the corpus dir before running. |
 | Bead-listed migration version `4.14.2` (chain) | All three RDR-089 migrations (chain enum, document_aspects, aspect_extraction_queue) tagged `4.14.2` | Migrations were initially tagged 4.14.2 / 4.14.3 / 4.14.4 progressively as beads landed. Substantive critique caught that the package version stayed at 4.14.1, so all three migrations were skipped at runtime. Retagged to share `4.14.2` (same-version-multiple-migrations pattern from 4.0.0); `pyproject.toml` bumped 4.14.1 → 4.14.2 in the same release commit. All three migrations now apply atomically as one bump. |
 
-**Out-of-scope follow-ups** (deferred per RDR Open Questions, not implementation defects):
+**Out-of-scope follow-ups — initial framing (post-acceptance, pre-full-scope-deliverable):**
 
-- The §D.4 analytics quartet (`operator_filter`, `operator_groupby`, `operator_aggregate`) does NOT yet read from `document_aspects`. The SQL fast-path and `source="aspects"` parameter are explicit Open Questions for a separate RDR. Until that ships, the O(1) SQL read benefit the spec advertises is potential, not realized — operators continue to LLM-extract per query against raw document text.
-- No back-pressure or "wait for queue drain" path. Operators querying `document_aspects` for a freshly-ingested document hit a row that may not exist yet (worker has not drained). The consistency model is "eventual, best-effort, on the order of seconds-to-minutes." Acceptable for Phase 1; should be revisited if `nx enrich aspects --wait-for-queue` or a queue-depth doctor check is needed.
-- Batch-Haiku-per-call extraction (one prompt extracts N papers) is Phase 4 and not implemented. At the measured 26.5 s median, a 1000-document corpus drains in ~7 hours of serial extraction; the batch path would be necessary for any genuinely-large enrichment workload.
-- `rdr__*` extractor (separate RDR — RDRs have structured frontmatter, markdown parsing > forced 5-field LLM extraction).
-- `extras` → fixed-column promotion policy (separate operations RDR).
+The above table captured the divergences as of the substantive-critic-driven Phase A landing. The user's "EVERYTHING we were to originally deliver" directive after the substantive critique closed every Open Question on this branch in Phases A through F:
+
+| Phase | Scope | Status |
+|-------|-------|--------|
+| A | Day-2 Ops: `nx enrich list` / `info` / `delete` (RDR §Day 2 Operations) | Shipped, 8 contract tests |
+| B | SQL fast path: `operator_filter` / `operator_groupby` / `operator_aggregate` with `source="auto"` / `"aspects"` / `"llm"` and `aspect_field` parameters; `nexus.operators.aspect_sql` substrate | Shipped, 36 contract tests |
+| C | Benchmark proving the O(1) claim (synthetic 100-paper corpus, mocked LLM at 1.5 s, real SQLite path) | Shipped: 500x speedup on filter/groupby; 47000x on aggregate — committed evidence in `scripts/spikes/bench_rdr089_results.json` |
+| D | Batch Haiku per call: `extract_aspects_batch(items)` extracts N papers in one Claude call; worker batches when queue depth ≥ `batch_size` (default 5) | Shipped, 9 contract tests + 2 worker integration tests |
+| E | `extras` → fixed-column promotion mechanic: `promote_extras_field()` + `nx enrich aspects-promote-field` CLI + audit log | Shipped, 16 contract tests |
+| F | `rdr__*` extractor (deterministic markdown + frontmatter parser, zero API cost): `rdr-frontmatter-v1` config registered; `ExtractorConfig.parser_fn` shortcut for any future deterministic path | Shipped, 21 contract tests |
+
+What still belongs to a separate operations RDR is **policy** (not mechanism): which `extras` keys graduate, who decides, what governance marks a model_version bump. The Phase E mechanism is one operator command away from action; the policy that drives it is the missing piece.
+
+The consistency model is now documented in the operator docstrings and the SQL fast path docstring (`nexus.operators.aspect_sql` module): operators querying `document_aspects` for a queue-pending document treat the missing row as a non-match (filter), `unassigned` (groupby), or excluded (aggregate). Callers needing eventual consistency re-run after the queue drains, or pass `source="llm"` to bypass T2 entirely.
 
 ## References
 
