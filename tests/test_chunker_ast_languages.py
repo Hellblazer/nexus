@@ -77,7 +77,11 @@ class Calculator:
     f.write_text(code)
     chunks = chunk_file(f, code)
     _assert_valid_chunks(chunks, min_count=1)
-    assert any(c.get("ast_chunked") for c in chunks), "Expected at least one AST-chunked chunk"
+    # The ``ast_chunked`` discriminator was dropped in nexus-59j0 (cargo —
+    # never read post the metadata factory refactor). The contract this
+    # test still pins is "Python files chunk successfully and the original
+    # text is preserved" — the AST vs line-fallback path is an internal
+    # implementation detail of the chunker.
     combined = "\n".join(c["text"] for c in chunks)
     assert "Calculator" in combined
     assert "def add" in combined
