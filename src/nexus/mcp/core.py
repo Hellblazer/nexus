@@ -564,7 +564,7 @@ def search(
                     lines.append("")  # blank separator between clusters
                 lines.append(f"── {cluster_label} ──")
                 current_cluster = cluster_label
-            title = r.metadata.get("source_title") or r.metadata.get("title", "")
+            title = r.metadata.get("title", "")
             source = r.metadata.get("source_path", "")
             dist = f"{r.distance:.4f}"
             label = title or source or r.id
@@ -780,19 +780,19 @@ def query(
                 ],
             }
 
-        # Group by document: use content_hash or source_title as doc key
+        # Group by document: use content_hash or title as doc key
         docs: dict[str, dict] = {}  # doc_key → {meta, snippets, best_distance}
         for r in results:
             meta = r.metadata
             doc_key = (
                 meta.get("content_hash")
-                or meta.get("source_title")
+                or meta.get("title")
                 or meta.get("source_path")
                 or r.id
             )
             if doc_key not in docs:
                 docs[doc_key] = {
-                    "title": meta.get("source_title") or meta.get("title") or doc_key[:40],
+                    "title": meta.get("title") or doc_key[:40],
                     "collection": r.collection,
                     "distance": r.distance,
                     "snippet": r.content[:300].replace("\n", " "),
@@ -989,7 +989,7 @@ def store_get(doc_id: str, collection: str = "knowledge") -> str:
                     )
         if entry is None:
             return f"Not found: {doc_id!r} in {col_name} (pass a 16-char content-hash from store_list/store_put/search, or an exact title)"
-        title = entry.get("source_title") or entry.get("title", "")
+        title = entry.get("title", "")
         tags = entry.get("tags", "")
         indexed_at = (entry.get("indexed_at") or "")[:10]
         method = entry.get("extraction_method", "")
@@ -1125,15 +1125,21 @@ def store_list(
         if not page:
             return f"No entries at offset {offset} (total {total})."
         lines: list[str] = [f"{col_name}  (showing {offset + 1}-{offset + len(page)} of {total})"]
+        from datetime import datetime, timedelta  # noqa: PLC0415
         for e in page:
             doc_id = e.get("id", "")[:16]
-            title = (e.get("title") or e.get("source_title") or "")[:40]
+            title = (e.get("title") or "")[:40]
             tags = e.get("tags") or ""
             ttl_days = e.get("ttl_days", 0)
-            expires_at = e.get("expires_at") or ""
-            indexed_at = (e.get("indexed_at") or "")[:10]
-            if ttl_days and ttl_days > 0 and expires_at:
-                ttl_str = f"expires {expires_at[:10]}"
+            indexed_at_full = e.get("indexed_at") or ""
+            indexed_at = indexed_at_full[:10]
+            if ttl_days and ttl_days > 0 and indexed_at_full:
+                try:
+                    exp = (datetime.fromisoformat(indexed_at_full)
+                           + timedelta(days=ttl_days)).date().isoformat()
+                    ttl_str = f"expires {exp}"
+                except ValueError:
+                    ttl_str = f"ttl {ttl_days}d"
             else:
                 ttl_str = "permanent"
             tag_str = f"  [{tags}]" if tags else ""
@@ -1174,7 +1180,7 @@ def _store_list_docs(t3, col_name: str, total: int) -> str:
     if not seen:
         return f"No documents in {col_name}."
 
-    docs = sorted(seen.items(), key=lambda kv: kv[1].get("source_title") or kv[1].get("title") or "")
+    docs = sorted(seen.items(), key=lambda kv: kv[1].get("title") or "")
     show_pages = any(d.get("page_count") for _, d in docs)
     lines = [f"{col_name}  ({len(docs)} documents, {total} chunks)"]
     for i, (h, d) in enumerate(docs, 1):
@@ -1182,7 +1188,7 @@ def _store_list_docs(t3, col_name: str, total: int) -> str:
         # without this column the natural list → get flow had no path from
         # title to hash.
         doc_id = (d.get("id") or h)[:16]
-        title = (d.get("source_title") or d.get("title") or "untitled")[:50]
+        title = (d.get("title") or "untitled")[:50]
         chunks = chunks_by_hash.get(h, "?")
         method = d.get("extraction_method", "")
         indexed = (d.get("indexed_at") or "")[:10]
@@ -1717,7 +1723,7 @@ def collection_info(name: str) -> str:
                 lines.append("")
                 lines.append("Sample entries:")
                 for e in peek:
-                    title = (e.get("source_title") or e.get("title") or "untitled")[:60]
+                    title = (e.get("title") or "untitled")[:60]
                     lines.append(f"  - {title}")
 
         return "\n".join(lines)

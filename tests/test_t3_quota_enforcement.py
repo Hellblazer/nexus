@@ -122,7 +122,7 @@ def _make_expire_pages(n_expired: int, past: str) -> list[dict]:
         end = min(start + 300, n_expired)
         pages.append({
             "ids": [f"id-{i}" for i in range(start, end)],
-            "metadatas": [{"ttl_days": 1, "expires_at": past}] * (end - start),
+            "metadatas": [{"ttl_days": 1, "indexed_at": past}] * (end - start),
         })
     pages.append({"ids": [], "metadatas": []})
     return pages
@@ -146,8 +146,8 @@ def test_expire_accumulates_then_deletes_not_interleaved() -> None:
     db, mock_col = _make_db_with_mock_col()
     past = (datetime.now(UTC) - timedelta(days=1)).isoformat()
     mock_col.get.side_effect = [
-        {"ids": [f"id-{i}" for i in range(300)], "metadatas": [{"ttl_days": 1, "expires_at": past}] * 300},
-        {"ids": [f"id-{i}" for i in range(300, 350)], "metadatas": [{"ttl_days": 1, "expires_at": past}] * 50},
+        {"ids": [f"id-{i}" for i in range(300)], "metadatas": [{"ttl_days": 1, "indexed_at": past}] * 300},
+        {"ids": [f"id-{i}" for i in range(300, 350)], "metadatas": [{"ttl_days": 1, "indexed_at": past}] * 50},
     ]
     db._client.list_collections.return_value = [MagicMock(name="knowledge__test")]
     db.expire()

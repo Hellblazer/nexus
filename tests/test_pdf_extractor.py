@@ -334,10 +334,16 @@ def test_formula_structlog_warning(extractor, dummy_pdf, item_type, expect_warni
 # ── _pdf_chunks has_formulas propagation ────────────────────────────────────
 
 
-@pytest.mark.parametrize("formula_count, drop_key, expected", [
-    (3, False, True), (0, False, False), (0, True, False),
+@pytest.mark.parametrize("formula_count, drop_key", [
+    (3, False), (0, False), (0, True),
 ], ids=["positive_count", "zero_count", "missing_key"])
-def test_pdf_chunks_has_formulas(formula_count, drop_key, expected):
+def test_pdf_chunks_extracts_without_error_on_any_formula_count(formula_count, drop_key):
+    """``has_formulas`` is consumed pre-store for Docling→MinerU routing
+    (see ``pdf_extractor.PDFExtractor.extract``) but is NOT in
+    ``ALLOWED_TOP_LEVEL`` — ``normalize()`` drops it before T3 storage,
+    so it's intentionally absent from chunk metadata. This test now
+    verifies the indexer survives all ``formula_count`` shapes without
+    asserting on the dropped field."""
     from nexus.doc_indexer import _pdf_chunks
     text = "Content long enough for at least one chunk to be produced by the splitter."
     meta = _full_metadata(formula_count=formula_count, text_len=len(text))
@@ -349,7 +355,7 @@ def test_pdf_chunks_has_formulas(formula_count, drop_key, expected):
         chunks = _pdf_chunks(Path("/fake/t.pdf"), "x", "voyage-context-3", "2026-01-01T00:00:00", "test")
     assert len(chunks) > 0
     for _id, _text, m in chunks:
-        assert m["has_formulas"] is expected
+        assert "has_formulas" not in m
 
 
 # ── RDR-044 Phase 2: auto-detect routing ───────────────────────────────────

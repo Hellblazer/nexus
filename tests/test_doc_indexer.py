@@ -268,13 +268,22 @@ def pdf_extract_patches_ctx():
 
 
 _BASE_REQUIRED_FIELDS = {
-    "source_path", "source_title", "source_author", "source_date",
-    "corpus", "store_type", "page_count", "page_number", "section_title",
-    "format", "extraction_method", "chunk_index", "chunk_count",
-    "chunk_start_char", "chunk_end_char", "embedding_model",
-    "indexed_at", "content_hash",
+    # Identity / position / spans (post source_title→title collapse, expires_at→indexed_at swap)
+    "source_path", "content_hash", "chunk_text_hash", "chunk_index", "chunk_count",
+    "chunk_start_char", "chunk_end_char", "page_number",
+    # Display / routing
+    "title", "source_author", "section_title", "section_type",
+    "tags", "category", "content_type", "store_type", "corpus", "embedding_model",
+    # Lifecycle
+    "indexed_at", "ttl_days", "frecency_score", "source_agent", "session_id",
 }
-_PDF_EXTRA_FIELDS = {"pdf_subject", "pdf_keywords", "is_image_pdf", "has_formulas"}
+# pdf_subject / pdf_keywords / is_image_pdf / has_formulas / format /
+# extraction_method / page_count / source_date are intentionally NOT in
+# ALLOWED_TOP_LEVEL — normalize() drops them. They were never stored
+# in T3 even before the factory refactor; the old test asserted on the
+# pre-normalize dict shape. After the factory, normalize runs inside
+# the indexer so the dropped fields are visible-as-missing.
+_PDF_EXTRA_FIELDS: set[str] = set()
 
 
 def test_docs_metadata_schema_complete(sample_md, monkeypatch, mock_t3, voyage_client):

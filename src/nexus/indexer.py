@@ -741,16 +741,15 @@ def _index_pdf_file(
     metadatas_raw = [p[2] for p in prepared]
 
     # Build embed_texts with context prefix BEFORE augmentation overwrites 'title'.
-    # source_title comes from _pdf_chunks (doc_indexer.py:251, field 'pdf_title').
-    # We must read it from metadatas_raw here; after augmentation 'title' is a
-    # file-path string like "path/to/file.pdf:page-3".
+    # PDF title is now stored under `title` (the source_title→title
+    # collapse). Read from metadatas_raw and use it in the embed prefix.
     embed_texts_pdf: list[str] = []
     for doc, m in zip(documents, metadatas_raw):
-        source_title = m.get("source_title", "")
+        title = m.get("title", "")
         page_number = m.get("page_number", 0)
         prefix_parts: list[str] = []
-        if source_title:
-            prefix_parts.append(f"Document: {source_title}")
+        if title:
+            prefix_parts.append(f"Document: {title}")
         prefix_parts.append(f"Page: {page_number}")
         prefix = "## " + "  ".join(prefix_parts)
         embed_texts_pdf.append(f"{prefix}\n\n{doc}")
@@ -762,7 +761,7 @@ def _index_pdf_file(
     # drops keys by insertion order, losing git metadata.
     _EMPTY_VALUES = ("", 0, False, None)
     # Keys where empty/zero IS meaningful (TTL guard, required fields)
-    _KEEP_ALWAYS = {"expires_at", "ttl_days", "chunk_index", "page_number"}
+    _KEEP_ALWAYS = {"ttl_days", "chunk_index", "page_number"}
     metadatas: list[dict] = []
     for m in metadatas_raw:
         # Drop empty raw metadata values
@@ -776,7 +775,6 @@ def _index_pdf_file(
             "tags": "pdf",
             "category": "prose",
             "source_agent": "nexus-indexer",
-            "expires_at": "",
             "ttl_days": 0,
             "frecency_score": float(score),
             **{k: v for k, v in git_meta.items() if v},

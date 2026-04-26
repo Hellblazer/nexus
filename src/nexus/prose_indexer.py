@@ -36,7 +36,8 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
     """
     from nexus.chunker import _line_chunk
     from nexus.doc_indexer import _embed_with_fallback
-    from nexus.md_chunker import SemanticMarkdownChunker, parse_frontmatter
+    from nexus.md_chunker import SemanticMarkdownChunker, classify_section_type, parse_frontmatter
+    from nexus.pdf_chunker import _extract_headings
 
     try:
         content = file_path.read_text(encoding="utf-8")
@@ -74,36 +75,32 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
             _log.debug("skipped file with no chunks", path=str(file_path))
             return 0
 
+        from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415
+
         for chunk in chunks:
             title = f"{file_path.relative_to(ctx.repo_path)}:chunk-{chunk.chunk_index}"
             doc_id = _hl.sha256(f"{ctx.corpus}:{title}".encode()).hexdigest()[:32]
-            metadata: dict = {
-                "title": title,
-                "tags": "markdown",
-                "category": "prose",
-                "session_id": "",
-                "source_agent": "nexus-indexer",
-                "store_type": "prose",
-                "indexed_at": ctx.now_iso,
-                "expires_at": "",
-                "ttl_days": 0,
-                "source_path": str(file_path),
-                # M1: SemanticMarkdownChunker uses char offsets, not line numbers
-                "line_start": 0,
-                "line_end": 0,
-                "chunk_start_char": chunk.metadata.get("chunk_start_char", 0) + frontmatter_len,
-                "chunk_end_char": chunk.metadata.get("chunk_end_char", 0) + frontmatter_len,
-                "section_title": chunk.metadata.get("header_path", ""),
-                "section_type": chunk.metadata.get("section_type", ""),
-                "frecency_score": float(ctx.score),
-                "chunk_index": chunk.chunk_index,
-                "chunk_count": len(chunks),
-                "corpus": ctx.corpus,
-                "embedding_model": ctx.embedding_model,
-                "content_hash": content_hash,
-                "chunk_text_hash": _hl.sha256(chunk.text.encode()).hexdigest(),
-                **ctx.git_meta,
-            }
+            metadata = make_chunk_metadata(
+                content_type="markdown",
+                source_path=str(file_path),
+                chunk_index=chunk.chunk_index,
+                chunk_count=len(chunks),
+                chunk_text_hash=_hl.sha256(chunk.text.encode()).hexdigest(),
+                content_hash=content_hash,
+                chunk_start_char=chunk.metadata.get("chunk_start_char", 0) + frontmatter_len,
+                chunk_end_char=chunk.metadata.get("chunk_end_char", 0) + frontmatter_len,
+                indexed_at=ctx.now_iso,
+                embedding_model=ctx.embedding_model,
+                store_type="prose",
+                corpus=ctx.corpus,
+                title=title,
+                section_title=chunk.metadata.get("header_path", ""),
+                section_type=chunk.metadata.get("section_type", ""),
+                tags="markdown",
+                category="prose",
+                frecency_score=float(ctx.score),
+                git_meta=ctx.git_meta,
+            )
             ids.append(doc_id)
             documents.append(chunk.text)
             metadatas.append(metadata)
@@ -125,32 +122,57 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
             raw_chunks = [(1, 1, content)]
         total_chunks = len(raw_chunks)
 
+        # Detect headings across the whole file once so each line-based
+        # chunk can carry section_type / section_title (matches PDF and
+        # markdown paths so prose-fallback chunks aren't second-class
+        # citizens for section-scoped retrieval).
+        from bisect import bisect_right
+        _line_offsets = [0]
+        for _i, _ch in enumerate(content):
+            if _ch == "\n":
+                _line_offsets.append(_i + 1)
+        _headings = _extract_headings(content)
+        _heading_offsets = [h[0] for h in _headings]
+
+        from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415
+
         for i, (ls, le, text) in enumerate(raw_chunks):
             title = f"{file_path.relative_to(ctx.repo_path)}:{ls}-{le}"
             doc_id = _hl.sha256(f"{ctx.corpus}:{title}".encode()).hexdigest()[:32]
-            metadata = {
-                "title": title,
-                "tags": ext.lstrip("."),
-                "category": "prose",
-                "session_id": "",
-                "source_agent": "nexus-indexer",
-                "store_type": "prose",
-                "indexed_at": ctx.now_iso,
-                "expires_at": "",
-                "ttl_days": 0,
-                "source_path": str(file_path),
-                "line_start": ls,
-                "line_end": le,
-                "frecency_score": float(ctx.score),
-                "chunk_index": i,
-                "chunk_count": total_chunks,
-                "corpus": ctx.corpus,
-                "embedding_model": ctx.embedding_model,
-                "content_hash": content_hash,
-                "chunk_text_hash": _hl.sha256(text.encode()).hexdigest(),
-                "section_type": "",
-                **ctx.git_meta,
-            }
+            chunk_start_char = _line_offsets[ls - 1] if 0 < ls <= len(_line_offsets) else 0
+            chunk_end_char = (
+                _line_offsets[le] if le < len(_line_offsets) else len(content)
+            )
+            section_title = ""
+            section_type = ""
+            if _headings:
+                _h_idx = bisect_right(_heading_offsets, chunk_start_char) - 1
+                if _h_idx >= 0:
+                    section_title = _headings[_h_idx][1]
+                    section_type = classify_section_type([section_title])
+            metadata = make_chunk_metadata(
+                content_type="prose",
+                source_path=str(file_path),
+                chunk_index=i,
+                chunk_count=total_chunks,
+                chunk_text_hash=_hl.sha256(text.encode()).hexdigest(),
+                content_hash=content_hash,
+                chunk_start_char=chunk_start_char,
+                chunk_end_char=chunk_end_char,
+                line_start=ls,
+                line_end=le,
+                indexed_at=ctx.now_iso,
+                embedding_model=ctx.embedding_model,
+                store_type="prose",
+                corpus=ctx.corpus,
+                title=title,
+                section_title=section_title,
+                section_type=section_type,
+                tags=ext.lstrip("."),
+                category="prose",
+                frecency_score=float(ctx.score),
+                git_meta=ctx.git_meta,
+            )
             ids.append(doc_id)
             documents.append(text)
             metadatas.append(metadata)

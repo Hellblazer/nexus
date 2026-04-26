@@ -89,14 +89,21 @@ def test_registry_collection_name_unique_for_same_basename(tmp_path: Path) -> No
     )
 
 
-# ── Test 3: T3 put() with ttl_days > 0 produces non-empty expires_at ──────────
+# ── Test 3: T3 put() with ttl_days > 0 stores indexed_at + ttl_days ──────────
 
-def test_t3_put_with_ttl_sets_non_empty_expires_at() -> None:
-    """put() with ttl_days=30 must store a non-empty ISO 8601 expires_at value.
+def test_t3_put_with_ttl_stores_indexed_at_and_ttl_days() -> None:
+    """put() with ttl_days=30 must store both ``indexed_at`` (ISO 8601)
+    and ``ttl_days``. Expiry is derived Python-side via
+    ``metadata_schema.is_expired`` from these two fields.
 
-    Regression guard: a bug caused expires_at to remain "" even when ttl_days>0,
-    making TTL-based expiry silently impossible — entries would never be pruned.
+    Regression guard: previously the schema stored a precomputed
+    ``expires_at`` string; that field was removed in the
+    source_title→title collapse / expires_at→indexed_at swap. Both
+    inputs must be present and parseable for the derived check to work.
     """
+    from nexus.metadata_schema import is_expired
+    from datetime import datetime, timedelta, UTC
+
     client = chromadb.EphemeralClient()
     ef = DefaultEmbeddingFunction()
     db = T3Database(_client=client, _ef_override=ef)
@@ -113,15 +120,17 @@ def test_t3_put_with_ttl_sets_non_empty_expires_at() -> None:
     assert result["metadatas"], "Document not found after put()"
     meta = result["metadatas"][0]
 
-    expires_at = meta.get("expires_at", "")
-    assert expires_at != "", (
-        f"expires_at must be a non-empty ISO 8601 string when ttl_days=30, "
-        f"but got {expires_at!r}"
-    )
-    # Basic sanity: looks like an ISO timestamp
-    assert "T" in expires_at or expires_at.count("-") >= 2, (
-        f"expires_at does not look like an ISO 8601 timestamp: {expires_at!r}"
-    )
+    indexed_at = meta.get("indexed_at", "")
+    assert indexed_at, "indexed_at must be a non-empty ISO 8601 string"
+    assert datetime.fromisoformat(indexed_at) <= datetime.now(UTC)
+    assert meta.get("ttl_days") == 30
+    assert "expires_at" not in meta  # removed from schema
+
+    # Derived check: not expired now, expired after 31 days.
+    fresh_now = datetime.now(UTC).isoformat()
+    far_future = (datetime.now(UTC) + timedelta(days=31)).isoformat()
+    assert not is_expired(meta, now_iso=fresh_now)
+    assert is_expired(meta, now_iso=far_future)
 
 
 # ── Test 4: RepoRegistry recovers from corrupt JSON ───────────────────────────

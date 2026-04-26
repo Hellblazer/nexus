@@ -343,6 +343,19 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
     embed_texts: list[str] = []  # prefixed texts sent to Voyage AI; raw text stored in ChromaDB
     metadatas: list[dict] = []
 
+    # Pre-compute char offsets for each 1-indexed line so each chunk
+    # can carry chunk_start_char / chunk_end_char alongside line_start /
+    # line_end. Code chunks previously shipped only line numbers, which
+    # forced any reader needing precise character spans (e.g. catalog
+    # `chash:<hex>:<start>-<end>` link spans, snippet rendering) to
+    # re-read the source file just to compute offsets.
+    _line_offsets = [0]
+    for _i, _ch in enumerate(content):
+        if _ch == "\n":
+            _line_offsets.append(_i + 1)
+
+    from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415
+
     for i, chunk in enumerate(chunks):
         title = f"{rel_path}:{chunk['line_start']}-{chunk['line_end']}"
         doc_id = _hl.sha256(f"{ctx.corpus}:{title}:chunk{i}".encode()).hexdigest()[:32]
@@ -353,32 +366,42 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
             rel_path, comment_char, class_ctx, method_ctx,
             chunk["line_start"], chunk["line_end"],
         )
-        metadata: dict = {
-            "title": title,
-            "tags": ext.lstrip("."),
-            "category": "code",
-            "session_id": "",
-            "source_agent": "nexus-indexer",
-            "store_type": "code",
-            "indexed_at": ctx.now_iso,
-            "expires_at": "",
-            "ttl_days": 0,
-            "source_path": str(file_path),
-            "line_start": chunk["line_start"],
-            "line_end": chunk["line_end"],
-            "frecency_score": float(ctx.score),
-            "chunk_index": chunk.get("chunk_index", i),
-            "chunk_count": chunk.get("chunk_count", total_chunks),
-            "ast_chunked": chunk.get("ast_chunked", False),
-            "filename": chunk.get("filename", str(file_path.name)),
-            "file_extension": chunk.get("file_extension", ext),
-            "programming_language": language,
-            "corpus": ctx.corpus,
-            "embedding_model": ctx.embedding_model,
-            "content_hash": content_hash,
-            "chunk_text_hash": _hl.sha256(chunk["text"].encode()).hexdigest(),
-            **ctx.git_meta,
-        }
+        _ls = chunk["line_start"]
+        _le = chunk["line_end"]
+        chunk_start_char = _line_offsets[_ls - 1] if 0 < _ls <= len(_line_offsets) else 0
+        chunk_end_char = (
+            _line_offsets[_le] if _le < len(_line_offsets) else len(content)
+        )
+        # Section context for code: innermost class + method (already
+        # computed above for the embed prefix). Stored as " > "-joined
+        # path matching the markdown / PDF convention so consumers can
+        # filter / display uniformly across content types.
+        section_chain = [s for s in (class_ctx, method_ctx) if s]
+        section_title = " > ".join(section_chain)
+        section_type = "method" if method_ctx else ("class" if class_ctx else "")
+        metadata = make_chunk_metadata(
+            content_type="code",
+            source_path=str(file_path),
+            chunk_index=chunk.get("chunk_index", i),
+            chunk_count=chunk.get("chunk_count", total_chunks),
+            chunk_text_hash=_hl.sha256(chunk["text"].encode()).hexdigest(),
+            content_hash=content_hash,
+            chunk_start_char=chunk_start_char,
+            chunk_end_char=chunk_end_char,
+            line_start=_ls,
+            line_end=_le,
+            indexed_at=ctx.now_iso,
+            embedding_model=ctx.embedding_model,
+            store_type="code",
+            corpus=ctx.corpus,
+            title=title,
+            section_title=section_title,
+            section_type=section_type,
+            tags=ext.lstrip("."),
+            category="code",
+            frecency_score=float(ctx.score),
+            git_meta=ctx.git_meta,
+        )
         ids.append(doc_id)
         documents.append(chunk["text"])
         embed_texts.append(f"{prefix}\n{chunk['text']}")

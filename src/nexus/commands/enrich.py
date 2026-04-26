@@ -89,7 +89,7 @@ def enrich_bib(collection: str, delay: float, limit: int) -> None:
             if meta.get("bib_semantic_scholar_id", ""):
                 already_enriched += 1
                 continue
-            title = meta.get("source_title", "") or ""
+            title = meta.get("title", "") or ""
             if not title:
                 continue
             title_to_ids.setdefault(title, []).append(chunk_id)

@@ -96,11 +96,13 @@ class TestPdfChunksMetadata:
         for chunk_id, text, meta in result:
             assert meta["store_type"] == "pdf"
             assert meta["content_hash"] == content_hash
-            assert meta["page_count"] == 1
-            assert meta["extraction_method"] == "docling"
+            # page_count + extraction_method are dropped by normalize() —
+            # not in ALLOWED_TOP_LEVEL.
+            assert "page_count" not in meta
+            assert "extraction_method" not in meta
             assert meta["chunk_count"] == len(result)
-            # source_title: Docling content-extracted or filename fallback ("simple")
-            assert isinstance(meta["source_title"], str)
+            # title (was source_title): Docling content-extracted or filename fallback
+            assert isinstance(meta["title"], str)
             # source_author: Docling does not expose XMP author; may be empty
             assert isinstance(meta["source_author"], str)
             assert meta["corpus"] == "mybook"
@@ -144,12 +146,12 @@ class TestPdfChunksMetadata:
         result = _pdf_chunks(bare, content_hash, "test-model", "2026-01-01T00:00:00", "test")
         assert result
         for _, _, meta in result:
-            # source_title: docling_title (may be empty for minimal PDFs) or filename fallback
-            assert isinstance(meta["source_title"], str)
+            # title (was source_title): docling_title may be empty; filename fallback
+            assert isinstance(meta["title"], str)
             # source_author: Docling doesn't expose XMP author
             assert meta["source_author"] == "", f"Expected '', got {meta['source_author']!r}"
-            # source_date: Docling doesn't expose XMP creation date
-            assert meta["source_date"] == "", f"Expected '', got {meta['source_date']!r}"
+            # source_date: not in ALLOWED_TOP_LEVEL — dropped by normalize().
+            assert "source_date" not in meta
 
 
 # ── AC-S3 / AC-S4 — index_pdf pipeline ───────────────────────────────────────

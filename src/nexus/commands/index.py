@@ -661,7 +661,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         # Summary line
         pages = sorted({int(m.get("page_number", 0)) for m in metas if m})
         page_range = f"{pages[0]}–{pages[-1]}" if len(pages) > 1 else str(pages[0]) if pages else "?"
-        title = metas[0].get("source_title", "") if metas else ""
+        title = metas[0].get("title", "") if metas else ""
         author = metas[0].get("source_author", "") if metas else ""
         summary_parts = [f"Chunks: {n}", f"Pages: {page_range}"]
         if title:
