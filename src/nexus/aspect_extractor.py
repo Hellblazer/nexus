@@ -238,6 +238,13 @@ def extract_aspects(
             )
             return _empty_record(source_path, collection, config)
 
+    # Defense against embedded null bytes (P1.3 spike finding 2026-04-25):
+    # pymupdf-extracted text from some PDFs contains \x00, which
+    # subprocess.run rejects with ValueError('embedded null byte') because
+    # POSIX argv entries are C strings. Strip them before prompting; they
+    # carry no semantic content for the extractor.
+    content = content.replace("\x00", "")
+
     prompt = config.prompt_template.format(content=content)
     parsed = _retry_subprocess(prompt, config)
     if parsed is None:

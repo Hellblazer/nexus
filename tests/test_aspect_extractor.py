@@ -279,6 +279,33 @@ class TestContentSourcing:
         assert record is not None
         assert record.problem_formulation == "Sharded WAL bottleneck."
 
+    def test_strips_embedded_null_bytes_from_content(self, monkeypatch) -> None:
+        """P1.3 spike caught real-world PDFs whose pymupdf-extracted text
+        contains \\x00 bytes. ``subprocess.run`` rejects argv entries
+        with embedded null bytes (POSIX C-string contract) — passing
+        them raises ``ValueError('embedded null byte')`` BEFORE the
+        retry guard runs. The extractor strips \\x00 from content
+        before building the prompt so this real-world failure mode
+        is no longer fatal.
+        """
+        from nexus.aspect_extractor import extract_aspects
+
+        captured: list[str] = []
+
+        def fake_run(args, **kwargs):
+            captured.append(args[2])
+            return _make_completed(_ok_stdout())
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        extract_aspects(
+            content="paper text with\x00null\x00bytes embedded",
+            source_path="/p1.pdf",
+            collection="knowledge__delos",
+        )
+        assert captured, "subprocess must have been invoked"
+        assert "\x00" not in captured[0]
+        assert "paper text withnullbytes embedded" in captured[0]
+
     def test_unreadable_source_path_returns_null_fields_record(
         self, tmp_path: Path, monkeypatch,
     ) -> None:
