@@ -49,7 +49,6 @@ Pass / fail per check. Total time ~2 min including reinstall.
 **Known fresh-sandbox failures** (not script bugs, expected for a clean sandbox):
 
 - `--check-plan-library`: reports `global-tier builtin count 0 < expected 9` because `nx catalog setup` has not run in the sandbox. To exercise plan-library code paths against the canonical seeded set, drop into `shell` mode and run `nx catalog setup` first.
-- `nx upgrade` may report `OldLayoutDetected` if your shell environment has cloud ChromaDB credentials pointing at a legacy four-database tenant. Unset `CHROMA_*` before running, or expect the noise.
 
 ### `shell`
 

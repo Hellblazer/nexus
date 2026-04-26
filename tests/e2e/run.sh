@@ -45,9 +45,8 @@ fi
 # Force local mode for the whole harness unless the caller explicitly
 # opts into cloud by setting NX_LOCAL=0. Without this, ``crun`` (used by
 # scenarios for direct ``nx`` invocations) inherits the outer shell's
-# ambient CHROMA_API_KEY / CHROMA_TENANT and hits production — which in
-# turn trips the OldLayoutDetected guard when the tenant still carries
-# legacy ``<db>_code`` databases. The sandbox goal is "not production."
+# ambient CHROMA_API_KEY / CHROMA_TENANT and hits production. The
+# sandbox goal is "not production."
 export NX_LOCAL="${NX_LOCAL:-1}"
 if [[ "$NX_LOCAL" == "1" ]]; then
     unset CHROMA_API_KEY CHROMA_TENANT CHROMA_DATABASE
@@ -176,9 +175,8 @@ cat >> "$TEST_HOME/.env.test" << EOF
 # NX_LOCAL=1 by default so the sandbox uses ``chromadb.PersistentClient``
 # + local ONNX embeddings instead of the cloud tenant configured in the
 # real .env. Otherwise an ambient CHROMA_API_KEY / CHROMA_TENANT bleeds
-# into the harness and ``nx index`` hits production — including the
-# OldLayoutDetected guard when the tenant still has legacy ``<db>_code``
-# databases. Override by exporting NX_LOCAL=0 before invoking run.sh.
+# into the harness and ``nx index`` hits production. Override by
+# exporting NX_LOCAL=0 before invoking run.sh.
 export NX_LOCAL="\${NX_LOCAL:-1}"
 export VOYAGE_API_KEY="${VOYAGE_API_KEY:-}"
 # Only forward cloud credentials when explicitly NOT in local mode, so

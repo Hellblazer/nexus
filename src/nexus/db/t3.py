@@ -35,10 +35,6 @@ from nexus.metadata_schema import CONTENT_TYPES, normalize, validate
 _log = structlog.get_logger(__name__)
 
 
-class OldLayoutDetected(RuntimeError):
-    """Raised when the old four-database ChromaDB layout is detected during init."""
-
-
 # Legacy store_type values accepted on input (nexus-40t). All map to a
 # :data:`nexus.metadata_schema.CONTENT_TYPES` value so the canonical
 # schema stays compact.
@@ -177,9 +173,10 @@ class T3Database:
     - **Local mode** (``local_mode=True``): ``chromadb.PersistentClient`` using a
       local directory — zero API keys required.
 
-    On first cloud connection (no ``NX_MIGRATED`` flag), the constructor probes for
-    the old four-database layout by attempting to connect to ``{base}_code``.
-    If that database exists, ``OldLayoutDetected`` is raised.
+    Single-database architecture (RDR-037, 2026-03-14): all collection
+    prefixes (``code__``, ``docs__``, ``rdr__``, ``knowledge__``) coexist
+    in one cloud database identified by the ``chroma_database`` config
+    value.
 
     The ``_client`` and ``_ef_override`` keyword arguments are injection
     points for testing — pass an ``EphemeralClient`` and
@@ -249,39 +246,12 @@ class T3Database:
         if _client is not None:
             self._client = _client
         else:
-            migrated = get_credential("migrated")
-            if migrated:
-                self._client = chromadb.CloudClient(
-                    tenant=tenant or None, database=database, api_key=api_key
-                )
-            else:
-                try:
-                    chromadb.CloudClient(
-                        tenant=tenant or None, database=f"{database}_code", api_key=api_key
-                    )
-                except _ChromaNotFoundError:
-                    # Old layout absent — connect to single database
-                    self._client = chromadb.CloudClient(
-                        tenant=tenant or None, database=database, api_key=api_key
-                    )
-                except Exception as probe_exc:
-                    # Auth errors, network errors, etc. during probe — wrap so
-                    # CLI callers (except RuntimeError) surface a clean message.
-                    raise RuntimeError(
-                        f"Failed to connect to ChromaDB Cloud (probe for '{database}_code').\n"
-                        f"Check CHROMA_API_KEY and network connectivity."
-                    ) from probe_exc
-                else:
-                    _log.warning(
-                        "old_layout_detected",
-                        database=database,
-                        msg="Old four-database layout detected. Set NX_MIGRATED=1 after migration.",
-                    )
-                    raise OldLayoutDetected(
-                        f"Old four-database layout detected: '{database}_code' exists.\n"
-                        f"Export data with the pre-upgrade version first, then set "
-                        f"NX_MIGRATED=1 or run 'nx config set migrated 1'."
-                    )
+            # Single-database architecture (RDR-037 consolidation,
+            # 2026-03-14). All collection prefixes (code__, docs__,
+            # rdr__, knowledge__) coexist in one cloud database.
+            self._client = chromadb.CloudClient(
+                tenant=tenant or None, database=database, api_key=api_key
+            )
 
     # ── Context manager (no-op: CloudClient is stateless REST) ───────────────
 
