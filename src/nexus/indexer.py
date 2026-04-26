@@ -809,6 +809,7 @@ def _index_pdf_file(
         # aspect extraction) cover CLI ingest the same way they cover
         # MCP store_put.
         from nexus.mcp_infra import (
+            fire_post_document_hooks,
             fire_post_store_batch_hooks,
             fire_post_store_hooks,
         )
@@ -817,6 +818,11 @@ def _index_pdf_file(
         )
         for _did, _doc in zip(ids, documents):
             fire_post_store_hooks(_did, collection_name, _doc)
+        # RDR-089 document-grain chain — once per PDF file boundary in
+        # the `nx index repo` PDF path. content="" (chunk-level scope
+        # only); the hook reads source_path itself per the P0.1
+        # content-sourcing contract.
+        fire_post_document_hooks(str(file), collection_name, "")
 
     return len(prepared)
 

@@ -618,8 +618,11 @@ def migrate_hook_failures_chain_column(conn: sqlite3.Connection) -> None:
     Additive only: ``is_batch`` and ``batch_doc_ids`` are retained for
     back-compat with pre-4.14.2 readers. Existing write paths dual-write
     ``chain`` alongside ``is_batch`` (see ``_record_batch_hook_failure``);
-    new readers may prefer ``chain``. A future migration may drop
-    ``is_batch`` once all readers consume ``chain``.
+    new readers may prefer ``chain``. Known consumers that still read
+    ``is_batch``: ``src/nexus/commands/taxonomy_cmd.py`` (status
+    display) and ~11 test files exercising the 4.14.1 schema directly.
+    A future migration may drop ``is_batch`` once those consumers
+    migrate to ``chain``.
 
     Data backfill: ``UPDATE hook_failures SET chain='batch' WHERE
     is_batch=1`` so historical RDR-095 rows are correctly classified

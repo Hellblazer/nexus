@@ -260,6 +260,76 @@ def test_fire_post_document_hooks_persists_failure_to_t2(
     assert chain == "document"
 
 
+def test_fire_post_document_hooks_falls_back_to_scalar_when_chain_column_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the ``chain`` column is absent (pre-4.14.2 schema, mixed-version
+    operator scenario: a write path running fresh code against an older
+    T2 schema), the failure capture writes a chain-less row rather than
+    crashing.
+
+    Bypasses ``T2Database`` because it would auto-apply migrations
+    through 4.14.1 inclusive (the package version stays at 4.14.1 until
+    the next release tag — see ``pyproject.toml``). Builds a raw sqlite
+    connection at the 4.14.1 schema and mocks ``t2_ctx`` to expose just
+    the surface ``_record_document_hook_failure`` reads.
+    """
+    import threading
+
+    import nexus.mcp_infra as mod
+    from nexus.db.migrations import (
+        migrate_hook_failures,
+        migrate_hook_failures_batch_columns,
+    )
+    from nexus.mcp_infra import (
+        fire_post_document_hooks,
+        register_post_document_hook,
+    )
+
+    db_path = tmp_path / "pre_4_14_2.db"
+    raw = sqlite3.connect(str(db_path), isolation_level=None)
+    migrate_hook_failures(raw)
+    migrate_hook_failures_batch_columns(raw)  # 4.14.1 — but NOT 4.14.2
+
+    cols = {r[1] for r in raw.execute("PRAGMA table_info(hook_failures)").fetchall()}
+    assert "chain" not in cols, (
+        "pre-condition: hook_failures must lack the chain column"
+    )
+
+    class _FakeTaxonomy:
+        def __init__(self, conn: sqlite3.Connection) -> None:
+            self.conn = conn
+            self._lock = threading.RLock()
+
+    class _FakeT2:
+        def __init__(self, conn: sqlite3.Connection) -> None:
+            self.taxonomy = _FakeTaxonomy(conn)
+        def __enter__(self) -> "_FakeT2":
+            return self
+        def __exit__(self, *_: object) -> None:
+            return None
+
+    monkeypatch.setattr(mod, "t2_ctx", lambda: _FakeT2(raw))
+
+    def raising(source_path, collection, content):
+        raise RuntimeError("doc kaboom")
+
+    register_post_document_hook(raising)
+    fire_post_document_hooks("/path/missing-chain.md", "knowledge__delos", "x")
+
+    rows = raw.execute(
+        "SELECT doc_id, hook_name, error FROM hook_failures"
+    ).fetchall()
+    raw.close()
+
+    # Fallback path persists scalar fields; the chain marker is dropped
+    # silently because the column does not exist on this DB.
+    assert len(rows) == 1
+    assert rows[0][0] == "/path/missing-chain.md"
+    assert rows[0][1] == "raising"
+    assert "doc kaboom" in rows[0][2]
+
+
 def test_fire_post_document_hooks_persist_swallowed_when_table_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -498,8 +568,11 @@ def test_record_batch_hook_failure_writes_chain_batch(
         row = db.taxonomy.conn.execute(
             "SELECT doc_id, batch_doc_ids, is_batch, chain FROM hook_failures"
         ).fetchone()
+    import json as _json
     assert row[0] == "d1"
-    assert row[1] == '["d1", "d2"]'
+    # Decoupled from json serialization whitespace: parse and compare the
+    # list contents rather than the raw string form.
+    assert _json.loads(row[1]) == ["d1", "d2"]
     assert row[2] == 1
     assert row[3] == "batch"
     mod._post_store_batch_hooks.clear()

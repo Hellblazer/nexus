@@ -699,11 +699,13 @@ _post_document_hooks: list = []
 
 
 def register_post_document_hook(fn) -> None:
-    """Register a callable(source_path, collection, content) to fire after
-    every document-level storage event.
+    """Register a synchronous ``fn(source_path, collection, content) -> None``
+    to fire after every document-level storage event.
 
     The callable MUST be synchronous. Async callables are silently
     unsupported — the dispatcher would drop the returned coroutine.
+    Phase 1 hook authors: see ``test_async_hooks_silently_unsupported_by_dispatcher``
+    for the contract test.
     """
     _post_document_hooks.append(fn)
 
@@ -770,6 +772,11 @@ def _record_document_hook_failure(
     semantics as ``_record_hook_failure`` and
     ``_record_batch_hook_failure``: persistence failure cannot break
     ingest.
+
+    Two-tier fallback (vs. three-tier in ``_record_batch_hook_failure``)
+    is correct: the document chain is new in 4.14.2, so there is no
+    intermediate 4.14.1-shape schema to handle — the row either has
+    ``chain`` (post-4.14.2) or it does not (pre-4.14.2 generic shape).
     """
     import sqlite3
     truncated = error[:2000]
@@ -921,12 +928,16 @@ def reset_singletons():
     embeddings against the injected client and produced nondeterministic
     matches.
 
-    NOTE: _post_store_hooks is intentionally NOT cleared here.  Hooks are
-    registered at module-import time (e.g. ``register_post_store_hook`` in
+    NOTE: ``_post_store_hooks``, ``_post_store_batch_hooks``, and
+    ``_post_document_hooks`` are intentionally NOT cleared here.  Hooks
+    are registered at module-import time (e.g. ``register_post_store_hook`` /
+    ``register_post_store_batch_hook`` / ``register_post_document_hook`` in
     ``nexus.mcp.core``).  Because Python only executes module-level code
-    once, clearing the list here would permanently lose those registrations
-    for the remainder of the test session.  Tests that need an empty hook
-    list should clear ``_post_store_hooks`` explicitly in their own fixture.
+    once, clearing the lists here would permanently lose those
+    registrations for the remainder of the test session.  Tests that
+    need an empty hook list should clear the relevant ``_post_*_hooks``
+    list explicitly in their own fixture (e.g. via the autouse fixture
+    in ``tests/test_post_document_hooks.py``).
     """
     global _t1_instance, _t1_isolated, _t3_instance, _collections_cache, _catalog_instance, _catalog_mtime
     _t1_instance = None

@@ -199,11 +199,13 @@ def test_every_cli_ingest_site_fires_both_chains() -> None:
 
 
 # Expected fire counts per module for the document-grain chain.
-# Total: 7 fire-statement instances across 6 modules (six logical
+# Total: 8 fire-statement instances across 7 modules (seven logical
 # document boundaries — doc_indexer.py:index_pdf has two branch tails,
 # accounting for the off-by-one between site count and module count).
+# Mirrors CLI_SITE_FILES above plus mcp/core.py:store_put.
 DOCUMENT_HOOK_FIRE_SITES: dict[str, int] = {
-    "src/nexus/doc_indexer.py": 3,        # _index_document + index_pdf x2
+    "src/nexus/indexer.py": 1,             # _index_pdf_file (nx index repo PDF path)
+    "src/nexus/doc_indexer.py": 3,         # _index_document + index_pdf x2
     "src/nexus/code_indexer.py": 1,        # index_code_file
     "src/nexus/prose_indexer.py": 1,       # index_prose_file
     "src/nexus/pipeline_stages.py": 1,     # pipeline_index_pdf (post _catalog_pdf_hook)
