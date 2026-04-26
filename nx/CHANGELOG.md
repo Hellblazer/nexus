@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.15.1] - 2026-04-26
+
+Plugin version aligned with conexus 4.15.1. No plugin-level functional changes. Documentation-only point release: the root `README.md` now opens with the new Tensegrity blog posts (Post 0 *How I actually use Nexus*, Post 00 *Installing Nexus*) as the recommended on-ramp ahead of Post 1 *Nexus by Example*, and the header image is the series establishing shot. See root `CHANGELOG.md` for full notes.
+
 ## [4.15.0] - 2026-04-26
 
 Plugin version aligned with conexus 4.15.0. No plugin-level functional changes. See root `CHANGELOG.md` for the metadata schema rationalisation arc: `make_chunk_metadata` factory unifying every indexer's chunk-metadata write, `section_type` populated on PDFs (was hardcoded empty since the chunker was written), `source_title -> title` collapse, `expires_at -> indexed_at + ttl_days` swap with new `is_expired` helper, the new `nx catalog remediate-paths` command for repairing basename and ghost file_paths in production catalogs, and the cargo cleanup that restored `bib_semantic_scholar_id` to the schema after discovering normalize() had been silently dropping the marker that drives `nx enrich`'s skip-already-enriched logic.

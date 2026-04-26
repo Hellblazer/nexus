@@ -6,6 +6,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.15.1] - 2026-04-26
+
+Documentation-only point release. README leads with the new Tensegrity blog posts: Post 0 (*How I actually use Nexus*) as the conceptual overview and Post 00 (*Installing Nexus*) as the install walkthrough, with Post 1 (*Nexus by Example*) following as the practice tour. Header image swapped to the establishing shot for the series.
+
+### Changed
+
+- **README.md**: "New to Nexus?" callout now opens with [Post 0](https://tensegrity.blog/2026/04/26/how-i-actually-use-nexus/) and [Post 00](https://tensegrity.blog/2026/04/26/installing-nexus/); header image is `a-stately-pleasure-dome.png`; Documentation table gains rows for both new posts.
+
+No source, schema, or plugin behaviour changes. Tag exists so the manifests, marketplace, and PyPI carry the documentation update without users needing to navigate to the blog from a stale README.
+
 ## [4.15.0] - 2026-04-26
 
 Metadata schema rationalisation arc plus a new catalog repair tool. Three landed PRs (#324, #325, #326) merged in sequence: the chunk-metadata factory + section_type-on-PDFs refactor, the `nx catalog remediate-paths` command for fixing basename and ghost file_paths in production catalogs, and a follow-up cargo cleanup that restored `bib_semantic_scholar_id` to the schema after discovering normalize() had been silently dropping the marker that drives `nx enrich`'s skip-already-enriched logic.
