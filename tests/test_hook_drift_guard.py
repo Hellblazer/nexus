@@ -193,3 +193,149 @@ def test_every_cli_ingest_site_fires_both_chains() -> None:
         "the same number of times. Offenders:\n  "
         + "\n  ".join(f"{p}: {ps}" for p, ps in sorted(offenders.items()))
     )
+
+
+# ── RDR-089 document-chain call-site presence ───────────────────────────────
+
+
+# Expected fire counts per module for the document-grain chain.
+# Total: 7 fire-statement instances across 6 modules (six logical
+# document boundaries — doc_indexer.py:index_pdf has two branch tails,
+# accounting for the off-by-one between site count and module count).
+DOCUMENT_HOOK_FIRE_SITES: dict[str, int] = {
+    "src/nexus/doc_indexer.py": 3,        # _index_document + index_pdf x2
+    "src/nexus/code_indexer.py": 1,        # index_code_file
+    "src/nexus/prose_indexer.py": 1,       # index_prose_file
+    "src/nexus/pipeline_stages.py": 1,     # pipeline_index_pdf (post _catalog_pdf_hook)
+    "src/nexus/mcp/core.py": 1,            # store_put
+}
+
+
+def _count_fire_calls(tree: ast.AST, fn_name: str) -> int:
+    """Count direct Call nodes whose callee is `fn_name` (matched by Name
+    or Attribute attr).
+    """
+    count = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name) and node.func.id == fn_name:
+            count += 1
+        elif isinstance(node.func, ast.Attribute) and node.func.attr == fn_name:
+            count += 1
+    return count
+
+
+def test_every_cli_ingest_site_fires_document_hook() -> None:
+    """RDR-089 P0.2 wiring invariant: each CLI ingest module + the MCP
+    store_put boundary must call ``fire_post_document_hooks`` exactly
+    the documented number of times. Total: 7 fire-statement instances
+    across 6 modules.
+
+    The call counts are pinned per-module so a future contributor who
+    drops a fire site (or accidentally double-fires inside a chunk
+    loop) fails CI here, not at runtime.
+
+    Either the alias name (``fire_post_document_hooks``) or the
+    privatised import name (``_fire_post_document_hooks`` in
+    ``mcp/core.py``) counts toward the total — they are the same
+    callable.
+    """
+    offenders: dict[str, str] = {}
+    for rel, expected in sorted(DOCUMENT_HOOK_FIRE_SITES.items()):
+        path = PROJECT_ROOT / rel
+        tree = ast.parse(path.read_text(), filename=str(path))
+        actual = (
+            _count_fire_calls(tree, "fire_post_document_hooks")
+            + _count_fire_calls(tree, "_fire_post_document_hooks")
+        )
+        if actual != expected:
+            offenders[rel] = f"expected {expected} call(s), got {actual}"
+
+    assert not offenders, (
+        "RDR-089 document-chain call-site invariant: each ingest "
+        "module must fire fire_post_document_hooks the documented "
+        "number of times. If this fails, the wiring drifted from the "
+        "P0.2 fire-site map. Offenders:\n  "
+        + "\n  ".join(f"{p}: {ps}" for p, ps in sorted(offenders.items()))
+    )
+
+
+def test_mcp_store_put_calls_document_hook_synchronously() -> None:
+    """RDR-089 load-bearing contract (audit F1): the call to
+    ``fire_post_document_hooks`` from ``mcp/core.py:store_put`` must be
+    a *plain sync* invocation. No ``await``, no ``asyncio.to_thread``
+    wrapping. ``store_put`` is ``def``, not ``async def``; FastMCP
+    wraps sync ``@mcp.tool()`` bodies in worker threads at the
+    framework level. Routing through ``async`` here would silently
+    drop the returned coroutine — exactly the original RDR-089 defect.
+
+    Pin via AST inspection: walk every ``Call`` node whose callee
+    targets ``fire_post_document_hooks`` (or its alias), then assert no
+    enclosing parent is an ``await`` or an ``asyncio.to_thread`` call.
+    """
+    rel = "src/nexus/mcp/core.py"
+    path = PROJECT_ROOT / rel
+    tree = ast.parse(path.read_text(), filename=str(path))
+
+    # Build child→parent map for ancestry checks.
+    parents: dict[int, ast.AST] = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[id(child)] = parent
+
+    def _is_doc_hook_call(node: ast.AST) -> bool:
+        if not isinstance(node, ast.Call):
+            return False
+        if isinstance(node.func, ast.Name):
+            return node.func.id in {
+                "fire_post_document_hooks", "_fire_post_document_hooks",
+            }
+        if isinstance(node.func, ast.Attribute):
+            return node.func.attr in {
+                "fire_post_document_hooks", "_fire_post_document_hooks",
+            }
+        return False
+
+    def _is_to_thread_call(node: ast.AST) -> bool:
+        if not isinstance(node, ast.Call):
+            return False
+        # asyncio.to_thread(...) — Attribute access
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "to_thread":
+            return True
+        if isinstance(node.func, ast.Name) and node.func.id == "to_thread":
+            return True
+        return False
+
+    offending_calls: list[str] = []
+    for node in ast.walk(tree):
+        if not _is_doc_hook_call(node):
+            continue
+        # Walk up from this call to ensure no ancestor is await or to_thread.
+        cur: ast.AST | None = node
+        line = getattr(node, "lineno", 0)
+        depth = 0
+        while cur is not None and depth < 20:
+            cur = parents.get(id(cur))
+            if cur is None:
+                break
+            if isinstance(cur, ast.Await):
+                offending_calls.append(
+                    f"line {line}: fire_post_document_hooks wrapped in await"
+                )
+                break
+            if _is_to_thread_call(cur):
+                offending_calls.append(
+                    f"line {line}: fire_post_document_hooks routed through "
+                    f"asyncio.to_thread"
+                )
+                break
+            depth += 1
+
+    assert not offending_calls, (
+        "RDR-089 sync-all-the-way-down contract (audit F1): "
+        "fire_post_document_hooks at MCP store_put must be a plain "
+        "synchronous call. await / asyncio.to_thread wrapping silently "
+        "drops the dispatch (store_put is `def`, not `async def`). "
+        "Offenders:\n  " + "\n  ".join(offending_calls)
+    )

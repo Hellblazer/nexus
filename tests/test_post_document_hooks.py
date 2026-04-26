@@ -135,6 +135,56 @@ def test_fire_passes_empty_content_signal_for_cli_path(tmp_path: Path) -> None:
     assert captured == ["body read from disk"]
 
 
+# ── Async/sync contract (RDR-089 load-bearing) ───────────────────────────────
+
+
+def test_async_hooks_silently_unsupported_by_dispatcher() -> None:
+    """The dispatcher is synchronous all the way down — RDR-089 load-bearing
+    contract. Routing through an async hook from this sync chain silently
+    drops the returned coroutine (which was the original RDR-089 defect
+    caught by audit F1). This test pins that behaviour: an async hook
+    registers fine, but its body never runs — calling code should treat
+    async hooks as caller-responsibility, not framework support.
+
+    Captures the RuntimeWarning emitted when a coroutine is never awaited
+    so the test fails fast if a future contributor reintroduces ``await``
+    or ``asyncio.to_thread`` inside ``fire_post_document_hooks``.
+    """
+    import warnings
+
+    from nexus.mcp_infra import (
+        fire_post_document_hooks,
+        register_post_document_hook,
+    )
+
+    body_ran: list[bool] = []
+
+    async def async_hook(source_path, collection, content):
+        body_ran.append(True)
+
+    register_post_document_hook(async_hook)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        fire_post_document_hooks("/p", "knowledge__delos", "x")
+
+    # Coroutine was created but never awaited → body did not run.
+    assert body_ran == []
+    # Python emits RuntimeWarning("coroutine 'async_hook' was never awaited")
+    # — pinned so future awaits trip this test.
+    coroutine_warnings = [
+        w for w in caught
+        if issubclass(w.category, RuntimeWarning) and "never awaited" in str(w.message)
+    ]
+    assert coroutine_warnings, (
+        "Expected a 'coroutine never awaited' RuntimeWarning; the "
+        "dispatcher must not await async hooks. If this assertion "
+        "fails, the dispatcher likely added await or "
+        "asyncio.to_thread — that violates the RDR-089 sync-all-the-"
+        "way-down contract (audit F1)."
+    )
+
+
 # ── Failure isolation ────────────────────────────────────────────────────────
 
 
