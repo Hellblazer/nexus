@@ -40,7 +40,7 @@ nx store put --collection knowledge__myapp "API rate limit is 10k/min per the ve
 nx search "consensus protocols" --where bib_year>=2024 --where chunk_type=table_page
 
 # Backfill bibliographic metadata on an existing collection
-nx enrich knowledge__papers --delay 0.5
+nx enrich bib knowledge__papers --delay 0.5
 ```
 
 **Topic taxonomy.** After indexing, Nexus automatically discovers topics across your corpus using HDBSCAN clustering, then labels each cluster with a human-readable name via Claude Haiku. Search results are grouped by topic and boosted for relevance. Works with both local and cloud embeddings; no configuration needed.
@@ -135,7 +135,8 @@ The `nx` command provides direct access to all storage tiers, indexing, and sear
 |---------|-------------|
 | `nx search` | Semantic and hybrid search across indexed code, docs, and knowledge. Supports `--where` with `=`, `>=`, `<=`, `>`, `<`, `!=` operators for metadata filtering |
 | `nx index` | Index git repos, PDFs, and markdown into searchable collections |
-| `nx enrich` | Backfill bibliographic metadata (year, venue, authors, citations) from Semantic Scholar |
+| `nx enrich bib` | Backfill bibliographic metadata (year, venue, authors, citations) from Semantic Scholar |
+| `nx enrich aspects` | Extract structured paper aspects (problem, method, datasets, baselines, results) into T2 |
 | `nx store` | Store, retrieve, export, and import knowledge entries |
 | `nx memory` | Per-project persistent notes (local, no API keys) |
 | `nx scratch` | Inter-agent session context (in-memory, no API keys) |

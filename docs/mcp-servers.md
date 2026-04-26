@@ -48,7 +48,7 @@ Full tool names follow Claude Code's convention: `mcp__plugin_nx_nexus__<tool>`.
 |---|---|
 | `search` | Semantic chunk search over T3 collections. Supports `topic` for topic-scoped search, `cluster_by="semantic"` for topic grouping, and automatic same-topic distance boost. |
 | `query` | Document-level catalog-aware retrieval (scope by `author`, `content_type`, `subtree`, `follow_links`, `depth`). Results ranked with both link-aware and topic-aware boosting. |
-| `store_put` | Write a document into a T3 collection. Triggers a post-store hook that auto-assigns the document to its nearest topic via centroid ANN lookup. |
+| `store_put` | Write a document into a T3 collection. Fires three post-store hook chains (single-doc, batch, document-grain): the batch chain auto-assigns the document to its nearest topic via centroid ANN lookup and dual-writes the chash index; the document-grain chain enqueues for async aspect extraction on `knowledge__*` collections (RDR-089). |
 | `store_get` | Retrieve a document by id from a T3 collection |
 | `store_get_many` | Batch hydration: given N ids, return N contents (with `missing` for not-found). Handles 300+ ids without the ChromaDB quota limit. |
 | `store_list` | Paginate documents in a T3 collection |

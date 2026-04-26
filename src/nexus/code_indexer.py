@@ -434,6 +434,7 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
         # chains fire from every storage event; the per-doc loop covers
         # single-shape consumers on CLI ingest.
         from nexus.mcp_infra import (
+            fire_post_document_hooks,
             fire_post_store_batch_hooks,
             fire_post_store_hooks,
         )
@@ -442,6 +443,9 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
         )
         for _did, _doc in zip(ids, documents):
             fire_post_store_hooks(_did, ctx.corpus, _doc)
+        # RDR-089 document-grain chain — once per code-file boundary.
+        # content="" (chunk-level scope only); hook reads source_path.
+        fire_post_document_hooks(str(file_path), ctx.corpus, "")
 
     return len(ids)
 

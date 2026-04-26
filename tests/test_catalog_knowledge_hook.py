@@ -50,6 +50,53 @@ class TestByDocId:
         assert entry.title == "A"
 
 
+class TestListByCollection:
+    """RDR-089 P2.2: ``Catalog.list_by_collection`` returns one entry
+    per source document (NOT per chunk) for a given physical
+    collection. Used by ``nx enrich aspects`` to drive per-document
+    iteration.
+    """
+
+    def test_returns_entries_for_collection(self, tmp_path: Path) -> None:
+        _, cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("knowledge", "curator")
+        cat.register(owner, "Paper A",
+                     content_type="paper",
+                     physical_collection="knowledge__delos",
+                     file_path="/papers/a.pdf")
+        cat.register(owner, "Paper B",
+                     content_type="paper",
+                     physical_collection="knowledge__delos",
+                     file_path="/papers/b.pdf")
+        cat.register(owner, "Paper C",
+                     content_type="paper",
+                     physical_collection="knowledge__other",
+                     file_path="/papers/c.pdf")
+
+        rows = cat.list_by_collection("knowledge__delos")
+        titles = sorted(r.title for r in rows)
+        assert titles == ["Paper A", "Paper B"]
+
+    def test_returns_empty_list_for_missing_collection(
+        self, tmp_path: Path,
+    ) -> None:
+        _, cat = _make_catalog(tmp_path)
+        assert cat.list_by_collection("knowledge__nonexistent") == []
+
+    def test_limit_caps_result(self, tmp_path: Path) -> None:
+        _, cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("knowledge", "curator")
+        for i in range(5):
+            cat.register(
+                owner, f"Paper {i}",
+                content_type="paper",
+                physical_collection="knowledge__delos",
+                file_path=f"/papers/p{i}.pdf",
+            )
+        assert len(cat.list_by_collection("knowledge__delos", limit=3)) == 3
+        assert len(cat.list_by_collection("knowledge__delos", limit=None)) == 5
+
+
 class TestStorePutHook:
     def test_registers_knowledge_entry(self, tmp_path, monkeypatch):
         from nexus.commands.store import _catalog_store_hook

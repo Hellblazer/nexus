@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import chromadb.errors
 import pytest
 
-from nexus.db.t3 import T3Database, OldLayoutDetected
+from nexus.db.t3 import T3Database
 
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
@@ -19,14 +19,7 @@ def mock_chromadb():
     with patch("nexus.db.t3.chromadb") as m, \
          patch("nexus.db.t3.get_credential", return_value=""):
         mock_client = MagicMock()
-
-        def _cloud_client_factory(*args, **kwargs):
-            db_name = kwargs.get("database", "")
-            if db_name.endswith("_code"):
-                raise chromadb.errors.NotFoundError("probe: old layout not found")
-            return mock_client
-
-        m.CloudClient.side_effect = _cloud_client_factory
+        m.CloudClient.return_value = mock_client
         yield m, mock_client
 
 
@@ -69,12 +62,11 @@ def expire_db(mock_chromadb):
 def test_cloudclient_init(mock_chromadb):
     chromadb_m, _ = mock_chromadb
     T3Database(tenant="my-tenant", database="my-db", api_key="secret")
-    assert chromadb_m.CloudClient.call_count == 2
-    calls = chromadb_m.CloudClient.call_args_list
-    assert calls[0].kwargs["database"] == "my-db_code"
-    assert calls[1].kwargs["database"] == "my-db"
-    assert calls[1].kwargs["tenant"] == "my-tenant"
-    assert calls[1].kwargs["api_key"] == "secret"
+    assert chromadb_m.CloudClient.call_count == 1
+    call = chromadb_m.CloudClient.call_args
+    assert call.kwargs["database"] == "my-db"
+    assert call.kwargs["tenant"] == "my-tenant"
+    assert call.kwargs["api_key"] == "secret"
 
 
 def test_cloudclient_receives_none_for_empty_tenant(mock_chromadb):
@@ -100,7 +92,6 @@ def test_bare_constructor_falls_back_to_get_credential(mock_chromadb):
         "chroma_database": "db-from-config",
         "chroma_api_key": "key-from-config",
         "voyage_api_key": "voyage-key-from-config",
-        "migrated": "1",   # skip the old-layout probe
     }
     with patch(
         "nexus.db.t3.get_credential",
@@ -155,27 +146,16 @@ def test_fallback_skipped_in_local_mode(tmp_path):
     assert not gc.called
 
 
-def test_old_layout_detected(mock_chromadb):
-    chromadb_m, mock_client = mock_chromadb
-    chromadb_m.CloudClient.side_effect = lambda **kw: mock_client
-    with pytest.raises(OldLayoutDetected, match="Old four-database layout detected"):
-        T3Database(tenant="t", database="mydb", api_key="k")
-
-
-def test_migration_flag_skips_probe(mock_chromadb):
+def test_cloud_init_uses_single_database(mock_chromadb):
+    """Cloud init connects to the configured database directly — no probe.
+    RDR-037 consolidation removed the legacy four-database layout; the
+    transitional probe was retired once the migration window closed.
+    """
     chromadb_m, _ = mock_chromadb
-    with patch("nexus.db.t3.get_credential", side_effect=lambda k: "1" if k == "migrated" else ""):
-        db = T3Database(tenant="t", database="mydb", api_key="k")
+    db = T3Database(tenant="t", database="mydb", api_key="k")
     assert chromadb_m.CloudClient.call_count == 1
     assert chromadb_m.CloudClient.call_args.kwargs["database"] == "mydb"
     assert db._client is not None
-
-
-def test_probe_auth_error_wraps_as_runtime_error(mock_chromadb):
-    chromadb_m, _ = mock_chromadb
-    chromadb_m.CloudClient.side_effect = Exception("Permission denied.")
-    with pytest.raises(RuntimeError, match="Failed to connect"):
-        T3Database(tenant="t", database="mydb", api_key="bad-key")
 
 
 def test_client_injection_sets_single_client(mock_chromadb):
@@ -677,8 +657,8 @@ def test_make_t3_uses_credentials(mock_chromadb):
     with patch("nexus.config.is_local_mode", return_value=False):
         with patch("nexus.db.get_credential", side_effect=lambda k: creds.get(k, "")):
             db = make_t3()
-    assert mock_chromadb[0].CloudClient.call_count == 2
-    assert mock_chromadb[0].CloudClient.call_args_list[1].kwargs["database"] == "my-db"
+    assert mock_chromadb[0].CloudClient.call_count == 1
+    assert mock_chromadb[0].CloudClient.call_args.kwargs["database"] == "my-db"
     assert db._voyage_api_key == "vk-xyz"
 
 

@@ -102,7 +102,7 @@ nx index repo ./my-project
 |------|-------------|
 | `--dir DIR` | Index all PDFs in a directory (mutually exclusive with `PATH`) |
 | `--collection NAME` | Fully-qualified T3 collection name (e.g. `knowledge__delos`). Overrides `--corpus` when set |
-| `--enrich` | Query Semantic Scholar for bibliographic metadata (year, venue, authors, citations). Off by default. Use `nx enrich <collection>` for bulk backfill |
+| `--enrich` | Query Semantic Scholar for bibliographic metadata (year, venue, authors, citations). Off by default. Use `nx enrich bib <collection>` for bulk backfill |
 | `--extractor [auto\|docling\|mineru]` | PDF extraction backend (default: `auto`). See [PDF Extraction Backends](#pdf-extraction-backends) below |
 | `--dry-run` | Extract and embed locally using ONNX (no API keys, no cloud writes). Prints a chunk preview |
 | `--streaming [auto\|always\|never]` | Pipeline mode (default: `auto`). `auto` uses the streaming pipeline for all PDFs (crash-resilient); `never` forces the legacy batch+checkpoint path |
@@ -163,10 +163,14 @@ nx index pdf paper.pdf --extractor mineru    # Always MinerU (fails if not insta
 
 ## nx enrich
 
+Subcommand group. The previous single-shape `nx enrich <coll>` is now `nx enrich bib <coll>`; a new `nx enrich aspects <coll>` ships RDR-089's structured-aspect extraction.
+
+### nx enrich bib
+
 Backfill bibliographic metadata from Semantic Scholar for an existing T3 collection.
 
 ```
-nx enrich knowledge__papers --delay 0.5 --limit 50
+nx enrich bib knowledge__papers --delay 0.5 --limit 50
 ```
 
 Queries Semantic Scholar for each unique `source_title` in the collection and writes `bib_year`, `bib_venue`, `bib_authors`, `bib_citation_count`, and `bib_semantic_scholar_id` back to every chunk with that title. Already-enriched chunks (non-empty `bib_semantic_scholar_id`) are skipped — the command is idempotent.
@@ -178,6 +182,70 @@ Queries Semantic Scholar for each unique `source_title` in the collection and wr
 | `--limit N` | Maximum number of titles to enrich (default: 0 = unlimited) |
 
 **Note**: Semantic Scholar's public API allows 100 requests per 5 minutes without an API key. For large collections, increase `--delay` or use `--limit` to process in batches.
+
+### nx enrich aspects
+
+Batch-extract structured aspects (problem formulation, proposed method, datasets, baselines, results, extras) for documents in a `knowledge__*` collection. Iterates the catalog (one entry per source document, NOT per chunk) and calls the synchronous extractor directly, bypassing the post-document hook chain to avoid double-firing on documents already triggered at ingest. Aspects land in T2 `document_aspects`.
+
+```
+nx enrich aspects knowledge__delos
+nx enrich aspects knowledge__delos --dry-run
+nx enrich aspects knowledge__delos --validate-sample 10
+nx enrich aspects knowledge__delos --re-extract --extractor-version claude-haiku-4-5-20251001
+```
+
+| Flag | Description |
+|------|-------------|
+| `COLLECTION` (positional) | Must be a `knowledge__*` collection (Phase 1 scope). Other prefixes return a "no extractor config" error |
+| `--dry-run` | Report document count + cost estimate (Haiku-class). No API calls, no T2 writes |
+| `--validate-sample N` | Validate N% of newly-extracted aspects via `operator_verify` against the document text. Disagreements append to `./validation_failures.jsonl`. Pass 0 to skip. Default 5 |
+| `--re-extract` | Re-run only on rows whose `model_version` is strictly less than `--extractor-version` (and rows that are missing entirely) |
+| `--extractor-version v` | Threshold for `--re-extract` (lexicographic STRICT-less-than) |
+
+### nx enrich list
+
+```
+nx enrich list COLLECTION [--limit N] [--json]
+```
+
+Day 2 Ops: list extracted aspect rows for a collection. One row per source document (not per chunk). Returns source path, extractor name, model version, extracted-at timestamp, and a confidence indicator. Useful for triaging "what got extracted?" before running `--re-extract` against a model upgrade.
+
+### nx enrich info
+
+```
+nx enrich info COLLECTION SOURCE_PATH [--json]
+```
+
+Day 2 Ops: show the full aspect record for a single document. Includes the five fixed columns (problem_formulation, proposed_method, experimental_datasets, experimental_baselines, experimental_results), the `extras` JSON object, confidence, extracted_at, model_version, and extractor_name.
+
+### nx enrich delete
+
+```
+nx enrich delete COLLECTION SOURCE_PATH [--yes]
+```
+
+Day 2 Ops: remove a single aspect row. Use when re-indexing a document with a content change that should drop the prior aspects rather than overwrite. Requires `--yes` for confirmation. Safe: the underlying chunks in T3 are untouched.
+
+### nx enrich aspects-promote-field
+
+```
+nx enrich aspects-promote-field NAME [--type {TEXT|INTEGER|REAL}] [--prune] [--history]
+```
+
+Promote a recurring `extras.<name>` key into a fixed column on `document_aspects` (RDR-089 Phase E). Three-phase mechanic:
+
+1. `ALTER TABLE document_aspects ADD COLUMN <name> <type>` (idempotent — re-running on an already-promoted field is a no-op).
+2. Backfill: copy the value of `extras.<name>` into the new column for every existing row via `json_extract`.
+3. (Optional) `--prune` removes the `extras.<name>` key after backfill so the source of truth is the new column.
+
+The promotion is logged to `aspect_promotion_log` (registry-managed) for audit. `--history` lists past promotions instead of running a new one. Reserved names (the 12 RDR-locked column names) and unsafe identifiers (digit prefix, hyphen, quote, semicolon, SQL-injection patterns, empty) are rejected before any DDL runs.
+
+| Flag | Description |
+|------|-------------|
+| `NAME` (positional) | The `extras.<name>` key to promote into a fixed column. Validated against an alphanumeric+underscore identifier rule |
+| `--type {TEXT|INTEGER|REAL}` | SQL column type. Default `TEXT`. `BLOB`, `JSON`, and other types are rejected |
+| `--prune` | After backfill, remove the `extras.<name>` key from every row. Use when the new column should replace the extras key as the source of truth. **Destructive** — re-running with `--prune` after data has been written to the new column has no effect, but rolling back requires reverting the schema change manually |
+| `--history` | List prior promotions from the audit log instead of running a new promotion |
 
 ---
 

@@ -151,7 +151,14 @@ fi
 
 case "$MODE" in
     smoke)
-        echo "[3/3] Smoke checks (running from /tmp to catch package-data bugs):"
+        # Force local mode so the smoke does not contact ChromaDB Cloud
+        # even if the parent shell has CHROMA_* set. The sandbox HOME is
+        # empty by design — there is no cloud data to populate from. Same
+        # pattern shakedown uses below; tests/e2e/run.sh has the long
+        # explanation.
+        export NX_LOCAL=1
+        unset CHROMA_API_KEY CHROMA_TENANT CHROMA_DATABASE
+        echo "[3/3] Smoke checks (running from /tmp, NX_LOCAL=1):"
         cd /tmp
         echo "  nx --version: $(nx --version)"
         echo
@@ -160,6 +167,14 @@ case "$MODE" in
         echo
         echo "  nx upgrade (apply):"
         nx upgrade 2>&1 | sed 's/^/    /' || true
+        echo
+        # nx catalog setup seeds 12 builtin plan templates that
+        # --check-plan-library verifies. Without this step the doctor
+        # check fails on every fresh sandbox — that is "you forgot the
+        # second setup step", not "something is genuinely broken." Make
+        # smoke green-green-green when the install is healthy.
+        echo "  nx catalog setup (seeds plan library + initializes catalog):"
+        nx catalog setup 2>&1 | tail -5 | sed 's/^/    /' || true
         echo
         for check in --check-schema --check-plan-library --check-taxonomy --check-hooks; do
             echo "  nx doctor $check:"

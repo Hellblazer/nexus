@@ -604,6 +604,200 @@ def migrate_hook_failures_batch_columns(conn: sqlite3.Connection) -> None:
     _log.info("Migrated: hook_failures.batch_doc_ids + is_batch (RDR-095)")
 
 
+def migrate_hook_failures_chain_column(conn: sqlite3.Connection) -> None:
+    """Add ``chain`` TEXT column to ``hook_failures`` for RDR-089 P0.1.
+
+    Replaces the previous ``is_batch`` boolean encoding with an enum-like
+    text column that is forward-compatible as new chain shapes land.
+    Values:
+
+    * ``'single'`` — the original single-document chain (RDR-070).
+    * ``'batch'`` — the batch chain (RDR-095).
+    * ``'document'`` — the document-grain chain introduced by RDR-089.
+
+    Additive only: ``is_batch`` and ``batch_doc_ids`` are retained for
+    back-compat with pre-4.14.2 readers. Existing write paths dual-write
+    ``chain`` alongside ``is_batch`` (see ``_record_batch_hook_failure``);
+    new readers may prefer ``chain``. Known consumers that still read
+    ``is_batch``: ``src/nexus/commands/taxonomy_cmd.py`` (status
+    display) and ~11 test files exercising the 4.14.1 schema directly.
+    A future migration may drop ``is_batch`` once those consumers
+    migrate to ``chain``.
+
+    Data backfill: ``UPDATE hook_failures SET chain='batch' WHERE
+    is_batch=1`` so historical RDR-095 rows are correctly classified
+    after this migration runs. Rows with ``is_batch=0`` keep the column
+    default ``'single'`` — no UPDATE needed.
+
+    Idempotent: no-op when the column already exists or when
+    ``hook_failures`` has not yet been created (4.9.10 migration runs
+    first in the chain).
+    """
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='hook_failures'"
+    ).fetchone()
+    if row is None:
+        return
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(hook_failures)").fetchall()}
+    if "chain" not in cols:
+        conn.execute(
+            "ALTER TABLE hook_failures "
+            "ADD COLUMN chain TEXT NOT NULL DEFAULT 'single'"
+        )
+        # Backfill historical batch rows captured at the 4.14.1 schema.
+        if "is_batch" in cols:
+            conn.execute(
+                "UPDATE hook_failures SET chain='batch' WHERE is_batch=1"
+            )
+    conn.commit()
+    _log.info("Migrated: hook_failures.chain enum column (RDR-089)")
+
+
+def migrate_document_aspects_table(conn: sqlite3.Connection) -> None:
+    """Create the ``document_aspects`` table for RDR-089 P1.1.
+
+    Schema (locked by RDR — see ``docs/rdr/rdr-089-structured-aspect-
+    extraction-at-ingest.md``):
+
+      - collection             TEXT NOT NULL
+      - source_path            TEXT NOT NULL
+      - problem_formulation    TEXT
+      - proposed_method        TEXT
+      - experimental_datasets  TEXT     -- JSON array (may be NULL)
+      - experimental_baselines TEXT     -- JSON array (may be NULL)
+      - experimental_results   TEXT
+      - extras                 TEXT     -- JSON object (may be NULL)
+      - confidence             REAL
+      - extracted_at           TEXT NOT NULL
+      - model_version          TEXT NOT NULL
+      - extractor_name         TEXT NOT NULL
+      - PRIMARY KEY (collection, source_path)
+
+    Compound PK rationale: per-chunk doc_id is intentionally not in
+    schema. Multiple chunks of the same source document map to a
+    single aspect row. The store's upsert semantics are COMPLETE
+    OVERWRITE — each new extraction replaces the previous row
+    verbatim (no diff/merge, no per-field stability check).
+
+    Secondary index ``idx_document_aspects_extractor`` supports the
+    ``list_by_extractor_version(name, max_version)`` query used by
+    re-extraction logic to find rows whose ``extractor_name`` matches
+    AND whose ``model_version`` is strictly below a threshold.
+
+    Idempotent: ``CREATE IF NOT EXISTS`` makes re-application a no-op.
+    """
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS document_aspects (
+            collection             TEXT NOT NULL,
+            source_path            TEXT NOT NULL,
+            problem_formulation    TEXT,
+            proposed_method        TEXT,
+            experimental_datasets  TEXT,
+            experimental_baselines TEXT,
+            experimental_results   TEXT,
+            extras                 TEXT,
+            confidence             REAL,
+            extracted_at           TEXT NOT NULL,
+            model_version          TEXT NOT NULL,
+            extractor_name         TEXT NOT NULL,
+            PRIMARY KEY (collection, source_path)
+        );
+        CREATE INDEX IF NOT EXISTS idx_document_aspects_extractor
+            ON document_aspects(extractor_name, model_version);
+    """)
+    conn.commit()
+    _log.info("Migrated: created document_aspects table (RDR-089)")
+
+
+def migrate_aspect_extraction_queue_table(conn: sqlite3.Connection) -> None:
+    """Create the ``aspect_extraction_queue`` table for RDR-089
+    follow-up (nexus-qeo8).
+
+    Durable WAL buffer feeding the async aspect-extraction worker. The
+    P1.3 spike invalidated Critical Assumption #2 (per-doc <3 s);
+    inline synchronous extraction is replaced by the
+    enqueue→worker→upsert pattern.
+
+    Schema:
+
+      - collection      TEXT NOT NULL
+      - source_path     TEXT NOT NULL
+      - content_hash    TEXT NOT NULL DEFAULT ''  (hint for downstream)
+      - status          TEXT NOT NULL DEFAULT 'pending'
+                                       (pending | in_progress | failed)
+      - retry_count     INTEGER NOT NULL DEFAULT 0
+      - enqueued_at     TEXT NOT NULL
+      - last_attempt_at TEXT
+      - last_error      TEXT
+      - PRIMARY KEY (collection, source_path)
+
+    PRIMARY KEY mirrors ``document_aspects`` so re-enqueue at the same
+    key replaces the row in place. Secondary index on ``status``
+    keeps the worker's per-poll SELECT an index seek (the worker
+    polls every 2 s by default).
+
+    Idempotent: ``CREATE IF NOT EXISTS`` makes re-application a no-op.
+    """
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS aspect_extraction_queue (
+            collection      TEXT NOT NULL,
+            source_path     TEXT NOT NULL,
+            content_hash    TEXT NOT NULL DEFAULT '',
+            content         TEXT NOT NULL DEFAULT '',
+            status          TEXT NOT NULL DEFAULT 'pending',
+            retry_count     INTEGER NOT NULL DEFAULT 0,
+            enqueued_at     TEXT NOT NULL,
+            last_attempt_at TEXT,
+            last_error      TEXT,
+            PRIMARY KEY (collection, source_path)
+        );
+        CREATE INDEX IF NOT EXISTS idx_aspect_queue_status
+            ON aspect_extraction_queue(status);
+    """)
+    conn.commit()
+    _log.info("Migrated: created aspect_extraction_queue table (RDR-089 follow-up)")
+
+
+def migrate_aspect_promotion_log_table(conn: sqlite3.Connection) -> None:
+    """Create the ``aspect_promotion_log`` audit table for RDR-089
+    Phase E (extras → fixed-column promotion).
+
+    Replaces lazy ``CREATE IF NOT EXISTS`` in
+    ``nexus.aspect_promotion._ensure_audit_table`` with a registered
+    migration so ``nx doctor --check-schema`` can audit the table's
+    presence and operators restoring T2 from backup get the table
+    even before a first promotion call.
+
+    Substantive critic finding: lazy table creation was breaking
+    the auditability claim — a backup-restored DB had no record of
+    the table's existence in the migration registry, and
+    ``check-schema`` did not surface the gap.
+
+    Idempotent: ``CREATE IF NOT EXISTS`` makes re-application a
+    no-op. The lazy ``_ensure_audit_table`` call in the promotion
+    module continues to exist as a defensive guard for any
+    extreme-legacy DB that bypassed migrations entirely.
+    """
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS aspect_promotion_log (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            field_name      TEXT NOT NULL,
+            sql_type        TEXT NOT NULL,
+            column_added    INTEGER NOT NULL,
+            rows_backfilled INTEGER NOT NULL DEFAULT 0,
+            rows_pruned     INTEGER NOT NULL DEFAULT 0,
+            pruned          INTEGER NOT NULL DEFAULT 0,
+            promoted_at     TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_aspect_promotion_log_field
+            ON aspect_promotion_log(field_name);
+    """)
+    conn.commit()
+    _log.info(
+        "Migrated: created aspect_promotion_log table (RDR-089 Phase E)"
+    )
+
+
 def migrate_chash_index(conn: sqlite3.Connection) -> None:
     """Create the ``chash_index`` table for RDR-086 Phase 1.
 
@@ -1334,6 +1528,26 @@ MIGRATIONS: list[Migration] = [
         "4.14.1",
         "Add hook_failures.batch_doc_ids + is_batch (RDR-095)",
         migrate_hook_failures_batch_columns,
+    ),
+    Migration(
+        "4.14.2",
+        "Add hook_failures.chain enum column + backfill batch rows (RDR-089)",
+        migrate_hook_failures_chain_column,
+    ),
+    Migration(
+        "4.14.2",
+        "Create document_aspects table (RDR-089 P1.1)",
+        migrate_document_aspects_table,
+    ),
+    Migration(
+        "4.14.2",
+        "Create aspect_extraction_queue table (RDR-089 follow-up nexus-qeo8)",
+        migrate_aspect_extraction_queue_table,
+    ),
+    Migration(
+        "4.14.2",
+        "Create aspect_promotion_log table (RDR-089 Phase E)",
+        migrate_aspect_promotion_log_table,
     ),
 ]
 

@@ -31,12 +31,31 @@ ALLOWED_FILES = frozenset({
 })
 
 
-def _scan_file_for_hook_refs(path: pathlib.Path) -> list[str]:
+# RDR-089 follow-up (nexus-qeo8): the aspect-extraction enqueue hook
+# is the document-grain analogue of the batch-chain guard above. The
+# hook lives in `nexus.aspect_worker` (not in mcp_infra, to keep the
+# infra module dependency-light), so the allow-list differs.
+DOCUMENT_HOOK_GUARDED_NAMES = frozenset({
+    "aspect_extraction_enqueue_hook",
+})
+
+DOCUMENT_HOOK_ALLOWED_FILES = frozenset({
+    "src/nexus/aspect_worker.py",  # the definition
+    "src/nexus/mcp/core.py",       # the single registration site
+})
+
+
+def _scan_file_for_hook_refs(
+    path: pathlib.Path,
+    *,
+    guarded_names: frozenset[str] = GUARDED_NAMES,
+    source_module: str = "nexus.mcp_infra",
+) -> list[str]:
     """Return semantic references to guarded hook names in *path*.
 
     Counts:
-      * ``from nexus.mcp_infra import <hook>``
-      * ``import nexus.mcp_infra ... ; mcp_infra.<hook>`` attribute access
+      * ``from <source_module> import <hook>``
+      * ``import <source_module> ... ; <source_module>.<hook>`` attribute access
       * Bare-name references where the hook was already imported
 
     Excludes docstrings, comments, and string literals (which can mention
@@ -54,18 +73,18 @@ def _scan_file_for_hook_refs(path: pathlib.Path) -> list[str]:
     refs: list[str] = []
 
     for node in ast.walk(tree):
-        # from nexus.mcp_infra import taxonomy_assign_batch_hook[, ...]
-        if isinstance(node, ast.ImportFrom) and node.module == "nexus.mcp_infra":
+        # from <source_module> import <hook>[, ...]
+        if isinstance(node, ast.ImportFrom) and node.module == source_module:
             for alias in node.names:
-                if alias.name in GUARDED_NAMES:
+                if alias.name in guarded_names:
                     refs.append(
-                        f"line {node.lineno}: from nexus.mcp_infra import {alias.name}"
+                        f"line {node.lineno}: from {source_module} import {alias.name}"
                     )
-        # mcp_infra.taxonomy_assign_batch_hook attribute access
-        elif isinstance(node, ast.Attribute) and node.attr in GUARDED_NAMES:
+        # <module>.<hook> attribute access
+        elif isinstance(node, ast.Attribute) and node.attr in guarded_names:
             refs.append(f"line {node.lineno}: ...{node.attr} attribute access")
-        # Bare-name reference (e.g. after `import taxonomy_assign_batch_hook`)
-        elif isinstance(node, ast.Name) and node.id in GUARDED_NAMES:
+        # Bare-name reference (e.g. after `import <hook>`)
+        elif isinstance(node, ast.Name) and node.id in guarded_names:
             refs.append(f"line {node.lineno}: bare reference to {node.id}")
 
     return refs
@@ -193,3 +212,217 @@ def test_every_cli_ingest_site_fires_both_chains() -> None:
         "the same number of times. Offenders:\n  "
         + "\n  ".join(f"{p}: {ps}" for p, ps in sorted(offenders.items()))
     )
+
+
+# ── RDR-089 document-chain call-site presence ───────────────────────────────
+
+
+# Expected fire counts per module for the document-grain chain.
+# Total: 8 fire-statement instances across 7 modules (seven logical
+# document boundaries — doc_indexer.py:index_pdf has two branch tails,
+# accounting for the off-by-one between site count and module count).
+# Mirrors CLI_SITE_FILES above plus mcp/core.py:store_put.
+DOCUMENT_HOOK_FIRE_SITES: dict[str, int] = {
+    "src/nexus/indexer.py": 1,             # _index_pdf_file (nx index repo PDF path)
+    "src/nexus/doc_indexer.py": 3,         # _index_document + index_pdf x2
+    "src/nexus/code_indexer.py": 1,        # index_code_file
+    "src/nexus/prose_indexer.py": 1,       # index_prose_file
+    "src/nexus/pipeline_stages.py": 1,     # pipeline_index_pdf (post _catalog_pdf_hook)
+    "src/nexus/mcp/core.py": 1,            # store_put
+}
+
+
+def _count_fire_calls(tree: ast.AST, fn_name: str) -> int:
+    """Count direct Call nodes whose callee is `fn_name` (matched by Name
+    or Attribute attr).
+    """
+    count = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name) and node.func.id == fn_name:
+            count += 1
+        elif isinstance(node.func, ast.Attribute) and node.func.attr == fn_name:
+            count += 1
+    return count
+
+
+def test_every_cli_ingest_site_fires_document_hook() -> None:
+    """RDR-089 P0.2 wiring invariant: each CLI ingest module + the MCP
+    store_put boundary must call ``fire_post_document_hooks`` exactly
+    the documented number of times. Total: 7 fire-statement instances
+    across 6 modules.
+
+    The call counts are pinned per-module so a future contributor who
+    drops a fire site (or accidentally double-fires inside a chunk
+    loop) fails CI here, not at runtime.
+
+    Either the alias name (``fire_post_document_hooks``) or the
+    privatised import name (``_fire_post_document_hooks`` in
+    ``mcp/core.py``) counts toward the total — they are the same
+    callable.
+    """
+    offenders: dict[str, str] = {}
+    for rel, expected in sorted(DOCUMENT_HOOK_FIRE_SITES.items()):
+        path = PROJECT_ROOT / rel
+        tree = ast.parse(path.read_text(), filename=str(path))
+        actual = (
+            _count_fire_calls(tree, "fire_post_document_hooks")
+            + _count_fire_calls(tree, "_fire_post_document_hooks")
+        )
+        if actual != expected:
+            offenders[rel] = f"expected {expected} call(s), got {actual}"
+
+    assert not offenders, (
+        "RDR-089 document-chain call-site invariant: each ingest "
+        "module must fire fire_post_document_hooks the documented "
+        "number of times. If this fails, the wiring drifted from the "
+        "P0.2 fire-site map. Offenders:\n  "
+        + "\n  ".join(f"{p}: {ps}" for p, ps in sorted(offenders.items()))
+    )
+
+
+def test_mcp_store_put_calls_document_hook_synchronously() -> None:
+    """RDR-089 load-bearing contract (audit F1): the call to
+    ``fire_post_document_hooks`` from ``mcp/core.py:store_put`` must be
+    a *plain sync* invocation. No ``await``, no ``asyncio.to_thread``
+    wrapping. ``store_put`` is ``def``, not ``async def``; FastMCP
+    wraps sync ``@mcp.tool()`` bodies in worker threads at the
+    framework level. Routing through ``async`` here would silently
+    drop the returned coroutine — exactly the original RDR-089 defect.
+
+    Pin via AST inspection: walk every ``Call`` node whose callee
+    targets ``fire_post_document_hooks`` (or its alias), then assert no
+    enclosing parent is an ``await`` or an ``asyncio.to_thread`` call.
+    """
+    rel = "src/nexus/mcp/core.py"
+    path = PROJECT_ROOT / rel
+    tree = ast.parse(path.read_text(), filename=str(path))
+
+    # Build child→parent map for ancestry checks.
+    parents: dict[int, ast.AST] = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[id(child)] = parent
+
+    def _is_doc_hook_call(node: ast.AST) -> bool:
+        if not isinstance(node, ast.Call):
+            return False
+        if isinstance(node.func, ast.Name):
+            return node.func.id in {
+                "fire_post_document_hooks", "_fire_post_document_hooks",
+            }
+        if isinstance(node.func, ast.Attribute):
+            return node.func.attr in {
+                "fire_post_document_hooks", "_fire_post_document_hooks",
+            }
+        return False
+
+    def _is_to_thread_call(node: ast.AST) -> bool:
+        if not isinstance(node, ast.Call):
+            return False
+        # asyncio.to_thread(...) — Attribute access
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "to_thread":
+            return True
+        if isinstance(node.func, ast.Name) and node.func.id == "to_thread":
+            return True
+        return False
+
+    offending_calls: list[str] = []
+    for node in ast.walk(tree):
+        if not _is_doc_hook_call(node):
+            continue
+        # Walk up from this call to ensure no ancestor is await or to_thread.
+        cur: ast.AST | None = node
+        line = getattr(node, "lineno", 0)
+        depth = 0
+        while cur is not None and depth < 20:
+            cur = parents.get(id(cur))
+            if cur is None:
+                break
+            if isinstance(cur, ast.Await):
+                offending_calls.append(
+                    f"line {line}: fire_post_document_hooks wrapped in await"
+                )
+                break
+            if _is_to_thread_call(cur):
+                offending_calls.append(
+                    f"line {line}: fire_post_document_hooks routed through "
+                    f"asyncio.to_thread"
+                )
+                break
+            depth += 1
+
+    assert not offending_calls, (
+        "RDR-089 sync-all-the-way-down contract (audit F1): "
+        "fire_post_document_hooks at MCP store_put must be a plain "
+        "synchronous call. await / asyncio.to_thread wrapping silently "
+        "drops the dispatch (store_put is `def`, not `async def`). "
+        "Offenders:\n  " + "\n  ".join(offending_calls)
+    )
+
+
+# ── Document-chain GUARDED_NAMES wave 2 (nexus-qeo8) ─────────────────────────
+
+
+def test_document_hook_not_called_outside_aspect_worker_and_core() -> None:
+    """RDR-089 follow-up drift guard: the document-grain hook
+    ``aspect_extraction_enqueue_hook`` may only be referenced inside
+    its definition module (``src/nexus/aspect_worker.py``) and the
+    single registration site (``src/nexus/mcp/core.py``). Every
+    other module fires through ``fire_post_document_hooks`` — the
+    framework dispatches.
+
+    The same anti-pattern caught by the batch-chain guard above:
+    a future contributor who imports the hook directly to call it
+    inline (e.g. to "make extraction synchronous in this one path")
+    re-introduces the synchronous-extraction bottleneck the P1.3
+    spike specifically retired. The fix is always to fire through
+    the chain dispatcher, not to import the hook.
+    """
+    offenders: dict[str, list[str]] = {}
+    for py in SRC_ROOT.rglob("*.py"):
+        rel = py.relative_to(PROJECT_ROOT).as_posix()
+        if rel in DOCUMENT_HOOK_ALLOWED_FILES:
+            continue
+        refs = _scan_file_for_hook_refs(
+            py,
+            guarded_names=DOCUMENT_HOOK_GUARDED_NAMES,
+            source_module="nexus.aspect_worker",
+        )
+        if refs:
+            offenders[rel] = refs
+
+    if offenders:
+        formatted = "\n".join(
+            f"  {path}:\n    " + "\n    ".join(refs)
+            for path, refs in sorted(offenders.items())
+        )
+        raise AssertionError(
+            "RDR-089 follow-up drift guard: "
+            "aspect_extraction_enqueue_hook may only be referenced "
+            "inside src/nexus/aspect_worker.py (definition) and "
+            "src/nexus/mcp/core.py (registration). New consumers "
+            "should fire through fire_post_document_hooks. "
+            "Offenders:\n" + formatted
+        )
+
+
+def test_document_hook_drift_guard_catches_synthetic_offender(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The drift-guard scanner correctly flags an ImportFrom of the
+    aspect-worker hook in an arbitrary file. Pinned so this guard
+    cannot regress to a no-op."""
+    offender = tmp_path / "offender.py"
+    offender.write_text(
+        "from nexus.aspect_worker import aspect_extraction_enqueue_hook\n"
+        "aspect_extraction_enqueue_hook('/p', 'knowledge__delos', '')\n"
+    )
+    refs = _scan_file_for_hook_refs(
+        offender,
+        guarded_names=DOCUMENT_HOOK_GUARDED_NAMES,
+        source_module="nexus.aspect_worker",
+    )
+    assert refs, "scanner must flag a direct ImportFrom of the guarded hook"
+    assert any("aspect_extraction_enqueue_hook" in r for r in refs)

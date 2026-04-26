@@ -35,6 +35,7 @@ Reinstall the tool venv, create a fresh isolated `$HOME`, then run from `/tmp`:
 - `nx --version` (sanity)
 - `nx upgrade --dry-run` (preview migrations)
 - `nx upgrade` (apply)
+- `nx catalog setup` (initialize catalog + seed 12 builtin plan templates)
 - `nx doctor --check-schema` (T2 schema sanity)
 - `nx doctor --check-plan-library` (builtin plan count)
 - `nx doctor --check-taxonomy` (topic_links invariant)
@@ -46,10 +47,9 @@ Pass / fail per check. Total time ~2 min including reinstall.
 ./tests/e2e/release-sandbox.sh smoke
 ```
 
-**Known fresh-sandbox failures** (not script bugs, expected for a clean sandbox):
-
-- `--check-plan-library`: reports `global-tier builtin count 0 < expected 9` because `nx catalog setup` has not run in the sandbox. To exercise plan-library code paths against the canonical seeded set, drop into `shell` mode and run `nx catalog setup` first.
-- `nx upgrade` may report `OldLayoutDetected` if your shell environment has cloud ChromaDB credentials pointing at a legacy four-database tenant. Unset `CHROMA_*` before running, or expect the noise.
+A green smoke means the install + migration + doctor surface is healthy
+end-to-end. A FAIL means something is genuinely broken — investigate
+before merging.
 
 ### `shell`
 

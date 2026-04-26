@@ -47,7 +47,7 @@ Set via `nx config init` (wizard) or `nx config set KEY VALUE`. Stored in `~/.co
 |---|---|---|
 | `S2_API_KEY` | No | Free API key for 100 req/s (vs 100/5min unauthenticated). Get one at https://www.semanticscholar.org/product/api#api-key |
 
-Used by `nx enrich` to fetch bibliographic metadata (year, venue, authors, citation count). Without the key, enrichment works but is ~50x slower due to rate limiting.
+Used by `nx enrich bib` to fetch bibliographic metadata (year, venue, authors, citation count). Without the key, enrichment works but is ~50x slower due to rate limiting.
 
 **`chroma_database` is the database name.** Nexus connects to this single database on ChromaDB Cloud. All collection prefixes (`code__*`, `docs__*`, `rdr__*`, `knowledge__*`) coexist in it. Use `nx doctor` to check its status.
 
@@ -55,7 +55,7 @@ Used by `nx enrich` to fetch bibliographic metadata (year, venue, authors, citat
 
 **Database creation is automatic.** `nx config init` provisions the database on Chroma Cloud using your API key — no dashboard visit required. If provisioning fails (e.g., plan restrictions), create the database manually in the Chroma Cloud dashboard.
 
-**Upgrading from the four-database layout?** If you previously used the four-database layout (`{base}_code`, `{base}_docs`, `{base}_rdr`, `{base}_knowledge`), nexus will auto-detect it and show migration steps. The migration is non-destructive — old databases are never modified or deleted. Export your data with the pre-upgrade version before upgrading, then follow the guided steps. See the [CHANGELOG](../CHANGELOG.md) for the full migration path.
+**Single-database architecture.** RDR-037 (2026-03-14) consolidated the legacy four-database layout (`{base}_code` / `{base}_docs` / `{base}_rdr` / `{base}_knowledge`) into a single database with collection prefixes. The transitional auto-detect probe was retired in 4.14.2 once the migration window closed. Anyone still on the legacy layout should pin `conexus<4.14.2`, run the export documented in the 4.x.0 CHANGELOG entries, then upgrade.
 
 ## Settings
 

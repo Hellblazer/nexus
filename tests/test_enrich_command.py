@@ -20,7 +20,7 @@ def test_enrich_empty_collection(mock_bib: MagicMock, mock_t3_factory: MagicMock
     mock_t3_factory.return_value = mock_db
 
     runner = CliRunner()
-    result = runner.invoke(enrich, ["knowledge__test"])
+    result = runner.invoke(enrich, ["bib", "knowledge__test"])
     assert result.exit_code == 0
     assert "is empty" in result.output
     mock_bib.assert_not_called()
@@ -43,7 +43,7 @@ def test_enrich_skips_already_enriched(mock_bib: MagicMock, mock_t3_factory: Mag
     mock_t3_factory.return_value = mock_db
 
     runner = CliRunner()
-    result = runner.invoke(enrich, ["knowledge__test"])
+    result = runner.invoke(enrich, ["bib", "knowledge__test"])
     assert result.exit_code == 0
     assert "2 already enriched" in result.output
     assert "0 titles to look up" in result.output
@@ -87,7 +87,7 @@ def test_enrich_updates_metadata(
     mock_t3_factory.return_value = mock_db
 
     runner = CliRunner()
-    result = runner.invoke(enrich, ["knowledge__test", "--delay", "0"])
+    result = runner.invoke(enrich, ["bib", "knowledge__test", "--delay", "0"])
     assert result.exit_code == 0
     assert "enriched 2 chunks across 1 titles" in result.output
 
@@ -108,7 +108,7 @@ def test_enrich_no_match_increments_skipped(mock_bib: MagicMock, mock_t3_factory
     mock_t3_factory.return_value = mock_db
 
     runner = CliRunner()
-    result = runner.invoke(enrich, ["knowledge__test", "--delay", "0"])
+    result = runner.invoke(enrich, ["bib", "knowledge__test", "--delay", "0"])
     assert result.exit_code == 0
     assert "1 titles had no Semantic Scholar match" in result.output
 
@@ -133,7 +133,7 @@ def test_enrich_limit_option(mock_bib: MagicMock, mock_t3_factory: MagicMock) ->
     mock_t3_factory.return_value = mock_db
 
     runner = CliRunner()
-    result = runner.invoke(enrich, ["knowledge__test", "--delay", "0", "--limit", "2"])
+    result = runner.invoke(enrich, ["bib", "knowledge__test", "--delay", "0", "--limit", "2"])
     assert result.exit_code == 0
     assert "capped at 2" in result.output
     assert mock_bib.call_count == 2

@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.14.2] - 2026-04-26
+
+Plugin version aligned with conexus 4.14.2. The SessionStart hook output line for the enrichment surface is updated for the new `nx enrich` subcommand structure: `nx enrich bib COLLECTION` (Semantic Scholar) | `nx enrich aspects COLLECTION` (RDR-089 structured aspects). See root `CHANGELOG.md` for the RDR-089 deliverable: document-grain post-store hook chain, async aspect-extraction worker, T2 `document_aspects` + `aspect_extraction_queue` stores, the new `nx enrich aspects` CLI, and the retirement of the RDR-037 four-database migration probe.
+
 ## [4.14.1] - 2026-04-25
 
 Plugin version aligned with conexus 4.14.1. No plugin-level functional changes. See root `CHANGELOG.md` for the RDR-095 deliverable: post-store hook framework batch contract, symmetric fire on every storage event, and T2 schema migration adding `batch_doc_ids` + `is_batch` columns to `hook_failures`.

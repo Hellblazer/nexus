@@ -79,11 +79,15 @@ class TestMigrationDataclass:
         # legacy operation-shape retirement (4.10.1) +
         # builtin-bindings backfill (4.10.2) +
         # hook_telemetry table (4.14.0, nexus-ntbg) +
-        # hook_failures batch columns (4.14.1, RDR-095) = 22.
+        # hook_failures batch columns (4.14.1, RDR-095) +
+        # hook_failures chain enum (4.14.2, RDR-089) +
+        # document_aspects table (4.14.2, RDR-089 P1.1) +
+        # aspect_extraction_queue (4.14.2, RDR-089 nexus-qeo8) +
+        # aspect_promotion_log table (4.14.2, RDR-089 Phase E) = 26.
         # Prefer the name-based checks in TestBackfillPlanDimensions
         # and TestAddPlanMatchTextColumn for future guards; this
         # count is a cheap sentinel only.
-        assert len(MIGRATIONS) == 22
+        assert len(MIGRATIONS) == 26
 
     def test_migrations_ordered_by_version(self) -> None:
         from nexus.db.migrations import MIGRATIONS, _parse_version

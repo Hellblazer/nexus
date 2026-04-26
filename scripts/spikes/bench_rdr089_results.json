@@ -1,0 +1,36 @@
+{
+  "rdr": "rdr-089",
+  "phase": "C",
+  "started_at": "2026-04-26T13:49:16.765501+00:00",
+  "papers": 100,
+  "trials": 10,
+  "llm_simulated_latency_s": 1.5,
+  "results": {
+    "operator_filter": {
+      "sql_median_ms": 3.007,
+      "sql_p95_ms": 3.202,
+      "llm_median_ms": 1502.216,
+      "llm_p95_ms": 1502.287,
+      "speedup_x": 499.5,
+      "trials": 10
+    },
+    "operator_groupby": {
+      "sql_median_ms": 2.993,
+      "sql_p95_ms": 3.29,
+      "llm_median_ms": 1501.637,
+      "llm_p95_ms": 1502.12,
+      "speedup_x": 501.7,
+      "trials": 10
+    },
+    "operator_aggregate": {
+      "sql_median_ms": 0.032,
+      "sql_p95_ms": 0.036,
+      "llm_median_ms": 1502.116,
+      "llm_p95_ms": 1502.252,
+      "speedup_x": 47622.8,
+      "trials": 10
+    }
+  },
+  "finished_at": "2026-04-26T13:50:02.812817+00:00",
+  "verdict_pass": true
+}
