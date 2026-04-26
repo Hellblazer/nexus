@@ -534,6 +534,69 @@ def test_record_hook_failure_writes_chain_single(
     mod._post_store_hooks.clear()
 
 
+def test_record_hook_failure_falls_back_when_chain_column_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Symmetric coverage with the document-chain fallback test: the
+    single-doc chain's failure recorder also falls back to a chain-less
+    INSERT on pre-4.14.2 schemas. Pinned so a future change to the
+    schema-fallback wording (`'no column named'` / `'no such column'`)
+    does not silently break the fallback path.
+    """
+    import threading
+
+    import nexus.mcp_infra as mod
+    from nexus.db.migrations import (
+        migrate_hook_failures,
+        migrate_hook_failures_batch_columns,
+    )
+    from nexus.mcp_infra import fire_post_store_hooks, register_post_store_hook
+
+    db_path = tmp_path / "single_pre_4_14_2.db"
+    raw = sqlite3.connect(str(db_path), isolation_level=None)
+    migrate_hook_failures(raw)
+    migrate_hook_failures_batch_columns(raw)  # 4.14.1 — but NOT 4.14.2
+
+    cols = {r[1] for r in raw.execute("PRAGMA table_info(hook_failures)").fetchall()}
+    assert "chain" not in cols, (
+        "pre-condition: hook_failures must lack the chain column"
+    )
+
+    class _FakeTaxonomy:
+        def __init__(self, conn: sqlite3.Connection) -> None:
+            self.conn = conn
+            self._lock = threading.RLock()
+
+    class _FakeT2:
+        def __init__(self, conn: sqlite3.Connection) -> None:
+            self.taxonomy = _FakeTaxonomy(conn)
+        def __enter__(self) -> "_FakeT2":
+            return self
+        def __exit__(self, *_: object) -> None:
+            return None
+
+    monkeypatch.setattr(mod, "t2_ctx", lambda: _FakeT2(raw))
+
+    mod._post_store_hooks.clear()
+
+    def raising(doc_id, collection, content):
+        raise RuntimeError("single boom")
+
+    register_post_store_hook(raising)
+    fire_post_store_hooks("doc-pre-4-14-2", "knowledge__delos", "x")
+
+    rows = raw.execute(
+        "SELECT doc_id, hook_name, error FROM hook_failures"
+    ).fetchall()
+    raw.close()
+
+    assert len(rows) == 1
+    assert rows[0][0] == "doc-pre-4-14-2"
+    assert rows[0][1] == "raising"
+    assert "single boom" in rows[0][2]
+    mod._post_store_hooks.clear()
+
+
 def test_record_batch_hook_failure_writes_chain_batch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
