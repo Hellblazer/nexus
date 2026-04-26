@@ -224,10 +224,13 @@ def chunk_file(file: Path, content: str, chunk_lines: int | None = None) -> list
     ext = file.suffix.lower()
     language = LANGUAGE_REGISTRY.get(ext)
 
+    # ``filename`` / ``file_extension`` / ``ast_chunked`` were dropped
+    # in nexus-59j0: they're not in metadata_schema.ALLOWED_TOP_LEVEL,
+    # so the indexer factory ignores them. ``file_path`` stays as the
+    # only chunker-level identifier the code_indexer reads (it's
+    # promoted to ``source_path`` at factory time).
     base_meta = {
         "file_path": str(file),
-        "filename": file.name,
-        "file_extension": ext,
     }
 
     if language:
@@ -237,7 +240,7 @@ def chunk_file(file: Path, content: str, chunk_lines: int | None = None) -> list
                 count = len(nodes)
                 result = []
                 for i, node in enumerate(nodes):
-                    meta = {**base_meta, **node.metadata, "ast_chunked": True, "chunk_index": i, "chunk_count": count}
+                    meta = {**base_meta, **node.metadata, "chunk_index": i, "chunk_count": count}
                     # CodeSplitter.get_nodes_from_documents() always returns metadata={} —
                     # no line_start/line_end. Derive per-chunk line numbers from the
                     # TextNode character offsets (start_char_idx is populated and accurate).
@@ -269,7 +272,6 @@ def chunk_file(file: Path, content: str, chunk_lines: int | None = None) -> list
         result.append(
             {
                 **base_meta,
-                "ast_chunked": False,
                 "chunk_index": i,
                 "chunk_count": count,
                 "line_start": ls,

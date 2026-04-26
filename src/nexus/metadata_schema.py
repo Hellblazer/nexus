@@ -74,11 +74,16 @@ ALLOWED_TOP_LEVEL: frozenset[str] = frozenset({
     "store_type",
     "corpus",
     "embedding_model",
-    # Bibliographic (filtered via where=bib_year; displayed in results) (4)
+    # Bibliographic (filtered via where=bib_year; displayed in results) (5).
+    # ``bib_semantic_scholar_id`` is the load-bearing "this title was
+    # enriched" marker (commands/enrich.py uses presence to skip
+    # already-enriched titles; catalog/link_generator.py uses it for
+    # citation links). Dropped together with the rest when all-empty.
     "bib_year",
     "bib_authors",
     "bib_venue",
     "bib_citation_count",
+    "bib_semantic_scholar_id",
     # Lifecycle / scoring (5) — ``expires_at`` removed; expiry is
     # derived from ``indexed_at + ttl_days`` Python-side. ``ttl_days=0``
     # is the "permanent" sentinel.
@@ -118,6 +123,7 @@ _GIT_FIELD_MAP: dict[str, str] = {
 #: contract stays uniform.
 _BIB_FIELDS: tuple[str, ...] = (
     "bib_year", "bib_authors", "bib_venue", "bib_citation_count",
+    "bib_semantic_scholar_id",
 )
 
 #: Primitive value types accepted by ChromaDB metadata.
@@ -281,6 +287,7 @@ def make_chunk_metadata(
     bib_authors: str = "",
     bib_venue: str = "",
     bib_citation_count: int = 0,
+    bib_semantic_scholar_id: str = "",
     # Lifecycle
     ttl_days: int = 0,
     frecency_score: float = 0.0,
@@ -326,6 +333,7 @@ def make_chunk_metadata(
         "bib_authors": bib_authors,
         "bib_venue": bib_venue,
         "bib_citation_count": bib_citation_count,
+        "bib_semantic_scholar_id": bib_semantic_scholar_id,
         "ttl_days": ttl_days,
         "indexed_at": indexed_at,
         "frecency_score": frecency_score,

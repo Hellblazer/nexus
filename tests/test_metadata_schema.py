@@ -56,7 +56,10 @@ def test_cargo_keys_not_allowed() -> None:
     from nexus.metadata_schema import ALLOWED_TOP_LEVEL
 
     for key in (
-        "bib_semantic_scholar_id",
+        # bib_semantic_scholar_id is now allowed — it is the load-bearing
+        # "this title was enriched" marker (commands/enrich.py:89,
+        # catalog/link_generator.py:38). Without it in the schema,
+        # normalize() drops the marker and enrich loses idempotency.
         "pdf_subject",
         "pdf_keywords",
         "source_date",
@@ -187,14 +190,14 @@ def test_normalize_preserves_bib_fields() -> None:
         "bib_authors": "Smith, Jones",
         "bib_venue": "ICML",
         "bib_citation_count": 42,
-        "bib_semantic_scholar_id": "dropthis",
+        "bib_semantic_scholar_id": "ss-12345",
     }
     out = normalize(raw, content_type="pdf")
     assert out["bib_year"] == 2024
     assert out["bib_authors"] == "Smith, Jones"
     assert out["bib_venue"] == "ICML"
     assert out["bib_citation_count"] == 42
-    assert "bib_semantic_scholar_id" not in out
+    assert out["bib_semantic_scholar_id"] == "ss-12345"
 
 
 def test_normalize_is_idempotent() -> None:

@@ -37,7 +37,10 @@ def _expected_keys_for_content_type(content_type: str) -> set[str]:
     by-design omissions — every other ALLOWED_TOP_LEVEL key must be
     present.
     """
-    bib_keys = {"bib_year", "bib_authors", "bib_venue", "bib_citation_count"}
+    bib_keys = {
+        "bib_year", "bib_authors", "bib_venue", "bib_citation_count",
+        "bib_semantic_scholar_id",
+    }
     return ALLOWED_TOP_LEVEL - bib_keys - {"git_meta"}
 
 
@@ -202,6 +205,7 @@ def _full_keyset_minus_optional() -> set[str]:
     """
     return ALLOWED_TOP_LEVEL - {
         "bib_year", "bib_authors", "bib_venue", "bib_citation_count",
+        "bib_semantic_scholar_id",
         "git_meta",
     }
 

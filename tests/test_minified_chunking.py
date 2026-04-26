@@ -116,19 +116,22 @@ def test_chunk_file_normal_js_unchanged(tmp_path: Path) -> None:
     chunks = chunk_file(Path("normal.js"), normal)
 
     assert len(chunks) >= 1
-    # Should use AST chunking for .js files
-    assert chunks[0]["ast_chunked"] is True or chunks[0]["ast_chunked"] is False
+    # The ``ast_chunked`` discriminator was dropped in nexus-59j0 (cargo).
+    # Contract here: chunker handles normal JS without crashing.
 
 
 def test_chunk_file_minified_preserves_metadata() -> None:
-    """Minified chunks have correct file_path, filename, extension metadata."""
+    """Minified chunks carry the keys the indexer factory consumes.
+
+    nexus-59j0 dropped ``filename`` / ``file_extension``; ``file_path``
+    is the only file-identifier the chunker emits."""
     minified = "function f(){" + "x();" * 5000 + "}"
     chunks = chunk_file(Path("/repo/app.min.js"), minified)
 
     for c in chunks:
         assert c["file_path"] == "/repo/app.min.js"
-        assert c["filename"] == "app.min.js"
-        assert c["file_extension"] == ".js"
+        assert "filename" not in c
+        assert "file_extension" not in c
         assert "chunk_index" in c
         assert "chunk_count" in c
         assert "line_start" in c
