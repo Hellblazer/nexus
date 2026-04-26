@@ -1,8 +1,19 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""CLI command: nx enrich — backfill bibliographic metadata for a collection."""
+"""CLI command: ``nx enrich`` — backfill metadata over an existing collection.
+
+Subcommands:
+
+  bib       — Semantic Scholar bibliographic metadata (existing).
+  aspects   — Structured aspect extraction (RDR-089 P2.2).
+
+The group structure replaces the previous ``nx enrich <collection>``
+single command. Migration: ``nx enrich <coll>`` → ``nx enrich bib
+<coll>``. The aspects subcommand is new in this restructure.
+"""
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import click
 import structlog
@@ -10,7 +21,23 @@ import structlog
 _log = structlog.get_logger(__name__)
 
 
-@click.command()
+@click.group(name="enrich")
+def enrich() -> None:
+    """Enrich a collection with bibliographic or aspect metadata.
+
+    Subcommands:
+
+    \b
+      bib       — backfill bibliographic metadata via Semantic Scholar
+      aspects   — extract structured aspects via the synchronous
+                  Claude CLI extractor (RDR-089 P2.2)
+    """
+
+
+# ── nx enrich bib (existing functionality, moved to subcommand) ─────────────
+
+
+@enrich.command(name="bib")
 @click.argument("collection")
 @click.option(
     "--delay",
@@ -25,15 +52,16 @@ _log = structlog.get_logger(__name__)
     type=int,
     help="Maximum number of titles to enrich (0 = unlimited).",
 )
-def enrich(collection: str, delay: float, limit: int) -> None:
+def enrich_bib(collection: str, delay: float, limit: int) -> None:
     """Backfill bibliographic metadata for chunks in COLLECTION.
 
     Queries Semantic Scholar for each unique source title found in the
-    collection and writes bib_year, bib_venue, bib_authors, bib_citation_count,
-    and bib_semantic_scholar_id back to every chunk with that title.
+    collection and writes bib_year, bib_venue, bib_authors,
+    bib_citation_count, and bib_semantic_scholar_id back to every
+    chunk with that title.
 
-    Already-enriched chunks (bib_semantic_scholar_id is non-empty) are skipped
-    — the command is idempotent.
+    Already-enriched chunks (bib_semantic_scholar_id is non-empty) are
+    skipped — the command is idempotent.
     """
     from nexus.bib_enricher import enrich as bib_enrich
     from nexus.db import make_t3
@@ -213,3 +241,321 @@ def _catalog_enrich_hook(title: str, bib_meta: dict, collection_name: str = "") 
             )
     except Exception:
         _log.debug("catalog_enrich_hook_failed", exc_info=True)
+
+
+# ── nx enrich aspects (RDR-089 P2.2) ────────────────────────────────────────
+
+
+# Per-paper Haiku cost estimate (RDR §Trade-offs). Conservative ceiling
+# for ~5K-token output on Haiku-4-class models. Used by --dry-run.
+_PER_PAPER_COST_USD = 0.01
+
+# RDR-089 P1.3 spike measured 16.7% strict-equality field stability —
+# below the RDR-088 95%/99% budget. The bead's note "raise to 20% per
+# the spike's verdict" sets the default to 20% rather than 5%.
+_DEFAULT_VALIDATE_SAMPLE_PCT = 20
+
+
+@enrich.command(name="aspects")
+@click.argument("collection")
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Report document count + cost estimate. No API calls. No T2 writes.",
+)
+@click.option(
+    "--validate-sample",
+    type=int,
+    default=_DEFAULT_VALIDATE_SAMPLE_PCT,
+    show_default=True,
+    help=(
+        "Validate N%% of newly-extracted aspects via operator_verify "
+        "(claim=aspects, evidence=document text). Disagreements append "
+        "to ./validation_failures.jsonl. Pass 0 to skip validation. "
+        "Default 20%% (raised from 5%% per the P1.3 spike's strict-"
+        "equality stability finding)."
+    ),
+)
+@click.option(
+    "--re-extract",
+    is_flag=True,
+    help="Re-run only on rows whose model_version < --extractor-version.",
+)
+@click.option(
+    "--extractor-version",
+    default="",
+    help="Threshold for --re-extract (lexicographic STRICT-less-than).",
+)
+def enrich_aspects(
+    collection: str,
+    dry_run: bool,
+    validate_sample: int,
+    re_extract: bool,
+    extractor_version: str,
+) -> None:
+    """Batch-extract structured aspects for documents in COLLECTION.
+
+    Iterates the catalog (one entry per source document, NOT per
+    chunk), calls extract_aspects directly (bypassing the
+    fire_post_document_hooks chain to avoid double-firing on
+    documents already triggered at ingest), and upserts AspectRecords
+    to ``document_aspects``.
+
+    Phase 1 supports ``knowledge__*`` collections only. Other
+    collections error out at the config-selection step.
+    """
+    from nexus.aspect_extractor import select_config
+
+    config = select_config(collection)
+    if config is None:
+        click.echo(
+            f"No extractor config registered for collection "
+            f"'{collection}'. Phase 1 (RDR-089) supports knowledge__* "
+            f"only. Aborting."
+        )
+        return
+
+    if re_extract and not extractor_version:
+        click.echo(
+            "--re-extract requires --extractor-version (the threshold "
+            "below which rows are re-run). Aborting."
+        )
+        return
+
+    entries = _select_entries(
+        collection=collection,
+        re_extract=re_extract,
+        extractor_version=extractor_version,
+        config_extractor_name=config.extractor_name,
+    )
+    if entries is None:  # catalog missing
+        return
+
+    if not entries:
+        click.echo(f"No documents to process in '{collection}'.")
+        return
+
+    cost_estimate = len(entries) * _PER_PAPER_COST_USD
+    click.echo(
+        f"{len(entries)} document(s) in '{collection}' "
+        f"(extractor={config.extractor_name}, "
+        f"version={config.model_version}). "
+        f"Estimated cost ~${cost_estimate:.2f} at Haiku rates."
+    )
+
+    if dry_run:
+        click.echo("--dry-run: skipping extraction.")
+        return
+
+    extracted = _run_extraction(entries, collection)
+    if not extracted:
+        click.echo("No aspects extracted.")
+        return
+
+    if validate_sample > 0:
+        _run_validation_sample(extracted, sample_pct=validate_sample)
+
+
+def _select_entries(
+    *,
+    collection: str,
+    re_extract: bool,
+    extractor_version: str,
+    config_extractor_name: str,
+) -> list | None:
+    """Return the catalog entries to process, or None if the catalog
+    is missing (terminal error already echoed)."""
+    from nexus.catalog import Catalog
+    from nexus.commands._helpers import default_db_path
+    from nexus.config import catalog_path
+    from nexus.db.t2 import T2Database
+
+    cat_path = catalog_path()
+    if not Catalog.is_initialized(cat_path):
+        click.echo("Catalog not initialized — run 'nx catalog setup' first.")
+        return None
+    cat = Catalog(cat_path, cat_path / ".catalog.db")
+    entries = cat.list_by_collection(collection)
+
+    if re_extract:
+        # Filter to entries whose existing aspect row has model_version
+        # below the threshold. Rows without an existing aspect entry
+        # are also included (they need first-time extraction).
+        with T2Database(default_db_path()) as db:
+            outdated_paths = {
+                r.source_path
+                for r in db.document_aspects.list_by_extractor_version(
+                    config_extractor_name, extractor_version,
+                )
+            }
+            # Find entries missing from document_aspects so they get
+            # included too (re-extract is "ensure all entries are at
+            # >= version"; a missing row is by definition at < version).
+            existing_paths = set()
+            for r in db.document_aspects.list_by_collection(collection):
+                existing_paths.add(r.source_path)
+
+        filtered = []
+        for e in entries:
+            sp = e.file_path or e.title
+            if sp in outdated_paths or sp not in existing_paths:
+                filtered.append(e)
+        entries = filtered
+
+    return entries
+
+
+def _run_extraction(entries: list, collection: str) -> list[tuple[str, object]]:
+    """Drive extract_aspects per entry, upsert document_aspects, return
+    the list of (source_path, AspectRecord) tuples for the successful
+    extractions (used as input for --validate-sample).
+    """
+    from nexus.aspect_extractor import extract_aspects
+    from nexus.commands._helpers import default_db_path
+    from nexus.db.t2 import T2Database
+
+    extracted: list[tuple[str, object]] = []
+    success = 0
+    null_fields = 0
+    skipped = 0
+
+    db_path = default_db_path()
+    for i, entry in enumerate(entries, 1):
+        source_path = entry.file_path or entry.title
+        if not source_path:
+            skipped += 1
+            click.echo(f"  [{i}/{len(entries)}] (no source_path) — skipped")
+            continue
+
+        record = extract_aspects(
+            content="",
+            source_path=source_path,
+            collection=collection,
+        )
+        if record is None:
+            # Defensive — select_config already passed at the parent
+            # level, so this branch should not fire under Phase 1.
+            skipped += 1
+            click.echo(f"  [{i}/{len(entries)}] {Path(source_path).name}: no extractor — skipped")
+            continue
+
+        with T2Database(db_path) as db:
+            db.document_aspects.upsert(record)
+
+        if record.problem_formulation is None:
+            null_fields += 1
+            click.echo(
+                f"  [{i}/{len(entries)}] {Path(source_path).name}: "
+                f"null-fields (extractor failed 3x)"
+            )
+        else:
+            success += 1
+            extracted.append((source_path, record))
+            click.echo(
+                f"  [{i}/{len(entries)}] {Path(source_path).name}: extracted"
+            )
+
+    click.echo(
+        f"Done: {success} extracted, {null_fields} null-fields, "
+        f"{skipped} skipped."
+    )
+    return extracted
+
+
+def _run_validation_sample(
+    extracted: list[tuple[str, object]],
+    *,
+    sample_pct: int,
+) -> None:
+    """Sample N% of extracted records, run operator_verify against the
+    raw document text, and write disagreements to
+    ``./validation_failures.jsonl``.
+    """
+    import asyncio
+    import json
+    import random
+    from datetime import UTC, datetime
+
+    sample_count = max(1, len(extracted) * sample_pct // 100)
+    sample_count = min(sample_count, len(extracted))
+    rng = random.Random()
+    sample = rng.sample(extracted, sample_count)
+    click.echo(
+        f"Validating {sample_count} of {len(extracted)} extractions "
+        f"({sample_pct}%) via operator_verify..."
+    )
+
+    failures_path = Path("validation_failures.jsonl")
+    failures = 0
+    verified = 0
+    errored = 0
+
+    for source_path, record in sample:
+        try:
+            content = (
+                Path(source_path)
+                .read_text(encoding="utf-8", errors="replace")
+                .replace("\x00", "")
+            )
+        except OSError as exc:
+            errored += 1
+            _log.warning(
+                "validate_sample_read_failed",
+                source_path=source_path, error=str(exc),
+            )
+            continue
+
+        claim_payload = {
+            "problem_formulation": record.problem_formulation,
+            "proposed_method": record.proposed_method,
+            "experimental_datasets": record.experimental_datasets,
+            "experimental_baselines": record.experimental_baselines,
+            "experimental_results": record.experimental_results,
+        }
+        claim_json = json.dumps(claim_payload)
+
+        try:
+            result = asyncio.run(_verify(claim_json, content[:50000]))
+        except Exception as exc:
+            errored += 1
+            _log.warning(
+                "validate_sample_verify_failed",
+                source_path=source_path, error=str(exc),
+            )
+            continue
+
+        if result.get("verified", False):
+            verified += 1
+            continue
+
+        failures += 1
+        with failures_path.open("a") as f:
+            f.write(json.dumps({
+                "source_path": source_path,
+                "extracted_aspects": claim_payload,
+                "operator_verify_reason": result.get("reason", ""),
+                "citations": result.get("citations", []),
+                "timestamp": datetime.now(UTC).isoformat(),
+            }) + "\n")
+
+    if failures:
+        click.echo(
+            f"Validation: {verified} verified, {failures} disagreement(s) "
+            f"written to {failures_path}, {errored} errored."
+        )
+    else:
+        click.echo(
+            f"Validation: all {verified} sample(s) verified "
+            f"({errored} errored)."
+        )
+
+
+async def _verify(claim_json: str, evidence: str) -> dict:
+    """Async wrapper around operator_verify so the CLI can call it
+    from synchronous click code via ``asyncio.run``."""
+    from nexus.mcp.core import operator_verify
+    return await operator_verify(
+        claim=claim_json,
+        evidence=evidence,
+        timeout=60.0,
+    )

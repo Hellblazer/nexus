@@ -706,6 +706,49 @@ class Catalog:
             alias_of=row[13] or "",
         )
 
+    def list_by_collection(
+        self, physical_collection: str, *, limit: int | None = None,
+    ) -> list[CatalogEntry]:
+        """Return every document entry whose ``physical_collection``
+        matches.
+
+        One entry per source document (NOT per chunk) — what callers
+        like ``nx enrich aspects`` need to drive a per-document
+        operation. Ordered by ``tumbler ASC`` for deterministic
+        iteration. ``limit=None`` returns every match.
+        """
+        sql = (
+            "SELECT tumbler, title, author, year, content_type, file_path, "
+            "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
+            "metadata, source_mtime, alias_of "
+            "FROM documents WHERE physical_collection = ? "
+            "ORDER BY tumbler ASC"
+        )
+        params: tuple = (physical_collection,)
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (physical_collection, limit)
+        rows = self._db.execute(sql, params).fetchall()
+        return [
+            CatalogEntry(
+                tumbler=Tumbler.parse(row[0]),
+                title=row[1],
+                author=row[2],
+                year=row[3],
+                content_type=row[4],
+                file_path=row[5],
+                corpus=row[6],
+                physical_collection=row[7],
+                chunk_count=row[8],
+                head_hash=row[9],
+                indexed_at=row[10],
+                meta=json.loads(row[11]) if row[11] else {},
+                source_mtime=row[12] or 0.0,
+                alias_of=row[13] or "",
+            )
+            for row in rows
+        ]
+
     def resolve_alias(self, tumbler: Tumbler, *, max_hops: int = 16) -> Tumbler:
         """Walk the alias chain to its canonical terminus.
 
