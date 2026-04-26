@@ -14,11 +14,17 @@ keyed on the ``knowledge__*`` collection prefix. Other prefixes
 return ``None`` from ``extract_aspects``; the calling hook should
 no-op on ``None``.
 
-Invocation: ``subprocess.run(["claude", "-p", PROMPT, "--json"],
-timeout=180, capture_output=True, text=True)``. The Claude CLI is
-expected to be on PATH; if it is not, ``subprocess.run`` raises
-``FileNotFoundError`` which propagates (configuration error, not a
-runtime extraction failure).
+Invocation: ``subprocess.run(["claude", "-p", PROMPT,
+"--output-format", "json"], timeout=180, capture_output=True,
+text=True)``. The Claude CLI is expected to be on PATH; if it is
+not, ``subprocess.run`` raises ``FileNotFoundError`` which propagates
+(configuration error, not a runtime extraction failure).
+
+The ``--output-format json`` flag returns a wrapper of the form
+``{"result": "<model-response-text>", "session_id": ..., "usage":
+...}``. The extractor pulls ``result`` and re-parses it as JSON.
+Markdown code-fence wrapping (```json ... ```) is stripped
+defensively before the inner parse.
 
 Retry policy (audit F8):
 
@@ -287,7 +293,7 @@ def _invoke_once(prompt: str) -> dict:
     """
     try:
         result = subprocess.run(
-            ["claude", "-p", prompt, "--json"],
+            ["claude", "-p", prompt, "--output-format", "json"],
             timeout=180,
             capture_output=True,
             text=True,
@@ -307,19 +313,56 @@ def _invoke_once(prompt: str) -> dict:
             f"{(result.stderr or '')[:200]}",
         )
 
+    # Outer parse: --output-format json returns a session-metadata
+    # wrapper of shape {"result": "<text>", "session_id": ..., ...}.
     try:
-        parsed = json.loads(result.stdout)
+        outer = json.loads(result.stdout)
     except (ValueError, TypeError) as exc:
-        raise _TransientFailure(f"json parse failure: {exc}") from exc
+        raise _TransientFailure(f"outer json parse failure: {exc}") from exc
+    if not isinstance(outer, dict) or "result" not in outer:
+        raise _HardFailure(
+            "claude --output-format json wrapper missing 'result' key "
+            f"(got keys: {list(outer.keys()) if isinstance(outer, dict) else type(outer).__name__})",
+        )
+
+    inner_text = outer["result"]
+    if not isinstance(inner_text, str):
+        raise _HardFailure(
+            f"wrapper 'result' is not a string (got {type(inner_text).__name__})",
+        )
+
+    # Inner parse: the model's response text. Strip markdown
+    # code fences defensively — the prompt asks for raw JSON but
+    # Claude can emit ```json ... ``` wrapping anyway.
+    cleaned = _strip_code_fence(inner_text.strip())
+    try:
+        parsed = json.loads(cleaned)
+    except (ValueError, TypeError) as exc:
+        raise _TransientFailure(f"inner json parse failure: {exc}") from exc
 
     if not isinstance(parsed, dict):
         # Top-level non-dict response is a schema violation — retrying
         # the same prompt cannot reshape the response.
         raise _HardFailure(
-            f"json top-level not a dict (got {type(parsed).__name__})",
+            f"inner json top-level not a dict (got {type(parsed).__name__})",
         )
 
     return parsed
+
+
+def _strip_code_fence(s: str) -> str:
+    """Strip a leading ```json (or bare ```) fence and trailing ``` if
+    the model wrapped the response in a markdown code block.
+    """
+    if s.startswith("```"):
+        # Drop the first line (the opening fence).
+        lines = s.split("\n")
+        if len(lines) >= 2:
+            inner = "\n".join(lines[1:])
+            if inner.endswith("```"):
+                inner = inner[: -len("```")].rstrip()
+            return inner
+    return s
 
 
 # ── Schema validation + record building ──────────────────────────────────────

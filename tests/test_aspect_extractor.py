@@ -37,8 +37,14 @@ def _ok_stdout(
     experimental_results: str = "30% throughput improvement on YCSB-A.",
     extras: dict | None = None,
     confidence: float = 0.9,
+    fence: bool = False,
 ) -> str:
-    payload = {
+    """Build a Claude CLI ``--output-format json`` wrapper containing
+    the model's response. The model response is the JSON object the
+    extractor wants; the outer wrapper is the session metadata
+    Claude Code emits.
+    """
+    inner = {
         "problem_formulation": problem_formulation,
         "proposed_method": proposed_method,
         "experimental_datasets": experimental_datasets or ["TPC-C", "YCSB"],
@@ -47,7 +53,29 @@ def _ok_stdout(
         "extras": extras or {"venue": "VLDB", "ablations_present": True},
         "confidence": confidence,
     }
-    return json.dumps(payload)
+    inner_text = json.dumps(inner)
+    if fence:
+        inner_text = f"```json\n{inner_text}\n```"
+    wrapper = {
+        "result": inner_text,
+        "session_id": "test-session",
+        "usage": {"input_tokens": 100, "output_tokens": 50},
+    }
+    return json.dumps(wrapper)
+
+
+def _wrap_inner(inner_payload_json: str, *, fence: bool = False) -> str:
+    """Wrap a raw inner-JSON string into the outer ``--output-format json``
+    envelope shape so tests can inject pathological inner payloads.
+    """
+    inner_text = inner_payload_json
+    if fence:
+        inner_text = f"```json\n{inner_text}\n```"
+    return json.dumps({
+        "result": inner_text,
+        "session_id": "test-session",
+        "usage": {},
+    })
 
 
 def _make_completed(stdout: str, stderr: str = "", returncode: int = 0):
@@ -109,8 +137,9 @@ class TestCollectionRouting:
 
 class TestSuccessfulExtraction:
     def test_subprocess_invocation_shape(self, monkeypatch) -> None:
-        """``extract_aspects`` invokes ``claude -p <prompt> --json`` with
-        timeout=180, capture_output=True, text=True."""
+        """``extract_aspects`` invokes ``claude -p <prompt>
+        --output-format json`` with timeout=180, capture_output=True,
+        text=True."""
         from nexus.aspect_extractor import extract_aspects
 
         captured: list[dict] = []
@@ -135,10 +164,53 @@ class TestSuccessfulExtraction:
         # paper content somewhere, must reference scholarly aspects).
         prompt = args[2]
         assert "some paper text" in prompt
-        assert args[3] == "--json"
+        assert args[3] == "--output-format"
+        assert args[4] == "json"
         assert kwargs.get("timeout") == 180
         assert kwargs.get("capture_output") is True
         assert kwargs.get("text") is True
+
+    def test_strips_markdown_code_fence_around_json(self, monkeypatch) -> None:
+        """The Claude CLI sometimes wraps JSON in a ```json ... ```
+        fence even when the prompt asks for raw JSON. The extractor
+        strips the fence before parsing.
+        """
+        from nexus.aspect_extractor import extract_aspects
+
+        monkeypatch.setattr(
+            subprocess, "run",
+            lambda *a, **kw: _make_completed(_ok_stdout(fence=True)),
+        )
+        record = extract_aspects(
+            content="x",
+            source_path="/p1.pdf",
+            collection="knowledge__delos",
+        )
+        assert record is not None
+        assert record.problem_formulation == "Sharded WAL bottleneck."
+
+    def test_outer_wrapper_missing_result_key_is_hard_failure(
+        self, monkeypatch,
+    ) -> None:
+        """If Claude returns a wrapper without a ``result`` field,
+        the extractor raises hard failure (no retry — the CLI
+        contract is wrong, retry won't fix it).
+        """
+        from nexus.aspect_extractor import extract_aspects
+
+        calls: list[int] = []
+
+        def fake_run(*a, **kw):
+            calls.append(1)
+            return _make_completed(json.dumps({"session_id": "x"}))
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        record = extract_aspects(
+            content="x", source_path="/p1.pdf", collection="knowledge__delos",
+        )
+        assert len(calls) == 1  # no retry on hard failure
+        assert record is not None
+        assert record.problem_formulation is None  # null-fields fallback
 
     def test_json_response_parsed_into_aspect_record(self, monkeypatch) -> None:
         from nexus.aspect_extractor import extract_aspects
@@ -308,8 +380,9 @@ class TestRetry:
         record WITHOUT retrying — retrying produces the same shape."""
         from nexus.aspect_extractor import extract_aspects
 
-        # Valid JSON but missing required fields (e.g. proposed_method).
-        bad_payload = json.dumps({"problem_formulation": "x"})
+        # Valid inner JSON but missing required fields (e.g. proposed_method).
+        # Wrap it in the outer ``--output-format json`` envelope.
+        bad_payload = _wrap_inner(json.dumps({"problem_formulation": "x"}))
         calls: list[int] = []
 
         def fake_run(*a, **kw):
