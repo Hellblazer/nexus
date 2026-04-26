@@ -1,21 +1,25 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""T2 SQLite memory bank — four domain stores behind a composing facade.
+"""T2 SQLite memory bank — six domain stores behind a composing facade.
 
-The T2 tier is split into four domain stores, each owning its own set
+The T2 tier is split into six domain stores, each owning its own set
 of tables in a shared SQLite file:
 
-====================  ==========================  =================================================================
-Attribute             Class                       Responsibility
-====================  ==========================  =================================================================
-``db.memory``         ``MemoryStore``             Persistent notes, FTS5 search, access tracking, heat-weighted TTL
-``db.plans``          ``PlanLibrary``             Plan templates, plan search, plan TTL
-``db.taxonomy``       ``CatalogTaxonomy``         Topic clustering, topic assignment
-``db.telemetry``      ``Telemetry``               Relevance log (query/chunk/action), retention-based expiry
-====================  ==========================  =================================================================
+=========================  ==========================  =================================================================
+Attribute                  Class                       Responsibility
+=========================  ==========================  =================================================================
+``db.memory``              ``MemoryStore``             Persistent notes, FTS5 search, access tracking, heat-weighted TTL
+``db.plans``               ``PlanLibrary``             Plan templates, plan search, plan TTL
+``db.taxonomy``            ``CatalogTaxonomy``         Topic clustering, topic assignment
+``db.telemetry``           ``Telemetry``               Relevance log (query/chunk/action), retention-based expiry
+``db.chash_index``         ``ChashIndex``              chash → (collection, doc_id) global lookup (RDR-086)
+``db.document_aspects``    ``DocumentAspects``         Per-document structured aspects table (RDR-089)
+=========================  ==========================  =================================================================
 
-``T2Database`` is a facade: it constructs the four stores and re-exposes
-their public methods as thin delegates for backward compatibility.
+``T2Database`` is a facade: it constructs the six stores and re-exposes
+the memory-domain public methods as thin delegates for backward
+compatibility (the chash, taxonomy, and document_aspects domains are
+accessed directly via their attributes — no facade delegates exist).
 ``expire()`` runs the cross-domain sweep that each store registers, and
 the context manager / ``close()`` tear the stores down in reverse
 construction order. The facade itself holds no database connection.

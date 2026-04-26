@@ -245,6 +245,18 @@ class DocumentAspects:
         were captured by an older model and should be re-run.
         Strict ``<`` (not ``<=``) so the threshold version is not
         repeatedly re-extracted.
+
+        Comparison is **lexicographic TEXT** ordering in SQLite — the
+        caller is responsible for using version strings that sort
+        lexicographically in the same order as their semantic order.
+        The ``claude-haiku-4-5-20251001`` slug format used by
+        ``scholarly-paper-v1`` satisfies this (the numeric tail is
+        zero-padded enough for the date suffix to dominate). A future
+        slug like ``claude-haiku-4-10`` would NOT — ``"4-10"`` sorts
+        BEFORE ``"4-5"`` lexicographically. New extractor configs
+        must either keep the constraint or factor a semver-aware
+        comparator before relying on this method for re-extraction
+        triage.
         """
         with self._lock:
             rows = self.conn.execute(

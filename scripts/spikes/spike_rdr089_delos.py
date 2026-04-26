@@ -228,26 +228,46 @@ def _stability_for_paper(paper_rows: list[dict]) -> dict:
 
 
 def _summarize_latency(rows: list[dict]) -> dict:
-    """Aggregate latency statistics + stability rates."""
+    """Aggregate latency statistics + stability rates.
+
+    Distinguishes ``ok_*`` aggregates (only ``status=ok`` rows — what the
+    extractor actually delivered) from ``all_*`` aggregates (every timed
+    attempt including exceptions). Both verdicts are reported because the
+    reviewer for the spike-evidence record needs to see the gap (an
+    exception attempt completes in ~0.1 ms and pulls the all-rows median
+    down, so the all-rows view is conservative).
+    """
     by_paper: dict[str, list[dict]] = {}
     for r in rows:
         by_paper.setdefault(r["source_path"], []).append(r)
 
-    elapsed = [r["elapsed_ms"] for r in rows if r["elapsed_ms"] is not None]
-    if not elapsed:
+    all_elapsed = [r["elapsed_ms"] for r in rows if r["elapsed_ms"] is not None]
+    ok_elapsed = [
+        r["elapsed_ms"]
+        for r in rows
+        if r["elapsed_ms"] is not None and r.get("status") == "ok"
+    ]
+    if not all_elapsed:
         return {
             "mode": "latency",
             "papers_total": len(by_paper),
+            "all_timed_attempts": 0,
             "successful_attempts": 0,
-            "verdict": "FAIL",
-            "reason": "no successful attempts",
+            "verdict_latency": "FAIL",
+            "reason": "no timed attempts recorded",
         }
-    elapsed.sort()
-    median = statistics.median(elapsed)
-    p95_idx = max(0, int(0.95 * len(elapsed)) - 1)
-    p95 = elapsed[p95_idx]
+    primary = ok_elapsed if ok_elapsed else all_elapsed
+    primary.sort()
+    median = statistics.median(primary)
+    p95_idx = max(0, int(0.95 * len(primary)) - 1)
+    p95 = primary[p95_idx]
 
     pass_latency = (median < 1500.0) and (p95 < 3000.0)
+
+    # Also compute the all-attempts view for full evidence reporting.
+    all_sorted = sorted(all_elapsed)
+    all_median = statistics.median(all_sorted)
+    all_p95 = all_sorted[max(0, int(0.95 * len(all_sorted)) - 1)]
 
     stability = [_stability_for_paper(rs) for rs in by_paper.values()]
     stable_field_total = sum(
@@ -263,13 +283,16 @@ def _summarize_latency(rows: list[dict]) -> dict:
         "mode": "latency",
         "papers_total": len(by_paper),
         "attempts_total": len(rows),
-        "successful_attempts": len(elapsed),
-        "median_ms": round(median, 2),
+        "all_timed_attempts": len(all_elapsed),
+        "successful_attempts": len(ok_elapsed),
+        "median_ms": round(median, 2),  # status=ok only when any exist
         "p95_ms": round(p95, 2),
-        "min_ms": round(min(elapsed), 2),
-        "max_ms": round(max(elapsed), 2),
+        "min_ms": round(min(primary), 2),
+        "max_ms": round(max(primary), 2),
+        "all_attempts_median_ms": round(all_median, 2),
+        "all_attempts_p95_ms": round(all_p95, 2),
         "verdict_latency": "PASS" if pass_latency else "FAIL",
-        "verdict_latency_threshold": "median<1500ms AND p95<3000ms",
+        "verdict_latency_threshold": "median<1500ms AND p95<3000ms (over status=ok rows)",
         "field_stability_rate": (
             round(field_stability_rate, 3)
             if field_stability_rate is not None else None

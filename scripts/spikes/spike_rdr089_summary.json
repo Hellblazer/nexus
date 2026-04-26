@@ -1,6 +1,6 @@
 {
   "rdr": "rdr-089",
-  "started_at": "2026-04-26T03:41:41.233717+00:00",
+  "started_at": "2026-04-26T03:42:00+00:00",
   "papers_dir": "/Users/hal.hildebrand/Downloads/delos-papers",
   "papers_count": 10,
   "runs_per_paper": 3,
@@ -9,13 +9,16 @@
       "mode": "latency",
       "papers_total": 10,
       "attempts_total": 30,
-      "successful_attempts": 30,
-      "median_ms": 23235.97,
-      "p95_ms": 34681.17,
-      "min_ms": 0.05,
+      "all_timed_attempts": 30,
+      "successful_attempts": 18,
+      "median_ms": 26493.24,
+      "p95_ms": 38116.5,
+      "min_ms": 21666.4,
       "max_ms": 41164.09,
+      "all_attempts_median_ms": 23235.97,
+      "all_attempts_p95_ms": 34681.17,
       "verdict_latency": "FAIL",
-      "verdict_latency_threshold": "median<1500ms AND p95<3000ms",
+      "verdict_latency_threshold": "median<1500ms AND p95<3000ms (over status=ok rows)",
       "field_stability_rate": 0.167,
       "field_stability_per_paper": [
         {
@@ -108,5 +111,6 @@
       "reason": "--skip-index passed"
     }
   },
-  "finished_at": "2026-04-26T03:50:18.696668+00:00"
+  "finished_at": "2026-04-26T04:01:46.079175+00:00",
+  "note": "Summary recomputed 2026-04-26 with corrected aggregator (P1.1 review fix). The status=ok elapsed values are now the primary verdict; all-attempts aggregates are reported separately for evidence completeness."
 }
