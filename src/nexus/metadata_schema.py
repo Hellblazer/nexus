@@ -36,6 +36,7 @@ __all__ = [
     "CONTENT_TYPES",
     "MAX_SAFE_TOP_LEVEL_KEYS",
     "MetadataSchemaError",
+    "make_chunk_metadata",
     "normalize",
     "validate",
 ]
@@ -59,9 +60,10 @@ ALLOWED_TOP_LEVEL: frozenset[str] = frozenset({
     "line_start",
     "line_end",
     "page_number",
-    # Display / user-facing (7)
+    # Display / user-facing (6) — ``source_title`` collapsed into
+    # ``title`` (consumers already used ``source_title or title`` as a
+    # fallback chain; one canonical field is simpler).
     "title",
-    "source_title",
     "source_author",
     "section_title",
     "section_type",
@@ -77,9 +79,11 @@ ALLOWED_TOP_LEVEL: frozenset[str] = frozenset({
     "bib_authors",
     "bib_venue",
     "bib_citation_count",
-    # Lifecycle / scoring (filtered or consumed by scorer) (5)
+    # Lifecycle / scoring (5) — ``expires_at`` removed; expiry is
+    # derived from ``indexed_at + ttl_days`` Python-side. ``ttl_days=0``
+    # is the "permanent" sentinel.
+    "indexed_at",
     "ttl_days",
-    "expires_at",
     "frecency_score",
     "source_agent",
     "session_id",
@@ -94,8 +98,9 @@ CONTENT_TYPES: frozenset[str] = frozenset({"code", "pdf", "markdown", "prose"})
 #: Safety margin below Chroma's 32-key cap (:data:`~nexus.db.chroma_quotas.
 #: QUOTAS.MAX_RECORD_METADATA_KEYS`). Any write producing more than this
 #: many keys raises :class:`MetadataSchemaError`. The canonical schema
-#: defined by :data:`ALLOWED_TOP_LEVEL` sits exactly at this cap so any
-#: accidental accretion trips validation immediately.
+#: defined by :data:`ALLOWED_TOP_LEVEL` sits at 30 keys after the
+#: ``source_title``/``expires_at`` removal — 2 keys of headroom above
+#: that for future additions before the validation guard fires.
 MAX_SAFE_TOP_LEVEL_KEYS: int = 31
 
 #: Git provenance sub-keys — packed into ``git_meta`` as a JSON string.
@@ -240,3 +245,130 @@ def validate(metadata: dict[str, Any]) -> None:
                 f"{type(value).__name__} — "
                 f"ChromaDB only accepts str/int/float/bool/None"
             )
+
+
+# ── Factory ─────────────────────────────────────────────────────────────────
+
+
+def make_chunk_metadata(
+    *,
+    content_type: str,
+    # Identity (always required)
+    source_path: str,
+    chunk_index: int,
+    chunk_count: int,
+    chunk_text_hash: str,
+    content_hash: str,
+    indexed_at: str,
+    embedding_model: str,
+    store_type: str,
+    corpus: str = "",
+    # Position (required where meaningful, default 0 elsewhere)
+    chunk_start_char: int = 0,
+    chunk_end_char: int = 0,
+    line_start: int = 0,
+    line_end: int = 0,
+    page_number: int = 0,
+    # Display
+    title: str = "",
+    source_author: str = "",
+    section_title: str = "",
+    section_type: str = "",
+    tags: str = "",
+    category: str = "",
+    # Bibliographic (defaults dropped together by normalize when all-empty)
+    bib_year: int = 0,
+    bib_authors: str = "",
+    bib_venue: str = "",
+    bib_citation_count: int = 0,
+    # Lifecycle
+    ttl_days: int = 0,
+    frecency_score: float = 0.0,
+    source_agent: str = "nexus-indexer",
+    session_id: str = "",
+    # Provenance — flat git_* keys; normalize() packs them into git_meta JSON
+    git_meta: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a complete chunk metadata dict and route through
+    :func:`normalize` so it's safe to write directly to T3.
+
+    Every :data:`ALLOWED_TOP_LEVEL` key gets a value (either explicit
+    or a documented default). Bib placeholders are dropped together
+    when all-empty (see :func:`normalize`); ``git_meta`` is packed
+    from the optional ``git_meta`` dict (flat ``{"project": ...}``
+    short keys or ``{"git_project_name": ...}`` long keys both work).
+
+    Indexers should never build chunk metadata dicts by hand — route
+    through this factory so adding a new ``ALLOWED_TOP_LEVEL`` key
+    is a single edit, not seven separate indexer changes.
+    """
+    raw: dict[str, Any] = {
+        "source_path": source_path,
+        "content_hash": content_hash,
+        "chunk_text_hash": chunk_text_hash,
+        "chunk_index": chunk_index,
+        "chunk_count": chunk_count,
+        "chunk_start_char": chunk_start_char,
+        "chunk_end_char": chunk_end_char,
+        "line_start": line_start,
+        "line_end": line_end,
+        "page_number": page_number,
+        "title": title,
+        "source_author": source_author,
+        "section_title": section_title,
+        "section_type": section_type,
+        "tags": tags,
+        "category": category,
+        "store_type": store_type,
+        "corpus": corpus,
+        "embedding_model": embedding_model,
+        "bib_year": bib_year,
+        "bib_authors": bib_authors,
+        "bib_venue": bib_venue,
+        "bib_citation_count": bib_citation_count,
+        "ttl_days": ttl_days,
+        "indexed_at": indexed_at,
+        "frecency_score": frecency_score,
+        "source_agent": source_agent,
+        "session_id": session_id,
+    }
+    if git_meta:
+        # Accept both short keys ({"project", "branch", ...}) and long
+        # keys ({"git_project_name", ...}) — normalize() repacks either.
+        for k, v in git_meta.items():
+            if k in _GIT_FIELD_MAP:
+                raw[k] = v
+            elif f"git_{k}_name" in _GIT_FIELD_MAP:
+                raw[f"git_{k}_name"] = v
+            elif k in {"project", "branch", "commit", "remote"}:
+                # Short-key form from existing call sites.
+                long = {v: k for k, v in _GIT_FIELD_MAP.items()}[k]
+                raw[long] = v
+            else:
+                raw[k] = v  # let normalize handle / drop unknown
+    return normalize(raw, content_type=content_type)
+
+
+# ── Expiry helper (replaces the dropped ``expires_at`` field) ────────────────
+
+
+def is_expired(metadata: dict[str, Any], *, now_iso: str) -> bool:
+    """Return ``True`` when *metadata* has elapsed its TTL.
+
+    Replaces the previous ``where=expires_at < now`` filter. Computes
+    expiry from ``indexed_at + ttl_days`` Python-side. ``ttl_days == 0``
+    is the permanent sentinel — never expires regardless of indexed_at.
+    """
+    ttl = metadata.get("ttl_days", 0)
+    if not ttl or ttl <= 0:
+        return False
+    indexed_at = metadata.get("indexed_at", "")
+    if not indexed_at:
+        return False
+    from datetime import datetime, timedelta
+    try:
+        idx_dt = datetime.fromisoformat(indexed_at)
+        now_dt = datetime.fromisoformat(now_iso)
+    except (TypeError, ValueError):
+        return False
+    return (now_dt - idx_dt) >= timedelta(days=ttl)

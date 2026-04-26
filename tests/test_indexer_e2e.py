@@ -436,4 +436,4 @@ def test_index_repository_pdf_routing(
     results = local_t3.search("Hello World test document PDF ingest", [docs_col], n_results=5)
     pdf_results = [r for r in results if r.get("store_type") == "pdf"]
     assert pdf_results, f"No PDF chunks; store_types: {[r.get('store_type') for r in results]}"
-    assert isinstance(pdf_results[0]["source_title"], str)
+    assert isinstance(pdf_results[0]["title"], str)

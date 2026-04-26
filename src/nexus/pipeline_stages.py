@@ -138,39 +138,30 @@ def _build_chunk_metadata(
     passes through to keep per-chunk overhead at zero. Empty dict when
     *pdf_path* is not in a git repo.
     """
-    base_git = {k: v for k, v in (git_meta or {}).items() if v}
-    return {**base_git,
-        "source_path": pdf_path,
-        "source_title": "",       # post-pass: from ExtractionResult
-        "source_author": "",      # post-pass: from ExtractionResult
-        "source_date": "",        # post-pass: from ExtractionResult
-        "corpus": corpus,
-        "store_type": "pdf",
-        "page_count": 0,          # post-pass: from ExtractionResult
-        "page_number": chunk.metadata.get("page_number", 0),
-        "section_title": "",
-        "section_type": "",
-        "format": "",             # post-pass: from ExtractionResult
-        "extraction_method": "",  # post-pass: from ExtractionResult
-        "chunk_type": chunk.metadata.get("chunk_type", "text"),
-        "chunk_index": chunk.chunk_index,
-        "chunk_count": chunk_count,  # provisional; corrected in post-pass
-        "chunk_start_char": chunk.metadata.get("chunk_start_char", 0),
-        "chunk_end_char": chunk.metadata.get("chunk_end_char", 0),
-        "embedding_model": embedding_model,
-        "indexed_at": now_iso,
-        "content_hash": content_hash,
-        "chunk_text_hash": hashlib.sha256(chunk.text.encode()).hexdigest(),
-        "pdf_subject": "",        # post-pass
-        "pdf_keywords": "",       # post-pass
-        "is_image_pdf": False,    # post-pass
-        "has_formulas": False,    # post-pass
-        "bib_year": 0,
-        "bib_venue": "",
-        "bib_authors": "",
-        "bib_citation_count": 0,
-        "bib_semantic_scholar_id": "",
-    }
+    from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415
+
+    return make_chunk_metadata(
+        content_type="pdf",
+        source_path=pdf_path,
+        chunk_index=chunk.chunk_index,
+        chunk_count=chunk_count,  # provisional; corrected in post-pass
+        chunk_text_hash=hashlib.sha256(chunk.text.encode()).hexdigest(),
+        content_hash=content_hash,
+        chunk_start_char=chunk.metadata.get("chunk_start_char", 0),
+        chunk_end_char=chunk.metadata.get("chunk_end_char", 0),
+        page_number=chunk.metadata.get("page_number", 0),
+        indexed_at=now_iso,
+        embedding_model=embedding_model,
+        store_type="pdf",
+        corpus=corpus,
+        title="",                 # post-pass: from ExtractionResult
+        source_author="",         # post-pass: from ExtractionResult
+        section_title=chunk.metadata.get("section_title", ""),
+        section_type=chunk.metadata.get("section_type", ""),
+        tags="pdf",
+        category="paper",
+        git_meta=git_meta,
+    )
 
 
 def _embed_and_write_batch(
@@ -488,9 +479,14 @@ def _catalog_pdf_hook(
         else:
             owner = cat.register_owner(owner_name, "curator")
 
-        # Dedup by file_path (stable identifier for PDFs)
+        # Dedup by file_path (stable identifier for PDFs). Resolve to an
+        # absolute path so downstream consumers (aspect_extractor's disk
+        # fallback, link generators, dedup-after-move detection) can open
+        # the file without depending on the cwd of the reading process.
+        # Portability across machines is now the catalog's source-mtime
+        # + content_hash story — both already populated.
         from datetime import UTC, datetime
-        file_path_str = pdf_path.name  # Portable — not machine-specific absolute path
+        file_path_str = str(pdf_path.resolve())
         existing = cat.by_file_path(owner, file_path_str)
 
         # Known TOCTOU window (Reviewer B/I-3): this stat happens AFTER
@@ -764,17 +760,14 @@ def _enrich_metadata_from_extraction(
         or pdf_path.stem.replace("_", " ").replace("-", " ")
     )
 
+    # Only `title` and `source_author` are in ALLOWED_TOP_LEVEL — the
+    # other fields below (source_date, extraction_method, format,
+    # page_count, pdf_subject, pdf_keywords, is_image_pdf, has_formulas)
+    # are dropped by metadata_schema.normalize() so writing them costs
+    # cycles for no payload. Keep this dict minimal.
     enrichment = {
-        "source_title": source_title,
+        "title": source_title,
         "source_author": meta.get("pdf_author", ""),
-        "source_date": meta.get("pdf_creation_date", ""),
-        "extraction_method": meta.get("extraction_method", ""),
-        "format": meta.get("format", ""),
-        "page_count": meta.get("page_count", 0),
-        "pdf_subject": meta.get("pdf_subject", ""),
-        "pdf_keywords": meta.get("pdf_keywords", ""),
-        "is_image_pdf": (text_len / page_count) < 20 if page_count else False,
-        "has_formulas": meta.get("formula_count", 0) > 0,
     }
 
     # Also correct chunk_count to the final total.

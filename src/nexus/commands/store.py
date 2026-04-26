@@ -180,15 +180,23 @@ def list_cmd(collection: str, limit: int, offset: int, docs: bool) -> None:
     shown_start = offset + 1
     shown_end = offset + len(entries)
     click.echo(f"{col_name}  (showing {shown_start}-{shown_end} of {total})\n")
+    from datetime import datetime, timedelta  # noqa: PLC0415
     for e in entries:
         doc_id = e.get("id", "")[:16]
-        title = (e.get("title") or e.get("source_title") or "")[:40]
+        title = (e.get("title") or "")[:40]
         tags = e.get("tags") or ""
         ttl_days = e.get("ttl_days", 0)
-        expires_at = e.get("expires_at") or ""
-        indexed_at = (e.get("indexed_at") or "")[:10]
-        if ttl_days and ttl_days > 0 and expires_at:
-            ttl_str = f"expires {expires_at[:10]}"
+        indexed_at_full = e.get("indexed_at") or ""
+        indexed_at = indexed_at_full[:10]
+        # Derive expiry from indexed_at + ttl_days (expires_at no longer
+        # stored — see metadata_schema.is_expired).
+        if ttl_days and ttl_days > 0 and indexed_at_full:
+            try:
+                exp = (datetime.fromisoformat(indexed_at_full)
+                       + timedelta(days=ttl_days)).date().isoformat()
+                ttl_str = f"expires {exp}"
+            except ValueError:
+                ttl_str = f"ttl {ttl_days}d"
         else:
             ttl_str = "permanent"
         tag_str = f"  [{tags}]" if tags else ""
@@ -224,10 +232,10 @@ def _list_documents(db: T3Database, col_name: str) -> None:
         click.echo(f"No documents in {col_name}.")
         return
 
-    docs = sorted(seen.values(), key=lambda d: d.get("source_title") or d.get("title") or "")
+    docs = sorted(seen.values(), key=lambda d: d.get("title") or "")
     click.echo(f"{col_name}  ({len(docs)} documents, {total_chunks} chunks)\n")
     for i, d in enumerate(docs, 1):
-        title = (d.get("source_title") or d.get("title") or "untitled")[:60]
+        title = (d.get("title") or "untitled")[:60]
         chunks = d.get("chunk_count", "?")
         pages = d.get("page_count", "?")
         method = d.get("extraction_method", "")

@@ -251,16 +251,32 @@ class TestLocalCollectionLifecycle:
         assert local_db.delete_by_id("knowledge__lifecycle", doc_id) is True
 
     def test_expire_ttl_entries(self, local_db: T3Database) -> None:
+        """``expire()`` deletes entries whose ``indexed_at + ttl_days``
+        is in the past; permanent entries (``ttl_days=0``) are kept.
+        ``expires_at`` was removed from the schema; expiry is derived
+        Python-side via ``metadata_schema.is_expired``."""
         from datetime import UTC, datetime, timedelta
+        from nexus.metadata_schema import make_chunk_metadata
+        import hashlib
 
-        past = (datetime.now(UTC) - timedelta(days=1)).isoformat()
-        local_db.put(
-            collection="knowledge__expire_test",
-            content="temporary data",
-            title="temp",
-            ttl_days=1,
-            expires_at=past,
+        # Backdate the indexed_at by 100 days with ttl_days=1 → expired.
+        old = (datetime.now(UTC) - timedelta(days=100)).isoformat()
+        col = local_db.get_or_create_collection("knowledge__expire_test")
+        h_temp = hashlib.sha256(b"temporary data").hexdigest()
+        col.upsert(
+            ids=["temp-id"],
+            documents=["temporary data"],
+            metadatas=[make_chunk_metadata(
+                content_type="prose", source_path="",
+                chunk_index=0, chunk_count=1,
+                chunk_text_hash=h_temp, content_hash=h_temp,
+                chunk_end_char=14,
+                indexed_at=old, ttl_days=1,
+                embedding_model="local-onnx-minilm-l6-v2",
+                store_type="knowledge", title="temp",
+            )],
         )
+        # Permanent entry — still alive after expire().
         local_db.put(
             collection="knowledge__expire_test",
             content="permanent data",

@@ -211,14 +211,22 @@ class AspectExtractionWorker:
         """
         from pathlib import Path
 
-        from nexus.aspect_extractor import extract_aspects_batch
+        from nexus.aspect_extractor import (
+            _source_content_from_t3,
+            extract_aspects_batch,
+        )
         from nexus.mcp_infra import t2_ctx
 
         # Per-row content source: prefer queued content, fall back to
-        # disk read for CLI rows where content was not in scope.
+        # T3 reassembly (same text we indexed; section-filtered for
+        # scholarly papers), then to disk read as last resort. Mirrors
+        # the single-doc path in extract_aspects so batch and single
+        # share the same sourcing precedence.
         items: list[tuple[str, str, str]] = []
         for row in rows:
             content = row.content
+            if not content:
+                content = _source_content_from_t3(row.collection, row.source_path)
             if not content:
                 try:
                     content = Path(row.source_path).read_text(

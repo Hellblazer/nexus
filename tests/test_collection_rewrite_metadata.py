@@ -129,7 +129,9 @@ def test_rewrite_drops_cargo_and_packs_git_meta() -> None:
     import json as _j
     assert _j.loads(written["git_meta"])["project"] == "myproj"
     assert "git_project_name" not in written
-    assert "indexed_at" not in written
+    # indexed_at is now in ALLOWED_TOP_LEVEL (replaces dropped expires_at;
+    # paired with ttl_days for derived expiry via is_expired()).
+    assert written["indexed_at"] == "2026-01-01T00:00:00+00:00"
     assert "format" not in written
     assert "extraction_method" not in written
     assert written["content_type"]  # injected

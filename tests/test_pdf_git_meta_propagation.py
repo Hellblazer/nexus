@@ -94,8 +94,10 @@ def test_detect_git_metadata_returns_empty_outside_repo(tmp_path: Path) -> None:
 # ── _pdf_chunks propagation ─────────────────────────────────────────────────
 
 
-def test_pdf_chunks_emits_flat_git_keys(repo_with_pdf) -> None:
-    """``_pdf_chunks`` writes git_* keys auto-detected from the PDF path."""
+def test_pdf_chunks_emits_packed_git_meta(repo_with_pdf) -> None:
+    """``_pdf_chunks`` routes through ``make_chunk_metadata`` which
+    pre-normalises git_* into the packed ``git_meta`` JSON. Flat
+    keys are gone by design — verify they're packed correctly."""
     from nexus.doc_indexer import _pdf_chunks
 
     repo, pdf = repo_with_pdf
@@ -104,28 +106,14 @@ def test_pdf_chunks_emits_flat_git_keys(repo_with_pdf) -> None:
     )
     assert chunks
     meta = chunks[0][2]
-    assert meta.get("git_project_name") == repo.name
-    assert meta.get("git_branch") == "main"
-    assert meta.get("git_remote_url") == "https://example.com/test-repo.git"
-    assert len(meta.get("git_commit_hash", "")) == 40
-
-
-def test_pdf_chunks_normalize_packs_git_meta(repo_with_pdf) -> None:
-    """End-to-end: _pdf_chunks → normalize → git_meta JSON populated."""
-    from nexus.doc_indexer import _pdf_chunks
-    from nexus.metadata_schema import normalize
-
-    repo, pdf = repo_with_pdf
-    chunks = _pdf_chunks(
-        pdf, "test-hash", "voyage-context-3", "2026-04-15Z", "test_corpus",
-    )
-    meta = chunks[0][2]
-    canonical = normalize(meta, content_type="pdf")
-    assert "git_meta" in canonical
-    decoded = json.loads(canonical["git_meta"])
+    assert "git_project_name" not in meta  # packed
+    assert "git_branch" not in meta
+    assert "git_meta" in meta
+    decoded = json.loads(meta["git_meta"])
     assert decoded["project"] == repo.name
     assert decoded["branch"] == "main"
     assert decoded["remote"] == "https://example.com/test-repo.git"
+    assert len(decoded["commit"]) == 40
 
 
 def test_pdf_chunks_outside_git_repo_no_git_keys(tmp_path: Path) -> None:
@@ -152,7 +140,8 @@ def test_pdf_chunks_outside_git_repo_no_git_keys(tmp_path: Path) -> None:
 
 def test_pdf_chunks_explicit_git_meta_override(repo_with_pdf) -> None:
     """Caller may pass ``git_meta=`` to override auto-detection
-    (useful for repo-walk paths that compute it once)."""
+    (useful for repo-walk paths that compute it once). The factory
+    pre-normalises so the result is in packed ``git_meta`` form."""
     from nexus.doc_indexer import _pdf_chunks
 
     _, pdf = repo_with_pdf
@@ -166,14 +155,18 @@ def test_pdf_chunks_explicit_git_meta_override(repo_with_pdf) -> None:
         },
     )
     meta = chunks[0][2]
-    assert meta["git_project_name"] == "override-name"
-    assert meta["git_branch"] == "feature"
+    assert "git_project_name" not in meta
+    decoded = json.loads(meta["git_meta"])
+    assert decoded["project"] == "override-name"
+    assert decoded["branch"] == "feature"
 
 
 # ── _markdown_chunks propagation ────────────────────────────────────────────
 
 
-def test_markdown_chunks_emits_flat_git_keys(repo_with_markdown) -> None:
+def test_markdown_chunks_emits_packed_git_meta(repo_with_markdown) -> None:
+    """Indexers route through ``make_chunk_metadata`` which pre-normalises
+    git_* into the packed ``git_meta`` JSON — flat keys are gone by design."""
     from nexus.doc_indexer import _markdown_chunks
 
     repo, md = repo_with_markdown
@@ -182,9 +175,14 @@ def test_markdown_chunks_emits_flat_git_keys(repo_with_markdown) -> None:
     )
     assert chunks
     meta = chunks[0][2]
-    assert meta.get("git_project_name") == repo.name
-    assert meta.get("git_branch") == "main"
-    assert meta.get("git_remote_url") == "https://example.com/test-repo.git"
+    assert "git_project_name" not in meta  # packed into git_meta
+    assert "git_branch" not in meta
+    assert "git_remote_url" not in meta
+    assert "git_meta" in meta
+    decoded = json.loads(meta["git_meta"])
+    assert decoded["project"] == repo.name
+    assert decoded["branch"] == "main"
+    assert decoded["remote"] == "https://example.com/test-repo.git"
 
 
 def test_markdown_chunks_normalize_packs_git_meta(repo_with_markdown) -> None:

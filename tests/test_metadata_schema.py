@@ -37,7 +37,7 @@ def test_load_bearing_keys_are_allowed() -> None:
         "page_number",
         "bib_year",
         "ttl_days",
-        "expires_at",
+        "indexed_at",  # replaces expires_at; expiry derived via is_expired()
         "section_type",
         "frecency_score",
         "source_agent",
@@ -68,13 +68,15 @@ def test_cargo_keys_not_allowed() -> None:
         "programming_language",
         "ast_chunked",
         "page_count",
-        "indexed_at",
         "is_image_pdf",
         "has_formulas",
         "git_project_name",
         "git_branch",
         "git_commit_hash",
         "git_remote_url",
+        # Removed in the source_title→title collapse + expires_at→indexed_at swap:
+        "source_title",
+        "expires_at",
     ):
         assert key not in ALLOWED_TOP_LEVEL, f"cargo key {key!r} should be dropped"
 
@@ -245,9 +247,11 @@ def test_normalize_unpacks_git_meta_on_reprocess() -> None:
     assert second["bib_year"] == 2024
 
 
-def test_normalize_drops_empty_ttl_defaults() -> None:
-    """``ttl_days=0, expires_at=''`` are load-bearing (permanent signal) and kept."""
-    from nexus.metadata_schema import normalize
+def test_normalize_keeps_ttl_and_indexed_at() -> None:
+    """``ttl_days=0`` is the permanent sentinel and is kept; ``expires_at``
+    no longer exists in the schema (computed from indexed_at + ttl_days
+    via :func:`is_expired` Python-side)."""
+    from nexus.metadata_schema import ALLOWED_TOP_LEVEL, normalize
 
     raw = {
         "source_path": "a",
@@ -256,11 +260,30 @@ def test_normalize_drops_empty_ttl_defaults() -> None:
         "chunk_index": 0,
         "chunk_count": 1,
         "ttl_days": 0,
-        "expires_at": "",
+        "indexed_at": "2026-04-26T00:00:00+00:00",
     }
     out = normalize(raw, content_type="code")
     assert out["ttl_days"] == 0
-    assert out["expires_at"] == ""
+    assert out["indexed_at"] == "2026-04-26T00:00:00+00:00"
+    assert "expires_at" not in ALLOWED_TOP_LEVEL
+
+
+def test_is_expired_uses_indexed_at_plus_ttl() -> None:
+    """Replacement for the old expires_at < now WHERE filter."""
+    from nexus.metadata_schema import is_expired
+
+    permanent = {"ttl_days": 0, "indexed_at": "2026-01-01T00:00:00+00:00"}
+    assert not is_expired(permanent, now_iso="2027-01-01T00:00:00+00:00")
+
+    fresh = {"ttl_days": 30, "indexed_at": "2026-04-20T00:00:00+00:00"}
+    assert not is_expired(fresh, now_iso="2026-04-25T00:00:00+00:00")
+
+    stale = {"ttl_days": 30, "indexed_at": "2026-01-01T00:00:00+00:00"}
+    assert is_expired(stale, now_iso="2026-04-25T00:00:00+00:00")
+
+    # Missing indexed_at → defensive: don't expire.
+    no_idx = {"ttl_days": 30, "indexed_at": ""}
+    assert not is_expired(no_idx, now_iso="2026-04-25T00:00:00+00:00")
 
 
 def test_normalize_drops_empty_bib_placeholders() -> None:

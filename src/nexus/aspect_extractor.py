@@ -602,6 +602,130 @@ class _HardFailure(Exception):
     immediately without further attempts."""
 
 
+# ── T3 content sourcing (RDR-089 follow-up) ──────────────────────────────────
+
+
+# Section types worth sending to the scholarly-paper extractor. Anything
+# else (references, acknowledgements, appendix) is dropped — they carry
+# no signal for the 5-field aspect schema and only inflate the prompt.
+_SCHOLARLY_SECTIONS = frozenset({
+    "abstract", "introduction", "related_work",
+    "methods", "results", "discussion", "conclusion",
+    # Empty section_type comes from chunks before the first heading
+    # (typically the title page + abstract for academic papers). Keep
+    # it so we don't accidentally drop the abstract on PDFs whose
+    # heading detection missed the "Abstract" label.
+    "",
+})
+
+# Cap on the joined T3 content forwarded to the extractor. ~80 KB
+# accommodates a 14-page paper's relevant sections while leaving
+# generous headroom under the prompt budget. The extractor prompt
+# itself is now stdin-fed (see _invoke_once below) so this cap exists
+# for cost / latency / context-window reasons, not OS argv limits.
+_T3_CONTENT_CAP_BYTES = 80_000
+
+
+def _source_content_from_t3(collection: str, source_path: str) -> str:
+    """Reassemble the source document's text from T3 chunks, preferring
+    section-scoped chunks for scholarly papers.
+
+    Returns an empty string on any failure (catalog lookup miss, T3
+    error, no chunks). Callers must treat the empty return as a signal
+    to fall back to disk read.
+
+    Routing notes:
+
+    * For ``knowledge__*`` collections the result is filtered to
+      :data:`_SCHOLARLY_SECTIONS` and capped at
+      :data:`_T3_CONTENT_CAP_BYTES`. This is the path that drove the
+      whole change: we previously slurped 14 pages of dense text into
+      argv.
+    * For other collections the full document is reassembled (no
+      filter). The cap still applies as a defensive bound.
+
+    The function is best-effort by design — every failure path returns
+    ``""`` and the caller falls back to the disk read. We don't want
+    the aspect extractor to crash because T3 is briefly unavailable.
+    """
+    try:
+        from nexus.db.t3 import T3Database  # noqa: PLC0415
+
+        # Bare constructor — credential fallback (chroma_tenant/database/api_key)
+        # comes from nexus.config via get_credential(); no positional args.
+        with T3Database() as t3:
+            try:
+                coll = t3.get_or_create_collection(collection)
+            except Exception:
+                # CloudClient raises on missing collection; treat as
+                # "no chunks" so the disk fallback can run.
+                return ""
+            from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415
+
+            # Page through all chunks for this source. QUOTAS.MAX_QUERY_RESULTS
+            # caps the per-call limit; documents with more chunks than
+            # the cap are paginated. 300 (current cap) covers ~450 KB
+            # of chunked text per page — a single page suffices for
+            # all but the longest scholarly papers.
+            collected: list[tuple[int, str, str]] = []  # (chunk_index, section_type, text)
+            offset = 0
+            page_limit = QUOTAS.MAX_QUERY_RESULTS
+            while True:
+                got = coll.get(
+                    where={"source_path": source_path},
+                    include=["documents", "metadatas"],
+                    limit=page_limit,
+                    offset=offset,
+                )
+                docs = got.get("documents") or []
+                mds = got.get("metadatas") or []
+                if not docs:
+                    break
+                for md, doc in zip(mds, docs):
+                    if not doc:
+                        continue
+                    ci = md.get("chunk_index", 0) if isinstance(md, dict) else 0
+                    st = md.get("section_type", "") if isinstance(md, dict) else ""
+                    collected.append((int(ci), str(st), doc))
+                if len(docs) < page_limit:
+                    break
+                offset += page_limit
+
+            if not collected:
+                return ""
+
+            collected.sort(key=lambda x: x[0])
+            if collection.startswith("knowledge__"):
+                kept = [
+                    (ci, st, txt) for ci, st, txt in collected
+                    if st in _SCHOLARLY_SECTIONS
+                ]
+                # If section filtering nuked everything (heading detection
+                # failed entirely on this document), fall back to all
+                # chunks rather than returning "" — better degraded
+                # extraction than no extraction.
+                if not kept:
+                    kept = collected
+            else:
+                kept = collected
+
+            joined = "\n\n".join(txt for _, _, txt in kept)
+            if len(joined.encode("utf-8", errors="replace")) > _T3_CONTENT_CAP_BYTES:
+                # Truncate at byte boundary (decoded back with errors=ignore)
+                # so the cap isn't broken by a multi-byte UTF-8 split.
+                joined = joined.encode("utf-8", errors="replace")[:_T3_CONTENT_CAP_BYTES]\
+                    .decode("utf-8", errors="ignore")
+            return joined
+    except Exception:
+        _log.debug(
+            "aspect_extractor_t3_source_failed",
+            collection=collection,
+            source_path=source_path,
+            exc_info=True,
+        )
+        return ""
+
+
 # ── Extraction core ──────────────────────────────────────────────────────────
 
 
@@ -614,12 +738,21 @@ def extract_aspects(
     populated ``AspectRecord``, or ``None`` when ``collection`` has no
     registered extractor.
 
-    Content-sourcing contract (RDR-089 P0.1 / audit F4):
+    Content-sourcing contract (revised for RDR-089 follow-up — the prior
+    disk-first contract was discarded after PR #N catalog file_path
+    basename + ARG_MAX issues surfaced):
 
     * ``content`` non-empty → used directly.
-    * ``content == ""`` → read ``source_path`` from disk.
-    * Read failure (missing or unreadable file) → null-fields
-      record returned without invoking the extractor subprocess.
+    * ``content == ""`` → fetch chunks from T3 by ``source_path`` and
+      filter to scholarly sections (abstract / introduction / methods /
+      results / discussion / conclusion). T3 holds the same text we
+      indexed; sourcing from T3 instead of the original PDF removes the
+      catalog-file_path dependency, the cwd-resolution dependency, and
+      caps prompt size by section selection.
+    * T3 lookup miss (no chunks for this source_path) → fall back to
+      reading ``source_path`` from disk for resilience.
+    * Disk read failure → null-fields record returned without invoking
+      the extractor subprocess.
 
     On unsupported collection (no config match) returns ``None``;
     the caller (post-store hook) should no-op.
@@ -632,6 +765,8 @@ def extract_aspects(
     if config is None:
         return None
 
+    if not content:
+        content = _source_content_from_t3(collection, source_path)
     if not content:
         try:
             content = Path(source_path).read_text(
@@ -646,10 +781,9 @@ def extract_aspects(
             return _empty_record(source_path, collection, config)
 
     # Defense against embedded null bytes (P1.3 spike finding 2026-04-25):
-    # pymupdf-extracted text from some PDFs contains \x00, which
-    # subprocess.run rejects with ValueError('embedded null byte') because
-    # POSIX argv entries are C strings. Strip them before prompting; they
-    # carry no semantic content for the extractor.
+    # some PDF extractors emit \x00 in their text output. Strip them
+    # before prompting (they carry no semantic content) and before any
+    # subprocess hand-off (POSIX argv rejects them outright).
     content = content.replace("\x00", "")
 
     if config.parser_fn is not None:
@@ -896,11 +1030,13 @@ def _retry_subprocess_batch(
 def _invoke_once_batch(prompt: str, *, timeout: int) -> dict:
     """Single batch subprocess invocation. Same shape as
     ``_invoke_once`` but with a configurable timeout (single-paper
-    is hardcoded at 180 s; batch scales up).
+    is hardcoded at 180 s; batch scales up). Prompt is stdin-fed
+    for the same reason as the single-paper path.
     """
     try:
         result = subprocess.run(
-            ["claude", "-p", prompt, "--output-format", "json"],
+            ["claude", "-p", "--output-format", "json"],
+            input=prompt,
             timeout=timeout,
             capture_output=True,
             text=True,
@@ -908,8 +1044,9 @@ def _invoke_once_batch(prompt: str, *, timeout: int) -> dict:
     except subprocess.TimeoutExpired as exc:
         raise _TransientFailure(f"timeout after {timeout}s: {exc}") from exc
     except OSError as exc:
-        # E2BIG (argument list too long), ENOMEM, etc. — non-retriable
-        # at this prompt size. Caller may fall back to per-paper.
+        # ENOMEM and similar boundary errors — non-retriable at this
+        # prompt size. Caller may fall back to per-paper. (E2BIG is
+        # no longer reachable now that prompts go via stdin.)
         raise _HardFailure(f"subprocess exec failed: {exc}") from exc
 
     if result.returncode != 0:
@@ -1052,10 +1189,16 @@ def _invoke_once(prompt: str) -> dict:
     """Single subprocess invocation. Raises ``_TransientFailure`` on
     retriable failure, ``_HardFailure`` on non-retriable. Returns the
     parsed JSON dict on success.
+
+    Prompt body is fed via stdin rather than argv. The Claude CLI
+    treats a missing positional ``[prompt]`` as a stdin read; passing
+    multi-page papers as argv tripped macOS ARG_MAX (errno 7) for
+    14-page documents in production. Stdin has no such limit.
     """
     try:
         result = subprocess.run(
-            ["claude", "-p", prompt, "--output-format", "json"],
+            ["claude", "-p", "--output-format", "json"],
+            input=prompt,
             timeout=180,
             capture_output=True,
             text=True,

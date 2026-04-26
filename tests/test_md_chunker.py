@@ -255,8 +255,22 @@ def test_split_large_section_overlap_no_header_duplication():
     (["Acknowledgments"], "acknowledgements"),
     (["Appendix A"], "appendix"),
     (["Appendices"], "appendix"),
-    (["Related Work"], "other"),
-    (["Introduction", "Background"], "introduction"),
+    (["Related Work"], "related_work"),
+    (["Background"], "related_work"),
+    (["Prior Work"], "related_work"),
+    (["Evaluation"], "results"),
+    (["Experiments"], "results"),
+    (["4 Evaluation"], "results"),
+    (["Experimental Results"], "results"),
+    (["Empirical Study"], "results"),
+    (["Findings"], "results"),
+    (["Approach"], "methods"),
+    (["Algorithm"], "methods"),
+    (["System Design"], "methods"),
+    (["Architecture"], "methods"),
+    (["Future Work"], "conclusion"),
+    (["Summary"], "conclusion"),
+    (["Introduction", "Background"], "related_work"),
     (["References", "Cited Works"], "references"),
 ])
 def test_classify_section_type(header_path, expected):
@@ -268,7 +282,7 @@ def test_classify_section_type(header_path, expected):
 @pytest.mark.parametrize("header_path, expected", [
     (["Abstract"], "abstract"),
     ([], ""),
-    (["Related Work"], "other"),
+    (["Related Work"], "related_work"),
 ])
 def test_make_chunk_section_type(header_path, expected):
     chunker = SemanticMarkdownChunker(chunk_size=512)

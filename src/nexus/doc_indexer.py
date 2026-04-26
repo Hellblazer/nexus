@@ -613,42 +613,37 @@ def _pdf_chunks(
         from nexus.bib_enricher import enrich as bib_enrich
         bib = bib_enrich(source_title)
 
+    from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415
+
     prepared: list[tuple[str, str, dict]] = []
     for chunk in chunks:
         chunk_id = f"{content_hash[:16]}_{chunk.chunk_index}"
-        meta: dict = {
-            "source_path": str(pdf_path),
-            "source_title": source_title,
-            "source_author": result.metadata.get("pdf_author", ""),
-            "source_date": result.metadata.get("pdf_creation_date", ""),
-            "corpus": corpus,
-            "store_type": "pdf",
-            "page_count": result.metadata.get("page_count", 0),
-            "page_number": chunk.metadata.get("page_number", 0),
-            "section_title": "",
-            "section_type": "",
-            "format": result.metadata.get("format", ""),
-            "extraction_method": result.metadata.get("extraction_method", ""),
-            "chunk_type": chunk.metadata.get("chunk_type", "text"),
-            "chunk_index": chunk.chunk_index,
-            "chunk_count": len(chunks),
-            "chunk_start_char": chunk.metadata.get("chunk_start_char", 0),
-            "chunk_end_char": chunk.metadata.get("chunk_end_char", 0),
-            "embedding_model": target_model,
-            "indexed_at": now_iso,
-            "content_hash": content_hash,
-            "pdf_subject": result.metadata.get("pdf_subject", ""),
-            "pdf_keywords": result.metadata.get("pdf_keywords", ""),
-            "is_image_pdf": is_image_pdf,
-            "has_formulas": has_formulas,
-            "bib_year": bib.get("year", 0),
-            "bib_venue": bib.get("venue", ""),
-            "bib_authors": bib.get("authors", ""),
-            "bib_citation_count": bib.get("citation_count", 0),
-            "bib_semantic_scholar_id": bib.get("semantic_scholar_id", ""),
-            "chunk_text_hash": hashlib.sha256(chunk.text.encode()).hexdigest(),
-            **{k: v for k, v in git_meta.items() if v},
-        }
+        meta = make_chunk_metadata(
+            content_type="pdf",
+            source_path=str(pdf_path),
+            chunk_index=chunk.chunk_index,
+            chunk_count=len(chunks),
+            chunk_text_hash=hashlib.sha256(chunk.text.encode()).hexdigest(),
+            content_hash=content_hash,
+            chunk_start_char=chunk.metadata.get("chunk_start_char", 0),
+            chunk_end_char=chunk.metadata.get("chunk_end_char", 0),
+            page_number=chunk.metadata.get("page_number", 0),
+            indexed_at=now_iso,
+            embedding_model=target_model,
+            store_type="pdf",
+            corpus=corpus,
+            title=source_title,
+            source_author=result.metadata.get("pdf_author", ""),
+            section_title=chunk.metadata.get("section_title", ""),
+            section_type=chunk.metadata.get("section_type", ""),
+            tags="pdf",
+            category="paper",
+            bib_year=bib.get("year", 0),
+            bib_authors=bib.get("authors", ""),
+            bib_venue=bib.get("venue", ""),
+            bib_citation_count=bib.get("citation_count", 0),
+            git_meta=git_meta,
+        )
         prepared.append((chunk_id, chunk.text, meta))
     return prepared
 
@@ -698,32 +693,33 @@ def _markdown_chunks(
         or derive_title(md_path, body)
     )
 
+    from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415
+
     prepared: list[tuple[str, str, dict]] = []
     for chunk in chunks:
         chunk_id = f"{content_hash[:16]}_{chunk.chunk_index}"
-        meta: dict = {
-            "source_path": sp,
-            "source_title": source_title,
-            "source_author": str(frontmatter.get("author", "")),
-            "source_date": str(frontmatter.get("date", "")),
-            "corpus": corpus,
-            "store_type": "markdown",
-            "page_count": 0,
-            "page_number": chunk.metadata.get("page_number", 0),
-            "section_title": chunk.metadata.get("header_path", ""),
-            "section_type": chunk.metadata.get("section_type", ""),
-            "format": "markdown",
-            "extraction_method": "markdown_chunker",
-            "chunk_index": chunk.chunk_index,
-            "chunk_count": len(chunks),
-            "chunk_start_char": chunk.metadata.get("chunk_start_char", 0) + frontmatter_len,
-            "chunk_end_char": chunk.metadata.get("chunk_end_char", 0) + frontmatter_len,
-            "embedding_model": target_model,
-            "indexed_at": now_iso,
-            "content_hash": content_hash,
-            "chunk_text_hash": hashlib.sha256(chunk.text.encode()).hexdigest(),
-            **{k: v for k, v in git_meta.items() if v},
-        }
+        meta = make_chunk_metadata(
+            content_type="markdown",
+            source_path=sp,
+            chunk_index=chunk.chunk_index,
+            chunk_count=len(chunks),
+            chunk_text_hash=hashlib.sha256(chunk.text.encode()).hexdigest(),
+            content_hash=content_hash,
+            chunk_start_char=chunk.metadata.get("chunk_start_char", 0) + frontmatter_len,
+            chunk_end_char=chunk.metadata.get("chunk_end_char", 0) + frontmatter_len,
+            page_number=chunk.metadata.get("page_number", 0),
+            indexed_at=now_iso,
+            embedding_model=target_model,
+            store_type="markdown",
+            corpus=corpus,
+            title=source_title,
+            source_author=str(frontmatter.get("author", "")),
+            section_title=chunk.metadata.get("header_path", ""),
+            section_type=chunk.metadata.get("section_type", ""),
+            tags="markdown",
+            category="prose",
+            git_meta=git_meta,
+        )
         prepared.append((chunk_id, chunk.text, meta))
     return prepared
 
@@ -837,7 +833,7 @@ def index_pdf(
                 return {
                     "chunks": count,
                     "pages": sorted({m.get("page_number", 0) for m in all_meta}),
-                    "title": all_meta[0].get("source_title", "") if all_meta else "",
+                    "title": all_meta[0].get("title", "") if all_meta else "",
                     "author": all_meta[0].get("source_author", "") if all_meta else "",
                 }
             return count
@@ -848,7 +844,7 @@ def index_pdf(
             from nexus.pipeline_stages import _catalog_pdf_hook
             _catalog_pdf_hook(
                 pdf_path, col_name,
-                title=meta_list[0].get("source_title", "") if meta_list else "",
+                title=meta_list[0].get("title", "") if meta_list else "",
                 author=meta_list[0].get("source_author", "") if meta_list else "",
                 year=int(meta_list[0].get("year", 0)) if meta_list else 0,
                 corpus=corpus,
@@ -882,7 +878,7 @@ def index_pdf(
             return {
                 "chunks": len(metadatas),
                 "pages": sorted({m.get("page_number", 0) for m in metadatas}),
-                "title": metadatas[0].get("source_title", "") if metadatas else "",
+                "title": metadatas[0].get("title", "") if metadatas else "",
                 "author": metadatas[0].get("source_author", "") if metadatas else "",
             }
         return count

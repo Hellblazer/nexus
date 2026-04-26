@@ -34,8 +34,8 @@ def test_enrich_skips_already_enriched(mock_bib: MagicMock, mock_t3_factory: Mag
     mock_col.get.return_value = {
         "ids": ["c1", "c2"],
         "metadatas": [
-            {"source_title": "Paper A", "bib_semantic_scholar_id": "abc123"},
-            {"source_title": "Paper A", "bib_semantic_scholar_id": "abc123"},
+            {"title": "Paper A", "bib_semantic_scholar_id": "abc123"},
+            {"title": "Paper A", "bib_semantic_scholar_id": "abc123"},
         ],
     }
     mock_db = MagicMock()
@@ -71,13 +71,13 @@ def test_enrich_updates_metadata(
     mock_retry.side_effect = [
         # First call: col.get for all chunks
         {"ids": ["c1", "c2"], "metadatas": [
-            {"source_title": "Paper A", "chunk_index": 0},
-            {"source_title": "Paper A", "chunk_index": 1},
+            {"title": "Paper A", "chunk_index": 0},
+            {"title": "Paper A", "chunk_index": 1},
         ]},
         # Second call: col.get for specific chunk IDs (re-fetch before update)
         {"ids": ["c1", "c2"], "metadatas": [
-            {"source_title": "Paper A", "chunk_index": 0},
-            {"source_title": "Paper A", "chunk_index": 1},
+            {"title": "Paper A", "chunk_index": 0},
+            {"title": "Paper A", "chunk_index": 1},
         ]},
         # Third call: col.update
         None,
@@ -101,7 +101,7 @@ def test_enrich_no_match_increments_skipped(mock_bib: MagicMock, mock_t3_factory
     mock_col = MagicMock()
     mock_col.get.return_value = {
         "ids": ["c1"],
-        "metadatas": [{"source_title": "Unknown Paper"}],
+        "metadatas": [{"title": "Unknown Paper"}],
     }
     mock_db = MagicMock()
     mock_db.get_or_create_collection.return_value = mock_col
@@ -123,9 +123,9 @@ def test_enrich_limit_option(mock_bib: MagicMock, mock_t3_factory: MagicMock) ->
     mock_col.get.return_value = {
         "ids": ["c1", "c2", "c3"],
         "metadatas": [
-            {"source_title": "Paper A"},
-            {"source_title": "Paper B"},
-            {"source_title": "Paper C"},
+            {"title": "Paper A"},
+            {"title": "Paper B"},
+            {"title": "Paper C"},
         ],
     }
     mock_db = MagicMock()

@@ -75,37 +75,41 @@ class TestOverlap:
 
 
 class TestIsImagePdf:
-    """is_image_pdf metadata field correctness (per-page heuristic)."""
+    """``is_image_pdf`` is computed inside ``_pdf_chunks`` from per-page
+    text density (text_len / page_count < 20) and used for routing
+    decisions (image-only PDFs need OCR / MinerU). It's NOT in
+    ``ALLOWED_TOP_LEVEL``, so ``normalize()`` drops it before T3
+    storage. These tests now verify the heuristic still produces chunks
+    on each input shape and that the dropped field is consistently
+    absent."""
 
-    def test_real_text_pdf_is_not_image(self, simple_pdf: Path) -> None:
-        """TrueType PDF with real extractable text → is_image_pdf False."""
+    def test_real_text_pdf_produces_chunks(self, simple_pdf: Path) -> None:
+        """TrueType PDF with real extractable text → chunks produced
+        (i.e. not classified as image-only and short-circuited)."""
         content_hash = _sha256(simple_pdf)
         chunks = _pdf_chunks(simple_pdf, content_hash, "test-model", "2026-01-01", "test")
         assert chunks, "Expected at least one chunk from simple.pdf"
-        assert all(chunk[2]["is_image_pdf"] is False for chunk in chunks), (
-            "simple.pdf should not be flagged as image-only"
-        )
+        assert all("is_image_pdf" not in chunk[2] for chunk in chunks)
 
-    def test_multipage_real_text_is_not_image(self, multipage_pdf: Path) -> None:
-        """3-page TrueType PDF → is_image_pdf False on all chunks."""
+    def test_multipage_real_text_produces_chunks(self, multipage_pdf: Path) -> None:
+        """3-page TrueType PDF → chunks produced on every page."""
         content_hash = _sha256(multipage_pdf)
         chunks = _pdf_chunks(multipage_pdf, content_hash, "test-model", "2026-01-01", "test")
         assert chunks
-        assert all(chunk[2]["is_image_pdf"] is False for chunk in chunks)
+        assert all("is_image_pdf" not in chunk[2] for chunk in chunks)
 
-    def test_type3_pdf_is_image_when_no_text(self, type3_pdf: Path) -> None:
-        """Type3 PDF whose glyph renders as empty text → is_image_pdf True."""
+    def test_type3_pdf_handled(self, type3_pdf: Path) -> None:
+        """Type3 PDF whose glyph renders as empty text — extractor still
+        runs without crashing whether or not chunks emerge."""
         from nexus.pdf_extractor import PDFExtractor
         result = PDFExtractor().extract(type3_pdf)
         page_count = result.metadata.get("page_count", 1) or 1
         chars_per_page = len(result.text) / page_count
-        # Only assert is_image_pdf when text extraction actually returns empty;
-        # pymupdf may or may not decode the single Type3 glyph depending on version.
         if chars_per_page < 20:
             content_hash = _sha256(type3_pdf)
             chunks = _pdf_chunks(type3_pdf, content_hash, "test-model", "2026-01-01", "test")
-            if chunks:
-                assert all(chunk[2]["is_image_pdf"] is True for chunk in chunks)
+            for chunk in chunks:
+                assert "is_image_pdf" not in chunk[2]
 
 
 class TestCharRangeMetadata:

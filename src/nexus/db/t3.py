@@ -498,30 +498,29 @@ class T3Database:
         source_agent: str = "",
         store_type: str = "knowledge",
         ttl_days: int = 0,
-        expires_at: str = "",
     ) -> str:
         """Upsert *content* into *collection*. Returns the document ID.
 
-        *ttl_days* = 0 means permanent (``expires_at=""``).
-
-        *expires_at* may be supplied by the caller (e.g. ``promote_cmd`` when
-        carrying over an existing T2 TTL from a known base timestamp).  When
-        omitted and *ttl_days* > 0, ``expires_at`` is computed from
-        ``datetime.now(UTC)``.
+        *ttl_days* = 0 means permanent. Expiry is no longer stored as a
+        separate ``expires_at`` field — it's computed Python-side via
+        :func:`nexus.metadata_schema.is_expired` from
+        ``indexed_at + ttl_days``.
 
         Note: The document ID is derived from ``collection:title``. Calling put()
         with an empty title will overwrite any previous empty-title document in the
         same collection. Always provide a meaningful title to avoid unintentional
         overwrites.
+
+        MCP-stored docs are single-chunk by definition; this routes through
+        :func:`nexus.metadata_schema.make_chunk_metadata` so every
+        ALLOWED_TOP_LEVEL field is populated and the chash dual-write hook
+        gets the chunk_text_hash it needs (closes the RDR-086 coverage hole
+        for MCP-stored docs).
         """
+        from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415
+
         doc_id = hashlib.sha256(f"{collection}:{title}".encode()).hexdigest()[:16]
         now_iso = datetime.now(UTC).isoformat()
-
-        if not expires_at:
-            if ttl_days > 0:
-                expires_at = (datetime.now(UTC) + timedelta(days=ttl_days)).isoformat()
-            else:
-                expires_at = ""
 
         # Determine whether this collection uses CCE.  When a voyage_api_key
         # is available and we're not in local mode, CCE collections (docs__,
@@ -533,18 +532,43 @@ class T3Database:
             and index_model_for_collection(collection) == "voyage-context-3"
         )
 
-        metadata: dict = {
-            "title": title,
-            "tags": tags,
-            "category": category,
-            "session_id": session_id,
-            "source_agent": source_agent,
-            "store_type": store_type,
-            "indexed_at": now_iso,
-            "expires_at": expires_at,
-            "ttl_days": ttl_days,
-            "embedding_model": index_model_for_collection(collection),
+        # Derive content_type from the collection prefix so the factory
+        # can stamp it through normalize().
+        prefix_to_ct = {
+            "code__": "code",
+            "docs__": "prose",
+            "rdr__": "markdown",
+            "knowledge__": "prose",
         }
+        content_type = "prose"
+        for prefix, ct in prefix_to_ct.items():
+            if collection.startswith(prefix):
+                content_type = ct
+                break
+
+        # MCP-stored docs are single-chunk: chunk_index=0, chunk_count=1,
+        # chunk_text_hash matches content_hash because content == chunk text.
+        content_hash = hashlib.sha256(content.encode()).hexdigest()
+        metadata = make_chunk_metadata(
+            content_type=content_type,
+            source_path="",  # MCP put has no on-disk source
+            chunk_index=0,
+            chunk_count=1,
+            chunk_text_hash=content_hash,
+            content_hash=content_hash,
+            chunk_start_char=0,
+            chunk_end_char=len(content),
+            indexed_at=now_iso,
+            embedding_model=index_model_for_collection(collection),
+            store_type=store_type,
+            corpus="",
+            title=title,
+            tags=tags,
+            category=category,
+            ttl_days=ttl_days,
+            source_agent=source_agent,
+            session_id=session_id,
+        )
 
         col = self.get_or_create_collection(collection)
         if is_cce:
@@ -732,15 +756,18 @@ class T3Database:
         Only queries the knowledge store — TTL-managed entries are written
         via ``nx store put`` which routes to the knowledge store.
 
-        Only removes entries where ``ttl_days > 0`` AND ``expires_at != ""``
-        AND ``expires_at < now``. Permanent entries (``ttl_days=0``,
-        ``expires_at=""``) are always preserved.
+        Expiry is computed from ``indexed_at + ttl_days`` Python-side
+        (see :func:`nexus.metadata_schema.is_expired`). ``ttl_days == 0``
+        is the permanent sentinel — never expires regardless of
+        indexed_at.
 
         Returns the total number of deleted documents.
         """
-        # ChromaDB only supports numeric $lt/$gt, so we filter by ttl_days > 0
-        # (int comparison) then check expires_at in Python (ISO 8601 strings are
-        # lexicographically ordered, so string comparison is correct).
+        from nexus.metadata_schema import is_expired  # noqa: PLC0415
+
+        # ChromaDB only supports numeric $lt/$gt, so pre-filter by
+        # ttl_days > 0 (eliminates permanent entries) then check
+        # indexed_at + ttl_days Python-side via is_expired().
         now_iso = datetime.now(UTC).isoformat()
         ttl_where: dict = {"ttl_days": {"$gt": 0}}
         total = 0
@@ -772,7 +799,7 @@ class T3Database:
                 )
                 page_ids = result["ids"]
                 for doc_id, meta in zip(page_ids, result["metadatas"]):
-                    if meta.get("expires_at", "") and meta["expires_at"] < now_iso:
+                    if is_expired(meta, now_iso=now_iso):
                         expired_ids.append(doc_id)
                 offset += len(page_ids)
                 if len(page_ids) < page_limit:
@@ -790,8 +817,8 @@ class T3Database:
         """Return metadata for entries in a single knowledge__ collection.
 
         Each entry is a dict with at minimum ``id``, ``title``, ``tags``,
-        ``ttl_days``, ``expires_at``, and ``indexed_at``.  Returns an empty
-        list when the collection does not exist.
+        ``ttl_days``, and ``indexed_at``.  Returns an empty list when the
+        collection does not exist.
 
         Supports offset-based pagination via ChromaDB's native offset param.
         """

@@ -1665,7 +1665,7 @@ def _backfill_rdrs(cat: Catalog, t3: object, dry_run: bool) -> int:
                 for meta in metas:
                     path = meta.get("source_path", "")
                     if path and path not in seen_paths:
-                        title = meta.get("source_title", "") or Path(path).stem
+                        title = meta.get("title", "") or Path(path).stem
                         seen_paths[path] = title
                 if len(metas) < 200:
                     break
@@ -1736,7 +1736,7 @@ def _backfill_papers(
             result = col.get(limit=1, include=["metadatas"])
             if result.get("ids") and result.get("metadatas"):
                 meta = result["metadatas"][0]
-                title = meta.get("source_title", "") or meta.get("title", "") or title
+                title = meta.get("title", "") or title
                 author = meta.get("bib_authors", "") or meta.get("author", "")
                 year = int(meta.get("bib_year", 0) or 0)
         except Exception:

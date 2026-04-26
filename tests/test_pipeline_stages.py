@@ -390,13 +390,16 @@ class TestPipelineIndexPdf:
             pytest.fail("table_regions post-pass did not update chunks to table_page")
 
     def test_metadata_enrichment_postpass(self, db) -> None:
+        """Post-pass writes the resolved title and author into the chunk
+        metadata. ``source_title`` was collapsed into ``title``; the
+        post-pass now writes ``title`` only."""
         fr = _er(1)
         fr.metadata["docling_title"] = "My Paper Title"
         fr.metadata["pdf_author"] = "Jane Doe"
         t3, _ = _run_with_col(
             db,
             col_get_return={"ids": ["abc_0"], "metadatas": [
-                {"source_title": "", "content_hash": "abc123", "page_number": 1}]},
+                {"title": "", "content_hash": "abc123", "page_number": 1}]},
             fake_result=fr,
             fake_chunks=_tc(("c0", 0, {"page_number": 1, "chunk_type": "text"})),
             pdf_path="/paper.pdf")
@@ -404,9 +407,11 @@ class TestPipelineIndexPdf:
             a = call[0]
             if a[0] == "docs__test":
                 m = a[2][0]
-                assert m["source_title"] == "My Paper Title"
+                assert m["title"] == "My Paper Title"
                 assert m["source_author"] == "Jane Doe"
-                assert m["extraction_method"] == "docling"
+                # extraction_method is dropped by normalize() — not in
+                # ALLOWED_TOP_LEVEL since no read site uses it.
+                assert "extraction_method" not in m
                 break
         else:
             pytest.fail("metadata enrichment post-pass not called")
@@ -468,15 +473,15 @@ class TestBufferEdgeCases:
 
 
 _REQUIRED_META = {
-    "source_path", "source_title", "source_author", "source_date",
-    "corpus", "store_type", "page_count", "page_number",
-    "section_title", "format", "extraction_method",
-    "chunk_type", "chunk_index", "chunk_count",
-    "chunk_start_char", "chunk_end_char",
-    "embedding_model", "indexed_at", "content_hash",
-    "pdf_subject", "pdf_keywords", "is_image_pdf", "has_formulas",
-    "bib_year", "bib_venue", "bib_authors",
-    "bib_citation_count", "bib_semantic_scholar_id",
+    # Identity / spans / position
+    "source_path", "content_hash", "chunk_text_hash", "chunk_index", "chunk_count",
+    "chunk_start_char", "chunk_end_char", "line_start", "line_end", "page_number",
+    # Display / routing (post source_title→title collapse, expires_at→indexed_at swap)
+    "title", "source_author", "section_title", "section_type", "tags", "category",
+    "content_type", "store_type", "corpus", "embedding_model",
+    # Lifecycle
+    "indexed_at", "ttl_days", "frecency_score", "source_agent", "session_id",
+    # bib_* and git_meta intentionally omitted (drop-when-empty by normalize)
 }
 
 

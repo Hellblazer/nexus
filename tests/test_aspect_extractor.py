@@ -137,9 +137,10 @@ class TestCollectionRouting:
 
 class TestSuccessfulExtraction:
     def test_subprocess_invocation_shape(self, monkeypatch) -> None:
-        """``extract_aspects`` invokes ``claude -p <prompt>
-        --output-format json`` with timeout=180, capture_output=True,
-        text=True."""
+        """``extract_aspects`` invokes ``claude -p --output-format json``
+        with the prompt fed via stdin (kwargs['input']), timeout=180,
+        capture_output=True, text=True. Stdin replaces argv to bypass
+        macOS ARG_MAX (errno 7) on multi-page papers."""
         from nexus.aspect_extractor import extract_aspects
 
         captured: list[dict] = []
@@ -158,17 +159,37 @@ class TestSuccessfulExtraction:
         assert len(captured) == 1
         args = captured[0]["args"]
         kwargs = captured[0]["kwargs"]
-        assert args[0] == "claude"
-        assert args[1] == "-p"
-        # Argument 2 is the prompt — shape-only check (must include the
-        # paper content somewhere, must reference scholarly aspects).
-        prompt = args[2]
-        assert "some paper text" in prompt
-        assert args[3] == "--output-format"
-        assert args[4] == "json"
+        assert args == ["claude", "-p", "--output-format", "json"]
+        # Prompt is stdin-fed, not argv. Must include the paper content.
+        assert "some paper text" in kwargs.get("input", "")
         assert kwargs.get("timeout") == 180
         assert kwargs.get("capture_output") is True
         assert kwargs.get("text") is True
+
+    def test_argv_size_is_bounded_regardless_of_content_length(
+        self, monkeypatch,
+    ) -> None:
+        """Long documents must not bloat argv. The whole point of stdin
+        is that 14-page papers no longer trip macOS ARG_MAX."""
+        from nexus.aspect_extractor import extract_aspects
+
+        captured: list[dict] = []
+
+        def fake_run(args, **kwargs):
+            captured.append({"args": args, "kwargs": kwargs})
+            return _make_completed(_ok_stdout())
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        big_content = "X" * 200_000  # 200 KB — would have tripped E2BIG
+        extract_aspects(
+            content=big_content,
+            source_path="/big.pdf",
+            collection="knowledge__delos",
+        )
+        # argv must stay tiny — only fixed flags. The content lives in stdin.
+        argv_bytes = sum(len(s) + 1 for s in captured[0]["args"])
+        assert argv_bytes < 256, f"argv unexpectedly grew to {argv_bytes} bytes"
+        assert len(captured[0]["kwargs"]["input"]) >= 200_000
 
     def test_strips_markdown_code_fence_around_json(self, monkeypatch) -> None:
         """The Claude CLI sometimes wraps JSON in a ```json ... ```
@@ -247,7 +268,7 @@ class TestContentSourcing:
         from nexus.aspect_extractor import extract_aspects
 
         def fake_run(args, **kwargs):
-            assert "INLINE_CONTENT_HERE" in args[2]
+            assert "INLINE_CONTENT_HERE" in kwargs.get("input", "")
             return _make_completed(_ok_stdout())
 
         monkeypatch.setattr(subprocess, "run", fake_run)
@@ -257,17 +278,25 @@ class TestContentSourcing:
             collection="knowledge__delos",
         )
 
-    def test_reads_source_path_when_content_empty(
+    def test_reads_source_path_when_content_empty_and_t3_miss(
         self, tmp_path: Path, monkeypatch,
     ) -> None:
-        """CLI sites pass content="". The extractor reads source_path."""
+        """CLI sites pass content="". When T3 has no chunks for this
+        source_path, the extractor falls back to reading source_path
+        from disk."""
         from nexus.aspect_extractor import extract_aspects
 
         src = tmp_path / "p1.txt"
         src.write_text("DISK_SOURCED_CONTENT")
 
+        # Force T3 lookup to miss by stubbing the helper to return "".
+        monkeypatch.setattr(
+            "nexus.aspect_extractor._source_content_from_t3",
+            lambda *a, **kw: "",
+        )
+
         def fake_run(args, **kwargs):
-            assert "DISK_SOURCED_CONTENT" in args[2]
+            assert "DISK_SOURCED_CONTENT" in kwargs.get("input", "")
             return _make_completed(_ok_stdout())
 
         monkeypatch.setattr(subprocess, "run", fake_run)
@@ -279,21 +308,43 @@ class TestContentSourcing:
         assert record is not None
         assert record.problem_formulation == "Sharded WAL bottleneck."
 
+    def test_sources_from_t3_when_content_empty_and_t3_hit(
+        self, monkeypatch,
+    ) -> None:
+        """When content="" and T3 has chunks for this source_path,
+        the extractor uses T3 (not disk) — the architectural correction
+        that motivated the whole change. Disk is the fallback now."""
+        from nexus.aspect_extractor import extract_aspects
+
+        monkeypatch.setattr(
+            "nexus.aspect_extractor._source_content_from_t3",
+            lambda c, sp: "T3_REASSEMBLED_CONTENT_FROM_CHUNKS",
+        )
+
+        def fake_run(args, **kwargs):
+            assert "T3_REASSEMBLED_CONTENT_FROM_CHUNKS" in kwargs.get("input", "")
+            return _make_completed(_ok_stdout())
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        record = extract_aspects(
+            content="",
+            source_path="/missing/on/disk.pdf",  # would fail if disk was tried
+            collection="knowledge__delos",
+        )
+        assert record is not None
+        assert record.problem_formulation == "Sharded WAL bottleneck."
+
     def test_strips_embedded_null_bytes_from_content(self, monkeypatch) -> None:
-        """P1.3 spike caught real-world PDFs whose pymupdf-extracted text
-        contains \\x00 bytes. ``subprocess.run`` rejects argv entries
-        with embedded null bytes (POSIX C-string contract) — passing
-        them raises ``ValueError('embedded null byte')`` BEFORE the
-        retry guard runs. The extractor strips \\x00 from content
-        before building the prompt so this real-world failure mode
-        is no longer fatal.
-        """
+        """Some PDF extractors emit \\x00 bytes. Strip them before
+        prompting (no semantic content) and before subprocess hand-off
+        (POSIX argv would reject them outright; stdin is more forgiving
+        but the strip stays as defense in depth)."""
         from nexus.aspect_extractor import extract_aspects
 
         captured: list[str] = []
 
         def fake_run(args, **kwargs):
-            captured.append(args[2])
+            captured.append(kwargs.get("input", ""))
             return _make_completed(_ok_stdout())
 
         monkeypatch.setattr(subprocess, "run", fake_run)
@@ -781,7 +832,7 @@ class TestBatchExtraction:
         captured_prompt: list[str] = []
 
         def fake_run(args, **kwargs):
-            captured_prompt.append(args[2])
+            captured_prompt.append(kwargs.get("input", ""))
             inner = json.dumps({
                 "papers": [
                     {

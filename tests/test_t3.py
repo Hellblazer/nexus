@@ -205,7 +205,9 @@ def test_store_put_permanent_metadata(mock_db):
     assert meta["session_id"] == "sess-001"
     assert meta["source_agent"] == "codebase-deep-analyzer"
     assert meta["ttl_days"] == 0
-    assert meta["expires_at"] == ""
+    # expires_at removed; expiry derived from indexed_at + ttl_days
+    assert "expires_at" not in meta
+    assert meta["indexed_at"]  # ISO timestamp
     assert meta["store_type"] == "knowledge"
     assert meta["embedding_model"] == "voyage-context-3"
 
@@ -215,8 +217,10 @@ def test_store_put_with_ttl_metadata(mock_db):
     db.put(collection="knowledge__security", content="temp finding", title="temp.md", ttl_days=30)
     meta = mock_col.upsert.call_args.kwargs["metadatas"][0]
     assert meta["ttl_days"] == 30
-    assert meta["expires_at"] != ""
-    assert datetime.fromisoformat(meta["expires_at"]) > datetime.now(UTC)
+    # expires_at no longer stored; verify the inputs to is_expired() are present
+    assert "expires_at" not in meta
+    assert meta["indexed_at"]
+    assert datetime.fromisoformat(meta["indexed_at"]) <= datetime.now(UTC)
 
 
 # ── AC4: expire ─────────────────────────────────────────────────────────────
@@ -233,8 +237,15 @@ def test_expire_guards_permanent_entries(expire_db):
 
 def test_expire_deletes_expired_entries(expire_db):
     db, mock_col = expire_db
-    past = "2020-01-01T00:00:00+00:00"
-    mock_col.get.return_value = {"ids": ["id-1", "id-2"], "metadatas": [{"expires_at": past}, {"expires_at": past}]}
+    # Old fixtures: indexed 100 days ago with 30-day ttl → expired now.
+    old_indexed = "2020-01-01T00:00:00+00:00"
+    mock_col.get.return_value = {
+        "ids": ["id-1", "id-2"],
+        "metadatas": [
+            {"indexed_at": old_indexed, "ttl_days": 30},
+            {"indexed_at": old_indexed, "ttl_days": 30},
+        ],
+    }
     assert db.expire() == 2
     mock_col.delete.assert_called_once_with(ids=["id-1", "id-2"])
 
@@ -242,8 +253,10 @@ def test_expire_deletes_expired_entries(expire_db):
 def test_expire_skips_non_knowledge_collections(mock_chromadb):
     _, mock_client = mock_chromadb
     mock_col = MagicMock()
-    past = "2020-01-01T00:00:00+00:00"
-    mock_col.get.return_value = {"ids": ["stale-id"], "metadatas": [{"expires_at": past}]}
+    mock_col.get.return_value = {
+        "ids": ["stale-id"],
+        "metadatas": [{"indexed_at": "2020-01-01T00:00:00+00:00", "ttl_days": 30}],
+    }
     mock_client.list_collections.return_value = ["code__myrepo", "docs__papers", "knowledge__sec"]
     mock_client.get_collection.return_value = mock_col
     db = T3Database(tenant="t", database="d", api_key="k")
@@ -252,9 +265,10 @@ def test_expire_skips_non_knowledge_collections(mock_chromadb):
 
 
 @pytest.mark.parametrize("ids,metadatas,expected_count,desc", [
-    (["id-no-expires"], [{"ttl_days": 30}], 0, "missing expires_at"),
-    (["id-perm"], [{"expires_at": "", "ttl_days": 30}], 0, "empty expires_at sentinel"),
-    (["id-future"], [{"expires_at": "2099-12-31T23:59:59+00:00", "ttl_days": 30}], 0, "future expires_at"),
+    (["id-no-indexed"], [{"ttl_days": 30}], 0, "missing indexed_at"),
+    (["id-perm"], [{"indexed_at": "2020-01-01T00:00:00+00:00", "ttl_days": 0}], 0, "ttl=0 is permanent sentinel"),
+    (["id-future"], [{"indexed_at": "2099-01-01T00:00:00+00:00", "ttl_days": 30}], 0, "indexed in the future"),
+    (["id-fresh"], [{"indexed_at": datetime.now(UTC).isoformat(), "ttl_days": 30}], 0, "fresh entry not yet expired"),
 ])
 def test_expire_preserves_non_expired(expire_db, ids, metadatas, expected_count, desc):
     db, mock_col = expire_db
@@ -265,12 +279,14 @@ def test_expire_preserves_non_expired(expire_db, ids, metadatas, expected_count,
 
 def test_expire_mixed_expired_and_permanent(expire_db):
     db, mock_col = expire_db
+    old = "2020-01-01T00:00:00+00:00"
+    fresh = datetime.now(UTC).isoformat()
     mock_col.get.return_value = {
-        "ids": ["expired-1", "perm-1", "future-1"],
+        "ids": ["expired-1", "perm-1", "fresh-1"],
         "metadatas": [
-            {"expires_at": "2020-01-01T00:00:00+00:00", "ttl_days": 30},
-            {"expires_at": "", "ttl_days": 30},
-            {"expires_at": "2099-12-31T23:59:59+00:00", "ttl_days": 30},
+            {"indexed_at": old, "ttl_days": 30},
+            {"indexed_at": old, "ttl_days": 0},  # permanent (ttl_days=0)
+            {"indexed_at": fresh, "ttl_days": 365},
         ],
     }
     assert db.expire() == 1
@@ -694,13 +710,14 @@ def test_upsert_chunks_calls_col_upsert(mock_db):
 
 def test_upsert_chunks_passes_all_metadata_fields(mock_db):
     """Canonical schema fields (nexus-40t) survive the normalize pass;
-    cargo (``indexed_at``) is dropped and ``content_type`` is injected
-    from the collection prefix."""
+    ``indexed_at`` is now in ALLOWED_TOP_LEVEL (replaces dropped
+    ``expires_at``); ``content_type`` is injected from the collection
+    prefix."""
     db, mock_col, _ = mock_db
     rich_meta = {
         "title": "f.py:1-5", "tags": "py", "category": "code", "session_id": "",
         "source_agent": "nexus-indexer", "store_type": "code",
-        "indexed_at": "2026-01-01T00:00:00+00:00", "expires_at": "", "ttl_days": 0,
+        "indexed_at": "2026-01-01T00:00:00+00:00", "ttl_days": 0,
         "source_path": "src/foo.py", "line_start": 1, "line_end": 5, "frecency_score": 0.42,
     }
     db.upsert_chunks(
@@ -715,12 +732,12 @@ def test_upsert_chunks_passes_all_metadata_fields(mock_db):
     assert written["store_type"] == "code"
     assert written["content_type"] == "code"  # injected
     assert written["ttl_days"] == 0
-    assert written["expires_at"] == ""
+    assert written["indexed_at"] == "2026-01-01T00:00:00+00:00"
+    assert "expires_at" not in written
     assert written["line_start"] == 1
     assert written["line_end"] == 5
     assert written["source_path"] == "src/foo.py"
     assert written["frecency_score"] == 0.42
-    assert "indexed_at" not in written  # cargo dropped
 
 
 def test_upsert_chunks_uses_correct_embedding_fn(mock_db_voyage):
