@@ -250,10 +250,15 @@ def _catalog_enrich_hook(title: str, bib_meta: dict, collection_name: str = "") 
 # for ~5K-token output on Haiku-4-class models. Used by --dry-run.
 _PER_PAPER_COST_USD = 0.01
 
-# RDR-089 P1.3 spike measured 16.7% strict-equality field stability —
-# below the RDR-088 95%/99% budget. The bead's note "raise to 20% per
-# the spike's verdict" sets the default to 20% rather than 5%.
-_DEFAULT_VALIDATE_SAMPLE_PCT = 20
+# Default per the RDR's original Phase 2 spec. The P1.3 spike's
+# 16.7% strict-equality "stability" rate measures whether the model
+# emits the same token sequence on a re-run, which is a methodology
+# question (the model paraphrases between runs and should), NOT a
+# hallucination-detection question. operator_verify is the
+# hallucination guard. Once token-overlap or embedding-similarity
+# stability metrics exist, this default should be revisited from
+# real signal.
+_DEFAULT_VALIDATE_SAMPLE_PCT = 5
 
 
 @enrich.command(name="aspects")
@@ -271,9 +276,7 @@ _DEFAULT_VALIDATE_SAMPLE_PCT = 20
     help=(
         "Validate N%% of newly-extracted aspects via operator_verify "
         "(claim=aspects, evidence=document text). Disagreements append "
-        "to ./validation_failures.jsonl. Pass 0 to skip validation. "
-        "Default 20%% (raised from 5%% per the P1.3 spike's strict-"
-        "equality stability finding)."
+        "to ./validation_failures.jsonl. Pass 0 to skip validation."
     ),
 )
 @click.option(

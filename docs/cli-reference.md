@@ -102,7 +102,7 @@ nx index repo ./my-project
 |------|-------------|
 | `--dir DIR` | Index all PDFs in a directory (mutually exclusive with `PATH`) |
 | `--collection NAME` | Fully-qualified T3 collection name (e.g. `knowledge__delos`). Overrides `--corpus` when set |
-| `--enrich` | Query Semantic Scholar for bibliographic metadata (year, venue, authors, citations). Off by default. Use `nx enrich <collection>` for bulk backfill |
+| `--enrich` | Query Semantic Scholar for bibliographic metadata (year, venue, authors, citations). Off by default. Use `nx enrich bib <collection>` for bulk backfill |
 | `--extractor [auto\|docling\|mineru]` | PDF extraction backend (default: `auto`). See [PDF Extraction Backends](#pdf-extraction-backends) below |
 | `--dry-run` | Extract and embed locally using ONNX (no API keys, no cloud writes). Prints a chunk preview |
 | `--streaming [auto\|always\|never]` | Pipeline mode (default: `auto`). `auto` uses the streaming pipeline for all PDFs (crash-resilient); `never` forces the legacy batch+checkpoint path |
@@ -163,10 +163,14 @@ nx index pdf paper.pdf --extractor mineru    # Always MinerU (fails if not insta
 
 ## nx enrich
 
+Subcommand group. The previous single-shape `nx enrich <coll>` is now `nx enrich bib <coll>`; a new `nx enrich aspects <coll>` ships RDR-089's structured-aspect extraction.
+
+### nx enrich bib
+
 Backfill bibliographic metadata from Semantic Scholar for an existing T3 collection.
 
 ```
-nx enrich knowledge__papers --delay 0.5 --limit 50
+nx enrich bib knowledge__papers --delay 0.5 --limit 50
 ```
 
 Queries Semantic Scholar for each unique `source_title` in the collection and writes `bib_year`, `bib_venue`, `bib_authors`, `bib_citation_count`, and `bib_semantic_scholar_id` back to every chunk with that title. Already-enriched chunks (non-empty `bib_semantic_scholar_id`) are skipped — the command is idempotent.
@@ -178,6 +182,25 @@ Queries Semantic Scholar for each unique `source_title` in the collection and wr
 | `--limit N` | Maximum number of titles to enrich (default: 0 = unlimited) |
 
 **Note**: Semantic Scholar's public API allows 100 requests per 5 minutes without an API key. For large collections, increase `--delay` or use `--limit` to process in batches.
+
+### nx enrich aspects
+
+Batch-extract structured aspects (problem formulation, proposed method, datasets, baselines, results, extras) for documents in a `knowledge__*` collection. Iterates the catalog (one entry per source document, NOT per chunk) and calls the synchronous extractor directly, bypassing the post-document hook chain to avoid double-firing on documents already triggered at ingest. Aspects land in T2 `document_aspects`.
+
+```
+nx enrich aspects knowledge__delos
+nx enrich aspects knowledge__delos --dry-run
+nx enrich aspects knowledge__delos --validate-sample 10
+nx enrich aspects knowledge__delos --re-extract --extractor-version claude-haiku-4-5-20251001
+```
+
+| Flag | Description |
+|------|-------------|
+| `COLLECTION` (positional) | Must be a `knowledge__*` collection (Phase 1 scope). Other prefixes return a "no extractor config" error |
+| `--dry-run` | Report document count + cost estimate (Haiku-class). No API calls, no T2 writes |
+| `--validate-sample N` | Validate N% of newly-extracted aspects via `operator_verify` against the document text. Disagreements append to `./validation_failures.jsonl`. Pass 0 to skip. Default 5 |
+| `--re-extract` | Re-run only on rows whose `model_version` is strictly less than `--extractor-version` (and rows that are missing entirely) |
+| `--extractor-version v` | Threshold for `--re-extract` (lexicographic STRICT-less-than) |
 
 ---
 

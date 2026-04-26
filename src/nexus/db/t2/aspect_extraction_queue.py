@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS aspect_extraction_queue (
     collection      TEXT NOT NULL,
     source_path     TEXT NOT NULL,
     content_hash    TEXT NOT NULL DEFAULT '',
+    content         TEXT NOT NULL DEFAULT '',
     status          TEXT NOT NULL DEFAULT 'pending',
     retry_count     INTEGER NOT NULL DEFAULT 0,
     enqueued_at     TEXT NOT NULL,
@@ -87,6 +88,15 @@ CREATE INDEX IF NOT EXISTS idx_aspect_queue_status
 """
 
 
+# Bounded retry budget for the SELECT-then-CAS-UPDATE loop in
+# ``claim_next``. Larger than the practical concurrent-worker count
+# in real deployments (one MCP server + one CLI process = 2 racers,
+# 4 covers the test-suite ThreadPoolExecutor as well). On the rare
+# extreme contention case where every retry races, ``None`` is
+# returned and the worker's next poll loop tick re-tries naturally.
+_MAX_CAS_RETRIES = 8
+
+
 # ── Row dataclass ───────────────────────────────────────────────────────────
 
 
@@ -95,11 +105,20 @@ class QueueRow:
     """A claimed queue row passed to the worker. Frozen because the
     worker holds it across the extract → upsert → mark_done sequence
     without mutation.
+
+    ``content`` is the document text captured at enqueue time. The
+    MCP ``store_put`` path passes ``content=<full text>`` (the only
+    moment the text is in scope before T3 commits); CLI ingest paths
+    pass ``content=""`` because chunk-level scope only — those rows
+    rely on the worker re-reading ``source_path`` from disk at
+    extraction time. The worker prefers ``content`` over file read
+    when non-empty.
     """
 
     collection: str
     source_path: str
     content_hash: str
+    content: str
     retry_count: int
 
 
@@ -138,6 +157,7 @@ class AspectExtractionQueue:
         collection: str,
         source_path: str,
         content_hash: str = "",
+        content: str = "",
     ) -> None:
         """Persist a new pending row for ``(collection, source_path)``.
 
@@ -145,6 +165,11 @@ class AspectExtractionQueue:
         resets ``status='pending'`` and ``retry_count=0``. Used for both
         first-time enqueue (from ``aspect_extraction_enqueue_hook``) and
         re-extraction triggers (``nx enrich aspects --re-extract``).
+
+        ``content`` is the document text captured at enqueue time. The
+        MCP path passes the full text (only moment it is in scope);
+        CLI paths pass ``""`` and the worker re-reads ``source_path``
+        from disk. Both shapes are valid.
 
         Empty ``collection`` or ``source_path`` raises ``ValueError`` —
         these are caller-side bugs that should fail fast.
@@ -157,10 +182,10 @@ class AspectExtractionQueue:
         with self._lock:
             self.conn.execute(
                 "INSERT OR REPLACE INTO aspect_extraction_queue "
-                "(collection, source_path, content_hash, status, "
+                "(collection, source_path, content_hash, content, status, "
                 " retry_count, enqueued_at, last_attempt_at, last_error) "
-                "VALUES (?, ?, ?, 'pending', 0, ?, NULL, NULL)",
-                (collection, source_path, content_hash, now),
+                "VALUES (?, ?, ?, ?, 'pending', 0, ?, NULL, NULL)",
+                (collection, source_path, content_hash, content, now),
             )
             self.conn.commit()
 
@@ -169,36 +194,59 @@ class AspectExtractionQueue:
 
         Returns the row as a ``QueueRow`` after flipping its status to
         ``in_progress`` and setting ``last_attempt_at``. Returns ``None``
-        when no pending row exists. Multi-threaded callers race against
-        the same connection's lock; whichever grabs the lock first wins
-        the row, the loser sees the now-claimed row pass it by and
-        either picks the next pending row or returns ``None``.
+        when no pending row exists.
+
+        Cross-process atomicity (compare-and-swap pattern): the UPDATE
+        WHERE clause includes ``status = 'pending'``. Two processes
+        racing the same row will both see it in the SELECT but only
+        one UPDATE matches a row whose status is still ``'pending'`` —
+        the other UPDATE matches zero rows (because the first commit
+        already flipped status to ``'in_progress'``). When this
+        process loses the race, ``cursor.rowcount == 0``, we re-run
+        the SELECT to find the next pending row. Bounded retry: at
+        most ``_MAX_CAS_RETRIES`` iterations before giving up and
+        returning ``None`` (queue depth has been racing-claimed by
+        peers; the caller's next poll will see fresh work).
+
+        The Python ``threading.Lock`` still serialises within-process
+        callers; the SQL CAS adds the across-process guarantee that
+        WAL row-locking alone does not provide for SELECT-then-UPDATE
+        sequences across separate connections.
         """
         now = datetime.now(UTC).isoformat()
-        with self._lock:
-            row = self.conn.execute(
-                "SELECT collection, source_path, content_hash, retry_count "
-                "FROM aspect_extraction_queue "
-                "WHERE status = 'pending' "
-                "ORDER BY enqueued_at ASC, source_path ASC "
-                "LIMIT 1"
-            ).fetchone()
-            if row is None:
-                return None
-            collection, source_path, content_hash, retry_count = row
-            self.conn.execute(
-                "UPDATE aspect_extraction_queue "
-                "SET status = 'in_progress', last_attempt_at = ? "
-                "WHERE collection = ? AND source_path = ?",
-                (now, collection, source_path),
-            )
-            self.conn.commit()
-        return QueueRow(
-            collection=collection,
-            source_path=source_path,
-            content_hash=content_hash,
-            retry_count=retry_count,
-        )
+        for _ in range(_MAX_CAS_RETRIES):
+            with self._lock:
+                row = self.conn.execute(
+                    "SELECT collection, source_path, content_hash, content, "
+                    "       retry_count "
+                    "FROM aspect_extraction_queue "
+                    "WHERE status = 'pending' "
+                    "ORDER BY enqueued_at ASC, source_path ASC "
+                    "LIMIT 1"
+                ).fetchone()
+                if row is None:
+                    return None
+                collection, source_path, content_hash, content, retry_count = row
+                cur = self.conn.execute(
+                    "UPDATE aspect_extraction_queue "
+                    "SET status = 'in_progress', last_attempt_at = ? "
+                    "WHERE collection = ? "
+                    "  AND source_path = ? "
+                    "  AND status = 'pending'",
+                    (now, collection, source_path),
+                )
+                self.conn.commit()
+                if cur.rowcount == 1:
+                    return QueueRow(
+                        collection=collection,
+                        source_path=source_path,
+                        content_hash=content_hash,
+                        content=content,
+                        retry_count=retry_count,
+                    )
+                # rowcount == 0 → another process / thread won the
+                # CAS; loop and try a different row.
+        return None
 
     def mark_done(self, collection: str, source_path: str) -> int:
         """DELETE the row at ``(collection, source_path)`` — success path.
@@ -291,7 +339,7 @@ class AspectExtractionQueue:
     def list_pending(self, limit: int | None = None) -> list[QueueRow]:
         """Return pending rows in claim order (FIFO by ``enqueued_at``)."""
         sql = (
-            "SELECT collection, source_path, content_hash, retry_count "
+            "SELECT collection, source_path, content_hash, content, retry_count "
             "FROM aspect_extraction_queue "
             "WHERE status = 'pending' "
             "ORDER BY enqueued_at ASC, source_path ASC"
@@ -305,7 +353,7 @@ class AspectExtractionQueue:
         return [
             QueueRow(
                 collection=c, source_path=sp, content_hash=ch,
-                retry_count=rc,
+                content=co, retry_count=rc,
             )
-            for c, sp, ch, rc in rows
+            for c, sp, ch, co, rc in rows
         ]

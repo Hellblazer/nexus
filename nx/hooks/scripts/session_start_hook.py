@@ -113,7 +113,7 @@ def main() -> None:
     output_lines.append("Plan library: `plan_save`/`plan_search` MCP tools (T2, project-scoped)")
     output_lines.append("Scratch: `scratch` MCP tool — session-scoped, shared across agents")
     output_lines.append("Catalog: `search`/`links`/`link` MCP tools (nexus-catalog server) — metadata-first routing; link creation with `chash:` spans (content-addressed, preferred)")
-    output_lines.append("Enrichment: `nx enrich COLLECTION` (CLI only)")
+    output_lines.append("Enrichment: `nx enrich bib COLLECTION` (Semantic Scholar) | `nx enrich aspects COLLECTION` (RDR-089 structured aspects)")
     output_lines.append("Pagination: search/store_list/memory_search return paged results. Footer shows `offset=N` for next page.")
     output_lines.append("")
     output_lines.append("MCP tool prefix: `mcp__plugin_nx_nexus__` (e.g. `mcp__plugin_nx_nexus__search`, `mcp__plugin_nx_nexus__query`)")

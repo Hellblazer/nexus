@@ -179,10 +179,12 @@ class AspectExtractionWorker:
         """Run extraction on one queue row and dispatch on the result."""
         from nexus.mcp_infra import t2_ctx
         try:
-            # content="" — the worker has no content in scope; the
-            # extractor's content-sourcing fallback reads source_path.
+            # Content was captured at enqueue time when in scope (MCP
+            # store_put). For CLI rows where content was not in scope
+            # at enqueue, ``row.content`` is "" and the extractor's
+            # content-sourcing fallback will read source_path.
             record = _extract_aspects(
-                content="",
+                content=row.content,
                 source_path=row.source_path,
                 collection=row.collection,
             )
@@ -319,17 +321,23 @@ def aspect_extraction_enqueue_hook(
       1. Skips collections without a registered extractor config
          (Phase 1 = ``knowledge__*`` only).
       2. Writes a pending row to ``aspect_extraction_queue``
-         (microsecond-scale T2 INSERT).
+         (microsecond-scale T2 INSERT). The row carries ``content``
+         when non-empty (MCP path) so the worker has the document
+         text without needing to re-read from disk; CLI paths pass
+         ``content=""`` and the worker falls back to a file read.
       3. Lazy-starts the worker if not already running.
 
     The hook is synchronous (RDR-089 P0.1 contract). It does not
     block on extraction; the worker drains in a background thread.
 
-    ``content`` is ignored — the worker re-reads ``source_path`` from
-    disk because most CLI sites already pass ``content=""`` and we
-    want consistent behaviour across the CLI / MCP entry points.
-    Phase 2 of this work may revisit caching content into the queue
-    row to avoid double-reads.
+    Content-sourcing contract (audit F4 + critical-issue fix):
+      * MCP store_put → ``content=<full document text>`` is in scope.
+        The hook persists it in the queue so the worker reads from
+        the row, not from disk (``source_path`` is a doc_id at the
+        MCP boundary, not a real filesystem path).
+      * CLI ingest → ``content=""`` (chunk scope only). Queue row
+        carries the empty string; worker falls back to
+        ``Path(source_path).read_text()``.
     """
     from nexus.aspect_extractor import select_config
     if select_config(collection) is None:
@@ -337,7 +345,9 @@ def aspect_extraction_enqueue_hook(
     from nexus.mcp_infra import t2_ctx
     try:
         with t2_ctx() as t2:
-            t2.aspect_queue.enqueue(collection, source_path)
+            t2.aspect_queue.enqueue(
+                collection, source_path, content=content,
+            )
     except Exception:
         _log.warning(
             "aspect_extraction_enqueue_failed",

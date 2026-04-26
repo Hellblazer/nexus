@@ -350,12 +350,14 @@ class TestValidateSample:
             assert "extracted_aspects" in row
             assert "timestamp" in row
 
-    def test_validate_sample_default_is_20_percent(self, env) -> None:
-        """The CLI's default --validate-sample is 20% per the P1.3
-        spike's strict-equality stability finding (raised from the
-        bead's original 5% baseline)."""
+    def test_validate_sample_default_is_5_percent(self, env) -> None:
+        """The CLI default --validate-sample is 5% per the RDR's
+        original Phase 2 spec. operator_verify catches hallucinations
+        on the sample; strict-equality cross-run stability is a
+        methodology metric not a model-quality metric and does not
+        belong in the default-rate decision."""
         from nexus.commands.enrich import _DEFAULT_VALIDATE_SAMPLE_PCT
-        assert _DEFAULT_VALIDATE_SAMPLE_PCT == 20
+        assert _DEFAULT_VALIDATE_SAMPLE_PCT == 5
 
 
 # ── Catalog missing ─────────────────────────────────────────────────────────

@@ -743,6 +743,7 @@ def migrate_aspect_extraction_queue_table(conn: sqlite3.Connection) -> None:
             collection      TEXT NOT NULL,
             source_path     TEXT NOT NULL,
             content_hash    TEXT NOT NULL DEFAULT '',
+            content         TEXT NOT NULL DEFAULT '',
             status          TEXT NOT NULL DEFAULT 'pending',
             retry_count     INTEGER NOT NULL DEFAULT 0,
             enqueued_at     TEXT NOT NULL,
@@ -1494,12 +1495,12 @@ MIGRATIONS: list[Migration] = [
         migrate_hook_failures_chain_column,
     ),
     Migration(
-        "4.14.3",
+        "4.14.2",
         "Create document_aspects table (RDR-089 P1.1)",
         migrate_document_aspects_table,
     ),
     Migration(
-        "4.14.4",
+        "4.14.2",
         "Create aspect_extraction_queue table (RDR-089 follow-up nexus-qeo8)",
         migrate_aspect_extraction_queue_table,
     ),

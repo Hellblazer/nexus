@@ -183,6 +183,83 @@ class TestWorkerDrain:
         assert rec.problem_formulation is None
         assert rec.extractor_name == "scholarly-paper-v1"
 
+    def test_mcp_path_content_survives_the_queue(
+        self, _isolate_t2: Path,
+    ) -> None:
+        """Critical-issue regression test (substantive critic finding):
+        MCP ``store_put`` passes ``content=<full text>`` and
+        ``source_path=<doc_id>``. The doc_id is a 16-char hex hash,
+        not a filesystem path. The worker must therefore use the
+        content the hook captured at enqueue time — re-reading
+        source_path would attempt to open a non-existent file,
+        produce a null-fields record, and silently lose the
+        extraction.
+        """
+        from nexus.aspect_extractor import AspectRecord
+        from nexus.aspect_worker import (
+            AspectExtractionWorker,
+            aspect_extraction_enqueue_hook,
+        )
+
+        # Simulate the MCP store_put boundary: source_path is a
+        # 16-char content-hash doc_id, content is the full text.
+        doc_id = "a3b9c2d1e4f5a6b7"
+        full_text = "Paper introduces a new approach to BFT consensus."
+        aspect_extraction_enqueue_hook(
+            source_path=doc_id,
+            collection="knowledge__delos",
+            content=full_text,
+        )
+
+        # Capture what extract_aspects sees.
+        seen: list[tuple[str, str]] = []
+
+        def fake_extract(content, source_path, collection):
+            seen.append((content, source_path))
+            return AspectRecord(
+                collection=collection,
+                source_path=source_path,
+                problem_formulation="P",
+                proposed_method="M",
+                experimental_datasets=["d1"],
+                experimental_baselines=["b1"],
+                experimental_results="R",
+                extras={"venue": "V"},
+                confidence=0.9,
+                extracted_at="2026-04-26T00:00:00+00:00",
+                model_version="claude-haiku-4-5-20251001",
+                extractor_name="scholarly-paper-v1",
+            )
+
+        with patch("nexus.aspect_worker._extract_aspects", fake_extract):
+            worker = AspectExtractionWorker(poll_interval=0.05)
+            worker.start()
+            try:
+                _wait_until(
+                    lambda: _queue_size(_isolate_t2) == 0, timeout=5.0,
+                )
+            finally:
+                worker.stop(timeout=5.0)
+
+        # The worker MUST have called extract_aspects with the
+        # captured content, NOT with content="" (which would force a
+        # file-read fallback against a non-existent path).
+        assert seen
+        captured_content, captured_source = seen[0]
+        assert captured_content == full_text, (
+            "MCP-path content was not propagated through the queue: "
+            "the worker received an empty string and would fall back "
+            "to reading the doc_id as a filesystem path."
+        )
+        assert captured_source == doc_id
+
+        # The aspect record landed in document_aspects with the doc_id
+        # as source_path (the MCP boundary identifier).
+        with T2Database(_isolate_t2) as db:
+            rec = db.document_aspects.get("knowledge__delos", doc_id)
+        assert rec is not None
+        assert rec.problem_formulation == "P"
+
     def test_worker_uncaught_exception_marks_failed(
         self, _isolate_t2: Path,
     ) -> None:

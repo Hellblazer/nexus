@@ -88,10 +88,11 @@ You don't have to register documents manually. Every indexing pathway does it au
 | `nx index pdf paper.pdf` | PDF with title, author, page count |
 | `nx index rdr .` | RDR documents with frontmatter titles |
 | `nx index md file.md` | Markdown documents |
-| `nx enrich <collection>` | Adds Semantic Scholar metadata + enables citation link generation |
+| `nx enrich bib <collection>` | Adds Semantic Scholar metadata + enables citation link generation |
+| `nx enrich aspects <collection>` | Extracts structured per-paper aspects (RDR-089) into T2 ``document_aspects`` |
 | MCP `store_put` | Knowledge entries stored by agents |
 
-After `nx enrich`, run `nx catalog setup` again (or `nx catalog generate-links`) to create citation links from the newly fetched references.
+After `nx enrich bib`, run `nx catalog setup` again (or `nx catalog generate-links`) to create citation links from the newly fetched references.
 
 ### Taxonomy and topic links
 
@@ -118,7 +119,7 @@ Agents also create links during their work — the debugger creates `relates` li
 
 | Type | Meaning | When to use | Created by |
 |------|---------|-------------|------------|
-| `cites` | Citation reference | Paper A references Paper B | `nx enrich` (auto), agents, manual |
+| `cites` | Citation reference | Paper A references Paper B | `nx enrich bib` (auto), agents, manual |
 | `implements-heuristic` | Code→RDR (auto-detected) | Indexer found title substring match | Indexer hook (automatic) |
 | `implements` | Code→RDR (confirmed) | Code intentionally realizes a design doc | Developer agent, manual |
 | `supersedes` | Document replaced by another | Retiring old doc, consolidating duplicates | RDR close, `nx_tidy` MCP tool, manual |
