@@ -2,12 +2,18 @@
 title: "RDR-089: Structured Aspect Extraction at Ingest"
 id: RDR-089
 type: Feature
-status: accepted
+status: closed
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-17
 accepted_date: 2026-04-25
+closed_date: 2026-04-26
+close_reason: implemented
+gap_closures:
+  Gap1: src/nexus/db/t2/document_aspects.py:99
+  Gap2: src/nexus/operators/aspect_sql.py:203
+  Gap3: src/nexus/operators/aspect_sql.py:384
 related_issues: []
 related_tests: [test_aspect_extractor.py]
 related: [RDR-042, RDR-044, RDR-070, RDR-076, RDR-078, RDR-088, RDR-090, RDR-093, RDR-095]
@@ -242,7 +248,7 @@ problem-statement + method + evaluation structure.
 ### Critical Assumptions
 
 - [x] Haiku produces schema-conformant output with ≥95% success rate across `knowledge__delos` — **Status**: Verified by precedent. RDR-088 Spike A measured 95% fully-stable / 99% micro-stable / 0% schema-validation errors across 100 `operator_check` dispatches; RDR-093 shipped `operator_groupby` and `operator_aggregate` against the same `claude_dispatch` substrate with no schema-conformance regressions in production. Field-level shape for the aspect schema specifically is unconfirmed but the substrate reliability budget is established. **Method**: optional 10-paper spike on `knowledge__delos` if the gate reviewer wants schema-shape confirmation; not blocking.
-- [ ] Aspect extraction adds &lt;3s per document to ingest time — **Status**: Unverified. The per-document hook fires once per source document (not once per chunk) after every chunk is in T3; one synchronous `subprocess.run(["claude", "-p", ...])` call (~1–3s) blocks the calling thread. At MCP `store_put` (sync `@mcp.tool()`) FastMCP runs the body in a worker thread, so subprocess blocking does not stall the asyncio event loop; CLI ingest paths block the indexing thread for the call duration. **Method**: Spike — measure end-to-end ingest delta on a 10-paper batch and confirm the new chain fires exactly once per source document at every CLI site.
+- [x] Aspect extraction adds &lt;3s per document to ingest time — **Status**: **Invalidated and superseded.** P1.3 spike on `knowledge__delos` (10 papers × 3 runs, `scripts/spikes/spike_rdr089_delos.py`) measured median 26.5 s and p95 38.1 s per document — 11–17× over the &lt;3 s threshold. Synchronous-inline extraction blocking the ingest path is therefore off the table. The redirect (nexus-qeo8): the document-grain hook enqueues to T2 `aspect_extraction_queue` in microseconds (single SQLite INSERT) and a daemon worker thread drains the queue invoking the same synchronous extractor. Ingest cost on the hook path is now microseconds; aspects populate within seconds-to-minutes of ingest depending on queue depth and batch size (`batch_size=5` default; `extract_aspects_batch` amortises one Haiku call across N papers). The implicit replacement assumption — "queue drain latency under non-pathological load is acceptable for read-many analytics use cases" — holds by design: no hard SLA is promised, and operators needing immediate consistency can pass `source="llm"` to bypass T2 entirely. See §Implementation Deviations row 1 and `CHANGELOG.md` `[4.14.2]`. **Method**: spike committed (`spike_rdr089_results.jsonl`, `verdict_pass: false` for the original threshold; the redirect was accepted by user direction on 2026-04-25).
 - [x] T2 write contention under concurrent indexing is acceptable (aspect upserts during ingest) — **Status**: Verified by RDR-095 production deployment. `taxonomy_assign_batch_hook` and `chash_dual_write_batch_hook` write per-doc upserts to T2 from the existing batch chain under concurrent indexing without contention issues; WAL mode + per-store lock pattern transfers. The new per-document chain reuses the same `t2_ctx()` connection path. **Method**: closed by RDR-095 acceptance; no separate spike needed.
 
 ## Proposed Solution
@@ -615,10 +621,10 @@ over aspect fields), not similarity-based.
 
 ### Consequences
 
-- Ingest time increases by ~1–3s per paper in-scope (one Haiku call).
-- Monthly cost: roughly $5 for a 500-paper corpus full extraction; &lt;$1 for steady-state incremental.
-- New T2 table requires a migration (handled by RDR-076 migration framework).
-- Aspects are stored as free text within structured fields; downstream operators still need LLM calls for fuzzy comparisons (e.g., "NDCG > 0.7" requires parsing `experimental_results` text).
+- ~~Ingest time increases by ~1–3s per paper in-scope (one Haiku call).~~ **Updated by Implementation Deviations**: ingest cost on the hook path is microseconds (single SQLite INSERT into `aspect_extraction_queue`); aspects populate within seconds-to-minutes of ingest depending on queue depth and `batch_size` (default 5). The original synchronous-inline cost was invalidated by the P1.3 spike (median 26.5s).
+- Monthly cost: roughly $5 for a 500-paper corpus full extraction; &lt;$1 for steady-state incremental. The Phase D batch path (`extract_aspects_batch`, one Haiku call per N papers) reduces drain wall-time on a 1000-paper corpus from ~7 hours single-paper to ~40–80 minutes batched.
+- New T2 tables require migrations (`document_aspects`, `aspect_extraction_queue`, `aspect_promotion_log`, `hook_failures.chain` enum column — handled by RDR-076 migration framework, all four registered as 4.14.2 migrations).
+- Aspects are stored as free text within structured fields; downstream operators still need LLM calls for fuzzy comparisons (e.g., "NDCG > 0.7" requires parsing `experimental_results` text). Phase B SQL fast path covers structured equality / token-membership / aggregate queries against fixed columns; non-trivial range / fuzzy queries still flow through the LLM substrate via `source="auto"` fallback.
 
 ### Risks and Mitigations
 
@@ -672,6 +678,8 @@ over aspect fields), not similarity-based.
 - **Silent**: extraction hallucinates plausible-but-wrong fields (dataset name the paper does not actually use). Mitigated by the sampled `operator_check` validation pass during `nx enrich aspects` (default 5% sample); the self-reported `confidence` field is **not** the detection mechanism (see Risks). Hallucinations on hook-path extractions land in T2 unflagged until the next batch enrichment pass surfaces them.
 
 ## Implementation Plan
+
+> **Note**: Symbol names (`aspect_assign_hook`), fire-site counts, and the synchronous-inline extraction path described in this section reflect the spec at acceptance time. The P1.3 spike invalidated the latency assumption and drove a redirect; the shipped artefact differs in several places. The frozen text below is preserved as the historical record. See **§Implementation Deviations** for what shipped: in particular, `aspect_assign_hook` → `aspect_extraction_enqueue_hook`, the addition of T2 `aspect_extraction_queue` plus an async worker, and the operator rename for `--validate-sample` (`operator_check` → `operator_verify`).
 
 ### Prerequisites
 
@@ -897,7 +905,7 @@ parked here to keep RDR-089 shippable:
 
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
-| `document_aspects` rows | `nx enrich aspects --list` | `nx enrich aspects --info <source_path>` | `nx enrich aspects --delete <source_path>` | schema check via `nx doctor` | T2 SQLite backup |
+| `document_aspects` rows | `nx enrich list <collection>` | `nx enrich info <collection> <source_path>` | `nx enrich delete <collection> <source_path>` | schema check via `nx doctor` | T2 SQLite backup |
 
 ### New Dependencies
 
@@ -953,8 +961,8 @@ This section captures audit-driven and spike-driven divergences between the spec
 | Hook symbol named `aspect_assign_hook` | Named `aspect_extraction_enqueue_hook` and lives in `src/nexus/aspect_worker.py` (not `mcp_infra.py`) | The async redirect changed the hook's job from "compute and persist" to "enqueue and lazy-spawn worker". The new name reflects the new shape; placing it in `aspect_worker.py` keeps `mcp_infra.py` dependency-light. Drift guard `DOCUMENT_HOOK_GUARDED_NAMES` allowlist is `aspect_worker.py` + `mcp/core.py` accordingly. |
 | MCP `store_put` hook fire wrapped in `await asyncio.to_thread(...)` | Plain synchronous call | Audit F1: `store_put` is `def`, not `async def`; FastMCP wraps sync `@mcp.tool()` bodies in worker threads at the framework level. The original spec's `await asyncio.to_thread` was a syntax error (await in a sync function). Pinned via the `test_mcp_store_put_calls_document_hook_synchronously` AST parent-walk test. |
 | `hook_failures.is_document=1` boolean column (third boolean alongside `is_batch`) | `hook_failures.chain` TEXT enum (`'single'` \| `'batch'` \| `'document'`) | Audit F7: stacking a third boolean would have been brittle as the chain set grows. Enum is forward-compatible. Migration backfills `chain='batch' WHERE is_batch=1` for historical RDR-095 rows; `is_batch` is retained for back-compat with pre-4.14.2 readers and existing write paths dual-write both columns. |
-| 7 fire sites in 6 modules | 8 fire sites in 7 modules | P0.review caught the omission: `indexer.py:_index_pdf_file` is a CLI ingest boundary that the bead's original site map did not list. Added in P0.review fix-up commit. |
-| `--validate-sample` calls `operator_check(items, check_instruction)` | Calls `operator_verify(claim, evidence)` | The RDR confused the two operators in the validation context. `operator_check` is 1-claim-to-N-items (consistency across peers); `operator_verify` is 1-claim-to-1-evidence (grounding a single extraction in its source) — which is what `--validate-sample` actually wants. Implementation uses the correct operator; this RDR text references the wrong one in §Implementation Plan and §Validation. |
+| 7 fire sites in 5 modules (per §Phase 0 Step 2 close) | 8 fire sites in 6 modules (`doc_indexer.py` accounts for 3 of 8 sites for the pdf/markdown/repo entry points) | P0.review caught the omission: `indexer.py:_index_pdf_file` is a CLI ingest boundary that the bead's original site map did not list. Added in P0.review fix-up commit. The "5 modules" → "6 modules" delta is `indexer.py` itself becoming a fire-site bearer; the "7 → 8" delta is the new site within `indexer.py`. CHANGELOG.md and CLAUDE.md cite the shipped count "8 sites in 6 modules". |
+| `--validate-sample` calls `operator_check(items, check_instruction)` | Calls `operator_verify(claim, evidence)` | The RDR confused the two operators in the validation context. `operator_check` is 1-claim-to-N-items (consistency across peers); `operator_verify` is 1-claim-to-1-evidence (grounding a single extraction in its source) — which is what `--validate-sample` actually wants. Implementation uses the correct operator; this RDR text references the wrong one in §Implementation Plan Phase 2 Step 2 (the `--validate-sample` flag description) and §Test Plan scenario 7 — both occurrences are in the frozen spec body and remain as the historical record. |
 | Hook chain `(source_path, collection, content)` ignores `content` at MCP boundary | Hook persists `content` to the queue row; worker uses `row.content` as the primary input | Substantive critique caught a silent correctness hole: `content` was originally discarded, and the worker tried to re-read `Path(source_path).read_text()` — but at the MCP boundary `source_path` is a 16-char content-hash `doc_id`, not a real filesystem path. Result was a null-fields record for every MCP-path extraction. Queue gained a `content TEXT` column; CLI rows still pass `content=""` and rely on the worker's source-path-read fallback. |
 | `claim_next` SELECT-then-UPDATE under a Python `threading.Lock` | Compare-and-swap pattern: UPDATE WHERE includes `AND status='pending'`, retry on `cursor.rowcount == 0` | Substantive critique caught a cross-process race: two concurrent processes (MCP server + CLI ingest) could double-claim the same row. Python lock does not span processes. CAS pattern adds the across-process guarantee that WAL row-locking alone does not provide for SELECT-then-UPDATE sequences across separate connections. |
 | `--validate-sample` default 5% | Default 5% (originally raised to 20% then reverted) | The interim raise to 20% was responding to the P1.3 spike's 16.7% strict-equality cross-run stability. That metric is methodology-shaped (does the model paraphrase between runs?), not hallucination-shaped. `operator_verify` is the hallucination guard; raising the sample rate does not improve hallucination coverage. Restored to RDR-original 5%; comment in source documents the methodology gap and the right trigger for revisiting (token-overlap or embedding-similarity stability metrics, not strict equality). |
