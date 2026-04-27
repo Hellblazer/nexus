@@ -324,6 +324,290 @@ class TestCatalogDocumentsSourceUriMigration:
         assert "source_uri" in cols
 
 
+# ── P2.2 null-row DELETE migration ──────────────────────────────────────────
+
+
+class TestNullRowDeleteMigration:
+    """RDR-096 P2.2: ``migrate_drop_null_aspect_rows`` removes
+    pre-RDR-096 read-failure rows from ``document_aspects`` using the
+    JSON-aware seven-clause discriminator from research-3 (id 1010).
+
+    The ``confidence IS NULL`` clause is load-bearing: without it the
+    migration silently drops ``rdr-frontmatter-v1`` "structured-zero"
+    successes (parser ran, document has no scholarly structure,
+    extractor wrote ``confidence=1.0`` with all fields empty).
+
+    The JSON-aware ``(IS NULL OR = '[]')`` clauses on
+    ``experimental_datasets`` / ``experimental_baselines`` are also
+    load-bearing: the writer stores ``json.dumps([]) == '[]'`` for
+    empty lists, NOT NULL. A bare ``IS NULL`` clause would match zero
+    rows in production despite the spike's empirical 15-row finding.
+    """
+
+    def _seed_legacy_table(self, conn: sqlite3.Connection) -> None:
+        from nexus.db.migrations import (
+            migrate_document_aspects_source_uri,
+            migrate_document_aspects_table,
+        )
+        migrate_document_aspects_table(conn)
+        migrate_document_aspects_source_uri(conn)
+
+    def _insert(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        collection: str,
+        source_path: str,
+        problem_formulation: str | None = None,
+        proposed_method: str | None = None,
+        experimental_datasets: str = "[]",
+        experimental_baselines: str = "[]",
+        experimental_results: str | None = None,
+        extras: str | None = "{}",
+        confidence: float | None = None,
+        extractor_name: str = "scholarly-paper-v1",
+    ) -> None:
+        conn.execute(
+            "INSERT INTO document_aspects "
+            "(collection, source_path, problem_formulation, proposed_method, "
+            " experimental_datasets, experimental_baselines, experimental_results, "
+            " extras, confidence, extracted_at, model_version, extractor_name) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                collection, source_path, problem_formulation, proposed_method,
+                experimental_datasets, experimental_baselines, experimental_results,
+                extras, confidence,
+                "2026-04-26T00:00:00+00:00", "claude-haiku-4-5-20251001",
+                extractor_name,
+            ),
+        )
+        conn.commit()
+
+    def _seed_three_categories(self, conn: sqlite3.Connection) -> None:
+        """Plant a 4-row fixture mirroring the four production
+        categories surfaced by research-3 (compressed for test speed):
+
+        - read-failure null (scholarly-paper-v1 + rdr-frontmatter-v1
+          shapes; confidence IS NULL, all aspect fields empty,
+          extras='{}'): SHOULD be dropped.
+        - structured-zero success (rdr-frontmatter-v1 with
+          confidence=1.0, all aspect fields empty): SHOULD be retained.
+        - partial (problem_formulation populated, rest empty):
+          SHOULD be retained.
+        - full (all fields populated): SHOULD be retained.
+        """
+        # Category 1: read-failure null (target of the migration).
+        # Three sub-shapes covering the writer-normalised form
+        # (extras='{}'), the legacy/hand-crafted form (extras IS NULL),
+        # and the JSON-array writer form (datasets='[]').
+        self._insert(
+            conn, collection="rdr__nexus", source_path="docs/rdr/missing-1.md",
+            extractor_name="rdr-frontmatter-v1",
+            problem_formulation=None, proposed_method=None,
+            experimental_datasets="[]", experimental_baselines="[]",
+            experimental_results=None, extras="{}", confidence=None,
+        )
+        self._insert(
+            conn, collection="knowledge__hybridrag", source_path="ghost-paper",
+            extractor_name="scholarly-paper-v1",
+            problem_formulation=None, proposed_method=None,
+            experimental_datasets="[]", experimental_baselines="[]",
+            experimental_results=None, extras="{}", confidence=None,
+        )
+        # Legacy / hand-crafted ghost: extras stored as SQL NULL,
+        # not '{}'. The OR-clause widening must catch this; without
+        # it the row would silently survive the migration.
+        self._insert(
+            conn, collection="rdr__nexus", source_path="docs/rdr/legacy-ghost.md",
+            extractor_name="rdr-frontmatter-v1",
+            problem_formulation=None, proposed_method=None,
+            experimental_datasets="[]", experimental_baselines="[]",
+            experimental_results=None, extras=None, confidence=None,
+        )
+
+        # Category 2: structured-zero success — confidence=1.0 retains.
+        self._insert(
+            conn, collection="rdr__nexus", source_path="docs/rdr/readme.md",
+            extractor_name="rdr-frontmatter-v1",
+            problem_formulation=None, proposed_method=None,
+            experimental_datasets="[]", experimental_baselines="[]",
+            experimental_results=None, extras="{}", confidence=1.0,
+        )
+
+        # Category 3: partial — at least one field populated.
+        self._insert(
+            conn, collection="knowledge__delos", source_path="aleph-bft.pdf",
+            problem_formulation="atomic broadcast",
+            proposed_method=None,
+            experimental_datasets="[]", experimental_baselines="[]",
+            experimental_results=None, extras="{}", confidence=None,
+        )
+
+        # Category 4: full success.
+        self._insert(
+            conn, collection="knowledge__delos", source_path="lightweight-smr.pdf",
+            problem_formulation="state machine replication",
+            proposed_method="median rule",
+            experimental_datasets='["TPC-C"]', experimental_baselines='["raft"]',
+            experimental_results="30% improvement",
+            extras='{"venue":"OSDI"}', confidence=0.9,
+        )
+
+    def test_drops_only_read_failure_nulls(self, tmp_path: Path) -> None:
+        from nexus.db.migrations import migrate_drop_null_aspect_rows
+
+        db = tmp_path / "drop.db"
+        conn = sqlite3.connect(str(db))
+        self._seed_legacy_table(conn)
+        self._seed_three_categories(conn)
+        # Pre: 6 rows (3 read-failure variants + 1 structured-zero +
+        # 1 partial + 1 full).
+        assert conn.execute(
+            "SELECT COUNT(*) FROM document_aspects",
+        ).fetchone()[0] == 6
+
+        migrate_drop_null_aspect_rows(conn)
+
+        # Post: 3 rows (all 3 read-failure variants dropped — including
+        # the legacy-ghost with extras IS NULL; structured-zero,
+        # partial, and full are retained).
+        rows = conn.execute(
+            "SELECT collection, source_path FROM document_aspects "
+            "ORDER BY collection, source_path",
+        ).fetchall()
+        conn.close()
+        assert rows == [
+            ("knowledge__delos", "aleph-bft.pdf"),         # partial
+            ("knowledge__delos", "lightweight-smr.pdf"),    # full
+            ("rdr__nexus", "docs/rdr/readme.md"),           # structured-zero
+        ]
+
+    def test_extras_null_clause_is_load_bearing(self, tmp_path: Path) -> None:
+        """``extras IS NULL`` is the third load-bearing widening
+        (alongside JSON-array and confidence). The writer always
+        emits ``json.dumps({}) == '{}'`` so the OR half is defensive
+        against legacy / hand-crafted rows. Without it, a ghost row
+        with ``extras=NULL`` silently survives the migration.
+        """
+        db = tmp_path / "no_extras_null.db"
+        conn = sqlite3.connect(str(db))
+        self._seed_legacy_table(conn)
+        self._seed_three_categories(conn)
+
+        # Run the bare ``extras = '{}'`` form (no ``OR IS NULL``).
+        # The legacy-ghost row with extras=NULL should escape.
+        conn.execute(
+            "DELETE FROM document_aspects "
+            "WHERE problem_formulation IS NULL "
+            "  AND proposed_method IS NULL "
+            "  AND (experimental_datasets IS NULL OR experimental_datasets = '[]') "
+            "  AND (experimental_baselines IS NULL OR experimental_baselines = '[]') "
+            "  AND experimental_results IS NULL "
+            "  AND extras = '{}' "  # bare; missing the IS NULL OR
+            "  AND confidence IS NULL"
+        )
+        conn.commit()
+        kept = {
+            r[1] for r in conn.execute(
+                "SELECT collection, source_path FROM document_aspects",
+            ).fetchall()
+        }
+        conn.close()
+        # Without the OR-clause: legacy-ghost survives.
+        assert "docs/rdr/legacy-ghost.md" in kept
+
+    def test_confidence_clause_is_load_bearing(self, tmp_path: Path) -> None:
+        """Without ``AND confidence IS NULL``, the migration would
+        also drop the structured-zero success (51 rows in production
+        per research-3). Manually run the SQL with the clause omitted
+        against the same fixture and verify the structured-zero
+        gets dropped — confirms the clause's load-bearing role.
+        """
+        db = tmp_path / "no_conf.db"
+        conn = sqlite3.connect(str(db))
+        self._seed_legacy_table(conn)
+        self._seed_three_categories(conn)
+
+        # Run a deliberately-broken SQL omitting confidence IS NULL.
+        conn.execute(
+            "DELETE FROM document_aspects "
+            "WHERE problem_formulation IS NULL "
+            "  AND proposed_method IS NULL "
+            "  AND (experimental_datasets IS NULL OR experimental_datasets = '[]') "
+            "  AND (experimental_baselines IS NULL OR experimental_baselines = '[]') "
+            "  AND experimental_results IS NULL "
+            "  AND extras = '{}' "
+            # Intentionally NO confidence clause.
+        )
+        conn.commit()
+        kept = {
+            r[1] for r in conn.execute(
+                "SELECT collection, source_path FROM document_aspects",
+            ).fetchall()
+        }
+        conn.close()
+        # Without confidence IS NULL: structured-zero readme is also gone.
+        assert "docs/rdr/readme.md" not in kept
+
+    def test_json_array_clause_is_load_bearing(self, tmp_path: Path) -> None:
+        """The writer stores ``json.dumps([]) == '[]'`` for empty
+        list fields, NOT NULL. Without the ``OR = '[]'`` part of the
+        clause, the bare ``IS NULL`` predicate matches zero rows
+        despite the spike's 15-row empirical finding.
+        """
+        db = tmp_path / "no_json.db"
+        conn = sqlite3.connect(str(db))
+        self._seed_legacy_table(conn)
+        self._seed_three_categories(conn)
+
+        # Run the bare IS NULL form — would match nothing.
+        conn.execute(
+            "DELETE FROM document_aspects "
+            "WHERE problem_formulation IS NULL "
+            "  AND proposed_method IS NULL "
+            "  AND experimental_datasets IS NULL "  # bare; no '[]' OR
+            "  AND experimental_baselines IS NULL "
+            "  AND experimental_results IS NULL "
+            "  AND extras = '{}' "
+            "  AND confidence IS NULL"
+        )
+        conn.commit()
+        count = conn.execute("SELECT COUNT(*) FROM document_aspects").fetchone()[0]
+        conn.close()
+        # Bare IS NULL matched ZERO rows because writer stored '[]' not NULL.
+        # Production-shaped data would also see zero matches under this SQL.
+        assert count == 6  # original count unchanged
+
+    def test_idempotent_on_re_run(self, tmp_path: Path) -> None:
+        from nexus.db.migrations import migrate_drop_null_aspect_rows
+
+        db = tmp_path / "idem.db"
+        conn = sqlite3.connect(str(db))
+        self._seed_legacy_table(conn)
+        self._seed_three_categories(conn)
+
+        migrate_drop_null_aspect_rows(conn)
+        first_count = conn.execute(
+            "SELECT COUNT(*) FROM document_aspects",
+        ).fetchone()[0]
+        # Second invocation: 0 read-failure rows remain → no-op.
+        migrate_drop_null_aspect_rows(conn)
+        second_count = conn.execute(
+            "SELECT COUNT(*) FROM document_aspects",
+        ).fetchone()[0]
+        conn.close()
+        assert first_count == second_count == 3
+
+    def test_no_op_when_table_missing(self, tmp_path: Path) -> None:
+        from nexus.db.migrations import migrate_drop_null_aspect_rows
+
+        db = tmp_path / "no_table.db"
+        conn = sqlite3.connect(str(db))
+        # Don't create document_aspects.
+        migrate_drop_null_aspect_rows(conn)  # must not raise
+        conn.close()
+
+
 # ── AspectRecord round-trip through the store ───────────────────────────────
 
 

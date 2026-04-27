@@ -346,17 +346,28 @@ To `document_aspects` and `catalog_documents`. Migration backfills `source_uri =
 One-shot delete with the **four-clause discriminator** (research-3 substantive design refinement, id 1010):
 
 ```sql
+-- Shipped form (RDR-096 P2.2, nexus-ocu9.4): the JSON-aware OR
+-- clauses on the experimental_* and extras columns are required
+-- because the writer (DocumentAspects.upsert) stores
+-- ``json.dumps([]) == '[]'`` and ``json.dumps({}) == '{}'`` for
+-- empty list/dict fields, NOT SQL NULL. A bare ``IS NULL`` form
+-- would match ZERO rows in production despite the spike's 15-row
+-- empirical finding (research-3, id 1010, used a Python-side JSON-
+-- aware discriminator).
 DELETE FROM document_aspects
 WHERE problem_formulation IS NULL
   AND proposed_method IS NULL
-  AND experimental_datasets IS NULL
-  AND experimental_baselines IS NULL
+  AND (experimental_datasets IS NULL OR experimental_datasets = '[]')
+  AND (experimental_baselines IS NULL OR experimental_baselines = '[]')
   AND experimental_results IS NULL
-  AND extras = '{}'
+  AND (extras IS NULL OR extras = '{}')
   AND confidence IS NULL;     -- gate: drops read-failure-nulls only
 ```
 
-The trailing `AND confidence IS NULL` clause is **load-bearing**: without it the migration would also delete 51 `rdr-frontmatter-v1` "structured-zero" success rows (extractor read the source, found no scholarly structure, deterministically wrote `confidence=1.0` with all aspect fields empty). Those rows are valid negative results and must be retained — dropping them triggers re-extraction on every backfill cycle.
+Two clauses are **load-bearing**:
+
+* The trailing `AND confidence IS NULL` clause: without it the migration would also delete 51 `rdr-frontmatter-v1` "structured-zero" success rows (extractor read the source, found no scholarly structure, deterministically wrote `confidence=1.0` with all aspect fields empty). Those rows are valid negative results and must be retained — dropping them triggers re-extraction on every backfill cycle.
+* The JSON-aware `(IS NULL OR = '[]')` and `(IS NULL OR = '{}')` clauses on the JSON-shaped columns: without the OR halves, the bare `IS NULL` form matches zero rows in production. The Python-side discriminator from research-3 was JSON-aware (parsed the column then checked for empty list/dict); the SQL form must be symmetric. The `extras IS NULL` half is also defensive against legacy / hand-crafted rows predating the writer's normalization.
 
 Audit count first via `SELECT COUNT(*) FROM document_aspects WHERE <same predicates>`; emit summary. Empirically (research-3): 15 rows match across the live `nexus_rdr` tables (12 `rdr-frontmatter-v1` catalog-stale paths from RDR-090 research-1003 + 3 `scholarly-paper-v1` read-failures from `knowledge__hybridrag`).
 

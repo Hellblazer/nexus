@@ -1,13 +1,38 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""Synchronous structured-aspect extractor (RDR-089 Phase 1.2).
+"""Synchronous structured-aspect extractor (RDR-089 Phase 1.2,
+RDR-096 P1.2 + P2.2).
 
 Single public entrypoint: ``extract_aspects(content, source_path,
-collection) -> AspectRecord | None``. The function is synchronous top
-to bottom — no ``async def``, no ``await``, no event loop. The
-RDR-089 load-bearing contract requires this so the document-grain
-hook chain (``fire_post_document_hooks``) can call it from a sync
-dispatcher without dropping a coroutine.
+collection) -> AspectRecord | ExtractFail | None``. The function is
+synchronous top to bottom — no ``async def``, no ``await``, no
+event loop. The RDR-089 load-bearing contract requires this so the
+document-grain hook chain (``fire_post_document_hooks``) can call it
+from a sync dispatcher without dropping a coroutine.
+
+**Going-forward writer contract** (RDR-096 P2.2 binds this; gate-
+binding for the null-row DELETE migration):
+
+* ``ExtractFail`` paths emit NO row at all. Read failures surface
+  through the typed sentinel; the upsert-guard in
+  ``commands/enrich.py`` skips on any ``ExtractFail``. This is the
+  structural guarantee that pre-RDR-096 null-field rows are
+  unreachable from new writes.
+* Subprocess success paths (``_build_record``) populate at least
+  one aspect field OR set ``confidence`` to a non-NULL value. The
+  current Sonnet/Haiku extractors return real confidences; the
+  ``rdr-frontmatter-v1`` parser sets ``confidence=1.0`` even when
+  the document has no scholarly structure (the "structured-zero"
+  case — empty fields, deterministic).
+* Subprocess hard-failure paths (``_empty_record``) — schema
+  validation failure, retry-exhausted — emit a null-fields row
+  with ``confidence=None``. **NOTE**: this is the one path that
+  produces ``(all-empty fields, extras='{}', confidence IS NULL)``
+  going forward, distinguishable from RDR-096-pre read failures
+  only by ``extracted_at`` timestamp. The P2.2 DELETE migration
+  ran once at 4.16.0 ship time; subsequent retry-exhausted rows
+  are the operator's signal that a real triage event happened
+  (not a pre-RDR-096 ghost).
 
 Phase 1 ships exactly one extractor config — ``scholarly-paper-v1``,
 keyed on the ``knowledge__*`` collection prefix. Other prefixes
@@ -1422,6 +1447,18 @@ def _empty_record(
     """Build an ``AspectRecord`` with all aspect fields null/empty,
     preserving identity (collection, source_path) + extractor
     metadata (extracted_at, extractor_name, model_version) for triage.
+
+    **RDR-096 P2.2 limitation (intentional)**: this row's shape is
+    structurally identical to a pre-RDR-096 read-failure ghost row
+    (all-empty aspect fields, ``extras='{}'``, ``confidence IS NULL``).
+    The P2.2 DELETE migration ran once at 4.16.0 ship time; subsequent
+    rows in this shape are real subprocess-side failures (timeout,
+    schema validation, retry-exhausted) emitted by THIS function and
+    are distinguishable from pre-RDR-096 ghosts only by the
+    ``extracted_at`` timestamp (post-4.16.0 shipdate). Operators
+    triaging null-field rows after 4.16.0 should treat them as
+    triage-worthy events, not as legacy noise. See module docstring
+    for the full going-forward writer contract.
     """
     return AspectRecord(
         collection=collection,

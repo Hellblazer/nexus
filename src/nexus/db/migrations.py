@@ -1529,6 +1529,95 @@ def migrate_document_aspects_source_uri(conn: sqlite3.Connection) -> None:
         )
 
 
+def migrate_drop_null_aspect_rows(conn: sqlite3.Connection) -> None:
+    """RDR-096 P2.2: drop pre-RDR-096 read-failure rows from
+    ``document_aspects`` using the seven-clause discriminator from
+    research-3 (id 1010).
+
+    Two clauses are load-bearing:
+
+    * ``confidence IS NULL`` — without it, the migration silently
+      drops ``rdr-frontmatter-v1`` "structured-zero" successes
+      (parser ran, document has no scholarly structure, extractor
+      wrote ``confidence=1.0`` with all aspect fields empty). On
+      live nexus_rdr, that's 51 rows that must be retained.
+    * ``(experimental_datasets IS NULL OR = '[]')`` and
+      ``(experimental_baselines IS NULL OR = '[]')`` — the writer
+      stores ``json.dumps([])`` which is the literal string ``'[]'``,
+      not SQL NULL. Bare ``IS NULL`` predicates would match zero
+      rows in production despite the spike's 15-row empirical
+      finding. The Python-side discriminator in
+      ``scripts/spikes/spike_rdr096_a3_partial_success.py`` is
+      JSON-aware (parses the column then checks for empty list);
+      the SQL form must be too.
+    * ``(extras IS NULL OR = '{}')`` — same shape as the array
+      clauses but for the ``extras`` JSON object column. The current
+      writer always emits ``json.dumps({}) == '{}'`` so the
+      ``IS NULL`` half is defensive against legacy / hand-crafted
+      rows that predate the writer's normalization. The gap was
+      caught in code review of P2.2 — without the OR clause, a
+      hand-crafted ``extras=NULL`` ghost row would silently survive
+      the migration.
+
+    Going-forward writer contract (RDR-096 Phase 2):
+    any extractor recording a "structured-zero" success MUST set
+    non-NULL ``confidence``. Only ``ExtractFail`` paths emit no row
+    at all. The combination guarantees ``confidence IS NULL ∧ all-
+    empty-aspect-fields ∧ extras='{}'`` is structurally reachable
+    only from a pre-RDR-096 read failure — exactly what this
+    migration cleans up.
+
+    Empirical baseline (research-3, id 1010): 15 rows match across
+    the live nexus_rdr at ship time (12 rdr-frontmatter-v1 catalog-
+    stale paths from RDR-090 research-1003 + 3 scholarly-paper-v1
+    read-failures on knowledge__hybridrag).
+
+    Idempotent: re-running on a cleaned database deletes 0 rows
+    (no-op). Safe on a missing table (no-op).
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(document_aspects)").fetchall()}
+    if not cols:
+        return
+
+    # Audit pass: count first so the operator log line shows the
+    # impact before the DELETE applies. Audit + DELETE run inside
+    # the ``apply_pending`` ``_upgrade_lock`` so no concurrent
+    # writer can interleave between the two statements; the count
+    # is exact, not approximate.
+    audit = conn.execute(
+        "SELECT COUNT(*) FROM document_aspects "
+        "WHERE problem_formulation IS NULL "
+        "  AND proposed_method IS NULL "
+        "  AND (experimental_datasets IS NULL OR experimental_datasets = '[]') "
+        "  AND (experimental_baselines IS NULL OR experimental_baselines = '[]') "
+        "  AND experimental_results IS NULL "
+        "  AND (extras IS NULL OR extras = '{}')"
+        "  AND confidence IS NULL",
+    ).fetchone()
+    matched = audit[0] if audit else 0
+
+    if matched == 0:
+        # No-op: either fresh install or all read-failures already cleaned.
+        return
+
+    cur = conn.execute(
+        "DELETE FROM document_aspects "
+        "WHERE problem_formulation IS NULL "
+        "  AND proposed_method IS NULL "
+        "  AND (experimental_datasets IS NULL OR experimental_datasets = '[]') "
+        "  AND (experimental_baselines IS NULL OR experimental_baselines = '[]') "
+        "  AND experimental_results IS NULL "
+        "  AND (extras IS NULL OR extras = '{}')"
+        "  AND confidence IS NULL",
+    )
+    conn.commit()
+    _log.info(
+        "migrate_drop_null_aspect_rows",
+        matched=matched,
+        deleted=cur.rowcount,
+    )
+
+
 MIGRATIONS: list[Migration] = [
     Migration("1.10.0", "Memory FTS rebuild with title", migrate_memory_fts),
     Migration("2.8.0", "Add plan project column", migrate_plan_project),
@@ -1636,6 +1725,11 @@ MIGRATIONS: list[Migration] = [
         "4.16.0",
         "Add document_aspects.source_uri column + backfill (RDR-096 P2.1)",
         migrate_document_aspects_source_uri,
+    ),
+    Migration(
+        "4.16.0",
+        "Drop pre-RDR-096 null-field aspect rows (RDR-096 P2.2)",
+        migrate_drop_null_aspect_rows,
     ),
 ]
 
