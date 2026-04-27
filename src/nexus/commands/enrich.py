@@ -351,9 +351,10 @@ def enrich_aspects(
 
     if dry_run:
         click.echo("--dry-run: skipping extraction.")
+        _dry_run_predict_skips(entries, collection)
         return
 
-    extracted = _run_extraction(entries, collection)
+    extracted = _run_extraction(entries, collection, config)
     if not extracted:
         click.echo("No aspects extracted.")
         return
@@ -411,19 +412,100 @@ def _select_entries(
     return entries
 
 
-def _run_extraction(entries: list, collection: str) -> list[tuple[str, object]]:
+def _dry_run_predict_skips(entries: list, collection: str) -> None:
+    """RDR-096 P1.3: predict ExtractFail entries via the read-side
+    check, without invoking the Claude subprocess. One ``read_source``
+    call per entry — chunk reassembly is the same path
+    ``extract_aspects`` would take. T3 unavailable / any other failure
+    is caught and the prediction step is skipped gracefully so dry-run
+    still works in environments without chroma access.
+    """
+    from urllib.parse import quote
+
+    try:
+        from nexus.aspect_readers import ReadFail, read_source
+        from nexus.mcp_infra import get_t3
+        t3 = get_t3()
+    except Exception as exc:
+        click.echo(f"  (read-side prediction skipped: {exc})")
+        return
+
+    planned: dict[str, int] = {}
+    skip_lines: list[str] = []
+    for entry in entries:
+        sp = entry.file_path or entry.title
+        if not sp:
+            continue
+        uri = f"chroma://{collection}/{quote(sp, safe='/')}"
+        try:
+            result = read_source(uri, t3=t3)
+        except Exception as exc:
+            # Per-entry transient failure shouldn't abort the whole
+            # prediction loop. Bucket under a synthetic ``read_error``
+            # reason so the operator sees the count without losing
+            # visibility into the rest of the catalog.
+            planned["read_error"] = planned.get("read_error", 0) + 1
+            skip_lines.append(
+                f"    - {Path(sp).name}: read_error ({type(exc).__name__})"
+            )
+            continue
+        if isinstance(result, ReadFail):
+            planned[result.reason] = planned.get(result.reason, 0) + 1
+            skip_lines.append(f"    - {Path(sp).name}: {result.reason}")
+
+    skipped = sum(planned.values())
+    if skipped == 0:
+        click.echo("  All entries readable; full extraction would proceed.")
+        return
+    click.echo(
+        f"  Planned skips: {skipped} of {len(entries)} document(s) "
+        f"would skip on read failure:"
+    )
+    # Cap output so a 500-entry collection doesn't flood the terminal.
+    for line in skip_lines[:20]:
+        click.echo(line)
+    if len(skip_lines) > 20:
+        click.echo(f"    ... and {len(skip_lines) - 20} more")
+    reasons_str = ", ".join(f"{k}={v}" for k, v in sorted(planned.items()))
+    click.echo(f"  by_reason: {reasons_str}")
+    actual_cost = (len(entries) - skipped) * _PER_PAPER_COST_USD
+    click.echo(
+        f"  Predicted actual cost (excluding skips): ~${actual_cost:.2f}"
+    )
+
+
+def _run_extraction(
+    entries: list,
+    collection: str,
+    config,
+) -> list[tuple[str, object]]:
     """Drive extract_aspects per entry, upsert document_aspects, return
     the list of (source_path, AspectRecord) tuples for the successful
     extractions (used as input for --validate-sample).
+
+    ``config`` is the pre-validated :class:`ExtractorConfig` from the
+    caller — the parent ``enrich_aspects`` already aborted when
+    ``select_config`` returned None, so this function need not
+    re-derive.
+
+    RDR-096 P1.3 upsert-guard: ``extract_aspects`` may return
+    ``ExtractFail`` on read failure. Such entries are logged
+    (``aspect_extract_skip``) and skipped — no row is written. This
+    is the structural guarantee that closes issue #331's null-field
+    symptom even before Phase 2's schema migration ships.
     """
-    from nexus.aspect_extractor import extract_aspects
+    from nexus.aspect_extractor import ExtractFail, extract_aspects
     from nexus.commands._helpers import default_db_path
     from nexus.db.t2 import T2Database
+
+    extractor_name = config.extractor_name
 
     extracted: list[tuple[str, object]] = []
     success = 0
     null_fields = 0
     skipped = 0
+    skipped_unreadable = 0
+    by_reason: dict[str, int] = {}
 
     db_path = default_db_path()
     with T2Database(db_path) as db:
@@ -446,6 +528,27 @@ def _run_extraction(entries: list, collection: str) -> list[tuple[str, object]]:
                 click.echo(f"  [{i}/{len(entries)}] {Path(source_path).name}: no extractor — skipped")
                 continue
 
+            if isinstance(record, ExtractFail):
+                # Typed read failure — skip without upsert. The log line
+                # is the operator surface for triaging the underlying
+                # source-identity drift; #331's symptom is closed by this
+                # branch alone.
+                _log.warning(
+                    "aspect_extract_skip",
+                    uri=record.uri,
+                    reason=record.reason,
+                    detail=record.detail,
+                    collection=collection,
+                    extractor_name=extractor_name,
+                )
+                skipped_unreadable += 1
+                by_reason[record.reason] = by_reason.get(record.reason, 0) + 1
+                click.echo(
+                    f"  [{i}/{len(entries)}] {Path(source_path).name}: "
+                    f"skipped (reason={record.reason})"
+                )
+                continue
+
             db.document_aspects.upsert(record)
 
             if record.problem_formulation is None:
@@ -461,10 +564,15 @@ def _run_extraction(entries: list, collection: str) -> list[tuple[str, object]]:
                     f"  [{i}/{len(entries)}] {Path(source_path).name}: extracted"
                 )
 
-    click.echo(
+    summary = (
         f"Done: {success} extracted, {null_fields} null-fields, "
-        f"{skipped} skipped."
+        f"{skipped_unreadable} skipped (read-failure), "
+        f"{skipped} skipped (other)"
     )
+    if by_reason:
+        reasons_str = ", ".join(f"{k}={v}" for k, v in sorted(by_reason.items()))
+        summary += f". by_reason: {reasons_str}"
+    click.echo(summary)
     return extracted
 
 
