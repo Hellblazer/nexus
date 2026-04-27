@@ -71,8 +71,8 @@ RDR-087). Human-authored ground truth is feasible at 30-query scale.
 ### Technical Environment
 
 - `src/nexus/search_engine.py` — naive baseline (path A).
-- `src/nexus/mcp/core.py:1773` (`nx_answer`) — plan-first with plan_match (path B).
-- `src/nexus/plans/runner.py` — plan_run execution for forced-dynamic (path C).
+- `src/nexus/mcp/core.py` (`nx_answer`) — plan-first with plan_match (path B). (Line numbers in this section are intentionally omitted; they drift across releases.)
+- `src/nexus/plans/runner.py` — target module for the `force_dynamic` skip-plan-match path (path C). The `force_dynamic` flag is a Phase 1 deliverable and does not yet exist; the spike used `scope="<full collection name>"` as a forced-miss proxy.
 - `docs/rdr/rdr-087-collection-observability-surfaces.md` — telemetry
   infrastructure this bench can plug into.
 
@@ -105,9 +105,14 @@ bench can cross-reference.
 - **Verified** (search_engine.py): baseline path uses
   `voyage-context-3` embedding + threshold filter; deterministic
   given fixed query and corpus.
-- **Assumed**: 30 human-authored queries are sufficient to
-  discriminate path A/B/C with statistical confidence. Needs power
-  analysis during spike.
+- **Assumed → partially informed by spike**: 30 human-authored queries
+  are sufficient to discriminate path A/B/C with statistical
+  confidence. The 5-query spike (research-1002) produced A2 FAIL
+  (only 2 of 5 queries above the |ΔNDCG@3| ≥ 0.05 threshold; criterion
+  required 3 of 5). N=30 (10 per category) provides sufficient
+  expected variation across query types for directional signal;
+  formal power analysis deferred pending actual per-query variance
+  from the bench's first run.
 - **Assumed**: multi-hop precision is measurable with small-N
   compositional queries. Paper reports on N=10 compositional
   queries; our 10 should be enough for directional signal, not
@@ -115,9 +120,9 @@ bench can cross-reference.
 
 ### Critical Assumptions
 
-- [ ] Human-labeled ground truth is feasible at 30-query scale within a 2-day labeling effort — **Status**: Unverified — **Method**: Spike (author 5 queries and label their GT; measure time).
-- [ ] Path A vs. path B vs. path C shows measurable NDCG@3 deltas on at least 50% of queries — **Status**: Unverified — **Method**: Spike on 5-query subset.
-- [ ] Compositional queries can be answered by path C (forced-dynamic) without plan_match assistance, enabling the three-way split — **Status**: Unverified — **Method**: Spike on 2 compositional queries.
+- [x] Human-labeled ground truth is feasible at 30-query scale within a 2-day labeling effort — **Status**: VERIFIED (research-1001/1002) — 5 queries authored + GT in ~12 min from project memory; extrapolated 30 × 5–10 min ≈ 2.5–5 hours, well under the 16h budget. Q2 surfaced the chunk-aware-authoring requirement (zero NDCG@3 on all paths when GT vocab mismatched corpus chunk vocabulary) which inflates the per-query budget but stays inside it.
+- [ ] Path A vs. path B vs. path C shows measurable NDCG@3 deltas on at least 50% of queries — **Status**: FAILED at N=5 (research-1002) — only 2 of 5 queries reached the pre-registered |ΔNDCG@3| ≥ 0.05 threshold; criterion required 3 of 5. Failure at N=5 is a definitive signal that the 5-query spike subset is too small to discriminate paths reliably; the proposed N=30 (10 per category) remains the right scale and is more credible after this finding, not less. Bench proceeds.
+- [ ] Compositional queries can be answered by path C (forced-dynamic) without plan_match assistance, enabling the three-way split — **Status**: PREMISE WEAKLY SUPPORTED (research-1002) — Q5 returned non-zero NDCG@3=0.469 on all paths, but plan #38 (the matched plan) is a 2-step search → summarize that reduces path C to a thin wrapper around path A on this category. True path-C value cannot be measured until the `force_dynamic` flag lands and the plan library carries genuinely multi-step compositional plans (see Path C contingency note in *Decision Rationale*).
 
 ## Proposed Solution
 
@@ -185,6 +190,17 @@ Human-authored queries (vs. LLM-generated) eliminates the circularity
 the paper's benchmark has. 30 queries is the smallest N that gives
 10 per category, enough for directional signal.
 
+**Path C compositional contingency** (research-1002 finding): path C's
+compositional discrimination is contingent on the plan library
+containing genuinely multi-step compositional plans — not 2-step
+search → summarize wrappers. Without those, path C collapses to path
+A on the compositional category (Q5 spike: A=B=C=0.469 because the
+matched plan #38 was such a wrapper). This is a known state the
+bench must annotate per-query, not a design flaw in the three-way
+split itself. Phase 1's `force_dynamic` flag lands the mechanism;
+Phase 2's compositional queries will reveal whether the live plan
+library has the depth required for path C to differentiate.
+
 ## Alternatives Considered
 
 ### Alternative 1: Reproduce the paper's benchmark on our corpus
@@ -245,8 +261,12 @@ get statistical power.
 
 ### Prerequisites
 
-- [ ] Spike: author 5 queries with GT; measure labeling time and delta-between-paths on a 5-query subset.
-- [ ] Add `force_dynamic` flag to `nx_answer` (small change to `src/nexus/mcp/core.py:1773`).
+- [x] Spike: author 5 queries with GT; measure labeling time and delta-between-paths on a 5-query subset. **Done — research-1001/1002/1003.**
+- [ ] **Add `force_dynamic` flag to `nx_answer`** — small change to `src/nexus/mcp/core.py`. Without it, path C cannot be isolated from path B for collection-scoped questions.
+- [ ] **Plan-library hygiene** (research-1002 side-findings) — file beads to (a) tighten `plan_match` so a plan with hardcoded `corpus="rdr__<other-project>-..."` does not match a `scope` for a different project's RDR collection (plan #52 leakage at confidence 0.476); (b) tighten the match-text generation in RDR-084 plan-grow so over-broad plans like #67 (returns "tumblers" for every "which RDR" question) cannot pollute the library. Without these, every bench run re-confirms path-B noise from the same two known pollutants.
+- [ ] **T3 staleness sweep** — promote `scripts/spikes/spike_rdr090_remediate_corpus.py` to a `nx` subcommand or CI check that deletes T3 chunks whose `source_path` is missing from disk. Spike found 7.8% of `rdr__nexus-571b8edd` was stale; the long tail surfaces at N=30+ even though it didn't pollute N=5 top-3.
+- [ ] **Catalog staleness remediation** — extend `nx catalog remediate-paths` (RDR-326) to a "match by RDR-number prefix" mode, OR ship `nx catalog prune-stale` for catalog rows whose `file_path` is missing from disk and has no plausible same-prefix replacement. 12 entries currently produce null-field aspect rows on every `nx enrich aspects rdr__nexus-...` run.
+- [ ] **Chunk-aware query authoring discipline** — bench authoring section must mandate top-K inspection during query authoring (refine query, not GT, when expected RDR doesn't surface). Q2 lesson — universal NDCG@3=0 because GT vocab "content-hash chunk index" did not match indexed chunk vocab.
 
 ### Minimum Viable Validation
 
@@ -317,7 +337,11 @@ Spike-validated baselines as the initial regression target.
 
 ## Finalization Gate
 
-_To be completed during /nx:rdr-gate._
+**Gate run**: 2026-04-27 — `/nx:rdr-gate 090`. Outcome: **PASSED** with 2 critical and 3 significant in-place edits applied to this RDR before accept (per the gate-accept-pause discipline). Critical edits synced this document to the spike outcomes (research-1001 pre-registration, research-1002 results, research-1003 corpus remediation): the three Critical Assumptions were updated from `[ ] Unverified` to their actual A1=PASS / A2=FAIL-at-N=5 / A3=WEAKLY-SUPPORTED states, and the Phase 1 Prerequisites list was expanded from 2 items to 6 items capturing the spike's side-findings (plan-library hygiene, T3 staleness, catalog staleness, chunk-aware authoring) alongside the original `force_dynamic` flag and the now-completed spike. Significant edits added the Path C compositional contingency note to *Decision Rationale*, removed a stale line-number reference in *Technical Environment* and clarified that the `force_dynamic` mechanism does not yet exist, and rewrote the "needs power analysis" Assumed bullet to record the spike's findings and document the N=30 rationale.
+
+The substantive-critic agent verified internal consistency of the updated RDR against research-1001/1002/1003 and cross-consistency with related RDRs 042 / 078 / 080 / 088. RDR-042's deferred quality-benchmark gap is exactly the gap RDR-090 closes; RDR-078's plan-first quality claim is now testable by the bench (and the spike already disconfirms quality superiority on the RDR corpus at N=5, which is informative not invalidating); RDR-080's `nx_answer` consolidation is the bench's path-B/C entry point unchanged; RDR-088 closed without quality measurement and named that gap as a motivating context for this RDR.
+
+A2's failure at N=5 is the headline finding. It is a definitive signal — pre-registered before harvesting data — that the 5-query spike subset cannot discriminate paths reliably. The proposed N=30 (10 per category) is correspondingly more credible, not less; the bench proceeds at the originally-proposed scale with formal power analysis deferred to first-run actuals.
 
 ## References
 
