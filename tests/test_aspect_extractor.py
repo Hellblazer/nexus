@@ -278,48 +278,64 @@ class TestContentSourcing:
             collection="knowledge__delos",
         )
 
-    def test_reads_source_path_when_content_empty_and_t3_miss(
-        self, tmp_path: Path, monkeypatch,
-    ) -> None:
-        """CLI sites pass content="". When T3 has no chunks for this
-        source_path, the extractor falls back to reading source_path
-        from disk."""
-        from nexus.aspect_extractor import extract_aspects
-
-        src = tmp_path / "p1.txt"
-        src.write_text("DISK_SOURCED_CONTENT")
-
-        # Force T3 lookup to miss by stubbing the helper to return "".
-        monkeypatch.setattr(
-            "nexus.aspect_extractor._source_content_from_t3",
-            lambda *a, **kw: "",
-        )
-
-        def fake_run(args, **kwargs):
-            assert "DISK_SOURCED_CONTENT" in kwargs.get("input", "")
-            return _make_completed(_ok_stdout())
-
-        monkeypatch.setattr(subprocess, "run", fake_run)
-        record = extract_aspects(
-            content="",
-            source_path=str(src),
-            collection="knowledge__delos",
-        )
-        assert record is not None
-        assert record.problem_formulation == "Sharded WAL bottleneck."
-
-    def test_sources_from_t3_when_content_empty_and_t3_hit(
+    def test_returns_extract_fail_on_chroma_miss(
         self, monkeypatch,
     ) -> None:
-        """When content="" and T3 has chunks for this source_path,
-        the extractor uses T3 (not disk) — the architectural correction
-        that motivated the whole change. Disk is the fallback now."""
-        from nexus.aspect_extractor import extract_aspects
+        """RDR-096: ``content=""`` plus a chroma miss returns
+        ``ExtractFail`` (no row written). The disk-read fallback that
+        the prior contract had is gone — read failures are surfaced
+        as a typed sentinel the upsert-guard skips on. Replaces the
+        prior ``test_reads_source_path_when_content_empty_and_t3_miss``
+        which exercised the deprecated disk fallback.
+        """
+        from nexus.aspect_extractor import ExtractFail, extract_aspects
+        from nexus.aspect_readers import ReadFail
 
+        # Stub read_source to return ReadFail directly.
         monkeypatch.setattr(
-            "nexus.aspect_extractor._source_content_from_t3",
-            lambda c, sp: "T3_REASSEMBLED_CONTENT_FROM_CHUNKS",
+            "nexus.aspect_extractor.read_source",
+            lambda uri, t3=None, **_kw: ReadFail(
+                reason="empty",
+                detail=f"no chunks for the test fixture {uri!r}",
+            ),
         )
+
+        with patch("subprocess.run", side_effect=AssertionError(
+            "subprocess must NOT be called when read_source fails",
+        )):
+            result = extract_aspects(
+                content="",
+                source_path="ghost-source",
+                collection="knowledge__delos",
+            )
+
+        assert isinstance(result, ExtractFail)
+        assert result.reason == "empty"
+        assert "ghost-source" in result.uri or result.uri.endswith("/ghost-source")
+        assert result.uri.startswith("chroma://knowledge__delos/")
+
+    def test_sources_via_read_source_when_content_empty_and_chroma_hit(
+        self, monkeypatch,
+    ) -> None:
+        """When ``content=""`` and ``read_source`` returns ``ReadOk``,
+        the extractor uses the reassembled text from chroma. Replaces
+        the prior ``test_sources_from_t3_when_content_empty_and_t3_hit``
+        which monkeypatched the deprecated ``_source_content_from_t3``
+        helper directly.
+        """
+        from nexus.aspect_extractor import extract_aspects
+        from nexus.aspect_readers import ReadOk
+
+        captured_uris: list[str] = []
+
+        def fake_read(uri, t3=None, **_kw):
+            captured_uris.append(uri)
+            return ReadOk(
+                text="T3_REASSEMBLED_CONTENT_FROM_CHUNKS",
+                metadata={"scheme": "chroma", "chunk_count": 1},
+            )
+
+        monkeypatch.setattr("nexus.aspect_extractor.read_source", fake_read)
 
         def fake_run(args, **kwargs):
             assert "T3_REASSEMBLED_CONTENT_FROM_CHUNKS" in kwargs.get("input", "")
@@ -332,7 +348,10 @@ class TestContentSourcing:
             collection="knowledge__delos",
         )
         assert record is not None
+        assert hasattr(record, "problem_formulation")
         assert record.problem_formulation == "Sharded WAL bottleneck."
+        # URI was constructed from (collection, source_path).
+        assert captured_uris == ["chroma://knowledge__delos//missing/on/disk.pdf"]
 
     def test_strips_embedded_null_bytes_from_content(self, monkeypatch) -> None:
         """Some PDF extractors emit \\x00 bytes. Strip them before
@@ -357,34 +376,208 @@ class TestContentSourcing:
         assert "\x00" not in captured[0]
         assert "paper text withnullbytes embedded" in captured[0]
 
-    def test_unreadable_source_path_returns_null_fields_record(
-        self, tmp_path: Path, monkeypatch,
+    def test_unreadable_source_returns_extract_fail(
+        self, monkeypatch,
     ) -> None:
-        """``content=""`` plus a missing file produces a null-fields
-        record (row exists for triage, no subprocess call attempted).
+        """RDR-096: ``content=""`` plus a read failure returns
+        ``ExtractFail`` instead of a null-field record. No row is
+        written; the upsert-guard in P1.3 skips on the typed sentinel.
+        Replaces the prior null-fields-record contract.
         """
-        from nexus.aspect_extractor import extract_aspects
+        from nexus.aspect_extractor import ExtractFail, extract_aspects
+        from nexus.aspect_readers import ReadFail
 
+        monkeypatch.setattr(
+            "nexus.aspect_extractor.read_source",
+            lambda uri, t3=None, **_kw: ReadFail(
+                reason="unreachable",
+                detail="FileNotFoundError: missing.pdf",
+            ),
+        )
         with patch("subprocess.run", side_effect=AssertionError(
-            "subprocess must NOT be called when source_path is unreadable",
+            "subprocess must NOT be called when read_source fails",
         )):
-            record = extract_aspects(
+            result = extract_aspects(
                 content="",
-                source_path=str(tmp_path / "does-not-exist.pdf"),
+                source_path="missing.pdf",
                 collection="knowledge__delos",
             )
 
-        assert record is not None
-        assert record.problem_formulation is None
-        assert record.proposed_method is None
-        assert record.experimental_datasets == []
-        assert record.experimental_baselines == []
-        assert record.experimental_results is None
-        assert record.extras == {}
-        assert record.confidence is None
-        assert record.extractor_name == "scholarly-paper-v1"
-        assert record.model_version  # config-supplied
-        assert record.extracted_at  # populated even on failure
+        assert isinstance(result, ExtractFail)
+        assert result.reason == "unreachable"
+        assert "FileNotFoundError" in result.detail
+
+
+# ── URI dispatch + chroma integration (RDR-096 P1.2) ────────────────────────
+
+
+class TestUriDispatch:
+    """Integration tests exercising the new ``read_source`` call path
+    inside ``extract_aspects`` against a real ``chromadb.EphemeralClient``.
+    Verifies the URI is constructed from ``(collection, source_path)``,
+    chunk reassembly works end-to-end, and read failures surface as
+    ``ExtractFail`` (no row written).
+    """
+
+    def test_succeeds_via_chroma_for_knowledge_collection(
+        self, monkeypatch,
+    ) -> None:
+        """End-to-end: knowledge__ shape with ``title``-keyed chunks
+        + EphemeralClient + a fake subprocess. The chroma reader
+        reassembles, the extractor parses, and an ``AspectRecord``
+        emerges with non-null fields.
+        """
+        import chromadb
+
+        from nexus.aspect_extractor import AspectRecord, extract_aspects
+
+        client = chromadb.EphemeralClient()
+        try:
+            client.delete_collection("knowledge__uri_dispatch")
+        except Exception:
+            pass
+        coll = client.get_or_create_collection("knowledge__uri_dispatch")
+        title = "decision-bfdb-update-capture-rdr005"
+        coll.add(
+            ids=[f"{title}::0"],
+            documents=["Knowledge note about update capture."],
+            metadatas=[{"title": title, "chunk_index": 0}],
+        )
+        monkeypatch.setattr("nexus.aspect_extractor.get_t3", lambda: client)
+
+        def fake_run(args, **kwargs):
+            assert "Knowledge note about update capture." in kwargs.get("input", "")
+            return _make_completed(_ok_stdout())
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        result = extract_aspects(
+            content="",
+            source_path=title,
+            collection="knowledge__uri_dispatch",
+        )
+        assert isinstance(result, AspectRecord)
+        assert result.problem_formulation == "Sharded WAL bottleneck."
+        assert result.collection == "knowledge__uri_dispatch"
+        assert result.source_path == title
+
+    def test_returns_extract_fail_on_planted_ghost(self, monkeypatch) -> None:
+        """Catalog-stale source_path: collection exists, but no chunks
+        match the queried identity. Returns ``ExtractFail(reason='empty')``;
+        no row written; subprocess never invoked.
+        """
+        import chromadb
+
+        from nexus.aspect_extractor import ExtractFail, extract_aspects
+
+        client = chromadb.EphemeralClient()
+        try:
+            client.delete_collection("knowledge__ghost")
+        except Exception:
+            pass
+        coll = client.get_or_create_collection("knowledge__ghost")
+        # Plant unrelated chunks so the collection exists but the
+        # ghost source_path matches none of them.
+        coll.add(
+            ids=["unrelated::0"],
+            documents=["irrelevant"],
+            metadatas=[{"title": "unrelated", "chunk_index": 0}],
+        )
+        monkeypatch.setattr("nexus.aspect_extractor.get_t3", lambda: client)
+
+        with patch("subprocess.run", side_effect=AssertionError(
+            "subprocess must NOT be called for a planted ghost",
+        )):
+            result = extract_aspects(
+                content="",
+                source_path="ghost-source-not-in-collection",
+                collection="knowledge__ghost",
+            )
+
+        assert isinstance(result, ExtractFail)
+        assert result.reason == "empty"
+        assert result.uri == "chroma://knowledge__ghost/ghost-source-not-in-collection"
+
+    def test_percent_encodes_source_path_with_anchor_or_query(
+        self, monkeypatch,
+    ) -> None:
+        """``source_path`` may contain ``#`` (markdown anchors) or
+        ``?`` (query params). Without percent-encoding,
+        ``urlparse`` would split them off as URI fragment / query and
+        corrupt the path component the chroma reader matches against.
+        """
+        from nexus.aspect_extractor import extract_aspects
+        from nexus.aspect_readers import ReadOk
+
+        captured: list[str] = []
+
+        def fake_read(uri, t3=None, **_kw):
+            captured.append(uri)
+            return ReadOk(text="x", metadata={})
+
+        monkeypatch.setattr("nexus.aspect_extractor.read_source", fake_read)
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: _make_completed(_ok_stdout()))
+
+        extract_aspects(
+            content="",
+            source_path="docs/notes#section-2?v=1",
+            collection="rdr__corpus",
+        )
+        assert len(captured) == 1
+        # Anchor + query characters are percent-encoded; ``/`` is preserved.
+        assert "%23" in captured[0]
+        assert "%3F" in captured[0]
+        assert captured[0].startswith("chroma://rdr__corpus/docs/notes")
+
+    def test_returns_extract_fail_on_infra_unavailable(
+        self, monkeypatch,
+    ) -> None:
+        """``get_t3()`` raising surfaces as
+        ``ExtractFail(reason='infra_unavailable')`` — distinct from
+        ``unreachable`` so operators distinguish "no client" from
+        "bad URI".
+        """
+        from nexus.aspect_extractor import ExtractFail, extract_aspects
+
+        def boom():
+            raise RuntimeError("chroma cloud unreachable")
+
+        monkeypatch.setattr("nexus.aspect_extractor.get_t3", boom)
+
+        result = extract_aspects(
+            content="",
+            source_path="anything",
+            collection="knowledge__test",
+        )
+        assert isinstance(result, ExtractFail)
+        assert result.reason == "infra_unavailable"
+        assert "chroma cloud unreachable" in result.detail
+
+    def test_constructs_chroma_uri_from_collection_and_source_path(
+        self, monkeypatch,
+    ) -> None:
+        """Verifies the URI shape passed to ``read_source``: the
+        scheme is always ``chroma://`` for empty-content calls in
+        Phase 1, and ``<collection>/<source_path>`` is the path.
+        """
+        from nexus.aspect_extractor import extract_aspects
+        from nexus.aspect_readers import ReadOk
+
+        captured: list[str] = []
+
+        def fake_read(uri, t3=None, **_kw):
+            captured.append(uri)
+            return ReadOk(text="content", metadata={"scheme": "chroma"})
+
+        monkeypatch.setattr("nexus.aspect_extractor.read_source", fake_read)
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: _make_completed(_ok_stdout()))
+
+        extract_aspects(
+            content="",
+            source_path="docs/rdr/rdr-090.md",
+            collection="rdr__corpus",
+        )
+        assert captured == ["chroma://rdr__corpus/docs/rdr/rdr-090.md"]
 
 
 # ── Retry behavior (audit F8) ────────────────────────────────────────────────

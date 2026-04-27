@@ -61,6 +61,7 @@ import structlog
 # ``nexus.aspect_worker._extract_aspects`` swap the worker's
 # extraction call cleanly without touching the public entrypoint.
 from nexus.aspect_extractor import (
+    ExtractFail,
     extract_aspects as _extract_aspects,
     extract_aspects_batch as _extract_aspects_batch,
 )
@@ -222,6 +223,14 @@ class AspectExtractionWorker:
         # scholarly papers), then to disk read as last resort. Mirrors
         # the single-doc path in extract_aspects so batch and single
         # share the same sourcing precedence.
+        #
+        # TODO(RDR-096 P5.1): adopt URI-based read_source + ExtractFail
+        # in this batch path. The single-doc path migrated in P1.2;
+        # the batch path still uses the deprecated _source_content_from_t3
+        # + disk fallback because extract_aspects_batch returns
+        # _empty_record on missing content rather than ExtractFail.
+        # When the batch return type widens, this pre-fetch block can
+        # delete itself in favour of read_source per row.
         items: list[tuple[str, str, str]] = []
         for row in rows:
             content = row.content
@@ -325,10 +334,27 @@ class AspectExtractionWorker:
                         row.collection, row.source_path,
                     )
                     return
-                # Either a populated record or a null-fields record;
-                # either way, the extractor already retried up to
-                # 3 attempts internally. Persist whatever it gave us
-                # and remove the row from the queue.
+                # RDR-096 P1.2: ExtractFail is the typed read-failure
+                # sentinel. No row written; mark queue done so we
+                # don't retry the unreadable source on every drain.
+                # Operators can re-enqueue manually after fixing the
+                # source identity.
+                if isinstance(record, ExtractFail):
+                    _log.info(
+                        "aspect_worker_extract_skip",
+                        uri=record.uri,
+                        reason=record.reason,
+                        detail=record.detail,
+                    )
+                    t2.aspect_queue.mark_done(
+                        row.collection, row.source_path,
+                    )
+                    return
+                # AspectRecord — either a populated record or a null-
+                # fields record from a subprocess-side failure (the
+                # extractor already retried up to 3 attempts
+                # internally for those paths). Persist and remove
+                # from the queue.
                 t2.document_aspects.upsert(record)
                 t2.aspect_queue.mark_done(
                     row.collection, row.source_path,
