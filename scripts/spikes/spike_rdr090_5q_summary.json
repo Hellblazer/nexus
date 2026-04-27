@@ -1,0 +1,79 @@
+{
+  "corpus": "rdr__nexus-571b8edd",
+  "queries": 5,
+  "k": 3,
+  "by_path": {
+    "A": {
+      "mean_ndcg_at_3": 0.5546392554942854,
+      "mean_elapsed_s": 8.975426249951123,
+      "errors": 0,
+      "n": 5
+    },
+    "B": {
+      "mean_ndcg_at_3": 0.2773196277471427,
+      "mean_elapsed_s": 48.47147600038443,
+      "errors": 0,
+      "n": 5
+    },
+    "C": {
+      "mean_ndcg_at_3": 0.2773196277471427,
+      "mean_elapsed_s": 36.757867591804825,
+      "errors": 0,
+      "n": 5
+    }
+  },
+  "by_category": {
+    "factual": {
+      "A": 0.6115462751419715,
+      "B": 0.30577313757098573,
+      "C": 0.30577313757098573
+    },
+    "comparative": {
+      "A": 0.4692787260227565,
+      "B": 0.0,
+      "C": 0.0
+    },
+    "compositional": {
+      "A": 0.4692787260227565,
+      "B": 0.4692787260227565,
+      "C": 0.4692787260227565
+    }
+  },
+  "deltas": [
+    {
+      "qid": "Q1-factual-tumblers",
+      "category": "factual",
+      "ndcg_a": 0.9173194127129571,
+      "ndcg_b": 0.9173194127129571,
+      "ndcg_c": 0.9173194127129571
+    },
+    {
+      "qid": "Q2-factual-chash",
+      "category": "factual",
+      "ndcg_a": 0.0,
+      "ndcg_b": 0.0,
+      "ndcg_c": 0.0
+    },
+    {
+      "qid": "Q3-factual-taxonomy",
+      "category": "factual",
+      "ndcg_a": 0.9173194127129571,
+      "ndcg_b": 0.0,
+      "ndcg_c": 0.0
+    },
+    {
+      "qid": "Q4-comparative-hooks",
+      "category": "comparative",
+      "ndcg_a": 0.4692787260227565,
+      "ndcg_b": 0.0,
+      "ndcg_c": 0.0
+    },
+    {
+      "qid": "Q5-compositional-retrieval",
+      "category": "compositional",
+      "ndcg_a": 0.4692787260227565,
+      "ndcg_b": 0.4692787260227565,
+      "ndcg_c": 0.4692787260227565
+    }
+  ]
+}
