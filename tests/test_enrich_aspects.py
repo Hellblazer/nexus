@@ -42,8 +42,10 @@ def _make_record(
     proposed_method: str | None = "M",
     model_version: str = "claude-haiku-4-5-20251001",
 ) -> AspectRecord:
+    from nexus.aspect_readers import uri_for
+    collection = "knowledge__delos"
     return AspectRecord(
-        collection="knowledge__delos",
+        collection=collection,
         source_path=source_path,
         problem_formulation=problem_formulation,
         proposed_method=proposed_method,
@@ -55,6 +57,9 @@ def _make_record(
         extracted_at=datetime.now(UTC).isoformat(),
         model_version=model_version,
         extractor_name="scholarly-paper-v1",
+        # Mirror the going-forward writer contract: extract_aspects'
+        # _build_record / _empty_record populate source_uri via uri_for.
+        source_uri=uri_for(collection, source_path),
     )
 
 
@@ -639,6 +644,119 @@ class TestDay2Ops:
         assert parsed["experimental_datasets"] == ["d1"]
         assert parsed["extras"] == {"venue": "V"}
         assert parsed["extractor_name"] == "scholarly-paper-v1"
+
+    def test_list_renders_scheme_column(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """RDR-096 P3.2: ``nx enrich list`` shows the URI scheme as
+        a ``[<scheme>]`` prefix on each row so operators can see at
+        a glance which reader will dispatch.
+        """
+        from nexus.aspect_readers import uri_for
+        from nexus.db.t2 import T2Database
+        from nexus.db.t2.document_aspects import AspectRecord
+
+        _, db_path, _ = env
+        with T2Database(db_path) as db:
+            # knowledge__delos with chroma:// URI (paper-shape).
+            db.document_aspects.upsert(_make_record(
+                source_path="/papers/aleph.pdf",
+            ))
+            # Legacy row with NULL source_uri (mimic backfill skip).
+            from datetime import UTC, datetime
+            db.document_aspects.upsert(AspectRecord(
+                collection="knowledge__delos",
+                source_path="/legacy.pdf",
+                problem_formulation="P", proposed_method="M",
+                experimental_datasets=["d1"], experimental_baselines=["b1"],
+                experimental_results="R", extras={"venue": "V"},
+                confidence=0.9,
+                extracted_at=datetime.now(UTC).isoformat(),
+                model_version="claude-haiku-4-5-20251001",
+                extractor_name="scholarly-paper-v1",
+                source_uri=None,  # legacy / unbackfilled
+            ))
+
+        runner = CliRunner()
+        result = runner.invoke(enrich, ["list", "knowledge__delos"])
+        assert result.exit_code == 0, result.output
+        # paper.pdf row carries chroma scheme; legacy row carries '-'.
+        assert "[chroma" in result.output
+        assert "[-" in result.output
+        # Sanity: the URI scheme matches what uri_for produces.
+        assert uri_for("knowledge__delos", "/papers/aleph.pdf").startswith("chroma://")
+
+    def test_list_filter_by_scheme(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """RDR-096 P3.2: ``--scheme=chroma`` filters to only chroma
+        URI rows. file:// + legacy entries are excluded.
+        """
+        from datetime import UTC, datetime
+        from nexus.db.t2 import T2Database
+        from nexus.db.t2.document_aspects import AspectRecord
+
+        _, db_path, _ = env
+        with T2Database(db_path) as db:
+            # chroma row (knowledge collection).
+            db.document_aspects.upsert(_make_record(
+                source_path="/papers/aleph.pdf",
+            ))
+            # file:// row (rdr collection — but use _make_record pattern).
+            db.document_aspects.upsert(AspectRecord(
+                collection="knowledge__delos",
+                source_path="/local.md",
+                problem_formulation="P", proposed_method="M",
+                experimental_datasets=["d1"], experimental_baselines=["b1"],
+                experimental_results="R", extras={"venue": "V"},
+                confidence=0.9,
+                extracted_at=datetime.now(UTC).isoformat(),
+                model_version="claude-haiku-4-5-20251001",
+                extractor_name="scholarly-paper-v1",
+                source_uri="file:///local.md",
+            ))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            enrich, ["list", "knowledge__delos", "--scheme", "chroma"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "/papers/aleph.pdf" in result.output
+        assert "/local.md" not in result.output
+        assert "matching scheme='chroma'" in result.output
+
+        # Filter by file:// — opposite slice.
+        result2 = runner.invoke(
+            enrich, ["list", "knowledge__delos", "--scheme", "file"],
+        )
+        assert result2.exit_code == 0
+        assert "/local.md" in result2.output
+        assert "/papers/aleph.pdf" not in result2.output
+
+    def test_info_includes_source_uri_and_scheme(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """RDR-096 P3.2: ``nx enrich info`` JSON output includes
+        ``source_uri`` and ``scheme`` so operators can see which
+        reader will dispatch.
+        """
+        import json
+        from nexus.db.t2 import T2Database
+
+        _, db_path, _ = env
+        with T2Database(db_path) as db:
+            db.document_aspects.upsert(_make_record(
+                source_path="/papers/aleph.pdf",
+            ))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            enrich, ["info", "knowledge__delos", "/papers/aleph.pdf"],
+        )
+        assert result.exit_code == 0, result.output
+        parsed = json.loads(result.output)
+        assert parsed["source_uri"].startswith("chroma://knowledge__delos/")
+        assert parsed["scheme"] == "chroma"
 
     def test_info_missing_row_prints_notice(self, env) -> None:
         runner = CliRunner()

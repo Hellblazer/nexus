@@ -700,14 +700,29 @@ async def _verify(claim_json: str, evidence: str) -> dict:
     default=0,
     help="Maximum rows to print (0 = unlimited).",
 )
-def enrich_aspects_list(collection: str, limit: int) -> None:
+@click.option(
+    "--scheme",
+    default="",
+    help=(
+        "Filter to rows whose source_uri scheme matches (RDR-096 "
+        "P3.2). Common values: 'file', 'chroma', 'https', "
+        "'nx-scratch'. Use '' (default) for no filter; rows with "
+        "empty / NULL source_uri are excluded when --scheme is set."
+    ),
+)
+def enrich_aspects_list(collection: str, limit: int, scheme: str) -> None:
     """List source paths with extracted aspects in COLLECTION.
 
     One row per source document, deterministic order
     (``source_path ASC``). For each row prints
-    ``<source_path>  <fields_populated>/5  <model_version>``
-    so an operator can spot null-fields rows quickly.
+    ``<scheme>:<source_path>  <fields_populated>/5  <model_version>``
+    so an operator can spot null-fields rows AND identify which URI
+    scheme each row will dispatch to. The ``--scheme`` flag pre-
+    filters to a single scheme (e.g., ``--scheme=chroma`` lists only
+    chunk-reassembly-backed rows).
     """
+    from urllib.parse import urlparse  # noqa: PLC0415
+
     from nexus.commands._helpers import default_db_path
     from nexus.db.t2 import T2Database
 
@@ -716,8 +731,15 @@ def enrich_aspects_list(collection: str, limit: int) -> None:
             collection, limit=limit if limit > 0 else None,
         )
 
+    if scheme:
+        records = [
+            r for r in records
+            if r.source_uri and urlparse(r.source_uri).scheme == scheme
+        ]
+
     if not records:
-        click.echo(f"No aspect rows for '{collection}'.")
+        suffix = f" with scheme={scheme!r}" if scheme else ""
+        click.echo(f"No aspect rows for '{collection}'{suffix}.")
         return
 
     for r in records:
@@ -728,10 +750,17 @@ def enrich_aspects_list(collection: str, limit: int) -> None:
             ) if v
         ) + (1 if r.experimental_datasets else 0) \
           + (1 if r.experimental_baselines else 0)
+        # Per-row scheme label so operators can see at a glance
+        # which reader will dispatch. ``-`` denotes a row with empty
+        # / NULL source_uri (legacy entry not yet backfilled).
+        row_scheme = (
+            urlparse(r.source_uri).scheme if r.source_uri else "-"
+        ) or "-"
         click.echo(
-            f"  {r.source_path}  {populated}/5  {r.model_version}"
+            f"  [{row_scheme:<10}] {r.source_path}  {populated}/5  {r.model_version}"
         )
-    click.echo(f"\n{len(records)} row(s) in '{collection}'.")
+    suffix = f" matching scheme={scheme!r}" if scheme else ""
+    click.echo(f"\n{len(records)} row(s) in '{collection}'{suffix}.")
 
 
 @enrich.command(name="info")
@@ -753,9 +782,20 @@ def enrich_aspects_info(collection: str, source_path: str) -> None:
         )
         return
 
+    from urllib.parse import urlparse  # noqa: PLC0415
+
+    scheme = (
+        urlparse(record.source_uri).scheme
+        if record.source_uri else ""
+    )
+
     click.echo(json.dumps({
         "collection": record.collection,
         "source_path": record.source_path,
+        # RDR-096 P3.2: surface URI + parsed scheme so operators
+        # can see which reader will dispatch for re-extraction.
+        "source_uri": record.source_uri,
+        "scheme": scheme,
         "problem_formulation": record.problem_formulation,
         "proposed_method": record.proposed_method,
         "experimental_datasets": record.experimental_datasets,
