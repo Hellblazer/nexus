@@ -509,8 +509,24 @@ def _query_filter(
     # cap) to handle large item lists. SQLite's default param limit
     # is 999 with two params per item (collection, source_path), so
     # batching at 300 leaves plenty of headroom.
+    # RDR-096 P2.3 dual-read: ``COALESCE(source_uri, 'file://' ||
+    # source_path) AS source_identity`` projects the URI form so the
+    # rationale entries can surface URIs alongside the source_path
+    # ``id`` (kept for back-compat). Rows whose source_uri escaped
+    # backfill (empty source_path) get the file://-shaped fallback
+    # via the COALESCE second arm.
+    #
+    # Rationale-shape contract (P2.3):
+    # * ``id`` — source_path string (back-compat with pre-P2.3 callers)
+    # * ``source_uri`` — populated for rows the SQL fast path
+    #   matched; ``""`` when no row exists (non-match, queue pending,
+    #   or aspects-only meta entry). Never ``None``: the empty-string
+    #   sentinel keeps the field type consistent for downstream
+    #   consumers that don't distinguish missing-vs-pending.
+    # * ``reason`` — human-readable explanation.
     keep: list[tuple[str, str]] = []
     matches: dict[tuple[str, str], bool] = {}
+    uris: dict[tuple[str, str], str] = {}
     with T2Database(default_db_path()) as db:
         conn = db.document_aspects.conn
         for chunk_start in range(0, len(idents), 300):
@@ -520,13 +536,16 @@ def _query_filter(
             for c, sp in batch:
                 params.extend([c, sp])
             sql = (
-                f"SELECT collection, source_path FROM document_aspects "
+                f"SELECT collection, source_path, "
+                f"       COALESCE(source_uri, 'file://' || source_path) AS source_identity "
+                f"FROM document_aspects "
                 f"WHERE (collection, source_path) IN ({placeholders}) "
                 f"  AND {pred_sql}"
             )
             params.extend(pred_params)
-            for c, sp in conn.execute(sql, params).fetchall():
+            for c, sp, uri in conn.execute(sql, params).fetchall():
                 matches[(c, sp)] = True
+                uris[(c, sp)] = uri
 
     rationale = []
     for c, sp in idents:
@@ -534,11 +553,13 @@ def _query_filter(
             keep.append((c, sp))
             rationale.append({
                 "id": sp,
+                "source_uri": uris.get((c, sp), ""),
                 "reason": f"{field} matches '{query}' (SQL fast path)",
             })
         else:
             rationale.append({
                 "id": sp,
+                "source_uri": "",
                 "reason": (
                     f"{field} does not match '{query}' "
                     f"(or aspect row absent — queue may be pending)"
@@ -566,6 +587,13 @@ def _query_groupby(
         select_expr = field
         select_params = []
 
+    # P2.3 note: ``_query_filter`` widens its SELECT with a COALESCE
+    # source_identity column so rationale entries can surface URIs.
+    # ``_query_groupby`` does not — its return shape (``{key:
+    # [(collection, source_path)]}``) doesn't currently expose
+    # identity to callers, and projecting an unused column would be
+    # dead overhead. When a future bead adds URI to groupby output,
+    # widen the SELECT here and update the unpacking.
     groups: dict[str, list[tuple[str, str]]] = {}
     fetched: dict[tuple[str, str], Any] = {}
 
@@ -717,7 +745,11 @@ def _aspects_only_or_none(source: str, reason: str) -> dict | None:
         return None
     return {
         "items": [],
-        "rationale": [{"id": "_meta", "reason": f"aspects-only: {reason}"}],
+        # ``source_uri: ""`` matches the rationale-shape contract:
+        # always present on entries, empty string when no document
+        # row exists to project from. ``"_meta"`` rationale rows
+        # describe the operator-call outcome, not a document.
+        "rationale": [{"id": "_meta", "source_uri": "", "reason": f"aspects-only: {reason}"}],
     }
 
 

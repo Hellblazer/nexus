@@ -33,6 +33,7 @@ def _make_record(
     confidence: float = 0.9,
     model_version: str = "claude-haiku-4-5-20251001",
 ) -> AspectRecord:
+    from nexus.aspect_readers import uri_for
     return AspectRecord(
         collection=collection,
         source_path=source_path,
@@ -46,6 +47,9 @@ def _make_record(
         extracted_at=datetime.now(UTC).isoformat(),
         model_version=model_version,
         extractor_name="scholarly-paper-v1",
+        # Mirror the going-forward writer contract from
+        # aspect_extractor._build_record / _empty_record.
+        source_uri=uri_for(collection, source_path),
     )
 
 
@@ -57,7 +61,18 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     path queries: scalar text (proposed_method, experimental_results,
     problem_formulation), JSON arrays (experimental_datasets,
     experimental_baselines), JSON object (extras.venue), and
-    confidence reals."""
+    confidence reals.
+
+    RDR-096 P2.3: ``_make_record`` populates ``source_uri`` via
+    ``uri_for``, mirroring the going-forward writer contract from
+    ``aspect_extractor._build_record`` / ``_empty_record``. Tests
+    that need the legacy "source_uri IS NULL" shape (e.g. for
+    P2.3's COALESCE-fallback regression guard in ``TestDualRead``)
+    explicitly NULL the column via raw SQL after fixture
+    construction — see
+    ``test_filter_rationale_falls_back_to_file_for_legacy_null_uri``
+    for the canonical pattern.
+    """
     db_path = tmp_path / "aspect_sql.db"
     import nexus.commands._helpers as h
     monkeypatch.setattr(h, "default_db_path", lambda: db_path)
@@ -318,6 +333,91 @@ class TestFilter:
                 source="LLM",  # wrong case
                 aspect_field="proposed_method",
             )
+
+
+# ── RDR-096 P2.3 dual-read ──────────────────────────────────────────────────
+
+
+class TestDualRead:
+    """RDR-096 P2.3: operator SQL fast paths read identity via
+    ``COALESCE(source_uri, 'file://' || source_path) AS source_identity``.
+    Rationale entries gain an additive ``source_uri`` field. This is
+    the dual-read that keeps the deprecation window honest:
+
+    * Post-P2.1 rows (writer populated source_uri): the COALESCE
+      first-arm wins; rationale shows the persisted URI.
+    * Pre-P2.1 rows (source_uri NULL because backfill skipped or
+      writer is from an older release): the COALESCE second-arm
+      synthesises ``file://<source_path>``; rationale shows that.
+    """
+
+    def test_filter_rationale_includes_source_uri_from_writer(
+        self, env: Path,
+    ) -> None:
+        items = _items("/papers/paxos.pdf")
+        result = aspect_sql.try_filter(
+            items, "paxos",
+            source="auto", aspect_field="proposed_method",
+        )
+        assert result is not None
+        # Single matching rationale entry with both id and source_uri.
+        match = [r for r in result["rationale"] if r["id"] == "/papers/paxos.pdf"]
+        assert len(match) == 1
+        # Writer populated source_uri at upsert time (RDR-096 P2.1).
+        # paxos.pdf is in knowledge__delos which routes through
+        # ``chroma://`` per uri_for. Note: source_path /papers/paxos.pdf
+        # round-trips verbatim because the path is the URI's path
+        # component.
+        assert match[0]["source_uri"] == (
+            "chroma://knowledge__delos//papers/paxos.pdf"
+        )
+
+    def test_filter_rationale_falls_back_to_file_for_legacy_null_uri(
+        self, env: Path, monkeypatch,
+    ) -> None:
+        """Rows whose source_uri escaped backfill (NULL in the DB)
+        get a synthesised ``file://<abspath>`` URI from the COALESCE
+        second arm. Simulate by NULLing one row directly in SQL.
+        """
+        # NULL out source_uri on one row to mimic a legacy /
+        # backfill-skipped state.
+        with T2Database(env) as db:
+            db.document_aspects.conn.execute(
+                "UPDATE document_aspects SET source_uri = NULL "
+                "WHERE source_path = '/papers/raft.pdf'"
+            )
+            db.document_aspects.conn.commit()
+
+        items = _items("/papers/raft.pdf")
+        result = aspect_sql.try_filter(
+            items, "raft",
+            source="auto", aspect_field="proposed_method",
+        )
+        assert result is not None
+        match = [r for r in result["rationale"] if r["id"] == "/papers/raft.pdf"]
+        assert len(match) == 1
+        # COALESCE second arm: 'file://' || source_path. Note SQL's
+        # || does not call os.path.abspath — it concatenates verbatim,
+        # so the URI is ``file:///papers/raft.pdf`` (the source_path
+        # already had a leading slash).
+        assert match[0]["source_uri"] == "file:///papers/raft.pdf"
+
+    def test_filter_non_match_rationale_has_empty_source_uri(
+        self, env: Path,
+    ) -> None:
+        """Items rejected by the filter (or whose aspect row is
+        missing) get ``source_uri=""`` — there's no row to project
+        the URI from, and emitting an empty string is honest.
+        """
+        items = _items("/papers/paxos.pdf", "/papers/bft.pdf")
+        result = aspect_sql.try_filter(
+            items, "paxos",
+            source="auto", aspect_field="proposed_method",
+        )
+        assert result is not None
+        bft = [r for r in result["rationale"] if r["id"] == "/papers/bft.pdf"]
+        assert len(bft) == 1
+        assert bft[0]["source_uri"] == ""
 
 
 # ── try_groupby ─────────────────────────────────────────────────────────────

@@ -11,6 +11,19 @@ of the latest extraction:
 Per-chunk doc_id is intentionally not in the schema — multiple chunks
 of the same source document map to a single aspect row.
 
+**RDR-096 deprecation window** (P2.1 → P5.1, two minor releases):
+``source_uri`` is the persistent URI identity column added at 4.16.0
+(P2.1). Operator SQL fast paths (``operators/aspect_sql.py``) read
+identity via ``COALESCE(source_uri, 'file://' || source_path) AS
+source_identity`` for the entire window — this is the dual-read that
+keeps any pre-migration row whose source_uri escaped backfill (empty
+source_path edge case from research-2) addressable. Two minor
+releases after 4.16.0, P5.1 stops new ingest paths from writing
+``source_path``, and the column becomes read-only. The
+``source_path`` column itself is dropped in a later migration once
+all consumer code has migrated to URI-only identity. The exact
+target version is set when P5.1 ships, not pre-pinned in source.
+
 Upsert semantics: COMPLETE IDEMPOTENT OVERWRITE. The latest extraction
 replaces any previous one verbatim. No diff/merge, no per-field
 stability check, no deviation log. Phase 1 callers are aspect
