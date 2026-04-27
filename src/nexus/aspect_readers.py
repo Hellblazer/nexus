@@ -394,6 +394,110 @@ def _read_scratch_uri(uri: str, *, scratch: Any = None, **_kw: Any) -> ReadResul
     )
 
 
+# ── https:// reader (RDR-096 P4.2) ───────────────────────────────────────────
+
+
+def _read_https_uri(
+    uri: str,
+    *,
+    t3: Any = None,
+    http_client: Any = None,
+    force_refresh: bool = False,
+    chroma_hint: tuple[str, str] | None = None,
+    **_kw: Any,
+) -> ReadResult:
+    """Read an ``https://`` URI for paywalled or dynamic upstreams
+    (Confluence pages, web research, RFC archives).
+
+    **Chroma-first preference**: when the caller provides
+    ``chroma_hint = (collection, source_id)`` AND ``force_refresh``
+    is False AND ``t3`` is available, the reader first tries the
+    chroma equivalent — returning the cached chunk-reassembled text
+    without a network round-trip when the chunk exists. The hint
+    is the caller's job to compute (e.g., the catalog can map a
+    URL to a (collection, source_id) tuple via its source_uri
+    column). Operator opt-in via ``force_refresh=True`` bypasses
+    the cache and always fetches live.
+
+    Failure modes:
+
+    * 401 / 403 → ``ReadFail(reason='unauthorized')`` (auth fixable
+      out of band; not retriable in-process).
+    * 404 / 5xx / network error → ``ReadFail(reason='unreachable')``.
+    * empty body → ``ReadFail(reason='empty')``.
+    * chroma-first miss → falls through to httpx (no error surfaced
+      from the chroma probe).
+
+    ``http_client`` is injected for tests; production calls
+    construct a short-timeout httpx.Client.
+    """
+    # Step 1 — chroma-first preference.
+    if (
+        not force_refresh
+        and chroma_hint is not None
+        and t3 is not None
+    ):
+        coll, src = chroma_hint
+        chroma_uri = f"chroma://{coll}/{src}"
+        chroma_result = _read_chroma_uri(chroma_uri, t3=t3)
+        if isinstance(chroma_result, ReadOk):
+            return ReadOk(
+                text=chroma_result.text,
+                metadata={
+                    **chroma_result.metadata,
+                    "https_uri": uri,
+                    "served_from": "chroma",
+                },
+            )
+        # Chroma miss: fall through to live fetch.
+
+    # Step 2 — live fetch via httpx.
+    own_client = False
+    if http_client is None:
+        import httpx  # noqa: PLC0415
+
+        http_client = httpx.Client(timeout=30, follow_redirects=True)
+        own_client = True
+    try:
+        try:
+            response = http_client.get(uri)
+        except Exception as e:
+            return ReadFail(
+                reason="unreachable",
+                detail=f"http fetch failed: {type(e).__name__}: {e}",
+            )
+    finally:
+        if own_client:
+            http_client.close()
+
+    status = response.status_code
+    if status in (401, 403):
+        return ReadFail(
+            reason="unauthorized",
+            detail=f"HTTP {status} from {uri!r}",
+        )
+    if status >= 400:
+        return ReadFail(
+            reason="unreachable",
+            detail=f"HTTP {status} from {uri!r}",
+        )
+    text = response.text or ""
+    if not text:
+        return ReadFail(
+            reason="empty",
+            detail=f"HTTP {status} with empty body from {uri!r}",
+        )
+    return ReadOk(
+        text=text,
+        metadata={
+            "scheme": "https",
+            "url": uri,
+            "http_status": status,
+            "served_from": "network",
+        },
+    )
+
+
 # ── Reader registry + dispatch helper ────────────────────────────────────────
 
 
@@ -401,6 +505,7 @@ _READERS: dict[str, Callable[..., ReadResult]] = {
     "file": _read_file_uri,
     "chroma": _read_chroma_uri,
     "nx-scratch": _read_scratch_uri,
+    "https": _read_https_uri,
 }
 
 

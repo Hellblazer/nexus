@@ -618,6 +618,225 @@ class TestReadScratchUri:
         assert result.text == "payload"
 
 
+# ── https:// reader (RDR-096 P4.2) ──────────────────────────────────────────
+
+
+class _StubHttpResponse:
+    """Minimal httpx.Response stand-in for tests. Carries
+    ``status_code`` and ``text`` like the real client returns."""
+
+    def __init__(self, status_code: int, text: str = "") -> None:
+        self.status_code = status_code
+        self.text = text
+
+
+class _StubHttpClient:
+    """Records each ``get`` call and replies with a queued response.
+    Lets tests assert ``calls == 0`` for the chroma-first preference
+    test (network must NOT fire when chroma hit serves the read).
+    """
+
+    def __init__(self, responses: list[_StubHttpResponse] | None = None) -> None:
+        self.responses = list(responses or [])
+        self.calls: list[str] = []
+
+    def get(self, url: str):
+        self.calls.append(url)
+        if not self.responses:
+            raise AssertionError(
+                f"_StubHttpClient.get({url!r}) ran out of canned responses "
+                f"— test should have queued one or asserted no call."
+            )
+        return self.responses.pop(0)
+
+    def close(self) -> None:
+        pass
+
+
+class TestReadHttpsUri:
+    """RDR-096 P4.2: ``https://`` scheme reader. Default behavior
+    prefers a chroma:// equivalent (no network round-trip) when a
+    ``chroma_hint`` is provided and the chunk exists in T3; falls
+    back to httpx fetch otherwise. ``force_refresh=True`` bypasses
+    the chroma-first preference.
+    """
+
+    def test_200_returns_read_ok(self):
+        from nexus.aspect_readers import ReadOk, _read_https_uri
+
+        client = _StubHttpClient([_StubHttpResponse(200, "page body text")])
+        result = _read_https_uri(
+            "https://docs.bito.ai/ingest", http_client=client,
+        )
+        assert isinstance(result, ReadOk)
+        assert result.text == "page body text"
+        assert result.metadata["scheme"] == "https"
+        assert result.metadata["served_from"] == "network"
+        assert result.metadata["http_status"] == 200
+        assert client.calls == ["https://docs.bito.ai/ingest"]
+
+    def test_401_returns_read_fail_unauthorized(self):
+        from nexus.aspect_readers import ReadFail, _read_https_uri
+
+        client = _StubHttpClient([_StubHttpResponse(401, "denied")])
+        result = _read_https_uri(
+            "https://paywalled.example.com/x", http_client=client,
+        )
+        assert isinstance(result, ReadFail)
+        assert result.reason == "unauthorized"
+        assert "401" in result.detail
+
+    def test_403_returns_read_fail_unauthorized(self):
+        from nexus.aspect_readers import ReadFail, _read_https_uri
+
+        client = _StubHttpClient([_StubHttpResponse(403, "forbidden")])
+        result = _read_https_uri(
+            "https://x.example.com", http_client=client,
+        )
+        assert isinstance(result, ReadFail)
+        assert result.reason == "unauthorized"
+
+    def test_404_returns_read_fail_unreachable(self):
+        from nexus.aspect_readers import ReadFail, _read_https_uri
+
+        client = _StubHttpClient([_StubHttpResponse(404, "not found")])
+        result = _read_https_uri(
+            "https://x.example.com/missing", http_client=client,
+        )
+        assert isinstance(result, ReadFail)
+        assert result.reason == "unreachable"
+        assert "404" in result.detail
+
+    def test_5xx_returns_read_fail_unreachable(self):
+        from nexus.aspect_readers import ReadFail, _read_https_uri
+
+        client = _StubHttpClient([_StubHttpResponse(503, "service unavailable")])
+        result = _read_https_uri(
+            "https://flaky.example.com", http_client=client,
+        )
+        assert isinstance(result, ReadFail)
+        assert result.reason == "unreachable"
+
+    def test_network_exception_returns_read_fail_unreachable(self):
+        from nexus.aspect_readers import ReadFail, _read_https_uri
+
+        class _ExplodingClient:
+            calls: list[str] = []
+
+            def get(self, url):
+                self.calls.append(url)
+                raise OSError("DNS resolution failed")
+
+            def close(self):
+                pass
+
+        client = _ExplodingClient()
+        result = _read_https_uri(
+            "https://nope.invalid", http_client=client,
+        )
+        assert isinstance(result, ReadFail)
+        assert result.reason == "unreachable"
+        assert "OSError" in result.detail
+
+    def test_empty_body_returns_read_fail_empty(self):
+        from nexus.aspect_readers import ReadFail, _read_https_uri
+
+        client = _StubHttpClient([_StubHttpResponse(200, "")])
+        result = _read_https_uri(
+            "https://blank.example.com", http_client=client,
+        )
+        assert isinstance(result, ReadFail)
+        assert result.reason == "empty"
+
+    def test_chroma_first_preference_skips_network_when_hint_resolves(
+        self, t3_client,
+    ):
+        """When ``chroma_hint=(collection, source_id)`` is provided
+        AND the chunk exists in T3 AND ``force_refresh=False``, the
+        reader returns the chroma content WITHOUT making a network
+        request.
+        """
+        from nexus.aspect_readers import ReadOk, _read_https_uri
+
+        # Plant a chroma chunk that will serve as the cached version.
+        title = "docs-bito-ingest-snapshot"
+        _seed_chunks(
+            t3_client,
+            "knowledge__bito",
+            identity_field="title",
+            source_id=title,
+            chunks=[(0, "cached page body from chroma")],
+        )
+        # Stub the http client; queue NO responses so any unexpected
+        # call would AssertionError out.
+        client = _StubHttpClient(responses=[])
+
+        result = _read_https_uri(
+            "https://docs.bito.ai/ingest",
+            t3=t3_client,
+            http_client=client,
+            chroma_hint=("knowledge__bito", title),
+        )
+        assert isinstance(result, ReadOk)
+        assert result.text == "cached page body from chroma"
+        assert result.metadata["served_from"] == "chroma"
+        assert result.metadata["https_uri"] == "https://docs.bito.ai/ingest"
+        # Network NOT touched.
+        assert client.calls == []
+
+    def test_force_refresh_bypasses_chroma_first(self, t3_client):
+        """``force_refresh=True`` skips the chroma-first preference
+        and always goes to the network — useful when an operator
+        wants the live page (Confluence edits, refreshed research).
+        """
+        from nexus.aspect_readers import ReadOk, _read_https_uri
+
+        title = "stale-snapshot"
+        _seed_chunks(
+            t3_client,
+            "knowledge__live",
+            identity_field="title",
+            source_id=title,
+            chunks=[(0, "stale chroma cached body")],
+        )
+        client = _StubHttpClient([_StubHttpResponse(200, "fresh live page")])
+
+        result = _read_https_uri(
+            "https://live.example.com/x",
+            t3=t3_client,
+            http_client=client,
+            chroma_hint=("knowledge__live", title),
+            force_refresh=True,
+        )
+        assert isinstance(result, ReadOk)
+        assert result.text == "fresh live page"
+        assert result.metadata["served_from"] == "network"
+        assert client.calls == ["https://live.example.com/x"]
+
+    def test_chroma_miss_falls_through_to_network(self, t3_client):
+        """When ``chroma_hint`` is provided but the chunk doesn't
+        exist in T3, the reader falls through to httpx fetch.
+        """
+        from nexus.aspect_readers import ReadOk, _read_https_uri
+
+        try:
+            t3_client.delete_collection("knowledge__nope")
+        except Exception:
+            pass
+        client = _StubHttpClient([_StubHttpResponse(200, "fetched body")])
+
+        result = _read_https_uri(
+            "https://example.com/x",
+            t3=t3_client,
+            http_client=client,
+            chroma_hint=("knowledge__nope", "missing-source"),
+        )
+        assert isinstance(result, ReadOk)
+        assert result.text == "fetched body"
+        assert result.metadata["served_from"] == "network"
+        assert client.calls == ["https://example.com/x"]
+
+
 # ── read_source dispatch ─────────────────────────────────────────────────────
 
 
