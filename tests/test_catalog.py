@@ -102,6 +102,189 @@ class TestRegisterDocument:
         assert entry is not None and entry.title == "indexer.py" and entry.content_type == "code"
 
 
+class TestSourceUriRegistration:
+    """RDR-096 P3.1: source_uri at the catalog register boundary.
+
+    Three contracts:
+    * Bare ``file_path`` auto-derives ``file://<abspath>`` source_uri.
+    * Explicit ``source_uri`` with a recognized scheme stores
+      verbatim.
+    * Malformed URI (no scheme; unrecognized scheme) raises
+      ``ValueError`` at register time — NOT silently persisted.
+    """
+
+    def test_register_with_file_path_derives_file_uri(
+        self, cat_with_owner,
+    ):
+        import os.path
+        cat, owner = cat_with_owner
+        doc = cat.register(
+            owner, "indexer.py", content_type="code",
+            file_path="src/nexus/indexer.py",
+        )
+        entry = cat.resolve(doc)
+        assert entry is not None
+        # Auto-derived: file://<abspath>.
+        assert entry.source_uri == "file://" + os.path.abspath("src/nexus/indexer.py")
+
+    def test_register_with_explicit_chroma_uri(self, cat_with_owner):
+        cat, owner = cat_with_owner
+        explicit = "chroma://knowledge__delos//papers/aleph.pdf"
+        doc = cat.register(
+            owner, "aleph", content_type="paper",
+            file_path="",  # no path; URI is canonical
+            source_uri=explicit,
+        )
+        entry = cat.resolve(doc)
+        assert entry is not None
+        # Stored verbatim.
+        assert entry.source_uri == explicit
+
+    def test_register_with_explicit_uri_overrides_file_path_derivation(
+        self, cat_with_owner,
+    ):
+        """When source_uri is provided, it wins over the file_path
+        auto-derivation."""
+        cat, owner = cat_with_owner
+        explicit = "https://docs.bito.ai/ingest-overview"
+        doc = cat.register(
+            owner, "bito-ingest", content_type="paper",
+            file_path="bito-mirror.md",
+            source_uri=explicit,
+        )
+        entry = cat.resolve(doc)
+        assert entry is not None
+        assert entry.source_uri == explicit
+        # file_path is preserved separately.
+        assert entry.file_path == "bito-mirror.md"
+
+    def test_register_rejects_malformed_uri_no_scheme(self, cat_with_owner):
+        cat, owner = cat_with_owner
+        with pytest.raises(ValueError, match="no scheme"):
+            cat.register(
+                owner, "broken", content_type="paper",
+                source_uri="not-a-uri-just-a-string",
+            )
+
+    def test_register_rejects_unknown_scheme(self, cat_with_owner):
+        cat, owner = cat_with_owner
+        # Future scheme not yet in _KNOWN_URI_SCHEMES (e.g. s3://, ftp://).
+        # Adding it requires registering a reader first.
+        with pytest.raises(ValueError, match="unknown source_uri scheme"):
+            cat.register(
+                owner, "premature", content_type="paper",
+                source_uri="s3://bucket/key.pdf",
+            )
+
+    def test_register_with_no_path_or_uri_stores_empty_uri(
+        self, cat_with_owner,
+    ):
+        """Legacy entries with no identity (synthesized records, ghost
+        registrations) get source_uri='' rather than failing.
+        """
+        cat, owner = cat_with_owner
+        doc = cat.register(owner, "ghost", content_type="paper")
+        entry = cat.resolve(doc)
+        assert entry is not None
+        assert entry.source_uri == ""
+
+    def test_known_uri_schemes_table_is_locked_to_planned_set(self):
+        """Lock the scheme registry against silent additions OR
+        shrinking. Phase 1: ``file`` + ``chroma``. Phase 4:
+        ``nx-scratch`` (P4.1) + ``https`` (P4.2). Plain ``http`` is
+        intentionally excluded — Phase 4's https reader does NOT
+        cover plain http, so accepting http URIs at register would
+        succeed silently and fail at extraction. Adding a new scheme
+        requires landing the reader first AND updating this lock.
+        """
+        from nexus.catalog.catalog import _KNOWN_URI_SCHEMES
+        assert _KNOWN_URI_SCHEMES == frozenset({
+            "file", "chroma", "https", "nx-scratch",
+        })
+
+    def test_register_rejects_http_scheme_until_reader_lands(
+        self, cat_with_owner,
+    ):
+        """``http://`` is not yet in the allowlist (P4.2 only ships
+        https). A user who pastes an http URL gets a clear error
+        rather than silent register-success-but-extract-failure.
+        """
+        cat, owner = cat_with_owner
+        with pytest.raises(ValueError, match="unknown source_uri scheme"):
+            cat.register(
+                owner, "http-only", content_type="paper",
+                source_uri="http://example.com/paper.pdf",
+            )
+
+    def test_update_preserves_source_uri(self, cat_with_owner):
+        """RDR-096 P3.1 regression guard: ``update()`` must carry
+        ``source_uri`` through unchanged when the caller does not
+        pass it. Without the carry-over, every update silently
+        clobbered the URI persisted at register time. Caught in code
+        review of P3.1.
+        """
+        cat, owner = cat_with_owner
+        explicit = "chroma://knowledge__delos//papers/aleph.pdf"
+        doc = cat.register(
+            owner, "aleph", content_type="paper",
+            source_uri=explicit,
+        )
+        # Update an unrelated field — title.
+        cat.update(doc, title="Aleph BFT (revised)")
+        entry = cat.resolve(doc)
+        assert entry is not None
+        assert entry.title == "Aleph BFT (revised)"
+        # source_uri preserved.
+        assert entry.source_uri == explicit
+
+    def test_update_with_explicit_source_uri_validates_at_boundary(
+        self, cat_with_owner,
+    ):
+        """When ``update()`` is called with ``source_uri=...``, the
+        new URI is validated through the same boundary as register;
+        malformed URIs raise rather than silently persist.
+        """
+        cat, owner = cat_with_owner
+        doc = cat.register(
+            owner, "valid", content_type="paper",
+            source_uri="chroma://knowledge__delos/x",
+        )
+        with pytest.raises(ValueError, match="no scheme"):
+            cat.update(doc, source_uri="not-a-uri")
+
+    def test_update_with_explicit_source_uri_replaces_value(
+        self, cat_with_owner,
+    ):
+        """When the caller passes a valid new ``source_uri``, it
+        replaces the previous value.
+        """
+        cat, owner = cat_with_owner
+        doc = cat.register(
+            owner, "doc", content_type="paper",
+            source_uri="chroma://knowledge__delos/old",
+        )
+        new_uri = "chroma://knowledge__delos/new"
+        cat.update(doc, source_uri=new_uri)
+        entry = cat.resolve(doc)
+        assert entry is not None
+        assert entry.source_uri == new_uri
+
+    def test_by_file_path_returns_source_uri(self, cat_with_owner):
+        """The ``by_file_path`` lookup site reads source_uri (covers
+        the gap caught in code review where 7 SELECT sites returned
+        empty source_uri even when persisted).
+        """
+        import os.path
+        cat, owner = cat_with_owner
+        cat.register(
+            owner, "indexed", content_type="code",
+            file_path="src/x.py",
+        )
+        entry = cat.by_file_path(owner, "src/x.py")
+        assert entry is not None
+        assert entry.source_uri == "file://" + os.path.abspath("src/x.py")
+
+
 class TestAliasResolution:
     """nexus-s8yz: documents.alias_of column — permanent tumbler aliasing.
 

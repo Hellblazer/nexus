@@ -6,6 +6,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+from urllib.parse import urlparse
 import re
 import subprocess
 from collections import deque
@@ -213,6 +214,55 @@ def reset_chash_fallback_warning_for_tests() -> None:
     _chash_fallback_warned = False
 
 
+# Set of URI schemes the catalog will accept verbatim. Each scheme
+# corresponds to a reader registered in ``nexus.aspect_readers``;
+# adding a new scheme is gated on landing the reader first so
+# register-time validation can't silently allow URIs that have no
+# downstream consumer. ``file`` and ``chroma`` ship in Phase 1
+# (RDR-096); ``https`` and ``nx-scratch`` are reserved for Phase 4.
+# ``http`` is intentionally excluded — Phase 4's https reader does
+# NOT cover plain http; users with http URIs must upgrade to https
+# or wait for a dedicated reader.
+_KNOWN_URI_SCHEMES: frozenset[str] = frozenset({
+    "file", "chroma", "https", "nx-scratch",
+})
+
+
+def _normalize_source_uri(source_uri: str, file_path: str) -> str:
+    """RDR-096 P3.1 register-boundary URI validation.
+
+    * Empty ``source_uri`` + non-empty ``file_path`` → derive
+      ``file://<abspath>`` (back-compat for callers passing only a
+      filesystem path).
+    * Empty ``source_uri`` + empty ``file_path`` → return ``""``
+      (legacy entries with no identity at all stay shapeless).
+    * Non-empty ``source_uri`` → validate via ``urlparse``: must
+      have a recognized scheme. Malformed URIs raise ``ValueError``
+      at the register boundary, NOT silently persisted (RDR-096
+      Risks and Mitigations).
+    """
+    if not source_uri:
+        if file_path:
+            return "file://" + os.path.abspath(file_path)
+        return ""
+
+    parsed = urlparse(source_uri)
+    scheme = parsed.scheme
+    if not scheme:
+        raise ValueError(
+            f"malformed source_uri {source_uri!r}: no scheme. "
+            f"Expected one of {sorted(_KNOWN_URI_SCHEMES)} or a "
+            f"bare filesystem path (passed via file_path instead).",
+        )
+    if scheme not in _KNOWN_URI_SCHEMES:
+        raise ValueError(
+            f"unknown source_uri scheme {scheme!r} in {source_uri!r}. "
+            f"Known schemes: {sorted(_KNOWN_URI_SCHEMES)}. To add a "
+            f"new scheme, register a reader in nexus.aspect_readers.",
+        )
+    return source_uri
+
+
 @dataclass
 class CatalogEntry:
     tumbler: Tumbler
@@ -233,6 +283,11 @@ class CatalogEntry:
     # entry is canonical. Populated by dedupe-owners (nexus-tmbh) when
     # consolidating duplicate owner registrations.
     alias_of: str = ""
+    # RDR-096 P3.1: persistent URI identity. Populated at register
+    # time — bare paths normalize to ``file://<abspath>``; explicit
+    # URIs (chroma://, https://, etc.) are stored verbatim. ''
+    # only on legacy entries that predate P2.1's column migration.
+    source_uri: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -250,6 +305,7 @@ class CatalogEntry:
             "meta": self.meta,
             "source_mtime": self.source_mtime,
             "alias_of": self.alias_of,
+            "source_uri": self.source_uri,
         }
 
 
@@ -584,7 +640,14 @@ class Catalog:
         year: int = 0,
         meta: dict | None = None,
         source_mtime: float = 0.0,
+        source_uri: str = "",
     ) -> Tumbler:
+        # RDR-096 P3.1: validate / derive source_uri at the register
+        # boundary. Bare paths normalize to ``file://``; explicit URIs
+        # are validated for scheme; malformed URIs raise ValueError
+        # rather than silently persist (matches the RDR's risk
+        # mitigation strategy).
+        source_uri = _normalize_source_uri(source_uri, file_path)
         dir_fd = self._acquire_lock()
         try:
             # Idempotency: check by file_path if non-empty
@@ -651,18 +714,19 @@ class Catalog:
                 indexed_at=now,
                 meta=meta or {},
                 source_mtime=source_mtime,
+                source_uri=source_uri,
             )
             self._append_jsonl(self._documents_path, rec.__dict__)
             self._db.execute(
                 "INSERT INTO documents "
                 "(tumbler, title, author, year, content_type, file_path, "
                 "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
-                "metadata, source_mtime) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "metadata, source_mtime, source_uri) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     str(tumbler), title, author, year, content_type, file_path,
                     corpus, physical_collection, chunk_count, head_hash, now,
-                    json.dumps(meta or {}), source_mtime,
+                    json.dumps(meta or {}), source_mtime, source_uri,
                 ),
             )
             self._db.commit()
@@ -683,7 +747,7 @@ class Catalog:
         row = self._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
             "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
-            "metadata, source_mtime, alias_of "
+            "metadata, source_mtime, alias_of, source_uri "
             "FROM documents WHERE tumbler = ?",
             (str(target),),
         ).fetchone()
@@ -704,6 +768,7 @@ class Catalog:
             meta=json.loads(row[11]) if row[11] else {},
             source_mtime=row[12] or 0.0,
             alias_of=row[13] or "",
+            source_uri=row[14] or "",
         )
 
     def list_by_collection(
@@ -728,7 +793,7 @@ class Catalog:
         sql = (
             "SELECT tumbler, title, author, year, content_type, file_path, "
             "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
-            "metadata, source_mtime, alias_of "
+            "metadata, source_mtime, alias_of, source_uri "
             "FROM documents WHERE physical_collection = ? "
             "ORDER BY tumbler ASC"
         )
@@ -753,6 +818,7 @@ class Catalog:
                 meta=json.loads(row[11]) if row[11] else {},
                 source_mtime=row[12] or 0.0,
                 alias_of=row[13] or "",
+                source_uri=row[14] or "",
             )
             for row in rows
         ]
@@ -1109,6 +1175,11 @@ class Catalog:
                 "indexed_at": entry.indexed_at,
                 "meta": entry.meta,
                 "source_mtime": entry.source_mtime,
+                # RDR-096 P3.1: preserve source_uri across updates.
+                # Without this carry-over, every update() call would
+                # silently clobber source_uri with the column default,
+                # erasing the URI persisted at register time.
+                "source_uri": entry.source_uri,
             }
             # Merge meta dict rather than replace
             if "meta" in fields and isinstance(fields["meta"], dict):
@@ -1116,14 +1187,21 @@ class Catalog:
                 merged_meta.update(fields["meta"])
                 fields = dict(fields, meta=merged_meta)
             rec_dict.update(fields)
+            # If a caller passes ``source_uri=...`` through ``fields``,
+            # validate it through the same boundary as register —
+            # malformed URIs are hard errors, not silent persistence.
+            if "source_uri" in fields:
+                rec_dict["source_uri"] = _normalize_source_uri(
+                    rec_dict["source_uri"], rec_dict.get("file_path", ""),
+                )
             self._append_jsonl(self._documents_path, rec_dict)
             # Upsert SQLite
             self._db.execute(
                 "INSERT OR REPLACE INTO documents "
                 "(tumbler, title, author, year, content_type, file_path, "
                 "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
-                "metadata, source_mtime) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "metadata, source_mtime, source_uri) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     rec_dict["tumbler"], rec_dict["title"], rec_dict["author"],
                     rec_dict["year"], rec_dict["content_type"], rec_dict["file_path"],
@@ -1131,6 +1209,7 @@ class Catalog:
                     rec_dict["chunk_count"], rec_dict["head_hash"],
                     rec_dict["indexed_at"], json.dumps(rec_dict["meta"]),
                     rec_dict.get("source_mtime", 0.0),
+                    rec_dict.get("source_uri", ""),
                 ),
             )
             self._db.commit()
@@ -1152,15 +1231,17 @@ class Catalog:
             rows = self._db.execute(
                 "SELECT tumbler, title, author, year, content_type, file_path, "
                 "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
-                "metadata, source_mtime "
+                "metadata, source_mtime, source_uri "
                 "FROM documents WHERE physical_collection = ?",
                 (old,),
             ).fetchall()
             for row in rows:
-                # Preserve source_mtime across the rename — JSONL is the
-                # rebuild source of truth, so any column omitted here is
-                # reset to 0.0 when Catalog.rebuild() replays the log
-                # (review finding — Reviewer B/C1, nexus-1ccq follow-up).
+                # Preserve source_mtime + source_uri across the rename
+                # — JSONL is the rebuild source of truth, so any
+                # column omitted here is reset to its default when
+                # Catalog.rebuild() replays the log (review finding —
+                # Reviewer B/C1, nexus-1ccq follow-up; RDR-096 P3.1
+                # extended this to source_uri).
                 rec = {
                     "tumbler": row[0],
                     "title": row[1],
@@ -1175,6 +1256,7 @@ class Catalog:
                     "indexed_at": row[10] or "",
                     "meta": json.loads(row[11]) if row[11] else {},
                     "source_mtime": row[12] or 0.0,
+                    "source_uri": row[13] or "",
                 }
                 self._append_jsonl(self._documents_path, rec)
             self._db.execute(
@@ -1245,7 +1327,7 @@ class Catalog:
     def by_file_path(self, owner: Tumbler, file_path: str) -> CatalogEntry | None:
         row = self._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime "
+            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
             f"FROM documents WHERE {self._prefix_sql(str(owner))[0]} AND file_path = ?",
             (*self._prefix_sql(str(owner))[1], file_path),
         ).fetchone()
@@ -1265,12 +1347,13 @@ class Catalog:
             indexed_at=row[10],
             meta=json.loads(row[11]) if row[11] else {},
             source_mtime=row[12] or 0.0,
+            source_uri=row[13] or "",
         )
 
     def by_owner(self, owner: Tumbler) -> list[CatalogEntry]:
         rows = self._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime "
+            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
             f"FROM documents WHERE {self._prefix_sql(str(owner))[0]}",
             self._prefix_sql(str(owner))[1],
         ).fetchall()
@@ -1289,6 +1372,7 @@ class Catalog:
                 indexed_at=r[10],
                 meta=json.loads(r[11]) if r[11] else {},
                 source_mtime=r[12] or 0.0,
+                source_uri=r[13] or "",
             )
             for r in rows
         ]
@@ -1297,7 +1381,7 @@ class Catalog:
         """List all entries with the given content type (code, paper, rdr, knowledge)."""
         rows = self._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime "
+            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
             "FROM documents WHERE content_type = ?",
             (content_type,),
         ).fetchall()
@@ -1308,6 +1392,7 @@ class Catalog:
                 physical_collection=r[7], chunk_count=r[8], head_hash=r[9],
                 indexed_at=r[10], meta=json.loads(r[11]) if r[11] else {},
                 source_mtime=r[12] or 0.0,
+                source_uri=r[13] or "",
             )
             for r in rows
         ]
@@ -1316,7 +1401,7 @@ class Catalog:
         """List all entries with the given corpus tag."""
         rows = self._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime "
+            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
             "FROM documents WHERE corpus = ?",
             (corpus,),
         ).fetchall()
@@ -1327,6 +1412,7 @@ class Catalog:
                 physical_collection=r[7], chunk_count=r[8], head_hash=r[9],
                 indexed_at=r[10], meta=json.loads(r[11]) if r[11] else {},
                 source_mtime=r[12] or 0.0,
+                source_uri=r[13] or "",
             )
             for r in rows
         ]
@@ -1340,7 +1426,7 @@ class Catalog:
         """Return all catalog entries. limit=0 means unlimited."""
         sql = (
             "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime "
+            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
             "FROM documents"
         )
         if limit > 0:
@@ -1353,6 +1439,7 @@ class Catalog:
                 physical_collection=r[7], chunk_count=r[8], head_hash=r[9],
                 indexed_at=r[10], meta=json.loads(r[11]) if r[11] else {},
                 source_mtime=r[12] or 0.0,
+                source_uri=r[13] or "",
             )
             for r in rows
         ]
@@ -1361,7 +1448,7 @@ class Catalog:
         """Look up catalog entry by T3 doc_id stored in meta.doc_id."""
         row = self._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime "
+            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
             "FROM documents WHERE json_extract(metadata, '$.doc_id') = ?",
             (doc_id,),
         ).fetchone()
@@ -1381,6 +1468,7 @@ class Catalog:
             indexed_at=row[10],
             meta=json.loads(row[11]) if row[11] else {},
             source_mtime=row[12] or 0.0,
+            source_uri=row[13] or "",
         )
 
     # ── Links ──────────────────────────────────────────────────────────────

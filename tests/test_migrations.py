@@ -83,11 +83,15 @@ class TestMigrationDataclass:
         # hook_failures chain enum (4.14.2, RDR-089) +
         # document_aspects table (4.14.2, RDR-089 P1.1) +
         # aspect_extraction_queue (4.14.2, RDR-089 nexus-qeo8) +
-        # aspect_promotion_log table (4.14.2, RDR-089 Phase E) = 26.
+        # aspect_promotion_log table (4.14.2, RDR-089 Phase E) +
+        # document_aspects.source_uri column + backfill (4.16.0,
+        # RDR-096 P2.1) +
+        # drop pre-RDR-096 null-field aspect rows (4.16.0, RDR-096 P2.2)
+        # = 28.
         # Prefer the name-based checks in TestBackfillPlanDimensions
         # and TestAddPlanMatchTextColumn for future guards; this
         # count is a cheap sentinel only.
-        assert len(MIGRATIONS) == 26
+        assert len(MIGRATIONS) == 28
 
     def test_migrations_ordered_by_version(self) -> None:
         from nexus.db.migrations import MIGRATIONS, _parse_version

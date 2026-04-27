@@ -122,6 +122,8 @@ class TestSchema:
             "extracted_at": ("TEXT", 1),
             "model_version": ("TEXT", 1),
             "extractor_name": ("TEXT", 1),
+            # RDR-096 P2.1: nullable URI column.
+            "source_uri": ("TEXT", 0),
         }
         assert cols == expected
 

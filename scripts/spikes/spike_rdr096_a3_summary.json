@@ -1,0 +1,43 @@
+{
+  "total_rows": 240,
+  "category_counts": {
+    "all_null": 66,
+    "all_populated": 1,
+    "partial": 173
+  },
+  "discriminator_validation": {
+    "all_null_matches": 15,
+    "all_null_total": 66,
+    "partial_matches_discriminator_BAD": 0,
+    "partial_total": 173,
+    "all_populated_matches_discriminator_BAD": 0,
+    "all_populated_total": 1
+  },
+  "ambiguous_rate_pct": 0.0,
+  "verdict": "BORDERLINE",
+  "partial_subcategories": {
+    "problem_formulation+proposed_method+experimental_baselines+experimental_results": 47,
+    "problem_formulation": 46,
+    "problem_formulation+experimental_baselines": 6,
+    "problem_formulation+proposed_method+experimental_baselines": 29,
+    "problem_formulation+proposed_method": 26,
+    "problem_formulation+experimental_baselines+experimental_results": 2,
+    "problem_formulation+experimental_results": 2,
+    "problem_formulation+proposed_method+experimental_results": 15
+  },
+  "by_collection": {
+    "knowledge__hybridrag": {
+      "all_null": 3,
+      "all_populated": 1,
+      "partial": 0,
+      "discriminator_matches": 3
+    },
+    "rdr__nexus-571b8edd": {
+      "all_null": 63,
+      "all_populated": 0,
+      "partial": 173,
+      "discriminator_matches": 12
+    }
+  },
+  "ambiguous_rows": []
+}

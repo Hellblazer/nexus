@@ -48,7 +48,11 @@ CREATE TABLE IF NOT EXISTS documents (
     -- written by other systems) continue to resolve via alias_of —
     -- that is the stability promise tumblers were chosen for.
     -- '' (empty) means "this is the canonical document".
-    alias_of TEXT NOT NULL DEFAULT ''
+    alias_of TEXT NOT NULL DEFAULT '',
+    -- RDR-096 P2.1: persistent URI identity. ``''`` (empty) on
+    -- legacy rows; populated for new registers after P2.1 ships.
+    -- Backfill derives URIs from ``file_path + physical_collection``.
+    source_uri TEXT NOT NULL DEFAULT ''
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
@@ -145,6 +149,19 @@ class CatalogDB:
                     "ALTER TABLE documents ADD COLUMN alias_of TEXT NOT NULL DEFAULT ''"
                 )
 
+        # RDR-096 P2.1 (nexus-ocu9.3): add source_uri column to existing
+        # databases. ``''`` on pre-migration rows; new rows get
+        # populated at register time. Backfill happens lazily on
+        # rebuild from JSONL — DocumentRecord.source_uri carries the
+        # value through.
+        try:
+            self._conn.execute("SELECT source_uri FROM documents LIMIT 0")
+        except sqlite3.OperationalError:
+            with self._conn:
+                self._conn.execute(
+                    "ALTER TABLE documents ADD COLUMN source_uri TEXT NOT NULL DEFAULT ''"
+                )
+
     def rebuild(
         self,
         owners: dict[str, OwnerRecord],
@@ -170,8 +187,8 @@ class CatalogDB:
                     "INSERT INTO documents "
                     "(tumbler, title, author, year, content_type, file_path, "
                     "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
-                    "metadata, source_mtime, alias_of) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "metadata, source_mtime, alias_of, source_uri) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         tumbler,
                         d.title,
@@ -187,6 +204,7 @@ class CatalogDB:
                         json.dumps(d.meta),
                         d.source_mtime,
                         d.alias_of,
+                        d.source_uri,
                     ),
                 )
 

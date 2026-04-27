@@ -351,9 +351,10 @@ def enrich_aspects(
 
     if dry_run:
         click.echo("--dry-run: skipping extraction.")
+        _dry_run_predict_skips(entries, collection)
         return
 
-    extracted = _run_extraction(entries, collection)
+    extracted = _run_extraction(entries, collection, config)
     if not extracted:
         click.echo("No aspects extracted.")
         return
@@ -411,19 +412,100 @@ def _select_entries(
     return entries
 
 
-def _run_extraction(entries: list, collection: str) -> list[tuple[str, object]]:
+def _dry_run_predict_skips(entries: list, collection: str) -> None:
+    """RDR-096 P1.3: predict ExtractFail entries via the read-side
+    check, without invoking the Claude subprocess. One ``read_source``
+    call per entry — chunk reassembly is the same path
+    ``extract_aspects`` would take. T3 unavailable / any other failure
+    is caught and the prediction step is skipped gracefully so dry-run
+    still works in environments without chroma access.
+    """
+    from urllib.parse import quote
+
+    try:
+        from nexus.aspect_readers import ReadFail, read_source
+        from nexus.mcp_infra import get_t3
+        t3 = get_t3()
+    except Exception as exc:
+        click.echo(f"  (read-side prediction skipped: {exc})")
+        return
+
+    planned: dict[str, int] = {}
+    skip_lines: list[str] = []
+    for entry in entries:
+        sp = entry.file_path or entry.title
+        if not sp:
+            continue
+        uri = f"chroma://{collection}/{quote(sp, safe='/')}"
+        try:
+            result = read_source(uri, t3=t3)
+        except Exception as exc:
+            # Per-entry transient failure shouldn't abort the whole
+            # prediction loop. Bucket under a synthetic ``read_error``
+            # reason so the operator sees the count without losing
+            # visibility into the rest of the catalog.
+            planned["read_error"] = planned.get("read_error", 0) + 1
+            skip_lines.append(
+                f"    - {Path(sp).name}: read_error ({type(exc).__name__})"
+            )
+            continue
+        if isinstance(result, ReadFail):
+            planned[result.reason] = planned.get(result.reason, 0) + 1
+            skip_lines.append(f"    - {Path(sp).name}: {result.reason}")
+
+    skipped = sum(planned.values())
+    if skipped == 0:
+        click.echo("  All entries readable; full extraction would proceed.")
+        return
+    click.echo(
+        f"  Planned skips: {skipped} of {len(entries)} document(s) "
+        f"would skip on read failure:"
+    )
+    # Cap output so a 500-entry collection doesn't flood the terminal.
+    for line in skip_lines[:20]:
+        click.echo(line)
+    if len(skip_lines) > 20:
+        click.echo(f"    ... and {len(skip_lines) - 20} more")
+    reasons_str = ", ".join(f"{k}={v}" for k, v in sorted(planned.items()))
+    click.echo(f"  by_reason: {reasons_str}")
+    actual_cost = (len(entries) - skipped) * _PER_PAPER_COST_USD
+    click.echo(
+        f"  Predicted actual cost (excluding skips): ~${actual_cost:.2f}"
+    )
+
+
+def _run_extraction(
+    entries: list,
+    collection: str,
+    config,
+) -> list[tuple[str, object]]:
     """Drive extract_aspects per entry, upsert document_aspects, return
     the list of (source_path, AspectRecord) tuples for the successful
     extractions (used as input for --validate-sample).
+
+    ``config`` is the pre-validated :class:`ExtractorConfig` from the
+    caller — the parent ``enrich_aspects`` already aborted when
+    ``select_config`` returned None, so this function need not
+    re-derive.
+
+    RDR-096 P1.3 upsert-guard: ``extract_aspects`` may return
+    ``ExtractFail`` on read failure. Such entries are logged
+    (``aspect_extract_skip``) and skipped — no row is written. This
+    is the structural guarantee that closes issue #331's null-field
+    symptom even before Phase 2's schema migration ships.
     """
-    from nexus.aspect_extractor import extract_aspects
+    from nexus.aspect_extractor import ExtractFail, extract_aspects
     from nexus.commands._helpers import default_db_path
     from nexus.db.t2 import T2Database
+
+    extractor_name = config.extractor_name
 
     extracted: list[tuple[str, object]] = []
     success = 0
     null_fields = 0
     skipped = 0
+    skipped_unreadable = 0
+    by_reason: dict[str, int] = {}
 
     db_path = default_db_path()
     with T2Database(db_path) as db:
@@ -446,6 +528,27 @@ def _run_extraction(entries: list, collection: str) -> list[tuple[str, object]]:
                 click.echo(f"  [{i}/{len(entries)}] {Path(source_path).name}: no extractor — skipped")
                 continue
 
+            if isinstance(record, ExtractFail):
+                # Typed read failure — skip without upsert. The log line
+                # is the operator surface for triaging the underlying
+                # source-identity drift; #331's symptom is closed by this
+                # branch alone.
+                _log.warning(
+                    "aspect_extract_skip",
+                    uri=record.uri,
+                    reason=record.reason,
+                    detail=record.detail,
+                    collection=collection,
+                    extractor_name=extractor_name,
+                )
+                skipped_unreadable += 1
+                by_reason[record.reason] = by_reason.get(record.reason, 0) + 1
+                click.echo(
+                    f"  [{i}/{len(entries)}] {Path(source_path).name}: "
+                    f"skipped (reason={record.reason})"
+                )
+                continue
+
             db.document_aspects.upsert(record)
 
             if record.problem_formulation is None:
@@ -461,10 +564,15 @@ def _run_extraction(entries: list, collection: str) -> list[tuple[str, object]]:
                     f"  [{i}/{len(entries)}] {Path(source_path).name}: extracted"
                 )
 
-    click.echo(
+    summary = (
         f"Done: {success} extracted, {null_fields} null-fields, "
-        f"{skipped} skipped."
+        f"{skipped_unreadable} skipped (read-failure), "
+        f"{skipped} skipped (other)"
     )
+    if by_reason:
+        reasons_str = ", ".join(f"{k}={v}" for k, v in sorted(by_reason.items()))
+        summary += f". by_reason: {reasons_str}"
+    click.echo(summary)
     return extracted
 
 
@@ -592,14 +700,29 @@ async def _verify(claim_json: str, evidence: str) -> dict:
     default=0,
     help="Maximum rows to print (0 = unlimited).",
 )
-def enrich_aspects_list(collection: str, limit: int) -> None:
+@click.option(
+    "--scheme",
+    default="",
+    help=(
+        "Filter to rows whose source_uri scheme matches (RDR-096 "
+        "P3.2). Common values: 'file', 'chroma', 'https', "
+        "'nx-scratch'. Use '' (default) for no filter; rows with "
+        "empty / NULL source_uri are excluded when --scheme is set."
+    ),
+)
+def enrich_aspects_list(collection: str, limit: int, scheme: str) -> None:
     """List source paths with extracted aspects in COLLECTION.
 
     One row per source document, deterministic order
     (``source_path ASC``). For each row prints
-    ``<source_path>  <fields_populated>/5  <model_version>``
-    so an operator can spot null-fields rows quickly.
+    ``<scheme>:<source_path>  <fields_populated>/5  <model_version>``
+    so an operator can spot null-fields rows AND identify which URI
+    scheme each row will dispatch to. The ``--scheme`` flag pre-
+    filters to a single scheme (e.g., ``--scheme=chroma`` lists only
+    chunk-reassembly-backed rows).
     """
+    from urllib.parse import urlparse  # noqa: PLC0415
+
     from nexus.commands._helpers import default_db_path
     from nexus.db.t2 import T2Database
 
@@ -608,8 +731,15 @@ def enrich_aspects_list(collection: str, limit: int) -> None:
             collection, limit=limit if limit > 0 else None,
         )
 
+    if scheme:
+        records = [
+            r for r in records
+            if r.source_uri and urlparse(r.source_uri).scheme == scheme
+        ]
+
     if not records:
-        click.echo(f"No aspect rows for '{collection}'.")
+        suffix = f" with scheme={scheme!r}" if scheme else ""
+        click.echo(f"No aspect rows for '{collection}'{suffix}.")
         return
 
     for r in records:
@@ -620,10 +750,17 @@ def enrich_aspects_list(collection: str, limit: int) -> None:
             ) if v
         ) + (1 if r.experimental_datasets else 0) \
           + (1 if r.experimental_baselines else 0)
+        # Per-row scheme label so operators can see at a glance
+        # which reader will dispatch. ``-`` denotes a row with empty
+        # / NULL source_uri (legacy entry not yet backfilled).
+        row_scheme = (
+            urlparse(r.source_uri).scheme if r.source_uri else "-"
+        ) or "-"
         click.echo(
-            f"  {r.source_path}  {populated}/5  {r.model_version}"
+            f"  [{row_scheme:<10}] {r.source_path}  {populated}/5  {r.model_version}"
         )
-    click.echo(f"\n{len(records)} row(s) in '{collection}'.")
+    suffix = f" matching scheme={scheme!r}" if scheme else ""
+    click.echo(f"\n{len(records)} row(s) in '{collection}'{suffix}.")
 
 
 @enrich.command(name="info")
@@ -645,9 +782,20 @@ def enrich_aspects_info(collection: str, source_path: str) -> None:
         )
         return
 
+    from urllib.parse import urlparse  # noqa: PLC0415
+
+    scheme = (
+        urlparse(record.source_uri).scheme
+        if record.source_uri else ""
+    )
+
     click.echo(json.dumps({
         "collection": record.collection,
         "source_path": record.source_path,
+        # RDR-096 P3.2: surface URI + parsed scheme so operators
+        # can see which reader will dispatch for re-extraction.
+        "source_uri": record.source_uri,
+        "scheme": scheme,
         "problem_formulation": record.problem_formulation,
         "proposed_method": record.proposed_method,
         "experimental_datasets": record.experimental_datasets,

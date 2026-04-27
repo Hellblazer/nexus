@@ -1,0 +1,590 @@
+{
+  "stage_a_aspect_total": 240,
+  "stage_b_t3_total_sampled": 5334,
+  "round_trip_total": 5471,
+  "round_trip_ok": 5470,
+  "round_trip_fail": 1,
+  "round_trip_pct_ok": 99.98172180588558,
+  "verdict": "PASS",
+  "by_reason": {
+    "empty_source_path": 1
+  },
+  "by_collection": {
+    "knowledge__hybridrag": {
+      "ok": 4,
+      "fail": 0,
+      "n": 4
+    },
+    "rdr__nexus-571b8edd": {
+      "ok": 259,
+      "fail": 0,
+      "n": 259
+    },
+    "code__ART-8c2e74c0": {
+      "ok": 600,
+      "fail": 0,
+      "n": 600
+    },
+    "code__BFDB-af165fac": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "code__Delos-5af9bfe0": {
+      "ok": 600,
+      "fail": 0,
+      "n": 600
+    },
+    "code__Kramer-2c1f322c": {
+      "ok": 331,
+      "fail": 0,
+      "n": 331
+    },
+    "code__Luciferase-f2d57dbc": {
+      "ok": 600,
+      "fail": 0,
+      "n": 600
+    },
+    "code__arcaneum-2ad2825c": {
+      "ok": 138,
+      "fail": 0,
+      "n": 138
+    },
+    "code__claude-code-7dbc4de3": {
+      "ok": 600,
+      "fail": 0,
+      "n": 600
+    },
+    "code__int-crossmodel-ba3a85dc": {
+      "ok": 0,
+      "fail": 1,
+      "n": 1
+    },
+    "code__mempalace-50bee29c": {
+      "ok": 84,
+      "fail": 0,
+      "n": 84
+    },
+    "code__nexus-571b8edd": {
+      "ok": 436,
+      "fail": 0,
+      "n": 436
+    },
+    "code__scheme-evolution-research-b7de0b63": {
+      "ok": 10,
+      "fail": 0,
+      "n": 10
+    },
+    "code__workspace-c52ddf65": {
+      "ok": 106,
+      "fail": 0,
+      "n": 106
+    },
+    "docs__ART-8c2e74c0": {
+      "ok": 365,
+      "fail": 0,
+      "n": 365
+    },
+    "docs__BFDB-af165fac": {
+      "ok": 51,
+      "fail": 0,
+      "n": 51
+    },
+    "docs__Delos-5af9bfe0": {
+      "ok": 205,
+      "fail": 0,
+      "n": 205
+    },
+    "docs__Kramer-2c1f322c": {
+      "ok": 50,
+      "fail": 0,
+      "n": 50
+    },
+    "docs__LAlexe-LTan-LVelegrakis-2008-LSLTLBenchmark": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__LAtzeni-LCappellari-LBernstein-2005-LModelLGen": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__LAtzeni-LTorlone-1996-LManagement-LMultiple-LModels": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__LBonifati-LMecca-2008-LSchema-LMapping-LVerification": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__LBonifati-LMecca-2008-LSpicy-LSystem-LMapping-LQuality": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__LBowers-2004-LUni-LLevel-LDescription": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__LChen-2012-LSchema-LEvolution-LService-LContinuity": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__LChiticariu-LTan-2006-LDebugging-LSchema-LMappings": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__LDeutsch-LTannen-2001-LOptimization-LProperties": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__LDohzen-2006-LMorpheus-LData-LIntegration": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__LEckwert-LEvolveLDLB-LModel-LDriven-LSchema-LEvolution": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__LEnhancing-LCapabilities-LAttribute-LCorrespondences": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__LFagin-1982-LSimplified-LUniversal-LRelation": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__LFagin-2007-LInverting-LSchema-LMappings": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__LFagin-LKolaitis-LPopa-LTan-2008-LQuasi-inverses": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__LFagin-LKolaitis-LPopa-LTan-2009-LReverse-LData-LExchange": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__LGhemawat-2023-LModern-LCloud-LApplications": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__LGottlob-LNash-2005-LComputing-LCores-LData-LExchange": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__LGottlob-LNash-2008-LEfficient-LCore-LComputation": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__LJong-2017-LZero-LDowntime-LSLQLL": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__LKulkarni-2012-LTemporal-LFeatures-LSLQLL-2011": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__LLemos-2016-LWeb-LService-LComposition": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__LLu-LHolubova-2019-LMulti-model-LDatabases": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__LMarks-2012-LMetadata-LDriven-LSchema-LUpgrades": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__LMarnette-2009-LGeneralized-LSchema-LMappings": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__LMarnette-2011-LSpicy-LSecond-LGeneration": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__LMecca-LPapotti-LRaunich-2009-LConcise-LExpressive-LSpicy": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__LMecca-LPapotti-LRaunich-2009-LCore-LSchema-LMappings": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__LMelnik-LGarcia-LMolina-LRahm-2002-LSimilarity-LFlooding": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__LMeurice-2014-LDahlia-LVisual-LAnalyzer": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__LMeurice-2016-LDetecting-LProgram-LInconsistencies": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__LMiller-LHernandez-LHaas-2001-LClio-LProject": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__LQiu-LLi-2013-LSchema-LCode-LCo-evolution": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__LVelegrakis-LMiller-LPopa-2004-LMapping-LAdaptation": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__LVive-la-LDifference-LDiff-LTesting": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__LYu-LPopa-2005-LSemantic-LAdaptation-LSchema-LMappings": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__Luciferase-f2d57dbc": {
+      "ok": 175,
+      "fail": 0,
+      "n": 175
+    },
+    "docs__alkowaileet-2020-lsm": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__amia-2010-multidatabase-schemas": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__arcaneum-2ad2825c": {
+      "ok": 42,
+      "fail": 0,
+      "n": 42
+    },
+    "docs__arenas-2009-recovery": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__arenas-2010-composition": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__art-grossberg-papers": {
+      "ok": 80,
+      "fail": 0,
+      "n": 80
+    },
+    "docs__bakke-papers": {
+      "ok": 3,
+      "fail": 0,
+      "n": 3
+    },
+    "docs__banerjee-1987-schema-evo-oo": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__bernstein-2000-vision": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__bernstein-2007-model-mgmt": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__bonifati-2019-validation": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__bounif-2006-repository": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__cate-2009-laconic": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__chase-2000-popa": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__chase-2005-fagin-composing": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__chase-2005-fagin-data-exchange": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__chase-2005-haas-clio": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__chase-2006-deutsch-query": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__chase-2013-curino-automation": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__chillon-2024-nosql": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__christopher-2021-schemadb": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__claude-code-7dbc4de3": {
+      "ok": 29,
+      "fail": 0,
+      "n": 29
+    },
+    "docs__comprehensive-2024-catalogs": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__curino-2008-prism": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__curino-2009-prism-demo": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__default": {
+      "ok": 66,
+      "fail": 0,
+      "n": 66
+    },
+    "docs__delplanque-2018-casestudy": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__doan-2001-reconciling-ml": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__floratou-2011-mapreduce": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__fuxman-2006-nested": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__halevy-2001-views": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__hellerstein-2007-architecture": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__herrmann-2016-parallel": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__int-cce-873d3bb1": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__kramer-research": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__lenzerini-2002-data-integration": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__marnette-2010-exchange": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__mempalace-50bee29c": {
+      "ok": 46,
+      "fail": 0,
+      "n": 46
+    },
+    "docs__miller-2018-open-data": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__nexus": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__nexus-571b8edd": {
+      "ok": 143,
+      "fail": 0,
+      "n": 143
+    },
+    "docs__offer-letter": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__polyglot-2024-datastores": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__pottinger-2003-merging": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__rahm-2001-schema-matching": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__ramos-2025-dami": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__scheme-evolution-research": {
+      "ok": 2,
+      "fail": 0,
+      "n": 2
+    },
+    "docs__scheme-evolution-research-b7de0b63": {
+      "ok": 134,
+      "fail": 0,
+      "n": 134
+    },
+    "docs__senellart-2008-complexity": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__test-repo-5e81b1fb": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__unified-2021-metamodel": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__verbitski-2017-aurora": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__viotti-2022-json": {
+      "ok": 1,
+      "fail": 0,
+      "n": 1
+    },
+    "docs__workspace-c52ddf65": {
+      "ok": 3,
+      "fail": 0,
+      "n": 3
+    },
+    "rdr__ART-8c2e74c0": {
+      "ok": 114,
+      "fail": 0,
+      "n": 114
+    },
+    "rdr__BFDB-af165fac": {
+      "ok": 45,
+      "fail": 0,
+      "n": 45
+    },
+    "rdr__Delos-5af9bfe0": {
+      "ok": 4,
+      "fail": 0,
+      "n": 4
+    },
+    "rdr__Kramer-2c1f322c": {
+      "ok": 39,
+      "fail": 0,
+      "n": 39
+    },
+    "rdr__Luciferase-f2d57dbc": {
+      "ok": 4,
+      "fail": 0,
+      "n": 4
+    },
+    "rdr__arcaneum-2ad2825c": {
+      "ok": 21,
+      "fail": 0,
+      "n": 21
+    }
+  },
+  "sample_cap_per_collection": 600
+}

@@ -470,6 +470,19 @@ class T3Database:
             name, **kwargs,
         )
 
+    def get_collection(self, name: str) -> chromadb.Collection:
+        """Read-only collection access. Raises on missing collection
+        (CloudClient surface; EphemeralClient + PersistentClient also
+        raise). Used by read paths that should NOT auto-create
+        collections — most importantly the ``chroma://`` reader in
+        :mod:`nexus.aspect_readers`, where a missing collection is a
+        signal to surface ``ReadFail(reason='unreachable')`` rather
+        than create an empty side-effect collection.
+        """
+        return _chroma_with_retry(
+            self._client_for(name).get_collection, name,
+        )
+
     def get_embeddings(self, collection_name: str, ids: list[str]) -> "np.ndarray":
         """Fetch embeddings for specific document IDs.
 

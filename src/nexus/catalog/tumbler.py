@@ -167,6 +167,10 @@ class DocumentRecord:
     # so external references continue to resolve. Resolution is transitive
     # with cycle protection — see Catalog.resolve_alias().
     alias_of: str = ""
+    # RDR-096 P2.1: persistent URI identity. '' on pre-migration rows;
+    # populated at register time for new entries. Phase 3.1 (P3.1)
+    # will derive URIs at the catalog register boundary.
+    source_uri: str = ""
     _deleted: bool = False
 
 

@@ -1,13 +1,38 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""Synchronous structured-aspect extractor (RDR-089 Phase 1.2).
+"""Synchronous structured-aspect extractor (RDR-089 Phase 1.2,
+RDR-096 P1.2 + P2.2).
 
 Single public entrypoint: ``extract_aspects(content, source_path,
-collection) -> AspectRecord | None``. The function is synchronous top
-to bottom — no ``async def``, no ``await``, no event loop. The
-RDR-089 load-bearing contract requires this so the document-grain
-hook chain (``fire_post_document_hooks``) can call it from a sync
-dispatcher without dropping a coroutine.
+collection) -> AspectRecord | ExtractFail | None``. The function is
+synchronous top to bottom — no ``async def``, no ``await``, no
+event loop. The RDR-089 load-bearing contract requires this so the
+document-grain hook chain (``fire_post_document_hooks``) can call it
+from a sync dispatcher without dropping a coroutine.
+
+**Going-forward writer contract** (RDR-096 P2.2 binds this; gate-
+binding for the null-row DELETE migration):
+
+* ``ExtractFail`` paths emit NO row at all. Read failures surface
+  through the typed sentinel; the upsert-guard in
+  ``commands/enrich.py`` skips on any ``ExtractFail``. This is the
+  structural guarantee that pre-RDR-096 null-field rows are
+  unreachable from new writes.
+* Subprocess success paths (``_build_record``) populate at least
+  one aspect field OR set ``confidence`` to a non-NULL value. The
+  current Sonnet/Haiku extractors return real confidences; the
+  ``rdr-frontmatter-v1`` parser sets ``confidence=1.0`` even when
+  the document has no scholarly structure (the "structured-zero"
+  case — empty fields, deterministic).
+* Subprocess hard-failure paths (``_empty_record``) — schema
+  validation failure, retry-exhausted — emit a null-fields row
+  with ``confidence=None``. **NOTE**: this is the one path that
+  produces ``(all-empty fields, extras='{}', confidence IS NULL)``
+  going forward, distinguishable from RDR-096-pre read failures
+  only by ``extracted_at`` timestamp. The P2.2 DELETE migration
+  ran once at 4.16.0 ship time; subsequent retry-exhausted rows
+  are the operator's signal that a real triage event happened
+  (not a pre-RDR-096 ghost).
 
 Phase 1 ships exactly one extractor config — ``scholarly-paper-v1``,
 keyed on the ``knowledge__*`` collection prefix. Other prefixes
@@ -52,17 +77,56 @@ import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import quote
 
 import structlog
 
+from nexus.aspect_readers import ReadFail, ReadOk, read_source, uri_for
 from nexus.db.t2.document_aspects import AspectRecord
+from nexus.mcp_infra import get_t3
 
 # Re-exported for ergonomic ``from nexus.aspect_extractor import
 # AspectRecord``. Phase 2 hook authors land here first; the
 # canonical definition stays with the store.
-__all__ = ["AspectRecord", "ExtractorConfig", "extract_aspects", "select_config"]
+__all__ = [
+    "AspectRecord",
+    "ExtractFail",
+    "ExtractorConfig",
+    "extract_aspects",
+    "select_config",
+]
 
 _log = structlog.get_logger(__name__)
+
+
+# ── Read-failure sentinel (RDR-096 P1.2) ─────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class ExtractFail:
+    """Typed failure sentinel returned by ``extract_aspects`` when a
+    source could not be read.
+
+    The upsert-guard in ``commands/enrich.py`` (P1.3) skips on any
+    ``ExtractFail`` — no row is written to ``document_aspects``. That
+    is the structural guarantee replacing the prior null-field-row
+    contract that polluted operator SQL fast paths.
+
+    Reason space (string-typed for forward-compat with future readers):
+
+    * ``unreachable`` / ``unauthorized`` / ``scheme_unknown`` /
+      ``empty`` — passed through from
+      :class:`nexus.aspect_readers.ReadFailReason`.
+    * ``infra_unavailable`` — T3 client could not be obtained
+      (singleton init failure). The URI was constructed but never
+      dispatched. Distinct from ``unreachable`` so operators can
+      separate "bad URI" from "no client".
+
+    ``detail`` is operator-readable.
+    """
+    uri: str
+    reason: str
+    detail: str
 
 
 # ── Extractor config ─────────────────────────────────────────────────────────
@@ -630,6 +694,16 @@ def _source_content_from_t3(collection: str, source_path: str) -> str:
     """Reassemble the source document's text from T3 chunks, preferring
     section-scoped chunks for scholarly papers.
 
+    .. deprecated:: RDR-096 P1.2 (2026-04-27)
+
+       ``extract_aspects`` no longer calls this function — it routes
+       through :func:`nexus.aspect_readers.read_source` with a
+       ``chroma://<collection>/<source_path>`` URI instead. The
+       function is retained as a deprecation shim for the worker's
+       batch-path pre-fetch (``aspect_worker._process_batch``) until
+       the worker migrates to ``read_source`` in a follow-up bead;
+       slated for removal in Phase 5 of RDR-096.
+
     Returns an empty string on any failure (catalog lookup miss, T3
     error, no chunks). Callers must treat the empty return as a signal
     to fall back to disk read.
@@ -648,6 +722,14 @@ def _source_content_from_t3(collection: str, source_path: str) -> str:
     ``""`` and the caller falls back to the disk read. We don't want
     the aspect extractor to crash because T3 is briefly unavailable.
     """
+    import warnings  # noqa: PLC0415
+    warnings.warn(
+        "nexus.aspect_extractor._source_content_from_t3 is deprecated; "
+        "callers should migrate to nexus.aspect_readers.read_source with "
+        "a chroma:// URI. Slated for removal in RDR-096 Phase 5.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     try:
         from nexus.db.t3 import T3Database  # noqa: PLC0415
 
@@ -733,52 +815,80 @@ def extract_aspects(
     content: str,
     source_path: str,
     collection: str,
-) -> AspectRecord | None:
-    """Synchronously extract aspects from ``content`` and return a
-    populated ``AspectRecord``, or ``None`` when ``collection`` has no
-    registered extractor.
+) -> AspectRecord | ExtractFail | None:
+    """Synchronously extract aspects from ``content`` and return either
+    a populated ``AspectRecord``, an :class:`ExtractFail` sentinel
+    when the source could not be read, or ``None`` when ``collection``
+    has no registered extractor.
 
-    Content-sourcing contract (revised for RDR-089 follow-up — the prior
-    disk-first contract was discarded after PR #N catalog file_path
-    basename + ARG_MAX issues surfaced):
+    Content-sourcing contract (RDR-096 P1.2 — replaces the prior
+    T3-then-disk fallback):
 
     * ``content`` non-empty → used directly.
-    * ``content == ""`` → fetch chunks from T3 by ``source_path`` and
-      filter to scholarly sections (abstract / introduction / methods /
-      results / discussion / conclusion). T3 holds the same text we
-      indexed; sourcing from T3 instead of the original PDF removes the
-      catalog-file_path dependency, the cwd-resolution dependency, and
-      caps prompt size by section selection.
-    * T3 lookup miss (no chunks for this source_path) → fall back to
-      reading ``source_path`` from disk for resilience.
-    * Disk read failure → null-fields record returned without invoking
-      the extractor subprocess.
+    * ``content == ""`` → construct
+      ``chroma://<collection>/<source_path>`` and dispatch through
+      :func:`nexus.aspect_readers.read_source`. The chroma reader
+      reassembles the document from T3 chunks via the
+      ``CHROMA_IDENTITY_FIELD`` dispatch table (``title`` for
+      ``knowledge__*`` collections, ``source_path`` for everything
+      else).
+    * Read failure → return ``ExtractFail(uri, reason, detail)`` with
+      no row written. Replaces the prior null-field-row contract that
+      let drift cases (catalog-stale paths, slug-shaped sources)
+      pollute downstream SQL.
 
-    On unsupported collection (no config match) returns ``None``;
-    the caller (post-store hook) should no-op.
+    On unsupported collection (no config match) returns ``None``; the
+    caller (post-store hook) should no-op.
 
-    On extractor failure (any failure path past content sourcing),
-    returns an ``AspectRecord`` with aspect fields null and
-    ``confidence=None``; the row remains queryable for triage.
+    On extractor failure past content sourcing (subprocess timeout,
+    schema validation, retry-exhausted), returns an ``AspectRecord``
+    with aspect fields null and ``confidence=None``; the row remains
+    queryable for triage. That subprocess-failure path is intentionally
+    out of scope for the P1.2 read-side fix.
     """
     config = select_config(collection)
     if config is None:
         return None
 
     if not content:
-        content = _source_content_from_t3(collection, source_path)
-    if not content:
+        # P1.2: URI-based source dispatch. The URI is constructed from
+        # ``(collection, source_path)`` at extract-time; Phase 2 will
+        # route through a stored ``source_uri`` column on
+        # ``document_aspects``. The ``chroma://`` reader handles both
+        # identity-field shapes (knowledge__* → ``title``,
+        # rdr__/docs__/code__ → ``source_path``) via the dispatch
+        # table in :mod:`nexus.aspect_readers`.
+        #
+        # ``source_path`` is percent-encoded so values containing
+        # ``#`` (markdown anchors) or ``?`` (query params) don't get
+        # split off as URI fragments / queries by ``urlparse`` in the
+        # reader. ``safe='/'`` preserves directory separators in
+        # filesystem-shaped paths (``docs/rdr/rdr-090.md``).
+        uri = f"chroma://{collection}/{quote(source_path, safe='/')}"
         try:
-            content = Path(source_path).read_text(
-                encoding="utf-8", errors="replace",
-            )
-        except (OSError, UnicodeDecodeError) as exc:
+            t3 = get_t3()
+        except Exception as exc:
             _log.warning(
-                "aspect_extractor_source_path_unreadable",
-                source_path=source_path,
+                "aspect_extractor_t3_unavailable",
+                uri=uri,
                 error=str(exc),
             )
-            return _empty_record(source_path, collection, config)
+            return ExtractFail(
+                uri=uri,
+                reason="infra_unavailable",
+                detail=f"get_t3 failed: {type(exc).__name__}: {exc}",
+            )
+        result = read_source(uri, t3=t3)
+        if isinstance(result, ReadFail):
+            _log.warning(
+                "aspect_extractor_source_unreadable",
+                uri=uri,
+                reason=result.reason,
+                detail=result.detail,
+            )
+            return ExtractFail(uri=uri, reason=result.reason, detail=result.detail)
+        assert isinstance(result, ReadOk)
+        content = result.text
 
     # Defense against embedded null bytes (P1.3 spike finding 2026-04-25):
     # some PDF extractors emit \x00 in their text output. Strip them
@@ -1325,6 +1435,7 @@ def _build_record(
         extracted_at=datetime.now(UTC).isoformat(),
         model_version=config.model_version,
         extractor_name=config.extractor_name,
+        source_uri=uri_for(collection, source_path),
     )
 
 
@@ -1336,6 +1447,18 @@ def _empty_record(
     """Build an ``AspectRecord`` with all aspect fields null/empty,
     preserving identity (collection, source_path) + extractor
     metadata (extracted_at, extractor_name, model_version) for triage.
+
+    **RDR-096 P2.2 limitation (intentional)**: this row's shape is
+    structurally identical to a pre-RDR-096 read-failure ghost row
+    (all-empty aspect fields, ``extras='{}'``, ``confidence IS NULL``).
+    The P2.2 DELETE migration ran once at 4.16.0 ship time; subsequent
+    rows in this shape are real subprocess-side failures (timeout,
+    schema validation, retry-exhausted) emitted by THIS function and
+    are distinguishable from pre-RDR-096 ghosts only by the
+    ``extracted_at`` timestamp (post-4.16.0 shipdate). Operators
+    triaging null-field rows after 4.16.0 should treat them as
+    triage-worthy events, not as legacy noise. See module docstring
+    for the full going-forward writer contract.
     """
     return AspectRecord(
         collection=collection,
@@ -1350,7 +1473,10 @@ def _empty_record(
         extracted_at=datetime.now(UTC).isoformat(),
         model_version=config.model_version,
         extractor_name=config.extractor_name,
+        source_uri=uri_for(collection, source_path),
     )
+
+
 
 
 def _str_or_none(value) -> str | None:

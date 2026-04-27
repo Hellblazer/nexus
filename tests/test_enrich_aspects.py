@@ -42,8 +42,10 @@ def _make_record(
     proposed_method: str | None = "M",
     model_version: str = "claude-haiku-4-5-20251001",
 ) -> AspectRecord:
+    from nexus.aspect_readers import uri_for
+    collection = "knowledge__delos"
     return AspectRecord(
-        collection="knowledge__delos",
+        collection=collection,
         source_path=source_path,
         problem_formulation=problem_formulation,
         proposed_method=proposed_method,
@@ -55,6 +57,9 @@ def _make_record(
         extracted_at=datetime.now(UTC).isoformat(),
         model_version=model_version,
         extractor_name="scholarly-paper-v1",
+        # Mirror the going-forward writer contract: extract_aspects'
+        # _build_record / _empty_record populate source_uri via uri_for.
+        source_uri=uri_for(collection, source_path),
     )
 
 
@@ -110,11 +115,22 @@ class TestRouting:
 
 
 class TestDryRun:
-    def test_dry_run_reports_count_and_cost_no_subprocess(self, env) -> None:
+    def test_dry_run_reports_count_and_cost_no_subprocess(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """--dry-run prints document count + cost estimate and NEVER
-        calls subprocess.run (the bead's load-bearing constraint)."""
+        calls subprocess.run (the bead's load-bearing constraint).
+        The prediction loop's T3 fetch is force-failed so the test
+        exercises only the count/cost output path.
+        """
         _, _, cat = env
         _register_entries(cat, [f"/papers/p{i}.pdf" for i in range(5)])
+
+        # Block prediction loop's T3 fetch — keeps the test deterministic
+        # in environments without chroma access.
+        def _no_t3():
+            raise RuntimeError("test: no t3")
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", _no_t3)
 
         with patch("subprocess.run", side_effect=AssertionError("must not call subprocess")):
             runner = CliRunner()
@@ -127,6 +143,89 @@ class TestDryRun:
         assert "knowledge__delos" in result.output
         assert "$0.05" in result.output  # 5 × $0.01
         assert "--dry-run: skipping extraction" in result.output
+        # Prediction step gracefully skipped when T3 is unavailable.
+        assert "read-side prediction skipped" in result.output
+
+    def test_dry_run_all_readable_proceeds(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When the read-side check finds every entry readable, the
+        dry-run reports 'All entries readable' without listing
+        individual entries or recomputing cost.
+        """
+        from nexus.aspect_readers import ReadOk
+
+        _, _, cat = env
+        _register_entries(cat, [f"/papers/p{i}.pdf" for i in range(3)])
+
+        class _FakeT3:
+            pass
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", lambda: _FakeT3())
+        monkeypatch.setattr(
+            "nexus.aspect_readers.read_source",
+            lambda uri, t3=None, **_kw: ReadOk(text="ok", metadata={}),
+        )
+
+        with patch("subprocess.run", side_effect=AssertionError("must not call subprocess")):
+            runner = CliRunner()
+            result = runner.invoke(
+                enrich, ["aspects", "knowledge__delos", "--dry-run"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "All entries readable" in result.output
+        # Skip listing should not appear when nothing is skipped.
+        assert "Planned skips" not in result.output
+        assert "by_reason" not in result.output
+
+    def test_dry_run_predicts_skips_via_read_source(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """--dry-run runs the read-side check per entry (no Claude
+        subprocess) to enumerate ExtractFail entries that would be
+        skipped, with by_reason summary. Closes the planning gap that
+        let operators run a $5 extraction only to discover most entries
+        would skip.
+        """
+        from nexus.aspect_readers import ReadFail, ReadOk
+
+        _, _, cat = env
+        _register_entries(cat, [
+            "/papers/good1.pdf",
+            "/papers/good2.pdf",
+            "/papers/ghost1.pdf",
+            "/papers/ghost2.pdf",
+            "/papers/ghost3.pdf",
+        ])
+
+        # Force prediction path to succeed — return ReadOk for paths
+        # containing 'good', ReadFail otherwise.
+        class _FakeT3:
+            pass
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", lambda: _FakeT3())
+
+        def fake_read(uri, t3=None, **_kw):
+            if "good" in uri:
+                return ReadOk(text="content", metadata={})
+            if "ghost1" in uri:
+                return ReadFail(reason="empty", detail="no chunks")
+            return ReadFail(reason="unreachable", detail="get_collection failed")
+
+        monkeypatch.setattr("nexus.aspect_readers.read_source", fake_read)
+
+        with patch("subprocess.run", side_effect=AssertionError("must not call subprocess")):
+            runner = CliRunner()
+            result = runner.invoke(
+                enrich, ["aspects", "knowledge__delos", "--dry-run"],
+            )
+
+        assert result.exit_code == 0, result.output
+        # Three entries would skip (1 empty, 2 unreachable).
+        assert "Planned skips: 3 of 5" in result.output
+        assert "empty=1" in result.output
+        assert "unreachable=2" in result.output
+        # Predicted cost reflects the 2 readable entries.
+        assert "$0.02" in result.output
 
 
 # ── default extraction path (no validate, no re-extract) ────────────────────
@@ -166,6 +265,63 @@ class TestDefaultExtraction:
                 "SELECT COUNT(*) FROM document_aspects"
             ).fetchone()[0]
         assert count == 2
+
+    def test_extract_fail_skips_without_upsert(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """RDR-096 P1.3 (closes #331's symptom): when ``extract_aspects``
+        returns ``ExtractFail``, the loop logs + skips with NO row
+        written. Per-collection summary reports the skip count and
+        the by_reason breakdown.
+        """
+        from nexus.aspect_extractor import ExtractFail
+        _, db_path, cat = env
+        _register_entries(cat, [
+            "/papers/good.pdf",
+            "/papers/ghost-stale.pdf",
+            "/papers/ghost-empty.pdf",
+        ])
+
+        def fake_extract(content, source_path, collection):
+            if "good" in source_path:
+                return _make_record(source_path=source_path)
+            if "ghost-stale" in source_path:
+                return ExtractFail(
+                    uri=f"chroma://{collection}/{source_path}",
+                    reason="empty",
+                    detail="no chunks for ghost-stale",
+                )
+            return ExtractFail(
+                uri=f"chroma://{collection}/{source_path}",
+                reason="unreachable",
+                detail="get_collection failed",
+            )
+
+        monkeypatch.setattr(
+            "nexus.aspect_extractor.extract_aspects", fake_extract,
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            enrich,
+            ["aspects", "knowledge__delos", "--validate-sample", "0"],
+        )
+        assert result.exit_code == 0, result.output
+
+        # Exactly one row in document_aspects (the good entry) — no
+        # null-field rows from the two ExtractFail entries.
+        from nexus.db.t2 import T2Database
+        with T2Database(db_path) as db:
+            count = db.document_aspects.conn.execute(
+                "SELECT COUNT(*) FROM document_aspects",
+            ).fetchone()[0]
+        assert count == 1
+
+        # Summary surfaces both extracted and skip counts with reasons.
+        assert "1 extracted" in result.output
+        assert "2 skipped (read-failure)" in result.output
+        assert "empty=1" in result.output
+        assert "unreachable=1" in result.output
 
     def test_null_fields_record_counted_separately(
         self, env, monkeypatch: pytest.MonkeyPatch,
@@ -488,6 +644,119 @@ class TestDay2Ops:
         assert parsed["experimental_datasets"] == ["d1"]
         assert parsed["extras"] == {"venue": "V"}
         assert parsed["extractor_name"] == "scholarly-paper-v1"
+
+    def test_list_renders_scheme_column(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """RDR-096 P3.2: ``nx enrich list`` shows the URI scheme as
+        a ``[<scheme>]`` prefix on each row so operators can see at
+        a glance which reader will dispatch.
+        """
+        from nexus.aspect_readers import uri_for
+        from nexus.db.t2 import T2Database
+        from nexus.db.t2.document_aspects import AspectRecord
+
+        _, db_path, _ = env
+        with T2Database(db_path) as db:
+            # knowledge__delos with chroma:// URI (paper-shape).
+            db.document_aspects.upsert(_make_record(
+                source_path="/papers/aleph.pdf",
+            ))
+            # Legacy row with NULL source_uri (mimic backfill skip).
+            from datetime import UTC, datetime
+            db.document_aspects.upsert(AspectRecord(
+                collection="knowledge__delos",
+                source_path="/legacy.pdf",
+                problem_formulation="P", proposed_method="M",
+                experimental_datasets=["d1"], experimental_baselines=["b1"],
+                experimental_results="R", extras={"venue": "V"},
+                confidence=0.9,
+                extracted_at=datetime.now(UTC).isoformat(),
+                model_version="claude-haiku-4-5-20251001",
+                extractor_name="scholarly-paper-v1",
+                source_uri=None,  # legacy / unbackfilled
+            ))
+
+        runner = CliRunner()
+        result = runner.invoke(enrich, ["list", "knowledge__delos"])
+        assert result.exit_code == 0, result.output
+        # paper.pdf row carries chroma scheme; legacy row carries '-'.
+        assert "[chroma" in result.output
+        assert "[-" in result.output
+        # Sanity: the URI scheme matches what uri_for produces.
+        assert uri_for("knowledge__delos", "/papers/aleph.pdf").startswith("chroma://")
+
+    def test_list_filter_by_scheme(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """RDR-096 P3.2: ``--scheme=chroma`` filters to only chroma
+        URI rows. file:// + legacy entries are excluded.
+        """
+        from datetime import UTC, datetime
+        from nexus.db.t2 import T2Database
+        from nexus.db.t2.document_aspects import AspectRecord
+
+        _, db_path, _ = env
+        with T2Database(db_path) as db:
+            # chroma row (knowledge collection).
+            db.document_aspects.upsert(_make_record(
+                source_path="/papers/aleph.pdf",
+            ))
+            # file:// row (rdr collection — but use _make_record pattern).
+            db.document_aspects.upsert(AspectRecord(
+                collection="knowledge__delos",
+                source_path="/local.md",
+                problem_formulation="P", proposed_method="M",
+                experimental_datasets=["d1"], experimental_baselines=["b1"],
+                experimental_results="R", extras={"venue": "V"},
+                confidence=0.9,
+                extracted_at=datetime.now(UTC).isoformat(),
+                model_version="claude-haiku-4-5-20251001",
+                extractor_name="scholarly-paper-v1",
+                source_uri="file:///local.md",
+            ))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            enrich, ["list", "knowledge__delos", "--scheme", "chroma"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "/papers/aleph.pdf" in result.output
+        assert "/local.md" not in result.output
+        assert "matching scheme='chroma'" in result.output
+
+        # Filter by file:// — opposite slice.
+        result2 = runner.invoke(
+            enrich, ["list", "knowledge__delos", "--scheme", "file"],
+        )
+        assert result2.exit_code == 0
+        assert "/local.md" in result2.output
+        assert "/papers/aleph.pdf" not in result2.output
+
+    def test_info_includes_source_uri_and_scheme(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """RDR-096 P3.2: ``nx enrich info`` JSON output includes
+        ``source_uri`` and ``scheme`` so operators can see which
+        reader will dispatch.
+        """
+        import json
+        from nexus.db.t2 import T2Database
+
+        _, db_path, _ = env
+        with T2Database(db_path) as db:
+            db.document_aspects.upsert(_make_record(
+                source_path="/papers/aleph.pdf",
+            ))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            enrich, ["info", "knowledge__delos", "/papers/aleph.pdf"],
+        )
+        assert result.exit_code == 0, result.output
+        parsed = json.loads(result.output)
+        assert parsed["source_uri"].startswith("chroma://knowledge__delos/")
+        assert parsed["scheme"] == "chroma"
 
     def test_info_missing_row_prints_notice(self, env) -> None:
         runner = CliRunner()
