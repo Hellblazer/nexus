@@ -75,7 +75,7 @@ The chunks are present in chroma in both cases. RDR-086's `chash` (chunk content
 
 | Dependency | Source Searched? | Key Findings |
 | --- | --- | --- |
-| `chromadb.Collection.get(where=...)` | Yes (`src/nexus/db/t3.py`) | Stable API; `where={"source_path": value}` returns chunks for a document. Pagination cap is 300 (`chroma_quotas.MAX_QUERY_RESULTS`); knowledge documents are well under this per-doc. |
+| `chromadb.Collection.get(where=...)` | Yes (`src/nexus/db/t3.py`) | Stable API. **Identity-field convention is collection-shape-dependent** (research-4): `rdr__/docs__/code__` use `where={"source_path": value}`; `knowledge__*` chunks have NO `source_path` field and use `where={"title": value}` instead. Pagination cap 300 (`chroma_quotas.MAX_QUERY_RESULTS`). |
 | Confluence URI shape | External | `https://<tenant>.atlassian.net/wiki/spaces/<space>/pages/<id>/<slug>` — already known to the ingest tooling that fetched the content. |
 | `urllib.parse` URI scheme dispatch | stdlib | Stable since Python 2; `urlparse(uri).scheme` is canonical. |
 | Existing `chash:` URL scheme | Yes (`src/nexus/doc/citations.py`) | RDR-086 already has chash-shaped citations in the codebase; URI dispatch is symmetric to it. |
@@ -84,15 +84,16 @@ The chunks are present in chroma in both cases. RDR-086's `chash` (chunk content
 
 - **Verified** (research-1003): chunks for the 12 catalog-stale RDRs are still present in `rdr__nexus-571b8edd` (the basename-prefix grep shows current versions indexed under new names). The stale-path failures are about identity, not data loss.
 - **Verified** (issue #333 reproducer): `knowledge__knowledge` documents are reassembled correctly by `nx_answer` and `query` (rich content returned) — the data is there; only the read path is broken.
+- **Verified — root cause deeper than #333 reports** (research-4): the existing `_source_content_from_t3` in `src/nexus/aspect_extractor.py:629–726` ALREADY attempts chroma reassembly (RDR-089's content-sourcing contract). It fails on `knowledge__*` because it queries `where={"source_path": slug}` — but `knowledge__*` chunks carry document identity in metadata field `title`, not `source_path`. Two collection-shape conventions live in T3 today: `nx index` ingests populate `source_path`, `store_put` MCP / `nx memory promote` ingests populate `title`. The chroma reader needs collection-prefix → identity-field dispatch (or a Phase 0 backfill normalizes everything to `source_path`).
 - **Verified** (RDR-089 close-mortem): scholarly-paper-v1's prompt already absorbs chunking-overlap artifacts on multi-page papers; chunk-reassembled text from chroma is in the same shape category.
 - **Assumed**: scheme-dispatched read latency does not regress the dominant `file://` path (the existing case). Verify via spike: 100-doc filesystem-backed extraction wall-clock before/after URI dispatch.
 - **Assumed**: a single `source_uri` column with scheme prefix is sufficient — no per-scheme metadata column needed (Confluence page IDs, S3 bucket names, etc. fit inside the URI string). Verify by drafting URIs for all six origin shapes from the table below before committing the schema.
 
 ### Critical Assumptions
 
-- [ ] Chroma chunk reassembly produces extractable text for `scholarly-paper-v1` on `knowledge__*` collections — **Status**: Unverified — **Method**: Spike on 5 documents from `knowledge__knowledge`, run `extract_aspects` on the reassembled text, compare extracted aspects against operator-verify on the original chunks.
-- [ ] Backfill of `source_uri` from existing `source_path` is unambiguous for filesystem-backed collections (1:1 mapping `file://" + os.path.abspath(source_path)`) — **Status**: Unverified — **Method**: Spike across all current `rdr__*` and `docs__*` collections; report any `source_path` that doesn't round-trip cleanly to a `file://` URI and back.
-- [ ] No-null-row contract does not regress aspect coverage for partial-extraction successes (e.g., extractor returns problem_formulation but not proposed_method) — **Status**: Unverified — **Method**: Audit RDR-089's existing extractor outcomes for the partial-success case; current behavior may already write rows with mixed null/non-null fields by design. The null-row footgun is read-failure-only, not partial-extraction.
+- [x] Chroma chunk reassembly produces extractable text for `scholarly-paper-v1` on `knowledge__*` collections — **Status**: VERIFIED PASS (research-4, id 1011) — 5/5 documents produced signal (problem_formulation OR proposed_method populated); mean operator_verify agreement 1.00 across 17 claims. **Caveat — Phase 2 prerequisite**: all 5 spike documents were single-chunk; multi-chunk reassembly + chunk_index sort + concatenation path was not exercised. Re-test on `knowledge__art` / `knowledge__delos` (paper-shaped multi-chunk collections) before Phase 2 ships. **Substantive root-cause finding**: existing `_source_content_from_t3` queries the wrong identity field for `knowledge__*` (queries `source_path`, but `knowledge__*` chunks identify documents by `title`). Phase 1 reader implementation must include collection-prefix → identity-field dispatch (see Phase 1 design below).
+- [x] Backfill of `source_uri` from existing `source_path` is unambiguous for filesystem-backed collections (1:1 mapping `"file://" + os.path.abspath(source_path)`) — **Status**: VERIFIED PASS (research-2, id 1009) — 99.98% round-trip across 5471 unique source_paths (5470 OK, 1 fail). The lone failure is one chunk in `code__int-crossmodel-ba3a85dc` with empty `source_path` — pre-existing data corruption, mitigation documented (skip empty source_paths during backfill; surface count via `nx doctor`; one row triaged manually).
+- [x] No-null-row contract does not regress aspect coverage for partial-extraction successes — **Status**: VERIFIED PASS (research-3, id 1010) — discriminator `confidence IS NULL AND extras='{}' AND all-fields-empty` matched 0 of 173 partial rows (0.00% ambiguous; pre-reg threshold ≤5%). **Substantive design refinement**: empirical data revealed a third category beyond the binary read-failure-vs-partial framing — 51 `rdr-frontmatter-v1` "structured-zero" successes (extractor reads source, document has no scholarly structure, `confidence=1.0`, all aspect fields empty). The Phase 2 null-row DELETE SQL must include an `AND confidence IS NULL` clause to retain these (see Phase 2 below). The script's auto-verdict reported "BORDERLINE" because of an over-strict implementation check (matching ALL 66 all_null rows) the pre-registration did not require; per the actual pre-reg spec (distinguish read-failure-nulls from partial-successes) the verdict is PASS.
 
 ## Proposed Solution
 
@@ -160,14 +161,34 @@ Add `source_uri TEXT` to `document_aspects` and to the catalog tables. Backfill 
 
 `source_path` is retained for two releases as a deprecated alias column (read for back-compat, not written by new code paths).
 
-**`chroma://` reader implementation**:
+**`chroma://` reader implementation** (research-4 mandates collection-prefix → identity-field dispatch; querying `where={"source_path": ...}` returns empty for `knowledge__*` chunks because they identify documents via `title`):
 
 ```python
+# Two collection-shape conventions live in T3 today:
+#  - nx index ingests (rdr__/docs__/code__) populate `source_path`
+#  - store_put MCP / nx memory promote ingests (knowledge__) populate `title`
+# The reader dispatches on collection prefix to pick the right identity field.
+CHROMA_IDENTITY_FIELD: dict[str, str] = {
+    "rdr__":       "source_path",
+    "docs__":      "source_path",
+    "code__":      "source_path",
+    "knowledge__": "title",
+}
+
+
+def _identity_field_for(collection: str) -> str:
+    for prefix, field in CHROMA_IDENTITY_FIELD.items():
+        if collection.startswith(prefix):
+            return field
+    return "source_path"  # safe default for unknown prefixes
+
+
 def _read_chroma_uri(uri: str, t3) -> ReadResult:
     # uri = "chroma://<collection>/<source-identifier>"
     parsed = urlparse(uri)
     collection = parsed.netloc
     source_id = parsed.path.lstrip("/")
+    identity_field = _identity_field_for(collection)
     try:
         coll = t3._client.get_collection(collection)
         # Pagination — chroma_quotas.MAX_QUERY_RESULTS = 300
@@ -175,7 +196,7 @@ def _read_chroma_uri(uri: str, t3) -> ReadResult:
         offset = 0
         while True:
             page = coll.get(
-                where={"source_path": source_id},
+                where={identity_field: source_id},
                 limit=300, offset=offset,
                 include=["documents", "metadatas"],
             )
@@ -191,11 +212,13 @@ def _read_chroma_uri(uri: str, t3) -> ReadResult:
         chunks.sort(key=lambda pair: pair[0].get("chunk_index", 0))
         return ReadOk(
             text="\n\n".join(doc for _, doc in chunks),
-            metadata={"scheme": "chroma", "chunk_count": len(chunks)},
+            metadata={"scheme": "chroma", "chunk_count": len(chunks), "identity_field": identity_field},
         )
     except Exception as e:
         return ReadFail(reason="unreachable", detail=f"{type(e).__name__}: {e}")
 ```
+
+**Alternative considered**: rather than per-collection dispatch, a Phase 0 backfill could normalize all `knowledge__*` chunks to populate `source_path` (copy from `title`). That eliminates dispatch logic permanently but requires a one-shot T3 migration touching every `knowledge__*` chunk. Decision deferred to /nx:rdr-accept's planning chain — both options ship a working reader; the dispatch table is the lower-blast-radius default.
 
 ### Existing Infrastructure Audit
 
@@ -288,9 +311,10 @@ The two-release deprecation window for `source_path` is conservative — the dua
 
 ### Prerequisites
 
-- [ ] Spike: 5-doc chroma-reassembly extraction on `knowledge__knowledge` with `operator_verify` cross-check against the extracted aspects on filesystem-read versions of the same papers (where filesystem versions exist). Measure wall-clock; verify scholarly-paper-v1 prompt is robust to chunk-overlap artifacts.
-- [ ] Spike: backfill dry-run across all current `rdr__*` and `docs__*` collections; report any `source_path` value that does not cleanly round-trip to a `file://` URI.
-- [ ] T2 schema review: `source_uri TEXT` column on `document_aspects` and `catalog_documents`; backfill SQL; deprecation policy on `source_path`.
+- [x] Spike A1: 5-doc chroma-reassembly extraction on `knowledge__knowledge` — **Done — research-4, id 1011 (PASS)**. 5/5 signal, mean operator_verify 1.00. **Phase 2 prerequisite remains**: re-test multi-chunk reassembly on `knowledge__art` / `knowledge__delos` (paper-shaped) before Phase 2 ships — A1 spike used single-chunk docs and did not exercise the chunk_index sort + concatenation path.
+- [x] Spike A2: backfill round-trip across `rdr__*`, `docs__*`, `code__*` collections — **Done — research-2, id 1009 (PASS)**. 99.98% (5470/5471). Lone empty-string `source_path` in `code__int-crossmodel-ba3a85dc` triaged at backfill time.
+- [x] Spike A3: no-null-row contract preserves partial successes — **Done — research-3, id 1010 (PASS)**. 0% ambiguous. Three-category split surfaced; Phase 2 SQL tightened with `AND confidence IS NULL` clause.
+- [ ] T2 schema review: `source_uri TEXT` column on `document_aspects` and `catalog_documents`; backfill SQL; deprecation policy on `source_path`. **Pending — handled in /nx:rdr-accept's planning chain.**
 
 ### Minimum Viable Validation
 
@@ -318,7 +342,24 @@ To `document_aspects` and `catalog_documents`. Migration backfills `source_uri =
 
 #### Step 2: Drop null-field rows from existing tables
 
-One-shot delete: rows where `problem_formulation IS NULL AND proposed_method IS NULL AND extras = '{}'`. Audit count first; emit summary.
+One-shot delete with the **four-clause discriminator** (research-3 substantive design refinement, id 1010):
+
+```sql
+DELETE FROM document_aspects
+WHERE problem_formulation IS NULL
+  AND proposed_method IS NULL
+  AND experimental_datasets IS NULL
+  AND experimental_baselines IS NULL
+  AND experimental_results IS NULL
+  AND extras = '{}'
+  AND confidence IS NULL;     -- gate: drops read-failure-nulls only
+```
+
+The trailing `AND confidence IS NULL` clause is **load-bearing**: without it the migration would also delete 51 `rdr-frontmatter-v1` "structured-zero" success rows (extractor read the source, found no scholarly structure, deterministically wrote `confidence=1.0` with all aspect fields empty). Those rows are valid negative results and must be retained — dropping them triggers re-extraction on every backfill cycle.
+
+Audit count first via `SELECT COUNT(*) FROM document_aspects WHERE <same predicates>`; emit summary. Empirically (research-3): 15 rows match across the live `nexus_rdr` tables (12 `rdr-frontmatter-v1` catalog-stale paths from RDR-090 research-1003 + 3 `scholarly-paper-v1` read-failures from `knowledge__hybridrag`).
+
+**Going-forward writer contract** (gate accept binds this): any extractor that records a "structured-zero" success — the source was readable, the extractor ran, no scholarly structure was found — MUST set non-NULL `confidence`. Only `ExtractFail` (read-failure) paths emit no row at all. The combination guarantees `confidence IS NULL ∧ all-empty-aspect-fields ∧ extras='{}'` is structurally reachable only from a pre-RDR-096 read failure, which is exactly what the migration cleans up.
 
 #### Step 3: Dual-read in operator SQL
 
@@ -389,7 +430,15 @@ Unit tests for `read_source` per scheme (file, chroma, scratch — https/s3 defe
 
 ## Finalization Gate
 
-_To be completed during /nx:rdr-gate._
+**Gate run**: 2026-04-27 — `/nx:rdr-gate 096`. Outcome: **PASSED** with 3 critical and 2 significant in-place edits applied to this RDR before accept (per the gate-accept-pause discipline). The architectural design is sound; all in-place edits sync the RDR body to the spike outcomes (research-1/2/3/4, ids 1008/1009/1010/1011).
+
+Critical edits: (1) Phase 2 null-row DELETE SQL was missing the `AND confidence IS NULL` clause — without it, the migration would silently delete 51 `rdr-frontmatter-v1` structured-zero successes. SQL now uses the four-clause form from research-3. (2) Phase 1 `_read_chroma_uri` code sketch queried `where={"source_path": ...}` — wrong field for `knowledge__*` chunks (which identify documents via `title`). Reader now includes a `CHROMA_IDENTITY_FIELD` collection-prefix → identity-field dispatch table per research-4. (3) All three Critical Assumption checkboxes synced from `[ ]` to `[x]` with PASS verdicts citing research findings; all three Phase 1 Prerequisites synced similarly.
+
+Significant edits: A3 verdict reconciliation note added to the assumption row (script reported BORDERLINE because of an over-strict implementation check the pre-registration did not require; per actual pre-reg spec the verdict is PASS). A1 multi-chunk gap explicitly marked as **Phase 2 prerequisite** — single-chunk-only spike coverage on `knowledge__knowledge` did not exercise the chunk_index sort + concatenation path; re-test on a paper-shaped collection (`knowledge__art` / `knowledge__delos`) before Phase 2 ships. Dependency Source Verification table updated with the collection-shape identity-field dependency.
+
+The substantive-critic agent verified internal consistency of the updated RDR against research-1008/1009/1010/1011 and cross-consistency with related RDRs 070 / 086 / 089 / 090 / 095. RDR-086's `chash:` URL scheme and RDR-096's `chroma://` scheme are orthogonal (different granularities and use contexts; coexist on the same chunk metadata). RDR-089's content-sourcing contract introduced `_source_content_from_t3` — RDR-096 honestly diagnoses why that contract is broken (queries wrong identity field for `knowledge__*`) rather than re-introducing the same fallback fresh. RDR-090's research-1003 documented the same-shape symptom on `rdr__nexus-571b8edd` (12 catalog-stale rows = exactly the read-failure-null targets of Phase 2's DELETE).
+
+Pre-registration discipline (research-1, id 1008) recognised by the critic as exemplary — three acceptance thresholds locked before harvesting any spike data, two falsification conditions per spike, all verdict-relevant numbers reproducible from on-disk artifacts. The two design refinements that landed (A3 four-clause SQL, A1 dispatch table) tightened the design rather than relaxing it.
 
 ## References
 

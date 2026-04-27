@@ -1,0 +1,18 @@
+{
+  "collection": "knowledge__knowledge",
+  "documents_tested": 5,
+  "docs_with_signal": 5,
+  "verify_scores_on_signal": [
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0
+  ],
+  "mean_verify_on_signal": 1.0,
+  "verdict": "PASS",
+  "notes": [
+    "knowledge__knowledge identifies documents by metadata 'title' field, not 'source_path'; existing _source_content_from_t3 querying where={'source_path':...} returns empty for these collections (root cause behind issue #333).",
+    "Documents in this collection are mostly single-chunk short notes; multi-chunk reassembly contract is exercised by paper collections (knowledge__art / knowledge__delos), not tested here."
+  ]
+}
