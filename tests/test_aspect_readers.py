@@ -502,6 +502,122 @@ class TestReadChromaUri:
         assert parts[-1] == f"c{n - 1}"
 
 
+# ── nx-scratch:// reader (RDR-096 P4.1) ─────────────────────────────────────
+
+
+@pytest.fixture
+def t1_scratch():
+    """Per-test T1Database backed by an EphemeralClient. Each test
+    gets a fresh session_id so process-shared EphemeralClient state
+    doesn't leak between tests.
+    """
+    import uuid
+
+    import chromadb
+
+    from nexus.db.t1 import T1Database
+
+    return T1Database(
+        session_id=f"test-{uuid.uuid4().hex[:8]}",
+        client=chromadb.EphemeralClient(),
+    )
+
+
+class TestReadScratchUri:
+    """RDR-096 P4.1: ``nx-scratch://session/<session-id>/<entry-id>``
+    reader for in-session synthesis documents that get persisted to
+    T3 — preserves provenance back to the originating session.
+    """
+
+    def test_live_scratch_entry_returns_read_ok(self, t1_scratch):
+        from nexus.aspect_readers import ReadOk, _read_scratch_uri
+
+        entry_id = t1_scratch.put("synthesis content from agent")
+        uri = f"nx-scratch://session/{t1_scratch.session_id}/{entry_id}"
+        result = _read_scratch_uri(uri, scratch=t1_scratch)
+        assert isinstance(result, ReadOk)
+        assert result.text == "synthesis content from agent"
+        assert result.metadata["scheme"] == "nx-scratch"
+        assert result.metadata["session_id"] == t1_scratch.session_id
+        assert result.metadata["entry_id"] == entry_id
+
+    def test_missing_entry_returns_read_fail_unreachable(self, t1_scratch):
+        from nexus.aspect_readers import ReadFail, _read_scratch_uri
+
+        # Plant something so the collection exists, then query a
+        # different entry id.
+        t1_scratch.put("noise")
+        missing_uri = f"nx-scratch://session/{t1_scratch.session_id}/00000000-0000-0000-0000-000000000000"
+        result = _read_scratch_uri(missing_uri, scratch=t1_scratch)
+        assert isinstance(result, ReadFail)
+        assert result.reason == "unreachable"
+        assert "not found" in result.detail
+
+    def test_no_scratch_client_returns_read_fail(self):
+        from nexus.aspect_readers import ReadFail, _read_scratch_uri
+
+        result = _read_scratch_uri(
+            "nx-scratch://session/abc/def", scratch=None,
+        )
+        assert isinstance(result, ReadFail)
+        assert result.reason == "unreachable"
+        assert "no scratch client" in result.detail
+
+    def test_malformed_uri_missing_session_id(self, t1_scratch):
+        from nexus.aspect_readers import ReadFail, _read_scratch_uri
+
+        # nx-scratch://session// — empty session-id segment.
+        result = _read_scratch_uri(
+            "nx-scratch://session//entry-id", scratch=t1_scratch,
+        )
+        assert isinstance(result, ReadFail)
+        assert result.reason == "unreachable"
+
+    def test_malformed_uri_missing_entry_id(self, t1_scratch):
+        from nexus.aspect_readers import ReadFail, _read_scratch_uri
+
+        result = _read_scratch_uri(
+            "nx-scratch://session/sess-only/", scratch=t1_scratch,
+        )
+        assert isinstance(result, ReadFail)
+        assert result.reason == "unreachable"
+
+    def test_unexpected_netloc_returns_read_fail(self, t1_scratch):
+        from nexus.aspect_readers import ReadFail, _read_scratch_uri
+
+        # The shape is ``nx-scratch://session/...``; anything else
+        # at the netloc position is rejected so callers don't paste
+        # arbitrary URIs that happen to share the scheme.
+        result = _read_scratch_uri(
+            "nx-scratch://other-host/sess/entry", scratch=t1_scratch,
+        )
+        assert isinstance(result, ReadFail)
+        assert result.reason == "unreachable"
+        assert "netloc" in result.detail
+
+    def test_empty_content_returns_read_fail_empty(self, t1_scratch):
+        from nexus.aspect_readers import ReadFail, _read_scratch_uri
+
+        # Plant an entry with empty content.
+        entry_id = t1_scratch.put("")
+        uri = f"nx-scratch://session/{t1_scratch.session_id}/{entry_id}"
+        result = _read_scratch_uri(uri, scratch=t1_scratch)
+        assert isinstance(result, ReadFail)
+        assert result.reason == "empty"
+
+    def test_dispatch_via_read_source(self, t1_scratch):
+        """``read_source`` routes nx-scratch:// URIs through
+        ``_read_scratch_uri`` — verify the registry wiring.
+        """
+        from nexus.aspect_readers import ReadOk, read_source
+
+        entry_id = t1_scratch.put("payload")
+        uri = f"nx-scratch://session/{t1_scratch.session_id}/{entry_id}"
+        result = read_source(uri, scratch=t1_scratch)
+        assert isinstance(result, ReadOk)
+        assert result.text == "payload"
+
+
 # ── read_source dispatch ─────────────────────────────────────────────────────
 
 

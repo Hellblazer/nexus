@@ -311,12 +311,96 @@ def _read_chroma_uri(uri: str, *, t3: Any = None, **_kw: Any) -> ReadResult:
     )
 
 
+# ── nx-scratch:// reader (RDR-096 P4.1) ──────────────────────────────────────
+
+
+def _read_scratch_uri(uri: str, *, scratch: Any = None, **_kw: Any) -> ReadResult:
+    """Read an ``nx-scratch://session/<session-id>/<entry-id>`` URI
+    from T1 scratch storage.
+
+    Use case: an agent synthesizes a document in T1 scratch and later
+    promotes it to T3. The catalog can preserve provenance back to
+    the originating session by storing the nx-scratch URI as
+    ``source_uri``. Subsequent re-extractions read the original
+    synthesis text from scratch when it is still live; once the
+    scratch session has expired or the entry has been deleted, the
+    reader returns ``ReadFail(reason='unreachable')`` and the
+    upsert-guard skips.
+
+    The ``session-id`` segment is a routing hint. Each session has
+    its own chromadb HTTP server with its own collection of scratch
+    entries; ``scratch.get(entry_id)`` returns ``None`` when the
+    entry isn't accessible from the caller's session (cross-session
+    lookups generally fail by design).
+
+    ``scratch`` is a ``T1Database``-compatible object exposing
+    ``.get(entry_id) -> dict | None`` where the returned dict
+    carries a ``content`` key.
+    """
+    if scratch is None:
+        return ReadFail(reason="unreachable", detail="no scratch client provided")
+    parsed = urlparse(uri)
+    if parsed.netloc != "session":
+        return ReadFail(
+            reason="unreachable",
+            detail=(
+                f"unexpected netloc {parsed.netloc!r} in nx-scratch URI; "
+                f"expected 'session' (shape: nx-scratch://session/<session-id>/<entry-id>)"
+            ),
+        )
+    path = parsed.path.removeprefix("/")
+    parts = path.split("/", 1)
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        return ReadFail(
+            reason="unreachable",
+            detail=(
+                f"malformed nx-scratch uri {uri!r}; expected "
+                f"nx-scratch://session/<session-id>/<entry-id>"
+            ),
+        )
+    session_id, entry_id = parts
+    try:
+        entry = scratch.get(entry_id)
+    except Exception as e:
+        return ReadFail(
+            reason="unreachable",
+            detail=f"scratch.get({entry_id!r}) failed: {type(e).__name__}: {e}",
+        )
+    if entry is None:
+        return ReadFail(
+            reason="unreachable",
+            detail=(
+                f"scratch entry {entry_id!r} not found "
+                f"(may be expired, deleted, or in a different "
+                f"session than {session_id!r})"
+            ),
+        )
+    text = entry.get("content", "") if isinstance(entry, dict) else ""
+    if not text:
+        return ReadFail(
+            reason="empty",
+            detail=f"scratch entry {entry_id!r} has empty content",
+        )
+    return ReadOk(
+        text=text,
+        metadata={
+            "scheme": "nx-scratch",
+            "session_id": session_id,
+            "entry_id": entry_id,
+            "actual_session_id": (
+                entry.get("session_id", "") if isinstance(entry, dict) else ""
+            ),
+        },
+    )
+
+
 # ── Reader registry + dispatch helper ────────────────────────────────────────
 
 
 _READERS: dict[str, Callable[..., ReadResult]] = {
     "file": _read_file_uri,
     "chroma": _read_chroma_uri,
+    "nx-scratch": _read_scratch_uri,
 }
 
 
