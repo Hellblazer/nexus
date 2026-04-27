@@ -2,12 +2,12 @@
 title: "RDR-090: Realistic AgenticScholar Benchmark"
 id: RDR-090
 type: Feature
-status: draft
+status: accepted
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-17
-accepted_date:
+accepted_date: 2026-04-27
 related_issues: []
 related_tests: [test_benchmark.py]
 related: [RDR-042, RDR-078, RDR-080, RDR-088]
