@@ -93,6 +93,60 @@ class TestRegisterAndShow:
         data = json.loads(result.output)
         assert data["title"] == "Test Paper"
 
+    def test_register_with_explicit_source_uri(
+        self, initialized_catalog, catalog_env,
+    ):
+        """RDR-096 P3.1: ``--source-uri`` flag stores the URI verbatim."""
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "catalog", "register",
+            "--title", "Aleph",
+            "--owner", "1.1",
+            "--type", "paper",
+            "--source-uri", "chroma://knowledge__delos//papers/aleph.pdf",
+        ])
+        assert result.exit_code == 0, result.output
+        # Verify via show.
+        show = runner.invoke(main, ["catalog", "show", "1.1.1"])
+        assert show.exit_code == 0
+        assert "URI:" in show.output
+        assert "chroma://knowledge__delos//papers/aleph.pdf" in show.output
+
+    def test_register_rejects_malformed_uri(
+        self, initialized_catalog, catalog_env,
+    ):
+        """RDR-096 P3.1: malformed URIs are hard errors at the
+        register boundary, not silent persistence.
+        """
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "catalog", "register",
+            "--title", "Broken",
+            "--owner", "1.1",
+            "--source-uri", "not-a-uri",
+        ])
+        # ClickException → non-zero exit + message in stdout (Click
+        # renders ClickException via echo, not via stderr/exception).
+        assert result.exit_code != 0
+        assert "no scheme" in result.output
+
+    def test_show_omits_uri_line_when_empty(
+        self, initialized_catalog, catalog_env,
+    ):
+        """Legacy entries (no path, no URI) shouldn't render an empty
+        ``URI:`` line. The display is conditional on a populated value.
+        """
+        runner = CliRunner()
+        runner.invoke(main, [
+            "catalog", "register",
+            "--title", "Ghost",
+            "--owner", "1.1",
+            # No --file-path, no --source-uri.
+        ])
+        result = runner.invoke(main, ["catalog", "show", "1.1.1"])
+        assert result.exit_code == 0
+        assert "URI:" not in result.output
+
 
 class TestListCommand:
     def test_list_entries(self, initialized_catalog, catalog_env):

@@ -215,11 +215,18 @@ def catalog_register(
     author: str = "",
     year: int = 0,
     file_path: str = "",
+    source_uri: str = "",
     corpus: str = "",
     physical_collection: str = "",
     meta: str = "",
 ) -> dict:
-    """Register a document. Assigns tumbler. Ghost elements: physical_collection can be empty."""
+    """Register a document. Assigns tumbler. Ghost elements: physical_collection can be empty.
+
+    RDR-096 P3.1: ``source_uri`` is the persistent URI identity. Omit
+    to auto-derive ``file://<abspath>`` from ``file_path``; pass an
+    explicit URI (``chroma://``, ``https://``, ``nx-scratch://``) to
+    store verbatim. Malformed URIs raise at register-time.
+    """
     cat, err = _require_catalog()
     if err:
         return {"error": err}
@@ -250,6 +257,7 @@ def catalog_register(
             corpus=corpus, author=author, year=year,
             physical_collection=physical_collection,
             meta=_json.loads(meta) if meta else None,
+            source_uri=source_uri,
         )
         return {"tumbler": str(tumbler), "title": title}
     except Exception as e:

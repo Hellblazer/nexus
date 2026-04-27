@@ -366,6 +366,8 @@ def show_cmd(tumbler_or_title: str, as_json: bool) -> None:
         click.echo(f"Year:       {entry.year}")
         click.echo(f"Type:       {entry.content_type}")
         click.echo(f"File:       {entry.file_path}")
+        if entry.source_uri:
+            click.echo(f"URI:        {entry.source_uri}")
         click.echo(f"Corpus:     {entry.corpus}")
         click.echo(f"Collection: {entry.physical_collection}")
         click.echo(f"Chunks:     {entry.chunk_count}")
@@ -430,10 +432,19 @@ def search_cmd(query: str, limit: int, offset: int, as_json: bool) -> None:
 @click.option("--year", default=0, type=int)
 @click.option("--type", "content_type", default="paper")
 @click.option("--file-path", default="")
+@click.option(
+    "--source-uri", default="",
+    help=(
+        "Persistent URI identity (RDR-096 P3.1). Omit to derive "
+        "'file://<abspath>' from --file-path automatically. Pass an "
+        "explicit URI (chroma://, https://, nx-scratch://) to store "
+        "verbatim. Malformed URIs are rejected at register-time."
+    ),
+)
 @click.option("--corpus", default="")
 def register_cmd(
     title: str, owner: str, author: str, year: int,
-    content_type: str, file_path: str, corpus: str,
+    content_type: str, file_path: str, source_uri: str, corpus: str,
 ) -> None:
     """Register a document in the catalog."""
     from nexus.catalog.catalog import make_relative
@@ -453,11 +464,17 @@ def register_cmd(
                     fp = rel
                     break
 
-    tumbler = cat.register(
-        Tumbler.parse(owner), title,
-        content_type=content_type, file_path=fp,
-        corpus=corpus, author=author, year=year,
-    )
+    try:
+        tumbler = cat.register(
+            Tumbler.parse(owner), title,
+            content_type=content_type, file_path=fp,
+            corpus=corpus, author=author, year=year,
+            source_uri=source_uri,
+        )
+    except ValueError as exc:
+        # P3.1 register-boundary validation surfaced a malformed URI.
+        # Hard error rather than silent persistence.
+        raise click.ClickException(str(exc)) from exc
     click.echo(f"Registered: {tumbler}")
 
 
