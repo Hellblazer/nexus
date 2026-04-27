@@ -43,7 +43,45 @@ __all__ = [
     "ReadOk",
     "ReadResult",
     "read_source",
+    "uri_for",
 ]
+
+
+# ── URI construction (RDR-096 P2.1) ──────────────────────────────────────────
+
+
+def uri_for(collection: str, source_path: str) -> str | None:
+    """Persistent URI for ``(collection, source_path)``. Single source
+    of truth: both the going-forward writer in
+    :mod:`nexus.aspect_extractor` and the backfill migration in
+    :mod:`nexus.db.migrations` import this helper to avoid silent
+    divergence on future prefix additions.
+
+    Returns ``None`` when ``source_path`` is empty — that maps to
+    SQLite ``NULL`` in :class:`AspectRecord` writes and matches the
+    migration's NULL-on-empty backfill behavior.
+
+    Filesystem-backed collections (``rdr__/docs__/code__``) use
+    ``file://`` with ``os.path.abspath``; everything else
+    (``knowledge__`` and any future prefix) uses ``chroma://`` with
+    the literal source_path as the path component. The chroma reader
+    handles the title/source_path identity-field fallback for
+    knowledge collections internally (research-5, id 1014).
+
+    Note: ``abspath`` resolves against the caller's CWD, so URIs
+    produced from a relative ``source_path`` depend on where the
+    writer (or migration) ran. Stored absolute paths round-trip
+    deterministically; relative paths may diverge between the
+    backfill site and going-forward writers if those run from
+    different CWDs.
+    """
+    import os.path
+
+    if not source_path:
+        return None
+    if collection.startswith(("rdr__", "docs__", "code__")):
+        return "file://" + os.path.abspath(source_path)
+    return f"chroma://{collection}/{source_path}"
 
 
 # ── Result types ─────────────────────────────────────────────────────────────

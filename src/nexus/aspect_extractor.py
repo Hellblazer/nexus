@@ -56,7 +56,7 @@ from urllib.parse import quote
 
 import structlog
 
-from nexus.aspect_readers import ReadFail, ReadOk, read_source
+from nexus.aspect_readers import ReadFail, ReadOk, read_source, uri_for
 from nexus.db.t2.document_aspects import AspectRecord
 from nexus.mcp_infra import get_t3
 
@@ -1410,6 +1410,7 @@ def _build_record(
         extracted_at=datetime.now(UTC).isoformat(),
         model_version=config.model_version,
         extractor_name=config.extractor_name,
+        source_uri=uri_for(collection, source_path),
     )
 
 
@@ -1435,7 +1436,10 @@ def _empty_record(
         extracted_at=datetime.now(UTC).isoformat(),
         model_version=config.model_version,
         extractor_name=config.extractor_name,
+        source_uri=uri_for(collection, source_path),
     )
+
+
 
 
 def _str_or_none(value) -> str | None:

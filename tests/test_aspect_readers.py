@@ -28,6 +28,51 @@ import pytest
 # ── CHROMA_IDENTITY_FIELD dispatch ───────────────────────────────────────────
 
 
+class TestUriFor:
+    """``uri_for`` is the single source of truth for URI construction
+    used by both the going-forward writer
+    (``aspect_extractor._build_record`` / ``_empty_record``) and the
+    backfill migration (``migrate_document_aspects_source_uri``).
+    Divergence between the two would cause silent inconsistency on
+    future prefix additions; the two consumers import this helper
+    rather than re-implementing the rule.
+    """
+
+    def test_filesystem_collection_returns_file_uri_with_abspath(self):
+        import os.path
+
+        from nexus.aspect_readers import uri_for
+
+        for collection in ("rdr__nexus", "docs__corpus", "code__nx"):
+            uri = uri_for(collection, "src/cli.py")
+            assert uri == "file://" + os.path.abspath("src/cli.py")
+
+    def test_knowledge_collection_returns_chroma_uri(self):
+        from nexus.aspect_readers import uri_for
+
+        assert uri_for("knowledge__delos", "/papers/aleph.pdf") == (
+            "chroma://knowledge__delos//papers/aleph.pdf"
+        )
+        assert uri_for("knowledge__knowledge", "decision-x") == (
+            "chroma://knowledge__knowledge/decision-x"
+        )
+
+    def test_unknown_prefix_returns_chroma_uri(self):
+        """Future prefixes default to chroma:// — same as the migration."""
+        from nexus.aspect_readers import uri_for
+
+        assert uri_for("future__x", "src") == "chroma://future__x/src"
+
+    def test_empty_source_path_returns_none(self):
+        """``None`` matches the migration's NULL-on-empty backfill
+        behavior. Writers that store the result get SQLite NULL.
+        """
+        from nexus.aspect_readers import uri_for
+
+        assert uri_for("rdr__nexus", "") is None
+        assert uri_for("knowledge__delos", "") is None
+
+
 class TestIdentityFieldDispatch:
     """The dispatch table picks the right metadata field per collection
     prefix. ``knowledge__*`` carries TWO shapes: papers ingested via

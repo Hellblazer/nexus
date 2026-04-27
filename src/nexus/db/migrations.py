@@ -1446,6 +1446,89 @@ def _backfill_builtin_bindings(conn: sqlite3.Connection) -> None:
         _log.info("backfill_builtin_bindings", rows=backfilled)
 
 
+def migrate_document_aspects_source_uri(conn: sqlite3.Connection) -> None:
+    """RDR-096 P2.1: add ``source_uri`` TEXT column to ``document_aspects``
+    and backfill from existing ``(collection, source_path)`` pairs.
+
+    Backfill rules (matches the going-forward writer contract):
+
+    * filesystem-backed collections (``rdr__*``, ``docs__*``,
+      ``code__*``): ``source_uri = 'file://' || abspath(source_path)``.
+    * chroma-backed collections (``knowledge__*`` and any other
+      prefix): ``source_uri = 'chroma://' || collection || '/' ||
+      source_path``. ``knowledge__*`` chunks may be reassembled from
+      T3 either by ``source_path`` or ``title`` (RDR-096 P2.0
+      research-5); the URI's path component is whatever was stored
+      in ``source_path`` at extraction time.
+    * Empty ``source_path`` rows are SKIPPED — they cannot be
+      backfilled (research-2 mitigation, id 1009: 1 chunk in
+      ``code__int-crossmodel-ba3a85dc`` has empty source_path).
+      A WARN is logged with the count for triage; ``nx doctor
+      --check-schema`` surfaces this in steady state.
+
+    Idempotent on three axes:
+
+    * ``ALTER TABLE`` — gated by ``PRAGMA table_info`` so re-runs
+      don't re-add the column.
+    * Backfill ``UPDATE`` — guarded by ``WHERE source_uri IS NULL``
+      so re-runs only touch unfilled rows. New writes that arrived
+      after the first migration pass are not stomped.
+    * No-op when the table doesn't exist (defensive, matches the
+      pattern of older RDR-089 migrations on this same registry).
+    """
+    # Import the single source of truth for URI construction so this
+    # migration and the going-forward writers in
+    # ``nexus.aspect_extractor._build_record`` / ``_empty_record`` stay
+    # in lockstep on prefix rules. ``uri_for`` returns ``None`` for
+    # empty source_path — matches the NULL-on-empty backfill behavior
+    # this migration's research-2 mitigation requires.
+    from nexus.aspect_readers import uri_for  # noqa: PLC0415
+
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(document_aspects)").fetchall()}
+    if not cols:
+        # Table doesn't exist (fresh install before
+        # migrate_document_aspects_table runs).
+        return
+    if "source_uri" not in cols:
+        conn.execute("ALTER TABLE document_aspects ADD COLUMN source_uri TEXT")
+        conn.commit()
+
+    # Two-pass backfill. Loop in Python (SQL has no abspath helper);
+    # wrap in an explicit transaction so 100K rows don't produce 100K
+    # round-trips against the WAL — autocommit would slow this from
+    # seconds to minutes on large catalogs.
+    rows = conn.execute(
+        "SELECT rowid, collection, source_path FROM document_aspects "
+        "WHERE source_uri IS NULL",
+    ).fetchall()
+
+    backfilled = 0
+    skipped_empty = 0
+    conn.execute("BEGIN")
+    try:
+        for rowid, collection, source_path in rows:
+            uri = uri_for(collection, source_path)
+            if uri is None:
+                skipped_empty += 1
+                continue
+            conn.execute(
+                "UPDATE document_aspects SET source_uri = ? WHERE rowid = ?",
+                (uri, rowid),
+            )
+            backfilled += 1
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    if backfilled or skipped_empty:
+        _log.info(
+            "migrate_document_aspects_source_uri",
+            backfilled=backfilled,
+            skipped_empty_source_path=skipped_empty,
+        )
+
+
 MIGRATIONS: list[Migration] = [
     Migration("1.10.0", "Memory FTS rebuild with title", migrate_memory_fts),
     Migration("2.8.0", "Add plan project column", migrate_plan_project),
@@ -1548,6 +1631,11 @@ MIGRATIONS: list[Migration] = [
         "4.14.2",
         "Create aspect_promotion_log table (RDR-089 Phase E)",
         migrate_aspect_promotion_log_table,
+    ),
+    Migration(
+        "4.16.0",
+        "Add document_aspects.source_uri column + backfill (RDR-096 P2.1)",
+        migrate_document_aspects_source_uri,
     ),
 ]
 

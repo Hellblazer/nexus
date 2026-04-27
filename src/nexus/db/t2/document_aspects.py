@@ -58,6 +58,13 @@ CREATE TABLE IF NOT EXISTS document_aspects (
     extracted_at           TEXT NOT NULL,
     model_version          TEXT NOT NULL,
     extractor_name         TEXT NOT NULL,
+    -- RDR-096 P2.1: persistent URI identity.
+    -- For new writes (Phase 1+), populated by callers as
+    -- ``chroma://<collection>/<source_path>`` (or ``file://`` for
+    -- legacy filesystem-backed collections). Read paths use
+    -- ``COALESCE(source_uri, 'file://' || source_path)`` during
+    -- the deprecation window (P2.3).
+    source_uri             TEXT,
     PRIMARY KEY (collection, source_path)
 );
 
@@ -91,6 +98,9 @@ class AspectRecord:
     extracted_at: str = ""
     model_version: str = ""
     extractor_name: str = ""
+    # RDR-096 P2.1: persistent URI identity. ``None`` on legacy rows
+    # written before P2.1 ships; populated for all writes after.
+    source_uri: str | None = None
 
 
 # ── DocumentAspects ─────────────────────────────────────────────────────────
@@ -154,8 +164,8 @@ class DocumentAspects:
                 " proposed_method, experimental_datasets, "
                 " experimental_baselines, experimental_results, "
                 " extras, confidence, extracted_at, "
-                " model_version, extractor_name) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " model_version, extractor_name, source_uri) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     record.collection,
                     record.source_path,
@@ -169,6 +179,7 @@ class DocumentAspects:
                     record.extracted_at,
                     record.model_version,
                     record.extractor_name,
+                    record.source_uri,
                 ),
             )
             self.conn.commit()
@@ -181,7 +192,7 @@ class DocumentAspects:
                 "       proposed_method, experimental_datasets, "
                 "       experimental_baselines, experimental_results, "
                 "       extras, confidence, extracted_at, "
-                "       model_version, extractor_name "
+                "       model_version, extractor_name, source_uri "
                 "FROM document_aspects "
                 "WHERE collection = ? AND source_path = ?",
                 (collection, source_path),
@@ -207,7 +218,7 @@ class DocumentAspects:
             "       proposed_method, experimental_datasets, "
             "       experimental_baselines, experimental_results, "
             "       extras, confidence, extracted_at, "
-            "       model_version, extractor_name "
+            "       model_version, extractor_name, source_uri "
             "FROM document_aspects "
             "WHERE collection = ? "
             "ORDER BY source_path ASC"
@@ -264,7 +275,7 @@ class DocumentAspects:
                 "       proposed_method, experimental_datasets, "
                 "       experimental_baselines, experimental_results, "
                 "       extras, confidence, extracted_at, "
-                "       model_version, extractor_name "
+                "       model_version, extractor_name, source_uri "
                 "FROM document_aspects "
                 "WHERE extractor_name = ? AND model_version < ? "
                 "ORDER BY collection, source_path",
@@ -295,6 +306,7 @@ def _row_to_record(row: tuple) -> AspectRecord:
         extracted_at,
         model_version,
         extractor_name,
+        source_uri,
     ) = row
     return AspectRecord(
         collection=collection,
@@ -309,6 +321,7 @@ def _row_to_record(row: tuple) -> AspectRecord:
         extracted_at=extracted_at,
         model_version=model_version,
         extractor_name=extractor_name,
+        source_uri=source_uri,
     )
 
 
