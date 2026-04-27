@@ -90,29 +90,39 @@ class ReadFail:
 ReadResult = ReadOk | ReadFail
 
 
-# ── Chroma identity-field dispatch (research-4, id 1011) ─────────────────────
+# ── Chroma identity-field dispatch (research-4, id 1011; P2.0 refined) ───────
 
 
-# Two collection-shape conventions live in T3 today:
-#   - nx index ingests (rdr__/docs__/code__) populate ``source_path``
-#   - store_put MCP / nx memory promote ingests (knowledge__) populate ``title``
-CHROMA_IDENTITY_FIELD: dict[str, str] = {
-    "rdr__":       "source_path",
-    "docs__":      "source_path",
-    "code__":      "source_path",
-    "knowledge__": "title",
+# Three collection-shape conventions live in T3 today:
+#   - nx index ingests (rdr__/docs__/code__/knowledge__<paper-coll>) populate
+#     ``source_path`` (filesystem path or PDF path).
+#   - store_put MCP / nx memory promote ingests (knowledge__knowledge) populate
+#     ``title`` (slug). The chunk has NO source_path metadata.
+#   - PDF papers ingested into knowledge__<corpus> via nx index pdf populate
+#     ``source_path`` (filesystem path); ``title`` is None on these chunks.
+#
+# The mapping value is an ORDERED tuple: the reader tries each field in turn
+# and uses the first one that returns chunks. ``source_path`` is preferred
+# because it dominates the catalog by chunk-volume; ``title`` is the
+# slug-shaped fallback for memory-promoted entries.
+CHROMA_IDENTITY_FIELD: dict[str, tuple[str, ...]] = {
+    "rdr__":       ("source_path",),
+    "docs__":      ("source_path",),
+    "code__":      ("source_path",),
+    "knowledge__": ("source_path", "title"),
 }
 
 
-def _identity_field_for(collection: str) -> str:
-    """Return the chunk-metadata field that identifies a source document
-    in ``collection``. Falls back to ``source_path`` for unknown
-    prefixes — that's the dominant convention in legacy ingests.
+def _identity_fields_for(collection: str) -> tuple[str, ...]:
+    """Return the ordered tuple of chunk-metadata fields that identify
+    a source document in ``collection``. Falls back to
+    ``("source_path",)`` for unknown prefixes — the dominant
+    convention in legacy ingests.
     """
-    for prefix, field in CHROMA_IDENTITY_FIELD.items():
+    for prefix, fields in CHROMA_IDENTITY_FIELD.items():
         if collection.startswith(prefix):
-            return field
-    return "source_path"
+            return fields
+    return ("source_path",)
 
 
 # ── file:// reader ───────────────────────────────────────────────────────────
@@ -169,7 +179,12 @@ def _read_chroma_uri(uri: str, *, t3: Any = None, **_kw: Any) -> ReadResult:
         return ReadFail(reason="unreachable", detail="no chroma client provided")
     parsed = urlparse(uri)
     collection = parsed.netloc
-    source_id = unquote(parsed.path.lstrip("/"))
+    # ``urlparse`` always prefixes the path with ``/`` when a netloc
+    # is present. ``removeprefix`` strips exactly one leading slash,
+    # preserving any that are part of the source_path itself (e.g.,
+    # ``/Users/.../paper.pdf`` round-trips intact when constructed as
+    # ``chroma://collection//Users/...``).
+    source_id = unquote(parsed.path.removeprefix("/"))
     if not collection or not source_id:
         return ReadFail(
             reason="unreachable",
@@ -178,7 +193,7 @@ def _read_chroma_uri(uri: str, *, t3: Any = None, **_kw: Any) -> ReadResult:
                 f"source_id={source_id!r})"
             ),
         )
-    identity_field = _identity_field_for(collection)
+    identity_fields = _identity_fields_for(collection)
     try:
         coll = t3.get_collection(collection)
     except Exception as e:
@@ -186,47 +201,62 @@ def _read_chroma_uri(uri: str, *, t3: Any = None, **_kw: Any) -> ReadResult:
             reason="unreachable",
             detail=f"get_collection({collection!r}) failed: {type(e).__name__}: {e}",
         )
-    # Tuple is (chunk_index, insertion_seq, text). The insertion
-    # sequence is the secondary sort key so that chunks with missing
-    # or duplicate ``chunk_index`` values fall back to a deterministic
-    # arrival-order tiebreak rather than relying on chromadb's
-    # within-page ordering, which is not contractually stable.
+    # Try each identity field in order; first non-empty result wins.
+    # Empirically (P2.0 spike survey 2026-04-27): knowledge__delos and
+    # knowledge__art chunks identify via ``source_path``; only
+    # knowledge__knowledge (slug-shaped MCP-promoted notes) identify via
+    # ``title``. The fallback list lets one reader handle both shapes.
+    matched_field = ""
     chunks: list[tuple[int, int, str]] = []
-    seq = 0
-    offset = 0
     page_limit = QUOTAS.MAX_QUERY_RESULTS
-    try:
-        while True:
-            page = coll.get(
-                where={identity_field: source_id},
-                limit=page_limit,
-                offset=offset,
-                include=["documents", "metadatas"],
+    for identity_field in identity_fields:
+        # Tuple is (chunk_index, insertion_seq, text). The insertion
+        # sequence is the secondary sort key so chunks with missing
+        # or duplicate ``chunk_index`` values fall back to a
+        # deterministic arrival-order tiebreak rather than relying on
+        # chromadb's within-page ordering, which is not contractually
+        # stable.
+        chunks = []
+        seq = 0
+        offset = 0
+        try:
+            while True:
+                page = coll.get(
+                    where={identity_field: source_id},
+                    limit=page_limit,
+                    offset=offset,
+                    include=["documents", "metadatas"],
+                )
+                docs = page.get("documents") or []
+                mds = page.get("metadatas") or []
+                if not docs:
+                    break
+                for md, doc in zip(mds, docs):
+                    if not doc:
+                        continue
+                    ci = md.get("chunk_index", 0) if isinstance(md, dict) else 0
+                    chunks.append((int(ci), seq, doc))
+                    seq += 1
+                if len(docs) < page_limit:
+                    break
+                offset += page_limit
+        except Exception as e:
+            return ReadFail(
+                reason="unreachable",
+                detail=(
+                    f"chroma.get failed (field={identity_field!r}): "
+                    f"{type(e).__name__}: {e}"
+                ),
             )
-            docs = page.get("documents") or []
-            mds = page.get("metadatas") or []
-            if not docs:
-                break
-            for md, doc in zip(mds, docs):
-                if not doc:
-                    continue
-                ci = md.get("chunk_index", 0) if isinstance(md, dict) else 0
-                chunks.append((int(ci), seq, doc))
-                seq += 1
-            if len(docs) < page_limit:
-                break
-            offset += page_limit
-    except Exception as e:
-        return ReadFail(
-            reason="unreachable",
-            detail=f"chroma.get failed: {type(e).__name__}: {e}",
-        )
+        if chunks:
+            matched_field = identity_field
+            break
     if not chunks:
         return ReadFail(
             reason="empty",
             detail=(
                 f"no chunks for {source_id!r} in {collection!r} "
-                f"(identity_field={identity_field!r})"
+                f"(identity_fields tried={list(identity_fields)})"
             ),
         )
     chunks.sort(key=lambda triple: (triple[0], triple[1]))
@@ -237,7 +267,7 @@ def _read_chroma_uri(uri: str, *, t3: Any = None, **_kw: Any) -> ReadResult:
             "scheme": "chroma",
             "collection": collection,
             "source_id": source_id,
-            "identity_field": identity_field,
+            "identity_field": matched_field,
             "chunk_count": len(chunks),
         },
     )

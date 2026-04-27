@@ -30,39 +30,43 @@ import pytest
 
 class TestIdentityFieldDispatch:
     """The dispatch table picks the right metadata field per collection
-    prefix. ``knowledge__*`` chunks carry document identity in
-    ``title``; everything else uses ``source_path`` (research-4,
-    id 1011).
+    prefix. ``knowledge__*`` carries TWO shapes: papers ingested via
+    ``nx index pdf`` populate ``source_path``; slugs from
+    ``store_put`` MCP / ``nx memory promote`` populate ``title``. The
+    dispatch table value is an ordered tuple so the reader can try
+    each in turn (P2.0 spike survey, 2026-04-27).
     """
 
     def test_rdr_collection_uses_source_path(self):
-        from nexus.aspect_readers import _identity_field_for
-        assert _identity_field_for("rdr__nexus-571b8edd") == "source_path"
+        from nexus.aspect_readers import _identity_fields_for
+        assert _identity_fields_for("rdr__nexus-571b8edd") == ("source_path",)
 
     def test_docs_collection_uses_source_path(self):
-        from nexus.aspect_readers import _identity_field_for
-        assert _identity_field_for("docs__corpus") == "source_path"
+        from nexus.aspect_readers import _identity_fields_for
+        assert _identity_fields_for("docs__corpus") == ("source_path",)
 
     def test_code_collection_uses_source_path(self):
-        from nexus.aspect_readers import _identity_field_for
-        assert _identity_field_for("code__nexus") == "source_path"
+        from nexus.aspect_readers import _identity_fields_for
+        assert _identity_fields_for("code__nexus") == ("source_path",)
 
-    def test_knowledge_collection_uses_title(self):
-        from nexus.aspect_readers import _identity_field_for
-        assert _identity_field_for("knowledge__knowledge") == "title"
+    def test_knowledge_collection_tries_source_path_then_title(self):
+        from nexus.aspect_readers import _identity_fields_for
+        # source_path first (paper-shaped collections like
+        # knowledge__delos), title second (slug-shaped
+        # knowledge__knowledge).
+        assert _identity_fields_for("knowledge__knowledge") == ("source_path", "title")
+        assert _identity_fields_for("knowledge__delos") == ("source_path", "title")
 
     def test_unknown_prefix_falls_back_to_source_path(self):
-        from nexus.aspect_readers import _identity_field_for
-        # Future prefix not in the table — defaults to source_path,
-        # the dominant convention in legacy ingests.
-        assert _identity_field_for("future__newshape") == "source_path"
+        from nexus.aspect_readers import _identity_fields_for
+        assert _identity_fields_for("future__newshape") == ("source_path",)
 
     def test_dispatch_table_exposes_all_known_prefixes(self):
         from nexus.aspect_readers import CHROMA_IDENTITY_FIELD
-        assert CHROMA_IDENTITY_FIELD["rdr__"] == "source_path"
-        assert CHROMA_IDENTITY_FIELD["docs__"] == "source_path"
-        assert CHROMA_IDENTITY_FIELD["code__"] == "source_path"
-        assert CHROMA_IDENTITY_FIELD["knowledge__"] == "title"
+        assert CHROMA_IDENTITY_FIELD["rdr__"] == ("source_path",)
+        assert CHROMA_IDENTITY_FIELD["docs__"] == ("source_path",)
+        assert CHROMA_IDENTITY_FIELD["code__"] == ("source_path",)
+        assert CHROMA_IDENTITY_FIELD["knowledge__"] == ("source_path", "title")
 
 
 # ── file:// reader ───────────────────────────────────────────────────────────
@@ -280,6 +284,70 @@ class TestReadChromaUri:
         assert isinstance(result, ReadFail)
         assert result.reason == "unreachable"
 
+    def test_knowledge_falls_back_to_title_when_source_path_misses(
+        self, t3_client,
+    ):
+        """``knowledge__*`` tries source_path FIRST (paper-shaped
+        ingests), falls back to ``title`` SECOND (slug-shaped
+        memory-promoted entries). This test plants chunks with only
+        ``title`` metadata (no source_path) — the slug-shaped
+        knowledge__knowledge case from research-4 — and verifies the
+        fallback recovers them.
+        """
+        from nexus.aspect_readers import ReadOk, _read_chroma_uri
+
+        title = "decision-bfdb-update-capture-rdr005"
+        try:
+            t3_client.delete_collection("knowledge__fallback")
+        except Exception:
+            pass
+        coll = t3_client.get_or_create_collection("knowledge__fallback")
+        # Note: ONLY title metadata, NO source_path key.
+        coll.add(
+            ids=[f"{title}::0"],
+            documents=["slug-shaped knowledge note text."],
+            metadatas=[{"title": title, "chunk_index": 0}],
+        )
+        result = _read_chroma_uri(
+            f"chroma://knowledge__fallback/{title}", t3=t3_client,
+        )
+        assert isinstance(result, ReadOk)
+        assert result.text == "slug-shaped knowledge note text."
+        # ``identity_field`` in metadata reports which field actually
+        # matched — useful for triage when the fallback fires.
+        assert result.metadata["identity_field"] == "title"
+
+    def test_knowledge_uses_source_path_when_present(self, t3_client):
+        """The dual case: ``knowledge__*`` collection where chunks
+        DO have source_path (paper-shaped ingests like
+        knowledge__delos / knowledge__art). The reader uses
+        source_path on the first try without consulting title.
+        """
+        from nexus.aspect_readers import ReadOk, _read_chroma_uri
+
+        sp = "/papers/aleph-bft.pdf"
+        try:
+            t3_client.delete_collection("knowledge__paper")
+        except Exception:
+            pass
+        coll = t3_client.get_or_create_collection("knowledge__paper")
+        coll.add(
+            ids=["aleph-bft::0"],
+            documents=["Paper body text."],
+            # Both fields present — but source_path is the first-try
+            # field so this asserts the preference order.
+            metadatas=[{"source_path": sp, "title": "unrelated", "chunk_index": 0}],
+        )
+        # Production constructs the URI as
+        # ``f"chroma://{collection}/{quote(source_path, safe='/')}"``
+        # — when source_path starts with ``/``, that yields a
+        # ``//``-separator URI. Mirror that here.
+        result = _read_chroma_uri(
+            f"chroma://knowledge__paper/{sp}", t3=t3_client,
+        )
+        assert isinstance(result, ReadOk)
+        assert result.metadata["identity_field"] == "source_path"
+
     def test_missing_chunk_index_uses_insertion_order_tiebreak(self, t3_client):
         """When ``chunk_index`` is absent from metadata, the chunk
         defaults to ``0``. Two such chunks must come back in a
@@ -312,6 +380,31 @@ class TestReadChromaUri:
         # yields plus the stable tiebreak.
         assert "alpha" in result.text
         assert "beta" in result.text
+
+    def test_absolute_source_path_round_trips(self, t3_client):
+        """Cloud-shaped source_paths are absolute filesystem paths
+        like ``/Users/.../paper.pdf``. The URI is then
+        ``chroma://collection//Users/.../paper.pdf`` (double-slash
+        separator). ``parsed.path.removeprefix('/')`` strips exactly
+        one leading slash, preserving the second to recover the
+        absolute path.
+        """
+        from nexus.aspect_readers import ReadOk, _read_chroma_uri
+
+        sp = "/Users/me/papers/aleph-bft.pdf"
+        _seed_chunks(
+            t3_client,
+            "knowledge__abs",
+            identity_field="source_path",
+            source_id=sp,
+            chunks=[(0, "Paper body.")],
+        )
+        # ``//`` separator after netloc preserves the leading slash.
+        result = _read_chroma_uri(
+            f"chroma://knowledge__abs/{sp}", t3=t3_client,
+        )
+        assert isinstance(result, ReadOk)
+        assert result.metadata["source_id"] == sp
 
     def test_source_path_with_slashes_round_trips(self, t3_client):
         """rdr__/docs__/code__ source paths typically contain ``/``;

@@ -1,0 +1,25 @@
+{
+  "papers": [
+    "lightweight-smr",
+    "aleph-bft",
+    "fireflies-tocs"
+  ],
+  "collection": "knowledge__delos",
+  "papers_tested": 3,
+  "docs_with_signal": 3,
+  "verify_scores": [
+    1.0,
+    1.0,
+    1.0
+  ],
+  "mean_verify_on_signal": 1.0,
+  "ordering_passed": true,
+  "ordering_failures": 0,
+  "verdict": "PASS",
+  "verdict_reason": "3/3 with signal, mean verify 1.00 \u2265 0.7",
+  "notes": [
+    "All three papers ingested via nx index pdf \u2014 chunks identify via 'source_path' metadata field, NOT 'title'. P1.1's CHROMA_IDENTITY_FIELD dispatch table updated to an ordered tuple ('source_path', 'title') for knowledge__* during this spike's survey.",
+    "Two of the three papers (lightweight-smr at 273 chunks, aleph-bft at 408 chunks) exceed QUOTAS.MAX_QUERY_RESULTS = 300, exercising the paginated coll.get loop.",
+    "Reassembled text is truncated to CONTENT_CAP_BYTES = 80_000 before extract_aspects (mirrors the prior _T3_CONTENT_CAP_BYTES from _source_content_from_t3). P2.0 does NOT validate the post-truncation prompt budget; that is a separate concern for Phase 2's writer contract."
+  ]
+}
