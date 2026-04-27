@@ -1,0 +1,39 @@
+{
+  "by_timing": {
+    "0": {
+      "runs": 10,
+      "connected_to_parent": 10,
+      "ephemeral_downgrade": 0,
+      "setup_failed": 0,
+      "unknown": 0
+    },
+    "5": {
+      "runs": 10,
+      "connected_to_parent": 10,
+      "ephemeral_downgrade": 0,
+      "setup_failed": 0,
+      "unknown": 0
+    },
+    "50": {
+      "runs": 10,
+      "connected_to_parent": 10,
+      "ephemeral_downgrade": 0,
+      "setup_failed": 0,
+      "unknown": 0
+    },
+    "200": {
+      "runs": 10,
+      "connected_to_parent": 10,
+      "ephemeral_downgrade": 0,
+      "setup_failed": 0,
+      "unknown": 0
+    }
+  },
+  "totals": {
+    "runs": 40,
+    "connected_to_parent": 40,
+    "ephemeral_downgrade": 0,
+    "setup_failed": 0
+  },
+  "interpretation": "ca2_verified_race_not_reproducible"
+}
