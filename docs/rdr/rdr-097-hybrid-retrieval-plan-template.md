@@ -9,7 +9,7 @@ reviewed-by: self
 created: 2026-04-28
 related_issues: []
 related_tests: []
-related: [RDR-049, RDR-050, RDR-052, RDR-078, RDR-080, RDR-084, RDR-091, RDR-092]
+related: [RDR-049, RDR-050, RDR-052, RDR-078, RDR-080, RDR-084, RDR-091, RDR-092, RDR-093, RDR-098]
 ---
 
 # RDR-097: Hybrid Retrieval Plan Template — Fusing Catalog Traversal and Vector Search for Factual QA
@@ -92,11 +92,15 @@ Three reasons. First, every other operator in the surface treats Claude as the s
 
 ### Why depth-2 BFS, not PPR (open question 2 resolution)
 
-The Zhou et al. unified framework reports PPR > BFS for specific-fact QA, but PPR requires a graph-wide stationary distribution computation that nexus does not currently support. Adding PPR is a separate operator (`operator_traverse_ppr` or extending `traverse` with a `strategy` arg), and the work is non-trivial. Depth-2 BFS is what `traverse` already gives us, it produces a tractable candidate set (typically 5-20 tumblers per seed at depth 2 on `knowledge__hybridrag`), and it's a known-imperfect baseline. File PPR as `nexus-XXX` follow-up bead after Phase 1 measurement.
+Zhou et al. (§6.2 of the unified framework, tumbler 1.653.79) report PPR > BFS for specific-fact QA, but PPR requires a graph-wide stationary distribution computation that nexus does not currently support. Adding PPR is a separate operator (`operator_traverse_ppr` or extending `traverse` with a `strategy` arg), and the work is non-trivial. Depth-2 BFS is what `traverse` already gives us, it produces a tractable candidate set (typically 5-20 tumblers per seed at depth 2 on `knowledge__hybridrag`), and it's a known-imperfect baseline. File PPR as `nexus-XXX` follow-up bead after Phase 1 measurement.
 
 ### Why a token budget per stream (Gap 4 resolution)
 
-The plan adds a new optional binding `vector_budget_chunks` (default 6) and `graph_budget_chunks` (default 4), giving a 60/40 split per RF-6. The `store_get_many` step truncates each stream to its budget before passing to `operator_rank`. This is a concrete, measurable cap; it does not require new operator infrastructure (just plan-level slicing in the `args` block); it directly addresses HybridRAG's documented context-precision regression.
+The plan exposes two optional bindings, `vector_budget_chunks` (default 6) and `graph_budget_chunks` (default 4), giving a 60/40 split per RF-6. **In Phase 1, these are plan-author conventions, not runner-enforced caps.** The plan YAML uses Python-style slice expressions in `store_get_many` step args (e.g. `ids: $step1.ids[:vector_budget_chunks]`) so each stream is hydrated only up to its budget before merge. The runner's auto-hydration applies a single global `_OPERATOR_MAX_INPUTS=100` cap; per-stream budget enforcement at the runner level is filed as `nexus-uwkw` follow-up bead. Phase 1 is honest about this: the integration test harness (P1.5) verifies the plan-level slicing produces the right hydrated counts; it does NOT verify a runner-level mechanism that doesn't yet exist.
+
+### Why pin `dimensions.verb: lookup` (open question 5 resolution)
+
+Both new templates use `verb: lookup` so they share matcher space and disambiguate on `strategy`: `hybrid-factual-lookup` vs `traverse-then-generate`. RDR-091's scope-aware matching keys on `(verb, scope, strategy)` triples, and RDR-092's hybrid match-text synthesizes its embedding anchor from the same fields plus name and description. Pinning verb at gate time matches the contract RDR-098 used (`verb: abstract`) and avoids carrying an indeterminate dimension into accept.
 
 ### Why a density measurement step before rollout (Gap 3 resolution)
 
@@ -110,14 +114,14 @@ One phase, one branch, one PR. Single-phase by design (see "Why one phase" above
 
 - **P1.1 — `hybrid-factual-lookup` plan YAML.** Create `nx/plans/builtin/hybrid-factual-lookup.yml` with the four-step shape (search → traverse → operator_rank → operator_generate) parameterized by seed-or-question, depth, link-type purpose, and the two stream budgets. Reuse `research-default.yml` and `citation-traversal.yml` as structural references. Run `nx catalog setup` against a clean DB to verify it loads without YAML errors.
 - **P1.2 — `traverse-then-generate` plan YAML.** Create `nx/plans/builtin/traverse-then-generate.yml`, a three-step variant (traverse → store_get_many → operator_generate) for the explicit-seeds path. Same YAML conventions as P1.1.
-- **P1.3 — `factual-evidence` purpose.** Add a new purpose alias to `src/nexus/plans/purposes.py` mapping `factual-evidence` → `["cites", "implements", "relates"]`, so both plans reference link types by stable name. Test via `nexus.plans.purposes.resolve_purpose("factual-evidence")`.
+- **P1.3 — `factual-evidence` purpose.** Add a new purpose alias to `src/nexus/plans/purposes.py` mapping `factual-evidence` → `["cites", "implements", "relates"]`, so both plans reference link types by stable name. Test via `nexus.plans.purposes.resolve_purpose("factual-evidence")`. *P1.5 validation: if `implements` fires zero times across the 5 test fixtures on `knowledge__hybridrag`, drop it from the alias before the PR lands. The `knowledge__*` corpus has sparse `implements` links by construction (those are usually code↔RDR pairs), so this is a real possibility.*
 - **P1.4 — Density measurement CLI.** Add `nx catalog link-density --by-collection` to `src/nexus/commands/catalog.py`. Output: one row per collection with `frontier_p50`, `frontier_p90`, `link_types_present`. Reuses the existing `Catalog.graph_many` machinery; no new SQL.
 - **P1.5 — Integration test harness.** Add `tests/test_hybrid_plan_factual_qa.py` with 5 question fixtures over `knowledge__hybridrag`. Each fixture: question string, expected-relevant tumbler set, expected-relevant chunk substrings. The test runs both `hybrid-factual-lookup` and a vector-only baseline plan against the same questions, computes recall@10 and overlap-with-expected, asserts the hybrid plan is *not worse* than vector-only on any question (the actual claim — "is it better" — is reported in the test output for measurement, not asserted as a gate). Records full inputs/outputs to T2 telemetry for diffability.
 - **P1.6 — Plan-level documentation.** Add a comment block at the top of `hybrid-factual-lookup.yml` documenting the context-precision tradeoff (HybridRAG §5.4) and the per-stream token budget rationale. Update `docs/architecture.md` plan-library section to list the new templates.
 
 ### Success Metrics
 
-- `nx catalog setup` seeds 14 templates (12 existing + 2 new) without YAML errors.
+- `nx catalog setup` seeds two new templates (`hybrid-factual-lookup`, `traverse-then-generate`) without YAML errors. Total count is `current_count + 2`; conditioned on RDR-098's abstract-themes template (PR #342) merge ordering — if RDR-098 lands first, current_count is 13 and the post-seed total is 15.
 - Both new plans match successfully via `plan_match` for the test fixtures' question shapes (recorded `match_count` increments after the integration test run).
 - Hybrid plan's recall@10 over the 5 fixtures is recorded as a baseline number; no regression assertion against vector-only beyond "not worse on any question".
 - Density CLI output has at least one row per collection in `knowledge__*` and reports a non-zero `frontier_p50` for `knowledge__hybridrag` (negative test: code-only collection should report `frontier_p50 = 0`).
@@ -135,15 +139,15 @@ One phase, one branch, one PR. Single-phase by design (see "Why one phase" above
 - **Risk: Sparse-link collections produce vector-equivalent results with extra latency.** Mitigation: the density CLI tells authors which collections to use the plan against; the plan still runs against any collection (no gating).
 - **Risk: Token budget defaults (6/4) are wrong for non-financial-QA corpora.** Mitigation: budgets are optional bindings; the integration test sweeps two settings (6/4 and 4/2) and records the better one in the test output; we don't pretend Phase 1 picked the global optimum.
 - **Risk: Context-precision regression on long-context questions.** Mitigation: the test harness includes one long-context fixture explicitly designed to exercise the regression; if it fires, we tighten budgets in a follow-up.
-- **Risk: Plan name collision or confusion with `citation-traversal.yml`.** Mitigation: the existing template has `dimensions.verb=research`; the new plan uses `dimensions.verb=lookup` or `qa` (decide during P1.1) so the matcher disambiguates by verb.
+- **Risk: Plan name collision or confusion with `citation-traversal.yml`.** Mitigation: the existing template has `dimensions.verb=research`; the new plans use `dimensions.verb=lookup` (pinned in §"Why pin `dimensions.verb: lookup`") so the matcher disambiguates by verb.
+- **Risk: T1 plan-session cache is stale after `nx catalog setup` seeds new templates mid-session, so `plan_match` returns wrong-plan or no-match results.** This was empirically observed during the RDR-098 abstract-themes smoke run on the same orchestration shape — the implementer had to bypass `nx_answer` and call `plan_run` directly via Python to get clean dispatch numbers. Mitigation: the P1.5 integration test harness explicitly resets `plans__session` (or uses a fresh `EphemeralClient` T1) before each test run; the test docstring calls out the cache contract so future maintainers don't waste an afternoon debugging the symptoms. Tracked as bead `nexus-qgjr` for the systemic fix (plan-cache invalidation on T2 mutation).
 
 ## Open Questions
 
-1. **PPR vs BFS** — depth-2 BFS as MVP per RF-6 + decision above. PPR filed as follow-up after Phase 1 measurement evidence is in.
+1. **PPR vs BFS** — depth-2 BFS as MVP per Zhou et al. §6.2. PPR filed as follow-up after Phase 1 measurement evidence is in.
 2. **Hybrid-merge operator shape** — Phase 1 uses `operator_rank` with a hybrid-score criterion. If non-determinism shows up materially in test reruns, follow-up introduces `operator_merge_streams` with a deterministic numeric contract.
 3. **Per-collection density gating policy** — Phase 1 ships density observability only. Whether density should *route* (auto-fall-back to vector-only on sparse-link collections) is a Phase 2 question.
 4. **Token budget tuning per corpus class** — Phase 1 ships defaults from RF-6. Per-corpus tuning is a follow-up if the integration test sweep shows large per-corpus variance.
-5. **Plan dimension `verb`** — `lookup`, `qa`, or `research`? Decision pinned during P1.1 implementation; current lean is `lookup` for `hybrid-factual-lookup` and `lookup` for `traverse-then-generate` so they share matcher space and disambiguate on `strategy`.
 
 ## References
 
