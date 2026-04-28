@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.17.0] - 2026-04-28
+
+Plugin version aligned with conexus 4.17.0. No plugin-level functional changes. The catalog backend gains the `x-devonthink-item://` URI scheme (`nexus-bqda`) and DT-aware `nx catalog remediate-paths` (`nexus-srck`) — see root `CHANGELOG.md` for details.
+
 ## [4.16.1] - 2026-04-27
 
 Plugin version aligned with conexus 4.16.1. No plugin-level functional changes. Hotfix release for `nx index md` / `nx index pdf` silently returning 0 chunks when credentials were unset — see root `CHANGELOG.md` for the local-embedder fallback (PR #338) + cloud-mode error path (PR #337) details. Closes #336.

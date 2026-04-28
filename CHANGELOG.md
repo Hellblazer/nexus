@@ -6,6 +6,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.17.0] - 2026-04-28
+
+DEVONthink integration for the catalog: PDFs managed by DEVONthink (DT3 / Pro / Server) carry a stable identity URL that survives DT-internal relocations, and Nexus now treats it as a first-class catalog source.
+
+### Added
+
+- **`x-devonthink-item://<UUID>` source-URI scheme** (`nexus-bqda`). Added to `_KNOWN_URI_SCHEMES` so `nx catalog register --source-uri x-devonthink-item://<UUID>` accepts it. A new reader in `nexus.aspect_readers` resolves the UUID via DEVONthink's AppleScript bridge (osascript → application id `DNtp`), reads the file at the resolved path, and returns `ReadOk` with `metadata.scheme = "x-devonthink-item"`. macOS-only; on other platforms returns `ReadFail("unreachable", "DEVONthink integration is macOS-only")` rather than attempting subprocess.
+- **`nx catalog remediate-paths` consults `meta.devonthink_uri`** before basename scanning (`nexus-srck`). DT-managed PDFs live inside `Files.noindex` trees that aren't part of any papers archive, so basename scanning can't find them. When DT reports an existing path, that wins (and the report shows `of which N via DEVONthink`); when DT returns nothing or a stale path, falls through to the legacy basename scan so we never persist a path the resolver lied about.
+
+### Behavior
+
+- Both paths share `_devonthink_resolver_default(uuid) -> (path|None, error_detail)` so production gets one osascript implementation. Tests inject a stub via `dt_resolver` kwarg (reader) or `monkeypatch.setattr` (remediate-paths), so the suite passes on non-macOS CI without invoking osascript.
+- `_KNOWN_URI_SCHEMES` lock test updated to include `x-devonthink-item`.
+
 ## [4.16.1] - 2026-04-27
 
 Hotfix release for `nx index md` / `nx index pdf` silently returning 0 chunks when Voyage/Chroma credentials were unset (#336). The CLI looked like it succeeded — exit code 0, "Indexed 0 chunk(s)" — while indexing nothing. The fix has two layers:
