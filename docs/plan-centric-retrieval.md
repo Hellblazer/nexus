@@ -106,7 +106,7 @@ dimensions in the same project will collide at seed time.  This is how
 the seed loader stays idempotent: a second run of `nx catalog setup` with
 unchanged templates produces zero inserts.
 
-## The 12 builtin scenario templates
+## The 14 builtin scenario templates
 
 `nx catalog setup` seeds these from `nx/plans/builtin/*.yml` as
 `scope:global` plans:
@@ -125,14 +125,21 @@ unchanged templates produces zero inserts.
 | `find-by-author` | research / find-by-author | Catalog author-index lookup → hydrate → summarise an author's contribution surface |
 | `citation-traversal` | research / citation-traversal | Resolve seed → walk `reference-chain` both directions → hydrate → summarise |
 | `type-scoped-search` | research / type-scoped | Catalog content-type filter → semantic query within that bucket → summarise |
+| `hybrid-factual-lookup` | lookup / hybrid-factual-lookup | Vector recall + factual-evidence graph traversal → per-stream `limit_per_source` budgets → rank merge → generate. RDR-097. |
+| `traverse-then-generate` | lookup / traverse-then-generate | Explicit-seeds path: walk `factual-evidence` from caller-supplied tumblers → hydrate → generate. RDR-097 companion to `hybrid-factual-lookup`. |
 
 The first 5 are the "verb" scenarios: they correspond to the 5
 RDR-078 verb skills (`/nx:research`, `/nx:review`, …). The next 4 are
-meta-seeds for the plan-library itself. The last 3 (RDR-092 Phase 0a
+meta-seeds for the plan-library itself. Three (RDR-092 Phase 0a
 migrations) replace the legacy `_PLAN_TEMPLATES` array retired from
 `src/nexus/commands/catalog.py`; two further legacy shapes (provenance
 and cross-corpus compare) were retired as redundant with
-`research-default` and `analyze-default` respectively.
+`research-default` and `analyze-default` respectively. The final two
+(`verb: lookup`) ship RDR-097's hybrid retrieval pattern for factual
+QA; they share matcher space and disambiguate on `strategy`. Use
+`hybrid-factual-lookup` when the caller has a question and needs
+vector recall to find seeds; use `traverse-then-generate` when seed
+tumblers are already explicit inputs.
 
 ## match_text synthesis
 
