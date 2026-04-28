@@ -884,3 +884,171 @@ class TestReadSourceDispatch:
         result = read_source("/just/a/path")
         assert isinstance(result, ReadFail)
         assert result.reason == "scheme_unknown"
+
+    def test_devonthink_scheme_dispatches_to_dt_reader(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        """``x-devonthink-item://`` URIs must reach the DT reader via
+        the registry. We can't drive osascript in tests, so we go
+        through the registry-aware ``read_source`` *and* monkeypatch
+        the default resolver so the reader's macOS gate doesn't reject
+        the call on Linux/Windows CI workers.
+        """
+        from nexus.aspect_readers import ReadOk, read_source
+
+        target = tmp_path / "dispatch.pdf"
+        target.write_bytes(b"%PDF-1.4 dispatched")
+
+        def fake_resolver(uuid: str) -> tuple[str | None, str]:
+            assert uuid == "DISPATCH-UUID"
+            return str(target), ""
+
+        monkeypatch.setattr(
+            "nexus.aspect_readers._devonthink_resolver_default",
+            fake_resolver,
+        )
+        # ``read_source`` doesn't pass dt_resolver — it must fall through
+        # to the patched default. We also patch sys.platform so the
+        # reader's macOS gate accepts the call on non-darwin runners.
+        monkeypatch.setattr("sys.platform", "darwin")
+
+        result = read_source("x-devonthink-item://DISPATCH-UUID")
+        assert isinstance(result, ReadOk)
+        assert result.metadata["scheme"] == "x-devonthink-item"
+        assert result.metadata["uuid"] == "DISPATCH-UUID"
+
+
+# ── x-devonthink-item:// reader (nexus-bqda) ────────────────────────────────
+
+
+class TestReadDevonthinkUri:
+    """The DT reader resolves a UUID via DEVONthink (osascript) to a
+    filesystem path, then reads the file. macOS-only — non-darwin
+    callers get a clear ``ReadFail`` rather than a silent crash trying
+    to invoke osascript.
+
+    All tests inject a stub resolver via the ``dt_resolver`` keyword to
+    avoid spawning a real subprocess.
+    """
+
+    def test_happy_path_resolves_and_reads_file(self, tmp_path: Path):
+        from nexus.aspect_readers import ReadOk, _read_devonthink_uri
+
+        target = tmp_path / "paper.pdf"
+        target.write_bytes(b"%PDF-1.4 dt body")
+
+        def resolver(uuid: str) -> tuple[str | None, str]:
+            assert uuid == "8EDC855D-213F-40AD-A9CF-9543CC76476B"
+            return str(target), ""
+
+        result = _read_devonthink_uri(
+            "x-devonthink-item://8EDC855D-213F-40AD-A9CF-9543CC76476B",
+            dt_resolver=resolver,
+        )
+        assert isinstance(result, ReadOk)
+        assert result.metadata["scheme"] == "x-devonthink-item"
+        assert result.metadata["uuid"] == "8EDC855D-213F-40AD-A9CF-9543CC76476B"
+        assert result.metadata["resolved_path"] == str(target)
+        assert result.metadata["bytes"] == len(b"%PDF-1.4 dt body")
+
+    def test_missing_record_returns_unreachable(self, tmp_path: Path):
+        """When DT replies that the UUID isn't found, the reader
+        surfaces an ``unreachable`` failure with the resolver's
+        detail so triage can tell "DT is up but doesn't know this
+        record" from "DT couldn't be reached at all".
+        """
+        from nexus.aspect_readers import ReadFail, _read_devonthink_uri
+
+        def resolver(uuid: str) -> tuple[str | None, str]:
+            return None, f"DEVONthink record {uuid!r} not found"
+
+        result = _read_devonthink_uri(
+            "x-devonthink-item://MISSING-UUID", dt_resolver=resolver,
+        )
+        assert isinstance(result, ReadFail)
+        assert result.reason == "unreachable"
+        assert "not found" in result.detail
+
+    def test_resolver_returning_path_that_doesnt_exist(self, tmp_path: Path):
+        """DT might report a path that has since been moved/deleted
+        out from under it (rare but possible). The reader should
+        surface a ``FileNotFoundError`` ``unreachable`` failure
+        rather than silently producing empty content.
+        """
+        from nexus.aspect_readers import ReadFail, _read_devonthink_uri
+
+        ghost = tmp_path / "ghost.pdf"  # never written
+
+        def resolver(uuid: str) -> tuple[str | None, str]:
+            return str(ghost), ""
+
+        result = _read_devonthink_uri(
+            "x-devonthink-item://GHOST-UUID", dt_resolver=resolver,
+        )
+        assert isinstance(result, ReadFail)
+        assert result.reason == "unreachable"
+        assert "FileNotFoundError" in result.detail
+
+    def test_empty_file_at_resolved_path(self, tmp_path: Path):
+        from nexus.aspect_readers import ReadFail, _read_devonthink_uri
+
+        empty = tmp_path / "empty.pdf"
+        empty.touch()
+
+        def resolver(uuid: str) -> tuple[str | None, str]:
+            return str(empty), ""
+
+        result = _read_devonthink_uri(
+            "x-devonthink-item://EMPTY-UUID", dt_resolver=resolver,
+        )
+        assert isinstance(result, ReadFail)
+        assert result.reason == "empty"
+
+    def test_empty_uuid_returns_unreachable(self):
+        from nexus.aspect_readers import ReadFail, _read_devonthink_uri
+
+        def resolver(uuid: str) -> tuple[str | None, str]:
+            raise AssertionError("resolver should not be called for empty UUID")
+
+        result = _read_devonthink_uri(
+            "x-devonthink-item://", dt_resolver=resolver,
+        )
+        assert isinstance(result, ReadFail)
+        assert result.reason == "unreachable"
+        assert "empty UUID" in result.detail
+
+    def test_non_macos_platform_returns_clear_unreachable(self, monkeypatch):
+        """On Linux/Windows the reader must NOT try to invoke
+        osascript. Surfacing a clean ``unreachable`` lets
+        cross-platform CI runners see the right error and skip
+        DT-keyed entries gracefully.
+        """
+        from nexus.aspect_readers import ReadFail, _read_devonthink_uri
+
+        monkeypatch.setattr("sys.platform", "linux")
+        result = _read_devonthink_uri("x-devonthink-item://UUID")
+        assert isinstance(result, ReadFail)
+        assert result.reason == "unreachable"
+        assert "macOS-only" in result.detail
+
+    def test_uuid_in_path_component_is_tolerated(self, tmp_path: Path):
+        """``urlparse`` puts the UUID in netloc when ``://`` is used
+        but writers that emit ``x-devonthink-item:UUID`` (single
+        colon) put it in ``path``. The reader handles both for
+        defensiveness; the canonical form remains the double-slash
+        shape that matches DEVONthink's own URL output.
+        """
+        from nexus.aspect_readers import ReadOk, _read_devonthink_uri
+
+        target = tmp_path / "compat.pdf"
+        target.write_bytes(b"%PDF-1.4 compat")
+
+        def resolver(uuid: str) -> tuple[str | None, str]:
+            assert uuid == "COMPAT-UUID"
+            return str(target), ""
+
+        result = _read_devonthink_uri(
+            "x-devonthink-item:COMPAT-UUID", dt_resolver=resolver,
+        )
+        assert isinstance(result, ReadOk)
+        assert result.metadata["uuid"] == "COMPAT-UUID"

@@ -13,6 +13,11 @@ Initial schemes (Phase 1):
 * ``file:///abs/path/to/file.md`` — disk read.
 * ``chroma://<collection>/<source-identifier>`` — chunk reassembly
   from T3 by metadata-field match.
+* ``x-devonthink-item://<UUID>`` — macOS-only, resolves the UUID to
+  a current filesystem path via the DEVONthink AppleScript bridge
+  (osascript) and reads the file. Lets DT-managed PDFs survive
+  relocations inside DT's database without breaking catalog URIs
+  (nexus-bqda).
 
 Knowledge collections (``knowledge__*``) identify documents by metadata
 field ``title`` (slug); ``nx index``-ingested collections
@@ -498,6 +503,122 @@ def _read_https_uri(
     )
 
 
+# ── x-devonthink-item:// reader (nexus-bqda) ─────────────────────────────────
+
+
+def _devonthink_resolver_default(uuid: str) -> tuple[str | None, str]:
+    """Resolve a DEVONthink record UUID to a filesystem path via osascript.
+
+    Returns ``(path, error_detail)``. On success ``path`` is the absolute
+    path reported by DEVONthink and ``error_detail`` is ``""``. On failure
+    ``path`` is ``None`` and ``error_detail`` describes the cause
+    (osascript not present, timeout, missing record, non-zero exit).
+
+    DEVONthink registers as application id ``DNtp`` so the script works
+    against any installed edition (DT 3 / DT Pro / DT Server). The
+    sentinel ``__NX_DT_MISSING__`` distinguishes "record not found" from
+    a literal empty path.
+    """
+    import subprocess  # noqa: PLC0415
+    script = (
+        'tell application id "DNtp"\n'
+        f'  set theItem to get record with uuid "{uuid}"\n'
+        '  if theItem is missing value then\n'
+        '    return "__NX_DT_MISSING__"\n'
+        '  else\n'
+        '    return path of theItem\n'
+        '  end if\n'
+        'end tell'
+    )
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=10,
+        )
+    except FileNotFoundError:
+        return None, "osascript not found (macOS-only)"
+    except subprocess.TimeoutExpired:
+        return None, "osascript timed out resolving DEVONthink UUID"
+    except OSError as e:
+        return None, f"osascript failed: {type(e).__name__}: {e}"
+    if proc.returncode != 0:
+        return None, (
+            f"osascript rc={proc.returncode}: {proc.stderr.strip() or '(no stderr)'}"
+        )
+    path = proc.stdout.strip()
+    if not path or path == "__NX_DT_MISSING__":
+        return None, f"DEVONthink record {uuid!r} not found"
+    return path, ""
+
+
+def _read_devonthink_uri(
+    uri: str,
+    *,
+    dt_resolver: Callable[[str], tuple[str | None, str]] | None = None,
+    **_kw: Any,
+) -> ReadResult:
+    """Read an ``x-devonthink-item://<UUID>`` URI.
+
+    Resolves the UUID via DEVONthink (macOS app, registered as ``DNtp``)
+    using osascript, then reads the file at the resolved path. macOS-only;
+    on other platforms returns a clear ``ReadFail`` so callers don't have
+    to special-case the platform check themselves.
+
+    The ``dt_resolver`` keyword exists so tests can drive the reader
+    without launching osascript; production calls fall through to
+    :func:`_devonthink_resolver_default`.
+    """
+    import sys  # noqa: PLC0415
+
+    if dt_resolver is None:
+        if sys.platform != "darwin":
+            return ReadFail(
+                reason="unreachable",
+                detail="DEVONthink integration is macOS-only",
+            )
+        dt_resolver = _devonthink_resolver_default
+
+    parsed = urlparse(uri)
+    # ``urlparse`` puts the UUID in netloc when ``://`` is present;
+    # tolerate the path shape too in case a writer ever emits
+    # ``x-devonthink-item:UUID`` without the double slash.
+    uuid = parsed.netloc or parsed.path.lstrip("/")
+    if not uuid:
+        return ReadFail(
+            reason="unreachable",
+            detail=f"empty UUID in DEVONthink URI {uri!r}",
+        )
+
+    path, error_detail = dt_resolver(uuid)
+    if path is None:
+        return ReadFail(
+            reason="unreachable",
+            detail=error_detail or "DEVONthink resolver returned no path",
+        )
+
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except FileNotFoundError as e:
+        return ReadFail(reason="unreachable", detail=f"FileNotFoundError: {e}")
+    except PermissionError as e:
+        return ReadFail(reason="unauthorized", detail=f"PermissionError: {e}")
+    except OSError as e:
+        return ReadFail(reason="unreachable", detail=f"{type(e).__name__}: {e}")
+    if not data:
+        return ReadFail(reason="empty", detail=f"empty file at {path!r}")
+    text = data.decode("utf-8", errors="replace")
+    return ReadOk(
+        text=text,
+        metadata={
+            "scheme": "x-devonthink-item",
+            "uuid": uuid,
+            "resolved_path": path,
+            "bytes": len(data),
+        },
+    )
+
+
 # ── Reader registry + dispatch helper ────────────────────────────────────────
 
 
@@ -506,6 +627,7 @@ _READERS: dict[str, Callable[..., ReadResult]] = {
     "chroma": _read_chroma_uri,
     "nx-scratch": _read_scratch_uri,
     "https": _read_https_uri,
+    "x-devonthink-item": _read_devonthink_uri,
 }
 
 

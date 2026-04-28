@@ -222,9 +222,13 @@ def reset_chash_fallback_warning_for_tests() -> None:
 # (RDR-096); ``https`` and ``nx-scratch`` are reserved for Phase 4.
 # ``http`` is intentionally excluded — Phase 4's https reader does
 # NOT cover plain http; users with http URIs must upgrade to https
-# or wait for a dedicated reader.
+# or wait for a dedicated reader. ``x-devonthink-item`` (nexus-bqda)
+# is macOS-only — DEVONthink-managed PDFs carry a stable identity
+# URL that resolves to the current filesystem path via osascript;
+# the reader gates on ``sys.platform == 'darwin'`` and surfaces a
+# clear error elsewhere.
 _KNOWN_URI_SCHEMES: frozenset[str] = frozenset({
-    "file", "chroma", "https", "nx-scratch",
+    "file", "chroma", "https", "nx-scratch", "x-devonthink-item",
 })
 
 

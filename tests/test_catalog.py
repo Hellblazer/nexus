@@ -158,6 +158,23 @@ class TestSourceUriRegistration:
         # file_path is preserved separately.
         assert entry.file_path == "bito-mirror.md"
 
+    def test_register_accepts_devonthink_uri(self, cat_with_owner):
+        """``x-devonthink-item://<UUID>`` is a first-class catalog URI
+        scheme (nexus-bqda). Registering with one stores it verbatim;
+        the macOS-only osascript bridge runs at extraction time, not
+        at register time, so this works on any platform.
+        """
+        cat, owner = cat_with_owner
+        explicit = "x-devonthink-item://8EDC855D-213F-40AD-A9CF-9543CC76476B"
+        doc = cat.register(
+            owner, "graph-rag", content_type="paper",
+            file_path="",
+            source_uri=explicit,
+        )
+        entry = cat.resolve(doc)
+        assert entry is not None
+        assert entry.source_uri == explicit
+
     def test_register_rejects_malformed_uri_no_scheme(self, cat_with_owner):
         cat, owner = cat_with_owner
         with pytest.raises(ValueError, match="no scheme"):
@@ -191,15 +208,17 @@ class TestSourceUriRegistration:
     def test_known_uri_schemes_table_is_locked_to_planned_set(self):
         """Lock the scheme registry against silent additions OR
         shrinking. Phase 1: ``file`` + ``chroma``. Phase 4:
-        ``nx-scratch`` (P4.1) + ``https`` (P4.2). Plain ``http`` is
-        intentionally excluded — Phase 4's https reader does NOT
-        cover plain http, so accepting http URIs at register would
-        succeed silently and fail at extraction. Adding a new scheme
-        requires landing the reader first AND updating this lock.
+        ``nx-scratch`` (P4.1) + ``https`` (P4.2). nexus-bqda adds
+        ``x-devonthink-item`` (macOS-only DT identity URLs). Plain
+        ``http`` is intentionally excluded — Phase 4's https reader
+        does NOT cover plain http, so accepting http URIs at register
+        would succeed silently and fail at extraction. Adding a new
+        scheme requires landing the reader first AND updating this
+        lock.
         """
         from nexus.catalog.catalog import _KNOWN_URI_SCHEMES
         assert _KNOWN_URI_SCHEMES == frozenset({
-            "file", "chroma", "https", "nx-scratch",
+            "file", "chroma", "https", "nx-scratch", "x-devonthink-item",
         })
 
     def test_register_rejects_http_scheme_until_reader_lands(
