@@ -119,7 +119,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-094](rdr-094-mcp-owned-t1-chroma-lifecycle.md) | MCP-Owned T1 Chroma Lifecycle | Architecture | Closed | 2026-04-24 |
 | [RDR-095](rdr-095-post-store-hook-batch-contract.md) | Post-Store Hook Framework: Batch Contract | Architecture | Closed (implemented) | 2026-04-25 |
 | [RDR-096](rdr-096-uri-source-identity.md) | URI-Based Source Identity for Aspect Extraction | Architecture | Accepted | 2026-04-27 |
-| [RDR-097](rdr-097-hybrid-retrieval-plan-template.md) | Hybrid Retrieval Plan Template — Fusing Catalog Traversal and Vector Search for Factual QA | Feature | Draft | 2026-04-28 |
+| [RDR-097](rdr-097-hybrid-retrieval-plan-template.md) | Hybrid Retrieval Plan Template — Fusing Catalog Traversal and Vector Search for Factual QA | Feature | Accepted | 2026-04-28 |
 
 ---
 

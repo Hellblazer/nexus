@@ -2,12 +2,13 @@
 title: "RDR-097: Hybrid Retrieval Plan Template — Fusing Catalog Traversal and Vector Search for Factual QA"
 id: RDR-097
 type: Feature
-status: draft
+status: accepted
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-28
-related_issues: []
+accepted_date: 2026-04-28
+related_issues: [nexus-uwkw, nexus-qgjr, nexus-h3e2]
 related_tests: []
 related: [RDR-049, RDR-050, RDR-052, RDR-078, RDR-080, RDR-084, RDR-091, RDR-092, RDR-093, RDR-098]
 ---
