@@ -3239,6 +3239,22 @@ async def nx_answer(
     run_bindings: dict[str, Any] = {"intent": question}
     if scope:
         run_bindings["_nx_scope"] = scope
+
+    # Auto-alias the question text into any required binding the plan
+    # declares but the caller didn't pre-supply. This mirrors what the
+    # inline-planner fallback already does — its constructed plans get
+    # every binding filled from the question text. Without this, any
+    # library plan with ``required_bindings: [concept]`` (or area,
+    # topic, etc.) failed at dispatch with ``missing required
+    # bindings: ['concept']`` even though ``$intent`` carried the
+    # equivalent value. Skills that pre-extract entities (e.g.,
+    # find-by-author with ``$author``) bypass this path by calling
+    # ``plan_run`` directly with explicit bindings.
+    defaults = best.default_bindings or {}
+    for req in best.required_bindings:
+        if req not in run_bindings and req not in defaults:
+            run_bindings[req] = question
+
     try:
         result = await _plan_run(best, run_bindings)
     except Exception as exc:
