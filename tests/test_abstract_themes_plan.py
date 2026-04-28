@@ -56,8 +56,9 @@ def test_template_step_shape(template: dict) -> None:
 
 
 def test_template_required_bindings(template: dict) -> None:
-    """``concept`` is the only required binding; ``corpus`` + ``limit`` default."""
-    assert template["required_bindings"] == ["concept"]
+    """``intent`` is the only required binding (auto-supplied by ``nx_answer``);
+    ``corpus`` + ``limit`` default."""
+    assert template["required_bindings"] == ["intent"]
     optional = set(template.get("optional_bindings") or [])
     assert {"corpus", "limit"}.issubset(optional)
     defaults = template["default_bindings"]
@@ -80,9 +81,10 @@ def test_groupby_partition_key_is_topic(template: dict) -> None:
     assert groupby_step["args"]["key"] == "topic"
 
 
-def test_aggregate_reducer_references_concept(template: dict) -> None:
-    """The reducer must thread the user's concept binding so each
-    per-topic summary stays scoped to the question, not free-form."""
+def test_aggregate_reducer_references_intent(template: dict) -> None:
+    """The reducer must thread the user's intent (the original question)
+    so each per-topic summary stays scoped to the question, not
+    free-form."""
     aggregate_step = template["plan_json"]["steps"][2]
     reducer = aggregate_step["args"]["reducer"]
-    assert "$concept" in reducer, f"reducer must reference $concept, got: {reducer!r}"
+    assert "$intent" in reducer, f"reducer must reference $intent, got: {reducer!r}"
