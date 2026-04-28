@@ -154,20 +154,49 @@ _PLAN_CACHE_UNAVAILABLE = object()  # sentinel — distinct from None
 _plan_cache_instance = None
 _plan_cache_lock = threading.Lock()
 _plan_cache_populated: bool = False
+#: SQLite file mtime captured at the most recent populate. Used by the
+#: mtime-guarded refresh in :func:`get_t1_plan_cache` to detect plan
+#: library mutation (a re-seeded builtin, an added or deleted row)
+#: without requiring an MCP-server restart. nexus-qgjr.
+_plan_cache_mtime: float = 0.0
+
+
+def _plan_library_mtime(library) -> float:
+    """Return the SQLite file mtime for *library*, or 0.0 when unknown.
+
+    Falls back to 0.0 when the library does not expose a ``path``
+    attribute (in-memory or test-stub libraries) or when the file is
+    missing — both produce a stable repopulate-never-runs fallback that
+    matches the legacy single-populate contract.
+    """
+    path = getattr(library, "path", None)
+    if path is None:
+        return 0.0
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 def get_t1_plan_cache(*, populate_from=None):
     """Return the T1 ``plans__session`` cache, lazy-populated on first call.
 
-    When *populate_from* (a PlanLibrary) is supplied and the cache has not yet
-    been populated this process, the full active plan set is loaded. Subsequent
-    calls short-circuit — the ``plan_save`` MCP hook keeps the cache fresh.
+    When *populate_from* (a PlanLibrary) is supplied, the cache is
+    populated from its rows on first call and **repopulated whenever
+    the underlying SQLite file mtime advances** (nexus-qgjr). The mtime
+    check mirrors the catalog's ``_last_consistency_mtime`` pattern at
+    ``catalog.py:405`` — cheap when nothing changed, rebuilds when a
+    write moves the file's stat-time.
 
-    Returns ``None`` when no T1 client is reachable — the matcher falls back
-    to FTS5 in that case.  Subsequent calls after an init failure return
-    ``None`` immediately without re-entering the lock (see sentinel above).
+    Libraries without a ``path`` attribute fall back to populate-once
+    semantics; the mtime tier costs them nothing.
+
+    Returns ``None`` when no T1 client is reachable — the matcher falls
+    back to FTS5 in that case. Subsequent calls after an init failure
+    return ``None`` immediately without re-entering the lock (see
+    sentinel above).
     """
-    global _plan_cache_instance, _plan_cache_populated
+    global _plan_cache_instance, _plan_cache_populated, _plan_cache_mtime
     if _plan_cache_instance is _PLAN_CACHE_UNAVAILABLE:
         return None
     if _plan_cache_instance is None:
@@ -183,25 +212,29 @@ def get_t1_plan_cache(*, populate_from=None):
                     _plan_cache_instance = _PLAN_CACHE_UNAVAILABLE
     if _plan_cache_instance is _PLAN_CACHE_UNAVAILABLE:
         return None
-    if (
-        populate_from is not None
-        and not _plan_cache_populated
-    ):
+    if populate_from is not None:
+        current_mtime = _plan_library_mtime(populate_from)
         with _plan_cache_lock:
-            if not _plan_cache_populated:
+            stale = (
+                not _plan_cache_populated
+                or (current_mtime > 0.0 and current_mtime > _plan_cache_mtime)
+            )
+            if stale:
                 try:
                     _plan_cache_instance.populate(populate_from)
                 finally:
                     _plan_cache_populated = True
+                    _plan_cache_mtime = current_mtime
     return _plan_cache_instance
 
 
 def reset_plan_cache_for_tests() -> None:
     """Test helper: drop the cache singleton so the next call re-init."""
-    global _plan_cache_instance, _plan_cache_populated
+    global _plan_cache_instance, _plan_cache_populated, _plan_cache_mtime
     with _plan_cache_lock:
         _plan_cache_instance = None
         _plan_cache_populated = False
+        _plan_cache_mtime = 0.0
 
 
 # ── Catalog management ────────────────────────────────────────────────────────
