@@ -55,6 +55,22 @@ def _has_credentials() -> bool:
     return bool(get_credential("voyage_api_key") and get_credential("chroma_api_key"))
 
 
+def _missing_credentials() -> list[str]:
+    """Return the list of unset Voyage / Chroma credentials.
+
+    Used to construct precise error messages — callers can tell the
+    user EXACTLY which key is missing rather than the generic
+    "credentials not configured" form. Empty list means both are set.
+    """
+    from nexus.config import get_credential
+    missing: list[str] = []
+    if not get_credential("voyage_api_key"):
+        missing.append("voyage_api_key")
+    if not get_credential("chroma_api_key"):
+        missing.append("chroma_api_key")
+    return missing
+
+
 _CCE_TOKEN_LIMIT = 24_000  # 75% of Voyage's 32K to account for token estimation error
 _CCE_TOTAL_TOKEN_LIMIT = 120_000  # Voyage API total token limit across all inputs
 # Note: per-batch limit of 32K means we never hit 120K in a single call
@@ -318,7 +334,21 @@ def _index_document(
     relative ``source_path`` stored in chunk metadata (RDR-060).
     """
     if embed_fn is None and not _has_credentials():
-        return 0
+        # GH #336: silent ``return 0`` here was the worst-of-all-worlds —
+        # the CLI reported "Indexed 0 chunks" with exit code 0, looking
+        # like a no-op success. Raise a precise error naming the missing
+        # credential(s); the CLI handlers in ``commands/index.py`` catch
+        # and format for the operator.
+        from nexus.errors import CredentialsMissingError  # noqa: PLC0415
+
+        missing = _missing_credentials()
+        raise CredentialsMissingError(
+            f"cannot index without {', '.join(missing)}. "
+            f"Set via 'nx config set <key> <value>' or the corresponding "
+            f"environment variable. Local-mode T3 reads work without these "
+            f"keys (see 'nx doctor'); ingestion does NOT — it currently "
+            f"requires Voyage embeddings + ChromaDB Cloud auth."
+        )
 
     # Normalize to absolute so staleness checks are path-form-independent.
     file_path = file_path.resolve()
@@ -768,7 +798,17 @@ def index_pdf(
 
     _empty_meta = {"chunks": 0, "pages": [], "title": "", "author": ""}
     if embed_fn is None and not _has_credentials():
-        return _empty_meta if return_metadata else 0
+        # GH #336 mirror: PDF ingestion had the same silent-return-0 bug.
+        from nexus.errors import CredentialsMissingError  # noqa: PLC0415
+
+        missing = _missing_credentials()
+        raise CredentialsMissingError(
+            f"cannot index without {', '.join(missing)}. "
+            f"Set via 'nx config set <key> <value>' or the corresponding "
+            f"environment variable. Local-mode T3 reads work without these "
+            f"keys (see 'nx doctor'); ingestion does NOT — it currently "
+            f"requires Voyage embeddings + ChromaDB Cloud auth."
+        )
 
     # Normalize to absolute so staleness checks are path-form-independent.
     pdf_path = pdf_path.resolve()

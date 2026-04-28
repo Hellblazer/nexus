@@ -512,7 +512,17 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
 
     from nexus.config import get_pdf_extractor
     from nexus.corpus import t3_collection_name
-    from nexus.doc_indexer import index_pdf
+    from nexus.doc_indexer import index_pdf as _index_pdf_raw
+    from nexus.errors import CredentialsMissingError
+
+    # Local wrapper: convert the typed credential error into a Click
+    # exception so the CLI shows a friendly message + exits non-zero
+    # rather than dumping a Python traceback to stderr (GH #336).
+    def index_pdf(*args, **kwargs):
+        try:
+            return _index_pdf_raw(*args, **kwargs)
+        except CredentialsMissingError as e:
+            raise click.ClickException(str(e)) from e
 
     if path is not None and dir_path is not None:
         raise click.UsageError("PATH and --dir are mutually exclusive.")
@@ -730,26 +740,32 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
 def index_md_cmd(path: Path, corpus: str, force: bool, monitor: bool) -> None:
     """Extract and index a Markdown file into T3 docs__CORPUS."""
     from nexus.doc_indexer import index_markdown
+    from nexus.errors import CredentialsMissingError
 
     path = path.resolve()
     label = "Force re-indexing" if force else "Indexing"
     click.echo(f"{label} {path}…")
-    if monitor or not sys.stdout.isatty():
-        chunk_bar = tqdm(total=0, desc="Embedding", unit="chunk", disable=None)
+    try:
+        if monitor or not sys.stdout.isatty():
+            chunk_bar = tqdm(total=0, desc="Embedding", unit="chunk", disable=None)
 
-        def on_chunk_progress(current: int, total: int) -> None:
-            chunk_bar.total = total
-            chunk_bar.n = current
-            chunk_bar.refresh()
+            def on_chunk_progress(current: int, total: int) -> None:
+                chunk_bar.total = total
+                chunk_bar.n = current
+                chunk_bar.refresh()
 
-        meta = index_markdown(path, corpus=corpus, force=force, return_metadata=True,
-                              on_progress=on_chunk_progress)
-        chunk_bar.close()
-        n = meta["chunks"]  # type: ignore[index]
-        sections = meta.get("sections", 0)  # type: ignore[union-attr]
-        click.echo(f"\n  Chunks: {n}  Sections: {sections}")
-    else:
-        n = index_markdown(path, corpus=corpus, force=force)
+            meta = index_markdown(path, corpus=corpus, force=force, return_metadata=True,
+                                  on_progress=on_chunk_progress)
+            chunk_bar.close()
+            n = meta["chunks"]  # type: ignore[index]
+            sections = meta.get("sections", 0)  # type: ignore[union-attr]
+            click.echo(f"\n  Chunks: {n}  Sections: {sections}")
+        else:
+            n = index_markdown(path, corpus=corpus, force=force)
+    except CredentialsMissingError as exc:
+        # GH #336: surface the silent failure visibly. Click maps
+        # ClickException to stderr + non-zero exit.
+        raise click.ClickException(str(exc)) from exc
     result_label = "Force re-indexed" if force else "Indexed"
     click.echo(f"{result_label} {n} chunk(s).")
 
