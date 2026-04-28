@@ -1448,6 +1448,179 @@ class TestNxAnswerEndToEnd:
         assert "planner" in result.lower() or "search" in result.lower()
 
 
+class TestNxAnswerBindingAlias:
+    """Library plans declare ``required_bindings`` like ``[concept]``,
+    ``[area, criterion]``, ``[topic]`` etc., but ``nx_answer`` only
+    auto-supplies ``intent``. Without aliasing, plans with these names
+    fail at dispatch with ``missing required bindings: [...]`` even
+    though ``$intent`` carries the equivalent value.
+
+    The fix: when the matched plan declares a required binding the
+    caller didn't pre-supply (and that has no default), nx_answer
+    aliases the question text into it before calling plan_run.
+    Mirrors what the inline-planner fallback already does.
+    """
+
+    @pytest.mark.asyncio
+    async def test_concept_binding_aliased_from_question(self, tmp_path):
+        """``required_bindings: [concept]`` (research-default shape) gets
+        ``concept = question`` filled in by nx_answer."""
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult
+
+        concept_plan = Match(
+            plan_id=1, name="research-default", description="research plan",
+            confidence=0.75, dimensions={"verb": "research"}, tags="",
+            plan_json=json.dumps({
+                "steps": [{"tool": "search",
+                           "args": {"query": "$concept", "corpus": "knowledge"}}],
+            }),
+            required_bindings=["concept"], optional_bindings=[],
+            default_bindings={}, parent_dims=None,
+        )
+        run_result = PlanResult(steps=[{"text": "ok"}])
+        captured: list[dict] = []
+
+        async def _spy(match, bindings):
+            captured.append(dict(bindings))
+            return run_result
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[concept_plan]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(side_effect=_spy)),
+        ):
+            from nexus.mcp.core import nx_answer
+            await nx_answer("how does projection quality work?")
+
+        assert captured, "plan_run was never called"
+        assert captured[0].get("intent") == "how does projection quality work?"
+        assert captured[0].get("concept") == "how does projection quality work?", (
+            f"concept binding not aliased from question: {captured[0]!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_multiple_required_bindings_all_aliased(self, tmp_path):
+        """``required_bindings: [area, criterion]`` (analyze-default
+        shape) gets both filled. Imperfect but consistent with inline-
+        planner behavior; better than dispatch failure."""
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult
+
+        analyze_plan = Match(
+            plan_id=2, name="analyze-default", description="analyze",
+            confidence=0.65, dimensions={"verb": "analyze"}, tags="",
+            plan_json=json.dumps({"steps": [{"tool": "search",
+                                              "args": {"query": "$area"}}]}),
+            required_bindings=["area", "criterion"], optional_bindings=[],
+            default_bindings={}, parent_dims=None,
+        )
+        run_result = PlanResult(steps=[{"text": "ok"}])
+        captured: list[dict] = []
+
+        async def _spy(match, bindings):
+            captured.append(dict(bindings))
+            return run_result
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[analyze_plan]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(side_effect=_spy)),
+        ):
+            from nexus.mcp.core import nx_answer
+            await nx_answer("compare projection strategies")
+
+        assert captured[0].get("area") == "compare projection strategies"
+        assert captured[0].get("criterion") == "compare projection strategies"
+
+    @pytest.mark.asyncio
+    async def test_default_bindings_not_overwritten(self, tmp_path):
+        """A required binding with a default value is left alone — only
+        unsupplied AND defaultless bindings get the question text."""
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult
+
+        plan_with_default = Match(
+            plan_id=3, name="with-default", description="x",
+            confidence=0.75, dimensions={}, tags="",
+            plan_json=json.dumps({"steps": [{"tool": "search",
+                                              "args": {"query": "$concept"}}]}),
+            required_bindings=["concept"], optional_bindings=[],
+            default_bindings={"concept": "hardcoded default"},
+            parent_dims=None,
+        )
+        run_result = PlanResult(steps=[{"text": "ok"}])
+        captured: list[dict] = []
+
+        async def _spy(match, bindings):
+            captured.append(dict(bindings))
+            return run_result
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[plan_with_default]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(side_effect=_spy)),
+        ):
+            from nexus.mcp.core import nx_answer
+            await nx_answer("the user's question")
+
+        # nx_answer must NOT clobber the default — plan_run merges
+        # defaults with caller bindings; nx_answer's auto-alias fires
+        # only when neither side supplied the binding.
+        assert "concept" not in captured[0], (
+            f"nx_answer overwrote a defaulted binding: {captured[0]!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_intent_required_binding_unchanged(self, tmp_path):
+        """``required_bindings: [intent]`` (the abstract-themes shape)
+        already gets ``intent`` from nx_answer's standard population —
+        the alias loop is a no-op for it."""
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult
+
+        intent_plan = Match(
+            plan_id=4, name="abstract-themes", description="x",
+            confidence=0.55, dimensions={}, tags="",
+            plan_json=json.dumps({"steps": [{"tool": "search",
+                                              "args": {"query": "$intent"}}]}),
+            required_bindings=["intent"], optional_bindings=[],
+            default_bindings={}, parent_dims=None,
+        )
+        run_result = PlanResult(steps=[{"text": "ok"}])
+        captured: list[dict] = []
+
+        async def _spy(match, bindings):
+            captured.append(dict(bindings))
+            return run_result
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[intent_plan]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(side_effect=_spy)),
+        ):
+            from nexus.mcp.core import nx_answer
+            await nx_answer("what are the main themes?")
+
+        assert captured[0].get("intent") == "what are the main themes?"
+
+
 class TestNxAnswerFTS5HitPath:
     """FTS5 sentinel (confidence=None) is treated as a hit, not a miss."""
 
