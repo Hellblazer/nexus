@@ -1,0 +1,101 @@
+# RDR-097 Phase 1 P1.1 — hybrid retrieval for factual QA.
+#
+# Fuses two retrieval streams against the catalog:
+#   1. Vector recall — over-fetch with the search MCP tool.
+#   2. Graph traversal — walk the factual-evidence purpose
+#      (cites / implements / relates) from the vector seeds.
+#
+# Each stream is hydrated with its own per-source cap via
+# ``limit_per_source`` (RDR-097 P1.0 / nexus-uwkw). The two streams
+# are merged into a single ranked list with a natural-language
+# criterion (Gap 2 Option (a) — Claude-prompted merge), then the
+# top-ranked context drives a generate step.
+#
+# Default budget split is 60/40 (vector / graph) per RF-6:
+# Zhou et al. VLDB 2025 §6.4 found this band gave the best tradeoff
+# between vector-recall recall and graph-traversal precision on
+# factual QA (60/40 plateaued the F1 curve before graph dominance
+# started hurting).
+#
+# Threshold note: the search step uses threshold=2.0 (effectively no
+# filter) because the per-corpus default (0.65 for prose) drops every
+# result on broad factual questions — the rank step provides the
+# downstream filter. Tracked as a systemic fix in nexus-h3e2;
+# hard-coded here until that lands.
+#
+# Companion plan: traverse-then-generate.yml shares the matcher space
+# (``verb: lookup``) and disambiguates on ``strategy``. Use
+# traverse-then-generate when the caller already has explicit seed
+# tumblers; use this plan when the caller has a question.
+
+name: hybrid-factual-lookup
+description: >-
+  What is the value / which paper / who reported / what does X say
+  about Y. Answers factual questions where the answer should be a
+  concrete claim, named entity, or specific data point. Fuses vector
+  recall over the catalog with citation- and relation-graph traversal
+  from the vector seeds, then ranks the merged stream against the
+  question. Use abstract-themes for theme / overview questions, and
+  citation-traversal for "what cites this paper" walks.
+dimensions:
+  verb: lookup
+  scope: global
+  strategy: hybrid-factual-lookup
+required_bindings:
+  - question
+optional_bindings:
+  - corpus
+  - limit
+  - depth
+  - vector_budget_chunks
+  - graph_budget_chunks
+default_bindings:
+  corpus: all
+  limit: 40
+  depth: 2
+  vector_budget_chunks: 6
+  graph_budget_chunks: 4
+tags: builtin-template,rdr-097,nexus-vej3,hybrid-rag,factual-qa
+plan_json:
+  steps:
+    - tool: search
+      args:
+        query: $question
+        limit: $limit
+        corpus: $corpus
+        # Disable per-corpus distance filter during over-fetch — the
+        # rank step downstream handles relevance. RF-9; tracked
+        # systemically as nexus-h3e2.
+        threshold: 2.0
+    - tool: traverse
+      args:
+        seeds: $step1.tumblers
+        purpose: factual-evidence
+        depth: $depth
+        direction: both
+    - tool: store_get_many
+      args:
+        ids: $step1.ids
+        collections: $step1.collections
+        limit_per_source: $vector_budget_chunks
+    - tool: store_get_many
+      args:
+        ids: $step2.ids
+        collections: $step2.collections
+        limit_per_source: $graph_budget_chunks
+    - tool: rank
+      args:
+        criterion: >-
+          Relevance to the question "$question". Prefer factual
+          evidence — concrete claims, named entities, numeric values,
+          dates — over topical mentions. The candidates are fused from
+          vector recall and citation/relation-graph traversal; value
+          direct evidence over loose association.
+        inputs:
+          - $step3.contents
+          - $step4.contents
+    - tool: generate
+      args:
+        outline: factual-answer
+        with_citations: true
+        inputs: $step5.ranked
