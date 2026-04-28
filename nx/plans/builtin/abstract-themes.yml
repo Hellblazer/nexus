@@ -36,7 +36,7 @@ dimensions:
   scope: global
   strategy: abstract-themes
 required_bindings:
-  - concept
+  - intent
 optional_bindings:
   - corpus
   - limit
@@ -48,9 +48,14 @@ plan_json:
   steps:
     - tool: search
       args:
-        query: $concept
+        query: $intent
         limit: $limit
         corpus: $corpus
+        # Abstract queries are broad — the per-corpus default threshold
+        # (0.65 for prose) drops every result on questions like "main
+        # themes in X". 2.0 = effectively no filter (cosine distance
+        # tops out at 2.0); downstream groupby/aggregate handles noise.
+        threshold: 2.0
     - tool: groupby
       args:
         ids: $step1.ids
@@ -59,7 +64,7 @@ plan_json:
     - tool: aggregate
       args:
         groups: $step2.groups
-        reducer: key themes and findings about $concept in these chunks
+        reducer: key themes and findings about $intent in these chunks
     - tool: summarize
       args:
         inputs: $step3.aggregates
