@@ -1468,6 +1468,145 @@ def coverage_cmd(owner_prefix: str) -> None:
         click.echo(f"  {ct:<12} {linked:>4}/{total:<4} = {pct:5.1f}%")
 
 
+@catalog.command("link-density")
+@click.option(
+    "--by-collection/--no-by-collection",
+    "by_collection",
+    default=True,
+    help="Aggregate by physical_collection (default).",
+)
+@click.option(
+    "--sample",
+    default=50,
+    type=int,
+    help="Max seeds per collection to BFS (capped to keep latency bounded).",
+)
+@click.option("--depth", default=2, type=int, help="BFS depth (default 2).")
+@click.option(
+    "--threshold",
+    default=3,
+    type=int,
+    help="Frontier-p50 below this flags the collection as low-density.",
+)
+def link_density_cmd(
+    by_collection: bool, sample: int, depth: int, threshold: int
+) -> None:
+    """Measure catalog link-graph density per collection.
+
+    For each ``physical_collection``, samples up to ``--sample`` seed
+    tumblers, runs a depth-``--depth`` BFS from each, and reports the
+    frontier-size distribution (p50, p90) plus the link types that
+    fired during traversal.
+
+    \b
+    Use this before deciding whether a hybrid retrieval plan
+    (RDR-097) makes sense for a given collection. A collection with
+    median frontier <``--threshold`` nodes is flagged as a poor
+    candidate — graph traversal will add latency with little recall
+    gain. Vector-only retrieval is the better choice there.
+
+    \b
+    The frontier count for one seed is the number of nodes reachable
+    within ``--depth`` hops, excluding the seed itself.
+    """
+    import statistics  # noqa: PLC0415
+
+    cat = _get_catalog()
+    db = cat._db
+
+    # By design the bead specifies physical_collection grouping; the
+    # ``--no-by-collection`` flag is a placeholder for a future
+    # global-density rollup so the option signature stays stable.
+    if not by_collection:
+        click.echo("Global rollup not yet implemented — use --by-collection.")
+        return
+
+    rows = db.execute(
+        "SELECT physical_collection, COUNT(*) FROM documents "
+        "WHERE physical_collection IS NOT NULL "
+        "  AND physical_collection != '' "
+        "GROUP BY physical_collection "
+        "ORDER BY physical_collection"
+    ).fetchall()
+
+    if not rows:
+        click.echo("No collections registered in catalog.")
+        return
+
+    click.echo(
+        f"Link-graph density (depth={depth}, sample={sample} per collection):"
+    )
+    header = (
+        f"  {'collection':<40} {'seeds':>5} {'p50':>5} {'p90':>5}  "
+        f"{'flag':<8}  link_types"
+    )
+    click.echo(header)
+    click.echo(f"  {'-' * 38:<40} {'-' * 5:>5} {'-' * 5:>5} {'-' * 5:>5}  "
+               f"{'-' * 6:<8}  ----------")
+
+    for coll, total in rows:
+        seed_rows = db.execute(
+            "SELECT tumbler FROM documents "
+            "WHERE physical_collection = ? "
+            "LIMIT ?",
+            (coll, sample),
+        ).fetchall()
+
+        seeds: list[Tumbler] = []
+        for r in seed_rows:
+            try:
+                seeds.append(Tumbler.parse(r[0]))
+            except Exception:
+                continue
+
+        if not seeds:
+            click.echo(
+                f"  {coll:<40} {0:>5} {0:>5} {0:>5}  "
+                f"{'no-seed':<8}  -"
+            )
+            continue
+
+        frontier_counts: list[int] = []
+        link_types_seen: set[str] = set()
+        for seed in seeds:
+            try:
+                result = cat.graph(seed, depth=depth, direction="both")
+            except Exception:
+                continue
+            nodes = result.get("nodes") or []
+            edges = result.get("edges") or []
+            frontier_counts.append(max(0, len(nodes) - 1))
+            for e in edges:
+                if getattr(e, "link_type", None):
+                    link_types_seen.add(e.link_type)
+
+        if not frontier_counts:
+            click.echo(
+                f"  {coll:<40} {len(seeds):>5} {0:>5} {0:>5}  "
+                f"{'bfs-err':<8}  -"
+            )
+            continue
+
+        sorted_counts = sorted(frontier_counts)
+        p50_val = statistics.median(sorted_counts)
+        # Positional p90: floor(0.9 * (n-1)). For n=1, that's index 0.
+        p90_idx = max(0, int(0.9 * (len(sorted_counts) - 1) + 0.5))
+        p90_val = sorted_counts[p90_idx]
+
+        flag = "low" if p50_val < threshold else "ok"
+        types_str = ",".join(sorted(link_types_seen)) or "-"
+        click.echo(
+            f"  {coll:<40} {len(seeds):>5} {p50_val:>5.1f} {p90_val:>5}  "
+            f"{flag:<8}  {types_str}"
+        )
+
+    click.echo()
+    click.echo(
+        f"Flag legend: 'low' = frontier-p50 < {threshold} (consider "
+        f"vector-only retrieval); 'ok' = sufficient density for hybrid."
+    )
+
+
 @catalog.command("suggest-links")
 @click.option("--limit", "-n", default=50, type=int, help="Max suggestions to show")
 @click.option("--threshold", default=0.0, type=float, help="Reserved for future similarity threshold (unused)")
