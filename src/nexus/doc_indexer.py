@@ -71,6 +71,53 @@ def _missing_credentials() -> list[str]:
     return missing
 
 
+def _make_local_embed_fn() -> tuple[EmbedFn, str]:
+    """Build an ``embed_fn`` backed by :class:`LocalEmbeddingFunction`,
+    returned alongside the model name it will report.
+
+    Used by ``_index_document`` and ``index_pdf`` as the credential-
+    free fallback path: when the user is in local mode (``NX_LOCAL=1``
+    or no Voyage/Chroma keys configured), ingestion uses the same
+    ONNX MiniLM / fastembed model that ``store_put`` and local-mode
+    ``nx search`` already use. The chunk metadata records the actual
+    model that ran, not the requested ``target_model`` — staleness
+    checks fire correctly when a later upgrade to cloud changes the
+    target model.
+
+    The caller overrides its ``target_model`` with the returned model
+    name so the staleness check + chunk metadata are consistent: a
+    re-index in local mode against unchanged content is a no-op
+    instead of a silent re-embed.
+    """
+    from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415
+
+    local_ef = LocalEmbeddingFunction()
+    model_name = local_ef.model_name
+
+    def _local_embed(texts: list[str], _target_model: str) -> tuple[list[list[float]], str]:
+        # Honest about the actual model used. ``staleness_check`` in
+        # ``_index_document`` compares ``stored_model == target_model``;
+        # the caller overrides ``target_model`` with this name so
+        # repeat-indexes against unchanged content are no-ops.
+        embeddings = local_ef(texts)
+        # Normalise to ``list[list[float]]`` regardless of which tier
+        # ran underneath. ChromaDB's ONNXMiniLM_L6_V2 (TIER0) returns
+        # ``np.ndarray`` per row; the chromadb upsert validator
+        # accepts list[list[float]] or list[np.ndarray] but rejects
+        # list[list[np.float32]] — so we convert all the way down to
+        # native floats. fastembed (TIER1) is converted by
+        # LocalEmbeddingFunction but ``np.float32`` scalars survive.
+        normalized: list[list[float]] = []
+        for vec in embeddings:
+            if hasattr(vec, "tolist"):
+                normalized.append(vec.tolist())  # numpy → list[float]
+            else:
+                normalized.append([float(x) for x in vec])
+        return normalized, model_name
+
+    return _local_embed, model_name
+
+
 _CCE_TOKEN_LIMIT = 24_000  # 75% of Voyage's 32K to account for token estimation error
 _CCE_TOTAL_TOKEN_LIMIT = 120_000  # Voyage API total token limit across all inputs
 # Note: per-batch limit of 32K means we never hit 120K in a single call
@@ -333,22 +380,26 @@ def _index_document(
     Callers pass a relative path here so that T3 metadata lookups match the
     relative ``source_path`` stored in chunk metadata (RDR-060).
     """
-    if embed_fn is None and not _has_credentials():
-        # GH #336: silent ``return 0`` here was the worst-of-all-worlds —
-        # the CLI reported "Indexed 0 chunks" with exit code 0, looking
-        # like a no-op success. Raise a precise error naming the missing
-        # credential(s); the CLI handlers in ``commands/index.py`` catch
-        # and format for the operator.
-        from nexus.errors import CredentialsMissingError  # noqa: PLC0415
+    # GH #336: when ``nx index md/pdf`` runs in local mode we want
+    # the local ONNX/fastembed embedder rather than a hard fail. The
+    # local model name overrides ``target_model`` so the staleness
+    # check + chunk metadata are consistent.
+    local_target_model: str | None = None
+    if embed_fn is None:
+        from nexus.config import is_local_mode  # noqa: PLC0415
 
-        missing = _missing_credentials()
-        raise CredentialsMissingError(
-            f"cannot index without {', '.join(missing)}. "
-            f"Set via 'nx config set <key> <value>' or the corresponding "
-            f"environment variable. Local-mode T3 reads work without these "
-            f"keys (see 'nx doctor'); ingestion does NOT — it currently "
-            f"requires Voyage embeddings + ChromaDB Cloud auth."
-        )
+        if is_local_mode():
+            embed_fn, local_target_model = _make_local_embed_fn()
+        elif not _has_credentials():
+            from nexus.errors import CredentialsMissingError  # noqa: PLC0415
+
+            missing = _missing_credentials()
+            raise CredentialsMissingError(
+                f"cannot index in cloud mode without {', '.join(missing)}. "
+                f"Either set the missing key(s) via 'nx config set <key> "
+                f"<value>' (or env var), or unset NX_LOCAL to fall back "
+                f"to local-mode ingestion (no API keys needed)."
+            )
 
     # Normalize to absolute so staleness checks are path-form-independent.
     file_path = file_path.resolve()
@@ -361,6 +412,12 @@ def _index_document(
     col = db.get_or_create_collection(collection_name)
 
     target_model = index_model_for_collection(collection_name)
+    if local_target_model is not None:
+        # Local-mode override: chunk metadata records the local model
+        # name so re-indexes against unchanged content skip cleanly,
+        # and a later upgrade to cloud mode triggers re-embed (the
+        # cloud target_model differs from the locally-stored name).
+        target_model = local_target_model
 
     # Incremental sync: skip if file is already indexed with the same hash AND model
     existing = _chroma_with_retry(
@@ -797,18 +854,23 @@ def index_pdf(
     from functools import partial
 
     _empty_meta = {"chunks": 0, "pages": [], "title": "", "author": ""}
-    if embed_fn is None and not _has_credentials():
-        # GH #336 mirror: PDF ingestion had the same silent-return-0 bug.
-        from nexus.errors import CredentialsMissingError  # noqa: PLC0415
+    # GH #336 mirror: same local-fallback semantics as ``_index_document``.
+    local_target_model: str | None = None
+    if embed_fn is None:
+        from nexus.config import is_local_mode  # noqa: PLC0415
 
-        missing = _missing_credentials()
-        raise CredentialsMissingError(
-            f"cannot index without {', '.join(missing)}. "
-            f"Set via 'nx config set <key> <value>' or the corresponding "
-            f"environment variable. Local-mode T3 reads work without these "
-            f"keys (see 'nx doctor'); ingestion does NOT — it currently "
-            f"requires Voyage embeddings + ChromaDB Cloud auth."
-        )
+        if is_local_mode():
+            embed_fn, local_target_model = _make_local_embed_fn()
+        elif not _has_credentials():
+            from nexus.errors import CredentialsMissingError  # noqa: PLC0415
+
+            missing = _missing_credentials()
+            raise CredentialsMissingError(
+                f"cannot index in cloud mode without {', '.join(missing)}. "
+                f"Either set the missing key(s) via 'nx config set <key> "
+                f"<value>' (or env var), or unset NX_LOCAL to fall back "
+                f"to local-mode ingestion (no API keys needed)."
+            )
 
     # Normalize to absolute so staleness checks are path-form-independent.
     pdf_path = pdf_path.resolve()
@@ -818,6 +880,11 @@ def index_pdf(
     db = t3 if t3 is not None else make_t3()  # T3Database instance (not PipelineDB)
     col = db.get_or_create_collection(col_name)
     target_model = index_model_for_collection(col_name)
+    if local_target_model is not None:
+        # See _index_document for rationale: keep the staleness check
+        # + chunk metadata aligned with the local embedder's actual
+        # model so repeat-indexes are no-ops.
+        target_model = local_target_model
 
     # Incremental sync: skip if file is already indexed with the same hash AND model
     existing = _chroma_with_retry(

@@ -119,8 +119,12 @@ def test_index_pdf_resolves_path(tmp_path: Path, monkeypatch) -> None:
     pdf.write_bytes(content)
     real_hash = hashlib.sha256(content).hexdigest()
 
-    # Mock credentials away
+    # Mock credentials away. Also force is_local_mode() to False so
+    # the local-embedder fallback (GH #336) doesn't fire — this test
+    # exercises the cloud-path staleness check, which expects to
+    # reach the staleness comparison without a fallback diversion.
     monkeypatch.setattr("nexus.doc_indexer._has_credentials", lambda: True)
+    monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
 
     captured_source_paths: list[str] = []
 
