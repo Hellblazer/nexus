@@ -1384,6 +1384,10 @@ class TestStreamingRouting:
         pdf.write_bytes(b"dummy")
         with (
             patch("nexus.doc_indexer._has_credentials", return_value=True),
+            # GH #336: prevent the local-fallback path from firing —
+            # this test exercises the cloud streaming router, not
+            # the credential-fallback branch.
+            patch("nexus.config.is_local_mode", return_value=False),
             patch("nexus.doc_indexer._sha256", return_value="abc123"),
             patch("nexus.doc_indexer.make_t3"),
             patch("nexus.doc_indexer._chroma_with_retry", return_value={"metadatas": []}),
@@ -1402,6 +1406,10 @@ class TestStreamingRouting:
         pdf.write_bytes(b"dummy")
         with (
             patch("nexus.doc_indexer._has_credentials", return_value=True),
+            # GH #336: prevent the local-fallback path from firing —
+            # this test parametrises over streaming routing, not the
+            # credential-fallback branch.
+            patch("nexus.config.is_local_mode", return_value=False),
             patch("nexus.doc_indexer._sha256", return_value="abc123"),
             patch("nexus.doc_indexer.make_t3"),
             patch("nexus.doc_indexer._chroma_with_retry", return_value={"metadatas": []}),
