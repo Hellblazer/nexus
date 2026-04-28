@@ -1,0 +1,57 @@
+# RDR-097 Phase 1 P1.2 — explicit-seeds variant of hybrid-factual-lookup.
+#
+# When the caller already has the seed tumblers (e.g. they know which
+# RDR or paper to expand from), the vector-recall step in
+# hybrid-factual-lookup is wasted work. This plan skips the vector
+# stream and goes graph → generate directly.
+#
+# Same matcher space as hybrid-factual-lookup (``verb: lookup``);
+# the two disambiguate on ``strategy``. The router picks this plan
+# when the caller's intent shape carries explicit seeds rather than a
+# question to be embedded.
+#
+# Companion to:
+#   - hybrid-factual-lookup.yml (full vector + graph fusion)
+#   - citation-traversal.yml (graph-only, summarize verb)
+
+name: traverse-then-generate
+description: >-
+  Expand from a known document (paper, RDR, chunk) and generate a
+  factual answer from the documents that cite, implement, or relate
+  to it. Use when the caller already has the seed tumblers and wants
+  the graph context summarised against a directing prompt; use
+  hybrid-factual-lookup when the caller has a question and needs
+  vector recall to find the seeds first.
+dimensions:
+  verb: lookup
+  scope: global
+  strategy: traverse-then-generate
+required_bindings:
+  - seeds
+optional_bindings:
+  - depth
+  - graph_budget_chunks
+  - prompt
+default_bindings:
+  depth: 2
+  graph_budget_chunks: 8
+  prompt: factual-answer
+tags: builtin-template,rdr-097,nexus-ddm0,graph-traversal,factual-qa
+plan_json:
+  steps:
+    - tool: traverse
+      args:
+        seeds: $seeds
+        purpose: factual-evidence
+        depth: $depth
+        direction: both
+    - tool: store_get_many
+      args:
+        ids: $step1.ids
+        collections: $step1.collections
+        limit_per_source: $graph_budget_chunks
+    - tool: generate
+      args:
+        outline: $prompt
+        with_citations: true
+        inputs: $step2.contents
