@@ -56,3 +56,16 @@ all-implementations:
     Strict-only implementation links — excludes ``implements-heuristic``.
   link_types:
     - implements
+
+factual-evidence:
+  description: >-
+    Walk from a paper / RDR / chunk to documents that cite it, implement
+    it, or are otherwise related — the link-type set that the
+    hybrid-factual-lookup plan uses to build graph context for factual
+    QA. RDR-097 P1.3. P1.5's integration test will measure whether
+    ``implements`` fires usefully on knowledge collections; if not the
+    alias drops to ``[cites, relates]`` before merge.
+  link_types:
+    - cites
+    - implements
+    - relates
