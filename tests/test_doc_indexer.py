@@ -153,15 +153,37 @@ def voyage_client():
     ("pdf", "sample_pdf"),
     ("markdown", "sample_md"),
 ])
-def test_index_skips_without_credentials(indexer, fixture_name, sample_pdf, sample_md, monkeypatch):
+def test_index_raises_credentials_missing_when_unset(
+    indexer, fixture_name, sample_pdf, sample_md, monkeypatch,
+):
+    """GH #336: raise ``CredentialsMissingError`` instead of silently
+    returning 0. The prior silent-return-0 behavior reported "Indexed
+    0 chunks" with exit code 0 — indistinguishable from a no-op
+    success and the worst-of-all-worlds for operator triage. The
+    typed exception flows up to the CLI handlers, which translate it
+    to a ``ClickException`` (visible message + non-zero exit).
+    """
+    from nexus.errors import CredentialsMissingError
+
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
+    # Also point the config-file reader at an empty path so the
+    # ``~/.config/nexus/config.yml`` fallback can't surface a key
+    # outside of the test's monkeypatch scope.
+    monkeypatch.setattr(
+        "nexus.config._global_config_path", lambda: Path("/nonexistent"),
+    )
     path = sample_pdf if indexer == "pdf" else sample_md
     fn = index_pdf if indexer == "pdf" else index_markdown
     with patch("nexus.doc_indexer.make_t3") as mock_factory:
-        result = fn(path, corpus="test")
-    assert result == 0
+        with pytest.raises(CredentialsMissingError) as excinfo:
+            fn(path, corpus="test")
+    # Make sure t3 client init was NOT attempted — we should fail
+    # fast at the credential check, not after constructing the client.
     mock_factory.assert_not_called()
+    # Operator-readable detail names the missing key(s).
+    assert "voyage_api_key" in str(excinfo.value)
+    assert "chroma_api_key" in str(excinfo.value)
 
 
 def test_index_pdf_skips_if_hash_unchanged(sample_pdf, monkeypatch):

@@ -114,6 +114,39 @@ def test_index_nonexistent_path_fails(runner, home, subcmd, ext):
     assert result.exit_code != 0
 
 
+@pytest.mark.parametrize("subcmd,fixture", [
+    ("pdf", "fake_pdf"),
+    ("md", "fake_md"),
+])
+def test_index_credentials_missing_exits_nonzero_with_message(
+    runner, request, subcmd, fixture, monkeypatch,
+):
+    """GH #336: when voyage_api_key / chroma_api_key are unset, the
+    indexer raises ``CredentialsMissingError`` instead of silently
+    returning 0. The CLI handler converts it to a ``ClickException``
+    so the operator sees a clear message + non-zero exit.
+    """
+    from nexus.errors import CredentialsMissingError
+
+    fixture_path = request.getfixturevalue(fixture)
+    fn_name = "index_pdf" if subcmd == "pdf" else "index_markdown"
+
+    # Make the indexer raise as if credentials were missing.
+    def _raise(*args, **kwargs):
+        raise CredentialsMissingError(
+            "cannot index without voyage_api_key, chroma_api_key. "
+            "Set via 'nx config set <key> <value>' ..."
+        )
+
+    with patch(f"nexus.doc_indexer.{fn_name}", side_effect=_raise):
+        result = runner.invoke(main, ["index", subcmd, str(fixture_path)])
+
+    assert result.exit_code != 0, result.output
+    # Click's ClickException prints the message to stdout in CliRunner.
+    assert "voyage_api_key" in result.output
+    assert "Set via" in result.output or "config set" in result.output
+
+
 # ── --frecency-only flag ─────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("flag,expected", [
