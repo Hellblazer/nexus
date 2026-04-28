@@ -11,11 +11,28 @@
 # criterion (Gap 2 Option (a) — Claude-prompted merge), then the
 # top-ranked context drives a generate step.
 #
+# Per-stream cap rationale (HybridRAG §5.4 context-precision tradeoff):
+# unbounded graph traversal injects loosely-relevant chunks that
+# regress the generator's precision faster than they lift recall —
+# §5.4 measured the regression curve and identified the per-source
+# cap as the cleanest mitigation. This plan applies the cap via
+# ``limit_per_source`` per stream rather than a single global cap so
+# vector and graph budgets can be tuned independently.
+#
 # Default budget split is 60/40 (vector / graph) per RF-6:
 # Zhou et al. VLDB 2025 §6.4 found this band gave the best tradeoff
 # between vector-recall recall and graph-traversal precision on
 # factual QA (60/40 plateaued the F1 curve before graph dominance
 # started hurting).
+#
+# ``limit_per_source`` is a runner-respected kwarg on the
+# ``store_get_many`` MCP tool, not a YAML-slice convention. The
+# planning-chain audit caught a prior draft that used Python-style
+# slice expressions (``$step1.ids[:vector_budget_chunks]``) — the
+# runner's binding-substitution language only resolves whole-token
+# ``$var`` / ``$stepN.field`` references; slice expressions would
+# pass through as literal bogus IDs. P1.0 (nexus-uwkw) shipped the
+# kwarg specifically to make per-stream budgeting expressible in YAML.
 #
 # Threshold note: the search step uses threshold=2.0 (effectively no
 # filter) because the per-corpus default (0.65 for prose) drops every
