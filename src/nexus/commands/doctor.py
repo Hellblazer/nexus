@@ -168,8 +168,10 @@ def _run_check_schema() -> None:
 
 #: Minimum number of global-tier builtin plan rows expected after
 #: ``nx catalog setup`` has run on a fresh install. RDR-078 shipped 9;
-#: RDR-092 Phase 0a brings that to 12, but the check only fails below 9
-#: so a partial install on an older plugin is still tolerated.
+#: RDR-092 Phase 0a brought that to 12; RDR-097 Phase 1 added two
+#: more (hybrid-factual-lookup, traverse-then-generate) for 14 total.
+#: The check only fails below 9 so a partial install on an older
+#: plugin is still tolerated.
 _MIN_GLOBAL_BUILTIN_COUNT: int = 9
 
 
