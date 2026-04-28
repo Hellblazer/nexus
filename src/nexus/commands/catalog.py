@@ -437,8 +437,9 @@ def search_cmd(query: str, limit: int, offset: int, as_json: bool) -> None:
     help=(
         "Persistent URI identity (RDR-096 P3.1). Omit to derive "
         "'file://<abspath>' from --file-path automatically. Pass an "
-        "explicit URI (chroma://, https://, nx-scratch://) to store "
-        "verbatim. Malformed URIs are rejected at register-time."
+        "explicit URI (chroma://, https://, nx-scratch://, "
+        "x-devonthink-item://) to store verbatim. Malformed URIs "
+        "are rejected at register-time."
     ),
 )
 @click.option("--corpus", default="")
@@ -1961,6 +1962,39 @@ def _entry_needs_remediation(entry: object) -> tuple[bool, str]:
     return (False, "")
 
 
+def _resolve_via_devonthink(entry: object) -> Path | None:
+    """If ``entry.meta`` carries a ``devonthink_uri``, ask DEVONthink for
+    the current filesystem path and return it when the file exists on
+    disk. Returns ``None`` when no DT URI is recorded, when the platform
+    isn't macOS, when osascript fails, or when DT reports a path that
+    doesn't actually exist (a sign the resolver returned a stale cache).
+
+    This is the companion path to making ``x-devonthink-item://`` a
+    canonical source URI (nexus-bqda): even with a ``file://`` source URI
+    we can still recover from DT relocations using the meta we already
+    record on entries that came in via DEVONthink.
+    """
+    import sys  # noqa: PLC0415
+
+    if sys.platform != "darwin":
+        return None
+    meta = getattr(entry, "meta", {}) or {}
+    dt_uri = meta.get("devonthink_uri", "") if isinstance(meta, dict) else ""
+    if not dt_uri or not dt_uri.startswith("x-devonthink-item://"):
+        return None
+    uuid = dt_uri[len("x-devonthink-item://"):]
+    if not uuid:
+        return None
+    from nexus.aspect_readers import _devonthink_resolver_default  # noqa: PLC0415
+    path, _detail = _devonthink_resolver_default(uuid)
+    if path is None:
+        return None
+    p = Path(path)
+    if not p.exists():
+        return None
+    return p
+
+
 def _resolve_candidate(
     entry: object,
     candidates: list[Path],
@@ -2092,6 +2126,7 @@ def remediate_paths_cmd(
     transitions: list[tuple[object, str, str, Path | None, str]] = []
     skipped_ok = 0
     skipped_no_file_path = 0
+    n_devonthink = 0
     for entry in entries:
         needs, reason = _entry_needs_remediation(entry)
         if not needs:
@@ -2101,6 +2136,16 @@ def remediate_paths_cmd(
                 skipped_ok += 1
             continue
         basename = Path(entry.file_path).name
+        # nexus-srck: try DEVONthink resolution before basename scan.
+        # When meta carries devonthink_uri and DT reports an existing
+        # path, that's authoritative — no point ranking basename matches
+        # against a SOURCE_DIR walk that wouldn't include DT's
+        # Files.noindex tree anyway.
+        dt_path = _resolve_via_devonthink(entry)
+        if dt_path is not None:
+            n_devonthink += 1
+            transitions.append((entry, reason, "devonthink", dt_path, basename))
+            continue
         candidates = index.get(basename, [])
         chosen, note = _resolve_candidate(
             entry, candidates, prefer_deepest=prefer_deepest,
@@ -2118,6 +2163,8 @@ def remediate_paths_cmd(
         f"(skipped {skipped_ok} already-good, {skipped_no_file_path} no-file-path):"
     )
     click.echo(f"  {n_resolved:4d} resolvable")
+    if n_devonthink:
+        click.echo(f"    of which {n_devonthink:4d} via DEVONthink")
     click.echo(f"  {n_ambiguous:4d} ambiguous (multiple basename matches)")
     click.echo(f"  {n_missing:4d} no candidate found in SOURCE_DIR")
 

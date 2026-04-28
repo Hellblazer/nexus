@@ -389,3 +389,278 @@ class TestRemediatePathsCLI:
         ])
         assert result2.exit_code == 0, result2.output
         assert "0 entries need remediation" in result2.output
+
+
+# ── nexus-srck: DEVONthink-aware remediation ────────────────────────────────
+
+
+def _register_paper_with_meta(
+    cat: Catalog, title: str, file_path: str, *, meta: dict,
+) -> str:
+    """Variant of ``_register_paper`` that attaches arbitrary meta —
+    needed to plant ``devonthink_uri`` on a registered entry without
+    going through the (still-evolving) DT ingest path.
+    """
+    from nexus.catalog.tumbler import Tumbler
+    owner_row = cat._db.execute(
+        "SELECT tumbler_prefix FROM owners WHERE name = 'test-papers'",
+    ).fetchone()
+    owner = Tumbler.parse(owner_row[0])
+    tumbler = cat.register(
+        owner=owner, title=title, content_type="paper",
+        file_path=file_path, meta=meta,
+    )
+    return str(tumbler)
+
+
+class TestRemediateViaDevonthink:
+    """When an entry's meta carries ``devonthink_uri``, remediate-paths
+    should ask DEVONthink for the current path before falling back to
+    a SOURCE_DIR basename scan. Tests stub the AppleScript bridge so
+    they run on every platform and don't require DT to be installed.
+    """
+
+    def test_resolves_via_meta_when_dt_returns_existing_path(
+        self,
+        initialized_catalog: Catalog,
+        catalog_env: Path,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        """The DT-resolved path takes precedence over basename scanning
+        — the file lives in DT's ``Files.noindex`` tree which is NOT
+        included in the SOURCE_DIR walk, but DT knows where it is.
+        """
+        # Plant the "real" DT-managed file outside SOURCE_DIR.
+        dt_tree = tmp_path / "DT" / "Files.noindex" / "pdf"
+        dt_tree.mkdir(parents=True)
+        real_pdf = dt_tree / "graph-rag.pdf"
+        real_pdf.write_bytes(b"%PDF-1.4 dt managed body")
+
+        # SOURCE_DIR is unrelated and contains no candidates.
+        source_dir = tmp_path / "papers"
+        source_dir.mkdir()
+
+        tumbler = _register_paper_with_meta(
+            initialized_catalog,
+            "Graph RAG",
+            "/old/broken/graph-rag.pdf",  # absolute, missing → triggers remediation
+            meta={"devonthink_uri": "x-devonthink-item://UUID-A"},
+        )
+
+        # Patch the DT resolver + force the macOS gate open so the
+        # remediator's _resolve_via_devonthink helper accepts the call
+        # on Linux/Windows runners.
+        def fake_resolver(uuid: str) -> tuple[str | None, str]:
+            assert uuid == "UUID-A"
+            return str(real_pdf), ""
+
+        monkeypatch.setattr(
+            "nexus.aspect_readers._devonthink_resolver_default", fake_resolver,
+        )
+        monkeypatch.setattr("sys.platform", "darwin")
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "catalog", "remediate-paths", str(source_dir),
+        ])
+        assert result.exit_code == 0, result.output
+        assert "via DEVONthink" in result.output
+
+        from nexus.catalog.tumbler import Tumbler
+        cat2 = Catalog(catalog_env, catalog_env / ".catalog.db")
+        entry = cat2.resolve(Tumbler.parse(tumbler))
+        assert entry.file_path == str(real_pdf)
+
+    def test_falls_through_to_basename_when_dt_resolver_fails(
+        self,
+        initialized_catalog: Catalog,
+        catalog_env: Path,
+        papers_dir: Path,
+        monkeypatch,
+    ) -> None:
+        """If DT can't resolve (record missing, app not running, etc.)
+        the entry should still get the legacy basename treatment so
+        we never regress relative to pre-nexus-srck behavior.
+        """
+        tumbler = _register_paper_with_meta(
+            initialized_catalog,
+            "SAGE",
+            "sage.pdf",
+            meta={"devonthink_uri": "x-devonthink-item://NOT-IN-DT"},
+        )
+
+        def fake_resolver(uuid: str) -> tuple[str | None, str]:
+            return None, "record not found"
+
+        monkeypatch.setattr(
+            "nexus.aspect_readers._devonthink_resolver_default", fake_resolver,
+        )
+        monkeypatch.setattr("sys.platform", "darwin")
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "catalog", "remediate-paths", str(papers_dir),
+        ])
+        assert result.exit_code == 0, result.output
+
+        from nexus.catalog.tumbler import Tumbler
+        cat2 = Catalog(catalog_env, catalog_env / ".catalog.db")
+        entry = cat2.resolve(Tumbler.parse(tumbler))
+        # Basename scan succeeded → file_path now absolute under papers_dir.
+        assert entry.file_path.endswith("sage.pdf")
+        assert "/" in entry.file_path
+
+    def test_falls_through_when_dt_path_doesnt_exist_on_disk(
+        self,
+        initialized_catalog: Catalog,
+        catalog_env: Path,
+        papers_dir: Path,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        """DT can return a path that's been moved/deleted out from
+        under it. Treat that as "DT doesn't really know" and fall
+        back to basename — never persist a path the resolver lied
+        about.
+        """
+        ghost = tmp_path / "ghost-dt-path.pdf"  # never written
+
+        tumbler = _register_paper_with_meta(
+            initialized_catalog,
+            "SAGE",
+            "sage.pdf",
+            meta={"devonthink_uri": "x-devonthink-item://STALE-UUID"},
+        )
+
+        def fake_resolver(uuid: str) -> tuple[str | None, str]:
+            return str(ghost), ""
+
+        monkeypatch.setattr(
+            "nexus.aspect_readers._devonthink_resolver_default", fake_resolver,
+        )
+        monkeypatch.setattr("sys.platform", "darwin")
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "catalog", "remediate-paths", str(papers_dir),
+        ])
+        assert result.exit_code == 0, result.output
+
+        from nexus.catalog.tumbler import Tumbler
+        cat2 = Catalog(catalog_env, catalog_env / ".catalog.db")
+        entry = cat2.resolve(Tumbler.parse(tumbler))
+        # Basename scan against papers_dir found sage.pdf.
+        assert entry.file_path.endswith("sage.pdf")
+        assert "ghost-dt-path" not in entry.file_path
+
+    def test_no_dt_meta_skips_dt_path_entirely(
+        self,
+        initialized_catalog: Catalog,
+        catalog_env: Path,
+        papers_dir: Path,
+        monkeypatch,
+    ) -> None:
+        """An entry without ``devonthink_uri`` must NOT trigger any
+        resolver call — keeps the resolver from being a hot path on
+        catalogs that have no DT-managed entries at all.
+        """
+        _register_paper_with_meta(
+            initialized_catalog, "SAGE", "sage.pdf", meta={"arxiv_id": "1234.5678"},
+        )
+
+        calls: list[str] = []
+
+        def tracking_resolver(uuid: str) -> tuple[str | None, str]:
+            calls.append(uuid)
+            return None, "should not be called"
+
+        monkeypatch.setattr(
+            "nexus.aspect_readers._devonthink_resolver_default", tracking_resolver,
+        )
+        monkeypatch.setattr("sys.platform", "darwin")
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "catalog", "remediate-paths", str(papers_dir),
+        ])
+        assert result.exit_code == 0, result.output
+        assert calls == []
+
+    def test_non_macos_platform_short_circuits_dt_resolution(
+        self,
+        initialized_catalog: Catalog,
+        catalog_env: Path,
+        papers_dir: Path,
+        monkeypatch,
+    ) -> None:
+        """On non-darwin runners the helper must early-return without
+        even reading meta — the resolver call would be meaningless.
+        """
+        _register_paper_with_meta(
+            initialized_catalog,
+            "SAGE",
+            "sage.pdf",
+            meta={"devonthink_uri": "x-devonthink-item://UUID-X"},
+        )
+
+        calls: list[str] = []
+
+        def tracking_resolver(uuid: str) -> tuple[str | None, str]:
+            calls.append(uuid)
+            return "/should/not/matter", ""
+
+        monkeypatch.setattr(
+            "nexus.aspect_readers._devonthink_resolver_default", tracking_resolver,
+        )
+        monkeypatch.setattr("sys.platform", "linux")
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "catalog", "remediate-paths", str(papers_dir),
+        ])
+        assert result.exit_code == 0, result.output
+        assert calls == []
+
+    def test_dry_run_with_dt_does_not_write(
+        self,
+        initialized_catalog: Catalog,
+        catalog_env: Path,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        dt_tree = tmp_path / "DT" / "Files.noindex"
+        dt_tree.mkdir(parents=True)
+        real_pdf = dt_tree / "doc.pdf"
+        real_pdf.write_bytes(b"%PDF-1.4 body")
+
+        source_dir = tmp_path / "papers"
+        source_dir.mkdir()
+
+        tumbler = _register_paper_with_meta(
+            initialized_catalog,
+            "Doc",
+            "/old/missing/doc.pdf",
+            meta={"devonthink_uri": "x-devonthink-item://UUID-DRY"},
+        )
+
+        def fake_resolver(uuid: str) -> tuple[str | None, str]:
+            return str(real_pdf), ""
+
+        monkeypatch.setattr(
+            "nexus.aspect_readers._devonthink_resolver_default", fake_resolver,
+        )
+        monkeypatch.setattr("sys.platform", "darwin")
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "catalog", "remediate-paths", str(source_dir), "--dry-run",
+        ])
+        assert result.exit_code == 0, result.output
+        assert "via DEVONthink" in result.output
+        assert "dry-run" in result.output.lower()
+
+        from nexus.catalog.tumbler import Tumbler
+        cat2 = Catalog(catalog_env, catalog_env / ".catalog.db")
+        entry = cat2.resolve(Tumbler.parse(tumbler))
+        assert entry.file_path == "/old/missing/doc.pdf"  # untouched
