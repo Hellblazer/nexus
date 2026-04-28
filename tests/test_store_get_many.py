@@ -116,3 +116,213 @@ class TestStoreGetManyBatchBoundary:
         assert len(result["contents"]) == n
         assert all(c == "" for c in result["contents"])
         assert len(result["missing"]) == n
+
+
+class TestStoreGetManyLimitPerSource:
+    """RDR-097 P1.0: ``limit_per_source`` truncation kwarg.
+
+    Three input shapes:
+      - ``None`` (default): no truncation; preserves existing behavior.
+      - ``int``: truncate single-stream ``ids`` to first N.
+      - ``list[int]``: pair with parallel-stream ``ids`` (``list[list[str]]``);
+        truncate each stream to its corresponding limit, then flatten.
+    """
+
+    def _make_t3(self, store: dict[str, dict]):
+        mock_t3 = MagicMock()
+        mock_t3.get_by_id = lambda col, doc_id: store.get(doc_id)
+        return mock_t3
+
+    def test_limit_per_source_none_preserves_default(self):
+        from nexus.mcp.core import store_get_many
+
+        ids = [f"doc-{i}" for i in range(10)]
+        store = {doc_id: {"content": f"body-{doc_id}"} for doc_id in ids}
+        with patch("nexus.mcp.core._get_t3", return_value=self._make_t3(store)):
+            result = store_get_many(
+                ids=ids, collections="knowledge", structured=True
+            )
+        assert len(result["contents"]) == 10
+        assert len(result["missing"]) == 0
+
+    def test_limit_per_source_int_truncates_single_stream(self):
+        from nexus.mcp.core import store_get_many
+
+        ids = [f"doc-{i}" for i in range(20)]
+        store = {doc_id: {"content": f"body-{doc_id}"} for doc_id in ids}
+        mock_t3 = self._make_t3(store)
+
+        with patch("nexus.mcp.core._get_t3", return_value=mock_t3):
+            result = store_get_many(
+                ids=ids,
+                collections="knowledge",
+                structured=True,
+                limit_per_source=5,
+            )
+
+        assert len(result["contents"]) == 5
+        assert result["contents"] == [f"body-doc-{i}" for i in range(5)]
+        assert len(result["missing"]) == 0
+
+    def test_limit_per_source_zero_returns_empty(self):
+        from nexus.mcp.core import store_get_many
+
+        ids = [f"doc-{i}" for i in range(5)]
+        store = {doc_id: {"content": f"body-{doc_id}"} for doc_id in ids}
+        with patch("nexus.mcp.core._get_t3", return_value=self._make_t3(store)):
+            result = store_get_many(
+                ids=ids,
+                collections="knowledge",
+                structured=True,
+                limit_per_source=0,
+            )
+        assert result["contents"] == []
+        assert result["missing"] == []
+
+    def test_limit_per_source_negative_raises_valueerror(self):
+        from nexus.mcp.core import store_get_many
+
+        ids = ["doc-1", "doc-2", "doc-3"]
+        with patch("nexus.mcp.core._get_t3", return_value=MagicMock()):
+            result = store_get_many(
+                ids=ids,
+                collections="knowledge",
+                structured=True,
+                limit_per_source=-1,
+            )
+        assert "error" in result
+        assert "limit_per_source" in result["error"]
+        assert "negative" in result["error"].lower() or "non-negative" in result["error"].lower()
+
+    def test_limit_per_source_list_truncates_parallel_streams(self):
+        from nexus.mcp.core import store_get_many
+
+        stream_a = [f"a{i}" for i in range(4)]
+        stream_b = [f"b{i}" for i in range(3)]
+        store = {
+            **{x: {"content": f"body-{x}"} for x in stream_a},
+            **{x: {"content": f"body-{x}"} for x in stream_b},
+        }
+        mock_t3 = self._make_t3(store)
+
+        with patch("nexus.mcp.core._get_t3", return_value=mock_t3):
+            result = store_get_many(
+                ids=[stream_a, stream_b],
+                collections="knowledge",
+                structured=True,
+                limit_per_source=[2, 1],
+            )
+
+        # Stream-major flatten: [a0, a1] then [b0]
+        assert len(result["contents"]) == 3
+        assert result["contents"] == ["body-a0", "body-a1", "body-b0"]
+        assert result["missing"] == []
+
+    def test_limit_per_source_list_with_single_stream_ids_raises(self):
+        from nexus.mcp.core import store_get_many
+
+        ids = ["doc-1", "doc-2", "doc-3"]
+        with patch("nexus.mcp.core._get_t3", return_value=MagicMock()):
+            result = store_get_many(
+                ids=ids,
+                collections="knowledge",
+                structured=True,
+                limit_per_source=[2],
+            )
+        assert "error" in result
+        assert "parallel" in result["error"].lower()
+
+    def test_limit_per_source_list_length_mismatch_raises_valueerror(self):
+        from nexus.mcp.core import store_get_many
+
+        stream_a = [f"a{i}" for i in range(4)]
+        stream_b = [f"b{i}" for i in range(3)]
+        with patch("nexus.mcp.core._get_t3", return_value=MagicMock()):
+            result = store_get_many(
+                ids=[stream_a, stream_b],
+                collections="knowledge",
+                structured=True,
+                limit_per_source=[2],
+            )
+        assert "error" in result
+        msg = result["error"].lower()
+        assert "1" in result["error"] and "2" in result["error"]
+        assert "length" in msg or "stream" in msg
+
+    def test_limit_per_source_int_with_parallel_ids_broadcasts(self):
+        from nexus.mcp.core import store_get_many
+
+        stream_a = [f"a{i}" for i in range(4)]
+        stream_b = [f"b{i}" for i in range(4)]
+        store = {
+            **{x: {"content": f"body-{x}"} for x in stream_a},
+            **{x: {"content": f"body-{x}"} for x in stream_b},
+        }
+        with patch("nexus.mcp.core._get_t3", return_value=self._make_t3(store)):
+            result = store_get_many(
+                ids=[stream_a, stream_b],
+                collections="knowledge",
+                structured=True,
+                limit_per_source=2,
+            )
+
+        assert len(result["contents"]) == 4
+        assert result["contents"] == ["body-a0", "body-a1", "body-b0", "body-b1"]
+
+    def test_parallel_ids_with_parallel_collections_aligns(self):
+        from nexus.mcp.core import store_get_many
+
+        stream_a = ["a1", "a2"]
+        stream_b = ["b1", "b2"]
+        store = {
+            "a1": {"content": "body-a1"},
+            "a2": {"content": "body-a2"},
+            "b1": {"content": "body-b1"},
+            "b2": {"content": "body-b2"},
+        }
+
+        # Track which collection each id was looked up in.
+        lookups: list[tuple[str, str]] = []
+
+        def stub_get(col_name: str, doc_id: str):
+            lookups.append((col_name, doc_id))
+            return store.get(doc_id)
+
+        mock_t3 = MagicMock()
+        mock_t3.get_by_id = stub_get
+
+        with patch("nexus.mcp.core._get_t3", return_value=mock_t3):
+            result = store_get_many(
+                ids=[stream_a, stream_b],
+                collections=["knowledge__alpha", "knowledge__beta"],
+                structured=True,
+            )
+
+        assert len(result["contents"]) == 4
+        # First two ids should be looked up in alpha, next two in beta.
+        # Resolve t3_collection_name's effect on the names.
+        from nexus.mcp.core import t3_collection_name
+        alpha = t3_collection_name("knowledge__alpha")
+        beta = t3_collection_name("knowledge__beta")
+        assert lookups[0] == (alpha, "a1")
+        assert lookups[1] == (alpha, "a2")
+        assert lookups[2] == (beta, "b1")
+        assert lookups[3] == (beta, "b2")
+
+    def test_parallel_ids_with_scalar_collections_broadcasts(self):
+        from nexus.mcp.core import store_get_many
+
+        stream_a = ["a1"]
+        stream_b = ["b1"]
+        store = {
+            "a1": {"content": "body-a1"},
+            "b1": {"content": "body-b1"},
+        }
+        with patch("nexus.mcp.core._get_t3", return_value=self._make_t3(store)):
+            result = store_get_many(
+                ids=[stream_a, stream_b],
+                collections="knowledge",
+                structured=True,
+            )
+        assert len(result["contents"]) == 2
+        assert result["contents"] == ["body-a1", "body-b1"]
