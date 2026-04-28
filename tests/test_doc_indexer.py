@@ -149,27 +149,114 @@ def voyage_client():
     return client
 
 
+def test_index_md_falls_back_to_local_embedder_when_no_credentials(
+    sample_md, tmp_path, monkeypatch,
+):
+    """GH #336 (option 3): ``nx index md`` must work without
+    Voyage/Chroma credentials in local mode — matching ``nx doctor``'s
+    claim that local mode needs no API keys, and matching the
+    local-embedder path that ``store_put`` already uses. The local
+    ONNX/fastembed embedder produces real vectors; chunks land in
+    the injected client; staleness check uses the local model name
+    so re-indexes against unchanged content are no-ops.
+
+    PDF parity is verified by inspection — ``index_pdf`` uses the
+    same fallback codepath via ``_make_local_embed_fn`` — but its
+    own integration test requires a real PDF fixture (the existing
+    ``sample_pdf`` is fake bytes; PDF tests in this file mock the
+    extractor). The codepath itself is tested at the source level.
+    """
+    import chromadb
+
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    monkeypatch.delenv("CHROMA_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "nexus.config._global_config_path", lambda: Path("/nonexistent"),
+    )
+    # is_local_mode() returns True when either key is absent; with
+    # both keys cleared above it's True without an explicit NX_LOCAL.
+
+    # Inject an EphemeralClient so the test doesn't hit a real
+    # PersistentClient on disk.
+    client = chromadb.EphemeralClient()
+    from nexus.db.t3 import T3Database
+    local_t3 = T3Database(_client=client, local_mode=True)
+
+    n = index_markdown(sample_md, corpus="local_fallback_test", t3=local_t3)
+    assert n > 0, (
+        f"local-mode markdown index should produce chunks; got {n}. "
+        f"This is the GH #336 contract: ingestion works without keys "
+        f"in local mode."
+    )
+
+    # Verify chunks landed AND were tagged with the local model name
+    # (not voyage-context-3 — staleness check on re-run depends on it).
+    col = local_t3.get_or_create_collection("docs__local_fallback_test")
+    rows = col.get(limit=1, include=["metadatas"])
+    assert rows["metadatas"], "expected at least one chunk in collection"
+    embedding_model = rows["metadatas"][0].get("embedding_model", "")
+    assert embedding_model and embedding_model != "voyage-context-3", (
+        f"chunk metadata should record the LOCAL model name; got "
+        f"{embedding_model!r}. The staleness check on re-index "
+        f"compares stored_model == target_model, and using the local "
+        f"name for both keeps repeat-index a no-op."
+    )
+
+    # Re-index against unchanged content: should skip (return 0)
+    # because hash + model match.
+    n2 = index_markdown(sample_md, corpus="local_fallback_test", t3=local_t3)
+    assert n2 == 0, (
+        f"re-index against unchanged content should be a no-op; got {n2}. "
+        f"If this fails, the staleness check is comparing the local "
+        f"actual_model against the cloud target_model from "
+        f"index_model_for_collection — see local_target_model override."
+    )
+
+
+def test_make_local_embed_fn_returns_consistent_model_name():
+    """Sanity: ``_make_local_embed_fn`` returns an embed_fn AND a
+    model_name. Calling the embed_fn returns embeddings tagged with
+    the SAME model_name. The caller relies on this consistency to
+    align ``target_model`` with what the embedder actually reports.
+    """
+    from nexus.doc_indexer import _make_local_embed_fn
+
+    embed_fn, model_name = _make_local_embed_fn()
+    assert isinstance(model_name, str) and model_name
+    assert model_name != "voyage-context-3"
+
+    embeddings, reported_model = embed_fn(["hello world"], "voyage-context-3")
+    assert len(embeddings) == 1
+    assert isinstance(embeddings[0], list)
+    assert len(embeddings[0]) > 0
+    assert reported_model == model_name, (
+        "embed_fn must report the same model_name returned by "
+        "_make_local_embed_fn — otherwise the caller's target_model "
+        "override (which uses the returned model_name) and the chunk "
+        "metadata (which uses the embed_fn's reported name) would "
+        "diverge, breaking the staleness check on re-index."
+    )
+
+
 @pytest.mark.parametrize("indexer,fixture_name", [
     ("pdf", "sample_pdf"),
     ("markdown", "sample_md"),
 ])
-def test_index_raises_credentials_missing_when_unset(
+def test_index_raises_credentials_missing_when_cloud_mode_explicit(
     indexer, fixture_name, sample_pdf, sample_md, monkeypatch,
 ):
-    """GH #336: raise ``CredentialsMissingError`` instead of silently
-    returning 0. The prior silent-return-0 behavior reported "Indexed
-    0 chunks" with exit code 0 — indistinguishable from a no-op
-    success and the worst-of-all-worlds for operator triage. The
-    typed exception flows up to the CLI handlers, which translate it
-    to a ``ClickException`` (visible message + non-zero exit).
+    """The corollary: when the user has explicitly opted into cloud
+    mode (``NX_LOCAL=0``) but credentials are missing, fail fast with
+    ``CredentialsMissingError`` rather than silently degrading to
+    local. ``NX_LOCAL=0`` is the operator's commitment to using
+    Voyage; honoring it means a credential gap should be surfaced,
+    not papered over.
     """
     from nexus.errors import CredentialsMissingError
 
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
-    # Also point the config-file reader at an empty path so the
-    # ``~/.config/nexus/config.yml`` fallback can't surface a key
-    # outside of the test's monkeypatch scope.
+    monkeypatch.setenv("NX_LOCAL", "0")
     monkeypatch.setattr(
         "nexus.config._global_config_path", lambda: Path("/nonexistent"),
     )
@@ -178,12 +265,10 @@ def test_index_raises_credentials_missing_when_unset(
     with patch("nexus.doc_indexer.make_t3") as mock_factory:
         with pytest.raises(CredentialsMissingError) as excinfo:
             fn(path, corpus="test")
-    # Make sure t3 client init was NOT attempted — we should fail
-    # fast at the credential check, not after constructing the client.
     mock_factory.assert_not_called()
-    # Operator-readable detail names the missing key(s).
     assert "voyage_api_key" in str(excinfo.value)
     assert "chroma_api_key" in str(excinfo.value)
+    assert "NX_LOCAL" in str(excinfo.value)
 
 
 def test_index_pdf_skips_if_hash_unchanged(sample_pdf, monkeypatch):
