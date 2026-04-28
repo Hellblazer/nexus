@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.16.1] - 2026-04-27
+
+Plugin version aligned with conexus 4.16.1. No plugin-level functional changes. Hotfix release for `nx index md` / `nx index pdf` silently returning 0 chunks when credentials were unset — see root `CHANGELOG.md` for the local-embedder fallback (PR #338) + cloud-mode error path (PR #337) details. Closes #336.
+
 ## [4.15.1] - 2026-04-26
 
 Plugin version aligned with conexus 4.15.1. No plugin-level functional changes. Documentation-only point release: the root `README.md` now opens with the new Tensegrity blog posts (Post 0 *How I actually use Nexus*, Post 00 *Installing Nexus*) as the recommended on-ramp ahead of Post 1 *Nexus by Example*, and the header image is the series establishing shot. See root `CHANGELOG.md` for full notes.

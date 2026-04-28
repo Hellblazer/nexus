@@ -6,6 +6,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.16.1] - 2026-04-27
+
+Hotfix release for `nx index md` / `nx index pdf` silently returning 0 chunks when Voyage/Chroma credentials were unset (#336). The CLI looked like it succeeded — exit code 0, "Indexed 0 chunk(s)" — while indexing nothing. The fix has two layers:
+
+### Fixed
+
+- **`nx index md` / `nx index pdf` now work without credentials in local mode** (`#338`). When `is_local_mode()` returns True (NX_LOCAL=1, or either `voyage_api_key` / `chroma_api_key` unset), ingestion falls back to the same `LocalEmbeddingFunction` (ONNX MiniLM / fastembed) that `store_put` and local-mode `nx search` already use. This finally honours the claim from `nx doctor`: "T3 mode: local (no API keys needed)" — the doctor was right about reads, but ingestion was lying. Chunk metadata records the local model name (not `voyage-context-3`), so re-indexes against unchanged content are no-ops, and a later upgrade to cloud correctly triggers re-embed.
+- **Cloud mode without credentials raises `CredentialsMissingError`** (`#337`). When the user has explicitly opted into cloud mode (`NX_LOCAL=0`) but `voyage_api_key`/`chroma_api_key` are missing, `nx index md` / `nx index pdf` exit non-zero with a 4-line operator-readable message naming the missing key(s) and explaining how to set them or fall back to local mode. Replaces the silent `return 0` that reported "Indexed 0 chunk(s)" with exit code 0 — indistinguishable from a no-op success.
+
+### Behavior matrix
+
+|  | `voyage_api_key` set | `voyage_api_key` unset |
+|---|---|---|
+| `NX_LOCAL=1` | local fallback | local fallback |
+| `NX_LOCAL` unset | cloud (existing) | local fallback |
+| `NX_LOCAL=0` | cloud (existing) | `CredentialsMissingError` |
+
+`NX_LOCAL=0` is the operator's explicit commitment to Voyage; honouring it means a credential gap surfaces rather than silently degrading.
+
+### Internal
+
+- New `_make_local_embed_fn` helper in `doc_indexer.py` returns `(embed_fn, model_name)`. The caller overrides `target_model` with the returned `model_name` so the staleness check + chunk metadata are aligned. Defensive embedding normalisation: chromadb's upsert validator accepts `list[list[float]]` or `list[np.ndarray]` but rejects `list[list[np.float32]]`; the helper converts all the way down to native floats regardless of whether TIER0 (ONNXMiniLM_L6_V2) or TIER1 (fastembed) ran underneath.
+- Three pre-existing tests that monkeypatched `_has_credentials → True` without env vars now also patch `is_local_mode → False` to preserve their cloud-path test intent.
+
 ## [4.15.1] - 2026-04-26
 
 Documentation-only point release. README leads with the new Tensegrity blog posts: Post 0 (*How I actually use Nexus*) as the conceptual overview and Post 00 (*Installing Nexus*) as the install walkthrough, with Post 1 (*Nexus by Example*) following as the practice tour. Header image swapped to the establishing shot for the series.
