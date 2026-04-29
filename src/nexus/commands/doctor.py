@@ -1345,22 +1345,30 @@ def _run_check_taxonomy() -> None:
     # flagging drift. Shakeout on live data: 15 of 20 residual drift
     # rows after a backfill were isolated topics that could never
     # produce a link.
+    # The NOT EXISTS form (``tl.from_topic_id = ta.topic_id OR
+    # tl.to_topic_id = ta.topic_id``) defeats SQLite's index planner —
+    # the OR forces a covering scan of topic_links per outer row, which
+    # multiplies with the topic_assignments scan into billions of row
+    # touches on real-size catalogs (~526k × 13k = ~7B comparisons in
+    # one production database, hanging the check past 30s). Pre-build
+    # the linked-topic set with a UNION (uses the topic_links primary
+    # key for both halves) and reduce to a single fast NOT IN.
     drift_rows = conn.execute(
         """
         SELECT DISTINCT ta.topic_id, t.label, t.collection
           FROM topic_assignments ta
           LEFT JOIN topics t ON t.id = ta.topic_id
          WHERE ta.assigned_by = 'projection'
+           AND ta.topic_id NOT IN (
+               SELECT from_topic_id FROM topic_links
+               UNION
+               SELECT to_topic_id   FROM topic_links
+           )
            AND EXISTS (
                SELECT 1 FROM topic_assignments ta2
                 WHERE ta2.doc_id      = ta.doc_id
                   AND ta2.topic_id    != ta.topic_id
                   AND ta2.assigned_by = 'projection'
-           )
-           AND NOT EXISTS (
-               SELECT 1 FROM topic_links tl
-                WHERE tl.from_topic_id = ta.topic_id
-                   OR tl.to_topic_id   = ta.topic_id
            )
         """
     ).fetchall()
