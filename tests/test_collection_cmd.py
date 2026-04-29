@@ -218,6 +218,49 @@ def test_reindex_aborts_on_sourceless(runner, env_creds, mock_db) -> None:
     assert any(w in result.output.lower() for w in ("sourceless", "source_path", "force", "lost"))
 
 
+def test_reindex_refuses_when_all_entries_sourceless(
+    runner, env_creds, mock_db,
+) -> None:
+    """GitHub #367: when every entry is store_put-only (no source_path),
+    --force must NOT bypass the safety check. The operation has no source
+    to re-index from and would destroy all data with no recovery path.
+
+    The fix routes the user to ``nx collection delete`` for an explicit
+    delete and refuses regardless of --force. Mirrors the failure mode
+    that lost 28 entries across knowledge__knowledge / knowledge__prd-
+    orchestrate / knowledge__conductor-orchestrate / taxonomy__centroids
+    when a user ran ``nx collection reindex --force`` during an embedding
+    model migration."""
+    mock_db.collection_info.return_value = {"count": 23, "metadata": {}}
+    mock_col = MagicMock()
+    # All 23 entries lack source_path — pure store_put population.
+    mock_col.get.return_value = {
+        "ids": [f"id{i}" for i in range(23)],
+        "metadatas": [{} for _ in range(23)],
+    }
+    mock_db.get_or_create_collection.return_value = mock_col
+
+    # Plain reindex must refuse.
+    result = _invoke(runner, mock_db, ["reindex", "knowledge__knowledge"])
+    assert result.exit_code != 0
+    assert "refusing to reindex" in result.output.lower()
+    assert "nx collection delete" in result.output
+    assert "#367" in result.output
+
+    # --force must ALSO refuse (the bug was --force bypassing the safety
+    # check when there's nothing to force).
+    result = _invoke(
+        runner, mock_db, ["reindex", "knowledge__knowledge", "--force"],
+    )
+    assert result.exit_code != 0
+    assert "refusing to reindex" in result.output.lower()
+    assert "--force does not bypass" in result.output
+
+    # Critical assertion: delete_collection was NEVER called. The bug
+    # deleted first and reported 0 chunks after.
+    mock_db.delete_collection.assert_not_called()
+
+
 def test_reindex_force_proceeds(runner, env_creds, mock_db, tmp_path) -> None:
     doc_file = tmp_path / "doc.md"
     doc_file.write_text("# Doc\ncontent")

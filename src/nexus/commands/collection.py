@@ -268,10 +268,31 @@ def reindex_cmd(name: str, force: bool) -> None:
             break
         offset += 300
 
+    # If EVERY entry is sourceless, --force does nothing useful — there is
+    # no source to reindex from, so the operation collapses to "delete the
+    # collection". GitHub #367: a user lost 28 store_put-only entries this
+    # way during an embedding-model migration. Refuse unconditionally and
+    # point at `nx collection delete` for the genuine-delete path.
+    if sourceless and not source_paths:
+        raise click.ClickException(
+            f"Refusing to reindex '{name}': all {len(sourceless)} entries "
+            f"lack source_path (e.g. manual store_put entries, "
+            f"taxonomy__centroids, or other programmatically-populated "
+            f"collections). There is no source to re-index from — this "
+            f"would destroy every chunk with no recovery path.\n\n"
+            f"  • If you want to delete the collection, run:\n"
+            f"      nx collection delete {name}\n"
+            f"  • In-place re-embedding (preserve content, swap embedding "
+            f"model) is not yet supported. Track at GitHub #367.\n\n"
+            f"--force does not bypass this check — there is nothing to force."
+        )
+
     if sourceless and not force:
         raise click.ClickException(
-            f"{len(sourceless)} entries lack source_path (manual entries). "
-            f"These cannot be re-indexed and will be LOST. Use --force to proceed."
+            f"{len(sourceless)} entries lack source_path (manual entries) "
+            f"and {len(source_paths)} have source files. The {len(sourceless)} "
+            f"sourceless entries cannot be re-indexed and will be LOST. "
+            f"Use --force to proceed and accept that loss."
         )
 
     # 3. Delete collection

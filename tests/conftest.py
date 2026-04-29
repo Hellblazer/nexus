@@ -72,6 +72,17 @@ def _isolate_t1_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     """
     sessions = tmp_path / ".nexus" / "sessions"
     sessions.mkdir(parents=True, exist_ok=True)
+    # Force-import the modules before monkeypatch.setattr's string-path
+    # resolver walks them. On Python 3.13, package attribute access via
+    # ``getattr(nexus.db, "t1")`` no longer auto-loads submodules — so
+    # if no prior test imported ``nexus.db.t1`` directly, monkeypatch's
+    # walk fails with ``AttributeError: module 'nexus.db' has no
+    # attribute 't1'``. Importing here guarantees the submodules are
+    # registered as parent-package attributes before the lookup.
+    # Python 3.12 was implicitly forgiving; 3.13 is not.
+    import nexus.db.t1  # noqa: F401  -- side effect: registers as attr
+    import nexus.hooks  # noqa: F401  -- side effect: registers as attr
+
     monkeypatch.setattr("nexus.db.t1.SESSIONS_DIR", sessions)
     monkeypatch.setattr("nexus.hooks.SESSIONS_DIR", sessions)
 
