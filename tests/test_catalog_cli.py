@@ -327,6 +327,55 @@ class TestLinksFilterCommand:
         assert uniq.output.count("implements") == 1
 
 
+class TestUpdateCommand:
+    def test_update_source_uri_recovery_path(
+        self, initialized_catalog, catalog_env,
+    ):
+        """``nx catalog update <tumbler> --source-uri <uri>`` is the
+        recovery path for entries whose DT-URI stamp failed during
+        ``nx dt index``. The flag must accept any URI in the
+        ``_KNOWN_URI_SCHEMES`` allowlist (validated at register-boundary).
+        """
+        runner = CliRunner()
+        # Register an entry with a file:// source_uri (mimics what a
+        # plain indexer registers before the dt stamp would run).
+        runner.invoke(main, [
+            "catalog", "register",
+            "--title", "Stamp-recovery target",
+            "--owner", "1.1",
+            "--file-path", "/Users/x/a.pdf",
+        ])
+
+        result = runner.invoke(main, [
+            "catalog", "update", "1.1.1",
+            "--source-uri",
+            "x-devonthink-item://8EDC855D-213F-40AD-A9CF-9543CC76476B",
+        ])
+        assert result.exit_code == 0, result.output
+
+        show = runner.invoke(main, ["catalog", "show", "1.1.1"])
+        assert "x-devonthink-item://8EDC855D" in show.output
+
+    def test_update_source_uri_validates_scheme(
+        self, initialized_catalog, catalog_env,
+    ):
+        """Unknown URI schemes are rejected at the register-boundary
+        validator (``_normalize_source_uri``); the CLI must surface
+        the failure cleanly rather than silently persist garbage."""
+        runner = CliRunner()
+        runner.invoke(main, [
+            "catalog", "register",
+            "--title", "x",
+            "--owner", "1.1",
+            "--file-path", "/Users/x/a.pdf",
+        ])
+        result = runner.invoke(main, [
+            "catalog", "update", "1.1.1",
+            "--source-uri", "imaginary-scheme://nope",
+        ])
+        assert result.exit_code != 0
+
+
 class TestDeleteCommand:
     def test_delete_by_tumbler(self, initialized_catalog, catalog_env):
         runner = CliRunner()
