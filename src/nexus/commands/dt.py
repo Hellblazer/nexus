@@ -483,3 +483,221 @@ def open_cmd(tumbler_or_uuid: str) -> None:
         )
 
     subprocess.run(["open", uri], check=True)  # noqa: S603,S607
+
+
+# ── DT-side AppleScript installer (nexus-tv5u) ────────────────────────────────
+
+
+# Manifest mapping each shipped .applescript file to the DT subdirs it
+# installs into. The actual files travel as wheel package data via
+# ``[tool.hatch.build.targets.wheel.force-include]`` ("dt/scripts" ->
+# "nexus/_resources/dt-scripts"); editable installs resolve the same
+# path through the ``src/nexus/_resources/dt-scripts`` symlink. Adding
+# a new script: drop it into ``dt/scripts/`` and add a manifest entry.
+_DT_SCRIPT_MANIFEST: dict[str, tuple[str, ...]] = {
+    "Index Selection in nx.applescript": ("Toolbar", "Menu"),
+    "Index Selection in nx (Knowledge).applescript": ("Menu",),
+    "Index Current Group in nx.applescript": ("Toolbar", "Menu"),
+}
+
+# DT4's bundle identifier. DT3 lives under ``com.devon-technologies.think3``;
+# we deliberately target DT4 only because that's where the ``nx dt`` CLI
+# was developed and exercised.
+_DT_APP_SCRIPTS_SUBDIR = "com.devon-technologies.think"
+
+
+def _default_app_scripts_dir() -> Path:
+    """Default ``--app-scripts-dir`` location for installed scripts.
+
+    DT4 watches subdirectories of ``~/Library/Application Scripts/
+    com.devon-technologies.think/`` (Toolbar, Menu, Contextual Menu,
+    Smart Rules, Reminders). The user must restart DT for a freshly-
+    installed Toolbar script to be draggable in "View > Customize
+    Toolbar…"; Menu items are picked up on next menu open.
+    """
+    return Path.home() / "Library" / "Application Scripts" / _DT_APP_SCRIPTS_SUBDIR
+
+
+def _resolve_dt_script_source_dir() -> Path:
+    """Resolve the package-data directory containing the shipped
+    ``.applescript`` source files.
+
+    Editable installs see ``src/nexus/_resources/dt-scripts`` (symlink
+    to ``dt/scripts``). Wheel installs see the force-included copy
+    inside the installed ``nexus/_resources/dt-scripts``. Both resolve
+    via :func:`importlib.resources.files`.
+    """
+    from importlib.resources import as_file, files
+
+    resource = files("nexus") / "_resources" / "dt-scripts"
+    with as_file(resource) as resolved:
+        return Path(resolved)
+
+
+@dt.command("install-scripts")
+@click.option(
+    "--target",
+    type=click.Choice(["toolbar", "menu", "all"], case_sensitive=False),
+    default="all",
+    show_default=True,
+    help=(
+        "Which DT script slot to install into. ``toolbar`` installs "
+        "scripts into the Toolbar/ subdir (drag to add as toolbar "
+        "buttons); ``menu`` installs into Menu/ (DT's Scripts menu, "
+        "left of Help); ``all`` does both."
+    ),
+)
+@click.option(
+    "--uninstall",
+    is_flag=True,
+    help="Remove installed scripts instead of installing.",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Overwrite existing files without prompting.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show what would happen without writing or deleting.",
+)
+@click.option(
+    "--app-scripts-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help=(
+        "Override the DEVONthink Application Scripts directory. "
+        "Defaults to ~/Library/Application Scripts/"
+        "com.devon-technologies.think. Used by tests; rarely needed "
+        "in practice."
+    ),
+)
+def install_scripts_cmd(
+    target: str,
+    uninstall: bool,
+    force: bool,
+    dry_run: bool,
+    app_scripts_dir: Path | None,
+) -> None:
+    """Install (or remove) DT-side AppleScripts that wrap ``nx dt index``.
+
+    Drops one or more ``.applescript`` files into DEVONthink's
+    Application Scripts subdirectories so the actions appear as
+    toolbar buttons (Toolbar/) or in DT's own Scripts menu (Menu/).
+    The scripts call back into ``nx dt index`` via ``do shell
+    script``; this verb is purely the file-copying installer.
+
+    Restart DEVONthink to make a newly-installed Toolbar script
+    draggable in "View > Customize Toolbar…". Menu items are picked
+    up on the next menu open.
+    """
+    if not _is_darwin():
+        raise click.ClickException("DEVONthink is macOS-only")
+
+    base = app_scripts_dir if app_scripts_dir is not None else _default_app_scripts_dir()
+
+    targets_filter: set[str] = (
+        {"Toolbar", "Menu"} if target == "all"
+        else {target.capitalize()}
+    )
+
+    if uninstall:
+        _uninstall_scripts(base, targets_filter, dry_run=dry_run)
+        return
+
+    src_dir = _resolve_dt_script_source_dir()
+    _install_scripts(
+        src_dir,
+        base,
+        targets_filter,
+        force=force,
+        dry_run=dry_run,
+    )
+
+
+def _install_scripts(
+    src_dir: Path,
+    base: Path,
+    targets_filter: set[str],
+    *,
+    force: bool,
+    dry_run: bool,
+) -> None:
+    """Copy each manifest entry into every applicable DT subdir."""
+    written = 0
+    skipped = 0
+    for filename, manifest_targets in _DT_SCRIPT_MANIFEST.items():
+        applicable = set(manifest_targets) & targets_filter
+        if not applicable:
+            continue
+        source = src_dir / filename
+        if not source.exists():
+            raise click.ClickException(
+                f"package-data file missing for manifest entry: {filename}",
+            )
+        for subdir in sorted(applicable):
+            dest_dir = base / subdir
+            dest = dest_dir / filename
+            if dry_run:
+                click.echo(f"would install: {dest}")
+                continue
+
+            if dest.exists() and not force:
+                if not click.confirm(
+                    f"{dest} already exists. Overwrite?",
+                    default=False,
+                ):
+                    click.echo(f"skipped: {dest}")
+                    skipped += 1
+                    continue
+
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(source.read_bytes())
+            click.echo(f"installed: {dest}")
+            written += 1
+
+    if dry_run:
+        return
+
+    click.echo("")
+    click.echo(f"Done: {written} installed, {skipped} skipped.")
+    if written:
+        click.echo(
+            "Restart DEVONthink to pick up Toolbar scripts in the "
+            "'Customize Toolbar…' sheet. Menu items appear on next "
+            "menu open.",
+        )
+
+
+def _uninstall_scripts(
+    base: Path,
+    targets_filter: set[str],
+    *,
+    dry_run: bool,
+) -> None:
+    """Remove every manifest entry from every applicable DT subdir.
+
+    Idempotent on missing files: a clean tree returns success with a
+    "0 removed" line so the caller can run uninstall freely without
+    pre-checking.
+    """
+    removed = 0
+    for filename, manifest_targets in _DT_SCRIPT_MANIFEST.items():
+        applicable = set(manifest_targets) & targets_filter
+        for subdir in sorted(applicable):
+            dest = base / subdir / filename
+            if not dest.exists():
+                continue
+            if dry_run:
+                click.echo(f"would remove: {dest}")
+                continue
+            dest.unlink()
+            click.echo(f"removed: {dest}")
+            removed += 1
+
+    if dry_run:
+        return
+
+    click.echo("")
+    click.echo(f"Done: {removed} removed.")
