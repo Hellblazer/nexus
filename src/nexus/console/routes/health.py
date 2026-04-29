@@ -103,7 +103,71 @@ def _collect_health_data() -> dict[str, Any]:
     else:
         data["dolt_server"] = {"exists": False}
 
+    # Aspect-extraction queue (RDR-089 worker depth, nexus-qf48). Mirrors
+    # the doctor.py --check-aspect-queue surface (nexus-1pfq) so the
+    # console exposes the same observability without invoking the CLI.
+    data["aspect_queue"] = _collect_aspect_queue_data()
+
     return data
+
+
+def _collect_aspect_queue_data() -> dict[str, Any]:
+    """Return aspect_extraction_queue depth + per-status breakdown.
+
+    Returns ``{"present": False}`` when the T2 database or table is
+    missing (pre-RDR-089 install). ``{"present": True, "total": N,
+    "by_status": {status: count, ...}, "oldest_pending": iso_str|None,
+    "failed_count": N}`` otherwise.
+    """
+    import sqlite3 as _sqlite3
+
+    from nexus.commands._helpers import default_db_path
+
+    db_path = default_db_path()
+    if not db_path.exists():
+        return {"present": False}
+
+    try:
+        conn = _sqlite3.connect(str(db_path))
+    except _sqlite3.Error:
+        return {"present": False}
+
+    try:
+        has_table = conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name='aspect_extraction_queue'"
+        ).fetchone()
+        if not has_table:
+            return {"present": False}
+
+        total = conn.execute(
+            "SELECT COUNT(*) FROM aspect_extraction_queue"
+        ).fetchone()[0]
+        by_status_rows = conn.execute(
+            "SELECT status, COUNT(*) FROM aspect_extraction_queue "
+            "GROUP BY status"
+        ).fetchall()
+        by_status = {status: int(count) for status, count in by_status_rows}
+
+        oldest = conn.execute(
+            "SELECT MIN(enqueued_at) FROM aspect_extraction_queue "
+            "WHERE status IN ('pending', 'processing')"
+        ).fetchone()
+        oldest_pending = oldest[0] if oldest and oldest[0] else None
+
+        failed_count = int(by_status.get("failed", 0))
+
+        return {
+            "present": True,
+            "total": int(total),
+            "by_status": by_status,
+            "oldest_pending": oldest_pending,
+            "failed_count": failed_count,
+        }
+    except _sqlite3.Error:
+        return {"present": False}
+    finally:
+        conn.close()
 
 
 def _age_str(seconds: int) -> str:
