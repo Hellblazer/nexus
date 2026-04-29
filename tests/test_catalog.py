@@ -790,3 +790,255 @@ class TestLinkChashValidation:
         cat, _, a, b = cat_with_two_docs
         assert cat.link(a, b, "cites", "test-agent",
                         from_span="chash:" + "a" * 64, allow_dangling=True) is True
+
+
+class TestCrossProjectGuard:
+    """nexus-3e4s: register-time guard against cross-project source_uri
+    contamination.
+
+    Background: ~6,500 catalog rows in Hal's catalog have nexus's own
+    files attributed to OTHER projects' physical_collections (the
+    smoking gun: owner X with repo_root=/path/to/X registered files
+    whose source_uri is /path/to/Y/foo.py). The guard fails loudly
+    at register time so the bug class cannot recur even when the
+    upstream code path is unknown.
+    """
+
+    @pytest.fixture
+    def cat_with_repo_owner(self, cat, tmp_path):
+        repo_root = tmp_path / "fake_project"
+        repo_root.mkdir()
+        owner = cat.register_owner(
+            "fake-project", "repo",
+            repo_hash="abcd1234",
+            repo_root=str(repo_root),
+        )
+        return cat, owner, repo_root
+
+    def test_register_inside_repo_root_succeeds(self, cat_with_repo_owner):
+        cat, owner, repo_root = cat_with_repo_owner
+        f = repo_root / "src" / "foo.py"
+        f.parent.mkdir(parents=True)
+        f.touch()
+        doc = cat.register(
+            owner, "foo.py", content_type="code",
+            file_path=str(f),
+        )
+        entry = cat.resolve(doc)
+        assert entry is not None
+        assert "fake_project" in entry.source_uri
+
+    def test_register_outside_repo_root_rejected(
+        self, cat_with_repo_owner, tmp_path,
+    ):
+        """Smoking gun: file whose path is OUTSIDE owner.repo_root is
+        the contamination signature. Reject with both URIs in message.
+        """
+        cat, owner, repo_root = cat_with_repo_owner
+        other = tmp_path / "other_project" / "bar.py"
+        other.parent.mkdir(parents=True)
+        other.touch()
+        with pytest.raises(ValueError) as exc_info:
+            cat.register(
+                owner, "bar.py", content_type="code",
+                file_path=str(other),
+            )
+        msg = str(exc_info.value)
+        assert "cross-project" in msg
+        # Both URIs must appear so operators can diagnose without
+        # rerunning the failed call.
+        assert str(repo_root) in msg
+        assert "bar.py" in msg
+
+    def test_register_outside_repo_root_via_explicit_source_uri_rejected(
+        self, cat_with_repo_owner, tmp_path,
+    ):
+        """The guard also catches the case where the caller supplies an
+        explicit ``source_uri=`` that lives outside the owner's root,
+        not just the auto-derived path."""
+        cat, owner, repo_root = cat_with_repo_owner
+        bogus = "file://" + str(tmp_path / "elsewhere" / "x.py")
+        with pytest.raises(ValueError, match="cross-project"):
+            cat.register(
+                owner, "x.py", content_type="code",
+                file_path="x.py",
+                source_uri=bogus,
+            )
+
+    def test_register_curator_owner_skips_guard(self, cat, tmp_path):
+        """Curator owners legitimately span sources (PDFs, mirrored
+        docs, etc.) — no repo_root, no enforcement.
+        """
+        owner = cat.register_owner("hal-papers", "curator")
+        # Source URI from any path — no project association to enforce.
+        far_away = tmp_path / "anywhere" / "paper.pdf"
+        far_away.parent.mkdir(parents=True)
+        far_away.touch()
+        doc = cat.register(
+            owner, "paper", content_type="paper",
+            file_path=str(far_away),
+        )
+        assert cat.resolve(doc) is not None
+
+    def test_register_repo_owner_without_repo_root_skips_guard(
+        self, cat, tmp_path,
+    ):
+        """Pre-RDR-060 owners persisted before repo_root was a column —
+        the guard cannot enforce what wasn't recorded. Skip rather
+        than reject (back-compat).
+        """
+        owner = cat.register_owner(
+            "legacy-repo", "repo", repo_hash="legacyhash",
+            # repo_root deliberately omitted to mimic a pre-RDR-060 row.
+        )
+        far = tmp_path / "anywhere" / "x.py"
+        far.parent.mkdir(parents=True)
+        far.touch()
+        doc = cat.register(
+            owner, "x.py", content_type="code", file_path=str(far),
+        )
+        assert cat.resolve(doc) is not None
+
+    def test_register_chroma_uri_skips_guard(self, cat_with_repo_owner):
+        """``chroma://`` URIs have no filesystem identity; the project
+        check does not apply.
+        """
+        cat, owner, _ = cat_with_repo_owner
+        doc = cat.register(
+            owner, "remote", content_type="paper",
+            source_uri="chroma://knowledge__delos/foo.pdf",
+        )
+        assert cat.resolve(doc) is not None
+
+    def test_register_devonthink_uri_skips_guard(self, cat_with_repo_owner):
+        cat, owner, _ = cat_with_repo_owner
+        doc = cat.register(
+            owner, "dt-paper", content_type="paper",
+            source_uri="x-devonthink-item://8EDC855D-213F-40AD-A9CF-9543CC76476B",
+        )
+        assert cat.resolve(doc) is not None
+
+    def test_register_https_uri_skips_guard(self, cat_with_repo_owner):
+        cat, owner, _ = cat_with_repo_owner
+        doc = cat.register(
+            owner, "html-mirror", content_type="paper",
+            source_uri="https://example.com/paper",
+        )
+        assert cat.resolve(doc) is not None
+
+    def test_register_empty_source_uri_skips_guard(self, cat_with_repo_owner):
+        """Synthesized records (no path, no URI) bypass the guard so
+        ghost-registration paths still work.
+        """
+        cat, owner, _ = cat_with_repo_owner
+        doc = cat.register(owner, "ghost", content_type="paper")
+        assert cat.resolve(doc) is not None
+
+    def test_env_override_allows_cross_project_register(
+        self, cat_with_repo_owner, tmp_path, monkeypatch,
+    ):
+        """Emergency recovery escape hatch: setting
+        ``NEXUS_CATALOG_ALLOW_CROSS_PROJECT=1`` bypasses the guard.
+        """
+        cat, owner, _ = cat_with_repo_owner
+        other = tmp_path / "other_project" / "qux.py"
+        other.parent.mkdir(parents=True)
+        other.touch()
+        monkeypatch.setenv("NEXUS_CATALOG_ALLOW_CROSS_PROJECT", "1")
+        doc = cat.register(
+            owner, "qux.py", content_type="code",
+            file_path=str(other),
+        )
+        assert cat.resolve(doc) is not None
+
+    def test_existing_contaminated_rows_remain_readable(
+        self, cat_with_repo_owner, tmp_path,
+    ):
+        """Migration concern: the guard is register-time only. Catalogs
+        with pre-existing contaminated rows (~6,500 in Hal's catalog
+        on 2026-04-29) must still load read-only without losing data.
+
+        We bypass register() and INSERT a contaminated row directly
+        via the underlying SQLite connection, then verify resolve()
+        and by_file_path() return it unchanged.
+        """
+        cat, owner, _ = cat_with_repo_owner
+        # Direct INSERT to mimic a contaminated row already in the DB
+        # — exactly what Hal's live catalog looks like.
+        contaminated_uri = "file://" + str(
+            tmp_path / "wrong_project" / "stowaway.py",
+        )
+        cat._db.execute(
+            "INSERT INTO documents "
+            "(tumbler, title, author, year, content_type, file_path, "
+            "corpus, physical_collection, chunk_count, head_hash, "
+            "indexed_at, metadata, source_mtime, source_uri) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                f"{owner}.999",
+                "stowaway.py", "", 0, "code",
+                "wrong_project/stowaway.py",
+                "code", "code__contaminated", 0, "",
+                "2026-04-09T00:00:00+00:00", "{}", 0.0,
+                contaminated_uri,
+            ),
+        )
+        cat._db.commit()
+        # Read-back must succeed: contamination cleanup is a separate
+        # operation (PR #381's audit-membership), not the guard's job.
+        entry = cat.resolve(Tumbler.parse(f"{owner}.999"))
+        assert entry is not None
+        assert entry.source_uri == contaminated_uri
+        assert entry.title == "stowaway.py"
+
+    def test_register_relative_file_path_anchors_on_owner_repo_root(
+        self, cat_with_repo_owner, tmp_path, monkeypatch,
+    ):
+        """nexus-3e4s upstream regression: when ``file_path`` is
+        relative AND the owner has a ``repo_root``, the derived
+        ``source_uri`` MUST anchor on ``repo_root`` rather than CWD.
+
+        Pre-fix: ``os.path.abspath("src/foo.py")`` would resolve
+        against the process CWD, producing ``source_uri`` rows that
+        pointed to nexus's tree even when the indexed repo was ART.
+        That was the contamination signature for ~6,500 rows.
+        """
+        cat, owner, repo_root = cat_with_repo_owner
+        # Force CWD to a totally unrelated directory to exercise the
+        # bug class — pre-fix this would attribute the URI to CWD.
+        foreign_cwd = tmp_path / "foreign_workspace"
+        foreign_cwd.mkdir()
+        monkeypatch.chdir(foreign_cwd)
+
+        (repo_root / "src").mkdir()
+        (repo_root / "src" / "main.py").touch()
+
+        doc = cat.register(
+            owner, "main.py", content_type="code",
+            file_path="src/main.py",  # relative — the bug pathway
+        )
+        entry = cat.resolve(doc)
+        assert entry is not None
+        # URI must anchor on owner's repo_root, not the foreign CWD.
+        assert str(repo_root) in entry.source_uri
+        assert str(foreign_cwd) not in entry.source_uri
+
+    def test_register_inside_nested_worktree_under_repo_root_succeeds(
+        self, cat_with_repo_owner,
+    ):
+        """A file under ``repo_root/.claude/worktrees/X/foo.py`` is
+        still legitimately under the owner's repo_root prefix-wise,
+        so the guard does NOT fire. (Worktrees that are themselves
+        separate owners must be registered to a different owner; this
+        test covers the case where the file IS still owned by the
+        outer repo.)
+        """
+        cat, owner, repo_root = cat_with_repo_owner
+        nested = repo_root / ".claude" / "worktrees" / "agent-x" / "code.py"
+        nested.parent.mkdir(parents=True)
+        nested.touch()
+        doc = cat.register(
+            owner, "code.py", content_type="code",
+            file_path=str(nested),
+        )
+        assert cat.resolve(doc) is not None
