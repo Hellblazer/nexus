@@ -2,11 +2,12 @@
 title: "RDR-098: Abstract-Question Plan Template — BERTopic Communities as Cheap Substitute for GraphRAG Community Reports"
 id: RDR-098
 type: Feature
-status: draft
+status: accepted
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-28
+accepted_date: 2026-04-29
 related_issues: []
 related_tests: []
 related: [RDR-070, RDR-075, RDR-078, RDR-080, RDR-088, RDR-091, RDR-092, RDR-093, RDR-097]
