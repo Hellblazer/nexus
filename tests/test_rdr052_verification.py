@@ -143,10 +143,11 @@ class TestPlanTemplates:
     def test_seed_creates_five_idempotent(self, tmp_path, monkeypatch):
         # RDR-092 Phase 0a: 12 YAML builtins (9 RDR-078 + 3 RDR-092
         # migrations). RDR-097 added 2 more (hybrid-factual-lookup,
-        # traverse-then-generate). Total: 14. Legacy _PLAN_TEMPLATES
+        # traverse-then-generate). RDR-098 added abstract-themes
+        # (CheapRAG community pattern). Total: 15. Legacy _PLAN_TEMPLATES
         # retired.
         db_path, seed_fn = _seed_templates(tmp_path, monkeypatch)
-        assert seed_fn() == 14
+        assert seed_fn() == 15
         assert seed_fn() == 0  # idempotent
 
     @pytest.mark.parametrize("field,expected", [

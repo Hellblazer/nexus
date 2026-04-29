@@ -386,7 +386,7 @@ class TestOwnersCommand:
 
 class TestSeedPlanTemplates:
     def test_seed_creates_legacy_templates(self, tmp_path, monkeypatch):
-        """All 14 RDR-078/092/097 YAML templates seed on first run.
+        """All 15 RDR-078/092/097/098 YAML templates seed on first run.
 
         RDR-092 Phase 0a retired the legacy ``_PLAN_TEMPLATES`` array:
         three entries migrated to dimensional YAML (find-by-author,
@@ -394,18 +394,19 @@ class TestSeedPlanTemplates:
         redundant with research-default / analyze-default. Pre-existing
         9 YAML plus 3 migrated = 12. RDR-097 added the
         hybrid-factual-lookup and traverse-then-generate plans (P1.1 /
-        P1.2), bringing the total to 14.
+        P1.2), and RDR-098 added abstract-themes (CheapRAG community
+        pattern), bringing the total to 15.
         """
         from nexus.db.t2 import T2Database
         db_path = tmp_path / "t2.db"
         monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: db_path)
         from nexus.commands.catalog import _seed_plan_templates
         count = _seed_plan_templates()
-        assert count == 14
+        assert count == 15
         db = T2Database(db_path)
         # Every seeded template carries the builtin-template tag.
         results = db.search_plans("builtin-template", limit=20)
-        assert len(results) == 14
+        assert len(results) == 15
         db.close()
 
     def test_seed_idempotent(self, tmp_path, monkeypatch):
@@ -415,7 +416,7 @@ class TestSeedPlanTemplates:
         from nexus.commands.catalog import _seed_plan_templates
         first = _seed_plan_templates()
         second = _seed_plan_templates()
-        assert first == 14
+        assert first == 15
         assert second == 0
 
     def test_seed_templates_have_builtin_tag(self, tmp_path, monkeypatch):
@@ -426,7 +427,7 @@ class TestSeedPlanTemplates:
         _seed_plan_templates()
         db = T2Database(db_path)
         plans = db.list_plans(limit=20)
-        assert len(plans) == 14
+        assert len(plans) == 15
         for p in plans:
             assert "builtin-template" in p["tags"]
         db.close()
@@ -540,7 +541,7 @@ class TestSeedPlanTemplates:
         _seed_plan_templates()
         db = T2Database(db_path)
         plans = db.list_plans(limit=20)
-        assert len(plans) == 14
+        assert len(plans) == 15
         for p in plans:
             assert p["verb"], f"missing verb on {p['query']!r}"
             assert p["name"], f"missing name on {p['query']!r}"
