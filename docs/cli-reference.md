@@ -161,6 +161,109 @@ nx index pdf paper.pdf --extractor mineru    # Always MinerU (fails if not insta
 
 ---
 
+## nx dt
+
+DEVONthink integration verbs (macOS only). Wraps DT so selections, smart
+groups, tags, and groups flow into Nexus indexing without manual
+UUID/path copying, and Nexus search results round-trip back to DT via
+`nx dt open`. Design rationale and acceptance criteria live in
+[RDR-099](rdr/rdr-099-devonthink-integration.md); the smart-rule recipe
+is in [`devonthink-smart-rules.md`](devonthink-smart-rules.md).
+
+The substrate (`x-devonthink-item://` URI scheme,
+`meta.devonthink_uri` reverse-lookup) shipped in 4.17.0; `nx dt` is
+the operator-facing surface.
+
+### nx dt index
+
+Index DT records into Nexus. Exactly one selector flag must be supplied:
+`--selection`, `--tag`, `--group`, `--smart-group`, or one or more
+`--uuid`. Per-record dispatch routes `.pdf` paths to `nx index pdf` and
+`.md` paths to `nx index md`; other extensions are skipped with a WARN.
+
+```bash
+# Whatever is currently selected in DT's UI.
+nx dt index --selection
+
+# Every record carrying a tag, across all open libraries.
+nx dt index --tag research
+
+# Same, scoped to one library.
+nx dt index --tag research --database NexusTest
+
+# Recursive walk under a group path.
+nx dt index --group "/AI/2025"
+
+# Execute a smart group's saved query (honouring its search-group scope
+# and exclude-subgroups flag).
+nx dt index --smart-group "Recent PDFs"
+
+# One or more known UUIDs.
+nx dt index --uuid 8EDC855D-213F-40AD-A9CF-9543CC76476B
+nx dt index --uuid UUID-A --uuid UUID-B --uuid UUID-C
+
+# See what would be indexed without writing.
+nx dt index --selection --dry-run
+```
+
+| Flag | Description |
+| --- | --- |
+| `--selection` | Index records currently selected in DT's UI |
+| `--tag <name>` | Index every record carrying this tag |
+| `--group <path>` | Index every record under this group path (recursive) |
+| `--smart-group <name>` | Run the smart group's saved query and index its results |
+| `--uuid <UUID>` | Index a single record; repeat for batch ingest |
+| `--database <name>` | Limit selectors to one DT library (default: every open library) |
+| `--collection <name>` | T3 collection override (e.g. `knowledge__papers`) |
+| `--corpus <name>` | Corpus name for `docs__` collection (default: `default`) |
+| `--dry-run` | Print records that would be indexed; make no T3 writes |
+
+Multi-database default is the right behaviour for tags shared across
+libraries (a `nexus-test` tag in both `Inbox` and a project library
+returns records from both). Use `--database` when scope matters.
+
+Smart groups honour their author-defined `search group` and
+`exclude subgroups` properties. A smart group with `search group =
+missing value` falls through to whole-library search.
+
+Exit codes:
+
+- `0`: indexed (or dry-ran) successfully, including the no-records case.
+- `1`: DT not running, malformed selectors, or non-darwin platform.
+- `2`: Click usage error (missing or mutually-exclusive flags).
+
+### nx dt open
+
+Open a record in DEVONthink by tumbler or UUID. UUIDs become
+`x-devonthink-item://<UUID>` directly; tumblers are resolved via the
+catalog, preferring `meta.devonthink_uri` and falling back to
+`source_uri` when the entry was registered with a DT identity.
+
+```bash
+# UUID form: no catalog hit, no osascript spawn.
+nx dt open 8EDC855D-213F-40AD-A9CF-9543CC76476B
+
+# Tumbler form: catalog lookup yields the DT URI.
+nx dt open 1.2.3
+```
+
+Exit codes:
+
+- `0`: `open <uri>` invoked successfully.
+- `1`: tumbler not found, no DT URI on the entry, malformed argument,
+  or non-darwin platform.
+
+### Cross-references
+
+- Smart rule + folder action recipes:
+  [`docs/devonthink-smart-rules.md`](devonthink-smart-rules.md).
+- Manual smoke runbook + fixture creation:
+  [`tests/e2e/devonthink-manual.md`](../tests/e2e/devonthink-manual.md).
+- Design rationale + acceptance criteria:
+  [RDR-099](rdr/rdr-099-devonthink-integration.md).
+
+---
+
 ## nx enrich
 
 Subcommand group. The previous single-shape `nx enrich <coll>` is now `nx enrich bib <coll>`; a new `nx enrich aspects <coll>` ships RDR-089's structured-aspect extraction.
