@@ -183,10 +183,28 @@ class TestHealthRouteRendersAspectQueueCard:
 
     def test_aspect_queue_card_dash_when_table_absent(
         self, isolated_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """When ``_collect_aspect_queue_data`` returns ``{present: False}``
+        the template renders the muted dash + "no T2 / table absent"
+        label.
+
+        We mock the helper rather than relying on an empty-disk fixture
+        because ``/health/refresh`` runs a chain of T2-touching health
+        checks before the aspect-queue check; on CI those side-effects
+        sometimes pre-create the T2 db at ``NEXUS_CONFIG_DIR/memory.db``
+        (env-dependent — the failure mode was observed on Ubuntu CI but
+        not macOS local). The unit test
+        ``TestCollectAspectQueueData::test_returns_absent_when_db_missing``
+        already covers the absent-disk path on the helper side; this
+        test now isolates the template branch from any T2 side-effects.
+        """
         from nexus.console.app import create_app
 
-        # No T2 file at all.
+        monkeypatch.setattr(
+            "nexus.console.routes.health._collect_aspect_queue_data",
+            lambda: {"present": False},
+        )
         app = create_app()
         client = TestClient(app)
         resp = client.get("/health/refresh")
