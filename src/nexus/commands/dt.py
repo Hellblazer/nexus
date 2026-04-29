@@ -1,0 +1,367 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+"""``nx dt`` — DEVONthink integration verbs (RDR-099 P2).
+
+Glue between the macOS-only :mod:`nexus.devonthink` selectors and the
+existing ``nx index pdf`` / ``nx index md`` ingest paths. The operator
+picks records in DT (selection / tag / group / smart group / UUID) and
+``nx dt index`` walks each ``(uuid, path)`` pair into the right indexer
+by file extension.
+
+Mutual exclusion is enforced at the Click layer — exactly one selector
+flag must be supplied. ``--uuid`` accepts ``multiple=True`` so batch
+ingest of a known UUID list (e.g. from a smart-rule) doesn't require
+shell-side fan-out.
+
+Per-record dispatch lives in :func:`_index_record`. Tests monkeypatch
+this single function rather than the heavyweight ``doc_indexer``
+machinery, so the CLI surface (flag wiring, mutual-exclusion, dry-run,
+error mapping) is exercised independently of the indexer internals.
+"""
+from __future__ import annotations
+
+import re
+import subprocess
+from pathlib import Path
+
+import click
+import structlog
+
+import nexus.devonthink as dt_mod
+from nexus.devonthink import DTNotAvailableError, _is_darwin
+
+_log = structlog.get_logger(__name__)
+
+
+_SUPPORTED_EXTS: frozenset[str] = frozenset({".pdf", ".md"})
+
+
+def _index_record(
+    uuid: str,
+    path: str,
+    *,
+    collection: str | None,
+    corpus: str,
+    dry_run: bool,
+) -> None:
+    """Dispatch a single supported ``(uuid, path)`` to the right indexer.
+
+    The caller (``index_cmd``) is responsible for filtering unsupported
+    extensions before calling this function — that lets tests and the
+    summary line see the skip count without having to introspect the
+    dispatcher's internals.
+
+    Tests monkeypatch this single function rather than the heavyweight
+    ``doc_indexer`` machinery so the CLI surface is exercised
+    independently of Voyage credentials and Chroma clients.
+    """
+    if dry_run:
+        # Dry-run is handled in the command body before this function
+        # is reached. If a caller invokes us with dry_run=True anyway,
+        # treat it as a no-op rather than a silent indexing run.
+        return
+
+    from nexus.doc_indexer import index_markdown, index_pdf  # noqa: PLC0415
+
+    file_path = Path(path)
+    ext = file_path.suffix.lower()
+    if ext == ".pdf":
+        index_pdf(file_path, corpus=corpus, collection_name=collection)
+    else:  # .md — extension filtering happens in index_cmd
+        index_markdown(file_path, corpus=corpus)
+
+
+@click.group("dt")
+def dt() -> None:
+    """DEVONthink integration verbs (macOS only).
+
+    Subcommands wrap DEVONthink so DT-side selections (or smart groups,
+    tags, groups) flow into Nexus indexing without manual UUID/path
+    copying. Requires DEVONthink to be running for selectors that read
+    live application state.
+    """
+
+
+@dt.command("index")
+@click.option(
+    "--selection",
+    "use_selection",
+    is_flag=True,
+    default=False,
+    help="Index records currently selected in DEVONthink's UI.",
+)
+@click.option(
+    "--tag",
+    default=None,
+    help="Index every record carrying this tag (use --database to scope).",
+)
+@click.option(
+    "--group",
+    "group_path",
+    default=None,
+    help="Index every record under this group path (recursive). "
+    "Use --database to scope to one library.",
+)
+@click.option(
+    "--smart-group",
+    "smart_group",
+    default=None,
+    help="Execute the named smart group's query and index its results. "
+    "Honours the smart group's own scope and exclude-subgroups flag.",
+)
+@click.option(
+    "--uuid",
+    "uuids",
+    multiple=True,
+    default=(),
+    help="Index a single record by UUID. Repeat for batch ingest.",
+)
+@click.option(
+    "--database",
+    default=None,
+    help="Limit selectors to one DEVONthink database. Default: all open libraries.",
+)
+@click.option(
+    "--collection",
+    default=None,
+    help="T3 collection override (e.g. knowledge__papers). Forwarded to the underlying indexer.",
+)
+@click.option(
+    "--corpus",
+    default="default",
+    show_default=True,
+    help="Corpus name for docs__ collection (used when --collection is not set).",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Print the records that would be indexed; make no T3 writes.",
+)
+def index_cmd(
+    use_selection: bool,
+    tag: str | None,
+    group_path: str | None,
+    smart_group: str | None,
+    uuids: tuple[str, ...],
+    database: str | None,
+    collection: str | None,
+    corpus: str,
+    dry_run: bool,
+) -> None:
+    """Index DEVONthink records into Nexus.
+
+    Exactly one selector flag must be provided: ``--selection``,
+    ``--tag``, ``--group``, ``--smart-group``, or one or more ``--uuid``.
+    """
+    selectors_used = sum([
+        use_selection,
+        tag is not None,
+        group_path is not None,
+        smart_group is not None,
+        bool(uuids),
+    ])
+    if selectors_used == 0:
+        raise click.UsageError(
+            "Provide exactly one selector: --selection, --tag, --group, "
+            "--smart-group, or --uuid (one or more).",
+        )
+    if selectors_used > 1:
+        raise click.UsageError(
+            "Selectors are mutually exclusive: pick one of --selection, "
+            "--tag, --group, --smart-group, or --uuid.",
+        )
+
+    try:
+        records = _gather_records(
+            use_selection=use_selection,
+            tag=tag,
+            group_path=group_path,
+            smart_group=smart_group,
+            uuids=uuids,
+            database=database,
+        )
+    except DTNotAvailableError as e:
+        raise click.ClickException(str(e)) from e
+
+    if not records:
+        click.echo("No records found.")
+        return
+
+    if dry_run:
+        click.echo(f"Would index {len(records)} record(s):")
+        for uuid, path in records:
+            click.echo(f"  {uuid}\t{path}")
+        return
+
+    indexed = 0
+    skipped = 0
+    for uuid, path in records:
+        ext = Path(path).suffix.lower()
+        if ext not in _SUPPORTED_EXTS:
+            _log.warning(
+                "dt_skip_unsupported_extension",
+                uuid=uuid,
+                path=path,
+                ext=ext,
+            )
+            skipped += 1
+            continue
+        _index_record(
+            uuid,
+            path,
+            collection=collection,
+            corpus=corpus,
+            dry_run=False,
+        )
+        indexed += 1
+    click.echo(f"Indexed {indexed} record(s) ({skipped} skipped).")
+
+
+def _gather_records(
+    *,
+    use_selection: bool,
+    tag: str | None,
+    group_path: str | None,
+    smart_group: str | None,
+    uuids: tuple[str, ...],
+    database: str | None,
+) -> list[tuple[str, str]]:
+    """Resolve the chosen selector to ``[(uuid, path), ...]``.
+
+    Mutual exclusion is enforced upstream — exactly one branch fires.
+    Selectors are accessed via the :mod:`nexus.devonthink` module
+    (rather than ``from nexus.devonthink import _dt_selection``) so
+    tests can monkeypatch the module attributes.
+    """
+    if use_selection:
+        return dt_mod._dt_selection()
+    if tag is not None:
+        return dt_mod._dt_tag_records(tag, database=database)
+    if group_path is not None:
+        return dt_mod._dt_group_records(group_path, database=database)
+    if smart_group is not None:
+        return dt_mod._dt_smart_group_records(smart_group, database=database)
+    # uuids — one resolver call per UUID, results merged.
+    out: list[tuple[str, str]] = []
+    for u in uuids:
+        out.extend(dt_mod._dt_uuid_record(u))
+    return out
+
+
+# ── nx dt open ───────────────────────────────────────────────────────────────
+
+
+# DT records use canonical 8-4-4-4-12 hex UUIDs; tumblers are
+# dot-separated decimal numbers (e.g. ``1.2.3``). The two shapes are
+# disjoint — UUIDs have hyphens, tumblers have dots — so a single regex
+# pair classifies the argument unambiguously.
+_UUID_RE = re.compile(
+    r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
+    r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$",
+)
+_TUMBLER_RE = re.compile(r"^\d+(\.\d+)+$")
+
+
+def _select_dt_uri_from_entry(entry: object) -> str | None:
+    """Pick the ``x-devonthink-item://`` URI off a catalog entry.
+
+    Pure function over an entry-shaped object (anything exposing
+    ``meta`` and ``source_uri``). Resolution order mirrors the
+    substrate at ``catalog._resolve_via_devonthink``:
+
+    1. ``meta.devonthink_uri`` if it starts with ``x-devonthink-item://``
+       (the canonical reverse-lookup recorded on entries that came in
+       via DEVONthink, e.g. anything indexed via ``nx dt index``).
+    2. ``source_uri`` if it starts with ``x-devonthink-item://``
+       (entries registered with a DT identity from the start).
+    3. ``None`` otherwise — caller decides how to surface this.
+
+    Extracted from :func:`_resolve_dt_uri_from_tumbler` so the
+    selection rule is unit-testable without standing up a Catalog
+    fixture.
+    """
+    meta = getattr(entry, "meta", {}) or {}
+    if isinstance(meta, dict):
+        dt_uri = meta.get("devonthink_uri", "")
+        if isinstance(dt_uri, str) and dt_uri.startswith(
+            "x-devonthink-item://",
+        ):
+            return dt_uri
+    source_uri = getattr(entry, "source_uri", "")
+    if isinstance(source_uri, str) and source_uri.startswith(
+        "x-devonthink-item://",
+    ):
+        return source_uri
+    return None
+
+
+def _resolve_dt_uri_from_tumbler(tumbler: str) -> str | None:
+    """Return the ``x-devonthink-item://`` URI for a tumbler, or
+    ``None`` when the entry exists but carries no DT URI.
+
+    Catalog plumbing only — the URI-selection rule lives in
+    :func:`_select_dt_uri_from_entry`.
+
+    Raises:
+        click.ClickException: when the tumbler doesn't resolve to any
+            catalog entry (caller surfaces this as a non-zero exit).
+    """
+    from nexus.catalog import resolve_tumbler  # noqa: PLC0415
+    from nexus.catalog.catalog import Catalog  # noqa: PLC0415
+    from nexus.config import catalog_path  # noqa: PLC0415
+
+    path = catalog_path()
+    if not Catalog.is_initialized(path):
+        raise click.ClickException(
+            "Catalog not initialized. Run 'nx catalog setup' first.",
+        )
+    cat = Catalog(path, path / ".catalog.db")
+    try:
+        t, err = resolve_tumbler(cat, tumbler)
+        if err:
+            raise click.ClickException(f"tumbler not found: {tumbler}")
+        entry = cat.resolve(t)
+        if entry is None:
+            raise click.ClickException(f"tumbler not found: {tumbler}")
+        return _select_dt_uri_from_entry(entry)
+    finally:
+        # CatalogDB owns the SQLite connection + WAL lock; close it
+        # explicitly so back-to-back CliRunner invocations (and any
+        # future in-process callers) don't leak the write lock until
+        # GC. Existing nx catalog commands rely on process-exit cleanup
+        # which is fine for one-shot CLI but not for in-process reuse.
+        cat._db.close()
+
+
+@dt.command("open")
+@click.argument("tumbler_or_uuid")
+def open_cmd(tumbler_or_uuid: str) -> None:
+    """Open a record in DEVONthink by tumbler or UUID.
+
+    A UUID-shaped argument (``8-4-4-4-12`` hex) is converted directly
+    to ``x-devonthink-item://<UUID>`` — no catalog hit, no osascript.
+    A tumbler (e.g. ``1.2.3``) is resolved through the catalog,
+    preferring ``meta.devonthink_uri`` and falling back to
+    ``source_uri`` when the entry was registered with a DT identity.
+    """
+    if _UUID_RE.match(tumbler_or_uuid):
+        uri = f"x-devonthink-item://{tumbler_or_uuid}"
+    elif _TUMBLER_RE.match(tumbler_or_uuid):
+        uri = _resolve_dt_uri_from_tumbler(tumbler_or_uuid)
+        if uri is None:
+            raise click.ClickException(
+                f"no DEVONthink URI for tumbler {tumbler_or_uuid}",
+            )
+    else:
+        raise click.ClickException(
+            "argument is neither a tumbler (e.g. 1.2.3) nor a UUID "
+            "(e.g. 8EDC855D-213F-40AD-A9CF-9543CC76476B).",
+        )
+
+    if not _is_darwin():
+        raise click.ClickException(
+            "DEVONthink integration is macOS-only",
+        )
+
+    subprocess.run(["open", uri], check=True)  # noqa: S603,S607
