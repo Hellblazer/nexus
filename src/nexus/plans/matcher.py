@@ -54,6 +54,33 @@ _log = structlog.get_logger()
 # much boost that a genuinely higher-cosine agnostic plan gets drowned.
 _SCOPE_FIT_WEIGHT: float = 0.15
 
+# RDR-090 P1.3 (nexus-zgko): plans saved by the inline-planner via the
+# RDR-084 plan-grow path inherit the originating question's match-text.
+# That match-text is signal for paraphrases of the same question but
+# noise for any unrelated question that shares scaffolding (e.g.
+# 'which RDR…'). The spike found plan #67 (saved from Q1 'Which RDR
+# introduced catalog tumblers?') firing at confidence 0.476 on
+# unrelated Q3 (taxonomy/BERTopic) and Q4 (hooks comparative). We
+# require grown plans to clear a higher floor — paraphrase-quality
+# matches still fire; loose prefix-overlap drops.
+#
+# 0.55 sits a clear margin above the observed 0.476 leakage and just
+# above the precision-first 0.50 calibration documented in RDR-079 P5
+# (precision 0.90 / recall 0.19 at 0.50).
+_GROWN_PLAN_MIN_CONFIDENCE: float = 0.55
+
+
+def _is_grown_plan_tags(tags: str | None) -> bool:
+    """Return True when *tags* identifies a grown plan.
+
+    The plan-grow save path at ``nx_answer`` writes ``ad-hoc,grown``;
+    we match the comma-token presence so future tag additions don't
+    silently break the detection (RDR-090 P1.3 / nexus-zgko).
+    """
+    if not tags:
+        return False
+    return "grown" in [t.strip() for t in tags.split(",")]
+
 
 def _scope_fit(plan_scope_tags: str, normalized_scope_pref: str) -> float | None:
     """Return scope-fit in ``{0.0, 1.0}`` or ``None`` for a conflict.
@@ -216,6 +243,14 @@ def plan_match(
             confidence = max(0.0, 1.0 - float(distance))
             if confidence < min_confidence:
                 continue
+            # RDR-090 P1.3: grown plans need a higher cosine floor so
+            # broad scaffolding ('which RDR…') in their match-text
+            # cannot fire against unrelated questions. Caller floor
+            # always wins when stricter.
+            if _is_grown_plan_tags(row.get("tags")):
+                grown_floor = max(min_confidence, _GROWN_PLAN_MIN_CONFIDENCE)
+                if confidence < grown_floor:
+                    continue
             m = Match.from_plan_row(row, confidence=confidence)
             if filter_dims and not _superset(m.dimensions, filter_dims):
                 continue
