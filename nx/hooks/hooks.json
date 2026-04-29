@@ -100,7 +100,7 @@
           {
             "type": "command",
             "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/pre_close_verification_hook.sh",
-            "timeout": 300
+            "timeout": 5
           }
         ]
       }

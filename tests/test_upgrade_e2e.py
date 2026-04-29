@@ -219,6 +219,39 @@ class TestSC8HooksJson:
         assert startup_hooks[0]["command"].startswith("nx upgrade --auto")
         assert startup_hooks[0]["timeout"] == 30
 
+    def test_pretooluse_bash_timeout_is_short(self) -> None:
+        """PreToolUse Bash timeout must stay short.
+
+        ``pre_close_verification_hook.sh`` is advisory (read stdin, JSON
+        out, exit 0); the body completes in <100 ms. A long timeout is a
+        footgun: a future bug or filesystem stall would block every
+        ``Bash`` tool call by that ceiling. Pinning low so any drift
+        toward "minutes" trips this test instead of the user.
+
+        Earlier shape used ``timeout: 300`` which would have masked a
+        five-minute stall in the hook with no operator visibility. The
+        bound here matches the SessionStart fast-path hooks (5 s).
+        """
+        hooks_path = Path(__file__).parent.parent / "nx" / "hooks" / "hooks.json"
+        data = json.loads(hooks_path.read_text())
+        bash_blocks = [
+            h for h in data["hooks"].get("PreToolUse", [])
+            if h.get("matcher") == "Bash"
+        ]
+        assert bash_blocks, "PreToolUse Bash matcher missing from hooks.json"
+        for block in bash_blocks:
+            for hook in block.get("hooks", []):
+                timeout = hook.get("timeout")
+                assert isinstance(timeout, int), (
+                    f"PreToolUse Bash hook missing/invalid timeout: {hook!r}"
+                )
+                assert timeout <= 10, (
+                    f"PreToolUse Bash timeout {timeout}s is too high. "
+                    f"This hook is advisory and should never need >5 s. "
+                    f"A long ceiling masks real stalls — keep it tight "
+                    f"(<=10 s)."
+                )
+
 
 # ── SC-9: Existing install bootstrapping ────────────────────────────────────
 
