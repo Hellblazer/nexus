@@ -1029,7 +1029,7 @@ class TestBatchExtraction:
             ("knowledge__delos", "/p1.pdf", "content 1"),
         ])
 
-        assert records[0] is None  # docs__handbook → unsupported
+        assert records[0] is None  # code__nexus → unsupported
         assert records[1].source_path == "/p1.pdf"
         assert records[1].problem_formulation == "P1"
 
