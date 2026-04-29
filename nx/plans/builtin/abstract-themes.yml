@@ -51,11 +51,13 @@ plan_json:
         query: $intent
         limit: $limit
         corpus: $corpus
-        # Abstract queries are broad — the per-corpus default threshold
-        # (0.65 for prose) drops every result on questions like "main
-        # themes in X". 2.0 = effectively no filter (cosine distance
-        # tops out at 2.0); downstream groupby/aggregate handles noise.
-        threshold: 2.0
+        # nexus-h3e2: broad-mode disables the per-corpus default
+        # threshold (0.65 for prose) which is tuned for narrow-target
+        # search and drops every result on questions like "main themes
+        # in X". The runner translates this to threshold=2.0 (cosine
+        # distance maxes at 2.0, effectively no filter); downstream
+        # groupby/aggregate handles noise.
+        mode: broad
     - tool: groupby
       args:
         ids: $step1.ids
