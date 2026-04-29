@@ -253,8 +253,61 @@ Exit codes:
 - `1`: tumbler not found, no DT URI on the entry, malformed argument,
   or non-darwin platform.
 
+### nx dt install-scripts
+
+Install (or remove) DT-side AppleScripts that wrap `nx dt index` so
+the actions are reachable from inside DEVONthink without a Claude
+Code or terminal detour. Each script appears as a draggable Toolbar
+button (`Toolbar/`) and/or in DT's own Scripts menu (`Menu/`, left
+of Help).
+
+```bash
+# Default: install everything into both Toolbar/ and Menu/.
+nx dt install-scripts
+
+# Toolbar buttons only.
+nx dt install-scripts --target toolbar
+
+# Preview without writing.
+nx dt install-scripts --dry-run
+
+# Remove every installed script.
+nx dt install-scripts --uninstall
+```
+
+| Flag | Description |
+|------|-------------|
+| `--target [toolbar\|menu\|all]` | Which DT script slot to install into. Default `all`. |
+| `--uninstall` | Remove installed scripts instead of installing. Idempotent on missing files. |
+| `--force` | Overwrite existing files without prompting. |
+| `--dry-run` | Show what would happen without writing or deleting. |
+| `--app-scripts-dir PATH` | Override the DT Application Scripts root. Used by tests; rarely needed. |
+
+Default install root:
+`~/Library/Application Scripts/com.devon-technologies.think/`. The
+verb is macOS-only and exits non-zero on other platforms.
+
+Shipped scripts (DT4):
+
+| File | Subdirs | Behaviour |
+|------|---------|-----------|
+| `Index Selection in nx.applescript` | `Toolbar/`, `Menu/` | Calls `nx dt index --selection` for whatever is highlighted in the front viewer window. |
+| `Index Selection in nx (Knowledge).applescript` | `Menu/` | Prompts for a collection name, then calls `nx dt index --selection --collection knowledge__<name>`. |
+| `Index Current Group in nx.applescript` | `Toolbar/`, `Menu/` | Recursively walks the current group's records and calls `nx dt index --uuid <U> --uuid <V> ...` in a single subprocess. |
+
+After install, restart DEVONthink so newly-installed Toolbar files
+become draggable in `View > Customize Toolbar…`. Menu items are
+picked up on the next menu open. Each script logs to
+`~/Library/Logs/nexus-dt-scripts.log` and backgrounds the shell call
+with a trailing `&` so DT's UI stays responsive.
+
+For automatic indexing on import (no manual click), see the smart-rule
+recipe in [`docs/devonthink-smart-rules.md`](devonthink-smart-rules.md).
+
 ### Cross-references
 
+- In-DT scripts (toolbar / menu):
+  [`docs/devonthink-scripts.md`](devonthink-scripts.md).
 - Smart rule + folder action recipes:
   [`docs/devonthink-smart-rules.md`](devonthink-smart-rules.md).
 - Manual smoke runbook + fixture creation:

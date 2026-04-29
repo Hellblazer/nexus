@@ -102,11 +102,18 @@ exclude = [
 # wheel.
 [tool.hatch.build.targets.wheel.force-include]
 "nx/plans" = "nexus/_resources/plans"
+# nexus-tv5u: ship DT-side AppleScripts as package data so
+# ``nx dt install-scripts`` can resolve them via
+# ``importlib.resources.files("nexus") / "_resources" / "dt-scripts"``
+# from a uv-tool / pipx / Homebrew install. Editable installs use a
+# ``src/nexus/_resources/dt-scripts`` symlink back into ``dt/scripts``.
+"dt/scripts" = "nexus/_resources/dt-scripts"
 
 [tool.hatch.build.targets.sdist]
 include = [
     "src",
     "nx/plans",
+    "dt/scripts",
     "README.md",
     "LICENSE",
     "pyproject.toml",
