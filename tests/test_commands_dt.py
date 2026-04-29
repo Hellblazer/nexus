@@ -375,3 +375,155 @@ class TestErrorHandling:
         result = runner.invoke(main, ["dt", "index", "--selection"])
         assert result.exit_code != 0
         assert "macOS-only" in result.output
+
+
+# ── nx dt open ───────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def fake_open(monkeypatch) -> list[list[str]]:
+    """Replace ``subprocess.run`` inside ``nexus.commands.dt`` with a
+    stub that records the argv it was asked to launch and returns a
+    success ``CompletedProcess``. Lets tests assert ``open <uri>`` is
+    invoked without spawning a real ``open(1)`` process.
+    """
+    import subprocess as _subprocess  # noqa: PLC0415
+
+    calls: list[list[str]] = []
+
+    def fake_run(argv, *args, **kwargs):
+        calls.append(list(argv))
+        return _subprocess.CompletedProcess(args=argv, returncode=0)
+
+    monkeypatch.setattr("nexus.commands.dt.subprocess.run", fake_run)
+    return calls
+
+
+@pytest.fixture
+def fake_resolve_tumbler(monkeypatch) -> dict:
+    """Replace the catalog tumbler resolver with a stub. Default
+    behaviour raises ``click.ClickException("tumbler not found ...")``;
+    tests override ``store["uri"]`` or ``store["error"]`` to drive
+    specific resolution outcomes.
+    """
+    import click as _click  # noqa: PLC0415
+
+    store: dict = {"uri": None, "error": None}
+
+    def fake_resolve(tumbler: str) -> str | None:
+        if store["error"] is not None:
+            raise _click.ClickException(store["error"])
+        return store["uri"]
+
+    monkeypatch.setattr(
+        "nexus.commands.dt._resolve_dt_uri_from_tumbler", fake_resolve,
+    )
+    return store
+
+
+class TestDtOpenUuidForm:
+    def test_uuid_builds_uri_directly(
+        self, runner, fake_open, monkeypatch,
+    ):
+        """A UUID-shaped argument bypasses the catalog entirely — the
+        URI is just ``x-devonthink-item://<UUID>``. Saves a DB hit
+        when the operator already has the UUID in hand."""
+        from nexus.cli import main
+
+        monkeypatch.setattr("sys.platform", "darwin")
+        uuid = "8EDC855D-213F-40AD-A9CF-9543CC76476B"
+        result = runner.invoke(main, ["dt", "open", uuid])
+        assert result.exit_code == 0, result.output
+        assert fake_open == [["open", f"x-devonthink-item://{uuid}"]]
+
+    def test_uuid_on_non_darwin_exits_with_macos_only(
+        self, runner, fake_open, monkeypatch,
+    ):
+        """``open(1)`` is darwin-only and the URL scheme requires DT
+        to handle it — refuse on Linux/Windows with the same
+        operator-friendly message the index command uses."""
+        from nexus.cli import main
+
+        monkeypatch.setattr("sys.platform", "linux")
+        uuid = "8EDC855D-213F-40AD-A9CF-9543CC76476B"
+        result = runner.invoke(main, ["dt", "open", uuid])
+        assert result.exit_code != 0
+        assert "macOS-only" in result.output
+        assert fake_open == []  # no spawn attempt
+
+
+class TestDtOpenTumblerForm:
+    def test_tumbler_uses_devonthink_uri_from_meta(
+        self, runner, fake_open, fake_resolve_tumbler, monkeypatch,
+    ):
+        """``meta.devonthink_uri`` is the canonical reverse-lookup
+        per RDR-099 — when the catalog entry carries it, that's the
+        URI we open."""
+        from nexus.cli import main
+
+        monkeypatch.setattr("sys.platform", "darwin")
+        fake_resolve_tumbler["uri"] = "x-devonthink-item://META-UUID"
+        result = runner.invoke(main, ["dt", "open", "1.2.3"])
+        assert result.exit_code == 0, result.output
+        assert fake_open == [["open", "x-devonthink-item://META-UUID"]]
+
+    def test_tumbler_falls_back_to_source_uri(
+        self, runner, fake_open, fake_resolve_tumbler, monkeypatch,
+    ):
+        """When ``meta.devonthink_uri`` is absent but ``source_uri``
+        is itself a DT URI (the entry was registered with a DT
+        identity from the start), fall through to it. The fake
+        resolver mimics the production helper that checks meta first
+        and source_uri second."""
+        from nexus.cli import main
+
+        monkeypatch.setattr("sys.platform", "darwin")
+        fake_resolve_tumbler["uri"] = "x-devonthink-item://SOURCE-UUID"
+        result = runner.invoke(main, ["dt", "open", "1.2.3"])
+        assert result.exit_code == 0, result.output
+        assert fake_open == [["open", "x-devonthink-item://SOURCE-UUID"]]
+
+    def test_tumbler_with_no_dt_uri_exits_non_zero(
+        self, runner, fake_open, fake_resolve_tumbler, monkeypatch,
+    ):
+        from nexus.cli import main
+
+        monkeypatch.setattr("sys.platform", "darwin")
+        fake_resolve_tumbler["uri"] = None  # no DT URI on the entry
+        result = runner.invoke(main, ["dt", "open", "1.2.3"])
+        assert result.exit_code != 0
+        assert "DEVONthink URI" in result.output or "not found" in result.output
+        assert fake_open == []
+
+    def test_tumbler_not_found_exits_non_zero(
+        self, runner, fake_open, fake_resolve_tumbler, monkeypatch,
+    ):
+        from nexus.cli import main
+
+        monkeypatch.setattr("sys.platform", "darwin")
+        fake_resolve_tumbler["error"] = "tumbler not found: 9.9.9"
+        result = runner.invoke(main, ["dt", "open", "9.9.9"])
+        assert result.exit_code != 0
+        assert "not found" in result.output.lower()
+        assert fake_open == []
+
+
+class TestDtOpenMalformedArg:
+    def test_malformed_argument_exits_with_usage_error(
+        self, runner, fake_open, monkeypatch,
+    ):
+        from nexus.cli import main
+
+        monkeypatch.setattr("sys.platform", "darwin")
+        result = runner.invoke(main, ["dt", "open", "not-a-tumbler-or-uuid"])
+        assert result.exit_code != 0
+        assert fake_open == []
+
+
+class TestDtOpenHelp:
+    def test_open_help_renders(self, runner):
+        from nexus.cli import main
+
+        result = runner.invoke(main, ["dt", "open", "--help"])
+        assert result.exit_code == 0
+        assert "tumbler" in result.output.lower() or "uuid" in result.output.lower()
