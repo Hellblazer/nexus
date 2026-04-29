@@ -91,9 +91,11 @@ Each AC corresponds to a bullet in [RDR-099 § Acceptance criteria](../../docs/r
    selected record. No catalog write.
 3. `nx dt index --selection`; verify summary line `Indexed N
    record(s) (M skipped).` where `N` matches step 2's count.
-4. `nx catalog list --source-uri-prefix x-devonthink-item://`;
-   verify N new entries appear (the prefix filter narrows to DT-keyed
-   entries indexed in step 3).
+4. `nx catalog list --json | jq '.[] | select(.source_uri | startswith("x-devonthink-item://"))'`;
+   verify N new entries appear (the JSON filter narrows to DT-keyed
+   entries indexed in step 3). `nx catalog list` has no built-in
+   `--source-uri-prefix` flag in v1; the JSON pipe is the canonical
+   query path.
 5. For each new entry, `nx catalog show <tumbler> --json`; verify
    `source_uri == "x-devonthink-item://<UUID>"` and
    `meta.devonthink_uri` matches.
@@ -102,7 +104,8 @@ Each AC corresponds to a bullet in [RDR-099 § Acceptance criteria](../../docs/r
 
 ```bash
 nx dt index --uuid "$NEXUS_DT_TEST_UUID"
-nx catalog list --source-uri-prefix "x-devonthink-item://$NEXUS_DT_TEST_UUID"
+nx catalog list --json | jq --arg u "$NEXUS_DT_TEST_UUID" \
+  '.[] | select(.source_uri == "x-devonthink-item://" + $u)'
 ```
 
 Verify: exactly one entry, with `source_uri == x-devonthink-item://$NEXUS_DT_TEST_UUID`
@@ -166,7 +169,9 @@ Switch to DT; verify the record is selected and visible.
 
 ```bash
 # Tumbler form; uses an entry indexed earlier (e.g. from AC-1).
-nx catalog list --source-uri-prefix x-devonthink-item:// | head -5
+nx catalog list --json \
+  | jq -r '.[] | select(.source_uri | startswith("x-devonthink-item://")) | .tumbler' \
+  | head -5
 nx dt open <tumbler-from-list>
 ```
 
@@ -208,7 +213,8 @@ doesn't see stale data:
 
 ```bash
 # List DT-keyed entries created during the smoke.
-nx catalog list --source-uri-prefix x-devonthink-item://
+nx catalog list --json \
+  | jq '.[] | select(.source_uri | startswith("x-devonthink-item://"))'
 
 # Remove them by tumbler (one at a time, or pipe through xargs).
 nx catalog remove <tumbler>
