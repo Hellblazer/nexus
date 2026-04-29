@@ -96,4 +96,26 @@
     </details>
   </article>
 
+  {# RDR-089 aspect-extraction queue depth (nexus-qf48). Mirrors
+     `nx doctor --check-aspect-queue`. #}
+  <article class="health-card {% if not aspect_queue.present %}warn{% elif aspect_queue.failed_count %}warn{% elif aspect_queue.total == 0 %}ok{% else %}ok{% endif %}">
+    <header>Aspect Queue</header>
+    {% if not aspect_queue.present %}
+    <div class="stat-value" style="color:var(--console-muted);">&mdash;</div>
+    <div class="stat-label">no T2 / table absent</div>
+    {% else %}
+    <div class="stat-value" {% if aspect_queue.failed_count %}style="color:var(--console-err);"{% elif aspect_queue.total == 0 %}style="color:var(--console-ok);"{% endif %}>{{ aspect_queue.total }}</div>
+    <div class="stat-label">
+      {% if aspect_queue.total == 0 %}empty{% else %}rows{% endif %}
+      {% if aspect_queue.by_status %}
+      &middot;
+      {% for status, count in aspect_queue.by_status.items() %}{{ status }}={{ count }}{% if not loop.last %}, {% endif %}{% endfor %}
+      {% endif %}
+    </div>
+    {% if aspect_queue.oldest_pending %}
+    <small style="color:var(--console-muted);">oldest pending: <code>{{ aspect_queue.oldest_pending }}</code></small>
+    {% endif %}
+    {% endif %}
+  </article>
+
 </div>

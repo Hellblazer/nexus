@@ -361,6 +361,38 @@ See `src/nexus/db/t2/__init__.py` for the facade source and
 | **Health** | `health.py`, `logging_setup.py` | `health.py`: health check data model and runner used by `nx doctor` and `nx console`. `logging_setup.py`: structured logging configuration for CLI, console, MCP, and hook entry points (stderr + rotating file handler) |
 | **Support** | `config.py`, `registry.py`, `corpus.py`, `session.py`, `hooks.py`, `ttl.py`, `formatters.py`, `types.py`, `errors.py`, `retry.py`, `commands/_helpers.py`, `commands/_provision.py` | Configuration, naming, formatting, session lifecycle, transient-error retry. `_helpers.py`: shared CLI helpers (e.g. `default_db_path()`). `_provision.py`: ChromaDB Cloud database provisioning (tenant resolution, database creation) |
 
+### Builtin plan templates
+
+The plan-centric retrieval stack ships fifteen builtin templates under `nx/plans/builtin/`. The seed loader (`nexus.plans.seed_loader.load_seed_directory`) upserts them into `PlanLibrary` on first run; idempotent thereafter. Each template pins a `verb` dimension (and usually `scope: global`); the matcher uses verb to filter candidates before cosine ranking.
+
+Grouped by verb:
+
+- **verb=query**
+  - `abstract-themes`: CheapRAG community-summary pipeline (`search` → `groupby` → `aggregate` → `summarize`) for theme extraction, topic landscape, and summary-of-findings questions. RDR-098.
+- **verb=analyze**
+  - `analyze-default`: Cross-corpus synthesis across prose and code. Gathers from both sides, walks reference chains, hydrates candidates, ranks against the caller's intent.
+- **verb=research**
+  - `research-default`: Concept → prose → implementing code. Walks from RDRs/docs/knowledge into the modules that implement them, then surfaces concrete code context.
+  - `citation-traversal`: Trace the citation chain around a seed document. Walks `cites` edges inward and outward, hydrates matches, summarises.
+  - `find-by-author`: Author-index lookup. Routes through the catalog's author index, hydrates matching documents, summarises contributions.
+  - `type-scoped-search`: Single-content-type semantic search. Resolves the content-type bucket and runs the query against only those collections.
+- **verb=lookup**
+  - `hybrid-factual-lookup`: Factual claim, named entity, or specific data point. Fuses vector recall with FTS lexical match for narrow-target retrieval.
+  - `traverse-then-generate`: Expand from a known seed tumbler. Walks `cites`/`implements`/related edges and generates a factual answer from the linked documents.
+- **verb=document**
+  - `document-default`: Documentation authoring or audit. Gathers prose and code touching the area, walks documentation-for edges, hydrates both corpora.
+- **verb=review**
+  - `review-default`: Change-set critique. Resolves changed files to catalog entries, walks decision-evolution history (RDRs superseded or cited), hydrates the RDR context.
+- **verb=debug**
+  - `debug-default`: Dev work from a concrete failure. Catalog per-file lookup as the primary link walk; multi-hop graph traversal is delegated to Serena.
+- **verb=plan-author**
+  - `plan-author-default`: Authoring a new plan template. Fetches the authoring guide and dimension registry, surveys prior art for the target verb, drafts a candidate `plan_json`.
+- **verb=plan-inspect**
+  - `plan-inspect-default`: Single-plan runtime metrics and match history (`use_count`, `match_count`, `match_conf_sum`, success/failure counts).
+  - `plan-inspect-dimensions`: Enumerate registered dimensions and count plans per axis. Surfaces the dimension registry to authoring agents.
+- **verb=plan-promote**
+  - `plan-promote-propose`: Rank promotion candidates from runtime metrics against the configured thresholds.
+
 ## Design Decisions
 
 1. **Protocols over ABCs** -- `typing.Protocol` for structural subtyping, no inheritance coupling.

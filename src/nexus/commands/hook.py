@@ -3,6 +3,7 @@
 import json
 import os
 import sys
+from typing import IO
 
 import click
 import structlog
@@ -10,6 +11,43 @@ import structlog
 from nexus import hooks
 
 _log = structlog.get_logger()
+
+
+def _read_stdin_session_id(stream: IO[str]) -> str | None:
+    """Read and parse a Claude-Code SessionStart JSON payload from *stream*.
+
+    Returns the ``session_id`` field or ``None`` when no usable payload
+    is available. Designed to be safe against the three problematic
+    inputs that produced nexus-rv2x:
+
+    * **TTY stdin** (no piped input). Reading would block until EOF
+      (Ctrl+D) or process death. Detected via ``isatty()`` and skipped
+      without calling ``read()``.
+    * **Empty / closed pipe**. ``read()`` returns ``""`` promptly;
+      ``json.loads`` raises; helper returns ``None``.
+    * **Malformed JSON**. Same swallow-and-return-None as empty.
+
+    The Claude Code invocation path is unchanged: a pipe carrying a
+    valid JSON payload reads and returns the ``session_id`` as before.
+    """
+    try:
+        if stream.isatty():
+            return None
+        raw = stream.read()
+    except Exception as exc:
+        _log.debug("session_start_stdin_read_failed", error=str(exc))
+        return None
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except Exception as exc:
+        _log.debug("session_start_stdin_parse_failed", error=str(exc))
+        return None
+    if not isinstance(data, dict):
+        return None
+    sid = data.get("session_id")
+    return sid if isinstance(sid, str) and sid else None
 
 
 @click.group("hook")
@@ -20,13 +58,9 @@ def hook_group() -> None:
 @hook_group.command("session-start")
 def session_start_cmd() -> None:
     """Run the SessionStart hook (called by Claude Code on session open)."""
-    # Claude Code pipes a JSON payload to stdin with session_id
-    claude_session_id = None
-    try:
-        data = json.loads(sys.stdin.read())
-        claude_session_id = data.get("session_id")
-    except Exception as exc:
-        _log.debug("session_start_stdin_parse_failed", error=str(exc))
+    # nexus-rv2x: TTY-aware stdin parse. Skips read() on a TTY so
+    # ``nx hook session-start`` invoked from a shell does not hang.
+    claude_session_id = _read_stdin_session_id(sys.stdin)
     output = hooks.session_start(claude_session_id=claude_session_id)
     click.echo(output)
 

@@ -231,24 +231,34 @@ class TestPhase3MVVPipeline:
         # Step 4 — terminal aggregate output.
         aggregate_out = result.steps[3]
         _assert_aggregate_shape(aggregate_out)
-        # Weak partition pin: the seed query targets the canonical
-        # crash-vs-Byzantine split that runs through the Delos /
-        # PBFT / HotStuff lineage. We expect at least 2 groups → at
-        # least 2 aggregates. Asserting >= 2 (rather than the
-        # previous >= 1) catches a regression where aggregate
-        # collapses all groups into one summary, which is a real
-        # failure mode the bundled-intermediate sentinels prevent
-        # us from observing at the groupby step.
-        # Structural caveat: bundled intermediates make per-step
-        # group counts unobservable from the host side; this is the
-        # closest pin we can apply downstream. nexus-3j6b is the
-        # natural place to revisit if the operator family later
-        # exposes intermediate counts via cross-operator metadata.
-        assert len(aggregate_out["aggregates"]) >= 2, (
-            "expected >=2 aggregates from the canonical Byzantine-vs-"
-            "crash partition over knowledge__delos; got "
-            f"{len(aggregate_out['aggregates'])}. Possible regression: "
-            "aggregate collapsed multiple groups into one summary."
+        # Plumbing pin: assert the bundled chain produced at least one
+        # aggregate. We previously asserted >=2 to catch the regression
+        # where aggregate collapses all groups into one summary, but
+        # the >=2 floor was empirically flaky (nexus-uf9f / nexus-16he):
+        # the LLM occasionally collapsed the canonical Byzantine-vs-
+        # crash split organically, with no nexus-side regression to
+        # blame. Three-run characterisation on identical code:
+        # PASS / FAIL / PASS.
+        #
+        # The deterministic regression-catch lives in two unit tests
+        # that mock claude_dispatch and assert N-aggregate preservation:
+        #   * tests/test_operator_dispatch.py
+        #     ::TestOperatorAggregate
+        #     ::test_returns_aggregates_with_key_value_and_summary
+        #     (3 aggregates round-trip through operator_aggregate)
+        #   * tests/test_plan_run.py
+        #     ::TestPlanRunBundledAggregateCount
+        #     ::test_bundled_pipeline_preserves_all_aggregates
+        #     (2 aggregates round-trip through plan_run's full
+        #     search → filter → groupby → aggregate bundle path)
+        # Those guards trip on a real runner-side collapse without
+        # requiring stochastic LLM behaviour. The E2E plumbing pin
+        # here just confirms the chain doesn't silently zero out.
+        assert len(aggregate_out["aggregates"]) >= 1, (
+            "expected >=1 aggregate from the search→filter→groupby→"
+            "aggregate bundle over knowledge__delos; got "
+            f"{len(aggregate_out['aggregates'])}. The bundled chain "
+            "produced no terminal output — possible plumbing failure."
         )
 
 

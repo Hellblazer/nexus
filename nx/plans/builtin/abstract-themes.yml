@@ -51,11 +51,19 @@ plan_json:
         query: $intent
         limit: $limit
         corpus: $corpus
-        # Abstract queries are broad — the per-corpus default threshold
-        # (0.65 for prose) drops every result on questions like "main
-        # themes in X". 2.0 = effectively no filter (cosine distance
-        # tops out at 2.0); downstream groupby/aggregate handles noise.
-        threshold: 2.0
+        # nexus-h3e2: broad-mode disables the per-corpus default
+        # threshold (0.65 for prose) which is tuned for narrow-target
+        # search and drops every result on questions like "main themes
+        # in X". The runner translates this to threshold=2.0 (cosine
+        # distance maxes at 2.0, effectively no filter); downstream
+        # groupby/aggregate handles noise.
+        mode: broad
+        # nexus-j5ka: drop bibliography / reference chunks. They
+        # cluster together regardless of subject and consume a groupby
+        # slot (one wasted aggregate LLM call per query). RDR-055
+        # chunkers populate section_type; this filter is a no-op on
+        # corpora that pre-date RDR-055 metadata.
+        where: section_type!=references
     - tool: groupby
       args:
         ids: $step1.ids

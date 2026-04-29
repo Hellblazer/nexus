@@ -2,14 +2,21 @@
 title: "RDR-097: Hybrid Retrieval Plan Template — Fusing Catalog Traversal and Vector Search for Factual QA"
 id: RDR-097
 type: Feature
-status: accepted
+status: closed
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-28
 accepted_date: 2026-04-28
-related_issues: [nexus-uwkw, nexus-qgjr, nexus-h3e2]
-related_tests: []
+closed_date: 2026-04-29
+close_reason: implemented
+gap_closures:
+  Gap1: nx/plans/builtin/hybrid-factual-lookup.yml:48
+  Gap2: nx/plans/builtin/hybrid-factual-lookup.yml:103
+  Gap3: src/nexus/commands/catalog.py:1471
+  Gap4: src/nexus/mcp/core.py:1017
+related_issues: [nexus-0n2u, nexus-uwkw, nexus-vej3, nexus-ddm0, nexus-wp9s, nexus-8el5, nexus-qlfa, nexus-24fz, nexus-qgjr, nexus-h3e2]
+related_tests: [test_hybrid_plan_factual_qa.py]
 related: [RDR-049, RDR-050, RDR-052, RDR-078, RDR-080, RDR-084, RDR-091, RDR-092, RDR-093, RDR-098]
 ---
 

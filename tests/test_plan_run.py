@@ -1574,3 +1574,105 @@ async def test_default_dispatcher_groupby_truncation_pop_and_merge(monkeypatch) 
     )
     assert result.get("original_count") == 150
     assert result.get("kept_count") == _OPERATOR_MAX_INPUTS
+
+
+# ── Bundled aggregate count preservation (nexus-uf9f / nexus-16he) ──────────
+#
+# Replaces the >=2 floor that lived on the integration test
+# ``test_search_filter_groupby_aggregate_end_to_end``. The real-LLM E2E
+# was empirically flaky (PASS/FAIL/PASS on identical code) because the
+# LLM occasionally collapses the canonical Byzantine-vs-crash partition
+# organically — no nexus-side regression to blame. The deterministic
+# preservation contract belongs at the runner level with a mocked
+# dispatch, which is what these tests pin.
+
+
+class TestPlanRunBundledAggregateCount:
+    """Runner-level guard: when the bundled dispatch returns N aggregates,
+    ``plan_run`` must stamp all N onto the terminal step output. The
+    operator-scope guard (``test_returns_aggregates_with_key_value_and_
+    summary`` in tests/test_operator_dispatch.py) covers single-operator
+    preservation; this test covers preservation through the bundled
+    path — the failure mode that the original >=2 integration assertion
+    was trying to catch."""
+
+    @pytest.mark.asyncio
+    async def test_bundled_pipeline_preserves_all_aggregates(
+        self, monkeypatch,
+    ) -> None:
+        """A 2-step bundled groupby→aggregate chain returning two
+        aggregates must surface both on ``result.steps[1]``."""
+        import nexus.operators.dispatch as _dispatch_mod
+        from nexus.plans.bundle import BUNDLED_INTERMEDIATE
+        from nexus.plans.runner import plan_run
+
+        # Mock claude_dispatch to return a deterministic 2-aggregate
+        # payload. The bundled prompt's terminal-step contract is the
+        # aggregate operator's ``{aggregates: [{key_value, summary}]}``.
+        async def fake_dispatch(prompt, schema, timeout=300.0):
+            return {
+                "aggregates": [
+                    {"key_value": "Byzantine",
+                     "summary": "BFT protocols tolerate arbitrary "
+                                "node behaviour via cryptographic quorum."},
+                    {"key_value": "crash-only",
+                     "summary": "Paxos/Raft tolerate halting failures "
+                                "via majority quorum without signatures."},
+                ],
+            }
+
+        monkeypatch.setattr(_dispatch_mod, "claude_dispatch", fake_dispatch)
+
+        plan = {
+            "steps": [
+                {
+                    "tool": "groupby",
+                    "args": {
+                        "items": json.dumps([
+                            {"id": "p1", "body": "PBFT view-change protocol"},
+                            {"id": "p2", "body": "Raft leader election"},
+                            {"id": "p3", "body": "HotStuff three-phase commit"},
+                            {"id": "p4", "body": "Multi-Paxos coordinator"},
+                        ]),
+                        "key": "fault model",
+                    },
+                },
+                {
+                    "tool": "aggregate",
+                    "args": {
+                        "groups": "$step1.groups",
+                        "reducer": "name one mechanism per fault model",
+                    },
+                },
+            ],
+        }
+
+        result = await plan_run(_match(plan), {}, dispatcher=None)
+
+        # Step 1 (groupby) is the bundled intermediate.
+        assert result.steps[0] == BUNDLED_INTERMEDIATE, (
+            "groupby must be a bundled intermediate when adjacent ops "
+            "are also bundleable"
+        )
+
+        # Step 2 (aggregate) carries the terminal payload.
+        aggregate_out = result.steps[1]
+        assert isinstance(aggregate_out, dict), (
+            "terminal bundled step must carry a dict payload"
+        )
+        assert "aggregates" in aggregate_out
+        assert isinstance(aggregate_out["aggregates"], list)
+        # The regression-catch the original integration >=2 was after.
+        # If the runner ever collapses N>=2 aggregates from the bundled
+        # dispatch into fewer outputs, this assertion trips
+        # deterministically — no LLM stochasticity in scope.
+        assert len(aggregate_out["aggregates"]) == 2, (
+            "runner must preserve every aggregate the bundled dispatch "
+            f"returned; got {len(aggregate_out['aggregates'])} "
+            "aggregates from a 2-aggregate fake_dispatch payload. "
+            "Possible regression: runner trimmed bundled output."
+        )
+        # And the per-aggregate shape stays intact.
+        for agg in aggregate_out["aggregates"]:
+            assert isinstance(agg.get("key_value"), str)
+            assert isinstance(agg.get("summary"), str)

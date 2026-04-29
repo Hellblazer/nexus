@@ -466,6 +466,63 @@ def _check_embedding_domain(
             )
 
 
+# ── Step ``mode`` flag (nexus-h3e2) ───────────────────────────────────────
+#
+# Plan authors writing abstract / community-summary plans need to disable
+# the per-corpus default threshold (e.g. 0.65 for prose) which is tuned
+# for narrow-target search and drops 100% of candidates on broad-phrasing
+# queries. Before this helper they had to memorise ``threshold: 2.0``
+# (cosine distance maxes at 2.0, effectively no filter). The ``mode``
+# field is the authoring affordance: ``mode: broad`` translates to
+# ``threshold = 2.0`` at dispatch time. ``mode: narrow`` is the default
+# and a no-op.
+#
+# Implemented as a runner-side argument-shaping step so the authoring
+# concept stays out of the MCP search/query tool API. An explicit
+# ``threshold`` in the same step wins (operator override).
+
+_BROAD_THRESHOLD: float = 2.0
+_VALID_MODES: frozenset[str] = frozenset({"narrow", "broad"})
+
+
+def _apply_mode_to_args(tool: str, args: dict[str, Any]) -> dict[str, Any]:
+    """Map a plan-step ``mode`` field to concrete tool kwargs.
+
+    * ``mode: broad`` on a retrieval tool sets ``threshold=2.0`` unless
+      the step already specified one (operator override always wins).
+    * ``mode: narrow`` is a no-op (the per-corpus default applies).
+    * ``mode`` on a non-retrieval tool is silently dropped.
+    * Unknown mode values log at warning and are dropped without
+      changing the threshold (no silent typo masking).
+
+    The ``mode`` key is consumed in every case so the dispatch
+    kwarg-drop guard does not log it as an unhandled extra.
+    """
+    if "mode" not in args:
+        return args
+    out = dict(args)
+    mode = out.pop("mode")
+    if not isinstance(mode, str):
+        _log.warning(
+            "plan_step_mode_invalid_type",
+            tool=tool, mode=mode, kind=type(mode).__name__,
+        )
+        return out
+    mode = mode.strip().lower()
+    if mode not in _VALID_MODES:
+        _log.warning(
+            "plan_step_mode_unknown",
+            tool=tool, mode=mode, valid=sorted(_VALID_MODES),
+        )
+        return out
+    if tool not in _RETRIEVAL_TOOLS:
+        # mode applies to retrieval semantics only; drop quietly.
+        return out
+    if mode == "broad" and "threshold" not in out:
+        out["threshold"] = _BROAD_THRESHOLD
+    return out
+
+
 # ── Scope forwarding (RDR-078 P2) ──────────────────────────────────────────
 
 
@@ -1100,6 +1157,11 @@ async def plan_run(
         resolved = _apply_caller_scope_to_args(
             tool, resolved, bindings=merged,
         )
+        # nexus-h3e2: ``mode: broad`` is an authoring affordance for
+        # abstract / community-summary plans whose per-corpus default
+        # threshold drops 100% of candidates. Runs last so an explicit
+        # ``threshold`` set by the plan author always wins.
+        resolved = _apply_mode_to_args(tool, resolved)
 
         # Dispatcher may be async (default path, RDR-079 P4) or sync
         # (legacy test fixtures + any caller that prefers the simpler

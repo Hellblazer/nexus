@@ -86,12 +86,13 @@ class TestMigrationDataclass:
         # aspect_promotion_log table (4.14.2, RDR-089 Phase E) +
         # document_aspects.source_uri column + backfill (4.16.0,
         # RDR-096 P2.1) +
-        # drop pre-RDR-096 null-field aspect rows (4.16.0, RDR-096 P2.2)
-        # = 28.
+        # drop pre-RDR-096 null-field aspect rows (4.16.0, RDR-096 P2.2) +
+        # plans.disabled_at column (4.17.1, nexus-mrzp soft-disable)
+        # = 29.
         # Prefer the name-based checks in TestBackfillPlanDimensions
         # and TestAddPlanMatchTextColumn for future guards; this
         # count is a cheap sentinel only.
-        assert len(MIGRATIONS) == 28
+        assert len(MIGRATIONS) == 29
 
     def test_migrations_ordered_by_version(self) -> None:
         from nexus.db.migrations import MIGRATIONS, _parse_version

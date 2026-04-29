@@ -127,6 +127,7 @@ unchanged templates produces zero inserts.
 | `type-scoped-search` | research / type-scoped | Catalog content-type filter → semantic query within that bucket → summarise |
 | `hybrid-factual-lookup` | lookup / hybrid-factual-lookup | Vector recall + factual-evidence graph traversal → per-stream `limit_per_source` budgets → rank merge → generate. RDR-097. |
 | `traverse-then-generate` | lookup / traverse-then-generate | Explicit-seeds path: walk `factual-evidence` from caller-supplied tumblers → hydrate → generate. RDR-097 companion to `hybrid-factual-lookup`. |
+| `abstract-themes` | query / abstract-themes | CheapRAG community-summary pipeline: broad over-fetch (`mode: broad`) → `groupby` by BERTopic centroid label → per-group `aggregate` → `summarize` coalesce. Routes "main themes / overview / give a summary" question shapes. RDR-098. |
 
 The first 5 are the "verb" scenarios: they correspond to the 5
 RDR-078 verb skills (`/nx:research`, `/nx:review`, …). The next 4 are
@@ -134,12 +135,19 @@ meta-seeds for the plan-library itself. Three (RDR-092 Phase 0a
 migrations) replace the legacy `_PLAN_TEMPLATES` array retired from
 `src/nexus/commands/catalog.py`; two further legacy shapes (provenance
 and cross-corpus compare) were retired as redundant with
-`research-default` and `analyze-default` respectively. The final two
-(`verb: lookup`) ship RDR-097's hybrid retrieval pattern for factual
-QA; they share matcher space and disambiguate on `strategy`. Use
-`hybrid-factual-lookup` when the caller has a question and needs
+`research-default` and `analyze-default` respectively. The two
+`verb: lookup` plans ship RDR-097's hybrid retrieval pattern for
+factual QA; they share matcher space and disambiguate on `strategy`.
+Use `hybrid-factual-lookup` when the caller has a question and needs
 vector recall to find seeds; use `traverse-then-generate` when seed
-tumblers are already explicit inputs.
+tumblers are already explicit inputs. The `abstract-themes` template
+(`verb: query, strategy: abstract-themes`) ships RDR-098's
+community-summary pattern: it uses RDR-070's BERTopic taxonomy as a
+substitute for GraphRAG-style community reports, partitioning
+search results by centroid label so per-theme summaries aggregate
+into a coalesced overview. v1 scope is single-collection abstract
+QA; cross-collection abstract retrieval is deferred (it would route
+through RDR-075's projection layer).
 
 ## match_text synthesis
 

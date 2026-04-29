@@ -225,6 +225,12 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
                 expires_at=expires_at,
             )
 
+        # nexus-9099: fire post-store chains so the promoted T3 row
+        # reaches chash_index / taxonomy / aspect queue. RDR-095
+        # symmetric-fire; this path was missed by the original commit.
+        from nexus.mcp_infra import fire_store_chains
+        fire_store_chains([doc_id], collection, [entry["content"]])
+
         if remove:
             db.delete(entry["project"], entry["title"])
             click.echo(
