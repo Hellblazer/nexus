@@ -51,14 +51,19 @@ DT supports per-group "smart rules" that run AppleScript or shell scripts when a
 - `_read_devonthink_uri()` is registered in the `_READERS` dict so `read_source(uri)` dispatches DT URIs through the resolver and reads the file. macOS-only, gated on `sys.platform == "darwin"`, returns `ReadFail("unreachable", "DEVONthink integration is macOS-only")` on Linux/Windows.
 - `nx catalog remediate-paths` consults `entry.meta.devonthink_uri` before basename scanning and persists the resolved path when DT reports the file exists on disk. The report shows `of which N via DEVONthink` so operators can see the DT-resolved subset.
 
-### DEVONthink AppleScript surface (DT 3 / DT Pro / DT Server, application id `DNtp`)
+### DEVONthink AppleScript surface (DT 3 / DT 4, application id `DNtp`)
 
-| What we want | AppleScript |
+The canonical reference is the AppleScript dictionary bundled with the installed app, dumped via `sdef /Applications/DEVONthink.app` (or File → Open Dictionary in Script Editor). The website's automation page is a marketing pointer; the handbook PDF requires auth; the discourse forum has community examples but not authoritative syntax. `sdef` ships with the binary so it's automatically version-matched. All snippets below are sdef-derived and empirically validated against DT 4.2.2 (Research Findings § 099-research-5).
+
+| What we want | DT 4 AppleScript (sdef-canonical) |
 |---|---|
-| Currently selected records | `tell app id "DNtp" to get selection` → list of records |
-| All records in a named group | `tell app id "DNtp" to get records of (get record at "/path/to/group")` |
-| All records with tag X | `tell app id "DNtp" to (every record whose tags contains "X")` |
-| All records in a smart group | `tell app id "DNtp" to (search query of smart group "Name")` |
+| Currently selected records | `tell app id "DNtp" to selected records` — DT4-preferred bulk form; sdef recommends over the legacy `selection` property "especially for bulk retrieval of properties like UUID" |
+| Record by UUID | `get record with uuid "<UUID>"` |
+| All records with tag X | `lookup records with tags {"X"} in database "Y"` — dedicated command `DTpacd92`; accepts a list of tags + optional `any:true` for OR semantics. **Not** `search "tags:X"` (that key is not honoured by DT 4's search syntax). |
+| Enumerate smart groups | `parents of database "Y" whose record type is smart group` |
+| Smart-group contents | Two-step: enumerate as above, then `set pred to search predicate of <sg>` and re-run via `search pred in root of database "Y"` — smart groups store a saved search, not a materialized list |
+| Records inside a group at a path | `get record at "<path>" in database "Y"` (`DTpacd23`) — path format is finicky; the empirical probe found `"/"` and `"/<dbname>"` both return missing-value, so the convention requires further investigation in a 1-2 hour spike before the `--group` flag ships |
+| Search scope (any search variant) | `search "<query>" in <group>` — the `in` clause requires a *record*, not a database. For database-wide search use `search "<q>" in root of database "Y"` |
 | UUID + path of a record | `uuid of theItem`, `path of theItem` |
 
 Every selector reduces to a list of (UUID, path) pairs. The ingest verb operates on those pairs uniformly.
@@ -109,7 +114,7 @@ A small Claude Code plugin layer (`dt/` next to `nx/` and `sn/`) ships in a foll
 ## Risks and Mitigations
 
 - **DT not installed / not running.** osascript surfaces this cleanly: `tell application id "DNtp"` errors with `Application isn't running`. The selector helpers in `devonthink.py` translate that into a clear `DTNotAvailableError` with operator guidance ("DEVONthink is not running. Open it and retry, or pass `--uuid` for a UUID you already have"). The verbs exit non-zero.
-- **DT version drift.** DT 3 / DT Pro / DT Server all register as application id `DNtp` and share the AppleScript surface used here. The `selection`, `tags`, `smart group`, `record` types have been stable across DT 3.x. v1 targets DT 3.x explicitly. If DT 4 ships with surface drift the integration tests will catch it.
+- **DT version drift.** DT 3 / DT 4 / DT Pro / DT Server all register as application id `DNtp`. v1 targets **DT 4.x as the validated platform** (empirically probed against 4.2.2 in Research Findings § 099-research-5); DT 3.x is expected to work given app-id stability and is the historical compatibility claim, but is not in the v1 test matrix. DT 3 → 4 introduced material AppleScript changes — `selected records` element replaces the legacy `selection` property as the preferred bulk-retrieval form; tag lookup canonical command became `lookup records with tags`; `every record of database` was removed; smart-group enumeration goes through `parents whose record type is smart group`. The RDR's documented snippets reflect the DT 4 dialect.
 - **osascript spawn cost.** Each verb spawns one osascript subprocess. Empirically (`nexus-bqda` measurement) that's ~80–150ms cold. For `--selection` with a typical 1-10 item selection, the AppleScript itself runs in ~10ms. Bulk selectors that return 100+ records add proportional time but stay under 1s in practice. Acceptable for a CLI verb. If we ever want sub-100ms response we'd switch to JXA or write a native binding — out of scope for v1.
 - **Files outside DT's `Files.noindex` tree.** DT can index files in-place rather than copying them into the database. The `path of theItem` AppleScript returns the in-place path correctly; the indexer doesn't care which tree the file lives in. No special-casing needed.
 - **Smart-group queries that return non-PDF files.** A user's smart group might contain mixed content. The dispatcher inspects file extension and routes to `index pdf` / `index md` / `index repo` (or skips for unrecognized extensions, with a warning per skipped item). The skip behavior is the same as `nx index repo` over a directory of mixed content.
@@ -135,3 +140,19 @@ A small Claude Code plugin layer (`dt/` next to `nx/` and `sn/`) ships in a foll
 ## Out of band
 
 A follow-up RDR (or bead) will scope the Claude Code plugin layer (`dt/` slash commands) once the CLI surface is settled. That plugin is purely a wrapper — it does not introduce new substrate.
+
+## Research Findings
+
+Recorded in T2 (`nexus_rdr/099-research-{1..5}`) on 2026-04-28. Pointers, not duplicates — read the full entries via `nx memory get --project nexus_rdr --title 099-research-N`.
+
+1. **`099-research-1` — DT installed at 4.2.2; selection AppleScript works.** Verifies the substrate shipped in 4.17.0 (`nexus-bqda` + `nexus-srck`) is wired up on the user's machine; confirms `tell app id "DNtp" to selected records` returns UUID + path cleanly; surfaces 3 mounted databases (Inbox, Sims, Constantine) and the implied multi-database scoping question for `--group` / `--smart-group`.
+
+2. **`099-research-2` — initial probe surfaced apparent gate blocker, since RESOLVED by `099-research-5`.** Three of four selectors as documented in the original draft (`every smart group`, `whose tags contains`, `every record of database`) failed empirically against DT 4.2.2. This was a documentation issue, not an architectural one — see finding 5 for the corrected dialect. The RDR draft has been updated to use the sdef-canonical forms and the blocker framing is withdrawn.
+
+3. **`099-research-3` — osascript spawn cost ~100ms cold.** Empirical: 80-110ms over 5+ runs of selection-resolving AppleScript against DT 4.2.2. Matches the RDR's prior claim. AppleScript itself is sub-10ms; the cost is osascript fork+exec+JIT. Acceptable as a CLI baseline.
+
+4. **`099-research-4` — prior-art survey: Hookmark, PyDT3, Org-DEVONthink.** All three converge on the same lessons: selection is the universal entry point, UUID is stable identity for *imported* content, path is stable for *indexed* content. Nexus already covers both via `meta.devonthink_uri` (UUID) and `file_path` (path) — substrate alignment validated. **No prior tool exposes DT as a CLI-addressable source with `--tag`/`--group`/`--smart-group` flags** — the v1 surface is genuinely novel in this dimension.
+
+5. **`099-research-5` — authoritative DT 4.2.2 dialect from sdef + empirical (overrides RDR draft AND synthesizer).** The bundled `.sdef` (extracted via `sdef /Applications/DEVONthink.app`, 5764 lines) is the canonical reference — version-matched to the running app, supersedes website docs and forum posts. Key corrections: tag lookup uses the dedicated `lookup records with tags` command (not `search "tags:X"`); selection uses the `selected records` element (not the legacy `selection` property); smart groups enumerate via `parents whose record type is smart group`; `search`'s `in` clause requires a *record*, not a database. The RDR's AppleScript reference table now reflects all sdef-canonical forms; only `--group <path>` (path format finicky) needs a 1-2 hour spike before shipping. The synthesizer agent's `search "tags:X"` recommendation is wrong and should not be used.
+
+**Net effect**: the v1 five-selector surface is viable. The dialect issues uncovered during research were documentation issues in the draft, not architectural gaps. The Proposed Decision section stands; the Context table has been corrected; only `--group <path>` carries a residual spike obligation before shipping.
