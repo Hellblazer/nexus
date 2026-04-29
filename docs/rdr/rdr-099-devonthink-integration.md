@@ -53,17 +53,18 @@ DT supports per-group "smart rules" that run AppleScript or shell scripts when a
 
 ### DEVONthink AppleScript surface (DT 3 / DT 4, application id `DNtp`)
 
-The canonical reference is the AppleScript dictionary bundled with the installed app, dumped via `sdef /Applications/DEVONthink.app` (or File → Open Dictionary in Script Editor). The website's automation page is a marketing pointer; the handbook PDF requires auth; the discourse forum has community examples but not authoritative syntax. `sdef` ships with the binary so it's automatically version-matched. All snippets below are sdef-derived and empirically validated against DT 4.2.2 (Research Findings § 099-research-5).
+The canonical reference is the AppleScript dictionary bundled with the installed app, dumped via `sdef /Applications/DEVONthink.app` (or File → Open Dictionary in Script Editor). The website's automation page is a marketing pointer; the handbook PDF requires auth; the discourse forum has community examples but not authoritative syntax. `sdef` ships with the binary so it's automatically version-matched. All snippets below are sdef-derived and empirically validated against DT 4.2.2 (Research Findings § 099-research-5 and § 099-research-6).
 
 | What we want | DT 4 AppleScript (sdef-canonical) |
 |---|---|
 | Currently selected records | `tell app id "DNtp" to selected records` — DT4-preferred bulk form; sdef recommends over the legacy `selection` property "especially for bulk retrieval of properties like UUID" |
 | Record by UUID | `get record with uuid "<UUID>"` |
-| All records with tag X | `lookup records with tags {"X"} in database "Y"` — dedicated command `DTpacd92`; accepts a list of tags + optional `any:true` for OR semantics. **Not** `search "tags:X"` (that key is not honoured by DT 4's search syntax). |
+| All records with tag X | `lookup records with tags {"X"} in database "Y"` — dedicated command `DTpacd92`; accepts a list of tags + optional `any:true` for OR semantics. (`search "tags:X"` also works for matching records but is subject to DT's predicate-parser quirks; the typed `lookup records with tags` is preferred.) |
 | Enumerate smart groups | `parents of database "Y" whose record type is smart group` |
-| Smart-group contents | Two-step: enumerate as above, then `set pred to search predicate of <sg>` and re-run via `search pred in root of database "Y"` — smart groups store a saved search, not a materialized list |
-| Records inside a group at a path | `get record at "<path>" in database "Y"` (`DTpacd23`) — path format is finicky; the empirical probe found `"/"` and `"/<dbname>"` both return missing-value, so the convention requires further investigation in a 1-2 hour spike before the `--group` flag ships |
+| Smart-group contents | Two-step: enumerate as above, then `set pred to search predicates of <sg>` (note the **plural** `search predicates`; the singular `search predicate` errors with `Can't make predicate ... into type specifier`) and re-run via `search pred in root of database "Y"`. Smart groups store a saved search, not a materialized list. |
+| Records inside a group at a path | `get record at "<path>" in database "Y"` (`DTpacd23`); path format is `/<group-name>` at the database root, `/<parent>/<sub>` for nested. The `location` property of a group is the parent path; round-trip is `<location><name>`. Slashes inside record names must be escaped as `\/` per the sdef. Empirically validated: `get record at "/Trash" in database "Inbox"` returns the Trash group. |
 | Search scope (any search variant) | `search "<query>" in <group>` — the `in` clause requires a *record*, not a database. For database-wide search use `search "<q>" in root of database "Y"` |
+| Reference URL | `reference URL of <record>` returns `x-devonthink-item://<UUID>` literally. For `nx dt open`, fetching this property is more robust than concatenating from a UUID — DT does the URL construction and we get any future scheme changes for free. |
 | UUID + path of a record | `uuid of theItem`, `path of theItem` |
 
 Every selector reduces to a list of (UUID, path) pairs. The ingest verb operates on those pairs uniformly.
@@ -95,7 +96,7 @@ All `nx dt index` variants share a single internal pipeline:
 `nx dt open <tumbler-or-uuid>` resolves the argument:
 
 - If it parses as a tumbler (`N.N.N`), look up the catalog entry and read `meta.devonthink_uri`. If absent, fall back to checking whether `source_uri` itself is `x-devonthink-item://`. If neither, error.
-- If it parses as a UUID-shape, construct `x-devonthink-item://<UUID>` directly without a catalog lookup.
+- If it parses as a UUID-shape, build the URL by calling `reference URL of (get record with uuid <UUID>)` via osascript. Letting DT construct the URL itself is more robust than string-concatenating `x-devonthink-item://<UUID>` — `reference URL` is the documented API and we get any future scheme changes for free.
 
 Then `subprocess.run(["open", uri])` shells out. macOS resolves the URL to DT.
 
@@ -139,11 +140,17 @@ A small Claude Code plugin layer (`dt/` next to `nx/` and `sn/`) ships in a foll
 
 ## Out of band
 
-A follow-up RDR (or bead) will scope the Claude Code plugin layer (`dt/` slash commands) once the CLI surface is settled. That plugin is purely a wrapper — it does not introduce new substrate.
+Three follow-ups identified during the research phase, each its own bead or RDR:
+
+1. **Claude Code plugin layer** (`dt/` slash commands) once the CLI surface is settled. Purely a wrapper — does not introduce new substrate.
+
+2. **Reverse-resolution migration toolkit** for existing nexus catalog entries with stale `file://` URIs into DT's `Files.noindex/` tree (the failure mode `nexus-srck` partly addresses). DT exposes `lookup records with content hash`, `lookup records with path`, `lookup records with file` (basename), and `lookup records with URL` — six identity dimensions beyond UUID. A migration RDR could ship a `nx catalog dt-resolve` verb that walks unmigrated entries, asks DT via these lookup commands, and back-fills `meta.devonthink_uri`. Out of v1 scope but the lookup primitives are documented for reuse.
+
+3. **`--capture-dt-meta` flag** for `nx dt index`. DT records carry `aliases` (wiki names), `URL` (web source), `comment`, `addition date`, and arbitrary custom metadata via `add custom meta data`. Capturing these into `meta.dt.*` keys on the catalog entry would preserve user-curated context that is currently lost on ingest. Optional flag, opt-in. v2 follow-up.
 
 ## Research Findings
 
-Recorded in T2 (`nexus_rdr/099-research-{1..5}`) on 2026-04-28. Pointers, not duplicates — read the full entries via `nx memory get --project nexus_rdr --title 099-research-N`.
+Recorded in T2 (`nexus_rdr/099-research-{1..6}`) on 2026-04-28. Pointers, not duplicates — read the full entries via `nx memory get --project nexus_rdr --title 099-research-N`.
 
 1. **`099-research-1` — DT installed at 4.2.2; selection AppleScript works.** Verifies the substrate shipped in 4.17.0 (`nexus-bqda` + `nexus-srck`) is wired up on the user's machine; confirms `tell app id "DNtp" to selected records` returns UUID + path cleanly; surfaces 3 mounted databases (Inbox, Sims, Constantine) and the implied multi-database scoping question for `--group` / `--smart-group`.
 
@@ -153,6 +160,8 @@ Recorded in T2 (`nexus_rdr/099-research-{1..5}`) on 2026-04-28. Pointers, not du
 
 4. **`099-research-4` — prior-art survey: Hookmark, PyDT3, Org-DEVONthink.** All three converge on the same lessons: selection is the universal entry point, UUID is stable identity for *imported* content, path is stable for *indexed* content. Nexus already covers both via `meta.devonthink_uri` (UUID) and `file_path` (path) — substrate alignment validated. **No prior tool exposes DT as a CLI-addressable source with `--tag`/`--group`/`--smart-group` flags** — the v1 surface is genuinely novel in this dimension.
 
-5. **`099-research-5` — authoritative DT 4.2.2 dialect from sdef + empirical (overrides RDR draft AND synthesizer).** The bundled `.sdef` (extracted via `sdef /Applications/DEVONthink.app`, 5764 lines) is the canonical reference — version-matched to the running app, supersedes website docs and forum posts. Key corrections: tag lookup uses the dedicated `lookup records with tags` command (not `search "tags:X"`); selection uses the `selected records` element (not the legacy `selection` property); smart groups enumerate via `parents whose record type is smart group`; `search`'s `in` clause requires a *record*, not a database. The RDR's AppleScript reference table now reflects all sdef-canonical forms; only `--group <path>` (path format finicky) needs a 1-2 hour spike before shipping. The synthesizer agent's `search "tags:X"` recommendation is wrong and should not be used.
+5. **`099-research-5` — authoritative DT 4.2.2 dialect from sdef + empirical (overrides RDR draft AND synthesizer).** The bundled `.sdef` (extracted via `sdef /Applications/DEVONthink.app`, 5764 lines, 140 commands) is the canonical reference — version-matched to the running app, supersedes website docs and forum posts. Key corrections: tag lookup uses the dedicated `lookup records with tags` command; selection uses the `selected records` element; smart groups enumerate via `parents whose record type is smart group`; `search`'s `in` clause requires a *record*, not a database.
 
-**Net effect**: the v1 five-selector surface is viable. The dialect issues uncovered during research were documentation issues in the draft, not architectural gaps. The Proposed Decision section stands; the Context table has been corrected; only `--group <path>` carries a residual spike obligation before shipping.
+6. **`099-research-6` — full sdef pass closes every remaining gap; v1 ships as proposed, no spike obligations.** Empirical resolution of the path format (`get record at "/<group-name>" in database "Y"` works — root is `/Trash`, `/Tags`, etc.; the earlier "/" probe failed because the root is unnamed). Smart-group re-execution corrected: property is `search predicates` *plural*, not singular. `reference URL of <record>` returns the canonical `x-devonthink-item://<UUID>` so `nx dt open` should call this rather than concatenating. Plus three migration primitives (`lookup records with content hash / path / file / URL`) that motivate the new follow-up bead in the Out-of-band section, and the `aliases` / `URL` / `comment` / custom metadata API that motivates the `--capture-dt-meta` v2 flag.
+
+**Net effect**: the v1 five-selector surface is fully shippable. The dialect issues uncovered during research were documentation issues in the draft, not architectural gaps. The `--group <path>` spike obligation introduced in finding 2 and held in finding 5 has been **withdrawn** by finding 6 — path format is `/<group-name>` rooted at the database. The Proposed Decision section stands; the Context table reflects all sdef-canonical forms; the Out-of-band section now lists three concrete follow-ups (plugin layer, migration toolkit, DT-meta capture) each with sdef-validated primitives backing them.
