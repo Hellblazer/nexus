@@ -848,6 +848,96 @@ def _record_document_hook_failure(
         )
 
 
+# ── Combined post-store fire helper (nexus-9099) ─────────────────────────────
+#
+# RDR-095 established symmetric-fire for the bulk CLI ingest paths
+# (``nx index repo / pdf / rdr``) so every storage event invokes the
+# single, batch, and document-grain hook chains. Three CLI paths were
+# overlooked by the symmetric-fire commit and shipped firing zero
+# chains: ``nx store put``, ``nx memory promote``, and
+# ``nx store import``. The downstream effect is silent drift between
+# the catalog row + chroma chunk and the T2 indexes that operator SQL
+# fast paths depend on (chash_index, taxonomy assignments, aspect
+# extraction queue). nexus-9099 surfaced the bug; this helper closes
+# the gap by giving every T3-write path a single call site that fires
+# all three chains in the correct order.
+#
+# Used by:
+#   * MCP ``store_put`` (mcp/core.py)
+#   * CLI ``nx store put`` (commands/store.py)
+#   * CLI ``nx memory promote`` (commands/memory.py)
+#   * CLI ``nx store import`` (commands/store.py)
+#
+# Bulk ``nx index *`` ingest paths still call the three fire functions
+# directly (see ``code_indexer.py``, ``prose_indexer.py``,
+# ``doc_indexer.py``, ``pipeline_stages.py``, ``indexer.py``) — the AST
+# drift guard in ``tests/test_hook_drift_guard.py`` enforces 7 CLI
+# fire sites + 1 MCP fire site for the document chain. This helper is
+# additive; it does not rewire the bulk paths.
+
+
+def fire_store_chains(
+    doc_ids: list[str],
+    collection: str,
+    contents: list[str],
+    *,
+    source_paths: list[str] | None = None,
+    embeddings: list[list[float]] | None = None,
+    metadatas: list[dict] | None = None,
+) -> None:
+    """Fire all three post-store hook chains for a batch of just-stored docs.
+
+    Single, batch, and document-grain chains run in that order. Errors
+    are caught per-hook and persisted to T2 ``hook_failures``; nothing
+    is propagated to the caller (matching the existing fire functions'
+    semantics).
+
+    Parameters
+    ----------
+    doc_ids:
+        Stable identifiers for each just-stored document.
+    collection:
+        Physical collection name (e.g. ``knowledge__knowledge``).
+    contents:
+        Document text per doc_id. Length must match ``doc_ids``.
+    source_paths:
+        On-disk source path per document, or ``None`` to use ``doc_ids``
+        as the source identity (the MCP ``store_put`` shape — there is
+        no on-disk source). Length must match ``doc_ids`` when given.
+    embeddings:
+        Optional dense vectors per doc; forwarded to the batch chain.
+        ``taxonomy_assign_batch_hook`` accepts ``None`` and fetches
+        embeddings from T3 inline.
+    metadatas:
+        Optional metadata dicts per doc; forwarded to the batch chain.
+        ``chash_dual_write_batch_hook`` reads from this.
+    """
+    n = len(doc_ids)
+    assert len(contents) == n, (
+        f"contents length {len(contents)} != doc_ids length {n}"
+    )
+    if source_paths is None:
+        source_paths = list(doc_ids)
+    elif len(source_paths) != n:
+        raise ValueError(
+            f"source_paths length {len(source_paths)} != doc_ids length {n}"
+        )
+
+    # Single-doc chain — once per (doc_id, content).
+    for doc_id, content in zip(doc_ids, contents):
+        fire_post_store_hooks(doc_id, collection, content)
+
+    # Batch chain — one call with the whole batch.
+    fire_post_store_batch_hooks(
+        doc_ids, collection, contents,
+        embeddings=embeddings, metadatas=metadatas,
+    )
+
+    # Document-grain chain — once per (source_path, content).
+    for sp, content in zip(source_paths, contents):
+        fire_post_document_hooks(sp, collection, content)
+
+
 # ── Version compatibility check (RDR-076) ─────────────────────────────────────
 
 

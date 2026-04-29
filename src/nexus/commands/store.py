@@ -111,6 +111,13 @@ def put_cmd(
     )
     click.echo(f"Stored: {doc_id}  →  {col_name}")
     _catalog_store_hook(title=title, doc_id=doc_id, collection_name=col_name)
+    # nexus-9099: fire the three post-store hook chains so the chash
+    # index, taxonomy assignment, and aspect-extraction queue see CLI
+    # store-put events. RDR-095 symmetric-fire; this path was missed by
+    # the original commit. doc_id is the source identity here (no
+    # on-disk file at the CLI boundary, mirroring MCP store_put).
+    from nexus.mcp_infra import fire_store_chains
+    fire_store_chains([doc_id], col_name, [content])
 
 
 def _catalog_store_hook(title: str, doc_id: str, collection_name: str) -> None:

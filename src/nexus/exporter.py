@@ -377,6 +377,17 @@ def import_collection(
                         embeddings=embeddings,
                         metadatas=metadatas,
                     )
+                    # nexus-9099: fire post-store chains for the imported
+                    # batch (RDR-095 symmetric-fire; missed by the original
+                    # commit). source_path comes from the export metadata
+                    # so the document chain sees the original on-disk path.
+                    from nexus.mcp_infra import fire_store_chains
+                    fire_store_chains(
+                        ids, collection_name, documents,
+                        source_paths=[m.get("source_path", "") for m in metadatas],
+                        embeddings=embeddings,
+                        metadatas=metadatas,
+                    )
                     imported_count += len(ids)
                     _log.debug("import_batch_written", count=len(ids), total_so_far=imported_count)
                     ids, documents, embeddings, metadatas = [], [], [], []
@@ -387,6 +398,13 @@ def import_collection(
             collection_name=collection_name,
             ids=ids,
             documents=documents,
+            embeddings=embeddings,
+            metadatas=metadatas,
+        )
+        from nexus.mcp_infra import fire_store_chains
+        fire_store_chains(
+            ids, collection_name, documents,
+            source_paths=[m.get("source_path", "") for m in metadatas],
             embeddings=embeddings,
             metadatas=metadatas,
         )
