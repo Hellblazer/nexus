@@ -402,6 +402,90 @@ def test_fts5_fallback_applies_scope_conflict_filter(library) -> None:
     assert result == [], "FTS5 path must also filter scope-conflicting plans"
 
 
+# ── RDR-090 P1.2 / nexus-smhc: bare-prefix scope no longer admits ──────────
+# specific-collection plans. Caller scope='rdr' must NOT match plan tag
+# 'rdr__arcaneum' — that's the plan #52 leakage the spike documented.
+
+
+def test_bare_prefix_caller_does_not_admit_specific_plan(library) -> None:
+    """Caller scope='rdr' (no '__') against plan tag 'rdr__arcaneum'.
+
+    Pre-fix: bidirectional prefix match silently widened bare 'rdr' to
+    cover any 'rdr__*' plan, so plan #52 ('across-arcaneum-s-rdrs',
+    hardcoded corpus 'rdr__arcaneum-2ad2825c') matched on nexus-specific
+    questions. Post-fix: the caller must use the canonical family form
+    ('rdr__') for direction-2 admission to fire — without the '__'
+    boundary, a bare prefix is treated as exact-only (matches agnostic
+    or exactly-equal plans).
+    """
+    from nexus.plans.matcher import plan_match
+
+    leaky_id = _seed(library, query="across arcaneum's rdrs collection",
+                     dimensions={"verb": "research", "variant": "arc"},
+                     scope_tags="rdr__arcaneum")
+    cache = _FakeCache(hits=[(leaky_id, 0.10)])
+    result = plan_match(
+        intent="how does chash work in nexus", library=library, cache=cache,
+        min_confidence=0.5, scope_preference="rdr",
+    )
+    assert result == [], (
+        f"bare 'rdr' caller must drop 'rdr__arcaneum' plan; got "
+        f"{[m.plan_id for m in result]}"
+    )
+
+
+def test_canonical_family_prefix_still_admits_specific_plan(library) -> None:
+    """Caller scope='rdr__' (canonical family form) still matches
+    plan tag 'rdr__arcaneum' — the legitimate broaden case is preserved.
+    """
+    from nexus.plans.matcher import plan_match
+
+    plan_id = _seed(library, query="q",
+                    dimensions={"verb": "research"},
+                    scope_tags="rdr__arcaneum")
+    cache = _FakeCache(hits=[(plan_id, 0.10)])
+    result = plan_match(
+        intent="q", library=library, cache=cache,
+        min_confidence=0.5, scope_preference="rdr__",
+    )
+    assert [m.plan_id for m in result] == [plan_id]
+
+
+def test_bare_prefix_caller_still_matches_exact_bare_tag(library) -> None:
+    """Caller scope='rdr' against plan tag exactly 'rdr' still matches
+    via direction-1 (caller is at least as specific). Regression guard
+    against over-tightening the fix.
+    """
+    from nexus.plans.matcher import plan_match
+
+    plan_id = _seed(library, query="q",
+                    dimensions={"verb": "research"},
+                    scope_tags="rdr")
+    cache = _FakeCache(hits=[(plan_id, 0.10)])
+    result = plan_match(
+        intent="q", library=library, cache=cache,
+        min_confidence=0.5, scope_preference="rdr",
+    )
+    assert [m.plan_id for m in result] == [plan_id]
+
+
+def test_bare_prefix_caller_still_passes_agnostic_plan(library) -> None:
+    """Bare-prefix scope tightening must not break the agnostic-plan
+    pass-through (empty scope_tags → neutral weight, kept).
+    """
+    from nexus.plans.matcher import plan_match
+
+    plan_id = _seed(library, query="q",
+                    dimensions={"verb": "research"},
+                    scope_tags="")
+    cache = _FakeCache(hits=[(plan_id, 0.10)])
+    result = plan_match(
+        intent="q", library=library, cache=cache,
+        min_confidence=0.5, scope_preference="rdr",
+    )
+    assert [m.plan_id for m in result] == [plan_id]
+
+
 def test_scope_fit_case_insensitive_prefix_match(library) -> None:
     """_scope_fit matches across case on both sides (nexus-yi7m).
 
