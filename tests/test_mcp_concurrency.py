@@ -4,6 +4,27 @@
 Uses multiprocessing.Process (not threads) to validate actual cross-process
 SQLite WAL contention, matching the real deployment scenario of multiple
 nx-mcp processes.
+
+Start method is pinned to ``spawn`` (via ``multiprocessing.get_context``)
+because ``fork`` is unsafe in this test's parent: pytest has imported
+chromadb + nexus.db.t1 + nexus.db.t3, all of which spin up background
+threads. Forking a multi-threaded parent can copy locks in an acquired
+state, which deadlocks the child indefinitely. The test originally hit
+this on Python 3.13 GitHub Actions runners during the v4.18.0 release
+job — one writer subprocess hung past the 30 s join timeout, leaving
+``p.exitcode == None`` and the assertion firing on a non-zero exit.
+The orphan subprocess then blocked pytest cleanup, hanging the whole
+job until manual cancellation.
+
+Python 3.12 raised ``DeprecationWarning: use of fork() may lead to
+deadlocks in the child``; 3.14 made ``forkserver`` the default on
+POSIX. Pinning ``spawn`` here removes the issue on every supported
+Python version (3.12 and 3.13). See:
+
+  * https://discuss.python.org/t/concerns-regarding-deprecation-of-fork-with-alive-threads/33555
+  * https://github.com/python/cpython/issues/146313 (3.13 resource_tracker
+    shutdown waitpid hang on fork-spawned processes — a second 3.13
+    failure mode that ``spawn`` also avoids)
 """
 from __future__ import annotations
 
@@ -17,6 +38,14 @@ import pytest
 from nexus.db.t1 import T1Database
 from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
+
+# Module-scope context so every Process/Manager in this file uses spawn.
+# Do NOT use ``multiprocessing.set_start_method("spawn")`` — that is
+# process-global and clobbers other tests / fixtures that may rely on
+# the platform default. ``get_context("spawn")`` returns a scoped
+# context whose ``Process``/``Manager`` honour the spawn semantics
+# without touching global state.
+_MP = multiprocessing.get_context("spawn")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -95,7 +124,7 @@ def test_t2_concurrent_writes():
     processes = []
 
     for i in range(n_processes):
-        p = multiprocessing.Process(
+        p = _MP.Process(
             target=_t2_writer,
             args=(str(db_path), f"proj-{i}", entries_per_process),
         )
@@ -135,14 +164,14 @@ def test_t2_concurrent_reads_during_writes():
         db.put(project="readtest", title=f"seed-{i}", content=f"seed content {i}")
     db.close()
 
-    manager = multiprocessing.Manager()
+    manager = _MP.Manager()
     result_list = manager.list()
 
     # Start a writer and reader concurrently
-    writer = multiprocessing.Process(
+    writer = _MP.Process(
         target=_t2_writer, args=(str(db_path), "readtest-write", 20)
     )
-    reader = multiprocessing.Process(
+    reader = _MP.Process(
         target=_t2_reader, args=(str(db_path), "readtest", result_list)
     )
 
