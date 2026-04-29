@@ -6,6 +6,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.19.0] - 2026-04-29
+
+Feature release. RDR-099 ships first-class DEVONthink integration on macOS: operators can now ingest DT records into Nexus by selection, tag, group, smart group, or UUID, and round-trip catalog entries back to DT. Cross-platform CI is unaffected; the integration is gated to `sys.platform == "darwin"` with friendly error messages elsewhere.
+
+### Added
+
+- **`nx dt` Click command group** (RDR-099, PR #363). Two subcommands cover the v1 surface:
+  - `nx dt index`: ingest DT records into Nexus. Mutually-exclusive selectors `--selection`, `--tag <name>`, `--group <path>`, `--smart-group <name>`, and `--uuid <UUID>` (repeatable for batch). Per-record dispatch by extension routes `.pdf` to `nx index pdf` and `.md` to `nx index md`; other extensions are skipped with a structured WARN. Passthrough `--database` (default: every open library, with UUID dedupe), `--collection`, `--corpus`, and `--dry-run`.
+  - `nx dt open <tumbler|UUID>`: round-trip a catalog entry back to DT via `open(1)`. UUID-shaped arguments build the URI directly (no catalog hit); tumblers resolve through the catalog, preferring `meta.devonthink_uri` and falling back to `source_uri`.
+- **`src/nexus/devonthink.py`**: selector helpers exposing 5 sdef-canonical AppleScript surfaces (`selected records`, `lookup records with tags`, `parents whose record type is smart group`, `search predicates` PLURAL + `search group` + `exclude subgroups`) over a centralised `_run_osascript` spawn. `DTNotAvailableError` translates DT's `Application isn't running` into an operator-friendly message; non-darwin invocations refuse with a clear `macOS-only` error rather than silently no-op.
+- **`docs/devonthink-smart-rules.md`**: operator recipe for DT smart rules + macOS folder actions calling `nx dt index --uuid`. Covers AppleScript stanza, save location (`~/Library/Application Scripts/com.devon-technologies.think/Smart Rules/`), error-handling pattern, and the concurrency caveat for bulk imports.
+- **`tests/e2e/devonthink-manual.md`**: fixture-creation runbook + per-AC manual smoke for the live-DT path (one-off setup, then `nx dt index --selection|--tag|--group|--smart-group|--uuid` + `nx dt open` repros).
+- **`tests/test_devonthink_live.py`**: gated live-DT integration suite (`sys.platform == "darwin"` + `NEXUS_DT_LIVE=1`) verifying multi-database tag invariant, recursive group walk, and smart-group `search group` scope preservation against real DT state.
+- Substrate from 4.17.0 is reused: `x-devonthink-item://` URI scheme (registered in `_KNOWN_URI_SCHEMES`), `meta.devonthink_uri` reverse-lookup, and the single-UUID resolver in `aspect_readers._devonthink_resolver_default`.
+
+### Fixed
+
+- **`tests/test_catalog_prune_stale.py` fixtures collided with real RDR-099** (RDR-099 P-Review). The fixtures used `rdr-099-*` as a deliberately-fake slug for missing-file entries; once RDR-099 shipped as a real RDR file, `nx catalog prune-stale`'s CWD-walk for same-prefix replacements found the real file and skipped the test entry instead of pruning. Fixtures renamed to `rdr-999-test-*` to remove the collision. (The underlying default-`--source-dir` behaviour is a separate concern; this fix takes the smallest-scope route.)
+
 ## [4.18.2] - 2026-04-29
 
 Data-loss fix. Closes #367. Plus two CI test-isolation fixes that surfaced during the PR's verification.

@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.19.0] - 2026-04-29
+
+Plugin version aligned with conexus 4.19.0. RDR-099 ships first-class DEVONthink integration on macOS via a new `nx dt` Click command group (PR #363). Two subcommands: `nx dt index` ingests DT records by selection / tag / group / smart group / UUID, and `nx dt open` round-trips a tumbler or UUID back to DT. New `src/nexus/devonthink.py` selector helpers use sdef-canonical AppleScript dialect (`selected records`, `lookup records with tags`, `parents whose record type is smart group`, `search predicates` PLURAL). Companion docs `docs/devonthink-smart-rules.md` and `tests/e2e/devonthink-manual.md` ship in the same release. Cross-platform CI is unaffected: every test runs on Linux without invoking osascript, and non-darwin invocations refuse with a clear `macOS-only` message. See root `CHANGELOG.md` for the full notes.
+
 ## [4.18.2] - 2026-04-29
 
 Plugin version aligned with conexus 4.18.2. Data-loss fix in the underlying CLI: `nx collection reindex` now refuses to delete a store_put-only collection when there's nothing to re-index from (#367); `--force` does not bypass; users are pointed at `nx collection delete` for the explicit-delete path. Plus two CI test-isolation fixes (Python 3.13 attribute strictness + console health template-branch test). See root `CHANGELOG.md` for the full notes.
