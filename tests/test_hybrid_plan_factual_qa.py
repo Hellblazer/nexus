@@ -26,16 +26,6 @@ replace the ``expected_tumblers`` and ``expected_substrings`` fields
 with values pulled from the live corpus. The bead nexus-qlfa carries
 the corpus-side prep; this file is the test side.
 
-Caveats and the cache-reset workaround
---------------------------------------
-
-The MCP plan-cache (``plans__session``) does not invalidate on T2
-mutation (nexus-qgjr). When ``nx catalog setup`` seeds new templates
-mid-session, the cosine cache returns stale matches. This harness
-calls :func:`nexus.mcp_infra.reset_plan_cache_for_tests` before each
-run as a workaround. The systemic fix is tracked separately;
-removing the reset call here is gated on that bead.
-
 Cost note
 ---------
 
@@ -152,12 +142,6 @@ HYBRIDRAG_FIXTURES: list[dict[str, Any]] = [
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────
-
-
-def _reset_plan_cache() -> None:
-    """Drop the T1 plan-session cache before each run (nexus-qgjr workaround)."""
-    from nexus.mcp_infra import reset_plan_cache_for_tests
-    reset_plan_cache_for_tests()
 
 
 def _vector_only_baseline(
@@ -332,7 +316,6 @@ def test_vector_only_baseline_runs(fixture: dict[str, Any]) -> None:
     the hybrid path has something to compare against. Asserts the
     baseline retrieves at least one chunk.
     """
-    _reset_plan_cache()
     out = _vector_only_baseline(fixture["question"])
     assert out["ids"], (
         f"Baseline returned zero hits for {fixture['id']!r}; corpus "
@@ -372,7 +355,6 @@ async def test_hybrid_not_worse_than_baseline(
     cross-run diff can answer "did the change regress recall on
     fixture X at budget Y" without re-running the whole suite.
     """
-    _reset_plan_cache()
     vector_budget, graph_budget = budget
 
     t0 = time.perf_counter()
