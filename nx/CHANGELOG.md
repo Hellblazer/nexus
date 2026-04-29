@@ -6,6 +6,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.19.1] - 2026-04-29
+
+Plugin version aligned with conexus 4.19.1. Two bug fixes from v4.19.0 post-release live shakeout:
+
+- `nx dt index` now stamps `source_uri = x-devonthink-item://<UUID>` and `meta.devonthink_uri` on the catalog entry, restoring RDR-099 AC-1's round-trip promise (PR #376).
+- `nx doctor --check-taxonomy` no longer hangs on real-size catalogs: the quadratic `NOT EXISTS` with `OR` query was restructured as `NOT IN (UNION)`, dropping runtime from 30s+ to 0.42s on a 526k-row database (PR #375).
+
+See root `CHANGELOG.md` for the full notes.
+
 ## [4.19.0] - 2026-04-29
 
 Plugin version aligned with conexus 4.19.0. RDR-099 ships first-class DEVONthink integration on macOS via a new `nx dt` Click command group (PR #363). Two subcommands: `nx dt index` ingests DT records by selection / tag / group / smart group / UUID, and `nx dt open` round-trips a tumbler or UUID back to DT. New `src/nexus/devonthink.py` selector helpers use sdef-canonical AppleScript dialect (`selected records`, `lookup records with tags`, `parents whose record type is smart group`, `search predicates` PLURAL). Companion docs `docs/devonthink-smart-rules.md` and `tests/e2e/devonthink-manual.md` ship in the same release. Cross-platform CI is unaffected: every test runs on Linux without invoking osascript, and non-darwin invocations refuse with a clear `macOS-only` message. See root `CHANGELOG.md` for the full notes.

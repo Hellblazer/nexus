@@ -6,6 +6,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.19.1] - 2026-04-29
+
+Two bug fixes caught during v4.19.0 post-release live shakeout. RDR-099 AC-1's central round-trip promise (`nx dt index` ↔ `nx dt open`) was silently broken; the doctor taxonomy check was hanging past 30s on real-size catalogs.
+
+### Fixed
+
+- **`nx dt index` now stamps the DT identity on the catalog entry** (PR #376, RDR-099 AC-1). Indexer-registered entries previously carried `source_uri = file://...` (the resolved local path) and empty `meta`. After the indexer call, `_stamp_dt_uri_on_entry` now updates the entry to `source_uri = x-devonthink-item://<UUID>` and `meta.devonthink_uri = x-devonthink-item://<UUID>`, restoring the round-trip via `nx dt open <tumbler>` and making the entry stable across DT relocations inside `Files.noindex/`. Stamp failures are logged and swallowed: a miss leaves a recoverable `file://` entry rather than aborting the whole batch. Verified end-to-end on a live DT installation: indexed PRDTs PDF (UUID 5321AD83), catalog now reports `URI: x-devonthink-item://5321AD83-...`, and `nx dt open 1.2163.1` opens the record in DT.
+- **`nx doctor --check-taxonomy` no longer hangs on real-size catalogs** (PR #375). The drift-detection query used `NOT EXISTS` with an `OR` clause (`tl.from_topic_id = ta.topic_id OR tl.to_topic_id = ta.topic_id`) that defeated SQLite's index planner: each outer row triggered a covering scan of `topic_links`. On one production database (526k `topic_assignments` × 13k `topic_links`) that's 6.93 BILLION row comparisons, timing out past 30s with no output. Restructured as `NOT IN (SELECT from_topic_id UNION SELECT to_topic_id)` so each half uses the primary-key index and the union materialises into a hash set. Same catalog: 30s+ → 0.42s (>71x improvement), drift output unchanged. All 6 `TestDoctorCheckTaxonomy` tests still pass.
+
+### Documentation
+
+- `tests/e2e/devonthink-manual.md`: replaced four `nx catalog list --source-uri-prefix x-devonthink-item://` examples with `nx catalog list --json | jq ...` (PR #374). The flag never existed; the JSON-pipe form is the canonical query path.
+
 ## [4.19.0] - 2026-04-29
 
 Feature release. RDR-099 ships first-class DEVONthink integration on macOS: operators can now ingest DT records into Nexus by selection, tag, group, smart group, or UUID, and round-trip catalog entries back to DT. Cross-platform CI is unaffected; the integration is gated to `sys.platform == "darwin"` with friendly error messages elsewhere.
