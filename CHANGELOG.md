@@ -6,6 +6,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.19.2] - 2026-04-29
+
+Patch release bundling six findings from a post-v4.19.1 audit (PR #378) plus the headline #377 fix. The audit ran two parallel deep-analyzer agents (one over the RDR-099 / `nx dt` surface, one over prefix-keyed config registries) and surfaced two critical bugs, three significant issues, and one feature gap.
+
+### Added
+
+- **`nx enrich aspects` now supports `docs__*` collections** (Closes #377). `docs__*` collections produced by `nx index repo` (markdown / ADR / design-doc holders) hold the same kind of substantive prose as `knowledge__*` but were silently excluded from the aspect-extraction registry. `_REGISTRY` now aliases `docs__` to the same `scholarly-paper-v1` config, so `problem_formulation`, `proposed_method`, `experimental_datasets`, `experimental_baselines`, and `experimental_results` extraction applies uniformly to both prefixes. Companion edits: error message in `nx enrich aspects` lists `docs__*` in supported prefixes; stale "Phase 1 = `knowledge__*` only" docstring in `aspect_worker.py` updated to current registry state.
+- **`nx catalog update --source-uri` flag**. `Catalog.update()` already accepted `source_uri` via `**fields` but the CLI exposed no flag. Adds the recovery path for entries whose DT-URI stamp failed during `nx dt index` (the entry would carry `source_uri=file://…` instead of `x-devonthink-item://<UUID>`). URI is validated against the same scheme allowlist as register-time.
+
+### Fixed
+
+- **`nx dt index` now forwards `--collection` for `.md` files**. `_index_record` passed `collection_name=collection` to `index_pdf` but called `index_markdown` without it, silently dropping the operator's `--collection` flag for every Markdown record. PDFs landed in the requested collection; Markdowns landed in `docs__default` regardless of intent. New `test_index_record_md_forwards_collection` exercises the real `_index_record` body to lock the parity.
+- **`nx dt open <tumbler>` checks platform before catalog I/O**. UUID-form gated correctly but the tumbler-form ran catalog resolution before checking `sys.platform`, leaking catalog errors (`tumbler not found`, `Catalog not initialized`) instead of the documented `macOS-only` diagnostic on non-darwin. Hoisted `_is_darwin()` to the top of `open_cmd`.
+- **`nx dt index` summary surfaces stamp failures**. `_stamp_dt_uri_on_entry` failures were logged-and-swallowed; the summary still reported `Indexed N record(s) (M skipped).` as if every entry got the DT identity. `_index_record` and `_stamp_dt_uri_on_entry` now return `bool`; the summary adds `<N> DT-URI stamp-failed` plus a recovery hint pointing at `nx catalog update --source-uri`.
+
+### Documentation
+
+- **`docs/devonthink-smart-rules.md` drift**: removed the last reference to the nonexistent `nx catalog list --source-uri-prefix` flag (PR #374 fixed the same drift in `tests/e2e/devonthink-manual.md` but missed this second file). Replaced with the canonical `nx catalog list --json | jq …` form.
+- **`docs/devonthink-smart-rules.md` install-path table**: `/usr/local/bin/nx` is the wrong default for Apple Silicon Homebrew (`/opt/homebrew/bin/nx`) and `uv tool install` (`~/.local/bin/nx`). Replaced the bare "replace this" note with a four-row table covering common install methods plus `which nx` instructions.
+
 ## [4.19.1] - 2026-04-29
 
 Two bug fixes caught during v4.19.0 post-release live shakeout. RDR-099 AC-1's central round-trip promise (`nx dt index` ↔ `nx dt open`) was silently broken; the doctor taxonomy check was hanging past 30s on real-size catalogs.

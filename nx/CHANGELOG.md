@@ -6,6 +6,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.19.2] - 2026-04-29
+
+Plugin version aligned with conexus 4.19.2. Bundles six findings from a post-v4.19.1 audit plus the headline #377 fix:
+
+- `nx enrich aspects` now supports `docs__*` collections (Closes #377). `nx catalog update --source-uri` adds a CLI recovery path for stamp failures.
+- `nx dt index` forwards `--collection` for `.md` files (was silently dropping the flag), and surfaces stamp failures in the summary line.
+- `nx dt open <tumbler>` checks platform before catalog I/O so non-darwin users see `macOS-only` instead of catalog errors.
+- `docs/devonthink-smart-rules.md` drift fixed (drift class also addressed in PR #374 for the manual.md sibling), plus an install-path table covering Apple Silicon Homebrew and uv tool install defaults.
+
+See root `CHANGELOG.md` for the full notes.
+
 ## [4.19.1] - 2026-04-29
 
 Plugin version aligned with conexus 4.19.1. Two bug fixes from v4.19.0 post-release live shakeout:
