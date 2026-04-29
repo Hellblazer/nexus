@@ -913,6 +913,11 @@ def store_put(
         # per-doc consumers; batch chain runs with a 1-element list so
         # batch-shape consumers (taxonomy, chash) see MCP store_put as
         # a single-document batch.
+        #
+        # Direct fire calls are required here (not the nexus-9099
+        # ``fire_store_chains`` helper) because ``test_hook_drift_guard``
+        # AST-counts these three names verbatim in mcp/core.py to enforce
+        # the 7-CLI + 1-MCP fire-site invariant.
         _fire_post_store_hooks(doc_id, col_name, content)
         _fire_post_store_batch_hooks(
             [doc_id], col_name, [content], None, None,
