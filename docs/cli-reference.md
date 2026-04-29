@@ -425,6 +425,28 @@ nx catalog orphans --no-links
 
 Find catalog entries with zero incoming and outgoing links. Useful for identifying documents that need linking or cleanup.
 
+### nx catalog audit-membership
+
+```
+nx catalog audit-membership <COLLECTION>
+nx catalog audit-membership <COLLECTION> --json
+nx catalog audit-membership <COLLECTION> --canonical-home '/git/ART' --purge-non-canonical --dry-run
+nx catalog audit-membership <COLLECTION> --canonical-home '/git/ART' --purge-non-canonical --yes
+```
+
+Detect cross-project source_uri contamination in a single physical_collection. Catalog entries are grouped by their `source_uri` "home" (the first four path segments for `file://` URIs, `<scheme>://<netloc>` otherwise); per-home counts surface multi-root collections that look correct in `nx catalog list` but break aspect extraction (the chunks live under one project's identity, every other-project entry skips with `reason=empty`).
+
+| Flag | Description |
+|------|-------------|
+| `COLLECTION` (positional) | Physical collection to audit (e.g. `rdr__ART-8c2e74c0`) |
+| `--purge-non-canonical` | Delete entries whose home does not match the canonical one. Use with `--dry-run` first |
+| `--canonical-home SUBSTR` | Override the dominant-home heuristic. Required when the contaminating entries outnumber the legitimate ones (e.g. `--canonical-home '/git/ART'`) |
+| `--dry-run` | With `--purge-non-canonical`, preview without writing |
+| `--yes` / `-y` | Skip the purge confirmation prompt |
+| `--json` | Emit per-home counts as JSON |
+
+The dominant home (numerical majority) is the default canonical. When dominance is wrong (e.g. ART-lhk1: 140 contaminating nexus URIs vs 105 legitimate ART URIs in `rdr__ART-...`), pass `--canonical-home` with a unique substring of the right home. Deletion is the standard `delete_document` path: tombstoned in JSONL, removed from SQLite, links preserved as orphans.
+
 ### nx catalog coverage
 
 ```
