@@ -2,14 +2,22 @@
 title: "RDR-098: Abstract-Question Plan Template — BERTopic Communities as Cheap Substitute for GraphRAG Community Reports"
 id: RDR-098
 type: Feature
-status: accepted
+status: closed
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-28
 accepted_date: 2026-04-29
-related_issues: []
-related_tests: []
+closed_date: 2026-04-29
+close_reason: implemented
+gap_closures:
+  Gap1: nx/plans/builtin/abstract-themes.yml:24
+  Gap2: nx/plans/builtin/abstract-themes.yml:35
+  Gap3: nx/plans/builtin/abstract-themes.yml:21
+  Gap4: nx/plans/builtin/abstract-themes.yml:45
+  Gap5: tests/test_abstract_themes_plan_integration.py:95
+related_issues: [nexus-ldnp, nexus-5gby, nexus-17yg, nexus-zvbc, nexus-j5ka, nexus-h3e2]
+related_tests: [test_abstract_themes_plan.py, test_abstract_themes_plan_integration.py]
 related: [RDR-070, RDR-075, RDR-078, RDR-080, RDR-088, RDR-091, RDR-092, RDR-093, RDR-097]
 ---
 
