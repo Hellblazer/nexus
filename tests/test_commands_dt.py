@@ -644,3 +644,169 @@ class TestSelectDtUriFromEntry:
             _select_dt_uri_from_entry(entry)
             == "x-devonthink-item://FALLBACK"
         )
+
+
+# ── _stamp_dt_uri_on_entry (post-index identity stamp) ───────────────────────
+
+
+class TestStampDtUriOnEntry:
+    """RDR-099 AC-1 requires every catalog entry produced by
+    ``nx dt index`` to have ``source_uri == x-devonthink-item://<UUID>``
+    AND ``meta.devonthink_uri`` matching. The indexer registers the
+    entry with the resolved local ``file://`` path; ``_stamp_dt_uri_on_entry``
+    runs afterwards to overwrite both fields with the DT identity.
+    """
+
+    def _setup_catalog_with_entry(self, tmp_path, file_path):
+        """Stand up a catalog with a single registered entry pointing
+        at ``file_path`` (mimics the post-index state before the
+        stamp helper runs). Returns the catalog instance."""
+        from nexus.catalog.catalog import Catalog  # noqa: PLC0415
+
+        cat = Catalog.init(tmp_path / "catalog")
+        owner = cat.register_owner(
+            "test-repo", "repo", repo_hash="cafebabe",
+        )
+        cat.register(
+            owner=owner,
+            title="A Test PDF",
+            file_path=str(file_path),
+            content_type="paper",
+        )
+        return cat
+
+    def test_stamps_source_uri_and_meta_devonthink_uri(
+        self, tmp_path, monkeypatch,
+    ):
+        """Happy path: indexer-registered entry with file:// source_uri
+        becomes a DT-keyed entry after the stamp runs."""
+        from nexus.commands.dt import _stamp_dt_uri_on_entry
+
+        file_path = tmp_path / "a.pdf"
+        file_path.write_bytes(b"%PDF-1.4 dt-stamp")
+        cat = self._setup_catalog_with_entry(tmp_path, file_path)
+        cat_dir = tmp_path / "catalog"
+        monkeypatch.setattr(
+            "nexus.config.catalog_path", lambda: cat_dir,
+        )
+
+        uuid = "8EDC855D-213F-40AD-A9CF-9543CC76476B"
+        _stamp_dt_uri_on_entry(file_path, uuid)
+
+        # Reopen so we read post-write state.
+        from nexus.catalog.catalog import Catalog  # noqa: PLC0415
+
+        cat2 = Catalog(cat_dir, cat_dir / ".catalog.db")
+        try:
+            entries = cat2.all_documents()
+            target = next(
+                e for e in entries if e.file_path == str(file_path)
+            )
+            assert target.source_uri == f"x-devonthink-item://{uuid}"
+            assert target.meta.get("devonthink_uri") == (
+                f"x-devonthink-item://{uuid}"
+            )
+        finally:
+            cat2._db.close()
+
+    def test_no_entry_match_logs_and_returns(
+        self, tmp_path, monkeypatch,
+    ):
+        """When no catalog entry matches the file_path (rare —
+        post-index, but possible if a concurrent purge runs), the
+        stamp helper logs a warning and returns cleanly. It must not
+        raise."""
+        from nexus.commands.dt import _stamp_dt_uri_on_entry
+
+        # Initialise a catalog but DON'T register any entry.
+        from nexus.catalog.catalog import Catalog  # noqa: PLC0415
+
+        cat_dir = tmp_path / "catalog"
+        Catalog.init(cat_dir)
+        monkeypatch.setattr(
+            "nexus.config.catalog_path", lambda: cat_dir,
+        )
+
+        file_path = tmp_path / "ghost.pdf"
+        # Should not raise.
+        _stamp_dt_uri_on_entry(file_path, "GHOST-UUID")
+
+    def test_uninitialized_catalog_logs_and_returns(
+        self, tmp_path, monkeypatch,
+    ):
+        """When the catalog is not initialised at all, the stamp
+        helper logs and returns instead of raising. Production callers
+        always initialise the catalog before indexing, but the
+        defence keeps the dt index summary intact rather than
+        bubbling a startup error."""
+        from nexus.commands.dt import _stamp_dt_uri_on_entry
+
+        # No Catalog.init call — catalog dir doesn't exist as a catalog.
+        bogus = tmp_path / "no-catalog-here"
+        bogus.mkdir()
+        monkeypatch.setattr(
+            "nexus.config.catalog_path", lambda: bogus,
+        )
+
+        # Should not raise.
+        _stamp_dt_uri_on_entry(tmp_path / "x.pdf", "ANY-UUID")
+
+    def test_index_record_invokes_stamp_helper(
+        self, monkeypatch, tmp_path,
+    ):
+        """``_index_record`` MUST call ``_stamp_dt_uri_on_entry`` after
+        the indexer runs — that's the contract that turns the
+        ``file://`` source_uri the indexer registers into the DT
+        identity AC-1 requires. Mocks both the indexer and the stamp
+        helper so we just verify the wiring."""
+        from nexus.commands import dt as dt_module
+
+        called: list[tuple[Path, str]] = []
+
+        def fake_stamp(file_path, uuid):
+            called.append((file_path, uuid))
+
+        def fake_index_pdf(*args, **kwargs):
+            return 0
+
+        monkeypatch.setattr(
+            dt_module, "_stamp_dt_uri_on_entry", fake_stamp,
+        )
+        monkeypatch.setattr(
+            "nexus.doc_indexer.index_pdf", fake_index_pdf,
+        )
+
+        dt_module._index_record(
+            uuid="UUID-WIRING",
+            path=str(tmp_path / "a.pdf"),
+            collection=None,
+            corpus="default",
+            dry_run=False,
+        )
+        assert len(called) == 1
+        assert called[0][0] == tmp_path / "a.pdf"
+        assert called[0][1] == "UUID-WIRING"
+
+    def test_index_record_dry_run_skips_stamp(
+        self, monkeypatch, tmp_path,
+    ):
+        """``--dry-run`` short-circuits — no indexer call, no stamp."""
+        from nexus.commands import dt as dt_module
+
+        stamps: list = []
+
+        def fake_stamp(file_path, uuid):
+            stamps.append((file_path, uuid))
+
+        monkeypatch.setattr(
+            dt_module, "_stamp_dt_uri_on_entry", fake_stamp,
+        )
+
+        dt_module._index_record(
+            uuid="UUID-DRY",
+            path=str(tmp_path / "a.pdf"),
+            collection=None,
+            corpus="default",
+            dry_run=True,
+        )
+        assert stamps == []

@@ -51,6 +51,14 @@ def _index_record(
     summary line see the skip count without having to introspect the
     dispatcher's internals.
 
+    After the indexer registers the catalog entry (with the resolved
+    ``file://`` source_uri it sees), this function stamps the DT
+    identity onto the entry: ``source_uri = x-devonthink-item://<UUID>``
+    and ``meta.devonthink_uri`` set to the same value. RDR-099 AC-1
+    requires this — the catalog identity must be stable across DT
+    relocations, and the file path returned by osascript at index time
+    is not (DT moves files inside Files.noindex/ on its own schedule).
+
     Tests monkeypatch this single function rather than the heavyweight
     ``doc_indexer`` machinery so the CLI surface is exercised
     independently of Voyage credentials and Chroma clients.
@@ -69,6 +77,82 @@ def _index_record(
         index_pdf(file_path, corpus=corpus, collection_name=collection)
     else:  # .md — extension filtering happens in index_cmd
         index_markdown(file_path, corpus=corpus)
+
+    _stamp_dt_uri_on_entry(file_path, uuid)
+
+
+def _stamp_dt_uri_on_entry(file_path: Path, uuid: str) -> None:
+    """Set ``source_uri`` and ``meta.devonthink_uri`` on the catalog
+    entry that was just indexed for ``file_path``.
+
+    The indexer registers the entry with the resolved local path as
+    ``source_uri`` (``file://...``); this is fine for non-DT ingest but
+    breaks RDR-099 AC-1, where the catalog identity must survive DT
+    moving the underlying file inside its ``Files.noindex/`` tree.
+    Looking up the entry by ``file_path`` immediately after the indexer
+    call is reliable because no other registrar runs between the two.
+
+    Failures are logged and swallowed: a stamp miss should not abort
+    the whole ``nx dt index`` run. The resulting catalog entry is still
+    usable, just without the round-trip property; ``nx catalog
+    remediate-paths`` (RDR-096 substrate) plus a manual ``nx catalog
+    update`` can recover after the fact.
+    """
+    from nexus.catalog import resolve_tumbler  # noqa: PLC0415
+    from nexus.catalog.catalog import Catalog  # noqa: PLC0415
+    from nexus.config import catalog_path  # noqa: PLC0415
+
+    dt_uri = f"x-devonthink-item://{uuid}"
+    cat_path = catalog_path()
+    if not Catalog.is_initialized(cat_path):
+        _log.warning(
+            "dt_stamp_skipped_uninitialized_catalog",
+            file_path=str(file_path),
+            uuid=uuid,
+        )
+        return
+
+    cat = Catalog(cat_path, cat_path / ".catalog.db")
+    try:
+        # Globally find the entry by file_path — no owner constraint
+        # because we don't know it from here. ``documents`` is keyed
+        # by tumbler primary key plus a unique (file_path) row per
+        # indexed file, so this returns one row.
+        row = cat._db.execute(
+            "SELECT tumbler FROM documents WHERE file_path = ? LIMIT 1",
+            (str(file_path),),
+        ).fetchone()
+        if row is None:
+            _log.warning(
+                "dt_stamp_no_entry_found",
+                file_path=str(file_path),
+                uuid=uuid,
+            )
+            return
+
+        from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415
+
+        tumbler = Tumbler.parse(row[0])
+        cat.update(
+            tumbler,
+            source_uri=dt_uri,
+            meta={"devonthink_uri": dt_uri},
+        )
+        _log.debug(
+            "dt_stamp_applied",
+            tumbler=str(tumbler),
+            uuid=uuid,
+            dt_uri=dt_uri,
+        )
+    except Exception as e:
+        _log.warning(
+            "dt_stamp_failed",
+            file_path=str(file_path),
+            uuid=uuid,
+            error=str(e),
+        )
+    finally:
+        cat._db.close()
 
 
 @click.group("dt")
