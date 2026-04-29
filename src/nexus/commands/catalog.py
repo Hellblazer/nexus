@@ -1468,6 +1468,145 @@ def coverage_cmd(owner_prefix: str) -> None:
         click.echo(f"  {ct:<12} {linked:>4}/{total:<4} = {pct:5.1f}%")
 
 
+@catalog.command("link-density")
+@click.option(
+    "--by-collection/--no-by-collection",
+    "by_collection",
+    default=True,
+    help="Aggregate by physical_collection (default).",
+)
+@click.option(
+    "--sample",
+    default=50,
+    type=int,
+    help="Max seeds per collection to BFS (capped to keep latency bounded).",
+)
+@click.option("--depth", default=2, type=int, help="BFS depth (default 2).")
+@click.option(
+    "--threshold",
+    default=3,
+    type=int,
+    help="Frontier-p50 below this flags the collection as low-density.",
+)
+def link_density_cmd(
+    by_collection: bool, sample: int, depth: int, threshold: int
+) -> None:
+    """Measure catalog link-graph density per collection.
+
+    For each ``physical_collection``, samples up to ``--sample`` seed
+    tumblers, runs a depth-``--depth`` BFS from each, and reports the
+    frontier-size distribution (p50, p90) plus the link types that
+    fired during traversal.
+
+    \b
+    Use this before deciding whether a hybrid retrieval plan
+    (RDR-097) makes sense for a given collection. A collection with
+    median frontier <``--threshold`` nodes is flagged as a poor
+    candidate — graph traversal will add latency with little recall
+    gain. Vector-only retrieval is the better choice there.
+
+    \b
+    The frontier count for one seed is the number of nodes reachable
+    within ``--depth`` hops, excluding the seed itself.
+    """
+    import statistics  # noqa: PLC0415
+
+    cat = _get_catalog()
+    db = cat._db
+
+    # By design the bead specifies physical_collection grouping; the
+    # ``--no-by-collection`` flag is a placeholder for a future
+    # global-density rollup so the option signature stays stable.
+    if not by_collection:
+        click.echo("Global rollup not yet implemented — use --by-collection.")
+        return
+
+    rows = db.execute(
+        "SELECT physical_collection, COUNT(*) FROM documents "
+        "WHERE physical_collection IS NOT NULL "
+        "  AND physical_collection != '' "
+        "GROUP BY physical_collection "
+        "ORDER BY physical_collection"
+    ).fetchall()
+
+    if not rows:
+        click.echo("No collections registered in catalog.")
+        return
+
+    click.echo(
+        f"Link-graph density (depth={depth}, sample={sample} per collection):"
+    )
+    header = (
+        f"  {'collection':<40} {'seeds':>5} {'p50':>5} {'p90':>5}  "
+        f"{'flag':<8}  link_types"
+    )
+    click.echo(header)
+    click.echo(f"  {'-' * 38:<40} {'-' * 5:>5} {'-' * 5:>5} {'-' * 5:>5}  "
+               f"{'-' * 6:<8}  ----------")
+
+    for coll, total in rows:
+        seed_rows = db.execute(
+            "SELECT tumbler FROM documents "
+            "WHERE physical_collection = ? "
+            "LIMIT ?",
+            (coll, sample),
+        ).fetchall()
+
+        seeds: list[Tumbler] = []
+        for r in seed_rows:
+            try:
+                seeds.append(Tumbler.parse(r[0]))
+            except Exception:
+                continue
+
+        if not seeds:
+            click.echo(
+                f"  {coll:<40} {0:>5} {0:>5} {0:>5}  "
+                f"{'no-seed':<8}  -"
+            )
+            continue
+
+        frontier_counts: list[int] = []
+        link_types_seen: set[str] = set()
+        for seed in seeds:
+            try:
+                result = cat.graph(seed, depth=depth, direction="both")
+            except Exception:
+                continue
+            nodes = result.get("nodes") or []
+            edges = result.get("edges") or []
+            frontier_counts.append(max(0, len(nodes) - 1))
+            for e in edges:
+                if getattr(e, "link_type", None):
+                    link_types_seen.add(e.link_type)
+
+        if not frontier_counts:
+            click.echo(
+                f"  {coll:<40} {len(seeds):>5} {0:>5} {0:>5}  "
+                f"{'bfs-err':<8}  -"
+            )
+            continue
+
+        sorted_counts = sorted(frontier_counts)
+        p50_val = statistics.median(sorted_counts)
+        # Positional p90: floor(0.9 * (n-1)). For n=1, that's index 0.
+        p90_idx = max(0, int(0.9 * (len(sorted_counts) - 1) + 0.5))
+        p90_val = sorted_counts[p90_idx]
+
+        flag = "low" if p50_val < threshold else "ok"
+        types_str = ",".join(sorted(link_types_seen)) or "-"
+        click.echo(
+            f"  {coll:<40} {len(seeds):>5} {p50_val:>5.1f} {p90_val:>5}  "
+            f"{flag:<8}  {types_str}"
+        )
+
+    click.echo()
+    click.echo(
+        f"Flag legend: 'low' = frontier-p50 < {threshold} (consider "
+        f"vector-only retrieval); 'ok' = sufficient density for hybrid."
+    )
+
+
 @catalog.command("suggest-links")
 @click.option("--limit", "-n", default=50, type=int, help="Max suggestions to show")
 @click.option("--threshold", default=0.0, type=float, help="Reserved for future similarity threshold (unused)")
@@ -2018,6 +2157,57 @@ def _resolve_candidate(
     return (None, "ambiguous")
 
 
+# nexus-zg4c: RDR-prefix matcher. RDRs are renamed end-to-end occasionally
+# (rdr-066-enrichment-time → rdr-066-composition-smoke) but their numeric
+# id is the durable handle. ``rdr-NNN-`` is the contract: digits, then a
+# dash, then the slug. Three or more digits accommodates the eventual
+# four-digit RDRs without rewriting the regex.
+import re as _re  # noqa: E402
+
+_RDR_PREFIX_RE = _re.compile(r"^(rdr-\d{3,}-)")
+
+
+def _rdr_prefix_of(file_path: str) -> str:
+    """Return the ``rdr-NNN-`` prefix of *file_path*'s basename, or ``""``.
+
+    Empty when *file_path* is empty, has no ``rdr-NNN-`` basename, or the
+    digit run is shorter than three (which would match release tag
+    artifacts like ``rdr-1-`` from migration scripts).
+    """
+    if not file_path:
+        return ""
+    basename = Path(file_path).name
+    match = _RDR_PREFIX_RE.match(basename)
+    return match.group(1) if match else ""
+
+
+def _build_rdr_prefix_index(
+    source_dir: Path,
+) -> dict[str, list[Path]]:
+    """Walk *source_dir* and return ``{rdr_prefix: [absolute_path, ...]}``.
+
+    Only ``.md`` / ``.markdown`` files participate — RDRs are markdown.
+    The prefix index lives alongside the basename index so the two-step
+    lookup in ``--rdr-prefix-mode`` (basename first, prefix second) only
+    walks the source tree once.
+    """
+    import os as _os
+    index: dict[str, list[Path]] = {}
+    for root, dirs, files in _os.walk(
+        str(source_dir.resolve()), followlinks=True,
+    ):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        root_path = Path(root)
+        for fname in files:
+            if Path(fname).suffix.lower() not in (".md", ".markdown"):
+                continue
+            prefix = _rdr_prefix_of(fname)
+            if not prefix:
+                continue
+            index.setdefault(prefix, []).append(root_path / fname)
+    return index
+
+
 @catalog.command("remediate-paths")
 @click.argument(
     "source_dir",
@@ -2050,6 +2240,12 @@ def _resolve_candidate(
     help="Comma-separated extensions to scan (default: .pdf,.md,.markdown). "
          "Use '*' to scan every file regardless of extension.",
 )
+@click.option(
+    "--rdr-prefix-mode", is_flag=True,
+    help="When basename match fails for an RDR file, fall back to matching "
+         "by ``rdr-NNN-`` prefix. Catches RDRs renamed end-to-end "
+         "(e.g. rdr-066-enrichment-time.md → rdr-066-composition-smoke.md).",
+)
 def remediate_paths_cmd(
     source_dir: Path,
     dry_run: bool,
@@ -2058,6 +2254,7 @@ def remediate_paths_cmd(
     prefer_deepest: bool,
     mark_missing: bool,
     extensions: str,
+    rdr_prefix_mode: bool,
 ) -> None:
     """Repair catalog entries whose file_path is a basename or has gone missing.
 
@@ -2103,6 +2300,17 @@ def remediate_paths_cmd(
     index = _build_basename_index(source_dir, ext_filter)
     click.echo(f"Indexed {sum(len(v) for v in index.values())} files "
                f"({len(index)} unique basenames).")
+
+    # Build the RDR prefix index up front so the resolution loop is one
+    # walk-cost: avoids scanning source_dir twice when --rdr-prefix-mode is on.
+    prefix_index: dict[str, list[Path]] = (
+        _build_rdr_prefix_index(source_dir) if rdr_prefix_mode else {}
+    )
+    if rdr_prefix_mode:
+        click.echo(
+            f"Indexed {sum(len(v) for v in prefix_index.values())} RDR file(s) "
+            f"({len(prefix_index)} unique prefixes)."
+        )
 
     # Select entries to consider.
     entries: list = []
@@ -2150,6 +2358,25 @@ def remediate_paths_cmd(
         chosen, note = _resolve_candidate(
             entry, candidates, prefer_deepest=prefer_deepest,
         )
+        # Fallback: same-RDR-prefix replacement. Only fires when basename
+        # match found nothing, the entry's basename has a usable rdr-NNN-
+        # prefix, and --rdr-prefix-mode was requested.
+        if (
+            chosen is None
+            and note == "none"
+            and rdr_prefix_mode
+        ):
+            prefix = _rdr_prefix_of(basename)
+            if prefix:
+                prefix_candidates = prefix_index.get(prefix, [])
+                chosen, note = _resolve_candidate(
+                    entry, prefix_candidates, prefer_deepest=prefer_deepest,
+                )
+                # Annotate the note so the table tells the operator the
+                # match came from the RDR-prefix path, not the basename
+                # path (relevant when sorting which renames you've shipped).
+                if chosen is not None and note in ("unique", "deepest"):
+                    note = f"rdr-prefix:{note}"
         transitions.append((entry, reason, note, chosen, basename))
 
     # Report.
@@ -2198,3 +2425,152 @@ def remediate_paths_cmd(
         + (f", marked {n_marked} as missing" if mark_missing else "")
         + "."
     )
+
+
+# ── nx catalog prune-stale (nexus-zg4c) ─────────────────────────────────────
+
+
+@catalog.command("prune-stale")
+@click.option(
+    "--collection", default="",
+    help="Limit prune to entries in this physical_collection.",
+)
+@click.option(
+    "--owner", default="",
+    help="Limit prune to entries under this owner tumbler prefix.",
+)
+@click.option(
+    "--source-dir", "source_dir_opt", default="",
+    type=click.Path(exists=False, file_okay=False, path_type=Path),
+    help="Optional source directory to consult for RDR-prefix replacements; "
+         "when set, entries whose ``rdr-NNN-`` prefix matches a file under "
+         "SOURCE_DIR are skipped (preferring rename-aware remediation over "
+         "destructive prune). Use --no-rdr-prefix-skip to disable that check.",
+)
+@click.option(
+    "--rdr-prefix-skip/--no-rdr-prefix-skip",
+    default=True,
+    help="When --source-dir is set, skip entries whose RDR-prefix has a "
+         "plausible replacement on disk. On by default.",
+)
+@click.option(
+    "--dry-run/--no-dry-run", default=True,
+    help="Report-only (default). Use --no-dry-run to perform deletions.",
+)
+@click.option(
+    "--confirm", is_flag=True, default=False,
+    help="Required alongside --no-dry-run to actually delete catalog rows.",
+)
+def prune_stale_cmd(
+    collection: str,
+    owner: str,
+    source_dir_opt: Path,
+    rdr_prefix_skip: bool,
+    dry_run: bool,
+    confirm: bool,
+) -> None:
+    """Drop catalog entries whose ``file_path`` is absolute and missing on disk.
+
+    Catalog-side counterpart to ``nx t3 prune-stale`` (#349). Pairs
+    naturally with ``nx catalog remediate-paths --rdr-prefix-mode``: run
+    the remediator first to repair what's recoverable, then prune the
+    rest.
+
+    \b
+    Default is read-only (--dry-run is on). To actually delete:
+      nx catalog prune-stale --no-dry-run --confirm
+
+    \b
+    Examples:
+      nx catalog prune-stale                                 # report all
+      nx catalog prune-stale -c rdr__nexus-571b8edd          # one collection
+      nx catalog prune-stale --source-dir docs/rdr           # honour rename hints
+      nx catalog prune-stale --no-dry-run --confirm          # actually delete
+
+    \b
+    Skip rules — these are never deleted:
+      * Empty file_path (MCP-stored entries with no source file).
+      * Basename-only file_path (no ``/``) — remediable, not stale.
+      * file_path that exists on disk.
+      * RDR entries whose ``rdr-NNN-`` prefix matches a file under
+        --source-dir, when --rdr-prefix-skip is on (default).
+    """
+    will_delete = (not dry_run) and confirm
+    if (not dry_run) and not confirm:
+        click.echo(
+            "--no-dry-run alone is treated as report-only. "
+            "Add --confirm to actually delete catalog rows."
+        )
+        will_delete = False
+
+    cat = _get_catalog()
+
+    # Build the RDR-prefix index lazily — only when both --source-dir is
+    # set and --rdr-prefix-skip is on. Skipping the walk on the no-source
+    # path is important; nx catalog prune-stale with no args should be
+    # fast enough to run in a CI loop.
+    prefix_index: dict[str, list[Path]] = {}
+    if source_dir_opt and rdr_prefix_skip and source_dir_opt.exists():
+        prefix_index = _build_rdr_prefix_index(source_dir_opt)
+
+    # Select candidate entries.
+    if owner:
+        entries = cat.by_owner(Tumbler.parse(owner))
+    elif collection:
+        entries = [
+            e for e in cat.all_documents()
+            if e.physical_collection == collection
+        ]
+    else:
+        entries = cat.all_documents()
+
+    stale: list = []  # entries to delete
+    skipped_replacement: list = []  # entries with RDR-prefix replacement
+    for entry in entries:
+        fp = entry.file_path or ""
+        if not fp:  # MCP-stored, no source file
+            continue
+        if "/" not in fp:  # basename-only — remediable
+            continue
+        if Path(fp).exists():  # live, not stale
+            continue
+        # Stale candidate. If a same-prefix replacement exists, prefer
+        # remediation: skip prune.
+        if prefix_index:
+            prefix = _rdr_prefix_of(fp)
+            if prefix and prefix_index.get(prefix):
+                skipped_replacement.append(entry)
+                continue
+        stale.append(entry)
+
+    n_stale = len(stale)
+    n_skipped = len(skipped_replacement)
+    click.echo(
+        f"{n_stale} stale entr{'y' if n_stale == 1 else 'ies'}"
+        + (
+            f" (skipped {n_skipped} with same-prefix replacement)"
+            if n_skipped else ""
+        )
+        + "."
+    )
+
+    if n_stale:
+        click.echo("\nSample (first 20):")
+        for entry in stale[:20]:
+            click.echo(
+                f"  {entry.tumbler}  [{entry.physical_collection or '-'}]  "
+                f"{entry.file_path}"
+            )
+
+    if not will_delete:
+        if dry_run:
+            click.echo("\n(dry-run — no catalog writes performed.)")
+        return
+
+    n_deleted = 0
+    for entry in stale:
+        if cat.delete_document(entry.tumbler):
+            n_deleted += 1
+
+    click.echo(f"\nDone: deleted {n_deleted} catalog entr"
+               f"{'y' if n_deleted == 1 else 'ies'}.")

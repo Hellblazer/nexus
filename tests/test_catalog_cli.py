@@ -386,24 +386,27 @@ class TestOwnersCommand:
 
 class TestSeedPlanTemplates:
     def test_seed_creates_legacy_templates(self, tmp_path, monkeypatch):
-        """All 12 RDR-078/092 YAML templates seed on first run.
+        """All 15 RDR-078/092/097/098 YAML templates seed on first run.
 
         RDR-092 Phase 0a retired the legacy ``_PLAN_TEMPLATES`` array:
         three entries migrated to dimensional YAML (find-by-author,
         citation-traversal, type-scoped-search); two were retired as
         redundant with research-default / analyze-default. Pre-existing
-        9 YAML plus 3 new = 12 total.
+        9 YAML plus 3 migrated = 12. RDR-097 added the
+        hybrid-factual-lookup and traverse-then-generate plans (P1.1 /
+        P1.2), and RDR-098 added abstract-themes (CheapRAG community
+        pattern), bringing the total to 15.
         """
         from nexus.db.t2 import T2Database
         db_path = tmp_path / "t2.db"
         monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: db_path)
         from nexus.commands.catalog import _seed_plan_templates
         count = _seed_plan_templates()
-        assert count == 12
+        assert count == 15
         db = T2Database(db_path)
         # Every seeded template carries the builtin-template tag.
         results = db.search_plans("builtin-template", limit=20)
-        assert len(results) == 12
+        assert len(results) == 15
         db.close()
 
     def test_seed_idempotent(self, tmp_path, monkeypatch):
@@ -413,7 +416,7 @@ class TestSeedPlanTemplates:
         from nexus.commands.catalog import _seed_plan_templates
         first = _seed_plan_templates()
         second = _seed_plan_templates()
-        assert first == 12
+        assert first == 15
         assert second == 0
 
     def test_seed_templates_have_builtin_tag(self, tmp_path, monkeypatch):
@@ -424,7 +427,7 @@ class TestSeedPlanTemplates:
         _seed_plan_templates()
         db = T2Database(db_path)
         plans = db.list_plans(limit=20)
-        assert len(plans) == 12
+        assert len(plans) == 15
         for p in plans:
             assert "builtin-template" in p["tags"]
         db.close()
@@ -538,7 +541,7 @@ class TestSeedPlanTemplates:
         _seed_plan_templates()
         db = T2Database(db_path)
         plans = db.list_plans(limit=20)
-        assert len(plans) == 12
+        assert len(plans) == 15
         for p in plans:
             assert p["verb"], f"missing verb on {p['query']!r}"
             assert p["name"], f"missing name on {p['query']!r}"
@@ -959,6 +962,96 @@ class TestVerifyCommand:
         assert result.exit_code == 0
         # The pair is already linked — should not appear
         assert "chunker" not in result.output.lower() or "0" in result.output
+
+
+class TestLinkDensity:
+    """Tests for `nx catalog link-density --by-collection` (RDR-097 P1.4)."""
+
+    def test_empty_catalog_reports_no_collections(
+        self, initialized_catalog, catalog_env
+    ):
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "link-density"])
+        assert result.exit_code == 0
+        assert "No collections" in result.output
+
+    def test_dense_collection_reports_nonzero_p50(
+        self, initialized_catalog, catalog_env
+    ):
+        """A collection with linked entries reports a non-zero frontier-p50."""
+        from nexus.catalog.tumbler import Tumbler
+        cat = initialized_catalog
+        owner = Tumbler.parse("1.1")
+        # Register four entries in the same collection.
+        a = cat.register(
+            owner, "A", content_type="paper",
+            physical_collection="knowledge__test_dense", file_path="a.pdf",
+        )
+        b = cat.register(
+            owner, "B", content_type="paper",
+            physical_collection="knowledge__test_dense", file_path="b.pdf",
+        )
+        c = cat.register(
+            owner, "C", content_type="paper",
+            physical_collection="knowledge__test_dense", file_path="c.pdf",
+        )
+        d = cat.register(
+            owner, "D", content_type="paper",
+            physical_collection="knowledge__test_dense", file_path="d.pdf",
+        )
+        # Wire them into a small connected graph so depth-2 BFS sees nodes.
+        cat.link(a, b, "cites", created_by="test")
+        cat.link(b, c, "cites", created_by="test")
+        cat.link(c, d, "cites", created_by="test")
+        cat.link(a, c, "relates", created_by="test")
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["catalog", "link-density", "--threshold", "1"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "knowledge__test_dense" in result.output
+        # link types observed should appear in the row
+        assert "cites" in result.output
+        assert "relates" in result.output
+        # A/B/C/D each see at least one node at depth 2 — flag should be 'ok'
+        # at threshold=1.
+        # Pull the row and check that the p50 column is not 0.0.
+        for line in result.output.splitlines():
+            if "knowledge__test_dense" in line:
+                cols = line.split()
+                # cols layout: collection seeds p50 p90 flag link_types
+                assert float(cols[2]) > 0.0, f"p50 should be > 0: {line}"
+                break
+
+    def test_isolated_collection_reports_zero_density(
+        self, initialized_catalog, catalog_env
+    ):
+        """A collection where entries have no outgoing links reports p50=0."""
+        from nexus.catalog.tumbler import Tumbler
+        cat = initialized_catalog
+        owner = Tumbler.parse("1.1")
+        cat.register(
+            owner, "lonely-1", content_type="code",
+            physical_collection="code__isolated", file_path="x.py",
+        )
+        cat.register(
+            owner, "lonely-2", content_type="code",
+            physical_collection="code__isolated", file_path="y.py",
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["catalog", "link-density", "--threshold", "3"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "code__isolated" in result.output
+        for line in result.output.splitlines():
+            if "code__isolated" in line:
+                cols = line.split()
+                assert float(cols[2]) == 0.0, f"p50 should be 0: {line}"
+                assert "low" in line, "low-density flag expected"
+                break
 
 
 class TestLinkGenerate:

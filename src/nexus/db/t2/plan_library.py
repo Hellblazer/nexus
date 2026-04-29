@@ -218,6 +218,10 @@ class PlanLibrary:
         self._lock = threading.Lock()
         self.conn = sqlite3.connect(str(path), check_same_thread=False)
         self.conn.execute("PRAGMA busy_timeout=5000")
+        # Public read-only attribute so callers (e.g. the mtime-guarded
+        # plan cache in mcp_infra) can stat the underlying file without
+        # peeking through ``self.conn`` internals (nexus-qgjr).
+        self.path: Path = path
         try:
             canonical_key = str(path.resolve())
         except OSError:
@@ -386,6 +390,20 @@ class PlanLibrary:
                 (project, dimensions),
             ).fetchone()
         return _row_to_dict(row) if row else None
+
+    def delete_plan(self, plan_id: int) -> int:
+        """Delete the plan with *plan_id*. Returns the row count removed.
+
+        Used by ``nx plan delete`` to clean up stale or shadowing plan
+        rows. Routine ops gap closer (nexus-la28) — before this method,
+        operators reached into raw SQL to remove plans.
+        """
+        with self._lock:
+            cursor = self.conn.execute(
+                "DELETE FROM plans WHERE id = ?", (plan_id,),
+            )
+            self.conn.commit()
+            return cursor.rowcount
 
     def list_active_plans(
         self,

@@ -1009,35 +1009,135 @@ def store_get_many(
     *,
     max_chars_per_doc: int = 4000,
     structured: bool = False,
+    limit_per_source: int | list[int] | None = None,
 ) -> str | dict:
     """Batch-hydrate document content by ID. RDR-079 hydration primitive.
 
     Args:
-        ids: Document IDs to fetch. Accepts a comma-separated string or list.
+        ids: Document IDs to fetch. Accepts:
+            - comma-separated string
+            - ``list[str]`` (single-stream form)
+            - ``list[list[str]]`` (parallel-stream form; pair with
+              ``list[int]`` ``limit_per_source``)
         collections: Target collection name(s). Accepts a single name,
-            comma-separated, or a list aligned 1:1 with ``ids``.
+            comma-separated string, or list. In single-stream form a list
+            aligned 1:1 with ``ids`` performs per-id collection routing;
+            in parallel-stream form a list aligned 1:1 with the outer
+            ``ids`` length performs per-stream collection routing
+            (each id in stream i is hydrated from ``collections[i]``).
         max_chars_per_doc: Per-document truncation cap (default 4 KB).
         structured: Return ``{contents, missing}`` dict when True;
             human-readable string when False.
+        limit_per_source: Cap input IDs before hydration (RDR-097 P1.0).
+            - ``None`` (default): no truncation; preserves prior behavior.
+            - ``int``: truncate ``ids`` to first N entries. With
+              parallel-stream ``ids``, broadcasts the cap across all
+              streams. Negative values raise ``ValueError``.
+            - ``list[int]``: requires parallel-stream ``ids``. Each
+              stream is truncated to its corresponding cap, then
+              flattened stream-major. ``len(limit_per_source)`` must
+              equal ``len(ids)`` or ``ValueError`` is raised. (Implemented
+              for contract symmetry; current consumers issue scalar calls
+              per stream — RDR-097 P1.1.)
     """
     try:
-        id_list: list[str]
-        if isinstance(ids, list):
-            id_list = [str(i) for i in ids if i]
-        else:
-            id_list = [s.strip() for s in str(ids or "").split(",") if s.strip()]
+        # Detect parallel-stream form: ids is a non-empty list of lists.
+        parallel_form = (
+            isinstance(ids, list)
+            and len(ids) > 0
+            and all(isinstance(stream, list) for stream in ids)
+        )
 
+        # Validate limit_per_source shape early.
+        if isinstance(limit_per_source, int) and not isinstance(limit_per_source, bool):
+            if limit_per_source < 0:
+                raise ValueError(
+                    f"limit_per_source must be non-negative, got {limit_per_source}"
+                )
+        elif isinstance(limit_per_source, list):
+            if not parallel_form:
+                raise ValueError(
+                    "limit_per_source as list[int] requires parallel-stream "
+                    "ids (list[list[str]]); got single-stream ids"
+                )
+            if len(limit_per_source) != len(ids):
+                raise ValueError(
+                    f"limit_per_source list length {len(limit_per_source)} "
+                    f"must equal ids stream count {len(ids)}"
+                )
+            if any(
+                (not isinstance(n, int)) or isinstance(n, bool) or n < 0
+                for n in limit_per_source
+            ):
+                raise ValueError(
+                    "limit_per_source list entries must be non-negative ints"
+                )
+        elif limit_per_source is not None:
+            raise ValueError(
+                "limit_per_source must be int, list[int], or None; "
+                f"got {type(limit_per_source).__name__}"
+            )
+
+        id_list: list[str]
         coll_list: list[str]
-        if isinstance(collections, list):
-            coll_list = [str(c) for c in collections if c]
-        else:
-            coll_list = [
-                s.strip()
-                for s in str(collections or "knowledge").split(",")
-                if s.strip()
+
+        if parallel_form:
+            # Build typed streams.
+            streams: list[list[str]] = [
+                [str(x) for x in stream if x] for stream in ids
             ]
-        if not coll_list:
-            coll_list = ["knowledge"]
+
+            # Truncate per limit_per_source.
+            if isinstance(limit_per_source, int):
+                streams = [s[:limit_per_source] for s in streams]
+            elif isinstance(limit_per_source, list):
+                streams = [s[:limit_per_source[i]] for i, s in enumerate(streams)]
+
+            # Parse collections input.
+            if isinstance(collections, list):
+                coll_input = [str(c) for c in collections if c]
+            else:
+                coll_input = [
+                    s.strip()
+                    for s in str(collections or "knowledge").split(",")
+                    if s.strip()
+                ]
+            if not coll_input:
+                coll_input = ["knowledge"]
+
+            if len(coll_input) == len(streams):
+                # Per-stream collection routing: flatten ids and build
+                # a parallel coll_list aligned 1:1 with id_list. The
+                # downstream loop then takes the existing 1:1 branch.
+                id_list = []
+                coll_list = []
+                for i, s in enumerate(streams):
+                    id_list.extend(s)
+                    coll_list.extend([coll_input[i]] * len(s))
+            else:
+                # Broadcast: every id may try every collection in coll_input.
+                id_list = [doc_id for stream in streams for doc_id in stream]
+                coll_list = coll_input
+
+        else:
+            if isinstance(ids, list):
+                id_list = [str(i) for i in ids if i]
+            else:
+                id_list = [s.strip() for s in str(ids or "").split(",") if s.strip()]
+
+            if isinstance(limit_per_source, int):
+                id_list = id_list[:limit_per_source]
+
+            if isinstance(collections, list):
+                coll_list = [str(c) for c in collections if c]
+            else:
+                coll_list = [
+                    s.strip()
+                    for s in str(collections or "knowledge").split(",")
+                    if s.strip()
+                ]
+            if not coll_list:
+                coll_list = ["knowledge"]
 
         t3 = _get_t3()
         contents: list[str] = []
@@ -2948,6 +3048,7 @@ async def nx_answer(
     dimensions: dict[str, Any] | None = None,
     structured: bool = False,
     min_confidence: float | None = None,
+    force_dynamic: bool = False,
 ) -> "str | dict":
     """Answer a knowledge question using plan-match-first retrieval. RDR-080 P1.
 
@@ -2989,6 +3090,14 @@ async def nx_answer(
             tighter value per-call without moving the global knob; the
             global default waits on Phase 5's larger-corpus
             validation. Must be in ``[0.0, 1.0]`` when supplied.
+        force_dynamic: RDR-090 P1.1 (nexus-dslg). When True, skip the
+            plan-match gate entirely and route directly to the inline
+            LLM planner / dynamic-generation path. Default False
+            preserves the plan-match-first flow. Used by the
+            AgenticScholar bench harness path C to isolate dynamic
+            generation from the matched-plan path on collection-scoped
+            questions where ``scope`` would otherwise act as a forced-
+            miss proxy.
 
     Returns:
         The final step's output — a string by default, or the envelope
@@ -3031,21 +3140,30 @@ async def nx_answer(
         min_confidence if min_confidence is not None
         else _PLAN_MATCH_MIN_CONFIDENCE
     )
-    try:
-        with _t2_ctx() as db:
-            cache = get_t1_plan_cache(populate_from=db.plans)
-            matches = _plan_match(
-                question,
-                library=db.plans,
-                cache=cache,
-                dimensions=dimensions,
-                scope_preference=scope,
-                context={"user_context": context} if context else None,
-                min_confidence=effective_min_confidence,
-                n=5,
-            )
-    except Exception as exc:
-        return _result(f"Error during plan match: {exc}")
+    if force_dynamic:
+        # RDR-090 P1.1: skip the plan-match gate entirely. The
+        # dynamic-planner path below picks up matches=[].
+        _log.info(
+            "nx_answer_force_dynamic",
+            question=question[:100] if trace else "[redacted]",
+        )
+        matches: list = []
+    else:
+        try:
+            with _t2_ctx() as db:
+                cache = get_t1_plan_cache(populate_from=db.plans)
+                matches = _plan_match(
+                    question,
+                    library=db.plans,
+                    cache=cache,
+                    dimensions=dimensions,
+                    scope_preference=scope,
+                    context={"user_context": context} if context else None,
+                    min_confidence=effective_min_confidence,
+                    n=5,
+                )
+        except Exception as exc:
+            return _result(f"Error during plan match: {exc}")
 
     if not matches or not _nx_answer_match_is_hit(
         matches[0].confidence, threshold=effective_min_confidence,
@@ -3221,6 +3339,22 @@ async def nx_answer(
     run_bindings: dict[str, Any] = {"intent": question}
     if scope:
         run_bindings["_nx_scope"] = scope
+
+    # Auto-alias the question text into any required binding the plan
+    # declares but the caller didn't pre-supply. This mirrors what the
+    # inline-planner fallback already does — its constructed plans get
+    # every binding filled from the question text. Without this, any
+    # library plan with ``required_bindings: [concept]`` (or area,
+    # topic, etc.) failed at dispatch with ``missing required
+    # bindings: ['concept']`` even though ``$intent`` carried the
+    # equivalent value. Skills that pre-extract entities (e.g.,
+    # find-by-author with ``$author``) bypass this path by calling
+    # ``plan_run`` directly with explicit bindings.
+    defaults = best.default_bindings or {}
+    for req in best.required_bindings:
+        if req not in run_bindings and req not in defaults:
+            run_bindings[req] = question
+
     try:
         result = await _plan_run(best, run_bindings)
     except Exception as exc:

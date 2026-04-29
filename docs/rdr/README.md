@@ -112,13 +112,15 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-087](rdr-087-collection-observability-surfaces.md) | Collection Observability and Curation Surfaces | Feature | Closed | 2026-04-17 |
 | [RDR-088](rdr-088-agenticscholar-operator-completion.md) | AgenticScholar Operator-Set Completion | Feature | Closed (Phases 1+2 implemented; Phase 3 closed by spike) | 2026-04-17 |
 | [RDR-089](rdr-089-structured-aspect-extraction-at-ingest.md) | Structured Aspect Extraction at Ingest | Feature | Accepted | 2026-04-25 |
-| [RDR-090](rdr-090-realistic-agenticscholar-benchmark.md) | Realistic AgenticScholar Benchmark | Feature | Draft | 2026-04-17 |
+| [RDR-090](rdr-090-realistic-agenticscholar-benchmark.md) | Realistic AgenticScholar Benchmark | Feature | Accepted | 2026-04-27 |
 | [RDR-091](rdr-091-scope-aware-plan-matching.md) | Scope-Aware Plan Matching (nexus-zs1d Phase 2) | Feature | Closed (implemented) | 2026-04-23 |
 | [RDR-092](rdr-092-plan-match-text-from-dimensional-identity.md) | Plan Match-Text from Dimensional Identity | Feature | Closed (implemented) | 2026-04-23 |
 | [RDR-093](rdr-093-groupby-aggregate-operators.md) | GroupBy and Aggregate Operators | Feature | Accepted | 2026-04-24 |
 | [RDR-094](rdr-094-mcp-owned-t1-chroma-lifecycle.md) | MCP-Owned T1 Chroma Lifecycle | Architecture | Closed | 2026-04-24 |
 | [RDR-095](rdr-095-post-store-hook-batch-contract.md) | Post-Store Hook Framework: Batch Contract | Architecture | Closed (implemented) | 2026-04-25 |
 | [RDR-096](rdr-096-uri-source-identity.md) | URI-Based Source Identity for Aspect Extraction | Architecture | Accepted | 2026-04-27 |
+| [RDR-097](rdr-097-hybrid-retrieval-plan-template.md) | Hybrid Retrieval Plan Template — Fusing Catalog Traversal and Vector Search for Factual QA | Feature | Accepted | 2026-04-28 |
+| [RDR-098](rdr-098-abstract-question-plan-template.md) | Abstract-Question Plan Template — BERTopic Communities as Cheap Substitute for GraphRAG Community Reports | Feature | Draft | 2026-04-28 |
 
 ---
 

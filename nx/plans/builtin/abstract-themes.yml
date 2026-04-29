@@ -1,0 +1,70 @@
+# CheapRAG-pattern abstract-question plan (nexus-ldnp / RDR-098).
+#
+# Routes "what are the main themes / give an overview / summarize"
+# questions through a community-summary pipeline: over-fetch → partition
+# by topic → reduce each partition to per-theme summary → coalesce.
+#
+# Maps to Zhou et al. VLDB 2025 "In-depth Analysis of Graph-based RAG"
+# (knowledge__hybridrag tumbler 1.653.79) finding L4: community-level
+# summaries beat raw chunk clusters for abstract QA. nexus's BERTopic
+# taxonomy centroids ARE community partitions, so the GraphRAG community
+# step is free here — we don't generate community reports, we use the
+# topology that BERTopic already produced at indexing time.
+#
+# Cost note: the groupby step partitions by inferred topic. If chunk
+# items lack a structured ``topic`` aspect field, the SQL fast path
+# misses and groupby falls back to one ``claude -p`` partitioning call.
+# Then aggregate fires K LLM calls (K = number of partitions, capped
+# at limit), then a final summarize. Worst case for K=5 partitions:
+# ~7 claude calls. Cap ``limit`` to keep latency bounded.
+#
+# v1 scope: single-collection abstract QA. Cross-collection abstract
+# questions (which would route through the taxonomy projection layer)
+# are explicitly out of scope; file as follow-up if needed.
+name: abstract-themes
+description: >-
+  What are the main themes? What are the key findings? What are the
+  dominant topics? Summarize this corpus. Give an overview. What does
+  this collection say about a subject? Answers abstract or
+  summary-style questions: theme extraction, topic landscape, summary
+  of findings, overview of a body of work. Broad over-fetch, partition
+  results into theme groups, summarize each group, coalesce into one
+  unified answer. Use the default query strategy for specific factual
+  lookups ("find X by Y", "who wrote Z").
+dimensions:
+  verb: query
+  scope: global
+  strategy: abstract-themes
+required_bindings:
+  - intent
+optional_bindings:
+  - corpus
+  - limit
+default_bindings:
+  corpus: all
+  limit: 30
+tags: builtin-template,rdr-098,nexus-ldnp,abstract-qa,community-summary
+plan_json:
+  steps:
+    - tool: search
+      args:
+        query: $intent
+        limit: $limit
+        corpus: $corpus
+        # Abstract queries are broad — the per-corpus default threshold
+        # (0.65 for prose) drops every result on questions like "main
+        # themes in X". 2.0 = effectively no filter (cosine distance
+        # tops out at 2.0); downstream groupby/aggregate handles noise.
+        threshold: 2.0
+    - tool: groupby
+      args:
+        ids: $step1.ids
+        collections: $step1.collections
+        key: topic
+    - tool: aggregate
+      args:
+        groups: $step2.groups
+        reducer: key themes and findings about $intent in these chunks
+    - tool: summarize
+      args:
+        inputs: $step3.aggregates
