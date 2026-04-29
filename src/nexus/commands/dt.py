@@ -76,7 +76,7 @@ def _index_record(
     if ext == ".pdf":
         index_pdf(file_path, corpus=corpus, collection_name=collection)
     else:  # .md — extension filtering happens in index_cmd
-        index_markdown(file_path, corpus=corpus)
+        index_markdown(file_path, corpus=corpus, collection_name=collection)
 
     _stamp_dt_uri_on_entry(file_path, uuid)
 

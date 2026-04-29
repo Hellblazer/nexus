@@ -762,11 +762,13 @@ class TestStampDtUriOnEntry:
         from nexus.commands import dt as dt_module
 
         called: list[tuple[Path, str]] = []
+        pdf_kwargs: list[dict] = []
 
         def fake_stamp(file_path, uuid):
             called.append((file_path, uuid))
 
         def fake_index_pdf(*args, **kwargs):
+            pdf_kwargs.append(kwargs)
             return 0
 
         monkeypatch.setattr(
@@ -779,13 +781,53 @@ class TestStampDtUriOnEntry:
         dt_module._index_record(
             uuid="UUID-WIRING",
             path=str(tmp_path / "a.pdf"),
-            collection=None,
+            collection="knowledge__test",
             corpus="default",
             dry_run=False,
         )
         assert len(called) == 1
         assert called[0][0] == tmp_path / "a.pdf"
         assert called[0][1] == "UUID-WIRING"
+        # PDF path must forward --collection.
+        assert pdf_kwargs[0].get("collection_name") == "knowledge__test"
+        assert pdf_kwargs[0].get("corpus") == "default"
+
+    def test_index_record_md_forwards_collection(
+        self, monkeypatch, tmp_path,
+    ):
+        """The .md branch must forward ``--collection`` the same as
+        the .pdf branch. This test catches a regression where
+        index_markdown was invoked without ``collection_name``,
+        silently dropping the operator's flag and routing every .md
+        file into ``docs__default`` regardless of intent.
+        """
+        from nexus.commands import dt as dt_module
+
+        md_kwargs: list[dict] = []
+
+        def fake_index_markdown(*args, **kwargs):
+            md_kwargs.append(kwargs)
+            return 0
+
+        # Stamp + indexer fakes — we only care about the collection
+        # forwarding, not the catalog stamp here.
+        monkeypatch.setattr(
+            dt_module, "_stamp_dt_uri_on_entry", lambda *a, **kw: None,
+        )
+        monkeypatch.setattr(
+            "nexus.doc_indexer.index_markdown", fake_index_markdown,
+        )
+
+        dt_module._index_record(
+            uuid="UUID-MD",
+            path=str(tmp_path / "note.md"),
+            collection="knowledge__notes",
+            corpus="default",
+            dry_run=False,
+        )
+        assert len(md_kwargs) == 1
+        assert md_kwargs[0].get("collection_name") == "knowledge__notes"
+        assert md_kwargs[0].get("corpus") == "default"
 
     def test_index_record_dry_run_skips_stamp(
         self, monkeypatch, tmp_path,
