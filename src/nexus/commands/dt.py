@@ -429,6 +429,17 @@ def open_cmd(tumbler_or_uuid: str) -> None:
     preferring ``meta.devonthink_uri`` and falling back to
     ``source_uri`` when the entry was registered with a DT identity.
     """
+    # Platform gate fires before any branch-specific work so non-darwin
+    # users get the documented "macOS-only" message regardless of
+    # argument shape. Previously the tumbler branch would open the
+    # catalog and resolve the tumbler before checking platform, leaking
+    # catalog errors (uninitialized, not-found) ahead of the real
+    # diagnostic.
+    if not _is_darwin():
+        raise click.ClickException(
+            "DEVONthink integration is macOS-only",
+        )
+
     if _UUID_RE.match(tumbler_or_uuid):
         uri = f"x-devonthink-item://{tumbler_or_uuid}"
     elif _TUMBLER_RE.match(tumbler_or_uuid):
@@ -441,11 +452,6 @@ def open_cmd(tumbler_or_uuid: str) -> None:
         raise click.ClickException(
             "argument is neither a tumbler (e.g. 1.2.3) nor a UUID "
             "(e.g. 8EDC855D-213F-40AD-A9CF-9543CC76476B).",
-        )
-
-    if not _is_darwin():
-        raise click.ClickException(
-            "DEVONthink integration is macOS-only",
         )
 
     subprocess.run(["open", uri], check=True)  # noqa: S603,S607

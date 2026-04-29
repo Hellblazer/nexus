@@ -474,6 +474,33 @@ class TestDtOpenUuidForm:
         assert "macOS-only" in result.output
         assert fake_open == []  # no spawn attempt
 
+    def test_tumbler_form_on_non_darwin_does_not_touch_catalog(
+        self, runner, fake_open, monkeypatch,
+    ):
+        """The platform gate fires BEFORE tumbler resolution. A
+        non-darwin user passing a tumbler argument should see
+        ``macOS-only``, not a catalog-not-initialized error or a
+        tumbler-not-found error. Asserts the resolver helper isn't
+        called at all on non-darwin."""
+        from nexus.cli import main
+
+        resolver_calls: list[str] = []
+
+        def must_not_resolve(tumbler):
+            resolver_calls.append(tumbler)
+            raise AssertionError("resolver must not run on non-darwin")
+
+        monkeypatch.setattr(
+            "nexus.commands.dt._resolve_dt_uri_from_tumbler",
+            must_not_resolve,
+        )
+        monkeypatch.setattr("sys.platform", "linux")
+        result = runner.invoke(main, ["dt", "open", "1.2.3"])
+        assert result.exit_code != 0
+        assert "macOS-only" in result.output
+        assert resolver_calls == []
+        assert fake_open == []
+
 
 class TestDtOpenTumblerForm:
     def test_tumbler_uses_devonthink_uri_from_meta(
