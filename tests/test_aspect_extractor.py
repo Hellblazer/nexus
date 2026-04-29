@@ -111,9 +111,24 @@ class TestCollectionRouting:
     def test_unrelated_collection_returns_none(self) -> None:
         from nexus.aspect_extractor import select_config
 
-        assert select_config("docs__handbook") is None
+        # code__* targets source-code chunks, not prose claims —
+        # aspect extraction does not apply, so no config is registered.
+        # taxonomy__* holds embedding centroids with no source docs.
         assert select_config("code__nexus") is None
-        # rdr__* now has its own config (RDR-089 Phase F).
+        assert select_config("taxonomy__centroids") is None
+
+    def test_docs_prefix_routes_to_scholarly_config(self) -> None:
+        """#377: docs__* collections (markdown / ADR / design docs
+        from `nx index repo`) hold the same kind of substantive prose
+        as knowledge__*. They route to the same scholarly-paper-v1
+        config so problem_formulation / proposed_method / etc. apply
+        uniformly. Until #377 landed, docs__* was unconditionally
+        rejected with 'No extractor config registered'."""
+        from nexus.aspect_extractor import select_config
+
+        config = select_config("docs__handbook")
+        assert config is not None
+        assert config.extractor_name == "scholarly-paper-v1"
 
     def test_extract_aspects_returns_none_for_unsupported_collection(
         self, tmp_path: Path,
@@ -973,11 +988,13 @@ class TestBatchExtraction:
         from nexus.aspect_extractor import extract_aspects_batch
 
         # Unsupported collection only → no subprocess call.
+        # code__* is unsupported by design (aspect extraction targets
+        # prose claims, not source-code chunks).
         with patch("subprocess.run", side_effect=AssertionError(
             "must not call subprocess for unsupported-only batch",
         )):
             records = extract_aspects_batch([
-                ("docs__handbook", "/p1.md", "content"),
+                ("code__nexus", "/p1.py", "content"),
             ])
         assert records == [None]
 
@@ -1008,7 +1025,7 @@ class TestBatchExtraction:
 
         monkeypatch.setattr(subprocess, "run", fake_run)
         records = extract_aspects_batch([
-            ("docs__handbook", "/skip.md", "content"),  # unsupported
+            ("code__nexus", "/skip.py", "content"),  # unsupported
             ("knowledge__delos", "/p1.pdf", "content 1"),
         ])
 
