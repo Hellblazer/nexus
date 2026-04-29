@@ -74,9 +74,21 @@ def test_t1_isolation_across_sessions():
 # ── T2 concurrent writes ─────────────────────────────────────────────────────
 
 def test_t2_concurrent_writes():
-    """N processes writing to same SQLite file via WAL — all entries persisted."""
+    """N processes writing to same SQLite file via WAL — all entries persisted.
+
+    Pre-initialises the schema in the parent so worker processes never
+    race on DDL (which doesn't play well with WAL the way INSERTs do).
+    The original race-then-retry shape was flaky on Python 3.13 / slow
+    CI runners — one worker would exhaust its retry budget and silently
+    drop all 10 writes, producing an N=30 instead of N=40 result.
+    """
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         db_path = Path(f.name)
+
+    # Pre-init schema in parent — eliminates the DDL race entirely.
+    # Subprocesses then contend only on INSERTs, which WAL handles well.
+    db = T2Database(db_path)
+    db.close()
 
     n_processes = 4
     entries_per_process = 10
@@ -93,6 +105,13 @@ def test_t2_concurrent_writes():
         p.start()
     for p in processes:
         p.join(timeout=30)
+
+    # Verify all writers exited cleanly. A non-zero exitcode means a
+    # subprocess crashed (e.g. on a stray DDL race) and we'd silently
+    # under-count below — fail loud here so the next maintainer sees
+    # the real cause instead of a 30-vs-40 head-scratcher.
+    for i, p in enumerate(processes):
+        assert p.exitcode == 0, f"writer {i} exited with code {p.exitcode}"
 
     # Verify all entries were written
     db = T2Database(db_path)
