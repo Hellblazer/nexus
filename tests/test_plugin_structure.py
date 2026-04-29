@@ -704,3 +704,99 @@ class TestRdr080StubAgents:
             f"nx/agents/{agent_name}.md must reference an MCP tool "
             "(mcp__plugin_nx_nexus__*) as its redirect target (RDR-080)."
         )
+
+
+# ── dt/ plugin structure (RDR-099 nexus-mv0p.11) ─────────────────────────────
+
+DT_PLUGIN_DIR = REPO_ROOT / "dt"
+DT_MANIFEST = DT_PLUGIN_DIR / ".claude-plugin" / "plugin.json"
+DT_SKILLS = ("dt-index-selection", "dt-open-result")
+DT_REQUIRED_FILES = ("README.md", "CHANGELOG.md", ".claude-plugin/plugin.json")
+
+
+class TestDtPluginStructure:
+    """Structural guards for the dt/ Claude Code plugin (pure-skill wrapper
+    around the `nx dt` CLI). The dt plugin has no agents, hooks, MCP servers,
+    or registry, so the heavyweight nx-only assertions do not apply. What
+    must hold: manifest is parseable and version-pinned, skill files exist
+    with the standard frontmatter shape, and the marketplace lists the
+    plugin alongside nx and sn."""
+
+    def test_plugin_dir_exists(self) -> None:
+        assert DT_PLUGIN_DIR.is_dir(), "dt/ plugin directory missing"
+
+    @pytest.mark.parametrize("rel_path", DT_REQUIRED_FILES)
+    def test_required_file_exists_and_non_empty(self, rel_path: str) -> None:
+        full = DT_PLUGIN_DIR / rel_path
+        assert full.exists(), f"dt/{rel_path} missing"
+        assert full.stat().st_size > 0, f"dt/{rel_path} is empty"
+
+    def test_manifest_parses_and_has_required_fields(self) -> None:
+        data = json.loads(DT_MANIFEST.read_text())
+        assert data.get("name") == "dt", f"plugin.json name != 'dt': {data.get('name')!r}"
+        assert data.get("version"), "plugin.json missing version"
+        assert data.get("description"), "plugin.json missing description"
+
+    def test_manifest_version_matches_pyproject(self) -> None:
+        with PYPROJECT_PATH.open("rb") as f:
+            pv = tomllib.load(f)["project"]["version"]
+        data = json.loads(DT_MANIFEST.read_text())
+        assert data.get("version") == pv, (
+            f"dt/.claude-plugin/plugin.json version {data.get('version')!r} "
+            f"!= pyproject.toml {pv!r}"
+        )
+
+    @pytest.mark.parametrize("skill_name", DT_SKILLS)
+    def test_skill_directory_and_file_exist(self, skill_name: str) -> None:
+        skill_dir = DT_PLUGIN_DIR / "skills" / skill_name
+        assert skill_dir.is_dir(), f"dt/skills/{skill_name}/ missing"
+        assert (skill_dir / "SKILL.md").exists(), f"dt/skills/{skill_name}/SKILL.md missing"
+
+    @pytest.mark.parametrize("skill_name", DT_SKILLS)
+    def test_skill_frontmatter_valid(self, skill_name: str) -> None:
+        path = DT_PLUGIN_DIR / "skills" / skill_name / "SKILL.md"
+        text = path.read_text()
+        fm_match = re.match(r"^---\n(.*?)\n---", text, re.DOTALL)
+        assert fm_match, f"dt/skills/{skill_name}/SKILL.md: no YAML frontmatter"
+        raw = fm_match.group(1)
+        fm = yaml.safe_load(raw)
+        extra = set(fm.keys()) - {"name", "description", "effort"}
+        assert not extra, (
+            f"dt/skills/{skill_name}/SKILL.md: non-standard frontmatter fields {extra}"
+        )
+        comment_lines = [l for l in raw.splitlines() if l.strip().startswith("#")]
+        assert not comment_lines, (
+            f"dt/skills/{skill_name}/SKILL.md: YAML comments in frontmatter: {comment_lines}"
+        )
+        assert fm.get("name") == skill_name, (
+            f"dt/skills/{skill_name}/SKILL.md: frontmatter name {fm.get('name')!r} != dir name"
+        )
+        desc = fm.get("description", "")
+        assert desc.lower().startswith("use when"), (
+            f"dt/skills/{skill_name}/SKILL.md: description must start with 'Use when'. "
+            f"Got: {desc[:80]!r}"
+        )
+        for kw in ("Triggers:", "user says", "workflow", "process:"):
+            assert kw not in desc, (
+                f"dt/skills/{skill_name}/SKILL.md: description contains workflow keyword {kw!r}"
+            )
+
+    @pytest.mark.parametrize("skill_name", DT_SKILLS)
+    def test_skill_documents_underlying_cli(self, skill_name: str) -> None:
+        """Every dt/ skill is a thin wrapper around `nx dt`. The skill body
+        must reference the underlying CLI verb so a reader can see what is
+        actually being delegated. This guards against the skill drifting away
+        from the CLI surface (or someone replacing the wrapper with bespoke
+        logic, which contradicts the plugin's reason to exist)."""
+        path = DT_PLUGIN_DIR / "skills" / skill_name / "SKILL.md"
+        text = path.read_text()
+        assert "nx dt" in text, (
+            f"dt/skills/{skill_name}/SKILL.md: must reference the underlying `nx dt` CLI"
+        )
+
+    def test_marketplace_lists_dt(self) -> None:
+        plugins = json.loads(MARKETPLACE_PATH.read_text()).get("plugins", [])
+        names = {p.get("name") for p in plugins}
+        assert "dt" in names, (
+            f"marketplace.json does not list 'dt' plugin; found: {sorted(names)}"
+        )

@@ -1,0 +1,5 @@
+{
+  "name": "dt",
+  "version": "4.19.2",
+  "description": "Slash commands wrapping the nx dt CLI for DEVONthink integration: index DT-side selections into Nexus and open Nexus tumblers back in DEVONthink (macOS only)."
+}
