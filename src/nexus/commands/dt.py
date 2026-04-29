@@ -20,13 +20,15 @@ error mapping) is exercised independently of the indexer internals.
 """
 from __future__ import annotations
 
+import re
+import subprocess
 from pathlib import Path
 
 import click
 import structlog
 
 import nexus.devonthink as dt_mod
-from nexus.devonthink import DTNotAvailableError
+from nexus.devonthink import DTNotAvailableError, _is_darwin
 
 _log = structlog.get_logger(__name__)
 
@@ -245,3 +247,96 @@ def _gather_records(
     for u in uuids:
         out.extend(dt_mod._dt_uuid_record(u))
     return out
+
+
+# ── nx dt open ───────────────────────────────────────────────────────────────
+
+
+# DT records use canonical 8-4-4-4-12 hex UUIDs; tumblers are
+# dot-separated decimal numbers (e.g. ``1.2.3``). The two shapes are
+# disjoint — UUIDs have hyphens, tumblers have dots — so a single regex
+# pair classifies the argument unambiguously.
+_UUID_RE = re.compile(
+    r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
+    r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$",
+)
+_TUMBLER_RE = re.compile(r"^\d+(\.\d+)+$")
+
+
+def _resolve_dt_uri_from_tumbler(tumbler: str) -> str | None:
+    """Return the ``x-devonthink-item://`` URI for a tumbler, or
+    ``None`` when the entry exists but carries no DT URI.
+
+    Resolution order mirrors the substrate at
+    ``catalog._resolve_via_devonthink``: ``meta.devonthink_uri`` first
+    (the canonical reverse-lookup recorded on entries that came in
+    via DEVONthink), then ``source_uri`` as fall-back when the entry
+    was registered with a DT identity from the start.
+
+    Raises:
+        click.ClickException: when the tumbler doesn't resolve to any
+            catalog entry (caller surfaces this as a non-zero exit).
+    """
+    from nexus.catalog import resolve_tumbler  # noqa: PLC0415
+    from nexus.catalog.catalog import Catalog  # noqa: PLC0415
+    from nexus.config import catalog_path  # noqa: PLC0415
+
+    path = catalog_path()
+    if not Catalog.is_initialized(path):
+        raise click.ClickException(
+            "Catalog not initialized. Run 'nx catalog setup' first.",
+        )
+    cat = Catalog(path, path / ".catalog.db")
+    t, err = resolve_tumbler(cat, tumbler)
+    if err:
+        raise click.ClickException(f"tumbler not found: {tumbler}")
+    entry = cat.resolve(t)
+    if entry is None:
+        raise click.ClickException(f"tumbler not found: {tumbler}")
+
+    meta = getattr(entry, "meta", {}) or {}
+    if isinstance(meta, dict):
+        dt_uri = meta.get("devonthink_uri", "")
+        if isinstance(dt_uri, str) and dt_uri.startswith(
+            "x-devonthink-item://",
+        ):
+            return dt_uri
+    source_uri = getattr(entry, "source_uri", "")
+    if isinstance(source_uri, str) and source_uri.startswith(
+        "x-devonthink-item://",
+    ):
+        return source_uri
+    return None
+
+
+@dt.command("open")
+@click.argument("tumbler_or_uuid")
+def open_cmd(tumbler_or_uuid: str) -> None:
+    """Open a record in DEVONthink by tumbler or UUID.
+
+    A UUID-shaped argument (``8-4-4-4-12`` hex) is converted directly
+    to ``x-devonthink-item://<UUID>`` — no catalog hit, no osascript.
+    A tumbler (e.g. ``1.2.3``) is resolved through the catalog,
+    preferring ``meta.devonthink_uri`` and falling back to
+    ``source_uri`` when the entry was registered with a DT identity.
+    """
+    if _UUID_RE.match(tumbler_or_uuid):
+        uri = f"x-devonthink-item://{tumbler_or_uuid}"
+    elif _TUMBLER_RE.match(tumbler_or_uuid):
+        uri = _resolve_dt_uri_from_tumbler(tumbler_or_uuid)
+        if uri is None:
+            raise click.ClickException(
+                f"no DEVONthink URI for tumbler {tumbler_or_uuid}",
+            )
+    else:
+        raise click.ClickException(
+            "argument is neither a tumbler (e.g. 1.2.3) nor a UUID "
+            "(e.g. 8EDC855D-213F-40AD-A9CF-9543CC76476B).",
+        )
+
+    if not _is_darwin():
+        raise click.ClickException(
+            "DEVONthink integration is macOS-only",
+        )
+
+    subprocess.run(["open", uri], check=True)  # noqa: S603,S607
