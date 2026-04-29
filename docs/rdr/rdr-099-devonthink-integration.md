@@ -2,11 +2,12 @@
 title: "RDR-099: DEVONthink Integration — First-Class CLI Verbs for Selection-Based Ingest and Reverse Lookup"
 id: RDR-099
 type: Feature
-status: draft
+status: accepted
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-28
+accepted_date: 2026-04-29
 related_issues: [nexus-bqda, nexus-srck]
 related_tests: []
 related: [RDR-096]

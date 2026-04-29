@@ -121,7 +121,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-096](rdr-096-uri-source-identity.md) | URI-Based Source Identity for Aspect Extraction | Architecture | Accepted | 2026-04-27 |
 | [RDR-097](rdr-097-hybrid-retrieval-plan-template.md) | Hybrid Retrieval Plan Template — Fusing Catalog Traversal and Vector Search for Factual QA | Feature | Closed (implemented) | 2026-04-28 |
 | [RDR-098](rdr-098-abstract-question-plan-template.md) | Abstract-Question Plan Template — BERTopic Communities as Cheap Substitute for GraphRAG Community Reports | Feature | Closed (implemented) | 2026-04-29 |
-| [RDR-099](rdr-099-devonthink-integration.md) | DEVONthink Integration — First-Class CLI Verbs for Selection-Based Ingest and Reverse Lookup | Feature | Draft | 2026-04-28 |
+| [RDR-099](rdr-099-devonthink-integration.md) | DEVONthink Integration — First-Class CLI Verbs for Selection-Based Ingest and Reverse Lookup | Feature | Accepted | 2026-04-29 |
 
 ---
 
