@@ -666,6 +666,96 @@ def _run_check_hooks(*, threshold_ms: int, days: int, json_out: bool) -> None:
         click.echo(f"  {ts:27} {dur:>10}  {evt:18} {tool}")
 
 
+# ── --check-aspect-queue (nexus-1pfq) ────────────────────────────────────────
+
+
+def _run_check_aspect_queue() -> None:
+    """Report aspect_extraction_queue depth + per-status breakdown.
+
+    RDR-089 follow-up nexus-qeo8 introduced an async worker
+    (``aspect_worker.py``) that drains this table on a daemon thread.
+    Without observability, a backlog grows silently. This check
+    surfaces (a) total rows, (b) per-status counts, (c) oldest
+    enqueued_at as a lag indicator, (d) failed rows with their last
+    error so a stuck worker is visible.
+    """
+    import sqlite3 as _sqlite3
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415
+
+    db_path = default_db_path()
+    if not db_path.exists():
+        click.echo("aspect_extraction_queue: T2 database not found.")
+        return
+
+    conn = _sqlite3.connect(str(db_path))
+    try:
+        # Confirm the table exists (pre-RDR-089 dbs won't have it).
+        has_table = conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name='aspect_extraction_queue'"
+        ).fetchone()
+        if not has_table:
+            click.echo(
+                "aspect_extraction_queue: table not present "
+                "(no aspect-extraction work has been queued)."
+            )
+            return
+
+        total = conn.execute(
+            "SELECT COUNT(*) FROM aspect_extraction_queue"
+        ).fetchone()[0]
+        click.echo(f"aspect_extraction_queue: {total} row(s) total")
+
+        if total == 0:
+            return
+
+        # Per-status breakdown.
+        click.echo("\nBy status:")
+        rows = conn.execute(
+            "SELECT status, COUNT(*) FROM aspect_extraction_queue "
+            "GROUP BY status ORDER BY status"
+        ).fetchall()
+        for status, count in rows:
+            click.echo(f"  {status:<12} {count:>6}")
+
+        # Oldest enqueued_at across all non-completed rows — the lag
+        # indicator. ``processing`` and ``pending`` both contribute
+        # to the worker's open-work view; we report MIN across them.
+        oldest = conn.execute(
+            "SELECT MIN(enqueued_at), source_path "
+            "FROM aspect_extraction_queue "
+            "WHERE status IN ('pending', 'processing')"
+        ).fetchone()
+        if oldest and oldest[0]:
+            click.echo(
+                f"\nOldest pending/processing: {oldest[0]} "
+                f"({oldest[1] or '?'})"
+            )
+
+        # Surface failed rows with their last_error so the operator
+        # sees stuck work without needing SQL.
+        failed = conn.execute(
+            "SELECT collection, source_path, retry_count, last_error "
+            "FROM aspect_extraction_queue "
+            "WHERE status = 'failed' "
+            "ORDER BY enqueued_at DESC LIMIT 20"
+        ).fetchall()
+        if failed:
+            click.echo(f"\nFailed rows (showing top {len(failed)}):")
+            for collection, source_path, retry_count, last_error in failed:
+                click.echo(
+                    f"  [{collection}] {source_path}  "
+                    f"(retries={retry_count})"
+                )
+                if last_error:
+                    # Truncate long errors but always show enough to
+                    # diagnose the failure class.
+                    err = (last_error or "").replace("\n", " ").strip()
+                    click.echo(f"    last_error: {err[:200]}")
+    finally:
+        conn.close()
+
+
 # ── --check-post-store-hooks (nexus-b0ka) ────────────────────────────────────
 
 
@@ -869,6 +959,15 @@ def _run_check_post_store_hooks() -> None:
          "chains (single-doc / batch / document-grain). nexus-b0ka.",
 )
 @click.option(
+    "--check-aspect-queue",
+    "check_aspect_queue",
+    is_flag=True,
+    default=False,
+    help="Report aspect_extraction_queue depth, per-status counts, "
+         "oldest pending row, and any failed rows with their last "
+         "error. nexus-1pfq.",
+)
+@click.option(
     "--hook-threshold",
     "hook_threshold",
     default=0,
@@ -894,7 +993,8 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                json_out: bool,
                trim_telemetry: bool, days: int,
                check_hooks: bool, hook_threshold: int,
-               check_post_store_hooks: bool) -> None:
+               check_post_store_hooks: bool,
+               check_aspect_queue: bool) -> None:
     """Verify that all required services and credentials are available."""
     if check_schema:
         _run_check_schema()
@@ -939,6 +1039,10 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
 
     if check_post_store_hooks:
         _run_check_post_store_hooks()
+        return
+
+    if check_aspect_queue:
+        _run_check_aspect_queue()
         return
 
     if fix:
