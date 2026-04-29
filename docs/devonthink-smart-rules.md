@@ -61,9 +61,19 @@ Key points:
   triage the rule itself the same way you triage `nx` failures.
 
 Replace `/usr/local/bin/nx` with the absolute path your `nx` is
-installed at if it differs. AppleScript's `PATH` is bare; the
-absolute path avoids the "command not found" silent failure when you
-run `nx` from a `.zshrc`-style shell.
+installed at. The example placeholder is wrong for most modern Mac
+setups. Common locations:
+
+| Install method | Path |
+| --- | --- |
+| `uv tool install conexus` | `~/.local/bin/nx` |
+| Homebrew (Apple Silicon) | `/opt/homebrew/bin/nx` |
+| Homebrew (Intel) | `/usr/local/bin/nx` |
+| pipx | `~/.local/bin/nx` |
+
+Run `which nx` from your shell once and paste the result. AppleScript's
+`PATH` is bare, so the absolute path avoids the "command not found"
+silent failure when you run `nx` from a `.zshrc`-style shell.
 
 ### 2. Save location
 
@@ -105,10 +115,13 @@ should show the `nx dt index --uuid <UUID>` invocation's stdout. Once
 the indexer finishes, confirm the catalog has the entry:
 
 ```bash
-nx catalog list --source-uri-prefix x-devonthink-item://
+nx catalog list --json \
+  | jq '.[] | select(.source_uri | startswith("x-devonthink-item://"))'
 ```
 
-The newest entry should match the PDF you dropped.
+`nx catalog list` has no built-in `--source-uri-prefix` flag in v1; the
+JSON pipe is the canonical query path. The newest entry (last line of
+the jq output) should match the PDF you dropped.
 
 ## Error handling
 
