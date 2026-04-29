@@ -1,0 +1,61 @@
+# RDR-090 spike fixture — five hand-authored queries on rdr__nexus-571b8edd.
+#
+# Lifted verbatim from scripts/spikes/spike_rdr090_5q.py's QUERIES list.
+# The spike script remains the source of truth for the gate-decision
+# numbers; this fixture lets the runner reproduce them.
+#
+# Schema (see scripts/bench/schema.py):
+#   queries: list of
+#     - qid: short ID
+#       category: factual | comparative | compositional
+#       text: the query string
+#       ground_truth: { "rdr-NNN-": grade } where grade in {0,1,2,3}
+#       scope: optional, forwarded to path B/C handlers when set
+queries:
+  - qid: Q1-factual-tumblers
+    category: factual
+    text: "Which RDR introduced catalog tumblers as hierarchical document addresses?"
+    ground_truth:
+      "rdr-049-": 3   # explicitly introduced tumblers + Nelson principles
+      "rdr-053-": 1   # Xanadu fidelity follow-up
+
+  - qid: Q2-factual-chash
+    category: factual
+    text: "Which RDR added the content-hash chunk index for stable chunk identity?"
+    ground_truth:
+      "rdr-086-": 3   # chash-index introduction
+      "rdr-061-": 1   # earlier content-hash chunk discussion
+      "rdr-075-": 1   # collection routing groundwork
+
+  - qid: Q3-factual-taxonomy
+    category: factual
+    text: "Which RDR proposed the BERTopic-based taxonomy with HDBSCAN clustering?"
+    ground_truth:
+      "rdr-070-": 3   # taxonomy with BERTopic + HDBSCAN
+      "rdr-067-": 1   # adjacent observability/audit work
+
+  - qid: Q4-comparative-hooks
+    category: comparative
+    text: >-
+      Compare the post-store hook chain mechanisms — single-document
+      vs batch vs document-grain — and identify which RDR introduced each.
+    ground_truth:
+      "rdr-070-": 3   # single-document hook chain origin
+      "rdr-095-": 3   # batch hook contract
+      "rdr-089-": 3   # document-grain chain (aspect extraction)
+      "rdr-086-": 1   # chash dual-write batch hook
+
+  - qid: Q5-compositional-retrieval
+    category: compositional
+    text: >-
+      Trace the retrieval-layer evolution: how did plan-first dispatch,
+      operator extraction, and plan match scope-awareness develop across
+      the RDR-078 through RDR-095 sequence?
+    ground_truth:
+      "rdr-078-": 3   # paper audit / retrieval critique
+      "rdr-080-": 3   # retrieval layer consolidation
+      "rdr-088-": 3   # operator additions
+      "rdr-091-": 3   # scope-aware plan matching
+      "rdr-092-": 2   # plan match-text from dimensional identity
+      "rdr-079-": 1   # operator dispatch (abandoned, partial relevance)
+      "rdr-093-": 1   # groupby/aggregate operators
