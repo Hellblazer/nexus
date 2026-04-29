@@ -149,8 +149,15 @@ def repair_cmd() -> None:
     is_flag=True,
     help="Emit JSON instead of a table.",
 )
+@click.option(
+    "--include-disabled",
+    is_flag=True,
+    default=False,
+    help="Include soft-disabled rows (nexus-mrzp). Default: skip.",
+)
 def list_cmd(
     scope: str, origin: str, name_pat: str, limit: int, as_json: bool,
+    include_disabled: bool,
 ) -> None:
     """Tabulate plans in the library.
 
@@ -176,7 +183,11 @@ def list_cmd(
     lib = PlanLibrary(path=db_path)
     try:
         # list_plans already filters out TTL-expired rows.
-        rows = lib.list_plans(limit=max(limit * 4, limit), project="")
+        rows = lib.list_plans(
+            limit=max(limit * 4, limit),
+            project="",
+            include_disabled=include_disabled,
+        )
     finally:
         lib.close()
 
@@ -224,6 +235,12 @@ def list_cmd(
     click.echo("  " + "-" * 80)
     for r in filtered:
         last = (r.get("last_used") or "")[:19] or "-"
+        # nexus-mrzp: visually mark soft-disabled rows when the
+        # operator opts in via --include-disabled.
+        disabled_marker = "[D]" if r.get("disabled_at") else ""
+        name_field = r.get("name") or r.get("query") or ""
+        if disabled_marker:
+            name_field = f"{disabled_marker} {name_field}"
         click.echo(
             f"{r.get('id') or 0:>5}  "
             f"{_classify_origin(r):<8}  "
@@ -231,7 +248,7 @@ def list_cmd(
             f"{(r.get('scope') or '-')[:10]:<10}  "
             f"{r.get('use_count') or 0:>4}  "
             f"{last:<20}  "
-            f"{r.get('name') or r.get('query') or ''}"
+            f"{name_field}"
         )
 
 
@@ -345,6 +362,87 @@ def delete_cmd(plan_id: int, yes: bool) -> None:
         lib.close()
 
     click.echo(f"Removed {removed} row(s).")
+
+
+@plan.command("disable")
+@click.argument("plan_id", type=int)
+@click.option(
+    "--reason",
+    default="",
+    help="Optional reason; appended as a 'disable-reason:<text>' tag "
+    "so the operator can later see why the plan was retired.",
+)
+def disable_cmd(plan_id: int, reason: str) -> None:
+    """Soft-disable the plan with *plan_id* (nexus-mrzp).
+
+    \b
+    Soft-disable takes a plan out of rotation without deleting the row,
+    preserving run history and supporting A/B tests, regression triage,
+    and rollback. Re-enable with ``nx plan enable <id>``.
+
+    \b
+    Both matcher lanes (T1 cosine via list_active_plans, T2 FTS5 via
+    search_plans) skip rows with disabled_at set.
+    """
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415
+    from nexus.db.t2.plan_library import PlanLibrary  # noqa: PLC0415
+
+    db_path = default_db_path()
+    if not db_path.exists():
+        click.echo(f"T2 database not found at {db_path}.")
+        raise click.exceptions.Exit(1)
+
+    lib = PlanLibrary(path=db_path)
+    try:
+        row = lib.get_plan(plan_id)
+        if row is None:
+            click.echo(f"No plan with id {plan_id}.")
+            raise click.exceptions.Exit(1)
+        ok = lib.set_plan_disabled(plan_id, reason=reason)
+    finally:
+        lib.close()
+
+    if not ok:
+        click.echo(f"Failed to disable plan {plan_id}.")
+        raise click.exceptions.Exit(1)
+
+    label = row.get("name") or row.get("query") or "(unnamed)"
+    suffix = f" (reason: {reason})" if reason else ""
+    click.echo(f"Disabled plan id={plan_id} name={label!r}{suffix}.")
+
+
+@plan.command("enable")
+@click.argument("plan_id", type=int)
+def enable_cmd(plan_id: int) -> None:
+    """Re-enable a previously soft-disabled plan (nexus-mrzp).
+
+    Clears the ``disabled_at`` column. The ``disable-reason:`` tag, if
+    present, is preserved as a historical record.
+    """
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415
+    from nexus.db.t2.plan_library import PlanLibrary  # noqa: PLC0415
+
+    db_path = default_db_path()
+    if not db_path.exists():
+        click.echo(f"T2 database not found at {db_path}.")
+        raise click.exceptions.Exit(1)
+
+    lib = PlanLibrary(path=db_path)
+    try:
+        row = lib.get_plan(plan_id)
+        if row is None:
+            click.echo(f"No plan with id {plan_id}.")
+            raise click.exceptions.Exit(1)
+        ok = lib.set_plan_enabled(plan_id)
+    finally:
+        lib.close()
+
+    if not ok:
+        click.echo(f"Failed to enable plan {plan_id}.")
+        raise click.exceptions.Exit(1)
+
+    label = row.get("name") or row.get("query") or "(unnamed)"
+    click.echo(f"Enabled plan id={plan_id} name={label!r}.")
 
 
 @plan.command("reseed")

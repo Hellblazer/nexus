@@ -849,6 +849,31 @@ def migrate_chash_index(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _add_plan_disabled_at(conn: sqlite3.Connection) -> None:
+    """Add the ``disabled_at`` column to ``plans`` (nexus-mrzp).
+
+    Soft-disable lets operators retire a plan from the matcher without
+    deleting the row (preserves run history; supports A/B and rollback).
+    The column is nullable: ``NULL`` means active, an ISO-8601 timestamp
+    means disabled at that time.
+
+    Idempotent via ``PRAGMA table_info`` guard. No-op on a DB without
+    the ``plans`` table (fresh install before plan_library instantiates).
+    """
+    has_table = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='plans'"
+    ).fetchone()
+    if not has_table:
+        return
+
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(plans)").fetchall()}
+    if "disabled_at" in cols:
+        return
+    _log.info("Adding plans column", column="disabled_at")
+    conn.execute("ALTER TABLE plans ADD COLUMN disabled_at TEXT")
+    conn.commit()
+
+
 def _add_plan_scope_tags(conn: sqlite3.Connection) -> None:
     """Add the ``scope_tags`` column to ``plans`` and backfill default rows.
 
@@ -1730,6 +1755,11 @@ MIGRATIONS: list[Migration] = [
         "4.16.0",
         "Drop pre-RDR-096 null-field aspect rows (RDR-096 P2.2)",
         migrate_drop_null_aspect_rows,
+    ),
+    Migration(
+        "4.17.1",
+        "Add plans.disabled_at column for soft-disable (nexus-mrzp)",
+        _add_plan_disabled_at,
     ),
 ]
 

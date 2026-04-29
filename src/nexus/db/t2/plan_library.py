@@ -154,6 +154,10 @@ _PLAN_COLUMNS = (
     "scope_tags",
     # RDR-092 Phase 3 hybrid match-text column.
     "match_text",
+    # nexus-mrzp soft-disable marker. ISO-8601 timestamp when set;
+    # NULL when the plan is active. Filtered out by search_plans /
+    # list_active_plans so disabled rows never reach the matcher.
+    "disabled_at",
 )
 
 
@@ -252,6 +256,7 @@ class PlanLibrary:
                 self._migrate_plans_if_needed()
                 self._migrate_plans_ttl_if_needed()
                 self._migrate_plans_scope_tags_if_needed()
+                self._migrate_plans_disabled_at_if_needed()
                 _migrated_paths.add(path_key)
 
     def _migrate_plans_if_needed(self) -> None:
@@ -289,6 +294,16 @@ class PlanLibrary:
 
         _add_plan_scope_tags(self.conn)
         _rewash_plan_scope_tags_all_sentinel(self.conn)
+
+    def _migrate_plans_disabled_at_if_needed(self) -> None:
+        """Add the ``disabled_at`` column (nexus-mrzp).
+
+        Lock-naive: caller must hold ``self._lock`` and ``_migrated_lock``.
+        Delegates to :func:`nexus.db.migrations._add_plan_disabled_at`.
+        """
+        from nexus.db.migrations import _add_plan_disabled_at
+
+        _add_plan_disabled_at(self.conn)
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -405,20 +420,87 @@ class PlanLibrary:
             self.conn.commit()
             return cursor.rowcount
 
+    def set_plan_disabled(
+        self, plan_id: int, *, reason: str = "",
+    ) -> bool:
+        """Soft-disable the plan with *plan_id*.
+
+        Stamps ``disabled_at`` with the current ISO-8601 UTC timestamp.
+        When *reason* is non-empty, appends ``disable-reason:<text>`` to
+        the ``tags`` column so operators can see why later. Existing
+        tags are preserved.
+
+        Returns True when the row was updated (1 row affected), False
+        when the id does not exist. nexus-mrzp.
+        """
+        from datetime import UTC, datetime  # noqa: PLC0415
+
+        now_iso = datetime.now(UTC).isoformat()
+        reason_tag = (
+            f"disable-reason:{reason.strip()}" if reason.strip() else ""
+        )
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT tags FROM plans WHERE id = ? LIMIT 1", (plan_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            existing = row[0] or ""
+            new_tags = existing
+            if reason_tag:
+                # Avoid duplicating the same reason on repeat disable calls.
+                tag_list = [
+                    t.strip() for t in existing.split(",") if t.strip()
+                ]
+                tag_list = [
+                    t for t in tag_list if not t.startswith("disable-reason:")
+                ]
+                tag_list.append(reason_tag)
+                new_tags = ", ".join(tag_list)
+            cursor = self.conn.execute(
+                "UPDATE plans SET disabled_at = ?, tags = ? WHERE id = ?",
+                (now_iso, new_tags, plan_id),
+            )
+            self.conn.commit()
+            return cursor.rowcount > 0
+
+    def set_plan_enabled(self, plan_id: int) -> bool:
+        """Re-enable a previously disabled plan (nexus-mrzp).
+
+        Clears the ``disabled_at`` column. The ``disable-reason:`` tag,
+        if present, is preserved as a historical record. Returns True
+        when the row was updated, False when the id does not exist.
+        """
+        with self._lock:
+            cursor = self.conn.execute(
+                "UPDATE plans SET disabled_at = NULL WHERE id = ?",
+                (plan_id,),
+            )
+            self.conn.commit()
+            return cursor.rowcount > 0
+
     def list_active_plans(
         self,
         *,
         outcome: str = "success",
         project: str = "",
     ) -> list[dict[str, Any]]:
-        """Return every non-expired plan with the given *outcome*."""
+        """Return every non-expired plan with the given *outcome*.
+
+        Skips soft-disabled rows (``disabled_at IS NOT NULL``) so the T1
+        cosine cache populate (which calls this) never embeds disabled
+        plans into the matching collection. nexus-mrzp.
+        """
         ttl_filter = (
             "(ttl IS NULL OR julianday('now') - julianday(created_at) <= ttl)"
         )
+        # nexus-mrzp: skip soft-disabled rows for the cosine populate path.
+        disabled_filter = "disabled_at IS NULL"
         if project:
             sql = (
                 f"SELECT {_PLAN_SELECT_COLS} FROM plans "
-                f"WHERE outcome = ? AND project = ? AND {ttl_filter} "
+                f"WHERE outcome = ? AND project = ? "
+                f"AND {ttl_filter} AND {disabled_filter} "
                 f"ORDER BY created_at DESC"
             )
             params: tuple = (outcome, project)
@@ -426,6 +508,7 @@ class PlanLibrary:
             sql = (
                 f"SELECT {_PLAN_SELECT_COLS} FROM plans "
                 f"WHERE outcome = ? AND {ttl_filter} "
+                f"AND {disabled_filter} "
                 f"ORDER BY created_at DESC"
             )
             params = (outcome,)
@@ -486,11 +569,15 @@ class PlanLibrary:
         """FTS5 search over plans (query + tags). Returns plans ordered by rank.
 
         Expired plans (ttl set and created_at + ttl days < now) are excluded.
+        Soft-disabled plans (``disabled_at IS NOT NULL``) are excluded
+        (nexus-mrzp).
         """
         safe = _sanitize_fts5(query)
         ttl_filter = (
             "AND (p.ttl IS NULL OR julianday('now') - julianday(p.created_at) <= p.ttl)"
         )
+        # nexus-mrzp: skip soft-disabled rows in the matcher's FTS5 lane.
+        disabled_filter = "AND p.disabled_at IS NULL"
         cols = ", ".join(f"p.{c}" for c in _PLAN_COLUMNS)
         if project:
             sql = f"""
@@ -499,6 +586,7 @@ class PlanLibrary:
                 JOIN plans_fts ON plans_fts.rowid = p.id
                 WHERE plans_fts MATCH ? AND p.project = ?
                 {ttl_filter}
+                {disabled_filter}
                 ORDER BY rank
                 LIMIT ?
             """
@@ -510,6 +598,7 @@ class PlanLibrary:
                 JOIN plans_fts ON plans_fts.rowid = p.id
                 WHERE plans_fts MATCH ?
                 {ttl_filter}
+                {disabled_filter}
                 ORDER BY rank
                 LIMIT ?
             """
@@ -521,19 +610,35 @@ class PlanLibrary:
                 raise ValueError(f"Invalid search query {query!r}: {exc}") from exc
         return [_row_to_dict(row) for row in rows]
 
-    def list_plans(self, limit: int = 20, project: str = "") -> list[dict[str, Any]]:
-        """Return most recent non-expired plans ordered by created_at DESC."""
+    def list_plans(
+        self,
+        limit: int = 20,
+        project: str = "",
+        *,
+        include_disabled: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Return most recent non-expired plans ordered by ``created_at`` DESC.
+
+        Soft-disabled rows are excluded by default (nexus-mrzp). Pass
+        ``include_disabled=True`` to surface them, e.g. for
+        ``nx plan list --include-disabled``.
+        """
         ttl_filter = "(ttl IS NULL OR julianday('now') - julianday(created_at) <= ttl)"
+        disabled_filter = (
+            "" if include_disabled else " AND disabled_at IS NULL"
+        )
         if project:
             sql = (
                 f"SELECT {_PLAN_SELECT_COLS} FROM plans "
-                f"WHERE project = ? AND {ttl_filter} ORDER BY created_at DESC LIMIT ?"
+                f"WHERE project = ? AND {ttl_filter}{disabled_filter} "
+                f"ORDER BY created_at DESC LIMIT ?"
             )
             params_l: tuple = (project, limit)
         else:
             sql = (
                 f"SELECT {_PLAN_SELECT_COLS} FROM plans "
-                f"WHERE {ttl_filter} ORDER BY created_at DESC LIMIT ?"
+                f"WHERE {ttl_filter}{disabled_filter} "
+                f"ORDER BY created_at DESC LIMIT ?"
             )
             params_l = (limit,)
         with self._lock:
