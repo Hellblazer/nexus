@@ -228,6 +228,127 @@ class TestDryRun:
         assert "$0.02" in result.output
 
 
+# ── nexus-ow9f: cost estimate distinguishes deterministic extractor ─────────
+
+
+class TestDeterministicCostEstimate:
+    """The ``rdr-frontmatter-v1`` extractor is a pure-Python parser
+    (``parser_fn`` set, ``prompt_template`` empty). Reporting a Haiku
+    cost estimate for it is misleading — the user runs the command
+    expecting LLM cost and instead gets ~free deterministic parsing.
+    Deterministic extractors must report ``$0.00`` / "no API cost".
+    """
+
+    def _register_rdr_entries(self, cat: Catalog, source_paths: list[str]) -> None:
+        owner = cat.register_owner("rdr", "rdr-curator")
+        for sp in source_paths:
+            cat.register(
+                owner, Path(sp).stem,
+                content_type="rdr",
+                physical_collection="rdr__nexus-foo",
+                file_path=sp,
+            )
+
+    def test_dry_run_rdr_collection_reports_no_api_cost(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _, _, cat = env
+        self._register_rdr_entries(
+            cat, [f"/repo/docs/rdr/RDR-{i:03d}.md" for i in range(5)],
+        )
+
+        def _no_t3():
+            raise RuntimeError("test: no t3")
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", _no_t3)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            enrich, ["aspects", "rdr__nexus-foo", "--dry-run"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "5 document(s)" in result.output
+        # Reports the no-API-cost branch instead of ``~$0.05 at Haiku``.
+        assert "deterministic parser" in result.output
+        assert "$0" in result.output
+        assert "Haiku" not in result.output
+
+    def test_dry_run_knowledge_collection_still_reports_haiku_cost(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Regression guard: the new branch must not swallow the cost
+        estimate for LLM-backed extractors. ``knowledge__*`` keeps the
+        Haiku-rate output."""
+        _, _, cat = env
+        _register_entries(cat, [f"/papers/p{i}.pdf" for i in range(3)])
+
+        def _no_t3():
+            raise RuntimeError("test: no t3")
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", _no_t3)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            enrich, ["aspects", "knowledge__delos", "--dry-run"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Haiku" in result.output
+        assert "$0.03" in result.output
+
+
+# ── nexus-ow9f: source_uri visibility in dry-run skips ──────────────────────
+
+
+class TestDryRunSurfacesSourceUri:
+    """When dry-run flags an entry as a skip, the per-entry line should
+    surface the entry's ``source_uri`` (when distinct from the
+    ``file_path``-derived URI). This makes cross-collection
+    contamination obvious — the operator sees a ``file:///Users/.../X/``
+    URI under a ``rdr__Y`` collection at a glance.
+
+    Recovered from ART-lhk1: 140 of 245 catalog rows in
+    ``rdr__ART-8c2e74c0`` had ``source_uri = file:///.../nexus/...``,
+    a distinct file root from the collection's owner. Without that
+    URI in the skip line, the bare ``empty`` reason masked the actual
+    diagnosis (cross-project catalog corruption).
+    """
+
+    def test_dry_run_skip_lines_include_source_uri(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from nexus.aspect_readers import ReadFail
+        from nexus.catalog import Catalog as _Cat  # noqa: F401
+
+        _, _, cat = env
+        owner = cat.register_owner("rdr", "rdr-curator")
+        # Register an entry with a source_uri pointing at a *different*
+        # repo than the collection owner — exactly the ART-lhk1 shape.
+        cat.register(
+            owner, "RDR-MISROUTED",
+            content_type="rdr",
+            physical_collection="rdr__myproject",
+            file_path="docs/rdr/RDR-MISROUTED.md",
+            source_uri="file:///Users/test/elsewhere/docs/rdr/RDR-MISROUTED.md",
+        )
+
+        class _FakeT3:
+            pass
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", lambda: _FakeT3())
+        monkeypatch.setattr(
+            "nexus.aspect_readers.read_source",
+            lambda uri, t3=None, **_kw: ReadFail(
+                reason="empty", detail="no chunks",
+            ),
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            enrich, ["aspects", "rdr__myproject", "--dry-run"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "RDR-MISROUTED.md" in result.output
+        # The skip line names the source_uri so contamination is obvious.
+        assert "/Users/test/elsewhere/" in result.output
+
+
 # ── default extraction path (no validate, no re-extract) ────────────────────
 
 

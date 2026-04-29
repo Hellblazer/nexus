@@ -1071,6 +1071,201 @@ def compact_cmd() -> None:
         click.echo("Run 'nx catalog sync' to commit the compacted files.")
 
 
+@catalog.command("audit-membership")
+@click.argument("collection")
+@click.option(
+    "--purge-non-canonical",
+    is_flag=True,
+    help=(
+        "Delete catalog entries whose source_uri does not match the "
+        "canonical home for COLLECTION. Default canonical = the home "
+        "with the most entries; override with --canonical-home. "
+        "Use with --dry-run to preview. Asks for confirmation unless "
+        "--yes is passed."
+    ),
+)
+@click.option(
+    "--canonical-home",
+    default="",
+    help=(
+        "Override the dominant-home calculation by specifying a "
+        "substring that the canonical home must contain (e.g., "
+        "'/git/ART'). Use when the contaminating entries outnumber "
+        "the legitimate ones, so dominance is a misleading heuristic."
+    ),
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Report what would be deleted without writing.",
+)
+@click.option(
+    "--yes", "-y", is_flag=True, help="Skip confirmation prompt for --purge-non-canonical.",
+)
+@click.option(
+    "--json", "as_json", is_flag=True,
+    help="Emit per-home counts as JSON instead of human-readable lines.",
+)
+def audit_membership_cmd(
+    collection: str,
+    purge_non_canonical: bool,
+    canonical_home: str,
+    dry_run: bool,
+    yes: bool,
+    as_json: bool,
+) -> None:
+    """Detect cross-project source_uri contamination in COLLECTION.
+
+    Originated from ART-lhk1 (nexus-ow9f): 140 of 245 catalog rows
+    in ``rdr__ART-8c2e74c0`` had ``source_uri`` rooted in
+    ``/Users/.../nexus/`` rather than the project's expected
+    ``/Users/.../ART/`` root. The collection's chunks live under one
+    project's identity, so every contaminated entry was a guaranteed
+    skip in ``nx enrich aspects`` (no chunks would match).
+
+    The audit groups entries by source_uri "home" (the first 4 path
+    segments for ``file://`` URIs, ``scheme://netloc`` otherwise),
+    surfaces per-home counts, and identifies the dominant home.
+    With ``--purge-non-canonical`` the non-dominant entries are
+    soft-deleted (tombstoned in JSONL, removed from SQLite) by the
+    standard ``delete_document`` path.
+    """
+    cat = _get_catalog()
+    rows = cat._db.execute(
+        "SELECT tumbler, source_uri FROM documents "
+        "WHERE physical_collection = ?",
+        (collection,),
+    ).fetchall()
+
+    if not rows:
+        if as_json:
+            click.echo(json.dumps({
+                "collection": collection,
+                "total_entries": 0,
+                "distinct_homes": 0,
+                "by_home": {},
+                "dominant_home": None,
+            }))
+        else:
+            click.echo(f"No entries in '{collection}'.")
+        return
+
+    by_home: dict[str, list[str]] = {}
+    for tumbler_str, source_uri in rows:
+        host = _source_uri_home_key(source_uri or "")
+        by_home.setdefault(host, []).append(tumbler_str)
+
+    home_counts = {k: len(v) for k, v in by_home.items()}
+    dominant_home = max(home_counts.items(), key=lambda kv: kv[1])[0]
+    distinct = len(home_counts)
+
+    # Resolve canonical home: explicit substring match wins over the
+    # numerical dominant. ART-lhk1 needs this when the contamination
+    # exceeds 50% — the user knows /git/ART is canonical even though
+    # the leaked /git/nexus entries outnumber the legitimate ones.
+    if canonical_home:
+        matches = [h for h in home_counts if canonical_home in h]
+        if not matches:
+            raise click.ClickException(
+                f"--canonical-home substring {canonical_home!r} matches "
+                f"no home in {sorted(home_counts.keys())!r}"
+            )
+        if len(matches) > 1:
+            raise click.ClickException(
+                f"--canonical-home substring {canonical_home!r} is "
+                f"ambiguous; matches {matches!r}. Tighten the substring."
+            )
+        resolved_canonical = matches[0]
+    else:
+        resolved_canonical = dominant_home
+
+    if as_json:
+        click.echo(json.dumps({
+            "collection": collection,
+            "total_entries": len(rows),
+            "distinct_homes": distinct,
+            "by_home": home_counts,
+            "dominant_home": dominant_home,
+            "canonical_home": resolved_canonical,
+        }, indent=2))
+    else:
+        click.echo(
+            f"Collection '{collection}': {len(rows)} entries, "
+            f"{distinct} distinct source_uri home(s)."
+        )
+        for home, count in sorted(home_counts.items(), key=lambda kv: -kv[1]):
+            tags = []
+            if home == dominant_home:
+                tags.append("dominant")
+            if home == resolved_canonical:
+                tags.append("canonical")
+            tag_str = f" [{', '.join(tags)}]" if tags else ""
+            click.echo(f"  {count:5d}  {home or '(empty source_uri)'}{tag_str}")
+        if distinct == 1:
+            click.echo(
+                "Single source_uri home; no contamination detected."
+            )
+
+    if not purge_non_canonical:
+        return
+    if distinct < 2:
+        return  # Nothing to purge.
+
+    purge_targets: list[str] = []
+    for home, tumblers in by_home.items():
+        if home != resolved_canonical:
+            purge_targets.extend(tumblers)
+
+    if dry_run:
+        click.echo(
+            f"\n[dry-run] Would delete {len(purge_targets)} entries "
+            f"whose source_uri home differs from {resolved_canonical!r}."
+        )
+        return
+
+    if not yes:
+        click.confirm(
+            f"\nDelete {len(purge_targets)} catalog entries whose "
+            f"source_uri home differs from {resolved_canonical!r}? "
+            f"Links will be preserved (orphaned).",
+            abort=True,
+        )
+
+    deleted = 0
+    for t_str in purge_targets:
+        try:
+            t = Tumbler.parse(t_str)
+        except Exception as e:
+            click.echo(f"  skip {t_str}: parse error {e}")
+            continue
+        if cat.delete_document(t):
+            deleted += 1
+    click.echo(f"\nDeleted {deleted} of {len(purge_targets)} non-canonical entries.")
+
+
+def _source_uri_home_key(uri: str) -> str:
+    """Stable grouping key for source_uri "home" detection.
+
+    For ``file://`` URIs, returns the first four path segments
+    (e.g. ``/Users/hal.hildebrand/git/ART``) so two entries from the
+    same repo cluster regardless of the file inside that repo. For
+    other schemes returns ``<scheme>://<netloc>``. Empty URIs map to
+    ``""`` so missing-source-uri entries form their own bucket.
+    """
+    from urllib.parse import urlparse
+
+    if not uri:
+        return ""
+    p = urlparse(uri)
+    if p.scheme == "file":
+        # path = "/Users/hal.hildebrand/git/ART/docs/rdr/X.md"
+        # parts = ["", "Users", "hal.hildebrand", "git", "ART", ...]
+        # Take through the 5th component (the project root).
+        parts = p.path.split("/")
+        return "/".join(parts[:5]) if len(parts) >= 5 else p.path
+    return f"{p.scheme}://{p.netloc}"
+
+
 @catalog.command("orphans")
 @click.option("--no-links", "no_links", is_flag=True, help="Show entries with zero incoming and outgoing links")
 def orphans_cmd(no_links: bool) -> None:

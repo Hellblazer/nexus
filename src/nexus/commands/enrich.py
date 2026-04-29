@@ -341,17 +341,27 @@ def enrich_aspects(
         click.echo(f"No documents to process in '{collection}'.")
         return
 
-    cost_estimate = len(entries) * _PER_PAPER_COST_USD
+    # nexus-ow9f: deterministic parsers (parser_fn set, no LLM
+    # subprocess) cost nothing at runtime. Reporting Haiku rates for
+    # rdr-frontmatter-v1 misled operators into thinking they were
+    # about to spend $2.45 to extract aspects from RDR markdown.
+    is_deterministic = config.parser_fn is not None
+    if is_deterministic:
+        cost_str = "Estimated cost: $0 (deterministic parser, no API calls)"
+    else:
+        cost_estimate = len(entries) * _PER_PAPER_COST_USD
+        cost_str = f"Estimated cost: ~${cost_estimate:.2f} at Haiku rates"
     click.echo(
         f"{len(entries)} document(s) in '{collection}' "
         f"(extractor={config.extractor_name}, "
-        f"version={config.model_version}). "
-        f"Estimated cost ~${cost_estimate:.2f} at Haiku rates."
+        f"version={config.model_version}). {cost_str}."
     )
 
     if dry_run:
         click.echo("--dry-run: skipping extraction.")
-        _dry_run_predict_skips(entries, collection)
+        _dry_run_predict_skips(
+            entries, collection, is_deterministic=is_deterministic,
+        )
         return
 
     extracted = _run_extraction(entries, collection, config)
@@ -412,13 +422,24 @@ def _select_entries(
     return entries
 
 
-def _dry_run_predict_skips(entries: list, collection: str) -> None:
+def _dry_run_predict_skips(
+    entries: list, collection: str, *, is_deterministic: bool = False,
+) -> None:
     """RDR-096 P1.3: predict ExtractFail entries via the read-side
     check, without invoking the Claude subprocess. One ``read_source``
     call per entry — chunk reassembly is the same path
     ``extract_aspects`` would take. T3 unavailable / any other failure
     is caught and the prediction step is skipped gracefully so dry-run
     still works in environments without chroma access.
+
+    nexus-ow9f: skip lines surface ``entry.source_uri`` when distinct
+    from the file_path-derived URI, so cross-project catalog
+    contamination (e.g., ART-lhk1's
+    ``file:///Users/.../nexus/`` URIs registered under
+    ``rdr__ART-...``) is visible at a glance instead of hiding behind
+    a bare ``empty`` reason. A per-host summary at the bottom counts
+    distinct source_uri scheme+host pairs, surfacing contamination
+    even when individual lines are truncated to the first 20.
     """
     from urllib.parse import quote
 
@@ -432,6 +453,7 @@ def _dry_run_predict_skips(entries: list, collection: str) -> None:
 
     planned: dict[str, int] = {}
     skip_lines: list[str] = []
+    by_host: dict[str, int] = {}
     for entry in entries:
         sp = entry.file_path or entry.title
         if not sp:
@@ -451,7 +473,13 @@ def _dry_run_predict_skips(entries: list, collection: str) -> None:
             continue
         if isinstance(result, ReadFail):
             planned[result.reason] = planned.get(result.reason, 0) + 1
-            skip_lines.append(f"    - {Path(sp).name}: {result.reason}")
+            line = f"    - {Path(sp).name}: {result.reason}"
+            entry_uri = getattr(entry, "source_uri", "") or ""
+            if entry_uri:
+                line += f"  [source_uri={entry_uri}]"
+                host_key = _source_uri_host_key(entry_uri)
+                by_host[host_key] = by_host.get(host_key, 0) + 1
+            skip_lines.append(line)
 
     skipped = sum(planned.values())
     if skipped == 0:
@@ -468,10 +496,48 @@ def _dry_run_predict_skips(entries: list, collection: str) -> None:
         click.echo(f"    ... and {len(skip_lines) - 20} more")
     reasons_str = ", ".join(f"{k}={v}" for k, v in sorted(planned.items()))
     click.echo(f"  by_reason: {reasons_str}")
-    actual_cost = (len(entries) - skipped) * _PER_PAPER_COST_USD
-    click.echo(
-        f"  Predicted actual cost (excluding skips): ~${actual_cost:.2f}"
-    )
+    if len(by_host) > 1:
+        # Multiple source_uri "homes" under a single physical_collection
+        # is the contamination signature. Surface it explicitly.
+        host_str = ", ".join(
+            f"{k}={v}" for k, v in sorted(by_host.items(), key=lambda kv: -kv[1])
+        )
+        click.echo(
+            f"  by_source_uri_host: {host_str} "
+            f"(multiple roots in one collection: likely cross-project "
+            f"catalog contamination)"
+        )
+    if is_deterministic:
+        click.echo(
+            f"  Predicted actual extraction (excluding skips): "
+            f"{len(entries) - skipped} document(s) at no API cost."
+        )
+    else:
+        actual_cost = (len(entries) - skipped) * _PER_PAPER_COST_USD
+        click.echo(
+            f"  Predicted actual cost (excluding skips): ~${actual_cost:.2f}"
+        )
+
+
+def _source_uri_host_key(uri: str) -> str:
+    """Stable grouping key for source_uri "home" detection.
+
+    For ``file://`` URIs, returns the first three path segments
+    (e.g. ``/Users/hal.hildebrand/git/ART``) so two entries from the
+    same repo cluster into one bucket regardless of the file inside
+    that repo. For other schemes, returns ``<scheme>://<netloc>``
+    so a mixed catalog still gets meaningful grouping.
+    """
+    from urllib.parse import urlparse
+
+    p = urlparse(uri)
+    if p.scheme == "file":
+        # /Users/hal.hildebrand/git/ART/docs/rdr/X.md
+        # -> ['', 'Users', 'hal.hildebrand', 'git', 'ART', 'docs', ...]
+        # Take through the 5th component (the project root).
+        parts = p.path.split("/")
+        return "/".join(parts[:5]) if len(parts) >= 5 else p.path
+    return f"{p.scheme}://{p.netloc}"
 
 
 def _run_extraction(
