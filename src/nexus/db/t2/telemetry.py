@@ -100,23 +100,6 @@ CREATE INDEX IF NOT EXISTS idx_search_tel_collection
 CREATE INDEX IF NOT EXISTS idx_search_tel_ts
     ON search_telemetry(ts);
 
--- nexus-ntbg: hook duration_ms telemetry (Claude Code v2.1.119+).
--- One row per slow PostToolUse firing (above threshold) — written by
--- nx/hooks/scripts/hook_telemetry.py. Surfaced via ``nx doctor --check-hooks``.
--- Schema duplicated in migrations.migrate_hook_telemetry for upgrades.
-CREATE TABLE IF NOT EXISTS hook_telemetry (
-    ts               TEXT    NOT NULL,
-    hook_event_name  TEXT    NOT NULL,
-    tool_name        TEXT,
-    duration_ms      INTEGER NOT NULL,
-    session_id       TEXT,
-    cwd              TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_hook_tel_ts
-    ON hook_telemetry(ts);
-CREATE INDEX IF NOT EXISTS idx_hook_tel_duration
-    ON hook_telemetry(duration_ms);
 """
 
 _RELEVANCE_LOG_COLUMNS = (
@@ -344,71 +327,6 @@ class Telemetry:
             "zero_hit_rate": zero_rate,
             "median_top_distance": median,
         }
-
-    # ── hook_telemetry (nexus-ntbg) ─────────────────────────────────────
-
-    def log_hook_event(
-        self,
-        hook_event_name: str,
-        tool_name: str,
-        duration_ms: int,
-        session_id: str = "",
-        cwd: str = "",
-    ) -> None:
-        """Record a slow hook firing (above caller's threshold).
-
-        The hook script is responsible for thresholding — this method writes
-        unconditionally. Append-only; periodic ``trim_hook_telemetry`` keeps
-        the table bounded.
-        """
-        ts = datetime.now(UTC).isoformat()
-        with self._lock:
-            self.conn.execute(
-                "INSERT INTO hook_telemetry "
-                "(ts, hook_event_name, tool_name, duration_ms, session_id, cwd) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (ts, hook_event_name, tool_name, duration_ms, session_id, cwd),
-            )
-            self.conn.commit()
-
-    def query_slow_hooks(
-        self,
-        threshold_ms: int = 0,
-        days: int = 7,
-        limit: int = 50,
-    ) -> list[dict[str, Any]]:
-        """Return slow-hook records, newest first.
-
-        ``threshold_ms`` filters in addition to whatever the writer used —
-        defaults to 0 (return everything stored). ``days`` bounds the lookback
-        window. ``limit`` caps result count.
-        """
-        if days < 1:
-            raise ValueError(f"days must be >= 1; got {days}")
-        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
-        with self._lock:
-            rows = self.conn.execute(
-                "SELECT ts, hook_event_name, tool_name, duration_ms, session_id, cwd "
-                "FROM hook_telemetry "
-                "WHERE ts >= ? AND duration_ms >= ? "
-                "ORDER BY ts DESC LIMIT ?",
-                (cutoff, threshold_ms, limit),
-            ).fetchall()
-        cols = ("ts", "hook_event_name", "tool_name", "duration_ms", "session_id", "cwd")
-        return [dict(zip(cols, row)) for row in rows]
-
-    def trim_hook_telemetry(self, days: int = 30) -> int:
-        """Delete ``hook_telemetry`` rows older than *days* days."""
-        if days < 1:
-            raise ValueError(f"days must be >= 1; got {days}")
-        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
-        with self._lock:
-            cur = self.conn.execute(
-                "DELETE FROM hook_telemetry WHERE ts < ?",
-                (cutoff,),
-            )
-            self.conn.commit()
-        return cur.rowcount
 
     def trim_search_telemetry(self, days: int = 30) -> int:
         """Delete ``search_telemetry`` rows older than *days* days (Phase 2.4).

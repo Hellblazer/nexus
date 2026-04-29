@@ -176,7 +176,7 @@ case "$MODE" in
         echo "  nx catalog setup (seeds plan library + initializes catalog):"
         nx catalog setup 2>&1 | tail -5 | sed 's/^/    /' || true
         echo
-        for check in --check-schema --check-plan-library --check-taxonomy --check-hooks; do
+        for check in --check-schema --check-plan-library --check-taxonomy; do
             echo "  nx doctor $check:"
             if nx doctor "$check" 2>&1 | sed 's/^/    /'; then
                 echo "    [pass]"
@@ -265,7 +265,7 @@ case "$MODE" in
         echo
         echo "── 9/9 nx doctor (all checks, post-activity) ──"
         for check in --check-schema --check-plan-library --check-taxonomy \
-                     --check-hooks --check-tmpdirs; do
+                     --check-tmpdirs; do
             echo "  $check:"
             nx doctor "$check" 2>&1 | tail -5 | sed 's/^/    /' || true
         done

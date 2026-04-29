@@ -39,7 +39,6 @@ Reinstall the tool venv, create a fresh isolated `$HOME`, then run from `/tmp`:
 - `nx doctor --check-schema` (T2 schema sanity)
 - `nx doctor --check-plan-library` (builtin plan count)
 - `nx doctor --check-taxonomy` (topic_links invariant)
-- `nx doctor --check-hooks` (slow PostToolUse firings)
 
 Pass / fail per check. Total time ~2 min including reinstall.
 
