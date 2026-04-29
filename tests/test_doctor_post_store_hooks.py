@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """nexus-b0ka: ``nx doctor --check-post-store-hooks`` enumerates registered hooks.
 
-RDR-095 § Day 2 Operations referenced ``nx doctor --check=hooks`` as the
-way to enumerate registered post-store hook names. The actual
-``--check-hooks`` flag (RDR-094 nexus-ntbg) reports slow Claude-Code
-PostToolUse hook telemetry — a different concept. This bead adds a
-sibling ``--check-post-store-hooks`` flag that imports
-``nexus.mcp.core`` (triggers registration) and prints the registered
-hook names per chain.
+RDR-095 § Day 2 Operations referenced ``nx doctor --check=hooks`` as
+the way to enumerate registered post-store hook names. This bead adds
+the ``--check-post-store-hooks`` flag that imports ``nexus.mcp.core``
+(triggers registration) and prints the registered hook names per
+chain.
 
 Use cases:
   * Confirm aspect_extraction_enqueue_hook (RDR-089) registered after

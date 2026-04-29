@@ -78,7 +78,6 @@ class TestMigrationDataclass:
         # RDR-092 Phase 3.1 match_text column (4.9.13) +
         # legacy operation-shape retirement (4.10.1) +
         # builtin-bindings backfill (4.10.2) +
-        # hook_telemetry table (4.14.0, nexus-ntbg) +
         # hook_failures batch columns (4.14.1, RDR-095) +
         # hook_failures chain enum (4.14.2, RDR-089) +
         # document_aspects table (4.14.2, RDR-089 P1.1) +
@@ -87,12 +86,15 @@ class TestMigrationDataclass:
         # document_aspects.source_uri column + backfill (4.16.0,
         # RDR-096 P2.1) +
         # drop pre-RDR-096 null-field aspect rows (4.16.0, RDR-096 P2.2) +
-        # plans.disabled_at column (4.17.1, nexus-mrzp soft-disable)
-        # = 29.
+        # plans.disabled_at column (4.17.1, nexus-mrzp soft-disable) +
+        # retire hook_telemetry table — telemetry hook removed entirely
+        # (4.18.1; the migration entry that previously created the table
+        # was dropped when the read/write surface was retired)
+        # = 28.
         # Prefer the name-based checks in TestBackfillPlanDimensions
         # and TestAddPlanMatchTextColumn for future guards; this
         # count is a cheap sentinel only.
-        assert len(MIGRATIONS) == 29
+        assert len(MIGRATIONS) == 28
 
     def test_migrations_ordered_by_version(self) -> None:
         from nexus.db.migrations import MIGRATIONS, _parse_version

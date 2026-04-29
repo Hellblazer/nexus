@@ -610,62 +610,6 @@ def _run_trim_telemetry(days: int) -> None:
     )
 
 
-# ── --check-hooks (nexus-ntbg) ───────────────────────────────────────────────
-
-
-def _run_check_hooks(*, threshold_ms: int, days: int, json_out: bool) -> None:
-    """Report slow PostToolUse hook firings recorded in T2 hook_telemetry."""
-    from nexus.commands._helpers import default_db_path
-    from nexus.db.t2.telemetry import Telemetry
-
-    db_path = default_db_path()
-    if not db_path.exists():
-        if json_out:
-            click.echo('{"rows": [], "count": 0, "note": "T2 db not found"}')
-        else:
-            click.echo("T2 database not found — no hook telemetry available.")
-        return
-
-    telemetry = Telemetry(db_path)
-    try:
-        rows = telemetry.query_slow_hooks(
-            threshold_ms=threshold_ms, days=days, limit=200,
-        )
-    finally:
-        telemetry.close()
-
-    if json_out:
-        import json as _json
-        click.echo(_json.dumps({"rows": rows, "count": len(rows)}))
-        return
-
-    if not rows:
-        click.echo(
-            f"No slow-hook records in last {days} days "
-            f"(threshold ≥{threshold_ms}ms)."
-        )
-        click.echo(
-            "  Tune writer threshold via env "
-            "NX_HOOK_TELEMETRY_THRESHOLD_MS (default 2000ms)."
-        )
-        return
-
-    click.echo(
-        f"Slow hook firings (last {days}d, ≥{threshold_ms}ms, "
-        f"top {len(rows)}):"
-    )
-    click.echo("")
-    # Brief table
-    click.echo(f"  {'TIMESTAMP':27} {'DURATION':>10}  {'EVENT':18} TOOL")
-    click.echo(f"  {'-'*27} {'-'*10}  {'-'*18} {'-'*30}")
-    for r in rows:
-        ts = (r.get("ts") or "")[:26]
-        dur = f"{r.get('duration_ms', 0)}ms"
-        evt = (r.get("hook_event_name") or "")[:18]
-        tool = (r.get("tool_name") or "")[:48]
-        click.echo(f"  {ts:27} {dur:>10}  {evt:18} {tool}")
-
-
 # ── --check-aspect-queue (nexus-1pfq) ────────────────────────────────────────
 
 
@@ -942,15 +886,6 @@ def _run_check_post_store_hooks() -> None:
          "cap T2 disk use. RDR-087 Phase 2.4.",
 )
 @click.option(
-    "--check-hooks",
-    "check_hooks",
-    is_flag=True,
-    default=False,
-    help="Report slow PostToolUse hook firings captured into "
-         "T2 hook_telemetry. Tunable via NX_HOOK_TELEMETRY_THRESHOLD_MS "
-         "(default 2000ms) on the hook side. nexus-ntbg.",
-)
-@click.option(
     "--check-post-store-hooks",
     "check_post_store_hooks",
     is_flag=True,
@@ -966,14 +901,6 @@ def _run_check_post_store_hooks() -> None:
     help="Report aspect_extraction_queue depth, per-status counts, "
          "oldest pending row, and any failed rows with their last "
          "error. nexus-1pfq.",
-)
-@click.option(
-    "--hook-threshold",
-    "hook_threshold",
-    default=0,
-    type=click.IntRange(min=0),
-    show_default=True,
-    help="Additional duration_ms filter for --check-hooks (0 = include all stored).",
 )
 @click.option(
     "--days",
@@ -992,7 +919,6 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                check_mcp_logs: bool, mcp_log_hours: int,
                json_out: bool,
                trim_telemetry: bool, days: int,
-               check_hooks: bool, hook_threshold: int,
                check_post_store_hooks: bool,
                check_aspect_queue: bool) -> None:
     """Verify that all required services and credentials are available."""
@@ -1031,10 +957,6 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
 
     if trim_telemetry:
         _run_trim_telemetry(days=days)
-        return
-
-    if check_hooks:
-        _run_check_hooks(threshold_ms=hook_threshold, days=days, json_out=json_out)
         return
 
     if check_post_store_hooks:
