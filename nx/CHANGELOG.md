@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.18.1] - 2026-04-29
+
+Plugin version aligned with conexus 4.18.1. Internal hardening release: `nx/hooks/hooks.json` PreToolUse Bash timeout drops 300s → 5s (PR #364), the empty-matcher PostToolUse hook (`hook_telemetry`) is removed entirely (PR #366), and the Python 3.13 multiprocessing flake that hung the v4.18.0 release-job is fixed via spawn start method (PR #365). The `nx doctor --check-hooks` flag is removed (its data source no longer exists). See root `CHANGELOG.md` for the full notes.
+
 ## [4.18.0] - 2026-04-29
 
 Plugin version aligned with conexus 4.18.0. Three new builtin plan templates (`hybrid-factual-lookup`, `traverse-then-generate`, `abstract-themes`) ship as `nx/plans/builtin/*.yml`; the seed loader picks them up on first `nx catalog setup`. New `nx plan disable / enable` admin subcommands plus `nx doctor --check-post-store-hooks` / `--check-aspect-queue` observability flags. Console UI gains an Aspect Queue card on `/health`. RDRs 089, 093, 097, 098 closed. See root `CHANGELOG.md` for the full notes.

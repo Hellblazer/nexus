@@ -6,6 +6,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.18.1] - 2026-04-29
+
+Internal hardening release. No new user-visible features. Fixes the multiprocessing flake that hung the v4.18.0 release job, removes a per-tool-call observability hook, tightens a Bash hook timeout footgun, and adds a workflow timeout ceiling.
+
+### Fixed
+
+- **Python 3.13 multiprocessing fork-with-threads flake destochasticised** (PR #365). `tests/test_mcp_concurrency.py` now pins `multiprocessing.get_context("spawn")` for every `Process` and `Manager`. `fork` was unsafe in this test's parent because pytest had imported chromadb + nexus.db.{t1,t3}, all of which spin up background threads; forking a multi-threaded parent can copy held locks into the child in an acquired state and deadlock the child. This is the root cause that hung Python 3.13's pytest run for 36+ min during the v4.18.0 tag-push, blocking PyPI publish until manual cancellation. `spawn` always creates a fresh interpreter so no parent state crosses the process boundary. Also avoids the 3.13 `resource_tracker` shutdown waitpid hang (cpython#146313).
+- **`nx hook session-start` no longer hangs on TTY stdin** — see v4.18.0 notes (this entry is for completeness; the fix shipped in 4.18.0).
+
+### Changed
+
+- **`nx/hooks/hooks.json` PreToolUse Bash timeout dropped from 300s to 5s** (PR #364). The advisory `pre_close_verification_hook.sh` is fast by construction (read stdin, JSON out, exit 0; <100 ms on the slow path). The 300s ceiling was a footgun: a future bug or filesystem stall would block every Bash tool call for five minutes with no operator visibility. 5s matches the SessionStart fast-path hooks and is comfortably above the actual budget. Two test pins (`tests/test_upgrade_e2e.py::TestSC8HooksJson::test_pretooluse_bash_timeout_is_short` + `tests/hooks/test_verification_integration.py::TestHooksJsonStructure::test_hooks_json_pretooluse_timeout`) enforce a `<=10 s` ceiling so any future drift toward "minutes" trips CI.
+- **Release workflow gets `timeout-minutes: 15`** (PR #365), matching `ci.yml`. Defense-in-depth: a future hang fails fast instead of stalling the publish step indefinitely. Hit during the v4.18.0 tag-push when pytest 3.13 ran 36 min before manual cancel.
+
+### Removed
+
+- **`hook_telemetry` PostToolUse hook + `nx doctor --check-hooks` flag** (PR #366). The hook fired on every tool call, paid ~100-300 ms Python cold-start, and the data was consumed only by an ad-hoc `nx doctor --check-hooks` inspection that was never gated on or read by code. Pure observability tax. Removed: `nx/hooks/scripts/hook_telemetry.py`, the empty-matcher `PostToolUse` block in `nx/hooks/hooks.json`, the `--check-hooks` flag and `_run_check_hooks` impl in `src/nexus/commands/doctor.py`, the `hook_telemetry` table from `_TELEMETRY_SCHEMA_SQL`, the `log_hook_event` / `query_slow_hooks` / `trim_hook_telemetry` methods on `Telemetry`, the `migrate_hook_telemetry` function and its MIGRATIONS entry (count drops 29 → 28), `tests/test_hook_telemetry.py`, and `--check-hooks` references in `tests/e2e/release-sandbox.{sh,md}`. Net diff: 13 insertions / 565 deletions. Existing installs that already migrated through 4.14.0 keep their `hook_telemetry` table as a dormant artifact (nothing reads or writes it; a future cleanup migration could `DROP TABLE` explicitly, but the table is tiny and not worth a migration entry just for that).
+
 ## [4.18.0] - 2026-04-29
 
 Three new builtin plan templates (RDR-097 hybrid factual lookup + companion, RDR-098 abstract-themes), CLI parity hardening for T3-write hook chains, observability across `nx doctor` and the console UI, plan-authoring affordances, and the RDR-090 retrieval-bench scaffold. Closes RDR-089, RDR-093, RDR-097, RDR-098.
