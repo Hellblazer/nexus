@@ -77,7 +77,7 @@ def fake_dispatcher(monkeypatch) -> list[dict]:
         collection: str | None,
         corpus: str,
         dry_run: bool,
-    ) -> None:
+    ) -> bool:
         calls.append({
             "uuid": uuid,
             "path": path,
@@ -85,6 +85,10 @@ def fake_dispatcher(monkeypatch) -> list[dict]:
             "corpus": corpus,
             "dry_run": dry_run,
         })
+        # Default success — tests that want to exercise the
+        # stamp-failed summary path replace the dispatcher with
+        # their own fake.
+        return True
 
     monkeypatch.setattr("nexus.commands.dt._index_record", record)
     return calls
@@ -398,6 +402,55 @@ class TestErrorHandling:
         result = runner.invoke(main, ["dt", "index", "--selection"])
         assert result.exit_code != 0
         assert "macOS-only" in result.output
+
+
+# ── stamp-failure summary surfacing ──────────────────────────────────────────
+
+
+class TestStampFailedSummary:
+    """When ``_index_record`` returns ``False`` (the stamp helper
+    couldn't apply the DT identity), ``index_cmd`` must surface the
+    miss in its summary line so the operator knows the round-trip
+    is broken for some records. Silent stamp failures were a
+    significant audit finding from v4.19.1 post-release scrub.
+    """
+
+    def test_summary_includes_stamp_failed_count(
+        self, runner, fake_selectors, monkeypatch,
+    ):
+        from nexus.cli import main
+
+        fake_selectors["selection"].return_value = [
+            ("U-OK", "/a.pdf"),
+            ("U-FAIL-1", "/b.pdf"),
+            ("U-FAIL-2", "/c.md"),
+        ]
+
+        # Dispatcher returns False for the two that should fail to stamp.
+        def maybe_fail(uuid, path, *, collection, corpus, dry_run):
+            return uuid == "U-OK"
+
+        monkeypatch.setattr("nexus.commands.dt._index_record", maybe_fail)
+
+        result = runner.invoke(main, ["dt", "index", "--selection"])
+        assert result.exit_code == 0, result.output
+        assert "Indexed 3 record(s)" in result.output
+        assert "2 DT-URI stamp-failed" in result.output
+        # Recovery hint should appear so the operator knows what to do.
+        assert "nx catalog update" in result.output
+
+    def test_summary_omits_stamp_failed_when_zero(
+        self, runner, fake_selectors, fake_dispatcher,
+    ):
+        """No stamp failures → no mention of stamp-failed in the
+        summary line. Keeps the happy path uncluttered."""
+        from nexus.cli import main
+
+        fake_selectors["selection"].return_value = [("U", "/a.pdf")]
+        result = runner.invoke(main, ["dt", "index", "--selection"])
+        assert result.exit_code == 0, result.output
+        assert "Indexed 1 record(s)" in result.output
+        assert "stamp-failed" not in result.output
 
 
 # ── nx dt open ───────────────────────────────────────────────────────────────
