@@ -232,7 +232,9 @@ _KNOWN_URI_SCHEMES: frozenset[str] = frozenset({
 })
 
 
-def _normalize_source_uri(source_uri: str, file_path: str) -> str:
+def _normalize_source_uri(
+    source_uri: str, file_path: str, *, repo_root: str = "",
+) -> str:
     """RDR-096 P3.1 register-boundary URI validation.
 
     * Empty ``source_uri`` + non-empty ``file_path`` → derive
@@ -244,10 +246,20 @@ def _normalize_source_uri(source_uri: str, file_path: str) -> str:
       have a recognized scheme. Malformed URIs raise ``ValueError``
       at the register boundary, NOT silently persisted (RDR-096
       Risks and Mitigations).
+
+    nexus-3e4s: when ``file_path`` is relative AND ``repo_root`` is
+    provided, the abspath is anchored on ``repo_root`` rather than
+    the process CWD. This is the upstream fix for the catalog
+    contamination bug class — without it, indexing repo ``A`` from
+    a CWD inside repo ``B`` produced ``source_uri`` rows pointing
+    to ``B``'s tree, leaving the row attributed to ``A``'s owner.
     """
     if not source_uri:
         if file_path:
-            return "file://" + os.path.abspath(file_path)
+            base = file_path
+            if repo_root and not os.path.isabs(file_path):
+                base = os.path.join(repo_root, file_path)
+            return "file://" + os.path.abspath(base)
         return ""
 
     parsed = urlparse(source_uri)
@@ -265,6 +277,13 @@ def _normalize_source_uri(source_uri: str, file_path: str) -> str:
             f"new scheme, register a reader in nexus.aspect_readers.",
         )
     return source_uri
+
+
+# nexus-3e4s: env-var escape hatch for the cross-project guard. Set to
+# ``"1"`` only to recover from emergency situations (e.g. a known-good
+# cleanup script that legitimately needs to register rows across project
+# boundaries). Never the right answer for normal indexing.
+_CROSS_PROJECT_OVERRIDE_ENV = "NEXUS_CATALOG_ALLOW_CROSS_PROJECT"
 
 
 @dataclass
@@ -629,6 +648,86 @@ class Catalog:
 
     # ── Documents ──────────────────────────────────────────────────────────
 
+    def _owner_repo_root(self, owner: Tumbler) -> str:
+        """Return the owner's ``repo_root``, or ``""`` if unknown.
+
+        nexus-3e4s: register() and update() call this to anchor relative
+        ``file_path`` values to the owner's working tree instead of CWD.
+        """
+        row = self._db.execute(
+            "SELECT repo_root FROM owners WHERE tumbler_prefix = ?",
+            (str(owner),),
+        ).fetchone()
+        if not row:
+            return ""
+        return row[0] or ""
+
+    def _check_source_uri_in_repo_root(
+        self, owner: Tumbler, source_uri: str,
+    ) -> None:
+        """Reject cross-project ``source_uri`` attribution at register time.
+
+        nexus-3e4s: this is the load-bearing guard against the bug class
+        where owner ``A``'s tumbler accumulates rows whose ``source_uri``
+        lives in a different project's working tree. The signature was
+        observed in the live catalog as ~6,500 rows where, for example,
+        the ART repo's owner registered files under nexus's source tree.
+
+        The guard is owner-type-aware:
+
+        * ``repo`` owners with a non-empty ``repo_root`` enforce the match;
+        * ``curator`` owners (no ``repo_root``) legitimately span sources
+          and skip the check;
+        * pre-RDR-060 ``repo`` owners persisted before ``repo_root`` was
+          a column have ``repo_root=""`` and skip the check (back-compat).
+
+        Only ``file://`` URIs carry a project association — ``chroma://``,
+        ``https://``, ``x-devonthink-item://``, etc. have no filesystem
+        identity to compare against and pass through unchanged.
+
+        Set ``NEXUS_CATALOG_ALLOW_CROSS_PROJECT=1`` to bypass for
+        emergency recovery; this is never the right answer for normal
+        indexing.
+        """
+        if os.environ.get(_CROSS_PROJECT_OVERRIDE_ENV) == "1":
+            return
+        if not source_uri:
+            return
+        parsed = urlparse(source_uri)
+        if parsed.scheme != "file":
+            return
+        row = self._db.execute(
+            "SELECT owner_type, repo_root FROM owners WHERE tumbler_prefix = ?",
+            (str(owner),),
+        ).fetchone()
+        if not row:
+            # Owner-not-found is its own bug class; the existing
+            # foreign-key flow surfaces it elsewhere. Don't double-fault.
+            return
+        owner_type, repo_root = row[0], row[1] or ""
+        if owner_type != "repo" or not repo_root:
+            return
+        # Realpath both sides so symlinked roots (notably macOS's
+        # /private/var ↔ /var) and ``..`` segments don't trigger
+        # false positives. realpath() tolerates non-existent paths.
+        from urllib.parse import unquote
+
+        file_abs = unquote(parsed.path)
+        real_file = os.path.realpath(file_abs)
+        real_root = os.path.realpath(repo_root)
+        try:
+            Path(real_file).relative_to(real_root)
+        except ValueError:
+            raise ValueError(
+                f"cross-project source_uri rejected (nexus-3e4s): "
+                f"owner {owner} has repo_root={repo_root!r} but "
+                f"source_uri {source_uri!r} resolves to {real_file!r} "
+                f"which is outside the owner's repo_root. This is the "
+                f"signature of the contamination bug class. Set "
+                f"{_CROSS_PROJECT_OVERRIDE_ENV}=1 to bypass for "
+                f"emergency recovery."
+            ) from None
+
     def register(
         self,
         owner: Tumbler,
@@ -646,12 +745,22 @@ class Catalog:
         source_mtime: float = 0.0,
         source_uri: str = "",
     ) -> Tumbler:
+        # nexus-3e4s: anchor relative file_path values to the owner's
+        # repo_root, not CWD. Without this, indexing repo A from a CWD
+        # inside repo B writes source_uris pointing to B's tree but
+        # attributed to A's owner — the contamination signature.
+        owner_repo_root = self._owner_repo_root(owner)
         # RDR-096 P3.1: validate / derive source_uri at the register
         # boundary. Bare paths normalize to ``file://``; explicit URIs
         # are validated for scheme; malformed URIs raise ValueError
         # rather than silently persist (matches the RDR's risk
         # mitigation strategy).
-        source_uri = _normalize_source_uri(source_uri, file_path)
+        source_uri = _normalize_source_uri(
+            source_uri, file_path, repo_root=owner_repo_root,
+        )
+        # nexus-3e4s: cross-project attribution guard. Reject when the
+        # source_uri lives outside the owner's repo_root prefix.
+        self._check_source_uri_in_repo_root(owner, source_uri)
         dir_fd = self._acquire_lock()
         try:
             # Idempotency: check by file_path if non-empty
@@ -1194,9 +1303,17 @@ class Catalog:
             # If a caller passes ``source_uri=...`` through ``fields``,
             # validate it through the same boundary as register —
             # malformed URIs are hard errors, not silent persistence.
+            # Anchor on the owner's repo_root so relative file_paths
+            # don't fall through to CWD-based abspath (nexus-3e4s).
             if "source_uri" in fields:
                 rec_dict["source_uri"] = _normalize_source_uri(
                     rec_dict["source_uri"], rec_dict.get("file_path", ""),
+                    repo_root=self._owner_repo_root(entry.tumbler.owner_address()),
+                )
+                # And re-run the cross-project guard so update() can't
+                # be used as a back door around register's check.
+                self._check_source_uri_in_repo_root(
+                    entry.tumbler.owner_address(), rec_dict["source_uri"],
                 )
             self._append_jsonl(self._documents_path, rec_dict)
             # Upsert SQLite
