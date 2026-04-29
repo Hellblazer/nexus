@@ -915,6 +915,49 @@ class T3Database:
         with self._ef_lock:
             self._ef_cache.pop(old, None)
 
+    def list_unique_source_paths(self, collection_name: str) -> list[str]:
+        """Return every distinct ``source_path`` value present in *collection_name*.
+
+        Paginates ``col.get()`` to respect the ChromaDB Cloud 300-record
+        limit and dedupes locally. Empty / missing source_path values
+        are skipped — those are MCP-put chunks that have no on-disk
+        source by design (the prune-stale CLI must not flag them).
+
+        nexus-u7r0 (P1.4 / RDR-090): the staleness sweep needs to
+        iterate the unique source paths in a collection so it can
+        ``Path(...).exists()`` each one and ``delete_by_source`` the
+        misses. There was no batched accessor for this before.
+        Returns empty list if the collection does not exist.
+        """
+        try:
+            col = self._client_for(collection_name).get_collection(collection_name)
+        except _ChromaNotFoundError:
+            return []
+        seen: set[str] = set()
+        offset = 0
+        page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
+        while True:
+            result = _chroma_with_retry(
+                col.get,
+                include=["metadatas"],
+                limit=page_limit,
+                offset=offset,
+            )
+            page_metas = result.get("metadatas") or []
+            page_ids = result.get("ids") or []
+            if not page_ids:
+                break
+            for meta in page_metas:
+                if not isinstance(meta, dict):
+                    continue
+                src = meta.get("source_path") or ""
+                if src:
+                    seen.add(src)
+            offset += len(page_ids)
+            if len(page_ids) < page_limit:
+                break
+        return sorted(seen)
+
     def ids_for_source(self, collection_name: str, source_path: str) -> list[str]:
         """Return all chunk IDs for a given source path. Does not fetch content.
 
