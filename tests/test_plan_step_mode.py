@@ -135,3 +135,27 @@ class TestAbstractThemesUsesMode:
         # threshold should NOT be hard-coded any more; the runner
         # applies 2.0 from the mode at dispatch time.
         assert "threshold" not in args
+
+    def test_abstract_themes_filters_references(self):
+        """nexus-j5ka: abstract-themes should filter out reference/
+        bibliography chunks so groupby doesn't waste a slot on a
+        non-substantive cluster (Carpenter & Grossberg refs etc.).
+        The ``section_type=references`` metadata is set by RDR-055
+        chunkers; the filter uses the search MCP tool's ``where`` arg
+        with the ``!=`` operator.
+        """
+        import yaml
+        from pathlib import Path
+
+        path = Path("nx/plans/builtin/abstract-themes.yml")
+        with path.open() as f:
+            doc = yaml.safe_load(f)
+        steps = doc.get("plan_json", {}).get("steps", [])
+        search_step = next(
+            (s for s in steps if s.get("tool") == "search"), None,
+        )
+        assert search_step is not None
+        where = search_step.get("args", {}).get("where", "")
+        assert "section_type" in where
+        assert "references" in where
+        assert "!=" in where

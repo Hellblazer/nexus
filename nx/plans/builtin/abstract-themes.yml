@@ -58,6 +58,12 @@ plan_json:
         # distance maxes at 2.0, effectively no filter); downstream
         # groupby/aggregate handles noise.
         mode: broad
+        # nexus-j5ka: drop bibliography / reference chunks. They
+        # cluster together regardless of subject and consume a groupby
+        # slot (one wasted aggregate LLM call per query). RDR-055
+        # chunkers populate section_type; this filter is a no-op on
+        # corpora that pre-date RDR-055 metadata.
+        where: section_type!=references
     - tool: groupby
       args:
         ids: $step1.ids
