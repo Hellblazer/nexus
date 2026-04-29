@@ -45,6 +45,8 @@ import sys
 
 import structlog
 
+import nexus.aspect_readers as _aspect_readers
+
 __all__ = [
     "DTNotAvailableError",
     "_dt_group_records",
@@ -239,9 +241,11 @@ def _dt_uuid_record(
     """
     if dt_resolver is None:
         _require_darwin()
-        from nexus.aspect_readers import _devonthink_resolver_default
-
-        dt_resolver = _devonthink_resolver_default
+        # Module attribute access (not local-name binding) so tests
+        # that monkeypatch ``nexus.aspect_readers._devonthink_resolver_default``
+        # see their fake here, and we don't pay a re-import cost on
+        # every call (audit fix F2 restated; per code-review feedback).
+        dt_resolver = _aspect_readers._devonthink_resolver_default
 
     path, error_detail = dt_resolver(uuid)
     if path is None:

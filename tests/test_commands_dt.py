@@ -206,7 +206,9 @@ class TestSelectorRouting:
         """Click's ``multiple=True`` packs repeated ``--uuid`` flags
         into a tuple. Each UUID becomes its own
         ``_dt_uuid_record`` call (the resolver is single-UUID by
-        construction)."""
+        construction). Asserting the exact call args catches a
+        regression that fans out incorrectly (e.g. passing all UUIDs
+        as one argument)."""
         from nexus.cli import main
 
         fake_selectors["uuid"].return_value = [("X", "/x.pdf")]
@@ -215,6 +217,9 @@ class TestSelectorRouting:
         ])
         assert result.exit_code == 0, result.output
         assert fake_selectors["uuid"].call_count == 2
+        # Per-UUID args, in CLI order — locks the fan-out shape.
+        assert fake_selectors["uuid"].call_args_list[0].args == ("U1",)
+        assert fake_selectors["uuid"].call_args_list[1].args == ("U2",)
 
 
 # ── Mutual exclusion ─────────────────────────────────────────────────────────

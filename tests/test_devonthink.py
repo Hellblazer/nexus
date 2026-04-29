@@ -387,17 +387,25 @@ class TestDtSmartGroupRecords:
     def test_missing_value_scope_does_not_crash(self, monkeypatch):
         """When ``search group`` is ``missing value`` (smart group
         scoped at database root), the helper must fall through to
-        whole-database search rather than raising."""
+        ``root of theDb`` rather than raising. Asserting the
+        fall-through token explicitly catches a regression that drops
+        the ``if theScope is missing value then ... end if`` block.
+        """
         from nexus.devonthink import _dt_smart_group_records
 
         monkeypatch.setattr("sys.platform", "darwin")
+        scripts: list[str] = []
 
         def fake(script, timeout):
+            scripts.append(script)
             return "R1\t/r/a.pdf\n"
 
         monkeypatch.setattr("nexus.devonthink._run_osascript", fake)
         result = _dt_smart_group_records("Library Wide")
         assert result == [("R1", "/r/a.pdf")]
+        joined = "\n".join(scripts)
+        assert "missing value" in joined
+        assert "root of theDb" in joined
 
     def test_single_database_scoping(self, monkeypatch):
         from nexus.devonthink import _dt_smart_group_records

@@ -287,26 +287,34 @@ def _resolve_dt_uri_from_tumbler(tumbler: str) -> str | None:
             "Catalog not initialized. Run 'nx catalog setup' first.",
         )
     cat = Catalog(path, path / ".catalog.db")
-    t, err = resolve_tumbler(cat, tumbler)
-    if err:
-        raise click.ClickException(f"tumbler not found: {tumbler}")
-    entry = cat.resolve(t)
-    if entry is None:
-        raise click.ClickException(f"tumbler not found: {tumbler}")
+    try:
+        t, err = resolve_tumbler(cat, tumbler)
+        if err:
+            raise click.ClickException(f"tumbler not found: {tumbler}")
+        entry = cat.resolve(t)
+        if entry is None:
+            raise click.ClickException(f"tumbler not found: {tumbler}")
 
-    meta = getattr(entry, "meta", {}) or {}
-    if isinstance(meta, dict):
-        dt_uri = meta.get("devonthink_uri", "")
-        if isinstance(dt_uri, str) and dt_uri.startswith(
+        meta = getattr(entry, "meta", {}) or {}
+        if isinstance(meta, dict):
+            dt_uri = meta.get("devonthink_uri", "")
+            if isinstance(dt_uri, str) and dt_uri.startswith(
+                "x-devonthink-item://",
+            ):
+                return dt_uri
+        source_uri = getattr(entry, "source_uri", "")
+        if isinstance(source_uri, str) and source_uri.startswith(
             "x-devonthink-item://",
         ):
-            return dt_uri
-    source_uri = getattr(entry, "source_uri", "")
-    if isinstance(source_uri, str) and source_uri.startswith(
-        "x-devonthink-item://",
-    ):
-        return source_uri
-    return None
+            return source_uri
+        return None
+    finally:
+        # CatalogDB owns the SQLite connection + WAL lock; close it
+        # explicitly so back-to-back CliRunner invocations (and any
+        # future in-process callers) don't leak the write lock until
+        # GC. Existing nx catalog commands rely on process-exit cleanup
+        # which is fine for one-shot CLI but not for in-process reuse.
+        cat._db.close()
 
 
 @dt.command("open")
