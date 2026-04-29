@@ -6,6 +6,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.18.2] - 2026-04-29
+
+Data-loss fix. Closes #367. Plus two CI test-isolation fixes that surfaced during the PR's verification.
+
+### Fixed
+
+- **`nx collection reindex` no longer silently destroys store_put-only collections** (PR #368, Closes #367). The previous logic refused with a `--force` gate when SOME entries were sourceless and some were source-backed, but when EVERY entry was sourceless `--force` took the user past the check and the command collapsed to a destructive delete with nothing to re-index from. The reporter lost 28 entries across three knowledge collections plus a `taxonomy__centroids` collection while migrating embedding models. The fix detects the all-sourceless case before any delete and refuses unconditionally; `--force` does NOT bypass. The error points users at `nx collection delete` for the explicit-delete path. In-place re-embedding (preserve content, swap embedding model) is the user's underlying need and is filed as a follow-up — out of scope for this hotfix; the goal here is "don't destroy data when the user types `reindex` on a file-less collection."
+- **CI test-isolation fixes** (PR #368). Two latent fragilities surfaced during the verification CI run:
+  - `tests/test_console_health_aspect_queue.py::test_aspect_queue_card_dash_when_table_absent` relied on filesystem-isolation that broke when the `/health/refresh` pipeline pre-created the T2 db at `NEXUS_CONFIG_DIR/memory.db` (Ubuntu CI side-effect; macOS local didn't trip it). Now mocks `_collect_aspect_queue_data` directly so the template-branch assertion is independent of T2 side-effects.
+  - `tests/conftest.py::_isolate_t1_sessions` autouse fixture's `monkeypatch.setattr("nexus.db.t1.SESSIONS_DIR", ...)` failed on Python 3.13 with `AttributeError: module 'nexus.db' has no attribute 't1'` when no prior test had imported `nexus.db.t1`. Python 3.13 tightened package-attribute lazy access; `getattr(nexus.db, 't1')` no longer auto-loads the submodule the way 3.12 did. Force-importing both `nexus.db.t1` and `nexus.hooks` at the top of the fixture body removes the test-ordering luck. Same class of strictness as the multiprocessing fork-with-threads flake fixed in v4.18.1.
+
 ## [4.18.1] - 2026-04-29
 
 Internal hardening release. No new user-visible features. Fixes the multiprocessing flake that hung the v4.18.0 release job, removes a per-tool-call observability hook, tightens a Bash hook timeout footgun, and adds a workflow timeout ceiling.
