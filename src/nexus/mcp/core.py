@@ -2948,6 +2948,7 @@ async def nx_answer(
     dimensions: dict[str, Any] | None = None,
     structured: bool = False,
     min_confidence: float | None = None,
+    force_dynamic: bool = False,
 ) -> "str | dict":
     """Answer a knowledge question using plan-match-first retrieval. RDR-080 P1.
 
@@ -2989,6 +2990,14 @@ async def nx_answer(
             tighter value per-call without moving the global knob; the
             global default waits on Phase 5's larger-corpus
             validation. Must be in ``[0.0, 1.0]`` when supplied.
+        force_dynamic: RDR-090 P1.1 (nexus-dslg). When True, skip the
+            plan-match gate entirely and route directly to the inline
+            LLM planner / dynamic-generation path. Default False
+            preserves the plan-match-first flow. Used by the
+            AgenticScholar bench harness path C to isolate dynamic
+            generation from the matched-plan path on collection-scoped
+            questions where ``scope`` would otherwise act as a forced-
+            miss proxy.
 
     Returns:
         The final step's output — a string by default, or the envelope
@@ -3031,21 +3040,30 @@ async def nx_answer(
         min_confidence if min_confidence is not None
         else _PLAN_MATCH_MIN_CONFIDENCE
     )
-    try:
-        with _t2_ctx() as db:
-            cache = get_t1_plan_cache(populate_from=db.plans)
-            matches = _plan_match(
-                question,
-                library=db.plans,
-                cache=cache,
-                dimensions=dimensions,
-                scope_preference=scope,
-                context={"user_context": context} if context else None,
-                min_confidence=effective_min_confidence,
-                n=5,
-            )
-    except Exception as exc:
-        return _result(f"Error during plan match: {exc}")
+    if force_dynamic:
+        # RDR-090 P1.1: skip the plan-match gate entirely. The
+        # dynamic-planner path below picks up matches=[].
+        _log.info(
+            "nx_answer_force_dynamic",
+            question=question[:100] if trace else "[redacted]",
+        )
+        matches: list = []
+    else:
+        try:
+            with _t2_ctx() as db:
+                cache = get_t1_plan_cache(populate_from=db.plans)
+                matches = _plan_match(
+                    question,
+                    library=db.plans,
+                    cache=cache,
+                    dimensions=dimensions,
+                    scope_preference=scope,
+                    context={"user_context": context} if context else None,
+                    min_confidence=effective_min_confidence,
+                    n=5,
+                )
+        except Exception as exc:
+            return _result(f"Error during plan match: {exc}")
 
     if not matches or not _nx_answer_match_is_hit(
         matches[0].confidence, threshold=effective_min_confidence,
