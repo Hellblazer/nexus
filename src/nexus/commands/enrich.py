@@ -317,7 +317,7 @@ def enrich_aspects(
         click.echo(
             f"No extractor config registered for collection "
             f"'{collection}'. Supported prefixes: knowledge__*, "
-            f"rdr__*. Aborting."
+            f"rdr__*, docs__*. Aborting."
         )
         return
 

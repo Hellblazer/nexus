@@ -230,32 +230,44 @@ its ``source_path`` line.
 """
 
 
-_REGISTRY: dict[str, ExtractorConfig] = {
-    "knowledge__": ExtractorConfig(
-        extractor_name="scholarly-paper-v1",
-        # The model is pinned at config; the actual Claude CLI may
-        # use a different model based on user config. This is the
-        # *expected* model version for this extractor recipe and is
-        # what gets stored in document_aspects.model_version so the
-        # version-filter query (list_by_extractor_version) can
-        # identify rows captured under an outdated recipe.
-        model_version="claude-haiku-4-5-20251001",
-        prompt_template=_SCHOLARLY_PAPER_PROMPT,
-        required_fields=(
-            "problem_formulation",
-            "proposed_method",
-            "experimental_datasets",
-            "experimental_baselines",
-            "experimental_results",
-        ),
+_SCHOLARLY_PAPER_CONFIG = ExtractorConfig(
+    extractor_name="scholarly-paper-v1",
+    # The model is pinned at config; the actual Claude CLI may
+    # use a different model based on user config. This is the
+    # *expected* model version for this extractor recipe and is
+    # what gets stored in document_aspects.model_version so the
+    # version-filter query (list_by_extractor_version) can
+    # identify rows captured under an outdated recipe.
+    model_version="claude-haiku-4-5-20251001",
+    prompt_template=_SCHOLARLY_PAPER_PROMPT,
+    required_fields=(
+        "problem_formulation",
+        "proposed_method",
+        "experimental_datasets",
+        "experimental_baselines",
+        "experimental_results",
     ),
+)
+
+
+_REGISTRY: dict[str, ExtractorConfig] = {
+    "knowledge__": _SCHOLARLY_PAPER_CONFIG,
+    # docs__* (#377): markdown / ADR / design-doc collections produced
+    # by `nx index repo` hold the same kind of substantive prose that
+    # `knowledge__*` does — architecturally identical to scholarly
+    # papers from the aspect-extraction perspective. Reuse the same
+    # config so problem_formulation / proposed_method / etc. fields
+    # apply uniformly. If a dedicated docs-prose schema ever
+    # warrants splitting, the alias here can be replaced with a
+    # purpose-built ExtractorConfig.
+    "docs__": _SCHOLARLY_PAPER_CONFIG,
     # rdr__* — pure-Python extractor (RDR-089 Phase F). RDRs carry
     # YAML frontmatter + labelled markdown sections; a deterministic
     # parser is more reliable and zero-cost compared to forcing the
     # 5-field LLM extraction shape onto the document.
     "rdr__": ExtractorConfig(
         extractor_name="rdr-frontmatter-v1",
-        model_version="rdr-frontmatter-v1",  # not a real model — pinned to recipe id
+        model_version="rdr-frontmatter-v1",  # not a real model, pinned to recipe id
         prompt_template="",  # unused (parser_fn shortcut)
         required_fields=(
             "problem_formulation",

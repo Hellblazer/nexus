@@ -108,13 +108,15 @@ class TestWorkerDrain:
     def test_worker_unsupported_collection_drops_silently(
         self, _isolate_t2: Path,
     ) -> None:
-        """If extract_aspects returns ``None`` (unsupported collection),
-        the worker still mark_dones the queue row so it doesn't loop
-        forever. No document_aspects row is written."""
+        """If extract_aspects returns ``None`` (unsupported collection
+        OR transient failure), the worker still mark_dones the queue
+        row so it doesn't loop forever. No document_aspects row is
+        written. Uses code__* — unsupported by design — to avoid
+        coupling to whichever prefix is currently in the registry."""
         from nexus.aspect_worker import AspectExtractionWorker
 
         with T2Database(_isolate_t2) as db:
-            db.aspect_queue.enqueue("docs__handbook", "/p1.md")
+            db.aspect_queue.enqueue("code__nexus", "/p1.py")
 
         def fake_extract(content, source_path, collection):
             return None  # unsupported collection
@@ -130,7 +132,7 @@ class TestWorkerDrain:
                 worker.stop(timeout=5.0)
 
         with T2Database(_isolate_t2) as db:
-            rec = db.document_aspects.get("docs__handbook", "/p1.md")
+            rec = db.document_aspects.get("code__nexus", "/p1.py")
         assert rec is None
 
     def test_worker_null_fields_record_persists_without_retry(
@@ -383,16 +385,23 @@ class TestEnqueueHook:
         self, _isolate_t2: Path,
     ) -> None:
         """Hook is a no-op for collections that have no extractor
-        config — no queue row, no worker started, no T3 read."""
+        config — no queue row, no worker started, no T3 read.
+
+        ``code__*`` is unsupported by design: aspect extraction
+        targets prose claims (problem_formulation, proposed_method,
+        etc.), which don't map to source-code AST chunks. After #377,
+        ``docs__*`` is no longer the canonical 'unsupported' example
+        — it routes to scholarly-paper-v1 like ``knowledge__*``.
+        """
         from nexus.aspect_worker import (
             aspect_extraction_enqueue_hook,
             get_worker,
         )
 
         aspect_extraction_enqueue_hook(
-            source_path="/p1.md",
-            collection="docs__handbook",
-            content="some text",
+            source_path="/p1.py",
+            collection="code__nexus",
+            content="def foo(): pass",
         )
         with T2Database(_isolate_t2) as db:
             rows = db.aspect_queue.list_pending()

@@ -43,7 +43,7 @@ def _index_record(
     collection: str | None,
     corpus: str,
     dry_run: bool,
-) -> None:
+) -> bool:
     """Dispatch a single supported ``(uuid, path)`` to the right indexer.
 
     The caller (``index_cmd``) is responsible for filtering unsupported
@@ -59,6 +59,11 @@ def _index_record(
     relocations, and the file path returned by osascript at index time
     is not (DT moves files inside Files.noindex/ on its own schedule).
 
+    Returns the stamp's success status (``True`` when the catalog entry
+    now carries the DT identity, ``False`` otherwise) so the caller can
+    surface stamp misses in the summary line. Indexing itself is
+    treated as a precondition: an indexer exception will propagate.
+
     Tests monkeypatch this single function rather than the heavyweight
     ``doc_indexer`` machinery so the CLI surface is exercised
     independently of Voyage credentials and Chroma clients.
@@ -67,7 +72,7 @@ def _index_record(
         # Dry-run is handled in the command body before this function
         # is reached. If a caller invokes us with dry_run=True anyway,
         # treat it as a no-op rather than a silent indexing run.
-        return
+        return True
 
     from nexus.doc_indexer import index_markdown, index_pdf  # noqa: PLC0415
 
@@ -76,12 +81,12 @@ def _index_record(
     if ext == ".pdf":
         index_pdf(file_path, corpus=corpus, collection_name=collection)
     else:  # .md — extension filtering happens in index_cmd
-        index_markdown(file_path, corpus=corpus)
+        index_markdown(file_path, corpus=corpus, collection_name=collection)
 
-    _stamp_dt_uri_on_entry(file_path, uuid)
+    return _stamp_dt_uri_on_entry(file_path, uuid)
 
 
-def _stamp_dt_uri_on_entry(file_path: Path, uuid: str) -> None:
+def _stamp_dt_uri_on_entry(file_path: Path, uuid: str) -> bool:
     """Set ``source_uri`` and ``meta.devonthink_uri`` on the catalog
     entry that was just indexed for ``file_path``.
 
@@ -92,11 +97,13 @@ def _stamp_dt_uri_on_entry(file_path: Path, uuid: str) -> None:
     Looking up the entry by ``file_path`` immediately after the indexer
     call is reliable because no other registrar runs between the two.
 
-    Failures are logged and swallowed: a stamp miss should not abort
-    the whole ``nx dt index`` run. The resulting catalog entry is still
-    usable, just without the round-trip property; ``nx catalog
-    remediate-paths`` (RDR-096 substrate) plus a manual ``nx catalog
-    update`` can recover after the fact.
+    Returns ``True`` when the entry now carries the DT identity,
+    ``False`` on any miss (uninitialized catalog, no matching row,
+    SQLite exception). Failures are logged and surfaced in the dt
+    index summary line by the caller; the function does not raise so
+    a stamp miss leaves a recoverable ``file://`` entry rather than
+    aborting the whole batch. ``nx catalog update --source-uri`` can
+    recover after the fact.
     """
     from nexus.catalog import resolve_tumbler  # noqa: PLC0415
     from nexus.catalog.catalog import Catalog  # noqa: PLC0415
@@ -110,7 +117,7 @@ def _stamp_dt_uri_on_entry(file_path: Path, uuid: str) -> None:
             file_path=str(file_path),
             uuid=uuid,
         )
-        return
+        return False
 
     cat = Catalog(cat_path, cat_path / ".catalog.db")
     try:
@@ -128,7 +135,7 @@ def _stamp_dt_uri_on_entry(file_path: Path, uuid: str) -> None:
                 file_path=str(file_path),
                 uuid=uuid,
             )
-            return
+            return False
 
         from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415
 
@@ -144,6 +151,7 @@ def _stamp_dt_uri_on_entry(file_path: Path, uuid: str) -> None:
             uuid=uuid,
             dt_uri=dt_uri,
         )
+        return True
     except Exception as e:
         _log.warning(
             "dt_stamp_failed",
@@ -151,6 +159,7 @@ def _stamp_dt_uri_on_entry(file_path: Path, uuid: str) -> None:
             uuid=uuid,
             error=str(e),
         )
+        return False
     finally:
         cat._db.close()
 
@@ -280,6 +289,7 @@ def index_cmd(
 
     indexed = 0
     skipped = 0
+    stamp_failed = 0
     for uuid, path in records:
         ext = Path(path).suffix.lower()
         if ext not in _SUPPORTED_EXTS:
@@ -291,7 +301,7 @@ def index_cmd(
             )
             skipped += 1
             continue
-        _index_record(
+        stamped = _index_record(
             uuid,
             path,
             collection=collection,
@@ -299,7 +309,25 @@ def index_cmd(
             dry_run=False,
         )
         indexed += 1
-    click.echo(f"Indexed {indexed} record(s) ({skipped} skipped).")
+        if not stamped:
+            stamp_failed += 1
+    summary = f"Indexed {indexed} record(s) ({skipped} skipped"
+    if stamp_failed:
+        # Stamp failure leaves the entry recoverable via
+        # 'nx catalog update --source-uri x-devonthink-item://<UUID>'
+        # — flag it so the operator knows the round-trip is broken
+        # for those records.
+        summary += f", {stamp_failed} DT-URI stamp-failed"
+    summary += ")."
+    click.echo(summary)
+    if stamp_failed:
+        click.echo(
+            "Some records were indexed but their catalog entry still "
+            "carries source_uri=file://… instead of x-devonthink-item://"
+            "<UUID>. Inspect ~/Library/Logs (or your structlog sink) "
+            "for 'dt_stamp_failed' events and recover with "
+            "'nx catalog update <tumbler> --source-uri x-devonthink-item://<UUID>'.",
+        )
 
 
 def _gather_records(
@@ -429,6 +457,17 @@ def open_cmd(tumbler_or_uuid: str) -> None:
     preferring ``meta.devonthink_uri`` and falling back to
     ``source_uri`` when the entry was registered with a DT identity.
     """
+    # Platform gate fires before any branch-specific work so non-darwin
+    # users get the documented "macOS-only" message regardless of
+    # argument shape. Previously the tumbler branch would open the
+    # catalog and resolve the tumbler before checking platform, leaking
+    # catalog errors (uninitialized, not-found) ahead of the real
+    # diagnostic.
+    if not _is_darwin():
+        raise click.ClickException(
+            "DEVONthink integration is macOS-only",
+        )
+
     if _UUID_RE.match(tumbler_or_uuid):
         uri = f"x-devonthink-item://{tumbler_or_uuid}"
     elif _TUMBLER_RE.match(tumbler_or_uuid):
@@ -441,11 +480,6 @@ def open_cmd(tumbler_or_uuid: str) -> None:
         raise click.ClickException(
             "argument is neither a tumbler (e.g. 1.2.3) nor a UUID "
             "(e.g. 8EDC855D-213F-40AD-A9CF-9543CC76476B).",
-        )
-
-    if not _is_darwin():
-        raise click.ClickException(
-            "DEVONthink integration is macOS-only",
         )
 
     subprocess.run(["open", uri], check=True)  # noqa: S603,S607

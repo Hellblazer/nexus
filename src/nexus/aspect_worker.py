@@ -454,7 +454,7 @@ def aspect_extraction_enqueue_hook(
     (RDR-089 P1.3 spike finding). Instead it:
 
       1. Skips collections without a registered extractor config
-         (Phase 1 = ``knowledge__*`` only).
+         (currently ``knowledge__*``, ``rdr__*``, ``docs__*``).
       2. Writes a pending row to ``aspect_extraction_queue``
          (microsecond-scale T2 INSERT). The row carries ``content``
          when non-empty (MCP path) so the worker has the document

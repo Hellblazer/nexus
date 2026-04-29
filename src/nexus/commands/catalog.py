@@ -486,16 +486,30 @@ def register_cmd(
 @click.option("--year", default=0, type=int)
 @click.option("--corpus", default="")
 @click.option("--meta", default="", help="JSON string of additional metadata")
+@click.option(
+    "--source-uri",
+    "source_uri",
+    default="",
+    help="Catalog source identity URI (e.g. x-devonthink-item://<UUID>). "
+         "Recovery path for entries whose DT-URI stamp failed during "
+         "nx dt index, or for manual reassignment of catalog identity.",
+)
 @click.option("--owner", default="", help="Batch: update all entries for this owner")
 @click.option("--search", "search_query", default="", help="Batch: update all entries matching this search")
 def update_cmd(
     tumbler: str, title: str, author: str, year: int, corpus: str, meta: str,
-    owner: str, search_query: str,
+    source_uri: str, owner: str, search_query: str,
 ) -> None:
     """Update catalog entry metadata. TUMBLER can be a tumbler or title.
 
     Batch mode: use --owner or --search to update multiple entries at once.
     Example: nx catalog update --owner 1.9 --corpus schema-evolution
+
+    --source-uri sets or replaces the catalog identity URI. Use this to
+    recover an entry whose DT-URI stamp failed during 'nx dt index'
+    (the entry will carry source_uri=file://… instead of x-devonthink-
+    item://<UUID>). The URI is validated against the same scheme allowlist
+    as register-time.
     """
     cat = _get_catalog()
     fields: dict = {}
@@ -509,6 +523,8 @@ def update_cmd(
         fields["corpus"] = corpus
     if meta:
         fields["meta"] = json.loads(meta)
+    if source_uri:
+        fields["source_uri"] = source_uri
     if not fields:
         raise click.ClickException("No fields to update")
 

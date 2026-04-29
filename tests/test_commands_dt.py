@@ -77,7 +77,7 @@ def fake_dispatcher(monkeypatch) -> list[dict]:
         collection: str | None,
         corpus: str,
         dry_run: bool,
-    ) -> None:
+    ) -> bool:
         calls.append({
             "uuid": uuid,
             "path": path,
@@ -85,6 +85,10 @@ def fake_dispatcher(monkeypatch) -> list[dict]:
             "corpus": corpus,
             "dry_run": dry_run,
         })
+        # Default success — tests that want to exercise the
+        # stamp-failed summary path replace the dispatcher with
+        # their own fake.
+        return True
 
     monkeypatch.setattr("nexus.commands.dt._index_record", record)
     return calls
@@ -400,6 +404,55 @@ class TestErrorHandling:
         assert "macOS-only" in result.output
 
 
+# ── stamp-failure summary surfacing ──────────────────────────────────────────
+
+
+class TestStampFailedSummary:
+    """When ``_index_record`` returns ``False`` (the stamp helper
+    couldn't apply the DT identity), ``index_cmd`` must surface the
+    miss in its summary line so the operator knows the round-trip
+    is broken for some records. Silent stamp failures were a
+    significant audit finding from v4.19.1 post-release scrub.
+    """
+
+    def test_summary_includes_stamp_failed_count(
+        self, runner, fake_selectors, monkeypatch,
+    ):
+        from nexus.cli import main
+
+        fake_selectors["selection"].return_value = [
+            ("U-OK", "/a.pdf"),
+            ("U-FAIL-1", "/b.pdf"),
+            ("U-FAIL-2", "/c.md"),
+        ]
+
+        # Dispatcher returns False for the two that should fail to stamp.
+        def maybe_fail(uuid, path, *, collection, corpus, dry_run):
+            return uuid == "U-OK"
+
+        monkeypatch.setattr("nexus.commands.dt._index_record", maybe_fail)
+
+        result = runner.invoke(main, ["dt", "index", "--selection"])
+        assert result.exit_code == 0, result.output
+        assert "Indexed 3 record(s)" in result.output
+        assert "2 DT-URI stamp-failed" in result.output
+        # Recovery hint should appear so the operator knows what to do.
+        assert "nx catalog update" in result.output
+
+    def test_summary_omits_stamp_failed_when_zero(
+        self, runner, fake_selectors, fake_dispatcher,
+    ):
+        """No stamp failures → no mention of stamp-failed in the
+        summary line. Keeps the happy path uncluttered."""
+        from nexus.cli import main
+
+        fake_selectors["selection"].return_value = [("U", "/a.pdf")]
+        result = runner.invoke(main, ["dt", "index", "--selection"])
+        assert result.exit_code == 0, result.output
+        assert "Indexed 1 record(s)" in result.output
+        assert "stamp-failed" not in result.output
+
+
 # ── nx dt open ───────────────────────────────────────────────────────────────
 
 
@@ -473,6 +526,33 @@ class TestDtOpenUuidForm:
         assert result.exit_code != 0
         assert "macOS-only" in result.output
         assert fake_open == []  # no spawn attempt
+
+    def test_tumbler_form_on_non_darwin_does_not_touch_catalog(
+        self, runner, fake_open, monkeypatch,
+    ):
+        """The platform gate fires BEFORE tumbler resolution. A
+        non-darwin user passing a tumbler argument should see
+        ``macOS-only``, not a catalog-not-initialized error or a
+        tumbler-not-found error. Asserts the resolver helper isn't
+        called at all on non-darwin."""
+        from nexus.cli import main
+
+        resolver_calls: list[str] = []
+
+        def must_not_resolve(tumbler):
+            resolver_calls.append(tumbler)
+            raise AssertionError("resolver must not run on non-darwin")
+
+        monkeypatch.setattr(
+            "nexus.commands.dt._resolve_dt_uri_from_tumbler",
+            must_not_resolve,
+        )
+        monkeypatch.setattr("sys.platform", "linux")
+        result = runner.invoke(main, ["dt", "open", "1.2.3"])
+        assert result.exit_code != 0
+        assert "macOS-only" in result.output
+        assert resolver_calls == []
+        assert fake_open == []
 
 
 class TestDtOpenTumblerForm:
@@ -762,11 +842,13 @@ class TestStampDtUriOnEntry:
         from nexus.commands import dt as dt_module
 
         called: list[tuple[Path, str]] = []
+        pdf_kwargs: list[dict] = []
 
         def fake_stamp(file_path, uuid):
             called.append((file_path, uuid))
 
         def fake_index_pdf(*args, **kwargs):
+            pdf_kwargs.append(kwargs)
             return 0
 
         monkeypatch.setattr(
@@ -779,13 +861,53 @@ class TestStampDtUriOnEntry:
         dt_module._index_record(
             uuid="UUID-WIRING",
             path=str(tmp_path / "a.pdf"),
-            collection=None,
+            collection="knowledge__test",
             corpus="default",
             dry_run=False,
         )
         assert len(called) == 1
         assert called[0][0] == tmp_path / "a.pdf"
         assert called[0][1] == "UUID-WIRING"
+        # PDF path must forward --collection.
+        assert pdf_kwargs[0].get("collection_name") == "knowledge__test"
+        assert pdf_kwargs[0].get("corpus") == "default"
+
+    def test_index_record_md_forwards_collection(
+        self, monkeypatch, tmp_path,
+    ):
+        """The .md branch must forward ``--collection`` the same as
+        the .pdf branch. This test catches a regression where
+        index_markdown was invoked without ``collection_name``,
+        silently dropping the operator's flag and routing every .md
+        file into ``docs__default`` regardless of intent.
+        """
+        from nexus.commands import dt as dt_module
+
+        md_kwargs: list[dict] = []
+
+        def fake_index_markdown(*args, **kwargs):
+            md_kwargs.append(kwargs)
+            return 0
+
+        # Stamp + indexer fakes — we only care about the collection
+        # forwarding, not the catalog stamp here.
+        monkeypatch.setattr(
+            dt_module, "_stamp_dt_uri_on_entry", lambda *a, **kw: None,
+        )
+        monkeypatch.setattr(
+            "nexus.doc_indexer.index_markdown", fake_index_markdown,
+        )
+
+        dt_module._index_record(
+            uuid="UUID-MD",
+            path=str(tmp_path / "note.md"),
+            collection="knowledge__notes",
+            corpus="default",
+            dry_run=False,
+        )
+        assert len(md_kwargs) == 1
+        assert md_kwargs[0].get("collection_name") == "knowledge__notes"
+        assert md_kwargs[0].get("corpus") == "default"
 
     def test_index_record_dry_run_skips_stamp(
         self, monkeypatch, tmp_path,
