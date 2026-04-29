@@ -112,10 +112,23 @@ class TestHooksJsonStructure:
         assert hook["timeout"] == 180
 
     def test_hooks_json_pretooluse_timeout(self) -> None:
+        """The advisory hook must have a tight ceiling.
+
+        Was 300s in the original RDR-024 / RDR-065 wiring; tightened
+        to 5s to match the SessionStart fast-path hooks. The script
+        body (read stdin, JSON out, exit 0) completes in <100ms, so
+        a long ceiling masks real stalls. Pinning low (<=10s) so any
+        future drift toward "minutes" trips this test rather than
+        blocking every Bash tool call for that ceiling.
+        """
         data = json.loads(HOOKS_JSON.read_text())
         pre_hooks = data["hooks"]["PreToolUse"]
         hook = pre_hooks[0]["hooks"][0]
-        assert hook["timeout"] == 300
+        assert hook["timeout"] <= 10, (
+            f"PreToolUse Bash timeout {hook['timeout']}s is too high; "
+            f"the advisory hook should never need >5s. A long ceiling "
+            f"masks real stalls."
+        )
 
     def test_hooks_json_pretooluse_matcher_is_bash(self) -> None:
         data = json.loads(HOOKS_JSON.read_text())
