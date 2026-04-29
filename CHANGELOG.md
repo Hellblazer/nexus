@@ -6,6 +6,63 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.18.0] - 2026-04-29
+
+Three new builtin plan templates (RDR-097 hybrid factual lookup + companion, RDR-098 abstract-themes), CLI parity hardening for T3-write hook chains, observability across `nx doctor` and the console UI, plan-authoring affordances, and the RDR-090 retrieval-bench scaffold. Closes RDR-089, RDR-093, RDR-097, RDR-098.
+
+### Added
+
+- **`hybrid-factual-lookup` plan template** (`verb=lookup, strategy=hybrid-factual-lookup`, RDR-097, `nexus-vej3`). Five-step shape: vector search over-fetch, graph traversal on factual-evidence purpose, per-stream `limit_per_source` budgets, operator_rank merge, operator_generate. Routes narrow-target factual queries where graph context disambiguates. Integration harness ships 5 fixtures over `knowledge__hybridrag` (RDR-097 P1.5).
+- **`traverse-then-generate` plan template** (`verb=lookup, strategy=traverse-then-generate`, RDR-097, `nexus-ddm0`). Explicit-seeds companion: walk `factual-evidence` from caller-supplied tumblers, hydrate, generate. Use when seed tumblers are inputs (not derived from a question).
+- **`abstract-themes` plan template** (`verb=query, strategy=abstract-themes`, RDR-098, `nexus-ldnp`). CheapRAG community-summary pipeline: broad over-fetch (`mode: broad`), groupby by BERTopic centroid label, per-group aggregate, coalesce summarize. Routes "main themes / overview / summary of findings" question shapes. v1 is single-collection abstract QA; cross-collection routes through RDR-075 projection layer (deferred). Integration harness covers 10 fixtures over `docs__art-grossberg-papers` and `knowledge__delos` plus 3 match-text hygiene fixtures (RDR-098 P1.4 + P1.5, `nexus-17yg`).
+- **`nx plan disable` / `nx plan enable`** subcommands (`nexus-mrzp`). Soft-disable a plan without deleting it: drops out of `plan_match` but preserves the row id, telemetry counters, and T1 cache embedding. Useful for triaging mis-routing without committing to a delete + reseed cycle. Backed by a new `plans.disabled_at` column (migration #29).
+- **`nx plan list / show / delete / reseed`** admin CLI. Day-2 plan-library maintenance counterparts to `nx plan repair`.
+- **`nx doctor --check-post-store-hooks`** (`nexus-b0ka`). Enumerates every hook the MCP runtime has registered against the document-grain and batch-grain post-store chains in fire order. Surfaces the side-effect surface that a `store_put` triggers without grepping `mcp_infra.py`.
+- **`nx doctor --check-aspect-queue`** (`nexus-1pfq`). Reports `aspect_extraction_queue` row count, per-status breakdown (pending / processing / failed / completed), oldest non-completed `enqueued_at` as a lag indicator, and top failed rows with `last_error`. Pre-RDR-089 databases report cleanly as "table not present" rather than erroring.
+- **`nx catalog link-density --by-collection`** (RDR-097 P1.4, `nexus-8el5`). Per-collection report of outgoing-link counts at the depth-N BFS frontier (default depth 2). Output: `frontier_p50`, `frontier_p90`, and `link_types` present per collection. Observability for hybrid plan rollout: collections with median frontier `<3` are poor candidates and the operator should fall back to a vector-only plan.
+- **`nx catalog prune-stale`** + **`nx catalog remediate-paths --rdr-prefix-mode`** (`nexus-zg4c`). Catalog hygiene CLIs.
+- **`nx t3 prune-stale`** subcommand (RDR-090 P1.4). T3 staleness sweep counterpart to the catalog command.
+- **Console `Aspect Queue` card on `/health`** (`nexus-qf48`). Polls `aspect_extraction_queue` total + per-status breakdown on the existing console refresh interval. Mirrors `nx doctor --check-aspect-queue`; warn-paints on failed rows or absent T2.
+- **`mode: broad` plan-step affordance** (`nexus-h3e2`). Disables the per-corpus default search threshold (e.g., 0.65 for prose) for broad / abstract phrasings; the runner translates to threshold=2.0 on the search step. Drop-in for plan templates that do over-fetch and rely on downstream re-ranking.
+- **`limit_per_source` kwarg on `store_get_many`** (RDR-097 P1.0, `nexus-uwkw`). Per-stream input cap, symmetrical with the existing list-shaped `ids` / `collections` contract. Hard prerequisite for RDR-097's per-stream token-budget mechanism.
+- **`factual-evidence` purpose alias** (RDR-097 P1.3, `nexus-wp9s`). Bundles `cites`, `implements`, `relates` link types under one stable name in `nx/plans/purposes.yml`.
+- **RDR-090 retrieval-bench harness scaffold** (`nexus-q5yt`). 5-query × 3-path benchmark spike infrastructure under `bench/` and `scripts/bench/`: query and result schemas, runner, metrics module. Phase 2 query authoring + Phase 3 weekly CI workflow are tracked separately.
+- **AST drift guard** for T3-write CLI parity (`nexus-jgzl`). New test catches a future regression where a CLI ingest path silently drops back to bypassing the post-store hook chain.
+- **`force_dynamic` kwarg on `nx_answer`** (RDR-090 P1.1). Skips `plan_match` and forces inline-planner dispatch. Used by the RDR-090 bench harness to compare grown-plan vs inline-planner trajectories.
+
+### Changed
+
+- **`abstract-themes` plan filters `section_type=references`** (`nexus-j5ka`). Drops bibliography clusters from the groupby surface; they cluster together regardless of subject and consume a groupby slot on every query. RDR-055 chunkers populate `section_type`; this filter is a no-op on corpora that pre-date RDR-055 metadata.
+- **Scope-fit weighting tightened** in `plan_match` (RDR-090 P1.2). Bare prefix matches no longer admit specific-scoped plans, so `arcaneum/*` doesn't accidentally pick up `arcaneum/web` plans.
+- **Cosine floor for grown plans raised** in `plan_match` (RDR-090 P1.3). Reduces false-confident matches from auto-saved plans whose match-text overlaps trivially with a different intent.
+- **`nx_answer` auto-aliases the question text** into any unsupplied `required_bindings`. Removes the `$intent`-only constraint for builtin templates; new plans can use semantic binding names (`$concept`, `$topic`, `$query`) without losing dispatch from a bare question.
+- **`nx catalog setup` seeds 15 templates** (was 14): abstract-themes added.
+- **AGENTS.md restructured** per the Augment Code AGENTS.md guidance (#357). Per-module `AGENTS.md` files now live alongside `src/nexus/catalog/`, `src/nexus/db/`, and `src/nexus/mcp/`. Root `CLAUDE.md` is a symlink to root `AGENTS.md`.
+
+### Fixed
+
+- **T3-write CLI paths now fire post-store hook chains** (`nexus-9099`). `nx store put`, `nx index repo`, `nx index pdf`, `nx index md` previously committed to T3 without invoking the document-grain post-store hooks (taxonomy assignment, link generation, aspect queueing). The MCP path always fired hooks; CLI parity was missing. The fix routes every CLI ingest through the same hook chain, with an AST drift guard test to catch future regressions.
+- **`nx hook session-start` no longer hangs on TTY stdin** (`nexus-rv2x`). The hook used to read stdin unconditionally, which blocked on interactive shells where the parent kept the TTY open.
+- **MCP plan-cache mtime-guarded refresh on T2 mutation** (`nexus-qgjr`). The `plans__session` cache rebuilt only on session start; re-seeded plan rows were invisible until the MCP server bounced. The fix mirrors `Catalog._last_consistency_mtime`: cache compares its populate-time mtime against the current PlanLibrary file mtime and refreshes when the underlying T2 file advances.
+- **Integration flake destochasticised** in `test_search_filter_groupby_aggregate_end_to_end` (`nexus-uf9f` / `nexus-16he`). The `>=2 aggregates` floor was empirically flaky (PASS/FAIL/PASS on identical code) due to LLM stochasticity in the Byzantine-vs-crash partition decision. Relaxed to `>=1` for E2E plumbing; the deterministic regression-catch moved to a new mocked unit test (`test_bundled_pipeline_preserves_all_aggregates`) plus the existing operator-scope unit (`test_returns_aggregates_with_key_value_and_summary`).
+- **`memory_search` discover_topics perf gate stabilised** (`nexus-9lzx`).
+- **Concurrent T2 writes test** pre-initialises schema to kill a DDL race that surfaced under threaded concurrency.
+
+### Documentation
+
+- **`docs/architecture.md`**: new `### Builtin plan templates` subsection (between `## Module Map` and `## Design Decisions`) enumerates all 15 shipped templates grouped by verb dimension.
+- **`docs/cli-reference.md`**: added sections for `nx catalog link-density`, `nx doctor --check-post-store-hooks` / `--check-aspect-queue`, `nx plan disable / enable`.
+- **`docs/plan-centric-retrieval.md`**: builtin-template table now includes `abstract-themes`; surrounding paragraph explains the v1 single-collection scope plus the RDR-070 / RDR-075 follow-up path.
+- **`docs/rdr/rdr-070-incremental-taxonomy-clustered-search.md`**: new `## Downstream consumers` section establishing that BERTopic centroid labels are RDR-098's community-partition substrate.
+- **`docs/rdr/README.md`**: index synced with frontmatter for RDR-089 / 093 / 097 / 098.
+
+### RDRs closed in this release
+
+- **RDR-089** Structured Aspect Extraction at Ingest (closed 2026-04-26)
+- **RDR-093** GroupBy and Aggregate Operators (closed)
+- **RDR-097** Hybrid Retrieval Plan Template (closed 2026-04-29)
+- **RDR-098** Abstract-Question Plan Template (closed 2026-04-29)
+
 ## [4.17.0] - 2026-04-28
 
 DEVONthink integration for the catalog: PDFs managed by DEVONthink (DT3 / Pro / Server) carry a stable identity URL that survives DT-internal relocations, and Nexus now treats it as a first-class catalog source.

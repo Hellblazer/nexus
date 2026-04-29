@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.18.0] - 2026-04-29
+
+Plugin version aligned with conexus 4.18.0. Three new builtin plan templates (`hybrid-factual-lookup`, `traverse-then-generate`, `abstract-themes`) ship as `nx/plans/builtin/*.yml`; the seed loader picks them up on first `nx catalog setup`. New `nx plan disable / enable` admin subcommands plus `nx doctor --check-post-store-hooks` / `--check-aspect-queue` observability flags. Console UI gains an Aspect Queue card on `/health`. RDRs 089, 093, 097, 098 closed. See root `CHANGELOG.md` for the full notes.
+
 ## [4.17.0] - 2026-04-28
 
 Plugin version aligned with conexus 4.17.0. No plugin-level functional changes. The catalog backend gains the `x-devonthink-item://` URI scheme (`nexus-bqda`) and DT-aware `nx catalog remediate-paths` (`nexus-srck`) — see root `CHANGELOG.md` for details.
