@@ -426,3 +426,150 @@ def test_document_hook_drift_guard_catches_synthetic_offender(
     )
     assert refs, "scanner must flag a direct ImportFrom of the guarded hook"
     assert any("aspect_extraction_enqueue_hook" in r for r in refs)
+
+
+# ── nexus-9099 + nexus-jgzl: T3-write CLI parity guard ─────────────────────
+#
+# RDR-095 established symmetric-fire for the bulk indexer modules
+# (test_every_cli_ingest_site_fires_both_chains above). nexus-9099
+# discovered that ``nx store put``, ``nx memory promote``, and
+# ``nx store import`` shipped without firing any chain — three CLI
+# T3-write paths that the bulk-indexer guard couldn't reach because
+# they live in ``commands/`` and ``exporter.py``, not the indexer
+# files. The fix wires those three paths through ``fire_store_chains``
+# (mcp_infra). This guard ensures any future CLI T3-write path also
+# fires the chains: a function that calls ``X.put(collection=...)`` or
+# ``X.upsert_chunks_with_embeddings(collection_name=...)`` in
+# ``src/nexus/commands/`` or ``src/nexus/exporter.py`` must also call
+# ``fire_store_chains`` in the same function body.
+#
+# The kwarg-shape heuristic is what distinguishes T3 writes from T2
+# writes:
+#   * ``T3Database.put`` is always called with ``collection=`` (T3
+#     ChromaDB collection name).
+#   * ``T2Database.put`` is called with ``project=`` (project namespace).
+#   * ``T3Database.upsert_chunks_with_embeddings`` always takes
+#     ``collection_name=``.
+# So matching on ``X.put(collection=...)`` plus the upsert variant
+# catches every T3 write and skips T2 writes without an allow-list.
+
+T3_WRITE_PARITY_FILES: list[str] = [
+    # All commands/*.py modules can host CLI T3 writes; scan them all
+    # so a future contributor adding a new write command is caught.
+    *sorted(
+        str(p.relative_to(PROJECT_ROOT))
+        for p in (SRC_ROOT / "commands").glob("*.py")
+        if p.name != "__init__.py"
+    ),
+    # Library module that backs ``nx store import``.
+    "src/nexus/exporter.py",
+]
+
+
+def _function_writes_to_t3(func: ast.AST) -> bool:
+    """True if *func* contains a call shaped like a T3 write.
+
+    Recognised shapes:
+
+    * ``X.put(collection=…)`` — the T3Database.put signature.
+      T2Database.put uses ``project=…`` and is correctly skipped.
+    * ``X.upsert_chunks_with_embeddings(collection_name=…)`` — bulk
+      import write; the only caller is exporter.import_collection.
+    """
+    for sub in ast.walk(func):
+        if not isinstance(sub, ast.Call):
+            continue
+        if not isinstance(sub.func, ast.Attribute):
+            continue
+        attr = sub.func.attr
+        kwarg_names = {kw.arg for kw in sub.keywords if kw.arg}
+        if attr == "put" and "collection" in kwarg_names:
+            return True
+        if (
+            attr == "upsert_chunks_with_embeddings"
+            and "collection_name" in kwarg_names
+        ):
+            return True
+    return False
+
+
+def _function_calls_fire_store_chains(func: ast.AST) -> bool:
+    """True if *func* contains a Call to ``fire_store_chains``."""
+    for sub in ast.walk(func):
+        if not isinstance(sub, ast.Call):
+            continue
+        if isinstance(sub.func, ast.Name) and sub.func.id == "fire_store_chains":
+            return True
+        if (
+            isinstance(sub.func, ast.Attribute)
+            and sub.func.attr == "fire_store_chains"
+        ):
+            return True
+    return False
+
+
+def test_every_cli_t3_write_function_fires_store_chains() -> None:
+    """Every function in commands/*.py and exporter.py that writes to T3
+    must also call ``fire_store_chains`` in the same function body.
+
+    nexus-9099 (RDR-095 follow-up): the bulk-indexer drift guard
+    (``test_every_cli_ingest_site_fires_both_chains``) doesn't cover
+    CLI command modules. This guard closes that gap so any future
+    write path gets caught at CI time, not at silent-corruption time.
+    """
+    offenders: list[str] = []
+    for rel in T3_WRITE_PARITY_FILES:
+        path = PROJECT_ROOT / rel
+        if not path.exists():
+            continue
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if not _function_writes_to_t3(node):
+                continue
+            if not _function_calls_fire_store_chains(node):
+                offenders.append(f"{rel}::{node.name}")
+
+    assert not offenders, (
+        "nexus-9099 + RDR-095 invariant: every CLI/library function that writes "
+        "to T3 (via X.put(collection=...) or X.upsert_chunks_with_embeddings) "
+        "must call fire_store_chains in the same function so the post-store "
+        "hook chains fire from CLI ingest paths. Offenders:\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+def test_t3_write_helper_detects_known_shapes() -> None:
+    """Sanity: the helper recognises the canonical T3-write call shapes
+    and skips T2-write call shapes. If this test ever flips, the
+    parity guard above silently stops catching regressions.
+    """
+    snippets = {
+        # Should be detected (T3 write):
+        "t3_put_kw": ("def f():\n    db.put(collection=c, content=x)\n", True),
+        "t3_put_self_kw": (
+            "def f():\n    self._t3.put(collection=c, content=x)\n", True,
+        ),
+        "upsert_kw": (
+            "def f():\n    db.upsert_chunks_with_embeddings("
+            "collection_name=c, ids=ids, documents=docs)\n",
+            True,
+        ),
+        # Should NOT be detected (T2 write or unrelated):
+        "t2_put_kw": (
+            "def f():\n    db.put(project=p, title=t, content=x)\n", False,
+        ),
+        "no_call": ("def f():\n    pass\n", False),
+        "positional_put": (
+            "def f():\n    db.put(c, x)\n", False,
+        ),
+    }
+    for name, (src, expected) in snippets.items():
+        tree = ast.parse(src)
+        func = tree.body[0]
+        actual = _function_writes_to_t3(func)
+        assert actual is expected, (
+            f"_function_writes_to_t3 mis-classified {name!r}: "
+            f"expected {expected}, got {actual}"
+        )
