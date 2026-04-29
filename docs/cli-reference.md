@@ -388,6 +388,14 @@ nx catalog gc [--dry-run]
 
 Remove orphan catalog entries (entries with `miss_count >= 2` — missed in 2 consecutive index runs). Use `--dry-run` to preview.
 
+### nx catalog link-density
+
+```
+nx catalog link-density --by-collection [--depth N] [--purpose NAME] [--json]
+```
+
+Per-collection report of outgoing-link counts at the depth-N BFS frontier (default depth 2). Output: one row per collection with `frontier_p50`, `frontier_p90`, and the set of `link_types` present. Introduced 4.18.0 (RDR-097, `nexus-8el5`) as observability for the hybrid retrieval plan: collections with median frontier `< 3` are poor candidates for `hybrid-factual-lookup` and the operator should fall back to a vector-only plan. The CLI is observability only; it does not auto-rewrite plans.
+
 ### nx catalog list / stats / owners / delete
 
 Standard catalog management. Run `nx catalog COMMAND --help` for details.
@@ -924,6 +932,18 @@ Exit codes:
 - `0` — reachable cloud tenant or local-mode (limits are reference-only).
 - `1` — cloud tenant unreachable in cloud mode; the report is not actionable without a working client. Suitable as a CI gate.
 
+```
+nx doctor --check-post-store-hooks   # Enumerate registered post-store hook chains
+```
+
+The `--check-post-store-hooks` flag (introduced 4.18.0, `nexus-b0ka`) prints every hook the MCP runtime has registered against the document-grain and batch-grain post-store chains, in fire order. Surfaces the side-effect surface that a `store_put` triggers (taxonomy assignment, aspect extraction queueing, link generation, etc.) without grepping `mcp_infra.py`. Use after a hook-registration change to confirm the chain wires up as intended.
+
+```
+nx doctor --check-aspect-queue       # Surface RDR-089 aspect-extraction worker depth
+```
+
+The `--check-aspect-queue` flag (introduced 4.18.0, `nexus-1pfq`) reports the `aspect_extraction_queue` row count plus per-status breakdown (`pending`, `processing`, `failed`, `completed`), the oldest non-completed `enqueued_at` as a lag indicator, and the top failed rows with their `last_error`. The same data surfaces in the `nx console` Aspect Queue card on `/health` for live monitoring. Pre-RDR-089 databases (no queue table) report cleanly as "table not present" rather than erroring.
+
 ---
 
 ## nx plan
@@ -953,6 +973,13 @@ T2 DB. On every run it:
 Idempotent: a second run reports `0 backfilled` and exits cleanly.
 When the T2 DB is absent, exits 0 with "nothing to do" rather than a
 traceback.
+
+```
+nx plan disable PLAN_ID    # Soft-disable a plan without deleting it
+nx plan enable PLAN_ID     # Re-enable a previously disabled plan
+```
+
+Introduced 4.18.0 (`nexus-mrzp`). `disable` flips `outcome=disabled` on the plan row so it drops out of `plan_match` results without losing its row id, telemetry counters, or T1 cache embedding. `enable` flips it back to `outcome=success`. Useful for triaging a plan whose match-text is misrouting traffic without committing to a delete + re-seed cycle. The pair operates on plan ids returned from `nx plan repair` or `plan_inspect_default`.
 
 ---
 
