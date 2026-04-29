@@ -190,6 +190,20 @@ class TestSelectorRouting:
             "Recent PDFs", database=None,
         )
 
+    def test_smart_group_with_database_passes_scope(
+        self, runner, fake_selectors, fake_dispatcher,
+    ):
+        from nexus.cli import main
+
+        result = runner.invoke(main, [
+            "dt", "index", "--smart-group", "Recent PDFs",
+            "--database", "MyLib",
+        ])
+        assert result.exit_code == 0, result.output
+        fake_selectors["smart_group"].assert_called_once_with(
+            "Recent PDFs", database="MyLib",
+        )
+
     def test_uuid_single_invokes_dt_uuid_record(
         self, runner, fake_selectors, fake_dispatcher,
     ):
@@ -231,6 +245,8 @@ class TestMutualExclusion:
 
         result = runner.invoke(main, ["dt", "index"])
         assert result.exit_code != 0
+        # Hint at the missing selector so the operator knows what to add.
+        assert "selector" in result.output.lower()
 
     def test_selection_plus_tag_errors(self, runner):
         from nexus.cli import main
@@ -239,6 +255,7 @@ class TestMutualExclusion:
             "dt", "index", "--selection", "--tag", "research",
         ])
         assert result.exit_code != 0
+        assert "exclusive" in result.output.lower()
 
     def test_group_plus_smart_group_errors(self, runner):
         from nexus.cli import main
@@ -247,6 +264,7 @@ class TestMutualExclusion:
             "dt", "index", "--group", "/X", "--smart-group", "Y",
         ])
         assert result.exit_code != 0
+        assert "exclusive" in result.output.lower()
 
 
 # ── Per-record dispatch by extension ─────────────────────────────────────────
@@ -522,6 +540,9 @@ class TestDtOpenMalformedArg:
         monkeypatch.setattr("sys.platform", "darwin")
         result = runner.invoke(main, ["dt", "open", "not-a-tumbler-or-uuid"])
         assert result.exit_code != 0
+        # Hint mentions both accepted shapes so the operator can correct it.
+        assert "tumbler" in result.output.lower()
+        assert "uuid" in result.output.lower()
         assert fake_open == []
 
 
@@ -532,3 +553,94 @@ class TestDtOpenHelp:
         result = runner.invoke(main, ["dt", "open", "--help"])
         assert result.exit_code == 0
         assert "tumbler" in result.output.lower() or "uuid" in result.output.lower()
+
+
+# ── _select_dt_uri_from_entry (pure unit) ────────────────────────────────────
+
+
+class _FakeEntry:
+    """Minimal duck-typed shape that ``_select_dt_uri_from_entry``
+    inspects: ``meta`` dict + ``source_uri`` string."""
+
+    def __init__(self, meta=None, source_uri=""):
+        self.meta = meta if meta is not None else {}
+        self.source_uri = source_uri
+
+
+class TestSelectDtUriFromEntry:
+    """Locks the meta-first / source-second / None fall-through rule
+    independently of catalog plumbing. The CLI tumbler tests in
+    TestDtOpenTumblerForm stub the whole resolver, so without these
+    tests a regression that reorders the branches inside
+    _select_dt_uri_from_entry would slip through.
+    """
+
+    def test_meta_devonthink_uri_wins_over_source_uri(self):
+        from nexus.commands.dt import _select_dt_uri_from_entry
+
+        entry = _FakeEntry(
+            meta={"devonthink_uri": "x-devonthink-item://META-UUID"},
+            source_uri="x-devonthink-item://SOURCE-UUID",
+        )
+        assert (
+            _select_dt_uri_from_entry(entry)
+            == "x-devonthink-item://META-UUID"
+        )
+
+    def test_source_uri_used_when_meta_absent(self):
+        from nexus.commands.dt import _select_dt_uri_from_entry
+
+        entry = _FakeEntry(
+            meta={},
+            source_uri="x-devonthink-item://SOURCE-UUID",
+        )
+        assert (
+            _select_dt_uri_from_entry(entry)
+            == "x-devonthink-item://SOURCE-UUID"
+        )
+
+    def test_source_uri_used_when_meta_devonthink_uri_empty(self):
+        """Empty string in meta is not a match — fall through."""
+        from nexus.commands.dt import _select_dt_uri_from_entry
+
+        entry = _FakeEntry(
+            meta={"devonthink_uri": ""},
+            source_uri="x-devonthink-item://SOURCE-UUID",
+        )
+        assert (
+            _select_dt_uri_from_entry(entry)
+            == "x-devonthink-item://SOURCE-UUID"
+        )
+
+    def test_returns_none_when_neither_present(self):
+        from nexus.commands.dt import _select_dt_uri_from_entry
+
+        entry = _FakeEntry(meta={}, source_uri="")
+        assert _select_dt_uri_from_entry(entry) is None
+
+    def test_returns_none_when_uris_not_devonthink_scheme(self):
+        """``file://`` and ``https://`` source URIs are common; the
+        helper must not treat them as DT URIs even though they share
+        the ``://`` shape."""
+        from nexus.commands.dt import _select_dt_uri_from_entry
+
+        entry = _FakeEntry(
+            meta={"devonthink_uri": "file:///Users/x/doc.pdf"},
+            source_uri="https://example.com/paper.pdf",
+        )
+        assert _select_dt_uri_from_entry(entry) is None
+
+    def test_meta_none_is_tolerated(self):
+        """Some catalog rows may surface ``meta=None`` rather than
+        ``{}``; the helper coerces via ``or {}`` so callers don't need
+        to special-case the shape."""
+        from nexus.commands.dt import _select_dt_uri_from_entry
+
+        entry = _FakeEntry(
+            meta=None,
+            source_uri="x-devonthink-item://FALLBACK",
+        )
+        assert (
+            _select_dt_uri_from_entry(entry)
+            == "x-devonthink-item://FALLBACK"
+        )

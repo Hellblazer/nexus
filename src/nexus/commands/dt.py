@@ -263,15 +263,45 @@ _UUID_RE = re.compile(
 _TUMBLER_RE = re.compile(r"^\d+(\.\d+)+$")
 
 
+def _select_dt_uri_from_entry(entry: object) -> str | None:
+    """Pick the ``x-devonthink-item://`` URI off a catalog entry.
+
+    Pure function over an entry-shaped object (anything exposing
+    ``meta`` and ``source_uri``). Resolution order mirrors the
+    substrate at ``catalog._resolve_via_devonthink``:
+
+    1. ``meta.devonthink_uri`` if it starts with ``x-devonthink-item://``
+       (the canonical reverse-lookup recorded on entries that came in
+       via DEVONthink, e.g. anything indexed via ``nx dt index``).
+    2. ``source_uri`` if it starts with ``x-devonthink-item://``
+       (entries registered with a DT identity from the start).
+    3. ``None`` otherwise — caller decides how to surface this.
+
+    Extracted from :func:`_resolve_dt_uri_from_tumbler` so the
+    selection rule is unit-testable without standing up a Catalog
+    fixture.
+    """
+    meta = getattr(entry, "meta", {}) or {}
+    if isinstance(meta, dict):
+        dt_uri = meta.get("devonthink_uri", "")
+        if isinstance(dt_uri, str) and dt_uri.startswith(
+            "x-devonthink-item://",
+        ):
+            return dt_uri
+    source_uri = getattr(entry, "source_uri", "")
+    if isinstance(source_uri, str) and source_uri.startswith(
+        "x-devonthink-item://",
+    ):
+        return source_uri
+    return None
+
+
 def _resolve_dt_uri_from_tumbler(tumbler: str) -> str | None:
     """Return the ``x-devonthink-item://`` URI for a tumbler, or
     ``None`` when the entry exists but carries no DT URI.
 
-    Resolution order mirrors the substrate at
-    ``catalog._resolve_via_devonthink``: ``meta.devonthink_uri`` first
-    (the canonical reverse-lookup recorded on entries that came in
-    via DEVONthink), then ``source_uri`` as fall-back when the entry
-    was registered with a DT identity from the start.
+    Catalog plumbing only — the URI-selection rule lives in
+    :func:`_select_dt_uri_from_entry`.
 
     Raises:
         click.ClickException: when the tumbler doesn't resolve to any
@@ -294,20 +324,7 @@ def _resolve_dt_uri_from_tumbler(tumbler: str) -> str | None:
         entry = cat.resolve(t)
         if entry is None:
             raise click.ClickException(f"tumbler not found: {tumbler}")
-
-        meta = getattr(entry, "meta", {}) or {}
-        if isinstance(meta, dict):
-            dt_uri = meta.get("devonthink_uri", "")
-            if isinstance(dt_uri, str) and dt_uri.startswith(
-                "x-devonthink-item://",
-            ):
-                return dt_uri
-        source_uri = getattr(entry, "source_uri", "")
-        if isinstance(source_uri, str) and source_uri.startswith(
-            "x-devonthink-item://",
-        ):
-            return source_uri
-        return None
+        return _select_dt_uri_from_entry(entry)
     finally:
         # CatalogDB owns the SQLite connection + WAL lock; close it
         # explicitly so back-to-back CliRunner invocations (and any
