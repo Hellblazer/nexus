@@ -58,12 +58,21 @@ _SCOPE_FIT_WEIGHT: float = 0.15
 def _scope_fit(plan_scope_tags: str, normalized_scope_pref: str) -> float | None:
     """Return scope-fit in ``{0.0, 1.0}`` or ``None`` for a conflict.
 
-    Semantics (RDR-091 §Proposed Solution → scope-fit):
+    Semantics (RDR-091 §Proposed Solution → scope-fit, tightened by
+    RDR-090 P1.2 / nexus-smhc):
+
       * empty caller scope → always ``0.0`` (no preference; no filter)
       * empty plan scope_tags (agnostic plan) → ``0.0`` (neutral; stays)
-      * any tag in *plan_scope_tags* prefix-matches the caller scope in
-        either direction (``tag.startswith(scope) or scope.startswith(tag)``)
-        → ``1.0`` (bare-family plans serve narrower queries and vice versa)
+      * **direction 1** (caller is at least as specific as the plan
+        tag): ``scope.startswith(tag)`` → ``1.0``. Bare-family plans
+        (``rdr__``) serve narrower callers (``rdr__nexus``).
+      * **direction 2** (plan is more specific than the caller):
+        ``tag.startswith(scope)`` is admitted ONLY when the caller's
+        scope is itself a canonical family-prefix (ends with ``__``).
+        Without the ``__`` boundary marker, a bare prefix like ``rdr``
+        would silently widen to ``rdr__arcaneum`` and pull
+        cross-project plans into the candidate set — the plan #52
+        leakage documented in the RDR-090 spike.
       * otherwise → ``None`` (conflict; caller filters out)
 
     Prefix matching is **case-insensitive**. Real collection names in
@@ -79,10 +88,18 @@ def _scope_fit(plan_scope_tags: str, normalized_scope_pref: str) -> float | None
     if not plan_scope_tags:
         return 0.0
     scope_lower = normalized_scope_pref.lower()
+    scope_is_family_prefix = scope_lower.endswith("__")
     tags = [t for t in plan_scope_tags.split(",") if t]
     for tag in tags:
         tag_lower = tag.lower()
-        if tag_lower.startswith(scope_lower) or scope_lower.startswith(tag_lower):
+        # Direction 1: caller is more-or-equally specific than plan tag.
+        if scope_lower.startswith(tag_lower):
+            return 1.0
+        # Direction 2: plan is more specific than caller — only admit
+        # when caller's scope ends with the family-prefix boundary.
+        # Without this guard, bare 'rdr' (no '__') silently widens to
+        # admit specific cross-project plans like 'rdr__arcaneum'.
+        if scope_is_family_prefix and tag_lower.startswith(scope_lower):
             return 1.0
     return None
 
