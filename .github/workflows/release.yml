@@ -9,6 +9,12 @@ jobs:
   test:
     name: pytest (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    # Match the CI workflow's 15-min ceiling. Without this, a hanging
+    # test (e.g. an unreaped multiprocessing subprocess from a fork-with-
+    # threads deadlock) would stall the release job indefinitely, blocking
+    # PyPI publish until manually cancelled. Hit during the v4.18.0
+    # tag-push: pytest 3.13 ran 36+ min before manual cancel.
+    timeout-minutes: 15
     strategy:
       fail-fast: true
       matrix:
