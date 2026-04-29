@@ -18,6 +18,7 @@ from nexus.commands.plan import plan as plan_group
 from nexus.commands.scratch import scratch
 from nexus.commands.search_cmd import search_cmd
 from nexus.commands.store import store
+from nexus.commands.t3 import t3 as t3_group
 from nexus.commands.taxonomy_cmd import taxonomy
 from nexus.commands.upgrade import upgrade
 
@@ -52,5 +53,6 @@ main.add_command(plan_group, name="plan")
 main.add_command(scratch)
 main.add_command(search_cmd, name="search")
 main.add_command(store)
+main.add_command(t3_group, name="t3")
 main.add_command(taxonomy)
 main.add_command(upgrade)
