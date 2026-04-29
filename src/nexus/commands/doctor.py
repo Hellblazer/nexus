@@ -666,6 +666,55 @@ def _run_check_hooks(*, threshold_ms: int, days: int, json_out: bool) -> None:
         click.echo(f"  {ts:27} {dur:>10}  {evt:18} {tool}")
 
 
+# ── --check-post-store-hooks (nexus-b0ka) ────────────────────────────────────
+
+
+def _run_check_post_store_hooks() -> None:
+    """Enumerate post-store hooks registered on each of the three chains.
+
+    Importing :mod:`nexus.mcp.core` triggers the static
+    ``register_post_store_*_hook`` calls; this function then reads the
+    chain lists from :mod:`nexus.mcp_infra` and prints the
+    ``__name__`` attributes per chain.
+
+    Use cases (from nexus-b0ka):
+
+      * Confirm RDR-089 aspect_extraction_enqueue_hook registered
+        after install.
+      * Detect drift if a hook silently fails to register due to
+        import-order bugs.
+      * Smoke after upgrade: are the expected hooks still registered?
+    """
+    # Import for side-effects: registers the chash_dual_write +
+    # taxonomy_assign batch hooks and the aspect-extraction document
+    # hook (mcp/core.py:387-388 + the nexus-qeo8 follow-up).
+    import nexus.mcp.core  # noqa: F401, PLC0415
+    from nexus.mcp_infra import (  # noqa: PLC0415
+        _post_document_hooks,
+        _post_store_batch_hooks,
+        _post_store_hooks,
+    )
+
+    chains: list[tuple[str, list]] = [
+        ("Single-doc chain (RDR-070)", _post_store_hooks),
+        ("Batch chain (RDR-095)", _post_store_batch_hooks),
+        ("Document-grain chain (RDR-089)", _post_document_hooks),
+    ]
+    total = 0
+    for label, hooks in chains:
+        click.echo(f"\n{label}:")
+        if not hooks:
+            click.echo("  (none)")
+            continue
+        for hook in hooks:
+            name = getattr(hook, "__name__", repr(hook))
+            module = getattr(hook, "__module__", "?")
+            click.echo(f"  - {name}  [{module}]")
+            total += 1
+
+    click.echo(f"\nTotal: {total} hook(s) registered across 3 chains.")
+
+
 @click.command("doctor")
 @click.option(
     "--clean-checkpoints",
@@ -812,6 +861,14 @@ def _run_check_hooks(*, threshold_ms: int, days: int, json_out: bool) -> None:
          "(default 2000ms) on the hook side. nexus-ntbg.",
 )
 @click.option(
+    "--check-post-store-hooks",
+    "check_post_store_hooks",
+    is_flag=True,
+    default=False,
+    help="Enumerate post-store hooks registered on each of the three "
+         "chains (single-doc / batch / document-grain). nexus-b0ka.",
+)
+@click.option(
     "--hook-threshold",
     "hook_threshold",
     default=0,
@@ -836,7 +893,8 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                check_mcp_logs: bool, mcp_log_hours: int,
                json_out: bool,
                trim_telemetry: bool, days: int,
-               check_hooks: bool, hook_threshold: int) -> None:
+               check_hooks: bool, hook_threshold: int,
+               check_post_store_hooks: bool) -> None:
     """Verify that all required services and credentials are available."""
     if check_schema:
         _run_check_schema()
@@ -877,6 +935,10 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
 
     if check_hooks:
         _run_check_hooks(threshold_ms=hook_threshold, days=days, json_out=json_out)
+        return
+
+    if check_post_store_hooks:
+        _run_check_post_store_hooks()
         return
 
     if fix:
