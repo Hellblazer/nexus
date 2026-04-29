@@ -222,8 +222,8 @@ class TestCatalogPruneStale:
         self, initialized_catalog: Catalog, catalog_env: Path, tmp_path: Path,
     ) -> None:
         """Default --dry-run reports stale entries without deleting."""
-        missing = str(tmp_path / "rdr-099-gone.md")
-        tumbler = _register(initialized_catalog, title="rdr-099", file_path=missing)
+        missing = str(tmp_path / "rdr-999-test-gone.md")
+        tumbler = _register(initialized_catalog, title="rdr-999-test", file_path=missing)
 
         runner = CliRunner()
         result = runner.invoke(main, ["catalog", "prune-stale"])
@@ -237,8 +237,8 @@ class TestCatalogPruneStale:
         self, initialized_catalog: Catalog, catalog_env: Path, tmp_path: Path,
     ) -> None:
         """--no-dry-run without --confirm reports but does not delete."""
-        missing = str(tmp_path / "rdr-099-gone.md")
-        tumbler = _register(initialized_catalog, title="rdr-099", file_path=missing)
+        missing = str(tmp_path / "rdr-999-test-gone.md")
+        tumbler = _register(initialized_catalog, title="rdr-999-test", file_path=missing)
 
         runner = CliRunner()
         result = runner.invoke(main, ["catalog", "prune-stale", "--no-dry-run"])
@@ -252,8 +252,8 @@ class TestCatalogPruneStale:
         self, initialized_catalog: Catalog, catalog_env: Path, tmp_path: Path,
     ) -> None:
         """--no-dry-run --confirm actually deletes the catalog row."""
-        missing = str(tmp_path / "rdr-099-gone.md")
-        tumbler = _register(initialized_catalog, title="rdr-099", file_path=missing)
+        missing = str(tmp_path / "rdr-999-test-gone.md")
+        tumbler = _register(initialized_catalog, title="rdr-999-test", file_path=missing)
 
         runner = CliRunner()
         result = runner.invoke(
