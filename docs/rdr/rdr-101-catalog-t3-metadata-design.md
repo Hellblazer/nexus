@@ -23,7 +23,7 @@ This RDR is bounded to the catalog/T3 metadata architecture. It does not propose
 
 ## Problem Statement
 
-### What drift looks like in production
+### Gap 1: Drift between catalog and T3 produces silent "empty" results
 
 Catalog and T3 both populate `source_path`/`source_uri`, `content_hash`/`head_hash`, `chunk_count`, `title`, and `indexed_at` independently at index time. The two writers compute the values from different inputs and update them through different paths thereafter. Nothing enforces equality. Every join across the boundary is a drift surface.
 
@@ -35,7 +35,7 @@ The 2026-04-29 incident confirmed this on the live host catalog:
 
 Each episode patched its own join site. None addressed the underlying invariant: the duplicated fields can drift, and the system has no structural guardrail.
 
-### Why the field-ownership approach is insufficient
+### Gap 2: Field-ownership migrations cannot eliminate the drift surface
 
 The first draft of this RDR (committed earlier in PR #404) proposed assigning each duplicated field to one store as the authority and demoting the other to a read-through cache. Substantive critique by `nx:substantive-critic` surfaced three critical gaps:
 
@@ -45,7 +45,7 @@ The first draft of this RDR (committed earlier in PR #404) proposed assigning ea
 
 All three are symptoms of duplication-without-referential-integrity. A phased migration that keeps duplication live during transition keeps the bug class live during transition.
 
-### Why duplication keeps re-occurring
+### Gap 3: Asymmetric writers and updaters keep recreating the duplication
 
 Three independent failure modes have produced overlap drift in the past 60 days:
 
@@ -204,7 +204,7 @@ Enforced at `CollectionCreated` time:
 1. Generate `doc_id` (UUID7).
 2. Compute chunks; per chunk compute `chash`.
 3. Append `DocumentRegistered(doc_id, owner_id, content_type, source_uri, coll_id)`.
-4. Embed chunks; T3 write per chunk: `add(id=chash, embedding=..., metadata={doc_id, coll_id, position, chash, content_hash})`.
+4. Embed chunks; T3 write per chunk: `add(id=chunk_id, embedding=..., metadata={chunk_id, doc_id, coll_id, position, chash, content_hash})` where `chunk_id` is freshly generated at `ChunkIndexed` time (UUID7 or a deterministic `(doc_id, position)` digest; Phase 0 survey picks one). Critical: `id=chunk_id`, NOT `id=chash`. chash is non-unique across documents (C1) and would collide on identical content; chunk_id is the per-row Chroma natural ID.
 5. Append one `ChunkIndexed(chash, doc_id, coll_id, position, content_hash)` per chunk.
 6. Projector batches the events into SQLite.
 
@@ -277,7 +277,7 @@ The greenfield design is not an alternate universe; it is a concrete migration p
 - **Direct writes to the catalog SQLite outside the projector are prohibited from Phase 3 onward** (resolves substantive critique S3). The doctor's replay-equality signal is reliable only if the event log is the only write path. Incident-response repairs (the kind that used `cat._db.execute(...)` during nexus-3e4s cleanup) must go through new event-emitter helpers (`nx catalog repair <verb>`); existing repair scripts are rewritten or retired in this phase.
 
 **Phase 4: switch readers to projection-based queries.**
-- All call sites that read `entry.source_uri`, `entry.head_hash`, `entry.chunk_count` continue to work (the projection still has these fields).
+- All call sites that read `entry.source_uri`, `entry.head_hash`, `entry.chunk_count` continue to work (the projection still has these fields). The Phase 3 new write path continues to populate them as a write-through cache during Phase 3-4 so readers see live values, not stale pre-Phase-3 snapshots; Phase 5 stops the write-through and the columns become projection-only.
 - Call sites that read T3 metadata directly (`source_path`, per-chunk `title`) migrate to use `doc_id` joins. Timeline: one minor release.
 - **`aspect_readers.py:CHROMA_IDENTITY_FIELD` is rewritten to `doc_id`-keyed dispatch** (resolves substantive critique C2). Pre-fix the dispatch maps `knowledge__* → ("source_path", "title")` and similar; Phase 5 removes both fields from T3 metadata and the dispatch would silently return empty for every document (the exact ART-lhk1 failure mode, structurally reproduced). Replacement: dispatch on `doc_id` for every collection prefix, and `_identity_fields_for()` returns `("doc_id",)` uniformly. Aspect extraction joins via `get(where={doc_id: {$in: [...]}})` grouped by doc_id, not by string match. Plumbing change: extract_aspects accepts a `doc_id_lookup` callable (catalog projection) and passes it to the chroma reader.
 - Phase 4 is incomplete until `aspect_readers.py`, `_identity_fields_for()`, and `extract_aspects` all join via `doc_id`. Test gate: `nx enrich aspects <coll> --dry-run` reports zero `(empty)` skips on a collection where every document has at least one chunk.
@@ -323,6 +323,8 @@ The plan is six phases. Each phase is one or more PRs. Beads filed at acceptance
 - [ ] Survey direct T3 metadata access in plugins, MCP tools, and operator scripts. Document which fields are read.
 - [ ] **Field-by-field disposition audit.** Enumerate every key currently in `metadata_schema.py:ALLOWED_TOP_LEVEL` (~30 keys). For each, decide one of: stays on chunk (intrinsic chunk position), moves to `Document` projection (per-doc fact), moves to `Provenance` projection (git/session), moves to a new `Frecency` projection (heat/decay), removed entirely (cargo data). Specifically include: `frecency_score`, `tags`, `category`, `chunk_index`, `chunk_count`, `corpus`, `store_type`, `ttl_days`, `expires_at`, `section_type`, `section_title`, `embedded_at`, all `git_*` fields, and `bib_semantic_scholar_id`.
 - [ ] **`bib_semantic_scholar_id` migration plan.** This field is the load-bearing "this title was enriched" marker (`metadata_schema.py:80-81`). Its disposition determines whether `commands/enrich.py`'s skip logic queries the catalog (new home) or T3 (current home); pick one before Phase 3.
+- [ ] **RDR-086 `chash_index` `doc_id` column rename.** RDR-086's T2 `chash_index` table uses `doc_id` to mean "ChromaDB-scoped chunk identifier"; RDR-101's new `Document.doc_id` is a UUID7 document identity. Same column name, different semantics. Phase 0 picks: rename the RDR-086 column (`chunk_chroma_id` or similar) before Phase 3 OR document the dual usage in the chash_index schema comment. Pick one; do not let the collision survive into Phase 3.
+- [ ] **`chunk_id` generation rule.** Decide whether `chunk_id` is a fresh UUID7 at `ChunkIndexed` time (opaque, decoupled from content) or a deterministic digest of `(doc_id, position)` (reproducible across re-runs, encodes structure). UUID7 lean for parallel with `doc_id` design; deterministic-digest considered if Phase 1 synthesis needs a stable mapping from existing T3 Chroma natural IDs.
 - [ ] File a post-mortem under `docs/rdr/post-mortem/` for nexus-3e4s referencing this RDR as the systemic fix.
 - [ ] Resolve open questions §below.
 
