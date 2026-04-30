@@ -158,9 +158,37 @@ A secondary risk: ChromaDB collection-creation cost. Each new collection is a sm
 
 This RDR is accepted when all four phases have a corresponding bead with acceptance criteria, the `related_issues` field is populated, and the priority ordering is reflected in bead dependencies (Phase 1 ready immediately, Phase 2 ready after Phase 1, etc.). The RDR transitions to `closed` when all four phases ship to main and their beads close.
 
+## Research Findings
+
+### 2026-04-30 (T2: `nexus_rdr/100-research-1`)
+
+Empirical investigation against the live plan library and `nx_answer_runs` telemetry produced findings that invalidate the original priority ordering:
+
+- **Q1 (MMR)**: 55 plans in the library, 49 unique strategies, all topically distinct match texts. No near-duplicate clustering observed. Over-fetch budget at `n=3` is 9-12 candidates. **Verdict: re-prioritize to lowest. MMR solves a problem that does not exist at current scale. Revisit above 200 plans.**
+- **Q2 (Floor)**: 93% cache hit rate (68/73 runs). True zero-chunk silence: 0 occurrences. The 2 observed "failures" are operator execution errors ("missing required argument"), not plan-miss silence. **Verdict: keep Phase 2 but re-frame. The floor targets operator-execution failures, not retrieval silence.**
+- **Q3 (Dispatcher)**: Only 5 of 73 runs (6.8%) invoke the inline planner. Planner average latency is 108s vs 51s for plan hits, a real delta, but affecting too few calls. 68/73 questions are redacted, so keyword-class fraction is unmeasurable. **Verdict: defer until an unredacted intent corpus and >500 runs are available.**
+- **Q4 (Hierarchy)**: `verb=research` dominates at 58% (32/55 plans). 0 dimensionless plans. Partition would reduce the hot bucket from 55 to 32 candidates, not the 3x speedup the acceptance criterion requires. **Verdict: correct design, not yet needed. Revisit above 300 plans per verb bucket.**
+
+### Revised priority ordering
+
+The findings invalidate the priority ordering in the original Proposal. New order:
+
+1. **Phase 2 (Deterministic floor)** is now the only phase addressing an observed real failure mode. Re-frame: the floor catches operator-execution failures (the 2 observed "missing required argument" errors), not retrieval silence (0 observed). The fallback should fire on `OperatorError` from the runner, not on empty `nx_answer` results.
+2. **Phase 3 (Dispatcher)** stays but moves up to second. Defer the actual implementation until the redaction policy is loosened and the intent corpus exceeds 500 runs. Until then, keep the design recorded but do not file a bead.
+3. **Phase 1 (MMR)** moves to third. The failure mode (mode collapse from near-duplicate ICL examples) is real in principle but not observed at current scale (49/55 unique strategies). Park behind Phase 2 + Phase 3.
+4. **Phase 4 (Hierarchy)** stays last. The verb skew (58% research) means partition would not deliver the targeted 3x speedup. Defer until per-bucket count exceeds 300.
+
+### What changes in the RDR
+
+- The Phase 2 acceptance criterion ("`nx_answer` never returns a 'no plan, no chunks' result") needs to shift from "retrieval silence" to "operator-execution failure surface a clean fallback rather than an unhandled error." The `_default_fallback_plan` constant remains, but the trigger condition is `runner.OperatorError`, not `len(chunks) == 0`.
+- Phase 1's acceptance gate should add a "library size > 200 plans" precondition. Until then, the cluster fixture is synthetic and the test cannot assert real-world behavior.
+- Phase 4's acceptance gate should add a "per-verb bucket > 300 plans" precondition. Currently the dominant bucket is 32; the partition is premature optimization at this scale.
+- The Open Questions section should add: telemetry redaction policy. The dispatcher phase is blocked on having enough unredacted intents to validate the heuristic classifier.
+
 ## Open Questions
 
 - **MMR `λ` calibration**: 0.5 is the CacheRAG default but they were running over a much larger plan pool with KG-shaped diversity. The right `λ` for nexus's MiniLM embedder over typed plans (verbs + scope_tags) is empirical. Phase 1's calibration test should sweep `λ ∈ {0.3, 0.5, 0.7}` and pick the F1-optimal value.
 - **Floor query embedder model**: when the floor fires across `corpus="all"`, the cosine query has to embed the intent against multiple embedder targets (`voyage-context-3` for `knowledge__/docs__/rdr__`, `voyage-code-3` for `code__`). Today `query` handles this by routing per-collection. Confirm the floor inherits the same routing.
 - **Dispatcher overrides**: should `nx_answer` accept a per-call `dispatch_hint` parameter that the dispatcher honors? Or do we lean on the `--planner` / `--no-planner` CLI flag exclusively? Both have call sites; pick one before Phase 3 ships.
 - **Partition migration story**: if Phase 4's partition key changes after ship (e.g., we switch from `verb` to `verb + scope_root`), the T1 cache repopulates on next session start, but live sessions hold stale partitions. Decision: a startup-time partition-key version check that triggers a full repopulate when the version mismatches. Cost is one populate per session start when the version bumps; negligible.
+- **Telemetry redaction policy** (added 2026-04-30 from research findings): 68 of 73 recent `nx_answer_runs` rows are redacted. Phase 3's dispatcher heuristic cannot be validated against an opaque corpus. Either loosen the redaction default for the dispatcher-validation window, or build a separate opt-in instrumentation pass before Phase 3 can ship.
