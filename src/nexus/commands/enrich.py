@@ -288,25 +288,38 @@ def _resolve_bib_for_title(
     from nexus.bib_extractor import extract_identifiers
     from nexus.retry import _chroma_with_retry
 
-    # Read first chunk text per source_path. One per title is enough
-    # in practice — papers rarely span multiple source_paths under
-    # one title — but try all if needed to find an identifier.
+    # Scan ALL chunks for DOI/arXiv ID. Docling's reading-order
+    # extraction can put the page-1 DOI text into chunks 0-4 OR much
+    # deeper, depending on column layout, abstract length, and figure
+    # placement (live evidence on knowledge__delos: 9/15 papers have
+    # an extractable DOI somewhere in their full text but only 2/15
+    # have it in the first 5 chunks). Concatenating all chunks of one
+    # title group is cheap — ChromaDB reads are free, the regex is
+    # bounded, and the OpenAlex direct lookup is unambiguous.
     body_text = ""
     filename = ""
     if chunk_ids:
         try:
-            head = _chroma_with_retry(
-                col.get, ids=chunk_ids[:1],
-                include=["documents", "metadatas"],
-            )
-            docs = head.get("documents") or []
-            metas = head.get("metadatas") or []
-            if docs and docs[0]:
-                body_text = docs[0][:8000]  # 8 KB enough for header/abstract
-            if metas and metas[0]:
-                filename = (metas[0] or {}).get("source_path", "")
+            collected_docs: list[str] = []
+            for batch_start in range(0, len(chunk_ids), 300):
+                batch = _chroma_with_retry(
+                    col.get,
+                    ids=chunk_ids[batch_start:batch_start + 300],
+                    include=["documents", "metadatas"],
+                )
+                docs = batch.get("documents") or []
+                metas = batch.get("metadatas") or []
+                for d in docs:
+                    if d:
+                        collected_docs.append(d)
+                if not filename:
+                    for m in metas:
+                        if m and m.get("source_path"):
+                            filename = m["source_path"]
+                            break
+            body_text = "\n".join(collected_docs)
         except Exception as exc:
-            _log.debug("enrich_first_chunk_fetch_failed", title=title, error=str(exc))
+            _log.debug("enrich_chunk_scan_failed", title=title, error=str(exc))
 
     # Filename fallback when chunk metadata didn't carry source_path.
     if not filename and source_paths:
