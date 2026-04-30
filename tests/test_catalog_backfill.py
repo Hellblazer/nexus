@@ -162,6 +162,258 @@ class TestBackfillCommand:
         assert result.exit_code != 0
 
 
+class TestBackfillFromT3:
+    """nexus-p03z Issue 2: per-file recovery from T3 chunk metadata for
+    repo-owned ``docs__<repo>`` and ``code__<repo>`` collections.
+
+    ``_backfill_repos`` registers a single summary row per (repo,
+    collection); ``_backfill_papers`` excludes repo-owned collections.
+    Without per-file recovery, deleted catalog rows for a repo's docs/
+    code files cannot be reconstructed from existing T3 state, even
+    though the chunks carry the correct ``source_path`` and the repo
+    owner already exists.
+
+    Live recovery executed during nexus-3e4s remediation
+    (2026-04-29):
+    - docs__ART-8c2e74c0: 1 row -> 365 rows (recovered 364 from
+      15,790 chunks)
+    - code__ART-8c2e74c0: 4,182 rows -> 4,397 rows from 63,077
+      chunks
+    """
+
+    def _mock_t3_with_chunks(
+        self,
+        collection_name: str,
+        chunks_per_path: dict[str, int],
+        repo_root: Path,
+    ) -> MagicMock:
+        """Build a mock T3 whose ``get_collection().get(...)`` paginates
+        chunks tagged with absolute source_paths under ``repo_root``."""
+        mock_t3 = MagicMock()
+        mock_col = MagicMock()
+        mock_col.name = collection_name
+
+        # Build a flat list of chunk metadata, one row per chunk per path.
+        all_metadatas: list[dict] = []
+        all_ids: list[str] = []
+        chunk_idx = 0
+        for rel_path, n in chunks_per_path.items():
+            abs_path = str(repo_root / rel_path)
+            for _ in range(n):
+                all_ids.append(f"chunk-{chunk_idx}")
+                all_metadatas.append({"source_path": abs_path})
+                chunk_idx += 1
+
+        # Paginate at 300 per Cloud T3 cap.
+        def _paginated_get(*, include, limit, offset, **kw):
+            page_ids = all_ids[offset:offset + limit]
+            page_meta = all_metadatas[offset:offset + limit]
+            return {
+                "ids": page_ids,
+                "metadatas": page_meta,
+                "documents": [None] * len(page_ids),
+            }
+
+        mock_col.get.side_effect = _paginated_get
+        mock_t3.get_collection.return_value = mock_col
+        mock_t3._client.get_collection.return_value = mock_col
+        return mock_t3
+
+    def test_per_file_recovery_registers_unique_source_paths(
+        self, catalog_env, tmp_path,
+    ):
+        """Each unique source_path in T3 chunks becomes a catalog row
+        under the repo owner, anchored to the repo_root."""
+        from nexus.commands.catalog import _backfill_per_file_from_t3
+
+        repo_root = tmp_path / "myrepo"
+        repo_root.mkdir()
+        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+        owner = cat.register_owner(
+            "myrepo", "repo", repo_hash="abc12345",
+            repo_root=str(repo_root),
+        )
+        # Pre-existing summary row from _backfill_repos.
+        cat.register(
+            owner=owner, title="myrepo (code)", content_type="code",
+            physical_collection="code__myrepo-abc12345",
+        )
+
+        t3 = self._mock_t3_with_chunks(
+            "code__myrepo-abc12345",
+            {"src/a.py": 5, "src/b.py": 3, "src/c.py": 2},
+            repo_root,
+        )
+
+        registered = _backfill_per_file_from_t3(
+            cat, t3, "code__myrepo-abc12345", dry_run=False,
+        )
+        assert registered == 3
+        # Verify each path got its own catalog row.
+        rows = cat._db.execute(
+            "SELECT file_path FROM documents "
+            "WHERE physical_collection = ? AND file_path != ''",
+            ("code__myrepo-abc12345",),
+        ).fetchall()
+        paths = {r[0] for r in rows}
+        assert "src/a.py" in paths
+        assert "src/b.py" in paths
+        assert "src/c.py" in paths
+
+    def test_per_file_recovery_idempotent(self, catalog_env, tmp_path):
+        """Re-running per-file recovery does not duplicate rows
+        (cat.register is idempotent on file_path within owner)."""
+        from nexus.commands.catalog import _backfill_per_file_from_t3
+
+        repo_root = tmp_path / "myrepo2"
+        repo_root.mkdir()
+        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat.register_owner(
+            "myrepo2", "repo", repo_hash="def67890",
+            repo_root=str(repo_root),
+        )
+
+        t3 = self._mock_t3_with_chunks(
+            "code__myrepo2-def67890",
+            {"src/x.py": 2, "src/y.py": 1},
+            repo_root,
+        )
+
+        first = _backfill_per_file_from_t3(
+            cat, t3, "code__myrepo2-def67890", dry_run=False,
+        )
+        second = _backfill_per_file_from_t3(
+            cat, t3, "code__myrepo2-def67890", dry_run=False,
+        )
+        assert first == 2
+        assert second == 0  # already registered
+
+    def test_per_file_recovery_dry_run_writes_nothing(
+        self, catalog_env, tmp_path,
+    ):
+        from nexus.commands.catalog import _backfill_per_file_from_t3
+
+        repo_root = tmp_path / "myrepo3"
+        repo_root.mkdir()
+        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat.register_owner(
+            "myrepo3", "repo", repo_hash="11111111",
+            repo_root=str(repo_root),
+        )
+
+        t3 = self._mock_t3_with_chunks(
+            "code__myrepo3-11111111",
+            {"src/m.py": 1, "src/n.py": 1},
+            repo_root,
+        )
+
+        would_register = _backfill_per_file_from_t3(
+            cat, t3, "code__myrepo3-11111111", dry_run=True,
+        )
+        assert would_register == 2
+        # Nothing written.
+        rows = cat._db.execute(
+            "SELECT count(*) FROM documents "
+            "WHERE physical_collection = ? AND file_path != ''",
+            ("code__myrepo3-11111111",),
+        ).fetchone()
+        assert rows[0] == 0
+
+    def test_per_file_recovery_rejects_non_repo_collection(
+        self, catalog_env,
+    ):
+        """Collections without a repo-hash suffix can't be recovered
+        this way (no owner to attribute under). Helper raises."""
+        from nexus.commands.catalog import _backfill_per_file_from_t3
+
+        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+        # No owner registered for this hash.
+        t3 = MagicMock()
+
+        with pytest.raises(Exception) as exc_info:
+            _backfill_per_file_from_t3(
+                cat, t3, "code__nosuchrepo-deadbeef", dry_run=True,
+            )
+        assert "owner" in str(exc_info.value).lower() or "no repo" in str(exc_info.value).lower()
+
+
+class TestBackfillFromT3CLI:
+    """CLI surface: ``nx catalog backfill --from-t3 [<COL>|--all-repo-collections]``."""
+
+    @patch("nexus.commands.catalog._make_t3")
+    @patch("nexus.commands.catalog._make_registry")
+    def test_from_t3_requires_target(
+        self, mock_reg_fn, mock_t3_fn, catalog_env, tmp_path,
+    ):
+        """``--from-t3`` without either ``--collection`` or
+        ``--all-repo-collections`` is a usage error."""
+        mock_reg_fn.return_value = _mock_registry(tmp_path)
+        mock_t3_fn.return_value = _mock_t3()
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "backfill", "--from-t3"])
+        assert result.exit_code != 0
+        out = result.output.lower()
+        assert "--collection" in out or "--all-repo-collections" in out
+
+    @patch("nexus.commands.catalog._make_t3")
+    @patch("nexus.commands.catalog._make_registry")
+    def test_from_t3_with_collection_runs_recovery(
+        self, mock_reg_fn, mock_t3_fn, catalog_env, tmp_path,
+    ):
+        """``--from-t3 --collection X`` runs per-file recovery for X
+        only, skipping the original 4-pass backfill."""
+        repo_root = tmp_path / "cli_repo"
+        repo_root.mkdir()
+        # Pre-register the owner so the recovery path can attribute.
+        cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+        cat.register_owner(
+            "cli_repo", "repo", repo_hash="cafebabe",
+            repo_root=str(repo_root),
+        )
+
+        # Mock T3: one collection with 3 unique source_paths.
+        all_metas = [
+            {"source_path": str(repo_root / "a.py")},
+            {"source_path": str(repo_root / "b.py")},
+            {"source_path": str(repo_root / "c.py")},
+        ]
+
+        def _paginated_get(*, include, limit, offset, **kw):
+            page = list(zip(
+                [f"id-{i}" for i in range(offset, min(offset + limit, len(all_metas)))],
+                all_metas[offset:offset + limit],
+            ))
+            return {
+                "ids": [p[0] for p in page],
+                "metadatas": [p[1] for p in page],
+                "documents": [None] * len(page),
+            }
+
+        mock_col = MagicMock()
+        mock_col.get.side_effect = _paginated_get
+        mock_t3 = MagicMock()
+        mock_t3.get_collection.return_value = mock_col
+        mock_t3._client.get_collection.return_value = mock_col
+        mock_t3_fn.return_value = mock_t3
+        mock_reg_fn.return_value = _mock_registry(tmp_path)
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "catalog", "backfill",
+            "--from-t3",
+            "--collection", "code__cli_repo-cafebabe",
+        ])
+        assert result.exit_code == 0, result.output
+        # Three rows registered.
+        rows = cat._db.execute(
+            "SELECT count(*) FROM documents "
+            "WHERE physical_collection = ? AND file_path != ''",
+            ("code__cli_repo-cafebabe",),
+        ).fetchone()
+        assert rows[0] == 3
+
+
 class TestBackfillRdrsRepoOwner:
     """nexus-3e4s critique-followup S1.
 

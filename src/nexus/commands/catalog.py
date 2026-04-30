@@ -2430,11 +2430,223 @@ def _make_registry():
     return RepoRegistry(nexus_config_dir() / "repos.json")
 
 
+def _backfill_per_file_from_t3(
+    cat: Catalog,
+    t3: object,
+    collection: str,
+    *,
+    dry_run: bool,
+) -> int:
+    """nexus-p03z Issue 2: per-file recovery from T3 chunk metadata.
+
+    For ``docs__<repo>`` and ``code__<repo>`` collections, reconstruct
+    one catalog row per unique ``source_path`` discovered in T3 chunk
+    metadata. The repo owner is resolved via the ``-<8hex>`` suffix in
+    the collection name; an unregistered repo raises so the operator
+    knows to register the owner first (or run the standard ``backfill``
+    repos pass).
+
+    Idempotent: ``cat.register`` deduplicates on ``(owner, file_path)``,
+    so re-running registers nothing new. The register-time anchor guard
+    (nexus-3e4s) automatically rejects chunks whose ``source_path``
+    lives outside the owner's ``repo_root`` — wrong-project chunks that
+    leaked into this collection won't recreate the contamination.
+
+    Returns the number of newly-registered catalog rows. ``dry_run`` skips
+    writes and returns the count that *would* register (subject to the
+    same dedup logic against existing rows).
+    """
+    # Parse the trailing -<8hex> as the repo hash. ``rsplit`` keeps
+    # repo names containing dashes intact (e.g. ``code__nexus-mini0-4ada4577``).
+    # Splitting on `__` first removes the prefix, then `-` splits name
+    # vs hash.
+    if "__" not in collection:
+        raise click.ClickException(
+            f"collection {collection!r} has no double-underscore prefix; "
+            "per-file recovery only supports docs__<repo>-<hash> and "
+            "code__<repo>-<hash> shapes."
+        )
+    suffix = collection.split("__", 1)[1]
+    if "-" not in suffix:
+        raise click.ClickException(
+            f"collection {collection!r} suffix {suffix!r} has no -<hash> tail; "
+            "per-file recovery requires a repo-owned collection."
+        )
+    _, repo_hash = suffix.rsplit("-", 1)
+    if len(repo_hash) != 8 or not all(c in "0123456789abcdef" for c in repo_hash):
+        raise click.ClickException(
+            f"collection {collection!r} suffix has malformed repo hash "
+            f"{repo_hash!r}; expected 8 hex chars."
+        )
+
+    owner = cat.owner_for_repo(repo_hash)
+    if owner is None:
+        raise click.ClickException(
+            f"no repo owner registered for hash {repo_hash!r} "
+            f"(collection {collection!r}). Run 'nx catalog backfill' "
+            "first to register repo owners, or 'nx repo register'."
+        )
+
+    # Look up the owner's repo_root so we can anchor file_paths
+    # relative to it (matches the post-RDR-060 catalog convention).
+    repo_root_row = cat._db.execute(
+        "SELECT repo_root FROM owners WHERE tumbler_prefix = ?",
+        (str(owner),),
+    ).fetchone()
+    repo_root = (repo_root_row[0] or "") if repo_root_row else ""
+
+    # Determine content_type from prefix.
+    if collection.startswith("code__"):
+        content_type = "code"
+    elif collection.startswith("docs__"):
+        content_type = "prose"
+    else:
+        raise click.ClickException(
+            f"collection {collection!r} prefix is not docs__ or code__; "
+            "per-file recovery only supports those two."
+        )
+
+    # Paginate T3 chunks at 300 (Cloud cap) and dedupe by source_path.
+    col = t3.get_collection(collection)
+    seen_paths: set[str] = set()
+    offset = 0
+    page_size = 300
+    while True:
+        page = col.get(
+            include=["metadatas"], limit=page_size, offset=offset,
+        )
+        ids = page.get("ids") or []
+        if not ids:
+            break
+        for meta in page.get("metadatas") or []:
+            if not isinstance(meta, dict):
+                continue
+            sp = meta.get("source_path", "")
+            if sp:
+                seen_paths.add(sp)
+        if len(ids) < page_size:
+            break
+        offset += page_size
+
+    registered = 0
+    for abs_path in sorted(seen_paths):
+        # Anchor relative to repo_root when possible; fall back to the
+        # raw path. The register-time guard rejects paths outside
+        # repo_root regardless.
+        if repo_root and abs_path.startswith(repo_root + "/"):
+            rel = abs_path[len(repo_root) + 1:]
+        else:
+            rel = abs_path
+
+        if dry_run:
+            registered += 1
+            continue
+
+        existing = cat.by_file_path(owner, rel)
+        if existing is not None:
+            continue
+        try:
+            cat.register(
+                owner=owner,
+                title=Path(rel).name or rel,
+                content_type=content_type,
+                physical_collection=collection,
+                file_path=rel,
+            )
+            registered += 1
+        except ValueError as exc:
+            # Cross-project anchor rejection from nexus-3e4s: the chunk
+            # claims to live outside this repo. Skip and log; this is
+            # exactly the contamination the guard exists to prevent.
+            _log.warning(
+                "backfill_from_t3_anchor_rejected",
+                collection=collection,
+                file_path=rel,
+                error=str(exc),
+            )
+
+    return registered
+
+
 @catalog.command("backfill", hidden=True)
 @click.option("--dry-run", is_flag=True, help="Show what would be created without writing")
-def backfill_cmd(dry_run: bool) -> None:
+@click.option(
+    "--from-t3",
+    "from_t3",
+    is_flag=True,
+    help=(
+        "Per-file recovery mode: enumerate T3 chunks and register one "
+        "catalog row per unique source_path under the repo owner. "
+        "Skips the standard 4-pass backfill. Requires --collection or "
+        "--all-repo-collections."
+    ),
+)
+@click.option(
+    "--collection",
+    "from_t3_collection",
+    default="",
+    help=(
+        "Single collection to recover from T3 chunks (used with "
+        "--from-t3). Must be a docs__<repo>-<hash> or "
+        "code__<repo>-<hash> collection whose repo owner is registered."
+    ),
+)
+@click.option(
+    "--all-repo-collections",
+    "from_t3_all",
+    is_flag=True,
+    help=(
+        "Run --from-t3 recovery against every docs__<repo>-<hash> and "
+        "code__<repo>-<hash> collection in T3. Mutually exclusive with "
+        "--collection."
+    ),
+)
+def backfill_cmd(
+    dry_run: bool,
+    from_t3: bool,
+    from_t3_collection: str,
+    from_t3_all: bool,
+) -> None:
     """Populate catalog from existing T3 collections and registry."""
     cat = _get_catalog()
+
+    if from_t3:
+        if from_t3_collection and from_t3_all:
+            raise click.UsageError(
+                "--collection and --all-repo-collections are mutually exclusive."
+            )
+        if not from_t3_collection and not from_t3_all:
+            raise click.UsageError(
+                "--from-t3 requires either --collection <NAME> or "
+                "--all-repo-collections."
+            )
+        t3 = _make_t3()
+        if from_t3_collection:
+            targets = [from_t3_collection]
+        else:
+            targets = [
+                c["name"] for c in t3.list_collections()
+                if (c["name"].startswith("docs__") or c["name"].startswith("code__"))
+                and "-" in c["name"].split("__", 1)[1]
+            ]
+        total_registered = 0
+        for target in targets:
+            try:
+                count = _backfill_per_file_from_t3(
+                    cat, t3, target, dry_run=dry_run,
+                )
+                mode = "would register" if dry_run else "registered"
+                click.echo(f"  {target}: {mode} {count} row(s)")
+                total_registered += count
+            except click.ClickException as exc:
+                # Non-repo-owned collection in --all sweep: skip with a note.
+                if from_t3_all:
+                    click.echo(f"  {target}: skipped ({exc.message})")
+                    continue
+                raise
+        mode = "dry-run" if dry_run else "complete"
+        click.echo(f"\nFrom-T3 recovery {mode}: {total_registered} row(s).")
+        return
 
     registry = _make_registry()
     t3 = _make_t3()
