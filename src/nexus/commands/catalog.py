@@ -1072,7 +1072,17 @@ def compact_cmd() -> None:
 
 
 @catalog.command("audit-membership")
-@click.argument("collection")
+@click.argument("collection", required=False)
+@click.option(
+    "--all-collections",
+    is_flag=True,
+    help=(
+        "Sweep every physical_collection in the catalog and emit a "
+        "single summary report. nexus-3e4s Phase 3 — the post-fix "
+        "health check. Incompatible with --purge-non-canonical and "
+        "--canonical-home (per-collection contexts)."
+    ),
+)
 @click.option(
     "--purge-non-canonical",
     is_flag=True,
@@ -1107,7 +1117,8 @@ def compact_cmd() -> None:
     help="Emit per-home counts as JSON instead of human-readable lines.",
 )
 def audit_membership_cmd(
-    collection: str,
+    collection: str | None,
+    all_collections: bool,
     purge_non_canonical: bool,
     canonical_home: str,
     dry_run: bool,
@@ -1129,7 +1140,33 @@ def audit_membership_cmd(
     With ``--purge-non-canonical`` the non-dominant entries are
     soft-deleted (tombstoned in JSONL, removed from SQLite) by the
     standard ``delete_document`` path.
+
+    With ``--all-collections`` the audit runs across every
+    physical_collection in the catalog and emits one summary report
+    (nexus-3e4s Phase 3). Read-only — purge is per-collection only.
     """
+    if all_collections:
+        if purge_non_canonical:
+            raise click.UsageError(
+                "--all-collections is read-only; --purge-non-canonical "
+                "must be invoked per-collection so the canonical-home "
+                "decision can be reviewed before deletion.",
+            )
+        if canonical_home:
+            raise click.UsageError(
+                "--canonical-home is per-collection by definition; "
+                "use it with a single COLLECTION argument.",
+            )
+        if collection:
+            raise click.UsageError(
+                "Pass either COLLECTION or --all-collections, not both.",
+            )
+        _audit_membership_all(as_json=as_json)
+        return
+    if not collection:
+        raise click.UsageError(
+            "Specify a COLLECTION or use --all-collections.",
+        )
     cat = _get_catalog()
     rows = cat._db.execute(
         "SELECT tumbler, source_uri FROM documents "
@@ -1241,6 +1278,94 @@ def audit_membership_cmd(
         if cat.delete_document(t):
             deleted += 1
     click.echo(f"\nDeleted {deleted} of {len(purge_targets)} non-canonical entries.")
+
+
+def _audit_membership_all(*, as_json: bool) -> None:
+    """Sweep every physical_collection and emit a contamination summary.
+
+    nexus-3e4s Phase 3. Reads the catalog in a single pass and groups
+    rows by (collection, home) so each collection's home distribution
+    is computed in O(rows) total rather than one query per collection.
+    """
+    cat = _get_catalog()
+    rows = cat._db.execute(
+        "SELECT physical_collection, source_uri FROM documents "
+        "WHERE physical_collection != ''",
+    ).fetchall()
+
+    by_collection: dict[str, dict[str, int]] = {}
+    for collection, source_uri in rows:
+        home = _source_uri_home_key(source_uri or "")
+        by_collection.setdefault(collection, {})[home] = (
+            by_collection.setdefault(collection, {}).get(home, 0) + 1
+        )
+
+    records: list[dict] = []
+    for collection, home_counts in by_collection.items():
+        total = sum(home_counts.values())
+        dominant = max(home_counts.items(), key=lambda kv: kv[1])[0]
+        contaminated = total - home_counts[dominant]
+        records.append({
+            "collection": collection,
+            "total_entries": total,
+            "distinct_homes": len(home_counts),
+            "by_home": dict(home_counts),
+            "dominant_home": dominant,
+            "contaminated_entries": contaminated,
+        })
+
+    # Sort: contaminated count desc, then total desc, then name asc so
+    # the worst offenders surface first and the order is stable.
+    records.sort(key=lambda r: (
+        -r["contaminated_entries"], -r["total_entries"], r["collection"],
+    ))
+
+    contaminated_count = sum(1 for r in records if r["contaminated_entries"] > 0)
+    clean_count = len(records) - contaminated_count
+
+    if as_json:
+        click.echo(json.dumps({
+            "total_collections": len(records),
+            "contaminated_count": contaminated_count,
+            "clean_count": clean_count,
+            "collections": records,
+        }, indent=2))
+        return
+
+    if not records:
+        click.echo("0 collections in catalog.")
+        return
+
+    click.echo(
+        f"Audited {len(records)} collections: "
+        f"{contaminated_count} contaminated, {clean_count} clean.",
+    )
+    if contaminated_count == 0:
+        click.echo("No contamination detected.")
+        return
+
+    click.echo()
+    click.echo(f"Contaminated collections ({contaminated_count}):")
+    for r in records:
+        if r["contaminated_entries"] == 0:
+            continue
+        click.echo(
+            f"  {r['contaminated_entries']:6d} of {r['total_entries']:6d}  "
+            f"{r['collection']:40s}  "
+            f"{r['distinct_homes']} homes  "
+            f"dominant={r['dominant_home']}",
+        )
+
+    if clean_count:
+        click.echo()
+        click.echo(f"Clean collections ({clean_count}):")
+        for r in records:
+            if r["contaminated_entries"] != 0:
+                continue
+            click.echo(
+                f"  {r['total_entries']:6d}  {r['collection']}  "
+                f"({r['dominant_home']})",
+            )
 
 
 def _source_uri_home_key(uri: str) -> str:
