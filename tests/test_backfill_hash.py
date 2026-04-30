@@ -91,6 +91,50 @@ class TestBackfillChunkTextHash:
         assert updated == 0
         assert skipped == 0
 
+    def test_backfill_skips_none_documents_without_crash(self):
+        """nexus-p03z Issue 1: when T3 returns ``documents[i] is None``
+        (an inconsistency that occurs in practice on rare chunks), the
+        previous code crashed on ``doc.encode()``. Guard skips those
+        rows, counts them as skipped, processes the remainder, and
+        returns normally.
+
+        Reproduces the live crash that made ``nx catalog backfill``
+        unusable on the host catalog. Uses a mocked collection because
+        chromadb's public ``add()`` rejects None document strings; the
+        None-document state is reachable in cloud T3 but not via local
+        EphemeralClient writes.
+        """
+        from unittest.mock import MagicMock
+
+        from nexus.commands.collection import _backfill_chunk_text_hash
+
+        col = MagicMock()
+        col.name = "code__none_doc_repro"
+        # First page: 3 chunks. Middle one has a None document. The
+        # other two have valid text and no chunk_text_hash so they
+        # should be hashed normally.
+        col.get.side_effect = [
+            {
+                "ids": ["c1", "c2", "c3"],
+                "documents": ["alpha", None, "gamma"],
+                "metadatas": [
+                    {"source_path": "a.py"},
+                    {"source_path": "b.py"},
+                    {"source_path": "c.py"},
+                ],
+            },
+            {"ids": [], "documents": [], "metadatas": []},
+        ]
+
+        updated, skipped, total = _backfill_chunk_text_hash(col)
+
+        assert total == 3
+        assert updated == 2  # alpha + gamma got hashed
+        assert skipped == 1  # the None doc skipped, not crashed
+        # The col.update call must NOT include the None-doc chunk.
+        update_call = col.update.call_args
+        assert "c2" not in update_call.kwargs["ids"]
+
 
 # ── Phase 1.3 (nexus-ppl) — T2 chash_index reconciliation ────────────────────
 
