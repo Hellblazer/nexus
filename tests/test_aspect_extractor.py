@@ -117,18 +117,32 @@ class TestCollectionRouting:
         assert select_config("code__nexus") is None
         assert select_config("taxonomy__centroids") is None
 
-    def test_docs_prefix_routes_to_scholarly_config(self) -> None:
-        """#377: docs__* collections (markdown / ADR / design docs
-        from `nx index repo`) hold the same kind of substantive prose
-        as knowledge__*. They route to the same scholarly-paper-v1
-        config so problem_formulation / proposed_method / etc. apply
-        uniformly. Until #377 landed, docs__* was unconditionally
-        rejected with 'No extractor config registered'."""
+    def test_docs_prefix_returns_none_revert_of_377(self) -> None:
+        """nexus-z70w: revert of #377. docs__<repo> collections are
+        populated by ``nx index repo``, which sweeps ANY prose file:
+        markdown documentation, dictionary text (.dict), JSONL test
+        fixtures, dot graphs. None of these are paper-shaped, but
+        scholarly-paper-v1 happily hallucinates 5-field aspect rows
+        (problem_formulation / proposed_method / datasets / baselines
+        / results) on whatever it sees.
+
+        Live evidence (ART, 2026-04-30): pre-revert, 286 of 287
+        aspect rows extracted on docs__ART content where the input
+        was markdown documentation, .dict phonetic dictionaries, and
+        .jsonl test fixtures. All technically 'populated' but the
+        extracted fields were uniformly hallucinated against
+        non-paper input.
+
+        Post-revert: docs__* matches no config, so
+        ``nx enrich aspects docs__<X>`` short-circuits at the
+        select_config gate (same shape as code__<X> today). Papers
+        in a repo go through ``nx index pdf`` into
+        knowledge__<repo>-papers, which routes correctly.
+        """
         from nexus.aspect_extractor import select_config
 
-        config = select_config("docs__handbook")
-        assert config is not None
-        assert config.extractor_name == "scholarly-paper-v1"
+        assert select_config("docs__handbook") is None
+        assert select_config("docs__ART-8c2e74c0") is None
 
     def test_extract_aspects_returns_none_for_unsupported_collection(
         self, tmp_path: Path,

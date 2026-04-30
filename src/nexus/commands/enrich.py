@@ -456,8 +456,15 @@ def enrich_aspects(
         click.echo(
             f"No extractor config registered for collection "
             f"'{collection}'. Supported prefixes: knowledge__*, "
-            f"rdr__*, docs__*. Aborting."
+            f"rdr__*. Aborting."
         )
+        if collection.startswith("docs__"):
+            click.echo(
+                "Note: docs__* collections are not paper-shaped (nexus-z70w "
+                "reverted the #377 routing). Index academic PDFs into "
+                "knowledge__<name> via 'nx index pdf --collection "
+                "knowledge__<name>' for aspect extraction."
+            )
         return
 
     if re_extract and not extractor_version:

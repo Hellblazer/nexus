@@ -34,8 +34,9 @@ binding for the null-row DELETE migration):
   are the operator's signal that a real triage event happened
   (not a pre-RDR-096 ghost).
 
-Phase 1 ships exactly one extractor config — ``scholarly-paper-v1``,
-keyed on the ``knowledge__*`` collection prefix. Other prefixes
+Two extractor configs ship: ``scholarly-paper-v1`` (LLM-backed, keyed
+on ``knowledge__*``) and ``rdr-frontmatter-v1`` (deterministic parser,
+keyed on ``rdr__*``). Other prefixes (``docs__``, ``code__``, etc.)
 return ``None`` from ``extract_aspects``; the calling hook should
 no-op on ``None``.
 
@@ -252,15 +253,17 @@ _SCHOLARLY_PAPER_CONFIG = ExtractorConfig(
 
 _REGISTRY: dict[str, ExtractorConfig] = {
     "knowledge__": _SCHOLARLY_PAPER_CONFIG,
-    # docs__* (#377): markdown / ADR / design-doc collections produced
-    # by `nx index repo` hold the same kind of substantive prose that
-    # `knowledge__*` does — architecturally identical to scholarly
-    # papers from the aspect-extraction perspective. Reuse the same
-    # config so problem_formulation / proposed_method / etc. fields
-    # apply uniformly. If a dedicated docs-prose schema ever
-    # warrants splitting, the alias here can be replaced with a
-    # purpose-built ExtractorConfig.
-    "docs__": _SCHOLARLY_PAPER_CONFIG,
+    # docs__* — NOT registered (nexus-z70w reverted #377). docs__<repo>
+    # is populated by `nx index repo`, which sweeps any prose file in
+    # the tree: markdown docs, .dict dictionaries, .jsonl fixtures,
+    # .dot graphs. The 5-field paper schema (problem_formulation,
+    # method, datasets, baselines, results) doesn't fit any of these
+    # shapes, and scholarly-paper-v1 hallucinates structure when
+    # forced. Paper-shaped content in a repo should be ingested via
+    # `nx index pdf --collection knowledge__<repo>-papers` (the
+    # convention nexus-olg5 established for the ART corpus split).
+    # If a dedicated doc-summary extractor with the right schema
+    # ever lands, register it here.
     # rdr__* — pure-Python extractor (RDR-089 Phase F). RDRs carry
     # YAML frontmatter + labelled markdown sections; a deterministic
     # parser is more reliable and zero-cost compared to forcing the
