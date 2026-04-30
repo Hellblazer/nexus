@@ -113,22 +113,32 @@ _TITLE_STOPWORDS: frozenset[str] = frozenset({
     "under",
 })
 
-# Jaccard threshold tuned so:
-#   * exact / near-duplicate titles (typical OpenAlex hit) clear easily
-#     (overlap is typically > 0.6 even with title variations)
-#   * citation-DOI-poisoned titles (entirely different paper) reject
-#     (overlap is typically < 0.05)
-# A real false positive would be two papers with overlapping topical
-# vocabulary but different identities; in practice the rejection
-# fall-through to fuzzy title search of the SOURCE title catches this.
-_TITLE_JACCARD_THRESHOLD: float = 0.20
+# Title-validation policy (4.21.2 refinement after v4.21.1 shakeout).
+# Pure Jaccard overpenalised short source titles ("Pbeegees" vs the
+# matching "pBeeGees: A Prudent Approach to Certificate-Decoupled BFT
+# Consensus" gave 1/6 = 0.167, rejecting a true positive). The
+# asymmetric rule below preserves the citation-poisoning rejection
+# (zero token overlap) while accepting the short-source case where one
+# title is genuinely just the matching tokens:
+#
+#   * intersection >= 2 substantive tokens: accept. Multi-token coincidence
+#     between unrelated papers is rare enough that this is a safe ceiling.
+#   * intersection == 1: accept only when the smaller token set has
+#     <= MAX_SHORT_SET_SIZE tokens (i.e., one side is essentially the
+#     intersection). Catches "Pbeegees" / "Hex Bloom" cases. Rejects
+#     coincidental single-token overlap in long titles (e.g.
+#     "Bloom Filter Survey" vs "Bloom Effects in Computer Graphics").
+#   * intersection == 0: reject. Disjoint vocabularies almost certainly
+#     mean different papers.
+_TITLE_MIN_INTERSECTION_FOR_AUTO_ACCEPT: int = 2
+_TITLE_MAX_SHORT_SET_SIZE: int = 2
 
 
 def _tokenize_title(title: str) -> frozenset[str]:
     """Lowercase, strip non-alphanumerics, drop short / stopword tokens.
 
-    Returns a frozenset of substantive tokens. Caller computes Jaccard
-    over two such sets.
+    Returns a frozenset of substantive tokens. Caller passes two such
+    sets to :func:`_titles_compatible`.
     """
     if not title:
         return frozenset()
@@ -144,16 +154,24 @@ def _titles_compatible(source: str, returned: str) -> bool:
     DOI extracted from the references section cannot stamp a foreign
     paper's metadata. Empty inputs are treated as incompatible (caller
     should fall through, not stamp empty bib).
+
+    The rule (4.21.2): two-or-more substantive token matches always
+    accept; a single-token match accepts only when one side is short
+    enough that the match is the bulk of the title (catches
+    filename-derived short source titles like "Pbeegees" matching the
+    full OpenAlex title "pBeeGees: A Prudent Approach to ...");
+    zero matches always reject.
     """
     a = _tokenize_title(source)
     b = _tokenize_title(returned)
     if not a or not b:
         return False
     intersection = a & b
-    union = a | b
-    if not union:
-        return False
-    return (len(intersection) / len(union)) >= _TITLE_JACCARD_THRESHOLD
+    if len(intersection) >= _TITLE_MIN_INTERSECTION_FOR_AUTO_ACCEPT:
+        return True
+    if len(intersection) == 1:
+        return min(len(a), len(b)) <= _TITLE_MAX_SHORT_SET_SIZE
+    return False
 
 
 def _direct_lookup(url: str, *, expected_title: str = "") -> dict[str, Any]:

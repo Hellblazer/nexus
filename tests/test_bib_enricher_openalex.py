@@ -364,6 +364,41 @@ def test_direct_lookup_includes_mailto(monkeypatch):
 # ── nexus-yy1m: title-validation post-lookup ────────────────────────────────
 
 
+def test_titles_compatible_short_source_matching_long_returned():
+    """4.21.2 refinement: a 1-token source title that fully matches one
+    token of a longer returned title should ACCEPT, not reject.
+    Regression case from v4.21.1 shakeout: 'Pbeegees' (filename-derived)
+    vs OpenAlex's full 'pBeeGees: A Prudent Approach to Certificate-
+    Decoupled BFT Consensus' was rejected by pure Jaccard (1/6=0.167)
+    even though it was the genuine match. Same shape for 'Hex Bloom'
+    vs 'HEX-BLOOM: An Efficient Method for Authenticity ...'. The
+    asymmetric rule keeps these legitimate hits."""
+    from nexus.bib_enricher_openalex import _titles_compatible
+
+    # The actual v4.21.1 false-negative cases.
+    assert _titles_compatible(
+        "Pbeegees",
+        "pBeeGees: A Prudent Approach to Certificate-Decoupled BFT Consensus",
+    )
+    assert _titles_compatible(
+        "Hex Bloom",
+        "HEX-BLOOM: An Efficient Method for Authenticity and Integrity Verification in Privacy-preserving Computing",
+    )
+
+
+def test_titles_compatible_single_overlap_in_long_titles_rejects():
+    """4.21.2: when both titles are long and only ONE substantive token
+    overlaps, that's almost certainly a topical coincidence not a match.
+    Reject. Counter-case to the short-source acceptance above."""
+    from nexus.bib_enricher_openalex import _titles_compatible
+
+    # Both titles have multiple substantive tokens, only "bloom" overlaps.
+    assert not _titles_compatible(
+        "Bloom Filter Survey Methods Comparison",
+        "Bloom Effects Computer Graphics Real Time Rendering",
+    )
+
+
 def test_titles_compatible_helper_basics():
     """The helper is exported so callers (commands/enrich._resolve_bib_for_title)
     can validate title shapes outside the OpenAlex backend too. Source-paper
