@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.21.2] - 2026-04-30
+
+Hotfix release. Refines the v4.21.1 title-validation heuristic after live shakeout against `knowledge__delos` showed pure Jaccard over-rejected legitimate matches with short filename-derived source titles (continuation of nexus-yy1m).
+
+### Fixed
+
+- **OpenAlex title validation accepts short-source matches** (PR #403). v4.21.1's Jaccard-with-threshold rule rejected `Pbeegees` (1 substantive token) against the genuine OpenAlex hit `pBeeGees: A Prudent Approach to Certificate-Decoupled BFT Consensus` (6 tokens; Jaccard 1/6 = 0.167 < 0.20) and `Hex Bloom` against `HEX-BLOOM: An Efficient Method for Authenticity ...` for the same reason. Both are legitimate matches the operator wanted. The threshold rule is replaced with an asymmetric one: 2+ substantive token matches accept (multi-token coincidence is rare); exactly 1 match accepts only when the smaller token set has at most 2 tokens (one side is essentially the intersection); 0 matches reject. Live shakeout on `knowledge__delos` (15 docs) went from 3 correct enrichments under 4.21.1 to 6 correct under 4.21.2, with 1 known false positive (`Zanzibar` single-word source matched a 2007 medical study via the place-name token, filed as `nexus-5cez` for richer year-sanity / content-keyword validation in a follow-up).
+
 ## [4.21.1] - 2026-04-30
 
 Hotfix release. Closes the citation-DOI poisoning class surfaced in the v4.21.0 live shakeout (nexus-yy1m).

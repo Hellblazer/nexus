@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.21.2] - 2026-04-30
+
+Plugin version aligned with conexus 4.21.2. Refines the v4.21.1 OpenAlex title-validation heuristic after live shakeout: pure Jaccard over-rejected legitimate matches when the source title was a 1-2 token filename derivative. Replaced with an asymmetric rule that accepts short-source single-token matches when the smaller token set is essentially the intersection. Net result on a 15-doc test collection: 6 correct enrichments (up from 3 in 4.21.1) and 1 known false-positive shape (filed as nexus-5cez for follow-up).
+
 ## [4.21.1] - 2026-04-30
 
 Plugin version aligned with conexus 4.21.1. Hotfix for the OpenAlex bib enricher citation-DOI poisoning surfaced in v4.21.0 live shakeout (nexus-yy1m). Both DOI / arXiv direct lookup and title-search now validate the returned title against the source title; low-similarity matches return empty (operator audits via the `openalex_title_*_rejected` warnings) instead of stamping a foreign paper's metadata. See root `CHANGELOG.md` for the failure-mode description.
