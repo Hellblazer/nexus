@@ -372,6 +372,87 @@ class TestPassthroughFlags:
         assert fake_dispatcher[0]["corpus"] == "knowledge"
 
 
+# ── nexus-cvaw: paper PDFs route to knowledge__ by default ──────────────────
+
+
+class TestDefaultCollectionByExtension:
+    """nexus-cvaw: nx dt index without --collection should pick a
+    paper-shaped home for PDFs (knowledge__<corpus>-papers, where
+    aspect extraction routes to scholarly-paper-v1) and a doc-shaped
+    home for markdown (docs__<corpus>). Pre-fix, both extensions
+    landed in docs__<corpus>, which after nexus-z70w (PR #393)
+    cannot route to any aspect extractor. PDFs ingested by the
+    default were stranded.
+
+    Tests assert the resolved collection_name passed to the
+    fake dispatcher, since the per-record routing is what determines
+    the paper's downstream eligibility for aspects + bib enrichment.
+    """
+
+    def test_pdf_default_routes_to_knowledge_papers(
+        self, runner, fake_selectors, fake_dispatcher,
+    ):
+        from nexus.cli import main
+
+        fake_selectors["selection"].return_value = [("U", "/foo/paper.pdf")]
+        result = runner.invoke(main, ["dt", "index", "--selection"])
+        assert result.exit_code == 0, result.output
+        # No --collection: PDF default is knowledge__dt-papers.
+        assert fake_dispatcher[0]["collection"] == "knowledge__dt-papers"
+
+    def test_pdf_with_corpus_routes_to_knowledge_papers_corpus(
+        self, runner, fake_selectors, fake_dispatcher,
+    ):
+        from nexus.cli import main
+
+        fake_selectors["selection"].return_value = [("U", "/foo/paper.pdf")]
+        result = runner.invoke(main, [
+            "dt", "index", "--selection", "--corpus", "rag",
+        ])
+        assert result.exit_code == 0, result.output
+        assert fake_dispatcher[0]["collection"] == "knowledge__rag-papers"
+
+    def test_markdown_default_routes_to_docs_dt(
+        self, runner, fake_selectors, fake_dispatcher,
+    ):
+        from nexus.cli import main
+
+        fake_selectors["selection"].return_value = [("U", "/foo/note.md")]
+        result = runner.invoke(main, ["dt", "index", "--selection"])
+        assert result.exit_code == 0, result.output
+        # Markdown notes go to docs__<corpus> (current behavior, but
+        # corpus default flipped from "default" to "dt" so the note
+        # corpus matches the paper corpus by convention).
+        assert fake_dispatcher[0]["collection"] == "docs__dt"
+
+    def test_markdown_with_corpus_routes_to_docs_corpus(
+        self, runner, fake_selectors, fake_dispatcher,
+    ):
+        from nexus.cli import main
+
+        fake_selectors["selection"].return_value = [("U", "/foo/note.md")]
+        result = runner.invoke(main, [
+            "dt", "index", "--selection", "--corpus", "rag",
+        ])
+        assert result.exit_code == 0, result.output
+        assert fake_dispatcher[0]["collection"] == "docs__rag"
+
+    def test_explicit_collection_overrides_default(
+        self, runner, fake_selectors, fake_dispatcher,
+    ):
+        """``--collection X`` always wins over the extension-based
+        default — the operator has explicitly requested X."""
+        from nexus.cli import main
+
+        fake_selectors["selection"].return_value = [("U", "/foo/paper.pdf")]
+        result = runner.invoke(main, [
+            "dt", "index", "--selection",
+            "--collection", "knowledge__custom-thing",
+        ])
+        assert result.exit_code == 0, result.output
+        assert fake_dispatcher[0]["collection"] == "knowledge__custom-thing"
+
+
 # ── Error handling ───────────────────────────────────────────────────────────
 
 

@@ -36,6 +36,33 @@ _log = structlog.get_logger(__name__)
 _SUPPORTED_EXTS: frozenset[str] = frozenset({".pdf", ".md"})
 
 
+def _resolve_dt_collection(
+    collection: str | None, corpus: str, ext: str,
+) -> str:
+    """nexus-cvaw: pick the right T3 collection for a DT-sourced record.
+
+    ``--collection X`` always wins (operator override). Otherwise:
+
+    * PDF (``.pdf``) -> ``knowledge__<corpus>-papers``. Paper-shaped
+      content goes to a knowledge__ collection so scholarly-paper-v1
+      can aspect-extract it.
+    * Markdown (``.md``) -> ``docs__<corpus>``. Notes / clippings /
+      doc-shaped content goes to docs__, which deliberately doesn't
+      route to any aspect extractor (nexus-z70w).
+
+    Pre-nexus-cvaw default was ``docs__default`` for both extensions,
+    which stranded paper PDFs ingested via ``nx dt index`` (no aspect
+    eligibility, no curated home). The split-by-extension default
+    matches the corpus split established by nexus-olg5 (ART papers
+    in knowledge__art-papers, ART repo docs in docs__ART-...).
+    """
+    if collection:
+        return collection
+    if ext == ".pdf":
+        return f"knowledge__{corpus}-papers"
+    return f"docs__{corpus}"
+
+
 def _index_record(
     uuid: str,
     path: str,
@@ -217,13 +244,24 @@ def dt() -> None:
 @click.option(
     "--collection",
     default=None,
-    help="T3 collection override (e.g. knowledge__papers). Forwarded to the underlying indexer.",
+    help=(
+        "T3 collection override. Wins over the extension-based "
+        "default. e.g. ``--collection knowledge__delos``."
+    ),
 )
 @click.option(
     "--corpus",
-    default="default",
+    default="dt",
     show_default=True,
-    help="Corpus name for docs__ collection (used when --collection is not set).",
+    help=(
+        "Corpus name used to derive the default collection when "
+        "--collection is not set. PDFs route to "
+        "``knowledge__<corpus>-papers`` (paper-shaped, aspect-eligible "
+        "via scholarly-paper-v1); markdown notes route to "
+        "``docs__<corpus>``. Pre-nexus-cvaw the default was "
+        "``default`` and PDFs landed in ``docs__default`` where "
+        "aspect extraction is intentionally disabled (nexus-z70w)."
+    ),
 )
 @click.option(
     "--dry-run",
@@ -301,10 +339,11 @@ def index_cmd(
             )
             skipped += 1
             continue
+        resolved_collection = _resolve_dt_collection(collection, corpus, ext)
         stamped = _index_record(
             uuid,
             path,
-            collection=collection,
+            collection=resolved_collection,
             corpus=corpus,
             dry_run=False,
         )
