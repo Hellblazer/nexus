@@ -12,6 +12,7 @@ single command. Migration: ``nx enrich <coll>`` → ``nx enrich bib
 """
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -1305,3 +1306,259 @@ def enrich_aspects_promote_field(
     click.echo(f"Backfilled {result.rows_backfilled} row(s).")
     if result.pruned:
         click.echo(f"Pruned {result.rows_pruned} extras key(s).")
+
+
+# ── nexus-bkvk: aspect read verbs (show / list) ─────────────────────────────
+
+
+_ASPECT_FIELDS: tuple[str, ...] = (
+    "problem_formulation",
+    "proposed_method",
+    "experimental_datasets",
+    "experimental_baselines",
+    "experimental_results",
+    "extras",
+    "confidence",
+)
+
+
+def _resolve_catalog_entry(tumbler_or_title: str):
+    """Resolve a tumbler or title to (catalog, entry). Raises
+    ClickException on miss."""
+    from nexus.catalog import Catalog, resolve_tumbler
+    from nexus.config import catalog_path
+
+    cat_path = catalog_path()
+    if not Catalog.is_initialized(cat_path):
+        raise click.ClickException(
+            "Catalog not initialized. Run 'nx catalog setup' first."
+        )
+    cat = Catalog(cat_path, cat_path / ".catalog.db")
+    t, err = resolve_tumbler(cat, tumbler_or_title)
+    if err:
+        raise click.ClickException(err)
+    entry = cat.resolve(t)
+    if entry is None:
+        raise click.ClickException(f"Not found: {tumbler_or_title}")
+    return cat, entry
+
+
+def _aspect_to_dict(record) -> dict:
+    """Serialize an AspectRecord for --json output."""
+    return {
+        "collection": record.collection,
+        "source_path": record.source_path,
+        "problem_formulation": record.problem_formulation,
+        "proposed_method": record.proposed_method,
+        "experimental_datasets": list(record.experimental_datasets or []),
+        "experimental_baselines": list(record.experimental_baselines or []),
+        "experimental_results": record.experimental_results,
+        "extras": dict(record.extras or {}),
+        "confidence": record.confidence,
+        "extracted_at": record.extracted_at,
+        "model_version": record.model_version,
+        "extractor_name": record.extractor_name,
+        "source_uri": record.source_uri,
+    }
+
+
+def _print_aspect_record(record, *, field: str = "") -> None:
+    """Human-readable formatter for `aspects-show`. ``field`` projects
+    a single aspect field (raw value, no labels)."""
+    if field:
+        if field not in _ASPECT_FIELDS:
+            raise click.ClickException(
+                f"Unknown field {field!r}. Choose from: {', '.join(_ASPECT_FIELDS)}"
+            )
+        value = getattr(record, field)
+        if isinstance(value, (list, dict)):
+            click.echo(json.dumps(value, indent=2))
+        elif value is None:
+            click.echo("")
+        else:
+            click.echo(value)
+        return
+
+    click.echo(f"Collection:     {record.collection}")
+    click.echo(f"Source path:    {record.source_path}")
+    click.echo(f"Source URI:     {record.source_uri or '(legacy: not set)'}")
+    click.echo(f"Extractor:      {record.extractor_name} ({record.model_version})")
+    click.echo(f"Extracted at:   {record.extracted_at}")
+    click.echo(f"Confidence:     {record.confidence if record.confidence is not None else '(null)'}")
+    click.echo("")
+    click.echo("--- Aspects ---")
+    click.echo("")
+    click.echo(f"problem_formulation:")
+    click.echo(f"  {record.problem_formulation or '(empty)'}")
+    click.echo("")
+    click.echo(f"proposed_method:")
+    click.echo(f"  {record.proposed_method or '(empty)'}")
+    click.echo("")
+    click.echo(f"experimental_datasets:  {record.experimental_datasets or '[]'}")
+    click.echo(f"experimental_baselines: {record.experimental_baselines or '[]'}")
+    click.echo("")
+    click.echo(f"experimental_results:")
+    click.echo(f"  {record.experimental_results or '(empty)'}")
+    click.echo("")
+    if record.extras:
+        click.echo("extras:")
+        click.echo(json.dumps(record.extras, indent=2))
+
+
+@enrich.command(name="aspects-show")
+@click.argument("tumbler_or_title")
+@click.option(
+    "--json", "as_json", is_flag=True,
+    help="Emit JSON instead of human-readable form.",
+)
+@click.option(
+    "--field", default="",
+    help=(
+        "Project a single aspect field (problem_formulation, "
+        "proposed_method, experimental_datasets, "
+        "experimental_baselines, experimental_results, extras, "
+        "confidence). Output is the raw value."
+    ),
+)
+def aspects_show_cmd(tumbler_or_title: str, as_json: bool, field: str) -> None:
+    """Display the aspect record for a single document.
+
+    nexus-bkvk: pre-this-verb the only way to inspect aspects was raw
+    SQL against ~/.config/nexus/memory.db. Resolves the tumbler (or
+    title) via the catalog, looks up the aspect row by
+    ``(physical_collection, file_path)``, and renders all fields.
+    """
+    from nexus.commands._helpers import default_db_path
+    from nexus.db.t2 import T2Database
+
+    _, entry = _resolve_catalog_entry(tumbler_or_title)
+    if not entry.physical_collection or not entry.file_path:
+        click.echo(
+            f"No aspect record for tumbler {entry.tumbler}: catalog "
+            "row has no physical_collection or file_path. Run "
+            "'nx enrich aspects <COLLECTION>' to extract."
+        )
+        return
+
+    with T2Database(default_db_path()) as db:
+        record = db.document_aspects.get(
+            entry.physical_collection, entry.file_path,
+        )
+
+    if record is None:
+        click.echo(
+            f"No aspect record extracted yet for tumbler "
+            f"{entry.tumbler} ({entry.title!r}). Run "
+            f"'nx enrich aspects {entry.physical_collection}' to extract."
+        )
+        return
+
+    if as_json:
+        click.echo(json.dumps(_aspect_to_dict(record), indent=2))
+        return
+    _print_aspect_record(record, field=field)
+
+
+@enrich.command(name="aspects-list")
+@click.option(
+    "--collection", required=True,
+    help="T3 collection to inspect (e.g. knowledge__papers).",
+)
+@click.option(
+    "--limit", default=20, show_default=True,
+    help="Maximum rows to display (0 = unlimited).",
+)
+@click.option(
+    "--missing", is_flag=True,
+    help=(
+        "Flip output: list catalog rows in COLLECTION that have NO "
+        "aspect record. Used to find gaps after partial enrichment."
+    ),
+)
+@click.option(
+    "--json", "as_json", is_flag=True,
+    help="Emit JSON array instead of human-readable form.",
+)
+def aspects_list_cmd(
+    collection: str, limit: int, missing: bool, as_json: bool,
+) -> None:
+    """List aspect records for COLLECTION, or the gaps with --missing.
+
+    nexus-bkvk: companion to aspects-show; gives the same data at
+    collection-level (preview/audit shape) instead of single-record
+    detail. With ``--missing`` the verb inverts to gap detection:
+    catalog rows in COLLECTION that don't have a matching aspect row.
+    """
+    from nexus.catalog import Catalog
+    from nexus.commands._helpers import default_db_path
+    from nexus.config import catalog_path
+    from nexus.db.t2 import T2Database
+
+    if missing:
+        cat_path = catalog_path()
+        if not Catalog.is_initialized(cat_path):
+            raise click.ClickException(
+                "Catalog not initialized. Run 'nx catalog setup' first."
+            )
+        cat = Catalog(cat_path, cat_path / ".catalog.db")
+        entries = cat.list_by_collection(collection)
+        with T2Database(default_db_path()) as db:
+            existing = {
+                r.source_path for r in db.document_aspects.list_by_collection(
+                    collection,
+                )
+            }
+        gaps = [e for e in entries if e.file_path and e.file_path not in existing]
+        if as_json:
+            click.echo(json.dumps([
+                {
+                    "tumbler": str(e.tumbler),
+                    "title": e.title,
+                    "file_path": e.file_path,
+                }
+                for e in gaps
+            ], indent=2))
+            return
+        if not gaps:
+            click.echo(
+                f"No missing aspects in '{collection}': every catalog "
+                f"row has an extracted aspect record."
+            )
+            return
+        click.echo(
+            f"{len(gaps)} catalog row(s) in '{collection}' have no "
+            f"aspect record:"
+        )
+        for e in gaps[:limit] if limit else gaps:
+            click.echo(f"  {e.tumbler}  {e.file_path}")
+        if limit and len(gaps) > limit:
+            click.echo(f"  ... and {len(gaps) - limit} more.")
+        return
+
+    with T2Database(default_db_path()) as db:
+        records = db.document_aspects.list_by_collection(
+            collection, limit=(limit if limit else None),
+        )
+
+    if as_json:
+        click.echo(json.dumps(
+            [_aspect_to_dict(r) for r in records], indent=2,
+        ))
+        return
+
+    if not records:
+        click.echo(
+            f"No aspect records in '{collection}'. Run "
+            f"'nx enrich aspects {collection}' to extract."
+        )
+        return
+
+    click.echo(f"{len(records)} aspect record(s) in '{collection}':")
+    click.echo("")
+    for r in records:
+        problem = (r.problem_formulation or "")[:80]
+        method = (r.proposed_method or "")[:80]
+        click.echo(f"  {r.source_path}")
+        click.echo(f"    problem: {problem}{'...' if r.problem_formulation and len(r.problem_formulation) > 80 else ''}")
+        click.echo(f"    method:  {method}{'...' if r.proposed_method and len(r.proposed_method) > 80 else ''}")
+        click.echo("")
