@@ -827,6 +827,8 @@ def extract_aspects(
     content: str,
     source_path: str,
     collection: str,
+    *,
+    lookup_path: str = "",
 ) -> AspectRecord | ExtractFail | None:
     """Synchronously extract aspects from ``content`` and return either
     a populated ``AspectRecord``, an :class:`ExtractFail` sentinel
@@ -838,9 +840,9 @@ def extract_aspects(
 
     * ``content`` non-empty → used directly.
     * ``content == ""`` → construct
-      ``chroma://<collection>/<source_path>`` and dispatch through
-      :func:`nexus.aspect_readers.read_source`. The chroma reader
-      reassembles the document from T3 chunks via the
+      ``chroma://<collection>/<lookup_path or source_path>`` and
+      dispatch through :func:`nexus.aspect_readers.read_source`. The
+      chroma reader reassembles the document from T3 chunks via the
       ``CHROMA_IDENTITY_FIELD`` dispatch table (``title`` for
       ``knowledge__*`` collections, ``source_path`` for everything
       else).
@@ -848,6 +850,15 @@ def extract_aspects(
       no row written. Replaces the prior null-field-row contract that
       let drift cases (catalog-stale paths, slug-shaped sources)
       pollute downstream SQL.
+
+    nexus-v9az: ``lookup_path`` decouples the chroma identity match
+    from the storage key. ``source_path`` is preserved on the
+    ``AspectRecord`` for downstream joins; ``lookup_path`` (when
+    provided) is used to build the chroma URI. Use case: catalog
+    rows recovered via ``--from-t3`` carry relative ``file_path`` but
+    chunks were ingested with absolute ``source_path``; the caller
+    passes the absolute path as ``lookup_path`` so the chroma reader
+    actually finds the chunks.
 
     On unsupported collection (no config match) returns ``None``; the
     caller (post-store hook) should no-op.
@@ -864,19 +875,15 @@ def extract_aspects(
 
     if not content:
         # P1.2: URI-based source dispatch. The URI is constructed from
-        # ``(collection, source_path)`` at extract-time; Phase 2 will
-        # route through a stored ``source_uri`` column on
-        # ``document_aspects``. The ``chroma://`` reader handles both
-        # identity-field shapes (knowledge__* → ``title``,
-        # rdr__/docs__/code__ → ``source_path``) via the dispatch
-        # table in :mod:`nexus.aspect_readers`.
-        #
-        # ``source_path`` is percent-encoded so values containing
-        # ``#`` (markdown anchors) or ``?`` (query params) don't get
-        # split off as URI fragments / queries by ``urlparse`` in the
-        # reader. ``safe='/'`` preserves directory separators in
-        # filesystem-shaped paths (``docs/rdr/rdr-090.md``).
-        uri = f"chroma://{collection}/{quote(source_path, safe='/')}"
+        # ``(collection, lookup_path or source_path)`` at extract-time.
+        # nexus-v9az: ``lookup_path`` overrides the URI's identity
+        # segment when it differs from the storage ``source_path``
+        # (relative-vs-absolute reconciliation after ``--from-t3``
+        # recovery). ``source_path`` percent-encoding keeps directory
+        # separators intact (``safe='/'``) and avoids ``#``/``?``
+        # being parsed as URI fragments / queries by the reader.
+        uri_identity = lookup_path or source_path
+        uri = f"chroma://{collection}/{quote(uri_identity, safe='/')}"
         try:
             t3 = get_t3()
         except Exception as exc:

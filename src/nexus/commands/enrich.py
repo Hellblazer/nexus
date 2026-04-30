@@ -455,7 +455,7 @@ def _dry_run_predict_skips(
     skip_lines: list[str] = []
     by_host: dict[str, int] = {}
     for entry in entries:
-        sp = entry.file_path or entry.title
+        sp = _chroma_source_id_for_entry(entry)
         if not sp:
             continue
         uri = f"chroma://{collection}/{quote(sp, safe='/')}"
@@ -517,6 +517,34 @@ def _dry_run_predict_skips(
         click.echo(
             f"  Predicted actual cost (excluding skips): ~${actual_cost:.2f}"
         )
+
+
+def _chroma_source_id_for_entry(entry: object) -> str:
+    """nexus-v9az: return the identity value the chroma reader should
+    match against ``source_path`` metadata in T3 chunks.
+
+    Rationale: after nexus-p03z's ``--from-t3`` recovery, catalog rows
+    for ``docs__<repo>`` and ``code__<repo>`` collections carry
+    relative ``file_path`` values (anchored to ``repo_root`` by the
+    nexus-3e4s register-time guard). T3 chunks for those same files
+    were ingested with absolute ``source_path`` metadata, so a lookup
+    keyed on the relative path returns zero chunks ("empty" skip).
+
+    The catalog row's ``source_uri`` is the absolute ``file://`` URI
+    set at register time — exactly the form we need for the chroma
+    lookup. Use it when present; fall back to the legacy
+    ``file_path`` (or ``title`` for slug-shaped knowledge entries)
+    when the URI is missing or non-file (curator owners, legacy rows
+    pre-source_uri).
+    """
+    from urllib.parse import unquote, urlparse
+
+    uri = getattr(entry, "source_uri", "") or ""
+    if uri:
+        p = urlparse(uri)
+        if p.scheme == "file" and p.path:
+            return unquote(p.path)
+    return getattr(entry, "file_path", "") or getattr(entry, "title", "")
 
 
 def _source_uri_host_key(uri: str) -> str:
@@ -582,10 +610,18 @@ def _run_extraction(
                 click.echo(f"  [{i}/{len(entries)}] (no source_path) — skipped")
                 continue
 
+            # nexus-v9az: chunks were ingested with absolute source_path
+            # metadata. After --from-t3 recovery (nexus-p03z), catalog
+            # rows may carry relative file_path, anchored to repo_root
+            # by the nexus-3e4s register-time guard. Pass the absolute
+            # path as ``lookup_path`` so the chroma reader's identity
+            # match succeeds. ``source_path`` is preserved as the
+            # storage key for AspectRecord.
             record = extract_aspects(
                 content="",
                 source_path=source_path,
                 collection=collection,
+                lookup_path=_chroma_source_id_for_entry(entry),
             )
             if record is None:
                 # Defensive — select_config already passed at the parent
