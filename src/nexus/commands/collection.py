@@ -4,9 +4,12 @@ import sys
 from collections.abc import Callable
 
 import click
+import structlog
 
 from nexus.commands.store import _t3
 from nexus.corpus import embedding_model_for_collection, index_model_for_collection
+
+_log = structlog.get_logger(__name__)
 
 
 @click.group()
@@ -485,6 +488,19 @@ def _backfill_chunk_text_hash(
                 # Reconciliation path: T3 already has the hash but T2 may not.
                 t2_ids.append(chunk_id)
                 t2_metas.append(dict(meta))
+                continue
+            if doc is None:
+                # nexus-p03z: Cloud T3 occasionally returns rows whose
+                # ``documents`` entry is None even when the chunk exists.
+                # Hashing a missing doc is impossible; skip and keep
+                # going. Without this guard, ``nx catalog backfill``
+                # crashes mid-pass and leaves the catalog half-recovered.
+                skipped += 1
+                _log.warning(
+                    "backfill_chunk_text_hash_none_doc",
+                    chunk_id=chunk_id,
+                    collection=getattr(col, "name", ""),
+                )
                 continue
             new_meta = dict(meta) if meta else {}
             new_meta["chunk_text_hash"] = hashlib.sha256(doc.encode()).hexdigest()
