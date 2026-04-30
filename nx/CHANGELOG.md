@@ -6,6 +6,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.21.0] - 2026-04-30
+
+Plugin version aligned with conexus 4.21.0. Bib enrichment gains an OpenAlex backend with DOI / arXiv-aware lookup; aspects acquire first-class read verbs; the PDF indexer surfaces silent zero-chunk failures as actionable errors:
+
+- `nx enrich bib --source openalex` adds OpenAlex as an alternative to Semantic Scholar. DOI / arXiv direct-lookup before fuzzy title fallback. Citation links index both `bib_semantic_scholar_id` and `bib_openalex_id`.
+- `nx enrich aspects-show <TUMBLER>` and `nx enrich aspects-list <COLLECTION>` are first-class read verbs for inspecting structured aspects. `--missing` inverts to gap detection; `--field` projects a single value.
+- `nx index pdf` no longer reports success on zero chunks. PyMuPDF fallback, batch path, and streaming path all raise actionable errors on extraction-or-chunking mismatch.
+- `nx dt index` now defaults PDFs to `knowledge__<collection>` (override with `--collection docs__<name>`).
+- `nx catalog backfill --from-t3` adds a per-file recovery path; `nx catalog update --source-uri` emits a clean error on unknown scheme instead of leaking a traceback.
+
+See root `CHANGELOG.md` for the full notes.
+
 ## [4.20.0] - 2026-04-29
 
 Plugin version aligned with conexus 4.20.0. Closes the cross-project `source_uri` contamination class (nexus-3e4s) and ships an audit-membership sweep tool plus DEVONthink in-app install scripts:

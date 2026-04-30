@@ -6,6 +6,32 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.21.0] - 2026-04-30
+
+Minor release. Bib enrichment gains an OpenAlex backend with DOI / arXiv-aware lookup; aspects acquire first-class read verbs; the PDF indexer surfaces silent zero-chunk failures with actionable error messages instead of reporting success on zero records.
+
+### Added
+
+- **OpenAlex bib backend** (PR #390, nexus-tv22). New `nx enrich bib --source openalex` (alongside `--source semantic-scholar`) with `enrich_by_doi` and `enrich_by_arxiv_id` direct-lookup paths. arXiv IDs use the canonical `10.48550/arXiv.<id>` DOI form for the OpenAlex `/works/doi:` endpoint. Companion changes: `link_generator.py` indexes both `bib_semantic_scholar_id` and `bib_openalex_id` so cross-source citation links resolve regardless of which backend enriched the row.
+- **DOI / arXiv-aware bib lookup** (PR #394, PR #395, PR #396, nexus-liir). `bib_extractor.py` extracts DOIs (with labeled-form preference) and arXiv IDs (with version-suffix disambiguation) from chunk body text across all chunks of a document, not just the first 5. Lookup tries DOI / arXiv direct hit first, falls back to fuzzy title only on miss. The "labeled preference" rule prefers `DOI: 10.x/y` over a bare `10.x/y` match elsewhere in the chunk to avoid cross-citation contamination.
+- **`nx enrich aspects-show <TUMBLER>`** and **`nx enrich aspects-list <COLLECTION>`** (PR #398, nexus-bkvk). First-class read interface for the structured aspects extracted by `nx enrich aspects`. `aspects-show` resolves a tumbler (or title) via the catalog, looks up the aspect row by `(physical_collection, file_path)`, and renders all fields (`problem_formulation`, `proposed_method`, `experimental_datasets`, `experimental_baselines`, `experimental_results`, `extras`, `confidence`). `aspects-list` is the collection-level companion (preview / audit shape) with `--missing` to invert into gap detection. `--json` and `--field <name>` for scripting and projection. Pre-this verb the only way to inspect aspects was raw SQL against `~/.config/nexus/memory.db`.
+- **`nx dt index` defaults PDFs to `knowledge__<collection>`** (PR #397, nexus-cvaw). DEVONthink-sourced PDFs now route to `knowledge__*` collections by default, matching the convention that external reference PDFs land in `knowledge__` and not `docs__`. Override with `--collection docs__<name>` if you specifically want the docs prefix. Markdown records still default to `docs__`.
+- **`nx catalog backfill --from-t3` per-file recovery** (PR #388, nexus-p03z Issue 2). Per-file targeted recovery path for catalog rows whose chroma side is healthy but whose catalog entry is missing or inconsistent. Reads the source-of-truth metadata from T3 and re-registers the catalog row idempotently.
+- **One-off ART migration script** (PR #391, `scripts/migrate_art_papers.py`). 78-PDF migration from `docs__ART` to `knowledge__art-papers` using `cat.update(tumbler, physical_collection=...)` so the move is atomic across T3 chunks, T2 aspects, and the catalog. Documented as the canonical pattern for future cross-collection migrations.
+
+### Fixed
+
+- **Silent zero-chunk PDF indexing now raises with actionable error** (PR #400, nexus-aold). A 71MB PDF (DEVONthink 4.2.2 user manual) caused `nx index pdf --extractor docling` to exit silently with 0 chunks indexed, with a multiprocessing leaked-semaphore warning at process shutdown as the only signal. Three load-bearing guards were added: `_extract_normalized` (PyMuPDF fallback) raises on empty text, `_pdf_chunks` (batch path) raises when extracted text is non-empty but the chunker returned zero chunks, and `chunker_loop` (streaming path, the actual hit path since `_STREAMING_THRESHOLD=0`) raises on the same mismatch. All errors include actionable mitigation: rerun with `--extractor mineru` or file a bug with the source PDF. The CLI surfaces these via the existing `try/except` in `commands/index.py:616`.
+- **`nx catalog update --source-uri` emits clean error on unknown scheme** (PR #399, nexus-fb6x). Previously the command leaked a `ValueError` traceback when given a URI whose scheme was not in the allow-list. Now wraps the validation in a `try/except ValueError` and prints a one-line diagnostic.
+- **`nx enrich aspects` catalog hook matches by `source_path`** (PR #392, nexus-tv22). Pre-fix the hook used a `LIMIT 1` fallback against the catalog's first row, which mis-attributed enrichment results when multiple aspect rows shared a tumbler. Now matches strictly by `(physical_collection, source_path)` so future enrich runs propagate cleanly without manual remediation.
+- **`nx enrich aspects` chroma lookup uses absolute path** (PR #389). Aspect extraction for `docs__*` collections was failing because the chroma lookup used a relative path while the indexed `source_path` was absolute. The lookup now derives an absolute path from `source_uri` so the lookup succeeds.
+- **`nx catalog backfill` skips `None` documents** (PR #386). Pre-fix the command crashed with an unhandled `AttributeError` when the catalog held a `None` document. Now skips with a structured warning.
+- **`docs__*` collections re-excluded from aspect extractor `_REGISTRY`** (PR #393, revert of #377). The pre-#377 behavior is restored: `_REGISTRY` aliases `knowledge__` only. The `docs__` aspect rows produced under #377 were inconsistent with the structured-aspect contract, so the v4.19.2 expansion is rolled back. RDR-089 will revisit `docs__` aspect extraction with a separate config.
+
+### Documentation
+
+- **RDR-100 (Plan-Cache Improvements from CacheRAG)** drafted, researched, and closed as `disposition: deferred` (PR #401). Empirical findings (T2: `nexus_rdr/100-research-1`) showed none of the four CacheRAG-inspired phases solve a problem the system is currently hitting at the live plan library's scale. Closure note documents revisit triggers (200 plans, 500 unredacted runs, 300 per-bucket). The narrow operator-error case that surfaced during research is filed separately as bead `nexus-l0yh`.
+
 ## [4.20.0] - 2026-04-29
 
 Minor release. Headline: closes the cross-project `source_uri` contamination class that produced ~6,500 mis-attributed catalog rows in the wild (nexus-3e4s), shipped alongside an audit-membership sweep tool and DEVONthink in-app install scripts.

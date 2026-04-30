@@ -325,21 +325,23 @@ Subcommand group. The previous single-shape `nx enrich <coll>` is now `nx enrich
 
 ### nx enrich bib
 
-Backfill bibliographic metadata from Semantic Scholar for an existing T3 collection.
+Backfill bibliographic metadata for an existing T3 collection. Two backends are supported: Semantic Scholar (default) and OpenAlex (`--source openalex`).
 
 ```
 nx enrich bib knowledge__papers --delay 0.5 --limit 50
+nx enrich bib knowledge__papers --source openalex --delay 0.5
 ```
 
-Queries Semantic Scholar for each unique `source_title` in the collection and writes `bib_year`, `bib_venue`, `bib_authors`, `bib_citation_count`, and `bib_semantic_scholar_id` back to every chunk with that title. Already-enriched chunks (non-empty `bib_semantic_scholar_id`) are skipped — the command is idempotent.
+For each unique `source_title` in the collection: extracts DOI / arXiv ID from chunk body text, tries the direct identifier lookup first, falls back to fuzzy title search on miss. Writes `bib_year`, `bib_venue`, `bib_authors`, `bib_citation_count`, plus the source-specific identifier (`bib_semantic_scholar_id` and / or `bib_openalex_id`) back to every chunk with that title. Already-enriched chunks (non-empty backend ID) are skipped, so the command is idempotent.
 
 | Flag | Description |
 |------|-------------|
 | `COLLECTION` (positional) | Fully-qualified T3 collection name (e.g. `knowledge__papers`) |
+| `--source {semantic-scholar\|openalex}` | Bibliographic backend (default: `semantic-scholar`) |
 | `--delay SECONDS` | Delay between API calls (default: 0.5s). Increase to avoid rate limiting |
 | `--limit N` | Maximum number of titles to enrich (default: 0 = unlimited) |
 
-**Note**: Semantic Scholar's public API allows 100 requests per 5 minutes without an API key. For large collections, increase `--delay` or use `--limit` to process in batches.
+**Note**: Semantic Scholar's public API allows 100 requests per 5 minutes without an API key. OpenAlex is unauthenticated but encourages including a contact email via `pyalex.config.email`. For large collections, increase `--delay` or use `--limit` to process in batches. DOI extraction prefers labeled DOIs (`DOI: 10.x/y`) over bare DOI strings to avoid contamination from cited references.
 
 ### nx enrich aspects
 
@@ -359,6 +361,44 @@ nx enrich aspects knowledge__delos --re-extract --extractor-version claude-haiku
 | `--validate-sample N` | Validate N% of newly-extracted aspects via `operator_verify` against the document text. Disagreements append to `./validation_failures.jsonl`. Pass 0 to skip. Default 5 |
 | `--re-extract` | Re-run only on rows whose `model_version` is strictly less than `--extractor-version` (and rows that are missing entirely) |
 | `--extractor-version v` | Threshold for `--re-extract` (lexicographic STRICT-less-than) |
+
+### nx enrich aspects-show
+
+Display the aspect record for a single document.
+
+```
+nx enrich aspects-show 1.653.83
+nx enrich aspects-show "CacheRAG"
+nx enrich aspects-show 1.653.83 --json
+nx enrich aspects-show 1.653.83 --field experimental_datasets
+```
+
+Resolves the tumbler (or document title) via the catalog, looks up the aspect row by `(physical_collection, file_path)`, and renders all fields: `problem_formulation`, `proposed_method`, `experimental_datasets`, `experimental_baselines`, `experimental_results`, `extras`, `confidence`, plus extractor metadata (extractor name, model version, extracted-at timestamp). Pre-this verb, inspecting aspects required raw SQL against `~/.config/nexus/memory.db`.
+
+| Flag | Description |
+|------|-------------|
+| `TUMBLER_OR_TITLE` (positional) | Catalog tumbler (`1.653.83`) or document title (case-insensitive substring match) |
+| `--json` | Emit JSON instead of human-readable form |
+| `--field NAME` | Project a single aspect field (`problem_formulation`, `proposed_method`, `experimental_datasets`, `experimental_baselines`, `experimental_results`, `extras`, `confidence`). Output is the raw value |
+
+### nx enrich aspects-list
+
+List aspect records for a collection, or the gaps with `--missing`.
+
+```
+nx enrich aspects-list --collection knowledge__delos
+nx enrich aspects-list --collection knowledge__delos --missing
+nx enrich aspects-list --collection knowledge__delos --json --limit 0
+```
+
+Companion to `aspects-show` at the collection level (preview / audit shape) instead of single-record detail. With `--missing` the verb inverts to gap detection: catalog rows in the collection that do not have a matching aspect row.
+
+| Flag | Description |
+|------|-------------|
+| `--collection NAME` (required) | T3 collection to inspect (e.g. `knowledge__delos`) |
+| `--limit N` | Maximum rows to display (default: 20; use 0 for unlimited) |
+| `--missing` | Flip output: list catalog rows with NO aspect record (gap detection after partial enrichment) |
+| `--json` | Emit JSON array instead of human-readable form |
 
 ### nx enrich list
 
