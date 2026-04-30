@@ -407,17 +407,22 @@ class TestSourceUriResolutionForChromaLookup:
         # docs__ collections route through scholarly-paper-v1; that
         # config is registered in aspect_extractor's _REGISTRY for
         # ``docs__`` prefix at runtime — patch select_config to return
-        # a stub if needed.
+        # a stub if needed. nexus-z70w removed docs__ from the
+        # production _REGISTRY, so this test must seed a stub
+        # explicitly to exercise the LLM path.
         from nexus.aspect_extractor import ExtractorConfig, _REGISTRY
-        # Minimal config: parser_fn=None forces the LLM path that
-        # builds the chroma URI.
         if "docs__" not in _REGISTRY:
-            _REGISTRY["docs__"] = ExtractorConfig(
+            monkeypatch.setitem(_REGISTRY, "docs__", ExtractorConfig(
                 extractor_name="test-stub",
                 model_version="test",
-                parser_fn=None,
                 prompt_template="",
-            )
+                required_fields=(
+                    "problem_formulation", "proposed_method",
+                    "experimental_datasets", "experimental_baselines",
+                    "experimental_results",
+                ),
+                parser_fn=None,
+            ))
 
         runner = CliRunner()
         result = runner.invoke(
