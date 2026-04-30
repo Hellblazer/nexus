@@ -678,6 +678,18 @@ def _pdf_chunks(
     chunker = PDFChunker(chunk_chars=chunk_chars) if chunk_chars is not None else PDFChunker()
     chunks = chunker.chunk(result.text, result.metadata)
     if not chunks:
+        if result.text.strip():
+            # nexus-aold: text was extracted but the chunker produced zero chunks.
+            # Pre-fix this fell through to a silent ``return []`` which the
+            # indexer reported as success-with-0-records (invisible failure).
+            raise RuntimeError(
+                f"chunker produced zero chunks for {pdf_path.name} despite "
+                f"non-empty extracted text ({len(result.text)} chars, "
+                f"extraction_method={result.metadata.get('extraction_method', 'unknown')}). "
+                "This usually indicates a chunker bug or a mismatch between "
+                "extractor output and chunker expectations; rerun with "
+                "--extractor mineru or file a bug with the source PDF."
+            )
         return []
 
     # Heuristic: fewer than 20 chars per page suggests a scanned/image-only PDF.

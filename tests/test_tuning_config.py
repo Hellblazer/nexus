@@ -145,7 +145,11 @@ def test_pdf_chunk_chars_wiring(tmp_path, chunk_chars, expected_call) -> None:
         mock_ext = MagicMock()
         mock_ext.extract.return_value = MagicMock(text="Content.", metadata={"page_count": 1, "page_boundaries": []})
         mock_ext_cls.return_value = mock_ext
-        mock_chunker_cls.return_value = MagicMock(chunk=MagicMock(return_value=[]))
+        # Return one chunk so the nexus-aold zero-chunk-from-non-empty-text
+        # guard does not fire. The test's purpose is the PDFChunker(...)
+        # constructor call, not chunk-output handling.
+        fake_chunk = MagicMock(text="Content.", chunk_index=0, metadata={})
+        mock_chunker_cls.return_value = MagicMock(chunk=MagicMock(return_value=[fake_chunk]))
         kwargs = {"chunk_chars": chunk_chars} if chunk_chars is not None else {}
         _pdf_chunks(pdf, "abc123", "voyage-context-3", "2026-01-01", "test", **kwargs)
     expected_call(mock_chunker_cls)

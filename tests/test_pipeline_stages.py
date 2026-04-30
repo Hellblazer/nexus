@@ -211,11 +211,36 @@ class TestChunkerLoop:
     def test_text_join_contract(self, db, done_event) -> None:
         _pop_pages(db, "h1", 3)
         joined: list[str] = []
+        # Return one chunk so the nexus-aold guard (raises on zero chunks
+        # from non-empty text) doesn't fire. The test's purpose is the
+        # join contract, not zero-chunk handling.
+        sentinel = _tc(("captured", 0, {}))
         with patch(_P_CHK) as MC:
-            MC.return_value.chunk.side_effect = lambda text, meta: (joined.append(text), [])[1]
+            MC.return_value.chunk.side_effect = lambda text, meta: (joined.append(text), sentinel)[1]
             chunker_loop("h1", db, threading.Event(), embed_fn=lambda t, m: ([], m),
                          extraction_done=done_event)
         assert joined[0] == "\n".join(f"Page {i} content here." for i in range(3))
+
+    def test_raises_when_text_present_but_chunker_empty(self, db, done_event) -> None:
+        """nexus-aold: streaming path silent-zero guard.
+
+        Pages were extracted (non-empty accumulated text) but the chunker
+        returned zero chunks. Pre-fix, ``chunker_loop`` quietly recorded
+        ``chunks_created=0`` and returned, the indexer reported success
+        with 0 records (the failure mode the bead names). Post-fix,
+        raises an informative RuntimeError so the orchestrator surfaces
+        the failure instead of swallowing it.
+        """
+        _pop_pages(db, "h1", 3)
+        with patch(_P_CHK) as MC:
+            MC.return_value.chunk.return_value = []
+            with pytest.raises(RuntimeError, match="zero chunks"):
+                chunker_loop(
+                    "h1", db, threading.Event(),
+                    embed_fn=lambda t, m: ([], m),
+                    extraction_done=done_event,
+                    pdf_path="/a.pdf",
+                )
 
     def test_idempotent_resume(self, db, done_event) -> None:
         _pop_pages(db, "h1", 2)
