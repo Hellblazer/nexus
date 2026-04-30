@@ -63,7 +63,12 @@ def _strip_doi_prefix(value: str) -> str:
 
 def _build_result(work: dict) -> dict[str, Any]:
     """Shared shape-builder. Maps an OpenAlex /works object to the
-    canonical bib_enricher result dict."""
+    canonical bib_enricher result dict.
+
+    The transient ``_lookup_title`` field carries the OpenAlex
+    ``display_name`` so callers (or :func:`_direct_lookup`) can
+    validate identity post-lookup. It is stripped before storage.
+    """
     authorships = work.get("authorships") or []
     authors = ", ".join(
         (a.get("author") or {}).get("display_name", "")
@@ -82,13 +87,87 @@ def _build_result(work: dict) -> dict[str, Any]:
         "openalex_id": _strip_openalex_prefix(work.get("id", "")) or "",
         "doi": _strip_doi_prefix(work.get("doi", "") or ""),
         "references": refs,
+        "_lookup_title": work.get("display_name", "") or "",
     }
 
 
-def _direct_lookup(url: str) -> dict[str, Any]:
+# nexus-yy1m: title-validation post-lookup. The DOI/arXiv-aware lookup
+# (PR #394 / #395 / #396) trusts whatever identifier shows up in the
+# document body, but academic papers have entire reference lists with
+# DOIs that belong to OTHER papers. v4.21.0 shakeout caught this: a
+# CacheRAG preprint without its own DOI got a citation DOI extracted
+# and stamped with the citation's metadata. The validator below is the
+# fallback gate: if the OpenAlex-returned title shares too few
+# substantive tokens with the source title, reject the result so the
+# caller falls through to fuzzy title search.
+
+# Stopwords kept short. Punctuation strip + lowercase + length>=4 token
+# filter does most of the work, and over-aggressive stopwording just
+# undershoots the "are these the same paper" question.
+_TITLE_STOPWORDS: frozenset[str] = frozenset({
+    "with", "from", "into", "this", "that", "these", "those",
+    "their", "them", "they", "your", "yours", "ours", "have",
+    "been", "being", "such", "what", "when", "where", "which",
+    "while", "without", "within", "about", "above", "after",
+    "before", "between", "during", "through", "based", "over",
+    "under",
+})
+
+# Jaccard threshold tuned so:
+#   * exact / near-duplicate titles (typical OpenAlex hit) clear easily
+#     (overlap is typically > 0.6 even with title variations)
+#   * citation-DOI-poisoned titles (entirely different paper) reject
+#     (overlap is typically < 0.05)
+# A real false positive would be two papers with overlapping topical
+# vocabulary but different identities; in practice the rejection
+# fall-through to fuzzy title search of the SOURCE title catches this.
+_TITLE_JACCARD_THRESHOLD: float = 0.20
+
+
+def _tokenize_title(title: str) -> frozenset[str]:
+    """Lowercase, strip non-alphanumerics, drop short / stopword tokens.
+
+    Returns a frozenset of substantive tokens. Caller computes Jaccard
+    over two such sets.
+    """
+    if not title:
+        return frozenset()
+    cleaned = "".join(c if c.isalnum() else " " for c in title.lower())
+    tokens = (t for t in cleaned.split() if len(t) >= 4)
+    return frozenset(t for t in tokens if t not in _TITLE_STOPWORDS)
+
+
+def _titles_compatible(source: str, returned: str) -> bool:
+    """Return True when *source* and *returned* are plausibly the same paper.
+
+    Used to gate identifier-based lookups (DOI / arXiv) so a citation
+    DOI extracted from the references section cannot stamp a foreign
+    paper's metadata. Empty inputs are treated as incompatible (caller
+    should fall through, not stamp empty bib).
+    """
+    a = _tokenize_title(source)
+    b = _tokenize_title(returned)
+    if not a or not b:
+        return False
+    intersection = a & b
+    union = a | b
+    if not union:
+        return False
+    return (len(intersection) / len(union)) >= _TITLE_JACCARD_THRESHOLD
+
+
+def _direct_lookup(url: str, *, expected_title: str = "") -> dict[str, Any]:
     """Direct ``/works/<id>`` GET. Returns the canonical bib dict on
     success, ``{}`` on failure (404, network error, malformed payload).
-    Same retry shape as :func:`enrich` for 429s."""
+    Same retry shape as :func:`enrich` for 429s.
+
+    When ``expected_title`` is non-empty, the OpenAlex-returned title
+    is validated against it via :func:`_titles_compatible`. A
+    low-similarity match returns ``{}`` and logs the rejection so
+    the caller can fall through (nexus-yy1m citation-DOI guard).
+    The transient ``_lookup_title`` field is stripped from the
+    returned dict regardless.
+    """
     import time
 
     params = {}
@@ -104,7 +183,18 @@ def _direct_lookup(url: str) -> dict[str, Any]:
                 time.sleep(wait)
                 continue
             resp.raise_for_status()
-            return _build_result(resp.json())
+            result = _build_result(resp.json())
+            lookup_title = result.pop("_lookup_title", "")
+            if expected_title and not _titles_compatible(expected_title, lookup_title):
+                _log.warning(
+                    "openalex_title_mismatch_rejected",
+                    url=url,
+                    expected_title=expected_title,
+                    returned_title=lookup_title,
+                    rejected_openalex_id=result.get("openalex_id", ""),
+                )
+                return {}
+            return result
         except (
             httpx.HTTPError,
             httpx.TimeoutException,
@@ -116,21 +206,31 @@ def _direct_lookup(url: str) -> dict[str, Any]:
     return {}
 
 
-def enrich_by_doi(doi: str) -> dict[str, Any]:
+def enrich_by_doi(doi: str, *, expected_title: str = "") -> dict[str, Any]:
     """Look up a paper by DOI directly. ``doi`` is the bare form
     (``10.1145/X.Y``); the URL-prefixed form is also accepted.
 
-    Unambiguous: OpenAlex resolves DOIs without fuzzy matching, so
-    ``mfaz`` no longer becomes a 1996 Developmental Brain Research
-    paper. Returns ``{}`` on miss / network error / malformed payload.
+    When ``expected_title`` is non-empty (nexus-yy1m), the returned
+    OpenAlex title is validated against it via :func:`_titles_compatible`.
+    A low-similarity match returns ``{}`` so the caller can fall
+    through to fuzzy title search instead of stamping the wrong paper.
+    The validator is what catches the "citation-DOI poisoning" case
+    where a DOI extracted from a paper's references section resolves
+    a foreign paper.
+
+    Returns ``{}`` on miss / network error / malformed payload, or on
+    title-validation rejection.
     """
     if not doi:
         return {}
     bare = _strip_doi_prefix(doi)
-    return _direct_lookup(f"https://api.openalex.org/works/doi:{bare}")
+    return _direct_lookup(
+        f"https://api.openalex.org/works/doi:{bare}",
+        expected_title=expected_title,
+    )
 
 
-def enrich_by_arxiv_id(arxiv_id: str) -> dict[str, Any]:
+def enrich_by_arxiv_id(arxiv_id: str, *, expected_title: str = "") -> dict[str, Any]:
     """Look up an arXiv paper directly. ``arxiv_id`` is the bare
     form (``2503.07641``, no version suffix).
 
@@ -139,6 +239,9 @@ def enrich_by_arxiv_id(arxiv_id: str) -> dict[str, Any]:
     DOI namespace: ``10.48550/arXiv.<id>``. We construct that DOI
     and reuse the by-DOI endpoint. Unambiguous when the paper is
     in OpenAlex; returns ``{}`` on 404 (paper not indexed).
+
+    When ``expected_title`` is non-empty (nexus-yy1m), the returned
+    OpenAlex title is validated; see :func:`enrich_by_doi`.
     """
     if not arxiv_id:
         return {}
@@ -147,7 +250,10 @@ def enrich_by_arxiv_id(arxiv_id: str) -> dict[str, Any]:
     # registered, in which case OpenAlex 404s and we fall through
     # to title search.
     arxiv_doi = f"10.48550/arXiv.{arxiv_id}"
-    return _direct_lookup(f"https://api.openalex.org/works/doi:{arxiv_doi}")
+    return _direct_lookup(
+        f"https://api.openalex.org/works/doi:{arxiv_doi}",
+        expected_title=expected_title,
+    )
 
 
 def enrich(title: str) -> dict[str, Any]:
@@ -178,30 +284,24 @@ def enrich(title: str) -> dict[str, Any]:
             data = resp.json().get("results") or []
             if not data:
                 return {}
-            work = data[0]
-
-            authorships = work.get("authorships") or []
-            authors = ", ".join(
-                (a.get("author") or {}).get("display_name", "")
-                for a in authorships[:5]
-            )
-
-            primary = work.get("primary_location") or {}
-            source = (primary.get("source") or {}) if isinstance(primary, dict) else {}
-            venue = source.get("display_name", "") if isinstance(source, dict) else ""
-
-            referenced = work.get("referenced_works") or []
-            refs = [_strip_openalex_prefix(r) for r in referenced if r]
-
-            return {
-                "year": work.get("publication_year", 0) or 0,
-                "venue": venue or "",
-                "authors": authors or "",
-                "citation_count": work.get("cited_by_count", 0) or 0,
-                "openalex_id": _strip_openalex_prefix(work.get("id", "")) or "",
-                "doi": _strip_doi_prefix(work.get("doi", "") or ""),
-                "references": refs,
-            }
+            result = _build_result(data[0])
+            lookup_title = result.pop("_lookup_title", "")
+            # nexus-yy1m: OpenAlex title search returns SOMETHING for
+            # almost every query, ranked by its relevance score. When
+            # the real paper isn't indexed (preprint, not yet accepted),
+            # the first result is whatever happens to share some tokens
+            # with the query, frequently a completely unrelated paper.
+            # Apply the same title-validation guard as the by-id paths
+            # to refuse wildly-mismatched fuzzy matches.
+            if not _titles_compatible(title, lookup_title):
+                _log.warning(
+                    "openalex_title_search_rejected",
+                    query_title=title,
+                    returned_title=lookup_title,
+                    rejected_openalex_id=result.get("openalex_id", ""),
+                )
+                return {}
+            return result
         except (
             httpx.HTTPError,
             httpx.TimeoutException,

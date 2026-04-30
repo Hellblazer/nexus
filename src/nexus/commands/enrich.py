@@ -329,12 +329,15 @@ def _resolve_bib_for_title(
     ids = extract_identifiers(filename=filename, body_text=body_text)
 
     if ids["doi"]:
-        bib = enrich_by_doi(ids["doi"])
+        # nexus-yy1m: pass our title so the OpenAlex backend can reject
+        # a citation-DOI poisoning (a DOI extracted from references that
+        # resolves to a foreign paper). On rejection, fall through.
+        bib = enrich_by_doi(ids["doi"], expected_title=title)
         if bib:
             bib["_resolved_via"] = "doi"
             return bib
     if ids["arxiv"]:
-        bib = enrich_by_arxiv_id(ids["arxiv"])
+        bib = enrich_by_arxiv_id(ids["arxiv"], expected_title=title)
         if bib:
             bib["_resolved_via"] = "arxiv"
             return bib

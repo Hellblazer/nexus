@@ -254,7 +254,9 @@ def test_enrich_openalex_prefers_doi_over_title_search(
         ["bib", "knowledge__test", "--delay", "0", "--source", "openalex"],
     )
     assert result.exit_code == 0, result.output
-    mock_doi.assert_called_once_with("10.1145/X.Y")
+    # nexus-yy1m: caller passes the source title as expected_title so
+    # the OpenAlex backend can reject citation-DOI poisoning.
+    mock_doi.assert_called_once_with("10.1145/X.Y", expected_title="mfaz")
     mock_title.assert_not_called()
     assert "via DOI/arXiv ID" in result.output
 
@@ -297,7 +299,8 @@ def test_enrich_openalex_falls_back_to_arxiv_when_no_doi(
         enrich, ["bib", "knowledge__test", "--delay", "0", "--source", "openalex"],
     )
     assert result.exit_code == 0, result.output
-    mock_arxiv.assert_called_once_with("1706.03762")
+    # nexus-yy1m: caller passes the source title as expected_title.
+    mock_arxiv.assert_called_once_with("1706.03762", expected_title="Attention")
     mock_title.assert_not_called()
     assert "via DOI/arXiv ID" in result.output
 
