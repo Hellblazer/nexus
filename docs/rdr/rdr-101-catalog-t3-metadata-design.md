@@ -113,6 +113,82 @@ The five Open Questions enumerated below are answered here with structured findi
 
 ### Entities
 
+```mermaid
+erDiagram
+    OWNER ||--o{ DOCUMENT : owns
+    OWNER ||--o{ COLLECTION : owns
+    DOCUMENT ||--o{ CHUNK : "contains"
+    COLLECTION ||--o{ CHUNK : "holds"
+    DOCUMENT |o--o| DOCUMENT : "alias_of"
+    COLLECTION |o--o| COLLECTION : "superseded_by"
+    DOCUMENT ||--o{ LINK : "from"
+    DOCUMENT ||--o{ LINK : "to"
+    DOCUMENT ||--o{ ASPECT : "extracted"
+    CHUNK ||--|| PROVENANCE : "augments"
+
+    OWNER {
+        uuid7 owner_id PK
+        string name
+        enum owner_type "repo|curator"
+        path repo_root
+        string repo_hash
+        timestamp created_at
+    }
+    DOCUMENT {
+        uuid7 doc_id PK
+        uuid7 owner_id FK
+        enum content_type "code|prose|paper|knowledge|rdr"
+        uri source_uri "file/chroma/https/devonthink/nx-scratch"
+        timestamp indexed_at_doc
+        float source_mtime
+        uuid7 alias_of FK "nullable, self-ref"
+        timestamp deleted_at "nullable, soft-delete tombstone"
+    }
+    COLLECTION {
+        string coll_id PK "name: content_type__owner_id__model@version"
+        uuid7 owner_id FK
+        enum content_type
+        string embedding_model
+        string model_version
+        timestamp created_at
+        string superseded_by FK "nullable, self-ref for re-embed migrations"
+        bool legacy_grandfathered "true for pre-RDR-101 collection names"
+    }
+    CHUNK {
+        string chunk_id PK "Chroma natural ID, NOT chash"
+        uuid7 doc_id FK
+        string coll_id FK
+        string chash "indexed, NOT unique (cross-doc dedup is intentional)"
+        int position
+        string content_hash
+        timestamp indexed_at_chunk
+    }
+    LINK {
+        uuid7 from_doc FK
+        uuid7 to_doc FK
+        enum link_type "cites|implements|relates|supersedes|quotes|formalizes"
+        string span_chash "chash:hex span reference (RDR-086)"
+        string creator
+        timestamp created_at
+    }
+    ASPECT {
+        uuid7 doc_id FK
+        string model_version
+        json payload_json "scholarly-paper-v1|rdr-frontmatter-v1"
+        timestamp extracted_at
+    }
+    PROVENANCE {
+        string chunk_id FK
+        string git_commit
+        string git_branch
+        string git_remote
+        string source_agent
+        string session_id
+    }
+```
+
+The same structure as a typed reference table:
+
 ```
 Owner          { owner_id PK (UUID7), name, owner_type, repo_root, repo_hash, created_at }
 Document       { doc_id PK (UUID7), owner_id FK, content_type, source_uri,
