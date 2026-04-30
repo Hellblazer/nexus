@@ -236,6 +236,19 @@ def test_extract_normalized_includes_docling_title_empty(extractor, dummy_pdf):
     assert result.metadata["pdf_title"] == "PDF Meta Title"
 
 
+def test_extract_normalized_raises_on_empty_output(extractor, dummy_pdf):
+    """nexus-aold: PyMuPDF fallback used to silently return an
+    ExtractionResult with text='' when the PDF was image-only or
+    extraction failed page-by-page. Downstream the empty text
+    produced 0 chunks and the indexer reported success with no
+    chunks indexed (a silent failure mode). Symmetry with
+    _extract_with_docling: empty output is a hard error."""
+    mock_pymupdf = _mock_pymupdf_doc(["", "", ""])
+    with patch.dict("sys.modules", {"pymupdf": mock_pymupdf}):
+        with pytest.raises(RuntimeError, match="empty"):
+            extractor._extract_normalized(dummy_pdf)
+
+
 # ── _get_converter lazy init ────────────────────────────────────────────────
 
 

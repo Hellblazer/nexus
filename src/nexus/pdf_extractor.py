@@ -885,6 +885,20 @@ class PDFExtractor:
                     current_pos += len(page_text) + 1
 
         text = "\n".join(text_parts)
+        if not text.strip():
+            # nexus-aold: silent zero-chunk indexing was the failure
+            # mode of large-PDF Docling crashes that cascaded into
+            # the PyMuPDF fallback returning an empty result. Make
+            # it a hard error here too, mirroring the equivalent
+            # guard in _extract_with_docling. The indexer's outer
+            # error path will surface this as a non-zero exit with
+            # a named failure mode (was: silent 0 chunks indexed).
+            raise RuntimeError(
+                f"pymupdf produced empty output for {pdf_path.name} "
+                f"(page_count={page_count}); the PDF may be image-only "
+                "or have a damaged text layer. Try --extractor mineru "
+                "or rerun OCR before indexing."
+            )
 
         return ExtractionResult(
             text=text,

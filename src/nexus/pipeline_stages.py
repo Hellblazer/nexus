@@ -325,6 +325,21 @@ def chunker_loop(
             chunk_metadata = {"page_boundaries": accumulated_boundaries, "table_regions": []}
             chunks = chunker.chunk(accumulated_text, chunk_metadata)
 
+            if is_final and not chunks and accumulated_text.strip():
+                # nexus-aold: extraction succeeded with non-empty text but the
+                # chunker produced zero chunks. Pre-fix this fell through to
+                # ``return`` after a no-op ``_embed_and_write_batch`` (the
+                # silent 0-chunk failure mode the bead names). Raise so the
+                # orchestrator surfaces it instead of completing "successfully".
+                raise RuntimeError(
+                    f"chunker produced zero chunks for {pdf_path} despite "
+                    f"non-empty extracted text ({len(accumulated_text)} chars "
+                    f"across {pages_cached} pages). This usually indicates a "
+                    "chunker bug or a mismatch between extractor output and "
+                    "chunker expectations; rerun with --extractor mineru or "
+                    "file a bug with the source PDF."
+                )
+
             batch_kwargs = dict(
                 pdf_path=pdf_path, corpus=corpus, target_model=current_model,
                 now_iso=now_iso, git_meta=git_meta,
