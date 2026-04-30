@@ -308,6 +308,9 @@ def test_enrich_by_doi_empty_input_returns_empty():
 
 
 def test_enrich_by_arxiv_id_calls_correct_endpoint():
+    """OpenAlex doesn't have a native arxiv: external-ID lookup, so
+    enrich_by_arxiv_id constructs the arXiv-DOI form
+    (10.48550/arXiv.<id>) and uses the by-DOI endpoint."""
     from nexus.bib_enricher_openalex import enrich_by_arxiv_id
 
     captured: list[str] = []
@@ -319,7 +322,9 @@ def test_enrich_by_arxiv_id_calls_correct_endpoint():
     with patch("httpx.get", side_effect=_capture):
         result = enrich_by_arxiv_id("2503.07641")
 
-    assert captured == ["https://api.openalex.org/works/arxiv:2503.07641"]
+    assert captured == [
+        "https://api.openalex.org/works/doi:10.48550/arXiv.2503.07641"
+    ]
     assert result["openalex_id"] == "W2741809807"
 
 

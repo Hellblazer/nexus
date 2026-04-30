@@ -34,17 +34,38 @@ _DOI_RE = re.compile(
     r"\b(10\.\d{4,9}/[-._;()/:a-z0-9]+)",
     re.IGNORECASE,
 )
+
+# nexus-liir: labeled-DOI preference. Papers print their canonical
+# identifier in a page-1 banner with an explicit ``DOI:`` /
+# ``doi:`` / ``https://doi.org/`` label. Reference-section DOIs
+# usually appear bare in numbered citation lists. Capturing the
+# label-prefixed form first eliminates the "first DOI in chunk
+# order is a reference, not the paper" false-positive class
+# (knowledge__delos: aleph-bft, pBeeGees, lightweight-smr all
+# matched citation DOIs from their references before the bare-DOI
+# fallback would have reached the paper's own banner DOI).
+_DOI_LABELED_RE = re.compile(
+    r"(?:doi[:\s]+|https?://(?:dx\.)?doi\.org/)"
+    r"(10\.\d{4,9}/[-._;()/:a-z0-9]+)",
+    re.IGNORECASE,
+)
 _DOI_TRAILING_PUNCT = re.compile(r"[.,;:)\]]+$")
 
 
 def extract_doi(text: str) -> str | None:
     """Return the first DOI in ``text``, or None.
 
-    Strips trailing punctuation that body text accumulates around
-    the identifier ('see (10.1145/X.Y).' yields ``10.1145/X.Y``).
+    nexus-liir: prefers DOIs that follow an explicit label
+    (``DOI:`` / ``doi:`` / ``https://doi.org/``) over bare DOIs
+    embedded in body text. Falls back to the first bare DOI when
+    no labeled form is present. Strips trailing punctuation that
+    body text accumulates ('see (10.1145/X.Y).' yields ``10.1145/X.Y``).
     """
     if not text:
         return None
+    labeled = _DOI_LABELED_RE.search(text)
+    if labeled:
+        return _DOI_TRAILING_PUNCT.sub("", labeled.group(1))
     match = _DOI_RE.search(text)
     if not match:
         return None
