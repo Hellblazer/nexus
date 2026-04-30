@@ -153,6 +153,11 @@ def enrich_bib(
         _BATCH = 200
         updated_ids: list[str] = []
         updated_meta: list[dict] = []
+        # nexus-tv22: collect distinct source_paths in this title
+        # group so the catalog hook can match catalog rows by
+        # file_path (unambiguous) instead of by title (which drifts
+        # after derive_title rewrites in --from-t3 recovery).
+        source_paths: set[str] = set()
         for batch_start in range(0, len(chunk_ids), _BATCH):
             batch_ids = chunk_ids[batch_start:batch_start + _BATCH]
             fetch = _chroma_with_retry(col.get, ids=batch_ids, include=["metadatas"])
@@ -175,6 +180,9 @@ def enrich_bib(
                     )
                 updated_ids.append(cid)
                 updated_meta.append(merged)
+                sp = meta.get("source_path", "") if meta else ""
+                if sp:
+                    source_paths.add(sp)
 
         if updated_ids:
             for batch_start in range(0, len(updated_ids), _BATCH):
@@ -196,6 +204,7 @@ def enrich_bib(
             _catalog_enrich_hook(
                 title=title, bib_meta=bib,
                 collection_name=collection, backend=backend,
+                source_paths=sorted(source_paths),
             )
 
     backend_label = "Semantic Scholar" if backend == "s2" else "OpenAlex"
@@ -251,6 +260,7 @@ def _catalog_enrich_hook(
     bib_meta: dict,
     collection_name: str = "",
     backend: str = "s2",
+    source_paths: list[str] | None = None,
 ) -> None:
     """Update catalog entry with bib metadata. Silently skipped if absent.
 
@@ -258,9 +268,25 @@ def _catalog_enrich_hook(
     catalog meta. The OpenAlex backend writes ``bib_openalex_id`` (and
     ``bib_doi`` when present) so the citation-link generator can match
     references in OpenAlex's W-id space.
+
+    nexus-tv22: ``source_paths`` (the absolute paths of the chunks
+    being enriched) is the authoritative way to find the catalog row.
+    Title matching can drift after migrations that rewrite chunk
+    titles (e.g. derive_title) while leaving catalog row titles as
+    placeholders. Match by ``file_path`` (the catalog row's
+    relative-or-absolute path) against each ``source_path`` and apply
+    the update to every matching row.
+
+    The pre-fix LIMIT-1-on-collection fallback caused all 75 ART
+    enrich calls to clobber the same first row in the collection,
+    instead of finding the correct one per paper. That fallback is
+    removed: when no source_paths are supplied AND the title doesn't
+    match, the hook is a silent no-op rather than randomly picking a
+    row to corrupt.
     """
     try:
         from nexus.catalog import Catalog
+        from nexus.catalog.tumbler import Tumbler
         from nexus.config import catalog_path
 
         cat_path = catalog_path()
@@ -269,48 +295,85 @@ def _catalog_enrich_hook(
 
         cat = Catalog(cat_path, cat_path / ".catalog.db")
 
-        # Look up by collection + title jointly for precision
-        entry = None
-        if collection_name:
-            from nexus.catalog.tumbler import Tumbler
+        target_tumblers: list[Tumbler] = []
+
+        # nexus-tv22: prefer source_path match (unique per document).
+        # Catalog rows store either absolute or relative file_path
+        # (relative is canonical post-RDR-060; absolute lingers from
+        # legacy ingests). Try both forms so the lookup works either
+        # way.
+        if source_paths:
+            for sp in source_paths:
+                if not sp:
+                    continue
+                rows = cat._db.execute(
+                    "SELECT tumbler FROM documents "
+                    "WHERE (physical_collection = ? OR ? = '') "
+                    "AND (file_path = ? OR file_path = ? "
+                    "OR ? LIKE '%/' || file_path)",
+                    (
+                        collection_name, collection_name,
+                        sp, sp.lstrip("/"), sp,
+                    ),
+                ).fetchall()
+                for (t_str,) in rows:
+                    target_tumblers.append(Tumbler.parse(t_str))
+
+        # Title match as fallback when source_paths are not provided
+        # (preserves backward compatibility with callers that haven't
+        # been updated yet — e.g. third-party scripts).
+        if not target_tumblers and collection_name:
             row = cat._db.execute(
-                "SELECT tumbler FROM documents WHERE physical_collection = ? AND title = ? LIMIT 1",
+                "SELECT tumbler FROM documents "
+                "WHERE physical_collection = ? AND title = ? LIMIT 1",
                 (collection_name, title),
             ).fetchone()
             if row:
-                entry = cat.resolve(Tumbler.parse(row[0]))
-            if entry is None:
-                # Fallback: collection-only (for renamed/enriched titles)
-                row = cat._db.execute(
-                    "SELECT tumbler FROM documents WHERE physical_collection = ? LIMIT 1",
-                    (collection_name,),
-                ).fetchone()
-                if row:
-                    entry = cat.resolve(Tumbler.parse(row[0]))
+                target_tumblers.append(Tumbler.parse(row[0]))
 
-        # Fallback to FTS title search (no collection context)
-        if entry is None:
+        # Last-resort FTS title search across the whole catalog
+        # (legacy path; only fires when the caller passed neither
+        # source_paths nor a title that matches inside the collection).
+        if not target_tumblers:
             entries = cat.find(title, content_type="paper")
-            entry = entries[0] if entries else None
+            if entries:
+                target_tumblers.append(entries[0].tumbler)
 
-        if entry:
-            meta_update: dict = {
-                "venue": bib_meta.get("venue", ""),
-                "citation_count": bib_meta.get("citation_count", 0),
-            }
-            if backend == "openalex":
-                meta_update["bib_openalex_id"] = bib_meta.get("openalex_id", "")
-                if bib_meta.get("doi"):
-                    meta_update["bib_doi"] = bib_meta.get("doi", "")
-            else:
-                meta_update["bib_semantic_scholar_id"] = bib_meta.get(
-                    "semantic_scholar_id", "",
-                )
-            refs = bib_meta.get("references", [])
-            if refs:
-                meta_update["references"] = refs
+        if not target_tumblers:
+            _log.debug(
+                "catalog_enrich_hook_no_match",
+                title=title,
+                collection=collection_name,
+                source_paths=source_paths or [],
+            )
+            return
+
+        # Build the update payload once, apply to every matched row.
+        meta_update: dict = {
+            "venue": bib_meta.get("venue", ""),
+            "citation_count": bib_meta.get("citation_count", 0),
+        }
+        if backend == "openalex":
+            meta_update["bib_openalex_id"] = bib_meta.get("openalex_id", "")
+            if bib_meta.get("doi"):
+                meta_update["bib_doi"] = bib_meta.get("doi", "")
+        else:
+            meta_update["bib_semantic_scholar_id"] = bib_meta.get(
+                "semantic_scholar_id", "",
+            )
+        refs = bib_meta.get("references", [])
+        if refs:
+            meta_update["references"] = refs
+
+        # Dedupe in case multiple source_paths matched the same row.
+        seen: set[str] = set()
+        for tumbler in target_tumblers:
+            key = str(tumbler)
+            if key in seen:
+                continue
+            seen.add(key)
             cat.update(
-                entry.tumbler,
+                tumbler,
                 author=bib_meta.get("authors", ""),
                 year=bib_meta.get("year", 0),
                 meta=meta_update,
