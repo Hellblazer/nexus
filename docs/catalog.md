@@ -247,6 +247,21 @@ Reports link graph health: total counts by type and creator, orphaned links (poi
 
 Orphaned links are kept as historical record — they are not auto-deleted. Use `link-bulk-delete` to clean them up if needed.
 
+### Cross-project source_uri guard (nexus-3e4s)
+
+`Catalog.register()` and `Catalog.update()` enforce a register-time invariant: for `repo` owners with a `repo_root`, the entry's `source_uri` must resolve inside that root. A `file://` URI that lands outside the owner's tree raises a `ValueError` with both URIs in the message. This is the load-bearing guard against the contamination class that produced ~6,500 mis-attributed rows in the wild: entries whose `source_uri` pointed at one project's tree but were attributed to a different project's owner, silently breaking aspect extraction.
+
+The guard skips:
+
+- Curator owners (legitimately span sources: papers, mirrored docs, etc.).
+- Pre-RDR-060 repo owners with empty `repo_root` (back-compat).
+- Non-`file://` URIs (`chroma://`, `https://`, `x-devonthink-item://`). They have no filesystem identity to compare.
+- Empty `source_uri`. Synthesized records with no path identity.
+
+To detect or remediate pre-existing contamination see [`nx catalog audit-membership`](cli-reference.md#nx-catalog-audit-membership), including `--all-collections` for a single-shot health check across the entire catalog.
+
+Set `NEXUS_CATALOG_ALLOW_CROSS_PROJECT=1` to bypass the guard for emergency recovery only. Never the right answer for normal indexing.
+
 ### Backfill and recovery
 
 ```bash
