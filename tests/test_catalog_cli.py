@@ -361,7 +361,13 @@ class TestUpdateCommand:
     ):
         """Unknown URI schemes are rejected at the register-boundary
         validator (``_normalize_source_uri``); the CLI must surface
-        the failure cleanly rather than silently persist garbage."""
+        the failure cleanly rather than silently persist garbage.
+
+        nexus-fb6x: pre-fix, the ValueError propagated uncaught and
+        the operator saw a 30-line Python stack trace. Post-fix, the
+        CLI catches and re-raises as ClickException so the output is
+        a clean ``Error: unknown source_uri scheme '...'`` line.
+        """
         runner = CliRunner()
         runner.invoke(main, [
             "catalog", "register",
@@ -374,6 +380,10 @@ class TestUpdateCommand:
             "--source-uri", "imaginary-scheme://nope",
         ])
         assert result.exit_code != 0
+        # nexus-fb6x: friendly message present, no traceback leak.
+        assert "unknown" in result.output.lower()
+        assert "imaginary-scheme" in result.output
+        assert "Traceback" not in result.output
 
 
 class TestDeleteCommand:
