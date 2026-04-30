@@ -277,3 +277,93 @@ class TestEmpty:
         result = runner.invoke(catalog, ["audit-membership", "rdr__nothing-here"])
         assert result.exit_code == 0, result.output
         assert "no entries" in result.output.lower() or "0" in result.output
+
+
+# ── --all-collections sweep mode (nexus-3e4s Phase 3) ───────────────────────
+
+
+class TestAllCollections:
+    """Sweep audit across every physical_collection in one call.
+
+    Useful as a daily / post-release health check to confirm the
+    register-time guard is doing its job and no NEW contamination is
+    accumulating across the catalog.
+    """
+
+    def _seed_two_collections(self, cat: Catalog) -> None:
+        """One contaminated collection, one clean one."""
+        _seed_contamination(cat, collection="rdr__contaminated")
+        owner = cat.register_owner("clean", "clean-curator")
+        for i in range(4):
+            cat.register(
+                owner, f"R{i}", content_type="rdr",
+                physical_collection="rdr__clean",
+                file_path=f"x/R{i}.md",
+                source_uri=f"file:///Users/test/projects/clean/x/R{i}.md",
+            )
+
+    def test_sweep_lists_contaminated_first(self, env: Catalog) -> None:
+        self._seed_two_collections(env)
+        runner = CliRunner()
+        result = runner.invoke(catalog, ["audit-membership", "--all-collections"])
+        assert result.exit_code == 0, result.output
+        # Contaminated collection appears before clean in the output.
+        out = result.output
+        assert "rdr__contaminated" in out
+        assert "rdr__clean" in out
+        assert out.index("rdr__contaminated") < out.index("rdr__clean")
+
+    def test_sweep_json_emits_structured_report(self, env: Catalog) -> None:
+        self._seed_two_collections(env)
+        runner = CliRunner()
+        result = runner.invoke(
+            catalog, ["audit-membership", "--all-collections", "--json"],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["total_collections"] == 2
+        assert data["contaminated_count"] == 1
+        assert data["clean_count"] == 1
+        # Per-collection records are sorted by contamination desc.
+        cols = data["collections"]
+        assert cols[0]["collection"] == "rdr__contaminated"
+        assert cols[0]["distinct_homes"] == 2
+        assert cols[0]["contaminated_entries"] == 3
+        assert cols[1]["collection"] == "rdr__clean"
+        assert cols[1]["distinct_homes"] == 1
+        assert cols[1]["contaminated_entries"] == 0
+
+    def test_sweep_empty_catalog(self, env: Catalog) -> None:
+        runner = CliRunner()
+        result = runner.invoke(catalog, ["audit-membership", "--all-collections"])
+        assert result.exit_code == 0, result.output
+        assert "0" in result.output or "no collections" in result.output.lower()
+
+    def test_sweep_rejects_purge_flag(self, env: Catalog) -> None:
+        """Bulk purge across all collections is too risky — the
+        canonical-home heuristic can be wrong per-collection. Refuse."""
+        self._seed_two_collections(env)
+        runner = CliRunner()
+        result = runner.invoke(catalog, [
+            "audit-membership", "--all-collections", "--purge-non-canonical",
+        ])
+        assert result.exit_code != 0
+        assert "purge" in result.output.lower()
+
+    def test_sweep_rejects_canonical_home_override(self, env: Catalog) -> None:
+        """A canonical-home override is per-collection by definition."""
+        self._seed_two_collections(env)
+        runner = CliRunner()
+        result = runner.invoke(catalog, [
+            "audit-membership", "--all-collections",
+            "--canonical-home", "/projects/myproject",
+        ])
+        assert result.exit_code != 0
+        assert "canonical-home" in result.output.lower()
+
+    def test_collection_arg_or_all_required(self, env: Catalog) -> None:
+        """Neither COLLECTION nor --all-collections → usage error."""
+        runner = CliRunner()
+        result = runner.invoke(catalog, ["audit-membership"])
+        assert result.exit_code != 0
+        assert "collection" in result.output.lower()
