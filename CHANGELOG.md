@@ -6,6 +6,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`nx dt install-scripts`** (PR #380). Installs the bundled in-DEVONthink toolbar / menu AppleScript wrappers for `nx dt index` (selection, current group, knowledge selection) under `~/Library/Application Scripts/com.devon-technologies.think/Menu/`. Idempotent; skips files that already exist unless `--force` is passed.
+- **`nx catalog audit-membership <COLLECTION>`** (PR #381, nexus-ow9f). Detects cross-project `source_uri` contamination in a single physical_collection by grouping entries by their source_uri "home" (the first 4 path segments for `file://` URIs, `<scheme>://<netloc>` otherwise). Per-home counts surface multi-root collections; `--canonical-home SUBSTR` overrides the dominant-home heuristic when contamination outnumbers legitimate entries; `--purge-non-canonical` deletes the offending rows after `--dry-run` review and a confirmation prompt (suppressible with `--yes`). `--json` for structured output.
+- **`nx catalog audit-membership --all-collections`** (PR #383, nexus-3e4s Phase 3). Sweep mode: runs the audit across every physical_collection in a single pass and emits one summary report. Sorted contaminated-first. Read-only by design; `--purge-non-canonical` and `--canonical-home` are per-collection contexts and raise `UsageError` when combined with `--all-collections`. Use as a daily / post-release health check.
+- **`NEXUS_CATALOG_ALLOW_CROSS_PROJECT=1` env var** (PR #382, nexus-3e4s). Emergency-only escape hatch that bypasses the new register-time cross-project guard. Use only for known-good recovery scripts that legitimately need to register rows across project boundaries.
+
+### Fixed
+
+- **Catalog `register()` no longer writes cross-project `source_uri` rows** (PR #382, nexus-3e4s). `_normalize_source_uri()` was deriving `source_uri` from a relative `file_path` via `os.path.abspath()`, which resolves against the process CWD rather than the owner's `repo_root`. The catalog hook always passes a relative `file_path`, so any `nx index` run from a CWD outside the indexed repo wrote `source_uri` rows pointing into CWD's tree but attributed to the indexed repo's owner. That was the contamination signature for ~6,500 rows in the live catalog. Fix: `_normalize_source_uri(repo_root=...)` anchors relative paths on `owner.repo_root` when provided. Companion register-time guard `Catalog._check_source_uri_in_repo_root` raises `ValueError` on any `file://` URI that still resolves outside the owner's `repo_root`, so the bug class cannot recur even if a future code path bypasses the normalization. Owner-type-aware (curator and pre-RDR-060 owners with empty `repo_root` skip), scheme-aware (`chroma://`, `https://`, `x-devonthink-item://` pass through). `update()` runs the same guard so it cannot back-door register.
+
 ## [4.19.2] - 2026-04-29
 
 Patch release bundling six findings from a post-v4.19.1 audit (PR #378) plus the headline #377 fix. The audit ran two parallel deep-analyzer agents (one over the RDR-099 / `nx dt` surface, one over prefix-keyed config registries) and surfaced two critical bugs, three significant issues, and one feature gap.
