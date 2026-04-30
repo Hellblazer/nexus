@@ -212,6 +212,96 @@ def test_enrich_source_auto_falls_back_to_openalex_without_s2_key(
     mock_oa.assert_called_once_with("Paper Auto")
 
 
+@patch("nexus.bib_enricher_openalex.enrich_by_doi")
+@patch("nexus.bib_enricher_openalex.enrich")
+@patch("nexus.db.make_t3")
+def test_enrich_openalex_prefers_doi_over_title_search(
+    mock_t3_factory: MagicMock,
+    mock_title: MagicMock,
+    mock_doi: MagicMock,
+) -> None:
+    """nexus-sbzr: when chunk text contains a DOI, the enricher must
+    look up by DOI directly and skip the fuzzy title search. This
+    prevents 'mfaz.pdf' from matching a 1996 Developmental Brain
+    Research paper at OpenAlex."""
+    mock_doi.return_value = {
+        "year": 2024, "venue": "VLDB", "authors": "Author X",
+        "citation_count": 7, "openalex_id": "WDOI",
+        "doi": "10.1145/X.Y", "references": [],
+    }
+    mock_col = MagicMock()
+    mock_col.get.side_effect = [
+        # 1: chunk scan
+        {"ids": ["c1"], "metadatas": [{
+            "title": "mfaz", "source_path": "/papers/mfaz.pdf",
+        }]},
+        # 2: first chunk text fetch (for ID extraction)
+        {"ids": ["c1"],
+         "documents": ["Title. Authors A, B.\nDOI: 10.1145/X.Y\nAbstract..."],
+         "metadatas": [{"title": "mfaz", "source_path": "/papers/mfaz.pdf"}]},
+        # 3: chunk-merge fetch
+        {"ids": ["c1"], "metadatas": [{
+            "title": "mfaz", "source_path": "/papers/mfaz.pdf",
+        }]},
+    ]
+    mock_db = MagicMock()
+    mock_db.get_or_create_collection.return_value = mock_col
+    mock_t3_factory.return_value = mock_db
+
+    runner = CliRunner()
+    result = runner.invoke(
+        enrich,
+        ["bib", "knowledge__test", "--delay", "0", "--source", "openalex"],
+    )
+    assert result.exit_code == 0, result.output
+    mock_doi.assert_called_once_with("10.1145/X.Y")
+    mock_title.assert_not_called()
+    assert "via DOI/arXiv ID" in result.output
+
+
+@patch("nexus.bib_enricher_openalex.enrich_by_arxiv_id")
+@patch("nexus.bib_enricher_openalex.enrich_by_doi")
+@patch("nexus.bib_enricher_openalex.enrich")
+@patch("nexus.db.make_t3")
+def test_enrich_openalex_falls_back_to_arxiv_when_no_doi(
+    mock_t3_factory: MagicMock,
+    mock_title: MagicMock,
+    mock_doi: MagicMock,
+    mock_arxiv: MagicMock,
+) -> None:
+    """No DOI in text + arXiv-shaped filename -> by-arXiv lookup,
+    not title search."""
+    mock_doi.return_value = {}
+    mock_arxiv.return_value = {
+        "year": 2017, "venue": "NeurIPS", "authors": "V et al.",
+        "citation_count": 90000, "openalex_id": "WARX",
+        "doi": "", "references": [],
+    }
+    mock_col = MagicMock()
+    mock_col.get.side_effect = [
+        {"ids": ["c1"], "metadatas": [{
+            "title": "Attention", "source_path": "/papers/1706.03762.pdf",
+        }]},
+        {"ids": ["c1"], "documents": ["Abstract, no DOI here."],
+         "metadatas": [{"title": "Attention", "source_path": "/papers/1706.03762.pdf"}]},
+        {"ids": ["c1"], "metadatas": [{
+            "title": "Attention", "source_path": "/papers/1706.03762.pdf",
+        }]},
+    ]
+    mock_db = MagicMock()
+    mock_db.get_or_create_collection.return_value = mock_col
+    mock_t3_factory.return_value = mock_db
+
+    runner = CliRunner()
+    result = runner.invoke(
+        enrich, ["bib", "knowledge__test", "--delay", "0", "--source", "openalex"],
+    )
+    assert result.exit_code == 0, result.output
+    mock_arxiv.assert_called_once_with("1706.03762")
+    mock_title.assert_not_called()
+    assert "via DOI/arXiv ID" in result.output
+
+
 @patch("nexus.db.make_t3")
 @patch("nexus.bib_enricher.enrich")
 @patch("nexus.bib_enricher_openalex.enrich")
