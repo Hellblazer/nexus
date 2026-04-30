@@ -251,12 +251,16 @@ Orphaned links are kept as historical record — they are not auto-deleted. Use 
 
 `Catalog.register()` and `Catalog.update()` enforce a register-time invariant: for `repo` owners with a `repo_root`, the entry's `source_uri` must resolve inside that root. A `file://` URI that lands outside the owner's tree raises a `ValueError` with both URIs in the message. This is the load-bearing guard against the contamination class that produced ~6,500 mis-attributed rows in the wild: entries whose `source_uri` pointed at one project's tree but were attributed to a different project's owner, silently breaking aspect extraction.
 
+`Catalog.update()` runs the same check on every call, not just when the caller passes `source_uri` explicitly. The production hot path (the catalog hook in `indexer.py`) updates `head_hash`, `physical_collection`, `meta`, and `source_mtime` on re-index without touching `source_uri`; the guard still validates the carried-through value so an in-place row whose URI drifted out of the owner's tree cannot be silently re-anointed.
+
 The guard skips:
 
 - Curator owners (legitimately span sources: papers, mirrored docs, etc.).
 - Pre-RDR-060 repo owners with empty `repo_root` (back-compat).
 - Non-`file://` URIs (`chroma://`, `https://`, `x-devonthink-item://`). They have no filesystem identity to compare.
 - Empty `source_uri`. Synthesized records with no path identity.
+
+`nx catalog backfill` rebuilds catalog entries from T3 metadata after data recovery. Backfill goes through the same `register()` boundary as live indexing, so the guard fires on the disaster-recovery path as well: an `rdr__*` collection whose suffix matches a registered repo is attributed to that repo's owner (not a curator), and any source path outside the owner's `repo_root` is rejected.
 
 To detect or remediate pre-existing contamination see [`nx catalog audit-membership`](cli-reference.md#nx-catalog-audit-membership), including `--all-collections` for a single-shot health check across the entire catalog.
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from unittest.mock import MagicMock, patch
 
 import chromadb
@@ -1042,3 +1043,161 @@ class TestCrossProjectGuard:
             file_path=str(nested),
         )
         assert cat.resolve(doc) is not None
+
+
+class TestUpdateGuard:
+    """nexus-3e4s critique-followup C1 + S3.
+
+    Pre-fix the guard on ``update()`` only ran when the caller passed
+    ``source_uri`` explicitly. The production hot path (the catalog
+    hook in ``indexer.py``) calls update() with ``head_hash``,
+    ``physical_collection``, ``meta``, and ``source_mtime`` but never
+    ``source_uri``, so the guard was effectively unreachable from the
+    most-traveled code path.
+    """
+
+    @pytest.fixture
+    def cat_with_repo_owner(self, tmp_path):
+        d = tmp_path / "catalog"
+        d.mkdir()
+        cat = Catalog(d, d / ".catalog.db")
+        repo_root = tmp_path / "fake_repo"
+        repo_root.mkdir()
+        owner = cat.register_owner(
+            "fake-project", "repo",
+            repo_hash="abcd1234",
+            repo_root=str(repo_root),
+        )
+        return cat, owner, repo_root
+
+    def test_update_explicit_cross_project_source_uri_rejected(
+        self, cat_with_repo_owner, tmp_path,
+    ):
+        cat, owner, repo_root = cat_with_repo_owner
+        f = repo_root / "x.py"
+        f.touch()
+        doc = cat.register(
+            owner, "x.py", content_type="code", file_path=str(f),
+        )
+        bogus = "file://" + str(tmp_path / "elsewhere" / "x.py")
+        with pytest.raises(ValueError, match="cross-project"):
+            cat.update(doc, source_uri=bogus)
+
+    def test_update_with_only_head_hash_runs_guard_on_carried_uri(
+        self, cat_with_repo_owner,
+    ):
+        """C1 regression: the production hot path passes head_hash and
+        physical_collection — no source_uri, no file_path. Pre-fix this
+        skipped the guard entirely. Post-fix it must still validate the
+        carried-through source_uri so any in-place row whose URI drifted
+        cannot be silently re-anointed.
+        """
+        cat, owner, repo_root = cat_with_repo_owner
+        f = repo_root / "x.py"
+        f.touch()
+        doc = cat.register(
+            owner, "x.py", content_type="code", file_path=str(f),
+        )
+        # Sanity: clean source_uri carries through without raising.
+        cat.update(
+            doc, head_hash="newhash",
+            physical_collection="code__fake",
+            meta={"content_hash": "abc"},
+        )
+        entry = cat.resolve(doc)
+        assert entry is not None
+        assert entry.head_hash == "newhash"
+        assert "fake_repo" in entry.source_uri
+
+    def test_update_blocks_carry_through_of_pre_existing_contamination(
+        self, cat_with_repo_owner, tmp_path,
+    ):
+        """C1: a row whose source_uri is contaminated (from before the
+        guard existed) must NOT be quietly carried forward by an
+        unrelated field update. The env override is the documented
+        escape hatch when remediation requires touching such rows.
+        """
+        cat, owner, _ = cat_with_repo_owner
+        # Inject a contaminated row by going around register().
+        contaminated_uri = "file://" + str(tmp_path / "wrong_project" / "x.py")
+        cat._db.execute(
+            "INSERT INTO documents "
+            "(tumbler, title, author, year, content_type, file_path, "
+            "corpus, physical_collection, chunk_count, head_hash, "
+            "indexed_at, metadata, source_mtime, source_uri) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                f"{owner}.999", "stowaway.py", "", 0, "code",
+                "wrong_project/stowaway.py", "code", "code__fake",
+                0, "", "2026-04-09T00:00:00+00:00", "{}", 0.0,
+                contaminated_uri,
+            ),
+        )
+        cat._db.commit()
+        with pytest.raises(ValueError, match="cross-project"):
+            cat.update(Tumbler.parse(f"{owner}.999"), head_hash="x")
+
+    def test_update_env_override_allows_cross_project(
+        self, cat_with_repo_owner, tmp_path, monkeypatch,
+    ):
+        cat, owner, repo_root = cat_with_repo_owner
+        f = repo_root / "x.py"
+        f.touch()
+        doc = cat.register(
+            owner, "x.py", content_type="code", file_path=str(f),
+        )
+        bogus = "file://" + str(tmp_path / "elsewhere" / "x.py")
+        monkeypatch.setenv("NEXUS_CATALOG_ALLOW_CROSS_PROJECT", "1")
+        cat.update(doc, source_uri=bogus)
+        entry = cat.resolve(doc)
+        assert entry is not None
+        assert entry.source_uri == bogus
+
+    def test_update_curator_owner_skips_guard(self, tmp_path):
+        d = tmp_path / "catalog"
+        d.mkdir()
+        cat = Catalog(d, d / ".catalog.db")
+        owner = cat.register_owner("hal-papers", "curator")
+        far = tmp_path / "anywhere" / "p.pdf"
+        far.parent.mkdir(parents=True)
+        far.touch()
+        doc = cat.register(
+            owner, "p", content_type="paper", file_path=str(far),
+        )
+        # Curator owners legitimately span sources — update with a
+        # totally different path is fine.
+        elsewhere = tmp_path / "elsewhere" / "p.pdf"
+        elsewhere.parent.mkdir()
+        elsewhere.touch()
+        cat.update(doc, source_uri="file://" + str(elsewhere))
+        entry = cat.resolve(doc)
+        assert entry is not None and "elsewhere" in entry.source_uri
+
+
+class TestOwnerRepoRootDefensive:
+    """nexus-3e4s S4: ``_owner_repo_root`` defensively absolute-paths."""
+
+    def test_relative_repo_root_returned_as_absolute(self, tmp_path, monkeypatch):
+        """A pre-RDR-060 owner with a relative ``repo_root`` would
+        otherwise let ``os.path.abspath`` inside ``_normalize_source_uri``
+        fall back to CWD-anchoring, silently reintroducing the bug.
+        """
+        d = tmp_path / "catalog"
+        d.mkdir()
+        cat = Catalog(d, d / ".catalog.db")
+        # Register normally then mutate the row to simulate legacy
+        # relative storage. register_owner refuses non-absolute
+        # repo_root, so we go around it.
+        owner = cat.register_owner(
+            "x", "repo", repo_hash="aaaa1111",
+            repo_root=str(tmp_path / "x"),
+        )
+        cat._db.execute(
+            "UPDATE owners SET repo_root = ? WHERE tumbler_prefix = ?",
+            ("relative/path", str(owner)),
+        )
+        cat._db.commit()
+        monkeypatch.chdir(tmp_path)
+        result = cat._owner_repo_root(owner)
+        assert os.path.isabs(result)
+        assert result == os.path.abspath("relative/path")

@@ -493,6 +493,8 @@ Detect cross-project source_uri contamination in a single physical_collection. C
 
 `--all-collections` runs the audit across every physical_collection in the catalog and emits one sorted summary (contaminated first). Use it as a daily or post-release health check to confirm the register-time guard (see [Catalog](catalog.md#cross-project-source_uri-guard-nexus-3e4s)) is preventing new contamination. The sweep is read-only. `--purge-non-canonical` and `--canonical-home` are per-collection contexts and raise a usage error when combined with `--all-collections`.
 
+The sweep is owner-aware: when a collection is owned by exactly one `repo` owner with a known `repo_root`, the dominant source_uri home is cross-checked against that root. A single-home collection whose home does not match the owner's tree is flagged as 100% contaminated with a `[wrong-home]` tag (text mode) and `wrong_home: true` field (JSON mode). Without the owner check, single-home wrong-home collections appear "clean" by majority vote, which was the failure mode that masked ~4,200 wrong-home rows in `code__ART-...` pre-fix.
+
 | Flag | Description |
 |------|-------------|
 | `COLLECTION` (positional) | Physical collection to audit (e.g. `rdr__ART-8c2e74c0`). Required unless `--all-collections` is set |
