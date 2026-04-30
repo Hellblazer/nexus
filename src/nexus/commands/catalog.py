@@ -538,8 +538,15 @@ def update_cmd(
             entries = cat.find(search_query)
         if not entries:
             raise click.ClickException("No entries matched")
-        for entry in entries:
-            cat.update(entry.tumbler, **fields)
+        try:
+            for entry in entries:
+                cat.update(entry.tumbler, **fields)
+        except ValueError as exc:
+            # nexus-fb6x: source_uri / file_path validation can raise
+            # ValueError (unknown scheme, malformed URI, owner-root
+            # mismatch). Re-raise as ClickException so the operator
+            # sees a clean error line instead of a stack trace.
+            raise click.ClickException(str(exc)) from exc
         click.echo(f"Updated {len(entries)} entries")
         return
 
@@ -547,7 +554,11 @@ def update_cmd(
     if not tumbler:
         raise click.ClickException("Provide a tumbler/title or use --owner/--search for batch")
     t = _resolve_tumbler(cat, tumbler)
-    cat.update(t, **fields)
+    try:
+        cat.update(t, **fields)
+    except ValueError as exc:
+        # nexus-fb6x: same UX-cleanup as the batch path.
+        raise click.ClickException(str(exc)) from exc
     click.echo(f"Updated: {t}")
 
 
