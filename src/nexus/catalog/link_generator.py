@@ -22,22 +22,37 @@ def _all_entries(cat: Catalog) -> list[CatalogEntry]:
 
 
 def generate_citation_links(cat: Catalog) -> int:
-    """Auto-create 'cites' links via bib_semantic_scholar_id cross-matching.
+    """Auto-create 'cites' links via bib ID cross-matching.
 
     Uses metadata already on catalog entries — no API calls.
     created_by='bib_enricher' per RF-8.
+
+    nexus-57mk: indexes both ``bib_semantic_scholar_id`` (Semantic
+    Scholar paper IDs) and ``bib_openalex_id`` (OpenAlex W-ids) so a
+    catalog enriched by either backend produces cite links. The
+    ``references`` list on each entry contains IDs from whichever
+    backend enriched that entry; matching is exact-string against the
+    same ID space, so cross-backend references (a paper enriched by
+    OpenAlex referencing one enriched only by S2) won't match — that's
+    the correct conservative behavior, since the two ID spaces are
+    distinct and we don't have a DOI bridge yet.
     """
     entries = _all_entries(cat)
 
-    # Build index: SS ID → tumbler
+    # Build index: bib ID -> tumbler. Both backends' IDs share one map
+    # because their ID spaces don't collide (S2 paperIds are 40-hex
+    # SHA-shaped strings; OpenAlex IDs start with 'W' followed by
+    # digits). A collision would only happen if a future backend
+    # introduced overlapping namespacing.
     id_to_tumbler: dict[str, Tumbler] = {}
     entries_with_refs: list[tuple[Tumbler, list[str]]] = []
 
     for entry in entries:
         meta = entry.meta or {}
-        ss_id = meta.get("bib_semantic_scholar_id", "")
-        if ss_id:
-            id_to_tumbler[ss_id] = entry.tumbler
+        for id_field in ("bib_semantic_scholar_id", "bib_openalex_id"):
+            bib_id = meta.get(id_field, "")
+            if bib_id:
+                id_to_tumbler[bib_id] = entry.tumbler
         refs = meta.get("references", [])
         if refs:
             entries_with_refs.append((entry.tumbler, refs))

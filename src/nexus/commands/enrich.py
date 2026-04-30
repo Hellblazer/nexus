@@ -44,7 +44,7 @@ def enrich() -> None:
     default=0.5,
     type=float,
     show_default=True,
-    help="Delay in seconds between Semantic Scholar API calls.",
+    help="Delay in seconds between API calls (per backend).",
 )
 @click.option(
     "--limit",
@@ -52,20 +52,40 @@ def enrich() -> None:
     type=int,
     help="Maximum number of titles to enrich (0 = unlimited).",
 )
-def enrich_bib(collection: str, delay: float, limit: int) -> None:
+@click.option(
+    "--source",
+    type=click.Choice(["auto", "s2", "openalex"], case_sensitive=False),
+    default="auto",
+    show_default=True,
+    help=(
+        "Bibliographic backend. ``s2`` queries Semantic Scholar "
+        "(needs S2_API_KEY env for higher rate limits; corporate or "
+        "academic email required for key issuance). ``openalex`` "
+        "queries OpenAlex (no key; set OPENALEX_MAILTO for the polite "
+        "pool). ``auto`` picks ``s2`` when S2_API_KEY is set, else "
+        "``openalex``."
+    ),
+)
+def enrich_bib(
+    collection: str, delay: float, limit: int, source: str,
+) -> None:
     """Backfill bibliographic metadata for chunks in COLLECTION.
 
-    Queries Semantic Scholar for each unique source title found in the
+    Queries the selected backend for each unique source title in the
     collection and writes bib_year, bib_venue, bib_authors,
-    bib_citation_count, and bib_semantic_scholar_id back to every
-    chunk with that title.
+    bib_citation_count, and a backend-specific ID
+    (bib_semantic_scholar_id or bib_openalex_id) back to every chunk
+    with that title. nexus-57mk added the OpenAlex backend so users
+    without a Semantic Scholar API key can still enrich.
 
-    Already-enriched chunks (bib_semantic_scholar_id is non-empty) are
-    skipped — the command is idempotent.
+    Already-enriched chunks (the backend's ID field is non-empty) are
+    skipped — the command is idempotent per backend.
     """
-    from nexus.bib_enricher import enrich as bib_enrich
     from nexus.db import make_t3
     from nexus.retry import _chroma_with_retry
+
+    backend, bib_enrich, id_field = _resolve_bib_backend(source)
+    click.echo(f"Backend: {backend} (id field: {id_field})")
 
     db = make_t3()
     col = db.get_or_create_collection(collection)
@@ -86,7 +106,7 @@ def enrich_bib(collection: str, delay: float, limit: int) -> None:
         batch_meta = batch.get("metadatas", [])
         total_chunks += len(batch_ids)
         for chunk_id, meta in zip(batch_ids, batch_meta):
-            if meta.get("bib_semantic_scholar_id", ""):
+            if meta.get(id_field, ""):
                 already_enriched += 1
                 continue
             title = meta.get("title", "") or ""
@@ -142,7 +162,17 @@ def enrich_bib(collection: str, delay: float, limit: int) -> None:
                 merged["bib_venue"] = bib.get("venue", "")
                 merged["bib_authors"] = bib.get("authors", "")
                 merged["bib_citation_count"] = bib.get("citation_count", 0)
-                merged["bib_semantic_scholar_id"] = bib.get("semantic_scholar_id", "")
+                # nexus-57mk: write the backend's native ID so re-runs
+                # against the same backend dedupe correctly. The
+                # citation-link generator matches against either field.
+                if backend == "openalex":
+                    merged["bib_openalex_id"] = bib.get("openalex_id", "")
+                    if bib.get("doi"):
+                        merged["bib_doi"] = bib.get("doi", "")
+                else:
+                    merged["bib_semantic_scholar_id"] = bib.get(
+                        "semantic_scholar_id", "",
+                    )
                 updated_ids.append(cid)
                 updated_meta.append(merged)
 
@@ -163,11 +193,15 @@ def enrich_bib(collection: str, delay: float, limit: int) -> None:
                 year=bib.get("year"),
                 venue=bib.get("venue"),
             )
-            _catalog_enrich_hook(title=title, bib_meta=bib, collection_name=collection)
+            _catalog_enrich_hook(
+                title=title, bib_meta=bib,
+                collection_name=collection, backend=backend,
+            )
 
+    backend_label = "Semantic Scholar" if backend == "s2" else "OpenAlex"
     click.echo(
         f"Done: enriched {enriched_chunks} chunks across {enriched_titles} titles; "
-        f"{skipped_titles} titles had no Semantic Scholar match."
+        f"{skipped_titles} titles had no {backend_label} match."
     )
 
     # Auto-generate citation links if catalog is initialized
@@ -188,8 +222,43 @@ def enrich_bib(collection: str, delay: float, limit: int) -> None:
             _log.debug("auto_citation_links_failed", exc_info=True)
 
 
-def _catalog_enrich_hook(title: str, bib_meta: dict, collection_name: str = "") -> None:
-    """Update catalog entry with bib metadata. Silently skipped if absent."""
+def _resolve_bib_backend(source: str) -> tuple[str, callable, str]:
+    """nexus-57mk: pick the bib enricher backend.
+
+    Returns ``(backend_name, enrich_callable, chunk_id_field_name)``.
+    ``auto`` defaults to ``s2`` when ``S2_API_KEY`` is set, else
+    ``openalex``.
+    """
+    import os as _os
+
+    chosen = source.lower()
+    if chosen == "auto":
+        chosen = "s2" if _os.environ.get("S2_API_KEY") else "openalex"
+
+    if chosen == "openalex":
+        from nexus.bib_enricher_openalex import enrich as _openalex_enrich
+        return "openalex", _openalex_enrich, "bib_openalex_id"
+    if chosen == "s2":
+        from nexus.bib_enricher import enrich as _s2_enrich
+        return "s2", _s2_enrich, "bib_semantic_scholar_id"
+    raise click.UsageError(
+        f"unknown bib source {source!r}; expected one of auto/s2/openalex"
+    )
+
+
+def _catalog_enrich_hook(
+    title: str,
+    bib_meta: dict,
+    collection_name: str = "",
+    backend: str = "s2",
+) -> None:
+    """Update catalog entry with bib metadata. Silently skipped if absent.
+
+    nexus-57mk: ``backend`` selects which ID field is written into
+    catalog meta. The OpenAlex backend writes ``bib_openalex_id`` (and
+    ``bib_doi`` when present) so the citation-link generator can match
+    references in OpenAlex's W-id space.
+    """
     try:
         from nexus.catalog import Catalog
         from nexus.config import catalog_path
@@ -227,9 +296,16 @@ def _catalog_enrich_hook(title: str, bib_meta: dict, collection_name: str = "") 
         if entry:
             meta_update: dict = {
                 "venue": bib_meta.get("venue", ""),
-                "bib_semantic_scholar_id": bib_meta.get("semantic_scholar_id", ""),
                 "citation_count": bib_meta.get("citation_count", 0),
             }
+            if backend == "openalex":
+                meta_update["bib_openalex_id"] = bib_meta.get("openalex_id", "")
+                if bib_meta.get("doi"):
+                    meta_update["bib_doi"] = bib_meta.get("doi", "")
+            else:
+                meta_update["bib_semantic_scholar_id"] = bib_meta.get(
+                    "semantic_scholar_id", "",
+                )
             refs = bib_meta.get("references", [])
             if refs:
                 meta_update["references"] = refs
