@@ -252,3 +252,101 @@ def test_enrich_anonymous_when_mailto_missing(monkeypatch):
         enrich("Paper")
 
     assert "mailto" not in captured["params"]
+
+
+# ── nexus-sbzr: direct-by-id lookups ────────────────────────────────────────
+
+
+def test_enrich_by_doi_calls_correct_endpoint():
+    from nexus.bib_enricher_openalex import enrich_by_doi
+
+    captured: list[str] = []
+
+    def _capture(url, *args, **kwargs):
+        captured.append(url)
+        return _make_response(200, _VALID_WORK)
+
+    with patch("httpx.get", side_effect=_capture):
+        result = enrich_by_doi("10.5555/3295222.3295349")
+
+    assert captured == ["https://api.openalex.org/works/doi:10.5555/3295222.3295349"]
+    assert result["openalex_id"] == "W2741809807"
+    assert result["year"] == 2017
+    assert result["doi"] == "10.5555/3295222.3295349"
+
+
+def test_enrich_by_doi_strips_url_prefix():
+    """If caller passes ``https://doi.org/10.x/y`` the helper still
+    constructs the bare-DOI endpoint URL."""
+    from nexus.bib_enricher_openalex import enrich_by_doi
+
+    captured: list[str] = []
+
+    def _capture(url, *args, **kwargs):
+        captured.append(url)
+        return _make_response(200, _VALID_WORK)
+
+    with patch("httpx.get", side_effect=_capture):
+        enrich_by_doi("https://doi.org/10.5555/3295222.3295349")
+
+    assert "doi:10.5555/3295222.3295349" in captured[0]
+    assert "doi.org" not in captured[0]
+
+
+def test_enrich_by_doi_returns_empty_on_404():
+    from nexus.bib_enricher_openalex import enrich_by_doi
+
+    with patch("httpx.get", return_value=_make_response(404, {"error": "not found"})):
+        assert enrich_by_doi("10.x/missing") == {}
+
+
+def test_enrich_by_doi_empty_input_returns_empty():
+    from nexus.bib_enricher_openalex import enrich_by_doi
+
+    assert enrich_by_doi("") == {}
+    assert enrich_by_doi(None) == {}  # type: ignore[arg-type]
+
+
+def test_enrich_by_arxiv_id_calls_correct_endpoint():
+    from nexus.bib_enricher_openalex import enrich_by_arxiv_id
+
+    captured: list[str] = []
+
+    def _capture(url, *args, **kwargs):
+        captured.append(url)
+        return _make_response(200, _VALID_WORK)
+
+    with patch("httpx.get", side_effect=_capture):
+        result = enrich_by_arxiv_id("2503.07641")
+
+    assert captured == ["https://api.openalex.org/works/arxiv:2503.07641"]
+    assert result["openalex_id"] == "W2741809807"
+
+
+def test_enrich_by_arxiv_id_returns_empty_on_404():
+    from nexus.bib_enricher_openalex import enrich_by_arxiv_id
+
+    with patch("httpx.get", return_value=_make_response(404, {})):
+        assert enrich_by_arxiv_id("9999.99999") == {}
+
+
+def test_enrich_by_arxiv_id_empty_input_returns_empty():
+    from nexus.bib_enricher_openalex import enrich_by_arxiv_id
+
+    assert enrich_by_arxiv_id("") == {}
+
+
+def test_direct_lookup_includes_mailto(monkeypatch):
+    from nexus.bib_enricher_openalex import enrich_by_doi
+
+    monkeypatch.setenv("OPENALEX_MAILTO", "test@example.com")
+    captured: dict = {}
+
+    def _capture(url, *args, **kwargs):
+        captured.update(kwargs)
+        return _make_response(200, _VALID_WORK)
+
+    with patch("httpx.get", side_effect=_capture):
+        enrich_by_doi("10.x/y")
+
+    assert captured["params"]["mailto"] == "test@example.com"

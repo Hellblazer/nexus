@@ -90,8 +90,11 @@ def enrich_bib(
     db = make_t3()
     col = db.get_or_create_collection(collection)
 
-    # Process incrementally: one batch at a time to bound memory usage.
+    # nexus-sbzr: also collect source_paths per title group so we can
+    # try DOI / arXiv-ID extraction from chunk text before falling
+    # through to fuzzy title search at the backend.
     title_to_ids: dict[str, list[str]] = {}
+    title_to_source_paths: dict[str, set[str]] = {}
     already_enriched = 0
     total_chunks = 0
     offset = 0
@@ -113,6 +116,9 @@ def enrich_bib(
             if not title:
                 continue
             title_to_ids.setdefault(title, []).append(chunk_id)
+            sp = meta.get("source_path", "") or ""
+            if sp:
+                title_to_source_paths.setdefault(title, set()).add(sp)
         if len(batch_ids) < 300:
             break
         offset += 300
@@ -136,12 +142,25 @@ def enrich_bib(
     enriched_titles = 0
     enriched_chunks = 0
     skipped_titles = 0
+    by_id_count = 0  # how many titles resolved via DOI / arXiv (nexus-sbzr)
 
     for i, (title, chunk_ids) in enumerate(titles_to_process):
         if i > 0:
             time.sleep(delay)
 
-        bib = bib_enrich(title)
+        bib = _resolve_bib_for_title(
+            title=title,
+            chunk_ids=chunk_ids,
+            source_paths=sorted(title_to_source_paths.get(title, set())),
+            col=col,
+            backend=backend,
+            bib_enrich=bib_enrich,
+        )
+        if bib.get("_resolved_via") in ("doi", "arxiv"):
+            by_id_count += 1
+            bib = {k: v for k, v in bib.items() if k != "_resolved_via"}
+        elif "_resolved_via" in bib:
+            bib = {k: v for k, v in bib.items() if k != "_resolved_via"}
         if not bib:
             skipped_titles += 1
             _log.debug("enrich_no_result", title=title)
@@ -208,8 +227,12 @@ def enrich_bib(
             )
 
     backend_label = "Semantic Scholar" if backend == "s2" else "OpenAlex"
+    via_id_note = (
+        f" ({by_id_count} via DOI/arXiv ID)" if by_id_count else ""
+    )
     click.echo(
-        f"Done: enriched {enriched_chunks} chunks across {enriched_titles} titles; "
+        f"Done: enriched {enriched_chunks} chunks across "
+        f"{enriched_titles} titles{via_id_note}; "
         f"{skipped_titles} titles had no {backend_label} match."
     )
 
@@ -229,6 +252,83 @@ def enrich_bib(
                     click.echo(f"Auto-generated {link_count} citation links in catalog.")
         except Exception:
             _log.debug("auto_citation_links_failed", exc_info=True)
+
+
+def _resolve_bib_for_title(
+    *,
+    title: str,
+    chunk_ids: list,
+    source_paths: list[str],
+    col,
+    backend: str,
+    bib_enrich,
+) -> dict:
+    """nexus-sbzr: DOI/arXiv-aware lookup with title fallback.
+
+    Tries identifiers in order:
+      1. DOI extracted from first chunk's body text -> openalex by-doi
+      2. arXiv ID from filename or first chunk text -> openalex by-arxiv
+      3. Title search at the backend (current behavior)
+
+    Returns the bib dict with a synthetic ``_resolved_via`` key
+    indicating which path produced the result (caller strips before
+    storage). Empty dict on miss across all three paths.
+
+    DOI/arXiv lookups are OpenAlex-only today; the S2 backend skips
+    straight to title search. If S2 ever adds direct-DOI lookup we
+    can extend the dispatcher.
+    """
+    if backend != "openalex":
+        bib = bib_enrich(title)
+        if bib:
+            bib["_resolved_via"] = "title"
+        return bib or {}
+
+    from nexus.bib_enricher_openalex import enrich_by_arxiv_id, enrich_by_doi
+    from nexus.bib_extractor import extract_identifiers
+    from nexus.retry import _chroma_with_retry
+
+    # Read first chunk text per source_path. One per title is enough
+    # in practice — papers rarely span multiple source_paths under
+    # one title — but try all if needed to find an identifier.
+    body_text = ""
+    filename = ""
+    if chunk_ids:
+        try:
+            head = _chroma_with_retry(
+                col.get, ids=chunk_ids[:1],
+                include=["documents", "metadatas"],
+            )
+            docs = head.get("documents") or []
+            metas = head.get("metadatas") or []
+            if docs and docs[0]:
+                body_text = docs[0][:8000]  # 8 KB enough for header/abstract
+            if metas and metas[0]:
+                filename = (metas[0] or {}).get("source_path", "")
+        except Exception as exc:
+            _log.debug("enrich_first_chunk_fetch_failed", title=title, error=str(exc))
+
+    # Filename fallback when chunk metadata didn't carry source_path.
+    if not filename and source_paths:
+        filename = source_paths[0]
+
+    ids = extract_identifiers(filename=filename, body_text=body_text)
+
+    if ids["doi"]:
+        bib = enrich_by_doi(ids["doi"])
+        if bib:
+            bib["_resolved_via"] = "doi"
+            return bib
+    if ids["arxiv"]:
+        bib = enrich_by_arxiv_id(ids["arxiv"])
+        if bib:
+            bib["_resolved_via"] = "arxiv"
+            return bib
+
+    bib = bib_enrich(title)
+    if bib:
+        bib["_resolved_via"] = "title"
+    return bib or {}
 
 
 def _resolve_bib_backend(source: str) -> tuple[str, callable, str]:
