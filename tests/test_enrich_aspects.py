@@ -349,6 +349,136 @@ class TestDryRunSurfacesSourceUri:
         assert "/Users/test/elsewhere/" in result.output
 
 
+# ── nexus-v9az: relative-vs-absolute path mismatch ─────────────────────────
+
+
+class TestSourceUriResolutionForChromaLookup:
+    """nexus-v9az: when an entry's ``file_path`` is relative (the
+    nexus-3e4s anchor guard rewrites them at register time) but T3
+    chunks were ingested with absolute ``source_path`` metadata, the
+    chroma reader must build its lookup URI from the absolute path,
+    not the relative file_path.
+
+    Without the fix, every entry from a docs__<repo> collection that
+    went through ``--from-t3`` recovery skips with reason='empty'
+    (zero chunks match `where={source_path: <relative>}`). The
+    register-time ``source_uri`` already holds the correct absolute
+    URI; the fix uses that as the lookup key when present.
+
+    Live repro 2026-04-30: ``nx enrich aspects docs__ART-8c2e74c0
+    --dry-run`` reported 365/365 empty skips against a freshly-
+    recovered catalog. After the fix, those entries reach the chroma
+    reader with the absolute path that matches the chunks' source_path
+    field.
+    """
+
+    def test_dry_run_uses_source_uri_abspath_when_available(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from nexus.aspect_readers import ReadOk
+
+        _, _, cat = env
+        # Register an owner with a repo_root, then an entry whose
+        # file_path is relative (anchored). The source_uri at register
+        # time is the absolute file:// URI.
+        owner = cat.register_owner(
+            "myrepo", "repo", repo_hash="abcd1234",
+            repo_root="/Users/test/myrepo",
+        )
+        cat.register(
+            owner=owner, title="paper.pdf",
+            content_type="prose",
+            physical_collection="docs__myrepo-abcd1234",
+            file_path="docs/paper.pdf",
+        )
+
+        # Capture the URIs the reader is asked to read.
+        seen_uris: list[str] = []
+
+        def fake_read(uri, t3=None, **_kw):
+            seen_uris.append(uri)
+            return ReadOk(text="content", metadata={})
+
+        class _FakeT3:
+            pass
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", lambda: _FakeT3())
+        monkeypatch.setattr("nexus.aspect_readers.read_source", fake_read)
+
+        # docs__ collections route through scholarly-paper-v1; that
+        # config is registered in aspect_extractor's _REGISTRY for
+        # ``docs__`` prefix at runtime — patch select_config to return
+        # a stub if needed.
+        from nexus.aspect_extractor import ExtractorConfig, _REGISTRY
+        # Minimal config: parser_fn=None forces the LLM path that
+        # builds the chroma URI.
+        if "docs__" not in _REGISTRY:
+            _REGISTRY["docs__"] = ExtractorConfig(
+                extractor_name="test-stub",
+                model_version="test",
+                parser_fn=None,
+                prompt_template="",
+            )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            enrich, ["aspects", "docs__myrepo-abcd1234", "--dry-run"],
+        )
+        assert result.exit_code == 0, result.output
+        # The constructed URI must reference the ABSOLUTE path so the
+        # chroma reader's ``where={source_path: <abs>}`` lookup matches
+        # what the indexer actually wrote.
+        assert any("/Users/test/myrepo/docs/paper.pdf" in u for u in seen_uris), (
+            f"expected chroma URI with absolute source_path; got {seen_uris!r}"
+        )
+        # And explicitly NOT the bare relative path that doesn't match
+        # absolute-path chunk metadata.
+        assert not any(u.endswith("/docs/paper.pdf") and "/Users/" not in u for u in seen_uris), (
+            f"reader should not be queried with bare relative path; got {seen_uris!r}"
+        )
+
+    def test_dry_run_falls_back_to_file_path_when_source_uri_empty(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Curator-owned entries (no repo_root) and pre-fix legacy
+        rows have empty source_uri. The lookup must fall back to
+        file_path so existing flows aren't regressed."""
+        from nexus.aspect_readers import ReadOk
+
+        _, _, cat = env
+        # Curator owners legitimately span sources; no repo_root.
+        owner = cat.register_owner("papers", "curator")
+        # Register with absolute file_path (the legacy paper path).
+        cat.register(
+            owner=owner, title="legacy.pdf",
+            content_type="paper",
+            physical_collection="knowledge__delos",
+            file_path="/abs/path/to/legacy.pdf",
+        )
+
+        seen_uris: list[str] = []
+
+        def fake_read(uri, t3=None, **_kw):
+            seen_uris.append(uri)
+            return ReadOk(text="content", metadata={})
+
+        class _FakeT3:
+            pass
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", lambda: _FakeT3())
+        monkeypatch.setattr("nexus.aspect_readers.read_source", fake_read)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            enrich, ["aspects", "knowledge__delos", "--dry-run"],
+        )
+        assert result.exit_code == 0, result.output
+        # source_uri ends up as file:///abs/path/... at register time
+        # (curator owners get the abspath fallback in
+        # _normalize_source_uri); the lookup uses that.
+        assert any("/abs/path/to/legacy.pdf" in u for u in seen_uris), (
+            f"reader should be queried with the absolute path; got {seen_uris!r}"
+        )
+
+
 # ── default extraction path (no validate, no re-extract) ────────────────────
 
 
@@ -363,7 +493,7 @@ class TestDefaultExtraction:
 
         extracted_calls: list[str] = []
 
-        def fake_extract(content, source_path, collection):
+        def fake_extract(content, source_path, collection, **_kw):
             extracted_calls.append(source_path)
             return _make_record(source_path=source_path)
 
@@ -403,7 +533,7 @@ class TestDefaultExtraction:
             "/papers/ghost-empty.pdf",
         ])
 
-        def fake_extract(content, source_path, collection):
+        def fake_extract(content, source_path, collection, **_kw):
             if "good" in source_path:
                 return _make_record(source_path=source_path)
             if "ghost-stale" in source_path:
@@ -453,7 +583,7 @@ class TestDefaultExtraction:
         _, _, cat = env
         _register_entries(cat, ["/papers/p1.pdf"])
 
-        def fake_extract(content, source_path, collection):
+        def fake_extract(content, source_path, collection, **_kw):
             return _make_record(
                 source_path=source_path,
                 problem_formulation=None,
@@ -503,7 +633,7 @@ class TestReExtract:
 
         re_extracted: list[str] = []
 
-        def fake_extract(content, source_path, collection):
+        def fake_extract(content, source_path, collection, **_kw):
             re_extracted.append(source_path)
             return _make_record(source_path=source_path)
 
@@ -548,7 +678,7 @@ class TestValidateSample:
 
         monkeypatch.setattr(
             "nexus.aspect_extractor.extract_aspects",
-            lambda content, source_path, collection: _make_record(
+            lambda content, source_path, collection, **_kw: _make_record(
                 source_path=source_path,
             ),
         )
@@ -591,7 +721,7 @@ class TestValidateSample:
 
         monkeypatch.setattr(
             "nexus.aspect_extractor.extract_aspects",
-            lambda content, source_path, collection: _make_record(
+            lambda content, source_path, collection, **_kw: _make_record(
                 source_path=source_path,
             ),
         )
