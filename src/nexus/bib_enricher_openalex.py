@@ -131,15 +131,23 @@ def enrich_by_doi(doi: str) -> dict[str, Any]:
 
 
 def enrich_by_arxiv_id(arxiv_id: str) -> dict[str, Any]:
-    """Look up a paper by arXiv ID directly. ``arxiv_id`` is the bare
+    """Look up an arXiv paper directly. ``arxiv_id`` is the bare
     form (``2503.07641``, no version suffix).
 
-    OpenAlex indexes arXiv preprints by their ID under the
-    ``arxiv:`` namespace. Unambiguous when the ID is on the paper.
+    OpenAlex does NOT support an ``arxiv:`` external-ID lookup
+    natively. The convention (via Crossref) is to use arXiv's own
+    DOI namespace: ``10.48550/arXiv.<id>``. We construct that DOI
+    and reuse the by-DOI endpoint. Unambiguous when the paper is
+    in OpenAlex; returns ``{}`` on 404 (paper not indexed).
     """
     if not arxiv_id:
         return {}
-    return _direct_lookup(f"https://api.openalex.org/works/arxiv:{arxiv_id}")
+    # arXiv-DOI form: registered with Crossref since 2022 for all
+    # arXiv submissions. Older papers may not be retroactively
+    # registered, in which case OpenAlex 404s and we fall through
+    # to title search.
+    arxiv_doi = f"10.48550/arXiv.{arxiv_id}"
+    return _direct_lookup(f"https://api.openalex.org/works/doi:{arxiv_doi}")
 
 
 def enrich(title: str) -> dict[str, Any]:

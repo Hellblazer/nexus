@@ -79,6 +79,69 @@ class TestExtractDoi:
         assert extract_doi(text) == "10.1109/ABC.2024.012345"
 
 
+class TestDoiLabelPreference:
+    """nexus-liir: when a document contains both a labeled paper-DOI
+    AND bare reference-DOIs, the labeled form wins. This eliminates
+    the wrong-paper class where Docling's chunk order placed the
+    references section before the page-1 banner."""
+
+    def test_labeled_doi_wins_over_earlier_bare_doi(self) -> None:
+        from nexus.bib_extractor import extract_doi
+
+        # Reference list comes first (bare DOIs); paper banner with
+        # 'DOI:' label appears later. Pre-fix: returned the first
+        # bare DOI (a citation). Post-fix: returns the labeled one.
+        text = (
+            "References\n[1] 10.1145/PBFT.OLD\n[2] 10.1109/CITED.OTHER\n"
+            "----\n"
+            "DOI: 10.1145/THIS-PAPER\nAbstract: ..."
+        )
+        assert extract_doi(text) == "10.1145/THIS-PAPER"
+
+    def test_doi_org_url_label_wins(self) -> None:
+        from nexus.bib_extractor import extract_doi
+
+        text = (
+            "[3] cites 10.1145/CITATION\n"
+            "Available at https://doi.org/10.4230/LIPIcs.OPODIS.2015.7"
+        )
+        assert extract_doi(text) == "10.4230/LIPIcs.OPODIS.2015.7"
+
+    def test_dx_doi_org_url_label_wins(self) -> None:
+        """Older papers use the dx.doi.org domain. Same preference."""
+        from nexus.bib_extractor import extract_doi
+
+        text = "ref 10.1/old\nhttp://dx.doi.org/10.1145/NEW.PAPER"
+        assert extract_doi(text) == "10.1145/NEW.PAPER"
+
+    def test_falls_back_to_bare_when_no_label(self) -> None:
+        """No labeled DOI in text: keep the original behavior of
+        returning the first bare DOI. Covers older papers that don't
+        print 'DOI:' explicitly on page 1."""
+        from nexus.bib_extractor import extract_doi
+
+        text = "Authors: A, B, C. 10.1145/BARE.DOI\n\nAbstract..."
+        assert extract_doi(text) == "10.1145/BARE.DOI"
+
+    def test_first_labeled_doi_wins_when_multiple(self) -> None:
+        """Some papers print the DOI twice (header + footer). Take
+        the first labeled occurrence."""
+        from nexus.bib_extractor import extract_doi
+
+        text = (
+            "Header DOI: 10.1145/FIRST\n"
+            "...content...\n"
+            "Footer doi: 10.1145/SECOND"
+        )
+        assert extract_doi(text) == "10.1145/FIRST"
+
+    def test_preserves_strip_trailing_punct_with_label(self) -> None:
+        from nexus.bib_extractor import extract_doi
+
+        text = "DOI: 10.1145/X.Y.Z, ..."
+        assert extract_doi(text) == "10.1145/X.Y.Z"
+
+
 # ── arXiv ID extraction ─────────────────────────────────────────────────────
 
 
