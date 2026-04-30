@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.21.1] - 2026-04-30
+
+Hotfix release. Closes the citation-DOI poisoning class surfaced in the v4.21.0 live shakeout (nexus-yy1m).
+
+### Fixed
+
+- **OpenAlex bib enrichment now validates returned title against the source title** (PR #402, nexus-yy1m). The DOI / arXiv-aware lookup added in 4.21.0 trusted whatever identifier showed up in the document body, but academic papers have full reference lists with DOIs that belong to OTHER papers. v4.21.0 shakeout caught this on a CacheRAG preprint: a citation DOI (`10.1145/3742872`) was extracted from the references section, looked up against OpenAlex, and stamped a foreign embedded-systems proceedings paper's metadata across all 174 chunks. The OpenAlex `/works?search=` title-search path had the same failure mode (returns SOMETHING for almost every query, ranked by relevance, so an irrelevant paper wins when the real one is not indexed). Both lookup paths now post-validate the returned `display_name` against the source title via Jaccard token similarity (threshold 0.20 over substantive 4+-character non-stopword tokens). Low-similarity matches return `{}` and emit a structured `openalex_title_mismatch_rejected` / `openalex_title_search_rejected` warning so the operator can audit. The Semantic Scholar backend is unaffected by the citation-DOI path (does not do direct-by-DOI lookup) and unchanged here. New helper `nexus.bib_enricher_openalex._titles_compatible(source, returned)` is exposed for callers that want to apply the same gate elsewhere.
+
 ## [4.21.0] - 2026-04-30
 
 Minor release. Bib enrichment gains an OpenAlex backend with DOI / arXiv-aware lookup; aspects acquire first-class read verbs; the PDF indexer surfaces silent zero-chunk failures with actionable error messages instead of reporting success on zero records.

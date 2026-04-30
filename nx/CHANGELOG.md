@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.21.1] - 2026-04-30
+
+Plugin version aligned with conexus 4.21.1. Hotfix for the OpenAlex bib enricher citation-DOI poisoning surfaced in v4.21.0 live shakeout (nexus-yy1m). Both DOI / arXiv direct lookup and title-search now validate the returned title against the source title; low-similarity matches return empty (operator audits via the `openalex_title_*_rejected` warnings) instead of stamping a foreign paper's metadata. See root `CHANGELOG.md` for the failure-mode description.
+
 ## [4.21.0] - 2026-04-30
 
 Plugin version aligned with conexus 4.21.0. Bib enrichment gains an OpenAlex backend with DOI / arXiv-aware lookup; aspects acquire first-class read verbs; the PDF indexer surfaces silent zero-chunk failures as actionable errors:
