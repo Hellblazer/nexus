@@ -214,9 +214,11 @@ nx dt index --selection --dry-run
 | `--smart-group <name>` | Run the smart group's saved query and index its results |
 | `--uuid <UUID>` | Index a single record; repeat for batch ingest |
 | `--database <name>` | Limit selectors to one DT library (default: every open library) |
-| `--collection <name>` | T3 collection override (e.g. `knowledge__papers`) |
-| `--corpus <name>` | Corpus name for `docs__` collection (default: `default`) |
+| `--collection <name>` | T3 collection override. Wins over the extension-based default (e.g. `--collection knowledge__delos`) |
+| `--corpus <name>` | Corpus name used to derive the default collection (default: `dt`). PDFs route to `knowledge__<corpus>-papers` (paper-shaped, aspect-eligible); markdown notes route to `docs__<corpus>` |
 | `--dry-run` | Print records that would be indexed; make no T3 writes |
+
+**Default routing by extension** (nexus-cvaw): `nx dt index --uuid X` without `--collection` picks the home based on file type. PDFs land in `knowledge__<corpus>-papers` so `nx enrich aspects` can extract structured fields via `scholarly-paper-v1`. Markdown notes land in `docs__<corpus>` (no aspect extraction; `docs__` is reserved for non-paper prose per nexus-z70w). Pre-nexus-cvaw both extensions defaulted to `docs__default`, which stranded paper PDFs.
 
 Multi-database default is the right behaviour for tags shared across
 libraries (a `nexus-test` tag in both `Inbox` and a project library
