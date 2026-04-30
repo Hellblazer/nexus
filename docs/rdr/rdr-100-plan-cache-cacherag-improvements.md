@@ -2,15 +2,35 @@
 title: "RDR-100: Plan-Cache Improvements Inspired by CacheRAG (Diversity, Floor, Dispatcher, Hierarchy)"
 id: RDR-100
 type: Architecture
-status: draft
+status: closed
+disposition: deferred
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-30
-related_issues: []
+closed_date: 2026-04-30
+related_issues: [nexus-l0yh]
 related_tests: []
 related: [RDR-079, RDR-080, RDR-091, RDR-092]
 ---
+
+## Closure Note (2026-04-30)
+
+This RDR is closed without action items for the four proposed phases. Empirical research (recorded above in Research Findings, T2: `nexus_rdr/100-research-1`) found that none of the proposed changes solve a problem the system is currently hitting:
+
+- MMR diversity: no near-duplicate clusters in the live plan library (49 unique strategies in 55 plans).
+- Deterministic floor: 0 zero-chunk runs in 73 samples. The 2 observed failures are operator-execution errors, not retrieval silence. The fix for those is small enough to be a bug, not an architecture (filed as `nexus-l0yh`).
+- Non-LLM dispatcher: 6.8% of runs hit the planner; 68/73 intents are redacted, so the classification corpus is unmeasurable.
+- Hierarchical Domain partition: 58% of plans live in `verb=research`, so partition would not deliver the targeted 3x speedup.
+
+The CacheRAG analysis still has documentary value: future contributors hitting the same idea can read this RDR and the research findings to see why we considered it and what scale thresholds would justify revisiting. Revisit triggers, in order of likelihood:
+
+- Plan library exceeds 200 plans → revisit Phase 1 (MMR).
+- Telemetry redaction loosens AND `nx_answer_runs` exceeds 500 unredacted entries → revisit Phase 3 (Dispatcher).
+- Per-verb bucket exceeds 300 plans → revisit Phase 4 (Hierarchy).
+- Phase 2's narrow scope (operator-error handling) is shipped via `nexus-l0yh` rather than as part of this RDR.
+
+
 
 # RDR-100: Plan-Cache Improvements Inspired by CacheRAG (Diversity, Floor, Dispatcher, Hierarchy)
 
