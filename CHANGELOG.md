@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.20.0] - 2026-04-29
+
+Minor release. Headline: closes the cross-project `source_uri` contamination class that produced ~6,500 mis-attributed catalog rows in the wild (nexus-3e4s), shipped alongside an audit-membership sweep tool and DEVONthink in-app install scripts.
+
+The contamination root cause was `_normalize_source_uri()` resolving relative `file_path` values against the process CWD instead of the owner's `repo_root`, so any `nx index <repo>` invoked from a foreign CWD wrote `source_uri` rows pointing at the foreign tree but attributed to the indexed repo's owner. The release-sandbox shakeout flow was the production trigger. The fix anchors relative paths on the owner's `repo_root`; a register-time guard catches anything that still slips through, including the disaster-recovery backfill path. `Catalog.update()` runs the same guard on every call (not just when `source_uri` is in fields), so the catalog hook's hot-path re-index calls now exercise the guard too. `nx catalog audit-membership --all-collections` provides a single-shot post-release health check; the sweep is owner-aware so single-home wrong-home collections cannot silently pass as "clean".
+
 ### Added
 
 - **`nx dt install-scripts`** (PR #380). Installs the bundled in-DEVONthink toolbar / menu AppleScript wrappers for `nx dt index` (selection, current group, knowledge selection) under `~/Library/Application Scripts/com.devon-technologies.think/Menu/`. Idempotent; skips files that already exist unless `--force` is passed.

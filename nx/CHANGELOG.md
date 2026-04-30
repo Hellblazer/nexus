@@ -6,6 +6,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.20.0] - 2026-04-29
+
+Plugin version aligned with conexus 4.20.0. Closes the cross-project `source_uri` contamination class (nexus-3e4s) and ships an audit-membership sweep tool plus DEVONthink in-app install scripts:
+
+- `nx catalog audit-membership <COLLECTION>` detects per-collection contamination; `--purge-non-canonical` (with `--canonical-home` override) deletes non-canonical entries after a confirmation prompt.
+- `nx catalog audit-membership --all-collections` sweeps every physical_collection in one read-only pass and emits a contamination summary, owner-aware so single-home wrong-home collections do not silently pass as clean.
+- Register-time and update-time guard against cross-project `source_uri` attribution; relative `file_path` values now anchor on the owning repo's `repo_root` instead of the process CWD. Backfill goes through the same guard.
+- `nx dt install-scripts` installs the bundled in-DEVONthink toolbar / menu AppleScript wrappers under `~/Library/Application Scripts/com.devon-technologies.think/Menu/`.
+- `NEXUS_CATALOG_ALLOW_CROSS_PROJECT=1` env var as the documented emergency-only escape hatch for the new guard.
+
+See root `CHANGELOG.md` for the full notes.
+
 ## [4.19.2] - 2026-04-29
 
 Plugin version aligned with conexus 4.19.2. Bundles six findings from a post-v4.19.1 audit plus the headline #377 fix:
