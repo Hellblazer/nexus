@@ -118,19 +118,31 @@ Owner          { owner_id PK (UUID7), name, owner_type, repo_root, repo_hash, cr
 Document       { doc_id PK (UUID7), owner_id FK, content_type, source_uri,
                  indexed_at_doc, source_mtime, alias_of FK, deleted_at }
 Collection     { coll_id PK, owner_id FK, content_type, embedding_model,
-                 model_version, name UNIQUE, created_at, superseded_by FK }
-Chunk          { chash PK, doc_id FK, coll_id FK, position, content_hash,
-                 indexed_at_chunk }
+                 model_version, name UNIQUE, created_at, superseded_by FK,
+                 legacy_grandfathered BOOL DEFAULT FALSE }
+Chunk          { chunk_id PK (Chroma's natural ID), doc_id FK, coll_id FK,
+                 chash, position, content_hash, indexed_at_chunk }
+                 # chash is INDEXED but NOT UNIQUE: two documents can hold
+                 # the same content (quoted abstracts, repeated boilerplate,
+                 # shared headers); each gets its own Chunk row pointing at
+                 # its own doc_id. Span resolution uses the chash index;
+                 # GC reference-counts chunks by doc_id FK.
 Link           { from_doc FK, to_doc FK, link_type, span_chash, creator,
                  created_at }
 Aspect         { doc_id FK, model_version, payload_json, extracted_at }
-Provenance     { chunk_chash FK, git_commit, git_branch, git_remote,
+Provenance     { chunk_id FK, git_commit, git_branch, git_remote,
                  source_agent, session_id }   # RDR-087-era data, denormalized
                                               # from chunk metadata into a
-                                              # separate projection
+                                              # separate projection. FKs the
+                                              # surrogate chunk_id, not chash,
+                                              # so two identical-content chunks
+                                              # in different docs keep distinct
+                                              # provenance.
 ```
 
-The critical change: `Chunk` foreign-keys `Document.doc_id`, not `source_path`. T3 chunk metadata stores only `{doc_id, coll_id, position, chash, content_hash}`. No `source_path`, no `title`, no `git_*` (those move to the `Provenance` projection above, which is rebuilt from the log if needed).
+The critical change: `Chunk` foreign-keys `Document.doc_id`, not `source_path`. T3 chunk metadata stores only `{chunk_id, doc_id, coll_id, position, chash, content_hash}`. No `source_path`, no `title`, no `git_*` (those move to the `Provenance` projection above, which is rebuilt from the log if needed).
+
+**Why `chunk_id` is PK rather than `chash`** (resolves substantive critique C1): the same passage of text can legitimately appear in two distinct documents (a quoted abstract in two papers; a shared changelog header). They produce identical `chash` values. Today's T3 stores them as independent Chroma records with distinct natural IDs. The greenfield `Chunk` schema preserves that: `chunk_id` is the Chroma-assigned natural ID and the PK; `chash` is a non-unique index that supports `chash:<hex>` span resolution (RDR-086) by returning the set of `chunk_id` values whose content hashes match. GC reference-counts chunks by `doc_id` FK; deleting one document leaves the other document's chunk intact even when the chash matches.
 
 ### Event log
 
@@ -141,13 +153,27 @@ OwnerRegistered     { owner_id, name, owner_type, repo_root, repo_hash, ts }
 CollectionCreated   { coll_id, owner_id, content_type, embedding_model,
                       model_version, name, ts }
 CollectionSuperseded{ old_coll_id, new_coll_id, reason, ts }
+                    # also used for legacy collection rename via
+                    # `nx catalog rename-collection` (Phase 6 grandfathering).
 DocumentRegistered  { doc_id, owner_id, content_type, source_uri, coll_id, ts }
 DocumentRenamed     { doc_id, new_source_uri, ts }
+                    # SAME-OWNER renames only. Cross-owner moves
+                    # (e.g. /git/ART/foo.md → /git/nexus/foo.md) MUST
+                    # use DocumentDeleted + DocumentRegistered because
+                    # the new location has a different owner_id and
+                    # the chunks must physically move to a collection
+                    # owned by the new project.
 DocumentAliased     { alias_doc_id, canonical_doc_id, ts }
 DocumentEnriched    { doc_id, model_version, payload, ts }
 DocumentDeleted     { doc_id, reason, ts }
-ChunkIndexed        { chash, doc_id, coll_id, position, content_hash, ts }
-ChunkOrphaned       { chash, reason, ts }
+ChunkIndexed        { chunk_id, chash, doc_id, coll_id, position,
+                      content_hash, ts }
+ChunkOrphaned       { chunk_id, reason, ts }
+                    # Emitted by `nx t3 gc` immediately before the
+                    # corresponding Chroma `delete()` call. NOT
+                    # operator-emittable directly; the GC verb is the
+                    # only emitter so the event log stays the truth
+                    # about which chunks exist in T3.
 LinkCreated         { from_doc, to_doc, link_type, span_chash, creator, ts }
 LinkDeleted         { link_id, ts }
 ```
@@ -194,7 +220,7 @@ No `source_path` in T3 metadata. No `title` per chunk (the document title lives 
 2. T3 batched fetch: `get(where={doc_id: {$in: [...]}})` returns chunks grouped by doc_id.
 3. Reassemble per doc; pass to extractor. No path-string match.
 
-**File rename**:
+**File rename (same owner)**:
 1. `mv old new` on disk.
 2. `DocumentRenamed(doc_id, new_source_uri)` event.
 3. Projector updates `documents.source_uri`.
@@ -202,10 +228,12 @@ No `source_path` in T3 metadata. No `title` per chunk (the document title lives 
 
 Today: re-index. Greenfield: one event.
 
+**File rename (cross-owner)**: a file moves from one project's tree to another (the recent ART/nexus content cleanup is exactly this). Cross-owner moves cannot use `DocumentRenamed` because the document's `owner_id` would change and the chunks would still live in the old owner's collection, violating the one-owner-per-collection invariant. Cross-owner moves emit `DocumentDeleted(old_doc_id)` followed by `DocumentRegistered(new_doc_id, new_owner_id, ...)` and re-embed into a collection owned by the new project. Chunks in the old collection GC normally via the orphan window. The new doc gets a fresh UUID7; the old doc_id is preserved in the event log for audit. Rationale: the chunks need to physically move to a different Chroma collection anyway, so the migration cost is the same as a re-index from scratch.
+
 **Re-index unchanged file** (idempotency):
 1. Compute `chash` per chunk.
-2. Catalog query: `SELECT doc_id FROM documents WHERE source_uri = ?`. If found, skip; else generate new `doc_id`.
-3. T3 query: `get(where={chash: X})` returns existing chunk if any. If found, skip the embedding cost; else `add(...)`.
+2. Catalog query: `SELECT doc_id FROM documents WHERE source_uri = ?`. If found, reuse the doc_id; else generate new UUID7.
+3. T3 query: `get(where={chash: X, doc_id: <this_doc>})` returns existing chunk for THIS document if any. If found, skip the embedding cost; else `add(chunk_id=..., metadata={chash, doc_id, ...})`. The `doc_id` filter is essential because chash is non-unique across documents (substantive critique C1): a chash hit for a different doc_id is not a dedup match, it is a coincidence.
 
 The dedup guard does not need `head_hash` on the catalog. It uses `source_uri` lookup for document identity (catalog-only) and `chash` lookup for chunk identity (T3-only). Each guard runs against the store that owns the field. No duplication.
 
@@ -228,33 +256,42 @@ T3 chunk metadata today carries `git_project_name`, `git_branch`, `git_commit_ha
 The greenfield design is not an alternate universe; it is a concrete migration path from the existing host catalog, executed once.
 
 **Phase 1: synthesize the event log from existing state.**
-- Walk the catalog `documents` table and emit one `DocumentRegistered` event per row, generating a fresh `doc_id` (UUID7).
-- Walk T3 chunks; emit one `ChunkIndexed` event per chunk, mapping `source_path` → newly-assigned `doc_id` via the catalog row's `source_uri` (or, where they disagree, the catalog's row wins for now since the cleanup just normalized it).
+- Walk the catalog `documents` table. For each row:
+  - **Live row** (`_deleted == False` AND `alias_of == ""`): emit `DocumentRegistered(doc_id, ...)` with a fresh UUID7.
+  - **Tombstoned row** (`_deleted == True`): emit `DocumentRegistered` (the document existed) followed by `DocumentDeleted(doc_id, reason="synthesized_from_tombstone")`. Without this explicit handling, the v: 0 projector path silently resurrects deleted documents because `_filter_fields(DocumentRecord, obj)` passes `_deleted: True` straight through to the dataclass and the projector has no tombstone awareness (resolves substantive critique C3).
+  - **Aliased row** (`alias_of != ""`): emit `DocumentRegistered(doc_id, ...)` for the alias, then `DocumentAliased(alias_doc_id, canonical_doc_id)`. Without this, the alias graph is silently flattened during synthesis.
+- Walk T3 chunks; emit one `ChunkIndexed` event per chunk, mapping `source_path` → newly-assigned `doc_id` via the catalog row's `source_uri`.
+  - **Empty-`source_uri` rows** (legacy paper rows, manually-registered documents that the cleanup intentionally left URI-less): match on catalog `title` instead via the same fallback `aspect_readers.py:CHROMA_IDENTITY_FIELD` uses today for `knowledge__*`. If neither `source_uri` nor `title` matches, emit `ChunkIndexed` with `doc_id=NULL` and a `_synthesized_orphan: true` tag so the doctor reports them rather than silently GC'ing them after the orphan window. Operator runs `nx catalog repair-orphan-chunks` to assign manually before Phase 2 enables the GC.
 - Synthesized events are tagged `_synthesized: true` so the doctor can distinguish them from native writes.
-- Output: a complete event log that reproduces the current catalog and T3 state.
+- Output: a complete event log that reproduces the current catalog and T3 state, including tombstones and aliases.
 
 **Phase 2: backfill T3 chunks with `doc_id` metadata.**
 - One-time `ChromaDB.update()` per chunk: add `doc_id` to metadata. Other fields stay (deprecation window).
 - Idempotent; can be re-run.
-- Live verification: every chunk's `doc_id` resolves in the catalog; every catalog row's chunks all carry the right `doc_id`.
+- Live verification: every chunk's `doc_id` resolves in the catalog; every catalog row's chunks all carry the right `doc_id`. Orphan chunks (the `_synthesized_orphan` set from Phase 1) are reported but not assigned; operator either repairs them or accepts they will GC after the orphan window.
 
 **Phase 3: ship the new write path.**
 - Indexer writes events to the log (new path). Projector projects to SQLite. T3 writes use `doc_id` metadata only on new chunks.
 - Old code paths (the `register()` / `update()` API on `Catalog`) become projector-internal only. External callers go through event-emitter helpers.
 - Old T3 metadata fields (`source_path`, `title`, `git_*`) are still written during deprecation, marked `__deprecated__` in the metadata schema, removed in Phase 5.
+- **Direct writes to the catalog SQLite outside the projector are prohibited from Phase 3 onward** (resolves substantive critique S3). The doctor's replay-equality signal is reliable only if the event log is the only write path. Incident-response repairs (the kind that used `cat._db.execute(...)` during nexus-3e4s cleanup) must go through new event-emitter helpers (`nx catalog repair <verb>`); existing repair scripts are rewritten or retired in this phase.
 
 **Phase 4: switch readers to projection-based queries.**
 - All call sites that read `entry.source_uri`, `entry.head_hash`, `entry.chunk_count` continue to work (the projection still has these fields).
 - Call sites that read T3 metadata directly (`source_path`, per-chunk `title`) migrate to use `doc_id` joins. Timeline: one minor release.
+- **`aspect_readers.py:CHROMA_IDENTITY_FIELD` is rewritten to `doc_id`-keyed dispatch** (resolves substantive critique C2). Pre-fix the dispatch maps `knowledge__* → ("source_path", "title")` and similar; Phase 5 removes both fields from T3 metadata and the dispatch would silently return empty for every document (the exact ART-lhk1 failure mode, structurally reproduced). Replacement: dispatch on `doc_id` for every collection prefix, and `_identity_fields_for()` returns `("doc_id",)` uniformly. Aspect extraction joins via `get(where={doc_id: {$in: [...]}})` grouped by doc_id, not by string match. Plumbing change: extract_aspects accepts a `doc_id_lookup` callable (catalog projection) and passes it to the chroma reader.
+- Phase 4 is incomplete until `aspect_readers.py`, `_identity_fields_for()`, and `extract_aspects` all join via `doc_id`. Test gate: `nx enrich aspects <coll> --dry-run` reports zero `(empty)` skips on a collection where every document has at least one chunk.
 
 **Phase 5: remove the deprecated fields.**
 - T3 metadata schema: remove `source_path`, per-chunk `title`, `git_*`, `corpus`, `store_type`, etc. New chunks written without them.
-- Backfill: T3 `update` to strip deprecated metadata (one-time, opt-in).
-- Catalog SQLite: drop `head_hash` (replaced by chash dedup), `chunk_count` (computed), file-scheme `source_uri` (still the projection of `DocumentRegistered`, but no longer mutable via `nx catalog update`). Non-file-scheme `source_uri` stays.
+- **`metadata_schema.py:ALLOWED_TOP_LEVEL` and `make_chunk_metadata()` factory updated to drop the deprecated keys.** Without this update, `validate()` continues to pass dicts carrying the removed fields and `make_chunk_metadata()` continues to emit them; the migration is incomplete. Phase 5 PR includes both the schema removal and the factory signature change.
+- Backfill: T3 `update` to strip deprecated metadata from existing chunks (one-time, opt-in via `nx t3 strip-deprecated-metadata --collection X`).
+- Catalog SQLite: drop `head_hash` (replaced by `(coll_id, chash)` lookup against the Chunk projection for register-time idempotency), `chunk_count` (computed via `SELECT COUNT(*) FROM chunks WHERE doc_id = ?`), file-scheme `source_uri` (still the projection of `DocumentRegistered`, but no longer mutable via `nx catalog update`). Non-file-scheme `source_uri` stays.
 
 **Phase 6: enforce invariants.**
 - `nx catalog doctor` becomes the canonical drift check. Cron-scheduled or pre-commit-gated, not operator-invoked.
-- Collection naming validation rejects non-conforming names at create time.
+- Collection naming validation rejects non-conforming names **at create time only**; existing legacy collections (`code__ART-8c2e74c0`, `docs__nexus-571b8edd`, `knowledge__knowledge`, `docs__default`, etc.) are grandfathered with `Collection.legacy_grandfathered = TRUE` (resolves substantive critique S1). Operators can opt into renaming via `nx catalog rename-collection <old> <new>`, which emits a `CollectionSuperseded` event and triggers a background Chroma re-create + re-embed job. Failing-loud at read time on legacy names is rejected as operationally hostile. The grandfathered set is enumerable (`nx catalog list --legacy`) and shrinkable over time but never mandatorily renamed.
+- **Default fallback collections (`docs__default`, `knowledge__knowledge`) are migrated, not deleted.** Phase 6 ships `nx catalog migrate-fallback --dry-run` that walks each fallback collection's documents and proposes a target collection per document (best guess: owner of the source path's repo, content_type from the doc). Operator reviews the proposal and applies it; per-document `DocumentRenamed` (same owner) or `DocumentDeleted + DocumentRegistered` (cross-owner) events execute the migration. Fallback collections are deprecated only after they go to zero rows, never silently nuked.
 - `cat.update()` for replaced fields raises `DeprecatedAPIError`.
 
 The migration is reversible through Phase 4. Phases 5 and 6 are the irreversible commitments and are gated on Phase 4 + doctor having run cleanly across all collections for one minor release.
@@ -284,6 +321,8 @@ The plan is six phases. Each phase is one or more PRs. Beads filed at acceptance
 - [ ] Land RDR-101 with this design.
 - [ ] Survey downstream callers of `entry.source_uri`, `entry.head_hash`, `entry.chunk_count`, `entry.title` across the codebase. Document which are read-only (safe through Phase 4) vs which mutate (need migration in Phase 3).
 - [ ] Survey direct T3 metadata access in plugins, MCP tools, and operator scripts. Document which fields are read.
+- [ ] **Field-by-field disposition audit.** Enumerate every key currently in `metadata_schema.py:ALLOWED_TOP_LEVEL` (~30 keys). For each, decide one of: stays on chunk (intrinsic chunk position), moves to `Document` projection (per-doc fact), moves to `Provenance` projection (git/session), moves to a new `Frecency` projection (heat/decay), removed entirely (cargo data). Specifically include: `frecency_score`, `tags`, `category`, `chunk_index`, `chunk_count`, `corpus`, `store_type`, `ttl_days`, `expires_at`, `section_type`, `section_title`, `embedded_at`, all `git_*` fields, and `bib_semantic_scholar_id`.
+- [ ] **`bib_semantic_scholar_id` migration plan.** This field is the load-bearing "this title was enriched" marker (`metadata_schema.py:80-81`). Its disposition determines whether `commands/enrich.py`'s skip logic queries the catalog (new home) or T3 (current home); pick one before Phase 3.
 - [ ] File a post-mortem under `docs/rdr/post-mortem/` for nexus-3e4s referencing this RDR as the systemic fix.
 - [ ] Resolve open questions §below.
 
@@ -313,24 +352,27 @@ The plan is six phases. Each phase is one or more PRs. Beads filed at acceptance
 ### Phase 4: Reader migration
 
 - [ ] Code audit: every call site that reads T3 chunk metadata directly. Migrate to `doc_id` joins.
-- [ ] Aspect extraction (`extract_aspects`, `_dry_run_predict_skips`) joins via `doc_id`, not `source_path`.
+- [ ] **`aspect_readers.py:CHROMA_IDENTITY_FIELD` rewritten to `doc_id`-keyed dispatch**; `_identity_fields_for()` returns `("doc_id",)` uniformly across collection prefixes (resolves substantive critique C2). Without this, Phase 5's removal of `source_path` and `title` from T3 metadata produces empty results for every aspect-extraction query, structurally reproducing the original ART-lhk1 failure.
+- [ ] Aspect extraction (`extract_aspects`, `_dry_run_predict_skips`) joins via `doc_id`, not `source_path`. Test gate: `nx enrich aspects <coll> --dry-run` reports zero `(empty)` skips.
 - [ ] Link audit (`nx catalog link-audit`), backfill verbs, doctor, all use the projection.
-- [ ] Plugin marketplace announcement: deprecation notice for direct T3 metadata access. One minor release.
+- [ ] **Plugin-marketplace telemetry shipped** (resolves substantive critique RF-5 dependency): counters at the T3 metadata read boundary (`direct_t3_metadata_read_total{field}`) and at the catalog projection boundary (`catalog_projection_read_total{field}`). The flip-default decision in Phase 5 depends on this telemetry showing zero direct-T3-metadata reads in the target field set.
+- [ ] Plugin marketplace announcement: deprecation notice for direct T3 metadata access. One minor release minimum, 30 days wall-clock minimum.
 
 ### Phase 5: Remove deprecated surface (irreversible)
 
-- [ ] Gate behind `[catalog].event_sourced = true` config flag. Default false for one minor release.
+- [ ] Gate behind `[catalog].event_sourced = true` config flag. Default false for one minor release minimum, 30 days wall-clock minimum.
 - [ ] T3 schema: remove `source_path`, per-chunk `title`, `git_*`, `corpus`, `store_type` from new chunks. Backfill verb (`nx t3 strip-deprecated-metadata`) for existing chunks; opt-in.
-- [ ] Catalog schema: drop `head_hash`, `chunk_count` columns; file-scheme `source_uri` becomes a projection-only field (read-only).
+- [ ] **`metadata_schema.py:ALLOWED_TOP_LEVEL` updated to drop the deprecated keys.** **`make_chunk_metadata()` factory signature updated** to no longer accept the dropped keys. Without these two updates the `validate()` guard continues to pass dicts carrying the removed fields and the factory continues to emit them; the migration is incomplete (resolves substantive critique observation O1).
+- [ ] Catalog schema: drop `head_hash`, `chunk_count` columns; file-scheme `source_uri` becomes a projection-only field (read-only). `register()` idempotency guard rewritten to query `(coll_id, chash, doc_id)` against the Chunk projection rather than `head_hash + title`.
 - [ ] `cat.update()` for any of the removed fields raises `DeprecatedAPIError`.
-- [ ] Flip default to `event_sourced = true` after one release with the flag enabled.
+- [ ] Flip default to `event_sourced = true` after one release with the flag enabled, gated on telemetry from Phase 4 confirming zero direct-T3-metadata reads.
 
 ### Phase 6: Enforcement
 
 - [ ] `nx catalog doctor` becomes part of the standard release shakedown; reported drift is a release blocker.
-- [ ] Collection naming validation rejects non-conforming collection names at create time.
-- [ ] Schema-encoded invariants (one owner per collection, one content_type, one embedding_model) enforced at write time.
-- [ ] Default fallback collections (`docs__default`, `knowledge__knowledge`) deprecated; explicit destinations required.
+- [ ] Collection naming validation rejects non-conforming collection names **at create time only**. Existing legacy collections grandfathered via `Collection.legacy_grandfathered = TRUE`; opt-in rename available via `nx catalog rename-collection <old> <new>` which emits `CollectionSuperseded` and triggers a Chroma re-create + re-embed in the background. Failing-loud at read time on legacy names is rejected as operationally hostile.
+- [ ] Schema-encoded invariants (one owner per collection, one content_type, one embedding_model) enforced at write time on new collections only.
+- [ ] **Fallback collection migration** (`docs__default`, `knowledge__knowledge`): `nx catalog migrate-fallback --dry-run` walks each fallback collection's documents and proposes a target collection per document. Operator reviews and applies; per-document `DocumentRenamed` (same owner) or `DocumentDeleted + DocumentRegistered` (cross-owner) events execute the migration. Fallback collections are deprecated only after they go to zero rows, never silently nuked.
 
 ## Out of Scope
 
@@ -345,7 +387,7 @@ The plan is six phases. Each phase is one or more PRs. Beads filed at acceptance
 
 ## Open Questions
 
-These five questions must be resolved before the RDR can move to gate. Each is a load-bearing design decision, not a tuning parameter.
+All five questions are RESOLVED. See §Resolved Open Questions above for the binding answers (RF-101-1 through RF-101-5). Full research bodies persisted to T2 as `nexus_rdr/101-research-{1..5}`. The original question text is retained below for historical context.
 
 1. **What identity scheme for `doc_id`?** Three candidates: (a) UUID7 (sortable, opaque, 16 bytes); (b) a content-derived hash of the canonical URI + creation timestamp (deterministic, surveyable); (c) keep tumblers as primary key with an internal sortable ID. Trade-offs: opacity vs reproducibility vs human-friendliness. Lean: UUID7 with tumbler addressing as a separate human-facing identity that resolves through the catalog.
 
