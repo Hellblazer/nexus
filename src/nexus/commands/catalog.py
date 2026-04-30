@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import click
@@ -1283,28 +1284,66 @@ def audit_membership_cmd(
 def _audit_membership_all(*, as_json: bool) -> None:
     """Sweep every physical_collection and emit a contamination summary.
 
-    nexus-3e4s Phase 3. Reads the catalog in a single pass and groups
-    rows by (collection, home) so each collection's home distribution
-    is computed in O(rows) total rather than one query per collection.
+    nexus-3e4s Phase 3 + critique-followup C2. Reads the catalog in a
+    single pass and groups rows by (collection, home). Owner context is
+    layered on top so single-home collections whose dominant home does
+    not match the owning ``repo``'s ``repo_root`` are flagged as 100%
+    contaminated rather than silently passing as "clean" — the failure
+    mode that masked ~4,200 wrong-home rows in ``code__ART-...``
+    pre-fix.
     """
     cat = _get_catalog()
     rows = cat._db.execute(
-        "SELECT physical_collection, source_uri FROM documents "
+        "SELECT physical_collection, source_uri, tumbler FROM documents "
         "WHERE physical_collection != ''",
     ).fetchall()
 
+    owner_rows = cat._db.execute(
+        "SELECT tumbler_prefix, owner_type, repo_root FROM owners",
+    ).fetchall()
+    owners_by_prefix: dict[str, dict[str, str]] = {
+        row[0]: {"owner_type": row[1] or "", "repo_root": row[2] or ""}
+        for row in owner_rows
+    }
+
     by_collection: dict[str, dict[str, int]] = {}
-    for collection, source_uri in rows:
+    collection_owners: dict[str, set[str]] = {}
+    for collection, source_uri, tumbler_str in rows:
         home = _source_uri_home_key(source_uri or "")
-        by_collection.setdefault(collection, {})[home] = (
-            by_collection.setdefault(collection, {}).get(home, 0) + 1
-        )
+        bucket = by_collection.setdefault(collection, {})
+        bucket[home] = bucket.get(home, 0) + 1
+        try:
+            owner_prefix = str(Tumbler.parse(tumbler_str).owner_address())
+            collection_owners.setdefault(collection, set()).add(owner_prefix)
+        except Exception:
+            pass
 
     records: list[dict] = []
     for collection, home_counts in by_collection.items():
         total = sum(home_counts.values())
         dominant = max(home_counts.items(), key=lambda kv: kv[1])[0]
         contaminated = total - home_counts[dominant]
+
+        # Owner-aware overlay (nexus-3e4s C2): when the collection is
+        # owned by exactly one ``repo`` owner with a known ``repo_root``,
+        # check that the dominant home matches the owner's tree. A
+        # mismatch flips the count to 100% — single-home + wrong-home
+        # is the worst failure mode and otherwise reads as "clean".
+        expected_root = ""
+        wrong_home = False
+        owner_prefixes = collection_owners.get(collection, set())
+        if len(owner_prefixes) == 1:
+            owner_info = owners_by_prefix.get(next(iter(owner_prefixes)))
+            if (
+                owner_info
+                and owner_info["owner_type"] == "repo"
+                and owner_info["repo_root"]
+            ):
+                expected_root = owner_info["repo_root"]
+                if not _home_matches_root(dominant, expected_root):
+                    contaminated = total
+                    wrong_home = True
+
         records.append({
             "collection": collection,
             "total_entries": total,
@@ -1312,6 +1351,8 @@ def _audit_membership_all(*, as_json: bool) -> None:
             "by_home": dict(home_counts),
             "dominant_home": dominant,
             "contaminated_entries": contaminated,
+            "expected_home": expected_root,
+            "wrong_home": wrong_home,
         })
 
     # Sort: contaminated count desc, then total desc, then name asc so
@@ -1349,11 +1390,15 @@ def _audit_membership_all(*, as_json: bool) -> None:
     for r in records:
         if r["contaminated_entries"] == 0:
             continue
+        wrong_tag = " [wrong-home]" if r["wrong_home"] else ""
+        expected_tag = (
+            f"  expected={r['expected_home']}" if r["expected_home"] else ""
+        )
         click.echo(
             f"  {r['contaminated_entries']:6d} of {r['total_entries']:6d}  "
             f"{r['collection']:40s}  "
             f"{r['distinct_homes']} homes  "
-            f"dominant={r['dominant_home']}",
+            f"dominant={r['dominant_home']}{expected_tag}{wrong_tag}",
         )
 
     if clean_count:
@@ -1366,6 +1411,22 @@ def _audit_membership_all(*, as_json: bool) -> None:
                 f"  {r['total_entries']:6d}  {r['collection']}  "
                 f"({r['dominant_home']})",
             )
+
+
+def _home_matches_root(home: str, repo_root: str) -> bool:
+    """Return True when ``home`` corresponds to the same project as ``repo_root``.
+
+    ``home`` is the 4-segment prefix returned by ``_source_uri_home_key``
+    for ``file://`` URIs; ``repo_root`` is the absolute path stored on
+    the owner. They match when one is a prefix of the other (the home
+    may be shallower than the root for nested repos, or deeper when the
+    root itself sits at a non-standard depth).
+    """
+    if not home or not repo_root:
+        return False
+    real_home = os.path.realpath(home)
+    real_root = os.path.realpath(repo_root)
+    return real_home.startswith(real_root) or real_root.startswith(real_home)
 
 
 def _source_uri_home_key(uri: str) -> str:
@@ -2145,7 +2206,6 @@ def _backfill_rdrs(cat: Catalog, t3: object, dry_run: bool) -> int:
 
     for col_info in rdr_cols:
         col_name = col_info["name"]
-        curator = _get_or_create_curator(cat, col_name.replace("rdr__", ""))
 
         try:
             col = t3.get_or_create_collection(col_name)
@@ -2164,23 +2224,48 @@ def _backfill_rdrs(cat: Catalog, t3: object, dry_run: bool) -> int:
                     break
                 offset += 200
 
-            # Derive repo root from registry for relativization (RDR-060)
+            # nexus-3e4s S1: prefer the repo owner whose hash matches
+            # the collection suffix, so backfill goes through the same
+            # register-time guard as live indexing. Fall back to a
+            # curator only when no registered repo owns this collection.
+            # Pre-fix this branch unconditionally created a curator,
+            # which made the guard skip and let backfill silently
+            # re-introduce the contamination class on disaster recovery.
             repo_root: Path | None = None
+            owner: Tumbler | None = None
             try:
                 import hashlib
 
-                from nexus.catalog.catalog import _default_registry_path, make_relative
+                from nexus.catalog.catalog import (
+                    _default_registry_path,
+                    make_relative,
+                )
                 from nexus.registry import RepoRegistry
 
                 reg_path = _default_registry_path()
                 if reg_path.exists():
                     for repo_path_str in RepoRegistry(reg_path).all_info():
-                        h = hashlib.sha256(repo_path_str.encode()).hexdigest()[:8]
+                        h = hashlib.sha256(
+                            repo_path_str.encode(),
+                        ).hexdigest()[:8]
                         if col_name.endswith(h):
                             repo_root = Path(repo_path_str)
+                            owner = cat.owner_for_repo(h)
                             break
             except Exception:
-                pass  # non-fatal — store as-is
+                _log.warning(
+                    "backfill_rdrs_repo_lookup_failed",
+                    col=col_name, exc_info=True,
+                )
+
+            if owner is None:
+                # Either no registry, no matching repo, or the owner
+                # has not yet been registered (backfill_repos runs first
+                # but the registry may have stale entries). Curator is
+                # the legitimate fallback for orphan rdr__* collections.
+                owner = _get_or_create_curator(
+                    cat, col_name.replace("rdr__", ""),
+                )
 
             for path, title in seen_paths.items():
                 if dry_run:
@@ -2188,10 +2273,13 @@ def _backfill_rdrs(cat: Catalog, t3: object, dry_run: bool) -> int:
                     count += 1
                     continue
                 fp = make_relative(path, repo_root) if repo_root else path
-                existing = [e for e in cat.by_owner(curator) if e.file_path in (path, fp)]
+                existing = [
+                    e for e in cat.by_owner(owner)
+                    if e.file_path in (path, fp)
+                ]
                 if not existing:
                     cat.register(
-                        owner=curator, title=title, content_type="rdr",
+                        owner=owner, title=title, content_type="rdr",
                         file_path=fp, physical_collection=col_name,
                     )
                     count += 1

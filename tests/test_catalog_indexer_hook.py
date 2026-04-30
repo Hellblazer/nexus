@@ -304,3 +304,55 @@ class TestRunHousekeeping:
         entry = cat.resolve(t)
         assert entry is not None  # not renamed, just incremented
         assert entry.meta.get("miss_count") == 1
+
+
+class TestCatalogHookForeignCwd:
+    """nexus-3e4s critique-followup S2.
+
+    The original contamination scenario was: ``nx index repo <REPO>``
+    invoked from a CWD outside ``<REPO>``. The catalog hook computes
+    ``rel_path = abs_path.relative_to(repo)`` and passes the relative
+    path to ``Catalog.register()``. Pre-fix, ``_normalize_source_uri``
+    applied ``os.path.abspath()`` against the process CWD instead of
+    the owner's ``repo_root``, producing ``source_uri`` rows pointing
+    at the foreign CWD's tree but attributed to ``<REPO>``'s owner.
+
+    This integration test drives the actual catalog hook (not just
+    ``Catalog.register()``) from a foreign CWD and asserts the
+    persisted ``source_uri`` is anchored on the indexed repo.
+    """
+
+    def test_hook_writes_correctly_attributed_uris_from_foreign_cwd(
+        self, tmp_path, monkeypatch,
+    ):
+        from nexus.indexer import _catalog_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        repo = tmp_path / "indexed_repo"
+        repo.mkdir()
+        src = repo / "src" / "main.py"
+        src.parent.mkdir(parents=True)
+        src.write_text("print('hello')")
+
+        # Move CWD to a totally unrelated directory — the smoking gun
+        # for the contamination class. Pre-fix this would write a
+        # source_uri pointing at the foreign tree.
+        foreign_cwd = tmp_path / "elsewhere"
+        foreign_cwd.mkdir()
+        monkeypatch.chdir(foreign_cwd)
+
+        _catalog_hook(
+            repo=repo, repo_name="indexed_repo", repo_hash="repo7777",
+            head_hash="aaa",
+            indexed_files=[(src, "code", "code__indexed_repo")],
+        )
+
+        owner = cat.owner_for_repo("repo7777")
+        entry = cat.by_file_path(owner, "src/main.py")
+        assert entry is not None
+        # source_uri must point inside the indexed repo, NOT inside
+        # the foreign CWD.
+        assert str(repo) in entry.source_uri
+        assert str(foreign_cwd) not in entry.source_uri

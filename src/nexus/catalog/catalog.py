@@ -658,9 +658,13 @@ class Catalog:
             "SELECT repo_root FROM owners WHERE tumbler_prefix = ?",
             (str(owner),),
         ).fetchone()
-        if not row:
+        if not row or not row[0]:
             return ""
-        return row[0] or ""
+        # nexus-3e4s S4: defensively absolute-path the stored value. A
+        # legacy relative repo_root (pre-RDR-060 migration artifact)
+        # would otherwise let _normalize_source_uri's os.path.abspath()
+        # fallback re-anchor on CWD, silently re-introducing the bug.
+        return os.path.abspath(row[0])
 
     def _check_source_uri_in_repo_root(
         self, owner: Tumbler, source_uri: str,
@@ -1300,21 +1304,26 @@ class Catalog:
                 merged_meta.update(fields["meta"])
                 fields = dict(fields, meta=merged_meta)
             rec_dict.update(fields)
-            # If a caller passes ``source_uri=...`` through ``fields``,
-            # validate it through the same boundary as register —
-            # malformed URIs are hard errors, not silent persistence.
-            # Anchor on the owner's repo_root so relative file_paths
-            # don't fall through to CWD-based abspath (nexus-3e4s).
-            if "source_uri" in fields:
+            # nexus-3e4s C1: always validate the final ``source_uri``,
+            # not just when the caller passes it explicitly. Pre-fix
+            # this block was gated on ``"source_uri" in fields`` and
+            # the production hot path (catalog hook calls update() with
+            # head_hash + physical_collection but no source_uri) never
+            # exercised the guard. Re-derive only when source_uri or
+            # file_path is being mutated; otherwise carry the existing
+            # source_uri through but still run the guard so any
+            # in-place row whose URI drifted out of the owner's tree
+            # cannot be silently extended.
+            owner_addr = entry.tumbler.owner_address()
+            owner_repo_root = self._owner_repo_root(owner_addr)
+            if "source_uri" in fields or "file_path" in fields:
                 rec_dict["source_uri"] = _normalize_source_uri(
                     rec_dict["source_uri"], rec_dict.get("file_path", ""),
-                    repo_root=self._owner_repo_root(entry.tumbler.owner_address()),
+                    repo_root=owner_repo_root,
                 )
-                # And re-run the cross-project guard so update() can't
-                # be used as a back door around register's check.
-                self._check_source_uri_in_repo_root(
-                    entry.tumbler.owner_address(), rec_dict["source_uri"],
-                )
+            self._check_source_uri_in_repo_root(
+                owner_addr, rec_dict["source_uri"],
+            )
             self._append_jsonl(self._documents_path, rec_dict)
             # Upsert SQLite
             self._db.execute(

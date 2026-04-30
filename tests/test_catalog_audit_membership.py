@@ -367,3 +367,134 @@ class TestAllCollections:
         result = runner.invoke(catalog, ["audit-membership"])
         assert result.exit_code != 0
         assert "collection" in result.output.lower()
+
+
+class TestAllCollectionsOwnerAware:
+    """nexus-3e4s critique-followup C2.
+
+    Pre-fix the sweep used dominant-home as its only signal, so a
+    collection where every row pointed at the wrong project (single
+    home, no internal disagreement) read as "clean" — the failure
+    mode that masked ~4,200 wrong-home rows in ``code__ART-...``.
+
+    Post-fix the sweep cross-references the owning repo's
+    ``repo_root``: a single-home collection whose dominant home does
+    NOT match the owner's tree is flagged as 100% contaminated and
+    tagged ``wrong_home=true`` in the JSON record.
+    """
+
+    def _seed_repo_owned_clean(self, cat: Catalog, tmp_path) -> str:
+        repo = tmp_path / "myrepo"
+        repo.mkdir()
+        owner = cat.register_owner(
+            "myrepo", "repo", repo_hash="repo0001",
+            repo_root=str(repo),
+        )
+        for i in range(4):
+            f = repo / f"x{i}.py"
+            f.touch()
+            cat.register(
+                owner, f"x{i}", content_type="code",
+                file_path=str(f),
+                physical_collection="code__myrepo-repo0001",
+            )
+        return "code__myrepo-repo0001"
+
+    def _seed_repo_owned_all_wrong_home(
+        self, cat: Catalog, tmp_path, monkeypatch,
+    ) -> str:
+        """Every row has source_uri pointing at the WRONG project,
+        attributed to the right repo owner. Single-home (all wrong),
+        which the pre-fix sweep silently treated as clean.
+
+        Uses the env override so the rows go through register() and
+        appear in BOTH JSONL and SQLite (a direct SQL insert would be
+        wiped by the catalog's consistency rebuild on the next read).
+        """
+        repo = tmp_path / "rightrepo"
+        repo.mkdir()
+        owner = cat.register_owner(
+            "rightrepo", "repo", repo_hash="repo0002",
+            repo_root=str(repo),
+        )
+        monkeypatch.setenv("NEXUS_CATALOG_ALLOW_CROSS_PROJECT", "1")
+        for i in range(3):
+            cat.register(
+                owner, f"f{i}", content_type="code",
+                file_path=f"f{i}.py",
+                physical_collection="code__rightrepo-repo0002",
+                source_uri=f"file:///wrong/project/f{i}.py",
+            )
+        monkeypatch.delenv("NEXUS_CATALOG_ALLOW_CROSS_PROJECT")
+        return "code__rightrepo-repo0002"
+
+    def test_sweep_flags_single_home_wrong_home_collection(
+        self, env: Catalog, tmp_path, monkeypatch,
+    ) -> None:
+        wrong_col = self._seed_repo_owned_all_wrong_home(env, tmp_path, monkeypatch)
+        runner = CliRunner()
+        result = runner.invoke(
+            catalog, ["audit-membership", "--all-collections", "--json"],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        rec = next(r for r in data["collections"] if r["collection"] == wrong_col)
+        assert rec["wrong_home"] is True
+        assert rec["contaminated_entries"] == rec["total_entries"] == 3
+        assert rec["expected_home"]
+        # The collection should appear in the contaminated bucket, not
+        # the clean one.
+        assert data["contaminated_count"] >= 1
+
+    def test_sweep_clean_when_dominant_matches_owner_repo_root(
+        self, env: Catalog, tmp_path,
+    ) -> None:
+        clean_col = self._seed_repo_owned_clean(env, tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(
+            catalog, ["audit-membership", "--all-collections", "--json"],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        rec = next(r for r in data["collections"] if r["collection"] == clean_col)
+        assert rec["wrong_home"] is False
+        assert rec["contaminated_entries"] == 0
+
+    def test_sweep_skips_owner_check_for_curator_collections(
+        self, env: Catalog,
+    ) -> None:
+        """Curator owners legitimately span sources — the wrong-home
+        check does not apply."""
+        owner = env.register_owner("hal-papers", "curator")
+        env.register(
+            owner, "p1", content_type="paper",
+            physical_collection="docs__hal_papers",
+            source_uri="file:///some/path/p1.pdf",
+        )
+        env.register(
+            owner, "p2", content_type="paper",
+            physical_collection="docs__hal_papers",
+            source_uri="file:///some/path/p2.pdf",
+        )
+        runner = CliRunner()
+        result = runner.invoke(
+            catalog, ["audit-membership", "--all-collections", "--json"],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        rec = next(
+            r for r in data["collections"]
+            if r["collection"] == "docs__hal_papers"
+        )
+        assert rec["wrong_home"] is False
+        assert rec["expected_home"] == ""
+
+    def test_sweep_text_output_marks_wrong_home(
+        self, env: Catalog, tmp_path, monkeypatch,
+    ) -> None:
+        self._seed_repo_owned_all_wrong_home(env, tmp_path, monkeypatch)
+        runner = CliRunner()
+        result = runner.invoke(catalog, ["audit-membership", "--all-collections"])
+        assert result.exit_code == 0, result.output
+        assert "wrong-home" in result.output
+        assert "expected=" in result.output
