@@ -123,7 +123,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-098](rdr-098-abstract-question-plan-template.md) | Abstract-Question Plan Template — BERTopic Communities as Cheap Substitute for GraphRAG Community Reports | Feature | Closed (implemented) | 2026-04-29 |
 | [RDR-099](rdr-099-devonthink-integration.md) | DEVONthink Integration — First-Class CLI Verbs for Selection-Based Ingest and Reverse Lookup | Feature | Accepted | 2026-04-29 |
 | [RDR-100](rdr-100-plan-cache-cacherag-improvements.md) | Plan-Cache Improvements Inspired by CacheRAG (Diversity, Floor, Dispatcher, Hierarchy) | Architecture | Closed (deferred) | 2026-04-30 |
-| [RDR-101](rdr-101-catalog-t3-metadata-design.md) | Catalog/T3 Metadata Field Ownership and Drift Elimination | Architecture | Draft | 2026-04-30 |
+| [RDR-101](rdr-101-catalog-t3-metadata-design.md) | Event-Sourced Catalog with Immutable Document Identity (Greenfield Catalog/T3 Architecture) | Architecture | Draft | 2026-04-30 |
 
 ---
 
