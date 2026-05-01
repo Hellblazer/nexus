@@ -595,6 +595,62 @@ class TestLegacyUpdateAliasOfColumn:
             "rec_dict['alias_of'] is not threaded through"
         )
 
+    def test_explicit_alias_of_in_es_fields_lands(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """RDR-101 Phase 3 follow-up C (nexus-o6aa.9.8): the
+        legacy-path coverage of the round-4 ``rec_dict['alias_of']``
+        threading fix did not have an ES-mode counterpart. Without
+        this test, a regression in the ES write path that silently
+        drops caller-supplied ``alias_of`` would not be caught.
+
+        Run the same scenario under ``NEXUS_EVENT_SOURCED=1`` so the
+        update emits a ``DocumentRegistered`` event AND projects to
+        SQLite. Both surfaces must reflect the explicit ``alias_of``.
+        """
+        monkeypatch.setenv("NEXUS_EVENT_SOURCED", "1")
+        monkeypatch.delenv("NEXUS_EVENT_LOG_SHADOW", raising=False)
+        d = tmp_path / "catalog"
+        d.mkdir()
+        cat = Catalog(d, d / ".catalog.db")
+        owner = cat.register_owner("nexus", "repo", repo_hash="abab")
+        a = cat.register(owner, "a.md", content_type="prose")
+        b = cat.register(owner, "b.md", content_type="prose")
+        cat.update(a, alias_of=str(b))
+
+        # Live SQLite (post-projection).
+        live_row = cat._db.execute(
+            "SELECT alias_of FROM documents WHERE tumbler = ?",
+            (str(a),),
+        ).fetchone()
+        assert live_row[0] == str(b), (
+            "ES update(t, alias_of='X') silently dropped the value — "
+            "rec_dict['alias_of'] is not threaded through to the "
+            "event payload OR the projection"
+        )
+
+        # Replay the event log into a fresh DB and assert the
+        # projection still carries the alias_of. This confirms the
+        # event payload itself (not just the live SQLite write)
+        # carries the value.
+        from nexus.catalog.event_log import EventLog
+        from nexus.catalog.projector import Projector
+        from nexus.catalog.catalog_db import CatalogDB
+
+        replay_db = CatalogDB(tmp_path / "replay.db")
+        try:
+            Projector(replay_db).apply_all(EventLog(d).replay())
+            replay_row = replay_db.execute(
+                "SELECT alias_of FROM documents WHERE tumbler = ?",
+                (str(a),),
+            ).fetchone()
+            assert replay_row[0] == str(b), (
+                "ES event log does not carry alias_of — replay produces "
+                "a projection with empty alias_of, breaking replay-equality"
+            )
+        finally:
+            replay_db.close()
+
 
 # ── Cached projector ─────────────────────────────────────────────────────
 

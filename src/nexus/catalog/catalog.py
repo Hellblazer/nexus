@@ -50,17 +50,46 @@ def _read_shadow_gate() -> bool:
     return val in ("1", "true", "yes", "on")
 
 
+_KNOWN_EVENT_SOURCED_VALUES: frozenset[str] = frozenset(
+    ("", "0", "1", "true", "false", "yes", "no", "on", "off"),
+)
+# Module-scoped sentinel — log the unrecognized-value warning at most
+# once per process so a tight loop reading the gate doesn't spam logs.
+_unrecognized_event_sourced_value_logged: set[str] = set()
+
+
 def _read_event_sourced_gate() -> bool:
     """Return True when the event-sourced write path is enabled.
 
     RDR-101 Phase 3 PR ζ: the default is ON. ``NEXUS_EVENT_SOURCED``
-    unset or set to any non-falsy value enables ES mode. Explicit
-    ``0`` / ``false`` / ``no`` / ``off`` opts back into the legacy
-    direct-write path.
+    unset or set to ``1`` / ``true`` / ``yes`` / ``on`` (or empty)
+    enables ES mode. Explicit ``0`` / ``false`` / ``no`` / ``off``
+    opts back into the legacy direct-write path.
+
+    RDR-101 Phase 3 follow-up C (nexus-o6aa.9.8): unrecognized values
+    (typos like ``ofg`` / ``nope`` / ``legacy``) silently activate ES
+    under the new default-ON semantics — pre-fix the gate flipped
+    from safe-by-default (only on for explicit truthy) to dangerous-
+    by-default. Log a structured warning the first time we see an
+    unrecognized value so an operator's typo is detectable.
     """
-    val = os.environ.get(_EVENT_SOURCED_ENV, "").strip().lower()
+    raw = os.environ.get(_EVENT_SOURCED_ENV, "")
+    val = raw.strip().lower()
     if val in ("0", "false", "no", "off"):
         return False
+    if val not in _KNOWN_EVENT_SOURCED_VALUES:
+        if raw not in _unrecognized_event_sourced_value_logged:
+            _unrecognized_event_sourced_value_logged.add(raw)
+            _log.warning(
+                "catalog_event_sourced_gate_unrecognized_value",
+                value=raw,
+                effective="ON",
+                note=(
+                    "NEXUS_EVENT_SOURCED carries an unrecognized value; "
+                    "treating as ON (default). Use 0/false/no/off to "
+                    "opt out, or 1/true/yes/on to make ES explicit."
+                ),
+            )
     return True
 
 
@@ -721,7 +750,14 @@ class Catalog:
                 return True
 
             from nexus.catalog import events as _ev
-            event_doc_count = 0
+            # Net document registrations: DocumentRegistered − DocumentDeleted.
+            # Can go negative (a dedupe-only event stream against a
+            # legacy catalog produces only DocumentDeleted), which the
+            # ``>= threshold`` check below relies on to fall through to
+            # legacy. RDR-101 Phase 3 follow-up C (nexus-o6aa.9.8):
+            # renamed from ``event_doc_count`` to make the negative
+            # values intentional rather than surprising.
+            net_registered = 0
             with self._events_path.open() as f:
                 for line in f:
                     line = line.strip()
@@ -733,9 +769,9 @@ class Catalog:
                         continue
                     t = obj.get("type")
                     if t == _ev.TYPE_DOCUMENT_REGISTERED:
-                        event_doc_count += 1
+                        net_registered += 1
                     elif t == _ev.TYPE_DOCUMENT_DELETED:
-                        event_doc_count -= 1
+                        net_registered -= 1
 
             # RDR-101 Phase 3 follow-up B (nexus-o6aa.9.7): floor the
             # threshold at 1. ``int(1 * 0.95) == 0`` and ``0 >= 0`` is
@@ -749,7 +785,7 @@ class Catalog:
             # log before ES rebuild is allowed at the smallest catalog
             # sizes.
             threshold = max(1, int(legacy_doc_count * 0.95))
-            return event_doc_count >= threshold
+            return net_registered >= threshold
         except Exception:
             # On any unexpected failure, refuse the event-sourced
             # rebuild (safer to fall through to legacy than to wipe).
