@@ -15,11 +15,19 @@ import pytest
 
 
 def test_allowed_top_level_is_bounded() -> None:
-    """The canonical schema fits inside MAX_SAFE_TOP_LEVEL_KEYS (≤28)."""
+    """The canonical schema fits inside MAX_SAFE_TOP_LEVEL_KEYS.
+
+    RDR-101 Phase 3 PR δ raised MAX_SAFE_TOP_LEVEL_KEYS to 32 (Chroma's
+    hard cap) to admit ``doc_id``. Phase 5b will drop legacy
+    ``source_path`` (RDR-096 P5.1/P5.2) and restore headroom; until
+    then the schema sits AT the cap. The bib_* placeholder-drop and
+    git_meta-omitted-when-empty filters in normalize() keep typical
+    chunks well under (no-bib + no-git ≈ 26 keys).
+    """
     from nexus.metadata_schema import ALLOWED_TOP_LEVEL, MAX_SAFE_TOP_LEVEL_KEYS
 
     assert len(ALLOWED_TOP_LEVEL) <= MAX_SAFE_TOP_LEVEL_KEYS
-    assert MAX_SAFE_TOP_LEVEL_KEYS < 32, "must stay below Chroma 32-key cap"
+    assert MAX_SAFE_TOP_LEVEL_KEYS <= 32, "must not exceed Chroma 32-key cap"
 
 
 def test_load_bearing_keys_are_allowed() -> None:
@@ -460,3 +468,135 @@ def test_normalize_output_fits_under_chroma_cap() -> None:
     assert len(out) <= MAX_SAFE_TOP_LEVEL_KEYS, (
         f"{len(out)} keys: {sorted(out.keys())}"
     )
+
+
+# ── RDR-101 Phase 3 PR δ — doc_id schema support ─────────────────────────
+
+
+class TestDocIdInSchema:
+    """``doc_id`` joins ALLOWED_TOP_LEVEL with drop-when-empty semantics
+    parallel to the bib_* and git_meta filters. Live indexing call sites
+    populate it from ``Catalog.by_file_path(owner, rel_path).tumbler``;
+    call sites that have no Catalog handle pass ``""`` and the field is
+    dropped by ``normalize`` so it does not consume a metadata slot.
+    """
+
+    def test_doc_id_in_allowed_top_level(self) -> None:
+        from nexus.metadata_schema import ALLOWED_TOP_LEVEL
+
+        assert "doc_id" in ALLOWED_TOP_LEVEL
+
+    def test_validate_accepts_doc_id(self) -> None:
+        # WITH TEETH: removing ``doc_id`` from ALLOWED_TOP_LEVEL makes
+        # ``validate`` raise on any chunk metadata that carries it,
+        # which is exactly what blocks the live indexing path under
+        # the funnel's ``_write_batch`` validate call.
+        from nexus.metadata_schema import validate
+
+        meta = {
+            "source_path": "src/foo.py",
+            "content_hash": "x",
+            "chunk_text_hash": "y",
+            "chunk_index": 0,
+            "chunk_count": 1,
+            "content_type": "code",
+            "doc_id": "1.1.42",
+        }
+        validate(meta)  # must not raise
+
+    def test_make_chunk_metadata_propagates_doc_id(self) -> None:
+        # WITH TEETH: confirms make_chunk_metadata wires doc_id into the
+        # raw dict and normalize() preserves it. A regression that
+        # forgot to add doc_id to the raw assignment would drop the
+        # value silently here.
+        from nexus.metadata_schema import make_chunk_metadata
+
+        meta = make_chunk_metadata(
+            content_type="code",
+            source_path="src/foo.py",
+            chunk_index=0,
+            chunk_count=1,
+            chunk_text_hash="abc",
+            content_hash="def",
+            indexed_at="2026-05-01T00:00:00+00:00",
+            embedding_model="voyage-context-3",
+            store_type="docs",
+            doc_id="1.1.42",
+        )
+        assert meta["doc_id"] == "1.1.42"
+
+    def test_make_chunk_metadata_drops_empty_doc_id(self) -> None:
+        # WITH TEETH: drop-when-empty saves the metadata slot for
+        # call sites that don't pass doc_id (back-compat). A regression
+        # that left doc_id="" in the dict would consume one of the
+        # 32 metadata slots for no payload.
+        from nexus.metadata_schema import make_chunk_metadata
+
+        meta = make_chunk_metadata(
+            content_type="code",
+            source_path="src/foo.py",
+            chunk_index=0,
+            chunk_count=1,
+            chunk_text_hash="abc",
+            content_hash="def",
+            indexed_at="2026-05-01T00:00:00+00:00",
+            embedding_model="voyage-context-3",
+            store_type="docs",
+            # doc_id omitted (defaults to "")
+        )
+        assert "doc_id" not in meta
+
+    def test_normalize_drops_explicit_empty_doc_id(self) -> None:
+        # WITH TEETH: normalize() Step 4c drops doc_id when value is
+        # falsy. Same invariant as bib_* and git_meta drop-when-empty.
+        from nexus.metadata_schema import normalize
+
+        out = normalize(
+            {
+                "source_path": "src/foo.py",
+                "content_hash": "x",
+                "chunk_text_hash": "y",
+                "chunk_index": 0,
+                "chunk_count": 1,
+                "doc_id": "",
+            },
+            content_type="code",
+        )
+        assert "doc_id" not in out
+
+    def test_normalize_preserves_truthy_doc_id(self) -> None:
+        # WITH TEETH: drop-when-empty must not also drop populated
+        # values. A regression that filtered ``doc_id`` unconditionally
+        # would silently lose the catalog cross-reference.
+        from nexus.metadata_schema import normalize
+
+        out = normalize(
+            {
+                "source_path": "src/foo.py",
+                "content_hash": "x",
+                "chunk_text_hash": "y",
+                "chunk_index": 0,
+                "chunk_count": 1,
+                "doc_id": "1.1.42",
+            },
+            content_type="code",
+        )
+        assert out["doc_id"] == "1.1.42"
+
+    def test_normalize_is_idempotent_with_doc_id(self) -> None:
+        # Round-trip: re-normalising preserves doc_id without accreting
+        # or dropping. Mirrors the bib_* / git_meta idempotency tests.
+        from nexus.metadata_schema import normalize
+
+        raw = {
+            "source_path": "src/foo.py",
+            "content_hash": "x",
+            "chunk_text_hash": "y",
+            "chunk_index": 0,
+            "chunk_count": 1,
+            "doc_id": "1.1.42",
+        }
+        first = normalize(raw, content_type="code")
+        second = normalize(first, content_type="code")
+        assert first == second
+        assert second["doc_id"] == "1.1.42"
