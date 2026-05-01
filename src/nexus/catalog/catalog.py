@@ -502,6 +502,14 @@ class Catalog:
         from nexus.catalog.projector import Projector as _Projector
         self._projector = _Projector(self._db)
         self.degraded: bool = False
+        # RDR-101 Phase 3 follow-up B (nexus-o6aa.9.7): set when
+        # ``_ensure_consistent`` runtime-decides to fall back to the
+        # legacy rebuild via ``_event_log_covers_legacy``. Surfaces
+        # the silent state where ``_event_sourced_enabled`` is True
+        # but reads come from legacy JSONL — operator-visible signal
+        # for ``nx catalog doctor``. Never read from the env; the
+        # condition is purely runtime.
+        self.bootstrap_fallback_active: bool = False
         # Diagnostic: log the active gate state at construction so an
         # operator inspecting structured logs can confirm which write
         # path is in effect without grepping environment dumps. Debug
@@ -609,19 +617,34 @@ class Catalog:
                 # the legacy JSONL has materially more documents than
                 # the event log carries DocumentRegistered events for.
                 # Refuse to wipe the legacy rows; fall through to the
-                # legacy rebuild and surface the gap so the operator
-                # can run ``nx catalog synthesize-log``.
+                # legacy rebuild and flag the state so operators see
+                # it via ``nx catalog doctor`` (not just structlog).
+                #
+                # RDR-101 Phase 3 follow-up B (nexus-o6aa.9.7): the
+                # remediation hint must say ``--force`` because
+                # ``synthesize-log`` refuses non-empty events.jsonl
+                # without it. Pre-fix the message read "Run 'nx
+                # catalog synthesize-log'", which sent operators into
+                # a "log is non-empty, --force required" error loop.
+                self.bootstrap_fallback_active = True
                 _log.warning(
                     "catalog_event_log_incomplete_falling_back_to_legacy",
                     catalog_dir=str(self._dir),
                     note=(
-                        "events.jsonl has fewer DocumentRegistered "
-                        "events than documents.jsonl has rows. Run "
-                        "'nx catalog synthesize-log' before relying "
-                        "on the event-sourced rebuild."
+                        "events.jsonl is non-empty but has fewer "
+                        "DocumentRegistered events than documents.jsonl "
+                        "has rows. ES writes are landing in the log "
+                        "but reads come from legacy JSONL — replay "
+                        "equality is silently broken until the log "
+                        "catches up. Run 'nx catalog synthesize-log "
+                        "--force' to rebuild events.jsonl from the "
+                        "legacy state, then 'nx catalog t3-backfill-"
+                        "doc-id' to align T3 chunks."
                     ),
                 )
                 use_event_log = False
+            else:
+                self.bootstrap_fallback_active = False
             if use_event_log:
                 # Replay events.jsonl through the projector into the
                 # live CatalogDB. Atomic: the transaction context
@@ -714,7 +737,19 @@ class Catalog:
                     elif t == _ev.TYPE_DOCUMENT_DELETED:
                         event_doc_count -= 1
 
-            return event_doc_count >= int(legacy_doc_count * 0.95)
+            # RDR-101 Phase 3 follow-up B (nexus-o6aa.9.7): floor the
+            # threshold at 1. ``int(1 * 0.95) == 0`` and ``0 >= 0`` is
+            # True, so a 1-document legacy catalog with a non-empty-but-
+            # ``DocumentRegistered``-free ``events.jsonl`` (e.g. a
+            # ChunkIndexed-only log from a partial Phase 2 synthesis,
+            # or a dedupe-only event stream that pushes
+            # ``event_doc_count`` to 0) used to bypass the guardrail
+            # and silently wipe the single legacy row. The floor
+            # guarantees a real DocumentRegistered must exist in the
+            # log before ES rebuild is allowed at the smallest catalog
+            # sizes.
+            threshold = max(1, int(legacy_doc_count * 0.95))
+            return event_doc_count >= threshold
         except Exception:
             # On any unexpected failure, refuse the event-sourced
             # rebuild (safer to fall through to legacy than to wipe).

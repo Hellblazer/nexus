@@ -3299,6 +3299,31 @@ def doctor_cmd(
     overall_pass = True
     json_payload: dict = {}
 
+    # RDR-101 Phase 3 follow-up B (nexus-o6aa.9.7): surface bootstrap
+    # fallback state to the operator. When _ensure_consistent runtime-
+    # decides to fall back to legacy reads (events.jsonl is non-empty
+    # but sparse vs documents.jsonl), ES writes still land in the log
+    # while reads come from legacy JSONL — a silent split state where
+    # replay-equality is fundamentally not testing what it claims.
+    # Construct a Catalog up front so _ensure_consistent runs and
+    # bootstrap_fallback_active is current.
+    bootstrap_status = _check_bootstrap_status()
+    if bootstrap_status["fallback_active"]:
+        if as_json:
+            json_payload["bootstrap_fallback"] = bootstrap_status
+        else:
+            click.echo(
+                "WARNING: catalog is operating in bootstrap-fallback mode.\n"
+                "  events.jsonl is non-empty but sparse vs documents.jsonl;\n"
+                "  ES writes are landing in the log but reads come from\n"
+                "  legacy JSONL — replay equality is silently broken.\n"
+                "  Remediate with:\n"
+                "    nx catalog synthesize-log --force\n"
+                "    nx catalog t3-backfill-doc-id\n",
+                err=True,
+            )
+        overall_pass = False
+
     if replay_equality:
         report = _run_replay_equality()
         if as_json:
@@ -3324,6 +3349,109 @@ def doctor_cmd(
 
     if not overall_pass:
         raise click.exceptions.Exit(1)
+
+
+def _check_bootstrap_status() -> dict:
+    """Inspect the canonical-truth files at the configured catalog
+    path and report whether the ES rebuild path would currently fall
+    back to legacy (RDR-101 Phase 3 follow-up B, nexus-o6aa.9.7).
+
+    Returns ``{"fallback_active": bool, "events_path": str,
+    "documents_path": str}``. Used by the doctor verb to surface the
+    silent split state where ``NEXUS_EVENT_SOURCED`` is on but reads
+    come from legacy JSONL.
+
+    Pure file inspection — does NOT construct a ``Catalog`` instance.
+    Constructing one would trigger ``_ensure_consistent``, which
+    re-projects events.jsonl into SQLite. That re-projection would
+    silently overwrite any operator-injected drift the downstream
+    doctor checks (e.g. ``--replay-equality``) are meant to detect.
+    """
+    from nexus.config import catalog_path
+    from nexus.catalog.catalog import _read_event_sourced_gate
+    from nexus.catalog import events as _ev
+
+    cat_path = catalog_path()
+    if not Catalog.is_initialized(cat_path):
+        return {"fallback_active": False, "reason": "catalog_not_initialized"}
+
+    events_path = cat_path / "events.jsonl"
+    documents_path = cat_path / "documents.jsonl"
+
+    if not _read_event_sourced_gate():
+        # Legacy mode: no ES rebuild path runs, no fallback state.
+        return {
+            "fallback_active": False,
+            "events_path": str(events_path),
+            "documents_path": str(documents_path),
+        }
+    if (
+        not events_path.exists()
+        or events_path.stat().st_size == 0
+        or not documents_path.exists()
+    ):
+        # ``use_event_log`` is False at the size gate before the
+        # guardrail check fires; not a fallback state.
+        return {
+            "fallback_active": False,
+            "events_path": str(events_path),
+            "documents_path": str(documents_path),
+        }
+
+    # Replicate the ``_event_log_covers_legacy`` math non-mutatively.
+    try:
+        registered: set[str] = set()
+        tombstoned: set[str] = set()
+        with documents_path.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                tumbler = rec.get("tumbler")
+                if not tumbler:
+                    continue
+                if rec.get("_deleted"):
+                    tombstoned.add(tumbler)
+                else:
+                    registered.add(tumbler)
+        legacy_doc_count = len(registered - tombstoned)
+        if legacy_doc_count == 0:
+            return {
+                "fallback_active": False,
+                "events_path": str(events_path),
+                "documents_path": str(documents_path),
+            }
+
+        event_doc_count = 0
+        with events_path.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                t = obj.get("type")
+                if t == _ev.TYPE_DOCUMENT_REGISTERED:
+                    event_doc_count += 1
+                elif t == _ev.TYPE_DOCUMENT_DELETED:
+                    event_doc_count -= 1
+
+        threshold = max(1, int(legacy_doc_count * 0.95))
+        fallback_active = event_doc_count < threshold
+    except Exception:
+        fallback_active = False
+
+    return {
+        "fallback_active": fallback_active,
+        "events_path": str(events_path),
+        "documents_path": str(documents_path),
+    }
 
 
 def _run_replay_equality() -> dict:
