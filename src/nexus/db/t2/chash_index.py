@@ -185,7 +185,7 @@ class ChashIndex:
         collide on the new PK. We defend by deleting any
         ``(chash, new)`` row that already exists before the UPDATE —
         rename is an atomic re-home so preserving the ``new``-side row
-        would drop our updated ``doc_id`` silently.
+        would drop our updated ``chunk_chroma_id`` silently.
         """
         with self._lock:
             # Drop any pre-existing new-collection rows that would collide
@@ -301,7 +301,10 @@ def dual_write_chash_index(
     ``T3Database.upsert_chunks_with_embeddings(...)``. Iterates the
     parallel ``ids`` and ``metadatas`` lists, extracts
     ``chunk_text_hash`` from each metadata dict, and registers the
-    ``(chash, collection, doc_id)`` tuple in T2.
+    ``(chash, collection, chunk_chroma_id)`` tuple in T2 (the
+    ``ids`` are Chroma natural IDs that the chash_index column
+    ``chunk_chroma_id`` was named for — pre-RDR-101-Phase-0 the
+    column was misleadingly called ``doc_id``).
 
     Best-effort: every insert is wrapped in a try/except that logs at
     warning level but does NOT re-raise. A T2 failure must never abort

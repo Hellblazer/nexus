@@ -31,10 +31,11 @@ def _read_shadow_gate() -> bool:
     return val in ("1", "true", "yes", "on")
 
 
-# Imported lazily inside Catalog methods so a process that never
-# constructs a Catalog (e.g. an MCP-only consumer) does not pay the
-# events-module import cost. Re-aliased to ``_Event`` here for the
-# ``_emit_shadow_event`` type hint.
+# Module-level imports of the typed event payloads. Aliased with a
+# leading underscore so callers outside this module don't reach in for
+# the private names (the public API is via Catalog methods that emit
+# events on behalf of the caller). The PR-F initial comment described
+# these as "lazy" imports — they are not, they run at import time.
 from nexus.catalog.events import (  # noqa: E402
     DocumentAliasedPayload as _DocumentAliasedPayload,
     DocumentDeletedPayload as _DocumentDeletedPayload,

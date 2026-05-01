@@ -3251,11 +3251,27 @@ def prune_stale_cmd(
     ),
 )
 @click.option(
+    "--strict-not-in-t3",
+    "strict_not_in_t3",
+    is_flag=True,
+    help=(
+        "With --t3-doc-id-coverage: treat 'event log claims a chunk T3 "
+        "doesn't have' as a hard failure rather than a warning. Default "
+        "is warning so legitimate operational deletions (re-ingestion, "
+        "pruning) don't permanently red the doctor; pass --strict-not-"
+        "in-t3 to enforce 'event log = authoritative ledger, T3 must "
+        "match exactly'."
+    ),
+)
+@click.option(
     "--json", "as_json", is_flag=True,
     help="Emit machine-readable JSON instead of text output.",
 )
 def doctor_cmd(
-    replay_equality: bool, t3_doc_id_coverage: bool, as_json: bool,
+    replay_equality: bool,
+    t3_doc_id_coverage: bool,
+    strict_not_in_t3: bool,
+    as_json: bool,
 ) -> None:
     """RDR-101 catalog doctor surface.
 
@@ -3287,7 +3303,7 @@ def doctor_cmd(
             overall_pass = False
 
     if t3_doc_id_coverage:
-        report = _run_t3_doc_id_coverage()
+        report = _run_t3_doc_id_coverage(strict_not_in_t3=strict_not_in_t3)
         if as_json:
             json_payload["t3_doc_id_coverage"] = report
         else:
@@ -3847,7 +3863,7 @@ def _print_t3_backfill_text(report: dict) -> None:
 # ── RDR-101 Phase 2: doctor --t3-doc-id-coverage ─────────────────────────
 
 
-def _run_t3_doc_id_coverage() -> dict:
+def _run_t3_doc_id_coverage(*, strict_not_in_t3: bool = False) -> dict:
     """Walk every T3 collection in events.jsonl and report doc_id coverage.
 
     Steps:
@@ -3961,14 +3977,21 @@ def _run_t3_doc_id_coverage() -> dict:
                 break
             offset += 300
 
-        # Chunks the event log expected but T3 doesn't have.
+        # Chunks the event log expected but T3 doesn't have. By default
+        # this is a WARNING rather than a hard failure: the most common
+        # cause is legitimate operational deletion of T3 chunks (re-
+        # ingestion, pruning) without a corresponding event in the log,
+        # which over time would make the doctor permanently red. Pass
+        # ``--strict-not-in-t3`` to make it a hard failure (the contract
+        # then becomes "the event log is the authoritative ledger and
+        # T3 must match it exactly").
         not_in_t3 = sorted(set(expected_chunks) - seen)
 
         coverage = with_doc_id / total if total else 1.0
         pass_for_coll = (
             not mismatched
             and not missing
-            and not not_in_t3
+            and (not strict_not_in_t3 or not not_in_t3)
         )
         per_coll[coll_name] = {
             "total_chunks": total,
@@ -4169,7 +4192,11 @@ def repair_orphan_chunks_cmd(
         return
 
     # Assign mode. Parse CHUNK_ID:DOC_ID pairs.
-    pairs: list[tuple[str, str]] = []
+    # Parse and dedupe by chunk_id (last assignment wins). Pre-fix a
+    # duplicate `--assign chunk_id:X --assign chunk_id:Y` would silently
+    # under-count `remaining_orphans` because only the first match
+    # appended a repair while both pairs counted as input.
+    pairs_by_chunk: dict[str, str] = {}
     for raw in assignments:
         if ":" not in raw:
             raise click.UsageError(
@@ -4182,7 +4209,18 @@ def repair_orphan_chunks_cmd(
             raise click.UsageError(
                 f"--assign expects non-empty CHUNK_ID and DOC_ID, got {raw!r}"
             )
-        pairs.append((chunk_id, doc_id))
+        pairs_by_chunk[chunk_id] = doc_id  # later --assign wins
+
+    # Build the set of doc_ids that ever appeared in a DocumentRegistered
+    # event so we can warn the operator if they --assign a doc_id that
+    # was never registered (typo / typo'd UUID7 / unknown id). The doc
+    # log is the canonical source of truth for "what doc_ids exist."
+    known_doc_ids: set[str] = set()
+    for prior in log.replay():
+        if prior.type == ev.TYPE_DOCUMENT_REGISTERED:
+            d = getattr(prior.payload, "doc_id", "") or ""
+            if d:
+                known_doc_ids.add(d)
 
     # Resolve each assignment to a current orphan to copy chash / coll_id
     # from. Refuse to assign a chunk that is not currently an orphan.
@@ -4192,7 +4230,7 @@ def repair_orphan_chunks_cmd(
 
     repairs: list = []
     skipped: list = []
-    for chunk_id, doc_id in pairs:
+    for chunk_id, doc_id in pairs_by_chunk.items():
         if chunk_id not in orphan_by_chunk_id:
             skipped.append({
                 "chunk_id": chunk_id,
@@ -4202,6 +4240,20 @@ def repair_orphan_chunks_cmd(
                 ),
             })
             continue
+        if known_doc_ids and doc_id not in known_doc_ids:
+            # Soft warning: the doc_id is unknown to the event log. The
+            # repair still applies (operator may be intentionally
+            # introducing a forward-reference doc_id), but surface the
+            # mismatch so a typo is visible.
+            _log.warning(
+                "repair_orphan_unknown_doc_id",
+                chunk_id=chunk_id,
+                doc_id=doc_id,
+                note=(
+                    "doc_id does not appear in any DocumentRegistered "
+                    "event; check for typo or run synthesize-log first"
+                ),
+            )
         orphan = orphan_by_chunk_id[chunk_id]
         repairs.append(ev.Event(
             type=ev.TYPE_CHUNK_INDEXED, v=0,

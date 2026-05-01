@@ -95,11 +95,12 @@ class TestMigrationDataclass:
         # frecency projection table (4.21.4, RDR-101 Phase 1 PR D
         # nexus-knn3 — schema-only, mutable side table, no event-log
         # participation)
-        # = 30.
+        # = 30 at the time of writing.
         # Prefer the name-based checks in TestBackfillPlanDimensions
         # and TestAddPlanMatchTextColumn for future guards; this
-        # count is a cheap sentinel only.
-        assert len(MIGRATIONS) == 30
+        # count is a non-shrinking sentinel only — the >= form lets a
+        # PR add migrations without rote-bumping this assertion.
+        assert len(MIGRATIONS) >= 30
 
     def test_migrations_ordered_by_version(self) -> None:
         from nexus.db.migrations import MIGRATIONS, _parse_version
