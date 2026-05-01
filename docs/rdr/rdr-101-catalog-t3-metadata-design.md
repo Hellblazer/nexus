@@ -340,7 +340,7 @@ sequenceDiagram
     CLI->>Log: 5. Append ChunkIndexed per chunk
     Log-->>Proj: notify (or polled)
     Proj->>SQL: INSERT chunks
-    Note over Log,T3: Single source of truth = log.<br/>SQLite + T3 are deterministic projections.<br/>Drift surface = 0 fields.
+    Note over Log,T3: Single source of truth is the log. SQLite plus T3 are deterministic projections. Drift surface is zero fields.
 ```
 
 #### Sequence: Aspect extraction (the original ART-lhk1 fix)
@@ -361,7 +361,7 @@ sequenceDiagram
         Ext-->>CLI: AspectRecord
     end
     CLI->>SQL: INSERT INTO document_aspects
-    Note over CLI,T3: Pre-fix (ART-lhk1): catalog source_uri<br/>vs T3 source_path string mismatch<br/>→ 140/140 (empty) skips.<br/>Post-fix: doc_id surrogate join,<br/>0 false-empty skips by construction.
+    Note over CLI,T3: Pre-fix (ART-lhk1) the catalog source_uri vs T3 source_path string mismatch produced 140 of 140 empty skips. Post-fix the doc_id surrogate join eliminates false-empty skips by construction.
 ```
 
 #### Sequence: File rename
@@ -382,7 +382,7 @@ sequenceDiagram
     CLI->>Log: Append DocumentRenamed<br/>(doc_id, new_source_uri)
     Log-->>Proj: notify
     Proj->>SQL: UPDATE documents SET source_uri
-    Note over T3: chunks unchanged<br/>(no source_path stored)
+    Note over T3: chunks unchanged (no source_path stored)
     end
 
     rect rgba(255, 200, 180, 0.18)
@@ -395,7 +395,7 @@ sequenceDiagram
     Proj->>SQL: tombstone old, INSERT new
     CLI->>T3: re-embed chunks into new owner's collection
     CLI->>Log: Append ChunkIndexed per new chunk
-    Note over T3: old chunks GC after orphan window<br/>(via nx t3 gc, NOT immediate)
+    Note over T3: old chunks GC after orphan window (via nx t3 gc, NOT immediate)
     end
 ```
 
@@ -412,14 +412,14 @@ sequenceDiagram
     Log-->>Op: expected_documents, expected_chunks
     Op->>SQL: SELECT * FROM documents, chunks
     SQL-->>Op: actual_documents, actual_chunks
-    Op->>Op: diff(expected, actual) → projector_drift_set
+    Op->>Op: diff(expected, actual) yields projector_drift_set
     loop per collection
         Op->>T3: get(include=[]) batched per coll_id
         T3-->>Op: actual chunk_ids in T3
-        Op->>Op: diff(expected_chunk_ids, actual)<br/>→ t3_drift_set
+        Op->>Op: diff(expected_chunk_ids, actual) yields t3_drift_set
     end
     Op->>Op: report (deterministic, no heuristics)
-    Note over Op,T3: PASS = both drift sets empty.<br/>Pre-fix doctor used per-home<br/>dominance heuristic;<br/>greenfield doctor is a pure diff.
+    Note over Op,T3: PASS means both drift sets empty. Pre-fix doctor used a per-home dominance heuristic. Greenfield doctor is a pure diff.
 ```
 
 **Index a file** (the indexer):
