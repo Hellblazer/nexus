@@ -55,7 +55,9 @@ from nexus.catalog.events import Event
 _log = structlog.get_logger()
 
 
-def synthesize_from_jsonl(catalog_dir: Path) -> Iterator[Event]:
+def synthesize_from_jsonl(
+    catalog_dir: Path, *, mint_doc_id: bool = False,
+) -> Iterator[Event]:
     """Yield v: 0 events that reproduce the catalog state under ``catalog_dir``.
 
     Order: owners → documents → links. Within each file, JSONL append order
@@ -63,6 +65,25 @@ def synthesize_from_jsonl(catalog_dir: Path) -> Iterator[Event]:
     sees one or two events per logical key, not the full append history).
 
     Skips a file if it does not exist (fresh catalog with partial state).
+
+    ``mint_doc_id`` controls how ``DocumentRegisteredPayload.doc_id`` is
+    populated:
+
+    - ``False`` (Phase 1 default): ``doc_id`` is set to the tumbler. This
+      keeps ``synthesize_from_jsonl`` driving the Phase 1 doctor verb's
+      replay-equality test, where the projector reads ``payload.tumbler``
+      to write the SQLite tumbler-keyed row anyway.
+    - ``True`` (Phase 2 ``nx catalog synthesize-log``): ``doc_id`` is a
+      fresh UUID7 per RDR-101 §Migration / Phase 1. The original tumbler
+      is preserved in ``payload.tumbler`` so the projector's v: 0 path
+      still writes a tumbler-keyed SQLite row, and the doc_id is carried
+      in the event log for Phase 3+ canonical use.
+
+    Aliased rows (``DocumentAliased`` events) follow the same rule: when
+    ``mint_doc_id=True``, ``alias_doc_id`` and ``canonical_doc_id`` are
+    the freshly-minted UUID7s for the alias and canonical rows
+    respectively, so the alias graph in the event log is doc_id-keyed
+    even though the catalog-side schema still tracks aliases by tumbler.
     """
     owners_path = catalog_dir / "owners.jsonl"
     docs_path = catalog_dir / "documents.jsonl"
@@ -70,10 +91,45 @@ def synthesize_from_jsonl(catalog_dir: Path) -> Iterator[Event]:
 
     if owners_path.exists():
         yield from _synthesize_owners(owners_path)
+
+    # ``DocumentAliased`` references both the alias's and the canonical's
+    # doc_id. When mint_doc_id is True we have to mint per-tumbler doc_ids
+    # before emitting aliases so the alias graph stays consistent. Build
+    # the tumbler→doc_id map up front (one full read of documents.jsonl);
+    # subsequent emits read from the map.
+    tumbler_to_doc_id: dict[str, str]
+    if mint_doc_id and docs_path.exists():
+        tumbler_to_doc_id = _build_tumbler_to_doc_id(docs_path)
+    else:
+        tumbler_to_doc_id = {}
+
     if docs_path.exists():
-        yield from _synthesize_documents(docs_path)
+        yield from _synthesize_documents(
+            docs_path,
+            tumbler_to_doc_id=tumbler_to_doc_id,
+            mint_doc_id=mint_doc_id,
+        )
     if links_path.exists():
         yield from _synthesize_links(links_path)
+
+
+def _build_tumbler_to_doc_id(docs_path: Path) -> dict[str, str]:
+    """Walk documents.jsonl once and mint a fresh UUID7 doc_id per tumbler.
+
+    A tumbler that appears multiple times in the JSONL (re-register,
+    tombstone+re-register, alias rewrite) gets one consistent doc_id —
+    the first occurrence wins. Subsequent rewrites update other fields
+    on the same logical document, so the doc_id must stay constant
+    across them.
+    """
+    mapping: dict[str, str] = {}
+    for obj in _iter_jsonl(docs_path):
+        tumbler = obj.get("tumbler")
+        if not tumbler:
+            continue
+        if tumbler not in mapping:
+            mapping[tumbler] = ev.new_doc_id()
+    return mapping
 
 
 # ── Owners ───────────────────────────────────────────────────────────────
@@ -111,7 +167,12 @@ def _synthesize_owners(path: Path) -> Iterator[Event]:
 # ── Documents ────────────────────────────────────────────────────────────
 
 
-def _synthesize_documents(path: Path) -> Iterator[Event]:
+def _synthesize_documents(
+    path: Path,
+    *,
+    tumbler_to_doc_id: dict[str, str] | None = None,
+    mint_doc_id: bool = False,
+) -> Iterator[Event]:
     """Walk documents.jsonl, collapse last-write-wins per tumbler, and emit
     one (or two) events per logical row.
 
@@ -121,9 +182,14 @@ def _synthesize_documents(path: Path) -> Iterator[Event]:
     intermediate states the catalog already discarded; the synthesizer's
     contract is "events that reproduce today's effective state", not
     "events that reproduce the full audit trail".
+
+    ``tumbler_to_doc_id`` and ``mint_doc_id`` are passed through from the
+    public ``synthesize_from_jsonl``; see its docstring for the
+    contract.
     """
     last_seen: dict[str, dict[str, Any]] = {}
     tombstoned: dict[str, dict[str, Any]] = {}
+    mapping = tumbler_to_doc_id or {}
 
     for obj in _iter_jsonl(path):
         key = obj.get("tumbler")
@@ -143,15 +209,24 @@ def _synthesize_documents(path: Path) -> Iterator[Event]:
 
     # Live documents → DocumentRegistered (+ DocumentAliased if alias_of set).
     for tumbler, obj in last_seen.items():
-        yield _document_registered_event(obj, synthesized=True)
+        yield _document_registered_event(
+            obj, mapping=mapping, mint_doc_id=mint_doc_id,
+        )
         alias_of = (obj.get("alias_of") or "").strip()
         if alias_of:
+            # Resolve both endpoints through the mapping when minting
+            # so the alias graph in the event log uses the canonical
+            # doc_ids, not raw tumblers.
+            alias_doc_id = mapping.get(tumbler, tumbler) if mint_doc_id else tumbler
+            canonical_doc_id = (
+                mapping.get(alias_of, alias_of) if mint_doc_id else alias_of
+            )
             yield Event(
                 type=ev.TYPE_DOCUMENT_ALIASED,
                 v=0,
                 payload=ev.DocumentAliasedPayload(
-                    alias_doc_id=tumbler,         # Phase 1: tumbler stands in for doc_id
-                    canonical_doc_id=alias_of,
+                    alias_doc_id=alias_doc_id,
+                    canonical_doc_id=canonical_doc_id,
                 ),
                 ts=_synthesized_ts(obj),
             )
@@ -161,12 +236,17 @@ def _synthesize_documents(path: Path) -> Iterator[Event]:
     # tombstone against; without the Deleted the projector silently resurrects
     # the row. Both are required.
     for tumbler, obj in tombstoned.items():
-        yield _document_registered_event(obj, synthesized=True)
+        yield _document_registered_event(
+            obj, mapping=mapping, mint_doc_id=mint_doc_id,
+        )
+        deleted_doc_id = (
+            mapping.get(tumbler, tumbler) if mint_doc_id else tumbler
+        )
         yield Event(
             type=ev.TYPE_DOCUMENT_DELETED,
             v=0,
             payload=ev.DocumentDeletedPayload(
-                doc_id=tumbler,
+                doc_id=deleted_doc_id,
                 reason="synthesized_from_tombstone",
             ),
             ts=_synthesized_ts(obj),
@@ -174,7 +254,10 @@ def _synthesize_documents(path: Path) -> Iterator[Event]:
 
 
 def _document_registered_event(
-    obj: dict[str, Any], *, synthesized: bool,
+    obj: dict[str, Any],
+    *,
+    mapping: dict[str, str] | None = None,
+    mint_doc_id: bool = False,
 ) -> Event:
     """Build a ``DocumentRegistered`` v: 0 event from a documents.jsonl row.
 
@@ -183,15 +266,25 @@ def _document_registered_event(
     legacy tumbler-schema fields so the Phase 1 projector can write a
     SQLite row identical to the one ``Catalog.rebuild()`` produces.
 
-    ``doc_id`` is set to the tumbler so the v: 0 path has a stable join
-    key during Phase 1; a fresh UUID7 doc_id is what Phase 2 backfill will
-    assign once the doc_id column lands in the SQLite schema.
+    ``doc_id`` rule:
+
+    - When ``mint_doc_id=False`` (default, Phase 1 doctor verb):
+      ``doc_id`` is set to the tumbler so the v: 0 projector has a
+      stable join key.
+    - When ``mint_doc_id=True`` (Phase 2 ``synthesize-log`` verb):
+      ``doc_id`` is the freshly-minted UUID7 from ``mapping``; the
+      tumbler stays in ``payload.tumbler``.
     """
+    mapping = mapping or {}
     tumbler = obj.get("tumbler", "")
     physical_collection = obj.get("physical_collection", "")
+    if mint_doc_id and tumbler in mapping:
+        doc_id = mapping[tumbler]
+    else:
+        doc_id = tumbler
     payload = ev.DocumentRegisteredPayload(
         # Canonical
-        doc_id=tumbler,  # Phase 1 stand-in; Phase 2 mints a fresh UUID7
+        doc_id=doc_id,
         owner_id=_owner_prefix_of(tumbler),
         content_type=obj.get("content_type", ""),
         source_uri=obj.get("source_uri", ""),

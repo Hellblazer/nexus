@@ -3426,3 +3426,114 @@ def _print_replay_equality_text(report: dict) -> None:
         click.echo("PASS — projector replay matches live SQLite for the current catalog state.")
     else:
         click.echo("FAIL — projector replay diverges from live SQLite. See diffs above.")
+
+
+# ── RDR-101 Phase 2: synthesize-log verb ─────────────────────────────────
+
+
+@catalog.command("synthesize-log")
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help=(
+        "Walk the catalog JSONL and report what would be written to "
+        "events.jsonl, without actually writing. Use to size the log "
+        "before committing to the synthesis."
+    ),
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help=(
+        "Overwrite an existing events.jsonl. Default is to refuse so "
+        "an accidental re-synthesis cannot replace a log that already "
+        "carries production state."
+    ),
+)
+@click.option(
+    "--json", "as_json", is_flag=True,
+    help="Emit machine-readable JSON instead of text output.",
+)
+def synthesize_log_cmd(dry_run: bool, force: bool, as_json: bool) -> None:
+    """RDR-101 Phase 2: synthesize events.jsonl from existing JSONL state.
+
+    Walks ``owners.jsonl`` + ``documents.jsonl`` + ``links.jsonl``,
+    mints fresh UUID7 ``doc_id`` values per the RDR-101 §Migration /
+    Phase 1 rule, and writes the resulting v: 0 events to
+    ``catalog_dir/events.jsonl``.
+
+    Idempotent only against an empty events.jsonl: the verb refuses to
+    overwrite a non-empty log unless ``--force`` is passed. ``--dry-run``
+    reports counts and exits without writing.
+
+    Phase 1's ``synthesize_from_jsonl`` (used by ``nx catalog doctor
+    --replay-equality``) preserves the original tumbler-as-doc_id mapping
+    for replay-equality testing. This verb is the canonical Phase 2 +
+    bridge: it mints UUID7 doc_ids that Phase 3 native writes will adopt.
+    """
+    from nexus.catalog.catalog import Catalog
+    from nexus.catalog.event_log import EventLog
+    from nexus.catalog.synthesizer import synthesize_from_jsonl
+    from nexus.config import catalog_path
+
+    cat_dir = catalog_path()
+    if not Catalog.is_initialized(cat_dir):
+        raise click.ClickException(
+            f"Catalog not initialized at {cat_dir}. "
+            "Run 'nx catalog setup' to create and populate it."
+        )
+
+    log = EventLog(cat_dir)
+    existing_size = (
+        log.path.stat().st_size if log.path.exists() else 0
+    )
+
+    if existing_size > 0 and not force and not dry_run:
+        raise click.ClickException(
+            f"events.jsonl is non-empty ({existing_size} bytes) at "
+            f"{log.path}. Pass --force to overwrite, --dry-run to size "
+            "the synthesis without writing, or back up the existing log "
+            "before re-running."
+        )
+
+    events = list(synthesize_from_jsonl(cat_dir, mint_doc_id=True))
+
+    counts: dict[str, int] = {}
+    for e in events:
+        counts[e.type] = counts.get(e.type, 0) + 1
+
+    report = {
+        "dry_run": dry_run,
+        "events_path": str(log.path),
+        "existing_bytes": existing_size,
+        "events_total": len(events),
+        "events_by_type": counts,
+        "wrote": False,
+    }
+
+    if not dry_run:
+        if existing_size > 0 and force:
+            log.truncate()
+        log.append_many(events)
+        report["wrote"] = True
+
+    if as_json:
+        click.echo(json.dumps(report, indent=2))
+    else:
+        _print_synthesize_log_text(report)
+
+
+def _print_synthesize_log_text(report: dict) -> None:
+    click.echo(f"Events path:    {report['events_path']}")
+    click.echo(f"Existing size:  {report['existing_bytes']} bytes")
+    click.echo(f"Events total:   {report['events_total']}")
+    if report["events_by_type"]:
+        click.echo("By type:")
+        for t, c in sorted(report["events_by_type"].items(), key=lambda kv: kv[0]):
+            click.echo(f"  {t:<24} {c}")
+    if report["dry_run"]:
+        click.echo("(dry-run — events.jsonl was not written.)")
+    elif report["wrote"]:
+        click.echo("Wrote events.jsonl.")
+    else:
+        click.echo("(no write performed.)")
