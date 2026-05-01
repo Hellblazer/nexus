@@ -536,51 +536,7 @@ The migration is reversible through Phase 4. Phases 5 and 6 are the irreversible
 
 ## Implementation Plan
 
-The plan is six phases. Each phase is one or more PRs. Beads filed at acceptance, not at draft.
-
-```mermaid
-stateDiagram-v2
-    [*] --> Phase0: RDR-101 accepted
-    Phase0: Phase 0<br/>Survey + Phase 0 audits
-    Phase1: Phase 1<br/>Event log infrastructure<br/>(write-only, no readers)
-    Phase2: Phase 2<br/>Synthesize log + backfill<br/>T3 doc_id metadata
-    Phase3: Phase 3<br/>New write path<br/>(dual-write to old fields)
-    Phase4: Phase 4<br/>Reader migration +<br/>plugin telemetry shipped
-    Phase5_optin: Phase 5 (opt-in)<br/>event_sourced=true flag<br/>default false
-    Phase5_default: Phase 5 (default-on)<br/>flip default to true<br/>IRREVERSIBLE
-    Phase5_final: Phase 5 (final)<br/>drop deprecated fields<br/>from T3 + catalog
-    Phase6: Phase 6<br/>Doctor as release blocker<br/>fallback collection migration
-
-    Phase0 --> Phase1: survey complete
-    Phase1 --> Phase2: replay-equality test passes
-    Phase2 --> Phase3: 100% T3 doc_id coverage
-    Phase3 --> Phase4: integration tests pass
-    Phase4 --> Phase5_optin: 30 days of deprecation warnings live
-    Phase5_optin --> Phase5_default: telemetry shows zero direct-T3-metadata reads<br/>30+ contiguous days
-    Phase5_default --> Phase5_final: one minor release with new default
-    Phase5_final --> Phase6: schema migration committed
-    Phase6 --> [*]: RDR-101 closed
-
-    note right of Phase3
-        Reversible through here.
-        Stalling at Phase 3 is an
-        acceptable steady state
-        (dual-write, no regression vs today).
-    end note
-
-    note right of Phase4
-        Reversible through here.
-        Telemetry shipping is the
-        Phase 4 deliverable that gates
-        the Phase 5 default-on decision.
-    end note
-
-    note right of Phase5_default
-        IRREVERSIBLE COMMITMENT.
-        Gated on telemetry, NOT calendar.
-        No version-count override.
-    end note
-```
+The plan is six phases. Each phase is one or more PRs. Beads filed at acceptance, not at draft. Reversible through Phase 4; Phase 5 default-on is the irreversible commitment, gated on telemetry showing zero direct-T3-metadata reads for 30+ contiguous days.
 
 ### Phase 0: Acceptance and survey
 
