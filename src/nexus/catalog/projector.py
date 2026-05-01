@@ -23,10 +23,14 @@ crash, it must surface the new event type so an operator can decide.
 Idempotency: re-projecting the same event sequence is a no-op past the
 first run. ``DocumentRegistered`` uses ``INSERT OR REPLACE`` keyed on
 ``tumbler`` so re-applying overwrites with identical data.
-``LinkCreated`` uses ``INSERT OR IGNORE`` against the existing UNIQUE
-INDEX on ``(from_tumbler, to_tumbler, link_type)`` so duplicate links are
-silently dropped. ``DocumentDeleted`` issues ``DELETE FROM documents
-WHERE tumbler = ?``; re-deleting a missing row is a no-op.
+``LinkCreated`` uses ``INSERT OR REPLACE`` against the UNIQUE INDEX on
+``(from_tumbler, to_tumbler, link_type)`` so a follow-up event for the
+same composite key OVERWRITES the prior row's spans + metadata (the
+writer's merge path emits a single LinkCreated event carrying the
+final merged metadata, not two separate Created+Updated events; the
+projector converges SQLite on whatever the most recent event says).
+``DocumentDeleted`` issues ``DELETE FROM documents WHERE tumbler = ?``;
+re-deleting a missing row is a no-op.
 
 The projector does NOT manage the SQLite schema or migrations — it
 takes a constructed ``CatalogDB`` and writes to whatever schema is
@@ -71,18 +75,26 @@ class Projector:
             return
         handler(self, event.payload)
 
-    def apply_all(self, events: Iterable[Event]) -> int:
+    def apply_all(self, events: Iterable[Event], *, commit: bool = True) -> int:
         """Apply a stream of events; return the count actually applied.
 
         ``CatalogDB.commit()`` is called once at the end so a long
         replay is one transaction (atomic against external readers and
         ~50x faster than per-event commits on the live host catalog).
+
+        Pass ``commit=False`` when the caller wraps this call in its
+        own ``CatalogDB.transaction()`` block (e.g.
+        ``Catalog._ensure_consistent`` event-sourced rebuild) — the
+        outer ``with`` block commits or rolls back atomically and a
+        nested commit would finalize the transaction prematurely,
+        defeating the rollback fence.
         """
         applied = 0
         for event in events:
             self.apply(event)
             applied += 1
-        self._db.commit()
+        if commit:
+            self._db.commit()
         return applied
 
     # ── v: 0 handlers (synthesized from existing JSONL state) ────────────
@@ -244,10 +256,24 @@ class Projector:
         return  # symmetric to chunk_indexed
 
     def _v0_link_created(self, payload: Any) -> None:
+        # Use INSERT OR REPLACE on the (from_tumbler, to_tumbler,
+        # link_type) UNIQUE INDEX so a second LinkCreated event for the
+        # same composite key OVERWRITES the prior row's spans + metadata
+        # rather than being silently dropped. The legacy
+        # ``Catalog._link_unlocked`` merge path emits a LinkCreated with
+        # the FINAL merged metadata after computing it from the existing
+        # row; the projector's job is to converge SQLite on that final
+        # state. INSERT OR IGNORE would have silently dropped the merge.
+        #
+        # SQLite implements OR REPLACE by deleting the conflicting row
+        # and inserting a fresh one, which assigns a new ``id`` integer.
+        # The doctor verb's links snapshot already excludes ``id`` (it is
+        # not part of the projection contract per RF-101-2), so the new
+        # ``id`` does not break replay-equality.
         if not payload.from_doc or not payload.to_doc or not payload.link_type:
             return
         self._db.execute(
-            "INSERT OR IGNORE INTO links "
+            "INSERT OR REPLACE INTO links "
             "(from_tumbler, to_tumbler, link_type, from_span, to_span, "
             "created_by, created_at, metadata) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -276,16 +302,22 @@ class Projector:
     #
     # Phase 1 does not write the new SQLite schema (Document.doc_id
     # column, Chunk table, etc.) — that lands in Phase 3. The v: 1
-    # handlers are placeholders so the dispatch table is symmetric and
-    # the doctor verb can flag "v: 1 event in log but no v: 1 SQLite
-    # writer" as a Phase-3-incomplete failure mode rather than a silent
-    # drop.
+    # handlers raise so a stray v: 1 emission lands LOUDLY rather than
+    # being silently absorbed into a no-op. Pre-fix the handlers logged
+    # a warning and returned, which combined with the
+    # ``make_event(..., v=1)`` default to produce a trap: any caller
+    # forgetting ``v=0`` would silently lose the event. Dispatch on
+    # (type, 1) now aborts the writer mid-mutation, which leaves
+    # SQLite + the legacy JSONL un-touched (the writer holds the flock
+    # and has not yet committed at that point) and gives the operator a
+    # stack trace pointing at the wrong-version site.
 
     def _v1_unsupported(self, payload: Any) -> None:
-        _log.warning(
-            "projector_v1_not_implemented_phase1",
-            payload=type(payload).__name__,
-            note="v: 1 native writes land in RDR-101 Phase 3",
+        raise NotImplementedError(
+            f"v: 1 projector handler not implemented for "
+            f"{type(payload).__name__}; native v: 1 writes land in "
+            f"RDR-101 Phase 3+. Pass v=0 to make_event() until the "
+            f"matching v: 1 handler ships."
         )
 
 

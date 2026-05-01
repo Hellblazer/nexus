@@ -474,7 +474,29 @@ class Catalog:
         # and shadow emit is unused (the new path emits to events.jsonl
         # by construction).
         self._event_sourced_enabled = _read_event_sourced_gate()
+        # RDR-101 Phase 3 PR α/β: cache one Projector instance for the
+        # whole catalog lifetime. The projector is stateless (it only
+        # holds a reference to the CatalogDB), so a per-mutator
+        # ``Projector(self._db)`` was wasted allocation and obscured
+        # which DB connection the projection landed on. The cache also
+        # means a future change to the projector's constructor (e.g.
+        # taking a Phase-5 schema version flag) only has to be
+        # threaded once.
+        from nexus.catalog.projector import Projector as _Projector
+        self._projector = _Projector(self._db)
         self.degraded: bool = False
+        # Diagnostic: log the active gate state at construction so an
+        # operator inspecting structured logs can confirm which write
+        # path is in effect without grepping environment dumps. One line
+        # at info level — Catalog is constructed once per process for
+        # the long-running cases (MCP server) and once per CLI call
+        # otherwise.
+        _log.info(
+            "catalog_gate_state",
+            event_sourced=self._event_sourced_enabled,
+            shadow_emit=self._shadow_emit_enabled,
+            catalog_dir=str(catalog_dir),
+        )
         # Storage review S-4: mtime cache so every Catalog() instantiation
         # doesn't re-parse the full JSONL corpus and re-build the SQLite
         # cache. For a 10k-entry catalog this was measurably slow on
@@ -503,34 +525,179 @@ class Catalog:
         )
 
     def _ensure_consistent(self) -> None:
-        """Rebuild SQLite from JSONL truth when the JSONL mtime has advanced.
+        """Rebuild SQLite from the canonical truth when its mtime has advanced.
+
+        With ``NEXUS_EVENT_SOURCED=1`` the canonical truth is
+        ``events.jsonl`` (the event log IS the state per RDR-101 §"Core
+        invariants"); the rebuild path replays the log through
+        ``Projector.apply_all`` so a cross-process write that landed on
+        events.jsonl gets re-projected into this process's SQLite cache.
+        With the gate OFF the legacy JSONL files (owners/documents/links)
+        remain canonical and the rebuild reads them directly.
+
+        **Bootstrap guardrail.** When the gate is on but the legacy
+        JSONL holds substantially more documents than events.jsonl
+        carries DocumentRegistered events, we are looking at a freshly-
+        flipped catalog that has not yet run ``nx catalog
+        synthesize-log`` — the event-sourced rebuild would DELETE every
+        legacy row and replay only the few new events, silently wiping
+        the catalog. Refuse the event-sourced path in that scenario
+        (fall through to legacy + emit a structured warning).
+
+        **Atomicity.** The DELETE+replay sequence runs inside
+        ``CatalogDB.transaction()`` so a malformed event, a
+        ``NotImplementedError`` from the v: 1 projector path, or an
+        ``OperationalError`` mid-replay rolls back to the pre-DELETE
+        state instead of leaving SQLite empty.
 
         Sets ``degraded`` flag on failure so callers can surface the stale
         state rather than silently serving outdated data (nexus-f2vp).
 
-        Storage review S-4: skips the rebuild when no JSONL file has been
-        written since the last successful rebuild. For a large catalog
-        this eliminates the O(entries) parse cost on every ``Catalog()``
-        construction — the MCP server instantiates one per tool call.
+        Storage review S-4: skips the rebuild when no canonical file has
+        been written since the last successful rebuild. For a large
+        catalog this eliminates the O(entries) parse cost on every
+        ``Catalog()`` construction — the MCP server instantiates one
+        per tool call.
         """
         try:
+            # Track all canonical-truth sources for mtime detection so a
+            # rebuild kicks in regardless of which path produced the
+            # write. With the gate OFF, legacy JSONL is canonical; with
+            # the gate ON, events.jsonl is canonical but legacy JSONL is
+            # still written (back-compat) and a bootstrap catalog may
+            # have JSONL data with an empty events.jsonl.
             current_mtime = 0.0
-            for p in (self._owners_path, self._documents_path, self._links_path):
+            for p in (
+                self._owners_path,
+                self._documents_path,
+                self._links_path,
+                self._events_path,
+            ):
                 if p.exists():
                     current_mtime = max(current_mtime, p.stat().st_mtime)
             if current_mtime <= self._last_consistency_mtime and not self.degraded:
                 return
 
-            owners = read_owners(self._owners_path) if self._owners_path.exists() else {}
-            documents = read_documents(self._documents_path) if self._documents_path.exists() else {}
-            links_dict = read_links(self._links_path) if self._links_path.exists() else {}
-            _log.debug("catalog_consistency_rebuild", mtime=current_mtime)
-            self._db.rebuild(owners, documents, list(links_dict.values()))
+            use_event_log = (
+                self._event_sourced_enabled
+                and self._events_path.exists()
+                and self._events_path.stat().st_size > 0
+            )
+            if use_event_log and not self._event_log_covers_legacy():
+                # Bootstrap guardrail: events.jsonl is non-empty but
+                # the legacy JSONL has materially more documents than
+                # the event log carries DocumentRegistered events for.
+                # Refuse to wipe the legacy rows; fall through to the
+                # legacy rebuild and surface the gap so the operator
+                # can run ``nx catalog synthesize-log``.
+                _log.warning(
+                    "catalog_event_log_incomplete_falling_back_to_legacy",
+                    catalog_dir=str(self._dir),
+                    note=(
+                        "events.jsonl has fewer DocumentRegistered "
+                        "events than documents.jsonl has rows. Run "
+                        "'nx catalog synthesize-log' before relying "
+                        "on the event-sourced rebuild."
+                    ),
+                )
+                use_event_log = False
+            if use_event_log:
+                # Replay events.jsonl through the projector into the
+                # live CatalogDB. Atomic: the transaction context
+                # rolls back the DELETEs if apply_all raises.
+                from nexus.catalog.event_log import EventLog
+                _log.debug(
+                    "catalog_consistency_rebuild_event_sourced",
+                    mtime=current_mtime,
+                )
+                with self._db.transaction() as conn:
+                    conn.execute("DELETE FROM links")
+                    conn.execute("DELETE FROM documents")
+                    conn.execute("DELETE FROM owners")
+                    # commit=False — the transaction context owns the
+                    # commit boundary; a nested commit() would finalize
+                    # the tx prematurely and defeat the rollback fence.
+                    self._projector.apply_all(
+                        EventLog(self._dir).replay(), commit=False,
+                    )
+            else:
+                owners = read_owners(self._owners_path) if self._owners_path.exists() else {}
+                documents = read_documents(self._documents_path) if self._documents_path.exists() else {}
+                links_dict = read_links(self._links_path) if self._links_path.exists() else {}
+                _log.debug("catalog_consistency_rebuild", mtime=current_mtime)
+                self._db.rebuild(owners, documents, list(links_dict.values()))
             self._last_consistency_mtime = current_mtime
             self.degraded = False
         except Exception as exc:
             _log.warning("catalog_consistency_rebuild_failed", error=str(exc), exc_info=True)
             self.degraded = True
+
+    def _event_log_covers_legacy(self) -> bool:
+        """Return True when events.jsonl plausibly covers documents.jsonl.
+
+        Bootstrap guardrail for ``_ensure_consistent``: refuses to
+        DELETE-and-rebuild from a sparse event log when the legacy
+        JSONL still holds the majority of the catalog's content (e.g.
+        an operator just flipped ``NEXUS_EVENT_SOURCED=1`` on a
+        populated catalog and the first event-sourced write produced
+        a one-event log).
+
+        Cheap O(N) line counts on both files. ``documents.jsonl`` may
+        contain duplicates (last-line-wins on rebuild) and tombstones
+        (``_deleted=True`` markers) — count distinct non-tombstoned
+        tumblers as the canonical row count. ``events.jsonl`` may
+        contain tombstones too (DocumentDeleted events) — count
+        DocumentRegistered events minus DocumentDeleted as the
+        replayed-document count. A 5% slop tolerance avoids tripping
+        on a single in-flight write or one-event drift.
+        """
+        if not self._documents_path.exists():
+            return True
+        try:
+            registered: set[str] = set()
+            tombstoned: set[str] = set()
+            with self._documents_path.open() as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    tumbler = rec.get("tumbler")
+                    if not tumbler:
+                        continue
+                    if rec.get("_deleted"):
+                        tombstoned.add(tumbler)
+                    else:
+                        registered.add(tumbler)
+            legacy_doc_count = len(registered - tombstoned)
+            if legacy_doc_count == 0:
+                return True
+
+            from nexus.catalog import events as _ev
+            event_doc_count = 0
+            with self._events_path.open() as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    t = obj.get("type")
+                    if t == _ev.TYPE_DOCUMENT_REGISTERED:
+                        event_doc_count += 1
+                    elif t == _ev.TYPE_DOCUMENT_DELETED:
+                        event_doc_count -= 1
+
+            return event_doc_count >= int(legacy_doc_count * 0.95)
+        except Exception:
+            # On any unexpected failure, refuse the event-sourced
+            # rebuild (safer to fall through to legacy than to wipe).
+            return False
 
     def jsonl_paths(self) -> tuple[Path, ...]:
         """Public accessor for JSONL file paths (used by mtime checks)."""
@@ -772,8 +939,7 @@ class Catalog:
                 # Event-sourced path: events.jsonl first, projector
                 # writes SQLite, legacy JSONL last for back-compat.
                 self._write_to_event_log(event)
-                from nexus.catalog.projector import Projector as _Projector
-                _Projector(self._db).apply(event)
+                self._projector.apply(event)
                 self._db.commit()
                 self._append_jsonl(self._owners_path, rec.__dict__)
             else:
@@ -1018,8 +1184,7 @@ class Catalog:
                 # back-compat. The event log is canonical; SQLite is a
                 # deterministic projection of it.
                 self._write_to_event_log(event)
-                from nexus.catalog.projector import Projector as _Projector
-                _Projector(self._db).apply(event)
+                self._projector.apply(event)
                 self._db.commit()
                 self._append_jsonl(self._documents_path, rec.__dict__)
             else:
@@ -1217,8 +1382,7 @@ class Catalog:
             )
             if self._event_sourced_enabled:
                 self._write_to_event_log(event)
-                from nexus.catalog.projector import Projector as _Projector
-                _Projector(self._db).apply(event)
+                self._projector.apply(event)
                 self._db.commit()
                 self._append_jsonl(self._documents_path, updated.__dict__)
             else:
@@ -1581,19 +1745,23 @@ class Catalog:
                 # fine-grained DocumentRenamed/DocumentEnriched events
                 # that capture intent rather than state.
                 self._write_to_event_log(event)
-                from nexus.catalog.projector import Projector as _Projector
-                _Projector(self._db).apply(event)
+                self._projector.apply(event)
                 self._db.commit()
                 self._append_jsonl(self._documents_path, rec_dict)
             else:
                 self._append_jsonl(self._documents_path, rec_dict)
-                # Upsert SQLite
+                # Upsert SQLite. ``alias_of`` is included in the column
+                # list because INSERT OR REPLACE on the tumbler PK
+                # deletes the prior row before inserting; omitting the
+                # column would let the new row carry the column default
+                # (NULL) instead of the prior alias pointer, silently
+                # severing the alias graph on every update().
                 self._db.execute(
                     "INSERT OR REPLACE INTO documents "
                     "(tumbler, title, author, year, content_type, file_path, "
                     "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
-                    "metadata, source_mtime, source_uri) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "metadata, source_mtime, source_uri, alias_of) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         rec_dict["tumbler"], rec_dict["title"], rec_dict["author"],
                         rec_dict["year"], rec_dict["content_type"], rec_dict["file_path"],
@@ -1602,6 +1770,7 @@ class Catalog:
                         rec_dict["indexed_at"], json.dumps(rec_dict["meta"]),
                         rec_dict.get("source_mtime", 0.0),
                         rec_dict.get("source_uri", ""),
+                        entry.alias_of or "",
                     ),
                 )
                 self._db.commit()
@@ -1634,7 +1803,6 @@ class Catalog:
                 (old,),
             ).fetchall()
             from nexus.catalog.synthesizer import _owner_prefix_of as _opo
-            from nexus.catalog.projector import Projector as _Projector
             for row in rows:
                 # Preserve source_mtime + source_uri + alias_of across
                 # the rename — JSONL is the rebuild source of truth, so
@@ -1690,7 +1858,7 @@ class Catalog:
                         v=0,
                     )
                     self._write_to_event_log(event)
-                    _Projector(self._db).apply(event)
+                    self._projector.apply(event)
                     self._append_jsonl(self._documents_path, rec)
                 else:
                     self._append_jsonl(self._documents_path, rec)
@@ -1792,8 +1960,7 @@ class Catalog:
             )
             if self._event_sourced_enabled:
                 self._write_to_event_log(event)
-                from nexus.catalog.projector import Projector as _Projector
-                _Projector(self._db).apply(event)
+                self._projector.apply(event)
                 self._db.commit()
                 self._append_jsonl(self._documents_path, tombstone)
             else:
@@ -2041,18 +2208,12 @@ class Catalog:
             if created_by != row[1] and created_by not in co:
                 co.append(created_by)
             existing_meta["co_discovered_by"] = co
-            self._db.execute(
-                "UPDATE links SET from_span=?, to_span=?, metadata=? WHERE id=?",
-                (from_span, to_span, json.dumps(existing_meta), row[0]),
-            )
             rec = LinkRecord(
                 from_t=str(from_t), to_t=str(to_t), link_type=link_type,
                 from_span=from_span, to_span=to_span,
                 created_by=row[1], created_at=row[3] or now, meta=existing_meta,
             )
-            self._append_jsonl(self._links_path, rec.__dict__)
-            self._db.commit()
-            self._emit_shadow_event(_make_event(
+            event = _make_event(
                 _LinkCreatedPayload(
                     from_doc=str(from_t),
                     to_doc=str(to_t),
@@ -2064,7 +2225,24 @@ class Catalog:
                     meta=dict(existing_meta),
                 ),
                 v=0,
-            ))
+            )
+            if self._event_sourced_enabled:
+                # Event-sourced merge: emit the LinkCreated carrying
+                # the FINAL merged metadata first, then let the
+                # projector's INSERT OR REPLACE overwrite the prior
+                # SQLite row with the merged state.
+                self._write_to_event_log(event)
+                self._projector.apply(event)
+                self._db.commit()
+                self._append_jsonl(self._links_path, rec.__dict__)
+            else:
+                self._db.execute(
+                    "UPDATE links SET from_span=?, to_span=?, metadata=? WHERE id=?",
+                    (from_span, to_span, json.dumps(existing_meta), row[0]),
+                )
+                self._append_jsonl(self._links_path, rec.__dict__)
+                self._db.commit()
+                self._emit_shadow_event(event)
             return False
         else:
             combined_meta = dict(meta)
@@ -2073,16 +2251,7 @@ class Catalog:
                 from_span=from_span, to_span=to_span,
                 created_by=created_by, created_at=now, meta=combined_meta,
             )
-            self._db.execute(
-                "INSERT OR IGNORE INTO links "
-                "(from_tumbler, to_tumbler, link_type, from_span, to_span, "
-                "created_by, created_at, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (str(from_t), str(to_t), link_type, from_span, to_span,
-                 created_by, now, json.dumps(combined_meta)),
-            )
-            self._append_jsonl(self._links_path, rec.__dict__)
-            self._db.commit()
-            self._emit_shadow_event(_make_event(
+            event = _make_event(
                 _LinkCreatedPayload(
                     from_doc=str(from_t),
                     to_doc=str(to_t),
@@ -2094,7 +2263,23 @@ class Catalog:
                     meta=dict(combined_meta),
                 ),
                 v=0,
-            ))
+            )
+            if self._event_sourced_enabled:
+                self._write_to_event_log(event)
+                self._projector.apply(event)
+                self._db.commit()
+                self._append_jsonl(self._links_path, rec.__dict__)
+            else:
+                self._db.execute(
+                    "INSERT OR IGNORE INTO links "
+                    "(from_tumbler, to_tumbler, link_type, from_span, to_span, "
+                    "created_by, created_at, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (str(from_t), str(to_t), link_type, from_span, to_span,
+                     created_by, now, json.dumps(combined_meta)),
+                )
+                self._append_jsonl(self._links_path, rec.__dict__)
+                self._db.commit()
+                self._emit_shadow_event(event)
             return True
 
     def link(
@@ -2196,16 +2381,7 @@ class Catalog:
                 from_span=from_span, to_span=to_span,
                 created_by=created_by, created_at=now, meta=combined_meta,
             )
-            self._db.execute(
-                "INSERT OR IGNORE INTO links "
-                "(from_tumbler, to_tumbler, link_type, from_span, to_span, "
-                "created_by, created_at, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (str(from_t), str(to_t), link_type, from_span, to_span,
-                 created_by, now, json.dumps(combined_meta)),
-            )
-            self._append_jsonl(self._links_path, rec.__dict__)
-            self._db.commit()
-            self._emit_shadow_event(_make_event(
+            event = _make_event(
                 _LinkCreatedPayload(
                     from_doc=str(from_t),
                     to_doc=str(to_t),
@@ -2217,7 +2393,23 @@ class Catalog:
                     meta=dict(combined_meta),
                 ),
                 v=0,
-            ))
+            )
+            if self._event_sourced_enabled:
+                self._write_to_event_log(event)
+                self._projector.apply(event)
+                self._db.commit()
+                self._append_jsonl(self._links_path, rec.__dict__)
+            else:
+                self._db.execute(
+                    "INSERT OR IGNORE INTO links "
+                    "(from_tumbler, to_tumbler, link_type, from_span, to_span, "
+                    "created_by, created_at, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (str(from_t), str(to_t), link_type, from_span, to_span,
+                     created_by, now, json.dumps(combined_meta)),
+                )
+                self._append_jsonl(self._links_path, rec.__dict__)
+                self._db.commit()
+                self._emit_shadow_event(event)
             return True
         finally:
             self._release_lock(dir_fd)
@@ -2255,18 +2447,7 @@ class Catalog:
                     "created_at": datetime.now(UTC).isoformat(),
                     "meta": json.loads(full[2]) if full and full[2] else {},
                 }
-                self._append_jsonl(self._links_path, tombstone)
-                self._db.execute("DELETE FROM links WHERE id = ?", (row_id,))
-
-            self._db.commit()
-            # Emit shadow events AFTER db.commit() so a process crash
-            # between the DELETE and the commit cannot leave events.jsonl
-            # claiming a deletion that SQLite has not yet committed.
-            # Pre-fix the emit was inside the per-row loop, opening a
-            # crash window where the event log diverged from the
-            # authoritative SQLite state.
-            for row_id, lt, original_created_by in rows:
-                self._emit_shadow_event(_make_event(
+                event = _make_event(
                     _LinkDeletedPayload(
                         from_doc=str(from_t),
                         to_doc=str(to_t),
@@ -2274,7 +2455,35 @@ class Catalog:
                         reason="catalog.unlink",
                     ),
                     v=0,
-                ))
+                )
+                if self._event_sourced_enabled:
+                    # Event-sourced: write event, project (DELETE),
+                    # then JSONL tombstone. Commit batched at end of
+                    # the loop for efficiency on multi-row unlinks.
+                    self._write_to_event_log(event)
+                    self._projector.apply(event)
+                    self._append_jsonl(self._links_path, tombstone)
+                else:
+                    self._append_jsonl(self._links_path, tombstone)
+                    self._db.execute("DELETE FROM links WHERE id = ?", (row_id,))
+
+            self._db.commit()
+            # Shadow-emit one LinkDeleted per removed row AFTER
+            # db.commit() so a process crash between the DELETE and the
+            # commit cannot leave events.jsonl claiming a deletion that
+            # SQLite has not yet committed. Skipped when event-sourced
+            # is on — the per-row loop above already emitted + applied.
+            if not self._event_sourced_enabled:
+                for row_id, lt, original_created_by in rows:
+                    self._emit_shadow_event(_make_event(
+                        _LinkDeletedPayload(
+                            from_doc=str(from_t),
+                            to_doc=str(to_t),
+                            link_type=lt,
+                            reason="catalog.unlink",
+                        ),
+                        v=0,
+                    ))
             return len(rows)
         finally:
             self._release_lock(dir_fd)
@@ -2427,16 +2636,7 @@ class Catalog:
                     "created_at": datetime.now(UTC).isoformat(),
                     "meta": lnk.meta,
                 }
-                self._append_jsonl(self._links_path, tombstone)
-                self._db.execute(
-                    "DELETE FROM links WHERE from_tumbler=? AND to_tumbler=? AND link_type=?",
-                    (str(lnk.from_tumbler), str(lnk.to_tumbler), lnk.link_type),
-                )
-            self._db.commit()
-            # Emit shadow events AFTER db.commit() (see ``unlink`` for the
-            # crash-window rationale).
-            for lnk in matching:
-                self._emit_shadow_event(_make_event(
+                event = _make_event(
                     _LinkDeletedPayload(
                         from_doc=str(lnk.from_tumbler),
                         to_doc=str(lnk.to_tumbler),
@@ -2444,7 +2644,32 @@ class Catalog:
                         reason="catalog.bulk_unlink",
                     ),
                     v=0,
-                ))
+                )
+                if self._event_sourced_enabled:
+                    self._write_to_event_log(event)
+                    self._projector.apply(event)
+                    self._append_jsonl(self._links_path, tombstone)
+                else:
+                    self._append_jsonl(self._links_path, tombstone)
+                    self._db.execute(
+                        "DELETE FROM links WHERE from_tumbler=? AND to_tumbler=? AND link_type=?",
+                        (str(lnk.from_tumbler), str(lnk.to_tumbler), lnk.link_type),
+                    )
+            self._db.commit()
+            # Shadow-emit AFTER db.commit() (see ``unlink`` for the
+            # crash-window rationale). Skipped when event-sourced — the
+            # per-row loop already wrote and projected.
+            if not self._event_sourced_enabled:
+                for lnk in matching:
+                    self._emit_shadow_event(_make_event(
+                        _LinkDeletedPayload(
+                            from_doc=str(lnk.from_tumbler),
+                            to_doc=str(lnk.to_tumbler),
+                            link_type=lnk.link_type,
+                            reason="catalog.bulk_unlink",
+                        ),
+                        v=0,
+                    ))
             return len(matching)
         finally:
             self._release_lock(dir_fd)

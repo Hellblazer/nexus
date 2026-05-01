@@ -189,9 +189,23 @@ class TestEnvelopeRoundtrip:
 class TestVersioning:
     """Envelope ``v`` versioning per RF-101-2."""
 
-    def test_default_version_is_1(self):
+    def test_default_version_is_0(self):
+        # Default flipped from 1→0 per the round-3 review: v=1 has no
+        # production projector landing site (it raises) and the previous
+        # default produced a silent-drop trap when callers forgot to
+        # pass ``v=0``. Default to the implemented schema; opt into v=1
+        # explicitly when a v: 1 handler is wired.
         e = ev.make_event(ev.DocumentDeletedPayload(doc_id="x", reason="y"))
+        assert e.v == 0
+
+    def test_explicit_v_one(self):
+        e = ev.make_event(
+            ev.DocumentDeletedPayload(doc_id="x", reason="phase3_native"),
+            v=1,
+        )
         assert e.v == 1
+        d = e.to_dict()
+        assert d["v"] == 1
 
     def test_synthesized_v_zero(self):
         e = ev.make_event(
