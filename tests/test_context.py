@@ -204,7 +204,7 @@ class TestSubagentHookInjection:
         cache_file.write_text("## Knowledge Map\n\ncode: Test Topic (42)\n")
 
         result = subprocess.run(
-            ["bash", str(self.HOOK_PATH)],
+            ["/bin/bash", str(self.HOOK_PATH)],  # /bin/bash 3.2 — homebrew bash 5.3 deadlocks on the NXTOOLS heredoc
             capture_output=True, text=True, timeout=10,
             cwd=str(repo_dir),
             env={**__import__("os").environ, "HOME": str(tmp_path)},
@@ -223,7 +223,7 @@ class TestSubagentHookInjection:
         repo_dir.mkdir()
 
         result = subprocess.run(
-            ["bash", str(self.HOOK_PATH)],
+            ["/bin/bash", str(self.HOOK_PATH)],  # /bin/bash 3.2 — homebrew bash 5.3 deadlocks on the NXTOOLS heredoc
             capture_output=True, text=True, timeout=10,
             cwd=str(repo_dir),
             env={**__import__("os").environ, "HOME": str(tmp_path)},
@@ -247,7 +247,7 @@ class TestSubagentHookInjection:
         repo_dir.mkdir()
 
         result = subprocess.run(
-            ["bash", str(self.HOOK_PATH)],
+            ["/bin/bash", str(self.HOOK_PATH)],  # /bin/bash 3.2 — homebrew bash 5.3 deadlocks on the NXTOOLS heredoc
             capture_output=True, text=True, timeout=10,
             cwd=str(repo_dir),
             env={**__import__("os").environ, "HOME": str(tmp_path)},

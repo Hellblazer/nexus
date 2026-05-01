@@ -101,40 +101,32 @@ RELAY
 # Serena + Context7 guidance injected by sn plugin (sn/hooks/scripts/mcp-inject.sh).
 
 if [[ $SKIP_STORAGE_DOCS -eq 0 ]]; then
-cat <<'NXTOOLS'
+# Heredoc bodies kept under 500 bytes each — bash 5.3.x deadlocks on
+# larger heredocs when the child writes the body to a pipe before
+# exec'ing cat (write blocks waiting for a reader that hasn't started
+# yet). /bin/bash 3.2 uses temp files so it's unaffected, but launchers
+# that pick homebrew bash via PATH lookup hang the whole subagent
+# dispatch. Splitting also trims redundant param signatures the agent
+# already sees in the live MCP tool list.
+cat <<'NX_TIERS'
 
-## nx Storage Tools
+## nx storage (call as mcp__plugin_nx_nexus__<tool>; pagination: footer shows offset=N)
 
-Results from search/list are paged — footer shows `offset=N` for next page.
+Tiers: T1 scratch (session, sibling-shared) -> T2 memory (project, persistent) -> T3 knowledge (semantic).
 
-T1 scratch (session-scoped, shared across siblings):
-  mcp__plugin_nx_nexus__scratch(action="put|search|list|get|delete", content, tags, query, limit, entry_id)
-  mcp__plugin_nx_nexus__scratch_manage(action="flag", entry_id, project, title)
+T1: scratch, scratch_manage
+T2: memory_get, memory_search, memory_put, memory_delete
+NX_TIERS
 
-T2 memory (project-scoped, persistent):
-  mcp__plugin_nx_nexus__memory_get(project, title="" → list titles only)
-  mcp__plugin_nx_nexus__memory_search(query, project, limit=20, offset=0)
-  mcp__plugin_nx_nexus__memory_put(content, project, title, ttl=30)
-  mcp__plugin_nx_nexus__memory_delete(project, title)
+cat <<'NX_T3'
+T3: search (where, cluster_by="semantic", topic), query (catalog-aware; follow_links, depth, subtree),
+    store_list, store_get, store_put (AUTO-LINKS via T1 tag "link-context"),
+    collection_list
+Plans (T2): plan_search, plan_save
 
-T3 knowledge (permanent, semantic search):
-  mcp__plugin_nx_nexus__search(query, corpus="knowledge", limit=10, offset=0, where, cluster_by, topic)
-    where: "section_type!=references" filters noise; cluster_by="semantic" groups; topic="Label" pre-filters
-  mcp__plugin_nx_nexus__query(question, corpus, where, limit, author, content_type, follow_links="cites", depth=1, subtree)
-    document-level, catalog-aware, taxonomy-boosted; subtree="1.1" = all descendants of tumbler prefix
-  mcp__plugin_nx_nexus__store_list(collection, limit=20, offset=0, docs=false)
-  mcp__plugin_nx_nexus__store_get(doc_id, collection)
-  mcp__plugin_nx_nexus__store_put(content, collection, title, tags)
-    AUTO-LINKS via T1 scratch tag "link-context"; self-seed via catalog_search → scratch put if absent.
-    Findings not stored are findings lost — call before returning.
-  mcp__plugin_nx_nexus__collection_list
-
-Plan library (T2):
-  mcp__plugin_nx_nexus__plan_search(query, project, limit=5)
-  mcp__plugin_nx_nexus__plan_save(query, plan_json, project, tags, ttl=30)
-
-Routing: T1 (sibling sharing) → T2 (project persistence) → T3 (semantic knowledge).
-NXTOOLS
+Hint: where="section_type!=references" filters noise.
+Findings not stored are findings lost - call store_put before returning.
+NX_T3
 
 # L1 Knowledge Map (per-repo, RDR-072) — outside the heredoc so $(…) expands
 CONTEXT_DIR="$HOME/.config/nexus/context"
@@ -162,17 +154,12 @@ SEQTHINK
 if [[ $SKIP_OPERATORS -eq 0 ]]; then
 cat <<'OPERATORS'
 
-## Analytical Operators (RDR-080)
+## Analytical operators (RDR-080)
 
-Five MCP tools wrap the five operations — each spawns `claude -p` (default timeout 120s). Call directly; no Agent dispatch.
+5 ops wrap claude -p (120s default). Call directly, no Agent dispatch:
+  operator_summarize, operator_extract, operator_rank, operator_compare, operator_generate
 
-  mcp__plugin_nx_nexus__operator_summarize(content, cited=True)
-  mcp__plugin_nx_nexus__operator_extract(inputs=[...], fields="title,year,author")
-  mcp__plugin_nx_nexus__operator_rank(items=[...], criterion)
-  mcp__plugin_nx_nexus__operator_compare(items=[...], focus)
-  mcp__plugin_nx_nexus__operator_generate(template, context)
-
-For plan-matched multi-step retrieval use mcp__plugin_nx_nexus__nx_answer — it composes search/query/operators under a plan-match-first gate.
+Multi-step retrieval (plan-match gate): nx_answer.
 OPERATORS
 fi
 
@@ -180,25 +167,25 @@ fi
 if echo "$TASK_TEXT" | grep -qiE "author|cit(e|ation|es|ed)|who wrote|what did.*write|papers? (by|about)|provenance|corpus|collection|tumbler|what research|informed by|based on|relationship|links? (from|to)|referenc|follow.on|build.on|what (implements|supersedes)|link (audit|query|graph)|orphan|catalog|rdr.*(close|accept|show|gate|research)|close.*rdr|accept.*rdr|supersed|consolidat|tidy|knowledge|research|synthesiz|archive|store_put|store put|debug.*finding|root.cause|prevention.pattern|architecture.*map|pattern.*catalog|architect.*decision|risk.assess|insight.*developer|analysis.*deep|analyz.*codebas"; then
   CATALOG_PATH="${NEXUS_CATALOG_PATH:-$HOME/.config/nexus/catalog}"
   if [[ -d "$CATALOG_PATH/.git" && -f "$CATALOG_PATH/documents.jsonl" ]]; then
-    cat <<'CATALOG'
+    cat <<'CATALOG_TOOLS'
 
-## Catalog — Document Registry + Link Graph
+## Catalog - metadata-first queries (author, corpus, citations, provenance)
+(call as mcp__plugin_nx_nexus-catalog__<tool>)
 
-Catalog tools for metadata-first queries (author, corpus, title, citations, provenance). /nx:query handles full catalog-aware plan execution.
+  search, show, resolve
+  links (direction="in"|"out", link_type, depth=2 -> nodes+edges; live docs only)
+  link (from_tumbler, to_tumbler, link_type, created_by, spans)
+  link_query (admin/audit; includes orphans)
+CATALOG_TOOLS
 
-  mcp__plugin_nx_nexus-catalog__search(query, author, corpus, owner, file_path, content_type)
-  mcp__plugin_nx_nexus-catalog__show(tumbler) — full entry with links_from + links_to
-  mcp__plugin_nx_nexus-catalog__links(tumbler, direction="in", link_type="cites", depth=2)
-    → {"nodes":[CatalogEntry], "edges":[link]}; live documents only (use link_query for orphans)
-  mcp__plugin_nx_nexus-catalog__link(from_tumbler, to_tumbler, link_type, created_by, from_span, to_span)
-    spans: "chash:<sha256hex>" preferred (content-addressed); "chash:<sha256hex>:<start>-<end>" sub-chunk;
-    fallback "L-L" line range or "C:S-E" chunk:char (positional, may go stale).
-    chash from search result chunk_text_hash metadata.
-  mcp__plugin_nx_nexus-catalog__link_query(link_type, created_by, created_at_before, limit=50) — admin/audit, all links
-  mcp__plugin_nx_nexus-catalog__resolve(owner, corpus) — → collection names
+    cat <<'CATALOG_LINKING'
+Link spans: "chash:<sha256hex>" preferred (content-addressed); ":<start>-<end>" sub-chunk;
+fallback "L-L" or "C:S-E" (positional, may go stale). chash via search chunk_text_hash.
 
-Link types: cites, implements-heuristic, supersedes, quotes, relates, comments, implements
-CATALOG
+Link types: cites, implements, implements-heuristic, supersedes, quotes, relates, comments.
+
+For full plan execution use /nx:query.
+CATALOG_LINKING
   fi
 fi
 
