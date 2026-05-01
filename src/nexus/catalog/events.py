@@ -274,6 +274,15 @@ class ChunkIndexedPayload:
     events emitted from existing T3 state, the legacy
     ``f"{content_hash[:16]}_{chunk_index}"`` shape is copied verbatim.
     Either way the projector treats ``chunk_id`` as opaque.
+
+    ``synthesized_orphan`` flags chunks that the Phase 2
+    ``synthesize-log --chunks`` walker could not resolve to a document
+    via the source_path → source_uri → tumbler → doc_id chain or via
+    the title fallback (Phase 0 ``CHROMA_IDENTITY_FIELD`` pattern).
+    Such chunks are emitted with ``doc_id=""`` and
+    ``synthesized_orphan=True`` so the doctor verb (PR δ) can report
+    them rather than the GC silently collecting them after the
+    orphan window.
     """
 
     chunk_id: str
@@ -283,6 +292,7 @@ class ChunkIndexedPayload:
     position: int
     content_hash: str = ""
     embedded_at: str = ""
+    synthesized_orphan: bool = False
 
 
 @dataclass(frozen=True, slots=True)

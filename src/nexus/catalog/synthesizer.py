@@ -434,3 +434,141 @@ def _owner_prefix_of(tumbler: str) -> str:
     if len(parts) < 2:
         return ""
     return ".".join(parts[:2])
+
+
+# ── T3 chunk synthesis (Phase 2 PR β) ────────────────────────────────────
+
+
+_CHUNK_PAGE_SIZE = 300  # matches the ChromaDB Cloud 300-row limit
+
+
+def synthesize_t3_chunks(
+    client: Any,
+    document_events: list[Event],
+) -> Iterator[Event]:
+    """Walk every collection on ``client`` and emit one ``ChunkIndexed``
+    v: 0 event per chunk.
+
+    ``document_events`` is the list of ``DocumentRegistered`` events the
+    document-side synthesizer just produced; this function reads
+    ``payload.source_uri`` / ``payload.title`` / ``payload.coll_id`` /
+    ``payload.doc_id`` to build reverse maps that resolve each T3 chunk's
+    ``source_path`` to a doc_id.
+
+    Resolution priority per chunk:
+
+    1. ``source_path`` exact match against ``source_uri`` after the
+       canonical ``file://`` prefix (the catalog stores file-scheme URIs
+       as ``file:///abs/path``; T3 chunks store the bare path).
+    2. ``title`` exact match (the Phase 0 ``CHROMA_IDENTITY_FIELD``
+       fallback for ``knowledge__*`` collections that legitimately have
+       empty source_uri rows in the catalog).
+    3. None — emit ``ChunkIndexed`` with ``doc_id=""`` and
+       ``synthesized_orphan=True`` so the Phase 2 doctor coverage
+       check (PR δ) can report the orphan rather than the GC silently
+       collecting it after the orphan window.
+
+    The walker uses paginated ``col.get(limit=300, offset=...)`` so a
+    multi-thousand-chunk collection does not exceed the ChromaDB Cloud
+    page limit. Chunks with empty / missing chash metadata are still
+    emitted (chash is empty in the event) — the corresponding catalog
+    rows existed before the chash_index landed (RDR-086) and would
+    otherwise vanish from the synthesized log.
+    """
+    # Build reverse maps once.
+    source_uri_to_doc_id: dict[str, str] = {}
+    title_to_doc_id: dict[str, str] = {}
+    coll_to_doc_ids: dict[str, set[str]] = {}
+    for ev_obj in document_events:
+        if ev_obj.type != ev.TYPE_DOCUMENT_REGISTERED:
+            continue
+        p = ev_obj.payload
+        if p.source_uri:
+            source_uri_to_doc_id[p.source_uri] = p.doc_id
+        if p.title:
+            # Last-write-wins: a title collision means the synthesized
+            # event log can only resolve to one of them; the doctor
+            # verb will surface the ambiguity downstream.
+            title_to_doc_id[p.title] = p.doc_id
+        if p.coll_id:
+            coll_to_doc_ids.setdefault(p.coll_id, set()).add(p.doc_id)
+
+    try:
+        collections = list(client.list_collections())
+    except Exception as exc:
+        _log.warning("synthesizer_t3_list_collections_failed", error=str(exc))
+        return
+
+    for col in collections:
+        coll_name = getattr(col, "name", None) or str(col)
+        try:
+            yield from _synthesize_collection_chunks(
+                col, coll_name,
+                source_uri_to_doc_id=source_uri_to_doc_id,
+                title_to_doc_id=title_to_doc_id,
+            )
+        except Exception as exc:
+            _log.warning(
+                "synthesizer_t3_collection_walk_failed",
+                collection=coll_name, error=str(exc),
+            )
+            continue
+
+
+def _synthesize_collection_chunks(
+    col: Any,
+    coll_name: str,
+    *,
+    source_uri_to_doc_id: dict[str, str],
+    title_to_doc_id: dict[str, str],
+) -> Iterator[Event]:
+    """Paginate one collection and yield ``ChunkIndexed`` per chunk."""
+    offset = 0
+    while True:
+        page = col.get(limit=_CHUNK_PAGE_SIZE, offset=offset, include=["metadatas"])
+        ids = page.get("ids") or []
+        metadatas = page.get("metadatas") or []
+        if not ids:
+            break
+        for chunk_id, meta in zip(ids, metadatas):
+            meta = meta or {}
+            source_path = meta.get("source_path") or ""
+            chunk_title = meta.get("title") or ""
+            chash = meta.get("chunk_text_hash") or ""
+            content_hash = meta.get("content_hash") or ""
+            chunk_index = int(meta.get("chunk_index", 0) or 0)
+            embedded_at = meta.get("indexed_at") or meta.get("embedded_at") or ""
+
+            # 1. source_path → file://source_path → source_uri map.
+            doc_id = ""
+            if source_path:
+                candidate = (
+                    source_path
+                    if source_path.startswith(("file://", "chroma://", "https://", "http://", "x-devonthink-item://"))
+                    else f"file://{source_path}"
+                )
+                doc_id = source_uri_to_doc_id.get(candidate, "")
+            # 2. Title fallback (CHROMA_IDENTITY_FIELD pattern).
+            if not doc_id and chunk_title:
+                doc_id = title_to_doc_id.get(chunk_title, "")
+            orphan = not doc_id
+
+            yield Event(
+                type=ev.TYPE_CHUNK_INDEXED,
+                v=0,
+                payload=ev.ChunkIndexedPayload(
+                    chunk_id=chunk_id,
+                    chash=chash,
+                    doc_id=doc_id,
+                    coll_id=coll_name,
+                    position=chunk_index,
+                    content_hash=content_hash,
+                    embedded_at=embedded_at,
+                    synthesized_orphan=orphan,
+                ),
+                ts=embedded_at,
+            )
+
+        if len(ids) < _CHUNK_PAGE_SIZE:
+            break
+        offset += _CHUNK_PAGE_SIZE
