@@ -3394,6 +3394,20 @@ def _run_replay_equality() -> dict:
     else:
         event_source = "synthesized"
 
+    # Round-4 review (reviewer B EC-4): when ``NEXUS_EVENT_LOG_SHADOW=1``
+    # but ``NEXUS_EVENT_SOURCED`` is unset, events.jsonl is being
+    # shadow-emitted (subset of mutations, post-commit) — it is NOT
+    # the canonical source of truth. A doctor replay against a
+    # shadow-only log will report bogus divergence (legacy bootstrap
+    # rows are absent from the log). Surface that explicitly so an
+    # operator reading a FAIL report does not waste time hunting a
+    # projector bug.
+    shadow_only = (
+        event_source == "events.jsonl"
+        and os.environ.get("NEXUS_EVENT_LOG_SHADOW", "").strip().lower() in ("1", "true", "yes", "on")
+        and os.environ.get("NEXUS_EVENT_SOURCED", "").strip().lower() not in ("1", "true", "yes", "on")
+    )
+
     # ── Snapshot live ──────────────────────────────────────────────────
     # Links carry an autoincrement ``id`` PK that the projector restarts
     # at 1; the live db's ids depend on insertion history. RF-101-2 does
@@ -3463,6 +3477,7 @@ def _run_replay_equality() -> dict:
         "catalog_dir": str(cat_dir),
         "live_db": str(live_db_path),
         "event_source": event_source,
+        "shadow_only": shadow_only,
         "tables": table_diffs,
     }
 
@@ -3501,6 +3516,14 @@ def _print_replay_equality_text(report: dict) -> None:
     click.echo(f"Catalog: {report['catalog_dir']}")
     click.echo(f"Live db: {report['live_db']}")
     click.echo(f"Event source: {report.get('event_source', 'synthesized')}")
+    if report.get("shadow_only"):
+        click.echo(
+            "WARNING: events.jsonl is shadow-emitted "
+            "(NEXUS_EVENT_LOG_SHADOW=1, NEXUS_EVENT_SOURCED unset). "
+            "Divergence below may reflect missing bootstrap events, "
+            "not a projector bug. Run 'nx catalog synthesize-log' "
+            "before relying on this verb in shadow mode."
+        )
     click.echo(f"Events applied: {report['events_applied']}")
     click.echo("")
 

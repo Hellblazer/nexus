@@ -241,9 +241,14 @@ def reset_plan_cache_for_tests() -> None:
 
 
 def _max_jsonl_mtime(cat) -> float:
-    """Return max mtime across all three JSONL files."""
+    """Return max mtime across every catalog file written by a mutator.
+
+    Includes ``events.jsonl`` (RDR-101 Phase 3) — without it, a
+    cross-process event-sourced write would not invalidate this
+    process's catalog cache and the singleton would serve stale state.
+    """
     mtime = 0.0
-    for path in cat.jsonl_paths():
+    for path in cat.mtime_paths():
         try:
             mtime = max(mtime, path.stat().st_mtime) if path.exists() else mtime
         except OSError:
@@ -254,8 +259,18 @@ def _max_jsonl_mtime(cat) -> float:
 def get_catalog():
     """Return Catalog singleton or None if not initialized.
 
-    Checks JSONL mtime on each access — if files changed externally
-    (e.g., git pull from another process), triggers a rebuild.
+    Checks catalog file mtimes on each access — if any of
+    ``owners.jsonl`` / ``documents.jsonl`` / ``links.jsonl`` /
+    ``events.jsonl`` advanced (cross-process write, git pull from
+    another process), triggers a rebuild.
+
+    **Gate caveat:** ``Catalog._event_sourced_enabled`` and
+    ``_shadow_emit_enabled`` are read once at construction. Flipping
+    ``NEXUS_EVENT_SOURCED`` or ``NEXUS_EVENT_LOG_SHADOW`` while the MCP
+    server is running has NO effect on the singleton until the process
+    restarts. This is fine for the cutover (a deployment changes the
+    env var and restarts the service) but tests that toggle the gate
+    mid-run must call :func:`reset_singletons` between toggles.
     """
     global _catalog_instance, _catalog_mtime
     if _catalog_instance is None:
@@ -1087,6 +1102,15 @@ def inject_t3(t3):
 
 
 def inject_catalog(cat):
-    """Inject a Catalog for testing."""
-    global _catalog_instance
+    """Inject a Catalog for testing.
+
+    Resets ``_catalog_mtime`` so the next ``get_catalog()`` call sees
+    the injected catalog's current mtime and skips the (irrelevant)
+    rebuild path. Without this reset the prior catalog's mtime would
+    survive the swap and the next ``get_catalog()`` could either
+    rebuild the injected catalog needlessly (if old mtime > new) or
+    skip a needed rebuild (if old mtime < new).
+    """
+    global _catalog_instance, _catalog_mtime
     _catalog_instance = cat
+    _catalog_mtime = 0.0
