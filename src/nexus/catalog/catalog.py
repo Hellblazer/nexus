@@ -29,12 +29,19 @@ _SHADOW_EMIT_ENV = "NEXUS_EVENT_LOG_SHADOW"
 # new path inverts the JSONL+SQLite write order: emit DocumentRegistered
 # event FIRST, project to SQLite via Projector.apply, then append to
 # legacy documents.jsonl for back-compat (Phase 5 deprecates legacy
-# JSONL). When OFF (default), the legacy direct-write path runs and
-# shadow emit (PR F) optionally appends to events.jsonl after the fact.
+# JSONL). When OFF, the legacy direct-write path runs and shadow emit
+# (PR F) optionally appends to events.jsonl after the fact.
 #
-# Default off so the gate flip is a deliberate operator action. The
-# IRREVERSIBILITY WINDOW (RDR-101 §Migration / Phase 3) only starts
-# when this default flips on, which is a later sub-PR in Phase 3.
+# RDR-101 Phase 3 PR ζ (nexus-o6aa.9.5): default flipped to ON. The
+# irreversibility window opens here — the catalog event log is now the
+# canonical write path by default. Existing catalogs without an
+# events.jsonl fall through to the legacy rebuild via the
+# ``_event_log_covers_legacy`` bootstrap guardrail in
+# ``_ensure_consistent``, so the flip is safe for catalogs that have
+# not yet run ``nx catalog synthesize-log`` — they keep operating in
+# legacy mode until an operator runs the migration. Set
+# ``NEXUS_EVENT_SOURCED=0`` (or ``false``/``no``/``off``) to opt back
+# into the legacy path.
 _EVENT_SOURCED_ENV = "NEXUS_EVENT_SOURCED"
 
 
@@ -44,8 +51,17 @@ def _read_shadow_gate() -> bool:
 
 
 def _read_event_sourced_gate() -> bool:
+    """Return True when the event-sourced write path is enabled.
+
+    RDR-101 Phase 3 PR ζ: the default is ON. ``NEXUS_EVENT_SOURCED``
+    unset or set to any non-falsy value enables ES mode. Explicit
+    ``0`` / ``false`` / ``no`` / ``off`` opts back into the legacy
+    direct-write path.
+    """
     val = os.environ.get(_EVENT_SOURCED_ENV, "").strip().lower()
-    return val in ("1", "true", "yes", "on")
+    if val in ("0", "false", "no", "off"):
+        return False
+    return True
 
 
 # Module-level imports of the typed event payloads. Aliased with a

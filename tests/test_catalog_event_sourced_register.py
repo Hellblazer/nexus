@@ -3,8 +3,10 @@
 """Tests for the RDR-101 Phase 3 PR α event-sourced register path.
 
 Coverage:
-- Gate parsing: 1/true/yes/on → ON; 0/false/no/off/unset → OFF.
-- Default (gate OFF): legacy direct-write path runs unchanged.
+- Gate parsing (PR ζ semantics, nexus-o6aa.9.5): 0/false/no/off → OFF;
+  1/true/yes/on/unset/empty → ON. The default flipped to ON in PR ζ.
+- Legacy path (gate explicitly OFF): legacy direct-write path runs
+  unchanged.
 - Gate ON: register_owner / register write events.jsonl FIRST, then
   project to SQLite via Projector.apply, then append to legacy JSONL
   for back-compat.
@@ -42,29 +44,36 @@ from nexus.catalog.projector import Projector
 
 
 class TestEventSourcedGate:
-    @pytest.mark.parametrize("val", ["1", "true", "TRUE", "yes", "ON"])
+    @pytest.mark.parametrize("val", ["1", "true", "TRUE", "yes", "ON", ""])
     def test_on_values(self, monkeypatch: pytest.MonkeyPatch, val: str):
+        # PR ζ (nexus-o6aa.9.5): empty string is ON (the default-on
+        # branch); only explicit falsy tokens flip it OFF.
         monkeypatch.setenv("NEXUS_EVENT_SOURCED", val)
         assert _read_event_sourced_gate() is True
 
-    @pytest.mark.parametrize("val", ["0", "false", "no", "off", ""])
+    @pytest.mark.parametrize("val", ["0", "false", "no", "off"])
     def test_off_values(self, monkeypatch: pytest.MonkeyPatch, val: str):
         monkeypatch.setenv("NEXUS_EVENT_SOURCED", val)
         assert _read_event_sourced_gate() is False
 
-    def test_unset_is_off(self, monkeypatch: pytest.MonkeyPatch):
+    def test_unset_is_on(self, monkeypatch: pytest.MonkeyPatch):
+        # PR ζ: default flipped to ON. The irreversibility window
+        # opens here; the bootstrap guardrail in _ensure_consistent
+        # falls back to legacy when events.jsonl is empty / absent.
         monkeypatch.delenv("NEXUS_EVENT_SOURCED", raising=False)
-        assert _read_event_sourced_gate() is False
+        assert _read_event_sourced_gate() is True
 
 
-# ── Default (gate OFF) — legacy behaviour unchanged ──────────────────────
+# ── Legacy path (gate explicitly OFF) — pre-ζ behaviour unchanged ────────
 
 
 class TestLegacyPathStillRuns:
     def test_register_does_not_write_events_jsonl_by_default(
         self, tmp_path, monkeypatch: pytest.MonkeyPatch,
     ):
-        monkeypatch.delenv("NEXUS_EVENT_SOURCED", raising=False)
+        # PR ζ flipped the default to ES; opt back into legacy for
+        # this assertion that no events.jsonl is produced.
+        monkeypatch.setenv("NEXUS_EVENT_SOURCED", "0")
         monkeypatch.delenv("NEXUS_EVENT_LOG_SHADOW", raising=False)
         d = tmp_path / "catalog"
         d.mkdir()
@@ -161,7 +170,8 @@ class TestEquivalence:
         if event_sourced:
             monkeypatch.setenv("NEXUS_EVENT_SOURCED", "1")
         else:
-            monkeypatch.delenv("NEXUS_EVENT_SOURCED", raising=False)
+            # PR ζ flipped default to ON; explicit OFF for legacy path.
+            monkeypatch.setenv("NEXUS_EVENT_SOURCED", "0")
         monkeypatch.delenv("NEXUS_EVENT_LOG_SHADOW", raising=False)
         d = tmp_path / name
         d.mkdir()

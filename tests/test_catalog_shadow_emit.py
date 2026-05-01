@@ -43,8 +43,13 @@ from nexus.catalog.projector import Projector
 
 @pytest.fixture()
 def cat_off(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Catalog:
-    """Catalog constructed with shadow emit OFF (default)."""
+    """Catalog constructed with shadow emit OFF and ES OFF — the
+    historical "no events.jsonl" config. PR ζ (nexus-o6aa.9.5) flipped
+    the ES default to ON, so asserting an empty event log now requires
+    opting both gates out.
+    """
     monkeypatch.delenv("NEXUS_EVENT_LOG_SHADOW", raising=False)
+    monkeypatch.setenv("NEXUS_EVENT_SOURCED", "0")
     d = tmp_path / "catalog"
     d.mkdir()
     return Catalog(d, d / ".catalog.db")
@@ -52,8 +57,12 @@ def cat_off(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Catalog:
 
 @pytest.fixture()
 def cat_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Catalog:
-    """Catalog constructed with shadow emit ON."""
+    """Catalog constructed with shadow emit ON and ES OFF — exercises
+    the shadow-only path. Under PR ζ this requires an explicit ES
+    opt-out so shadow is the only writer of events.jsonl.
+    """
     monkeypatch.setenv("NEXUS_EVENT_LOG_SHADOW", "1")
+    monkeypatch.setenv("NEXUS_EVENT_SOURCED", "0")
     d = tmp_path / "catalog"
     d.mkdir()
     return Catalog(d, d / ".catalog.db")

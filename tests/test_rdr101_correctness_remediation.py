@@ -206,7 +206,12 @@ class TestUnlinkEventOrderingAfterCommit:
         loop's terminating commit. Post-fix, emits happen after the
         commit so a process crash leaves SQLite + events.jsonl
         consistent (or both reflecting the pre-delete state).
+
+        PR ζ (nexus-o6aa.9.5) flipped NEXUS_EVENT_SOURCED default to
+        ON; shadow emit is a no-op under ES so this test pins to the
+        legacy path explicitly to exercise the ordering invariant.
         """
+        monkeypatch.setenv("NEXUS_EVENT_SOURCED", "0")
         monkeypatch.setenv("NEXUS_EVENT_LOG_SHADOW", "1")
         d = tmp_path / "catalog"
         d.mkdir()

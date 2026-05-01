@@ -196,11 +196,12 @@ def test_dedupe_emits_events_under_es(tmp_path, monkeypatch):
 
 
 def test_dedupe_legacy_mode_unchanged(tmp_path, monkeypatch):
-    """Regression guard: NEXUS_EVENT_SOURCED unset/0 still drives the
-    legacy direct-DELETE path. The function returns the same counts
-    and the orphan rows are gone from SQLite immediately.
+    """Regression guard: NEXUS_EVENT_SOURCED=0 still drives the legacy
+    direct-DELETE path. The function returns the same counts and the
+    orphan rows are gone from SQLite immediately.
     """
-    monkeypatch.delenv("NEXUS_EVENT_SOURCED", raising=False)
+    # PR ζ flipped the default to ON; opt back into legacy explicitly.
+    monkeypatch.setenv("NEXUS_EVENT_SOURCED", "0")
     d = tmp_path / "catalog"
     d.mkdir()
     cat = Catalog(d, d / ".catalog.db")

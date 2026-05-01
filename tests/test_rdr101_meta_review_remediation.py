@@ -62,6 +62,10 @@ class TestShadowEmitFailureNonFatal:
     def test_typeerror_in_emit_does_not_abort_mutation(
         self, tmp_path, monkeypatch: pytest.MonkeyPatch,
     ):
+        # PR ζ (nexus-o6aa.9.5) flipped NEXUS_EVENT_SOURCED default to
+        # ON; shadow emit is a no-op under ES, so pin to legacy to
+        # exercise the shadow-failure-non-fatal invariant.
+        monkeypatch.setenv("NEXUS_EVENT_SOURCED", "0")
         monkeypatch.setenv("NEXUS_EVENT_LOG_SHADOW", "1")
         d = tmp_path / "catalog"
         d.mkdir()

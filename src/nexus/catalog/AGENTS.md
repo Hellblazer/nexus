@@ -46,7 +46,9 @@ The bar is **register a reader first, then add to the allow-list**. New schemes 
 
 ## Key invariants
 
-- **JSONL is canonical, SQLite is cache.** Never write to SQLite without going through `Catalog.register/update/link`. Direct SQL writes will be overwritten on next mtime-driven rebuild.
+- **`events.jsonl` is canonical; SQLite is a deterministic projection.** Under RDR-101 Phase 3 PR ζ (`NEXUS_EVENT_SOURCED` default ON, nexus-o6aa.9.5) every catalog mutation flows through `Catalog.register / update / link / unlink / set_alias / dedupe`, which emits an event into `events.jsonl` first and then projects to SQLite. The legacy per-class JSONL files (`owners.jsonl`, `documents.jsonl`, `links.jsonl`) are still written for the cutover window but are no longer canonical — the doctor's `--replay-equality` signal is the binding test.
+- **Bootstrap guardrail.** Existing catalogs without an `events.jsonl` (or with one that is materially sparser than the legacy `documents.jsonl`) keep operating in legacy mode via `_event_log_covers_legacy()` in `_ensure_consistent`. Run `nx catalog synthesize-log --chunks --force` then `nx catalog t3-backfill-doc-id` to migrate; doctor `--replay-equality --t3-doc-id-coverage --strict-not-in-t3` validates the result.
+- **Opting out.** Set `NEXUS_EVENT_SOURCED=0` (or `false`/`no`/`off`) to fall back to the legacy direct-write path. Test fixtures that exercise legacy-only behaviour (shadow-emit invariants, `synthesize-log` tests, `doctor --replay-equality` synthesizer fallback, etc.) pin to `0` explicitly.
 - **Tumblers are append-only.** Updating an entry preserves the tumbler; deletion creates a tombstone, not a free slot. Reusing a tumbler corrupts the link graph.
 - **Owners with `owner_type='repo'` MUST carry a `repo_hash`.** Enforced in `register_owner`. The empty-hash variant produced 83 orphan owners in the wild before the guard.
 
@@ -58,4 +60,4 @@ The lint gate scope is intentionally `src/nexus/catalog/`, not just `projector.p
 
 Test fixtures that need to construct invariant-violating state (forced alias cycles, contaminated source_uri rows, backdated `created_at` for stale-span audits) tag the offending line with `# epsilon-allow: <reason>`. The reason is mandatory; bare markers do not suppress.
 
-Repair operations that previously ran as `cat._db.execute(...)` ad-hoc scripts must land as `nx catalog repair-*` verbs that emit events. The doctor's `--replay-equality` signal is reliable only if the event log is the only write path; PR ζ flips `NEXUS_EVENT_SOURCED=1` by default and depends on this gate.
+Repair operations that previously ran as `cat._db.execute(...)` ad-hoc scripts must land as `nx catalog repair-*` verbs that emit events. The doctor's `--replay-equality` signal is reliable only if the event log is the only write path; PR ζ (nexus-o6aa.9.5) flipped `NEXUS_EVENT_SOURCED=1` to ON by default and depends on this gate plus the dedupe-projector wiring (PR ζ-prereq, nexus-o6aa.9.4).
