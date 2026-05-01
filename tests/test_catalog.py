@@ -358,7 +358,7 @@ class TestAliasResolution:
         cat.set_alias(a, b)
         # Bypass set_alias guard to force a cycle — the walker must still
         # terminate instead of looping forever.
-        cat._db.execute("UPDATE documents SET alias_of = ? WHERE tumbler = ?",
+        cat._db.execute("UPDATE documents SET alias_of = ? WHERE tumbler = ?",  # epsilon-allow: forced alias cycle, set_alias guard rejects it (RDR-101 ε)
                          (str(a), str(b)))
         cat._db.commit()
         result = cat.resolve_alias(a)
@@ -378,7 +378,7 @@ class TestAliasResolution:
         a = cat.register(owner, "a.py", content_type="code", file_path="a.py")
         # Point at a non-existent tumbler directly via SQL (bypassing
         # set_alias' validation, which doesn't verify existence).
-        cat._db.execute(
+        cat._db.execute(  # epsilon-allow: dangling alias fixture, set_alias does not verify target existence (RDR-101 ε)
             "UPDATE documents SET alias_of = ? WHERE tumbler = ?",
             ("1.99.99", str(a)),
         )
@@ -653,7 +653,7 @@ class TestLinkAuditStaleSpans:
     def test_stale_span_detected(self, cat_with_two_docs):
         cat, _, a, b = cat_with_two_docs
         cat.link(a, b, "quotes", created_by="user", from_span="10-20")
-        cat._db.execute("UPDATE links SET created_at = '2020-01-01T00:00:00Z' WHERE from_tumbler = ?", (str(a),))
+        cat._db.execute("UPDATE links SET created_at = '2020-01-01T00:00:00Z' WHERE from_tumbler = ?", (str(a),))  # epsilon-allow: backdate link.created_at to fixture-test stale_span audit (RDR-101 ε)
         cat._db.commit()
         cat.update(a, head_hash="new-hash")
         audit = cat.link_audit()
@@ -969,7 +969,7 @@ class TestCrossProjectGuard:
         contaminated_uri = "file://" + str(
             tmp_path / "wrong_project" / "stowaway.py",
         )
-        cat._db.execute(
+        cat._db.execute(  # epsilon-allow: simulate pre-guard contaminated source_uri row, register() now refuses these (RDR-101 ε)
             "INSERT INTO documents "
             "(tumbler, title, author, year, content_type, file_path, "
             "corpus, physical_collection, chunk_count, head_hash, "
@@ -1120,7 +1120,7 @@ class TestUpdateGuard:
         cat, owner, _ = cat_with_repo_owner
         # Inject a contaminated row by going around register().
         contaminated_uri = "file://" + str(tmp_path / "wrong_project" / "x.py")
-        cat._db.execute(
+        cat._db.execute(  # epsilon-allow: simulate pre-guard contaminated source_uri row for env-override test (RDR-101 ε)
             "INSERT INTO documents "
             "(tumbler, title, author, year, content_type, file_path, "
             "corpus, physical_collection, chunk_count, head_hash, "
@@ -1192,7 +1192,7 @@ class TestOwnerRepoRootDefensive:
             "x", "repo", repo_hash="aaaa1111",
             repo_root=str(tmp_path / "x"),
         )
-        cat._db.execute(
+        cat._db.execute(  # epsilon-allow: simulate legacy relative repo_root, register_owner now refuses non-absolute paths (RDR-101 ε)
             "UPDATE owners SET repo_root = ? WHERE tumbler_prefix = ?",
             ("relative/path", str(owner)),
         )

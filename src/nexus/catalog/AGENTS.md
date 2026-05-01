@@ -49,3 +49,13 @@ The bar is **register a reader first, then add to the allow-list**. New schemes 
 - **JSONL is canonical, SQLite is cache.** Never write to SQLite without going through `Catalog.register/update/link`. Direct SQL writes will be overwritten on next mtime-driven rebuild.
 - **Tumblers are append-only.** Updating an entry preserves the tumbler; deletion creates a tombstone, not a free slot. Reusing a tumbler corrupts the link graph.
 - **Owners with `owner_type='repo'` MUST carry a `repo_hash`.** Enforced in `register_owner`. The empty-hash variant produced 83 orphan owners in the wild before the guard.
+
+## Direct catalog writes outside this module are forbidden (RDR-101 Phase 3 ε)
+
+Under RDR-101 the event log (`events.jsonl`) is canonical and the SQLite catalog is a deterministic projection. From PR ε onward, `tests/test_no_direct_catalog_writes_outside_projector.py` is a lint gate: no production source file outside `src/nexus/catalog/` may issue `INSERT / UPDATE / DELETE / REPLACE / CREATE / DROP / ALTER / TRUNCATE` through `_db.execute`. Reads (SELECT, plus `fetchone`/`fetchall` chains) remain fine.
+
+The lint gate scope is intentionally `src/nexus/catalog/`, not just `projector.py` — `catalog.py`'s legacy direct-write branches are gated behind `if not self._event_sourced_enabled:` and remain in-module. Mutations from anywhere else must travel through public Catalog API (`register`, `update`, `link`, `unlink`, `set_alias`, …), which under `NEXUS_EVENT_SOURCED=1` emits a domain event and projects it.
+
+Test fixtures that need to construct invariant-violating state (forced alias cycles, contaminated source_uri rows, backdated `created_at` for stale-span audits) tag the offending line with `# epsilon-allow: <reason>`. The reason is mandatory; bare markers do not suppress.
+
+Repair operations that previously ran as `cat._db.execute(...)` ad-hoc scripts must land as `nx catalog repair-*` verbs that emit events. The doctor's `--replay-equality` signal is reliable only if the event log is the only write path; PR ζ flips `NEXUS_EVENT_SOURCED=1` by default and depends on this gate.

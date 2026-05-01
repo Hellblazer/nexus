@@ -133,7 +133,7 @@ class TestLinkAuditChashVerification:
         cat.link(doc_a, doc_b, "quotes", "test-agent", from_span=f"chash:{HASH_A}")
 
         # Backdate the link so it's older than the document's indexed_at
-        cat._db.execute(
+        cat._db.execute(  # epsilon-allow: backdate link.created_at to assert chash spans survive re-indexing (RDR-101 ε)
             "UPDATE links SET created_at = '2020-01-01T00:00:00Z' WHERE from_tumbler = ?",
             (str(doc_a),),
         )
@@ -163,7 +163,7 @@ class TestStaleSpanToSide:
         cat.link(doc_a, doc_b, "quotes", "test-agent", to_span="10-20")
 
         # Backdate the link
-        cat._db.execute(
+        cat._db.execute(  # epsilon-allow: backdate link.created_at to assert to_span staleness detection (RDR-101 ε)
             "UPDATE links SET created_at = '2020-01-01T00:00:00Z' "
             "WHERE from_tumbler = ?", (str(doc_a),),
         )
