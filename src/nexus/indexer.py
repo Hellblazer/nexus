@@ -246,8 +246,17 @@ def _catalog_hook(
     repo_hash: str,
     head_hash: str,
     indexed_files: list[tuple[Path, str, str]],
-) -> None:
-    """Register/update indexed files in catalog. Silently skipped if catalog absent."""
+) -> dict[Path, str]:
+    """Register/update indexed files in catalog. Silently skipped if catalog absent.
+
+    Returns a ``{abs_path: doc_id}`` map (empty when the catalog is absent
+    or cannot be opened) so the orchestrator can build a
+    ``doc_id_resolver`` closure and inject it into ``IndexContext``
+    before per-file indexing runs (RDR-101 Phase 3 PR δ Stage B). The
+    return type is additive — existing test call sites that ignore the
+    return value continue to work unchanged.
+    """
+    file_to_doc_id: dict[Path, str] = {}
     try:
         from nexus.catalog import Catalog
         from nexus.config import catalog_path
@@ -255,7 +264,7 @@ def _catalog_hook(
         cat_path = catalog_path()
         if not Catalog.is_initialized(cat_path):
             _log.debug("catalog_hook_skipped", reason="catalog not initialized")
-            return
+            return file_to_doc_id
 
         cat = Catalog(cat_path, cat_path / ".catalog.db")
 
@@ -318,6 +327,7 @@ def _catalog_hook(
                     source_mtime=source_mtime,
                 )
                 new_tumblers.append(tumbler)
+                file_to_doc_id[abs_path] = str(tumbler)
             else:
                 cat.update(
                     existing.tumbler,
@@ -326,6 +336,7 @@ def _catalog_hook(
                     meta={"content_hash": file_hash} if file_hash else None,
                     source_mtime=source_mtime,
                 )
+                file_to_doc_id[abs_path] = str(existing.tumbler)
         _progress(f"  Catalog: {len(new_tumblers)} new, {len(indexed_files) - len(new_tumblers)} updated\n")
 
         # Auto-generate links after registration (incremental: only new entries)
@@ -348,6 +359,7 @@ def _catalog_hook(
         _progress(f"  Catalog: done ({len(new_tumblers)} new, {links_created} links)\n")
     except Exception:
         _log.debug("catalog_hook_failed", exc_info=True)
+    return file_to_doc_id
 
 
 def _run_housekeeping(
@@ -646,6 +658,7 @@ def _index_prose_file(
     *,
     embed_fn: Callable | None = None,
     stage_timers: "StageTimers | None" = None,
+    doc_id_resolver: Callable[[Path], str] | None = None,
 ) -> int:
     """Index a single prose file.  Delegates to nexus.prose_indexer.index_prose_file.
 
@@ -655,6 +668,11 @@ def _index_prose_file(
     ``stage_timers`` (nexus-7niu) is an optional :class:`StageTimers` the
     per-file indexer writes chunking / embed / upload / retry times into.
     ``None`` is the fast path: no overhead, no output.
+
+    ``doc_id_resolver`` (RDR-101 Phase 3 PR δ Stage B.1) returns the
+    catalog ``Document.doc_id`` for *file* so prose chunks land in T3
+    with a back-reference to the catalog. ``None`` is the legacy /
+    no-catalog path.
     """
     from nexus.prose_indexer import index_prose_file
     from nexus.index_context import IndexContext
@@ -674,6 +692,7 @@ def _index_prose_file(
         timeout=timeout,
         embed_fn=embed_fn,
         stage_timers=stage_timers,
+        doc_id_resolver=doc_id_resolver,
     )
     return index_prose_file(ctx, file)
 
@@ -1206,6 +1225,50 @@ def _run_index(
         else:
             _log.info("force_stale_skipped", reason="all collections current")
 
+    # ── Pre-index catalog registration (RDR-101 Phase 3 PR δ Stage B) ───────
+    # Register catalog entries BEFORE per-file indexing so the prose
+    # (and forthcoming code / PDF / RDR) indexers can write the catalog
+    # ``Document.doc_id`` into T3 chunk metadata at chunk-write time.
+    # ``_catalog_hook`` is a graceful no-op when the catalog is absent
+    # (returns an empty map), so the resolver becomes a noop closure
+    # and indexers fall back to the legacy / no-catalog code path.
+    #
+    # The hook also runs link generation and orphan housekeeping. Both
+    # are determined by the file LIST not by indexing OUTCOME, so
+    # running them up front is safe; on a CTRL-C mid-index, the next
+    # run re-derives them idempotently.
+    from nexus.registry import _rdr_collection_name as _rdr_coll_name_for_repo
+    indexed_for_catalog: list[tuple[Path, str, str]] = []
+    for _, f in code_files:
+        indexed_for_catalog.append((f, "code", code_collection))
+    for _, f in prose_files:
+        indexed_for_catalog.append((f, "prose", docs_collection))
+    if rdr_abs_paths:
+        rdr_col_name = _rdr_coll_name_for_repo(repo)
+        for rdr_dir in rdr_abs_paths:
+            if rdr_dir.is_dir():
+                for md_file in sorted(rdr_dir.rglob("*.md")):
+                    if md_file.is_file():
+                        indexed_for_catalog.append((md_file, "rdr", rdr_col_name))
+
+    if on_phase is not None:
+        on_phase(f"Registering {len(indexed_for_catalog)} catalog entries…")
+    _catalog_t0 = time.monotonic()
+    file_to_doc_id = _catalog_hook(
+        repo=repo,
+        repo_name=_repo_basename,
+        repo_hash=_repo_hash,
+        head_hash=_current_head(repo),
+        indexed_files=indexed_for_catalog,
+    )
+    if on_phase is not None:
+        on_phase(
+            f"Catalog registration done ({time.monotonic() - _catalog_t0:.1f}s)"
+        )
+
+    def _doc_id_resolver(path: Path) -> str:
+        return file_to_doc_id.get(path, "")
+
     # Index code files → code__ (voyage-code-3, AST chunking)
     # NOTE: calls _index_code_file (the module-level wrapper) so that tests
     # patching nexus.indexer._index_code_file continue to intercept correctly.
@@ -1251,6 +1314,7 @@ def _run_index(
             timeout=read_timeout_seconds,
             embed_fn=_embed_fn,
             stage_timers=timers,
+            doc_id_resolver=_doc_id_resolver,
         )
         if on_file:
             on_file(file, chunks, time.monotonic() - t0)
@@ -1363,32 +1427,11 @@ def _run_index(
                     _log.debug("rdr_stamp_skipped", collection=rdr_col_name)
             _phase(f"Pipeline version stamped ({time.monotonic() - _t:.1f}s)")
 
-        # Catalog hook: register indexed files (opt-in, graceful absence)
-        indexed_for_catalog: list[tuple[Path, str, str]] = []
-        for _, f in code_files:
-            indexed_for_catalog.append((f, "code", code_collection))
-        for _, f in prose_files:
-            indexed_for_catalog.append((f, "prose", docs_collection))
-        # Include RDR files so code→RDR provenance links can be generated
-        # Register regardless of T3 indexing success — catalog tracks existence
-        if rdr_abs_paths:
-            from nexus.registry import _rdr_collection_name
-            rdr_col = _rdr_collection_name(repo)
-            for rdr_dir in rdr_abs_paths:
-                if rdr_dir.is_dir():
-                    for md_file in sorted(rdr_dir.rglob("*.md")):
-                        if md_file.is_file():
-                            indexed_for_catalog.append((md_file, "rdr", rdr_col))
-        _phase(f"Registering {len(indexed_for_catalog)} catalog entries…")
-        _t = time.monotonic()
-        _catalog_hook(
-            repo=repo,
-            repo_name=_repo_basename,
-            repo_hash=_repo_hash,
-            head_hash=_current_head(repo),
-            indexed_files=indexed_for_catalog,
-        )
-        _phase(f"Catalog registration done ({time.monotonic() - _t:.1f}s)")
+        # Catalog registration ran upfront (RDR-101 Phase 3 PR δ Stage B)
+        # so prose chunks could carry ``doc_id`` at chunk-write time.
+        # The "Registering …" / "Catalog registration done …" phase
+        # markers fire from the pre-index path (above the per-file loops),
+        # not from this block.
     except BaseException as exc:
         post_error = exc
         raise

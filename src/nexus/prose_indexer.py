@@ -77,9 +77,19 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
 
         from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415
 
+        # Catalog Document.doc_id (RDR-101 Phase 3 PR δ): resolved once per
+        # file. Empty string when no catalog handle exists; ``normalize``
+        # Step 4c drops the field on the way to T3.
+        catalog_doc_id = (
+            ctx.doc_id_resolver(file_path) if ctx.doc_id_resolver is not None else ""
+        )
+
         for chunk in chunks:
             title = f"{file_path.relative_to(ctx.repo_path)}:chunk-{chunk.chunk_index}"
-            doc_id = _hl.sha256(f"{ctx.corpus}:{title}".encode()).hexdigest()[:32]
+            # ``chunk_chroma_id`` is the per-chunk Chroma natural-id
+            # (sha256-derived) — disambiguated from the catalog
+            # ``Document.doc_id`` per RDR-101 Phase 0 nexus-o6aa.3.
+            chunk_chroma_id = _hl.sha256(f"{ctx.corpus}:{title}".encode()).hexdigest()[:32]
             metadata = make_chunk_metadata(
                 content_type="markdown",
                 source_path=str(file_path),
@@ -100,8 +110,9 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
                 category="prose",
                 frecency_score=float(ctx.score),
                 git_meta=ctx.git_meta,
+                doc_id=catalog_doc_id,
             )
-            ids.append(doc_id)
+            ids.append(chunk_chroma_id)
             documents.append(chunk.text)
             metadatas.append(metadata)
             # Embed-only prefix: helps Voyage AI locate the right context without
@@ -136,9 +147,18 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
 
         from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415
 
+        # Catalog Document.doc_id (RDR-101 Phase 3 PR δ): resolved once per
+        # file. Empty string when no catalog handle exists.
+        catalog_doc_id = (
+            ctx.doc_id_resolver(file_path) if ctx.doc_id_resolver is not None else ""
+        )
+
         for i, (ls, le, text) in enumerate(raw_chunks):
             title = f"{file_path.relative_to(ctx.repo_path)}:{ls}-{le}"
-            doc_id = _hl.sha256(f"{ctx.corpus}:{title}".encode()).hexdigest()[:32]
+            # ``chunk_chroma_id`` is the per-chunk Chroma natural-id —
+            # disambiguated from catalog ``Document.doc_id`` per RDR-101
+            # Phase 0 nexus-o6aa.3.
+            chunk_chroma_id = _hl.sha256(f"{ctx.corpus}:{title}".encode()).hexdigest()[:32]
             chunk_start_char = _line_offsets[ls - 1] if 0 < ls <= len(_line_offsets) else 0
             chunk_end_char = (
                 _line_offsets[le] if le < len(_line_offsets) else len(content)
@@ -172,8 +192,9 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
                 category="prose",
                 frecency_score=float(ctx.score),
                 git_meta=ctx.git_meta,
+                doc_id=catalog_doc_id,
             )
-            ids.append(doc_id)
+            ids.append(chunk_chroma_id)
             documents.append(text)
             metadatas.append(metadata)
 
