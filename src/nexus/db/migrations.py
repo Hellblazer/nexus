@@ -822,6 +822,49 @@ def migrate_chash_index(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def migrate_frecency_projection_table(conn: sqlite3.Connection) -> None:
+    """Create the ``frecency`` projection table (RDR-101 Phase 1 PR D).
+
+    Phase 0 design gap 1 surfaced that RDR-101 §Entities omitted a
+    Frecency projection while Phase 5 plans to relocate
+    ``frecency_score`` / ``ttl_days`` / ``miss_count`` /
+    ``last_hit_at`` / ``embedded_at`` off T3 chunk metadata. This
+    migration ships the schema; Phase 5 will fill in the read/write
+    paths once the relocation work begins.
+
+    Schema choices (Phase 1 simpler-path direction, 2026-05-01):
+
+    - ``chunk_id`` is the FK back to ``Chunk.chunk_id`` (the Chroma
+      natural ID, also the PK of the future Phase 5 ``chunks`` table).
+      Phase 1 has no ``chunks`` table to FK into, so the relationship
+      is enforced by convention; Phase 5 makes it a real FK.
+    - ``expires_at`` is NOT a column. Decay queries derive it from
+      ``(embedded_at + ttl_days)`` at read time. If the read pattern
+      ever forces a ``WHERE expires_at < ?`` index seek, a generated
+      column or a follow-up migration can materialize it; Phase 1
+      does not predict that need.
+    - The Frecency projection is a mutable side table — Phase 1 does
+      NOT participate in the event log. ``ChunkAccessed`` /
+      ``ChunkMissed`` events are out of scope for now; if the doctor
+      verb later needs to verify frecency state matches the log, a
+      sub-RDR can introduce them.
+
+    Idempotent: ``CREATE IF NOT EXISTS`` makes re-application a no-op.
+    """
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS frecency (
+            chunk_id        TEXT PRIMARY KEY,
+            embedded_at     TEXT NOT NULL DEFAULT '',
+            ttl_days        INTEGER NOT NULL DEFAULT 0,
+            frecency_score  REAL NOT NULL DEFAULT 0,
+            miss_count      INTEGER NOT NULL DEFAULT 0,
+            last_hit_at     TEXT NOT NULL DEFAULT ''
+        );
+    """)
+    conn.commit()
+    _log.info("Migrated: created frecency projection table (RDR-101 Phase 1 PR D)")
+
+
 def migrate_chash_index_rename_doc_id(conn: sqlite3.Connection) -> None:
     """Rename ``chash_index.doc_id`` to ``chunk_chroma_id`` (RDR-101 Phase 0).
 
@@ -1778,6 +1821,11 @@ MIGRATIONS: list[Migration] = [
         "4.21.3",
         "Rename chash_index.doc_id to chunk_chroma_id (RDR-101 Phase 0 nexus-o6aa.3)",
         migrate_chash_index_rename_doc_id,
+    ),
+    Migration(
+        "4.21.4",
+        "Create frecency projection table (RDR-101 Phase 1 PR D nexus-knn3)",
+        migrate_frecency_projection_table,
     ),
 ]
 
