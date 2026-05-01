@@ -88,7 +88,8 @@ class TestDoctorReportSchema:
     ):
         from nexus.commands.catalog import _run_replay_equality
 
-        monkeypatch.delenv("NEXUS_EVENT_SOURCED", raising=False)
+        # PR ζ flipped default to ES; legacy-path assertion.
+        monkeypatch.setenv("NEXUS_EVENT_SOURCED", "0")
         monkeypatch.delenv("NEXUS_EVENT_LOG_SHADOW", raising=False)
         d = tmp_path / "test-catalog"
         Catalog.init(d)

@@ -490,7 +490,9 @@ class TestDoctorReplayEqualityEventLog:
     ):
         from nexus.commands.catalog import _run_replay_equality
 
-        monkeypatch.delenv("NEXUS_EVENT_SOURCED", raising=False)
+        # PR ζ flipped NEXUS_EVENT_SOURCED default to ON; the doctor
+        # synthesizer fallback is the legacy path, so pin explicitly.
+        monkeypatch.setenv("NEXUS_EVENT_SOURCED", "0")
         monkeypatch.delenv("NEXUS_EVENT_LOG_SHADOW", raising=False)
         d = tmp_path / "test-catalog"
         Catalog.init(d)
@@ -530,7 +532,8 @@ class TestLegacyUpdateAliasOfColumn:
     def test_alias_of_survives_legacy_update_through_alias(
         self, tmp_path, monkeypatch: pytest.MonkeyPatch,
     ):
-        monkeypatch.delenv("NEXUS_EVENT_SOURCED", raising=False)
+        # PR ζ flipped default to ES; this is a legacy-path test.
+        monkeypatch.setenv("NEXUS_EVENT_SOURCED", "0")
         monkeypatch.delenv("NEXUS_EVENT_LOG_SHADOW", raising=False)
         d = tmp_path / "catalog"
         d.mkdir()
@@ -563,7 +566,9 @@ class TestLegacyUpdateAliasOfColumn:
         # VALUES read ``entry.alias_of``, silently dropping the
         # caller-supplied value. Round-4 fix threads
         # ``rec_dict["alias_of"]``.
-        monkeypatch.delenv("NEXUS_EVENT_SOURCED", raising=False)
+        #
+        # PR ζ flipped default to ES; this is a legacy-path test.
+        monkeypatch.setenv("NEXUS_EVENT_SOURCED", "0")
         monkeypatch.delenv("NEXUS_EVENT_LOG_SHADOW", raising=False)
         d = tmp_path / "catalog"
         d.mkdir()

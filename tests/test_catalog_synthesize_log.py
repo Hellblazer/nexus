@@ -36,6 +36,17 @@ from nexus.catalog.projector import Projector
 from nexus.commands.catalog import synthesize_log_cmd
 
 
+@pytest.fixture(autouse=True)
+def _legacy_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """RDR-101 Phase 3 PR ζ flipped NEXUS_EVENT_SOURCED default to ON.
+    Synthesize-log's premise is that the input catalog has only legacy
+    JSONL state — running ES on the source would prepopulate
+    events.jsonl and invalidate every "log untouched" / "log empty"
+    assertion in this file. Pin to legacy for the whole module.
+    """
+    monkeypatch.setenv("NEXUS_EVENT_SOURCED", "0")
+
+
 @pytest.fixture()
 def isolated_nexus(tmp_path: Path) -> Path:
     """Catalog dir set up by the autouse ``_isolate_catalog`` fixture in

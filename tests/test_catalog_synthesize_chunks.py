@@ -33,6 +33,16 @@ from nexus.catalog.event_log import EventLog
 from nexus.catalog.synthesizer import synthesize_t3_chunks
 
 
+@pytest.fixture(autouse=True)
+def _legacy_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PR ζ (nexus-o6aa.9.5) flipped NEXUS_EVENT_SOURCED default to ON.
+    The synthesize-log --chunks tests assume the source catalog only
+    has legacy JSONL state, otherwise events.jsonl is pre-populated
+    and the verb refuses to overwrite without --force. Pin to legacy.
+    """
+    monkeypatch.setenv("NEXUS_EVENT_SOURCED", "0")
+
+
 @pytest.fixture()
 def isolated_nexus(tmp_path: Path) -> Path:
     return tmp_path / "test-catalog"
