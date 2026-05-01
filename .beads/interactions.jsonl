@@ -446,3 +446,5 @@
 {"id":"int-f379e4fd","kind":"field_change","created_at":"2026-05-01T08:54:08.946892Z","actor":"Hellblazer","issue_id":"nexus-ebz6","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
 {"id":"int-4e77a879","kind":"field_change","created_at":"2026-05-01T08:54:09.639937Z","actor":"Hellblazer","issue_id":"nexus-o6aa.7","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
 {"id":"int-d7241a43","kind":"field_change","created_at":"2026-05-01T09:08:58.935031Z","actor":"Hellblazer","issue_id":"nexus-tn8i","extra":{"field":"status","new_value":"in_progress","old_value":"open"}}
+{"id":"int-f18ab824","kind":"field_change","created_at":"2026-05-01T09:13:49.68973Z","actor":"Hellblazer","issue_id":"nexus-tn8i","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
+{"id":"int-4be6f52b","kind":"field_change","created_at":"2026-05-01T09:20:35.213518Z","actor":"Hellblazer","issue_id":"nexus-isro","extra":{"field":"status","new_value":"in_progress","old_value":"open"}}

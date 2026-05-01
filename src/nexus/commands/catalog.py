@@ -3451,10 +3451,25 @@ def _print_replay_equality_text(report: dict) -> None:
     ),
 )
 @click.option(
+    "--chunks/--no-chunks",
+    default=False,
+    help=(
+        "Also walk every T3 collection and emit one ChunkIndexed event "
+        "per chunk, with doc_id resolved from source_path → catalog "
+        "source_uri → tumbler → doc_id (or the title fallback for "
+        "knowledge__* collections that have empty source_uri rows). "
+        "Off by default so synthesizing the document side does not "
+        "require ChromaDB credentials. Phase 2 deployment guides will "
+        "set this on for the canonical synthesis run."
+    ),
+)
+@click.option(
     "--json", "as_json", is_flag=True,
     help="Emit machine-readable JSON instead of text output.",
 )
-def synthesize_log_cmd(dry_run: bool, force: bool, as_json: bool) -> None:
+def synthesize_log_cmd(
+    dry_run: bool, force: bool, chunks: bool, as_json: bool,
+) -> None:
     """RDR-101 Phase 2: synthesize events.jsonl from existing JSONL state.
 
     Walks ``owners.jsonl`` + ``documents.jsonl`` + ``links.jsonl``,
@@ -3497,24 +3512,49 @@ def synthesize_log_cmd(dry_run: bool, force: bool, as_json: bool) -> None:
         )
 
     events = list(synthesize_from_jsonl(cat_dir, mint_doc_id=True))
+    chunk_events: list = []
+    orphan_count = 0
+    if chunks:
+        from nexus.catalog.synthesizer import synthesize_t3_chunks
+        from nexus.db import make_t3
+
+        try:
+            t3 = make_t3()
+            chunk_events = list(
+                synthesize_t3_chunks(t3._client, events)
+            )
+            orphan_count = sum(
+                1 for e in chunk_events
+                if getattr(e.payload, "synthesized_orphan", False)
+            )
+        except Exception as exc:
+            raise click.ClickException(
+                f"Failed to walk T3 chunks: {exc}. Pass --no-chunks to "
+                "skip the chunk synthesis pass and re-run later once "
+                "ChromaDB credentials are configured."
+            )
+
+    all_events = events + chunk_events
 
     counts: dict[str, int] = {}
-    for e in events:
+    for e in all_events:
         counts[e.type] = counts.get(e.type, 0) + 1
 
     report = {
         "dry_run": dry_run,
         "events_path": str(log.path),
         "existing_bytes": existing_size,
-        "events_total": len(events),
+        "events_total": len(all_events),
         "events_by_type": counts,
+        "chunks_synthesized": chunks,
+        "orphan_chunks": orphan_count,
         "wrote": False,
     }
 
     if not dry_run:
         if existing_size > 0 and force:
             log.truncate()
-        log.append_many(events)
+        log.append_many(all_events)
         report["wrote"] = True
 
     if as_json:
@@ -3527,6 +3567,8 @@ def _print_synthesize_log_text(report: dict) -> None:
     click.echo(f"Events path:    {report['events_path']}")
     click.echo(f"Existing size:  {report['existing_bytes']} bytes")
     click.echo(f"Events total:   {report['events_total']}")
+    if report.get("chunks_synthesized"):
+        click.echo(f"Orphan chunks:  {report.get('orphan_chunks', 0)}")
     if report["events_by_type"]:
         click.echo("By type:")
         for t, c in sorted(report["events_by_type"].items(), key=lambda kv: kv[0]):
