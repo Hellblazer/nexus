@@ -880,26 +880,37 @@ def store_put(
         ttl_days = days if days is not None else 0
         col_name = t3_collection_name(collection)
         t3 = _get_t3()
+
+        # RDR-101 Phase 3 PR δ Stage B.5: pre-register the catalog entry
+        # so the T3 chunk can carry the resulting tumbler as ``doc_id``
+        # at write-time. Same pattern as the CLI ``nx store put`` (B.4).
+        # The chunk_chroma_id is deterministic (sha256 of "{coll}:{title}"),
+        # matching ``T3Database.put``'s internal derivation.
+        import hashlib as _hl
+        chunk_chroma_id = _hl.sha256(f"{col_name}:{title}".encode()).hexdigest()[:16]
+        catalog_doc_id = ""
+        try:
+            from nexus.commands.store import _catalog_store_hook
+            catalog_doc_id = _catalog_store_hook(
+                title=title, doc_id=chunk_chroma_id, collection_name=col_name,
+            )
+        except Exception:
+            import structlog
+            structlog.get_logger().warning(
+                "catalog_store_hook_failed",
+                doc_id=chunk_chroma_id,
+                collection=col_name,
+                exc_info=True,
+            )
+
         doc_id = t3.put(
             collection=col_name,
             content=content,
             title=title,
             tags=tags,
             ttl_days=ttl_days,
+            catalog_doc_id=catalog_doc_id,
         )
-        # Register in catalog (same hook the CLI uses). Non-fatal — T3 row is
-        # source of truth — but log so #253 orphan shape is observable.
-        try:
-            from nexus.commands.store import _catalog_store_hook
-            _catalog_store_hook(title=title, doc_id=doc_id, collection_name=col_name)
-        except Exception:
-            import structlog
-            structlog.get_logger().warning(
-                "catalog_store_hook_failed",
-                doc_id=doc_id,
-                collection=col_name,
-                exc_info=True,
-            )
         # Auto-link from T1 scratch link-context
         try:
             n = _catalog_auto_link(doc_id)

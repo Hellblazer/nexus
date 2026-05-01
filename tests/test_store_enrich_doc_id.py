@@ -55,6 +55,20 @@ def _no_op_post_store(*args, **kwargs):
     pass
 
 
+@pytest.fixture(autouse=True)
+def _isolate_t3_singleton():
+    """Reset the mcp_infra ``_t3_instance`` global before / after each
+    test. Other tests in the suite (notably ``test_mcp_server.py::t3``)
+    inject a T3 instance into this global without resetting it; the
+    leak masks our ``patch("nexus.commands.store._t3", ...)`` because
+    downstream hooks (``fire_post_store_hooks`` etc.) read the global
+    directly. Belt-and-suspenders isolation."""
+    from nexus.mcp_infra import inject_t3
+    inject_t3(None)
+    yield
+    inject_t3(None)
+
+
 def test_store_put_cli_writes_catalog_doc_id_into_t3_chunk_metadata(
     local_t3: T3Database,
     catalog_env: Path,
@@ -90,6 +104,14 @@ def test_store_put_cli_writes_catalog_doc_id_into_t3_chunk_metadata(
     assert result.exit_code == 0, f"store put failed: {result.output}"
     assert "Stored:" in result.output
 
+    # Extract the stored collection name from the CLI output
+    # ("Stored: <chunk_id>  →  <collection>"). ChromaDB's EphemeralClient
+    # shares process-wide state, so other tests in the suite may have
+    # populated unrelated knowledge__ collections; we must scope to the
+    # exact collection this CLI invocation wrote to.
+    stored_line = next(line for line in result.output.splitlines() if "Stored:" in line)
+    stored_col_name = stored_line.split("→")[-1].strip()
+
     # Catalog should now have an entry for the stored doc.
     cat = Catalog(catalog_env, catalog_env / ".catalog.db")
     rows = cat._db.execute(
@@ -98,18 +120,11 @@ def test_store_put_cli_writes_catalog_doc_id_into_t3_chunk_metadata(
     assert rows, "expected catalog entry for the stored doc"
     expected_doc_id = rows[0][0]
 
-    # Find the actual stored collection (resolved from "knowledge" via
-    # t3_collection_name → "knowledge__knowledge" in the default routing).
-    cols = local_t3._client.list_collections()
-    stored_col = None
-    for c in cols:
-        if c.name.startswith("knowledge"):
-            stored_col = c
-            break
-    assert stored_col is not None, "expected a knowledge__ collection"
-
+    stored_col = local_t3._client.get_collection(stored_col_name)
     chunk_result = stored_col.get(include=["metadatas"])
-    assert chunk_result["ids"], "expected at least one chunk in knowledge collection"
+    assert chunk_result["ids"], (
+        f"expected at least one chunk in {stored_col_name}"
+    )
 
     matching_metas = [
         m for m in chunk_result["metadatas"]
@@ -156,13 +171,9 @@ def test_store_put_doc_id_absent_when_catalog_uninitialized(
         ], catch_exceptions=False)
     assert result.exit_code == 0, f"store put failed: {result.output}"
 
-    cols = local_t3._client.list_collections()
-    stored_col = None
-    for c in cols:
-        if c.name.startswith("knowledge"):
-            stored_col = c
-            break
-    assert stored_col is not None
+    stored_line = next(line for line in result.output.splitlines() if "Stored:" in line)
+    stored_col_name = stored_line.split("→")[-1].strip()
+    stored_col = local_t3._client.get_collection(stored_col_name)
     chunk_result = stored_col.get(include=["metadatas"])
     assert chunk_result["ids"]
 

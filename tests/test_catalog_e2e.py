@@ -257,6 +257,16 @@ class TestLinks:
 
 
 def test_store_put_registers_in_catalog(tmp_path, monkeypatch):
+    """RDR-101 Phase 3 PR δ Stage B.5 changed the timing so the catalog
+    hook now runs BEFORE the T3 write (so the chunk can carry the
+    catalog tumbler as ``doc_id``). The catalog's legacy
+    ``meta.doc_id`` lookup field is therefore populated with the real
+    deterministic ``chunk_chroma_id`` (sha256 of "{collection}:{title}"
+    truncated), not whatever a mocked ``db.put`` echoes back. The real
+    ``db.put`` returns the same hash, so the production behaviour is
+    unchanged — only the test setup needs to match.
+    """
+    import hashlib as _hl
     from nexus.mcp_server import _reset_singletons, store_put
 
     catalog_dir = tmp_path / "catalog"
@@ -274,7 +284,14 @@ def test_store_put_registers_in_catalog(tmp_path, monkeypatch):
             tags="research,embeddings",
         )
     assert "Stored" in result
-    entry = Catalog(catalog_dir, catalog_dir / ".catalog.db").by_doc_id("doc-abc123")
+    # The catalog now stores the deterministic chunk_chroma_id, matching
+    # what the real T3Database.put returns (independent of the mock).
+    expected_chunk_chroma_id = _hl.sha256(
+        b"knowledge__knowledge:research-vector-indexing"
+    ).hexdigest()[:16]
+    entry = Catalog(catalog_dir, catalog_dir / ".catalog.db").by_doc_id(
+        expected_chunk_chroma_id,
+    )
     assert entry is not None and entry.title == "research-vector-indexing"
 
 
