@@ -127,6 +127,13 @@ include = [
 testpaths = ["tests"]
 pythonpath = ["scripts"]
 log_level = "WARNING"
+# Honour the documented default: integration / slow tests are opt-in.
+# Without this, ``pytest tests/`` runs everything including
+# ``tests/integration/test_nx_answer_equivalence.py`` which calls real
+# Voyage / Chroma APIs in retry loops without credentials and hangs
+# pytest indefinitely (239+ CLOSE_WAIT TCP sockets observed locally).
+# Run them explicitly with ``pytest -m integration`` or ``-m slow``.
+addopts = "-m 'not integration and not slow'"
 markers = [
     "integration: end-to-end tests requiring real services (deselect with '-m not integration')",
     "slow: expensive benchmarks (deselect with '-m not slow')",
