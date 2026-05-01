@@ -1,10 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""ChashIndex — global chunk-hash → (collection, doc_id) lookup table (RDR-086 Phase 1).
+"""ChashIndex — global chunk-hash → (collection, chunk_chroma_id) lookup table (RDR-086 Phase 1).
 
 Answers "given this ``chash:<hex>`` citation, which physical collection
-and doc_id hold the chunk?" in ~50 µs via a SQLite JOIN, replacing the
-~13-min serial-ChromaDB-filter alternative measured in RF-6.
+and Chroma-natural-id hold the chunk?" in ~50 µs via a SQLite JOIN,
+replacing the ~13-min serial-ChromaDB-filter alternative measured in RF-6.
+
+The third column was originally named ``doc_id`` (ChromaDB-scoped chunk
+natural ID, equivalent to RDR-101's ``Chunk.chunk_id``). RDR-101 introduces
+``Document.doc_id`` as a UUID7 document identity — a different namespace.
+Phase 0 nexus-o6aa.3 deliverable
+(``docs/rdr/post-mortem/rdr-101-rdr086-collision.md``) chose Option A
+(rename) before Phase 3 ships, so every reader joining across catalog and
+the chash_index sees one unambiguous ``doc_id`` meaning. The rename runs
+in lockstep with the Python read-path edits so an in-flight upgrade does
+not crash on the missing column.
 
 Every indexing write site in ``code_indexer``, ``prose_indexer``,
 ``doc_indexer``, and ``pipeline_stages`` dual-writes into this table
@@ -51,7 +61,7 @@ _CHASH_INDEX_SCHEMA_SQL = """\
 CREATE TABLE IF NOT EXISTS chash_index (
     chash                TEXT NOT NULL,
     physical_collection  TEXT NOT NULL,
-    doc_id               TEXT NOT NULL,
+    chunk_chroma_id      TEXT NOT NULL,
     created_at           TEXT NOT NULL,
     PRIMARY KEY (chash, physical_collection)
 );
@@ -92,11 +102,11 @@ class ChashIndex:
 
     # ── Public API ────────────────────────────────────────────────────────
 
-    def upsert(self, *, chash: str, collection: str, doc_id: str) -> None:
-        """Register ``chash`` as living in ``collection`` at ``doc_id``.
+    def upsert(self, *, chash: str, collection: str, chunk_chroma_id: str) -> None:
+        """Register ``chash`` as living in ``collection`` at ``chunk_chroma_id``.
 
         ``INSERT OR REPLACE`` semantics: re-indexing the same file
-        overwrites the existing row (updates ``doc_id`` and
+        overwrites the existing row (updates ``chunk_chroma_id`` and
         ``created_at``) rather than erroring. Compound PK
         ``(chash, collection)`` lets the same chunk text register in
         multiple collections without conflict.
@@ -104,38 +114,49 @@ class ChashIndex:
         Raises ``ValueError`` if any of the three identifiers is empty —
         empty values indicate caller-side bugs and are cheaper to fail
         fast than to silently accept.
+
+        Naming: ``chunk_chroma_id`` was renamed from ``doc_id`` per the
+        RDR-101 Phase 0 nexus-o6aa.3 deliverable to disambiguate from
+        ``Document.doc_id`` (UUID7 document identity) before Phase 3
+        ships.
         """
         if not chash:
             raise ValueError("chash must not be empty")
         if not collection:
             raise ValueError("collection must not be empty")
-        if not doc_id:
-            raise ValueError("doc_id must not be empty")
+        if not chunk_chroma_id:
+            raise ValueError("chunk_chroma_id must not be empty")
         now = datetime.now(UTC).isoformat()
         with self._lock:
             self.conn.execute(
                 "INSERT OR REPLACE INTO chash_index "
-                "(chash, physical_collection, doc_id, created_at) "
+                "(chash, physical_collection, chunk_chroma_id, created_at) "
                 "VALUES (?, ?, ?, ?)",
-                (chash, collection, doc_id, now),
+                (chash, collection, chunk_chroma_id, now),
             )
             self.conn.commit()
 
     def lookup(self, chash: str) -> list[dict[str, Any]]:
-        """Return all (collection, doc_id, created_at) rows for ``chash``.
+        """Return all (collection, chunk_chroma_id, created_at) rows for ``chash``.
 
         Phase 2's ``Catalog.resolve_chash`` tie-breaks multi-match by
         newest ``created_at``. Returns ``[]`` when ``chash`` is unknown.
+
+        The dict's ``chunk_chroma_id`` key carries the Chroma-natural-ID
+        meaning the column has always had; ``Catalog.resolve_chash``'s
+        public ``ChunkRef`` continues to surface this value under a
+        ``doc_id`` key for back-compat with downstream callers, until
+        RDR-101 Phase 3 disambiguates the public surface.
         """
         with self._lock:
             rows = self.conn.execute(
-                "SELECT physical_collection, doc_id, created_at "
+                "SELECT physical_collection, chunk_chroma_id, created_at "
                 "FROM chash_index WHERE chash = ?",
                 (chash,),
             ).fetchall()
         return [
-            {"collection": coll, "doc_id": did, "created_at": ts}
-            for coll, did, ts in rows
+            {"collection": coll, "chunk_chroma_id": cid, "created_at": ts}
+            for coll, cid, ts in rows
         ]
 
     def delete_collection(self, collection: str) -> int:
@@ -237,26 +258,29 @@ class ChashIndex:
             ).fetchone()
         return int(row[0]) if row else 0
 
-    def doc_ids_present_in_collection(
-        self, collection: str, doc_ids: list[str],
+    def chunk_chroma_ids_present_in_collection(
+        self, collection: str, chunk_chroma_ids: list[str],
     ) -> set[str]:
-        """Return the subset of ``doc_ids`` that are indexed in *collection*.
+        """Return the subset of ``chunk_chroma_ids`` indexed in *collection*.
 
         Targeted membership probe for ``compute_chash_coverage`` — takes a
-        caller-provided list of T3 chunk ids and returns the ones that
-        appear in ``chash_index`` for the given collection. Callers use
-        the set difference to surface missing ids.
+        caller-provided list of T3 Chroma natural IDs and returns the ones
+        that appear in ``chash_index`` for the given collection. Callers
+        use the set difference to surface missing ids.
 
-        Empty ``doc_ids`` → empty set (no query issued).
+        Empty ``chunk_chroma_ids`` → empty set (no query issued).
+
+        Renamed from ``doc_ids_present_in_collection`` per the RDR-101
+        Phase 0 nexus-o6aa.3 deliverable.
         """
-        if not doc_ids:
+        if not chunk_chroma_ids:
             return set()
-        placeholders = ",".join("?" * len(doc_ids))
+        placeholders = ",".join("?" * len(chunk_chroma_ids))
         with self._lock:
             rows = self.conn.execute(
-                f"SELECT doc_id FROM chash_index "
-                f"WHERE physical_collection = ? AND doc_id IN ({placeholders})",
-                (collection, *doc_ids),
+                f"SELECT chunk_chroma_id FROM chash_index "
+                f"WHERE physical_collection = ? AND chunk_chroma_id IN ({placeholders})",
+                (collection, *chunk_chroma_ids),
             ).fetchall()
         return {r[0] for r in rows}
 
@@ -295,17 +319,20 @@ def dual_write_chash_index(
     """
     if chash_index is None:
         return
-    for doc_id, meta in zip(ids, metadatas):
+    for chunk_chroma_id, meta in zip(ids, metadatas):
         chash = meta.get("chunk_text_hash", "") if isinstance(meta, dict) else ""
-        if not chash or not doc_id:
+        if not chash or not chunk_chroma_id:
             continue
         try:
-            chash_index.upsert(chash=chash, collection=collection, doc_id=doc_id)
+            chash_index.upsert(
+                chash=chash, collection=collection,
+                chunk_chroma_id=chunk_chroma_id,
+            )
         except Exception as exc:
             _log.warning(
                 "chash_index_dual_write_failed",
                 collection=collection,
-                doc_id=doc_id,
+                chunk_chroma_id=chunk_chroma_id,
                 chash_prefix=chash[:16],
                 error=str(exc),
             )

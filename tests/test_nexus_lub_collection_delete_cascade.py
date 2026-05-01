@@ -362,14 +362,14 @@ class TestChashIndexDeleteCascade:
         db_path = tmp_path / "memory.db"
         with T2Database(db_path) as db:
             db.chash_index.upsert(
-                chash="aa11", collection="code__gone", doc_id="d1",
+                chash="aa11", collection="code__gone", chunk_chroma_id="d1",
             )
             db.chash_index.upsert(
-                chash="bb22", collection="code__gone", doc_id="d2",
+                chash="bb22", collection="code__gone", chunk_chroma_id="d2",
             )
             # Row in a different collection — must survive the cascade.
             db.chash_index.upsert(
-                chash="cc33", collection="code__stays", doc_id="d3",
+                chash="cc33", collection="code__stays", chunk_chroma_id="d3",
             )
 
         fake_t3 = MagicMock()
@@ -414,7 +414,7 @@ class TestChashIndexDeleteCascade:
         db_path = tmp_path / "memory.db"
         with T2Database(db_path) as db:
             db.chash_index.upsert(
-                chash="aa11", collection="docs__orphan", doc_id="d1",
+                chash="aa11", collection="docs__orphan", chunk_chroma_id="d1",
             )
 
         fake_t3 = MagicMock()
@@ -456,7 +456,7 @@ class TestChashIndexDeleteCascade:
         with T2Database(db_path) as db:
             for i in range(5):
                 db.chash_index.upsert(
-                    chash=f"h{i:02d}", collection="code__reported", doc_id=f"d{i}",
+                    chash=f"h{i:02d}", collection="code__reported", chunk_chroma_id=f"d{i}",
                 )
 
         fake_t3 = MagicMock()

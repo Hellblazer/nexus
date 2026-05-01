@@ -89,12 +89,14 @@ class TestMigrationDataclass:
         # plans.disabled_at column (4.17.1, nexus-mrzp soft-disable) +
         # retire hook_telemetry table — telemetry hook removed entirely
         # (4.18.1; the migration entry that previously created the table
-        # was dropped when the read/write surface was retired)
-        # = 28.
+        # was dropped when the read/write surface was retired) +
+        # rename chash_index.doc_id → chunk_chroma_id (4.21.3, RDR-101
+        # Phase 0 nexus-o6aa.3 collision resolution)
+        # = 29.
         # Prefer the name-based checks in TestBackfillPlanDimensions
         # and TestAddPlanMatchTextColumn for future guards; this
         # count is a cheap sentinel only.
-        assert len(MIGRATIONS) == 28
+        assert len(MIGRATIONS) == 29
 
     def test_migrations_ordered_by_version(self) -> None:
         from nexus.db.migrations import MIGRATIONS, _parse_version
@@ -1227,11 +1229,23 @@ class TestMigrateChashIndex:
         assert "chash_index" in tables
 
     def test_chash_index_schema_columns(self) -> None:
-        """Columns match the bead spec: chash, physical_collection, doc_id, created_at — all TEXT."""
-        from nexus.db.migrations import migrate_chash_index
+        """Columns match the post-RDR-101 spec: chash, physical_collection, chunk_chroma_id, created_at — all TEXT.
+
+        Both ``migrate_chash_index`` (RDR-086 Phase 1.1 install) and
+        ``migrate_chash_index_rename_doc_id`` (RDR-101 Phase 0
+        nexus-o6aa.3) must run together because production hosts always
+        receive both migrations: the install migration creates the table
+        with the legacy ``doc_id`` column, the rename migration renames
+        it to ``chunk_chroma_id``. Test reflects the production end state.
+        """
+        from nexus.db.migrations import (
+            migrate_chash_index,
+            migrate_chash_index_rename_doc_id,
+        )
 
         conn = sqlite3.connect(":memory:")
         migrate_chash_index(conn)
+        migrate_chash_index_rename_doc_id(conn)
 
         cols = {
             r[1]: r[2]
@@ -1239,10 +1253,10 @@ class TestMigrateChashIndex:
                 "PRAGMA table_info(chash_index)"
             ).fetchall()
         }
-        assert cols.keys() == {"chash", "physical_collection", "doc_id", "created_at"}
+        assert cols.keys() == {"chash", "physical_collection", "chunk_chroma_id", "created_at"}
         assert cols["chash"] == "TEXT"
         assert cols["physical_collection"] == "TEXT"
-        assert cols["doc_id"] == "TEXT"
+        assert cols["chunk_chroma_id"] == "TEXT"
         assert cols["created_at"] == "TEXT"
 
     def test_chash_index_compound_pk_allows_duplicate_hash_different_collection(self) -> None:
@@ -1252,10 +1266,14 @@ class TestMigrateChashIndex:
         Issue 1: knowledge__delos + knowledge__delos_docling both ingest a
         paper; every chunk's SHA-256 is identical.
         """
-        from nexus.db.migrations import migrate_chash_index
+        from nexus.db.migrations import (
+            migrate_chash_index,
+            migrate_chash_index_rename_doc_id,
+        )
 
         conn = sqlite3.connect(":memory:")
         migrate_chash_index(conn)
+        migrate_chash_index_rename_doc_id(conn)
 
         conn.execute(
             "INSERT INTO chash_index VALUES (?, ?, ?, ?)",
@@ -1268,7 +1286,7 @@ class TestMigrateChashIndex:
         conn.commit()
 
         rows = conn.execute(
-            "SELECT physical_collection, doc_id FROM chash_index WHERE chash = ? ORDER BY physical_collection",
+            "SELECT physical_collection, chunk_chroma_id FROM chash_index WHERE chash = ? ORDER BY physical_collection",
             ("abc123",),
         ).fetchall()
         assert rows == [
@@ -1337,25 +1355,90 @@ class TestMigrateChashIndex:
         assert [name for _, name in pk_cols] == ["chash", "physical_collection"]
 
     def test_chash_index_migration_idempotent(self) -> None:
-        """Re-applying on a populated DB must not raise or clobber data."""
-        from nexus.db.migrations import migrate_chash_index
+        """Re-applying on a populated DB must not raise or clobber data.
+
+        The full production sequence is install + rename; both must be
+        idempotent so a re-attempted upgrade after a partial failure
+        does not double-mutate.
+        """
+        from nexus.db.migrations import (
+            migrate_chash_index,
+            migrate_chash_index_rename_doc_id,
+        )
 
         conn = sqlite3.connect(":memory:")
         migrate_chash_index(conn)
+        migrate_chash_index_rename_doc_id(conn)
         conn.execute(
             "INSERT INTO chash_index VALUES (?, ?, ?, ?)",
             ("abc123", "knowledge__delos", "doc-1", "2026-04-18T00:00:00Z"),
         )
         conn.commit()
 
-        migrate_chash_index(conn)  # must not raise
-        migrate_chash_index(conn)  # must not raise
+        migrate_chash_index(conn)              # must not raise
+        migrate_chash_index_rename_doc_id(conn)  # must not raise (no-op when already renamed)
+        migrate_chash_index(conn)              # must not raise
+        migrate_chash_index_rename_doc_id(conn)  # must not raise
 
         # Data preserved.
         row = conn.execute(
-            "SELECT chash, physical_collection, doc_id FROM chash_index"
+            "SELECT chash, physical_collection, chunk_chroma_id FROM chash_index"
         ).fetchone()
         assert row == ("abc123", "knowledge__delos", "doc-1")
+
+    def test_chash_index_rename_doc_id_runs_against_legacy_column(self) -> None:
+        """The rename migration converts a legacy ``doc_id`` column to ``chunk_chroma_id``.
+
+        This exercises path 3 from ``migrate_chash_index_rename_doc_id``'s
+        idempotency contract: table present with legacy ``doc_id`` column
+        → ALTER TABLE renames in place.
+        """
+        from nexus.db.migrations import (
+            migrate_chash_index,
+            migrate_chash_index_rename_doc_id,
+        )
+
+        conn = sqlite3.connect(":memory:")
+        # Install creates the legacy ``doc_id`` column.
+        migrate_chash_index(conn)
+        legacy_cols = {
+            r[1] for r in conn.execute("PRAGMA table_info(chash_index)").fetchall()
+        }
+        assert "doc_id" in legacy_cols
+        assert "chunk_chroma_id" not in legacy_cols
+
+        # Rename migration converts in place; data must survive.
+        conn.execute(
+            "INSERT INTO chash_index VALUES (?, ?, ?, ?)",
+            ("aa", "code__x", "chunk-7", "2026-04-30T00:00:00Z"),
+        )
+        conn.commit()
+        migrate_chash_index_rename_doc_id(conn)
+
+        new_cols = {
+            r[1] for r in conn.execute("PRAGMA table_info(chash_index)").fetchall()
+        }
+        assert "chunk_chroma_id" in new_cols
+        assert "doc_id" not in new_cols
+
+        row = conn.execute(
+            "SELECT chash, physical_collection, chunk_chroma_id FROM chash_index"
+        ).fetchone()
+        assert row == ("aa", "code__x", "chunk-7")
+
+    def test_chash_index_rename_doc_id_no_op_on_fresh_install(self) -> None:
+        """Path 1: table absent → rename migration is a no-op (no error)."""
+        from nexus.db.migrations import migrate_chash_index_rename_doc_id
+
+        conn = sqlite3.connect(":memory:")
+        # No prior install of chash_index.
+        migrate_chash_index_rename_doc_id(conn)  # must not raise
+
+        # Table still absent.
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='chash_index'"
+        ).fetchone()
+        assert row is None
 
     def test_chash_index_in_migrations_list(self) -> None:
         from nexus.db.migrations import MIGRATIONS
