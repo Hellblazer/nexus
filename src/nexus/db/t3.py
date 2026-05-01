@@ -511,6 +511,7 @@ class T3Database:
         source_agent: str = "",
         store_type: str = "knowledge",
         ttl_days: int = 0,
+        catalog_doc_id: str = "",
     ) -> str:
         """Upsert *content* into *collection*. Returns the document ID.
 
@@ -529,6 +530,14 @@ class T3Database:
         ALLOWED_TOP_LEVEL field is populated and the chash dual-write hook
         gets the chunk_text_hash it needs (closes the RDR-086 coverage hole
         for MCP-stored docs).
+
+        ``catalog_doc_id`` (RDR-101 Phase 3 PR δ Stage B.4) is the
+        catalog ``Document.doc_id`` (Tumbler string) for the
+        single-chunk doc. Caller registers the catalog entry FIRST and
+        passes the resulting tumbler so the T3 chunk lands with a
+        cross-reference back to the catalog at write-time. Empty
+        string is the legacy / no-catalog path; ``normalize`` Step 4c
+        drops the field on the way to T3.
         """
         from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415
 
@@ -581,6 +590,7 @@ class T3Database:
             ttl_days=ttl_days,
             source_agent=source_agent,
             session_id=session_id,
+            doc_id=catalog_doc_id,
         )
 
         col = self.get_or_create_collection(collection)

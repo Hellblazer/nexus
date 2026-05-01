@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import hashlib
 import sys
 from pathlib import Path
 
@@ -99,6 +100,18 @@ def put_cmd(
 
     col_name = t3_collection_name(collection)
     db = _t3()
+
+    # RDR-101 Phase 3 PR δ Stage B.4: pre-register the catalog entry
+    # so the T3 chunk can carry the resulting tumbler as ``doc_id``
+    # at write-time. The chunk_chroma_id (sha256 of "{collection}:{title}")
+    # is deterministic, so we can compute it here and pass to the hook
+    # for legacy meta.doc_id dedup. The hook returns the catalog
+    # tumbler string (or "" when the catalog is absent).
+    chunk_chroma_id = hashlib.sha256(f"{col_name}:{title}".encode()).hexdigest()[:16]
+    catalog_doc_id = _catalog_store_hook(
+        title=title, doc_id=chunk_chroma_id, collection_name=col_name,
+    )
+
     doc_id = db.put(
         collection=col_name,
         content=content,
@@ -108,9 +121,9 @@ def put_cmd(
         session_id=session_id,
         source_agent=agent,
         ttl_days=ttl_days,
+        catalog_doc_id=catalog_doc_id,
     )
     click.echo(f"Stored: {doc_id}  →  {col_name}")
-    _catalog_store_hook(title=title, doc_id=doc_id, collection_name=col_name)
     # nexus-9099: fire the three post-store hook chains so the chash
     # index, taxonomy assignment, and aspect-extraction queue see CLI
     # store-put events. RDR-095 symmetric-fire; this path was missed by
@@ -120,21 +133,33 @@ def put_cmd(
     fire_store_chains([doc_id], col_name, [content])
 
 
-def _catalog_store_hook(title: str, doc_id: str, collection_name: str) -> None:
-    """Register knowledge entry in catalog. Silently skipped if absent."""
+def _catalog_store_hook(title: str, doc_id: str, collection_name: str) -> str:
+    """Register knowledge entry in catalog. Silently skipped if absent.
+
+    Returns the catalog ``Document.doc_id`` (Tumbler string) so the
+    caller can pass it to ``T3Database.put()`` as ``catalog_doc_id``
+    for chunk-write-time embedding (RDR-101 Phase 3 PR δ Stage B.4).
+    Returns ``""`` when the catalog is absent or an error occurs — the
+    schema funnel drops empty doc_id at the boundary.
+
+    ``doc_id`` here is the legacy T3 chunk Chroma natural-id
+    (sha256-of-collection-and-title), used for dedup against the
+    legacy ``meta.doc_id`` mapping.
+    """
     try:
         from nexus.catalog import Catalog
         from nexus.config import catalog_path
 
         cat_path = catalog_path()
         if not Catalog.is_initialized(cat_path):
-            return
+            return ""
 
         cat = Catalog(cat_path, cat_path / ".catalog.db")
 
-        # Dedup by doc_id
-        if cat.by_doc_id(doc_id) is not None:
-            return
+        # Dedup by chunk_chroma_id stored in legacy meta.doc_id.
+        existing = cat.by_doc_id(doc_id)
+        if existing is not None:
+            return str(existing.tumbler)
 
         # Get or create "knowledge" curator owner
         rows = cat._db.execute(
@@ -146,13 +171,15 @@ def _catalog_store_hook(title: str, doc_id: str, collection_name: str) -> None:
         else:
             owner = cat.register_owner("knowledge", "curator")
 
-        cat.register(
+        tumbler = cat.register(
             owner=owner, title=title, content_type="knowledge",
             physical_collection=collection_name,
             meta={"doc_id": doc_id},
         )
+        return str(tumbler)
     except Exception:
         _log.debug("catalog_store_hook_failed", exc_info=True)
+        return ""
 
 
 @store.command("list")
