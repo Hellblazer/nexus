@@ -54,6 +54,10 @@ dependencies = [
     "mcp>=1.0",
     "fastapi>=0.115",
     "uvicorn[standard]",
+    # RDR-101: UUID7 (RFC 9562) for doc_id and chunk_id surrogate identity.
+    # Python 3.14 lands uuid.uuid7() in stdlib; on 3.13 use uuid7-standard
+    # (NOT the older "uuid7" package, which uses pre-RFC encoding).
+    "uuid7-standard>=1.1.0; python_version<'3.14'",
 ]
 
 [project.optional-dependencies]
