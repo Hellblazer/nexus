@@ -25,9 +25,26 @@ if TYPE_CHECKING:
 # convention used elsewhere in the codebase (1/true/yes/on).
 _SHADOW_EMIT_ENV = "NEXUS_EVENT_LOG_SHADOW"
 
+# RDR-101 Phase 3 PR α: event-sourced write path gate. When ON, the
+# new path inverts the JSONL+SQLite write order: emit DocumentRegistered
+# event FIRST, project to SQLite via Projector.apply, then append to
+# legacy documents.jsonl for back-compat (Phase 5 deprecates legacy
+# JSONL). When OFF (default), the legacy direct-write path runs and
+# shadow emit (PR F) optionally appends to events.jsonl after the fact.
+#
+# Default off so the gate flip is a deliberate operator action. The
+# IRREVERSIBILITY WINDOW (RDR-101 §Migration / Phase 3) only starts
+# when this default flips on, which is a later sub-PR in Phase 3.
+_EVENT_SOURCED_ENV = "NEXUS_EVENT_SOURCED"
+
 
 def _read_shadow_gate() -> bool:
     val = os.environ.get(_SHADOW_EMIT_ENV, "").strip().lower()
+    return val in ("1", "true", "yes", "on")
+
+
+def _read_event_sourced_gate() -> bool:
+    val = os.environ.get(_EVENT_SOURCED_ENV, "").strip().lower()
     return val in ("1", "true", "yes", "on")
 
 
@@ -451,6 +468,12 @@ class Catalog:
         # this log; Phase 1 only shadow-emits when an operator opts in.
         self._events_path = catalog_dir / "events.jsonl"
         self._shadow_emit_enabled = _read_shadow_gate()
+        # RDR-101 Phase 3 PR α (nexus-8t7z): event-sourced write path
+        # gate. Off by default; opt in via NEXUS_EVENT_SOURCED=1. When
+        # both gates are on, the event-sourced path takes precedence
+        # and shadow emit is unused (the new path emits to events.jsonl
+        # by construction).
+        self._event_sourced_enabled = _read_event_sourced_gate()
         self.degraded: bool = False
         # Storage review S-4: mtime cache so every Catalog() instantiation
         # doesn't re-parse the full JSONL corpus and re-build the SQLite
@@ -631,6 +654,24 @@ class Catalog:
 
     # ── RDR-101 Phase 1 PR F: shadow event-log emit ─────────────────────
 
+    def _write_to_event_log(self, event: "_Event") -> None:
+        """Append ``event`` to ``events.jsonl`` unconditionally.
+
+        Caller MUST hold the catalog directory flock and MUST handle
+        TypeError / OSError; this helper does no error suppression
+        (compare ``_emit_shadow_event``, which is best-effort).
+
+        The Phase 3 event-sourced write path uses this helper because
+        the event log IS the canonical source of truth — a failure to
+        append must abort the write, not be silently swallowed.
+        """
+        if not self._events_path.exists():
+            self._events_path.touch()
+        line = json.dumps(event.to_dict(), separators=(",", ":"))
+        with self._events_path.open("a") as f:
+            f.write(line)
+            f.write("\n")
+
     def _emit_shadow_event(self, event: "_Event") -> None:
         """Append ``event`` to ``events.jsonl`` if shadow emit is enabled.
 
@@ -663,13 +704,13 @@ class Catalog:
         """
         if not self._shadow_emit_enabled:
             return
+        # Skip shadow emit when the event-sourced path is on — the new
+        # path writes the same event via _write_to_event_log already,
+        # and a duplicate emit would write the line twice.
+        if self._event_sourced_enabled:
+            return
         try:
-            if not self._events_path.exists():
-                self._events_path.touch()
-            line = json.dumps(event.to_dict(), separators=(",", ":"))
-            with self._events_path.open("a") as f:
-                f.write(line)
-                f.write("\n")
+            self._write_to_event_log(event)
         except Exception as exc:
             event_type = getattr(event, "type", "?")
             _log.warning(
@@ -716,15 +757,7 @@ class Catalog:
                 description=description,
                 repo_root=repo_root,
             )
-            self._append_jsonl(self._owners_path, rec.__dict__)
-            # Upsert SQLite
-            self._db.execute(
-                "INSERT OR REPLACE INTO owners (tumbler_prefix, name, owner_type, repo_hash, description, repo_root) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (prefix, name, owner_type, repo_hash, description, repo_root),
-            )
-            self._db.commit()
-            self._emit_shadow_event(_make_event(
+            event = _make_event(
                 _OwnerRegisteredPayload(
                     owner_id=prefix,
                     name=name,
@@ -734,7 +767,25 @@ class Catalog:
                     description=description,
                 ),
                 v=0,
-            ))
+            )
+            if self._event_sourced_enabled:
+                # Event-sourced path: events.jsonl first, projector
+                # writes SQLite, legacy JSONL last for back-compat.
+                self._write_to_event_log(event)
+                from nexus.catalog.projector import Projector as _Projector
+                _Projector(self._db).apply(event)
+                self._db.commit()
+                self._append_jsonl(self._owners_path, rec.__dict__)
+            else:
+                self._append_jsonl(self._owners_path, rec.__dict__)
+                # Upsert SQLite
+                self._db.execute(
+                    "INSERT OR REPLACE INTO owners (tumbler_prefix, name, owner_type, repo_hash, description, repo_root) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (prefix, name, owner_type, repo_hash, description, repo_root),
+                )
+                self._db.commit()
+                self._emit_shadow_event(event)
             return Tumbler.parse(prefix)
         finally:
             self._release_lock(dir_fd)
@@ -932,21 +983,7 @@ class Catalog:
                 source_mtime=source_mtime,
                 source_uri=source_uri,
             )
-            self._append_jsonl(self._documents_path, rec.__dict__)
-            self._db.execute(
-                "INSERT INTO documents "
-                "(tumbler, title, author, year, content_type, file_path, "
-                "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
-                "metadata, source_mtime, source_uri) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    str(tumbler), title, author, year, content_type, file_path,
-                    corpus, physical_collection, chunk_count, head_hash, now,
-                    json.dumps(meta or {}), source_mtime, source_uri,
-                ),
-            )
-            self._db.commit()
-            self._emit_shadow_event(_make_event(
+            event = _make_event(
                 _DocumentRegisteredPayload(
                     # Phase 1 stand-in: tumbler doubles as doc_id until
                     # Phase 3 mints UUID7 doc_ids via the new write path.
@@ -972,7 +1009,37 @@ class Catalog:
                     meta=dict(meta or {}),
                 ),
                 v=0,
-            ))
+            )
+
+            if self._event_sourced_enabled:
+                # RDR-101 Phase 3 PR α — event-sourced write path.
+                # Order is inverted: events.jsonl FIRST, then SQLite
+                # via the projector, then legacy documents.jsonl for
+                # back-compat. The event log is canonical; SQLite is a
+                # deterministic projection of it.
+                self._write_to_event_log(event)
+                from nexus.catalog.projector import Projector as _Projector
+                _Projector(self._db).apply(event)
+                self._db.commit()
+                self._append_jsonl(self._documents_path, rec.__dict__)
+            else:
+                # Legacy direct-write path. Shadow emit (PR F) optionally
+                # writes the event AFTER the SQLite + JSONL commits.
+                self._append_jsonl(self._documents_path, rec.__dict__)
+                self._db.execute(
+                    "INSERT INTO documents "
+                    "(tumbler, title, author, year, content_type, file_path, "
+                    "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
+                    "metadata, source_mtime, source_uri) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        str(tumbler), title, author, year, content_type, file_path,
+                        corpus, physical_collection, chunk_count, head_hash, now,
+                        json.dumps(meta or {}), source_mtime, source_uri,
+                    ),
+                )
+                self._db.commit()
+                self._emit_shadow_event(event)
             return tumbler
         finally:
             self._release_lock(dir_fd)
