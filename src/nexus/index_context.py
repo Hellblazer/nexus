@@ -60,6 +60,16 @@ class IndexContext:
     # When set, replaces Voyage AI embedding in code_indexer and prose_indexer.
     embed_fn: Callable[[list[str]], list[list[float]]] | None = field(default=None)
 
+    # Catalog Document.doc_id resolver (RDR-101 Phase 3 PR δ Stage B).
+    # When set, indexers call ``doc_id_resolver(file_path)`` and pass the
+    # returned tumbler string into ``make_chunk_metadata``'s ``doc_id``
+    # argument so freshly-written T3 chunks carry the catalog
+    # cross-reference at chunk-write time. The orchestrator builds this
+    # closure from the pre-index catalog registration map; ``None`` is
+    # the legacy / no-catalog path (chunks ship without ``doc_id``,
+    # which ``metadata_schema.normalize`` Step 4c then drops).
+    doc_id_resolver: Callable[[Path], str] | None = field(default=None)
+
     # Per-stage intra-file timing bucket (nexus-7niu, vatx Gap 4b).
     # Populated only when the operator passes ``nx index repo --debug-timing``.
     # Silent when ``None`` — the per-file indexer skips the timing blocks
