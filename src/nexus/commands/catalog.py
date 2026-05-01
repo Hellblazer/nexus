@@ -3327,22 +3327,35 @@ def doctor_cmd(
 
 
 def _run_replay_equality() -> dict:
-    """Drive synthesizer + projector against the live catalog and diff.
+    """Drive the projector against the live catalog and diff.
 
-    Steps:
+    Source of truth depends on the catalog's write path:
+
+    * **Event-sourced** (``events.jsonl`` exists and is non-empty): replay
+      the native event log directly. This is the path that matters once
+      ``NEXUS_EVENT_SOURCED=1`` is on by default, since the legacy JSONL
+      becomes a back-compat shadow rather than canonical state and a
+      synthesizer-driven check would silently miss any divergence in the
+      native write path.
+    * **Legacy** (no events.jsonl, or empty): synthesize v: 0 events
+      from ``owners.jsonl``/``documents.jsonl``/``links.jsonl`` (the
+      Phase 1 path).
+
+    Steps in either mode:
       1. Resolve ``catalog_path()`` and require an initialized catalog.
       2. Open ``.catalog.db`` read-only (sqlite URI ``mode=ro``) for the
          live snapshot. Snapshot owners + documents + links rows.
       3. Build a fresh ``CatalogDB`` under a TemporaryDirectory; drive
-         ``synthesize_from_jsonl`` + ``Projector.apply_all`` into it.
+         ``Projector.apply_all`` over the chosen event stream into it.
          Snapshot the same three tables.
       4. Diff the snapshots. Report counts and the first 5 mismatches per
          table. Pass = every table identical; fail = any difference.
 
     The live ``.catalog.db`` is opened read-only so an operator running
     this verb on a working host cannot accidentally corrupt the cached
-    SQLite. JSONL files are read but not written. The projected SQLite
-    is ephemeral and discarded with the TemporaryDirectory.
+    SQLite. JSONL / events.jsonl files are read but not written. The
+    projected SQLite is ephemeral and discarded with the
+    TemporaryDirectory.
     """
     import sqlite3
     import tempfile
@@ -3368,6 +3381,19 @@ def _run_replay_equality() -> dict:
             "pull' to rebuild from JSONL."
         )
 
+    # ── Pick the event source ──────────────────────────────────────────
+    # Stat-only check; never construct ``EventLog`` here because its
+    # constructor touch-creates ``events.jsonl`` if missing, which
+    # would (a) shift the catalog dir's mtime mid-doctor-run and (b)
+    # break the doctor's "read-only against live state" guarantee for a
+    # legacy-mode catalog that has no events.jsonl yet.
+    events_path = cat_dir / "events.jsonl"
+    event_source: str
+    if events_path.exists() and events_path.stat().st_size > 0:
+        event_source = "events.jsonl"
+    else:
+        event_source = "synthesized"
+
     # ── Snapshot live ──────────────────────────────────────────────────
     # Links carry an autoincrement ``id`` PK that the projector restarts
     # at 1; the live db's ids depend on insertion history. RF-101-2 does
@@ -3389,9 +3415,17 @@ def _run_replay_equality() -> dict:
         projected_path = Path(tmpdir) / "projected.db"
         proj_db = CatalogDB(projected_path)
         try:
-            applied = Projector(proj_db).apply_all(
-                synthesize_from_jsonl(cat_dir)
-            )
+            if event_source == "events.jsonl":
+                # Local import: deferring to call-time avoids module-load
+                # side effects in environments that never need this path.
+                from nexus.catalog.event_log import EventLog
+                applied = Projector(proj_db).apply_all(
+                    EventLog(cat_dir).replay()
+                )
+            else:
+                applied = Projector(proj_db).apply_all(
+                    synthesize_from_jsonl(cat_dir)
+                )
         finally:
             proj_db.close()
 
@@ -3428,6 +3462,7 @@ def _run_replay_equality() -> dict:
         "events_applied": applied,
         "catalog_dir": str(cat_dir),
         "live_db": str(live_db_path),
+        "event_source": event_source,
         "tables": table_diffs,
     }
 
@@ -3465,6 +3500,7 @@ def _print_replay_equality_text(report: dict) -> None:
     """Operator-friendly text rendering of the replay-equality report."""
     click.echo(f"Catalog: {report['catalog_dir']}")
     click.echo(f"Live db: {report['live_db']}")
+    click.echo(f"Event source: {report.get('event_source', 'synthesized')}")
     click.echo(f"Events applied: {report['events_applied']}")
     click.echo("")
 

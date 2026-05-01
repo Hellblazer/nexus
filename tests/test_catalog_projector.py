@@ -327,9 +327,14 @@ class TestUnknownDispatch:
         assert rows[0] == 0
         db.close()
 
-    def test_v1_known_type_is_logged_skipped(self, tmp_path):
-        # Phase 3 will ship v: 1 handlers; Phase 1 logs and skips so the
-        # doctor verb can flag "v: 1 in log but Phase 3 not deployed".
+    def test_v1_known_type_raises(self, tmp_path):
+        # Round-3 review: pre-fix _v1_unsupported logged a warning and
+        # returned, which combined with the v=1 default in make_event
+        # produced a silent-drop trap. Now it raises NotImplementedError
+        # so dispatch on (type, 1) lands LOUDLY before any write commits
+        # — the writer holds the flock and has not yet committed at the
+        # point this raises, so SQLite + JSONL stay un-touched.
+        import pytest as _pytest
         db = CatalogDB(tmp_path / "x.db")
         proj = Projector(db)
 
@@ -337,8 +342,8 @@ class TestUnknownDispatch:
             ev.DocumentDeletedPayload(doc_id="1.7.42", reason="x"),
             v=1,
         )
-        proj.apply(e)
-        # v: 1 path is the v1_unsupported no-op for Phase 1.
+        with _pytest.raises(NotImplementedError, match="v: 1"):
+            proj.apply(e)
         rows = db.execute(
             "SELECT count(*) FROM documents WHERE tumbler = ?",
             ("1.7.42",),

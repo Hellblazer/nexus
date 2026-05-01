@@ -468,12 +468,18 @@ class Event:
 # ── Convenience constructors ─────────────────────────────────────────────
 
 
-def make_event(payload: Any, *, v: int = 1, ts: str | None = None) -> Event:
+def make_event(payload: Any, *, v: int = 0, ts: str | None = None) -> Event:
     """Build an Event envelope from a typed payload dataclass.
 
     Looks up the type name from ``payload``'s class so callers don't have
-    to repeat themselves. ``v`` defaults to 1 (native write); pass ``v=0``
-    for the synthesized projector path. ``ts`` defaults to now.
+    to repeat themselves. ``v`` defaults to ``0`` (synthesized / Phase 1
+    schema): every v: 0 dispatch handler is implemented, so the default
+    is the safe, observable path. Pass ``v=1`` once a Phase 3+ writer is
+    wired against a v: 1 dispatch handler that does something other than
+    raise — until then, v: 1 events have no projector landing site and
+    the projector raises ``NotImplementedError`` to surface the gap.
+
+    ``ts`` defaults to now.
     """
     type_ = _CLASS_TO_TYPE.get(type(payload))
     if type_ is None:

@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 import structlog
@@ -137,7 +138,12 @@ class CatalogDB:
     def __init__(self, db_path: Path) -> None:
         self._path = db_path
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
-        self._lock = threading.Lock()
+        # Reentrant: ``execute()`` callers inside a ``transaction()``
+        # context (RDR-101 round-3) re-acquire the lock from the same
+        # thread. With a plain ``Lock()`` the nested ``with self._lock:``
+        # in ``execute`` would deadlock. ``RLock`` is a strict superset
+        # of ``Lock`` for cross-thread mutual exclusion.
+        self._lock = threading.RLock()
         # Storage review I-2: match the T2 domain-store concurrency defaults
         # (5 s busy_timeout + WAL) so cross-process writers don't immediately
         # raise ``OperationalError: database is locked`` when the CLI races
@@ -368,6 +374,25 @@ class CatalogDB:
         """Thread-safe commit wrapper."""
         with self._lock:
             self._conn.commit()
+
+    @contextmanager
+    def transaction(self):
+        """Atomic transaction context (RDR-101 round-3, atomicity fix).
+
+        Wraps the connection in ``with self._lock, self._conn:`` so a
+        sequence of ``execute()`` calls runs as one transaction —
+        commits on success, rolls back on any exception. ``_lock`` is
+        an ``RLock`` so the inner ``execute()`` calls re-acquire the
+        same thread's lock without deadlock.
+
+        Used by ``Catalog._ensure_consistent`` to make the
+        DELETE+replay rebuild atomic; pre-fix the three DELETEs
+        autocommitted before ``Projector.apply_all`` ran, so any
+        exception mid-replay (a malformed event, the v: 1 raise) left
+        SQLite empty and unrecoverable until the next mtime tick.
+        """
+        with self._lock, self._conn:
+            yield self._conn
 
     def close(self) -> None:
         with self._lock:
