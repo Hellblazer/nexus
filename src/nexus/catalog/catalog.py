@@ -648,19 +648,37 @@ class Catalog:
         v: 0 schema is used so the existing Phase 1 projector handlers
         apply unchanged. Phase 3 introduces v: 1 native-write semantics
         with new projector handlers.
+
+        Failure handling: the shadow log is non-authoritative in Phase 1
+        (nothing reads it yet). A failed emit MUST NOT abort the
+        catalog mutation that triggered it — SQLite + the legacy JSONL
+        are already committed by the time this method runs. Pre-fix
+        ``json.dumps``'s default=str silently coerced bad payload
+        values; the post-fix raises TypeError, which would otherwise
+        propagate out of the mutator and leave the catalog in a
+        committed-but-unobservable state. Catch broadly here, log a
+        structured warning, and let the mutation succeed. The doctor
+        verb's ``--replay-equality`` will surface the resulting event
+        log gap at audit time.
         """
         if not self._shadow_emit_enabled:
             return
-        if not self._events_path.exists():
-            self._events_path.touch()
-        # Match EventLog.append: no default=str. Non-JSON-native values
-        # in the payload raise TypeError rather than round-tripping as
-        # silently-coerced strings. Catalog mutators must not stuff
-        # datetime / Path / Decimal into payload meta.
-        line = json.dumps(event.to_dict(), separators=(",", ":"))
-        with self._events_path.open("a") as f:
-            f.write(line)
-            f.write("\n")
+        try:
+            if not self._events_path.exists():
+                self._events_path.touch()
+            line = json.dumps(event.to_dict(), separators=(",", ":"))
+            with self._events_path.open("a") as f:
+                f.write(line)
+                f.write("\n")
+        except Exception as exc:
+            event_type = getattr(event, "type", "?")
+            _log.warning(
+                "shadow_emit_failed",
+                event_type=event_type,
+                error=str(exc),
+                error_type=type(exc).__name__,
+                path=str(self._events_path),
+            )
 
     # ── Owners ─────────────────────────────────────────────────────────────
 
@@ -1525,20 +1543,26 @@ class Catalog:
         """
         dir_fd = self._acquire_lock()
         try:
+            # Include ``alias_of`` in the SELECT so the rename's shadow
+            # emit can preserve it for any aliased document being
+            # renamed. Pre-fix the SELECT omitted alias_of and the emit
+            # hardcoded it to "", silently severing the alias graph
+            # for any renamed alias row on replay.
             rows = self._db.execute(
                 "SELECT tumbler, title, author, year, content_type, file_path, "
                 "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
-                "metadata, source_mtime, source_uri "
+                "metadata, source_mtime, source_uri, alias_of "
                 "FROM documents WHERE physical_collection = ?",
                 (old,),
             ).fetchall()
             for row in rows:
-                # Preserve source_mtime + source_uri across the rename
-                # — JSONL is the rebuild source of truth, so any
-                # column omitted here is reset to its default when
+                # Preserve source_mtime + source_uri + alias_of across
+                # the rename — JSONL is the rebuild source of truth, so
+                # any column omitted here is reset to its default when
                 # Catalog.rebuild() replays the log (review finding —
                 # Reviewer B/C1, nexus-1ccq follow-up; RDR-096 P3.1
-                # extended this to source_uri).
+                # extended this to source_uri; meta-review extended it
+                # to alias_of).
                 rec = {
                     "tumbler": row[0],
                     "title": row[1],
@@ -1554,6 +1578,7 @@ class Catalog:
                     "meta": json.loads(row[11]) if row[11] else {},
                     "source_mtime": row[12] or 0.0,
                     "source_uri": row[13] or "",
+                    "alias_of": row[14] or "",
                 }
                 self._append_jsonl(self._documents_path, rec)
             self._db.execute(
@@ -1571,33 +1596,44 @@ class Catalog:
             # check. Emitting after db.commit() (same crash-window
             # discipline as unlink/bulk_unlink) keeps the event log
             # consistent with the durable SQLite state.
-            owner_addr_for = lambda t: ".".join(t.split(".")[:2])
-            for row in rows:
-                meta_dict = json.loads(row[11]) if row[11] else {}
-                self._emit_shadow_event(_make_event(
-                    _DocumentRegisteredPayload(
-                        doc_id=row[0],
-                        owner_id=owner_addr_for(row[0]),
-                        content_type=row[4] or "",
-                        source_uri=row[13] or "",
-                        coll_id=new,
-                        title=row[1] or "",
-                        source_mtime=float(row[12] or 0.0),
-                        indexed_at_doc=row[10] or "",
-                        tumbler=row[0],
-                        author=row[2] or "",
-                        year=int(row[3] or 0),
-                        file_path=row[5] or "",
-                        corpus=row[6] or "",
-                        physical_collection=new,
-                        chunk_count=int(row[8] or 0),
-                        head_hash=row[9] or "",
-                        indexed_at=row[10] or "",
-                        alias_of="",
-                        meta=dict(meta_dict),
-                    ),
-                    v=0,
-                ))
+            #
+            # Hoist the gate check above the per-row payload
+            # construction: when shadow emit is OFF (the default), a
+            # 10k-row rename should not pay the cost of building 10k
+            # _DocumentRegisteredPayload objects only to discard them
+            # in _emit_shadow_event's first line.
+            if self._shadow_emit_enabled:
+                from nexus.catalog.synthesizer import _owner_prefix_of
+                for row in rows:
+                    meta_dict = json.loads(row[11]) if row[11] else {}
+                    self._emit_shadow_event(_make_event(
+                        _DocumentRegisteredPayload(
+                            doc_id=row[0],
+                            # Use the synthesizer's helper for owner
+                            # extraction so malformed tumblers (no dots)
+                            # produce "" rather than the whole tumbler
+                            # — matches synthesize_from_jsonl's contract.
+                            owner_id=_owner_prefix_of(row[0]),
+                            content_type=row[4] or "",
+                            source_uri=row[13] or "",
+                            coll_id=new,
+                            title=row[1] or "",
+                            source_mtime=float(row[12] or 0.0),
+                            indexed_at_doc=row[10] or "",
+                            tumbler=row[0],
+                            author=row[2] or "",
+                            year=int(row[3] or 0),
+                            file_path=row[5] or "",
+                            corpus=row[6] or "",
+                            physical_collection=new,
+                            chunk_count=int(row[8] or 0),
+                            head_hash=row[9] or "",
+                            indexed_at=row[10] or "",
+                            alias_of=row[14] or "",
+                            meta=dict(meta_dict),
+                        ),
+                        v=0,
+                    ))
             return len(rows)
         finally:
             self._release_lock(dir_fd)
