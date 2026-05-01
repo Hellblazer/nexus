@@ -154,20 +154,35 @@ class TestHealthRouteRendersAspectQueueCard:
 
     def test_aspect_queue_card_present_when_table_populated(
         self, isolated_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """The template renders pending/failed/oldest_pending fields when
+        ``_collect_aspect_queue_data`` returns a populated payload.
+
+        We mock the helper rather than relying on a fixture-populated
+        ``memory.db`` for the same reason the absent-test mocks it (see
+        sibling docstring): ``/health/refresh`` runs a chain of T2-touching
+        health checks before the aspect-queue check, and on Ubuntu CI those
+        side-effects rewrite the DB the route reads from, so the test's
+        ``_create_queue_table`` + ``_insert_row`` setup is not what the
+        route sees by the time it queries (observed: only the "failed"
+        row survives the round-trip on CI; pending row is dropped). The
+        unit tests under ``TestCollectAspectQueueData`` already cover the
+        helper's data path against a real ``memory.db``; this test now
+        isolates the *template* branch from T2 side-effects.
+        """
         from nexus.console.app import create_app
 
-        db_path = isolated_config_dir / "memory.db"
-        _create_queue_table(db_path)
-        _insert_row(
-            db_path, collection="knowledge__a", source_path="/a/1",
-            status="pending", enqueued_at="2026-04-29T00:00:00Z",
+        monkeypatch.setattr(
+            "nexus.console.routes.health._collect_aspect_queue_data",
+            lambda: {
+                "present": True,
+                "total": 2,
+                "by_status": {"pending": 1, "failed": 1},
+                "oldest_pending": "2026-04-29T00:00:00Z",
+                "failed_count": 1,
+            },
         )
-        _insert_row(
-            db_path, collection="knowledge__a", source_path="/a/2",
-            status="failed", enqueued_at="2026-04-29T01:00:00Z",
-        )
-
         app = create_app()
         client = TestClient(app)
         resp = client.get("/health/refresh")
