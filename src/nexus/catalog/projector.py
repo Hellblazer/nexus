@@ -29,6 +29,26 @@ same composite key OVERWRITES the prior row's spans + metadata (the
 writer's merge path emits a single LinkCreated event carrying the
 final merged metadata, not two separate Created+Updated events; the
 projector converges SQLite on whatever the most recent event says).
+
+Why state-snapshot ``LinkCreated`` rather than intent-preserving
+``LinkUpdated``? Three reasons. First, the projector contract is
+"replay equals direct write" (RF-101-2); a state-snapshot makes
+convergence trivial — one INSERT OR REPLACE handler covers create,
+merge, and re-merge alike. A LinkUpdated split would need two handlers
+plus a "first vs subsequent" classification on every event, expanding
+the test surface. Second, the writer's merge logic
+(``Catalog._link_unlocked``) already computes the FINAL merged metadata
+before emitting; an intent-preserving event would force the projector
+to recompute the merge against current SQLite state, duplicating the
+writer's logic in two places. Third, intent reconstruction (was this
+event a fresh create or a merge?) is an audit/forensics concern that
+can be derived offline by replaying the log up to and past the event
+in question — the live SQLite never needs that distinction. The
+trade-off (lossier event log) is bounded: the metadata payload still
+carries the FINAL ``co_discovered_by`` list, so the merge participants
+are recoverable. PR γ's ``TestLongLinkMutationSequence`` and
+``TestBulkUnlinkRenameInterleaving`` lock down replay-equality across
+long mutation sequences that exercise this path.
 ``DocumentDeleted`` issues ``DELETE FROM documents WHERE tumbler = ?``;
 re-deleting a missing row is a no-op.
 
