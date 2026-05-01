@@ -189,6 +189,18 @@ class T2Database:
                     apply_pending(conn, current_version)
                 finally:
                     conn.close()
+                # apply_pending() keys _upgrade_done by
+                # _connection_path_key(conn) (Path(row[2]).resolve() from
+                # PRAGMA database_list). The fast-path check above keys by
+                # str(path.resolve()) on the Path argument. The two forms
+                # are equivalent in nearly all cases but diverge in CI
+                # path-resolution edge cases (nexus-avwe), leaving the
+                # T2Database-form path_key absent from _upgrade_done after
+                # apply_pending populated only its own form. Recording the
+                # T2Database form here ensures a second construction with
+                # the same Path argument short-circuits without re-opening
+                # the connection.
+                _upgrade_done.add(path_key)
 
         # ── Construct domain stores ───────────────────────────────────
         self.memory: MemoryStore = MemoryStore(path)

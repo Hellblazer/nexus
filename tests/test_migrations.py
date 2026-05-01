@@ -839,6 +839,20 @@ class TestT2DatabaseIntegration:
             mock_ap.assert_not_called()
             db2.close()
 
+    def test_t2database_records_path_key_in_upgrade_done(self, tmp_path: Path) -> None:
+        """T2Database records its own path_key form (str(path.resolve())) in
+        _upgrade_done, independent of _connection_path_key's form, so the
+        outer fast-path check on a subsequent construction is guaranteed to
+        short-circuit (nexus-avwe regression).
+        """
+        from nexus.db.migrations import _upgrade_done
+        from nexus.db.t2 import T2Database
+
+        db_path = tmp_path / "memory.db"
+        db = T2Database(db_path)
+        db.close()
+        assert str(db_path.resolve()) in _upgrade_done
+
     def test_t2database_base_tables_exist(self, tmp_path: Path) -> None:
         """All four base schemas are created by transient connection."""
         from nexus.db.t2 import T2Database
