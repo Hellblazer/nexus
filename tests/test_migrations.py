@@ -91,12 +91,15 @@ class TestMigrationDataclass:
         # (4.18.1; the migration entry that previously created the table
         # was dropped when the read/write surface was retired) +
         # rename chash_index.doc_id → chunk_chroma_id (4.21.3, RDR-101
-        # Phase 0 nexus-o6aa.3 collision resolution)
-        # = 29.
+        # Phase 0 nexus-o6aa.3 collision resolution) +
+        # frecency projection table (4.21.4, RDR-101 Phase 1 PR D
+        # nexus-knn3 — schema-only, mutable side table, no event-log
+        # participation)
+        # = 30.
         # Prefer the name-based checks in TestBackfillPlanDimensions
         # and TestAddPlanMatchTextColumn for future guards; this
         # count is a cheap sentinel only.
-        assert len(MIGRATIONS) == 29
+        assert len(MIGRATIONS) == 30
 
     def test_migrations_ordered_by_version(self) -> None:
         from nexus.db.migrations import MIGRATIONS, _parse_version

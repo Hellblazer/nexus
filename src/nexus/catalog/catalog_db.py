@@ -52,7 +52,26 @@ CREATE TABLE IF NOT EXISTS documents (
     -- RDR-096 P2.1: persistent URI identity. ``''`` (empty) on
     -- legacy rows; populated for new registers after P2.1 ships.
     -- Backfill derives URIs from ``file_path + physical_collection``.
-    source_uri TEXT NOT NULL DEFAULT ''
+    source_uri TEXT NOT NULL DEFAULT '',
+    -- RDR-101 Phase 1 PR D (nexus-knn3): bibliographic enrichment
+    -- columns from the bib disposition deliverable
+    -- (docs/rdr/post-mortem/rdr-101-bib-disposition.md, Option A).
+    -- The bib_* fields move OFF T3 chunk metadata and live exactly once
+    -- on the Document projection. Phase 1 ships the empty columns;
+    -- Phase 3 wires DocumentEnriched v: 1 events to populate them
+    -- through the projector. The two indexed ID columns are the
+    -- "this title was enriched on backend X" cardinality marker that
+    -- nx enrich bib's skip query will read against (Phase 4); the
+    -- partial indexes (created below) make that query a sub-millisecond
+    -- presence test instead of a 300-row Chroma pagination.
+    bib_year INTEGER NOT NULL DEFAULT 0,
+    bib_authors TEXT NOT NULL DEFAULT '',
+    bib_venue TEXT NOT NULL DEFAULT '',
+    bib_citation_count INTEGER NOT NULL DEFAULT 0,
+    bib_semantic_scholar_id TEXT NOT NULL DEFAULT '',
+    bib_openalex_id TEXT NOT NULL DEFAULT '',
+    bib_doi TEXT NOT NULL DEFAULT '',
+    bib_enriched_at TEXT NOT NULL DEFAULT ''
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
@@ -104,6 +123,11 @@ CREATE INDEX IF NOT EXISTS idx_links_created_by_type
 
 CREATE INDEX IF NOT EXISTS idx_documents_tumbler
     ON documents(tumbler);
+
+-- RDR-101 Phase 1 PR D (nexus-knn3) partial indexes on bib backend IDs
+-- live in the post-migration block in __init__: the legacy-DB upgrade
+-- path has to ALTER TABLE the bib columns into existence before the
+-- partial-index CREATE can reference them.
 """
 
 
@@ -161,6 +185,49 @@ class CatalogDB:
                 self._conn.execute(
                     "ALTER TABLE documents ADD COLUMN source_uri TEXT NOT NULL DEFAULT ''"
                 )
+
+        # RDR-101 Phase 1 PR D (nexus-knn3): add bib_* columns to existing
+        # databases. The bib disposition deliverable
+        # (docs/rdr/post-mortem/rdr-101-bib-disposition.md, Option A)
+        # moves these fields off T3 chunk metadata and onto the Document
+        # projection. Phase 1 ships the columns empty; Phase 3 wires the
+        # projector to populate them from DocumentEnriched v: 1 events.
+        # Each ALTER probes for the column first; failure means it was
+        # added in a previous run (idempotent migration pattern matches
+        # the rest of this method).
+        for col_name, col_decl in (
+            ("bib_year",                "INTEGER NOT NULL DEFAULT 0"),
+            ("bib_authors",             "TEXT NOT NULL DEFAULT ''"),
+            ("bib_venue",               "TEXT NOT NULL DEFAULT ''"),
+            ("bib_citation_count",      "INTEGER NOT NULL DEFAULT 0"),
+            ("bib_semantic_scholar_id", "TEXT NOT NULL DEFAULT ''"),
+            ("bib_openalex_id",         "TEXT NOT NULL DEFAULT ''"),
+            ("bib_doi",                 "TEXT NOT NULL DEFAULT ''"),
+            ("bib_enriched_at",         "TEXT NOT NULL DEFAULT ''"),
+        ):
+            try:
+                self._conn.execute(f"SELECT {col_name} FROM documents LIMIT 0")
+            except sqlite3.OperationalError:
+                with self._conn:
+                    self._conn.execute(
+                        f"ALTER TABLE documents ADD COLUMN {col_name} {col_decl}"
+                    )
+
+        # Partial indexes on the two bib backend IDs. CREATE INDEX IF NOT
+        # EXISTS is safe on a fresh DB (where _SCHEMA_SQL already created
+        # them) and on existing DBs (where the columns just landed via
+        # ALTER above).
+        with self._conn:
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_documents_bib_s2_id "
+                "ON documents(bib_semantic_scholar_id) "
+                "WHERE bib_semantic_scholar_id != ''"
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_documents_bib_oa_id "
+                "ON documents(bib_openalex_id) "
+                "WHERE bib_openalex_id != ''"
+            )
 
     def rebuild(
         self,
