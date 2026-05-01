@@ -3579,3 +3579,198 @@ def _print_synthesize_log_text(report: dict) -> None:
         click.echo("Wrote events.jsonl.")
     else:
         click.echo("(no write performed.)")
+
+
+# ── RDR-101 Phase 2: t3-backfill-doc-id verb ─────────────────────────────
+
+
+@catalog.command("t3-backfill-doc-id")
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help=(
+        "Walk events.jsonl and report what would change in T3, without "
+        "calling ChromaDB.update. Use to size the backfill (per-"
+        "collection chunk count, orphan count) before committing."
+    ),
+)
+@click.option(
+    "--collection",
+    "collection_filter",
+    default="",
+    help=(
+        "Restrict the backfill to one collection name. Default is "
+        "every collection that appears in the event log. Use to "
+        "stage a per-collection rollout on a large catalog."
+    ),
+)
+@click.option(
+    "--json", "as_json", is_flag=True,
+    help="Emit machine-readable JSON instead of text output.",
+)
+def t3_backfill_doc_id_cmd(
+    dry_run: bool, collection_filter: str, as_json: bool,
+) -> None:
+    """RDR-101 Phase 2: backfill T3 chunks with the doc_id from the event log.
+
+    Reads ``events.jsonl`` for ``ChunkIndexed`` events (which the Phase 2
+    ``synthesize-log --chunks`` walker emits with resolved ``doc_id``
+    values), opens every collection that appears in the log, and calls
+    ``col.update(ids=[chunk_id], metadatas=[{..existing.., doc_id: X}])``
+    for each chunk whose stored metadata does not already carry a matching
+    doc_id. Idempotent — re-running on already-backfilled chunks is a
+    cheap no-op.
+
+    Orphan chunks (``synthesized_orphan=True``) are skipped and surfaced
+    in the report; the operator runs ``nx catalog repair-orphan-chunks``
+    to assign them manually before they GC after the orphan window.
+    """
+    from nexus.catalog.catalog import Catalog
+    from nexus.catalog.event_log import EventLog
+    from nexus.catalog import events as ev
+    from nexus.config import catalog_path
+    from nexus.db import make_t3
+
+    cat_dir = catalog_path()
+    if not Catalog.is_initialized(cat_dir):
+        raise click.ClickException(
+            f"Catalog not initialized at {cat_dir}. "
+            "Run 'nx catalog setup' to create and populate it."
+        )
+
+    log = EventLog(cat_dir)
+    if not log.path.exists() or log.path.stat().st_size == 0:
+        raise click.ClickException(
+            f"events.jsonl is empty at {log.path}. Run 'nx catalog "
+            "synthesize-log --chunks' first to populate the log with "
+            "ChunkIndexed events."
+        )
+
+    # Group ChunkIndexed events by collection so each ChromaDB
+    # collection is opened once, regardless of how many chunks live in
+    # it. Skip orphans (no doc_id to backfill).
+    by_coll: dict[str, list] = {}
+    orphans_total = 0
+    for event in log.replay():
+        if event.type != ev.TYPE_CHUNK_INDEXED:
+            continue
+        if event.payload.synthesized_orphan or not event.payload.doc_id:
+            orphans_total += 1
+            continue
+        if collection_filter and event.payload.coll_id != collection_filter:
+            continue
+        by_coll.setdefault(event.payload.coll_id, []).append(event.payload)
+
+    chunks_updated = 0
+    chunks_already_correct = 0
+    errors: list[dict] = []
+
+    if not dry_run:
+        try:
+            t3 = make_t3()
+        except Exception as exc:
+            raise click.ClickException(
+                f"Failed to open T3 client: {exc}. Check ChromaDB credentials."
+            )
+
+    for coll_name, payloads in by_coll.items():
+        if dry_run:
+            chunks_updated += len(payloads)
+            continue
+        try:
+            col = t3._client.get_collection(name=coll_name)
+        except Exception as exc:
+            errors.append({
+                "collection": coll_name,
+                "stage": "open",
+                "error": str(exc),
+            })
+            continue
+
+        # Idempotency: read current metadata in batches; only update
+        # chunks that don't already carry the right doc_id.
+        ids = [p.chunk_id for p in payloads]
+        for batch_start in range(0, len(ids), 300):
+            batch_ids = ids[batch_start:batch_start + 300]
+            batch_payloads = payloads[batch_start:batch_start + 300]
+            try:
+                existing = col.get(ids=batch_ids, include=["metadatas"])
+            except Exception as exc:
+                errors.append({
+                    "collection": coll_name,
+                    "stage": "read",
+                    "batch_size": len(batch_ids),
+                    "error": str(exc),
+                })
+                continue
+
+            existing_meta = {
+                cid: m for cid, m in zip(
+                    existing.get("ids") or [],
+                    existing.get("metadatas") or [],
+                )
+            }
+
+            update_ids: list[str] = []
+            update_metas: list[dict] = []
+            for payload in batch_payloads:
+                current = existing_meta.get(payload.chunk_id) or {}
+                if current.get("doc_id") == payload.doc_id:
+                    chunks_already_correct += 1
+                    continue
+                merged = dict(current)
+                merged["doc_id"] = payload.doc_id
+                update_ids.append(payload.chunk_id)
+                update_metas.append(merged)
+
+            if not update_ids:
+                continue
+            try:
+                col.update(ids=update_ids, metadatas=update_metas)
+                chunks_updated += len(update_ids)
+            except Exception as exc:
+                errors.append({
+                    "collection": coll_name,
+                    "stage": "update",
+                    "batch_size": len(update_ids),
+                    "error": str(exc),
+                })
+
+    report = {
+        "dry_run": dry_run,
+        "events_path": str(log.path),
+        "collection_filter": collection_filter or "(all)",
+        "collections_processed": len(by_coll),
+        "chunks_eligible": sum(len(p) for p in by_coll.values()),
+        "chunks_updated": chunks_updated,
+        "chunks_already_correct": chunks_already_correct,
+        "orphans_skipped": orphans_total,
+        "errors": errors,
+    }
+
+    if as_json:
+        click.echo(json.dumps(report, indent=2))
+    else:
+        _print_t3_backfill_text(report)
+
+    if errors and not dry_run:
+        # Surface a non-zero exit so an operator running this in a
+        # script can detect partial failure.
+        raise click.exceptions.Exit(1)
+
+
+def _print_t3_backfill_text(report: dict) -> None:
+    click.echo(f"Events path:           {report['events_path']}")
+    click.echo(f"Collection filter:     {report['collection_filter']}")
+    click.echo(f"Collections processed: {report['collections_processed']}")
+    click.echo(f"Chunks eligible:       {report['chunks_eligible']}")
+    if report["dry_run"]:
+        click.echo("(dry-run — no T3 writes performed.)")
+    else:
+        click.echo(f"Chunks updated:        {report['chunks_updated']}")
+        click.echo(f"Already correct:       {report['chunks_already_correct']}")
+    click.echo(f"Orphans skipped:       {report['orphans_skipped']}")
+    if report["errors"]:
+        click.echo(f"\nErrors ({len(report['errors'])}):")
+        for e in report["errors"][:10]:
+            click.echo(f"  {e['collection']} ({e['stage']}): {e['error']}")
