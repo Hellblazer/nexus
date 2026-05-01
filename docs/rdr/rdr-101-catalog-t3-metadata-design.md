@@ -2,11 +2,12 @@
 title: "RDR-101: Event-Sourced Catalog with Immutable Document Identity (Greenfield Catalog/T3 Architecture)"
 id: RDR-101
 type: Architecture
-status: draft
+status: accepted
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-30
+accepted_date: 2026-04-30
 related_issues: [nexus-3e4s, nexus-p03z, nexus-v9az, ART-lhk1]
 related_tests: []
 related: [RDR-004, RDR-060, RDR-086, RDR-087, RDR-096]
