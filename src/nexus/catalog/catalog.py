@@ -20,6 +20,36 @@ import structlog
 if TYPE_CHECKING:
     from chromadb.api import ClientAPI
 
+# RDR-101 Phase 1 PR F: shadow event-log emit gate. Read once at
+# Catalog.__init__ time. Recognised "on" values match the boolean-env
+# convention used elsewhere in the codebase (1/true/yes/on).
+_SHADOW_EMIT_ENV = "NEXUS_EVENT_LOG_SHADOW"
+
+
+def _read_shadow_gate() -> bool:
+    val = os.environ.get(_SHADOW_EMIT_ENV, "").strip().lower()
+    return val in ("1", "true", "yes", "on")
+
+
+# Imported lazily inside Catalog methods so a process that never
+# constructs a Catalog (e.g. an MCP-only consumer) does not pay the
+# events-module import cost. Re-aliased to ``_Event`` here for the
+# ``_emit_shadow_event`` type hint.
+from nexus.catalog.events import (  # noqa: E402
+    DocumentAliasedPayload as _DocumentAliasedPayload,
+    DocumentDeletedPayload as _DocumentDeletedPayload,
+    DocumentEnrichedPayload as _DocumentEnrichedPayload,
+    DocumentRegisteredPayload as _DocumentRegisteredPayload,
+    DocumentRenamedPayload as _DocumentRenamedPayload,
+    Event as _Event,
+    LinkCreatedPayload as _LinkCreatedPayload,
+    LinkDeletedPayload as _LinkDeletedPayload,
+    OwnerRegisteredPayload as _OwnerRegisteredPayload,
+    SCHEMA_BIB_S2_V1 as _SCHEMA_BIB_S2_V1,
+    SCHEMA_SCHOLARLY_PAPER_V1 as _SCHEMA_SCHOLARLY_PAPER_V1,
+    make_event as _make_event,
+)
+
 # Span format: "line_start-line_end" or "chunk_idx:char_start-char_end" or
 # "chash:<sha256hex>" or "".  Empty string means "the whole document".
 _SPAN_PATTERN = re.compile(
@@ -414,6 +444,12 @@ class Catalog:
         self._owners_path = catalog_dir / "owners.jsonl"
         self._documents_path = catalog_dir / "documents.jsonl"
         self._links_path = catalog_dir / "links.jsonl"
+        # RDR-101 Phase 1 PR F (nexus-ebz6): shadow event log lives next to
+        # the existing JSONL files. Off by default; opt in via
+        # NEXUS_EVENT_LOG_SHADOW=1. Phase 3 cuts production writes over to
+        # this log; Phase 1 only shadow-emits when an operator opts in.
+        self._events_path = catalog_dir / "events.jsonl"
+        self._shadow_emit_enabled = _read_shadow_gate()
         self.degraded: bool = False
         # Storage review S-4: mtime cache so every Catalog() instantiation
         # doesn't re-parse the full JSONL corpus and re-build the SQLite
@@ -592,6 +628,37 @@ class Catalog:
         with path.open("a") as f:
             f.write(json.dumps(record, default=str) + "\n")
 
+    # ── RDR-101 Phase 1 PR F: shadow event-log emit ─────────────────────
+
+    def _emit_shadow_event(self, event: "_Event") -> None:
+        """Append ``event`` to ``events.jsonl`` if shadow emit is enabled.
+
+        Caller MUST hold the catalog directory flock — this method does
+        not acquire its own. Mirrors ``_append_jsonl``'s contract so the
+        emit happens inside the same critical section as the JSONL +
+        SQLite writes the event corresponds to (no torn cross-file state
+        if the process crashes between writes).
+
+        Off-by-default. Read the gate once at ``Catalog.__init__`` time
+        from ``NEXUS_EVENT_LOG_SHADOW``; runtime flips require a fresh
+        Catalog construction. Phase 3 will flip the default and remove
+        the gate.
+
+        v: 0 schema is used so the existing Phase 1 projector handlers
+        apply unchanged. Phase 3 introduces v: 1 native-write semantics
+        with new projector handlers.
+        """
+        if not self._shadow_emit_enabled:
+            return
+        if not self._events_path.exists():
+            self._events_path.touch()
+        line = json.dumps(
+            event.to_dict(), default=str, separators=(",", ":"),
+        )
+        with self._events_path.open("a") as f:
+            f.write(line)
+            f.write("\n")
+
     # ── Owners ─────────────────────────────────────────────────────────────
 
     def register_owner(
@@ -636,6 +703,17 @@ class Catalog:
                 (prefix, name, owner_type, repo_hash, description, repo_root),
             )
             self._db.commit()
+            self._emit_shadow_event(_make_event(
+                _OwnerRegisteredPayload(
+                    owner_id=prefix,
+                    name=name,
+                    owner_type=owner_type,
+                    repo_root=repo_root,
+                    repo_hash=repo_hash,
+                    description=description,
+                ),
+                v=0,
+            ))
             return Tumbler.parse(prefix)
         finally:
             self._release_lock(dir_fd)
@@ -847,6 +925,33 @@ class Catalog:
                 ),
             )
             self._db.commit()
+            self._emit_shadow_event(_make_event(
+                _DocumentRegisteredPayload(
+                    # Phase 1 stand-in: tumbler doubles as doc_id until
+                    # Phase 3 mints UUID7 doc_ids via the new write path.
+                    doc_id=str(tumbler),
+                    owner_id=str(owner),
+                    content_type=content_type,
+                    source_uri=source_uri,
+                    coll_id=physical_collection,
+                    title=title,
+                    source_mtime=source_mtime,
+                    indexed_at_doc=now,
+                    # Legacy fields needed for the v: 0 projection.
+                    tumbler=str(tumbler),
+                    author=author,
+                    year=year,
+                    file_path=file_path,
+                    corpus=corpus,
+                    physical_collection=physical_collection,
+                    chunk_count=chunk_count,
+                    head_hash=head_hash,
+                    indexed_at=now,
+                    alias_of="",
+                    meta=dict(meta or {}),
+                ),
+                v=0,
+            ))
             return tumbler
         finally:
             self._release_lock(dir_fd)
@@ -1015,6 +1120,13 @@ class Catalog:
             alias_of=str(canonical),
         )
         self._append_jsonl(self._documents_path, updated.__dict__)
+        self._emit_shadow_event(_make_event(
+            _DocumentAliasedPayload(
+                alias_doc_id=str(tumbler),
+                canonical_doc_id=str(canonical),
+            ),
+            v=0,
+        ))
 
     def resolve_path(self, tumbler: Tumbler) -> Path | None:
         """Return absolute path for the document's file_path.
@@ -1350,6 +1462,42 @@ class Catalog:
                 ),
             )
             self._db.commit()
+            # Shadow-emit the canonical event for the kind of update that
+            # happened. ``update()`` is overloaded — source_uri rename and
+            # bib enrichment both flow through here. The projector
+            # idempotently INSERT OR REPLACEs the documents row from a
+            # DocumentRegistered with the full updated payload, which is
+            # equivalent to applying a DocumentRenamed and/or
+            # DocumentEnriched plus the prior register. Phase 1 takes
+            # the lossless path: emit DocumentRegistered with the post-
+            # update field set, mirroring what the synthesizer does for
+            # documents.jsonl rows that have been mutated. Phase 3
+            # introduces fine-grained event types (DocumentRenamed,
+            # DocumentEnriched) that capture intent rather than state.
+            self._emit_shadow_event(_make_event(
+                _DocumentRegisteredPayload(
+                    doc_id=rec_dict["tumbler"],
+                    owner_id=str(entry.tumbler.owner_address()),
+                    content_type=rec_dict["content_type"],
+                    source_uri=rec_dict.get("source_uri", ""),
+                    coll_id=rec_dict["physical_collection"],
+                    title=rec_dict["title"],
+                    source_mtime=float(rec_dict.get("source_mtime", 0.0) or 0.0),
+                    indexed_at_doc=rec_dict["indexed_at"],
+                    tumbler=rec_dict["tumbler"],
+                    author=rec_dict["author"],
+                    year=int(rec_dict["year"] or 0),
+                    file_path=rec_dict["file_path"],
+                    corpus=rec_dict["corpus"],
+                    physical_collection=rec_dict["physical_collection"],
+                    chunk_count=int(rec_dict["chunk_count"] or 0),
+                    head_hash=rec_dict["head_hash"],
+                    indexed_at=rec_dict["indexed_at"],
+                    alias_of=entry.alias_of or "",
+                    meta=dict(rec_dict["meta"]),
+                ),
+                v=0,
+            ))
         finally:
             self._release_lock(dir_fd)
 
@@ -1436,6 +1584,13 @@ class Catalog:
             self._append_jsonl(self._documents_path, tombstone)
             self._db.execute("DELETE FROM documents WHERE tumbler = ?", (str(tumbler),))
             self._db.commit()
+            self._emit_shadow_event(_make_event(
+                _DocumentDeletedPayload(
+                    doc_id=str(tumbler),
+                    reason="catalog.delete_document",
+                ),
+                v=0,
+            ))
             return True
         finally:
             self._release_lock(dir_fd)
@@ -1684,6 +1839,19 @@ class Catalog:
             )
             self._append_jsonl(self._links_path, rec.__dict__)
             self._db.commit()
+            self._emit_shadow_event(_make_event(
+                _LinkCreatedPayload(
+                    from_doc=str(from_t),
+                    to_doc=str(to_t),
+                    link_type=link_type,
+                    creator=row[1],
+                    from_span=from_span,
+                    to_span=to_span,
+                    created_at=row[3] or now,
+                    meta=dict(existing_meta),
+                ),
+                v=0,
+            ))
             return False
         else:
             combined_meta = dict(meta)
@@ -1701,6 +1869,19 @@ class Catalog:
             )
             self._append_jsonl(self._links_path, rec.__dict__)
             self._db.commit()
+            self._emit_shadow_event(_make_event(
+                _LinkCreatedPayload(
+                    from_doc=str(from_t),
+                    to_doc=str(to_t),
+                    link_type=link_type,
+                    creator=created_by,
+                    from_span=from_span,
+                    to_span=to_span,
+                    created_at=now,
+                    meta=dict(combined_meta),
+                ),
+                v=0,
+            ))
             return True
 
     def link(
@@ -1811,6 +1992,19 @@ class Catalog:
             )
             self._append_jsonl(self._links_path, rec.__dict__)
             self._db.commit()
+            self._emit_shadow_event(_make_event(
+                _LinkCreatedPayload(
+                    from_doc=str(from_t),
+                    to_doc=str(to_t),
+                    link_type=link_type,
+                    creator=created_by,
+                    from_span=from_span,
+                    to_span=to_span,
+                    created_at=now,
+                    meta=dict(combined_meta),
+                ),
+                v=0,
+            ))
             return True
         finally:
             self._release_lock(dir_fd)
@@ -1850,6 +2044,15 @@ class Catalog:
                 }
                 self._append_jsonl(self._links_path, tombstone)
                 self._db.execute("DELETE FROM links WHERE id = ?", (row_id,))
+                self._emit_shadow_event(_make_event(
+                    _LinkDeletedPayload(
+                        from_doc=str(from_t),
+                        to_doc=str(to_t),
+                        link_type=lt,
+                        reason="catalog.unlink",
+                    ),
+                    v=0,
+                ))
 
             self._db.commit()
             return len(rows)
@@ -2009,6 +2212,15 @@ class Catalog:
                     "DELETE FROM links WHERE from_tumbler=? AND to_tumbler=? AND link_type=?",
                     (str(lnk.from_tumbler), str(lnk.to_tumbler), lnk.link_type),
                 )
+                self._emit_shadow_event(_make_event(
+                    _LinkDeletedPayload(
+                        from_doc=str(lnk.from_tumbler),
+                        to_doc=str(lnk.to_tumbler),
+                        link_type=lnk.link_type,
+                        reason="catalog.bulk_unlink",
+                    ),
+                    v=0,
+                ))
             self._db.commit()
             return len(matching)
         finally:
