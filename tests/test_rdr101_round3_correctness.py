@@ -514,36 +514,72 @@ class TestDoctorReplayEqualityEventLog:
 
 
 class TestLegacyUpdateAliasOfColumn:
-    """The legacy ``update()`` ``INSERT OR REPLACE`` column list now
-    includes ``alias_of`` so the column is symmetric with the
-    event-sourced projector path. Pre-fix the legacy path silently
-    omitted ``alias_of`` from the column list; the projector path
-    wrote it. The asymmetry was theoretical (no public API exercises a
-    direct alias_of write through update() because resolve() follows
-    aliases first), but the equivalence claim in PR α/β tests rests on
-    the two SQL paths being byte-symmetric. Defensive symmetry."""
+    """The legacy ``update()`` ``INSERT OR REPLACE`` column list
+    includes ``alias_of`` and the round-4 fix threads
+    ``rec_dict["alias_of"]`` so a caller passing ``alias_of`` in
+    ``**fields`` actually lands.
 
-    def test_alias_of_column_present_in_update_sql(
+    Round-4 review (reviewer E) flagged the original test as a non-
+    test (alias_of="" matches the column default — removing the
+    column would have produced the same value). These replacements
+    pre-set alias_of via set_alias() and verify it survives an
+    update(), and explicitly pass alias_of via **fields and verify
+    the value lands (the round-4 rec_dict["alias_of"] threading
+    fix)."""
+
+    def test_alias_of_survives_legacy_update_through_alias(
         self, tmp_path, monkeypatch: pytest.MonkeyPatch,
     ):
-        # Smoke-test: legacy update() runs without erroring even when
-        # the entry has alias_of carried through entry.alias_of (which
-        # is the value the new column slot writes).
         monkeypatch.delenv("NEXUS_EVENT_SOURCED", raising=False)
         monkeypatch.delenv("NEXUS_EVENT_LOG_SHADOW", raising=False)
         d = tmp_path / "catalog"
         d.mkdir()
         cat = Catalog(d, d / ".catalog.db")
         owner = cat.register_owner("nexus", "repo", repo_hash="abab")
-        doc = cat.register(owner, "doc.md", content_type="prose")
-        # update() through the legacy path; entry.alias_of is "" for a
-        # canonical row but the SQL must accept the parameter.
-        cat.update(doc, chunk_count=99)
-        row = cat._db.execute(
-            "SELECT chunk_count, alias_of FROM documents WHERE tumbler = ?",
-            (str(doc),),
+        canonical = cat.register(owner, "canonical.md", content_type="prose")
+        alias = cat.register(owner, "alias.md", content_type="prose")
+        cat.set_alias(alias, canonical)
+
+        # update() FOLLOWS the alias by default — it ends up updating
+        # canonical's row, not alias's. The alias row's alias_of must
+        # not change. Pins resolve-follows-alias semantics.
+        cat.update(alias, chunk_count=99)
+        alias_row = cat._db.execute(
+            "SELECT alias_of, chunk_count FROM documents WHERE tumbler = ?",
+            (str(alias),),
         ).fetchone()
-        assert row == (99, "")
+        assert alias_row == (str(canonical), 0)
+        canon_row = cat._db.execute(
+            "SELECT alias_of, chunk_count FROM documents WHERE tumbler = ?",
+            (str(canonical),),
+        ).fetchone()
+        assert canon_row == ("", 99)
+
+    def test_explicit_alias_of_in_fields_lands(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        # Round-4 review (reviewer D): caller passes ``alias_of``
+        # explicitly. Pre-fix both event payload and legacy SQL
+        # VALUES read ``entry.alias_of``, silently dropping the
+        # caller-supplied value. Round-4 fix threads
+        # ``rec_dict["alias_of"]``.
+        monkeypatch.delenv("NEXUS_EVENT_SOURCED", raising=False)
+        monkeypatch.delenv("NEXUS_EVENT_LOG_SHADOW", raising=False)
+        d = tmp_path / "catalog"
+        d.mkdir()
+        cat = Catalog(d, d / ".catalog.db")
+        owner = cat.register_owner("nexus", "repo", repo_hash="abab")
+        a = cat.register(owner, "a.md", content_type="prose")
+        b = cat.register(owner, "b.md", content_type="prose")
+        cat.update(a, alias_of=str(b))
+        row = cat._db.execute(
+            "SELECT alias_of FROM documents WHERE tumbler = ?",
+            (str(a),),
+        ).fetchone()
+        assert row[0] == str(b), (
+            "update(t, alias_of='X') silently dropped the value — "
+            "rec_dict['alias_of'] is not threaded through"
+        )
 
 
 # ── Cached projector ─────────────────────────────────────────────────────

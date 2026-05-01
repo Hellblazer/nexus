@@ -487,11 +487,15 @@ class Catalog:
         self.degraded: bool = False
         # Diagnostic: log the active gate state at construction so an
         # operator inspecting structured logs can confirm which write
-        # path is in effect without grepping environment dumps. One line
-        # at info level — Catalog is constructed once per process for
-        # the long-running cases (MCP server) and once per CLI call
-        # otherwise.
-        _log.info(
+        # path is in effect without grepping environment dumps. Debug
+        # level — every CLI verb that touches the catalog constructs
+        # a Catalog at the start of its handler (16 sites in commands/
+        # alone), so info-level here would inflate the operator log
+        # rate substantially without proportional value. The MCP
+        # server constructs once per session and developers running
+        # ``NEXUS_LOG_LEVEL=debug`` can still surface the line on
+        # demand.
+        _log.debug(
             "catalog_gate_state",
             event_sourced=self._event_sourced_enabled,
             shadow_emit=self._shadow_emit_enabled,
@@ -700,8 +704,32 @@ class Catalog:
             return False
 
     def jsonl_paths(self) -> tuple[Path, ...]:
-        """Public accessor for JSONL file paths (used by mtime checks)."""
+        """Public accessor for legacy JSONL file paths.
+
+        The three paths returned correspond to the legacy
+        ``owners``/``documents``/``links`` tables one-to-one (callers
+        like ``_should_compact`` rely on ``Path.stem`` matching the
+        table name). Use :meth:`mtime_paths` for change detection — it
+        also includes ``events.jsonl`` once event-sourced writes are in
+        use.
+        """
         return (self._owners_path, self._documents_path, self._links_path)
+
+    def mtime_paths(self) -> tuple[Path, ...]:
+        """Return every catalog file whose mtime advances on a write.
+
+        Adds ``events.jsonl`` to :meth:`jsonl_paths`. Callers that watch
+        for cross-process writes (the MCP singleton's freshness check)
+        must include events.jsonl, otherwise an event-sourced write made
+        by another process is invisible to the cache and the projector
+        replay never re-runs.
+        """
+        return (
+            self._owners_path,
+            self._documents_path,
+            self._links_path,
+            self._events_path,
+        )
 
     @classmethod
     def init(cls, catalog_path: Path, remote: str | None = None) -> Catalog:
@@ -910,11 +938,27 @@ class Catalog:
             raise ValueError(f"repo_root must be an absolute path: {repo_root!r}")
         dir_fd = self._acquire_lock()
         try:
-            # Read existing owners to find next number
-            owners = read_owners(self._owners_path) if self._owners_path.exists() else {}
-            next_num = max(
-                (Tumbler.parse(k).owner for k in owners), default=0
-            ) + 1
+            # Compute next owner number. Under event-sourced mode the
+            # events.jsonl is canonical and SQLite is its projection,
+            # which means SQLite is consistent with all committed
+            # events even after a crash that lost the JSONL append
+            # (events.jsonl is written FIRST, SQLite committed second,
+            # JSONL appended last). Reading the high-water-mark from
+            # JSONL would re-allocate a colliding tumbler in that
+            # crash window. Under legacy mode JSONL is canonical, so
+            # read from JSONL.
+            if self._event_sourced_enabled:
+                row = self._db.execute(
+                    "SELECT COALESCE(MAX(CAST(SUBSTR(tumbler_prefix, "
+                    "INSTR(tumbler_prefix, '.') + 1) AS INTEGER)), 0) "
+                    "FROM owners WHERE tumbler_prefix LIKE '1.%'"
+                ).fetchone()
+                next_num = (row[0] or 0) + 1
+            else:
+                owners = read_owners(self._owners_path) if self._owners_path.exists() else {}
+                next_num = max(
+                    (Tumbler.parse(k).owner for k in owners), default=0
+                ) + 1
             prefix = f"1.{next_num}"
             rec = OwnerRecord(
                 owner=prefix,
@@ -1685,6 +1729,13 @@ class Catalog:
                 # silently clobber source_uri with the column default,
                 # erasing the URI persisted at register time.
                 "source_uri": entry.source_uri,
+                # Round-4 review (reviewer D): carry alias_of into
+                # rec_dict so a caller passing ``update(t, alias_of="X")``
+                # threads through both the event payload and the legacy
+                # SQL VALUES list. Pre-fix both paths read from
+                # ``entry.alias_of`` directly, silently dropping the
+                # caller-supplied value.
+                "alias_of": entry.alias_of or "",
             }
             # Merge meta dict rather than replace
             if "meta" in fields and isinstance(fields["meta"], dict):
@@ -1731,7 +1782,7 @@ class Catalog:
                     chunk_count=int(rec_dict["chunk_count"] or 0),
                     head_hash=rec_dict["head_hash"],
                     indexed_at=rec_dict["indexed_at"],
-                    alias_of=entry.alias_of or "",
+                    alias_of=rec_dict["alias_of"],
                     meta=dict(rec_dict["meta"]),
                 ),
                 v=0,
@@ -1770,7 +1821,7 @@ class Catalog:
                         rec_dict["indexed_at"], json.dumps(rec_dict["meta"]),
                         rec_dict.get("source_mtime", 0.0),
                         rec_dict.get("source_uri", ""),
-                        entry.alias_of or "",
+                        rec_dict["alias_of"],
                     ),
                 )
                 self._db.commit()
