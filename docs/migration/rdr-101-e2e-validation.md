@@ -75,3 +75,37 @@ The harness validates that the surfaced state, the remediation, and the rollback
 ```
 
 Self-cleaning sandbox (`/tmp/nexus-rdr101-e2e-XXXXXX`) on success; preserved on failure with transcript at `$SANDBOX/.cache/transcript.log`.
+
+---
+
+## Extended validation (nexus-o6aa.9.11)
+
+Two of the four marketplace-grade gaps from the original assessment have been closed. The remaining two (real Chroma Cloud T3 backfill, MCP smoke test) are filed as separate beads pending credentials / harness scaffolding.
+
+### Scaled soak — `scripts/validate/rdr-101-migration-e2e-scaled.sh`
+
+Heavyweight bash harness running the same walk at N=200 docs (configurable via `N=...` env). 9/9 pass at N=200. Wall-clock observations:
+
+| Stage | N=200 wall | Per-doc |
+|---|---|---|
+| Doc generation | 343ms | ~2ms |
+| Legacy index | 4m 26s | 1.3s |
+| Doctor (synthesizer path, empty events) | 378ms | flat |
+| `synthesize-log --force` | 365ms | 1ms |
+| Doctor (post-migration replay) | 377ms | flat |
+
+Python interpreter startup dominates the per-`nx` cost; actual catalog work is sub-second even at 200 docs. The doctor wall-clock is **flat** from N=3 to N=200 (344ms → 378ms), confirming that `_check_bootstrap_status` and `_event_log_covers_legacy` scale linearly with no hidden quadratic.
+
+### Partial-failure injection — `tests/test_catalog_t3_backfill_partial_failure.py`
+
+Two tests cover the recovery story documented in this guide:
+
+* `test_first_update_per_collection_fails_then_recovers` — fault injector raises `RuntimeError("simulated 503")` on the first `col.update` call. Verb exits 1 (errors reported in JSON), zero chunks updated, original chunks unchanged. Re-running without the injector recovers cleanly: exit 0, all chunks now carry `doc_id`.
+* `test_partial_completion_some_collections_succeed` — fault trips on the first update across all collections. One collection's batch lands cleanly, the other fails. Re-run flags the previously-good chunk as `chunks_already_correct` (idempotency) and updates the failed one.
+
+Both pass. The recovery claim ("Re-run `nx catalog t3-backfill-doc-id`. Idempotent — already-backfilled chunks are no-ops.") is verified end-to-end.
+
+### Still open (filed for follow-up)
+
+* **Real Chroma Cloud T3 backfill** — needs throwaway tenant credentials. Separate bead.
+* **MCP smoke test** — needs MCP server harness scaffolding. Separate bead.
