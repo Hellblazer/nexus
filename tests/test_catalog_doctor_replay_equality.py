@@ -107,7 +107,9 @@ class TestReplayEqualityPasses:
 
         result = runner.invoke(doctor_cmd, ["--replay-equality", "--json"])
         assert result.exit_code == 0
-        payload = json.loads(result.output)
+        # Phase 2 PR δ wraps each check's payload under its flag name so
+        # multiple checks can be invoked in one run.
+        payload = json.loads(result.output)["replay_equality"]
         assert payload["pass"] is True
         assert payload["events_applied"] >= 3  # 1 owner + 2 documents
         assert "tables" in payload
@@ -179,7 +181,8 @@ class TestReplayEqualityFails:
 
         result = runner.invoke(doctor_cmd, ["--replay-equality", "--json"])
         assert result.exit_code == 1
-        payload = json.loads(result.output)
+        # Phase 2 PR δ wraps each check's payload under its flag name.
+        payload = json.loads(result.output)["replay_equality"]
         assert payload["pass"] is False
         # Documents table is the source of the disagreement
         docs_diff = payload["tables"]["documents"]

@@ -3239,28 +3239,68 @@ def prune_stale_cmd(
     ),
 )
 @click.option(
+    "--t3-doc-id-coverage",
+    "t3_doc_id_coverage",
+    is_flag=True,
+    help=(
+        "Walk every T3 collection and report doc_id coverage. PASS = "
+        "every non-orphan chunk in every collection carries a doc_id "
+        "matching what events.jsonl claims. Read-only against T3 and "
+        "the catalog. Run after 'nx catalog t3-backfill-doc-id' to "
+        "confirm Phase 2 is complete on a host."
+    ),
+)
+@click.option(
     "--json", "as_json", is_flag=True,
     help="Emit machine-readable JSON instead of text output.",
 )
-def doctor_cmd(replay_equality: bool, as_json: bool) -> None:
+def doctor_cmd(
+    replay_equality: bool, t3_doc_id_coverage: bool, as_json: bool,
+) -> None:
     """RDR-101 catalog doctor surface.
 
-    Phase 1 supports only ``--replay-equality``; future flags
-    (``--t3-doc-id-coverage``, ``--legacy-collection-grandfather``, etc.)
-    land in later phases.
+    Supports two checks today:
+      - ``--replay-equality`` (Phase 1, PR C): synthesizer + projector
+        round-trip against the live SQLite.
+      - ``--t3-doc-id-coverage`` (Phase 2, PR δ): T3 chunks carry the
+        doc_id metadata that events.jsonl claims.
+
+    Future flags (``--legacy-collection-grandfather``, etc.) land in
+    later phases.
     """
-    if not replay_equality:
+    if not replay_equality and not t3_doc_id_coverage:
         raise click.UsageError(
-            "Pass a check flag, e.g. --replay-equality. "
-            "Phase 1 supports only --replay-equality."
+            "Pass a check flag: --replay-equality or "
+            "--t3-doc-id-coverage."
         )
 
-    report = _run_replay_equality()
+    overall_pass = True
+    json_payload: dict = {}
+
+    if replay_equality:
+        report = _run_replay_equality()
+        if as_json:
+            json_payload["replay_equality"] = report
+        else:
+            _print_replay_equality_text(report)
+        if not report["pass"]:
+            overall_pass = False
+
+    if t3_doc_id_coverage:
+        report = _run_t3_doc_id_coverage()
+        if as_json:
+            json_payload["t3_doc_id_coverage"] = report
+        else:
+            if replay_equality:
+                click.echo("")  # separator between checks
+            _print_t3_doc_id_coverage_text(report)
+        if not report["pass"]:
+            overall_pass = False
+
     if as_json:
-        click.echo(json.dumps(report, indent=2))
-    else:
-        _print_replay_equality_text(report)
-    if not report["pass"]:
+        click.echo(json.dumps(json_payload, indent=2))
+
+    if not overall_pass:
         raise click.exceptions.Exit(1)
 
 
@@ -3774,3 +3814,202 @@ def _print_t3_backfill_text(report: dict) -> None:
         click.echo(f"\nErrors ({len(report['errors'])}):")
         for e in report["errors"][:10]:
             click.echo(f"  {e['collection']} ({e['stage']}): {e['error']}")
+
+
+# ── RDR-101 Phase 2: doctor --t3-doc-id-coverage ─────────────────────────
+
+
+def _run_t3_doc_id_coverage() -> dict:
+    """Walk every T3 collection in events.jsonl and report doc_id coverage.
+
+    Steps:
+      1. Read events.jsonl. Build the expected doc_id per (coll_id, chunk_id)
+         from ChunkIndexed events. Track orphans separately.
+      2. For each collection, paginate col.get(limit=300, offset=...,
+         include=["metadatas"]); compare each chunk's actual doc_id against
+         the expected one.
+      3. Report per-collection counts: total_chunks, with_doc_id,
+         missing_doc_id, mismatched_doc_id, expected_orphans.
+      4. PASS = every non-orphan event has a matching T3 chunk with the
+         right doc_id, AND no T3 chunk lacks a doc_id outside the
+         expected-orphan set.
+
+    Read-only against T3 (col.get only, no col.update).
+    """
+    from nexus.catalog.catalog import Catalog
+    from nexus.catalog.event_log import EventLog
+    from nexus.catalog import events as ev
+    from nexus.config import catalog_path
+    from nexus.db import make_t3
+
+    cat_dir = catalog_path()
+    if not Catalog.is_initialized(cat_dir):
+        raise click.ClickException(
+            f"Catalog not initialized at {cat_dir}. "
+            "Run 'nx catalog setup' to create and populate it."
+        )
+    log = EventLog(cat_dir)
+    if not log.path.exists() or log.path.stat().st_size == 0:
+        raise click.ClickException(
+            f"events.jsonl is empty at {log.path}. Run 'nx catalog "
+            "synthesize-log --chunks' first."
+        )
+
+    # Build expected (coll_id, chunk_id) → doc_id; track orphans.
+    expected: dict[str, dict[str, str]] = {}
+    expected_orphans: dict[str, set[str]] = {}
+    for event in log.replay():
+        if event.type != ev.TYPE_CHUNK_INDEXED:
+            continue
+        coll = event.payload.coll_id
+        cid = event.payload.chunk_id
+        if event.payload.synthesized_orphan:
+            expected_orphans.setdefault(coll, set()).add(cid)
+            continue
+        expected.setdefault(coll, {})[cid] = event.payload.doc_id
+
+    try:
+        t3 = make_t3()
+    except Exception as exc:
+        raise click.ClickException(
+            f"Failed to open T3 client: {exc}. Check ChromaDB credentials."
+        )
+
+    per_coll: dict[str, dict] = {}
+    overall_pass = True
+
+    for coll_name, expected_chunks in expected.items():
+        try:
+            col = t3._client.get_collection(name=coll_name)
+        except Exception as exc:
+            per_coll[coll_name] = {
+                "error": f"open: {exc}",
+                "expected_chunks": len(expected_chunks),
+            }
+            overall_pass = False
+            continue
+
+        total = 0
+        with_doc_id = 0
+        mismatched: list[dict] = []
+        missing: list[str] = []
+        seen: set[str] = set()
+        offset = 0
+        while True:
+            try:
+                page = col.get(
+                    limit=300, offset=offset, include=["metadatas"],
+                )
+            except Exception as exc:
+                per_coll[coll_name] = {
+                    "error": f"get: {exc}",
+                    "expected_chunks": len(expected_chunks),
+                }
+                overall_pass = False
+                break
+            ids = page.get("ids") or []
+            metas = page.get("metadatas") or []
+            if not ids:
+                break
+            for cid, meta in zip(ids, metas):
+                meta = meta or {}
+                total += 1
+                seen.add(cid)
+                actual = meta.get("doc_id", "") or ""
+                expected_doc_id = expected_chunks.get(cid, "")
+                is_orphan = cid in expected_orphans.get(coll_name, set())
+                if actual:
+                    with_doc_id += 1
+                    if expected_doc_id and actual != expected_doc_id:
+                        mismatched.append({
+                            "chunk_id": cid,
+                            "actual": actual,
+                            "expected": expected_doc_id,
+                        })
+                else:
+                    if not is_orphan:
+                        missing.append(cid)
+            if len(ids) < 300:
+                break
+            offset += 300
+
+        # Chunks the event log expected but T3 doesn't have.
+        not_in_t3 = sorted(set(expected_chunks) - seen)
+
+        coverage = with_doc_id / total if total else 1.0
+        pass_for_coll = (
+            not mismatched
+            and not missing
+            and not not_in_t3
+        )
+        per_coll[coll_name] = {
+            "total_chunks": total,
+            "with_doc_id": with_doc_id,
+            "expected_chunks": len(expected_chunks),
+            "expected_orphans": len(expected_orphans.get(coll_name, set())),
+            "missing_doc_id_sample": missing[:5],
+            "missing_doc_id_count": len(missing),
+            "mismatched_doc_id_sample": mismatched[:5],
+            "mismatched_doc_id_count": len(mismatched),
+            "not_in_t3_sample": not_in_t3[:5],
+            "not_in_t3_count": len(not_in_t3),
+            "coverage": round(coverage, 4),
+            "pass": pass_for_coll,
+        }
+        if not pass_for_coll:
+            overall_pass = False
+
+    return {
+        "pass": overall_pass,
+        "events_path": str(log.path),
+        "collections_in_log": len(expected),
+        "tables": per_coll,
+    }
+
+
+def _print_t3_doc_id_coverage_text(report: dict) -> None:
+    click.echo("=== T3 doc_id coverage ===")
+    click.echo(f"Events path:        {report['events_path']}")
+    click.echo(f"Collections in log: {report['collections_in_log']}")
+    click.echo("")
+    for coll_name, diff in report["tables"].items():
+        if "error" in diff:
+            click.echo(
+                f"  ✗ {coll_name:<40}  ERROR: {diff['error']} "
+                f"(expected {diff['expected_chunks']} chunks)"
+            )
+            continue
+        marker = "✓" if diff["pass"] else "✗"
+        click.echo(
+            f"  {marker} {coll_name:<40}  "
+            f"total={diff['total_chunks']:>6}  "
+            f"with_doc_id={diff['with_doc_id']:>6}  "
+            f"coverage={diff['coverage']:.2%}"
+        )
+        if diff["mismatched_doc_id_count"]:
+            click.echo(
+                f"     mismatched: {diff['mismatched_doc_id_count']} "
+                f"(first {len(diff['mismatched_doc_id_sample'])} shown)"
+            )
+            for m in diff["mismatched_doc_id_sample"]:
+                click.echo(
+                    f"       {m['chunk_id']}: actual={m['actual']!r} "
+                    f"expected={m['expected']!r}"
+                )
+        if diff["missing_doc_id_count"]:
+            click.echo(
+                f"     missing doc_id: {diff['missing_doc_id_count']} "
+                f"(first {len(diff['missing_doc_id_sample'])} shown): "
+                f"{diff['missing_doc_id_sample']}"
+            )
+        if diff["not_in_t3_count"]:
+            click.echo(
+                f"     in event log but not in T3: {diff['not_in_t3_count']} "
+                f"(first {len(diff['not_in_t3_sample'])} shown): "
+                f"{diff['not_in_t3_sample']}"
+            )
+    click.echo("")
+    if report["pass"]:
+        click.echo("PASS — every non-orphan chunk carries the expected doc_id.")
+    else:
+        click.echo("FAIL — T3 doc_id metadata diverges from the event log.")
