@@ -3221,3 +3221,208 @@ def prune_stale_cmd(
 
     click.echo(f"\nDone: deleted {n_deleted} catalog entr"
                f"{'y' if n_deleted == 1 else 'ies'}.")
+
+
+# ── RDR-101 Phase 1: doctor --replay-equality ────────────────────────────
+
+
+@catalog.command("doctor")
+@click.option(
+    "--replay-equality",
+    "replay_equality",
+    is_flag=True,
+    help=(
+        "Drive the synthesizer + projector against the live catalog and "
+        "diff the projected SQLite against the live .catalog.db. "
+        "Confirms that the event-sourced projection is deterministic for "
+        "the current catalog state. Read-only against the live catalog."
+    ),
+)
+@click.option(
+    "--json", "as_json", is_flag=True,
+    help="Emit machine-readable JSON instead of text output.",
+)
+def doctor_cmd(replay_equality: bool, as_json: bool) -> None:
+    """RDR-101 catalog doctor surface.
+
+    Phase 1 supports only ``--replay-equality``; future flags
+    (``--t3-doc-id-coverage``, ``--legacy-collection-grandfather``, etc.)
+    land in later phases.
+    """
+    if not replay_equality:
+        raise click.UsageError(
+            "Pass a check flag, e.g. --replay-equality. "
+            "Phase 1 supports only --replay-equality."
+        )
+
+    report = _run_replay_equality()
+    if as_json:
+        click.echo(json.dumps(report, indent=2))
+    else:
+        _print_replay_equality_text(report)
+    if not report["pass"]:
+        raise click.exceptions.Exit(1)
+
+
+def _run_replay_equality() -> dict:
+    """Drive synthesizer + projector against the live catalog and diff.
+
+    Steps:
+      1. Resolve ``catalog_path()`` and require an initialized catalog.
+      2. Open ``.catalog.db`` read-only (sqlite URI ``mode=ro``) for the
+         live snapshot. Snapshot owners + documents + links rows.
+      3. Build a fresh ``CatalogDB`` under a TemporaryDirectory; drive
+         ``synthesize_from_jsonl`` + ``Projector.apply_all`` into it.
+         Snapshot the same three tables.
+      4. Diff the snapshots. Report counts and the first 5 mismatches per
+         table. Pass = every table identical; fail = any difference.
+
+    The live ``.catalog.db`` is opened read-only so an operator running
+    this verb on a working host cannot accidentally corrupt the cached
+    SQLite. JSONL files are read but not written. The projected SQLite
+    is ephemeral and discarded with the TemporaryDirectory.
+    """
+    import sqlite3
+    import tempfile
+    from contextlib import closing
+
+    from nexus.catalog.catalog import Catalog
+    from nexus.catalog.catalog_db import CatalogDB
+    from nexus.catalog.projector import Projector
+    from nexus.catalog.synthesizer import synthesize_from_jsonl
+    from nexus.config import catalog_path
+
+    cat_dir = catalog_path()
+    if not Catalog.is_initialized(cat_dir):
+        raise click.ClickException(
+            f"Catalog not initialized at {cat_dir}. "
+            "Run 'nx catalog setup' to create and populate it."
+        )
+
+    live_db_path = cat_dir / ".catalog.db"
+    if not live_db_path.exists():
+        raise click.ClickException(
+            f"Catalog SQLite missing at {live_db_path}; run 'nx catalog "
+            "pull' to rebuild from JSONL."
+        )
+
+    # ── Snapshot live ──────────────────────────────────────────────────
+    live_uri = f"file:{live_db_path}?mode=ro"
+    with closing(sqlite3.connect(live_uri, uri=True)) as live_conn:
+        live_snap = {
+            "owners": _snapshot_table(live_conn, "owners"),
+            "documents": _snapshot_table(live_conn, "documents"),
+            "links": _snapshot_table(live_conn, "links"),
+        }
+
+    # ── Project + snapshot ────────────────────────────────────────────
+    with tempfile.TemporaryDirectory() as tmpdir:
+        projected_path = Path(tmpdir) / "projected.db"
+        proj_db = CatalogDB(projected_path)
+        try:
+            applied = Projector(proj_db).apply_all(
+                synthesize_from_jsonl(cat_dir)
+            )
+        finally:
+            proj_db.close()
+
+        with closing(sqlite3.connect(str(projected_path))) as proj_conn:
+            projected_snap = {
+                "owners": _snapshot_table(proj_conn, "owners"),
+                "documents": _snapshot_table(proj_conn, "documents"),
+                "links": _snapshot_table(proj_conn, "links"),
+            }
+
+    # ── Diff ──────────────────────────────────────────────────────────
+    table_diffs: dict[str, dict] = {}
+    overall_pass = True
+    for table in ("owners", "documents", "links"):
+        live_rows = live_snap[table]
+        proj_rows = projected_snap[table]
+        # Links carry an autoincrement ``id`` PK that the projector
+        # restarts at 1; the live db's ids depend on insertion history.
+        # Strip the id column from both before comparing — the rest of
+        # the row is the actual content under test (RF-101-2 doesn't
+        # claim the autoincrement is part of the projection contract).
+        if table == "links":
+            live_rows = [r[1:] for r in live_rows]
+            proj_rows = [r[1:] for r in proj_rows]
+        live_set = set(live_rows)
+        proj_set = set(proj_rows)
+        only_live = sorted(live_set - proj_set)
+        only_proj = sorted(proj_set - live_set)
+        equal = not only_live and not only_proj
+        table_diffs[table] = {
+            "live_count": len(live_rows),
+            "projected_count": len(proj_rows),
+            "only_in_live": [list(r) for r in only_live[:5]],
+            "only_in_projected": [list(r) for r in only_proj[:5]],
+            "equal": equal,
+        }
+        if not equal:
+            overall_pass = False
+
+    return {
+        "pass": overall_pass,
+        "events_applied": applied,
+        "catalog_dir": str(cat_dir),
+        "live_db": str(live_db_path),
+        "tables": table_diffs,
+    }
+
+
+def _snapshot_table(conn, table: str) -> list[tuple]:
+    """Snapshot one catalog table in deterministic row order.
+
+    Sort by every column so the comparison is independent of insertion
+    order. ``documents.metadata`` and ``links.metadata`` are JSON blobs
+    that round-trip as strings, which sort byte-wise.
+    """
+    cur = conn.execute(f"PRAGMA table_info({table})")
+    cols = [row[1] for row in cur.fetchall()]
+    if not cols:
+        return []
+    sort_cols = ", ".join(cols)
+    rows = conn.execute(
+        f"SELECT {sort_cols} FROM {table} ORDER BY {sort_cols}"
+    ).fetchall()
+    return rows
+
+
+def _print_replay_equality_text(report: dict) -> None:
+    """Operator-friendly text rendering of the replay-equality report."""
+    click.echo(f"Catalog: {report['catalog_dir']}")
+    click.echo(f"Live db: {report['live_db']}")
+    click.echo(f"Events applied: {report['events_applied']}")
+    click.echo("")
+
+    for table, diff in report["tables"].items():
+        marker = "✓" if diff["equal"] else "✗"
+        click.echo(
+            f"  {marker} {table:<10}  live={diff['live_count']:>6}  "
+            f"projected={diff['projected_count']:>6}"
+        )
+        if not diff["equal"]:
+            if diff["only_in_live"]:
+                click.echo(
+                    f"    only in live ({len(diff['only_in_live'])} sample"
+                    + ("s" if len(diff["only_in_live"]) != 1 else "")
+                    + "):"
+                )
+                for row in diff["only_in_live"]:
+                    click.echo(f"      {row!r}")
+            if diff["only_in_projected"]:
+                click.echo(
+                    f"    only in projected "
+                    f"({len(diff['only_in_projected'])} sample"
+                    + ("s" if len(diff["only_in_projected"]) != 1 else "")
+                    + "):"
+                )
+                for row in diff["only_in_projected"]:
+                    click.echo(f"      {row!r}")
+
+    click.echo("")
+    if report["pass"]:
+        click.echo("PASS — projector replay matches live SQLite for the current catalog state.")
+    else:
+        click.echo("FAIL — projector replay diverges from live SQLite. See diffs above.")
