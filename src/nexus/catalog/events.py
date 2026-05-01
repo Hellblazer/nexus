@@ -175,6 +175,16 @@ class DocumentRegisteredPayload:
     ``doc_id`` is a fresh UUID7 (RF-101-1). ``source_uri`` is the canonical
     URI; for files it is the ``file://`` form. ``coll_id`` records which
     collection the document's chunks live in.
+
+    The trailing block of fields preserves the existing tumbler-keyed
+    ``documents`` row schema during the Phase 1 transition: v: 0 events
+    synthesized from ``documents.jsonl`` populate them so the projector
+    can produce a SQLite state byte-equal to today's ``Catalog.rebuild()``
+    output (replay-equality test). v: 1 native writes (Phase 3+) leave
+    them empty and rely on canonical fields plus separate projections
+    (Provenance, Frecency, Aspect) for the rest. Phase 5 drops the
+    legacy columns from the SQLite schema; the events keep them so the
+    log is replayable into older schemas during a downgrade.
     """
 
     doc_id: str
@@ -185,6 +195,18 @@ class DocumentRegisteredPayload:
     title: str = ""
     source_mtime: float = 0.0
     indexed_at_doc: str = ""
+    # ── Legacy tumbler-keyed schema fields (Phase 1 transition) ────────────
+    tumbler: str = ""
+    author: str = ""
+    year: int = 0
+    file_path: str = ""
+    corpus: str = ""
+    physical_collection: str = ""
+    chunk_count: int = 0
+    head_hash: str = ""
+    indexed_at: str = ""
+    alias_of: str = ""
+    meta: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,6 +305,10 @@ class LinkCreatedPayload:
     (matching the existing ``links.jsonl`` ``from_t``/``to_t`` shape).
     Phase 3+ may carry ``doc_id`` UUID7 values; the projector chooses the
     join column at read time.
+
+    ``created_at`` and ``meta`` preserve fields the existing
+    ``links.jsonl`` carries so v: 0 synthesis can reproduce the
+    tumbler-keyed ``links`` SQLite row.
     """
 
     from_doc: str
@@ -292,6 +318,8 @@ class LinkCreatedPayload:
     creator: str = ""
     from_span: str = ""  # legacy positional span (RDR-053); empty for chash-spanned links
     to_span: str = ""
+    created_at: str = ""
+    meta: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
