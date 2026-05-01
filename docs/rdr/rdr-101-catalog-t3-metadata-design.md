@@ -220,6 +220,49 @@ The critical change: `Chunk` foreign-keys `Document.doc_id`, not `source_path`. 
 
 **Why `chunk_id` is PK rather than `chash`** (resolves substantive critique C1): the same passage of text can legitimately appear in two distinct documents (a quoted abstract in two papers; a shared changelog header). They produce identical `chash` values. Today's T3 stores them as independent Chroma records with distinct natural IDs. The greenfield `Chunk` schema preserves that: `chunk_id` is the Chroma-assigned natural ID and the PK; `chash` is a non-unique index that supports `chash:<hex>` span resolution (RDR-086) by returning the set of `chunk_id` values whose content hashes match. GC reference-counts chunks by `doc_id` FK; deleting one document leaves the other document's chunk intact even when the chash matches.
 
+#### Document lifecycle
+
+The Document entity moves through a small state machine. Aliases and tombstones are first-class states, not flags-on-a-row, so the doctor can detect illegal transitions deterministically.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Live: DocumentRegistered
+
+    Live --> Live: DocumentRenamed<br/>(same owner)
+    Live --> Live: DocumentEnriched<br/>(aspect extraction)
+
+    Live --> CrossOwnerMoved: cross-owner rename<br/>(DocumentDeleted +<br/>new DocumentRegistered)
+    CrossOwnerMoved --> [*]: old doc_id retired<br/>chunks GC after window
+
+    Live --> Aliased: DocumentAliased(canonical)
+    Aliased --> Aliased: resolve through alias chain<br/>(cycle protection)
+
+    Live --> Tombstoned: DocumentDeleted
+    Aliased --> Tombstoned: DocumentDeleted
+
+    Tombstoned --> Reaped: nx t3 gc<br/>after orphan_window<br/>(default 30d)
+    Reaped --> [*]: chunks removed from T3<br/>ChunkOrphaned events emitted
+
+    note right of Live
+        T3 chunks live; queries return them.
+        source_uri is mutable via DocumentRenamed
+        but doc_id is immutable forever.
+    end note
+
+    note right of Aliased
+        Catalog.resolve(alias_doc_id) returns
+        the canonical doc transparently.
+        T3 chunks for the alias remain.
+    end note
+
+    note right of Tombstoned
+        Catalog hides the document.
+        T3 chunks survive the orphan window
+        so chash:<hex> spans in surviving links
+        keep resolving (RDR-086 fail-soft).
+    end note
+```
+
 ### Event log
 
 Append-only JSONL. Git-managed (compacts via `git gc` over time, snapshots via periodic merge). Typed events:
@@ -275,6 +318,109 @@ Enforced at `CollectionCreated` time:
 - Re-embedding requires `CollectionSuperseded`: new collection created, all chunks re-embedded into new collection, old collection retained for read until `superseded_by` switch is committed.
 
 ### Read paths
+
+The diagrams below visualize the four canonical flows. Operational details and edge cases follow each diagram.
+
+#### Sequence: Index a file
+
+```mermaid
+sequenceDiagram
+    participant CLI as nx index
+    participant Log as Event Log<br/>(JSONL+git)
+    participant Proj as Projector
+    participant SQL as Catalog SQLite
+    participant T3 as ChromaDB
+
+    CLI->>CLI: 1. Generate doc_id (UUID7)
+    CLI->>CLI: 2. Compute chunks + chash per chunk
+    CLI->>Log: 3. Append DocumentRegistered<br/>(doc_id, owner_id, source_uri, coll_id)
+    Log-->>Proj: notify (or polled)
+    Proj->>SQL: INSERT documents
+    CLI->>T3: 4. add(id=chunk_id, vector, metadata={chunk_id, doc_id, coll_id, chash})<br/>per chunk (NO source_path, NO title, NO git_*)
+    CLI->>Log: 5. Append ChunkIndexed per chunk
+    Log-->>Proj: notify (or polled)
+    Proj->>SQL: INSERT chunks
+    Note over Log,T3: Single source of truth = log.<br/>SQLite + T3 are deterministic projections.<br/>Drift surface = 0 fields.
+```
+
+#### Sequence: Aspect extraction (the original ART-lhk1 fix)
+
+```mermaid
+sequenceDiagram
+    participant CLI as nx enrich aspects
+    participant SQL as Catalog SQLite
+    participant T3 as ChromaDB
+    participant Ext as Extractor<br/>(scholarly-paper-v1<br/>or rdr-frontmatter-v1)
+
+    CLI->>SQL: SELECT doc_id, source_uri, title<br/>FROM documents WHERE coll_id = X
+    SQL-->>CLI: list of (doc_id, source_uri, title)
+    CLI->>T3: get(where={doc_id: {$in: [...]}})<br/>batched
+    T3-->>CLI: chunks grouped by doc_id<br/>(no source_path string match)
+    loop per document
+        CLI->>Ext: doc_id, source_uri, ordered chunks
+        Ext-->>CLI: AspectRecord
+    end
+    CLI->>SQL: INSERT INTO document_aspects
+    Note over CLI,T3: Pre-fix (ART-lhk1): catalog source_uri<br/>vs T3 source_path string mismatch<br/>→ 140/140 (empty) skips.<br/>Post-fix: doc_id surrogate join,<br/>0 false-empty skips by construction.
+```
+
+#### Sequence: File rename
+
+```mermaid
+sequenceDiagram
+    participant Op as Operator
+    participant CLI as nx
+    participant Log as Event Log
+    participant Proj as Projector
+    participant SQL as Catalog SQLite
+    participant T3 as ChromaDB
+
+    rect rgba(180, 220, 255, 0.18)
+    Note over Op,T3: Same-owner rename (zero T3 touch)
+    Op->>Op: mv old new
+    Op->>CLI: nx catalog rename <doc_id> <new_uri>
+    CLI->>Log: Append DocumentRenamed<br/>(doc_id, new_source_uri)
+    Log-->>Proj: notify
+    Proj->>SQL: UPDATE documents SET source_uri
+    Note over T3: chunks unchanged<br/>(no source_path stored)
+    end
+
+    rect rgba(255, 200, 180, 0.18)
+    Note over Op,T3: Cross-owner rename (full chunk migration)
+    Op->>Op: mv /git/ART/foo.md /git/nexus/foo.md
+    Op->>CLI: nx catalog move-cross-owner ...
+    CLI->>Log: Append DocumentDeleted(old_doc_id)
+    CLI->>Log: Append DocumentRegistered(new_doc_id, new_owner_id, ...)
+    Log-->>Proj: notify
+    Proj->>SQL: tombstone old, INSERT new
+    CLI->>T3: re-embed chunks into new owner's collection
+    CLI->>Log: Append ChunkIndexed per new chunk
+    Note over T3: old chunks GC after orphan window<br/>(via nx t3 gc, NOT immediate)
+    end
+```
+
+#### Sequence: Doctor (deterministic drift detection)
+
+```mermaid
+sequenceDiagram
+    participant Op as nx catalog doctor
+    participant Log as Event Log
+    participant SQL as Catalog SQLite
+    participant T3 as ChromaDB
+
+    Op->>Log: Replay all events into ephemeral state
+    Log-->>Op: expected_documents, expected_chunks
+    Op->>SQL: SELECT * FROM documents, chunks
+    SQL-->>Op: actual_documents, actual_chunks
+    Op->>Op: diff(expected, actual) → projector_drift_set
+    loop per collection
+        Op->>T3: get(include=[]) batched per coll_id
+        T3-->>Op: actual chunk_ids in T3
+        Op->>Op: diff(expected_chunk_ids, actual)<br/>→ t3_drift_set
+    end
+    Op->>Op: report (deterministic, no heuristics)
+    Note over Op,T3: PASS = both drift sets empty.<br/>Pre-fix doctor used per-home<br/>dominance heuristic;<br/>greenfield doctor is a pure diff.
+```
 
 **Index a file** (the indexer):
 1. Generate `doc_id` (UUID7).
@@ -391,6 +537,50 @@ The migration is reversible through Phase 4. Phases 5 and 6 are the irreversible
 ## Implementation Plan
 
 The plan is six phases. Each phase is one or more PRs. Beads filed at acceptance, not at draft.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Phase0: RDR-101 accepted
+    Phase0: Phase 0<br/>Survey + Phase 0 audits
+    Phase1: Phase 1<br/>Event log infrastructure<br/>(write-only, no readers)
+    Phase2: Phase 2<br/>Synthesize log + backfill<br/>T3 doc_id metadata
+    Phase3: Phase 3<br/>New write path<br/>(dual-write to old fields)
+    Phase4: Phase 4<br/>Reader migration +<br/>plugin telemetry shipped
+    Phase5_optin: Phase 5 (opt-in)<br/>event_sourced=true flag<br/>default false
+    Phase5_default: Phase 5 (default-on)<br/>flip default to true<br/>IRREVERSIBLE
+    Phase5_final: Phase 5 (final)<br/>drop deprecated fields<br/>from T3 + catalog
+    Phase6: Phase 6<br/>Doctor as release blocker<br/>fallback collection migration
+
+    Phase0 --> Phase1: survey complete
+    Phase1 --> Phase2: replay-equality test passes
+    Phase2 --> Phase3: 100% T3 doc_id coverage
+    Phase3 --> Phase4: integration tests pass
+    Phase4 --> Phase5_optin: 30 days of deprecation warnings live
+    Phase5_optin --> Phase5_default: telemetry shows zero direct-T3-metadata reads<br/>30+ contiguous days
+    Phase5_default --> Phase5_final: one minor release with new default
+    Phase5_final --> Phase6: schema migration committed
+    Phase6 --> [*]: RDR-101 closed
+
+    note right of Phase3
+        Reversible through here.
+        Stalling at Phase 3 is an
+        acceptable steady state
+        (dual-write, no regression vs today).
+    end note
+
+    note right of Phase4
+        Reversible through here.
+        Telemetry shipping is the
+        Phase 4 deliverable that gates
+        the Phase 5 default-on decision.
+    end note
+
+    note right of Phase5_default
+        IRREVERSIBLE COMMITMENT.
+        Gated on telemetry, NOT calendar.
+        No version-count override.
+    end note
+```
 
 ### Phase 0: Acceptance and survey
 
