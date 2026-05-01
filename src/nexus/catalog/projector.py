@@ -164,6 +164,15 @@ class Projector:
         # preceding DocumentRegistered's INSERT OR REPLACE).
         if not payload.alias_doc_id or not payload.canonical_doc_id:
             return
+        # Refuse self-alias: ``Catalog.set_alias`` rejects this with
+        # ``ValueError`` at the public API; a hand-emitted bad event
+        # would slip past that guard and leave alias_of pointing at
+        # the row's own tumbler — a 1-cycle in the alias graph that
+        # ``Catalog.resolve_alias``'s cycle protection then has to
+        # detect at every read. Bail out here so the projector is the
+        # second line of defense.
+        if payload.alias_doc_id == payload.canonical_doc_id:
+            return
         self._db.execute(
             "UPDATE documents SET alias_of = ? WHERE tumbler = ?",
             (payload.canonical_doc_id, payload.alias_doc_id),
@@ -175,11 +184,19 @@ class Projector:
         # by ``synthesizer._synthesize_documents``). Kept registered so
         # dispatch on (DocumentRenamed, 0) doesn't trigger the
         # unknown-dispatch warning if someone hand-emits one.
-        if not payload.doc_id or not payload.new_source_uri:
+        #
+        # Like ``_v0_document_deleted``, prefer ``payload.tumbler`` for
+        # the v: 0 schema's tumbler-keyed UPDATE — falling back to
+        # ``payload.doc_id`` when tumbler is empty. Pre-fix the WHERE
+        # clause used ``doc_id`` directly, which silently no-oped when
+        # Phase 2 / Phase 3 paths emit a UUID7 doc_id against the
+        # tumbler-keyed schema.
+        tumbler = getattr(payload, "tumbler", "") or payload.doc_id
+        if not tumbler or not payload.new_source_uri:
             return
         self._db.execute(
             "UPDATE documents SET source_uri = ? WHERE tumbler = ?",
-            (payload.new_source_uri, payload.doc_id),
+            (payload.new_source_uri, tumbler),
         )
 
     def _v0_document_deleted(self, payload: Any) -> None:

@@ -3289,6 +3289,12 @@ def doctor_cmd(
             "Pass a check flag: --replay-equality or "
             "--t3-doc-id-coverage."
         )
+    if strict_not_in_t3 and not t3_doc_id_coverage:
+        raise click.UsageError(
+            "--strict-not-in-t3 requires --t3-doc-id-coverage; the "
+            "flag scopes the not-in-T3 fail behaviour of the coverage "
+            "check and is meaningless without it."
+        )
 
     overall_pass = True
     json_payload: dict = {}
@@ -3582,6 +3588,14 @@ def synthesize_log_cmd(
     # this, --force would mint fresh UUID7s and silently invalidate every
     # T3 chunk's doc_id; the doctor's --t3-doc-id-coverage would
     # catastrophically fail until the operator re-ran the backfill.
+    #
+    # LAST-occurrence wins (not first-occurrence): if a tumbler was
+    # tombstoned then re-registered with a new UUID7 (legitimate
+    # resurrection), the active doc_id is the LAST one in the log. A
+    # first-wins guard would preserve the dead doc_id and silently
+    # mismatch every T3 chunk that carries the post-resurrection id.
+    # Warn loudly when a tumbler appears with conflicting doc_ids so
+    # an operator can investigate.
     preserve_map: dict[str, str] = {}
     if existing_size > 0:
         from nexus.catalog import events as ev_mod
@@ -3590,8 +3604,20 @@ def synthesize_log_cmd(
                 continue
             t = getattr(prior.payload, "tumbler", "") or ""
             d = getattr(prior.payload, "doc_id", "") or ""
-            if t and d and t not in preserve_map:
-                preserve_map[t] = d
+            if not (t and d):
+                continue
+            if t in preserve_map and preserve_map[t] != d:
+                _log.warning(
+                    "synthesize_preserve_map_tumbler_conflict",
+                    tumbler=t,
+                    prior_doc_id=preserve_map[t],
+                    new_doc_id=d,
+                    note=(
+                        "tumbler appears with multiple doc_ids in prior "
+                        "log; last-occurrence wins"
+                    ),
+                )
+            preserve_map[t] = d  # last-occurrence wins
 
     events = list(synthesize_from_jsonl(
         cat_dir, mint_doc_id=True, preserve_doc_ids=preserve_map,
@@ -4014,6 +4040,7 @@ def _run_t3_doc_id_coverage(*, strict_not_in_t3: bool = False) -> dict:
         "pass": overall_pass,
         "events_path": str(log.path),
         "collections_in_log": len(expected),
+        "strict_not_in_t3": strict_not_in_t3,
         "tables": per_coll,
     }
 
@@ -4160,6 +4187,9 @@ def repair_orphan_chunks_cmd(
             "chunk_id": event.payload.chunk_id,
             "doc_id": event.payload.doc_id,
             "chash": event.payload.chash,
+            "position": event.payload.position,
+            "content_hash": event.payload.content_hash,
+            "embedded_at": event.payload.embedded_at,
             "synthesized_orphan": event.payload.synthesized_orphan,
         }
     orphans = [
@@ -4255,6 +4285,11 @@ def repair_orphan_chunks_cmd(
                 ),
             )
         orphan = orphan_by_chunk_id[chunk_id]
+        # Preserve the orphan's intrinsic chunk fields (position,
+        # content_hash, embedded_at) on the corrective event. Pre-fix
+        # ``position=0`` was hardcoded, dropping the original chunk
+        # ordering on every repair — Phase 5's chunks-table schema
+        # depends on position for reading-order reconstruction.
         repairs.append(ev.Event(
             type=ev.TYPE_CHUNK_INDEXED, v=0,
             payload=ev.ChunkIndexedPayload(
@@ -4262,7 +4297,9 @@ def repair_orphan_chunks_cmd(
                 chash=orphan["chash"],
                 doc_id=doc_id,
                 coll_id=orphan["coll_id"],
-                position=0,
+                position=int(orphan.get("position", 0) or 0),
+                content_hash=orphan.get("content_hash", "") or "",
+                embedded_at=orphan.get("embedded_at", "") or "",
                 synthesized_orphan=False,
             ),
             ts=ev.now_ts(),

@@ -215,10 +215,18 @@ class DocumentRenamedPayload:
 
     Cross-owner moves use ``DocumentDeleted + DocumentRegistered`` per
     RDR-101 §"File rename (cross-owner)".
+
+    ``tumbler`` is the legacy join key the v: 0 projector uses to find
+    the SQLite row to UPDATE. Pre-fix the projector used ``doc_id`` as
+    the WHERE clause; with Phase 2's ``mint_doc_id=True`` that's a
+    UUID7 and the tumbler-keyed schema would silently drop the rename.
+    Mirrors the same fix already in ``DocumentDeletedPayload``. Optional
+    with empty default so v: 1 native writes don't have to populate it.
     """
 
     doc_id: str
     new_source_uri: str
+    tumbler: str = ""
 
 
 @dataclass(frozen=True, slots=True)
