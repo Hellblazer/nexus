@@ -4013,3 +4013,198 @@ def _print_t3_doc_id_coverage_text(report: dict) -> None:
         click.echo("PASS — every non-orphan chunk carries the expected doc_id.")
     else:
         click.echo("FAIL — T3 doc_id metadata diverges from the event log.")
+
+
+# ── RDR-101 Phase 2: repair-orphan-chunks verb ───────────────────────────
+
+
+@catalog.command("repair-orphan-chunks")
+@click.option(
+    "--list",
+    "list_mode",
+    is_flag=True,
+    help=(
+        "List orphan ChunkIndexed events from events.jsonl (chunks the "
+        "Phase 2 synthesizer could not resolve to a document). Default "
+        "mode when neither --list nor --assign is passed."
+    ),
+)
+@click.option(
+    "--assign",
+    "assignments",
+    multiple=True,
+    help=(
+        "Repeatable. Format: CHUNK_ID:DOC_ID. Each pair appends a "
+        "corrective ChunkIndexed event with synthesized_orphan=False and "
+        "the assigned doc_id; the projector applies last-event-wins so "
+        "the orphan is healed without rewriting the existing log lines."
+    ),
+)
+@click.option(
+    "--collection",
+    "collection_filter",
+    default="",
+    help="Restrict listing/assignment to one collection name.",
+)
+@click.option(
+    "--json", "as_json", is_flag=True,
+    help="Emit machine-readable JSON instead of text output.",
+)
+def repair_orphan_chunks_cmd(
+    list_mode: bool,
+    assignments: tuple,
+    collection_filter: str,
+    as_json: bool,
+) -> None:
+    """RDR-101 Phase 2: list or repair orphan ChunkIndexed events.
+
+    The Phase 2 synthesizer (``synthesize-log --chunks``) emits
+    ``ChunkIndexed`` events with ``doc_id=""`` and
+    ``synthesized_orphan=True`` for chunks whose ``source_path`` did not
+    match any catalog ``source_uri`` and whose ``title`` did not match
+    any catalog title. This verb lets an operator review and repair
+    those orphans before the GC sweeps them after the orphan window.
+
+    Repair appends a new ``ChunkIndexed`` event with the resolved
+    ``doc_id`` and ``synthesized_orphan=False``. The original orphan
+    event stays in the log; the projector dispatches on the last event
+    per ``(coll_id, chunk_id)``, so replay sees the corrected state.
+    """
+    from nexus.catalog.catalog import Catalog
+    from nexus.catalog.event_log import EventLog
+    from nexus.catalog import events as ev
+    from nexus.config import catalog_path
+
+    cat_dir = catalog_path()
+    if not Catalog.is_initialized(cat_dir):
+        raise click.ClickException(
+            f"Catalog not initialized at {cat_dir}. "
+            "Run 'nx catalog setup' to create and populate it."
+        )
+    log = EventLog(cat_dir)
+    if not log.path.exists() or log.path.stat().st_size == 0:
+        raise click.ClickException(
+            f"events.jsonl is empty at {log.path}. Run 'nx catalog "
+            "synthesize-log --chunks' first."
+        )
+
+    if not list_mode and not assignments:
+        list_mode = True  # default to listing
+
+    if list_mode and assignments:
+        raise click.UsageError(
+            "Pass either --list (default) or --assign, not both."
+        )
+
+    # Build the current orphan set: walk events.jsonl, apply last-write
+    # semantics per (coll_id, chunk_id), and surface those that end up
+    # synthesized_orphan=True.
+    state: dict[tuple[str, str], dict] = {}
+    for event in log.replay():
+        if event.type != ev.TYPE_CHUNK_INDEXED:
+            continue
+        key = (event.payload.coll_id, event.payload.chunk_id)
+        state[key] = {
+            "coll_id": event.payload.coll_id,
+            "chunk_id": event.payload.chunk_id,
+            "doc_id": event.payload.doc_id,
+            "chash": event.payload.chash,
+            "synthesized_orphan": event.payload.synthesized_orphan,
+        }
+    orphans = [
+        s for s in state.values()
+        if s["synthesized_orphan"]
+        and (not collection_filter or s["coll_id"] == collection_filter)
+    ]
+
+    if list_mode:
+        report = {
+            "mode": "list",
+            "collection_filter": collection_filter or "(all)",
+            "events_path": str(log.path),
+            "orphans": orphans,
+            "orphans_count": len(orphans),
+        }
+        if as_json:
+            click.echo(json.dumps(report, indent=2))
+        else:
+            click.echo(f"Events path:       {log.path}")
+            click.echo(f"Collection filter: {collection_filter or '(all)'}")
+            click.echo(f"Orphans:           {len(orphans)}")
+            click.echo("")
+            for o in orphans[:50]:
+                click.echo(
+                    f"  {o['chunk_id']:<40} {o['coll_id']:<35} chash={o['chash'][:16]}"
+                )
+            if len(orphans) > 50:
+                click.echo(f"  ... and {len(orphans) - 50} more")
+        return
+
+    # Assign mode. Parse CHUNK_ID:DOC_ID pairs.
+    pairs: list[tuple[str, str]] = []
+    for raw in assignments:
+        if ":" not in raw:
+            raise click.UsageError(
+                f"--assign expects CHUNK_ID:DOC_ID, got {raw!r}"
+            )
+        chunk_id, _, doc_id = raw.partition(":")
+        chunk_id = chunk_id.strip()
+        doc_id = doc_id.strip()
+        if not chunk_id or not doc_id:
+            raise click.UsageError(
+                f"--assign expects non-empty CHUNK_ID and DOC_ID, got {raw!r}"
+            )
+        pairs.append((chunk_id, doc_id))
+
+    # Resolve each assignment to a current orphan to copy chash / coll_id
+    # from. Refuse to assign a chunk that is not currently an orphan.
+    orphan_by_chunk_id = {
+        o["chunk_id"]: o for o in orphans
+    }
+
+    repairs: list = []
+    skipped: list = []
+    for chunk_id, doc_id in pairs:
+        if chunk_id not in orphan_by_chunk_id:
+            skipped.append({
+                "chunk_id": chunk_id,
+                "doc_id": doc_id,
+                "reason": (
+                    "not currently an orphan (already resolved or unknown)"
+                ),
+            })
+            continue
+        orphan = orphan_by_chunk_id[chunk_id]
+        repairs.append(ev.Event(
+            type=ev.TYPE_CHUNK_INDEXED, v=0,
+            payload=ev.ChunkIndexedPayload(
+                chunk_id=chunk_id,
+                chash=orphan["chash"],
+                doc_id=doc_id,
+                coll_id=orphan["coll_id"],
+                position=0,
+                synthesized_orphan=False,
+            ),
+            ts=ev.now_ts(),
+        ))
+
+    log.append_many(repairs)
+
+    report = {
+        "mode": "assign",
+        "collection_filter": collection_filter or "(all)",
+        "events_path": str(log.path),
+        "repairs_count": len(repairs),
+        "skipped_count": len(skipped),
+        "skipped": skipped,
+        "remaining_orphans": len(orphans) - len(repairs),
+    }
+    if as_json:
+        click.echo(json.dumps(report, indent=2))
+    else:
+        click.echo(f"Repairs applied:   {len(repairs)}")
+        if skipped:
+            click.echo(f"Skipped:           {len(skipped)}")
+            for s in skipped[:10]:
+                click.echo(f"  {s['chunk_id']}: {s['reason']}")
+        click.echo(f"Remaining orphans: {report['remaining_orphans']}")
