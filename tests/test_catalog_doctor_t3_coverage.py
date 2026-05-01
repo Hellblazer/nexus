@@ -207,10 +207,15 @@ class TestCoverageFails:
         assert m["actual"] == "uuid7-WRONG"
         assert m["expected"] == "uuid7-A"
 
-    def test_chunk_in_log_but_not_in_t3_fails(
+    def test_chunk_in_log_but_not_in_t3_fails_under_strict(
         self, isolated_nexus, runner, chroma_client,
         monkeypatch: pytest.MonkeyPatch,
     ):
+        """Pre-hardening, ``not_in_t3`` was a hard fail by default.
+        Post-hardening, the default treats it as a warning so legitimate
+        T3 deletions don't permanently red the doctor; ``--strict-not-
+        in-t3`` opts back into the strict 'event log = authoritative'
+        contract."""
         events = [_chunk("missing-from-t3", "uuid7-A", "code__test")]
         _seed_log(isolated_nexus, events)
         _seed(chroma_client, "code__test", [
@@ -226,7 +231,8 @@ class TestCoverageFails:
 
         monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
         result = runner.invoke(
-            doctor_cmd, ["--t3-doc-id-coverage", "--json"],
+            doctor_cmd,
+            ["--t3-doc-id-coverage", "--strict-not-in-t3", "--json"],
         )
         assert result.exit_code == 1
         payload = json.loads(result.output)["t3_doc_id_coverage"]

@@ -900,9 +900,19 @@ def migrate_chash_index_rename_doc_id(conn: sqlite3.Connection) -> None:
     if "chunk_chroma_id" in cols:
         return
     if "doc_id" not in cols:
-        # Table exists but has neither column — schema is unrecognized;
-        # skip rather than risk corrupting it. The doctor verb will
-        # surface the divergence.
+        # Table exists but has neither column — schema is unrecognized.
+        # Log a warning so an operator can correlate it with the doctor
+        # verb's later divergence report rather than only finding out
+        # at query time when production code reads chunk_chroma_id.
+        _log.warning(
+            "chash_index_unrecognized_schema",
+            cols=sorted(cols),
+            note=(
+                "chash_index table exists but has neither doc_id nor "
+                "chunk_chroma_id; skipping rename. Run nx catalog "
+                "doctor to investigate."
+            ),
+        )
         return
     conn.execute(
         "ALTER TABLE chash_index RENAME COLUMN doc_id TO chunk_chroma_id"
