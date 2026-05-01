@@ -721,6 +721,7 @@ def _index_pdf_file(
     *,
     embed_fn: Callable | None = None,
     stage_timers: "StageTimers | None" = None,
+    doc_id_resolver: Callable[[Path], str] | None = None,
 ) -> int:
     """Index a single PDF file into the docs__ collection.
 
@@ -733,6 +734,11 @@ def _index_pdf_file(
     ``stage_timers`` (nexus-7niu) is an optional :class:`StageTimers` that
     accumulates chunking / embed / upload / retry time for this file.
     ``None`` is the fast path — the instrumented blocks are no-ops.
+
+    ``doc_id_resolver`` (RDR-101 Phase 3 PR δ Stage B.3) returns the
+    catalog ``Document.doc_id`` for *file* so PDF chunks land in T3 with
+    a back-reference to the catalog. ``None`` is the legacy /
+    no-catalog path.
     """
     import hashlib as _hl
     from nexus.doc_indexer import _embed_with_fallback, _pdf_chunks
@@ -780,6 +786,11 @@ def _index_pdf_file(
         prefix = "## " + "  ".join(prefix_parts)
         embed_texts_pdf.append(f"{prefix}\n\n{doc}")
 
+    # Catalog Document.doc_id (RDR-101 Phase 3 PR δ Stage B.3): resolved
+    # once per file. Empty string when no catalog handle exists;
+    # ``normalize`` Step 4c drops the field on the way to T3.
+    catalog_doc_id = doc_id_resolver(file) if doc_id_resolver is not None else ""
+
     # Augment metadata with repo-indexer fields.
     # Filter empty/zero values from _pdf_chunks to stay under ChromaDB's
     # 32-key metadata limit. PDF chunks produce ~31 raw keys; augmentation
@@ -803,6 +814,7 @@ def _index_pdf_file(
             "source_agent": "nexus-indexer",
             "ttl_days": 0,
             "frecency_score": float(score),
+            "doc_id": catalog_doc_id,
             **{k: v for k, v in git_meta.items() if v},
         }
         metadatas.append(augmented)
@@ -1250,6 +1262,12 @@ def _run_index(
         indexed_for_catalog.append((f, "code", code_collection))
     for _, f in prose_files:
         indexed_for_catalog.append((f, "prose", docs_collection))
+    # RDR-101 Phase 3 PR δ Stage B.3: PDFs were missing from
+    # ``indexed_for_catalog`` pre-Stage-B.3 (B.1 surfaced this gap during
+    # verification). Register them upfront so the resolver returns a
+    # tumbler for PDF chunks too.
+    for _, f in pdf_files:
+        indexed_for_catalog.append((f, "pdf", docs_collection))
     if rdr_abs_paths:
         rdr_col_name = _rdr_coll_name_for_repo(repo)
         for rdr_dir in rdr_abs_paths:
@@ -1347,6 +1365,7 @@ def _run_index(
             chunk_chars=tuning.pdf_chunk_chars,
             embed_fn=_embed_fn,
             stage_timers=timers,
+            doc_id_resolver=_doc_id_resolver,
         )
         if on_file:
             on_file(file, chunks, time.monotonic() - t0)
