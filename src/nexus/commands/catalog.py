@@ -3347,12 +3347,19 @@ def _run_replay_equality() -> dict:
         )
 
     # ── Snapshot live ──────────────────────────────────────────────────
+    # Links carry an autoincrement ``id`` PK that the projector restarts
+    # at 1; the live db's ids depend on insertion history. RF-101-2 does
+    # not claim the autoincrement is part of the projection contract, so
+    # both snapshots exclude the ``id`` column by name (not by position
+    # — a future schema migration that adds a column before ``id`` would
+    # silently strip the wrong field under positional indexing).
+    LINKS_EXCLUDE = ["id"]
     live_uri = f"file:{live_db_path}?mode=ro"
     with closing(sqlite3.connect(live_uri, uri=True)) as live_conn:
         live_snap = {
             "owners": _snapshot_table(live_conn, "owners"),
             "documents": _snapshot_table(live_conn, "documents"),
-            "links": _snapshot_table(live_conn, "links"),
+            "links": _snapshot_table(live_conn, "links", exclude_cols=LINKS_EXCLUDE),
         }
 
     # ── Project + snapshot ────────────────────────────────────────────
@@ -3370,7 +3377,7 @@ def _run_replay_equality() -> dict:
             projected_snap = {
                 "owners": _snapshot_table(proj_conn, "owners"),
                 "documents": _snapshot_table(proj_conn, "documents"),
-                "links": _snapshot_table(proj_conn, "links"),
+                "links": _snapshot_table(proj_conn, "links", exclude_cols=LINKS_EXCLUDE),
             }
 
     # ── Diff ──────────────────────────────────────────────────────────
@@ -3379,14 +3386,6 @@ def _run_replay_equality() -> dict:
     for table in ("owners", "documents", "links"):
         live_rows = live_snap[table]
         proj_rows = projected_snap[table]
-        # Links carry an autoincrement ``id`` PK that the projector
-        # restarts at 1; the live db's ids depend on insertion history.
-        # Strip the id column from both before comparing — the rest of
-        # the row is the actual content under test (RF-101-2 doesn't
-        # claim the autoincrement is part of the projection contract).
-        if table == "links":
-            live_rows = [r[1:] for r in live_rows]
-            proj_rows = [r[1:] for r in proj_rows]
         live_set = set(live_rows)
         proj_set = set(proj_rows)
         only_live = sorted(live_set - proj_set)
@@ -3411,17 +3410,28 @@ def _run_replay_equality() -> dict:
     }
 
 
-def _snapshot_table(conn, table: str) -> list[tuple]:
+def _snapshot_table(
+    conn, table: str, *, exclude_cols: list[str] | None = None,
+) -> list[tuple]:
     """Snapshot one catalog table in deterministic row order.
 
     Sort by every column so the comparison is independent of insertion
     order. ``documents.metadata`` and ``links.metadata`` are JSON blobs
     that round-trip as strings, which sort byte-wise.
+
+    ``exclude_cols`` removes named columns from both the SELECT and the
+    ORDER BY. Used by the doctor's links snapshot to exclude the
+    autoincrement ``id`` column without a fragile positional slice.
     """
     cur = conn.execute(f"PRAGMA table_info({table})")
     cols = [row[1] for row in cur.fetchall()]
     if not cols:
         return []
+    if exclude_cols:
+        exclude = set(exclude_cols)
+        cols = [c for c in cols if c not in exclude]
+        if not cols:
+            return []
     sort_cols = ", ".join(cols)
     rows = conn.execute(
         f"SELECT {sort_cols} FROM {table} ORDER BY {sort_cols}"
@@ -3551,7 +3561,25 @@ def synthesize_log_cmd(
             "before re-running."
         )
 
-    events = list(synthesize_from_jsonl(cat_dir, mint_doc_id=True))
+    # Preserve existing tumbler→doc_id mapping across --force re-synthesis
+    # so a prior ``t3-backfill-doc-id`` run's metadata stays valid. Without
+    # this, --force would mint fresh UUID7s and silently invalidate every
+    # T3 chunk's doc_id; the doctor's --t3-doc-id-coverage would
+    # catastrophically fail until the operator re-ran the backfill.
+    preserve_map: dict[str, str] = {}
+    if existing_size > 0:
+        from nexus.catalog import events as ev_mod
+        for prior in log.replay():
+            if prior.type != ev_mod.TYPE_DOCUMENT_REGISTERED:
+                continue
+            t = getattr(prior.payload, "tumbler", "") or ""
+            d = getattr(prior.payload, "doc_id", "") or ""
+            if t and d and t not in preserve_map:
+                preserve_map[t] = d
+
+    events = list(synthesize_from_jsonl(
+        cat_dir, mint_doc_id=True, preserve_doc_ids=preserve_map,
+    ))
     chunk_events: list = []
     orphan_count = 0
     if chunks:

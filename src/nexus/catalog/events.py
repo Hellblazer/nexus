@@ -259,10 +259,20 @@ class DocumentEnrichedPayload:
 
 @dataclass(frozen=True, slots=True)
 class DocumentDeletedPayload:
-    """Soft-delete tombstone. Chunks remain in T3 until ``nx t3 gc`` collects."""
+    """Soft-delete tombstone. Chunks remain in T3 until ``nx t3 gc`` collects.
+
+    ``tumbler`` is the legacy join key the v: 0 projector uses to find the
+    SQLite row to delete. When ``mint_doc_id=False`` (Phase 1 doctor verb)
+    ``doc_id`` IS the tumbler and the projector can use either; when
+    ``mint_doc_id=True`` (Phase 2 ``synthesize-log``) ``doc_id`` is a
+    UUID7 and ``tumbler`` is the only join key the tumbler-keyed schema
+    can match. Optional with empty default so v: 1 native writes don't
+    have to populate it.
+    """
 
     doc_id: str
     reason: str = ""
+    tumbler: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -418,10 +428,24 @@ class Event:
         keys are dropped silently (forward-compat). For unknown event
         types, the payload is preserved as a raw dict so the projector
         can emit the RF-101-2 unknown-(type, v) warning and skip.
+
+        Defensive against malformed line shapes:
+        - ``v`` that does not coerce to int falls back to 0 (synthesized);
+          a hard error here would propagate out of ``EventLog.replay`` and
+          abort the whole iterator on a single bad line.
+        - ``payload`` that is not a dict (list, int, null, etc.) is
+          treated as an empty dict so ``payload_raw.keys()`` does not
+          raise ``AttributeError``. The resulting Event has an empty
+          payload, which the projector handles via its unknown-key path.
         """
         type_ = d["type"]
-        v = int(d.get("v", 0))
-        payload_raw = d.get("payload") or {}
+        try:
+            v = int(d.get("v", 0))
+        except (TypeError, ValueError):
+            v = 0
+        payload_raw = d.get("payload")
+        if not isinstance(payload_raw, dict):
+            payload_raw = {}
         ts = d.get("ts", "")
 
         cls_ = payload_class(type_)
