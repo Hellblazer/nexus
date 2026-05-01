@@ -41,7 +41,10 @@ def _expected_keys_for_content_type(content_type: str) -> set[str]:
         "bib_year", "bib_authors", "bib_venue", "bib_citation_count",
         "bib_semantic_scholar_id",
     }
-    return ALLOWED_TOP_LEVEL - bib_keys - {"git_meta"}
+    # RDR-101 Phase 3 PR δ: ``doc_id`` is opt-in. Drop-when-empty
+    # parallels bib_* / git_meta — call sites that do not pass a
+    # Catalog-resolved doc_id get ``""`` and normalize() strips it.
+    return ALLOWED_TOP_LEVEL - bib_keys - {"git_meta", "doc_id"}
 
 
 def test_factory_emits_full_keyset_for_code() -> None:
@@ -201,12 +204,17 @@ def _full_keyset_minus_optional() -> set[str]:
     """Keys that every chunked-write indexer MUST emit.
 
     bib_* and git_meta are intentionally optional (see normalize() rules).
+    RDR-101 Phase 3 PR δ: ``doc_id`` is also opt-in — call sites with a
+    Catalog handle pass it; call sites without one (e.g. MCP store_put,
+    bare-metadata factory tests) pass ``""`` and the field is dropped
+    by ``normalize`` Step 4c.
     Every other ALLOWED_TOP_LEVEL key must appear on every chunk.
     """
     return ALLOWED_TOP_LEVEL - {
         "bib_year", "bib_authors", "bib_venue", "bib_citation_count",
         "bib_semantic_scholar_id",
         "git_meta",
+        "doc_id",
     }
 
 

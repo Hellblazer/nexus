@@ -94,6 +94,17 @@ ALLOWED_TOP_LEVEL: frozenset[str] = frozenset({
     "session_id",
     # Consolidated provenance — JSON string, opaque to filters (1)
     "git_meta",
+    # RDR-101 Phase 3 PR δ — catalog cross-reference (1).
+    # ``doc_id`` carries the catalog Tumbler string for the document
+    # this chunk belongs to (Phase 1 stand-in: ``str(tumbler)``;
+    # Phase 3+ will mint UUID7 doc_ids via the new write path,
+    # see ``Catalog.register`` doc_id stand-in comment).
+    # The Phase 2 ``nx catalog t3-backfill-doc-id`` verb writes this
+    # field retroactively for legacy chunks; PR δ writes it at
+    # chunk-write time so live re-indexing carries the field through
+    # the funnel (``_write_batch`` calls ``validate()`` which would
+    # otherwise strip a non-whitelisted key).
+    "doc_id",
 })
 
 #: Allowed content_type values. Replaces the old overlapping pair
@@ -102,11 +113,14 @@ CONTENT_TYPES: frozenset[str] = frozenset({"code", "pdf", "markdown", "prose"})
 
 #: Safety margin below Chroma's 32-key cap (:data:`~nexus.db.chroma_quotas.
 #: QUOTAS.MAX_RECORD_METADATA_KEYS`). Any write producing more than this
-#: many keys raises :class:`MetadataSchemaError`. The canonical schema
-#: defined by :data:`ALLOWED_TOP_LEVEL` sits at 30 keys after the
-#: ``source_title``/``expires_at`` removal — 2 keys of headroom above
-#: that for future additions before the validation guard fires.
-MAX_SAFE_TOP_LEVEL_KEYS: int = 31
+#: many keys raises :class:`MetadataSchemaError`. RDR-101 Phase 3 PR δ
+#: bumped this to 32 to admit the new ``doc_id`` field; the schema is
+#: now AT the Chroma cap. Phase 5b plans to drop legacy ``source_path``
+#: in favour of ``source_uri`` (RDR-096 P5.1/P5.2), which restores
+#: headroom. Until then, the ``bib_*`` placeholder-drop and
+#: ``git_meta``-omitted-when-empty filters in :func:`normalize` keep
+#: typical chunks well under the cap (no-bib + no-git ≈ 26 keys).
+MAX_SAFE_TOP_LEVEL_KEYS: int = 32
 
 #: Git provenance sub-keys — packed into ``git_meta`` as a JSON string.
 _GIT_FIELD_MAP: dict[str, str] = {
@@ -200,6 +214,14 @@ def normalize(raw: dict[str, Any], *, content_type: str) -> dict[str, Any]:
     if not any(normalised.get(field) for field in _BIB_FIELDS):
         for field in _BIB_FIELDS:
             normalised.pop(field, None)
+
+    # Step 4c (RDR-101 PR δ): drop ``doc_id`` when the call site did not
+    # populate it. Pre-PR-δ chunks have no doc_id; the field is opt-in
+    # for indexers that have a Catalog handle. Empty value would
+    # otherwise consume a metadata slot for no payload, costing the
+    # last bit of headroom under the 32-key Chroma cap.
+    if not normalised.get("doc_id"):
+        normalised.pop("doc_id", None)
 
     # Step 3 (cont.): write git_meta only when at least one field has
     # a truthy value.
@@ -295,6 +317,13 @@ def make_chunk_metadata(
     session_id: str = "",
     # Provenance — flat git_* keys; normalize() packs them into git_meta JSON
     git_meta: dict[str, Any] | None = None,
+    # RDR-101 Phase 3 PR δ — catalog cross-reference. Empty string is
+    # the "not registered" sentinel; live-indexing call sites populate
+    # it from ``Catalog.by_file_path(owner, rel_path).tumbler``. Empty
+    # values flow through normalize() unchanged but are dropped from
+    # the written metadata by the same cargo-key filter that handles
+    # other empty optionals (see normalize() Step 4).
+    doc_id: str = "",
 ) -> dict[str, Any]:
     """Build a complete chunk metadata dict and route through
     :func:`normalize` so it's safe to write directly to T3.
@@ -339,6 +368,7 @@ def make_chunk_metadata(
         "frecency_score": frecency_score,
         "source_agent": source_agent,
         "session_id": session_id,
+        "doc_id": doc_id,
     }
     if git_meta:
         # Accept both short keys ({"project", "branch", ...}) and long

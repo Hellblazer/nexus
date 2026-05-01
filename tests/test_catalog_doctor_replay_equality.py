@@ -121,21 +121,39 @@ class TestReplayEqualityPasses:
         cat_dir = isolated_nexus
         _build_initialized_catalog(cat_dir)
         live_db = cat_dir / ".catalog.db"
-        before_mtime = live_db.stat().st_mtime
-        # Sleep one filesystem-resolution-tick so a write would shift mtime
-        # detectably even on coarse-grained Linux filesystems.
-        import time as _time
-        _time.sleep(0.05)
+
+        # Assert the LOGICAL invariant: doctor must not change the row
+        # contents of any catalog table. SQLite in WAL mode can advance
+        # the main-db file mtime on a read-only open by checkpointing
+        # pending WAL data into the main file — that's a format-internal
+        # touch that preserves logical contents but changes mtime / file
+        # bytes. The original mtime-based assertion was a proxy that
+        # passed on darwin (sub-tick timing) and intermittently failed
+        # on Linux CI Python 3.12 (mtime tick advanced past the stat
+        # baseline). Snapshotting owners + documents + links rows
+        # captures the actual "doctor doesn't mutate live state"
+        # contract and is robust to WAL checkpointing behaviour.
+        def _snap(db_path: Path) -> dict[str, list[tuple]]:
+            with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as c:
+                return {
+                    table: list(
+                        c.execute(f"SELECT * FROM {table} ORDER BY 1, 2")
+                    )
+                    for table in ("owners", "documents", "links")
+                }
+
+        before_snap = _snap(live_db)
 
         result = runner.invoke(doctor_cmd, ["--replay-equality"])
         assert result.exit_code == 0
 
-        after_mtime = live_db.stat().st_mtime
-        assert before_mtime == after_mtime, (
-            "doctor --replay-equality must be read-only against "
-            ".catalog.db; mtime advanced from "
-            f"{before_mtime} to {after_mtime}"
-        )
+        after_snap = _snap(live_db)
+        for table, before_rows in before_snap.items():
+            after_rows = after_snap[table]
+            assert before_rows == after_rows, (
+                f"doctor --replay-equality mutated table {table!r}: "
+                f"row count {len(before_rows)} → {len(after_rows)}"
+            )
 
 
 # ── Failure path: live SQLite diverges from JSONL ────────────────────────
