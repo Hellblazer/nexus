@@ -4512,3 +4512,187 @@ def repair_orphan_chunks_cmd(
             for s in skipped[:10]:
                 click.echo(f"  {s['chunk_id']}: {s['reason']}")
         click.echo(f"Remaining orphans: {report['remaining_orphans']}")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# RDR-101 Phase 3 follow-up D (nexus-o6aa.9.9): one-shot migration verb.
+# ──────────────────────────────────────────────────────────────────────
+
+
+@catalog.command("migrate")
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help=(
+        "Report what would happen without writing. Shows the current "
+        "bootstrap state (fallback active vs not), what synthesize-log "
+        "would produce, what t3-backfill would touch."
+    ),
+)
+@click.option(
+    "--no-chunks",
+    is_flag=True,
+    help=(
+        "Skip the T3 chunk synthesis + backfill steps. Use when the "
+        "catalog has no T3 collections yet, or when staging the "
+        "document-side migration before opening the T3 connection."
+    ),
+)
+@click.option(
+    "--json", "as_json", is_flag=True,
+    help="Emit machine-readable JSON instead of text output.",
+)
+@click.pass_context
+def migrate_cmd(
+    ctx: click.Context,
+    dry_run: bool,
+    no_chunks: bool,
+    as_json: bool,
+) -> None:
+    """RDR-101 Phase 3: one-shot migration to event-sourced canonical state.
+
+    Composed verb that sequences the three steps an upgrading operator
+    would otherwise run by hand:
+
+      1. ``nx catalog synthesize-log --force [--chunks]`` — rebuild
+         events.jsonl from the legacy JSONL state.
+      2. ``nx catalog t3-backfill-doc-id`` — write doc_id metadata to
+         existing T3 chunks (skipped under --no-chunks).
+      3. ``nx catalog doctor --replay-equality [--t3-doc-id-coverage
+         --strict-not-in-t3]`` — verify the result.
+
+    **Idempotent.** Pre-checks ``Catalog.bootstrap_fallback_active``.
+    If the catalog is already migrated (events.jsonl matches
+    documents.jsonl, no fallback) the verb exits 0 with "nothing to do"
+    rather than regenerating a perfectly-good event log. The empty-
+    events.jsonl synthesizer-PASS case (no ES mutations have happened
+    yet on a freshly-upgraded catalog) is treated as a proactive
+    migration opportunity, not a no-op — proactively populating the
+    log avoids the bootstrap-fallback state arising on first ES write.
+
+    Verified by ``scripts/validate/rdr-101-migration-e2e.sh`` (PR ζ
+    sandbox e2e harness, nexus-o6aa.9.10).
+    """
+    from nexus.catalog.catalog import Catalog
+    from nexus.catalog.event_log import EventLog
+    from nexus.config import catalog_path
+
+    cat_dir = catalog_path()
+    if not Catalog.is_initialized(cat_dir):
+        raise click.ClickException(
+            f"Catalog not initialized at {cat_dir}. "
+            "Run 'nx catalog setup' to create and populate it first."
+        )
+
+    status = _check_bootstrap_status()
+    fallback_active = status.get("fallback_active", False)
+
+    log = EventLog(cat_dir)
+    documents_path = cat_dir / "documents.jsonl"
+    has_legacy_docs = documents_path.exists() and documents_path.stat().st_size > 0
+    has_events = log.path.exists() and log.path.stat().st_size > 0
+
+    # Decision matrix:
+    #   has_legacy_docs=False & has_events=False → empty catalog: nothing to do
+    #   has_legacy_docs=True  & has_events=True  & not fallback_active
+    #     → already migrated cleanly: nothing to do
+    #   has_legacy_docs=True  & has_events=False
+    #     → freshly-upgraded, no ES mutations yet: proactively migrate
+    #   has_legacy_docs=True  & fallback_active   → migrate
+    needs_migration = has_legacy_docs and (not has_events or fallback_active)
+
+    if not needs_migration:
+        report = {
+            "needs_migration": False,
+            "reason": (
+                "catalog is empty"
+                if not has_legacy_docs
+                else "events.jsonl already covers documents.jsonl (no fallback active)"
+            ),
+            "fallback_active": fallback_active,
+            "documents_jsonl": str(documents_path),
+            "events_jsonl": str(log.path),
+        }
+        if as_json:
+            click.echo(json.dumps(report, indent=2))
+        else:
+            click.echo(f"Nothing to do — {report['reason']}.")
+        return
+
+    if dry_run:
+        report = {
+            "needs_migration": True,
+            "fallback_active": fallback_active,
+            "would_run": [
+                f"nx catalog synthesize-log --force"
+                + ("" if no_chunks else " --chunks"),
+            ] + (
+                [] if no_chunks else ["nx catalog t3-backfill-doc-id"]
+            ) + [
+                "nx catalog doctor --replay-equality"
+                + ("" if no_chunks else " --t3-doc-id-coverage --strict-not-in-t3"),
+            ],
+            "documents_jsonl": str(documents_path),
+            "events_jsonl": str(log.path),
+        }
+        if as_json:
+            click.echo(json.dumps(report, indent=2))
+        else:
+            click.echo("Migration plan:")
+            for step in report["would_run"]:
+                click.echo(f"  {step}")
+        return
+
+    # Step 1: synthesize-log --force.
+    click.echo("==> nx catalog synthesize-log --force"
+               + ("" if no_chunks else " --chunks"))
+    syn_args = ["--force"] + ([] if no_chunks else ["--chunks"])
+    try:
+        ctx.invoke(synthesize_log_cmd, **{
+            "dry_run": False,
+            "force": True,
+            "chunks": not no_chunks,
+            "as_json": False,
+        })
+    except click.ClickException as exc:
+        raise click.ClickException(
+            f"synthesize-log failed: {exc.message}. Migration aborted; "
+            "no further steps run."
+        ) from exc
+
+    # Step 2: t3-backfill-doc-id (unless --no-chunks).
+    if not no_chunks:
+        click.echo("==> nx catalog t3-backfill-doc-id")
+        try:
+            ctx.invoke(t3_backfill_doc_id_cmd, **{
+                "dry_run": False,
+                "collection_filter": "",
+                "as_json": False,
+            })
+        except click.ClickException as exc:
+            raise click.ClickException(
+                f"t3-backfill-doc-id failed: {exc.message}. Migration "
+                "partial; events.jsonl is current but T3 chunks may "
+                "lack doc_id metadata. Re-run 'nx catalog "
+                "t3-backfill-doc-id' after fixing the underlying issue."
+            ) from exc
+
+    # Step 3: doctor verification.
+    click.echo("==> nx catalog doctor --replay-equality"
+               + ("" if no_chunks else " --t3-doc-id-coverage --strict-not-in-t3"))
+    try:
+        ctx.invoke(doctor_cmd, **{
+            "replay_equality": True,
+            "t3_doc_id_coverage": not no_chunks,
+            "strict_not_in_t3": not no_chunks,
+            "as_json": False,
+        })
+    except click.exceptions.Exit as exc:
+        if exc.exit_code != 0:
+            raise click.ClickException(
+                "Migration completed but doctor verification did not "
+                "PASS. Inspect the report above; re-running this verb "
+                "is safe and idempotent."
+            ) from exc
+
+    click.echo("\nMigration complete.")
