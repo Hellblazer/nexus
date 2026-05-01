@@ -1192,12 +1192,6 @@ class Catalog:
             raw = self.resolve(tumbler, follow_alias=False)
             if raw is None:
                 return
-            self._db.execute(
-                "UPDATE documents SET alias_of = ? WHERE tumbler = ?",
-                (str(canonical), str(tumbler)),
-            )
-            self._db.commit()
-            # Append updated JSONL record so a future rebuild sees the alias.
             updated = DocumentRecord(
                 tumbler=str(tumbler),
                 title=raw.title,
@@ -1214,14 +1208,28 @@ class Catalog:
                 source_mtime=raw.source_mtime,
                 alias_of=str(canonical),
             )
-            self._append_jsonl(self._documents_path, updated.__dict__)
-            self._emit_shadow_event(_make_event(
+            event = _make_event(
                 _DocumentAliasedPayload(
                     alias_doc_id=str(tumbler),
                     canonical_doc_id=str(canonical),
                 ),
                 v=0,
-            ))
+            )
+            if self._event_sourced_enabled:
+                self._write_to_event_log(event)
+                from nexus.catalog.projector import Projector as _Projector
+                _Projector(self._db).apply(event)
+                self._db.commit()
+                self._append_jsonl(self._documents_path, updated.__dict__)
+            else:
+                self._db.execute(
+                    "UPDATE documents SET alias_of = ? WHERE tumbler = ?",
+                    (str(canonical), str(tumbler)),
+                )
+                self._db.commit()
+                # Append updated JSONL record so a future rebuild sees the alias.
+                self._append_jsonl(self._documents_path, updated.__dict__)
+                self._emit_shadow_event(event)
         finally:
             self._release_lock(dir_fd)
 
@@ -1540,38 +1548,7 @@ class Catalog:
             self._check_source_uri_in_repo_root(
                 owner_addr, rec_dict["source_uri"],
             )
-            self._append_jsonl(self._documents_path, rec_dict)
-            # Upsert SQLite
-            self._db.execute(
-                "INSERT OR REPLACE INTO documents "
-                "(tumbler, title, author, year, content_type, file_path, "
-                "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
-                "metadata, source_mtime, source_uri) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    rec_dict["tumbler"], rec_dict["title"], rec_dict["author"],
-                    rec_dict["year"], rec_dict["content_type"], rec_dict["file_path"],
-                    rec_dict["corpus"], rec_dict["physical_collection"],
-                    rec_dict["chunk_count"], rec_dict["head_hash"],
-                    rec_dict["indexed_at"], json.dumps(rec_dict["meta"]),
-                    rec_dict.get("source_mtime", 0.0),
-                    rec_dict.get("source_uri", ""),
-                ),
-            )
-            self._db.commit()
-            # Shadow-emit the canonical event for the kind of update that
-            # happened. ``update()`` is overloaded — source_uri rename and
-            # bib enrichment both flow through here. The projector
-            # idempotently INSERT OR REPLACEs the documents row from a
-            # DocumentRegistered with the full updated payload, which is
-            # equivalent to applying a DocumentRenamed and/or
-            # DocumentEnriched plus the prior register. Phase 1 takes
-            # the lossless path: emit DocumentRegistered with the post-
-            # update field set, mirroring what the synthesizer does for
-            # documents.jsonl rows that have been mutated. Phase 3
-            # introduces fine-grained event types (DocumentRenamed,
-            # DocumentEnriched) that capture intent rather than state.
-            self._emit_shadow_event(_make_event(
+            event = _make_event(
                 _DocumentRegisteredPayload(
                     doc_id=rec_dict["tumbler"],
                     owner_id=str(entry.tumbler.owner_address()),
@@ -1594,7 +1571,41 @@ class Catalog:
                     meta=dict(rec_dict["meta"]),
                 ),
                 v=0,
-            ))
+            )
+            if self._event_sourced_enabled:
+                # Phase 3 PR β — event-sourced update path. update() is
+                # overloaded (source_uri rename, bib enrichment, etc.);
+                # the lossless DocumentRegistered-with-post-update-state
+                # captures everything via the projector's INSERT OR
+                # REPLACE. Future Phase 3+ work may introduce
+                # fine-grained DocumentRenamed/DocumentEnriched events
+                # that capture intent rather than state.
+                self._write_to_event_log(event)
+                from nexus.catalog.projector import Projector as _Projector
+                _Projector(self._db).apply(event)
+                self._db.commit()
+                self._append_jsonl(self._documents_path, rec_dict)
+            else:
+                self._append_jsonl(self._documents_path, rec_dict)
+                # Upsert SQLite
+                self._db.execute(
+                    "INSERT OR REPLACE INTO documents "
+                    "(tumbler, title, author, year, content_type, file_path, "
+                    "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
+                    "metadata, source_mtime, source_uri) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        rec_dict["tumbler"], rec_dict["title"], rec_dict["author"],
+                        rec_dict["year"], rec_dict["content_type"], rec_dict["file_path"],
+                        rec_dict["corpus"], rec_dict["physical_collection"],
+                        rec_dict["chunk_count"], rec_dict["head_hash"],
+                        rec_dict["indexed_at"], json.dumps(rec_dict["meta"]),
+                        rec_dict.get("source_mtime", 0.0),
+                        rec_dict.get("source_uri", ""),
+                    ),
+                )
+                self._db.commit()
+                self._emit_shadow_event(event)
         finally:
             self._release_lock(dir_fd)
 
@@ -1622,6 +1633,8 @@ class Catalog:
                 "FROM documents WHERE physical_collection = ?",
                 (old,),
             ).fetchall()
+            from nexus.catalog.synthesizer import _owner_prefix_of as _opo
+            from nexus.catalog.projector import Projector as _Projector
             for row in rows:
                 # Preserve source_mtime + source_uri + alias_of across
                 # the rename — JSONL is the rebuild source of truth, so
@@ -1647,12 +1660,46 @@ class Catalog:
                     "source_uri": row[13] or "",
                     "alias_of": row[14] or "",
                 }
-                self._append_jsonl(self._documents_path, rec)
-            self._db.execute(
-                "UPDATE documents SET physical_collection = ? "
-                "WHERE physical_collection = ?",
-                (new, old),
-            )
+                if self._event_sourced_enabled:
+                    # Per-row event-source: write event, project to
+                    # SQLite, append legacy JSONL. SQLite commit is
+                    # batched at the end for efficiency.
+                    meta_dict = json.loads(row[11]) if row[11] else {}
+                    event = _make_event(
+                        _DocumentRegisteredPayload(
+                            doc_id=row[0],
+                            owner_id=_opo(row[0]),
+                            content_type=row[4] or "",
+                            source_uri=row[13] or "",
+                            coll_id=new,
+                            title=row[1] or "",
+                            source_mtime=float(row[12] or 0.0),
+                            indexed_at_doc=row[10] or "",
+                            tumbler=row[0],
+                            author=row[2] or "",
+                            year=int(row[3] or 0),
+                            file_path=row[5] or "",
+                            corpus=row[6] or "",
+                            physical_collection=new,
+                            chunk_count=int(row[8] or 0),
+                            head_hash=row[9] or "",
+                            indexed_at=row[10] or "",
+                            alias_of=row[14] or "",
+                            meta=dict(meta_dict),
+                        ),
+                        v=0,
+                    )
+                    self._write_to_event_log(event)
+                    _Projector(self._db).apply(event)
+                    self._append_jsonl(self._documents_path, rec)
+                else:
+                    self._append_jsonl(self._documents_path, rec)
+            if not self._event_sourced_enabled:
+                self._db.execute(
+                    "UPDATE documents SET physical_collection = ? "
+                    "WHERE physical_collection = ?",
+                    (new, old),
+                )
             self._db.commit()
             # Shadow-emit one DocumentRegistered per renamed row with
             # the new physical_collection. The projector's INSERT OR
@@ -1669,7 +1716,10 @@ class Catalog:
             # 10k-row rename should not pay the cost of building 10k
             # _DocumentRegisteredPayload objects only to discard them
             # in _emit_shadow_event's first line.
-            if self._shadow_emit_enabled:
+            # When event-sourced is ON the per-row write loop above
+            # already emitted + projected each event; skip the
+            # shadow-emit loop to avoid duplicate writes.
+            if self._shadow_emit_enabled and not self._event_sourced_enabled:
                 from nexus.catalog.synthesizer import _owner_prefix_of
                 for row in rows:
                     meta_dict = json.loads(row[11]) if row[11] else {}
@@ -1732,17 +1782,28 @@ class Catalog:
                 "source_mtime": entry.source_mtime,
                 "_deleted": True,
             }
-            self._append_jsonl(self._documents_path, tombstone)
-            self._db.execute("DELETE FROM documents WHERE tumbler = ?", (str(tumbler),))
-            self._db.commit()
-            self._emit_shadow_event(_make_event(
+            event = _make_event(
                 _DocumentDeletedPayload(
                     doc_id=str(tumbler),
                     reason="catalog.delete_document",
                     tumbler=str(tumbler),
                 ),
                 v=0,
-            ))
+            )
+            if self._event_sourced_enabled:
+                self._write_to_event_log(event)
+                from nexus.catalog.projector import Projector as _Projector
+                _Projector(self._db).apply(event)
+                self._db.commit()
+                self._append_jsonl(self._documents_path, tombstone)
+            else:
+                self._append_jsonl(self._documents_path, tombstone)
+                self._db.execute(
+                    "DELETE FROM documents WHERE tumbler = ?",
+                    (str(tumbler),),
+                )
+                self._db.commit()
+                self._emit_shadow_event(event)
             return True
         finally:
             self._release_lock(dir_fd)
