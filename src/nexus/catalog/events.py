@@ -81,6 +81,7 @@ def now_ts() -> str:
 # ── Event type names ─────────────────────────────────────────────────────
 
 TYPE_OWNER_REGISTERED = "OwnerRegistered"
+TYPE_OWNER_DELETED = "OwnerDeleted"
 TYPE_COLLECTION_CREATED = "CollectionCreated"
 TYPE_COLLECTION_SUPERSEDED = "CollectionSuperseded"
 TYPE_DOCUMENT_REGISTERED = "DocumentRegistered"
@@ -96,6 +97,7 @@ TYPE_LINK_DELETED = "LinkDeleted"
 ALL_EVENT_TYPES: frozenset[str] = frozenset(
     {
         TYPE_OWNER_REGISTERED,
+        TYPE_OWNER_DELETED,
         TYPE_COLLECTION_CREATED,
         TYPE_COLLECTION_SUPERSEDED,
         TYPE_DOCUMENT_REGISTERED,
@@ -136,6 +138,27 @@ class OwnerRegisteredPayload:
     repo_root: str = ""
     repo_hash: str = ""
     description: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class OwnerDeletedPayload:
+    """Tombstone for an owner.
+
+    Emitted by ``nx catalog dedupe`` (RDR-101 Phase 3 follow-up,
+    nexus-o6aa.9.4) when an orphan owner is being retired. Without this
+    event the projector's event-sourced rebuild would replay the owner's
+    original ``OwnerRegistered`` event and silently resurrect the row,
+    breaking ``doctor --replay-equality`` and the ζ default-flip
+    irreversibility.
+
+    ``owner_id`` is the tumbler prefix (e.g. ``1.7``) — same shape as
+    ``OwnerRegisteredPayload.owner_id`` so the projector can match on a
+    single column. ``reason`` is operator provenance for forensic
+    archaeology (e.g. ``"dedupe.orphan"``).
+    """
+
+    owner_id: str
+    reason: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -362,6 +385,7 @@ class LinkDeletedPayload:
 
 _PAYLOAD_CLASSES: dict[str, type] = {
     TYPE_OWNER_REGISTERED: OwnerRegisteredPayload,
+    TYPE_OWNER_DELETED: OwnerDeletedPayload,
     TYPE_COLLECTION_CREATED: CollectionCreatedPayload,
     TYPE_COLLECTION_SUPERSEDED: CollectionSupersededPayload,
     TYPE_DOCUMENT_REGISTERED: DocumentRegisteredPayload,

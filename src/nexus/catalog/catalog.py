@@ -62,6 +62,7 @@ from nexus.catalog.events import (  # noqa: E402
     Event as _Event,
     LinkCreatedPayload as _LinkCreatedPayload,
     LinkDeletedPayload as _LinkDeletedPayload,
+    OwnerDeletedPayload as _OwnerDeletedPayload,
     OwnerRegisteredPayload as _OwnerRegisteredPayload,
     SCHEMA_BIB_S2_V1 as _SCHEMA_BIB_S2_V1,
     SCHEMA_SCHOLARLY_PAPER_V1 as _SCHEMA_SCHOLARLY_PAPER_V1,

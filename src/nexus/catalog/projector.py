@@ -134,6 +134,19 @@ class Projector:
             ),
         )
 
+    def _v0_owner_deleted(self, payload: Any) -> None:
+        # nexus-o6aa.9.4: dedupe-driven owner retirement under
+        # NEXUS_EVENT_SOURCED=1. Re-deleting a missing row is a no-op.
+        # Documents under this owner come out via their own
+        # DocumentDeleted events; we do not cascade here because the
+        # projection contract is one event = one row mutation.
+        if not payload.owner_id:
+            return
+        self._db.execute(
+            "DELETE FROM owners WHERE tumbler_prefix = ?",
+            (payload.owner_id,),
+        )
+
     def _v0_document_registered(self, payload: Any) -> None:
         # The existing schema is tumbler-keyed; v: 0 synthesis stuffs the
         # tumbler into both ``payload.tumbler`` (legacy) and ``payload.doc_id``
@@ -348,6 +361,7 @@ def _build_dispatch() -> dict[tuple[str, int], Any]:
     return {
         # v: 0 — synthesized from existing JSONL
         (ev.TYPE_OWNER_REGISTERED, 0):       Projector._v0_owner_registered,
+        (ev.TYPE_OWNER_DELETED, 0):          Projector._v0_owner_deleted,
         (ev.TYPE_COLLECTION_CREATED, 0):     Projector._v0_owner_or_collection_noop,
         (ev.TYPE_COLLECTION_SUPERSEDED, 0):  Projector._v0_owner_or_collection_noop,
         (ev.TYPE_DOCUMENT_REGISTERED, 0):    Projector._v0_document_registered,
@@ -361,6 +375,7 @@ def _build_dispatch() -> dict[tuple[str, int], Any]:
         (ev.TYPE_LINK_DELETED, 0):           Projector._v0_link_deleted,
         # v: 1 — Phase 3 ships these
         (ev.TYPE_OWNER_REGISTERED, 1):       Projector._v1_unsupported,
+        (ev.TYPE_OWNER_DELETED, 1):          Projector._v1_unsupported,
         (ev.TYPE_COLLECTION_CREATED, 1):     Projector._v1_unsupported,
         (ev.TYPE_COLLECTION_SUPERSEDED, 1):  Projector._v1_unsupported,
         (ev.TYPE_DOCUMENT_REGISTERED, 1):    Projector._v1_unsupported,

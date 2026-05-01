@@ -273,22 +273,80 @@ def apply_remove_plan(cat: "Catalog", op: OrphanPlan) -> tuple[int, int]:
         })
     cat._append_jsonl(cat._owners_path, {"owner": orphan_prefix, "_deleted": True})
 
-    # 4. SQL deletion.
-    if doc_tumblers:
-        cat._db.execute(
-            f"DELETE FROM links WHERE from_tumbler IN ({placeholders}) "
-            f"OR to_tumbler IN ({placeholders})",
-            (*doc_tumblers, *doc_tumblers),
+    # 4. SQL deletion. Under NEXUS_EVENT_SOURCED=1 every mutation must
+    # travel through events.jsonl so the projector's rebuild is the only
+    # source of truth (RDR-101 Phase 3, nexus-o6aa.9.4 — blocks ζ). The
+    # legacy direct-DELETE path is retained for backward compatibility
+    # under the gate-off configuration; the JSONL tombstones above are
+    # written in both modes (no-op under ES rebuild but kept for the
+    # cutover window).
+    if cat._event_sourced_enabled:
+        from nexus.catalog.catalog import (
+            _DocumentDeletedPayload,
+            _LinkDeletedPayload,
+            _OwnerDeletedPayload,
+            _make_event,
         )
-    cat._db.execute(f"DELETE FROM documents WHERE {clause}", params)
-    cat._db.execute(
-        "DELETE FROM owners WHERE tumbler_prefix = ?", (orphan_prefix,),
-    )
-    cat._db.commit()
+
+        # Order: links first (so the projector mutates dependent rows
+        # before the documents that anchor them), then documents, then
+        # the owner row last. The projector contract accepts any order
+        # for v: 0 events but operator-readable replay benefits from
+        # the natural dependency ordering.
+        for r in link_rows:
+            event = _make_event(
+                _LinkDeletedPayload(
+                    from_doc=r[0],
+                    to_doc=r[1],
+                    link_type=r[2],
+                    reason="dedupe.orphan",
+                ),
+                v=0,
+            )
+            cat._write_to_event_log(event)
+            cat._projector.apply(event)
+
+        for r in rows:
+            event = _make_event(
+                _DocumentDeletedPayload(
+                    doc_id=r[0],
+                    tumbler=r[0],
+                    reason="dedupe.orphan",
+                ),
+                v=0,
+            )
+            cat._write_to_event_log(event)
+            cat._projector.apply(event)
+
+        cat._write_to_event_log(
+            owner_event := _make_event(
+                _OwnerDeletedPayload(
+                    owner_id=orphan_prefix,
+                    reason="dedupe.orphan",
+                ),
+                v=0,
+            )
+        )
+        cat._projector.apply(owner_event)
+
+        cat._db.commit()
+    else:
+        if doc_tumblers:
+            cat._db.execute(
+                f"DELETE FROM links WHERE from_tumbler IN ({placeholders}) "
+                f"OR to_tumbler IN ({placeholders})",
+                (*doc_tumblers, *doc_tumblers),
+            )
+        cat._db.execute(f"DELETE FROM documents WHERE {clause}", params)
+        cat._db.execute(
+            "DELETE FROM owners WHERE tumbler_prefix = ?", (orphan_prefix,),
+        )
+        cat._db.commit()
 
     _log.info(
         "catalog.dedupe.remove_plan_applied",
         orphan=op.orphan_name, docs=len(rows), links=len(link_rows),
+        event_sourced=cat._event_sourced_enabled,
     )
     return len(rows), len(link_rows)
 
