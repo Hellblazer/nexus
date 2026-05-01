@@ -372,7 +372,16 @@ class TestEnsureConsistentEventSourced:
         d.mkdir()
         cat_a = Catalog(d, d / ".catalog.db")
         owner = cat_a.register_owner("nexus", "repo", repo_hash="abab")
+        # Register enough documents that the bootstrap guardrail
+        # (RDR-101 Phase 3 follow-up B floor at 1) unambiguously
+        # passes — leaving the v:1 raise as the failure path the
+        # test is exercising. With one document, a poisoned v:1
+        # DocumentDeleted decrements event_doc_count to 0 < 1, the
+        # guardrail fires before the rebuild attempt, and the
+        # atomicity invariant has nothing to assert against.
         a = cat_a.register(owner, "a.md", content_type="prose")
+        cat_a.register(owner, "b.md", content_type="prose")
+        cat_a.register(owner, "c.md", content_type="prose")
         cat_a._db.close()
 
         # Append a v: 1 event after the legitimate v: 0 events. The
