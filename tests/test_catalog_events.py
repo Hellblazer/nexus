@@ -69,9 +69,10 @@ class TestPayloadRegistry:
         assert ev.payload_class("FutureEventType") is None
 
     def test_event_type_count_matches_rdr_101(self):
-        # RDR-101 §Event log enumerates exactly 12 event types.
+        # RDR-101 §Event log enumerated 12 event types at Phase 1; Phase 3
+        # follow-up nexus-o6aa.9.4 added OwnerDeleted (v: 0 dedupe path).
         # Update this assertion alongside any addition.
-        assert len(ev.ALL_EVENT_TYPES) == 12
+        assert len(ev.ALL_EVENT_TYPES) == 13
 
 
 class TestEnvelopeRoundtrip:
@@ -135,6 +136,10 @@ class TestEnvelopeRoundtrip:
             ev.DocumentDeletedPayload(
                 doc_id=ev.new_doc_id(),
                 reason="user-requested",
+            ),
+            ev.OwnerDeletedPayload(
+                owner_id="1.42",
+                reason="dedupe.orphan",
             ),
             ev.ChunkIndexedPayload(
                 chunk_id=ev.new_chunk_id(),
