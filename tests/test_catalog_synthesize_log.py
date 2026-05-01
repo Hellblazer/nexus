@@ -131,30 +131,49 @@ class TestWriteAndOverwrite:
         assert second.exit_code != 0
         assert "non-empty" in second.output.lower()
 
-    def test_force_truncates_and_rewrites(self, isolated_nexus, runner):
+    def test_force_truncates_and_preserves_doc_ids(
+        self, isolated_nexus, runner,
+    ):
+        """--force preserves the prior tumbler→doc_id mapping.
+
+        Pre-fix, --force minted fresh UUID7s for every tumbler, which
+        silently invalidated every T3 chunk's doc_id metadata that the
+        prior ``t3-backfill-doc-id`` had written and made the doctor's
+        --t3-doc-id-coverage check catastrophically fail. The
+        regression guard below asserts the post-fix contract:
+        doc_ids for tumblers that already appeared in the prior log
+        carry through the --force re-synthesis unchanged.
+        """
         cat = _build_initialized_catalog(isolated_nexus)
         cat._db.close()
 
         runner.invoke(synthesize_log_cmd, [])
         log = EventLog(isolated_nexus)
         first_events = list(log.replay())
-        first_doc_ids = {
-            e.payload.doc_id for e in first_events
-            if e.type == ev.TYPE_DOCUMENT_REGISTERED
+        first_by_tumbler = {
+            e.payload.tumbler: e.payload.doc_id
+            for e in first_events
+            if e.type == ev.TYPE_DOCUMENT_REGISTERED and e.payload.tumbler
         }
+        assert first_by_tumbler  # sanity
 
         result = runner.invoke(synthesize_log_cmd, ["--force"])
         assert result.exit_code == 0
         second_events = list(log.replay())
         # Same event count.
         assert len(second_events) == len(first_events)
-        second_doc_ids = {
-            e.payload.doc_id for e in second_events
-            if e.type == ev.TYPE_DOCUMENT_REGISTERED
+        second_by_tumbler = {
+            e.payload.tumbler: e.payload.doc_id
+            for e in second_events
+            if e.type == ev.TYPE_DOCUMENT_REGISTERED and e.payload.tumbler
         }
-        # Fresh UUID7s on every synthesize-log run — the canonical
-        # doc_ids are different even though the tumblers are the same.
-        assert first_doc_ids.isdisjoint(second_doc_ids)
+        # Every tumbler that existed in the prior log keeps its doc_id.
+        for tumbler, doc_id in first_by_tumbler.items():
+            assert second_by_tumbler.get(tumbler) == doc_id, (
+                f"--force changed the doc_id for tumbler {tumbler!r}: "
+                f"{first_by_tumbler[tumbler]!r} → "
+                f"{second_by_tumbler.get(tumbler)!r}"
+            )
 
 
 # ── UUID7 minting + tumbler preservation ─────────────────────────────────

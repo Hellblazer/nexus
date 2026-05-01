@@ -652,9 +652,11 @@ class Catalog:
             return
         if not self._events_path.exists():
             self._events_path.touch()
-        line = json.dumps(
-            event.to_dict(), default=str, separators=(",", ":"),
-        )
+        # Match EventLog.append: no default=str. Non-JSON-native values
+        # in the payload raise TypeError rather than round-tripping as
+        # silently-coerced strings. Catalog mutators must not stuff
+        # datetime / Path / Decimal into payload meta.
+        line = json.dumps(event.to_dict(), separators=(",", ":"))
         with self._events_path.open("a") as f:
             f.write(line)
             f.write("\n")
@@ -1092,41 +1094,50 @@ class Catalog:
         """
         if str(tumbler) == str(canonical):
             raise ValueError(f"self-alias rejected: {tumbler} → {canonical}")
-        # Read current row (by raw tumbler — do not follow alias, we want
-        # to update THIS row specifically).
-        raw = self.resolve(tumbler, follow_alias=False)
-        if raw is None:
-            return
-        self._db.execute(
-            "UPDATE documents SET alias_of = ? WHERE tumbler = ?",
-            (str(canonical), str(tumbler)),
-        )
-        self._db.commit()
-        # Append updated JSONL record so a future rebuild sees the alias.
-        updated = DocumentRecord(
-            tumbler=str(tumbler),
-            title=raw.title,
-            author=raw.author,
-            year=raw.year,
-            content_type=raw.content_type,
-            file_path=raw.file_path,
-            corpus=raw.corpus,
-            physical_collection=raw.physical_collection,
-            chunk_count=raw.chunk_count,
-            head_hash=raw.head_hash,
-            indexed_at=raw.indexed_at,
-            meta=raw.meta,
-            source_mtime=raw.source_mtime,
-            alias_of=str(canonical),
-        )
-        self._append_jsonl(self._documents_path, updated.__dict__)
-        self._emit_shadow_event(_make_event(
-            _DocumentAliasedPayload(
-                alias_doc_id=str(tumbler),
-                canonical_doc_id=str(canonical),
-            ),
-            v=0,
-        ))
+        # Acquire the catalog directory flock so the JSONL append and
+        # the shadow-event emit (which both have a "caller holds the
+        # flock" contract) cannot race a concurrent writer. Pre-PR-F
+        # this method was unlocked because it was JSONL+SQLite-only;
+        # adding the shadow emit made the lock load-bearing.
+        dir_fd = self._acquire_lock()
+        try:
+            # Read current row (by raw tumbler — do not follow alias, we want
+            # to update THIS row specifically).
+            raw = self.resolve(tumbler, follow_alias=False)
+            if raw is None:
+                return
+            self._db.execute(
+                "UPDATE documents SET alias_of = ? WHERE tumbler = ?",
+                (str(canonical), str(tumbler)),
+            )
+            self._db.commit()
+            # Append updated JSONL record so a future rebuild sees the alias.
+            updated = DocumentRecord(
+                tumbler=str(tumbler),
+                title=raw.title,
+                author=raw.author,
+                year=raw.year,
+                content_type=raw.content_type,
+                file_path=raw.file_path,
+                corpus=raw.corpus,
+                physical_collection=raw.physical_collection,
+                chunk_count=raw.chunk_count,
+                head_hash=raw.head_hash,
+                indexed_at=raw.indexed_at,
+                meta=raw.meta,
+                source_mtime=raw.source_mtime,
+                alias_of=str(canonical),
+            )
+            self._append_jsonl(self._documents_path, updated.__dict__)
+            self._emit_shadow_event(_make_event(
+                _DocumentAliasedPayload(
+                    alias_doc_id=str(tumbler),
+                    canonical_doc_id=str(canonical),
+                ),
+                v=0,
+            ))
+        finally:
+            self._release_lock(dir_fd)
 
     def resolve_path(self, tumbler: Tumbler) -> Path | None:
         """Return absolute path for the document's file_path.
@@ -1550,6 +1561,42 @@ class Catalog:
                 (new, old),
             )
             self._db.commit()
+            # Shadow-emit one DocumentRegistered per renamed row with
+            # the new physical_collection. The projector's INSERT OR
+            # REPLACE makes the replay state converge on the new
+            # collection name. Pre-fix this method emitted nothing,
+            # so a replayed events.jsonl produced rows with the OLD
+            # physical_collection, breaking the doctor's replay-equality
+            # check. Emitting after db.commit() (same crash-window
+            # discipline as unlink/bulk_unlink) keeps the event log
+            # consistent with the durable SQLite state.
+            owner_addr_for = lambda t: ".".join(t.split(".")[:2])
+            for row in rows:
+                meta_dict = json.loads(row[11]) if row[11] else {}
+                self._emit_shadow_event(_make_event(
+                    _DocumentRegisteredPayload(
+                        doc_id=row[0],
+                        owner_id=owner_addr_for(row[0]),
+                        content_type=row[4] or "",
+                        source_uri=row[13] or "",
+                        coll_id=new,
+                        title=row[1] or "",
+                        source_mtime=float(row[12] or 0.0),
+                        indexed_at_doc=row[10] or "",
+                        tumbler=row[0],
+                        author=row[2] or "",
+                        year=int(row[3] or 0),
+                        file_path=row[5] or "",
+                        corpus=row[6] or "",
+                        physical_collection=new,
+                        chunk_count=int(row[8] or 0),
+                        head_hash=row[9] or "",
+                        indexed_at=row[10] or "",
+                        alias_of="",
+                        meta=dict(meta_dict),
+                    ),
+                    v=0,
+                ))
             return len(rows)
         finally:
             self._release_lock(dir_fd)
@@ -1588,6 +1635,7 @@ class Catalog:
                 _DocumentDeletedPayload(
                     doc_id=str(tumbler),
                     reason="catalog.delete_document",
+                    tumbler=str(tumbler),
                 ),
                 v=0,
             ))
@@ -2044,6 +2092,15 @@ class Catalog:
                 }
                 self._append_jsonl(self._links_path, tombstone)
                 self._db.execute("DELETE FROM links WHERE id = ?", (row_id,))
+
+            self._db.commit()
+            # Emit shadow events AFTER db.commit() so a process crash
+            # between the DELETE and the commit cannot leave events.jsonl
+            # claiming a deletion that SQLite has not yet committed.
+            # Pre-fix the emit was inside the per-row loop, opening a
+            # crash window where the event log diverged from the
+            # authoritative SQLite state.
+            for row_id, lt, original_created_by in rows:
                 self._emit_shadow_event(_make_event(
                     _LinkDeletedPayload(
                         from_doc=str(from_t),
@@ -2053,8 +2110,6 @@ class Catalog:
                     ),
                     v=0,
                 ))
-
-            self._db.commit()
             return len(rows)
         finally:
             self._release_lock(dir_fd)
@@ -2212,6 +2267,10 @@ class Catalog:
                     "DELETE FROM links WHERE from_tumbler=? AND to_tumbler=? AND link_type=?",
                     (str(lnk.from_tumbler), str(lnk.to_tumbler), lnk.link_type),
                 )
+            self._db.commit()
+            # Emit shadow events AFTER db.commit() (see ``unlink`` for the
+            # crash-window rationale).
+            for lnk in matching:
                 self._emit_shadow_event(_make_event(
                     _LinkDeletedPayload(
                         from_doc=str(lnk.from_tumbler),
@@ -2221,7 +2280,6 @@ class Catalog:
                     ),
                     v=0,
                 ))
-            self._db.commit()
             return len(matching)
         finally:
             self._release_lock(dir_fd)

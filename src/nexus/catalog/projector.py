@@ -141,14 +141,33 @@ class Projector:
         )
 
     def _v0_document_aliased(self, payload: Any) -> None:
-        # The Phase 1 SQLite schema stores ``alias_of`` as a column on the
-        # ``documents`` row. ``DocumentRegistered`` populated it already
-        # for v: 0 synthesis; ``DocumentAliased`` is a no-op for the
-        # tumbler-keyed projection. Future projections (a separate
-        # ``aliases`` table or alias-graph view) consume this event;
-        # Phase 1 just keeps the dispatch entry registered so the doctor
-        # verb can verify the alias graph round-trips through the log.
-        return
+        # Two emit paths produce DocumentAliased events that the Phase 1
+        # SQLite schema (``documents.alias_of`` column) needs to track:
+        #
+        # 1. Synthesize-from-JSONL emits DocumentRegistered (with
+        #    ``alias_of`` populated) FOLLOWED BY DocumentAliased. The
+        #    DocumentRegistered's INSERT OR REPLACE already wrote the
+        #    correct alias_of column; the DocumentAliased UPDATE here
+        #    is idempotent on that row.
+        # 2. Shadow-emit ``Catalog.set_alias`` emits ONLY
+        #    DocumentAliased (no preceding DocumentRegistered for the
+        #    aliased row). Without an UPDATE here, replaying that log
+        #    leaves the projected SQLite row with empty alias_of,
+        #    breaking the alias graph.
+        #
+        # The UPDATE is keyed on ``alias_doc_id`` which equals the
+        # tumbler when ``mint_doc_id=False`` (the case for both
+        # shadow-emit and the Phase 1 doctor verb). For
+        # ``mint_doc_id=True`` synthesize-log paths the alias_doc_id is
+        # a UUID7 that no tumbler-keyed row matches, so the UPDATE is a
+        # safe no-op (and the alias_of column was already set by the
+        # preceding DocumentRegistered's INSERT OR REPLACE).
+        if not payload.alias_doc_id or not payload.canonical_doc_id:
+            return
+        self._db.execute(
+            "UPDATE documents SET alias_of = ? WHERE tumbler = ?",
+            (payload.canonical_doc_id, payload.alias_doc_id),
+        )
 
     def _v0_document_renamed(self, payload: Any) -> None:
         # v: 0 synthesis never emits this event today (renames before the
@@ -164,11 +183,19 @@ class Projector:
         )
 
     def _v0_document_deleted(self, payload: Any) -> None:
-        if not payload.doc_id:
+        # Prefer the legacy ``tumbler`` field for the v: 0 schema's
+        # tumbler-keyed DELETE. ``doc_id`` is a UUID7 when the Phase 2
+        # synthesizer ran with ``mint_doc_id=True``; using it as the
+        # WHERE clause would silently no-op the deletion. When
+        # ``tumbler`` is empty (e.g. v: 1 native writes that haven't
+        # populated it yet, or hand-emitted events), fall back to
+        # ``doc_id`` for back-compat with the Phase 1 doctor verb path.
+        tumbler = payload.tumbler or payload.doc_id
+        if not tumbler:
             return
         self._db.execute(
             "DELETE FROM documents WHERE tumbler = ?",
-            (payload.doc_id,),
+            (tumbler,),
         )
 
     def _v0_document_enriched(self, payload: Any) -> None:

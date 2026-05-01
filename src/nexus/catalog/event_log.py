@@ -72,8 +72,16 @@ class EventLog:
         log in append mode, writes one JSON line, and releases the lock.
         The lock pattern matches ``Catalog._acquire_lock`` exactly so
         Phase 1 writers and the existing JSONL writers don't race.
+
+        Raises ``TypeError`` if the event payload contains values
+        ``json.dumps`` cannot serialize (e.g. ``datetime``, ``Path``,
+        ``Decimal``). Earlier versions silently coerced these via
+        ``default=str``, which round-tripped them as strings on replay
+        and produced silent data corruption. Callers must ensure
+        ``meta`` and ``payload`` dict fields contain JSON-native
+        primitives before calling.
         """
-        line = json.dumps(event.to_dict(), default=str, separators=(",", ":"))
+        line = json.dumps(event.to_dict(), separators=(",", ":"))
         dir_fd = os.open(str(self._dir), os.O_RDONLY)
         try:
             fcntl.flock(dir_fd, fcntl.LOCK_EX)
@@ -91,11 +99,14 @@ class EventLog:
         catalog row produces multiple events (e.g. tombstoned row →
         ``DocumentRegistered`` + ``DocumentDeleted``). A single flock keeps
         the batch atomic with respect to other catalog writers.
+
+        Like ``append``, raises ``TypeError`` on non-JSON-serializable
+        payload values rather than silently coercing them.
         """
         if not events:
             return
         lines = [
-            json.dumps(e.to_dict(), default=str, separators=(",", ":"))
+            json.dumps(e.to_dict(), separators=(",", ":"))
             for e in events
         ]
         dir_fd = os.open(str(self._dir), os.O_RDONLY)
@@ -110,7 +121,17 @@ class EventLog:
             os.close(dir_fd)
 
     def replay(self) -> Iterator[Event]:
-        """Yield events in append order. Skips malformed lines with a warning."""
+        """Yield events in append order. Skips malformed lines with a warning.
+
+        Catches the full failure surface so one bad line does not abort the
+        iterator: JSONDecodeError on garbage text, missing-``type`` shape
+        errors, and any TypeError/AttributeError/ValueError that
+        ``Event.from_dict`` raises on a syntactically-valid JSON line whose
+        payload has the wrong shape (``payload: null``, ``payload: [1,2,3]``,
+        ``v: "abc"``, etc.). The catalog event log is git-managed and
+        machine-edited; a hard fail on a single malformed line would brick
+        the projector for the whole catalog.
+        """
         if not self._path.exists():
             return
         with self._path.open() as f:
@@ -136,7 +157,17 @@ class EventLog:
                         preview=line[:80],
                     )
                     continue
-                yield Event.from_dict(obj)
+                try:
+                    yield Event.from_dict(obj)
+                except (TypeError, AttributeError, ValueError) as exc:
+                    _log.warning(
+                        "event_log_payload_error",
+                        path=str(self._path),
+                        lineno=lineno,
+                        preview=line[:80],
+                        error=str(exc),
+                    )
+                    continue
 
     def truncate(self) -> None:
         """Drop the entire event log. Test-only — production code never calls."""

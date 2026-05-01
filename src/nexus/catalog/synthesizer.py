@@ -56,7 +56,10 @@ _log = structlog.get_logger()
 
 
 def synthesize_from_jsonl(
-    catalog_dir: Path, *, mint_doc_id: bool = False,
+    catalog_dir: Path,
+    *,
+    mint_doc_id: bool = False,
+    preserve_doc_ids: dict[str, str] | None = None,
 ) -> Iterator[Event]:
     """Yield v: 0 events that reproduce the catalog state under ``catalog_dir``.
 
@@ -79,6 +82,16 @@ def synthesize_from_jsonl(
       still writes a tumbler-keyed SQLite row, and the doc_id is carried
       in the event log for Phase 3+ canonical use.
 
+    ``preserve_doc_ids`` (Phase 2 ``synthesize-log --force`` use case):
+    a tumbler→doc_id mapping carried over from a prior synthesis run.
+    For each tumbler that appears in ``preserve_doc_ids``, that doc_id
+    is reused instead of minting a fresh UUID7. Tumblers absent from
+    the map get fresh UUID7s. Without this, ``--force`` would mint
+    new doc_ids and silently invalidate every T3 chunk's doc_id
+    metadata that the prior ``t3-backfill-doc-id`` run wrote — the
+    doctor's ``--t3-doc-id-coverage`` would catastrophically fail
+    until the operator re-ran the backfill.
+
     Aliased rows (``DocumentAliased`` events) follow the same rule: when
     ``mint_doc_id=True``, ``alias_doc_id`` and ``canonical_doc_id`` are
     the freshly-minted UUID7s for the alias and canonical rows
@@ -100,6 +113,14 @@ def synthesize_from_jsonl(
     tumbler_to_doc_id: dict[str, str]
     if mint_doc_id and docs_path.exists():
         tumbler_to_doc_id = _build_tumbler_to_doc_id(docs_path)
+        if preserve_doc_ids:
+            # Preserve doc_ids that already exist in the prior log so a
+            # re-synthesis (--force) does not invalidate downstream T3
+            # metadata. Tumblers absent from the prior log keep their
+            # freshly-minted UUID7.
+            for tumbler, doc_id in preserve_doc_ids.items():
+                if tumbler in tumbler_to_doc_id and doc_id:
+                    tumbler_to_doc_id[tumbler] = doc_id
     else:
         tumbler_to_doc_id = {}
 
@@ -248,6 +269,11 @@ def _synthesize_documents(
             payload=ev.DocumentDeletedPayload(
                 doc_id=deleted_doc_id,
                 reason="synthesized_from_tombstone",
+                # Always preserve the tumbler so the v: 0 projector's
+                # tumbler-keyed DELETE finds the SQLite row even when
+                # ``mint_doc_id=True`` mints a UUID7 doc_id that the
+                # tumbler-keyed schema doesn't know about.
+                tumbler=tumbler,
             ),
             ts=_synthesized_ts(obj),
         )
