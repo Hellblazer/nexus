@@ -227,128 +227,169 @@ def apply_remove_plan(cat: "Catalog", op: OrphanPlan) -> tuple[int, int]:
     also dropped. Writes JSONL tombstones so the deletion survives a
     future rebuild.
 
+    Atomicity (RDR-101 Phase 3 follow-up A, nexus-o6aa.9.6):
+
+    - Acquires the catalog directory flock for the duration of the
+      whole operation. ``_write_to_event_log``'s contract requires the
+      caller to hold this lock (see ``Catalog._write_to_event_log`` at
+      catalog.py:852); every other ES mutator (``set_alias``,
+      ``unlink``, ``register``, …) acquires it. Pre-fix this function
+      did not, so a concurrent ``nx catalog register`` from another
+      process could interleave appends in events.jsonl AND the legacy
+      JSONL files.
+    - Under ES, writes ALL events to events.jsonl FIRST (a single
+      flock-held batch via the existing per-event helper, which honors
+      the outer flock), THEN projects them inside
+      ``cat._db.transaction()``. If projection raises on event N of M,
+      the SQLite transaction rolls back to the pre-dedupe state while
+      events.jsonl carries the full batch; the next
+      ``_ensure_consistent`` mtime tick replays events.jsonl through
+      the projector and converges on the intended post-dedupe state.
+      Pre-fix the per-event interleave (write log → project → write log
+      → project → … → single commit) split events from SQLite on
+      mid-loop projector failure with no operator-visible recovery.
+
     Returns ``(deleted_docs, deleted_links)``.
     """
     orphan_prefix = op.orphan_prefix
     clause, params = cat._prefix_sql(orphan_prefix)
 
-    # 1. Collect docs to delete (need the tombstone payload before SQL DELETE).
-    rows = cat._db.execute(
-        f"SELECT tumbler, title, author, year, content_type, file_path, "
-        f"corpus, physical_collection, chunk_count, head_hash, indexed_at, "
-        f"metadata, source_mtime, alias_of FROM documents WHERE {clause}",
-        params,
-    ).fetchall()
-    doc_tumblers = [r[0] for r in rows]
+    dir_fd = cat._acquire_lock()
+    try:
+        # 1. Collect docs to delete (need the tombstone payload before
+        # SQL DELETE).
+        rows = cat._db.execute(
+            f"SELECT tumbler, title, author, year, content_type, file_path, "
+            f"corpus, physical_collection, chunk_count, head_hash, indexed_at, "
+            f"metadata, source_mtime, alias_of FROM documents WHERE {clause}",
+            params,
+        ).fetchall()
+        doc_tumblers = [r[0] for r in rows]
 
-    # 2. Collect links to delete.
-    placeholders = ",".join("?" * len(doc_tumblers)) if doc_tumblers else "''"
-    link_rows = cat._db.execute(
-        f"SELECT from_tumbler, to_tumbler, link_type, from_span, to_span, "
-        f"created_by, created_at, metadata FROM links "
-        f"WHERE from_tumbler IN ({placeholders}) OR to_tumbler IN ({placeholders})",
-        (*doc_tumblers, *doc_tumblers) if doc_tumblers else (),
-    ).fetchall() if doc_tumblers else []
-
-    # 3. JSONL tombstones — documents, links, owner.
-    import json as _json
-    for r in rows:
-        cat._append_jsonl(cat._documents_path, {
-            "tumbler": r[0], "title": r[1], "author": r[2], "year": r[3],
-            "content_type": r[4], "file_path": r[5], "corpus": r[6],
-            "physical_collection": r[7], "chunk_count": r[8],
-            "head_hash": r[9], "indexed_at": r[10],
-            "meta": _json.loads(r[11]) if r[11] else {},
-            "source_mtime": r[12] or 0.0,
-            "alias_of": r[13] or "",
-            "_deleted": True,
-        })
-    for r in link_rows:
-        cat._append_jsonl(cat._links_path, {
-            "from_t": r[0], "to_t": r[1], "link_type": r[2],
-            "from_span": r[3] or "", "to_span": r[4] or "",
-            "created_by": r[5], "created_at": r[6] or "",
-            "meta": _json.loads(r[7]) if r[7] else {},
-            "_deleted": True,
-        })
-    cat._append_jsonl(cat._owners_path, {"owner": orphan_prefix, "_deleted": True})
-
-    # 4. SQL deletion. Under NEXUS_EVENT_SOURCED=1 every mutation must
-    # travel through events.jsonl so the projector's rebuild is the only
-    # source of truth (RDR-101 Phase 3, nexus-o6aa.9.4 — blocks ζ). The
-    # legacy direct-DELETE path is retained for backward compatibility
-    # under the gate-off configuration; the JSONL tombstones above are
-    # written in both modes (no-op under ES rebuild but kept for the
-    # cutover window).
-    if cat._event_sourced_enabled:
-        from nexus.catalog.catalog import (
-            _DocumentDeletedPayload,
-            _LinkDeletedPayload,
-            _OwnerDeletedPayload,
-            _make_event,
+        # 2. Collect links to delete.
+        placeholders = (
+            ",".join("?" * len(doc_tumblers)) if doc_tumblers else "''"
         )
+        link_rows = cat._db.execute(
+            f"SELECT from_tumbler, to_tumbler, link_type, from_span, to_span, "
+            f"created_by, created_at, metadata FROM links "
+            f"WHERE from_tumbler IN ({placeholders}) "
+            f"OR to_tumbler IN ({placeholders})",
+            (*doc_tumblers, *doc_tumblers) if doc_tumblers else (),
+        ).fetchall() if doc_tumblers else []
 
-        # Order: links first (so the projector mutates dependent rows
-        # before the documents that anchor them), then documents, then
-        # the owner row last. The projector contract accepts any order
-        # for v: 0 events but operator-readable replay benefits from
-        # the natural dependency ordering.
-        for r in link_rows:
-            event = _make_event(
-                _LinkDeletedPayload(
-                    from_doc=r[0],
-                    to_doc=r[1],
-                    link_type=r[2],
-                    reason="dedupe.orphan",
-                ),
-                v=0,
-            )
-            cat._write_to_event_log(event)
-            cat._projector.apply(event)
-
+        # 3. JSONL tombstones — documents, links, owner. Written in
+        # both modes (no-op under ES rebuild but kept for the cutover
+        # window).
+        import json as _json
         for r in rows:
-            event = _make_event(
-                _DocumentDeletedPayload(
-                    doc_id=r[0],
-                    tumbler=r[0],
-                    reason="dedupe.orphan",
-                ),
-                v=0,
-            )
-            cat._write_to_event_log(event)
-            cat._projector.apply(event)
-
-        cat._write_to_event_log(
-            owner_event := _make_event(
-                _OwnerDeletedPayload(
-                    owner_id=orphan_prefix,
-                    reason="dedupe.orphan",
-                ),
-                v=0,
-            )
+            cat._append_jsonl(cat._documents_path, {
+                "tumbler": r[0], "title": r[1], "author": r[2], "year": r[3],
+                "content_type": r[4], "file_path": r[5], "corpus": r[6],
+                "physical_collection": r[7], "chunk_count": r[8],
+                "head_hash": r[9], "indexed_at": r[10],
+                "meta": _json.loads(r[11]) if r[11] else {},
+                "source_mtime": r[12] or 0.0,
+                "alias_of": r[13] or "",
+                "_deleted": True,
+            })
+        for r in link_rows:
+            cat._append_jsonl(cat._links_path, {
+                "from_t": r[0], "to_t": r[1], "link_type": r[2],
+                "from_span": r[3] or "", "to_span": r[4] or "",
+                "created_by": r[5], "created_at": r[6] or "",
+                "meta": _json.loads(r[7]) if r[7] else {},
+                "_deleted": True,
+            })
+        cat._append_jsonl(
+            cat._owners_path, {"owner": orphan_prefix, "_deleted": True},
         )
-        cat._projector.apply(owner_event)
 
-        cat._db.commit()
-    else:
-        if doc_tumblers:
+        # 4. SQL deletion. Under NEXUS_EVENT_SOURCED=1 every mutation
+        # travels through events.jsonl; the legacy direct-DELETE path
+        # is retained for backward compatibility under the gate-off
+        # configuration.
+        if cat._event_sourced_enabled:
+            # Import from events.py (the canonical source) rather than
+            # catalog.py's private aliases — pre-fix this depended on
+            # ``catalog.py`` re-exporting the underscore-prefixed
+            # private names, a hidden cross-module coupling.
+            from nexus.catalog.events import (
+                DocumentDeletedPayload,
+                LinkDeletedPayload,
+                OwnerDeletedPayload,
+                make_event,
+            )
+
+            # Phase A: build all event envelopes upfront — pure data,
+            # no mutation. Order: links first (dependent rows before
+            # the documents that anchor them), then documents, then
+            # the owner row last. The projector contract is
+            # order-agnostic for v: 0 events but operator-readable
+            # replay benefits from the natural dependency ordering.
+            events: list = []
+            for r in link_rows:
+                events.append(make_event(
+                    LinkDeletedPayload(
+                        from_doc=r[0], to_doc=r[1], link_type=r[2],
+                        reason="dedupe.orphan",
+                    ),
+                    v=0,
+                ))
+            for r in rows:
+                events.append(make_event(
+                    DocumentDeletedPayload(
+                        doc_id=r[0], tumbler=r[0], reason="dedupe.orphan",
+                    ),
+                    v=0,
+                ))
+            events.append(make_event(
+                OwnerDeletedPayload(
+                    owner_id=orphan_prefix, reason="dedupe.orphan",
+                ),
+                v=0,
+            ))
+
+            # Phase B: durably append every event to events.jsonl
+            # under the outer flock. The per-event helper does not
+            # re-acquire the flock (caller holds it); each line is
+            # flushed and closed before the next opens, so a crash
+            # mid-batch leaves a prefix of events on disk which the
+            # next replay handles deterministically (the orphan rows
+            # are still gone in the projection).
+            for event in events:
+                cat._write_to_event_log(event)
+
+            # Phase C: project every event into SQLite inside one
+            # transaction. If apply raises on event N of M, the tx
+            # rolls back to the pre-dedupe state while events.jsonl
+            # already carries the full batch. _ensure_consistent on
+            # the next mtime tick replays the durable batch and
+            # converges on the intended post-dedupe state.
+            with cat._db.transaction():
+                for event in events:
+                    cat._projector.apply(event)
+        else:
+            if doc_tumblers:
+                cat._db.execute(
+                    f"DELETE FROM links WHERE from_tumbler IN ({placeholders}) "
+                    f"OR to_tumbler IN ({placeholders})",
+                    (*doc_tumblers, *doc_tumblers),
+                )
+            cat._db.execute(f"DELETE FROM documents WHERE {clause}", params)
             cat._db.execute(
-                f"DELETE FROM links WHERE from_tumbler IN ({placeholders}) "
-                f"OR to_tumbler IN ({placeholders})",
-                (*doc_tumblers, *doc_tumblers),
+                "DELETE FROM owners WHERE tumbler_prefix = ?", (orphan_prefix,),
             )
-        cat._db.execute(f"DELETE FROM documents WHERE {clause}", params)
-        cat._db.execute(
-            "DELETE FROM owners WHERE tumbler_prefix = ?", (orphan_prefix,),
-        )
-        cat._db.commit()
+            cat._db.commit()
 
-    _log.info(
-        "catalog.dedupe.remove_plan_applied",
-        orphan=op.orphan_name, docs=len(rows), links=len(link_rows),
-        event_sourced=cat._event_sourced_enabled,
-    )
-    return len(rows), len(link_rows)
+        _log.info(
+            "catalog.dedupe.remove_plan_applied",
+            orphan=op.orphan_name, docs=len(rows), links=len(link_rows),
+            event_sourced=cat._event_sourced_enabled,
+        )
+        return len(rows), len(link_rows)
+    finally:
+        cat._release_lock(dir_fd)
 
 
 def apply_plan(
