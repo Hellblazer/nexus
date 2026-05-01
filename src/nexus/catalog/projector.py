@@ -141,7 +141,44 @@ class Projector:
         # DocumentDeleted events; we do not cascade here because the
         # projection contract is one event = one row mutation.
         if not payload.owner_id:
+            # nexus-o6aa.9.8: malformed event (hand-emitted, synthesis
+            # bug, or a future v: 1 path that didn't populate the
+            # field). Surface it in the structured log rather than
+            # silently absorbing — replay should be observable.
+            _log.warning(
+                "projector_owner_deleted_no_owner_id",
+                payload=str(payload),
+            )
             return
+
+        # nexus-o6aa.9.8: protocol invariant — OwnerDeleted MUST be
+        # preceded by DocumentDeleted events for every document under
+        # the owner. The projection contract has no FK CASCADE; if a
+        # caller emits OwnerDeleted while documents under the prefix
+        # still exist in SQLite, the orphaned rows point at a
+        # non-existent owner. Surface this so a hand-emitted or
+        # synthesis-driven OwnerDeleted that skipped its DocumentDeleted
+        # prerequisites lands as a loud structured warning rather than
+        # a silently corrupted projection.
+        descendants = self._db.execute(
+            "SELECT COUNT(*) FROM documents WHERE tumbler LIKE ?",
+            (f"{payload.owner_id}.%",),
+        ).fetchone()
+        descendant_count = descendants[0] if descendants else 0
+        if descendant_count > 0:
+            _log.warning(
+                "projector_owner_deleted_with_extant_documents",
+                owner_id=payload.owner_id,
+                descendant_count=descendant_count,
+                note=(
+                    "OwnerDeleted projected while documents under the "
+                    "owner prefix still exist; protocol requires "
+                    "DocumentDeleted for every descendant first. "
+                    "Orphaned document rows now point at a non-existent "
+                    "owner."
+                ),
+            )
+
         self._db.execute(
             "DELETE FROM owners WHERE tumbler_prefix = ?",
             (payload.owner_id,),

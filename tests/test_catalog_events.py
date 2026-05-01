@@ -69,10 +69,32 @@ class TestPayloadRegistry:
         assert ev.payload_class("FutureEventType") is None
 
     def test_event_type_count_matches_rdr_101(self):
-        # RDR-101 §Event log enumerated 12 event types at Phase 1; Phase 3
-        # follow-up nexus-o6aa.9.4 added OwnerDeleted (v: 0 dedupe path).
-        # Update this assertion alongside any addition.
-        assert len(ev.ALL_EVENT_TYPES) == 13
+        # RDR-101 §Event log enumerated 12 event types at Phase 1;
+        # Phase 3 follow-up nexus-o6aa.9.4 added OwnerDeleted (v: 0
+        # dedupe path). Asserting both the count AND the explicit
+        # set membership so a future addition fails with a clear
+        # diagnostic instead of an opaque count mismatch (RDR-101
+        # Phase 3 follow-up C, nexus-o6aa.9.8).
+        expected = {
+            ev.TYPE_OWNER_REGISTERED,
+            ev.TYPE_OWNER_DELETED,  # added Phase 3 follow-up
+            ev.TYPE_COLLECTION_CREATED,
+            ev.TYPE_COLLECTION_SUPERSEDED,
+            ev.TYPE_DOCUMENT_REGISTERED,
+            ev.TYPE_DOCUMENT_RENAMED,
+            ev.TYPE_DOCUMENT_ALIASED,
+            ev.TYPE_DOCUMENT_ENRICHED,
+            ev.TYPE_DOCUMENT_DELETED,
+            ev.TYPE_CHUNK_INDEXED,
+            ev.TYPE_CHUNK_ORPHANED,
+            ev.TYPE_LINK_CREATED,
+            ev.TYPE_LINK_DELETED,
+        }
+        assert ev.ALL_EVENT_TYPES == expected, (
+            f"event-type set drifted; difference: "
+            f"added={ev.ALL_EVENT_TYPES - expected} "
+            f"removed={expected - ev.ALL_EVENT_TYPES}"
+        )
 
 
 class TestEnvelopeRoundtrip:

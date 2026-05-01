@@ -265,6 +265,13 @@ class TestShadowReplayRoundTrip:
     def test_register_register_link_unlink_delete(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ):
+        # RDR-101 Phase 3 follow-up C (nexus-o6aa.9.8): pin to legacy
+        # explicitly so the shadow path is the only writer of
+        # events.jsonl. Pre-fix this test inherited PR ζ's default-ON
+        # ES gate and silently exercised the ES write path while
+        # purporting to test shadow round-trip — passing for the
+        # wrong reason because ES also writes events.jsonl.
+        monkeypatch.setenv("NEXUS_EVENT_SOURCED", "0")
         monkeypatch.setenv("NEXUS_EVENT_LOG_SHADOW", "1")
         cat_dir = tmp_path / "catalog"
         cat_dir.mkdir()
@@ -309,6 +316,70 @@ class TestShadowReplayRoundTrip:
             # Links: both should be empty (link + unlink + delete leave 0 links).
             assert live_conn.execute("SELECT COUNT(*) FROM links").fetchone()[0] == 0
             assert proj_conn.execute("SELECT COUNT(*) FROM links").fetchone()[0] == 0
+        finally:
+            live_conn.close()
+            proj_conn.close()
+
+    def test_register_register_link_unlink_delete_under_es(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """ES-mode companion (RDR-101 Phase 3 follow-up C,
+        nexus-o6aa.9.8). The legacy-mode test above pins the shadow
+        path's round-trip invariant; this one exercises the same
+        register/link/unlink/delete sequence under
+        ``NEXUS_EVENT_SOURCED=1`` so the ES write path's events.jsonl
+        is similarly verified to replay into a byte-equal SQLite.
+
+        Without this test, a regression in the ES write path that
+        emits a malformed event (or omits one) would slip through —
+        the shadow-path test above runs only in legacy mode.
+        """
+        monkeypatch.setenv("NEXUS_EVENT_SOURCED", "1")
+        monkeypatch.delenv("NEXUS_EVENT_LOG_SHADOW", raising=False)
+        cat_dir = tmp_path / "catalog"
+        cat_dir.mkdir()
+        cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+
+        owner = cat.register_owner("nexus", "repo", repo_hash="ababab")
+        a = cat.register(owner, "a.md", content_type="prose", file_path="a.md")
+        b = cat.register(owner, "b.md", content_type="prose", file_path="b.md")
+        cat.link(a, b, link_type="cites", created_by="manual")
+        cat.unlink(a, b, link_type="cites")
+        cat.delete_document(b)
+
+        log = EventLog(cat_dir)
+        projected_path = tmp_path / "projected.db"
+        proj_db = CatalogDB(projected_path)
+        try:
+            Projector(proj_db).apply_all(log.replay())
+        finally:
+            proj_db.close()
+
+        live_conn = sqlite3.connect(str(cat_dir / ".catalog.db"))
+        proj_conn = sqlite3.connect(str(projected_path))
+        try:
+            for table in ("owners", "documents"):
+                cur = live_conn.execute(
+                    f"PRAGMA table_info({table})"
+                )
+                cols = ", ".join(r[1] for r in cur.fetchall())
+                live_rows = sorted(live_conn.execute(
+                    f"SELECT {cols} FROM {table} ORDER BY {cols}"
+                ).fetchall())
+                proj_rows = sorted(proj_conn.execute(
+                    f"SELECT {cols} FROM {table} ORDER BY {cols}"
+                ).fetchall())
+                assert live_rows == proj_rows, (
+                    f"ES mode: {table} rows differ:\n"
+                    f"  live:      {live_rows}\n"
+                    f"  projected: {proj_rows}"
+                )
+            assert live_conn.execute(
+                "SELECT COUNT(*) FROM links",
+            ).fetchone()[0] == 0
+            assert proj_conn.execute(
+                "SELECT COUNT(*) FROM links",
+            ).fetchone()[0] == 0
         finally:
             live_conn.close()
             proj_conn.close()
