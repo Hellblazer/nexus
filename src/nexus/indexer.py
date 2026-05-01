@@ -610,6 +610,7 @@ def _index_code_file(
     *,
     embed_fn: Callable | None = None,
     stage_timers: "StageTimers | None" = None,
+    doc_id_resolver: Callable[[Path], str] | None = None,
 ) -> int:
     """Index a single code file.  Delegates to nexus.code_indexer.index_code_file.
 
@@ -619,6 +620,11 @@ def _index_code_file(
     ``stage_timers`` (nexus-7niu) is an optional :class:`StageTimers` the
     per-file indexer writes chunking / embed / upload / retry times into.
     When ``None`` the instrumented blocks are no-ops; no overhead.
+
+    ``doc_id_resolver`` (RDR-101 Phase 3 PR δ Stage B.2) returns the
+    catalog ``Document.doc_id`` for *file* so code chunks land in T3
+    with a back-reference to the catalog. ``None`` is the legacy /
+    no-catalog path.
     """
     from nexus.code_indexer import index_code_file
     from nexus.index_context import IndexContext
@@ -638,6 +644,7 @@ def _index_code_file(
         force=force,
         embed_fn=embed_fn,
         stage_timers=stage_timers,
+        doc_id_resolver=doc_id_resolver,
     )
     return index_code_file(ctx, file)
 
@@ -1290,6 +1297,7 @@ def _run_index(
             force=force,
             embed_fn=_embed_fn,
             stage_timers=timers,
+            doc_id_resolver=_doc_id_resolver,
         )
         if on_file:
             on_file(file, chunks, time.monotonic() - t0)
