@@ -232,3 +232,142 @@ def test_dedupe_legacy_mode_unchanged(tmp_path, monkeypatch):
         (f"{orphan}.%",),
     ).fetchone()[0]
     assert remaining == 0
+
+
+# ─────────────────────────────────────────────────────────────────────
+# RDR-101 Phase 3 follow-up A (nexus-o6aa.9.6): atomicity tests.
+#
+# The pre-A implementation interleaved
+# ``_write_to_event_log + _projector.apply`` per event with a single
+# trailing commit. A mid-loop projector exception left events 1..N-1
+# durable in events.jsonl while the pending SQLite mutations rolled
+# back at the un-committed connection close — a split state with no
+# operator-visible diagnostic.
+#
+# Post-A: events are written first (durable batch), then projected
+# inside ``cat._db.transaction()``. A projector exception rolls the
+# whole projection back to the pre-dedupe state while events.jsonl
+# still carries the full batch; the next ``_ensure_consistent`` mtime
+# tick replays the durable batch and converges on the post-dedupe
+# state.
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_dedupe_acquires_flock(tmp_path, monkeypatch):
+    """``apply_remove_plan`` must acquire the catalog directory flock
+    at entry. Pre-fix every other ES mutator did but dedupe didn't, so
+    a concurrent ``register`` call could interleave appends in
+    events.jsonl and the legacy JSONL files.
+    """
+    cat = _make_catalog_es(tmp_path, monkeypatch)
+    orphan_prefix, _ = _populate_with_orphan(cat)
+
+    acquired: list[int] = []
+    released: list[int] = []
+    original_acquire = cat._acquire_lock
+    original_release = cat._release_lock
+
+    def tracked_acquire():
+        fd = original_acquire()
+        acquired.append(fd)
+        return fd
+
+    def tracked_release(fd):
+        released.append(fd)
+        return original_release(fd)
+
+    monkeypatch.setattr(cat, "_acquire_lock", tracked_acquire)
+    monkeypatch.setattr(cat, "_release_lock", tracked_release)
+
+    plan = OrphanPlan(
+        orphan_prefix=orphan_prefix, orphan_name="nexus-571b8edd",
+        action="remove", doc_count=2,
+    )
+    apply_remove_plan(cat, plan)
+
+    assert len(acquired) == 1, (
+        f"apply_remove_plan must acquire flock exactly once; got {acquired}"
+    )
+    assert acquired == released, (
+        f"every acquire must be paired with a release; got "
+        f"acquired={acquired} released={released}"
+    )
+
+
+def test_projector_failure_rolls_back_sqlite_but_log_durable(
+    tmp_path, monkeypatch,
+):
+    """Atomicity invariant: if ``_projector.apply`` raises mid-batch,
+    SQLite reverts to the pre-dedupe state (transaction rollback)
+    while events.jsonl carries the full event batch (durable). The
+    next ``_ensure_consistent`` rebuild replays the batch and
+    converges on the post-dedupe state.
+
+    Pre-fix the per-event interleave produced events 1..N-1 durable
+    plus uncommitted SQLite mutations 1..N-1 that rolled back at
+    connection close — split state with no operator diagnostic.
+    """
+    cat = _make_catalog_es(tmp_path, monkeypatch)
+    orphan_prefix, orphan_docs = _populate_with_orphan(cat)
+
+    pre_doc_count = cat._db.execute(
+        "SELECT COUNT(*) FROM documents WHERE tumbler LIKE ?",
+        (f"{orphan_prefix}.%",),
+    ).fetchone()[0]
+    pre_event_size = (
+        cat._events_path.read_text().count("\n")
+        if cat._events_path.exists() else 0
+    )
+
+    # Poison the projector to raise on the 3rd apply call.
+    original_apply = cat._projector.apply
+    call_count = [0]
+
+    def poisoned_apply(event):
+        call_count[0] += 1
+        if call_count[0] == 3:
+            raise RuntimeError("simulated projector failure on event 3")
+        return original_apply(event)
+
+    monkeypatch.setattr(cat._projector, "apply", poisoned_apply)
+
+    plan = OrphanPlan(
+        orphan_prefix=orphan_prefix, orphan_name="nexus-571b8edd",
+        action="remove", doc_count=2,
+    )
+    with pytest.raises(RuntimeError, match="simulated projector failure"):
+        apply_remove_plan(cat, plan)
+
+    # SQLite invariant: rolled back to pre-dedupe state.
+    post_doc_count = cat._db.execute(
+        "SELECT COUNT(*) FROM documents WHERE tumbler LIKE ?",
+        (f"{orphan_prefix}.%",),
+    ).fetchone()[0]
+    assert post_doc_count == pre_doc_count, (
+        "SQLite must roll back on projector failure; "
+        f"pre={pre_doc_count} post={post_doc_count}"
+    )
+
+    # events.jsonl invariant: full batch durably written before
+    # projection started.
+    post_event_lines = cat._events_path.read_text().splitlines()
+    new_event_count = len(post_event_lines) - pre_event_size
+    # 2 LinkDeleted + 2 DocumentDeleted + 1 OwnerDeleted == 5 new events.
+    assert new_event_count == 5, (
+        f"events.jsonl must carry the full batch even when projection "
+        f"failed; got {new_event_count} new events"
+    )
+
+    # Convergence invariant: after restoring the projector, force a
+    # rebuild and assert orphans stay deleted (the durable events
+    # replay correctly).
+    monkeypatch.setattr(cat._projector, "apply", original_apply)
+    _force_rebuild_from_events(cat)
+    final_count = cat._db.execute(
+        "SELECT COUNT(*) FROM documents WHERE tumbler LIKE ?",
+        (f"{orphan_prefix}.%",),
+    ).fetchone()[0]
+    assert final_count == 0, (
+        f"rebuild from durable events must converge on post-dedupe "
+        f"state; got {final_count} surviving orphan docs"
+    )
