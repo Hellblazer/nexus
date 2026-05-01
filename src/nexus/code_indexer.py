@@ -356,9 +356,19 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
 
     from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415
 
+    # Catalog Document.doc_id (RDR-101 Phase 3 PR δ): resolved once per
+    # file. Empty string when no catalog handle exists; ``normalize``
+    # Step 4c drops the field on the way to T3.
+    catalog_doc_id = (
+        ctx.doc_id_resolver(file_path) if ctx.doc_id_resolver is not None else ""
+    )
+
     for i, chunk in enumerate(chunks):
         title = f"{rel_path}:{chunk['line_start']}-{chunk['line_end']}"
-        doc_id = _hl.sha256(f"{ctx.corpus}:{title}:chunk{i}".encode()).hexdigest()[:32]
+        # ``chunk_chroma_id`` is the per-chunk Chroma natural-id
+        # (sha256-derived) — disambiguated from catalog
+        # ``Document.doc_id`` per RDR-101 Phase 0 nexus-o6aa.3.
+        chunk_chroma_id = _hl.sha256(f"{ctx.corpus}:{title}:chunk{i}".encode()).hexdigest()[:32]
         class_ctx, method_ctx = _extract_context(
             source_bytes, language, chunk["line_start"] - 1, chunk["line_end"] - 1
         )
@@ -401,8 +411,9 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
             category="code",
             frecency_score=float(ctx.score),
             git_meta=ctx.git_meta,
+            doc_id=catalog_doc_id,
         )
-        ids.append(doc_id)
+        ids.append(chunk_chroma_id)
         documents.append(chunk["text"])
         embed_texts.append(f"{prefix}\n{chunk['text']}")
         metadatas.append(metadata)
