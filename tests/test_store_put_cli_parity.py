@@ -132,13 +132,17 @@ class TestMemoryPromoteCli:
 
         # T2 environment: a memory entry to promote. ``memory promote``
         # takes the integer entry_id as its positional argument.
-        db_path = tmp_path / "t2.db"
-        monkeypatch.setattr(
-            "nexus.commands._helpers.default_db_path", lambda: db_path,
-        )
+        # NEXUS_CONFIG_DIR is the documented isolation knob — patching
+        # ``nexus.commands._helpers.default_db_path`` does NOT reach
+        # ``memory._default_db_path`` because memory.py captures the
+        # function via ``from … import … as`` at module-load time.
+        # Setting the env var is read at call time inside
+        # ``nexus_config_dir()``, so it isolates every CLI subcommand.
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.setattr(
             "nexus.config.is_local_mode", lambda: True,
         )
+        db_path = tmp_path / "memory.db"
         db = T2Database(db_path)
         entry_id = db.put(
             project="proj-test", title="m-1", content="memory body",
