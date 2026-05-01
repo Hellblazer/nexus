@@ -422,11 +422,13 @@ def compute_chash_coverage(collection: str) -> ChashCoverage | None:
                 ids = page.get("ids") or []
                 metadatas = page.get("metadatas") or []
                 if ids and metadatas:
-                    indexed_ids = idx.doc_ids_present_in_collection(
-                        collection, ids,
+                    indexed_chunk_chroma_ids = (
+                        idx.chunk_chroma_ids_present_in_collection(
+                            collection, ids,
+                        )
                     )
                     for cid in ids:
-                        if cid not in indexed_ids:
+                        if cid not in indexed_chunk_chroma_ids:
                             missing.append(cid)
                         if len(missing) >= 5:
                             break

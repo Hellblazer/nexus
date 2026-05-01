@@ -404,7 +404,7 @@ class TestChashCoverageSection:
         idx = ChashIndex(db_path)
         try:
             for chash, coll, doc_id in rows:
-                idx.upsert(chash=chash, collection=coll, doc_id=doc_id)
+                idx.upsert(chash=chash, collection=coll, chunk_chroma_id=doc_id)
         finally:
             idx.close()
 

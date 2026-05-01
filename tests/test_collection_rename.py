@@ -39,9 +39,9 @@ class TestChashIndexRename:
         from nexus.db.t2.chash_index import ChashIndex
 
         idx = ChashIndex(tmp_path / "chash.db")
-        idx.upsert(chash="aa", collection="code__old", doc_id="d1")
-        idx.upsert(chash="bb", collection="code__old", doc_id="d2")
-        idx.upsert(chash="cc", collection="code__stays", doc_id="d3")
+        idx.upsert(chash="aa", collection="code__old", chunk_chroma_id="d1")
+        idx.upsert(chash="bb", collection="code__old", chunk_chroma_id="d2")
+        idx.upsert(chash="cc", collection="code__stays", chunk_chroma_id="d3")
 
         count = idx.rename_collection(old="code__old", new="code__new")
         assert count == 2
@@ -61,22 +61,22 @@ class TestChashIndexRename:
         assert (old_rows, new_rows, stays_rows) == (0, 2, 1)
 
     def test_pk_collision_new_side_wins(self, tmp_path: Path) -> None:
-        """When `(chash, new)` already exists, the rename's updated doc_id
+        """When `(chash, new)` already exists, the rename's updated chunk_chroma_id
         must win — pre-existing new-side row is cleared first."""
         from nexus.db.t2.chash_index import ChashIndex
 
         idx = ChashIndex(tmp_path / "chash.db")
-        idx.upsert(chash="aa", collection="code__old", doc_id="from_old")
-        idx.upsert(chash="aa", collection="code__new", doc_id="stale_new")
+        idx.upsert(chash="aa", collection="code__old", chunk_chroma_id="from_old")
+        idx.upsert(chash="aa", collection="code__new", chunk_chroma_id="stale_new")
 
         count = idx.rename_collection(old="code__old", new="code__new")
         assert count == 1
 
-        doc_id = idx.conn.execute(
-            "SELECT doc_id FROM chash_index WHERE chash = ? AND physical_collection = ?",
+        chunk_chroma_id = idx.conn.execute(
+            "SELECT chunk_chroma_id FROM chash_index WHERE chash = ? AND physical_collection = ?",
             ("aa", "code__new"),
         ).fetchone()[0]
-        assert doc_id == "from_old"
+        assert chunk_chroma_id == "from_old"
 
     def test_no_rows_returns_zero(self, tmp_path: Path) -> None:
         from nexus.db.t2.chash_index import ChashIndex
@@ -274,7 +274,7 @@ class TestRenameCLI:
         from nexus.db.t2 import T2Database
         with T2Database(db_path) as db:
             db.chash_index.upsert(
-                chash="aa", collection="code__old", doc_id="d1",
+                chash="aa", collection="code__old", chunk_chroma_id="d1",
             )
 
         fake = self._fake_t3(old_exists=True, new_exists=False)

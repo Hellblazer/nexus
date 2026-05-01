@@ -48,7 +48,7 @@ def cite_env(tmp_path: Path):
 
     chash_index = ChashIndex(tmp_path / "t2.db")
     chash_index.upsert(
-        chash=chash_hex, collection="knowledge__cite", doc_id="doc:0:chunk:0",
+        chash=chash_hex, collection="knowledge__cite", chunk_chroma_id="doc:0:chunk:0",
     )
     yield cat, t3, chash_index, chash_hex
     chash_index.close()
@@ -211,10 +211,10 @@ class TestCiteTiedCandidatesNote:
 
         # Register a second row so the empty-index guard passes.
         chash_index.upsert(
-            chash=c1, collection="knowledge__cite", doc_id="doc:0:chunk:0",
+            chash=c1, collection="knowledge__cite", chunk_chroma_id="doc:0:chunk:0",
         )
         chash_index.upsert(
-            chash=c2, collection="knowledge__cite", doc_id="doc:0:chunk:0",
+            chash=c2, collection="knowledge__cite", chunk_chroma_id="doc:0:chunk:0",
         )
 
         def _fake_search(**kwargs):
@@ -245,10 +245,10 @@ class TestCiteTiedCandidatesNote:
         cat, t3, chash_index, _ = cite_env
         c1, c2 = "a" * 64, "b" * 64
         chash_index.upsert(
-            chash=c1, collection="knowledge__cite", doc_id="doc:0:chunk:0",
+            chash=c1, collection="knowledge__cite", chunk_chroma_id="doc:0:chunk:0",
         )
         chash_index.upsert(
-            chash=c2, collection="knowledge__cite", doc_id="doc:0:chunk:0",
+            chash=c2, collection="knowledge__cite", chunk_chroma_id="doc:0:chunk:0",
         )
 
         def _fake_search(**kwargs):

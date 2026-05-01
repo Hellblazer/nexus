@@ -822,6 +822,51 @@ def migrate_chash_index(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def migrate_chash_index_rename_doc_id(conn: sqlite3.Connection) -> None:
+    """Rename ``chash_index.doc_id`` to ``chunk_chroma_id`` (RDR-101 Phase 0).
+
+    The original column name collides with RDR-101's ``Document.doc_id``
+    (UUID7 document identity); this column has always carried the
+    ChromaDB-scoped chunk natural ID. Phase 0 deliverable nexus-o6aa.3
+    (``docs/rdr/post-mortem/rdr-101-rdr086-collision.md``) chose Option A
+    (rename) ahead of Phase 3 to remove the disambiguation tax across
+    every reader joining catalog and chash_index.
+
+    SQLite 3.25+ supports ``ALTER TABLE ... RENAME COLUMN`` natively. The
+    primary key ``(chash, physical_collection)`` is unaffected; the
+    secondary index ``idx_chash_index_collection`` on
+    ``physical_collection`` is unaffected.
+
+    Idempotent in three states:
+      1. Table absent (fresh install): no-op (the create-if-not-exists
+         path in ``ChashIndex._init_schema`` and ``migrate_chash_index``
+         already use the new name).
+      2. Table present with ``chunk_chroma_id`` column (already migrated):
+         no-op.
+      3. Table present with legacy ``doc_id`` column: rename column.
+    """
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='chash_index'"
+    ).fetchone()
+    if row is None:
+        return
+    cols = {
+        r[1]
+        for r in conn.execute("PRAGMA table_info(chash_index)").fetchall()
+    }
+    if "chunk_chroma_id" in cols:
+        return
+    if "doc_id" not in cols:
+        # Table exists but has neither column — schema is unrecognized;
+        # skip rather than risk corrupting it. The doctor verb will
+        # surface the divergence.
+        return
+    conn.execute(
+        "ALTER TABLE chash_index RENAME COLUMN doc_id TO chunk_chroma_id"
+    )
+    conn.commit()
+
+
 def _add_plan_disabled_at(conn: sqlite3.Connection) -> None:
     """Add the ``disabled_at`` column to ``plans`` (nexus-mrzp).
 
@@ -1728,6 +1773,11 @@ MIGRATIONS: list[Migration] = [
         "4.17.1",
         "Add plans.disabled_at column for soft-disable (nexus-mrzp)",
         _add_plan_disabled_at,
+    ),
+    Migration(
+        "4.21.3",
+        "Rename chash_index.doc_id to chunk_chroma_id (RDR-101 Phase 0 nexus-o6aa.3)",
+        migrate_chash_index_rename_doc_id,
     ),
 ]
 

@@ -44,7 +44,7 @@ def _seed_chunk(
         documents=[text],
         metadatas=[{"chunk_text_hash": chash, "source_path": "s.py"}],
     )
-    chash_index.upsert(chash=chash, collection=collection, doc_id=chunk_id)
+    chash_index.upsert(chash=chash, collection=collection, chunk_chroma_id=chunk_id)
 
 
 # ── ChunkRef type ────────────────────────────────────────────────────────────
@@ -117,13 +117,13 @@ class TestResolveChashT2Hit:
         with chash_index._lock:
             chash_index.conn.execute(
                 "INSERT OR REPLACE INTO chash_index "
-                "(chash, physical_collection, doc_id, created_at) "
+                "(chash, physical_collection, chunk_chroma_id, created_at) "
                 "VALUES (?, ?, ?, ?)",
                 (h, "code__old", "c-old", "2025-01-01T00:00:00+00:00"),
             )
             chash_index.conn.execute(
                 "INSERT OR REPLACE INTO chash_index "
-                "(chash, physical_collection, doc_id, created_at) "
+                "(chash, physical_collection, chunk_chroma_id, created_at) "
                 "VALUES (?, ?, ?, ?)",
                 (h, "code__new", "c-new", "2026-04-18T00:00:00+00:00"),
             )
@@ -160,7 +160,7 @@ class TestResolveChashSelfHeal:
         cat, t3, chash_index = resolve_env
         h = "e" * 64
         # Register a chash pointing at a collection that does not exist in T3.
-        chash_index.upsert(chash=h, collection="code__deleted", doc_id="ghost")
+        chash_index.upsert(chash=h, collection="code__deleted", chunk_chroma_id="ghost")
         # And a live one.
         _seed_chunk(t3, chash_index, "code__live", "real-id", "real text", h)
 

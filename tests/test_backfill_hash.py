@@ -166,7 +166,7 @@ class TestBackfillPopulatesT2ChashIndex:
             assert total == 2
 
             rows = sorted(store.conn.execute(
-                "SELECT chash, physical_collection, doc_id FROM chash_index"
+                "SELECT chash, physical_collection, chunk_chroma_id FROM chash_index"
             ).fetchall())
             alpha = hashlib.sha256(b"alpha code").hexdigest()
             beta = hashlib.sha256(b"beta code").hexdigest()
@@ -201,7 +201,7 @@ class TestBackfillPopulatesT2ChashIndex:
             assert total == 2
 
             rows = sorted(store.conn.execute(
-                "SELECT chash, physical_collection, doc_id FROM chash_index"
+                "SELECT chash, physical_collection, chunk_chroma_id FROM chash_index"
             ).fetchall())
             gamma = hashlib.sha256(b"gamma code").hexdigest()
             delta = hashlib.sha256(b"delta code").hexdigest()

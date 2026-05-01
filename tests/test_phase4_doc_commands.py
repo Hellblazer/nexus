@@ -58,7 +58,7 @@ def _seed_catalog_and_t3(tmp_path: Path):
 
     chash_index = ChashIndex(tmp_path / "t2.db")
     chash_index.upsert(
-        chash=chash, collection="knowledge__phase4", doc_id="doc:0:chunk:0",
+        chash=chash, collection="knowledge__phase4", chunk_chroma_id="doc:0:chunk:0",
     )
     return cat, t3, chash_index, chash
 

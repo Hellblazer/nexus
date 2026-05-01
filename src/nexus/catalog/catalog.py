@@ -1257,9 +1257,16 @@ class Catalog:
                     span_res = None
                 if span_res is None:
                     continue
+                # ``row["chunk_chroma_id"]`` carries the Chroma-natural-ID
+                # value the column has always held (renamed from ``doc_id``
+                # per RDR-101 Phase 0 nexus-o6aa.3 to disambiguate from
+                # ``Document.doc_id``). The public ``ChunkRef`` keeps the
+                # ``doc_id`` key in its returned dict for back-compat;
+                # Phase 3 will introduce a parallel ``chunk_chroma_id``
+                # key on the public surface.
                 return _build_ref(
                     coll=row["collection"],
-                    doc_id=row["doc_id"],
+                    doc_id=row["chunk_chroma_id"],
                     span_result=span_res,
                 )
 
