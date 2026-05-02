@@ -3960,6 +3960,7 @@ def t3_backfill_doc_id_cmd(
 
     chunks_updated = 0
     chunks_already_correct = 0
+    chunks_deferred: list[dict] = []
     errors: list[dict] = []
 
     if not dry_run:
@@ -3969,6 +3970,21 @@ def t3_backfill_doc_id_cmd(
             raise click.ClickException(
                 f"Failed to open T3 client: {exc}. Check ChromaDB credentials."
             )
+
+    # nexus-o6aa.9.18: deferred-class detector for the per-chunk
+    # retry path. Errors carrying a class string in this set are
+    # treated as expected during the Phase 4 transition (chunks
+    # over the 32-key NumMetadataKeys cap that pre-date the cap or
+    # carry deprecated metadata Phase 4 will prune). They land in
+    # ``chunks_deferred`` rather than ``errors`` so the verb exits
+    # 0 — the operator sees a deferred-cleanup list, not a failure.
+    DEFERRED_QUOTA_HINTS: tuple[str, ...] = (
+        "NumMetadataKeys",
+        "Number of metadata dictionary keys",
+    )
+
+    def _is_deferred_error(exc_text: str) -> bool:
+        return any(hint in exc_text for hint in DEFERRED_QUOTA_HINTS)
 
     for coll_name, payloads in by_coll.items():
         if dry_run:
@@ -4026,12 +4042,32 @@ def t3_backfill_doc_id_cmd(
                 col.update(ids=update_ids, metadatas=update_metas)
                 chunks_updated += len(update_ids)
             except Exception as exc:
-                errors.append({
-                    "collection": coll_name,
-                    "stage": "update",
-                    "batch_size": len(update_ids),
-                    "error": str(exc),
-                })
+                # nexus-o6aa.9.18: batch-level rejection is all-or-nothing.
+                # Fall back to per-chunk updates so clean chunks in a
+                # batch with one over-cap chunk still get doc_id; only
+                # the genuinely-failing chunks land in chunks_deferred.
+                # Pre-fix this swept ~22k clean chunks into the deferred
+                # list because ChromaDB's 32-key NumMetadataKeys cap
+                # rejected the whole batch on the first over-cap chunk.
+                for cid, meta in zip(update_ids, update_metas):
+                    try:
+                        col.update(ids=[cid], metadatas=[meta])
+                        chunks_updated += 1
+                    except Exception as inner_exc:
+                        msg = str(inner_exc)
+                        record = {
+                            "collection": coll_name,
+                            "chunk_id": cid,
+                            "key_count": len(meta),
+                            "error": msg[:200],
+                        }
+                        if _is_deferred_error(msg):
+                            chunks_deferred.append(record)
+                        else:
+                            errors.append({
+                                **record, "stage": "update_per_chunk",
+                                "batch_size": 1,
+                            })
 
     report = {
         "dry_run": dry_run,
@@ -4042,6 +4078,8 @@ def t3_backfill_doc_id_cmd(
         "chunks_updated": chunks_updated,
         "chunks_already_correct": chunks_already_correct,
         "orphans_skipped": orphans_total,
+        "chunks_deferred": chunks_deferred,
+        "chunks_deferred_count": len(chunks_deferred),
         "errors": errors,
     }
 
@@ -4050,9 +4088,12 @@ def t3_backfill_doc_id_cmd(
     else:
         _print_t3_backfill_text(report)
 
+    # nexus-o6aa.9.18: deferred-class failures (NumMetadataKeys quota)
+    # are expected during the Phase 4 transition — they represent
+    # over-cap chunks awaiting the prune-deprecated-keys verb. Exit 0
+    # when the only failures were deferred-class. Genuine errors
+    # (network, auth, schema, etc.) still surface as exit 1.
     if errors and not dry_run:
-        # Surface a non-zero exit so an operator running this in a
-        # script can detect partial failure.
         raise click.exceptions.Exit(1)
 
 
@@ -4067,6 +4108,19 @@ def _print_t3_backfill_text(report: dict) -> None:
         click.echo(f"Chunks updated:        {report['chunks_updated']}")
         click.echo(f"Already correct:       {report['chunks_already_correct']}")
     click.echo(f"Orphans skipped:       {report['orphans_skipped']}")
+    deferred = report.get("chunks_deferred_count", 0)
+    if deferred:
+        click.echo(
+            f"Deferred (over-cap):   {deferred}  (Phase 4 prune-keys remediation)"
+        )
+        # First few examples for operator visibility.
+        for d in (report.get("chunks_deferred") or [])[:3]:
+            click.echo(
+                f"  {d['collection']} {d['chunk_id'][:24]}…  "
+                f"keys={d['key_count']}"
+            )
+        if deferred > 3:
+            click.echo(f"  …and {deferred - 3} more (use --json for full list)")
     if report["errors"]:
         click.echo(f"\nErrors ({len(report['errors'])}):")
         for e in report["errors"][:10]:
