@@ -12,6 +12,30 @@ from nexus.corpus import embedding_model_for_collection, index_model_for_collect
 _log = structlog.get_logger(__name__)
 
 
+def _doc_id_to_file_path(doc_id: str) -> str:
+    """nexus-7b5n: resolve a chunk's ``doc_id`` to the catalog's
+    ``file_path``. Returns "" when the catalog is uninitialized or has
+    no entry. Used by ``reindex_cmd``'s pre-delete safety check so
+    post-prune chunks (which lack ``source_path``) still drive the
+    reindex via the catalog projection. Best-effort; any failure
+    returns "" and the caller treats the chunk as sourceless.
+    """
+    try:
+        from nexus.catalog import Catalog
+        from nexus.config import catalog_path
+
+        cat_path = catalog_path()
+        if not Catalog.is_initialized(cat_path):
+            return ""
+        cat = Catalog(cat_path, cat_path / ".catalog.db")
+        entry = cat.by_doc_id(doc_id)
+        if entry is None:
+            return ""
+        return entry.file_path or ""
+    except Exception:
+        return ""
+
+
 @click.group()
 def collection() -> None:
     """Manage ChromaDB collections (list, info, verify, delete)."""
@@ -254,7 +278,13 @@ def reindex_cmd(name: str, force: bool) -> None:
 
     before_count = info["count"]
 
-    # 2. Pre-delete safety: paginate for sourceless entries (nexus-unyc)
+    # 2. Pre-delete safety: paginate for sourceless entries (nexus-unyc).
+    # nexus-7b5n: a chunk is "reindexable" when it carries either
+    # ``source_path`` (legacy chunks predating the doc_id backfill) or
+    # ``doc_id`` (post-Phase-4 chunks). After the prune verb drops
+    # source_path from chunk metadata, doc_id is the only signal; the
+    # catalog row pointed to by doc_id holds the file_path used for
+    # the actual reindex.
     col = db.get_or_create_collection(name)
     sourceless: list[str] = []
     source_paths: set[str] = set()
@@ -262,9 +292,24 @@ def reindex_cmd(name: str, force: bool) -> None:
     while True:
         batch = col.get(limit=300, offset=offset, include=["metadatas"])
         for mid, meta in zip(batch["ids"], batch["metadatas"] or []):
-            sp = (meta or {}).get("source_path", "")
+            meta = meta or {}
+            sp = meta.get("source_path", "")
+            did = meta.get("doc_id", "")
             if sp:
                 source_paths.add(sp)
+            elif did:
+                # Post-prune chunk: source_path was dropped but the
+                # catalog still holds the file_path keyed on doc_id.
+                # Resolve it so the reindex driver below has the path.
+                resolved = _doc_id_to_file_path(did)
+                if resolved:
+                    source_paths.add(resolved)
+                else:
+                    # Catalog gap: treat as sourceless so the safety
+                    # check fires. Operator runs ``nx catalog
+                    # synthesize-log`` + ``t3-backfill-doc-id`` before
+                    # reindex.
+                    sourceless.append(mid)
             else:
                 sourceless.append(mid)
         if len(batch["ids"]) < 300:

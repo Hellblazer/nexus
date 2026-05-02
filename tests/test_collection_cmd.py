@@ -261,6 +261,79 @@ def test_reindex_refuses_when_all_entries_sourceless(
     mock_db.delete_collection.assert_not_called()
 
 
+def test_reindex_treats_doc_id_only_chunk_as_reindexable(
+    runner, env_creds, mock_db, tmp_path,
+) -> None:
+    """nexus-7b5n: post-prune chunks lack source_path but carry
+    doc_id. The safety check must resolve doc_id → catalog file_path
+    and treat the chunk as reindexable, not sourceless.
+
+    WITH TEETH: a regression that drops the doc_id branch lands the
+    chunk in ``sourceless`` and triggers the all-sourceless refuse
+    path even though the catalog has a backing source.
+    """
+    doc_file = tmp_path / "doc.md"
+    doc_file.write_text("# Doc\ncontent")
+
+    mock_db.collection_info.return_value = {"count": 1, "metadata": {}}
+    mock_col = MagicMock()
+    # Chunk has only doc_id (post-prune shape); source_path absent.
+    mock_col.get.return_value = {
+        "ids": ["chunk-0"],
+        "metadatas": [{"doc_id": "ART-deadbeef"}],
+    }
+    mock_db.get_or_create_collection.return_value = mock_col
+    from nexus.db.t3 import VerifyResult
+    mock_db.delete_collection.return_value = None
+    after_col = MagicMock()
+    after_col.count.return_value = 1
+    mock_db.get_or_create_collection.side_effect = [mock_col, after_col]
+    vr = VerifyResult(status="healthy", doc_count=1, probe_doc_id="x", distance=0.05, metric="l2")
+
+    with patch(
+        "nexus.commands.collection._doc_id_to_file_path",
+        return_value=str(doc_file),
+    ), \
+         patch("nexus.commands.collection._t3", return_value=mock_db), \
+         patch("nexus.doc_indexer.index_markdown", return_value=1), \
+         patch("nexus.db.t3.verify_collection_deep", return_value=vr):
+        result = runner.invoke(
+            main, ["collection", "reindex", "docs__test", "--force"],
+        )
+    # Must NOT hit the all-sourceless refuse branch; reindex proceeds.
+    assert "refusing to reindex" not in result.output.lower()
+    mock_db.delete_collection.assert_called_once_with("docs__test")
+
+
+def test_reindex_treats_doc_id_with_no_catalog_entry_as_sourceless(
+    runner, env_creds, mock_db,
+) -> None:
+    """When the chunk carries doc_id but the catalog has no entry
+    (catalog gap / pre-Phase-3 chunks), the safety check falls back
+    to the sourceless path so the operator runs synthesize-log first.
+    """
+    mock_db.collection_info.return_value = {"count": 1, "metadata": {}}
+    mock_col = MagicMock()
+    mock_col.get.return_value = {
+        "ids": ["chunk-orphan"],
+        "metadatas": [{"doc_id": "ART-orphan"}],
+    }
+    mock_db.get_or_create_collection.return_value = mock_col
+
+    with patch(
+        "nexus.commands.collection._doc_id_to_file_path",
+        return_value="",
+    ), \
+         patch("nexus.commands.collection._t3", return_value=mock_db):
+        result = runner.invoke(
+            main, ["collection", "reindex", "docs__orphan", "--force"],
+        )
+    # All chunks resolve to "" file_path → all-sourceless refuse path.
+    assert result.exit_code != 0
+    assert "refusing to reindex" in result.output.lower()
+    mock_db.delete_collection.assert_not_called()
+
+
 def test_reindex_force_proceeds(runner, env_creds, mock_db, tmp_path) -> None:
     doc_file = tmp_path / "doc.md"
     doc_file.write_text("# Doc\ncontent")
