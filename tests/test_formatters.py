@@ -5,6 +5,7 @@ import subprocess
 import pytest
 
 from nexus.formatters import (
+    _display_path,
     _extract_context,
     _find_matching_lines,
     _is_bat_installed,
@@ -43,6 +44,72 @@ def test_vimgrep_missing_source_path() -> None:
     r = _result()
     r.metadata.pop("source_path")
     assert format_vimgrep([r])[0].startswith(":10:0:")
+
+
+# ── nexus-1qed: _display_path priority + formatter integration ──────────────
+
+
+class TestDisplayPathPriority:
+    """nexus-1qed: ``_display_path`` (catalog-resolved) wins over
+    ``source_path`` and ``file_path`` so chunks that no longer carry
+    ``source_path`` (post-prune) still render via the catalog projection.
+    """
+
+    def test_display_path_wins_over_source_path(self) -> None:
+        meta = {
+            "_display_path": "/abs/from/catalog.py",
+            "source_path": "src/legacy.py",
+        }
+        # WITH TEETH: a regression that drops the _display_path branch
+        # and reads source_path directly fails this assertion.
+        assert _display_path(meta) == "/abs/from/catalog.py"
+
+    def test_falls_back_to_source_path_when_display_path_absent(self) -> None:
+        assert _display_path({"source_path": "src/legacy.py"}) == "src/legacy.py"
+
+    def test_falls_back_to_file_path_when_neither_present(self) -> None:
+        assert _display_path({"file_path": "older/shape.md"}) == "older/shape.md"
+
+    def test_default_when_no_path_keys(self) -> None:
+        assert _display_path({}, default="unknown") == "unknown"
+
+
+def test_formatters_use_display_path_when_attached() -> None:
+    """nexus-1qed end-to-end: format_plain reads ``_display_path`` so a
+    chunk without ``source_path`` (post-prune shape) renders the
+    catalog-resolved path. Pre-fix code keys on source_path and renders
+    the fallback "[distance] title" form instead.
+    """
+    r = SearchResult(
+        id="r1",
+        content="def foo(): pass",
+        distance=0.1,
+        collection="code__x",
+        metadata={
+            # post-prune chunk shape: no source_path, only doc_id +
+            # _display_path attached by search_engine._attach_display_paths.
+            "_display_path": "/abs/path/to/foo.py",
+            "doc_id": "ART-deadbeef",
+            "line_start": 1,
+        },
+    )
+    out = format_plain([r])
+    assert out == ["/abs/path/to/foo.py:1:def foo(): pass"]
+
+
+def test_format_compact_prefers_display_path() -> None:
+    r = SearchResult(
+        id="r1",
+        content="def foo(): pass",
+        distance=0.1,
+        collection="code__x",
+        metadata={
+            "_display_path": "/abs/from/catalog.py",
+            "source_path": "stale/legacy.py",
+            "line_start": 5,
+        },
+    )
+    assert format_compact([r]) == ["/abs/from/catalog.py:5:def foo(): pass"]
 
 
 def test_vimgrep_multiple_results() -> None:

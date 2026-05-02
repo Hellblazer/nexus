@@ -65,6 +65,50 @@ class SearchDiagnostics:
             return None
         return max(candidates, key=lambda item: item[2])
 
+def _attach_display_paths(
+    results: list[SearchResult], catalog: Any | None,
+) -> None:
+    """nexus-1qed: annotate each result's metadata with a derived
+    ``_display_path`` resolved through the catalog.
+
+    Mutates *results* in place. Formatters read ``meta["_display_path"]``
+    in preference to legacy ``source_path``; this keeps display sites
+    catalog-agnostic so the prune verb (nexus-o6aa.10.3) can drop
+    ``source_path`` from chunk metadata without breaking display.
+
+    No-op when *catalog* is ``None`` or no result carries a ``doc_id``.
+    A doc_id with no matching catalog entry leaves ``_display_path``
+    unset; the formatter helper then falls back to ``source_path`` /
+    ``file_path``. Best-effort by design: a display-path lookup must
+    never break a search.
+    """
+    if catalog is None or not results:
+        return
+    doc_ids = {
+        r.metadata.get("doc_id", "") for r in results
+        if r.metadata.get("doc_id")
+    }
+    if not doc_ids:
+        return
+    # Single-pass cache so repeated doc_ids (multi-chunk results) only
+    # hit the catalog once.
+    cache: dict[str, str] = {}
+    for did in doc_ids:
+        try:
+            entry = catalog.by_doc_id(did)
+        except Exception:
+            continue
+        if entry is not None and entry.file_path:
+            cache[did] = entry.file_path
+    if not cache:
+        return
+    for r in results:
+        did = r.metadata.get("doc_id", "")
+        path = cache.get(did) if did else None
+        if path:
+            r.metadata["_display_path"] = path
+
+
 # Maximum ID-set size for ChromaDB $in filter — cap to avoid payload bloat.
 _MAX_PREFILTER_IDS = 500
 
@@ -487,6 +531,12 @@ def search_cross_corpus(
             )
         except Exception:
             _log.debug("topic_boost_failed", exc_info=True)
+
+    # nexus-1qed: catalog-resolved display path attached as metadata
+    # so formatters never need to import the catalog. Best-effort;
+    # absent catalog or missing doc_ids leave _display_path unset and
+    # formatters fall back to source_path / file_path.
+    _attach_display_paths(all_results, catalog)
 
     return all_results
 
