@@ -486,7 +486,9 @@ def _catalog_pdf_hook(
         # Get or create curator owner
         owner = None
         rows = cat._db.execute(
-            "SELECT tumbler_prefix FROM owners WHERE name = ?", (owner_name,)
+            "SELECT tumbler_prefix FROM owners WHERE name = ? "
+            "AND owner_type = 'curator'",
+            (owner_name,),
         ).fetchone()
         if rows:
             from nexus.catalog.tumbler import Tumbler
