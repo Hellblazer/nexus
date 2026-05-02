@@ -14,12 +14,57 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import click
 import structlog
 
 _log = structlog.get_logger(__name__)
+
+
+def _build_catalog_doc_id_lookup() -> Callable[[str, str], str] | None:
+    """Build a ``doc_id_lookup(collection, source_id) -> doc_id``
+    callable backed by the catalog's ``physical_collection`` +
+    ``file_path`` (or ``title`` for slug-shaped knowledge entries)
+    SQL projection.
+
+    Returns ``None`` when the catalog is uninitialized; callers
+    treat that as "no lookup; fall back to the legacy probe".
+
+    nexus-o6aa.10.1: this is the catalog projection that the chroma
+    reader expects. It converts the URI's source identifier (legacy
+    source_path or slug-title) into the catalog's ``doc_id`` so chunk
+    lookups stay consistent across the Phase 4 prune.
+    """
+    try:
+        from nexus.catalog import Catalog
+        from nexus.config import catalog_path
+
+        cat_path = catalog_path()
+        if not Catalog.is_initialized(cat_path):
+            return None
+        cat = Catalog(cat_path, cat_path / ".catalog.db")
+    except Exception:
+        return None
+
+    def _lookup(collection: str, source_id: str) -> str:
+        try:
+            row = cat._db.execute(
+                "SELECT json_extract(metadata, '$.doc_id') "
+                "FROM documents "
+                "WHERE physical_collection = ? "
+                "  AND (file_path = ? OR title = ?) "
+                "LIMIT 1",
+                (collection, source_id, source_id),
+            ).fetchone()
+        except Exception:
+            return ""
+        if not row:
+            return ""
+        return row[0] or ""
+
+    return _lookup
 
 
 @click.group(name="enrich")
@@ -714,6 +759,11 @@ def _dry_run_predict_skips(
         click.echo(f"  (read-side prediction skipped: {exc})")
         return
 
+    # nexus-o6aa.10.1: chroma reader resolves source_id → doc_id via
+    # this projection so the dry-run reflects post-prune behavior. ``None``
+    # falls back to the legacy probe (catalog absent / pre-Phase-3).
+    doc_id_lookup = _build_catalog_doc_id_lookup()
+
     planned: dict[str, int] = {}
     skip_lines: list[str] = []
     by_host: dict[str, int] = {}
@@ -723,7 +773,7 @@ def _dry_run_predict_skips(
             continue
         uri = f"chroma://{collection}/{quote(sp, safe='/')}"
         try:
-            result = read_source(uri, t3=t3)
+            result = read_source(uri, t3=t3, doc_id_lookup=doc_id_lookup)
         except Exception as exc:
             # Per-entry transient failure shouldn't abort the whole
             # prediction loop. Bucket under a synthetic ``read_error``
@@ -864,6 +914,11 @@ def _run_extraction(
     skipped_unreadable = 0
     by_reason: dict[str, int] = {}
 
+    # nexus-o6aa.10.1: a single catalog projection serves every entry
+    # in this collection. Built once outside the loop because the SQL
+    # connection inside the helper is cheap-but-not-free per-call.
+    doc_id_lookup = _build_catalog_doc_id_lookup()
+
     db_path = default_db_path()
     with T2Database(db_path) as db:
         for i, entry in enumerate(entries, 1):
@@ -885,6 +940,7 @@ def _run_extraction(
                 source_path=source_path,
                 collection=collection,
                 lookup_path=_chroma_source_id_for_entry(entry),
+                doc_id_lookup=doc_id_lookup,
             )
             if record is None:
                 # Defensive — select_config already passed at the parent

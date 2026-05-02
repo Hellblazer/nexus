@@ -82,36 +82,41 @@ class TestIdentityFieldDispatch:
     each in turn (P2.0 spike survey, 2026-04-27).
     """
 
-    def test_rdr_collection_uses_source_path(self):
+    def test_rdr_collection_uses_doc_id(self):
+        # nexus-o6aa.10.1: post-fix, every prefix dispatches on doc_id.
         from nexus.aspect_readers import _identity_fields_for
-        assert _identity_fields_for("rdr__nexus-571b8edd") == ("source_path",)
+        assert _identity_fields_for("rdr__nexus-571b8edd") == ("doc_id",)
 
-    def test_docs_collection_uses_source_path(self):
+    def test_docs_collection_uses_doc_id(self):
         from nexus.aspect_readers import _identity_fields_for
-        assert _identity_fields_for("docs__corpus") == ("source_path",)
+        assert _identity_fields_for("docs__corpus") == ("doc_id",)
 
-    def test_code_collection_uses_source_path(self):
+    def test_code_collection_uses_doc_id(self):
         from nexus.aspect_readers import _identity_fields_for
-        assert _identity_fields_for("code__nexus") == ("source_path",)
+        assert _identity_fields_for("code__nexus") == ("doc_id",)
 
-    def test_knowledge_collection_tries_source_path_then_title(self):
+    def test_knowledge_collection_uses_doc_id(self):
+        # Both paper-shaped (``knowledge__delos``) and slug-shaped
+        # (``knowledge__knowledge``) collections dispatch on doc_id;
+        # the source_path/title divergence is resolved by the catalog
+        # projection in ``doc_id_lookup``.
         from nexus.aspect_readers import _identity_fields_for
-        # source_path first (paper-shaped collections like
-        # knowledge__delos), title second (slug-shaped
-        # knowledge__knowledge).
-        assert _identity_fields_for("knowledge__knowledge") == ("source_path", "title")
-        assert _identity_fields_for("knowledge__delos") == ("source_path", "title")
+        assert _identity_fields_for("knowledge__knowledge") == ("doc_id",)
+        assert _identity_fields_for("knowledge__delos") == ("doc_id",)
 
-    def test_unknown_prefix_falls_back_to_source_path(self):
+    def test_unknown_prefix_falls_back_to_doc_id(self):
         from nexus.aspect_readers import _identity_fields_for
-        assert _identity_fields_for("future__newshape") == ("source_path",)
+        assert _identity_fields_for("future__newshape") == ("doc_id",)
 
-    def test_dispatch_table_exposes_all_known_prefixes(self):
+    def test_dispatch_table_uniformly_keyed_on_doc_id(self):
         from nexus.aspect_readers import CHROMA_IDENTITY_FIELD
-        assert CHROMA_IDENTITY_FIELD["rdr__"] == ("source_path",)
-        assert CHROMA_IDENTITY_FIELD["docs__"] == ("source_path",)
-        assert CHROMA_IDENTITY_FIELD["code__"] == ("source_path",)
-        assert CHROMA_IDENTITY_FIELD["knowledge__"] == ("source_path", "title")
+        # WITH TEETH: every dispatch entry must be the single-element
+        # tuple ('doc_id',). A regression that re-introduces source_path
+        # or title fails this assertion directly.
+        for prefix, fields in CHROMA_IDENTITY_FIELD.items():
+            assert fields == ("doc_id",), (
+                f"{prefix!r} dispatched on {fields!r}, expected ('doc_id',)"
+            )
 
 
 # ── file:// reader ───────────────────────────────────────────────────────────
@@ -500,6 +505,154 @@ class TestReadChromaUri:
         parts = result.text.split("\n\n")
         assert parts[0] == "c0"
         assert parts[-1] == f"c{n - 1}"
+
+
+# ── chroma:// reader: doc_id_lookup plumbing (nexus-o6aa.10.1) ───────────────
+
+
+class TestReadChromaUriDocIdLookup:
+    """nexus-o6aa.10.1: when ``doc_id_lookup`` is supplied, the reader
+    resolves ``(collection, source_id) → doc_id`` via the catalog
+    projection and queries on ``doc_id`` only. Without the lookup the
+    reader falls back to the legacy multi-field probe (back-compat for
+    callers without catalog access: tests, ad-hoc CLI runs).
+
+    The Phase 4 critical-gate: aspect extraction MUST run through this
+    path so chunks remain reachable after the prune verb (.10.3) drops
+    ``source_path`` and ``title`` from chunk metadata. Without the
+    rewrite, every aspect-extraction read would return ``empty`` and
+    structurally reproduce the ART-lhk1 failure.
+    """
+
+    def test_doc_id_lookup_queries_on_doc_id_metadata(self, t3_client):
+        from nexus.aspect_readers import ReadOk, _read_chroma_uri
+
+        col_name = "knowledge__lookup"
+        try:
+            t3_client.delete_collection(col_name)
+        except Exception:
+            pass
+        coll = t3_client.get_or_create_collection(col_name)
+        # Plant chunks with doc_id metadata only: NO source_path,
+        # NO title. Post-prune chunk shape.
+        coll.add(
+            ids=["chunk-0", "chunk-1"],
+            documents=["first chunk", "second chunk"],
+            metadatas=[
+                {"doc_id": "ART-deadbeef", "chunk_index": 0},
+                {"doc_id": "ART-deadbeef", "chunk_index": 1},
+            ],
+        )
+
+        # Source identity in the URI (e.g. legacy source_path) is
+        # mapped to doc_id via the lookup.
+        def lookup(coll: str, source_id: str) -> str:
+            assert coll == col_name
+            assert source_id == "/abs/path/paper.pdf"
+            return "ART-deadbeef"
+
+        result = _read_chroma_uri(
+            "chroma://knowledge__lookup//abs/path/paper.pdf",
+            t3=t3_client, doc_id_lookup=lookup,
+        )
+        assert isinstance(result, ReadOk)
+        assert result.text == "first chunk\n\nsecond chunk"
+        # WITH TEETH: identity_field is now ``doc_id`` for lookup-driven
+        # reads. Pre-fix code reports ``source_path`` or ``title`` here.
+        assert result.metadata["identity_field"] == "doc_id"
+
+    def test_doc_id_lookup_returns_empty_yields_unreachable(self, t3_client):
+        """Live-data gate semantics: a missing doc_id (catalog gap, orphan
+        chunk after Phase 1 synthesis) must report a structural failure
+        (``unreachable``), NOT ``empty``. The Phase 4 acceptance gate
+        explicitly forbids ``empty`` skips for documents that have
+        chunks; an empty-doc_id is a structural reason."""
+        from nexus.aspect_readers import ReadFail, _read_chroma_uri
+
+        col_name = "docs__nodocid"
+        try:
+            t3_client.delete_collection(col_name)
+        except Exception:
+            pass
+        t3_client.get_or_create_collection(col_name)
+
+        def lookup(_coll: str, _source_id: str) -> str:
+            return ""
+
+        result = _read_chroma_uri(
+            "chroma://docs__nodocid/orphan.md",
+            t3=t3_client, doc_id_lookup=lookup,
+        )
+        assert isinstance(result, ReadFail)
+        assert result.reason == "unreachable", (
+            f"missing-doc_id must report a structural reason "
+            f"(unreachable), not {result.reason!r}; the Phase 4 gate "
+            f"forbids 'empty' for documents that haven't been backfilled."
+        )
+
+    def test_no_doc_id_lookup_falls_back_to_legacy_probe(self, t3_client):
+        """Back-compat: callers without catalog access (tests, ad-hoc
+        CLI runs) call _read_chroma_uri without doc_id_lookup. The
+        reader falls back to the legacy ``(source_path, title)`` probe
+        so existing chunks remain readable.
+        """
+        from nexus.aspect_readers import ReadOk, _read_chroma_uri
+
+        title = "decision-bfdb-update-capture-rdr005"
+        _seed_chunks(
+            t3_client,
+            "knowledge__legacy",
+            identity_field="title",
+            source_id=title,
+            chunks=[(0, "legacy chunk")],
+        )
+        # No doc_id_lookup → legacy ``(source_path, title)`` probe.
+        result = _read_chroma_uri(
+            f"chroma://knowledge__legacy/{title}", t3=t3_client,
+        )
+        assert isinstance(result, ReadOk)
+        assert result.text == "legacy chunk"
+        # identity_field reports which legacy field actually matched.
+        assert result.metadata["identity_field"] == "title"
+
+    def test_doc_id_lookup_skips_legacy_probe(self, t3_client):
+        """When doc_id_lookup is provided, the reader does NOT probe
+        source_path or title, even if those metadata fields exist.
+        WITH TEETH: a regression that re-introduces the legacy probe
+        path under doc_id_lookup would surface a stale chunk and fail
+        this assertion.
+        """
+        from nexus.aspect_readers import ReadFail, _read_chroma_uri
+
+        col_name = "docs__strict"
+        try:
+            t3_client.delete_collection(col_name)
+        except Exception:
+            pass
+        coll = t3_client.get_or_create_collection(col_name)
+        # Chunk has source_path metadata but the wrong doc_id.
+        coll.add(
+            ids=["c-0"],
+            documents=["wrong-doc text"],
+            metadatas=[{
+                "doc_id": "ART-other",
+                "source_path": "/path/the_one_we_query.md",
+                "chunk_index": 0,
+            }],
+        )
+
+        # Lookup maps the source_path to a doc_id that ISN'T present.
+        def lookup(_coll: str, _source_id: str) -> str:
+            return "ART-target-not-here"
+
+        result = _read_chroma_uri(
+            "chroma://docs__strict//path/the_one_we_query.md",
+            t3=t3_client, doc_id_lookup=lookup,
+        )
+        # Pre-fix would match by source_path and return wrong-doc text;
+        # post-fix queries strictly on doc_id and returns empty.
+        assert isinstance(result, ReadFail)
+        assert result.reason == "empty"
 
 
 # ── nx-scratch:// reader (RDR-096 P4.1) ─────────────────────────────────────
