@@ -15,6 +15,29 @@ from nexus.types import SearchResult
 _log = structlog.get_logger()
 
 
+def _display_path(meta: dict, default: str = "") -> str:
+    """nexus-1qed: return the best display path for a SearchResult's metadata.
+
+    Priority order:
+
+    1. ``_display_path`` (catalog-resolved path attached by
+       ``search_engine._attach_display_paths`` when a catalog is in scope).
+    2. ``source_path`` (legacy chunk metadata; survives until the prune
+       verb in nexus-o6aa.10.3 lands).
+    3. ``file_path`` (older chunk shape, used by some MCP-promoted entries).
+    4. *default* (caller-provided fallback string).
+
+    Formatters use this in place of direct ``meta.get("source_path", ...)``
+    reads so a single fallback chain serves catalog-resolved + legacy chunks.
+    """
+    return (
+        meta.get("_display_path")
+        or meta.get("source_path")
+        or meta.get("file_path")
+        or default
+    )
+
+
 def _find_matching_lines(
     chunk_text: str,
     query: str,
@@ -155,10 +178,11 @@ def _format_with_bat(
     """
     from collections import defaultdict
 
-    # Group results by source_path
+    # Group results by display path (nexus-1qed: prefer catalog-resolved
+    # _display_path, fall back to source_path / file_path for legacy chunks).
     groups: dict[str, list[SearchResult]] = defaultdict(list)
     for r in results:
-        src = r.metadata.get("source_path", r.metadata.get("file_path", "unknown"))
+        src = _display_path(r.metadata, default="unknown")
         groups[src].append(r)
 
     output_parts: list[str] = []
@@ -250,7 +274,7 @@ def format_compact(
     """
     output: list[str] = []
     for r in results:
-        source_path = r.metadata.get("source_path", "")
+        source_path = _display_path(r.metadata)
         line_start = int(r.metadata.get("line_start", 0))
         chunk_lines = r.content.splitlines()
         if not chunk_lines:
@@ -281,7 +305,7 @@ def format_vimgrep(results: list[SearchResult], query: str | None = None) -> lis
     """
     lines: list[str] = []
     for r in results:
-        source_path = r.metadata.get("source_path", "")
+        source_path = _display_path(r.metadata)
         line_start = int(r.metadata.get("line_start", 0))
         chunk_lines = r.content.splitlines() if r.content else [""]
 
@@ -331,7 +355,7 @@ def format_plain(results: list[SearchResult]) -> list[str]:
     """
     lines: list[str] = []
     for r in results:
-        source_path = r.metadata.get("source_path", "")
+        source_path = _display_path(r.metadata)
         if not source_path:
             title = r.metadata.get("title") or r.id
             snippet = r.content.splitlines()[0] if r.content else ""
@@ -367,7 +391,7 @@ def format_plain_with_context(
 
     output: list[str] = []
     for r in results:
-        source_path = r.metadata.get("source_path", "")
+        source_path = _display_path(r.metadata)
         line_start = int(r.metadata.get("line_start", 0))
         chunk_lines = r.content.splitlines()
         total = len(chunk_lines)

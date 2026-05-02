@@ -1,4 +1,5 @@
 """AC1–AC8: Search engine — hybrid scoring, reranking, output formatters."""
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -11,7 +12,7 @@ from nexus.scoring import (
     rerank_results,
     round_robin_interleave,
 )
-from nexus.search_engine import search_cross_corpus
+from nexus.search_engine import _attach_display_paths, search_cross_corpus
 from nexus.types import SearchResult
 
 
@@ -583,3 +584,87 @@ class TestSearchTelemetryHotPath:
             assert count == 1
         finally:
             telemetry.close()
+
+
+# ── nexus-1qed: _attach_display_paths catalog projection ────────────────────
+
+
+class TestAttachDisplayPaths:
+    """nexus-1qed: search_engine attaches catalog-resolved display paths
+    to results so formatters never need to import the catalog. Best-
+    effort: missing catalog / missing doc_ids leave the field unset."""
+
+    def _result(self, doc_id: str = "", source_path: str = "") -> SearchResult:
+        meta: dict = {}
+        if doc_id:
+            meta["doc_id"] = doc_id
+        if source_path:
+            meta["source_path"] = source_path
+        return SearchResult(
+            id=f"r-{doc_id or source_path or 'x'}",
+            content="x", distance=0.1, collection="code__c", metadata=meta,
+        )
+
+    def test_no_catalog_is_noop(self):
+        r = self._result(doc_id="ART-x", source_path="src/legacy.py")
+        _attach_display_paths([r], catalog=None)
+        assert "_display_path" not in r.metadata
+
+    def test_no_doc_ids_is_noop(self):
+        catalog = MagicMock()
+        r = self._result(source_path="src/legacy.py")
+        _attach_display_paths([r], catalog=catalog)
+        catalog.by_doc_id.assert_not_called()
+        assert "_display_path" not in r.metadata
+
+    def test_attaches_catalog_resolved_path(self):
+        """WITH TEETH: the resolved file_path lands on the metadata
+        dict under ``_display_path``. A regression that drops the
+        write or routes through the wrong key fails this test."""
+        catalog = MagicMock()
+        catalog.by_doc_id.return_value = SimpleNamespace(
+            file_path="/abs/from/catalog.py",
+        )
+        r = self._result(doc_id="ART-deadbeef", source_path="src/legacy.py")
+        _attach_display_paths([r], catalog=catalog)
+        catalog.by_doc_id.assert_called_once_with("ART-deadbeef")
+        assert r.metadata["_display_path"] == "/abs/from/catalog.py"
+        # source_path stays untouched: the prune verb owns its removal.
+        assert r.metadata["source_path"] == "src/legacy.py"
+
+    def test_doc_id_with_no_catalog_entry_leaves_field_unset(self):
+        catalog = MagicMock()
+        catalog.by_doc_id.return_value = None
+        r = self._result(doc_id="ART-orphan", source_path="src/legacy.py")
+        _attach_display_paths([r], catalog=catalog)
+        assert "_display_path" not in r.metadata
+
+    def test_repeated_doc_id_only_hits_catalog_once(self):
+        """Multi-chunk results sharing the same doc_id share one
+        catalog lookup. Pre-fix code that loops per result without a
+        cache hits the catalog N times (slow on large result sets).
+        """
+        catalog = MagicMock()
+        catalog.by_doc_id.return_value = SimpleNamespace(
+            file_path="/abs/foo.py",
+        )
+        results = [
+            self._result(doc_id="ART-shared"),
+            self._result(doc_id="ART-shared"),
+            self._result(doc_id="ART-shared"),
+        ]
+        _attach_display_paths(results, catalog=catalog)
+        assert catalog.by_doc_id.call_count == 1
+        for r in results:
+            assert r.metadata["_display_path"] == "/abs/foo.py"
+
+    def test_catalog_exception_does_not_break_search(self):
+        """A catalog read failure is logged-and-swallowed; the result
+        passes through with no _display_path. Display always degrades
+        gracefully."""
+        catalog = MagicMock()
+        catalog.by_doc_id.side_effect = RuntimeError("catalog dead")
+        r = self._result(doc_id="ART-x", source_path="src/legacy.py")
+        # Must not raise.
+        _attach_display_paths([r], catalog=catalog)
+        assert "_display_path" not in r.metadata
