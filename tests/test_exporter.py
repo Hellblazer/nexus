@@ -209,6 +209,82 @@ class TestRoundTrip:
                     f"_bypass_canonical_schema guard in t3.py."
                 )
 
+    def test_round_trip_preserves_taxonomy_distance_metric(
+        self, ephemeral_db: T3Database, tmp_path: Path,
+    ):
+        """nexus-18wz: ``taxonomy__*`` round-trip must preserve the
+        ``hnsw:space=cosine`` distance metric.
+
+        Pre-fix, the production import path (``upsert_chunks_with_embeddings``
+        → ``get_or_create_collection``) injected an embedding_function and
+        defaulted to L2, so a faithful-looking metadata round-trip silently
+        recreated the collection with the wrong metric. Cosine queries
+        against the imported collection then returned out-of-range
+        distances and broke any downstream similarity assignment.
+
+        The fix extends ``get_or_create_collection`` so bypass-prefix
+        collections (per ``_BYPASS_SCHEMA_PREFIXES``) are created with
+        ``embedding_function=None`` and ``metadata={'hnsw:space':
+        'cosine'}`` — mirroring ``catalog_taxonomy._create_centroid_collection``.
+        """
+        col_name = "taxonomy__centroids_metric"
+        target = "taxonomy__restored_metric"
+        ids = ["c:1", "c:2"]
+        docs = ["", ""]
+        # Use orthonormal-ish vectors so cosine and L2 disagree clearly:
+        # cosine_distance(e1, e2) = 1.0; L2_distance(e1, e2) = sqrt(2).
+        embeddings = [_EF(["alpha"])[0], _EF(["beta"])[0]]
+        metadatas = [
+            {"topic_id": 1, "label": "alpha", "collection": "x", "doc_count": 1},
+            {"topic_id": 2, "label": "beta", "collection": "x", "doc_count": 1},
+        ]
+        col = ephemeral_db._client.get_or_create_collection(
+            col_name,
+            embedding_function=None,
+            metadata={"hnsw:space": "cosine"},
+        )
+        col.upsert(
+            ids=ids, documents=docs, embeddings=embeddings, metadatas=metadatas,
+        )
+
+        _export_import(
+            ephemeral_db, col_name, tmp_path, target=target,
+        )
+
+        restored = ephemeral_db._client_for(target).get_collection(target)
+
+        # Direct metadata assertion as the load-bearing claim — pre-fix
+        # the import path passes no metadata kwarg in non-local mode, so
+        # ``restored.metadata`` is ``None`` and ChromaDB falls back to
+        # the L2 default. After the fix, bypass-prefix collections are
+        # created with ``metadata={'hnsw:space': 'cosine'}`` regardless
+        # of local_mode.
+        assert restored.metadata is not None, (
+            "imported collection metadata is None — the import path is "
+            "creating bypass-prefix collections without explicit "
+            "hnsw:space=cosine. Check get_or_create_collection's "
+            "bypass-prefix branch in src/nexus/db/t3.py (nexus-18wz)."
+        )
+        assert restored.metadata.get("hnsw:space") == "cosine", (
+            f"imported collection metadata: {restored.metadata!r} — "
+            f"expected hnsw:space=cosine (nexus-18wz)"
+        )
+
+        # Smoke check: a query against the imported collection returns
+        # distances within cosine bounds [0, 2]. A passing metadata
+        # assertion above guarantees this; the secondary check guards
+        # against future ChromaDB versions where ``metadata['hnsw:space']``
+        # might decouple from the actual index space.
+        query_result = restored.query(
+            query_embeddings=[embeddings[0]],
+            n_results=2,
+            include=["distances"],
+        )
+        for d in query_result["distances"][0]:
+            assert 0.0 <= d <= 2.0, (
+                f"distance {d} is outside cosine bounds [0, 2]"
+            )
+
 
 # ── Unit: gzip compression ───────────────────────────────────────────────────
 

@@ -491,15 +491,33 @@ class T3Database:
         In local mode, the collection is created with ``hnsw:search_ef`` set to
         the configured value (default 256) so HNSW query recall is tuned at
         collection-creation time.  Cloud SPANN collections do not use this key.
+
+        nexus-18wz: programmatic vector-only collections matching
+        :data:`_BYPASS_SCHEMA_PREFIXES` (``taxonomy__*``) are created with
+        ``embedding_function=None`` and ``metadata={'hnsw:space': 'cosine'}``
+        regardless of local_mode — mirroring
+        :meth:`CatalogTaxonomy._create_centroid_collection`. This makes
+        ``nx store import`` of a ``.nxexp`` for a taxonomy collection
+        recreate the right shape; without it the import would silently
+        default to L2 and break cosine queries against the imported centroids.
         """
         from nexus.corpus import validate_collection_name
         validate_collection_name(name)
-        kwargs: dict = {"embedding_function": self._embedding_fn(name)}
-        if self._local_mode:
-            from nexus.config import load_config
-            cfg = load_config()
-            hnsw_ef = cfg.get("search", {}).get("hnsw_ef", 256)
-            kwargs["metadata"] = {"hnsw:search_ef": hnsw_ef}
+
+        if _bypass_canonical_schema(name):
+            metadata: dict = {"hnsw:space": "cosine"}
+            if self._local_mode:
+                from nexus.config import load_config
+                cfg = load_config()
+                metadata["hnsw:search_ef"] = cfg.get("search", {}).get("hnsw_ef", 256)
+            kwargs: dict = {"embedding_function": None, "metadata": metadata}
+        else:
+            kwargs = {"embedding_function": self._embedding_fn(name)}
+            if self._local_mode:
+                from nexus.config import load_config
+                cfg = load_config()
+                hnsw_ef = cfg.get("search", {}).get("hnsw_ef", 256)
+                kwargs["metadata"] = {"hnsw:search_ef": hnsw_ef}
         return _chroma_with_retry(
             self._client_for(name).get_or_create_collection,
             name, **kwargs,

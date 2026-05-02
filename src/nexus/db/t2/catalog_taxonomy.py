@@ -1603,8 +1603,12 @@ class CatalogTaxonomy:
         """Create or retrieve the ``taxonomy__centroids`` ChromaDB collection.
 
         Uses ``embedding_function=None`` (pre-computed MiniLM 384d vectors)
-        and ``hnsw:space=cosine`` (RF-070-11). Do NOT use
-        ``t3.get_or_create_collection()`` — it injects the wrong EF + L2.
+        and ``hnsw:space=cosine`` (RF-070-11). This direct chromadb-client
+        call predates ``T3Database.get_or_create_collection``'s
+        bypass-prefix branch (nexus-18wz) which now produces the same
+        shape; either is correct. Production code keeps this direct call
+        because it avoids the chromadb client lookup indirection on the
+        taxonomy hot path.
         """
         return client.get_or_create_collection(
             "taxonomy__centroids",
