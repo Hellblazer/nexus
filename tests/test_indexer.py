@@ -214,6 +214,65 @@ def test_frecency_only_updates_frecency_score(tmp_path):
     assert kw["metadatas"][0]["title"] == "main.py:1-1"
 
 
+def test_frecency_only_uses_doc_id_when_catalog_has_entry(tmp_path):
+    """nexus-f4z9: when the catalog has the file registered under
+    the repo owner, the chunk lookup keys on doc_id (post-prune
+    safe) instead of source_path. WITH TEETH: a regression that drops
+    the doc_id branch fails the where-filter assertion.
+    """
+    from nexus.indexer import _run_index_frecency_only
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    src = repo / "main.py"
+    src.write_text("x = 1\n")
+    old = {"frecency_score": 0.1, "source_path": str(src), "title": "main.py:1-1"}
+    col = MagicMock()
+    col.get.return_value = {"ids": ["c1"], "metadatas": [old]}
+    db = MagicMock()
+    db.get_or_create_collection.return_value = col
+
+    # Mock the catalog map so the file resolves to a known doc_id.
+    with patch(
+        "nexus.indexer._build_frecency_doc_id_map",
+        return_value={src: "1.1.1"},
+    ), \
+         patch("nexus.frecency.batch_frecency", return_value={src: 0.75}), \
+         patch("nexus.config.get_credential", return_value="fake-key"), \
+         patch("nexus.db.make_t3", return_value=db):
+        _run_index_frecency_only(repo, _reg())
+    where = col.get.call_args.kwargs["where"]
+    assert where == {"doc_id": "1.1.1"}, (
+        f"expected doc_id-keyed lookup, got {where!r}"
+    )
+
+
+def test_frecency_only_falls_back_to_source_path_when_no_catalog_entry(tmp_path):
+    """Files missing from the catalog map use the legacy source_path
+    filter so chunks predating the catalog backfill keep getting
+    frecency updates.
+    """
+    from nexus.indexer import _run_index_frecency_only
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    src = repo / "legacy.py"
+    src.write_text("z = 3\n")
+    old = {"frecency_score": 0.1, "source_path": str(src), "title": "legacy.py:1-1"}
+    col = MagicMock()
+    col.get.return_value = {"ids": ["c1"], "metadatas": [old]}
+    db = MagicMock()
+    db.get_or_create_collection.return_value = col
+    with patch(
+        "nexus.indexer._build_frecency_doc_id_map",
+        return_value={},
+    ), \
+         patch("nexus.frecency.batch_frecency", return_value={src: 0.42}), \
+         patch("nexus.config.get_credential", return_value="fake-key"), \
+         patch("nexus.db.make_t3", return_value=db):
+        _run_index_frecency_only(repo, _reg())
+    where = col.get.call_args.kwargs["where"]
+    assert where == {"source_path": str(src)}
+
+
 def test_frecency_only_skips_unindexed_files(tmp_path):
     from nexus.indexer import _run_index_frecency_only
     repo = tmp_path / "repo"; repo.mkdir()
