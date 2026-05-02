@@ -77,6 +77,24 @@ def _normalize_for_write(metadata: dict, collection_name: str) -> dict:
     return normalize(metadata, content_type=content_type)
 
 
+# nexus-o6aa.9.16: collection prefixes whose writes bypass the canonical
+# chunk schema. These are programmatically-populated collections that
+# carry their own metadata vocabulary — applying the canonical
+# normalize/validate would strip every collection-specific key. The
+# production writers (e.g. ``catalog_taxonomy._batched_upsert``) already
+# bypass by calling ``coll.upsert()`` directly; this set keeps the
+# T3-public write path symmetric so .nxexp round-trips don't silently
+# strip the collection's metadata at import time.
+_BYPASS_SCHEMA_PREFIXES: tuple[str, ...] = ("taxonomy__",)
+
+
+def _bypass_canonical_schema(collection_name: str) -> bool:
+    """Return ``True`` if *collection_name* should skip canonical schema
+    normalisation/validation (nexus-o6aa.9.16).
+    """
+    return collection_name.startswith(_BYPASS_SCHEMA_PREFIXES)
+
+
 def _rewrite_collection_metadata(
     t3_db: T3Database,
     collection_name: str,
@@ -422,11 +440,21 @@ class T3Database:
         # ``git_*`` into ``git_meta``; ``validate()`` then fails loud if
         # anything still violates the 30-key ceiling or schema rules —
         # never silently drops fields by insertion order.
-        metadatas = [
-            _normalize_for_write(m, collection_name) for m in metadatas
-        ]
-        for m in metadatas:
-            validate(m)
+        #
+        # nexus-o6aa.9.16: programmatic vector-only collections
+        # (``taxonomy__*``) carry collection-specific metadata
+        # (``topic_id``, ``label``, ``doc_count``, ``collection``) that
+        # is not part of the canonical chunk schema. Production writes
+        # bypass this funnel entirely (``catalog_taxonomy._batched_upsert``
+        # calls ``coll.upsert()`` directly); the import path must do the
+        # same or .nxexp round-trips for taxonomy collections silently
+        # strip every taxonomy-specific key, breaking export-as-backup.
+        if not _bypass_canonical_schema(collection_name):
+            metadatas = [
+                _normalize_for_write(m, collection_name) for m in metadatas
+            ]
+            for m in metadatas:
+                validate(m)
 
         size = QUOTAS.MAX_RECORDS_PER_WRITE
         with self._write_sem(collection_name):
@@ -671,10 +699,15 @@ class T3Database:
         Every record is funnelled through the canonical metadata schema
         (nexus-40t) so enrichment post-passes can't overrun Chroma's
         32-key cap by merging fields on top of an already-full row.
+
+        nexus-o6aa.9.16: programmatic vector-only collections
+        (``taxonomy__*``) bypass the canonical schema — see
+        :func:`_bypass_canonical_schema`.
         """
-        metadatas = [_normalize_for_write(m, collection) for m in metadatas]
-        for m in metadatas:
-            validate(m)
+        if not _bypass_canonical_schema(collection):
+            metadatas = [_normalize_for_write(m, collection) for m in metadatas]
+            for m in metadatas:
+                validate(m)
         col = self.get_or_create_collection(collection)
         size = QUOTAS.MAX_RECORDS_PER_WRITE
         with self._write_sem(collection):
