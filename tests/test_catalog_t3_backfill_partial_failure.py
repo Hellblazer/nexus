@@ -373,3 +373,96 @@ def test_genuine_per_chunk_error_still_fails_verb(
     assert err["chunk_id"] == "ch2"
     assert err["stage"] == "update_per_chunk"
     assert "schema validation" in err["error"]
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Batch-bisect O(log N) recovery (.9.19)
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_bisect_uses_log_n_calls_for_isolated_overcap_chunk(
+    isolated_nexus, runner, chroma_client, monkeypatch,
+):
+    """nexus-o6aa.9.19: when ONE over-cap chunk is buried in a batch
+    of N, the bisect-and-recurse retry isolates it in ~log2(N)
+    ``col.update`` calls instead of N per-chunk retries.
+
+    Live-migration motivation: Hal's first migration ran the .9.18
+    per-chunk retry path against ~9k over-cap chunks scattered across
+    105 batches of 300. Worst-case 105 × 300 = 31,500 individual
+    ``col.update`` round-trips at ~50–100 ms each = 26–52 minutes.
+    With bisect, each failed batch resolves in ~log2(300) = 9 calls.
+
+    With N=16 and one over-cap chunk:
+    - .9.18 per-chunk retry path: 16 + 1 = 17 ``col.update`` calls
+    - .9.19 bisect path: ≤ 2 × log2(16) + 1 = 9 calls (worst case)
+
+    WITH TEETH: assert call count is bisect-shaped, not per-chunk.
+    """
+    n = 16
+    overcap_idx = 7
+
+    events = [
+        _chunk_event(f"ch{i:02d}", f"uuid-{i}", "code__test")
+        for i in range(n)
+    ]
+    _seed_event_log(isolated_nexus, events)
+
+    chunks: list[dict] = []
+    for i in range(n):
+        if i == overcap_idx:
+            chunks.append({
+                "id": f"ch{i:02d}", "content": "x",
+                "metadata": {f"k{j}": f"v{j}" for j in range(35)},
+            })
+        else:
+            chunks.append({
+                "id": f"ch{i:02d}", "content": "x",
+                "metadata": {"chunk_text_hash": f"h{i}"},
+            })
+    _seed(chroma_client, "code__test", chunks)
+
+    fault_client = _OverCapFaultClient(chroma_client)
+
+    # Wrap col.update to count invocations during the verb's run.
+    call_count = {"n": 0}
+    real_get_collection = fault_client.get_collection
+
+    def counting_get_collection(name):
+        col = real_get_collection(name)
+        outer_update = col.update
+
+        def counted_update(*a, **kw):
+            call_count["n"] += 1
+            return outer_update(*a, **kw)
+
+        col.update = counted_update
+        return col
+
+    fault_client.get_collection = counting_get_collection
+
+    class _CountT3:
+        _client = fault_client
+
+    monkeypatch.setattr("nexus.db.make_t3", lambda: _CountT3())
+    result = runner.invoke(t3_backfill_doc_id_cmd, ["--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = _parse_json_payload(result.output)
+    assert payload["chunks_updated"] == n - 1, payload
+    assert payload["chunks_deferred_count"] == 1, payload
+    assert payload["chunks_deferred"][0]["chunk_id"] == f"ch{overcap_idx:02d}"
+
+    # WITH TEETH: bisect of N=16 with one bad leaf takes at most
+    # 2*log2(N)+1 = 9 col.update calls. Per-chunk retry would take
+    # N+1 = 17 (initial batch + N singletons). If this number creeps
+    # up, the bisect has degraded — fail loudly so the regression is
+    # caught in CI.
+    max_expected = 2 * 4 + 1  # 2 * log2(16) + 1
+    assert call_count["n"] <= max_expected, (
+        f"bisect issued {call_count['n']} col.update calls for N={n}; "
+        f"expected ≤ {max_expected} (worst case 2*log2(N)+1). "
+        f"Per-chunk retry would be {n + 1} = {n}+1. If this assertion "
+        f"fails high, the bisect degraded to per-chunk and the .9.19 "
+        f"speedup was lost."
+    )

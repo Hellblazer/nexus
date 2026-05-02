@@ -3881,6 +3881,81 @@ def _print_synthesize_log_text(report: dict) -> None:
 # ── RDR-101 Phase 2: t3-backfill-doc-id verb ─────────────────────────────
 
 
+# nexus-o6aa.9.18: deferred-class detector for the per-chunk retry
+# path. Errors carrying a class string in this set are treated as
+# expected during the Phase 4 transition (chunks over the 32-key
+# NumMetadataKeys cap that pre-date the cap or carry deprecated
+# metadata Phase 4 will prune). They land in ``chunks_deferred``
+# rather than ``errors`` so the verb exits 0 — the operator sees
+# a deferred-cleanup list, not a failure.
+_DEFERRED_QUOTA_HINTS: tuple[str, ...] = (
+    "NumMetadataKeys",
+    "Number of metadata dictionary keys",
+)
+
+
+def _is_deferred_error(exc_text: str) -> bool:
+    return any(hint in exc_text for hint in _DEFERRED_QUOTA_HINTS)
+
+
+def _bisect_update(
+    col, ids: list[str], metas: list[dict], coll_name: str,
+) -> tuple[int, list[dict], list[dict]]:
+    """Recurse-and-halve to isolate failing chunks (nexus-o6aa.9.19).
+
+    On a batch update failure, halving recovers from a small number
+    of failing chunks in O(log N) col.update calls instead of the
+    O(N) per-chunk retry. Worst case (1 over-cap chunk per batch of
+    300): ~9 update calls instead of 300, ~30× faster against Cloud
+    T3 latency.
+
+    Returns ``(updated_count, deferred_records, error_records)``.
+
+    Single-chunk failures classify the same way as before:
+    deferred-class quotas (``NumMetadataKeys``) → deferred_records;
+    everything else → error_records (operator-visible exit 1).
+    """
+    if not ids:
+        return 0, [], []
+
+    # Try the full slice first. Cheap to retry the whole thing — if
+    # it now succeeds (transient network blip), we save log(N) calls.
+    try:
+        col.update(ids=ids, metadatas=metas)
+        return len(ids), [], []
+    except Exception as exc:
+        if len(ids) == 1:
+            # Leaf failure — classify and return.
+            cid = ids[0]
+            meta = metas[0]
+            msg = str(exc)
+            record = {
+                "collection": coll_name,
+                "chunk_id": cid,
+                "key_count": len(meta),
+                "error": msg[:200],
+            }
+            if _is_deferred_error(msg):
+                return 0, [record], []
+            return 0, [], [{
+                **record, "stage": "update_per_chunk", "batch_size": 1,
+            }]
+
+        # Bisect: split in half, recurse on each side.
+        mid = len(ids) // 2
+        left_ok, left_def, left_err = _bisect_update(
+            col, ids[:mid], metas[:mid], coll_name,
+        )
+        right_ok, right_def, right_err = _bisect_update(
+            col, ids[mid:], metas[mid:], coll_name,
+        )
+        return (
+            left_ok + right_ok,
+            left_def + right_def,
+            left_err + right_err,
+        )
+
+
 @catalog.command("t3-backfill-doc-id")
 @click.option(
     "--dry-run",
@@ -3971,21 +4046,6 @@ def t3_backfill_doc_id_cmd(
                 f"Failed to open T3 client: {exc}. Check ChromaDB credentials."
             )
 
-    # nexus-o6aa.9.18: deferred-class detector for the per-chunk
-    # retry path. Errors carrying a class string in this set are
-    # treated as expected during the Phase 4 transition (chunks
-    # over the 32-key NumMetadataKeys cap that pre-date the cap or
-    # carry deprecated metadata Phase 4 will prune). They land in
-    # ``chunks_deferred`` rather than ``errors`` so the verb exits
-    # 0 — the operator sees a deferred-cleanup list, not a failure.
-    DEFERRED_QUOTA_HINTS: tuple[str, ...] = (
-        "NumMetadataKeys",
-        "Number of metadata dictionary keys",
-    )
-
-    def _is_deferred_error(exc_text: str) -> bool:
-        return any(hint in exc_text for hint in DEFERRED_QUOTA_HINTS)
-
     for coll_name, payloads in by_coll.items():
         if dry_run:
             chunks_updated += len(payloads)
@@ -4038,36 +4098,21 @@ def t3_backfill_doc_id_cmd(
 
             if not update_ids:
                 continue
-            try:
-                col.update(ids=update_ids, metadatas=update_metas)
-                chunks_updated += len(update_ids)
-            except Exception as exc:
-                # nexus-o6aa.9.18: batch-level rejection is all-or-nothing.
-                # Fall back to per-chunk updates so clean chunks in a
-                # batch with one over-cap chunk still get doc_id; only
-                # the genuinely-failing chunks land in chunks_deferred.
-                # Pre-fix this swept ~22k clean chunks into the deferred
-                # list because ChromaDB's 32-key NumMetadataKeys cap
-                # rejected the whole batch on the first over-cap chunk.
-                for cid, meta in zip(update_ids, update_metas):
-                    try:
-                        col.update(ids=[cid], metadatas=[meta])
-                        chunks_updated += 1
-                    except Exception as inner_exc:
-                        msg = str(inner_exc)
-                        record = {
-                            "collection": coll_name,
-                            "chunk_id": cid,
-                            "key_count": len(meta),
-                            "error": msg[:200],
-                        }
-                        if _is_deferred_error(msg):
-                            chunks_deferred.append(record)
-                        else:
-                            errors.append({
-                                **record, "stage": "update_per_chunk",
-                                "batch_size": 1,
-                            })
+            # nexus-o6aa.9.18 + .9.19: batch-level rejection is
+            # all-or-nothing on Cloud T3. _bisect_update tries the
+            # whole slice first; on failure it bisects-and-recurses
+            # to isolate the failing chunks in O(log N) update calls
+            # instead of O(N) per-chunk retry. The .9.18 per-chunk
+            # path was correct but took ~30 min wall-clock against
+            # Cloud T3 latency on a 9k-chunk over-cap surface; .9.19
+            # brings that down to ~log2(300) = 9 calls per failed
+            # batch (~30× faster).
+            ok, deferred_records, error_records = _bisect_update(
+                col, update_ids, update_metas, coll_name,
+            )
+            chunks_updated += ok
+            chunks_deferred.extend(deferred_records)
+            errors.extend(error_records)
 
     report = {
         "dry_run": dry_run,
