@@ -1051,6 +1051,53 @@ class T3Database:
             self._delete_batch(col, collection_name, ids)
         return len(ids)
 
+    def ids_for_doc_id(self, collection_name: str, doc_id: str) -> list[str]:
+        """Return all chunk IDs for a given catalog ``doc_id``. No content fetch.
+
+        Companion to :meth:`ids_for_source`; switches the chunk-lookup
+        identity field from ``source_path`` to ``doc_id`` (RDR-101 Phase 4
+        reader migration). Paginates ``col.get()`` to respect the ChromaDB
+        Cloud 300-record limit. Returns empty list if the collection does
+        not exist.
+        """
+        try:
+            col = self._client_for(collection_name).get_collection(collection_name)
+        except _ChromaNotFoundError:
+            return []
+        ids: list[str] = []
+        offset = 0
+        page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
+        while True:
+            result = _chroma_with_retry(
+                col.get,
+                where={"doc_id": doc_id},
+                include=[],
+                limit=page_limit,
+                offset=offset,
+            )
+            page_ids = result["ids"]
+            ids.extend(page_ids)
+            offset += len(page_ids)
+            if len(page_ids) < page_limit:
+                break
+        return ids
+
+    def delete_by_doc_id(self, collection_name: str, doc_id: str) -> int:
+        """Delete all chunks for a given catalog ``doc_id``. Returns count.
+
+        Companion to :meth:`delete_by_source` (RDR-101 Phase 4 reader
+        migration). Uses paginated ``col.get()`` keyed on ``doc_id`` to
+        avoid the ChromaDB Cloud 300-record truncation limit.
+        """
+        try:
+            col = self._client_for(collection_name).get_collection(collection_name)
+        except _ChromaNotFoundError:
+            return 0
+        ids = self.ids_for_doc_id(collection_name, doc_id)
+        if ids:
+            self._delete_batch(col, collection_name, ids)
+        return len(ids)
+
     def update_source_path(
         self, collection_name: str, old_path: str, new_path: str
     ) -> int:
