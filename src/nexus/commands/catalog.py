@@ -4386,13 +4386,18 @@ def _run_t3_doc_id_coverage(
         )
 
     # Build expected (coll_id, chunk_id) → doc_id; track orphans.
+    # RDR-102 D3: also track every coll_id that appears in events.jsonl
+    # (whether non-orphan or orphan-only) so the orphan-ratio surface
+    # can report on collections that don't appear in ``expected``.
     expected: dict[str, dict[str, str]] = {}
     expected_orphans: dict[str, set[str]] = {}
+    all_event_collections: set[str] = set()
     for event in log.replay():
         if event.type != ev.TYPE_CHUNK_INDEXED:
             continue
         coll = event.payload.coll_id
         cid = event.payload.chunk_id
+        all_event_collections.add(coll)
         if event.payload.synthesized_orphan:
             expected_orphans.setdefault(coll, set()).add(cid)
             continue
@@ -4485,6 +4490,21 @@ def _run_t3_doc_id_coverage(
         not_in_t3 = sorted(set(expected_chunks) - seen)
 
         coverage = with_doc_id / total if total else 1.0
+        # RDR-102 D3: per-collection orphan ratio = orphan_events /
+        # (orphan_events + non_orphan_events). The denominator is the
+        # event-log population for this collection, NOT total T3
+        # chunks, because the surface is "what fraction of this
+        # collection's catalog projection is orphan'd". A 0/0 case
+        # (collection appears in no events at all) is unreachable
+        # here — we're inside the `for coll_name in expected.items()`
+        # loop so this branch always has at least one non-orphan event.
+        n_orphans = len(expected_orphans.get(coll_name, set()))
+        n_non_orphan = len(expected_chunks)
+        orphan_ratio = (
+            n_orphans / (n_orphans + n_non_orphan)
+            if (n_orphans + n_non_orphan)
+            else 0.0
+        )
         pass_for_coll = (
             not mismatched
             and not missing
@@ -4494,7 +4514,8 @@ def _run_t3_doc_id_coverage(
             "total_chunks": total,
             "with_doc_id": with_doc_id,
             "expected_chunks": len(expected_chunks),
-            "expected_orphans": len(expected_orphans.get(coll_name, set())),
+            "expected_orphans": n_orphans,
+            "orphan_ratio": round(orphan_ratio, 4),
             "missing_doc_id_sample": missing[:5],
             "missing_doc_id_count": len(missing),
             "mismatched_doc_id_sample": mismatched[:5],
@@ -4515,19 +4536,71 @@ def _run_t3_doc_id_coverage(
                 err=True,
             )
 
+    # RDR-102 D3: surface orphan-only collections (those that appear in
+    # events.jsonl but have ZERO non-orphan ChunkIndexed events). They
+    # would otherwise be invisible because the per-coll loop only
+    # iterates ``expected`` (non-orphan-bearing collections). For the
+    # operator dashboard, orphan-only collections should appear in
+    # tables with orphan_ratio=1.0 and total_chunks=0 (no T3 inspection
+    # since the verb's strict_not_in_t3 contract doesn't have non-
+    # orphan events to anchor against).
+    for coll_name in sorted(all_event_collections - set(expected)):
+        n_orphans = len(expected_orphans.get(coll_name, set()))
+        per_coll[coll_name] = {
+            "total_chunks": 0,
+            "with_doc_id": 0,
+            "expected_chunks": 0,
+            "expected_orphans": n_orphans,
+            "orphan_ratio": 1.0,
+            "missing_doc_id_sample": [],
+            "missing_doc_id_count": 0,
+            "mismatched_doc_id_sample": [],
+            "mismatched_doc_id_count": 0,
+            "not_in_t3_sample": [],
+            "not_in_t3_count": 0,
+            "coverage": 1.0,
+            "pass": True,  # nothing to fail on — all events are orphan
+        }
+
+    # Global orphan ratio across every event in the log.
+    total_orphan_events = sum(len(s) for s in expected_orphans.values())
+    total_non_orphan_events = sum(len(d) for d in expected.values())
+    total_events = total_orphan_events + total_non_orphan_events
+    global_orphan_ratio = (
+        total_orphan_events / total_events if total_events else 0.0
+    )
+
     return {
         "pass": overall_pass,
         "events_path": str(log.path),
         "collections_in_log": len(expected),
+        "collections_in_log_total": len(all_event_collections),
+        "orphan_ratio": round(global_orphan_ratio, 4),
         "strict_not_in_t3": strict_not_in_t3,
         "tables": per_coll,
     }
 
 
+_ORPHAN_RATIO_WARN_THRESHOLD = 0.50
+
+
 def _print_t3_doc_id_coverage_text(report: dict) -> None:
     click.echo("=== T3 doc_id coverage ===")
     click.echo(f"Events path:        {report['events_path']}")
-    click.echo(f"Collections in log: {report['collections_in_log']}")
+    # RDR-102 D3: clarified header. The original "Collections in log: N"
+    # was the count of collections with at least one non-orphan
+    # ChunkIndexed event (the slice the PASS gate sees), not the count
+    # of distinct coll_id values in events.jsonl. On the host catalog
+    # the numbers diverge ~30x (23 vs 783), and operators reading the
+    # output would silently believe most collections were covered.
+    in_log_total = report.get(
+        "collections_in_log_total", report["collections_in_log"],
+    )
+    click.echo(
+        f"Collections with non-orphan ChunkIndexed events: "
+        f"{report['collections_in_log']} "
+        f"(total in events.jsonl: {in_log_total})"
+    )
     click.echo("")
     for coll_name, diff in report["tables"].items():
         if "error" in diff:
@@ -4565,6 +4638,35 @@ def _print_t3_doc_id_coverage_text(report: dict) -> None:
                 f"(first {len(diff['not_in_t3_sample'])} shown): "
                 f"{diff['not_in_t3_sample']}"
             )
+    click.echo("")
+    # RDR-102 D3: orphan-ratio surface. PASS gate stays unchanged
+    # (per A4 — tightening would invalidate the host catalog's current
+    # PASS); orphan ratio is a SOFT signal alongside the gate. Any
+    # collection above the WARN threshold prints a WARN line; the
+    # global ratio prints regardless so operators see the headline.
+    click.echo("=== Orphan ratio ===")
+    global_ratio = report.get("orphan_ratio", 0.0)
+    click.echo(f"Global: {global_ratio:.2%}")
+    warn_lines: list[str] = []
+    for coll_name, diff in report["tables"].items():
+        if "error" in diff:
+            continue
+        ratio = diff.get("orphan_ratio", 0.0)
+        if ratio > _ORPHAN_RATIO_WARN_THRESHOLD:
+            warn_lines.append(
+                f"  WARN: {coll_name:<40}  orphan_ratio={ratio:.2%}  "
+                f"(orphans={diff['expected_orphans']}, non-orphans="
+                f"{diff['expected_chunks']})"
+            )
+    if warn_lines:
+        for line in warn_lines:
+            click.echo(line)
+        click.echo(
+            "  Run 'nx catalog synthesize-log --force --chunks "
+            "--prefer-live-catalog' followed by 'nx catalog "
+            "t3-backfill-doc-id' to recover content_hash-matchable "
+            "orphans. See docs/migration/rdr-101-phase4-orphan-recovery.md."
+        )
     click.echo("")
     if report["pass"]:
         click.echo("PASS — every non-orphan chunk carries the expected doc_id.")
