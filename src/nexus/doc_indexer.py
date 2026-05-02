@@ -82,8 +82,13 @@ def _lookup_existing_doc_id(file_path: str, corpus: str) -> str:
         # write lock with concurrent _ensure_consistent rebuilds.
         cat = open_cached(cat_path)
         owner_name = corpus or "standalone-pdfs"
+        # Curator-only lookup — see _register_or_lookup_doc_id for
+        # rationale (repo and curator owners can share names; lookups
+        # from the doc_indexer family must use the curator namespace).
         row = cat._db.execute(
-            "SELECT tumbler_prefix FROM owners WHERE name = ?", (owner_name,)
+            "SELECT tumbler_prefix FROM owners WHERE name = ? "
+            "AND owner_type = 'curator'",
+            (owner_name,),
         ).fetchone()
         if not row:
             return ""
@@ -166,8 +171,23 @@ def _register_or_lookup_doc_id(
             owner_name = "standalone-pdfs"
         else:
             owner_name = "standalone-docs"
+        # Curator-only lookup. A REPO owner can share the same name
+        # (e.g. "scheme-evolution-research" exists as both a repo
+        # owner created by ``nx index repo`` AND as a target for
+        # ``nx index pdf --corpus scheme-evolution-research``). Picking
+        # up the repo owner here triggers the cross-project guard at
+        # ``catalog.py:_check_source_uri_in_repo_root`` when the file
+        # lives outside the repo's tree (e.g. a DEVONthink-sourced
+        # PDF), the resulting ValueError gets caught broadly below
+        # and returns "" — silently breaking Phase A pre-flight
+        # registration for cross-source ingest. Filtering on
+        # owner_type='curator' keeps the namespaces separate; repo
+        # owners are reachable only via owner_for_repo(repo_hash)
+        # from the repo indexer, never via a corpus-name lookup here.
         row = cat._db.execute(
-            "SELECT tumbler_prefix FROM owners WHERE name = ?", (owner_name,)
+            "SELECT tumbler_prefix FROM owners WHERE name = ? "
+            "AND owner_type = 'curator'",
+            (owner_name,),
         ).fetchone()
         if row:
             owner = Tumbler.parse(row[0])
@@ -1321,8 +1341,12 @@ def _catalog_markdown_hook(
             pass
 
         owner_name = corpus if corpus else "standalone-docs"
+        # Curator-only lookup — see _register_or_lookup_doc_id for
+        # rationale.
         rows = cat._db.execute(
-            "SELECT tumbler_prefix FROM owners WHERE name = ?", (owner_name,)
+            "SELECT tumbler_prefix FROM owners WHERE name = ? "
+            "AND owner_type = 'curator'",
+            (owner_name,),
         ).fetchone()
         if rows:
             from nexus.catalog.tumbler import Tumbler
