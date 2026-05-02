@@ -525,7 +525,12 @@ def _index_document(
     # RDR-089 document-grain chain — fires once per file boundary.
     # content="" because only chunk text is in scope here; the hook
     # reads source_path itself per the P0.1 content-sourcing contract.
-    fire_post_document_hooks(sp, collection_name, "")
+    # nexus-tdgc: pre-flight catalog lookup so the aspect-queue hook
+    # can capture the doc_id alongside source_path.
+    fire_post_document_hooks(
+        sp, collection_name, "",
+        doc_id=_lookup_existing_doc_id(sp, corpus),
+    )
 
     # Prune stale chunks from a previous (larger) version of this file.
     # Paginate: ChromaDB Cloud returns at most 300 records per get() call.
@@ -1061,8 +1066,13 @@ def index_pdf(
         # incremental-branch tail. content="" (chunks already paginated
         # through T3); the hook reads source_path itself per the P0.1
         # content-sourcing contract.
+        # nexus-tdgc: forward the catalog doc_id (lookup is post-register
+        # so the entry exists by this point in the incremental path).
         from nexus.mcp_infra import fire_post_document_hooks
-        fire_post_document_hooks(str(pdf_path), col_name, "")
+        fire_post_document_hooks(
+            str(pdf_path), col_name, "",
+            doc_id=_lookup_existing_doc_id(str(pdf_path), corpus),
+        )
         if return_metadata:
             return {
                 "chunks": len(metadatas),
@@ -1107,7 +1117,11 @@ def index_pdf(
     # RDR-089 document-grain chain — fires once per small-doc PDF boundary.
     # content="" (full document text not retained in this path); the hook
     # reads source_path itself.
-    fire_post_document_hooks(str(pdf_path), col_name, "")
+    # nexus-tdgc: forward the catalog doc_id post-register.
+    fire_post_document_hooks(
+        str(pdf_path), col_name, "",
+        doc_id=_lookup_existing_doc_id(str(pdf_path), corpus),
+    )
 
     # Prune stale chunks (nexus-dcym: doc_id-keyed when catalog has the
     # entry; first-time indexes harmlessly use source_path).

@@ -739,8 +739,14 @@ def pipeline_index_pdf(
     # RDR-089 document-grain chain — once per PDF boundary at the streaming
     # pipeline tail. content="" (PDF text streamed not retained); the hook
     # reads source_path itself per the P0.1 content-sourcing contract.
+    # nexus-tdgc: _catalog_pdf_hook ran above so the catalog entry now
+    # exists; resolve the doc_id and forward it to the document chain.
+    from nexus.doc_indexer import _lookup_existing_doc_id
     from nexus.mcp_infra import fire_post_document_hooks
-    fire_post_document_hooks(str(pdf_path), collection, "")
+    fire_post_document_hooks(
+        str(pdf_path), collection, "",
+        doc_id=_lookup_existing_doc_id(str(pdf_path), corpus),
+    )
 
     return total_chunks
 

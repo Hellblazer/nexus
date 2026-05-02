@@ -760,6 +760,8 @@ def register_post_document_hook(fn) -> None:
 
 def fire_post_document_hooks(
     source_path: str, collection: str, content: str,
+    *,
+    doc_id: str = "",
 ) -> None:
     """Invoke all registered document-grain hooks. Per-hook failures are
     captured, logged, and persisted to T2 ``hook_failures`` with
@@ -776,12 +778,21 @@ def fire_post_document_hooks(
       may need to read ``source_path`` itself. The framework forwards
       both arguments unchanged; content-sourcing is the hook's
       responsibility, not the framework's.
+
+    ``doc_id`` (nexus-tdgc / RDR-101 Phase 4) is the catalog identity
+    of the source document. Forwarded to every registered hook as a
+    keyword arg; hooks that don't accept the kw are called without it
+    so older registrations keep working during the migration window.
     """
     import structlog
     _hook_log = structlog.get_logger()
     for hook in _post_document_hooks:
         try:
-            hook(source_path, collection, content)
+            try:
+                hook(source_path, collection, content, doc_id=doc_id)
+            except TypeError:
+                # Back-compat: hook predates the doc_id keyword.
+                hook(source_path, collection, content)
         except Exception as exc:
             hook_name = getattr(hook, "__name__", "?")
             _hook_log.warning(
@@ -949,8 +960,12 @@ def fire_store_chains(
     )
 
     # Document-grain chain — once per (source_path, content).
-    for sp, content in zip(source_paths, contents):
-        fire_post_document_hooks(sp, collection, content)
+    # nexus-tdgc: doc_id is forwarded so the aspect-queue hook can
+    # capture it at enqueue time. The doc_ids list is the same one
+    # the post_store + batch chains use; for the document chain it is
+    # the catalog identity.
+    for did, sp, content in zip(doc_ids, source_paths, contents):
+        fire_post_document_hooks(sp, collection, content, doc_id=did)
 
 
 # ── Version compatibility check (RDR-076) ─────────────────────────────────────

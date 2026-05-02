@@ -487,7 +487,11 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
             fire_post_store_hooks(_did, ctx.corpus, _doc)
         # RDR-089 document-grain chain — once per code-file boundary.
         # content="" (chunk-level scope only); hook reads source_path.
-        fire_post_document_hooks(str(file_path), ctx.corpus, "")
+        # nexus-tdgc: forward catalog doc_id when available.
+        fire_post_document_hooks(
+            str(file_path), ctx.corpus, "",
+            doc_id=catalog_doc_id,
+        )
 
     return len(ids)
 
