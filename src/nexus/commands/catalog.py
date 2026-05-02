@@ -3806,15 +3806,42 @@ def synthesize_log_cmd(
                 )
             preserve_map[t] = d  # last-occurrence wins
 
+    # nexus-o6aa.9.17: stage-by-stage progress output. Stderr only so
+    # ``--json`` stdout stays machine-clean; suppressed when --json is
+    # set so JSON consumers see no progress noise.
+    import time as _time
+    show_progress = not as_json
+
+    if show_progress:
+        click.echo(
+            "  [synthesize-log] walking owners.jsonl + documents.jsonl + "
+            "links.jsonl…",
+            err=True,
+        )
+    _t0 = _time.monotonic()
     events = list(synthesize_from_jsonl(
         cat_dir, mint_doc_id=True, preserve_doc_ids=preserve_map,
     ))
+    if show_progress:
+        click.echo(
+            f"  [synthesize-log] {len(events)} events from JSONL in "
+            f"{_time.monotonic() - _t0:.1f}s",
+            err=True,
+        )
+
     chunk_events: list = []
     orphan_count = 0
     if chunks:
         from nexus.catalog.synthesizer import synthesize_t3_chunks
         from nexus.db import make_t3
 
+        if show_progress:
+            click.echo(
+                "  [synthesize-log] walking T3 collections (Chroma read; "
+                "may take several minutes on a large catalog)…",
+                err=True,
+            )
+        _tc = _time.monotonic()
         try:
             t3 = make_t3()
             chunk_events = list(
@@ -3824,6 +3851,13 @@ def synthesize_log_cmd(
                 1 for e in chunk_events
                 if getattr(e.payload, "synthesized_orphan", False)
             )
+            if show_progress:
+                click.echo(
+                    f"  [synthesize-log] {len(chunk_events)} chunk events "
+                    f"({orphan_count} orphans) in "
+                    f"{_time.monotonic() - _tc:.1f}s",
+                    err=True,
+                )
         except Exception as exc:
             raise click.ClickException(
                 f"Failed to walk T3 chunks: {exc}. Pass --no-chunks to "
@@ -4046,10 +4080,26 @@ def t3_backfill_doc_id_cmd(
                 f"Failed to open T3 client: {exc}. Check ChromaDB credentials."
             )
 
-    for coll_name, payloads in by_coll.items():
+    # nexus-o6aa.9.17: per-collection progress so operators see the
+    # verb is working through Cloud T3 (each collection is a network
+    # round-trip per 300-id batch; large collections can be tens of
+    # minutes). Stderr only; suppressed under --json.
+    import time as _time
+    show_progress = not dry_run and not as_json
+    coll_count = len(by_coll)
+
+    for coll_idx, (coll_name, payloads) in enumerate(by_coll.items(), start=1):
         if dry_run:
             chunks_updated += len(payloads)
             continue
+        if show_progress:
+            click.echo(
+                f"  [t3-backfill {coll_idx}/{coll_count}] {coll_name}: "
+                f"{len(payloads)} chunks…",
+                err=True,
+            )
+        _tc = _time.monotonic()
+        coll_updated_before = chunks_updated
         try:
             col = t3._client.get_collection(name=coll_name)
         except Exception as exc:
@@ -4058,6 +4108,12 @@ def t3_backfill_doc_id_cmd(
                 "stage": "open",
                 "error": str(exc),
             })
+            if show_progress:
+                click.echo(
+                    f"  [t3-backfill {coll_idx}/{coll_count}] {coll_name}: "
+                    f"could not open ({exc})",
+                    err=True,
+                )
             continue
 
         # Idempotency: read current metadata in batches; only update
@@ -4113,6 +4169,15 @@ def t3_backfill_doc_id_cmd(
             chunks_updated += ok
             chunks_deferred.extend(deferred_records)
             errors.extend(error_records)
+
+        if show_progress:
+            updated_here = chunks_updated - coll_updated_before
+            elapsed = _time.monotonic() - _tc
+            click.echo(
+                f"  [t3-backfill {coll_idx}/{coll_count}] {coll_name}: "
+                f"{updated_here}/{len(payloads)} updated in {elapsed:.1f}s",
+                err=True,
+            )
 
     report = {
         "dry_run": dry_run,
@@ -4742,10 +4807,17 @@ def migrate_cmd(
                 click.echo(f"  {step}")
         return
 
+    # nexus-o6aa.9.17: per-step timing so the operator sees how long
+    # each phase took. Real-data finding (Hal's first migration):
+    # synthesize-log was ~5 min, t3-backfill was ~3 min, doctor was
+    # ~1 min — but with no echo until the next step's "==>" line, the
+    # operator was guessing whether the process was alive.
+    import time as _time
+
     # Step 1: synthesize-log --force.
     click.echo("==> nx catalog synthesize-log --force"
                + ("" if no_chunks else " --chunks"))
-    syn_args = ["--force"] + ([] if no_chunks else ["--chunks"])
+    _step1_t0 = _time.monotonic()
     try:
         ctx.invoke(synthesize_log_cmd, **{
             "dry_run": False,
@@ -4758,10 +4830,14 @@ def migrate_cmd(
             f"synthesize-log failed: {exc.message}. Migration aborted; "
             "no further steps run."
         ) from exc
+    click.echo(
+        f"    synthesize-log: {_time.monotonic() - _step1_t0:.1f}s",
+    )
 
     # Step 2: t3-backfill-doc-id (unless --no-chunks).
     if not no_chunks:
         click.echo("==> nx catalog t3-backfill-doc-id")
+        _step2_t0 = _time.monotonic()
         try:
             ctx.invoke(t3_backfill_doc_id_cmd, **{
                 "dry_run": False,
@@ -4775,6 +4851,9 @@ def migrate_cmd(
                 "lack doc_id metadata. Re-run 'nx catalog "
                 "t3-backfill-doc-id' after fixing the underlying issue."
             ) from exc
+        click.echo(
+            f"    t3-backfill-doc-id: {_time.monotonic() - _step2_t0:.1f}s",
+        )
 
     # Synchronize live SQLite to events.jsonl before doctor runs.
     # nexus-o6aa.9.14: ``synthesize-log`` writes events.jsonl but does
@@ -4792,6 +4871,7 @@ def migrate_cmd(
     # replays events.jsonl into the live SQLite. After that, doctor's
     # comparison is apples-to-apples.
     click.echo("==> sync live SQLite to events.jsonl")
+    _sync_t0 = _time.monotonic()
     sync_cat = Catalog(cat_dir, cat_dir / ".catalog.db")
     try:
         # Constructor calls ``_ensure_consistent`` at the end of
@@ -4800,10 +4880,14 @@ def migrate_cmd(
         sync_cat._db.commit()
     finally:
         sync_cat._db.close()
+    click.echo(
+        f"    sync: {_time.monotonic() - _sync_t0:.1f}s",
+    )
 
     # Step 3: doctor verification.
     click.echo("==> nx catalog doctor --replay-equality"
                + ("" if no_chunks else " --t3-doc-id-coverage --strict-not-in-t3"))
+    _doc_t0 = _time.monotonic()
     try:
         ctx.invoke(doctor_cmd, **{
             "replay_equality": True,
@@ -4818,5 +4902,8 @@ def migrate_cmd(
                 "PASS. Inspect the report above; re-running this verb "
                 "is safe and idempotent."
             ) from exc
+    click.echo(
+        f"    doctor: {_time.monotonic() - _doc_t0:.1f}s",
+    )
 
     click.echo("\nMigration complete.")
