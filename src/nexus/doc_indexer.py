@@ -1331,12 +1331,33 @@ def _catalog_markdown_hook(
             source_mtime = md_path.stat().st_mtime
         except OSError:
             source_mtime = 0.0
-        cat.register(
-            owner=owner, title=title, content_type=content_type,
-            file_path=fp, physical_collection=collection_name,
-            chunk_count=chunk_count, year=year,
-            source_mtime=source_mtime,
-        )
+        # RDR-102 Phase A: mirror _catalog_pdf_hook's existing-vs-fresh
+        # branch. The pre-flight _register_or_lookup_doc_id already wrote
+        # the Document row with chunk_count=0, so the unconditional
+        # cat.register() this used to do hits Catalog.register's
+        # by_file_path early-return and never updates chunk_count off
+        # zero. Use cat.update() on the existing tumbler to write the
+        # final chunk_count + indexed_at + source_mtime; fall through to
+        # cat.register() only when no row exists yet (no-pre-flight
+        # branch — preserves the no-catalog ingest contract for callers
+        # that bypass the public entry points).
+        from datetime import UTC, datetime  # noqa: PLC0415
+        existing = cat.by_file_path(owner, fp)
+        if existing is not None:
+            cat.update(
+                existing.tumbler,
+                physical_collection=collection_name,
+                chunk_count=chunk_count,
+                indexed_at=datetime.now(UTC).isoformat(),
+                source_mtime=source_mtime,
+            )
+        else:
+            cat.register(
+                owner=owner, title=title, content_type=content_type,
+                file_path=fp, physical_collection=collection_name,
+                chunk_count=chunk_count, year=year,
+                source_mtime=source_mtime,
+            )
     except Exception:
         _log.debug("catalog_markdown_hook_failed", exc_info=True)
 

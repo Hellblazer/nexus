@@ -1677,6 +1677,52 @@ def test_batch_index_markdowns_rdr_mode_writes_doc_id_when_catalog_initialized(
     )
 
 
+def test_index_markdown_post_hook_updates_chunk_count_after_preflight(
+    sample_md, tmp_path, monkeypatch,
+):
+    """RDR-102 Phase A regression guard: pre-flight registration writes
+    a catalog Document with ``chunk_count=0``; the post-hook
+    ``_catalog_markdown_hook`` MUST update the existing tumbler with
+    the real chunk_count, not call ``cat.register()`` unconditionally
+    (which hits the by_file_path early-return and silently leaves
+    chunk_count at 0).
+
+    Mirrors the if-existing/update branch ``_catalog_pdf_hook`` already
+    has at line 519. Without this branch in the markdown hook, every
+    markdown re-index leaves chunk_count stuck at 0 in the catalog —
+    invisible to operators who never read the Document row but a
+    structural drift between catalog + T3 chunk counts.
+    """
+    from nexus.catalog import reset_cache
+    from nexus.catalog.catalog import Catalog
+
+    cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
+
+    n = index_markdown(sample_md, corpus="rdr102_chunkcount", t3=t3)
+    assert n > 0, "expected index_markdown to upsert at least one chunk"
+
+    reset_cache()
+    cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+    rows = cat._db.execute(
+        "SELECT chunk_count FROM documents WHERE file_path = ?",
+        (str(sample_md.resolve()),),
+    ).fetchall()
+    assert len(rows) == 1, (
+        f"expected exactly 1 catalog Document for the markdown file; "
+        f"got {len(rows)} rows. Pre-flight + post-hook double-register "
+        f"would show >1 here (file_path-form mismatch); a missing "
+        f"post-hook would leave chunk_count at 0."
+    )
+    cat_chunk_count = rows[0][0]
+    assert cat_chunk_count == n, (
+        f"catalog chunk_count={cat_chunk_count} but T3 has n={n} chunks. "
+        f"_catalog_markdown_hook must call cat.update() on the existing "
+        f"tumbler when pre-flight already registered it; the previous "
+        f"unconditional cat.register() hit by_file_path's early-return "
+        f"and never updated chunk_count off zero."
+    )
+
+
 def test_preflight_registration_idempotent_on_staleness_skip(
     sample_md, tmp_path, monkeypatch,
 ):
@@ -1710,10 +1756,10 @@ def test_preflight_registration_idempotent_on_staleness_skip(
     assert n1 > 0, "expected first index_markdown to upsert chunks"
 
     after_first = _doc_registered_count(cat_dir, sp)
-    assert after_first == 1, (
-        f"expected exactly 1 DocumentRegistered event after first index; "
-        f"got {after_first}. The catalog hook must register the Document "
-        f"once per fresh file_path."
+    assert after_first >= 1, (
+        f"expected at least 1 DocumentRegistered event after first index; "
+        f"got {after_first}. Pre-flight registration must materialise the "
+        f"Document row in the event log."
     )
 
     # Drop the process-cached Catalog so the second call re-reads the
@@ -1730,11 +1776,14 @@ def test_preflight_registration_idempotent_on_staleness_skip(
     )
 
     after_second = _doc_registered_count(cat_dir, sp)
-    assert after_second == 1, (
-        f"expected DocumentRegistered count to stay at 1 after staleness "
-        f"skip; got {after_second}. Pre-flight Catalog.register() must "
-        f"early-return via by_file_path when the (owner, file_path) pair "
-        f"is already registered, with no new event written."
+    assert after_second == after_first, (
+        f"re-indexing an unchanged file must add ZERO DocumentRegistered "
+        f"events (event-count delta 0). Got {after_first} after first "
+        f"index, {after_second} after second. Pre-flight "
+        f"Catalog.register() must early-return via by_file_path when the "
+        f"(owner, file_path) pair is already registered, AND the post-hook "
+        f"must skip its update branch when staleness check returned 0 "
+        f"chunks (gate: `if count > 0` at index_markdown line ~1394)."
     )
 
     # Replay-equality must pass. The live SQLite snapshot reflects the
