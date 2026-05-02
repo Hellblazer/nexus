@@ -502,14 +502,24 @@ def synthesize_t3_chunks(
     2. ``title`` exact match (the Phase 0 ``CHROMA_IDENTITY_FIELD``
        fallback for ``knowledge__*`` collections that legitimately have
        empty source_uri rows in the catalog).
-    3. **(RDR-102 D5)** ``content_hash`` match against
+    3. **(nexus-olhr)** title-prefix file_path match for code/prose
+       chunks. ``code_indexer`` and ``prose_indexer`` write
+       ``meta["title"] = "<relpath>:<line-range>"`` (e.g.
+       ``"mcp-server/src/index.ts:1-24"``); the matching catalog
+       Document carries ``file_path = "<relpath>"`` (e.g.
+       ``"mcp-server/src/index.ts"``). When the chunk title contains
+       ``:``, split on the first colon and look up the prefix in the
+       file_path reverse map. Recovers ~85K production orphans that
+       lost source_path to ``prune-deprecated-keys`` (PR #480) before
+       Phase A wired doc_id at chunk-write time.
+    4. **(RDR-102 D5)** ``content_hash`` match against
        *live_doc_lookup* — the ``--prefer-live-catalog`` recovery
        fallback. Use to recover chunks whose owning Document was
        registered AFTER an earlier ``synthesize-log`` run had already
        classified them as orphans, or whose source_path / title drifted
        (file moved, repo re-rooted) but whose content_hash still
        matches a live catalog Document.
-    4. None — emit ``ChunkIndexed`` with ``doc_id=""`` and
+    5. None — emit ``ChunkIndexed`` with ``doc_id=""`` and
        ``synthesized_orphan=True`` so the Phase 2 doctor coverage
        check (PR δ) can report the orphan rather than the GC silently
        collecting it after the orphan window.
@@ -534,6 +544,7 @@ def synthesize_t3_chunks(
     # Build reverse maps once.
     source_uri_to_doc_id: dict[str, str] = {}
     title_to_doc_id: dict[str, str] = {}
+    file_path_to_doc_id: dict[str, str] = {}
     coll_to_doc_ids: dict[str, set[str]] = {}
     for ev_obj in document_events:
         if ev_obj.type != ev.TYPE_DOCUMENT_REGISTERED:
@@ -546,6 +557,11 @@ def synthesize_t3_chunks(
             # event log can only resolve to one of them; the doctor
             # verb will surface the ambiguity downstream.
             title_to_doc_id[p.title] = p.doc_id
+        # nexus-olhr: build file_path reverse map for the title-prefix
+        # recovery path. Last-write-wins on collision (multiple repos
+        # with the same relative path).
+        if getattr(p, "file_path", ""):
+            file_path_to_doc_id[p.file_path] = p.doc_id
         if p.coll_id:
             coll_to_doc_ids.setdefault(p.coll_id, set()).add(p.doc_id)
 
@@ -562,6 +578,7 @@ def synthesize_t3_chunks(
                 col, coll_name,
                 source_uri_to_doc_id=source_uri_to_doc_id,
                 title_to_doc_id=title_to_doc_id,
+                file_path_to_doc_id=file_path_to_doc_id,
                 live_doc_lookup=live_doc_lookup,
             )
         except Exception as exc:
@@ -578,6 +595,7 @@ def _synthesize_collection_chunks(
     *,
     source_uri_to_doc_id: dict[str, str],
     title_to_doc_id: dict[str, str],
+    file_path_to_doc_id: dict[str, str] | None = None,
     live_doc_lookup: dict[str, str] | None = None,
 ) -> Iterator[Event]:
     """Paginate one collection and yield ``ChunkIndexed`` per chunk."""
@@ -620,7 +638,21 @@ def _synthesize_collection_chunks(
             # 2. Title fallback (CHROMA_IDENTITY_FIELD pattern).
             if not doc_id and chunk_title:
                 doc_id = title_to_doc_id.get(chunk_title, "")
-            # 3. RDR-102 D5: live-catalog content_hash recovery fallback.
+            # 3. nexus-olhr: title-prefix file_path match. Code/prose
+            #    chunks have title "<relpath>:<line-range>"; the
+            #    catalog Document's file_path is "<relpath>". Split on
+            #    the first ':' and look up the prefix. The colon-
+            #    presence guard prevents accidentally matching a
+            #    Document whose file_path equals an unrelated chunk's
+            #    full title (e.g. a knowledge paper title that happens
+            #    to coincide with a file_path string).
+            if (
+                not doc_id and chunk_title and file_path_to_doc_id
+                and ":" in chunk_title
+            ):
+                relpath_candidate = chunk_title.split(":", 1)[0]
+                doc_id = file_path_to_doc_id.get(relpath_candidate, "")
+            # 4. RDR-102 D5: live-catalog content_hash recovery fallback.
             #    Only consulted when source_uri + title both miss; the
             #    synthesized run's DocumentRegistered events stay
             #    authoritative for non-orphan chunks. Empty content_hash

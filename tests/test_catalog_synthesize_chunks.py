@@ -102,6 +102,7 @@ def _make_doc_events(*specs: dict) -> list[ev.Event]:
                 coll_id=s.get("coll_id", ""),
                 title=s.get("title", ""),
                 tumbler=s.get("tumbler", ""),
+                file_path=s.get("file_path", ""),
             ),
             ts="2026-04-30T00:00:00Z",
         ))
@@ -349,6 +350,161 @@ class TestSynthesizeLogChunksFlag:
         payload = json.loads(result.output)
         assert payload["chunks_synthesized"] is False
         assert "ChunkIndexed" not in payload["events_by_type"]
+
+
+# ── nexus-olhr: title-prefix file_path resolution ────────────────────────
+
+
+class TestTitlePrefixFilePathRecovery:
+    """Code/prose chunks indexed by ``code_indexer`` / ``prose_indexer``
+    carry ``meta["title"] = "<relpath>:<line-range>"`` (e.g.
+    ``"mcp-server/src/index.ts:1-24"``). The matching catalog Document
+    has ``file_path = "<relpath>"`` (e.g. ``"mcp-server/src/index.ts"``).
+    The exact-title-match path (priority 2) misses because the chunk
+    title doesn't equal the Document title (Document title is just
+    the filename, e.g. ``"index.ts"``).
+
+    Production post-mortem (RDR-102 close): ~85K of 138K orphans on
+    Hal's catalog are exactly this shape — code chunks whose
+    source_path was stripped by ``prune-deprecated-keys`` (PR #480,
+    pre-RDR-102) AND whose title doesn't satisfy the exact-match
+    fallback. Adding a 4th resolution priority that splits chunk
+    title on ``:`` and looks up the prefix against a
+    ``file_path_to_doc_id`` reverse map recovers them WITHOUT
+    re-embedding.
+    """
+
+    def test_code_chunk_title_prefix_resolves_via_file_path(
+        self, chroma_client,
+    ):
+        """RDR-102 nexus-olhr: a code chunk with title
+        ``"<relpath>:<line-range>"`` MUST resolve to the catalog
+        Document whose ``file_path`` matches the relpath portion,
+        even when source_uri / exact-title / content_hash all miss.
+        """
+        _seed_collection(chroma_client, "code__title_prefix", [
+            {
+                "id": "tp1", "content": "code chunk content",
+                "metadata": {
+                    # source_path stripped by prune-deprecated-keys
+                    "title": "mcp-server/src/index.ts:1-24",
+                    "chunk_text_hash": "tp1hash",
+                    "content_hash": "tp1content",
+                    "chunk_index": 0,
+                },
+            },
+        ])
+        # Document carries file_path matching the chunk title's prefix
+        # (everything before the ':').
+        doc_events = _make_doc_events({
+            "doc_id": "uuid7-title-prefix",
+            "source_uri": "",  # source_uri match would also work but
+                               # this isolates the title-prefix path
+            "coll_id": "code__title_prefix",
+            "tumbler": "1.7.42",
+            "title": "index.ts",  # exact-title-match would FAIL —
+                                  # chunk title 'mcp-server/src/index.ts:1-24'
+                                  # does not equal 'index.ts'
+            "file_path": "mcp-server/src/index.ts",
+        })
+
+        events = list(synthesize_t3_chunks(chroma_client, doc_events))
+        assert len(events) == 1
+        e = events[0]
+        assert e.payload.doc_id == "uuid7-title-prefix", (
+            f"expected title-prefix file_path resolution to win; got "
+            f"{e.payload.doc_id!r}. The chunk's title splits on ':' to "
+            f"give 'mcp-server/src/index.ts', which matches the "
+            f"Document's file_path. Without this priority the chunk "
+            f"orphans — exactly the production failure mode RDR-102 "
+            f"post-close investigation surfaced."
+        )
+        assert e.payload.synthesized_orphan is False
+
+    def test_title_without_colon_does_not_attempt_file_path_match(
+        self, chroma_client,
+    ):
+        """A chunk whose title doesn't contain ``:`` (e.g. a knowledge
+        paper title, a single filename) MUST NOT trigger the title-
+        prefix lookup. The split-on-colon would yield the entire title
+        as the prefix; if that accidentally matched a Document's
+        file_path the chunk would be wrongly anchored."""
+        _seed_collection(chroma_client, "knowledge__no_colon", [
+            {
+                "id": "nc1", "content": "knowledge chunk",
+                "metadata": {
+                    "title": "Some Paper Title",  # no colon
+                    "chunk_text_hash": "nc1hash",
+                    "content_hash": "nc1content",
+                    "chunk_index": 0,
+                },
+            },
+        ])
+        # A Document with file_path == 'Some Paper Title' would be
+        # accidentally matched if we naively did `prefix = title.split(':')[0]`
+        # without checking for colon presence.
+        doc_events = _make_doc_events({
+            "doc_id": "uuid7-wrong",
+            "source_uri": "",
+            "coll_id": "knowledge__no_colon",
+            "tumbler": "1.7.99",
+            "title": "Different Title",  # exact-title doesn't match
+            "file_path": "Some Paper Title",  # would WRONGLY match if
+                                              # split-on-colon ran on
+                                              # a title without ':'
+        })
+
+        events = list(synthesize_t3_chunks(chroma_client, doc_events))
+        assert len(events) == 1
+        e = events[0]
+        # Without the colon-presence guard, the chunk would resolve
+        # to 'uuid7-wrong'. With the guard, it correctly orphans.
+        assert e.payload.doc_id == "", (
+            f"chunk title with no ':' must not trigger title-prefix "
+            f"file_path lookup; got doc_id={e.payload.doc_id!r}. The "
+            f"split-on-colon must be guarded by `if ':' in title`."
+        )
+        assert e.payload.synthesized_orphan is True
+
+    def test_priority_chain_unchanged_for_existing_match_paths(
+        self, chroma_client,
+    ):
+        """A chunk that resolves via priority 0/1/2 (chunk doc_id /
+        source_uri / exact title) must NOT fall through to the new
+        title-prefix priority. The new priority is a FALLBACK after
+        the existing matchers fail."""
+        _seed_collection(chroma_client, "code__priority_unchanged", [
+            {
+                "id": "pu1", "content": "chunk with exact title match",
+                "metadata": {
+                    "title": "index.ts",  # exact-title match candidate
+                    "chunk_text_hash": "pu1hash",
+                    "content_hash": "pu1content",
+                    "chunk_index": 0,
+                },
+            },
+        ])
+        # Document has BOTH title="index.ts" (exact match) AND
+        # file_path="something/else.ts". The exact-title match
+        # (priority 2) MUST win over the title-prefix lookup
+        # (new priority 2.5).
+        doc_events = _make_doc_events({
+            "doc_id": "uuid7-exact-title",
+            "source_uri": "",
+            "coll_id": "code__priority_unchanged",
+            "tumbler": "1.7.10",
+            "title": "index.ts",
+            "file_path": "something/else.ts",  # would NOT match
+                                                # a chunk title that
+                                                # has no ':'
+        })
+
+        events = list(synthesize_t3_chunks(chroma_client, doc_events))
+        assert len(events) == 1
+        assert events[0].payload.doc_id == "uuid7-exact-title", (
+            "exact-title match (priority 2) must take precedence over "
+            "title-prefix file_path match (new priority 2.5)"
+        )
 
 
 # ── RDR-102 Phase A / D5: --prefer-live-catalog flag ─────────────────────
