@@ -4873,11 +4873,23 @@ def migrate_cmd(
     # Decision matrix:
     #   has_legacy_docs=False & has_events=False → empty catalog: nothing to do
     #   has_legacy_docs=True  & has_events=True  & not fallback_active
-    #     → already migrated cleanly: nothing to do
+    #     → Phase 3 done; Phase 4 may still be needed (run when the
+    #       operator has set --i-have-completed-the-reader-migration)
     #   has_legacy_docs=True  & has_events=False
     #     → freshly-upgraded, no ES mutations yet: proactively migrate
     #   has_legacy_docs=True  & fallback_active   → migrate
-    needs_migration = has_legacy_docs and (not has_events or fallback_active)
+    phase3_needs_migration = has_legacy_docs and (
+        not has_events or fallback_active
+    )
+    # nexus-o6aa.10.4 fix: with --i-have-completed-the-reader-migration,
+    # the Phase 4 finisher (prune + drain backfill) needs to run even
+    # when Phase 3 is already done. The previous gate skipped to
+    # "nothing to do" and never reached the Phase 4 step. Idempotent on
+    # already-pruned catalogs (chunks_already_pruned counts the no-ops).
+    phase4_needs_run = (
+        reader_migration_done and not no_chunks and has_events
+    )
+    needs_migration = phase3_needs_migration or phase4_needs_run
 
     if not needs_migration:
         report = {
@@ -4897,13 +4909,20 @@ def migrate_cmd(
             click.echo(f"Nothing to do — {report['reason']}.")
         return
 
+    # Track whether the Phase 3 steps need to run (Phase 4 alone path
+    # skips synthesize-log + first backfill). Steps below honor this.
+    phase3_only = phase3_needs_migration and not phase4_needs_run
+    skip_phase3 = phase4_needs_run and not phase3_needs_migration
+
     if dry_run:
-        would_run = [
-            f"nx catalog synthesize-log --force"
-            + ("" if no_chunks else " --chunks"),
-        ]
-        if not no_chunks:
-            would_run.append("nx catalog t3-backfill-doc-id")
+        would_run = []
+        if not skip_phase3:
+            would_run.append(
+                f"nx catalog synthesize-log --force"
+                + ("" if no_chunks else " --chunks")
+            )
+            if not no_chunks:
+                would_run.append("nx catalog t3-backfill-doc-id")
         if reader_migration_done and not no_chunks:
             would_run.extend([
                 "nx catalog prune-deprecated-keys "
@@ -4938,45 +4957,53 @@ def migrate_cmd(
     # operator was guessing whether the process was alive.
     import time as _time
 
-    # Step 1: synthesize-log --force.
-    click.echo("==> nx catalog synthesize-log --force"
-               + ("" if no_chunks else " --chunks"))
-    _step1_t0 = _time.monotonic()
-    try:
-        ctx.invoke(synthesize_log_cmd, **{
-            "dry_run": False,
-            "force": True,
-            "chunks": not no_chunks,
-            "as_json": False,
-        })
-    except click.ClickException as exc:
-        raise click.ClickException(
-            f"synthesize-log failed: {exc.message}. Migration aborted; "
-            "no further steps run."
-        ) from exc
-    click.echo(
-        f"    synthesize-log: {_time.monotonic() - _step1_t0:.1f}s",
-    )
-
-    # Step 2: t3-backfill-doc-id (unless --no-chunks).
-    if not no_chunks:
-        click.echo("==> nx catalog t3-backfill-doc-id")
-        _step2_t0 = _time.monotonic()
+    # Steps 1-2: Phase 3 work. Skipped when only the Phase 4 finisher
+    # needs to run (Phase 3 is already complete).
+    if not skip_phase3:
+        # Step 1: synthesize-log --force.
+        click.echo("==> nx catalog synthesize-log --force"
+                   + ("" if no_chunks else " --chunks"))
+        _step1_t0 = _time.monotonic()
         try:
-            ctx.invoke(t3_backfill_doc_id_cmd, **{
+            ctx.invoke(synthesize_log_cmd, **{
                 "dry_run": False,
-                "collection_filter": "",
+                "force": True,
+                "chunks": not no_chunks,
                 "as_json": False,
             })
         except click.ClickException as exc:
             raise click.ClickException(
-                f"t3-backfill-doc-id failed: {exc.message}. Migration "
-                "partial; events.jsonl is current but T3 chunks may "
-                "lack doc_id metadata. Re-run 'nx catalog "
-                "t3-backfill-doc-id' after fixing the underlying issue."
+                f"synthesize-log failed: {exc.message}. Migration aborted; "
+                "no further steps run."
             ) from exc
         click.echo(
-            f"    t3-backfill-doc-id: {_time.monotonic() - _step2_t0:.1f}s",
+            f"    synthesize-log: {_time.monotonic() - _step1_t0:.1f}s",
+        )
+
+        # Step 2: t3-backfill-doc-id (unless --no-chunks).
+        if not no_chunks:
+            click.echo("==> nx catalog t3-backfill-doc-id")
+            _step2_t0 = _time.monotonic()
+            try:
+                ctx.invoke(t3_backfill_doc_id_cmd, **{
+                    "dry_run": False,
+                    "collection_filter": "",
+                    "as_json": False,
+                })
+            except click.ClickException as exc:
+                raise click.ClickException(
+                    f"t3-backfill-doc-id failed: {exc.message}. Migration "
+                    "partial; events.jsonl is current but T3 chunks may "
+                    "lack doc_id metadata. Re-run 'nx catalog "
+                    "t3-backfill-doc-id' after fixing the underlying issue."
+                ) from exc
+            click.echo(
+                f"    t3-backfill-doc-id: {_time.monotonic() - _step2_t0:.1f}s",
+            )
+    else:
+        click.echo(
+            "Phase 3 already complete (events.jsonl covers documents.jsonl). "
+            "Running Phase 4 finisher only."
         )
 
     # Synchronize live SQLite to events.jsonl before doctor runs.
