@@ -49,9 +49,15 @@ def _build_catalog_doc_id_lookup() -> Callable[[str, str], str] | None:
         return None
 
     def _lookup(collection: str, source_id: str) -> str:
+        # Phase 1 contract: catalog tumbler doubles as doc_id when
+        # metadata.doc_id is unpopulated (event-sourcing path not yet
+        # run on this collection). Falls back to tumbler so the chroma
+        # reader still receives a usable identity; chunks indexed via
+        # the indexer's _doc_id_resolver carry str(tumbler) as their
+        # doc_id metadata, which matches.
         try:
             row = cat._db.execute(
-                "SELECT json_extract(metadata, '$.doc_id') "
+                "SELECT json_extract(metadata, '$.doc_id'), tumbler "
                 "FROM documents "
                 "WHERE physical_collection = ? "
                 "  AND (file_path = ? OR title = ?) "
@@ -62,7 +68,8 @@ def _build_catalog_doc_id_lookup() -> Callable[[str, str], str] | None:
             return ""
         if not row:
             return ""
-        return row[0] or ""
+        # row[0] = metadata.doc_id (may be NULL/empty); row[1] = tumbler.
+        return row[0] or row[1] or ""
 
     return _lookup
 

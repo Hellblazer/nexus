@@ -615,44 +615,54 @@ class TestReadChromaUriDocIdLookup:
         # identity_field reports which legacy field actually matched.
         assert result.metadata["identity_field"] == "title"
 
-    def test_doc_id_lookup_skips_legacy_probe(self, t3_client):
-        """When doc_id_lookup is provided, the reader does NOT probe
-        source_path or title, even if those metadata fields exist.
-        WITH TEETH: a regression that re-introduces the legacy probe
-        path under doc_id_lookup would surface a stale chunk and fail
-        this assertion.
-        """
-        from nexus.aspect_readers import ReadFail, _read_chroma_uri
+    def test_doc_id_lookup_falls_back_to_legacy_when_doc_id_query_empty(
+        self, t3_client,
+    ):
+        """nexus-o6aa.10.1 transitional shape: when doc_id_lookup
+        returns a doc_id but the strict doc_id query returns no chunks
+        (chunks predate t3-backfill-doc-id), fall back to the legacy
+        ``(source_path, title)`` probe rather than report ``empty``.
+        Phase 5b drops this fallback once the prune verb's coverage
+        gate turns green.
 
-        col_name = "docs__strict"
+        WITH TEETH: a regression that drops the fallback (or restores
+        the strict doc_id-only contract) reports ``empty`` here and
+        fails the live-data gate on collections like
+        ``knowledge__knowledge`` where catalog metadata.doc_id is
+        populated but T3 chunks haven't been backfilled.
+        """
+        from nexus.aspect_readers import ReadOk, _read_chroma_uri
+
+        col_name = "knowledge__transitional"
         try:
             t3_client.delete_collection(col_name)
         except Exception:
             pass
         coll = t3_client.get_or_create_collection(col_name)
-        # Chunk has source_path metadata but the wrong doc_id.
+        # Chunk has title metadata only (slug-shaped, pre-backfill);
+        # NO doc_id field on the chunk.
         coll.add(
             ids=["c-0"],
-            documents=["wrong-doc text"],
+            documents=["transitional content"],
             metadatas=[{
-                "doc_id": "ART-other",
-                "source_path": "/path/the_one_we_query.md",
+                "title": "decision-x-pre-backfill",
                 "chunk_index": 0,
             }],
         )
 
-        # Lookup maps the source_path to a doc_id that ISN'T present.
+        # Catalog has the doc_id mapped, but the chunk doesn't carry it.
         def lookup(_coll: str, _source_id: str) -> str:
-            return "ART-target-not-here"
+            return "1.2.3"  # tumbler-shaped doc_id
 
         result = _read_chroma_uri(
-            "chroma://docs__strict//path/the_one_we_query.md",
+            "chroma://knowledge__transitional/decision-x-pre-backfill",
             t3=t3_client, doc_id_lookup=lookup,
         )
-        # Pre-fix would match by source_path and return wrong-doc text;
-        # post-fix queries strictly on doc_id and returns empty.
-        assert isinstance(result, ReadFail)
-        assert result.reason == "empty"
+        # Strict-doc_id query returns empty; legacy fallback probes on
+        # (source_path, title) and finds the chunk via title.
+        assert isinstance(result, ReadOk)
+        assert result.text == "transitional content"
+        assert result.metadata["identity_field"] == "title"
 
 
 # ── nx-scratch:// reader (RDR-096 P4.1) ─────────────────────────────────────
