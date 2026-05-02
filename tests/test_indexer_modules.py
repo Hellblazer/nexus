@@ -75,7 +75,11 @@ def test_check_staleness_uses_doc_id_when_provided(tmp_path):
     """
     mock_col = MagicMock()
     mock_col.get.return_value = {
-        "metadatas": [{"content_hash": "abc", "embedding_model": "voyage-code-3"}],
+        "metadatas": [{
+            "content_hash": "abc",
+            "embedding_model": "voyage-code-3",
+            "doc_id": "ART-deadbeef",
+        }],
         "ids": ["id1"],
     }
     result = check_staleness(
@@ -95,6 +99,50 @@ def test_check_staleness_falls_back_to_source_path_when_no_doc_id(tmp_path):
     check_staleness(mock_col, file_path, "abc", "voyage-code-3")
     where = mock_col.get.call_args.kwargs["where"]
     assert where == {"source_path": str(file_path)}
+
+
+def test_check_staleness_treats_chunk_without_doc_id_as_stale(tmp_path):
+    """nexus-o6aa.10.4 follow-up: ghost-chunk class. Stored chunk
+    matches content_hash + model but lacks doc_id metadata. When the
+    caller has a non-empty doc_id (catalog hook resolved it this run),
+    return False so the indexer re-upserts and writes the missing
+    doc_id. WITH TEETH: a regression that drops this branch resurrects
+    Hal's 499-chunk ghost class.
+    """
+    mock_col = MagicMock()
+    mock_col.get.return_value = {
+        "metadatas": [
+            # Stored chunk: matches content + model but no doc_id.
+            {"content_hash": "abc", "embedding_model": "voyage-code-3"},
+        ],
+        "ids": ["chunk-0"],
+    }
+    result = check_staleness(
+        mock_col, tmp_path / "foo.py", "abc", "voyage-code-3",
+        doc_id="ART-deadbeef",
+    )
+    assert result is False, (
+        "stored chunk lacks doc_id but the caller has one to write; "
+        "staleness must return False so the chunk gets re-upserted"
+    )
+
+
+def test_check_staleness_passes_when_chunk_has_matching_doc_id(tmp_path):
+    """Inverse: stored chunk has the same doc_id as caller → still stale."""
+    mock_col = MagicMock()
+    mock_col.get.return_value = {
+        "metadatas": [{
+            "content_hash": "abc",
+            "embedding_model": "voyage-code-3",
+            "doc_id": "ART-deadbeef",
+        }],
+        "ids": ["chunk-0"],
+    }
+    result = check_staleness(
+        mock_col, tmp_path / "foo.py", "abc", "voyage-code-3",
+        doc_id="ART-deadbeef",
+    )
+    assert result is True
 
 
 # ── check_credentials ────────────────────────────────────────────────────────

@@ -283,6 +283,14 @@ def _catalog_hook(
         _progress = sys.stderr.write
         _progress(f"  Catalog: registering {len(indexed_files)} files…\r")
         new_tumblers = []
+        # nexus-o6aa.10.4 follow-up: track per-file failures so the
+        # catalog hook stops failing silently. Pre-fix, a single
+        # cat.register() exception inside the loop tripped the outer
+        # except at line ~362 which logs at DEBUG, suppressing the
+        # rest of the registrations and leaving file_to_doc_id empty
+        # for every subsequent file in this run. Found via Hal's
+        # ghost-chunk class on 2026-05-02.
+        skipped_files: list[tuple[Path, str]] = []
         for abs_path, content_type, collection_name in indexed_files:
             try:
                 rel_path = str(abs_path.relative_to(repo))
@@ -314,30 +322,54 @@ def _catalog_hook(
             except OSError:
                 file_hash = ""
 
-            existing = cat.by_file_path(owner, rel_path)
-            if existing is None:
-                tumbler = cat.register(
-                    owner=owner,
-                    title=abs_path.name,
-                    content_type=content_type,
-                    file_path=rel_path,
-                    physical_collection=collection_name,
-                    head_hash=head_hash,
-                    meta={"content_hash": file_hash} if file_hash else None,
-                    source_mtime=source_mtime,
+            try:
+                existing = cat.by_file_path(owner, rel_path)
+                if existing is None:
+                    tumbler = cat.register(
+                        owner=owner,
+                        title=abs_path.name,
+                        content_type=content_type,
+                        file_path=rel_path,
+                        physical_collection=collection_name,
+                        head_hash=head_hash,
+                        meta={"content_hash": file_hash} if file_hash else None,
+                        source_mtime=source_mtime,
+                    )
+                    new_tumblers.append(tumbler)
+                    file_to_doc_id[abs_path] = str(tumbler)
+                else:
+                    cat.update(
+                        existing.tumbler,
+                        head_hash=head_hash,
+                        physical_collection=collection_name,
+                        meta={"content_hash": file_hash} if file_hash else None,
+                        source_mtime=source_mtime,
+                    )
+                    file_to_doc_id[abs_path] = str(existing.tumbler)
+            except Exception as exc:
+                # Per-file failure must NOT abort the rest of the loop.
+                # The previous behaviour swallowed every subsequent
+                # registration too, leaving the entire repo's chunks
+                # without doc_id metadata (the ghost class).
+                skipped_files.append((abs_path, str(exc)))
+                _log.warning(
+                    "catalog_hook_register_failed",
+                    rel_path=rel_path,
+                    abs_path=str(abs_path),
+                    error=str(exc),
+                    exc_info=True,
                 )
-                new_tumblers.append(tumbler)
-                file_to_doc_id[abs_path] = str(tumbler)
-            else:
-                cat.update(
-                    existing.tumbler,
-                    head_hash=head_hash,
-                    physical_collection=collection_name,
-                    meta={"content_hash": file_hash} if file_hash else None,
-                    source_mtime=source_mtime,
-                )
-                file_to_doc_id[abs_path] = str(existing.tumbler)
-        _progress(f"  Catalog: {len(new_tumblers)} new, {len(indexed_files) - len(new_tumblers)} updated\n")
+        if skipped_files:
+            _progress(
+                f"  Catalog: {len(new_tumblers)} new, "
+                f"{len(indexed_files) - len(new_tumblers) - len(skipped_files)} updated, "
+                f"{len(skipped_files)} skipped (see structlog warnings)\n"
+            )
+        else:
+            _progress(
+                f"  Catalog: {len(new_tumblers)} new, "
+                f"{len(indexed_files) - len(new_tumblers)} updated\n"
+            )
 
         # Auto-generate links after registration (incremental: only new entries)
         links_created = 0

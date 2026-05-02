@@ -215,10 +215,23 @@ def check_staleness(
     if not existing["metadatas"]:
         return False
     stored = existing["metadatas"][0]
-    return (
-        stored.get("content_hash") == content_hash
-        and stored.get("embedding_model") == embedding_model
-    )
+    if (
+        stored.get("content_hash") != content_hash
+        or stored.get("embedding_model") != embedding_model
+    ):
+        return False
+    # nexus-o6aa.10.4 follow-up: ghost-chunk class. Stored chunk
+    # matches content_hash + model but lacks doc_id metadata. The
+    # staleness check would normally return True (skip re-index) and
+    # the ghost would persist forever. When the caller has a non-empty
+    # doc_id resolver result for this file, treat the stored chunk as
+    # metadata-stale so the indexer re-upserts and the ghost gets a
+    # doc_id. Found on Hal's catalog 2026-05-02: 499 chunks indexed
+    # under an old branch when the catalog hook silently failed,
+    # surviving content-hash dedup on every subsequent re-index.
+    if doc_id and not stored.get("doc_id"):
+        return False
+    return True
 
 
 def check_credentials(voyage_key: str, chroma_key: str) -> None:
