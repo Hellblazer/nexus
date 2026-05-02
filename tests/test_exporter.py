@@ -172,7 +172,18 @@ class TestRoundTrip:
             },
         ]
         embeddings = [_EF(["x"])[0], _EF(["y"])[0]]
-        col = ephemeral_db.get_or_create_collection(col_name)
+        # Mirror catalog_taxonomy._create_centroid_collection: use the
+        # underlying chromadb client directly with hnsw:space=cosine.
+        # NOT ephemeral_db.get_or_create_collection — that injects an
+        # embedding_function and defaults to L2, which pollutes
+        # process-wide chromadb state and breaks downstream
+        # test_projection_quality similarity assertions when test
+        # ordering co-locates these tests in the same process.
+        col = ephemeral_db._client.get_or_create_collection(
+            col_name,
+            embedding_function=None,
+            metadata={"hnsw:space": "cosine"},
+        )
         col.upsert(
             ids=ids, documents=docs, embeddings=embeddings, metadatas=metadatas,
         )
