@@ -112,11 +112,18 @@ _OP_MAP = {"$eq": "=", "$gte": ">=", "$lte": "<=", "$gt": ">", "$lt": "<", "$ne"
 _PREDICATE_TO_COLUMN = {"bib_year": "year"}
 
 
-def _catalog_ids_for_predicates(db: sqlite3.Connection, predicates: dict) -> list[str]:
-    """Query catalog SQLite for file_paths matching *predicates*.
+def _catalog_doc_ids_for_predicates(
+    db: sqlite3.Connection, predicates: dict,
+) -> list[str]:
+    """Query catalog SQLite for ``doc_id`` values matching *predicates*.
 
     Only handles predicates that map to catalog columns (bib_year → year).
-    Returns file_path list (used as source_path filter in ChromaDB).
+    Returns the list of ``Document.doc_id`` values (extracted from
+    ``documents.metadata`` via ``json_extract($.doc_id)``) used as the
+    ``doc_id`` $in filter in ChromaDB. Rows whose metadata lacks a
+    ``doc_id`` are excluded — the prefilter relies on the catalog being
+    backfilled (``nx catalog t3-backfill-doc-id``) before it can narrow
+    against them; legacy rows fall through to standard search.
     """
     clauses: list[str] = []
     params: list[Any] = []
@@ -141,7 +148,8 @@ def _catalog_ids_for_predicates(db: sqlite3.Connection, predicates: dict) -> lis
 
     where = " AND ".join(clauses)
     rows = db.execute(
-        f"SELECT file_path FROM documents WHERE {where} AND file_path IS NOT NULL",
+        f"SELECT json_extract(metadata, '$.doc_id') FROM documents "
+        f"WHERE {where} AND json_extract(metadata, '$.doc_id') IS NOT NULL",
         params,
     ).fetchall()
     return [r[0] for r in rows]
@@ -150,11 +158,17 @@ def _catalog_ids_for_predicates(db: sqlite3.Connection, predicates: dict) -> lis
 def _prefilter_from_catalog(
     where: dict | None, catalog: Any | None,
 ) -> dict | None:
-    """Build a ChromaDB source_path pre-filter from catalog when selectivity is high.
+    """Build a ChromaDB ``doc_id`` pre-filter from catalog when selectivity is high.
 
-    Returns a ChromaDB ``where`` dict with ``source_path $in`` if the catalog
-    match set is small enough (<5% of total docs, ≤500 IDs).  Returns ``None``
-    to fall through to standard post-filtering otherwise.
+    Returns a ChromaDB ``where`` dict with ``doc_id $in`` if the catalog
+    match set is small enough (<5% of total docs, ≤500 IDs). Returns
+    ``None`` to fall through to standard post-filtering otherwise.
+
+    RDR-101 Phase 4 (nexus-ufyl) replaces the legacy ``source_path``-keyed
+    filter so the prune of deprecated chunk-metadata keys
+    (nexus-o6aa.10.3) can drop ``source_path`` without breaking catalog
+    prefiltering. The chunk-side identity field is the new ``doc_id``
+    metadata column populated by ``t3-backfill-doc-id``.
     """
     if not where or catalog is None:
         return None
@@ -171,23 +185,23 @@ def _prefilter_from_catalog(
     try:
         # Get the raw sqlite3 connection from CatalogDB wrapper
         conn = getattr(db, "_conn", db)
-        paths = _catalog_ids_for_predicates(conn, mappable)
+        doc_ids = _catalog_doc_ids_for_predicates(conn, mappable)
     except Exception:
         _log.debug("catalog_prefilter_failed", exc_info=True)
         return None
 
-    if not paths:
+    if not doc_ids:
         return None
-    if len(paths) > _MAX_PREFILTER_IDS:
-        _log.debug("catalog_prefilter_too_many", count=len(paths))
+    if len(doc_ids) > _MAX_PREFILTER_IDS:
+        _log.debug("catalog_prefilter_too_many", count=len(doc_ids))
         return None
 
     # Selectivity check
     total = catalog.doc_count() if hasattr(catalog, "doc_count") else 0
-    if total > 0 and len(paths) / total > _SELECTIVITY_THRESHOLD:
+    if total > 0 and len(doc_ids) / total > _SELECTIVITY_THRESHOLD:
         return None
 
-    return {"source_path": {"$in": paths}}
+    return {"doc_id": {"$in": doc_ids}}
 
 
 # ── Cross-corpus search ───────────────────────────────────────────────────────
@@ -286,13 +300,17 @@ def search_cross_corpus(
     )
 
     # Catalog pre-filter: for high-selectivity predicates, narrow the search
-    # space via source_path $in filter (Compass, RF-3).
+    # space via doc_id $in filter (Compass, RF-3; RDR-101 Phase 4 nexus-ufyl
+    # switched the key from source_path to doc_id).
     prefilter = _prefilter_from_catalog(where, catalog)
     if prefilter is not None:
-        # Merge pre-filter with original where — pre-filter uses source_path,
+        # Merge pre-filter with original where — pre-filter narrows on doc_id,
         # original where keeps the metadata predicates for ChromaDB post-filter.
         effective_where: dict | None = {"$and": [prefilter, where]} if where else prefilter
-        _log.debug("catalog_prefilter_applied", paths=len(prefilter.get("source_path", {}).get("$in", [])))
+        _log.debug(
+            "catalog_prefilter_applied",
+            doc_ids=len(prefilter.get("doc_id", {}).get("$in", [])),
+        )
     else:
         effective_where = where
 
