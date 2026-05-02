@@ -565,7 +565,12 @@ def search(
                 lines.append(f"── {cluster_label} ──")
                 current_cluster = cluster_label
             title = r.metadata.get("title", "")
-            source = r.metadata.get("source_path", "")
+            # nexus-1qed: prefer the catalog-resolved _display_path so
+            # the label survives after the prune verb drops source_path.
+            source = (
+                r.metadata.get("_display_path")
+                or r.metadata.get("source_path", "")
+            )
             dist = f"{r.distance:.4f}"
             label = title or source or r.id
             snippet = r.content[:200].replace("\n", " ")
@@ -780,13 +785,18 @@ def query(
                 ],
             }
 
-        # Group by document: use content_hash or title as doc key
+        # Group by document: use doc_id (post-prune stable identity)
+        # then content_hash, title, _display_path, source_path as fallbacks.
+        # nexus-1qed: doc_id sits at the top so chunks of the same
+        # document group together even after source_path is pruned.
         docs: dict[str, dict] = {}  # doc_key → {meta, snippets, best_distance}
         for r in results:
             meta = r.metadata
             doc_key = (
-                meta.get("content_hash")
+                meta.get("doc_id")
+                or meta.get("content_hash")
                 or meta.get("title")
+                or meta.get("_display_path")
                 or meta.get("source_path")
                 or r.id
             )
@@ -804,7 +814,12 @@ def query(
                     # page_count / extraction_method / has_formulas are not in
                     # ALLOWED_TOP_LEVEL — normalize() drops them, so the read
                     # always returned "". Removed in nexus-59j0 cleanup.
-                    "source_path": meta.get("source_path", ""),
+                    # nexus-1qed: prefer catalog-resolved _display_path so
+                    # the response survives after source_path is pruned.
+                    "source_path": (
+                        meta.get("_display_path")
+                        or meta.get("source_path", "")
+                    ),
                 }
             elif r.distance < docs[doc_key]["distance"]:
                 # Better matching chunk — update snippet

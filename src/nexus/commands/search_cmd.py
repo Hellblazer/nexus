@@ -320,11 +320,14 @@ def search_cmd(
         click.echo("No results.")
         return
 
-    # Python-side path scoping (ChromaDB has no $startswith operator)
+    # Python-side path scoping (ChromaDB has no $startswith operator).
+    # nexus-1qed: prefer the catalog-resolved _display_path so post-prune
+    # chunks that no longer carry source_path still match the scope.
     if resolved is not None:
         results = [
             r for r in results
-            if r.metadata.get("file_path", "").startswith(resolved)
+            if (r.metadata.get("_display_path") or "").startswith(resolved)
+            or r.metadata.get("file_path", "").startswith(resolved)
             or r.metadata.get("source_path", "").startswith(resolved)
         ]
         if not results:
@@ -377,7 +380,15 @@ def search_cmd(
     # Also attach matched line numbers for downstream context windowing (RDR-027).
     if rg_file_paths:
         for r in results:
-            src = r.metadata.get("source_path", r.metadata.get("file_path", ""))
+            # nexus-1qed: rg paths are filesystem absolute; prefer the
+            # catalog-resolved _display_path so post-prune chunks still
+            # match. Falls through to source_path / file_path for legacy
+            # chunks predating the doc_id backfill.
+            src = (
+                r.metadata.get("_display_path")
+                or r.metadata.get("source_path")
+                or r.metadata.get("file_path", "")
+            )
             if src in rg_file_paths:
                 r.hybrid_score = min(1.0, r.hybrid_score + EXACT_MATCH_BOOST)
                 if src in rg_matched_lines:
@@ -386,8 +397,14 @@ def search_cmd(
     # Filter rg__cache signals from output. Promote rg-only results (files that
     # ripgrep found but vector search missed) with a penalty score.
     if hybrid:
+        # nexus-1qed: same path-priority as the rg exact-match boost so
+        # post-prune chunks dedupe correctly against rg results.
         vector_paths = {
-            r.metadata.get("source_path", r.metadata.get("file_path", ""))
+            (
+                r.metadata.get("_display_path")
+                or r.metadata.get("source_path")
+                or r.metadata.get("file_path", "")
+            )
             for r in results if r.collection != "rg__cache"
         }
         seen_rg_paths: set[str] = set()
@@ -416,9 +433,15 @@ def search_cmd(
         for line in format_vimgrep(results, query=query):
             click.echo(line)
     elif files_only:
+        # nexus-1qed: prefer the catalog-resolved _display_path so
+        # files-only output stays correct after the prune verb drops
+        # source_path from chunk metadata.
         seen: set[str] = set()
         for r in results:
-            file_path = r.metadata.get("source_path", "")
+            file_path = (
+                r.metadata.get("_display_path")
+                or r.metadata.get("source_path", "")
+            )
             if file_path and file_path not in seen:
                 seen.add(file_path)
                 click.echo(file_path)

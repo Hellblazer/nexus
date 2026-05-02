@@ -206,44 +206,40 @@ def apply_link_boost(
 ) -> list[SearchResult]:
     """Boost hybrid_score for results whose source documents have outgoing links.
 
-    Looks up each result's source_path in the catalog, finds outgoing links,
-    and computes a link signal from type weights. Additive:
-    ``score += boost_weight * min(signal, 1.0)``.
+    nexus-1qed (RDR-101 Phase 4): keyed on the catalog ``doc_id`` rather
+    than on the legacy ``source_path``. The catalog projects ``doc_id``
+    onto ``tumbler`` directly, so the prune verb (.10.3) can drop
+    ``source_path`` from chunk metadata without breaking the link boost.
 
-    Only processes results that have ``source_path`` metadata and a matching
-    catalog entry. Results without catalog matches are untouched.
+    Only processes results that carry ``doc_id`` metadata. Chunks
+    predating the doc_id backfill are skipped. Additive:
+    ``score += boost_weight * min(signal, 1.0)``.
     """
     if not catalog:
         return results
     tw = type_weights if type_weights is not None else _LINK_BOOST_WEIGHTS
 
-    # Collect unique source_paths from results
-    source_paths: set[str] = set()
+    # Collect unique doc_ids from results.
+    doc_ids: set[str] = set()
     for r in results:
-        sp = r.metadata.get("source_path", "")
-        if sp:
-            source_paths.add(sp)
+        did = r.metadata.get("doc_id", "")
+        if did:
+            doc_ids.add(did)
 
-    if not source_paths:
+    if not doc_ids:
         return results
 
-    # Batch query: find all tumblers for these source_paths
-    placeholders = ",".join("?" for _ in source_paths)
-    rows = catalog._db.execute(
-        f"SELECT file_path, tumbler FROM documents WHERE file_path IN ({placeholders})",
-        list(source_paths),
-    ).fetchall()
-    path_to_tumbler: dict[str, str] = {row[0]: row[1] for row in rows}
-
-    if not path_to_tumbler:
-        return results
-
-    # Batch query: get all outgoing links for these tumblers
-    tumbler_strs = list(path_to_tumbler.values())
-    placeholders2 = ",".join("?" for _ in tumbler_strs)
+    # nexus-1qed: Phase 1 contract is ``doc_id == str(tumbler)`` (see
+    # catalog/catalog.py:_DocumentRegisteredPayload). The links table
+    # is keyed on tumbler, so doc_id can join links.from_tumbler
+    # directly without the source_path → tumbler indirection the
+    # legacy code carried. Phase 3 will mint UUID7 doc_ids distinct
+    # from tumblers; that change reintroduces a metadata.doc_id →
+    # tumbler projection step here.
+    placeholders = ",".join("?" for _ in doc_ids)
     link_rows = catalog._db.execute(
-        f"SELECT from_tumbler, link_type FROM links WHERE from_tumbler IN ({placeholders2})",
-        tumbler_strs,
+        f"SELECT from_tumbler, link_type FROM links WHERE from_tumbler IN ({placeholders})",
+        list(doc_ids),
     ).fetchall()
 
     # Aggregate: tumbler -> total weighted signal
@@ -252,13 +248,12 @@ def apply_link_boost(
         w = tw.get(link_type, 0.0)
         tumbler_signal[from_t] = tumbler_signal.get(from_t, 0.0) + w
 
-    # Apply boost
+    # Apply boost.
     for r in results:
-        sp = r.metadata.get("source_path", "")
-        t_str = path_to_tumbler.get(sp)
-        if not t_str:
+        did = r.metadata.get("doc_id", "")
+        if not did:
             continue
-        signal = min(tumbler_signal.get(t_str, 0.0), 1.0)
+        signal = min(tumbler_signal.get(did, 0.0), 1.0)
         if signal > 0:
             r.hybrid_score += boost_weight * signal
 
