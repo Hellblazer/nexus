@@ -4284,7 +4284,9 @@ def _print_t3_backfill_text(report: dict) -> None:
 # ── RDR-101 Phase 2: doctor --t3-doc-id-coverage ─────────────────────────
 
 
-def _run_t3_doc_id_coverage(*, strict_not_in_t3: bool = False) -> dict:
+def _run_t3_doc_id_coverage(
+    *, strict_not_in_t3: bool = False, progress: bool = False,
+) -> dict:
     """Walk every T3 collection in events.jsonl and report doc_id coverage.
 
     Steps:
@@ -4342,8 +4344,19 @@ def _run_t3_doc_id_coverage(*, strict_not_in_t3: bool = False) -> dict:
 
     per_coll: dict[str, dict] = {}
     overall_pass = True
+    coll_count = len(expected)
+    import time as _time
 
-    for coll_name, expected_chunks in expected.items():
+    for coll_idx, (coll_name, expected_chunks) in enumerate(
+        expected.items(), start=1,
+    ):
+        if progress:
+            click.echo(
+                f"  [coverage {coll_idx}/{coll_count}] {coll_name}: "
+                f"{len(expected_chunks)} expected chunks…",
+                err=True,
+            )
+        _tc = _time.monotonic()
         try:
             col = t3._client.get_collection(name=coll_name)
         except Exception as exc:
@@ -4430,6 +4443,14 @@ def _run_t3_doc_id_coverage(*, strict_not_in_t3: bool = False) -> dict:
         }
         if not pass_for_coll:
             overall_pass = False
+        if progress:
+            elapsed = _time.monotonic() - _tc
+            click.echo(
+                f"  [coverage {coll_idx}/{coll_count}] {coll_name}: "
+                f"{with_doc_id}/{total} covered "
+                f"({coverage * 100:.1f}%) in {elapsed:.1f}s",
+                err=True,
+            )
 
     return {
         "pass": overall_pass,
@@ -5097,8 +5118,16 @@ def prune_deprecated_keys_cmd(
     # Coverage gate. Reuse the doctor's projection; refuse if any
     # target collection drops below 100%.
     if not skip_coverage_check:
+        if not as_json:
+            click.echo(
+                "Running t3-doc-id-coverage gate (this walks every "
+                "collection in events.jsonl)…",
+                err=True,
+            )
         try:
-            coverage_report = _run_t3_doc_id_coverage()
+            coverage_report = _run_t3_doc_id_coverage(
+                progress=not as_json,
+            )
         except click.ClickException:
             raise
         except Exception as exc:
@@ -5137,13 +5166,23 @@ def prune_deprecated_keys_cmd(
             )
 
     # Walk + rewrite.
+    # nexus-o6aa.10.4: progress is shown in dry-run too (the walk is
+    # the slow part regardless of whether we update). Suppressed only
+    # when --json is set so the structured payload stays parseable.
     import time as _time
-    show_progress = not dry_run and not as_json
+    show_progress = not as_json
     chunks_updated = 0
     chunks_already_pruned = 0
     chunks_deferred: list[dict] = []
     errors: list[dict] = []
     per_collection_summary: dict[str, dict] = {}
+
+    if show_progress:
+        click.echo(
+            f"\nWalking {len(target_collections)} collections "
+            f"({'dry run' if dry_run else 'live'})…",
+            err=True,
+        )
 
     for coll_idx, coll_name in enumerate(target_collections, start=1):
         try:
