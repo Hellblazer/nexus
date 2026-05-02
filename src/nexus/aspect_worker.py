@@ -301,10 +301,21 @@ class AspectExtractionWorker:
             # store_put). For CLI rows where content was not in scope
             # at enqueue, ``row.content`` is "" and the extractor's
             # content-sourcing fallback will read source_path.
+            # nexus-tdgc: when the queue row carries a doc_id, build a
+            # lookup callable so the chroma reader can route to the
+            # doc_id-keyed chunk lookup. Empty doc_id passes through as
+            # a None lookup; the extractor falls back to legacy probes.
+            queued_doc_id = getattr(row, "doc_id", "") or ""
+            doc_id_lookup = (
+                (lambda _coll, _sid, _d=queued_doc_id: _d)
+                if queued_doc_id
+                else None
+            )
             record = _extract_aspects(
                 content=row.content,
                 source_path=row.source_path,
                 collection=row.collection,
+                doc_id_lookup=doc_id_lookup,
             )
         except Exception as exc:
             _log.warning(
@@ -445,6 +456,8 @@ def aspect_extraction_enqueue_hook(
     source_path: str,
     collection: str,
     content: str,
+    *,
+    doc_id: str = "",
 ) -> None:
     """Post-document hook: enqueue a row for async aspect extraction.
 
@@ -482,6 +495,7 @@ def aspect_extraction_enqueue_hook(
         with t2_ctx() as t2:
             t2.aspect_queue.enqueue(
                 collection, source_path, content=content,
+                doc_id=doc_id,
             )
     except Exception:
         _log.warning(

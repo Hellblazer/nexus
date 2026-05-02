@@ -73,7 +73,7 @@ class TestWorkerDrain:
         with T2Database(_isolate_t2) as db:
             db.aspect_queue.enqueue("knowledge__delos", "/p1.pdf")
 
-        def fake_extract(content, source_path, collection):
+        def fake_extract(content, source_path, collection, **_kw):
             return AspectRecord(
                 collection=collection,
                 source_path=source_path,
@@ -118,7 +118,7 @@ class TestWorkerDrain:
         with T2Database(_isolate_t2) as db:
             db.aspect_queue.enqueue("code__nexus", "/p1.py")
 
-        def fake_extract(content, source_path, collection):
+        def fake_extract(content, source_path, collection, **_kw):
             return None  # unsupported collection
 
         with patch("nexus.aspect_worker._extract_aspects", fake_extract):
@@ -150,7 +150,7 @@ class TestWorkerDrain:
 
         call_count = [0]
 
-        def fake_extract(content, source_path, collection):
+        def fake_extract(content, source_path, collection, **_kw):
             call_count[0] += 1
             return AspectRecord(
                 collection=collection,
@@ -216,7 +216,7 @@ class TestWorkerDrain:
         # Capture what extract_aspects sees.
         seen: list[tuple[str, str]] = []
 
-        def fake_extract(content, source_path, collection):
+        def fake_extract(content, source_path, collection, **_kw):
             seen.append((content, source_path))
             return AspectRecord(
                 collection=collection,
@@ -274,7 +274,7 @@ class TestWorkerDrain:
         with T2Database(_isolate_t2) as db:
             db.aspect_queue.enqueue("knowledge__delos", "/p1.pdf")
 
-        def fake_extract(content, source_path, collection):
+        def fake_extract(content, source_path, collection, **_kw):
             raise RuntimeError("worker-level failure (not extractor)")
 
         with patch("nexus.aspect_worker._extract_aspects", fake_extract):
@@ -513,7 +513,7 @@ class TestBatchPath:
                 for c, sp, _content in items
             ]
 
-        def fake_single(content, source_path, collection):
+        def fake_single(content, source_path, collection, **_kw):
             single_calls.append(source_path)
             raise AssertionError("single path should not fire on batch>=2")
 
@@ -564,7 +564,7 @@ class TestBatchPath:
             batch_calls.append(len(items))
             raise AssertionError("batch path should not fire for 1 row")
 
-        def fake_single(content, source_path, collection):
+        def fake_single(content, source_path, collection, **_kw):
             single_calls.append(source_path)
             return AspectRecord(
                 collection=collection, source_path=source_path,

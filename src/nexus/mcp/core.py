@@ -956,7 +956,9 @@ def store_put(
         # source_path is doc_id here — there is no on-disk file at the
         # MCP boundary, so the doc_id serves as the stable identifier
         # the hook uses for failure attribution.
-        _fire_post_document_hooks(doc_id, col_name, content)
+        # nexus-tdgc: forward doc_id explicitly so the aspect-queue
+        # hook can store it on the queue row alongside source_path.
+        _fire_post_document_hooks(doc_id, col_name, content, doc_id=doc_id)
         # RDR-061 E2: log relevance correlation for the most recent search in
         # this session. Only the newest trace is used to minimize noise —
         # older traces are unlikely to have driven this store_put.

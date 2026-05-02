@@ -80,6 +80,7 @@ _ASPECT_QUEUE_SCHEMA_SQL = """\
 CREATE TABLE IF NOT EXISTS aspect_extraction_queue (
     collection      TEXT NOT NULL,
     source_path     TEXT NOT NULL,
+    doc_id          TEXT NOT NULL DEFAULT '',
     content_hash    TEXT NOT NULL DEFAULT '',
     content         TEXT NOT NULL DEFAULT '',
     status          TEXT NOT NULL DEFAULT 'pending',
@@ -116,10 +117,17 @@ class QueueRow:
     ``content`` is the document text captured at enqueue time. The
     MCP ``store_put`` path passes ``content=<full text>`` (the only
     moment the text is in scope before T3 commits); CLI ingest paths
-    pass ``content=""`` because chunk-level scope only — those rows
+    pass ``content=""`` because chunk-level scope only; those rows
     rely on the worker re-reading ``source_path`` from disk at
     extraction time. The worker prefers ``content`` over file read
     when non-empty.
+
+    ``doc_id`` (nexus-tdgc / RDR-101 Phase 4) is the catalog identity
+    of the source document. Captured at enqueue time so the worker
+    can build a ``doc_id_lookup`` for the chroma reader without a
+    second catalog round-trip. Empty string for legacy rows
+    enqueued before the column was added; the worker treats empty
+    ``doc_id`` as "fall back to source_path".
     """
 
     collection: str
@@ -127,6 +135,7 @@ class QueueRow:
     content_hash: str
     content: str
     retry_count: int
+    doc_id: str = ""
 
 
 # ── AspectExtractionQueue ───────────────────────────────────────────────────
@@ -155,6 +164,41 @@ class AspectExtractionQueue:
         with self._lock:
             self.conn.executescript("PRAGMA journal_mode=WAL;")
             self.conn.executescript(_ASPECT_QUEUE_SCHEMA_SQL)
+            # nexus-tdgc: in-place migration for tables created before
+            # the doc_id column was added. ADD COLUMN with a NOT NULL
+            # DEFAULT '' fills legacy rows with the empty string; the
+            # worker treats empty doc_id as "fall back to source_path".
+            # The PRAGMA-then-ALTER pattern races under concurrent
+            # T2Database construction: thread A reads cols (no doc_id),
+            # thread B reads cols (no doc_id), A commits ALTER, B's
+            # ALTER raises "duplicate column name". Catching the
+            # specific error keeps construction idempotent across
+            # threads. Same SQLite catch pattern used in nexus.db.migrations.
+            cols = {
+                r[1] for r in self.conn.execute(
+                    "PRAGMA table_info(aspect_extraction_queue)"
+                ).fetchall()
+            }
+            if "doc_id" not in cols:
+                try:
+                    self.conn.execute(
+                        "ALTER TABLE aspect_extraction_queue "
+                        "ADD COLUMN doc_id TEXT NOT NULL DEFAULT ''"
+                    )
+                except sqlite3.OperationalError as exc:
+                    # Another constructor raced ahead of us and added
+                    # the column first; verify it really exists before
+                    # swallowing the error so a genuinely broken ALTER
+                    # still surfaces.
+                    if "duplicate column" not in str(exc).lower():
+                        raise
+                    cols_after = {
+                        r[1] for r in self.conn.execute(
+                            "PRAGMA table_info(aspect_extraction_queue)"
+                        ).fetchall()
+                    }
+                    if "doc_id" not in cols_after:
+                        raise
             self.conn.commit()
 
     # ── Public API ────────────────────────────────────────────────────────
@@ -165,6 +209,8 @@ class AspectExtractionQueue:
         source_path: str,
         content_hash: str = "",
         content: str = "",
+        *,
+        doc_id: str = "",
     ) -> None:
         """Persist a new pending row for ``(collection, source_path)``.
 
@@ -178,7 +224,13 @@ class AspectExtractionQueue:
         CLI paths pass ``""`` and the worker re-reads ``source_path``
         from disk. Both shapes are valid.
 
-        Empty ``collection`` or ``source_path`` raises ``ValueError`` —
+        ``doc_id`` (nexus-tdgc) is the catalog identity. Caller passes
+        ``ctx.doc_id_resolver(path)`` (or equivalent) when known; empty
+        string is acceptable and routes the worker through the legacy
+        source_path path. Stored on the row so the worker can build a
+        chroma reader ``doc_id_lookup`` without a catalog round-trip.
+
+        Empty ``collection`` or ``source_path`` raises ``ValueError``;
         these are caller-side bugs that should fail fast.
         """
         if not collection:
@@ -189,10 +241,10 @@ class AspectExtractionQueue:
         with self._lock:
             self.conn.execute(
                 "INSERT OR REPLACE INTO aspect_extraction_queue "
-                "(collection, source_path, content_hash, content, status, "
-                " retry_count, enqueued_at, last_attempt_at, last_error) "
-                "VALUES (?, ?, ?, ?, 'pending', 0, ?, NULL, NULL)",
-                (collection, source_path, content_hash, content, now),
+                "(collection, source_path, doc_id, content_hash, content, "
+                " status, retry_count, enqueued_at, last_attempt_at, last_error) "
+                "VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, NULL, NULL)",
+                (collection, source_path, doc_id, content_hash, content, now),
             )
             self.conn.commit()
 
@@ -225,7 +277,7 @@ class AspectExtractionQueue:
             with self._lock:
                 row = self.conn.execute(
                     "SELECT collection, source_path, content_hash, content, "
-                    "       retry_count "
+                    "       retry_count, doc_id "
                     "FROM aspect_extraction_queue "
                     "WHERE status = 'pending' "
                     "ORDER BY enqueued_at ASC, source_path ASC "
@@ -233,7 +285,7 @@ class AspectExtractionQueue:
                 ).fetchone()
                 if row is None:
                     return None
-                collection, source_path, content_hash, content, retry_count = row
+                collection, source_path, content_hash, content, retry_count, doc_id = row
                 cur = self.conn.execute(
                     "UPDATE aspect_extraction_queue "
                     "SET status = 'in_progress', last_attempt_at = ? "
@@ -250,6 +302,7 @@ class AspectExtractionQueue:
                         content_hash=content_hash,
                         content=content,
                         retry_count=retry_count,
+                        doc_id=doc_id or "",
                     )
                 # rowcount == 0 → another process / thread won the
                 # CAS; loop and try a different row.

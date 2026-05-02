@@ -866,7 +866,11 @@ def _index_pdf_file(
         # the `nx index repo` PDF path. content="" (chunk-level scope
         # only); the hook reads source_path itself per the P0.1
         # content-sourcing contract.
-        fire_post_document_hooks(str(file), collection_name, "")
+        # nexus-tdgc: forward catalog doc_id when available.
+        fire_post_document_hooks(
+            str(file), collection_name, "",
+            doc_id=catalog_doc_id,
+        )
 
     return len(prepared)
 

@@ -165,6 +165,50 @@ class TestEnqueue:
         assert row.content == body
         assert row.content_hash == "hashabc"
 
+    def test_enqueue_with_doc_id_round_trips_via_claim(
+        self, tmp_path: Path,
+    ) -> None:
+        """nexus-tdgc: doc_id captured at enqueue is retrievable on
+        claim. WITH TEETH: a regression that drops the doc_id column
+        write or the claim_next read fails the round-trip assertion.
+        Worker uses this value to build a doc_id_lookup for the chroma
+        reader without a second catalog round-trip.
+        """
+        from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
+
+        store = AspectExtractionQueue(tmp_path / "t2.db")
+        try:
+            store.enqueue(
+                "knowledge__delos",
+                "/abs/path/paper.pdf",
+                content_hash="hash",
+                content="body",
+                doc_id="ART-deadbeef",
+            )
+            row = store.claim_next()
+        finally:
+            store.close()
+        assert row is not None
+        assert row.doc_id == "ART-deadbeef"
+
+    def test_enqueue_without_doc_id_defaults_to_empty(
+        self, tmp_path: Path,
+    ) -> None:
+        """Legacy callers that don't pass doc_id get an empty string
+        on the queue row; the worker treats this as a signal to fall
+        back to source_path-keyed extraction.
+        """
+        from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
+
+        store = AspectExtractionQueue(tmp_path / "t2.db")
+        try:
+            store.enqueue("docs__legacy", "/abs/path/doc.md")
+            row = store.claim_next()
+        finally:
+            store.close()
+        assert row is not None
+        assert row.doc_id == ""
+
 
 # ── Claim / mark_done / mark_failed / mark_retry ─────────────────────────────
 
