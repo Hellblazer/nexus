@@ -486,7 +486,7 @@ class TestUpdate:
         doc = cat.register(owner, "a.py", content_type="code", file_path="a.py")
 
         # Forcibly write the legacy bad shape into the metadata column.
-        cat._db.execute(
+        cat._db.execute(  # epsilon-allow: inject historical metadata='null' that the public API can no longer produce (register coerces); needed to exercise the heal path (RDR-101 ε)
             "UPDATE documents SET metadata = 'null' WHERE tumbler = ?",
             (str(doc),),
         )
