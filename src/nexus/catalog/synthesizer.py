@@ -471,6 +471,8 @@ _CHUNK_PAGE_SIZE = 300  # matches the ChromaDB Cloud 300-row limit
 def synthesize_t3_chunks(
     client: Any,
     document_events: list[Event],
+    *,
+    live_doc_lookup: dict[str, str] | None = None,
 ) -> Iterator[Event]:
     """Walk every collection on ``client`` and emit one ``ChunkIndexed``
     v: 0 event per chunk.
@@ -489,10 +491,27 @@ def synthesize_t3_chunks(
     2. ``title`` exact match (the Phase 0 ``CHROMA_IDENTITY_FIELD``
        fallback for ``knowledge__*`` collections that legitimately have
        empty source_uri rows in the catalog).
-    3. None — emit ``ChunkIndexed`` with ``doc_id=""`` and
+    3. **(RDR-102 D5)** ``content_hash`` match against
+       *live_doc_lookup* — the ``--prefer-live-catalog`` recovery
+       fallback. Use to recover chunks whose owning Document was
+       registered AFTER an earlier ``synthesize-log`` run had already
+       classified them as orphans, or whose source_path / title drifted
+       (file moved, repo re-rooted) but whose content_hash still
+       matches a live catalog Document.
+    4. None — emit ``ChunkIndexed`` with ``doc_id=""`` and
        ``synthesized_orphan=True`` so the Phase 2 doctor coverage
        check (PR δ) can report the orphan rather than the GC silently
        collecting it after the orphan window.
+
+    *live_doc_lookup* (RDR-102 Phase A / D5): optional
+    ``{content_hash: doc_id}`` map sourced from the LIVE catalog. The
+    map's doc_ids are the canonical Document tumblers (e.g. ``1.7.42``),
+    not synthesized UUID7s. The lookup runs ONLY when source_uri and
+    title both fail — synthesized matches always take priority so the
+    canonical run's DocumentRegistered events stay authoritative for
+    non-orphan chunks. ``None`` (default) preserves the pre-RDR-102
+    behaviour (no live-catalog fallback; orphan-by-mismatch stays
+    orphan).
 
     The walker uses paginated ``col.get(limit=300, offset=...)`` so a
     multi-thousand-chunk collection does not exceed the ChromaDB Cloud
@@ -532,6 +551,7 @@ def synthesize_t3_chunks(
                 col, coll_name,
                 source_uri_to_doc_id=source_uri_to_doc_id,
                 title_to_doc_id=title_to_doc_id,
+                live_doc_lookup=live_doc_lookup,
             )
         except Exception as exc:
             _log.warning(
@@ -547,6 +567,7 @@ def _synthesize_collection_chunks(
     *,
     source_uri_to_doc_id: dict[str, str],
     title_to_doc_id: dict[str, str],
+    live_doc_lookup: dict[str, str] | None = None,
 ) -> Iterator[Event]:
     """Paginate one collection and yield ``ChunkIndexed`` per chunk."""
     offset = 0
@@ -577,6 +598,13 @@ def _synthesize_collection_chunks(
             # 2. Title fallback (CHROMA_IDENTITY_FIELD pattern).
             if not doc_id and chunk_title:
                 doc_id = title_to_doc_id.get(chunk_title, "")
+            # 3. RDR-102 D5: live-catalog content_hash recovery fallback.
+            #    Only consulted when source_uri + title both miss; the
+            #    synthesized run's DocumentRegistered events stay
+            #    authoritative for non-orphan chunks. Empty content_hash
+            #    short-circuits to keep the lookup deterministic.
+            if not doc_id and live_doc_lookup and content_hash:
+                doc_id = live_doc_lookup.get(content_hash, "")
             orphan = not doc_id
 
             yield Event(
@@ -598,3 +626,59 @@ def _synthesize_collection_chunks(
         if len(ids) < _CHUNK_PAGE_SIZE:
             break
         offset += _CHUNK_PAGE_SIZE
+
+
+def build_live_catalog_content_hash_map(
+    catalog_dir: Path,
+) -> dict[str, str]:
+    """RDR-102 D5: build a ``{content_hash: tumbler}`` map from the live
+    catalog SQLite for the ``synthesize-log --prefer-live-catalog``
+    recovery path.
+
+    Walks the ``documents`` table and extracts ``content_hash`` from
+    each row's ``metadata`` JSON column (where the repo indexer stamps
+    it via ``meta={"content_hash": file_hash}`` at
+    ``indexer.py:_catalog_hook``). Documents with no ``content_hash``
+    in their meta are skipped — content_hash matching is opt-in per
+    indexed file (PDFs and standalone markdown registered via
+    ``_catalog_pdf_hook`` / ``_catalog_markdown_hook`` do NOT carry
+    content_hash today; the recovery path for those is to re-index via
+    the Phase A entry points so doc_id lands at chunk-write time).
+
+    Last-write-wins on collision: the same content_hash mapping to
+    multiple tumblers (file copy, content dedup) yields the LAST seen
+    tumbler. The ambiguity is unavoidable — the synthesizer cannot
+    choose which Document the chunk belongs to without source_uri /
+    title context, and content_hash recovery is a best-effort fallback
+    for chunks that already orphan'd via those paths.
+
+    Read-only against the catalog SQLite (``mode=ro`` URI) so this
+    helper cannot accidentally corrupt the live cache during a
+    synthesize-log run.
+    """
+    import sqlite3
+    from contextlib import closing
+
+    db_path = catalog_dir / ".catalog.db"
+    if not db_path.exists():
+        return {}
+    mapping: dict[str, str] = {}
+    uri = f"file:{db_path}?mode=ro"
+    with closing(sqlite3.connect(uri, uri=True)) as conn:
+        rows = conn.execute(
+            "SELECT tumbler, metadata FROM documents WHERE metadata IS NOT NULL"
+        ).fetchall()
+    for tumbler, metadata_json in rows:
+        if not metadata_json or not tumbler:
+            continue
+        try:
+            meta = json.loads(metadata_json)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(meta, dict):
+            continue
+        content_hash = meta.get("content_hash")
+        if not content_hash or not isinstance(content_hash, str):
+            continue
+        mapping[content_hash] = tumbler  # last-write-wins on collision
+    return mapping

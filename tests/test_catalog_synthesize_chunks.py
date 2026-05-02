@@ -31,6 +31,7 @@ from nexus.catalog import events as ev
 from nexus.catalog.catalog import Catalog
 from nexus.catalog.event_log import EventLog
 from nexus.catalog.synthesizer import synthesize_t3_chunks
+from nexus.commands.catalog import synthesize_log_cmd
 
 
 @pytest.fixture(autouse=True)
@@ -348,3 +349,278 @@ class TestSynthesizeLogChunksFlag:
         payload = json.loads(result.output)
         assert payload["chunks_synthesized"] is False
         assert "ChunkIndexed" not in payload["events_by_type"]
+
+
+# ── RDR-102 Phase A / D5: --prefer-live-catalog flag ─────────────────────
+
+
+class TestPreferLiveCatalogDirect:
+    """Direct synthesizer-level coverage for the live-catalog content_hash
+    map. Pinned at the synthesize_t3_chunks API so the resolution
+    semantics are testable without spinning up the full CLI verb.
+    """
+
+    def test_live_catalog_lookup_resolves_orphan_via_content_hash(
+        self, chroma_client,
+    ):
+        """RDR-102 D5: when the synthesized DocumentRegistered events
+        do not match a chunk via source_uri or title (the chunk's
+        owning Document was registered AFTER synthesize-log already ran
+        once), the live catalog lookup map must resolve the chunk's
+        content_hash to the live Document tumbler. The chunk emits
+        ChunkIndexed with doc_id=tumbler and synthesized_orphan=False.
+        """
+        # Chunk has no source_uri/title match in the synthesized events,
+        # but its content_hash matches a live Document (tumbler 1.7.42).
+        _seed_collection(chroma_client, "code__recovered", [
+            {
+                "id": "rec1", "content": "recovered chunk",
+                "metadata": {
+                    "source_path": "/git/renamed/old-path.py",
+                    "title": "old-title",
+                    "chunk_text_hash": "rec1hash",
+                    "content_hash": "live-content-hash-abc",
+                    "chunk_index": 0,
+                },
+            },
+        ])
+        # Live catalog has a Document for the SAME content_hash but
+        # under a different source_uri / title (file moved + renamed
+        # since the chunk was first indexed).
+        live_doc_lookup = {"live-content-hash-abc": "1.7.42"}
+
+        events = list(synthesize_t3_chunks(
+            chroma_client, [],  # no synthesized doc_events
+            live_doc_lookup=live_doc_lookup,
+        ))
+        assert len(events) == 1
+        e = events[0]
+        assert e.payload.doc_id == "1.7.42", (
+            f"expected doc_id resolved from live catalog content_hash "
+            f"map; got {e.payload.doc_id!r}. The --prefer-live-catalog "
+            f"recovery path must consult content_hash before declaring "
+            f"the chunk an orphan."
+        )
+        assert e.payload.synthesized_orphan is False, (
+            "live-catalog match must clear the synthesized_orphan flag"
+        )
+
+    def test_back_compat_no_lookup_keeps_orphan(self, chroma_client):
+        """RDR-102 D5 back-compat: omitting live_doc_lookup keeps the
+        existing behaviour. Same chunk + same absent source_uri/title
+        match → orphan ChunkIndexed event.
+        """
+        _seed_collection(chroma_client, "code__recovered_bc", [
+            {
+                "id": "bc1", "content": "no-recovery chunk",
+                "metadata": {
+                    "source_path": "/git/renamed/old-path.py",
+                    "title": "old-title",
+                    "chunk_text_hash": "bc1hash",
+                    "content_hash": "live-content-hash-bc",
+                    "chunk_index": 0,
+                },
+            },
+        ])
+        events = list(synthesize_t3_chunks(
+            chroma_client, [],
+            # No live_doc_lookup passed — pre-RDR-102 behaviour.
+        ))
+        assert len(events) == 1
+        e = events[0]
+        assert e.payload.doc_id == ""
+        assert e.payload.synthesized_orphan is True
+
+    def test_synthesized_match_takes_priority_over_live_lookup(
+        self, chroma_client,
+    ):
+        """The live-catalog map is a FALLBACK for chunks that would
+        otherwise orphan. When a synthesized DocumentRegistered already
+        matches via source_uri, that doc_id wins — we must not silently
+        rewrite the chunk's identity to a different live tumbler when
+        the synthesized identity is the canonical one for this run.
+        """
+        _seed_collection(chroma_client, "code__priority", [
+            {
+                "id": "pri1", "content": "priority chunk",
+                "metadata": {
+                    "source_path": "/git/x/foo.py",
+                    "chunk_text_hash": "pri1hash",
+                    "content_hash": "live-h",
+                    "chunk_index": 0,
+                },
+            },
+        ])
+        doc_events = _make_doc_events({
+            "doc_id": "uuid7-foo", "owner_id": "1.1",
+            "source_uri": "file:///git/x/foo.py",
+            "coll_id": "code__priority",
+            "tumbler": "1.1.1",
+            "title": "foo.py",
+        })
+        # Live catalog lookup also has the same content_hash but maps
+        # to a DIFFERENT tumbler — the synthesized doc_events match
+        # must win for non-orphans.
+        live_doc_lookup = {"live-h": "9.9.9"}
+
+        events = list(synthesize_t3_chunks(
+            chroma_client, doc_events,
+            live_doc_lookup=live_doc_lookup,
+        ))
+        assert len(events) == 1
+        e = events[0]
+        assert e.payload.doc_id == "uuid7-foo", (
+            f"synthesized source_uri match must take priority over "
+            f"live_doc_lookup; got {e.payload.doc_id!r}. The lookup map "
+            f"is a fallback for orphans, not an override."
+        )
+
+
+class TestPreferLiveCatalogCli:
+    """CLI surface for the --prefer-live-catalog flag on
+    synthesize-log. Exercises the integration: real Catalog setup +
+    EphemeralClient T3 + Click runner end-to-end.
+    """
+
+    def test_prefer_live_catalog_flag_recovers_orphan_via_content_hash(
+        self, isolated_nexus, runner,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """End-to-end: a Document is in the live catalog with
+        meta={"content_hash": ...}; a T3 chunk carries that
+        content_hash but its source_path does not match any catalog
+        source_uri AND its title does not match any catalog title
+        (e.g. the file was renamed and re-indexed under a different
+        title before synthesize-log first ran, leaving the chunk an
+        orphan via the source_uri/title paths). With
+        --prefer-live-catalog set, the chunk's ChunkIndexed event
+        resolves to the live Document's tumbler via content_hash and
+        is NOT classified as an orphan.
+        """
+        Catalog.init(isolated_nexus)
+        cat = Catalog(isolated_nexus, isolated_nexus / ".catalog.db")
+        owner = cat.register_owner(
+            "nexus", "repo", repo_hash="abcd1234",
+        )
+        # Document with content_hash in meta — mirrors how the repo
+        # indexer stamps content_hash via _catalog_hook (indexer.py:335).
+        # The Document's title is the CURRENT name; the chunk below
+        # carries the OLD name so the title fallback misses and the
+        # content_hash recovery actually fires.
+        cat.register(
+            owner, "current-name.py", content_type="code",
+            file_path="current-name.py",
+            physical_collection="code__nexus-recover",
+            meta={"content_hash": "live-hash-xyz"},
+        )
+        cat._db.close()
+
+        client = chromadb.EphemeralClient()
+        for col in list(client.list_collections()):
+            try:
+                client.delete_collection(col.name)
+            except Exception:
+                pass
+        # Chunk's source_path AND title differ from the catalog
+        # Document (file renamed since first index) but content_hash
+        # matches — exactly the orphan-recovery scenario the flag
+        # exists to handle.
+        _seed_collection(client, "code__nexus-recover", [
+            {
+                "id": "moved_0", "content": "recovered code",
+                "metadata": {
+                    "source_path": "/legacy/cwd/old-name.py",
+                    "title": "old-name.py",
+                    "chunk_text_hash": "moved_h",
+                    "content_hash": "live-hash-xyz",
+                    "chunk_index": 0,
+                },
+            },
+        ])
+
+        class _FakeT3:
+            _client = client
+        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
+
+        result = runner.invoke(
+            synthesize_log_cmd,
+            ["--chunks", "--prefer-live-catalog", "--json"],
+        )
+        assert result.exit_code == 0, (
+            f"verb failed: {result.output}\n{result.exception!r}"
+        )
+        payload = json.loads(result.output)
+        assert payload["events_by_type"].get("ChunkIndexed", 0) == 1
+        assert payload["orphan_chunks"] == 0, (
+            f"expected 0 orphans after --prefer-live-catalog recovery; "
+            f"got {payload['orphan_chunks']}. The flag must consult the "
+            f"live catalog content_hash map and resolve the moved-file "
+            f"chunk to the live Document tumbler."
+        )
+
+        # Confirm the persisted ChunkIndexed event carries the live
+        # Document's tumbler as doc_id.
+        log_events = list(EventLog(isolated_nexus).replay())
+        chunk_events = [
+            e for e in log_events if e.type == ev.TYPE_CHUNK_INDEXED
+        ]
+        assert len(chunk_events) == 1
+        assert chunk_events[0].payload.doc_id == "1.1.1", (
+            f"chunk must carry the live Document tumbler (1.1.1); got "
+            f"{chunk_events[0].payload.doc_id!r}"
+        )
+        assert chunk_events[0].payload.synthesized_orphan is False
+
+    def test_no_flag_keeps_orphan_back_compat(
+        self, isolated_nexus, runner,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Same setup as the recovery test, but without
+        --prefer-live-catalog. The chunk MUST orphan (back-compat: the
+        flag is opt-in)."""
+        Catalog.init(isolated_nexus)
+        cat = Catalog(isolated_nexus, isolated_nexus / ".catalog.db")
+        owner = cat.register_owner(
+            "nexus", "repo", repo_hash="bcde2345",
+        )
+        cat.register(
+            owner, "moved.py", content_type="code",
+            file_path="moved.py",
+            physical_collection="code__nexus-bc",
+            meta={"content_hash": "bc-hash"},
+        )
+        cat._db.close()
+
+        client = chromadb.EphemeralClient()
+        for col in list(client.list_collections()):
+            try:
+                client.delete_collection(col.name)
+            except Exception:
+                pass
+        _seed_collection(client, "code__nexus-bc", [
+            {
+                "id": "bc_0", "content": "bc chunk",
+                "metadata": {
+                    "source_path": "/legacy/different/moved.py",
+                    "title": "moved.py-renamed",
+                    "chunk_text_hash": "bc_h",
+                    "content_hash": "bc-hash",
+                    "chunk_index": 0,
+                },
+            },
+        ])
+
+        class _FakeT3:
+            _client = client
+        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
+
+        result = runner.invoke(
+            synthesize_log_cmd, ["--chunks", "--json"],
+        )
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        assert payload["events_by_type"].get("ChunkIndexed", 0) == 1
+        assert payload["orphan_chunks"] == 1, (
+            f"without --prefer-live-catalog the chunk must orphan "
+            f"(content_hash recovery is opt-in); got {payload['orphan_chunks']}"
+        )

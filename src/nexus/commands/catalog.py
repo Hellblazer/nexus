@@ -3767,11 +3767,28 @@ def _print_replay_equality_text(report: dict) -> None:
     ),
 )
 @click.option(
+    "--prefer-live-catalog",
+    "prefer_live_catalog",
+    is_flag=True,
+    help=(
+        "RDR-102 D5 orphan-recovery: when a T3 chunk would otherwise "
+        "orphan (source_path / title both miss the synthesized "
+        "DocumentRegistered events), look up its content_hash against "
+        "the LIVE catalog Documents table and use the matching "
+        "Document tumbler as doc_id. Recovers chunks whose owning "
+        "Document was registered after an earlier synthesize-log run, "
+        "or whose source_path drifted (file moved, repo re-rooted) but "
+        "whose content matches a live Document. Implies --chunks. "
+        "Off by default — explicit opt-in for orphan-recovery runs."
+    ),
+)
+@click.option(
     "--json", "as_json", is_flag=True,
     help="Emit machine-readable JSON instead of text output.",
 )
 def synthesize_log_cmd(
-    dry_run: bool, force: bool, chunks: bool, as_json: bool,
+    dry_run: bool, force: bool, chunks: bool,
+    prefer_live_catalog: bool, as_json: bool,
 ) -> None:
     """RDR-101 Phase 2: synthesize events.jsonl from existing JSONL state.
 
@@ -3873,11 +3890,41 @@ def synthesize_log_cmd(
             err=True,
         )
 
+    # RDR-102 D5: --prefer-live-catalog implies --chunks (the recovery
+    # operates on T3 chunks). Surface the implication rather than
+    # silently no-op'ing the flag.
+    if prefer_live_catalog and not chunks:
+        chunks = True
+        if show_progress:
+            click.echo(
+                "  [synthesize-log] --prefer-live-catalog implies --chunks "
+                "(walking T3 to apply content_hash recovery)",
+                err=True,
+            )
+
     chunk_events: list = []
     orphan_count = 0
     if chunks:
-        from nexus.catalog.synthesizer import synthesize_t3_chunks
+        from nexus.catalog.synthesizer import (
+            build_live_catalog_content_hash_map,
+            synthesize_t3_chunks,
+        )
         from nexus.db import make_t3
+
+        # RDR-102 D5: build the live-catalog content_hash → tumbler
+        # recovery map once, before the chunk walk. Empty when no live
+        # Documents carry content_hash — the lookup is then a no-op
+        # and chunks classify exactly as they did pre-flag.
+        live_doc_lookup: dict[str, str] | None = None
+        if prefer_live_catalog:
+            live_doc_lookup = build_live_catalog_content_hash_map(cat_dir)
+            if show_progress:
+                click.echo(
+                    f"  [synthesize-log] --prefer-live-catalog: built "
+                    f"content_hash map with {len(live_doc_lookup)} live "
+                    f"Document entr{'y' if len(live_doc_lookup) == 1 else 'ies'}",
+                    err=True,
+                )
 
         if show_progress:
             click.echo(
@@ -3889,7 +3936,10 @@ def synthesize_log_cmd(
         try:
             t3 = make_t3()
             chunk_events = list(
-                synthesize_t3_chunks(t3._client, events)
+                synthesize_t3_chunks(
+                    t3._client, events,
+                    live_doc_lookup=live_doc_lookup,
+                )
             )
             orphan_count = sum(
                 1 for e in chunk_events
