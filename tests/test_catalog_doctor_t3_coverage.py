@@ -281,3 +281,165 @@ class TestCombined:
         assert "replay_equality" in payload
         assert "t3_doc_id_coverage" in payload
         assert payload["t3_doc_id_coverage"]["pass"] is True
+
+
+# ── RDR-102 Phase C / D3: orphan-ratio surfacing ─────────────────────────
+
+
+class TestOrphanRatioSurface:
+    """RDR-102 D3: doctor must surface the per-collection orphan ratio
+    so operators see when 84% of T3 lives outside the projection (the
+    audit baseline). Pre-RDR-102 the doctor's PASS gate counted only
+    non-orphan chunks and the orphan slice was invisible. Phase C adds:
+
+      - report["t3_doc_id_coverage"]["orphan_ratio"] (top-level / global)
+      - report["t3_doc_id_coverage"]["tables"][coll_name]["orphan_ratio"]
+        (per-collection)
+      - text output section "=== Orphan ratio ===" with WARN lines for
+        any collection > 50% orphan
+      - clarified "Collections in log" header that distinguishes
+        "with non-orphan ChunkIndexed events" from
+        "total in events.jsonl"
+
+    The PASS gate stays as-is per A4 rejection (tightening would
+    invalidate the host catalog's current PASS, which is operationally
+    awkward and a Phase 5 concern).
+    """
+
+    def test_orphan_ratio_section_warn_above_threshold(
+        self, isolated_nexus, runner, chroma_client,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """An 80%-orphan collection MUST surface a WARN line in the text
+        output AND an orphan_ratio field in the JSON payload (both
+        global and per-collection). The PASS gate stays — orphan ratio
+        is a soft signal, not a hard fail.
+        """
+        # 8 orphan + 2 non-orphan ChunkIndexed events for one collection
+        # → 80% orphan ratio. Single non-orphan chunk in T3 to satisfy
+        # the existing PASS gate.
+        events = [
+            _chunk("nor1", "uuid7-N1", "code__warn"),
+            _chunk("nor2", "uuid7-N2", "code__warn"),
+        ]
+        for i in range(8):
+            events.append(_chunk(f"orp{i}", "", "code__warn", orphan=True))
+        _seed_log(isolated_nexus, events)
+        _seed(chroma_client, "code__warn", [
+            {"id": "nor1", "content": "x",
+             "metadata": {"doc_id": "uuid7-N1"}},
+            {"id": "nor2", "content": "y",
+             "metadata": {"doc_id": "uuid7-N2"}},
+        ])
+
+        class _FakeT3:
+            _client = chroma_client
+        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
+
+        # Text output assertions
+        text_result = runner.invoke(doctor_cmd, ["--t3-doc-id-coverage"])
+        assert text_result.exit_code == 0, text_result.output
+        out = text_result.output
+        assert "Orphan ratio" in out, (
+            f"expected '=== Orphan ratio ===' section; got:\n{out}"
+        )
+        assert "WARN" in out, (
+            f"80%-orphan collection must surface a WARN line; got:\n{out}"
+        )
+        # The clarified header carries both counts.
+        assert "non-orphan" in out and "total in events.jsonl" in out, (
+            f"'Collections in log' header must distinguish non-orphan "
+            f"events count from total-in-log count; got:\n{out}"
+        )
+
+        # JSON payload assertions
+        json_result = runner.invoke(
+            doctor_cmd, ["--t3-doc-id-coverage", "--json"],
+        )
+        assert json_result.exit_code == 0, json_result.output
+        coverage = json.loads(json_result.output)["t3_doc_id_coverage"]
+        assert "orphan_ratio" in coverage, (
+            f"top-level orphan_ratio field missing; got keys: "
+            f"{sorted(coverage.keys())}"
+        )
+        assert 0.79 <= coverage["orphan_ratio"] <= 0.81, (
+            f"global orphan_ratio should be ~0.80 (8/10); got "
+            f"{coverage['orphan_ratio']!r}"
+        )
+        per_coll = coverage.get("tables", {}).get("code__warn", {})
+        assert "orphan_ratio" in per_coll, (
+            f"per-collection orphan_ratio missing in tables['code__warn']; "
+            f"got keys: {sorted(per_coll.keys())}"
+        )
+        assert 0.79 <= per_coll["orphan_ratio"] <= 0.81
+
+    @pytest.mark.parametrize("orphan_count,non_orphan_count,should_warn", [
+        (5, 5, False),  # 50% exactly — RDR D3 says "> 0.50", so no WARN
+        (51, 49, True),  # 51% — WARN
+        (49, 51, False),  # 49% — no WARN
+        (0, 10, False),  # 0% — no WARN
+    ])
+    def test_orphan_ratio_threshold_edges(
+        self, isolated_nexus, runner, chroma_client,
+        monkeypatch: pytest.MonkeyPatch,
+        orphan_count, non_orphan_count, should_warn,
+    ):
+        """RDR D3 threshold is strict-greater-than 0.50. Verify the
+        edge cases: exactly 50% does NOT WARN, 51% does, 49% does not."""
+        coll = f"code__edge_{orphan_count}_{non_orphan_count}"
+        events: list = []
+        chunks_in_t3: list = []
+        for i in range(non_orphan_count):
+            events.append(_chunk(f"nor{i}", f"uuid7-N{i}", coll))
+            chunks_in_t3.append({
+                "id": f"nor{i}", "content": f"x{i}",
+                "metadata": {"doc_id": f"uuid7-N{i}"},
+            })
+        for i in range(orphan_count):
+            events.append(_chunk(f"orp{i}", "", coll, orphan=True))
+        _seed_log(isolated_nexus, events)
+        if chunks_in_t3:
+            _seed(chroma_client, coll, chunks_in_t3)
+
+        class _FakeT3:
+            _client = chroma_client
+        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
+
+        text_result = runner.invoke(doctor_cmd, ["--t3-doc-id-coverage"])
+        assert text_result.exit_code == 0, text_result.output
+        warn_present = "WARN" in text_result.output
+        assert warn_present == should_warn, (
+            f"orphans={orphan_count} non_orphans={non_orphan_count} "
+            f"(ratio={orphan_count / (orphan_count + non_orphan_count):.2f}) "
+            f"expected WARN={should_warn} got WARN={warn_present}; "
+            f"output:\n{text_result.output}"
+        )
+
+    def test_orphan_ratio_zero_when_no_orphans(
+        self, isolated_nexus, runner, chroma_client,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A 100% non-orphan collection has orphan_ratio == 0.0 and no
+        WARN line. Confirms the new field defaults sensibly when the
+        collection is fully covered."""
+        events = [_chunk("nor1", "uuid7-A", "code__clean")]
+        _seed_log(isolated_nexus, events)
+        _seed(chroma_client, "code__clean", [
+            {"id": "nor1", "content": "x",
+             "metadata": {"doc_id": "uuid7-A"}},
+        ])
+
+        class _FakeT3:
+            _client = chroma_client
+        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
+
+        json_result = runner.invoke(
+            doctor_cmd, ["--t3-doc-id-coverage", "--json"],
+        )
+        coverage = json.loads(json_result.output)["t3_doc_id_coverage"]
+        assert coverage.get("orphan_ratio") == 0.0
+        per_coll = coverage["tables"]["code__clean"]
+        assert per_coll.get("orphan_ratio") == 0.0
+        assert "WARN" not in runner.invoke(
+            doctor_cmd, ["--t3-doc-id-coverage"],
+        ).output
