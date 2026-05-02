@@ -235,10 +235,14 @@ class TestLinkBoost:
         (cat_dir / "links.jsonl").touch()
         return Catalog(cat_dir, cat_dir / ".catalog.db")
 
-    def _make_result(self, source_path="src/foo.py", score=0.5, collection="code__test"):
+    def _make_result(self, doc_id="", score=0.5, collection="code__test"):
+        # nexus-1qed: link boost keys on doc_id (Phase 1: doc_id == str(tumbler)).
+        meta: dict = {}
+        if doc_id:
+            meta["doc_id"] = doc_id
         return SearchResult(
             id="r1", content="text", distance=0.3, collection=collection,
-            metadata={"source_path": source_path}, hybrid_score=score,
+            metadata=meta, hybrid_score=score,
         )
 
     def test_implements_link_boosts_score(self, tmp_path):
@@ -248,7 +252,7 @@ class TestLinkBoost:
         t2 = cat.register(owner, "bar.py", content_type="code", file_path="src/bar.py")
         cat.link(t1, t2, "implements", created_by="test")
 
-        r = self._make_result(source_path="src/foo.py", score=0.5)
+        r = self._make_result(doc_id=str(t1), score=0.5)
         apply_link_boost([r], cat)
         assert r.hybrid_score > 0.5  # boosted
 
@@ -259,7 +263,7 @@ class TestLinkBoost:
         t2 = cat.register(owner, "bar.py", content_type="code", file_path="src/bar.py")
         cat.link(t1, t2, "implements-heuristic", created_by="test")
 
-        r = self._make_result(source_path="src/foo.py", score=0.5)
+        r = self._make_result(doc_id=str(t1), score=0.5)
         apply_link_boost([r], cat)
         assert r.hybrid_score == 0.5  # unchanged
 
@@ -270,7 +274,25 @@ class TestLinkBoost:
 
     def test_no_matching_entry_unchanged(self, tmp_path):
         cat = self._make_catalog(tmp_path)
-        r = self._make_result(source_path="nonexistent.py", score=0.5)
+        r = self._make_result(doc_id="nonexistent-tumbler", score=0.5)
+        apply_link_boost([r], cat)
+        assert r.hybrid_score == 0.5
+
+    def test_chunk_without_doc_id_skipped(self, tmp_path):
+        """nexus-1qed: chunks predating the doc_id backfill are
+        skipped silently. WITH TEETH: a regression that re-introduces
+        the legacy source_path probe would boost the score."""
+        cat = self._make_catalog(tmp_path)
+        owner = cat.register_owner("test", "repo", repo_hash="abc12345", repo_root=str(tmp_path))
+        t1 = cat.register(owner, "foo.py", content_type="code", file_path="src/foo.py")
+        t2 = cat.register(owner, "bar.py", content_type="code", file_path="src/bar.py")
+        cat.link(t1, t2, "implements", created_by="test")
+
+        # Chunk has source_path but no doc_id (pre-backfill shape).
+        r = SearchResult(
+            id="legacy-chunk", content="x", distance=0.3, collection="code__test",
+            metadata={"source_path": "src/foo.py"}, hybrid_score=0.5,
+        )
         apply_link_boost([r], cat)
         assert r.hybrid_score == 0.5
 
@@ -283,7 +305,7 @@ class TestLinkBoost:
             t_target = cat.register(owner, f"bar{i}.py", content_type="code", file_path=f"src/bar{i}.py")
             cat.link(t1, t_target, "implements", created_by="test")
 
-        r = self._make_result(source_path="src/foo.py", score=0.5)
+        r = self._make_result(doc_id=str(t1), score=0.5)
         apply_link_boost([r], cat, boost_weight=0.15)
         # signal capped at 1.0, so max boost is 0.15
         assert r.hybrid_score == pytest.approx(0.65, abs=0.01)
@@ -295,7 +317,7 @@ class TestLinkBoost:
         t2 = cat.register(owner, "bar.py", content_type="code", file_path="src/bar.py")
         cat.link(t1, t2, "relates", created_by="test")
 
-        r = self._make_result(source_path="src/foo.py", score=0.5)
+        r = self._make_result(doc_id=str(t1), score=0.5)
         apply_link_boost([r], cat, boost_weight=0.15)
         # relates = 0.5 weight, so boost = 0.15 * 0.5 = 0.075
         assert r.hybrid_score == pytest.approx(0.575, abs=0.01)
@@ -307,7 +329,7 @@ class TestLinkBoost:
         t2 = cat.register(owner, "bar.py", content_type="code", file_path="src/bar.py")
         cat.link(t1, t2, "implements", created_by="test")
 
-        r = self._make_result(source_path="src/foo.py", score=0.5)
+        r = self._make_result(doc_id=str(t1), score=0.5)
         apply_link_boost([r], cat, boost_weight=0.2, type_weights={"implements": 0.5})
         # 0.2 * 0.5 = 0.1
         assert r.hybrid_score == pytest.approx(0.6, abs=0.01)
