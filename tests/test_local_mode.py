@@ -215,17 +215,26 @@ class TestLocalStaleness:
         from nexus.indexer_utils import check_staleness
 
         col = local_db.get_or_create_collection("code__test")
+        # RDR-102 D2 dropped source_path from ALLOWED_TOP_LEVEL, so
+        # normalize() filters it out at write time — the staleness
+        # check now keys on doc_id (the catalog tumbler) rather than
+        # source_path. Stamp doc_id at upsert and pass it to
+        # check_staleness so the test exercises the post-Phase-A /
+        # post-Phase-B identity path.
         local_db.upsert_chunks(
             "code__test",
             ids=["chunk1"],
             documents=["def hello(): pass"],
             metadatas=[{
-                "source_path": "/repo/hello.py",
+                "doc_id": "1.7.42",
                 "content_hash": "abc123",
                 "embedding_model": "all-MiniLM-L6-v2",
             }],
         )
-        assert check_staleness(col, "/repo/hello.py", query_hash, query_model) is expected
+        assert check_staleness(
+            col, "/repo/hello.py", query_hash, query_model,
+            doc_id="1.7.42",
+        ) is expected
 
 
 # ── Collection lifecycle ──────────────────────────────────────────────────────
@@ -267,7 +276,7 @@ class TestLocalCollectionLifecycle:
             ids=["temp-id"],
             documents=["temporary data"],
             metadatas=[make_chunk_metadata(
-                content_type="prose", source_path="",
+                content_type="prose",
                 chunk_index=0, chunk_count=1,
                 chunk_text_hash=h_temp, content_hash=h_temp,
                 chunk_end_char=14,

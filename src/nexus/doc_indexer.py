@@ -884,7 +884,6 @@ def _pdf_chunks(
         chunk_id = f"{content_hash[:16]}_{chunk.chunk_index}"
         meta = make_chunk_metadata(
             content_type="pdf",
-            source_path=str(pdf_path),
             chunk_index=chunk.chunk_index,
             chunk_count=len(chunks),
             chunk_text_hash=hashlib.sha256(chunk.text.encode()).hexdigest(),
@@ -941,9 +940,15 @@ def _markdown_chunks(
     frontmatter, body = parse_frontmatter(raw_text)
     frontmatter_len = len(raw_text) - len(body)
 
-    sp = make_relative(md_path, base_path) if base_path else str(md_path)
+    # RDR-102 D2: source_path is no longer carried at any layer of the
+    # chunk-write path (schema-removed). The chunker's base_metadata
+    # spread (md_chunker.py:380) propagates whatever is in this dict to
+    # each chunk's intermediate metadata, but ``_markdown_chunks``
+    # builds the final T3 metadata from scratch via
+    # ``make_chunk_metadata`` and reads only chunk_start_char /
+    # chunk_end_char / header_path / section_type from
+    # ``chunk.metadata`` — source_path was always dead in the output.
     base_meta: dict = {
-        "source_path": sp,
         "corpus": corpus,
     }
     chunks = SemanticMarkdownChunker().chunk(body, base_meta)
@@ -966,7 +971,6 @@ def _markdown_chunks(
         chunk_id = f"{content_hash[:16]}_{chunk.chunk_index}"
         meta = make_chunk_metadata(
             content_type="markdown",
-            source_path=sp,
             chunk_index=chunk.chunk_index,
             chunk_count=len(chunks),
             chunk_text_hash=hashlib.sha256(chunk.text.encode()).hexdigest(),

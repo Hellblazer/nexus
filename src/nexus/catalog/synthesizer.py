@@ -579,6 +579,7 @@ def _synthesize_collection_chunks(
             break
         for chunk_id, meta in zip(ids, metadatas):
             meta = meta or {}
+            chunk_doc_id = meta.get("doc_id") or ""
             source_path = meta.get("source_path") or ""
             chunk_title = meta.get("title") or ""
             chash = meta.get("chunk_text_hash") or ""
@@ -586,9 +587,19 @@ def _synthesize_collection_chunks(
             chunk_index = int(meta.get("chunk_index", 0) or 0)
             embedded_at = meta.get("indexed_at") or meta.get("embedded_at") or ""
 
+            # 0. RDR-102 Phase A propagation: chunks indexed by the
+            #    post-Phase-A writer carry their catalog tumbler in
+            #    ``meta["doc_id"]`` at chunk-write time. Trust that
+            #    value directly — it is the canonical identity the
+            #    catalog assigned when the Document was registered.
+            #    This priority is what makes the chunk-write doc_id
+            #    survive the synthesize-log → t3-backfill-doc-id round
+            #    trip post-RDR-102 D2 (which removed source_path from
+            #    the chunk schema, breaking the source_uri match path
+            #    for chunks that lacked it).
+            doc_id = chunk_doc_id
             # 1. source_path → file://source_path → source_uri map.
-            doc_id = ""
-            if source_path:
+            if not doc_id and source_path:
                 candidate = (
                     source_path
                     if source_path.startswith(("file://", "chroma://", "https://", "http://", "x-devonthink-item://"))

@@ -211,22 +211,31 @@ class TestMakeRelative:
         assert make_relative(str(root / "src" / "foo.py"), root) == "src/foo.py"
 
 
-# ── _markdown_chunks relative source_path (nexus-1p4g.3) ─────────────────────
+# ── _markdown_chunks no longer emits source_path (RDR-102 D2) ────────────────
 
 
 class TestMarkdownChunksRelativePath:
-    """_markdown_chunks stores relative source_path when base_path given."""
+    """RDR-102 D2 retired ``source_path`` from the chunk schema. The
+    ``base_path`` parameter still drives the catalog hook's
+    ``file_path`` storage (relative vs absolute) so the tumbler's
+    catalog row can be looked up in the operator's expected form, but
+    the chunk metadata itself no longer carries source_path at all.
+    """
 
-    def test_markdown_chunks_absolute_source_path_by_default(self, tmp_path: Path) -> None:
+    def test_markdown_chunks_does_not_emit_source_path_by_default(
+        self, tmp_path: Path,
+    ) -> None:
         from nexus.doc_indexer import _markdown_chunks
 
         md = tmp_path / "doc.md"
         md.write_text("# Hello\n\nSome content here for chunking.")
         result = _markdown_chunks(md, "abc123", "voyage-context-3", "2026-01-01", "corp")
         assert result  # non-empty
-        assert result[0][2]["source_path"] == str(md)  # absolute
+        assert "source_path" not in result[0][2]
 
-    def test_markdown_chunks_relative_source_path_with_base(self, tmp_path: Path) -> None:
+    def test_markdown_chunks_does_not_emit_source_path_with_base(
+        self, tmp_path: Path,
+    ) -> None:
         from nexus.doc_indexer import _markdown_chunks
 
         repo = tmp_path / "myrepo"
@@ -236,7 +245,7 @@ class TestMarkdownChunksRelativePath:
         md.write_text("# RDR-001\n\nSome research content for chunking.")
         result = _markdown_chunks(md, "abc123", "voyage-context-3", "2026-01-01", "corp", base_path=repo)
         assert result
-        assert result[0][2]["source_path"] == "docs/rdr/rdr-001.md"
+        assert "source_path" not in result[0][2]
 
 
 # ── _index_document source_key (nexus-1p4g.3) ───────────────────────────────

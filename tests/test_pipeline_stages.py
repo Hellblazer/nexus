@@ -192,10 +192,14 @@ class TestChunkerLoop:
         out = db.read_ready_chunks("h1")
         assert len(out) == 2
         meta = json.loads(out[0]["metadata_json"])
-        for k, v in [("source_path", "/a.pdf"), ("corpus", "test"),
+        # RDR-102 D2 dropped source_path; corpus / content_hash /
+        # embedding_model / store_type / page_number remain as the
+        # canonical chunk-time identity / routing fields.
+        for k, v in [("corpus", "test"),
                      ("content_hash", "h1"), ("embedding_model", "voyage-context-3"),
                      ("store_type", "pdf"), ("page_number", 1)]:
             assert meta[k] == v
+        assert "source_path" not in meta
         assert "indexed_at" in meta
         assert out[0]["chunk_id"] == "h1_0" and out[1]["chunk_id"] == "h1_1"
 
@@ -622,8 +626,10 @@ class TestBufferEdgeCases:
 
 
 _REQUIRED_META = {
-    # Identity / spans / position
-    "source_path", "content_hash", "chunk_text_hash", "chunk_index", "chunk_count",
+    # Identity / spans / position — RDR-102 D2 dropped source_path.
+    # doc_id is drop-when-empty so it's not in this required set
+    # (the chunker_loop test below has no catalog).
+    "content_hash", "chunk_text_hash", "chunk_index", "chunk_count",
     "chunk_start_char", "chunk_end_char", "line_start", "line_end", "page_number",
     # Display / routing (post source_title→title collapse, expires_at→indexed_at swap)
     "title", "source_author", "section_title", "section_type", "tags", "category",

@@ -626,7 +626,6 @@ class T3Database:
         content_hash = hashlib.sha256(content.encode()).hexdigest()
         metadata = make_chunk_metadata(
             content_type=content_type,
-            source_path="",  # MCP put has no on-disk source
             chunk_index=0,
             chunk_count=1,
             chunk_text_hash=content_hash,

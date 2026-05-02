@@ -100,7 +100,6 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
             chunk_chroma_id = _hl.sha256(f"{ctx.corpus}:{title}".encode()).hexdigest()[:32]
             metadata = make_chunk_metadata(
                 content_type="markdown",
-                source_path=str(file_path),
                 chunk_index=chunk.chunk_index,
                 chunk_count=len(chunks),
                 chunk_text_hash=_hl.sha256(chunk.text.encode()).hexdigest(),
@@ -180,7 +179,6 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
                     section_type = classify_section_type([section_title])
             metadata = make_chunk_metadata(
                 content_type="prose",
-                source_path=str(file_path),
                 chunk_index=i,
                 chunk_count=total_chunks,
                 chunk_text_hash=_hl.sha256(text.encode()).hexdigest(),

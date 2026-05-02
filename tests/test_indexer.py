@@ -162,9 +162,19 @@ def test_run_index_skips_hidden_files(tmp_path, monkeypatch):
     assert any("main.py" in str(p) for p in seen)
 
 
-# ── Absolute source_path ────────────────────────────────────────────────────
+# ── source_path absent (RDR-102 D2) ─────────────────────────────────────────
 
-def test_run_index_source_path_is_absolute(tmp_path):
+def test_run_index_chunks_have_no_source_path(tmp_path):
+    """RDR-102 D2 retired ``source_path`` from the chunk schema. The
+    canonical reference for "which file did this chunk come from" is
+    now the catalog tumbler in ``doc_id`` (Phase A wires this for
+    standalone indexers; ``nx index repo`` already wired it via
+    indexer.py's ``_catalog_hook`` + ``doc_id_resolver`` closure
+    pattern). The legacy ``source_path`` key MUST be absent from
+    freshly-written chunks; a regression that re-introduces it would
+    re-create the prune-vs-write regression cycle this RDR closes
+    (RF-8).
+    """
     from nexus.indexer import _run_index
     repo = tmp_path / "repo"; repo.mkdir()
     (repo / "main.py").write_text("x = 1\n")
@@ -175,8 +185,12 @@ def test_run_index_source_path_is_absolute(tmp_path):
     with _patches(db, extra={"nexus.chunker.chunk_file": {"return_value": [_chunk()]},
                               "voyageai.Client": {"return_value": v}}):
         _run_index(repo, _reg())
-    assert cap and Path(cap[0]["source_path"]).is_absolute()
-    assert cap[0]["source_path"] == str(repo / "main.py")
+    assert cap, "expected at least one chunk to be upserted"
+    leaked = [m for m in cap if "source_path" in m]
+    assert not leaked, (
+        f"{len(leaked)}/{len(cap)} chunks still carry source_path "
+        f"(RDR-102 Phase B regression)"
+    )
 
 
 # ── Content-hash dedup ──────────────────────────────────────────────────────
@@ -334,7 +348,9 @@ def test_run_index_excludes_rdr_paths_from_docs(tmp_path):
                               "nexus.doc_indexer.batch_index_markdowns": {}}) as mocks:
         _run_index(repo, _reg())
     if "docs__repo" in ups:
-        paths = [m["source_path"] for m in ups["docs__repo"]]
+        # RDR-102 D2: source_path is gone; title carries
+        # "{relpath}:chunk-{i}" per prose_indexer.py:96.
+        paths = [m.get("title", "") for m in ups["docs__repo"]]
         assert any("README.md" in p for p in paths) and not any("ADR-001" in p for p in paths)
     mb = mocks["batch_index_markdowns"]; mb.assert_called_once()
     assert any("ADR-001.md" in str(p) for p in mb.call_args[0][0])
@@ -385,8 +401,10 @@ def test_run_index_mixed_repo(tmp_path):
         "nexus.doc_indexer._embed_with_fallback": {"return_value": ([[0.1]*10], "voyage-context-3")},
     }):
         _run_index(repo, _reg())
-    assert any("main.py" in m["source_path"] for m in ups["code__repo"])
-    dp = {m["source_path"] for m in ups["docs__repo"]}
+    # RDR-102 D2: source_path is gone; title carries
+    # "{relpath}:chunk-{i}" per code_indexer.py:393 / prose_indexer.py:96.
+    assert any("main.py" in m.get("title", "") for m in ups["code__repo"])
+    dp = {m.get("title", "") for m in ups["docs__repo"]}
     assert any("README.md" in p for p in dp) and any("notes.rst" in p for p in dp)
     assert not any("data.txt" in p for p in dp), ".txt files should be SKIP"
 

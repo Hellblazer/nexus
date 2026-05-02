@@ -31,11 +31,17 @@ def test_allowed_top_level_is_bounded() -> None:
 
 
 def test_load_bearing_keys_are_allowed() -> None:
-    """Every key read by ``where=`` filters or scoring must be top-level."""
+    """Every key read by ``where=`` filters or scoring must be top-level.
+
+    RDR-102 D2 dropped ``source_path`` from the schema — the catalog
+    tumbler in ``doc_id`` is now the canonical reference and the
+    stale-detection where-filters fall back to ``source_path`` only
+    for legacy chunks indexed before the doc_id-keyed identity wiring
+    landed (RDR-101 Phase 5b will drop the fallback branch entirely).
+    """
     from nexus.metadata_schema import ALLOWED_TOP_LEVEL
 
     for key in (
-        "source_path",
         "content_hash",
         "chunk_text_hash",
         "chunk_index",
@@ -49,6 +55,7 @@ def test_load_bearing_keys_are_allowed() -> None:
         "section_type",
         "frecency_score",
         "source_agent",
+        "doc_id",  # RDR-101 Phase 3 PR δ — catalog cross-reference
     ):
         assert key in ALLOWED_TOP_LEVEL, f"load-bearing key {key!r} missing"
 
@@ -96,6 +103,11 @@ def test_cargo_keys_not_allowed() -> None:
 
 
 def test_normalize_drops_unknown_keys() -> None:
+    """RDR-102 D2: ``source_path`` is now also a key normalize() drops
+    (the schema-level removal flips it from a load-bearing key to a
+    cargo key). The ``content_hash`` / ``chunk_index`` / ``chunk_count``
+    / ``content_type`` checks below stand in for "load-bearing keys
+    survive" since they remain in ALLOWED_TOP_LEVEL."""
     from nexus.metadata_schema import normalize
 
     raw = {
@@ -112,7 +124,12 @@ def test_normalize_drops_unknown_keys() -> None:
     assert "pdf_subject" not in out
     assert "extraction_method" not in out
     assert "ast_chunked" not in out
-    assert out["source_path"] == "/a.pdf"
+    assert "source_path" not in out, (
+        "RDR-102 D2: source_path is no longer in ALLOWED_TOP_LEVEL; "
+        "normalize() must drop it"
+    )
+    assert out["content_hash"] == "abc"
+    assert out["chunk_index"] == 0
 
 
 def test_normalize_consolidates_git_meta() -> None:
@@ -394,7 +411,7 @@ def test_validate_rejects_unknown_key() -> None:
     from nexus.metadata_schema import MetadataSchemaError, validate
 
     with pytest.raises(MetadataSchemaError, match="unknown"):
-        validate({"source_path": "a", "bogus_key": "x"})
+        validate({"content_hash": "x", "bogus_key": "x"})
 
 
 def test_validate_rejects_non_primitive_values() -> None:
@@ -402,7 +419,7 @@ def test_validate_rejects_non_primitive_values() -> None:
     from nexus.metadata_schema import MetadataSchemaError, validate
 
     with pytest.raises(MetadataSchemaError, match="non-primitive"):
-        validate({"source_path": "a", "git_meta": {"branch": "main"}})
+        validate({"content_hash": "x", "git_meta": {"branch": "main"}})
 
 
 # ── Write path protection ───────────────────────────────────────────────────
@@ -494,7 +511,6 @@ class TestDocIdInSchema:
         from nexus.metadata_schema import validate
 
         meta = {
-            "source_path": "src/foo.py",
             "content_hash": "x",
             "chunk_text_hash": "y",
             "chunk_index": 0,
@@ -513,7 +529,6 @@ class TestDocIdInSchema:
 
         meta = make_chunk_metadata(
             content_type="code",
-            source_path="src/foo.py",
             chunk_index=0,
             chunk_count=1,
             chunk_text_hash="abc",
@@ -534,7 +549,6 @@ class TestDocIdInSchema:
 
         meta = make_chunk_metadata(
             content_type="code",
-            source_path="src/foo.py",
             chunk_index=0,
             chunk_count=1,
             chunk_text_hash="abc",

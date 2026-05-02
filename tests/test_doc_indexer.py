@@ -229,9 +229,23 @@ def test_index_md_falls_back_to_local_embedder_when_no_credentials(
     own integration test requires a real PDF fixture (the existing
     ``sample_pdf`` is fake bytes; PDF tests in this file mock the
     extractor). The codepath itself is tested at the source level.
+
+    RDR-102 D2: source_path was removed from the chunk schema, so the
+    re-index no-op contract now relies on the doc_id-keyed staleness
+    check (chunks must carry doc_id for identity_where to find them).
+    The test initializes a catalog at the autouse-fixture path so the
+    Phase A pre-flight registration writes doc_id at chunk-write time;
+    without that, no-catalog ingest writes chunks with neither
+    source_path nor doc_id and the staleness check correctly cannot
+    detect "unchanged" — re-index would proceed every time.
     """
     import chromadb
+    from nexus.catalog import reset_cache
+    from nexus.catalog.catalog import Catalog
 
+    cat_dir = tmp_path / "test-catalog"
+    Catalog.init(cat_dir)
+    reset_cache()
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
     monkeypatch.setattr(
@@ -439,8 +453,12 @@ def pdf_extract_patches_ctx():
 
 
 _BASE_REQUIRED_FIELDS = {
-    # Identity / position / spans (post source_title→title collapse, expires_at→indexed_at swap)
-    "source_path", "content_hash", "chunk_text_hash", "chunk_index", "chunk_count",
+    # Identity / position / spans — RDR-102 D2 dropped source_path; the
+    # catalog tumbler in doc_id is the canonical reference. doc_id is
+    # drop-when-empty (the no-catalog ingest contract), so it is NOT
+    # in this required set — chunks indexed without a catalog have
+    # neither source_path nor doc_id.
+    "content_hash", "chunk_text_hash", "chunk_index", "chunk_count",
     "chunk_start_char", "chunk_end_char", "page_number",
     # Display / routing
     "title", "source_author", "section_title", "section_type",

@@ -148,7 +148,6 @@ def _build_chunk_metadata(
 
     return make_chunk_metadata(
         content_type="pdf",
-        source_path=pdf_path,
         chunk_index=chunk.chunk_index,
         chunk_count=chunk_count,  # provisional; corrected in post-pass
         chunk_text_hash=hashlib.sha256(chunk.text.encode()).hexdigest(),
