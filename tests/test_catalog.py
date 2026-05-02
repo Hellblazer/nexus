@@ -460,6 +460,59 @@ class TestUpdate:
         with pytest.raises(KeyError):
             cat.update(Tumbler.parse("1.1.999"), title="x")
 
+    def test_update_heals_null_metadata_column(self, cat_with_owner):
+        """nexus-ga48: when SQLite's ``metadata`` column already holds
+        the literal string ``'null'`` (a self-perpetuating shape that
+        slipped in through historical writes pre-coercion), the next
+        ``update()`` must heal it to ``'{}'`` rather than re-emit
+        ``'null'``.
+
+        Pre-fix path: ``Catalog.update`` at catalog.py:1909 wrote
+        ``json.dumps(rec_dict["meta"])``; resolve() decoded the column
+        with ``json.loads(row[11]) if row[11] else {}`` which turns
+        the literal ``'null'`` into Python ``None`` (truthy string,
+        loads to None); update then re-serialised None back to the
+        literal ``'null'``. The synthesizer emits ``meta={}``, so
+        ``doctor --replay-equality`` reports FAIL on every such row.
+        Post-fix: any non-dict ``rec_dict["meta"]`` (None, missing,
+        etc.) is coerced to ``{}`` before serialisation.
+
+        Reproduction injects the bad shape via direct SQL because
+        ``register()`` already coerces None at write time; the only
+        way to land ``'null'`` is to bypass register's coercion or
+        to migrate from a historical state that lacked it.
+        """
+        cat, owner = cat_with_owner
+        doc = cat.register(owner, "a.py", content_type="code", file_path="a.py")
+
+        # Forcibly write the legacy bad shape into the metadata column.
+        cat._db.execute(
+            "UPDATE documents SET metadata = 'null' WHERE tumbler = ?",
+            (str(doc),),
+        )
+        cat._db.commit()
+
+        # Confirm the bad shape is in place pre-fix.
+        before = cat._db.execute(
+            "SELECT metadata FROM documents WHERE tumbler = ?", (str(doc),),
+        ).fetchone()[0]
+        assert before == "null", (
+            f"setup failed: SQL inject did not land 'null'; got {before!r}"
+        )
+
+        # Update an unrelated field — should heal metadata as a side effect.
+        cat.update(doc, title="renamed")
+
+        after = cat._db.execute(
+            "SELECT metadata FROM documents WHERE tumbler = ?", (str(doc),),
+        ).fetchone()[0]
+        assert after == "{}", (
+            f"update() must heal 'null' → '{{}}'; got {after!r}. "
+            f"If this fails with 'null' the coerce-or-{{}} fix at "
+            f"catalog.py:1909 was reverted or the resolve→update path "
+            f"is leaking None through additional sites."
+        )
+
 
 class TestEnsureConsistent:
     def test_malformed_jsonl_no_crash(self, tmp_path):
