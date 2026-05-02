@@ -1810,7 +1810,18 @@ class Catalog:
                 "chunk_count": entry.chunk_count,
                 "head_hash": entry.head_hash,
                 "indexed_at": entry.indexed_at,
-                "meta": entry.meta,
+                # nexus-ga48: coerce ``None`` → ``{}`` at the source so
+                # the downstream merge (line ~1830), event payload
+                # (~1874), and SQL serialisation (~1909) all see a
+                # dict shape. Pre-fix, a row whose SQLite ``metadata``
+                # column held the literal ``'null'`` string decoded
+                # back through resolve() as Python ``None``, which
+                # then crashed in ``dict(None)`` at the merge or
+                # event-payload sites — silently blocking any
+                # ``update()`` on the 11 affected rows in Hal's
+                # catalog. The boundary serialisation at line 1909
+                # also gets ``or {}`` defence-in-depth.
+                "meta": entry.meta or {},
                 "source_mtime": entry.source_mtime,
                 # RDR-096 P3.1: preserve source_uri across updates.
                 # Without this carry-over, every update() call would
@@ -1906,7 +1917,8 @@ class Catalog:
                         rec_dict["year"], rec_dict["content_type"], rec_dict["file_path"],
                         rec_dict["corpus"], rec_dict["physical_collection"],
                         rec_dict["chunk_count"], rec_dict["head_hash"],
-                        rec_dict["indexed_at"], json.dumps(rec_dict["meta"]),
+                        rec_dict["indexed_at"],
+                        json.dumps(rec_dict["meta"] or {}),
                         rec_dict.get("source_mtime", 0.0),
                         rec_dict.get("source_uri", ""),
                         rec_dict["alias_of"],
