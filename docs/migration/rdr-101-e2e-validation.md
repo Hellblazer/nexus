@@ -105,7 +105,22 @@ Two tests cover the recovery story documented in this guide:
 
 Both pass. The recovery claim ("Re-run `nx catalog t3-backfill-doc-id`. Idempotent — already-backfilled chunks are no-ops.") is verified end-to-end.
 
+### MCP smoke test under bootstrap-fallback — `tests/test_catalog_mcp_bootstrap_fallback.py`
+
+`nexus-o6aa.9.13`. Four in-process tests against the MCP tool surface (`mcp_server.catalog_list`, `catalog_show`, `catalog_search`) with a fixture that constructs a sandbox catalog in bootstrap-fallback state (10 legacy `documents.jsonl` rows + 1 stray `DocumentRegistered` event in `events.jsonl` → 95% guardrail trips).
+
+Contract validated:
+
+* `Catalog.bootstrap_fallback_active` is True after construction (sanity guardrail).
+* `catalog_list` returns the 10 legacy rows via the fallback read path — not an error stub.
+* `catalog_show(tumbler="1.1.1")` returns the document's full metadata under fallback.
+* `catalog_search` accepts a query and returns without crashing.
+* No human-readable upgrade banner ("bootstrap-fallback active", "nx catalog migrate") leaks to stderr from any MCP path. The banner is fired only from `cli.py:main()` — the structural separation is the load-bearing invariant. If a future refactor adds a prompt call to the MCP server, the assertion catches it.
+
+The structlog warning (`catalog_event_log_incomplete_falling_back_to_legacy`) is emitted as expected; it goes through the configured structlog sink (not stderr by default), so MCP transport stdout/stderr is uncontaminated.
+
+4/4 pass. The TTY suppression unit test (`tests/test_migration_prompt.py::test_prompt_suppressed_when_not_tty`) covers the `_migration_prompt` module directly; this file is the e2e MCP-side counterpart.
+
 ### Still open (filed for follow-up)
 
-* **Real Chroma Cloud T3 backfill** — needs throwaway tenant credentials. Separate bead.
-* **MCP smoke test** — needs MCP server harness scaffolding. Separate bead.
+* **Real Chroma Cloud T3 backfill** — needs throwaway tenant credentials. Separate bead (`nexus-o6aa.9.12`).
