@@ -4951,3 +4951,332 @@ def migrate_cmd(
     )
 
     click.echo("\nMigration complete.")
+
+
+# ── RDR-101 Phase 4: prune-deprecated-keys verb (nexus-o6aa.10.3) ─────────
+
+
+# Five legacy chunk-metadata keys that the Phase 4 reader migrations
+# stopped depending on. ``title`` is intentionally NOT in this set; the
+# .10.2 audit (docs/migration/rdr-101-phase4-reader-audit.md, Category C)
+# kept it permanently as the slug-shaped identity for ``knowledge__knowledge``
+# and the universal display field across formatters.
+_PRUNE_DEPRECATED_KEYS: frozenset[str] = frozenset({
+    "source_path",
+    "git_branch",
+    "git_commit_hash",
+    "git_project_name",
+    "git_remote_url",
+})
+
+
+@catalog.command("prune-deprecated-keys")
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help=(
+        "Walk every collection and report what would change without "
+        "calling col.update. Use to size the prune (per-collection "
+        "chunk count, total deprecated-key occurrences) before "
+        "committing."
+    ),
+)
+@click.option(
+    "--collection",
+    "collection_filter",
+    default="",
+    help=(
+        "Restrict the prune to one collection name. Default: every "
+        "collection in T3. Use to stage a per-collection rollout."
+    ),
+)
+@click.option(
+    "--json", "as_json", is_flag=True,
+    help="Emit machine-readable JSON instead of text output.",
+)
+@click.option(
+    "--i-have-completed-the-reader-migration",
+    "reader_migration_done",
+    is_flag=True,
+    default=False,
+    help=(
+        "REQUIRED. Acknowledges that every audit-listed reader "
+        "(docs/migration/rdr-101-phase4-reader-audit.md) has migrated "
+        "to doc_id-keyed lookups. Without this flag the verb refuses "
+        "to run; pruning before the readers migrate produces silent "
+        "empty results across aspect extraction, link boost, "
+        "incremental sync, and display formatters."
+    ),
+)
+@click.option(
+    "--skip-coverage-check",
+    is_flag=True,
+    default=False,
+    help=(
+        "Bypass the --t3-doc-id-coverage gate. The default refuses "
+        "to run on a collection whose chunks aren't 100%% covered by "
+        "doc_id metadata. Override is for operators who have a known "
+        "orphan-chunk class they intend to clean up post-prune."
+    ),
+)
+def prune_deprecated_keys_cmd(
+    dry_run: bool,
+    collection_filter: str,
+    as_json: bool,
+    reader_migration_done: bool,
+    skip_coverage_check: bool,
+) -> None:
+    """RDR-101 Phase 4: drop legacy metadata keys from every T3 chunk.
+
+    Removes the five keys whose readers migrated to doc_id-keyed
+    catalog lookups in Phase 4: ``source_path``, ``git_branch``,
+    ``git_commit_hash``, ``git_project_name``, ``git_remote_url``.
+    Idempotent: chunks that already lack the keys are no-ops.
+
+    The chunk metadata key budget on ChromaDB Cloud is 32 top-level
+    keys (``MAX_SAFE_TOP_LEVEL_KEYS``). Over-cap chunks on Hal's
+    catalog carry 35-36 keys; dropping these five brings them to
+    30-31 keys and leaves room for ``doc_id`` + future additions.
+
+    Pre-flight gates (refuse to proceed unless overridden):
+    - ``--i-have-completed-the-reader-migration`` is required. Without
+      it the verb errors out with the migration audit doc reference.
+    - Per-collection ``--t3-doc-id-coverage = 100%%`` (the
+      ``nx catalog doctor --t3-doc-id-coverage`` check). Override with
+      ``--skip-coverage-check`` only after deciding what to do about
+      the missing-doc_id chunks; the prune leaves them strictly
+      unreachable for the post-Phase-5 reader.
+
+    Bisect-on-failure (mirrors ``t3-backfill-doc-id`` per .9.19): on
+    a batch update failure, halve and recurse to isolate failing
+    chunks in O(log N) update calls instead of O(N) per-chunk retry.
+    """
+    from nexus.catalog.catalog import Catalog
+    from nexus.config import catalog_path
+    from nexus.db import make_t3
+
+    cat_dir = catalog_path()
+    if not Catalog.is_initialized(cat_dir):
+        raise click.ClickException(
+            f"Catalog not initialized at {cat_dir}. "
+            "Run 'nx catalog setup' to create and populate it."
+        )
+
+    if not reader_migration_done:
+        raise click.ClickException(
+            "Refusing to prune. The Phase 4 reader migration must be "
+            "complete first; pruning ahead of the readers produces "
+            "silent empty results.\n\n"
+            "Read docs/migration/rdr-101-phase4-reader-audit.md for "
+            "the migration scope, verify every listed reader has "
+            "shipped, then re-run with "
+            "--i-have-completed-the-reader-migration."
+        )
+
+    try:
+        t3 = make_t3()
+    except Exception as exc:
+        raise click.ClickException(
+            f"Failed to open T3 client: {exc}. Check ChromaDB credentials."
+        )
+
+    # Resolve target collections.
+    if collection_filter:
+        target_collections = [collection_filter]
+    else:
+        try:
+            target_collections = [
+                c["name"] if isinstance(c, dict) else c.name
+                for c in t3.list_collections()
+            ]
+        except Exception as exc:
+            raise click.ClickException(
+                f"Failed to list collections: {exc}"
+            )
+
+    # Coverage gate. Reuse the doctor's projection; refuse if any
+    # target collection drops below 100%.
+    if not skip_coverage_check:
+        try:
+            coverage_report = _run_t3_doc_id_coverage()
+        except click.ClickException:
+            raise
+        except Exception as exc:
+            raise click.ClickException(
+                f"Coverage check failed: {exc}. Re-run with "
+                "--skip-coverage-check to override."
+            )
+        per_coll = coverage_report.get("tables", {})
+        offenders: list[dict] = []
+        for name in target_collections:
+            row = per_coll.get(name)
+            if row is None:
+                continue  # not in events.jsonl: nothing claimed; skip.
+            total = row.get("total_chunks", 0)
+            with_doc_id = row.get("with_doc_id", 0)
+            if total > 0 and with_doc_id < total:
+                offenders.append({
+                    "collection": name,
+                    "total": total,
+                    "with_doc_id": with_doc_id,
+                    "missing": total - with_doc_id,
+                })
+        if offenders:
+            lines = [
+                f"  {o['collection']}: {o['with_doc_id']}/{o['total']} "
+                f"covered (missing={o['missing']})"
+                for o in offenders
+            ]
+            raise click.ClickException(
+                "Refusing to prune. The following collections have "
+                "chunks whose doc_id is unpopulated; pruning would "
+                "leave them strictly unreachable:\n"
+                + "\n".join(lines)
+                + "\n\nRun 'nx catalog t3-backfill-doc-id' on each, "
+                "or pass --skip-coverage-check to proceed anyway."
+            )
+
+    # Walk + rewrite.
+    import time as _time
+    show_progress = not dry_run and not as_json
+    chunks_updated = 0
+    chunks_already_pruned = 0
+    chunks_deferred: list[dict] = []
+    errors: list[dict] = []
+    per_collection_summary: dict[str, dict] = {}
+
+    for coll_idx, coll_name in enumerate(target_collections, start=1):
+        try:
+            col = t3._client.get_collection(name=coll_name)
+        except Exception as exc:
+            errors.append({
+                "collection": coll_name,
+                "stage": "open",
+                "error": str(exc),
+            })
+            continue
+
+        if show_progress:
+            click.echo(
+                f"  [prune {coll_idx}/{len(target_collections)}] "
+                f"{coll_name}…",
+                err=True,
+            )
+        _tc = _time.monotonic()
+        coll_updated_before = chunks_updated
+        coll_already_before = chunks_already_pruned
+
+        offset = 0
+        while True:
+            try:
+                page = col.get(
+                    limit=300, offset=offset, include=["metadatas"],
+                )
+            except Exception as exc:
+                errors.append({
+                    "collection": coll_name,
+                    "stage": "read",
+                    "offset": offset,
+                    "error": str(exc),
+                })
+                break
+            ids = page.get("ids") or []
+            metas = page.get("metadatas") or []
+            if not ids:
+                break
+            update_ids: list[str] = []
+            update_metas: list[dict] = []
+            for cid, meta in zip(ids, metas):
+                meta = meta or {}
+                deprecated_present = _PRUNE_DEPRECATED_KEYS.intersection(meta)
+                if not deprecated_present:
+                    chunks_already_pruned += 1
+                    continue
+                # ChromaDB's ``col.update(metadatas=...)`` MERGES rather
+                # than replaces; passing only the kept keys leaves the
+                # deprecated keys in place. The delete-key shape is
+                # ``{key: None}``, which removes the key from storage.
+                deletion_patch: dict = {k: None for k in deprecated_present}
+                update_ids.append(cid)
+                update_metas.append(deletion_patch)
+
+            if update_ids and not dry_run:
+                ok, deferred_records, error_records = _bisect_update(
+                    col, update_ids, update_metas, coll_name,
+                )
+                chunks_updated += ok
+                chunks_deferred.extend(deferred_records)
+                errors.extend(error_records)
+            elif update_ids:
+                # Dry run: count what would change.
+                chunks_updated += len(update_ids)
+
+            if len(ids) < 300:
+                break
+            offset += 300
+
+        per_collection_summary[coll_name] = {
+            "updated": chunks_updated - coll_updated_before,
+            "already_pruned": chunks_already_pruned - coll_already_before,
+            "elapsed_seconds": round(_time.monotonic() - _tc, 2),
+        }
+
+        if show_progress:
+            updated_here = chunks_updated - coll_updated_before
+            elapsed = _time.monotonic() - _tc
+            click.echo(
+                f"  [prune {coll_idx}/{len(target_collections)}] "
+                f"{coll_name}: {updated_here} updated "
+                f"in {elapsed:.1f}s",
+                err=True,
+            )
+
+    report = {
+        "dry_run": dry_run,
+        "collection_filter": collection_filter or "(all)",
+        "deprecated_keys": sorted(_PRUNE_DEPRECATED_KEYS),
+        "chunks_updated": chunks_updated,
+        "chunks_already_pruned": chunks_already_pruned,
+        "chunks_deferred": chunks_deferred,
+        "errors": errors,
+        "per_collection": per_collection_summary,
+    }
+
+    if as_json:
+        click.echo(json.dumps(report, indent=2, default=str))
+    else:
+        _print_prune_deprecated_keys_text(report)
+
+    if errors:
+        raise click.exceptions.Exit(1)
+
+
+def _print_prune_deprecated_keys_text(report: dict) -> None:
+    """Render the prune-deprecated-keys report in plain text."""
+    if report["dry_run"]:
+        click.echo("DRY RUN: no col.update calls issued.")
+    click.echo(
+        f"Pruned keys: {', '.join(report['deprecated_keys'])}"
+    )
+    click.echo(f"  chunks_updated:        {report['chunks_updated']}")
+    click.echo(f"  chunks_already_pruned: {report['chunks_already_pruned']}")
+    if report["chunks_deferred"]:
+        click.echo(
+            f"  chunks_deferred:       {len(report['chunks_deferred'])}"
+        )
+    if report["errors"]:
+        click.echo(f"  errors:                {len(report['errors'])}")
+        for err in report["errors"][:5]:
+            click.echo(f"    {err}")
+        if len(report["errors"]) > 5:
+            click.echo(
+                f"    ... and {len(report['errors']) - 5} more"
+            )
+    if report["per_collection"]:
+        click.echo("\nPer collection:")
+        for name, summary in sorted(report["per_collection"].items()):
+            click.echo(
+                f"  {name:<40}  updated={summary['updated']}  "
+                f"already={summary['already_pruned']}  "
+                f"elapsed={summary['elapsed_seconds']}s"
+            )
