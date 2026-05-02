@@ -126,6 +126,7 @@ def _build_chunk_metadata(
     chunk_count: int,
     now_iso: str,
     git_meta: dict | None = None,
+    doc_id: str = "",
 ) -> dict:
     """Build chunk metadata with fields known at chunk time.
 
@@ -137,6 +138,11 @@ def _build_chunk_metadata(
     resolves once via :func:`nexus.indexer_utils.detect_git_metadata` and
     passes through to keep per-chunk overhead at zero. Empty dict when
     *pdf_path* is not in a git repo.
+
+    *doc_id* (RDR-102 Phase A) — catalog tumbler resolved at the streaming
+    entry boundary. Empty string when the catalog is absent or pre-flight
+    registration failed; ``normalize()`` drops the field on empty so chunks
+    from no-catalog runs are unchanged.
     """
     from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415
 
@@ -161,6 +167,7 @@ def _build_chunk_metadata(
         tags="pdf",
         category="paper",
         git_meta=git_meta,
+        doc_id=doc_id,
     )
 
 
@@ -178,6 +185,7 @@ def _embed_and_write_batch(
     chunk_count: int,
     now_iso: str,
     git_meta: dict | None = None,
+    doc_id: str = "",
 ) -> tuple[int, str]:
     """Embed and write a batch of chunks. Returns (count_written, actual_model)."""
     if not chunks_to_embed:
@@ -213,6 +221,7 @@ def _embed_and_write_batch(
             chunk_count=chunk_count,
             now_iso=now_iso,
             git_meta=git_meta,
+            doc_id=doc_id,
         )
         db.write_chunk(content_hash, chunk.chunk_index, chunk.text, chunk_id,
                         metadata=meta, embedding=emb_bytes)
@@ -233,6 +242,7 @@ def chunker_loop(
     corpus: str = "",
     target_model: str = "voyage-context-3",
     git_meta: dict | None = None,
+    doc_id: str = "",
 ) -> None:
     """Incrementally chunk pages as they arrive, overlapping with extraction.
 
@@ -342,7 +352,7 @@ def chunker_loop(
 
             batch_kwargs = dict(
                 pdf_path=pdf_path, corpus=corpus, target_model=current_model,
-                now_iso=now_iso, git_meta=git_meta,
+                now_iso=now_iso, git_meta=git_meta, doc_id=doc_id,
             )
 
             if is_final:
@@ -549,6 +559,7 @@ def pipeline_index_pdf(
     target_model: str = "voyage-context-3",
     git_meta: dict | None = None,
     force: bool = False,
+    doc_id: str = "",
 ) -> int:
     """Three-stage streaming pipeline for PDFs.
 
@@ -583,6 +594,21 @@ def pipeline_index_pdf(
     if git_meta is None:
         from nexus.indexer_utils import detect_git_metadata
         git_meta = detect_git_metadata(pdf_path)
+
+    # RDR-102 Phase A: pre-flight catalog registration for the streaming
+    # path. When called via index_pdf (the routing case) the caller already
+    # resolved doc_id and passed it through; otherwise (direct invocation,
+    # e.g. tests / future callers) resolve it here so chunker_loop can
+    # thread doc_id through every chunk metadata. Idempotent on re-index
+    # via Catalog.register's by_file_path early-return; returns "" when
+    # the catalog is absent (no-catalog ingest contract preserved).
+    if not doc_id:
+        from nexus.doc_indexer import _register_or_lookup_doc_id
+        doc_id = _register_or_lookup_doc_id(
+            pdf_path, corpus,
+            content_type="paper",
+            physical_collection=collection,
+        )
 
     # nexus-9ji: --force must break the partial-ingest deadlock. Both
     # pipeline.db state and T3 orphan chunks can independently block
@@ -632,7 +658,7 @@ def pipeline_index_pdf(
             chunker_loop, content_hash, db, cancel, embed_fn,
             extraction_done=extraction_done, chunking_done=chunking_done,
             pdf_path=str(pdf_path), corpus=corpus, target_model=target_model,
-            git_meta=git_meta,
+            git_meta=git_meta, doc_id=doc_id,
         )
         upload_future = pool.submit(
             uploader_loop, content_hash, db, t3, collection, cancel,
