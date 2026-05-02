@@ -225,6 +225,8 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
     bar: tqdm | None = None
     n = 0
     total = 0
+    total_chunks = 0
+    skipped_files = 0
     eta_ticker = _ETATicker(emit=lambda msg: click.echo(f"  {msg}", err=True))
 
     def on_start(count: int) -> None:
@@ -237,12 +239,25 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
         eta_ticker.start(count)
 
     def on_file(fpath: Path, chunks: int, elapsed: float) -> None:
-        nonlocal n
+        nonlocal n, total_chunks, skipped_files
         n += 1
+        total_chunks += chunks
+        if not chunks:
+            skipped_files += 1
         eta_ticker.record(chunks)
         if bar is not None:
             bar.update(1)
-            bar.set_postfix(now=fpath.name)
+            # nexus-6xqk: cumulative chunks + skipped count alongside
+            # current file. Surfaces real work progress even before
+            # the ETA ticker's warm-up sample lands. ``skip`` shows
+            # only when non-zero so healthy runs stay terse.
+            postfix: dict[str, object] = {
+                "now": fpath.name,
+                "chunks": f"{total_chunks:,}",
+            }
+            if skipped_files:
+                postfix["skip"] = skipped_files
+            bar.set_postfix(**postfix)
         if monitor or not sys.stdout.isatty():
             lbl = f"{chunks} chunks" if chunks else "skipped"
             line = f"  [{n}/{total}] {fpath.name} \u2014 {lbl}  ({elapsed:.1f}s)"
