@@ -691,7 +691,7 @@ def pipeline_index_pdf(
             post_pass_ok = False
 
     # 3. Stale chunk pruning.
-    if not _prune_stale_chunks(col, str(pdf_path), content_hash):
+    if not _prune_stale_chunks(col, str(pdf_path), content_hash, corpus=corpus):
         post_pass_ok = False
 
     state = db.get_pipeline_state(content_hash)
@@ -867,23 +867,29 @@ def _update_chunk_metadata(
 
 
 def _prune_stale_chunks(
-    col: Any, pdf_path: str, content_hash: str,
+    col: Any, pdf_path: str, content_hash: str, *, corpus: str = "",
 ) -> bool:
     """Delete chunks from T3 that belong to a previous version of the same PDF.
 
     Returns True on success, False on failure.  Query and delete errors are
     handled separately so a delete failure reports how many stale chunks
     remain (nexus-tcwm).
+
+    nexus-dcym: when *corpus* is supplied and the catalog already
+    registered the file, the chunk lookup keys on ``doc_id``. Empty or
+    missing entries fall back to the legacy ``source_path`` lookup.
     """
+    from nexus.doc_indexer import _identity_where  # noqa: PLC0415
     stale_ids: list[str] = []
     offset = 0
+    where_filter = _identity_where(pdf_path, corpus)
 
     # Phase 1: query for stale chunks
     try:
         while True:
             batch = _chroma_with_retry(
                 col.get,
-                where={"source_path": pdf_path},
+                where=where_filter,
                 include=["metadatas"],
                 limit=300,
                 offset=offset,

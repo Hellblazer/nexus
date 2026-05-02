@@ -55,6 +55,57 @@ def _has_credentials() -> bool:
     return bool(get_credential("voyage_api_key") and get_credential("chroma_api_key"))
 
 
+def _lookup_existing_doc_id(file_path: str, corpus: str) -> str:
+    """nexus-dcym: pre-flight catalog lookup for an already-indexed file.
+
+    Returns the catalog ``doc_id`` (str) if a registration already exists
+    under the corpus's owner; empty string otherwise (catalog absent,
+    owner missing, or first-time registration). Best-effort: any failure
+    silently returns "" so callers fall back to the legacy
+    ``source_path``-keyed chunk lookup.
+
+    The pipeline registers PDFs in the catalog *after* the staleness
+    check, so on a fresh index this returns "" (no entry yet) and the
+    legacy lookup keeps working. On a re-index, the prior registration
+    is found and the chunk lookup keys on ``doc_id``.
+    """
+    try:
+        from nexus.catalog import Catalog  # noqa: PLC0415
+        from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415
+        from nexus.config import catalog_path  # noqa: PLC0415
+
+        cat_path = catalog_path()
+        if not Catalog.is_initialized(cat_path):
+            return ""
+        cat = Catalog(cat_path, cat_path / ".catalog.db")
+        owner_name = corpus or "standalone-pdfs"
+        row = cat._db.execute(
+            "SELECT tumbler_prefix FROM owners WHERE name = ?", (owner_name,)
+        ).fetchone()
+        if not row:
+            return ""
+        owner = Tumbler.parse(row[0])
+        existing = cat.by_file_path(owner, file_path)
+        if existing is None:
+            return ""
+        return str(existing.tumbler)
+    except Exception:
+        return ""
+
+
+def _identity_where(file_path: str, corpus: str) -> dict:
+    """nexus-dcym: chunk-identity where-filter for incremental sync sites.
+
+    Prefers a ``doc_id``-keyed lookup when the catalog already has an
+    entry for *file_path* under *corpus*; otherwise emits the legacy
+    ``source_path`` filter so chunks indexed before the catalog backfill
+    keep being detected. RDR-101 Phase 5b drops the ``source_path``
+    branch once the prune verb has run on every collection.
+    """
+    doc_id = _lookup_existing_doc_id(file_path, corpus)
+    return {"doc_id": doc_id} if doc_id else {"source_path": file_path}
+
+
 def _missing_credentials() -> list[str]:
     """Return the list of unset Voyage / Chroma credentials.
 
@@ -419,10 +470,13 @@ def _index_document(
         # cloud target_model differs from the locally-stored name).
         target_model = local_target_model
 
-    # Incremental sync: skip if file is already indexed with the same hash AND model
+    # Incremental sync: skip if file is already indexed with the same hash AND model.
+    # nexus-dcym: prefer doc_id-keyed lookup; falls back to source_path
+    # for first-time registrations and legacy chunks.
+    incremental_where = _identity_where(sp, corpus)
     existing = _chroma_with_retry(
         col.get,
-        where={"source_path": sp},
+        where=incremental_where,
         include=["metadatas"],
         limit=1,
     )
@@ -475,13 +529,19 @@ def _index_document(
 
     # Prune stale chunks from a previous (larger) version of this file.
     # Paginate: ChromaDB Cloud returns at most 300 records per get() call.
+    # nexus-dcym: doc_id keying so a re-index after rename still
+    # detects the prior chunk set. The catalog hook for this corpus
+    # registered the file before this point on prior indexes; on a
+    # first-ever index there is no prior chunk set so the where filter
+    # never matches and the legacy source_path branch is harmless.
+    prune_where = _identity_where(sp, corpus)
     current_ids_set = set(ids)
     stale_ids: list[str] = []
     offset = 0
     while True:
         batch = _chroma_with_retry(
             col.get,
-            where={"source_path": sp},
+            where=prune_where,
             include=[],
             limit=300,
             offset=offset,
@@ -612,14 +672,18 @@ def _index_pdf_incremental(
             on_progress(batch_end, total)
 
     # Prune stale chunks from a previous (larger) version of this file.
+    # nexus-dcym: prefer doc_id when the catalog already registered this
+    # file in a prior run; first-time indexes have no prior chunk set
+    # so the legacy source_path branch is harmless.
     col = t3.get_or_create_collection(collection_name)
+    prune_where = _identity_where(str(file_path), corpus)
     current_ids_set = set(ids_all)
     stale_ids: list[str] = []
     offset = 0
     while True:
         batch = _chroma_with_retry(
             col.get,
-            where={"source_path": str(file_path)},
+            where=prune_where,
             include=[],
             limit=300,
             offset=offset,
@@ -898,10 +962,13 @@ def index_pdf(
         # model so repeat-indexes are no-ops.
         target_model = local_target_model
 
-    # Incremental sync: skip if file is already indexed with the same hash AND model
+    # Incremental sync: skip if file is already indexed with the same hash AND model.
+    # nexus-dcym: prefer doc_id-keyed lookup; falls back to source_path
+    # for first-time registrations and legacy chunks.
+    incremental_where = _identity_where(str(pdf_path), corpus)
     existing = _chroma_with_retry(
         col.get,
-        where={"source_path": str(pdf_path)},
+        where=incremental_where,
         include=["metadatas"],
         limit=1,
     )
@@ -935,12 +1002,15 @@ def index_pdf(
             )
             if return_metadata:
                 # Query T3 for metadata after streaming upload.
+                # nexus-dcym: re-resolve doc_id since pipeline_index_pdf
+                # may have just registered the catalog entry.
+                meta_where = _identity_where(str(pdf_path), corpus)
                 all_meta: list[dict] = []
                 offset = 0
                 while True:
                     batch = _chroma_with_retry(
                         col.get,
-                        where={"source_path": str(pdf_path)},
+                        where=meta_where,
                         include=["metadatas"],
                         limit=300,
                         offset=offset,
@@ -1039,14 +1109,16 @@ def index_pdf(
     # reads source_path itself.
     fire_post_document_hooks(str(pdf_path), col_name, "")
 
-    # Prune stale chunks
+    # Prune stale chunks (nexus-dcym: doc_id-keyed when catalog has the
+    # entry; first-time indexes harmlessly use source_path).
+    prune_where = _identity_where(str(pdf_path), corpus)
     current_ids_set = set(ids)
     stale_ids: list[str] = []
     offset = 0
     while True:
         batch = _chroma_with_retry(
             col.get,
-            where={"source_path": str(pdf_path)},
+            where=prune_where,
             include=[],
             limit=300,
             offset=offset,
