@@ -4677,6 +4677,31 @@ def migrate_cmd(
                 "t3-backfill-doc-id' after fixing the underlying issue."
             ) from exc
 
+    # Synchronize live SQLite to events.jsonl before doctor runs.
+    # nexus-o6aa.9.14: ``synthesize-log`` writes events.jsonl but does
+    # NOT re-project into SQLite — the live SQLite from before the
+    # migration retains its legacy-rebuild shape. Doctor's
+    # ``_run_replay_equality`` opens ``.catalog.db`` directly via
+    # ``sqlite3.connect(...mode=ro)`` (read-only snapshot) and bypasses
+    # ``Catalog._ensure_consistent`` entirely, so it never triggers
+    # the ES rebuild that would heal the live state. Without this
+    # explicit sync, doctor reports FAIL on every row whose JSONL
+    # shape differs from what the synthesizer emits (e.g. ``meta:
+    # null`` in JSONL → ``'null'`` in legacy SQLite vs ``'{}'`` in
+    # the projection). Constructing a fresh Catalog here triggers
+    # ``_ensure_consistent``'s ES rebuild path, which DELETEs and
+    # replays events.jsonl into the live SQLite. After that, doctor's
+    # comparison is apples-to-apples.
+    click.echo("==> sync live SQLite to events.jsonl")
+    sync_cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+    try:
+        # Constructor calls ``_ensure_consistent`` at the end of
+        # __init__; the rebuild is in the live ``.catalog.db`` by the
+        # time ``_db.commit()`` returns.
+        sync_cat._db.commit()
+    finally:
+        sync_cat._db.close()
+
     # Step 3: doctor verification.
     click.echo("==> nx catalog doctor --replay-equality"
                + ("" if no_chunks else " --t3-doc-id-coverage --strict-not-in-t3"))

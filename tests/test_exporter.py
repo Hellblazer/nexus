@@ -468,3 +468,116 @@ class TestCorruptMsgpackBody:
         ephemeral_db.get_or_create_collection("knowledge__corrupt")
         with pytest.raises(Exception):
             import_collection(ephemeral_db, out)
+
+
+# ── Vector-only entries (document=None) ──────────────────────────────────────
+
+
+class TestVectorOnlyImport:
+    """Regression for nexus-fxc1: ``taxonomy__centroids`` and similar
+    vector-only collections store ``document=None`` and round-trip that
+    via ``.nxexp``.  The import path used to crash with
+    ``'NoneType' object has no attribute 'encode'`` because the
+    byte-length check in ``_write_batch`` called ``doc.encode()``
+    unconditionally.
+    """
+
+    def _write_nxexp_with_none_docs(
+        self, path: Path, collection_name: str, n_records: int = 3, dim: int = 16
+    ) -> None:
+        import msgpack
+
+        header = {
+            "format_version": FORMAT_VERSION,
+            "collection_name": collection_name,
+            "database_type": collection_name.split("__")[0],
+            "embedding_model": "voyage-code-3",
+            "record_count": n_records,
+            "embedding_dim": dim,
+            "exported_at": "2026-05-01T00:00:00+00:00",
+            "pipeline_version": "nexus-1",
+        }
+        with open(path, "wb") as f:
+            f.write(json.dumps(header).encode() + b"\n")
+            with gzip.GzipFile(fileobj=f, mode="wb") as gz:
+                rng = np.random.default_rng(seed=42)
+                for i in range(n_records):
+                    emb = rng.standard_normal(dim).astype(np.float32).tobytes()
+                    gz.write(msgpack.packb(
+                        {
+                            "id": f"vec-only-{i:03d}",
+                            "document": None,  # vector-only entry
+                            "metadata": {"topic_id": i, "label": f"cluster-{i}"},
+                            "embedding": emb,
+                        },
+                        use_bin_type=True,
+                    ))
+
+    def test_import_succeeds_when_documents_are_none(
+        self, ephemeral_db: T3Database, tmp_path: Path
+    ):
+        out = tmp_path / "vec_only.nxexp"
+        col_name = "taxonomy__test_centroids"
+        self._write_nxexp_with_none_docs(out, col_name, n_records=3)
+
+        # Pre-create the collection so the EF override applies — matches
+        # the production flow where the collection already exists.
+        ephemeral_db.get_or_create_collection(col_name)
+
+        result = import_collection(ephemeral_db, out)
+        assert result["imported_count"] == 3
+        assert result["collection_name"] == col_name
+
+        col = ephemeral_db._client_for(col_name).get_collection(col_name)
+        assert col.count() == 3
+        # Vector-only entries should have empty (or None) documents and
+        # the original embeddings preserved.
+        got = col.get(include=["documents", "embeddings"])
+        assert all((d == "" or d is None) for d in got["documents"])
+        assert len(got["embeddings"]) == 3
+        assert len(got["embeddings"][0]) == 16
+
+    def test_import_mixed_some_none_some_text(
+        self, ephemeral_db: T3Database, tmp_path: Path
+    ):
+        """Mixed batch: half ``document=None``, half real text. Both must import."""
+        import msgpack
+
+        col_name = "taxonomy__mixed"
+        out = tmp_path / "mixed.nxexp"
+        header = {
+            "format_version": FORMAT_VERSION,
+            "collection_name": col_name,
+            "database_type": "taxonomy",
+            "embedding_model": "voyage-code-3",
+            "record_count": 4,
+            "embedding_dim": 16,
+            "exported_at": "2026-05-01T00:00:00+00:00",
+            "pipeline_version": "nexus-1",
+        }
+        rng = np.random.default_rng(seed=7)
+        records = [
+            {"id": "a", "document": None,        "metadata": {"k": "v1"}},
+            {"id": "b", "document": "real text", "metadata": {"k": "v2"}},
+            {"id": "c", "document": None,        "metadata": {"k": "v3"}},
+            {"id": "d", "document": "more text", "metadata": {"k": "v4"}},
+        ]
+        with open(out, "wb") as f:
+            f.write(json.dumps(header).encode() + b"\n")
+            with gzip.GzipFile(fileobj=f, mode="wb") as gz:
+                for r in records:
+                    r["embedding"] = rng.standard_normal(16).astype(np.float32).tobytes()
+                    gz.write(msgpack.packb(r, use_bin_type=True))
+
+        ephemeral_db.get_or_create_collection(col_name)
+        result = import_collection(ephemeral_db, out)
+        assert result["imported_count"] == 4
+
+        col = ephemeral_db._client_for(col_name).get_collection(col_name)
+        assert col.count() == 4
+        got = col.get(ids=["a", "b"], include=["documents"])
+        # ``a`` was None, normalized to ""; ``b`` keeps its text.
+        a_doc = got["documents"][got["ids"].index("a")]
+        b_doc = got["documents"][got["ids"].index("b")]
+        assert a_doc in ("", None)
+        assert b_doc == "real text"

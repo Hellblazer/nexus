@@ -278,3 +278,94 @@ def test_migrate_fails_loudly_when_catalog_uninitialized(tmp_path, monkeypatch):
 
     assert result.exit_code != 0
     assert "not initialized" in result.output.lower()
+
+
+# ─────────────────────────────────────────────────────────────────────
+# nexus-o6aa.9.14: migrate forces ES rebuild before doctor verification
+# so live SQLite reflects the post-synthesize-log state. Without the
+# rebuild step, doctor's _run_replay_equality opens .catalog.db
+# read-only and compares the legacy-rebuild SQLite to a fresh
+# projection of events.jsonl — they diverge on any row whose JSONL
+# shape differs from what the synthesizer emits.
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_migrate_syncs_live_sqlite_to_events_for_doctor_pass(
+    tmp_path, monkeypatch,
+):
+    """The end-to-end UX assertion: a row whose legacy JSONL has
+    ``"meta": null`` produces the literal SQLite string ``'null'`` on
+    legacy rebuild but the synthesizer emits ``meta={}`` (default-
+    factory coercion). Pre-fix: migrate runs synth-log + doctor;
+    doctor compares un-rebuilt live (``'null'``) to projection
+    (``'{}'``) and FAILs. Post-fix: migrate forces a Catalog
+    construction between t3-backfill and doctor, triggering the ES
+    rebuild that synchronizes live SQLite to events.jsonl. Doctor
+    PASSes.
+    """
+    # Legacy populate.
+    monkeypatch.setenv("NEXUS_EVENT_SOURCED", "0")
+    d = _init_legacy_catalog(tmp_path)
+    _populate_legacy(d, n_docs=3)
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(d))
+
+    # Inject a row with ``meta: null`` directly into documents.jsonl
+    # to reproduce the shape drift Hal's real catalog has on 11 rows.
+    docs_path = d / "documents.jsonl"
+    with docs_path.open("a") as f:
+        f.write(json.dumps({
+            "tumbler": "1.1.99",
+            "title": "drift.py",
+            "author": "",
+            "year": 0,
+            "content_type": "code",
+            "file_path": "drift.py",
+            "corpus": "",
+            "physical_collection": "code__drift",
+            "chunk_count": 0,
+            "head_hash": "",
+            "indexed_at": "2026-04-08T16:55:55.193766+00:00",
+            "meta": None,
+            "source_mtime": 0.0,
+            "alias_of": "",
+            "source_uri": "file:///tmp/drift.py",
+            "_deleted": False,
+        }))
+        f.write("\n")
+
+    # Force a legacy rebuild so the null-meta row lands in SQLite.
+    cat = Catalog(d, d / ".catalog.db")
+    drift_meta = cat._db.execute(
+        "SELECT metadata FROM documents WHERE tumbler = ?", ("1.1.99",),
+    ).fetchone()
+    cat._db.close()
+    assert drift_meta is not None and drift_meta[0] == "null", (
+        f"legacy rebuild should produce 'null' from meta:null JSONL; "
+        f"got {drift_meta!r}"
+    )
+
+    # Now flip ES on and run migrate. Pre-fix this leaves live SQLite
+    # at 'null' while events project to '{}', so doctor would FAIL.
+    # Post-fix the migrate verb's explicit Catalog construction
+    # triggers _ensure_consistent's ES rebuild → live becomes '{}'.
+    monkeypatch.setenv("NEXUS_EVENT_SOURCED", "1")
+    runner = CliRunner()
+    result = runner.invoke(migrate_cmd, ["--no-chunks"])
+
+    assert result.exit_code == 0, (
+        f"migrate did not converge to a clean PASS post-fix; output:\n"
+        f"{result.output}"
+    )
+    assert "Migration complete" in result.output
+
+    # Verify the live SQLite was rebuilt: drift.py's metadata is now
+    # '{}' (events.jsonl shape), not 'null' (legacy shape).
+    cat2 = Catalog(d, d / ".catalog.db")
+    drift_meta_post = cat2._db.execute(
+        "SELECT metadata FROM documents WHERE tumbler = ?", ("1.1.99",),
+    ).fetchone()
+    cat2._db.close()
+    assert drift_meta_post[0] == "{}", (
+        f"migrate did not sync live SQLite to events.jsonl; the null "
+        f"row is still 'null' instead of '{{}}': got {drift_meta_post!r}"
+    )
