@@ -266,10 +266,20 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
             else:
                 click.echo(line)
 
+    post_pass_started = False
+
     def on_phase(msg: str) -> None:
         # nexus-vatx Gap 2: surface post-processing phases so the operator
         # knows the indexer is still busy after the per-file bar finishes.
         # Stderr so the line is visible even when stdout is redirected.
+        nonlocal post_pass_started
+        if not post_pass_started:
+            # nexus-6xqk follow-up: file walk is done by the time the
+            # first post-pass phase fires. Stop the ETA ticker so its
+            # 60-second loop doesn't spam the same "done" line on top
+            # of the post-pass output.
+            post_pass_started = True
+            eta_ticker.stop()
         click.echo(f"  [post] {msg}", err=True)
 
     def _emit_retry_summary() -> None:
