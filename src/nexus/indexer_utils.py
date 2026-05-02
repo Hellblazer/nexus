@@ -181,6 +181,8 @@ def check_staleness(
     source_file: object,
     content_hash: str,
     embedding_model: str,
+    *,
+    doc_id: str = "",
 ) -> bool:
     """Return True if the file is already indexed with an identical hash and model.
 
@@ -192,14 +194,21 @@ def check_staleness(
         source_file: Path (or string) of the source file being checked.
         content_hash: SHA-256 hex digest of the current file content.
         embedding_model: Target embedding model name.
+        doc_id: Catalog ``doc_id`` for the file. When non-empty (RDR-101
+            Phase 4, nexus-dcym), the chunk lookup keys on ``doc_id`` so
+            that the staleness check stays consistent across renames and
+            owner-scope changes. Empty falls back to the legacy
+            ``source_path``-keyed lookup for chunks predating the
+            doc_id backfill.
 
     Returns:
         True when the stored chunk has the same content_hash AND embedding_model,
         meaning the file is current and can be skipped.  False otherwise.
     """
+    where: dict = {"doc_id": doc_id} if doc_id else {"source_path": str(source_file)}
     existing = _chroma_with_retry(
         col.get,  # type: ignore[attr-defined]
-        where={"source_path": str(source_file)},
+        where=where,
         include=["metadatas"],
         limit=1,
     )

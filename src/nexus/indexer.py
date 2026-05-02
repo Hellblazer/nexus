@@ -749,8 +749,16 @@ def _index_pdf_file(
             content_hash.update(block)
     content_hash_hex = content_hash.hexdigest()
 
-    # Staleness check
-    if not force and check_staleness(col, file, content_hash_hex, target_model):
+    # Staleness check.
+    # nexus-dcym: prefer doc_id-keyed lookup when the catalog hook
+    # supplied a resolver; falls back to source_path for legacy chunks.
+    catalog_doc_id_for_staleness = (
+        doc_id_resolver(file) if doc_id_resolver is not None else ""
+    )
+    if not force and check_staleness(
+        col, file, content_hash_hex, target_model,
+        doc_id=catalog_doc_id_for_staleness,
+    ):
         return 0
 
     # nexus-7niu: per-stage timer instrumentation. Silent when
@@ -974,32 +982,49 @@ def _prune_misclassified(
     prose_files: list[Path],
     pdf_files: list[Path],
     db: object,
+    *,
+    file_to_doc_id: dict[Path, str] | None = None,
 ) -> None:
     """Remove chunks from the wrong collection after reclassification.
 
     If a file was previously classified as code but is now prose (or vice versa),
     its chunks in the old collection must be removed.
+
+    nexus-dcym: when ``file_to_doc_id`` is supplied (always populated by
+    the catalog hook), the chunk-prune lookup keys on ``doc_id``. Files
+    not in the map fall back to the legacy ``source_path`` lookup so
+    chunks indexed before catalog backfill keep getting cleaned up.
     """
     code_col = db.get_or_create_collection(code_collection)
     docs_col = db.get_or_create_collection(docs_collection)
+    file_to_doc_id = file_to_doc_id or {}
+
+    def _prune_one(col: object, path: Path, kind: str) -> None:
+        doc_id = file_to_doc_id.get(path, "")
+        where: dict
+        log_field: dict
+        if doc_id:
+            where = {"doc_id": doc_id}
+            log_field = {"doc_id": doc_id, "source_path": str(path)}
+        else:
+            where = {"source_path": str(path)}
+            log_field = {"source_path": str(path)}
+        existing = _paginated_get(col, include=[], where=where)
+        if existing["ids"]:
+            _batched_delete(col, existing["ids"])
+            _log.debug(
+                f"pruned misclassified chunks from {kind} collection",
+                count=len(existing["ids"]),
+                **log_field,
+            )
 
     # Prose + PDF files should NOT have chunks in the code__ collection
-    docs_paths = {str(f) for f in prose_files} | {str(f) for f in pdf_files}
-    for source_path in docs_paths:
-        existing = _paginated_get(code_col, include=[], where={"source_path": source_path})
-        if existing["ids"]:
-            _batched_delete(code_col, existing["ids"])
-            _log.debug("pruned misclassified chunks from code collection",
-                       source_path=source_path, count=len(existing["ids"]))
+    for path in set(prose_files) | set(pdf_files):
+        _prune_one(code_col, path, "code")
 
     # Code files should NOT have chunks in the docs__ collection
-    code_paths = {str(f) for f in code_files}
-    for source_path in code_paths:
-        existing = _paginated_get(docs_col, include=[], where={"source_path": source_path})
-        if existing["ids"]:
-            _batched_delete(docs_col, existing["ids"])
-            _log.debug("pruned misclassified chunks from docs collection",
-                       source_path=source_path, count=len(existing["ids"]))
+    for path in set(code_files):
+        _prune_one(docs_col, path, "docs")
 
 
 def _prune_deleted_files(
@@ -1421,6 +1446,7 @@ def _run_index(
             [f for _, f in prose_files],
             [f for _, f in pdf_files],
             db,
+            file_to_doc_id=file_to_doc_id,
         )
         _phase(f"Pruning misclassified done ({time.monotonic() - _t:.1f}s)")
 

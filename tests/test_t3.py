@@ -773,6 +773,74 @@ def test_delete_by_source_nonexistent_collection_returns_zero(mock_chromadb):
     assert db.delete_by_source("code__nonexistent", "src/file.py") == 0
 
 
+# ── ids_for_doc_id / delete_by_doc_id (nexus-dcym) ────────────────────────
+
+
+@pytest.mark.parametrize("col,doc_id,returned_ids,expected_count", [
+    ("code__myrepo", "ART-deadbeef", ["a1", "a2", "a3"], 3),
+    ("knowledge__wiki", "ART-cafe1234", ["x1"], 1),
+    ("code__myrepo", "ART-nonexistent", [], 0),
+])
+def test_ids_for_doc_id(mock_db, col, doc_id, returned_ids, expected_count):
+    """ids_for_doc_id queries on the doc_id metadata field, not source_path."""
+    db, mock_col, _ = mock_db
+    mock_col.get.return_value = {"ids": returned_ids}
+    result = db.ids_for_doc_id(col, doc_id)
+    assert result == returned_ids
+    assert len(result) == expected_count
+    # The chunk-lookup must use doc_id, NOT source_path. WITH TEETH:
+    # if the implementation accidentally falls back to source_path, this fails.
+    where = mock_col.get.call_args.kwargs["where"]
+    assert where == {"doc_id": doc_id}
+
+
+def test_ids_for_doc_id_nonexistent_collection_returns_empty(mock_chromadb):
+    _, mock_client = mock_chromadb
+    mock_client.get_collection.side_effect = chromadb.errors.NotFoundError("Collection not found")
+    db = T3Database(tenant="t", database="d", api_key="k")
+    assert db.ids_for_doc_id("code__nonexistent", "ART-deadbeef") == []
+
+
+def test_ids_for_doc_id_paginates_over_300_record_quota(mock_db):
+    """Cloud has a 300-record limit per get(); helper must page."""
+    db, mock_col, _ = mock_db
+    page1 = {"ids": [f"id-{i}" for i in range(300)]}
+    page2 = {"ids": [f"id-{i}" for i in range(300, 450)]}
+    mock_col.get.side_effect = [page1, page2]
+    result = db.ids_for_doc_id("code__myrepo", "ART-large")
+    assert len(result) == 450
+    assert mock_col.get.call_count == 2
+    # offset advances by page size
+    assert mock_col.get.call_args_list[0].kwargs["offset"] == 0
+    assert mock_col.get.call_args_list[1].kwargs["offset"] == 300
+
+
+@pytest.mark.parametrize("col,doc_id,returned_ids,expected_count,expect_delete", [
+    ("code__myrepo", "ART-deadbeef", ["a1", "a2", "a3"], 3, True),
+    ("knowledge__wiki", "ART-cafe1234", ["x1", "x2"], 2, True),
+    ("code__myrepo", "ART-nonexistent", [], 0, False),
+])
+def test_delete_by_doc_id(mock_db, col, doc_id, returned_ids, expected_count, expect_delete):
+    db, mock_col, _ = mock_db
+    mock_col.get.return_value = {"ids": returned_ids}
+    result = db.delete_by_doc_id(col, doc_id)
+    assert result == expected_count
+    if expect_delete:
+        mock_col.delete.assert_called_once_with(ids=returned_ids)
+    else:
+        mock_col.delete.assert_not_called()
+    # The lookup leg must filter on doc_id.
+    where = mock_col.get.call_args.kwargs["where"]
+    assert where == {"doc_id": doc_id}
+
+
+def test_delete_by_doc_id_nonexistent_collection_returns_zero(mock_chromadb):
+    _, mock_client = mock_chromadb
+    mock_client.get_collection.side_effect = chromadb.errors.NotFoundError("Collection not found")
+    db = T3Database(tenant="t", database="d", api_key="k")
+    assert db.delete_by_doc_id("code__nonexistent", "ART-deadbeef") == 0
+
+
 # ── update_source_path ─────────────────────────────────────────────────────
 
 

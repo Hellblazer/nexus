@@ -2890,12 +2890,18 @@ class Catalog:
                 from nexus.db import make_t3
                 t3 = make_t3()
                 col = t3.get_or_create_collection(entry.physical_collection)
-                # Query by chunk_index metadata for deterministic ordering
-                where_filter: dict = {"chunk_index": chunk_idx}
-                if entry.file_path:
-                    where_filter["source_path"] = entry.file_path
+                # nexus-dcym: chunk identity is the catalog ``doc_id``,
+                # not the legacy ``source_path``. ``doc_id`` is stored
+                # by the projector under ``meta.doc_id``; older entries
+                # predate that and fall back to ``str(entry.tumbler)``
+                # (Phase 1's stand-in for ``doc_id``).
+                doc_id = entry.meta.get("doc_id") or str(entry.tumbler)
+                where_filter: dict = {
+                    "chunk_index": chunk_idx,
+                    "doc_id": doc_id,
+                }
                 result = col.get(
-                    where=where_filter if len(where_filter) == 1 else {"$and": [{k: v} for k, v in where_filter.items()]},
+                    where={"$and": [{k: v} for k, v in where_filter.items()]},
                     include=["documents"],
                     limit=1,
                 )

@@ -67,6 +67,36 @@ def test_check_staleness_no_existing_chunks(tmp_path):
     assert check_staleness(mock_col, tmp_path / "foo.py", "abc123", "voyage-code-3") is False
 
 
+def test_check_staleness_uses_doc_id_when_provided(tmp_path):
+    """nexus-dcym: when caller passes ``doc_id``, the where-filter must
+    key on doc_id, not the legacy source_path. WITH TEETH: a stash-revert
+    of indexer_utils.py to the source_path-keyed form makes the assertion
+    on ``where`` fail.
+    """
+    mock_col = MagicMock()
+    mock_col.get.return_value = {
+        "metadatas": [{"content_hash": "abc", "embedding_model": "voyage-code-3"}],
+        "ids": ["id1"],
+    }
+    result = check_staleness(
+        mock_col, tmp_path / "shared.py", "abc", "voyage-code-3",
+        doc_id="ART-deadbeef",
+    )
+    assert result is True
+    where = mock_col.get.call_args.kwargs["where"]
+    assert where == {"doc_id": "ART-deadbeef"}
+
+
+def test_check_staleness_falls_back_to_source_path_when_no_doc_id(tmp_path):
+    """No doc_id passed → legacy source_path lookup (back-compat)."""
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"metadatas": [], "ids": []}
+    file_path = tmp_path / "foo.py"
+    check_staleness(mock_col, file_path, "abc", "voyage-code-3")
+    where = mock_col.get.call_args.kwargs["where"]
+    assert where == {"source_path": str(file_path)}
+
+
 # ── check_credentials ────────────────────────────────────────────────────────
 
 def test_check_credentials_both_present():

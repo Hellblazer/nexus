@@ -799,6 +799,58 @@ def test_prune_misclassified_paginates(tmp_path):
     assert d == {f"s-{i}" for i in range(310)}
 
 
+def test_prune_misclassified_uses_doc_id_when_supplied(tmp_path):
+    """nexus-dcym: chunk lookup for the prune keys on doc_id when the
+    catalog hook's ``file_to_doc_id`` map is supplied. WITH TEETH:
+    a stash-revert to the source_path-keyed form makes the assertion
+    on the ``where`` filter fail.
+    """
+    from nexus.indexer import _prune_misclassified
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    bp = repo / "ambiguous.md"
+    bp.write_text("# a\n")
+    cc = MagicMock()
+    cc.get.return_value = {"ids": ["chunk-abc"]}
+    dc = MagicMock()
+    dc.get.return_value = {"ids": []}
+    db = MagicMock()
+    db.get_or_create_collection.side_effect = {"code__repo": cc, "docs__repo": dc}.get
+    _prune_misclassified(
+        repo, "code__repo", "docs__repo",
+        [], [bp], [], db,
+        file_to_doc_id={bp: "ART-deadbeef"},
+    )
+    where = cc.get.call_args.kwargs["where"]
+    assert where == {"doc_id": "ART-deadbeef"}
+    cc.delete.assert_called_once_with(ids=["chunk-abc"])
+
+
+def test_prune_misclassified_falls_back_to_source_path_for_unmapped_files(tmp_path):
+    """Files missing from ``file_to_doc_id`` use the legacy source_path
+    lookup so chunks indexed before the catalog backfill keep getting
+    cleaned up.
+    """
+    from nexus.indexer import _prune_misclassified
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    bp = repo / "legacy.md"
+    bp.write_text("# l\n")
+    cc = MagicMock()
+    cc.get.return_value = {"ids": ["chunk-legacy"]}
+    dc = MagicMock()
+    dc.get.return_value = {"ids": []}
+    db = MagicMock()
+    db.get_or_create_collection.side_effect = {"code__repo": cc, "docs__repo": dc}.get
+    _prune_misclassified(
+        repo, "code__repo", "docs__repo",
+        [], [bp], [], db,
+        file_to_doc_id={},
+    )
+    where = cc.get.call_args.kwargs["where"]
+    assert where == {"source_path": str(bp)}
+
+
 # ── Lock file cleanup ───────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("side_effect", [None, RuntimeError("boom"), CredentialsMissingError("x")])

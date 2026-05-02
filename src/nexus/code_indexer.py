@@ -320,8 +320,16 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
     comment_char = _COMMENT_CHARS.get(language, "#")
     rel_path = file_path.relative_to(ctx.repo_path)
 
-    # Staleness check — skip if content + model unchanged
-    if not ctx.force and check_staleness(ctx.col, file_path, content_hash, ctx.embedding_model):
+    # Staleness check — skip if content + model unchanged.
+    # nexus-dcym: prefer doc_id-keyed lookup when the catalog hook
+    # supplied a resolver; falls back to source_path for legacy chunks.
+    catalog_doc_id_for_staleness = (
+        ctx.doc_id_resolver(file_path) if ctx.doc_id_resolver is not None else ""
+    )
+    if not ctx.force and check_staleness(
+        ctx.col, file_path, content_hash, ctx.embedding_model,
+        doc_id=catalog_doc_id_for_staleness,
+    ):
         return 0
 
     # nexus-7niu: per-stage timer instrumentation. Silent when
