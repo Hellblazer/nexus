@@ -168,16 +168,37 @@ class AspectExtractionQueue:
             # the doc_id column was added. ADD COLUMN with a NOT NULL
             # DEFAULT '' fills legacy rows with the empty string; the
             # worker treats empty doc_id as "fall back to source_path".
+            # The PRAGMA-then-ALTER pattern races under concurrent
+            # T2Database construction: thread A reads cols (no doc_id),
+            # thread B reads cols (no doc_id), A commits ALTER, B's
+            # ALTER raises "duplicate column name". Catching the
+            # specific error keeps construction idempotent across
+            # threads. Same SQLite catch pattern used in nexus.db.migrations.
             cols = {
                 r[1] for r in self.conn.execute(
                     "PRAGMA table_info(aspect_extraction_queue)"
                 ).fetchall()
             }
             if "doc_id" not in cols:
-                self.conn.execute(
-                    "ALTER TABLE aspect_extraction_queue "
-                    "ADD COLUMN doc_id TEXT NOT NULL DEFAULT ''"
-                )
+                try:
+                    self.conn.execute(
+                        "ALTER TABLE aspect_extraction_queue "
+                        "ADD COLUMN doc_id TEXT NOT NULL DEFAULT ''"
+                    )
+                except sqlite3.OperationalError as exc:
+                    # Another constructor raced ahead of us and added
+                    # the column first; verify it really exists before
+                    # swallowing the error so a genuinely broken ALTER
+                    # still surfaces.
+                    if "duplicate column" not in str(exc).lower():
+                        raise
+                    cols_after = {
+                        r[1] for r in self.conn.execute(
+                            "PRAGMA table_info(aspect_extraction_queue)"
+                        ).fetchall()
+                    }
+                    if "doc_id" not in cols_after:
+                        raise
             self.conn.commit()
 
     # ── Public API ────────────────────────────────────────────────────────
