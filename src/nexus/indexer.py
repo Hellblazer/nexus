@@ -530,6 +530,48 @@ def index_repository(
                 pass  # already gone — harmless
 
 
+def _build_frecency_doc_id_map(
+    repo: Path, files: list[Path],
+) -> dict[Path, str]:
+    """nexus-f4z9: resolve each file's catalog ``doc_id`` so the
+    frecency-only update can key chunk lookups on ``doc_id`` instead
+    of ``source_path``. Returns a ``{abs_path: doc_id}`` mapping;
+    files without a catalog entry are absent from the map (the caller
+    falls back to the legacy ``source_path`` filter for those).
+
+    Best-effort: catalog absent / owner missing / lookup failure all
+    return an empty map so the caller's legacy path keeps working.
+    """
+    file_to_doc_id: dict[Path, str] = {}
+    try:
+        from nexus.catalog import Catalog
+        from nexus.config import catalog_path
+        from nexus.registry import _repo_identity
+
+        cat_path = catalog_path()
+        if not Catalog.is_initialized(cat_path):
+            return file_to_doc_id
+        cat = Catalog(cat_path, cat_path / ".catalog.db")
+        _, repo_hash = _repo_identity(repo)
+        owner = cat.owner_for_repo(repo_hash)
+        if owner is None:
+            return file_to_doc_id
+        for abs_path in files:
+            try:
+                rel_path = str(abs_path.relative_to(repo))
+            except ValueError:
+                rel_path = abs_path.name
+            try:
+                entry = cat.by_file_path(owner, rel_path)
+            except Exception:
+                continue
+            if entry is not None:
+                file_to_doc_id[abs_path] = str(entry.tumbler)
+    except Exception:
+        _log.debug("frecency_doc_id_map_failed", exc_info=True)
+    return file_to_doc_id
+
+
 def _run_index_frecency_only(repo: Path, registry: "RepoRegistry") -> None:
     """Update frecency_score metadata on all indexed chunks without re-embedding.
 
@@ -559,6 +601,12 @@ def _run_index_frecency_only(repo: Path, registry: "RepoRegistry") -> None:
     frecency_map = batch_frecency(repo)
     db = make_t3()
 
+    # nexus-f4z9: pre-resolve doc_ids once for all files so the chunk
+    # lookup can key on ``doc_id`` when the catalog has the entry.
+    # Files predating the catalog backfill fall through to the legacy
+    # ``source_path``-keyed filter.
+    file_to_doc_id = _build_frecency_doc_id_map(repo, list(frecency_map.keys()))
+
     # Update frecency in both collections
     collection_names = [code_collection]
     if docs_collection:
@@ -567,10 +615,12 @@ def _run_index_frecency_only(repo: Path, registry: "RepoRegistry") -> None:
     for collection_name in collection_names:
         col = db.get_or_create_collection(collection_name)
         for file, score in frecency_map.items():
+            doc_id = file_to_doc_id.get(file, "")
+            where = {"doc_id": doc_id} if doc_id else {"source_path": str(file)}
             existing = _paginated_get(
                 col,
                 include=["metadatas"],
-                where={"source_path": str(file)},
+                where=where,
             )
             if not existing["ids"]:
                 continue  # not yet indexed — needs full nx index repo
