@@ -553,13 +553,15 @@ def rebuild_cmd(collection: str, project: str, k: int | None) -> None:
 def _resolve_doc_titles(doc_ids: list[str]) -> list[str]:
     """Resolve doc_ids to human-readable titles via catalog, fallback to raw ID."""
     try:
+        from nexus.catalog import open_cached
         from nexus.catalog.catalog import Catalog
         from nexus.config import catalog_path
 
         cat_path = catalog_path()
         if not Catalog.is_initialized(cat_path):
             return doc_ids
-        cat = Catalog(cat_path, cat_path / ".catalog.db")
+        # nexus-6xqk follow-up: process-cached read-only accessor.
+        cat = open_cached(cat_path)
         titles: list[str] = []
         for doc_id in doc_ids:
             results = cat.search(doc_id)
@@ -783,12 +785,15 @@ def split_cmd(topic_label: str, k: int, collection: str) -> None:
 def _try_load_catalog() -> Any:
     """Load the catalog if initialized, else return None."""
     try:
+        from nexus.catalog import open_cached
         from nexus.catalog.catalog import Catalog
         from nexus.config import catalog_path
 
         cat_path = catalog_path()
         if Catalog.is_initialized(cat_path):
-            return Catalog(cat_path, cat_path / ".catalog.db")
+            # nexus-6xqk follow-up: shared accessor used by topic-link
+            # computation; cached so repeated calls don't rebuild.
+            return open_cached(cat_path)
     except Exception:
         pass
     return None

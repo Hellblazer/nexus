@@ -576,14 +576,16 @@ def _build_frecency_doc_id_map(
     """
     file_to_doc_id: dict[Path, str] = {}
     try:
-        from nexus.catalog import Catalog
+        from nexus.catalog import Catalog, open_cached
         from nexus.config import catalog_path
         from nexus.registry import _repo_identity
 
         cat_path = catalog_path()
         if not Catalog.is_initialized(cat_path):
             return file_to_doc_id
-        cat = Catalog(cat_path, cat_path / ".catalog.db")
+        # nexus-6xqk follow-up: process-cached Catalog avoids a fresh
+        # _ensure_consistent rebuild on every frecency-only run.
+        cat = open_cached(cat_path)
         _, repo_hash = _repo_identity(repo)
         owner = cat.owner_for_repo(repo_hash)
         if owner is None:

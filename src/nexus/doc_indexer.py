@@ -70,14 +70,17 @@ def _lookup_existing_doc_id(file_path: str, corpus: str) -> str:
     is found and the chunk lookup keys on ``doc_id``.
     """
     try:
-        from nexus.catalog import Catalog  # noqa: PLC0415
+        from nexus.catalog import Catalog, open_cached  # noqa: PLC0415
         from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415
         from nexus.config import catalog_path  # noqa: PLC0415
 
         cat_path = catalog_path()
         if not Catalog.is_initialized(cat_path):
             return ""
-        cat = Catalog(cat_path, cat_path / ".catalog.db")
+        # nexus-6xqk follow-up: use the process-cached Catalog so per-
+        # file lookups during a force-reindex don't storm the SQLite
+        # write lock with concurrent _ensure_consistent rebuilds.
+        cat = open_cached(cat_path)
         owner_name = corpus or "standalone-pdfs"
         row = cat._db.execute(
             "SELECT tumbler_prefix FROM owners WHERE name = ?", (owner_name,)
