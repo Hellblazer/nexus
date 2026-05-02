@@ -134,6 +134,70 @@ class TestRoundTrip:
         restored_emb = restored_col.get(ids=["id-000"], include=["embeddings"])["embeddings"][0]
         np.testing.assert_allclose(orig_emb, restored_emb, rtol=1e-6)
 
+    def test_round_trip_preserves_taxonomy_metadata(
+        self, ephemeral_db: T3Database, tmp_path: Path,
+    ):
+        """nexus-o6aa.9.16: programmatic vector-only collections
+        (``taxonomy__*``) carry collection-specific metadata
+        (``topic_id``, ``label``, ``doc_count``, ``collection``) that
+        is not part of the canonical chunk schema. Pre-fix, the
+        canonical normalize/validate funnel in T3Database stripped
+        every taxonomy-specific key on import — silently turning the
+        .nxexp round-trip from a faithful backup into a lossy one.
+
+        This regression test seeds a ``taxonomy__centroids``-shape
+        collection, exports it, imports into a fresh collection,
+        and asserts every taxonomy key round-trips intact.
+        """
+        col_name = "taxonomy__centroids"
+        ids = ["taxonomy__centroids:1", "taxonomy__centroids:2"]
+        # Vector-only entries: no documents, just embeddings + metadata.
+        # _seed_collection requires non-empty docs to compute embeddings,
+        # so we seed with placeholder docs but then read back the
+        # metadata only.
+        docs = ["", ""]
+        # Hand-craft metadatas that mirror catalog_taxonomy._batched_upsert.
+        metadatas = [
+            {
+                "topic_id": 1,
+                "label": "neural laminar circuits",
+                "collection": "papers__grossberg",
+                "doc_count": 12,
+            },
+            {
+                "topic_id": 2,
+                "label": "phoneme blocking dynamics",
+                "collection": "papers__grossberg",
+                "doc_count": 8,
+            },
+        ]
+        embeddings = [_EF(["x"])[0], _EF(["y"])[0]]
+        col = ephemeral_db.get_or_create_collection(col_name)
+        col.upsert(
+            ids=ids, documents=docs, embeddings=embeddings, metadatas=metadatas,
+        )
+
+        _export_import(
+            ephemeral_db, col_name, tmp_path, target="taxonomy__restored",
+        )
+
+        restored = ephemeral_db._client_for(
+            "taxonomy__restored",
+        ).get_collection("taxonomy__restored")
+        result = restored.get(ids=ids, include=["metadatas"])
+        meta_by_id = dict(zip(result["ids"], result["metadatas"]))
+        # WITH TEETH — every taxonomy key must survive the round trip.
+        for original_id, original_meta in zip(ids, metadatas):
+            roundtripped = meta_by_id[original_id]
+            for key, expected in original_meta.items():
+                assert roundtripped.get(key) == expected, (
+                    f"taxonomy key {key!r} did not round-trip on "
+                    f"{original_id!r}: expected {expected!r}, "
+                    f"got {roundtripped!r}. If this fails the canonical "
+                    f"schema funnel stripped the key — re-check the "
+                    f"_bypass_canonical_schema guard in t3.py."
+                )
+
 
 # ── Unit: gzip compression ───────────────────────────────────────────────────
 
