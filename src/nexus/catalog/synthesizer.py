@@ -485,9 +485,20 @@ def synthesize_t3_chunks(
 
     Resolution priority per chunk:
 
+    0. **(RDR-102 Phase A)** ``meta["doc_id"]`` already populated. Trust
+       it directly — it is the canonical catalog tumbler the post-Phase-A
+       writer stamped at chunk-write time. This priority makes the
+       chunk-write doc_id survive the synthesize-log → t3-backfill-doc-id
+       round trip post-RDR-102 D2 (which removed source_path from the
+       chunk schema, breaking the source_uri match path for chunks that
+       lacked it). Also makes ``--prefer-live-catalog`` re-runs
+       idempotent: chunks that a prior recovery run wrote keep their
+       resolved tumbler and are not silently rewritten.
     1. ``source_path`` exact match against ``source_uri`` after the
        canonical ``file://`` prefix (the catalog stores file-scheme URIs
-       as ``file:///abs/path``; T3 chunks store the bare path).
+       as ``file:///abs/path``; T3 chunks store the bare path). Only
+       reachable for legacy chunks that pre-date Phase A (no doc_id in
+       their metadata) and still carry source_path (pre-Phase-B).
     2. ``title`` exact match (the Phase 0 ``CHROMA_IDENTITY_FIELD``
        fallback for ``knowledge__*`` collections that legitimately have
        empty source_uri rows in the catalog).

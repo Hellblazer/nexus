@@ -431,6 +431,61 @@ class TestPreferLiveCatalogDirect:
         assert e.payload.doc_id == ""
         assert e.payload.synthesized_orphan is True
 
+    def test_chunk_own_doc_id_takes_priority_over_all_lookups(
+        self, chroma_client,
+    ):
+        """RDR-102 Phase A propagation invariant: a chunk that already
+        carries ``meta["doc_id"]`` (post-Phase-A writer wrote it at
+        chunk-write time) MUST keep its tumbler through the synthesize-
+        log round trip, even when source_uri, title, AND
+        live_doc_lookup all point at DIFFERENT doc_ids. The chunk's
+        own metadata is the canonical identity — overriding it would
+        silently re-orphan or rewrite chunks that the post-Phase-A
+        writer already authoritatively assigned, AND would make
+        ``--prefer-live-catalog`` re-runs non-idempotent.
+        """
+        _seed_collection(chroma_client, "code__priority_zero", [
+            {
+                "id": "p0_1", "content": "post-Phase-A chunk",
+                "metadata": {
+                    "doc_id": "1.7.42",  # canonical tumbler from Phase A writer
+                    "source_path": "/git/x/foo.py",
+                    "title": "foo.py",
+                    "chunk_text_hash": "p0hash",
+                    "content_hash": "p0-content-hash",
+                    "chunk_index": 0,
+                },
+            },
+        ])
+        # Synthesized DocumentRegistered points source_uri AND title at
+        # a DIFFERENT doc_id (would resolve via priority 1 or 2).
+        doc_events = _make_doc_events({
+            "doc_id": "uuid7-conflict",
+            "source_uri": "file:///git/x/foo.py",
+            "coll_id": "code__priority_zero",
+            "tumbler": "1.1.999",
+            "title": "foo.py",
+        })
+        # Live-catalog map points content_hash at YET ANOTHER doc_id
+        # (would resolve via priority 3).
+        live_doc_lookup = {"p0-content-hash": "8.8.8"}
+
+        events = list(synthesize_t3_chunks(
+            chroma_client, doc_events,
+            live_doc_lookup=live_doc_lookup,
+        ))
+        assert len(events) == 1
+        e = events[0]
+        assert e.payload.doc_id == "1.7.42", (
+            f"chunk's own meta['doc_id']=1.7.42 must take priority over "
+            f"all resolution lookups; got {e.payload.doc_id!r}. The "
+            f"post-Phase-A writer is authoritative for chunks that "
+            f"carry doc_id at write time. A regression here would "
+            f"silently rewrite chunk identity on every synthesize-log "
+            f"run and break --prefer-live-catalog re-run idempotency."
+        )
+        assert e.payload.synthesized_orphan is False
+
     def test_synthesized_match_takes_priority_over_live_lookup(
         self, chroma_client,
     ):

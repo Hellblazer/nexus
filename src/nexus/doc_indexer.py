@@ -1076,6 +1076,14 @@ def index_pdf(
     # Idempotent on re-index via Catalog.register's by_file_path early-return
     # (no duplicate DocumentRegistered events). Returns "" when the catalog
     # is absent — preserves the no-catalog ingest contract.
+    #
+    # ``content_type="paper"`` here is the CATALOG content_type (used by
+    # ``_register_or_lookup_doc_id`` to derive the curator owner default
+    # ``standalone-pdfs`` and to populate ``Document.content_type``).
+    # The chunk-metadata content_type at write time below is ``"pdf"``
+    # (set inside ``_pdf_chunks`` via ``make_chunk_metadata(content_type=
+    # "pdf", ...)``). The two namespaces are distinct: catalog tracks
+    # source typing; chunk metadata tracks T3 routing.
     doc_id = _register_or_lookup_doc_id(
         pdf_path, corpus,
         content_type="paper",
@@ -1345,7 +1353,6 @@ def _catalog_markdown_hook(
         # cat.register() only when no row exists yet (no-pre-flight
         # branch — preserves the no-catalog ingest contract for callers
         # that bypass the public entry points).
-        from datetime import UTC, datetime  # noqa: PLC0415
         existing = cat.by_file_path(owner, fp)
         if existing is not None:
             cat.update(

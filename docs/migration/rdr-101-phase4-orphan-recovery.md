@@ -72,6 +72,20 @@ For PDFs / markdown collections, the recovery is to **re-index the source files*
 
 Existing chunks in T3 (whose content_hash hasn't changed) survive the re-index via ChromaDB's metadata-merge upsert — they retain their original chunk text + embedding and gain the `doc_id` field via the new write. The re-index path costs the embedding API calls only for files whose content actually changed.
 
+## No-catalog mode caveat (RDR-102 Phase B side effect)
+
+`nx index pdf` / `nx index md` / `nx index rdr` and `nx index repo` all support running without an initialized catalog (`NEXUS_CATALOG_PATH` points at a directory that has no `.git` / `documents.jsonl`). Pre-RDR-102 the staleness check used `source_path` as the chunk-identity key, so re-indexing an unchanged file in no-catalog mode was a no-op even without `doc_id` wiring.
+
+Phase B removes `source_path` from the chunk schema. With no catalog initialized, `_register_or_lookup_doc_id` returns `""` and the chunks land in T3 with neither `source_path` nor `doc_id`. The staleness check's `_identity_where(file_path, corpus)` falls back to `{"source_path": file_path}`, queries T3, finds zero chunks (nothing carries source_path), and reports "no existing chunks" — so the indexer re-embeds the file every run.
+
+Implications:
+
+- Operators running in no-catalog mode will see every `nx index ...` call re-embed already-indexed files. This wastes Voyage API quota and clock time but does not corrupt T3 — the upsert overwrites with identical content.
+- The fix is to initialize a catalog: `nx catalog setup` (or any other path that calls `Catalog.init` at the configured `NEXUS_CATALOG_PATH`). Once initialized, the next index pre-flight registers each file and chunks gain `doc_id` at write time; the staleness check then keys on `doc_id` and re-index becomes a no-op as before.
+- This regression is intentional per RDR-102 D2 ("Hard-remove the source_path parameter from make_chunk_metadata") and the substantive-critic gate that rejected the deprecated-noop alternative. The honest-signal approach trades the no-catalog re-index ergonomics for the elimination of the prune-vs-write regression cycle.
+
+If you depend on no-catalog re-index being a no-op (e.g., scripted test fixtures), initialize the catalog as part of the test harness setup or accept the per-run re-embed cost.
+
 ## What you should NOT do
 
 - Do **not** run `synthesize-log --prefer-live-catalog` without `--force` against a non-empty `events.jsonl`. The verb refuses to overwrite a non-empty log without `--force`; that guard exists precisely so an accidental re-synthesis does not replace a log carrying production state.
