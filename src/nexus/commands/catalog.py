@@ -2220,17 +2220,42 @@ def _backfill_rdrs(cat: Catalog, t3: object, dry_run: bool) -> int:
 
         try:
             col = t3.get_or_create_collection(col_name)
-            # Paginate to discover ALL unique source_path values
+            # Paginate to discover ALL unique documents.
+            # nexus-7b5n: when chunks carry doc_id (post t3-backfill-doc-id),
+            # dedup on doc_id so two entries with the same source_path under
+            # different owners stay distinct. Falls back to source_path for
+            # collections that haven't been backfilled yet (legacy walks).
             seen_paths: dict[str, str] = {}  # path → title
+            seen_doc_ids: set[str] = set()
+            use_doc_id: bool | None = None
             offset = 0
             while True:
                 result = col.get(include=["metadatas"], limit=200, offset=offset)
                 metas = result.get("metadatas", [])
+                if metas and use_doc_id is None:
+                    use_doc_id = any(
+                        isinstance(m, dict) and m.get("doc_id", "")
+                        for m in metas
+                    )
                 for meta in metas:
+                    if not isinstance(meta, dict):
+                        continue
                     path = meta.get("source_path", "")
-                    if path and path not in seen_paths:
-                        title = meta.get("title", "") or Path(path).stem
-                        seen_paths[path] = title
+                    if not path:
+                        continue
+                    if use_doc_id:
+                        did = meta.get("doc_id", "")
+                        # Chunks predating t3-backfill-doc-id have empty
+                        # doc_id; fall through to source_path dedup so they
+                        # still land in the catalog.
+                        if did and did in seen_doc_ids:
+                            continue
+                        if did:
+                            seen_doc_ids.add(did)
+                    if path in seen_paths:
+                        continue
+                    title = meta.get("title", "") or Path(path).stem
+                    seen_paths[path] = title
                 if len(metas) < 200:
                     break
                 offset += 200
@@ -2518,8 +2543,14 @@ def _backfill_per_file_from_t3(
         )
 
     # Paginate T3 chunks at 300 (Cloud cap) and dedupe by source_path.
+    # nexus-7b5n: when chunks carry doc_id (post t3-backfill-doc-id),
+    # also dedup on doc_id so two distinct documents that happen to
+    # share a source_path stay distinct. Empty doc_id falls back to
+    # source_path-only dedup for legacy chunks predating the backfill.
     col = t3.get_collection(collection)
     seen_paths: set[str] = set()
+    seen_doc_ids: set[str] = set()
+    use_doc_id: bool | None = None
     offset = 0
     page_size = 300
     while True:
@@ -2529,12 +2560,25 @@ def _backfill_per_file_from_t3(
         ids = page.get("ids") or []
         if not ids:
             break
-        for meta in page.get("metadatas") or []:
+        metas = page.get("metadatas") or []
+        if use_doc_id is None and metas:
+            use_doc_id = any(
+                isinstance(m, dict) and m.get("doc_id", "")
+                for m in metas
+            )
+        for meta in metas:
             if not isinstance(meta, dict):
                 continue
             sp = meta.get("source_path", "")
-            if sp:
-                seen_paths.add(sp)
+            if not sp:
+                continue
+            if use_doc_id:
+                did = meta.get("doc_id", "")
+                if did and did in seen_doc_ids:
+                    continue
+                if did:
+                    seen_doc_ids.add(did)
+            seen_paths.add(sp)
         if len(ids) < page_size:
             break
         offset += page_size
