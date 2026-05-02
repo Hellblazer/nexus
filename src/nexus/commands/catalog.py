@@ -4507,6 +4507,23 @@ def _print_t3_doc_id_coverage_text(report: dict) -> None:
         click.echo("PASS — every non-orphan chunk carries the expected doc_id.")
     else:
         click.echo("FAIL — T3 doc_id metadata diverges from the event log.")
+        # nexus-o6aa.10.4: surface the next operator verb. The most
+        # common cause of a coverage FAIL is a pre-Phase-4 catalog
+        # whose chunks lack doc_id metadata; ``nx catalog migrate``
+        # is the single-command remediation. Mismatched doc_ids point
+        # at a different (rarer) class (synthesize-log drift)
+        # which is caught by the same verb's projection rebuild step.
+        click.echo("")
+        click.echo("Next step:")
+        click.echo("  nx catalog migrate --i-have-completed-the-reader-migration")
+        click.echo(
+            "  (or 'nx catalog t3-backfill-doc-id' alone if you have not "
+            "shipped the Phase 4 reader migration yet)"
+        )
+        click.echo(
+            "See docs/migration/rdr-101.md § 'Post-Phase-4 cleanup' for "
+            "the full remediation walk-through."
+        )
 
 
 # ── RDR-101 Phase 2: repair-orphan-chunks verb ───────────────────────────
@@ -4771,23 +4788,45 @@ def repair_orphan_chunks_cmd(
     "--json", "as_json", is_flag=True,
     help="Emit machine-readable JSON instead of text output.",
 )
+@click.option(
+    "--i-have-completed-the-reader-migration",
+    "reader_migration_done",
+    is_flag=True,
+    default=False,
+    help=(
+        "Phase 4 finisher. When set, migrate also runs "
+        "prune-deprecated-keys (drops 5 legacy chunk-metadata keys) "
+        "and a second t3-backfill-doc-id pass to drain the deferred "
+        "class. Without this flag the verb stops after Phase 3. "
+        "Acknowledges that every audit-listed reader (see "
+        "docs/migration/rdr-101-phase4-reader-audit.md) has migrated "
+        "to doc_id-keyed lookups; pruning ahead of the readers "
+        "produces silent empty results."
+    ),
+)
 @click.pass_context
 def migrate_cmd(
     ctx: click.Context,
     dry_run: bool,
     no_chunks: bool,
     as_json: bool,
+    reader_migration_done: bool,
 ) -> None:
-    """RDR-101 Phase 3: one-shot migration to event-sourced canonical state.
+    """RDR-101 Phase 3 (and Phase 4) migration: one-shot upgrade verb.
 
-    Composed verb that sequences the three steps an upgrading operator
+    Composed verb that sequences the steps an upgrading operator
     would otherwise run by hand:
 
       1. ``nx catalog synthesize-log --force [--chunks]`` — rebuild
          events.jsonl from the legacy JSONL state.
       2. ``nx catalog t3-backfill-doc-id`` — write doc_id metadata to
          existing T3 chunks (skipped under --no-chunks).
-      3. ``nx catalog doctor --replay-equality [--t3-doc-id-coverage
+      3. **Phase 4 finisher** (only when
+         ``--i-have-completed-the-reader-migration`` is set):
+         ``nx catalog prune-deprecated-keys`` drops 5 legacy chunk-
+         metadata keys, then a second ``t3-backfill-doc-id`` pass
+         drains the deferred class.
+      4. ``nx catalog doctor --replay-equality [--t3-doc-id-coverage
          --strict-not-in-t3]`` — verify the result.
 
     **Idempotent.** Pre-checks ``Catalog.bootstrap_fallback_active``.
@@ -4796,8 +4835,18 @@ def migrate_cmd(
     rather than regenerating a perfectly-good event log. The empty-
     events.jsonl synthesizer-PASS case (no ES mutations have happened
     yet on a freshly-upgraded catalog) is treated as a proactive
-    migration opportunity, not a no-op — proactively populating the
+    migration opportunity, not a no-op; proactively populating the
     log avoids the bootstrap-fallback state arising on first ES write.
+
+    **Pre-RDR-101 operators.** Catalogs that span the pre-Phase-3 era
+    typically carry chunks at the 32-key Cloud quota with both
+    ``source_path`` + ``git_*`` legacy keys present. Step 2 cannot
+    add ``doc_id`` to those chunks (``chunks_deferred`` in the
+    backfill report). The Phase 4 finisher (step 3) frees the slots
+    and the second backfill pass catches them in a single run. Pass
+    ``--i-have-completed-the-reader-migration`` once your nexus
+    version includes Phase 4's reader migrations (PRs #471-#480, on
+    main since 2026-05-02) to take that single-command path.
 
     Verified by ``scripts/validate/rdr-101-migration-e2e.sh`` (PR ζ
     sandbox e2e harness, nexus-o6aa.9.10).
@@ -4849,18 +4898,28 @@ def migrate_cmd(
         return
 
     if dry_run:
+        would_run = [
+            f"nx catalog synthesize-log --force"
+            + ("" if no_chunks else " --chunks"),
+        ]
+        if not no_chunks:
+            would_run.append("nx catalog t3-backfill-doc-id")
+        if reader_migration_done and not no_chunks:
+            would_run.extend([
+                "nx catalog prune-deprecated-keys "
+                "--i-have-completed-the-reader-migration "
+                "--skip-coverage-check",
+                "nx catalog t3-backfill-doc-id  # drain deferred class",
+            ])
+        would_run.append(
+            "nx catalog doctor --replay-equality"
+            + ("" if no_chunks else " --t3-doc-id-coverage --strict-not-in-t3")
+        )
         report = {
             "needs_migration": True,
             "fallback_active": fallback_active,
-            "would_run": [
-                f"nx catalog synthesize-log --force"
-                + ("" if no_chunks else " --chunks"),
-            ] + (
-                [] if no_chunks else ["nx catalog t3-backfill-doc-id"]
-            ) + [
-                "nx catalog doctor --replay-equality"
-                + ("" if no_chunks else " --t3-doc-id-coverage --strict-not-in-t3"),
-            ],
+            "phase4_finisher": reader_migration_done,
+            "would_run": would_run,
             "documents_jsonl": str(documents_path),
             "events_jsonl": str(log.path),
         }
@@ -4948,6 +5007,58 @@ def migrate_cmd(
     click.echo(
         f"    sync: {_time.monotonic() - _sync_t0:.1f}s",
     )
+
+    # Phase 4 finisher (optional, gated on the operator flag).
+    # nexus-o6aa.10.4: pre-101 catalogs hit the over-cap chunk class
+    # in step 2 (t3-backfill-doc-id can't fit doc_id alongside the
+    # legacy git_* + source_path keys on chunks already at the 32-key
+    # quota). Pruning frees those slots, then the second backfill
+    # pass drains the deferred class. Idempotent on catalogs without
+    # over-cap chunks (chunks_already_pruned=N, second backfill is
+    # a no-op).
+    if reader_migration_done and not no_chunks:
+        click.echo("==> nx catalog prune-deprecated-keys")
+        _step3_t0 = _time.monotonic()
+        try:
+            ctx.invoke(prune_deprecated_keys_cmd, **{
+                "dry_run": False,
+                "collection_filter": "",
+                "as_json": False,
+                "reader_migration_done": True,
+                # The migrate orchestrator owns the gate: step 2 just
+                # ran, so unmapped doc_ids are exactly the deferred
+                # class the prune is meant to free.
+                "skip_coverage_check": True,
+            })
+        except click.ClickException as exc:
+            raise click.ClickException(
+                f"prune-deprecated-keys failed: {exc.message}. "
+                "Migration partial; events.jsonl is current and "
+                "T3 has whatever doc_id coverage step 2 reached. "
+                "Inspect the report above and re-run."
+            ) from exc
+        click.echo(
+            f"    prune-deprecated-keys: "
+            f"{_time.monotonic() - _step3_t0:.1f}s",
+        )
+
+        click.echo("==> nx catalog t3-backfill-doc-id  # drain deferred class")
+        _step4_t0 = _time.monotonic()
+        try:
+            ctx.invoke(t3_backfill_doc_id_cmd, **{
+                "dry_run": False,
+                "collection_filter": "",
+                "as_json": False,
+            })
+        except click.ClickException as exc:
+            raise click.ClickException(
+                f"second t3-backfill-doc-id (drain deferred) failed: "
+                f"{exc.message}. Re-run 'nx catalog t3-backfill-doc-id'."
+            ) from exc
+        click.echo(
+            f"    t3-backfill-doc-id (drain): "
+            f"{_time.monotonic() - _step4_t0:.1f}s",
+        )
 
     # Step 3: doctor verification.
     click.echo("==> nx catalog doctor --replay-equality"
