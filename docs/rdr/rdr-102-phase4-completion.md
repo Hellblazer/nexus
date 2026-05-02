@@ -2,14 +2,15 @@
 title: "RDR-102: RDR-101 Phase 4 Completion — doc_indexer Wiring, Write-Side source_path Retirement, Doctor Visibility"
 id: RDR-102
 type: Architecture
-status: accepted
+status: closed
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-02
 accepted_date: 2026-05-02
-related_issues: [nexus-o6aa.10, nexus-u2n9, nexus-wb3c, nexus-ht8j]
-related_tests: []
+closed_date: 2026-05-02
+related_issues: [nexus-o6aa.10, nexus-u2n9, nexus-wb3c, nexus-ht8j, nexus-uusi, nexus-4uv5, nexus-ejs4, nexus-2nls, nexus-wc3f]
+related_tests: [tests/e2e/rdr-102-phase-d-gate.sh]
 related: [RDR-101]
 ---
 
