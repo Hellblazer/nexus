@@ -377,28 +377,35 @@ class T3Database:
         """
         # Defense-in-depth: drop any document that exceeds the hard ChromaDB limit.
         # The chunker-level SAFE_CHUNK_BYTES cap should prevent this from ever firing.
+        # Vector-only entries (``taxonomy__centroids``) legitimately have
+        # ``document=None`` — treat as zero-byte rather than crashing on
+        # ``None.encode()`` (nexus-fxc1).
         max_bytes = QUOTAS.MAX_DOCUMENT_BYTES
+
+        def _doc_bytes(d: str | None) -> int:
+            return 0 if d is None else len(d.encode())
+
         valid = [
             i for i, doc in enumerate(documents)
-            if len(doc.encode()) <= max_bytes
+            if _doc_bytes(doc) <= max_bytes
         ]
         if len(valid) < len(documents):
             for i, doc in enumerate(documents):
-                if len(doc.encode()) > max_bytes:
+                if _doc_bytes(doc) > max_bytes:
                     source = metadatas[i].get("source_path", "<unknown>") if i < len(metadatas) else "<unknown>"
                     if fail_on_oversized:
                         from nexus.errors import PutOversizedError
 
                         raise PutOversizedError(
                             doc_id=ids[i],
-                            doc_bytes=len(doc.encode()),
+                            doc_bytes=_doc_bytes(doc),
                             max_bytes=max_bytes,
                             collection=collection_name,
                         )
                     _log.warning(
                         "write_batch_oversized_document_dropped",
                         source_path=source,
-                        doc_bytes=len(doc.encode()),
+                        doc_bytes=_doc_bytes(doc),
                         max_bytes=max_bytes,
                         collection=collection_name,
                     )

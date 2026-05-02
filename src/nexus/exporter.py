@@ -336,7 +336,11 @@ def import_collection(
             unpacker = msgpack.Unpacker(gz, raw=False, max_buffer_size=10 * 1024 * 1024)
             for record in unpacker:
                 rec_id: str = record["id"]
-                doc: str = record["document"]
+                # Vector-only entries (e.g. ``taxonomy__centroids``) round-trip
+                # ``document=None``. Coerce to empty string so the downstream
+                # write path's byte-length checks don't trip on ``None.encode()``
+                # (nexus-fxc1).
+                doc: str = record["document"] or ""
                 meta: dict = record["metadata"]
                 emb_bytes: bytes = record["embedding"]
 
