@@ -275,14 +275,19 @@ class TestRoundTrip:
         # assertion above guarantees this; the secondary check guards
         # against future ChromaDB versions where ``metadata['hnsw:space']``
         # might decouple from the actual index space.
+        # Tolerance accounts for float underflow when querying a vector
+        # against itself (distance ~0 can dip to a tiny negative on
+        # some CPUs / ChromaDB builds — Linux CI runner hits this).
         query_result = restored.query(
             query_embeddings=[embeddings[0]],
             n_results=2,
             include=["distances"],
         )
+        eps = 1e-6
         for d in query_result["distances"][0]:
-            assert 0.0 <= d <= 2.0, (
-                f"distance {d} is outside cosine bounds [0, 2]"
+            assert -eps <= d <= 2.0 + eps, (
+                f"distance {d} is outside cosine bounds [0, 2] "
+                f"(tolerance {eps})"
             )
 
 
