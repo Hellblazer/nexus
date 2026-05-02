@@ -4163,6 +4163,7 @@ def t3_backfill_doc_id_cmd(
         # Idempotency: read current metadata in batches; only update
         # chunks that don't already carry the right doc_id.
         ids = [p.chunk_id for p in payloads]
+        _last_progress = _time.monotonic()
         for batch_start in range(0, len(ids), 300):
             batch_ids = ids[batch_start:batch_start + 300]
             batch_payloads = payloads[batch_start:batch_start + 300]
@@ -4196,23 +4197,35 @@ def t3_backfill_doc_id_cmd(
                 update_ids.append(payload.chunk_id)
                 update_metas.append(merged)
 
-            if not update_ids:
-                continue
-            # nexus-o6aa.9.18 + .9.19: batch-level rejection is
-            # all-or-nothing on Cloud T3. _bisect_update tries the
-            # whole slice first; on failure it bisects-and-recurses
-            # to isolate the failing chunks in O(log N) update calls
-            # instead of O(N) per-chunk retry. The .9.18 per-chunk
-            # path was correct but took ~30 min wall-clock against
-            # Cloud T3 latency on a 9k-chunk over-cap surface; .9.19
-            # brings that down to ~log2(300) = 9 calls per failed
-            # batch (~30× faster).
-            ok, deferred_records, error_records = _bisect_update(
-                col, update_ids, update_metas, coll_name,
-            )
-            chunks_updated += ok
-            chunks_deferred.extend(deferred_records)
-            errors.extend(error_records)
+            if update_ids:
+                # nexus-o6aa.9.18 + .9.19: batch-level rejection is
+                # all-or-nothing on Cloud T3. _bisect_update tries the
+                # whole slice first; on failure it bisects-and-recurses
+                # to isolate the failing chunks in O(log N) update calls
+                # instead of O(N) per-chunk retry. The .9.18 per-chunk
+                # path was correct but took ~30 min wall-clock against
+                # Cloud T3 latency on a 9k-chunk over-cap surface; .9.19
+                # brings that down to ~log2(300) = 9 calls per failed
+                # batch (~30x faster).
+                ok, deferred_records, error_records = _bisect_update(
+                    col, update_ids, update_metas, coll_name,
+                )
+                chunks_updated += ok
+                chunks_deferred.extend(deferred_records)
+                errors.extend(error_records)
+
+            # Per-batch heartbeat every 5 seconds so large collections
+            # don't look hung.
+            if show_progress and _time.monotonic() - _last_progress >= 5.0:
+                progressed = batch_start + len(batch_ids)
+                pct = (progressed / len(ids)) * 100 if ids else 0
+                click.echo(
+                    f"      batch {batch_start // 300 + 1}: "
+                    f"{progressed}/{len(ids)} ({pct:.0f}%), "
+                    f"updated={chunks_updated - coll_updated_before}",
+                    err=True,
+                )
+                _last_progress = _time.monotonic()
 
         if show_progress:
             updated_here = chunks_updated - coll_updated_before
@@ -5333,13 +5346,22 @@ def prune_deprecated_keys_cmd(
             })
             continue
 
+        # Pre-fetch the total chunk count so progress can show
+        # offset/total. Cheap (one round-trip) versus walking 200+
+        # pages with no denominator. Falls back to "?" on error.
+        try:
+            total_chunks = col.count()
+        except Exception:
+            total_chunks = None
+
         if show_progress:
             click.echo(
                 f"  [prune {coll_idx}/{len(target_collections)}] "
-                f"{coll_name}…",
+                f"{coll_name}: {total_chunks if total_chunks is not None else '?'} chunks…",
                 err=True,
             )
         _tc = _time.monotonic()
+        _last_progress = _tc
         coll_updated_before = chunks_updated
         coll_already_before = chunks_already_pruned
 
@@ -5387,6 +5409,25 @@ def prune_deprecated_keys_cmd(
             elif update_ids:
                 # Dry run: count what would change.
                 chunks_updated += len(update_ids)
+
+            # Per-page heartbeat every 5 seconds so large collections
+            # don't look hung. Threshold-throttled rather than
+            # per-page so small collections stay quiet.
+            if show_progress and _time.monotonic() - _last_progress >= 5.0:
+                pages_done = offset // 300 + 1
+                progressed = offset + len(ids)
+                pct = (
+                    f"{(progressed / total_chunks) * 100:.0f}%"
+                    if total_chunks
+                    else "?"
+                )
+                click.echo(
+                    f"      page {pages_done}: "
+                    f"{progressed}/{total_chunks if total_chunks else '?'} "
+                    f"({pct}), updated={chunks_updated - coll_updated_before}",
+                    err=True,
+                )
+                _last_progress = _time.monotonic()
 
             if len(ids) < 300:
                 break
