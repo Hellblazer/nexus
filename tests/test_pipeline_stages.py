@@ -478,6 +478,72 @@ class TestPipelineIndexPdf:
             with pytest.raises(RuntimeError, match="voyage_api_key not configured"):
                 pipeline_index_pdf(Path("/a.pdf"), "h1", "docs__test", mock_t3, db=db)
 
+    def test_writes_doc_id_when_catalog_initialized(
+        self, db, tmp_path, monkeypatch,
+    ) -> None:
+        """RDR-102 D4 #2 (streaming pipeline mirror): pipeline_index_pdf
+        must populate ``doc_id`` on every chunk it uploads when the
+        catalog is initialized.
+
+        Pre-Phase-A this fails because the streaming pipeline registers
+        the catalog Document via ``_catalog_pdf_hook`` AFTER the upload
+        completes (line 729 of pipeline_stages.py); ``chunker_loop``
+        builds chunk metadata via ``_build_chunk_metadata`` →
+        ``make_chunk_metadata()`` with no ``doc_id`` argument. Phase A
+        registers the Document at the streaming-entry boundary and
+        threads doc_id through chunker_loop's metadata builder.
+        """
+        import chromadb
+        from nexus.catalog import reset_cache
+        from nexus.catalog.catalog import Catalog
+        from nexus.db.t3 import T3Database
+
+        cat_dir = tmp_path / "test-catalog"
+        Catalog.init(cat_dir)
+        reset_cache()
+        monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+        monkeypatch.delenv("CHROMA_API_KEY", raising=False)
+        monkeypatch.setattr(
+            "nexus.config._global_config_path",
+            lambda: Path("/nonexistent"),
+        )
+
+        pdf_path = tmp_path / "stream.pdf"
+        pdf_path.write_bytes(b"fake pdf bytes for streaming pipeline test")
+        client = chromadb.EphemeralClient()
+        t3 = T3Database(_client=client, local_mode=True)
+
+        fc = _tc(
+            ("chunk 0 text", 0, {"page_number": 1, "chunk_type": "text",
+                                  "chunk_start_char": 0, "chunk_end_char": 12}),
+            ("chunk 1 text", 1, {"page_number": 2, "chunk_type": "text",
+                                  "chunk_start_char": 12, "chunk_end_char": 24}),
+        )
+        fr = _er(2)
+        with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
+            ME.return_value.extract.side_effect = _fx(2, fr)
+            MC.return_value.chunk.return_value = fc
+            total = pipeline_index_pdf(
+                pdf_path, "rdr102streamhash", "docs__rdr102_stream",
+                t3, db=db, embed_fn=_embed,
+                corpus="rdr102_stream",
+            )
+        assert total == 2, f"expected 2 chunks uploaded; got {total}"
+
+        col = t3.get_or_create_collection("docs__rdr102_stream")
+        rows = col.get(include=["metadatas"])
+        assert rows["metadatas"], (
+            "expected at least one chunk in docs__rdr102_stream"
+        )
+        missing_doc_id = [m for m in rows["metadatas"] if not m.get("doc_id")]
+        assert not missing_doc_id, (
+            f"{len(missing_doc_id)}/{len(rows['metadatas'])} streaming "
+            f"pipeline chunks missing doc_id. Phase A must register the "
+            f"catalog Document at the pipeline_index_pdf entry boundary "
+            f"and thread doc_id through chunker_loop's metadata builder, "
+            f"not via the post-upload _catalog_pdf_hook."
+        )
+
 
 
 class TestBufferEdgeCases:
