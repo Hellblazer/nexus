@@ -1580,6 +1580,55 @@ def _doc_registered_count(cat_dir: Path, file_path: str) -> int:
     return count
 
 
+def test_index_pdf_does_not_emit_source_path(
+    sample_pdf, tmp_path, monkeypatch,
+):
+    """RDR-102 Phase B / D2: index_pdf at doc_indexer.py:794 (the
+    _pdf_chunks make_chunk_metadata call) must drop source_path from
+    its kwargs. After Phase B, every PDF chunk carries no source_path
+    key; the catalog tumbler in doc_id is the canonical reference and
+    normalize() filters source_path at the schema-level removal.
+    """
+    cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
+
+    with pdf_extract_patches_ctx():
+        index_pdf(sample_pdf, corpus="rdr102_pdf_b", t3=t3, embed_fn=_fake_embed)
+
+    col = t3.get_or_create_collection("docs__rdr102_pdf_b")
+    rows = col.get(include=["metadatas"])
+    assert rows["metadatas"], "expected at least one chunk"
+    leaked = [m for m in rows["metadatas"] if "source_path" in m]
+    assert not leaked, (
+        f"{len(leaked)}/{len(rows['metadatas'])} index_pdf chunks still "
+        f"carry source_path. Phase B must drop source_path= from "
+        f"_pdf_chunks (doc_indexer.py:794) AND remove source_path from "
+        f"ALLOWED_TOP_LEVEL so normalize() filters any residual writes."
+    )
+
+
+def test_index_markdown_does_not_emit_source_path(
+    sample_md, tmp_path, monkeypatch,
+):
+    """RDR-102 Phase B / D2: index_markdown at doc_indexer.py:874 (the
+    _markdown_chunks make_chunk_metadata call) must drop source_path
+    from its kwargs.
+    """
+    cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
+
+    n = index_markdown(sample_md, corpus="rdr102_md_b", t3=t3)
+    assert n > 0
+
+    col = t3.get_or_create_collection("docs__rdr102_md_b")
+    rows = col.get(include=["metadatas"])
+    assert rows["metadatas"], "expected at least one chunk"
+    leaked = [m for m in rows["metadatas"] if "source_path" in m]
+    assert not leaked, (
+        f"{len(leaked)}/{len(rows['metadatas'])} index_markdown chunks "
+        f"still carry source_path. Phase B must drop source_path= from "
+        f"_markdown_chunks (doc_indexer.py:874)."
+    )
+
+
 def test_index_pdf_writes_doc_id_when_catalog_initialized(
     sample_pdf, tmp_path, monkeypatch,
 ):

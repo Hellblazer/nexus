@@ -304,3 +304,112 @@ def test_index_prose_file_non_markdown_uses_line_chunk(tmp_path, make_ctx):
     assert embed_texts == upsert_kwargs["documents"]
     meta = upsert_kwargs["metadatas"][0]
     assert "line_start" in meta and meta["line_start"] >= 1
+
+
+# ── RDR-102 Phase B: source_path absent from indexer-stamped chunk meta ──
+
+
+def test_index_code_file_does_not_emit_source_path(tmp_path, make_ctx):
+    """RDR-102 Phase B / D2: code_indexer at line 402 of code_indexer.py
+    must drop the ``source_path=str(file_path)`` kwarg from its
+    make_chunk_metadata call. After Phase B, every code chunk landing
+    in T3 carries no source_path key — the catalog tumbler in
+    ``doc_id`` is the canonical reference and ``normalize()`` filters
+    source_path out at the schema-level removal.
+    """
+    from nexus.code_indexer import index_code_file
+
+    py_file = tmp_path / "phase_b.py"
+    py_file.write_text("def fn():\n    return 'phase B'\n")
+
+    mock_voyage = MagicMock()
+    mock_embed_result = MagicMock()
+    mock_embed_result.embeddings = [[0.1] * 128]
+    mock_voyage.embed.return_value = mock_embed_result
+    mock_db = MagicMock()
+    ctx = make_ctx(
+        db=mock_db, voyage_client=mock_voyage,
+        git_meta={"git_project_name": "phase-b-test"},
+    )
+
+    with patch("nexus.indexer_utils._chroma_with_retry") as mock_retry:
+        mock_retry.return_value = {"metadatas": [], "ids": []}
+        result = index_code_file(ctx, py_file)
+
+    assert result >= 1
+    metadatas = mock_db.upsert_chunks_with_embeddings.call_args[1]["metadatas"]
+    leaked = [m for m in metadatas if "source_path" in m]
+    assert not leaked, (
+        f"{len(leaked)}/{len(metadatas)} code-indexer chunks still carry "
+        f"source_path. Phase B must drop the source_path= kwarg from "
+        f"the make_chunk_metadata call at code_indexer.py:402, AND "
+        f"remove source_path from ALLOWED_TOP_LEVEL so normalize() "
+        f"filters any residual writes."
+    )
+
+
+def test_index_prose_file_markdown_does_not_emit_source_path(
+    tmp_path, make_ctx,
+):
+    """RDR-102 Phase B / D2: prose_indexer markdown branch (branch A,
+    line 103 of prose_indexer.py) must drop source_path from its
+    make_chunk_metadata call.
+    """
+    from nexus.prose_indexer import index_prose_file
+
+    md_file = tmp_path / "phase_b_branch_a.md"
+    md_file.write_text("# Phase B Branch A\n\nMarkdown body content.\n")
+    mock_db = MagicMock()
+    ctx = make_ctx(
+        db=mock_db, voyage_client=None,
+        corpus="docs__phase-b-md", embedding_model="voyage-context-3",
+    )
+
+    with patch("nexus.indexer_utils._chroma_with_retry") as mock_retry, \
+         patch("nexus.doc_indexer._embed_with_fallback") as mock_embed:
+        mock_retry.return_value = {"metadatas": [], "ids": []}
+        mock_embed.return_value = ([[0.1] * 128], "voyage-context-3")
+        result = index_prose_file(ctx, md_file)
+
+    assert result >= 1
+    metadatas = mock_db.upsert_chunks_with_embeddings.call_args[1]["metadatas"]
+    leaked = [m for m in metadatas if "source_path" in m]
+    assert not leaked, (
+        f"{len(leaked)}/{len(metadatas)} prose-indexer (markdown branch) "
+        f"chunks still carry source_path. Phase B must drop source_path "
+        f"from the make_chunk_metadata call at prose_indexer.py:103."
+    )
+
+
+def test_index_prose_file_line_chunk_does_not_emit_source_path(
+    tmp_path, make_ctx,
+):
+    """RDR-102 Phase B / D2: prose_indexer non-markdown branch (branch
+    B, line 183 of prose_indexer.py — used for .txt and other plain
+    text) must drop source_path from its make_chunk_metadata call.
+    """
+    from nexus.prose_indexer import index_prose_file
+
+    txt_file = tmp_path / "phase_b_branch_b.txt"
+    txt_file.write_text("Line one of phase B branch B.\nLine two.\n")
+    mock_db = MagicMock()
+    ctx = make_ctx(
+        db=mock_db, voyage_client=None,
+        corpus="docs__phase-b-txt", embedding_model="voyage-context-3",
+    )
+
+    with patch("nexus.indexer_utils._chroma_with_retry") as mock_retry, \
+         patch("nexus.doc_indexer._embed_with_fallback") as mock_embed:
+        mock_retry.return_value = {"metadatas": [], "ids": []}
+        mock_embed.return_value = ([[0.1] * 128], "voyage-context-3")
+        result = index_prose_file(ctx, txt_file)
+
+    assert result >= 1
+    metadatas = mock_db.upsert_chunks_with_embeddings.call_args[1]["metadatas"]
+    leaked = [m for m in metadatas if "source_path" in m]
+    assert not leaked, (
+        f"{len(leaked)}/{len(metadatas)} prose-indexer (line-chunk "
+        f"branch) chunks still carry source_path. Phase B must drop "
+        f"source_path from the make_chunk_metadata call at "
+        f"prose_indexer.py:183."
+    )

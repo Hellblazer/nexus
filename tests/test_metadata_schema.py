@@ -600,3 +600,93 @@ class TestDocIdInSchema:
         second = normalize(first, content_type="code")
         assert first == second
         assert second["doc_id"] == "1.1.42"
+
+
+# ── RDR-102 Phase B: source_path retirement ─────────────────────────────
+
+
+def test_prune_deprecated_keys_disjoint_from_allowed_top_level() -> None:
+    """RDR-102 D4 #1 / RF-8: the canonical schema and the prune
+    verb's deprecated-key set MUST be disjoint.
+
+    Pre-RDR-102 the intersection was ``{'source_path'}``: every reindex
+    rewrote source_path through ``make_chunk_metadata``, the prune verb
+    stripped it post-write, the next reindex put it back. The cycle
+    only terminates by removing source_path from ALLOWED_TOP_LEVEL —
+    Phase B does that. CI failed to catch the original divergence; this
+    test makes any future re-introduction a build break.
+
+    The four ``git_*`` keys in _PRUNE_DEPRECATED_KEYS are not in
+    ALLOWED_TOP_LEVEL (they get repacked into ``git_meta`` JSON before
+    normalize runs), so the prune is structurally one-shot for them
+    even today. Only source_path cycles, and only source_path needs
+    the schema-level removal.
+    """
+    from nexus.commands.catalog import _PRUNE_DEPRECATED_KEYS
+    from nexus.metadata_schema import ALLOWED_TOP_LEVEL
+
+    intersection = ALLOWED_TOP_LEVEL & _PRUNE_DEPRECATED_KEYS
+    assert intersection == frozenset(), (
+        f"_PRUNE_DEPRECATED_KEYS and ALLOWED_TOP_LEVEL share keys: "
+        f"{sorted(intersection)}. Each shared key creates a regression "
+        f"cycle: writer stamps it, prune strips it, writer re-stamps. "
+        f"Remove the key from ALLOWED_TOP_LEVEL (and the writer call "
+        f"sites that pass it) so normalize() drops it at the source."
+    )
+
+
+def test_make_chunk_metadata_rejects_source_path_kwarg() -> None:
+    """RDR-102 D2 / Alternative A3 (REJECTED at substantive-critic
+    gate): ``source_path`` is HARD-REMOVED from ``make_chunk_metadata``,
+    not kept as a deprecated no-op kwarg. A caller passing
+    ``source_path=...`` must get a ``TypeError`` rather than a silent
+    drop.
+
+    The silent-drop alternative (A3) was rejected because it is an
+    invisible failure mode: caller passes the value, call succeeds,
+    value is silently discarded, downstream ``where={"source_path":
+    ...}`` returns zero results — the failure surfaces nowhere. The
+    hard-remove approach forces every call site to be edited in
+    lockstep with a TypeError so re-introduction is a build break.
+    """
+    import pytest as _pytest
+
+    from nexus.metadata_schema import make_chunk_metadata
+
+    with _pytest.raises(TypeError):
+        make_chunk_metadata(
+            content_type="code",
+            source_path="/should/raise/typeerror.py",  # RDR-102 D2: rejected kwarg
+            chunk_index=0,
+            chunk_count=1,
+            chunk_text_hash="abc",
+            content_hash="def",
+            indexed_at="2026-05-02T00:00:00Z",
+            embedding_model="voyage-code-3",
+            store_type="code",
+        )
+
+
+def test_make_chunk_metadata_does_not_emit_source_path() -> None:
+    """RDR-102 D2: a ``make_chunk_metadata`` call with no source_path
+    kwarg (the post-Phase-B signature) MUST NOT emit a ``source_path``
+    key in the returned metadata. The schema-level removal from
+    ALLOWED_TOP_LEVEL is what enforces this — ``normalize()`` drops
+    any key not in the set, and source_path no longer is.
+    """
+    from nexus.metadata_schema import make_chunk_metadata
+
+    meta = make_chunk_metadata(
+        content_type="code",
+        chunk_index=0,
+        chunk_count=1,
+        chunk_text_hash="abc",
+        content_hash="def",
+        indexed_at="2026-05-02T00:00:00Z",
+        embedding_model="voyage-code-3",
+        store_type="code",
+    )
+    assert "source_path" not in meta, (
+        f"source_path must not appear in chunk metadata after Phase B; "
+        f"got keys: {sorted(meta.keys())}"
+    )
