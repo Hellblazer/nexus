@@ -4163,6 +4163,7 @@ def t3_backfill_doc_id_cmd(
         # Idempotency: read current metadata in batches; only update
         # chunks that don't already carry the right doc_id.
         ids = [p.chunk_id for p in payloads]
+        _last_progress = _time.monotonic()
         for batch_start in range(0, len(ids), 300):
             batch_ids = ids[batch_start:batch_start + 300]
             batch_payloads = payloads[batch_start:batch_start + 300]
@@ -4196,23 +4197,35 @@ def t3_backfill_doc_id_cmd(
                 update_ids.append(payload.chunk_id)
                 update_metas.append(merged)
 
-            if not update_ids:
-                continue
-            # nexus-o6aa.9.18 + .9.19: batch-level rejection is
-            # all-or-nothing on Cloud T3. _bisect_update tries the
-            # whole slice first; on failure it bisects-and-recurses
-            # to isolate the failing chunks in O(log N) update calls
-            # instead of O(N) per-chunk retry. The .9.18 per-chunk
-            # path was correct but took ~30 min wall-clock against
-            # Cloud T3 latency on a 9k-chunk over-cap surface; .9.19
-            # brings that down to ~log2(300) = 9 calls per failed
-            # batch (~30× faster).
-            ok, deferred_records, error_records = _bisect_update(
-                col, update_ids, update_metas, coll_name,
-            )
-            chunks_updated += ok
-            chunks_deferred.extend(deferred_records)
-            errors.extend(error_records)
+            if update_ids:
+                # nexus-o6aa.9.18 + .9.19: batch-level rejection is
+                # all-or-nothing on Cloud T3. _bisect_update tries the
+                # whole slice first; on failure it bisects-and-recurses
+                # to isolate the failing chunks in O(log N) update calls
+                # instead of O(N) per-chunk retry. The .9.18 per-chunk
+                # path was correct but took ~30 min wall-clock against
+                # Cloud T3 latency on a 9k-chunk over-cap surface; .9.19
+                # brings that down to ~log2(300) = 9 calls per failed
+                # batch (~30x faster).
+                ok, deferred_records, error_records = _bisect_update(
+                    col, update_ids, update_metas, coll_name,
+                )
+                chunks_updated += ok
+                chunks_deferred.extend(deferred_records)
+                errors.extend(error_records)
+
+            # Per-batch heartbeat every 5 seconds so large collections
+            # don't look hung.
+            if show_progress and _time.monotonic() - _last_progress >= 5.0:
+                progressed = batch_start + len(batch_ids)
+                pct = (progressed / len(ids)) * 100 if ids else 0
+                click.echo(
+                    f"      batch {batch_start // 300 + 1}: "
+                    f"{progressed}/{len(ids)} ({pct:.0f}%), "
+                    f"updated={chunks_updated - coll_updated_before}",
+                    err=True,
+                )
+                _last_progress = _time.monotonic()
 
         if show_progress:
             updated_here = chunks_updated - coll_updated_before
@@ -4873,11 +4886,23 @@ def migrate_cmd(
     # Decision matrix:
     #   has_legacy_docs=False & has_events=False → empty catalog: nothing to do
     #   has_legacy_docs=True  & has_events=True  & not fallback_active
-    #     → already migrated cleanly: nothing to do
+    #     → Phase 3 done; Phase 4 may still be needed (run when the
+    #       operator has set --i-have-completed-the-reader-migration)
     #   has_legacy_docs=True  & has_events=False
     #     → freshly-upgraded, no ES mutations yet: proactively migrate
     #   has_legacy_docs=True  & fallback_active   → migrate
-    needs_migration = has_legacy_docs and (not has_events or fallback_active)
+    phase3_needs_migration = has_legacy_docs and (
+        not has_events or fallback_active
+    )
+    # nexus-o6aa.10.4 fix: with --i-have-completed-the-reader-migration,
+    # the Phase 4 finisher (prune + drain backfill) needs to run even
+    # when Phase 3 is already done. The previous gate skipped to
+    # "nothing to do" and never reached the Phase 4 step. Idempotent on
+    # already-pruned catalogs (chunks_already_pruned counts the no-ops).
+    phase4_needs_run = (
+        reader_migration_done and not no_chunks and has_events
+    )
+    needs_migration = phase3_needs_migration or phase4_needs_run
 
     if not needs_migration:
         report = {
@@ -4897,13 +4922,20 @@ def migrate_cmd(
             click.echo(f"Nothing to do — {report['reason']}.")
         return
 
+    # Track whether the Phase 3 steps need to run (Phase 4 alone path
+    # skips synthesize-log + first backfill). Steps below honor this.
+    phase3_only = phase3_needs_migration and not phase4_needs_run
+    skip_phase3 = phase4_needs_run and not phase3_needs_migration
+
     if dry_run:
-        would_run = [
-            f"nx catalog synthesize-log --force"
-            + ("" if no_chunks else " --chunks"),
-        ]
-        if not no_chunks:
-            would_run.append("nx catalog t3-backfill-doc-id")
+        would_run = []
+        if not skip_phase3:
+            would_run.append(
+                f"nx catalog synthesize-log --force"
+                + ("" if no_chunks else " --chunks")
+            )
+            if not no_chunks:
+                would_run.append("nx catalog t3-backfill-doc-id")
         if reader_migration_done and not no_chunks:
             would_run.extend([
                 "nx catalog prune-deprecated-keys "
@@ -4938,45 +4970,53 @@ def migrate_cmd(
     # operator was guessing whether the process was alive.
     import time as _time
 
-    # Step 1: synthesize-log --force.
-    click.echo("==> nx catalog synthesize-log --force"
-               + ("" if no_chunks else " --chunks"))
-    _step1_t0 = _time.monotonic()
-    try:
-        ctx.invoke(synthesize_log_cmd, **{
-            "dry_run": False,
-            "force": True,
-            "chunks": not no_chunks,
-            "as_json": False,
-        })
-    except click.ClickException as exc:
-        raise click.ClickException(
-            f"synthesize-log failed: {exc.message}. Migration aborted; "
-            "no further steps run."
-        ) from exc
-    click.echo(
-        f"    synthesize-log: {_time.monotonic() - _step1_t0:.1f}s",
-    )
-
-    # Step 2: t3-backfill-doc-id (unless --no-chunks).
-    if not no_chunks:
-        click.echo("==> nx catalog t3-backfill-doc-id")
-        _step2_t0 = _time.monotonic()
+    # Steps 1-2: Phase 3 work. Skipped when only the Phase 4 finisher
+    # needs to run (Phase 3 is already complete).
+    if not skip_phase3:
+        # Step 1: synthesize-log --force.
+        click.echo("==> nx catalog synthesize-log --force"
+                   + ("" if no_chunks else " --chunks"))
+        _step1_t0 = _time.monotonic()
         try:
-            ctx.invoke(t3_backfill_doc_id_cmd, **{
+            ctx.invoke(synthesize_log_cmd, **{
                 "dry_run": False,
-                "collection_filter": "",
+                "force": True,
+                "chunks": not no_chunks,
                 "as_json": False,
             })
         except click.ClickException as exc:
             raise click.ClickException(
-                f"t3-backfill-doc-id failed: {exc.message}. Migration "
-                "partial; events.jsonl is current but T3 chunks may "
-                "lack doc_id metadata. Re-run 'nx catalog "
-                "t3-backfill-doc-id' after fixing the underlying issue."
+                f"synthesize-log failed: {exc.message}. Migration aborted; "
+                "no further steps run."
             ) from exc
         click.echo(
-            f"    t3-backfill-doc-id: {_time.monotonic() - _step2_t0:.1f}s",
+            f"    synthesize-log: {_time.monotonic() - _step1_t0:.1f}s",
+        )
+
+        # Step 2: t3-backfill-doc-id (unless --no-chunks).
+        if not no_chunks:
+            click.echo("==> nx catalog t3-backfill-doc-id")
+            _step2_t0 = _time.monotonic()
+            try:
+                ctx.invoke(t3_backfill_doc_id_cmd, **{
+                    "dry_run": False,
+                    "collection_filter": "",
+                    "as_json": False,
+                })
+            except click.ClickException as exc:
+                raise click.ClickException(
+                    f"t3-backfill-doc-id failed: {exc.message}. Migration "
+                    "partial; events.jsonl is current but T3 chunks may "
+                    "lack doc_id metadata. Re-run 'nx catalog "
+                    "t3-backfill-doc-id' after fixing the underlying issue."
+                ) from exc
+            click.echo(
+                f"    t3-backfill-doc-id: {_time.monotonic() - _step2_t0:.1f}s",
+            )
+    else:
+        click.echo(
+            "Phase 3 already complete (events.jsonl covers documents.jsonl). "
+            "Running Phase 4 finisher only."
         )
 
     # Synchronize live SQLite to events.jsonl before doctor runs.
@@ -5306,13 +5346,22 @@ def prune_deprecated_keys_cmd(
             })
             continue
 
+        # Pre-fetch the total chunk count so progress can show
+        # offset/total. Cheap (one round-trip) versus walking 200+
+        # pages with no denominator. Falls back to "?" on error.
+        try:
+            total_chunks = col.count()
+        except Exception:
+            total_chunks = None
+
         if show_progress:
             click.echo(
                 f"  [prune {coll_idx}/{len(target_collections)}] "
-                f"{coll_name}…",
+                f"{coll_name}: {total_chunks if total_chunks is not None else '?'} chunks…",
                 err=True,
             )
         _tc = _time.monotonic()
+        _last_progress = _tc
         coll_updated_before = chunks_updated
         coll_already_before = chunks_already_pruned
 
@@ -5360,6 +5409,25 @@ def prune_deprecated_keys_cmd(
             elif update_ids:
                 # Dry run: count what would change.
                 chunks_updated += len(update_ids)
+
+            # Per-page heartbeat every 5 seconds so large collections
+            # don't look hung. Threshold-throttled rather than
+            # per-page so small collections stay quiet.
+            if show_progress and _time.monotonic() - _last_progress >= 5.0:
+                pages_done = offset // 300 + 1
+                progressed = offset + len(ids)
+                pct = (
+                    f"{(progressed / total_chunks) * 100:.0f}%"
+                    if total_chunks
+                    else "?"
+                )
+                click.echo(
+                    f"      page {pages_done}: "
+                    f"{progressed}/{total_chunks if total_chunks else '?'} "
+                    f"({pct}), updated={chunks_updated - coll_updated_before}",
+                    err=True,
+                )
+                _last_progress = _time.monotonic()
 
             if len(ids) < 300:
                 break
