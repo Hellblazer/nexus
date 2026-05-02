@@ -126,6 +126,35 @@ class TestT3DatabaseLocalMode:
         assert len(results) >= 1
         assert any("Python" in r.get("content", "") for r in results)
 
+    def test_local_mode_put_does_not_emit_source_path(
+        self, local_db: T3Database,
+    ) -> None:
+        """RDR-102 D2 / Phase B per-writer absence guard for the MCP
+        ``store_put`` path (db/t3.py:627). MCP-stored docs are
+        single-chunk and route through ``make_chunk_metadata`` like
+        every other writer; after Phase B they MUST land without
+        source_path. Closes the RF-4 inventory: 6 indexer call sites
+        + this MCP put site = 7 writer paths verified absent.
+        """
+        local_db.put(
+            collection="knowledge__source_path_check",
+            content="MCP put has no on-disk source",
+            title="mcp-no-source-path",
+        )
+        col = local_db.get_or_create_collection(
+            "knowledge__source_path_check",
+        )
+        rows = col.get(include=["metadatas"])
+        assert rows["metadatas"], "expected MCP put to land at least one chunk"
+        leaked = [m for m in rows["metadatas"] if "source_path" in m]
+        assert not leaked, (
+            f"{len(leaked)}/{len(rows['metadatas'])} MCP store_put "
+            f"chunks still carry source_path. Phase B dropped the "
+            f"source_path= kwarg from db/t3.py:627; if this test fails "
+            f"a regression has re-added it OR ALLOWED_TOP_LEVEL has "
+            f"re-acquired source_path."
+        )
+
     def test_local_mode_search_skips_cce(self, local_db: T3Database) -> None:
         assert local_db._voyage_client is None
         local_db.put(collection="knowledge__test", content="test content", title="t1")

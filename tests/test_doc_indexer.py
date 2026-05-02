@@ -1823,10 +1823,19 @@ def test_preflight_registration_idempotent_on_staleness_skip(
     assert n1 > 0, "expected first index_markdown to upsert chunks"
 
     after_first = _doc_registered_count(cat_dir, sp)
-    assert after_first >= 1, (
-        f"expected at least 1 DocumentRegistered event after first index; "
-        f"got {after_first}. Pre-flight registration must materialise the "
-        f"Document row in the event log."
+    # Expected count is 1 OR 2 — Catalog.update() also writes a
+    # DocumentRegistered event (lossless replay model at
+    # catalog.py:1865-1888), so the post-hook's existing-row update
+    # for chunk_count adds a second event. The exact count depends on
+    # whether the post-hook fired (it does for count > 0). Either
+    # value is fine; the load-bearing assertion is the delta-0 check
+    # below — re-indexing an unchanged file must add ZERO events.
+    assert 1 <= after_first <= 2, (
+        f"expected 1 or 2 DocumentRegistered events after first index "
+        f"(pre-flight register + optional post-hook update); got "
+        f"{after_first}. A value > 2 indicates pre-flight or post-hook "
+        f"is double-registering — the by_file_path early-return / the "
+        f"if-existing/update branch is broken."
     )
 
     # Drop the process-cached Catalog so the second call re-reads the

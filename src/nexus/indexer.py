@@ -1120,22 +1120,49 @@ def _prune_deleted_files(
     docs_collection: str,
     all_current_paths: set[str],
     db: object,
+    *,
+    file_to_doc_id: dict[Path, str] | None = None,
 ) -> None:
     """Remove chunks for files that no longer exist in the repo (C3 fix).
 
-    Queries each collection for all distinct source_paths and deletes chunks
-    for any path not in *all_current_paths*.
+    Queries each collection for all distinct chunk identities and deletes
+    chunks for any file no longer present in the repo.
+
+    RDR-102 D2: source_path is no longer written to chunks at the
+    canonical write path; identity is keyed on the catalog tumbler
+    (``doc_id``) for chunks the post-Phase-A writer produced. The
+    *file_to_doc_id* map (always populated by the catalog hook when a
+    catalog is initialized) provides the current ``{abs_path: doc_id}``
+    set; chunks whose ``doc_id`` is NOT in that map's value set are
+    "deleted-file" chunks and get pruned. Legacy chunks (no ``doc_id``
+    in metadata, pre-Phase-A) fall back to the source_path lookup so
+    pre-RDR-102 collections keep getting cleaned up — RDR-101 Phase 5b
+    will drop the fallback once the prune verb has run on every
+    collection.
     """
+    file_to_doc_id = file_to_doc_id or {}
+    current_doc_ids: set[str] = {d for d in file_to_doc_id.values() if d}
+
     for collection_name in (code_collection, docs_collection):
         col = db.get_or_create_collection(collection_name)
-        # Get all chunks to find unique source_paths (paginated — Cloud cap is 300)
+        # Get all chunks to find their identities (paginated — Cloud cap is 300)
         all_chunks = _paginated_get(col, include=["metadatas"])
         if not all_chunks["ids"]:
             continue
 
-        # Group chunk IDs by source_path
         stale_ids: list[str] = []
         for chunk_id, meta in zip(all_chunks["ids"], all_chunks["metadatas"]):
+            doc_id = meta.get("doc_id", "")
+            if doc_id:
+                # Phase A path: chunk carries catalog tumbler. Stale iff
+                # the tumbler is not in the current file_to_doc_id values.
+                if current_doc_ids and doc_id not in current_doc_ids:
+                    stale_ids.append(chunk_id)
+                continue
+            # Legacy fallback: chunk pre-dates Phase A doc_id wiring AND
+            # was written before Phase B dropped source_path. Phase 5b
+            # cleanup will drop this branch once the prune verb has
+            # swept every collection.
             source_path = meta.get("source_path", "")
             if source_path and source_path not in all_current_paths:
                 stale_ids.append(chunk_id)
@@ -1548,7 +1575,10 @@ def _run_index(
             all_current_paths.add(str(f))
         for _, f in pdf_files:
             all_current_paths.add(str(f))
-        _prune_deleted_files(code_collection, docs_collection, all_current_paths, db)
+        _prune_deleted_files(
+            code_collection, docs_collection, all_current_paths, db,
+            file_to_doc_id=file_to_doc_id,
+        )
         _phase(f"Pruning deleted files done ({time.monotonic() - _t:.1f}s)")
 
         # Stamp pipeline version on force indexing (after all work completes)
