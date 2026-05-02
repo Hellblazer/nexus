@@ -133,22 +133,35 @@ class ReadFail:
 ReadResult = ReadOk | ReadFail
 
 
-# ── Chroma identity-field dispatch (research-4, id 1011; P2.0 refined) ───────
+# ── Chroma identity-field dispatch (RDR-101 Phase 4, nexus-o6aa.10.1) ────────
 
 
-# Three collection-shape conventions live in T3 today:
-#   - nx index ingests (rdr__/docs__/code__/knowledge__<paper-coll>) populate
-#     ``source_path`` (filesystem path or PDF path).
-#   - store_put MCP / nx memory promote ingests (knowledge__knowledge) populate
-#     ``title`` (slug). The chunk has NO source_path metadata.
-#   - PDF papers ingested into knowledge__<corpus> via nx index pdf populate
-#     ``source_path`` (filesystem path); ``title`` is None on these chunks.
+# Post-Phase-4 dispatch: every collection prefix identifies chunks by the
+# catalog-stable ``doc_id`` (mirrors ``Document.doc_id``). The chroma reader
+# resolves the URI's source identifier to a ``doc_id`` via a caller-supplied
+# projection callable (``doc_id_lookup`` keyword on ``_read_chroma_uri`` /
+# ``read_source``); without that callable the reader falls back to the
+# legacy ``(source_path, title)`` probe so callers without catalog access
+# (tests, ad-hoc CLI runs) keep working.
 #
-# The mapping value is an ORDERED tuple: the reader tries each field in turn
-# and uses the first one that returns chunks. ``source_path`` is preferred
-# because it dominates the catalog by chunk-volume; ``title`` is the
-# slug-shaped fallback for memory-promoted entries.
+# Pre-Phase-4 the dispatch was per-prefix and per-shape: ``source_path`` for
+# ``nx index``-ingested collections, ``(source_path, title)`` for
+# ``knowledge__*`` to handle slug-shaped MCP-promoted notes. The legacy probe
+# below preserves that behavior for back-compat callers; the load-bearing
+# claim post-RDR-101 is the doc_id-keyed path.
 CHROMA_IDENTITY_FIELD: dict[str, tuple[str, ...]] = {
+    "rdr__":       ("doc_id",),
+    "docs__":      ("doc_id",),
+    "code__":      ("doc_id",),
+    "knowledge__": ("doc_id",),
+}
+
+
+# Legacy fallback fields, used by ``_read_chroma_uri`` only when the caller
+# does not supply a ``doc_id_lookup``. Mirrors the pre-Phase-4 dispatch
+# table. Slated for removal once the prune verb (.10.3) lands and chunks
+# uniformly carry ``doc_id`` metadata.
+_LEGACY_IDENTITY_FIELDS: dict[str, tuple[str, ...]] = {
     "rdr__":       ("source_path",),
     "docs__":      ("source_path",),
     "code__":      ("source_path",),
@@ -158,11 +171,24 @@ CHROMA_IDENTITY_FIELD: dict[str, tuple[str, ...]] = {
 
 def _identity_fields_for(collection: str) -> tuple[str, ...]:
     """Return the ordered tuple of chunk-metadata fields that identify
-    a source document in ``collection``. Falls back to
-    ``("source_path",)`` for unknown prefixes — the dominant
-    convention in legacy ingests.
+    a source document in ``collection``. Post-RDR-101 Phase 4 every
+    prefix maps to ``("doc_id",)`` uniformly; the legacy multi-field
+    probe lives behind ``_legacy_identity_fields_for`` for back-compat.
     """
     for prefix, fields in CHROMA_IDENTITY_FIELD.items():
+        if collection.startswith(prefix):
+            return fields
+    return ("doc_id",)
+
+
+def _legacy_identity_fields_for(collection: str) -> tuple[str, ...]:
+    """Return the pre-RDR-101 identity fields for *collection*.
+
+    ``source_path`` for ``nx index`` ingests, ``(source_path, title)``
+    for ``knowledge__*``. Used by ``_read_chroma_uri`` only when no
+    ``doc_id_lookup`` is supplied.
+    """
+    for prefix, fields in _LEGACY_IDENTITY_FIELDS.items():
         if collection.startswith(prefix):
             return fields
     return ("source_path",)
@@ -204,14 +230,97 @@ def _read_file_uri(uri: str, **_kw: Any) -> ReadResult:
 # ── chroma:// reader ─────────────────────────────────────────────────────────
 
 
-def _read_chroma_uri(uri: str, *, t3: Any = None, **_kw: Any) -> ReadResult:
+def _gather_chroma_chunks_by_field(
+    *,
+    coll: Any,
+    collection: str,
+    source_id: str,
+    identity_field: str,
+    match_value: str,
+) -> ReadResult:
+    """Page through ``coll.get(where={identity_field: match_value})`` and
+    return a ``ReadOk`` with chunks reassembled in ``chunk_index`` order
+    (insertion-sequence tiebreaker). ``ReadFail(reason='empty')`` when
+    no chunks match. Shared between the doc_id-keyed primary path
+    and the legacy multi-field probe.
+    """
+    chunks: list[tuple[int, int, str]] = []
+    seq = 0
+    offset = 0
+    page_limit = QUOTAS.MAX_QUERY_RESULTS
+    try:
+        while True:
+            page = coll.get(
+                where={identity_field: match_value},
+                limit=page_limit,
+                offset=offset,
+                include=["documents", "metadatas"],
+            )
+            docs = page.get("documents") or []
+            mds = page.get("metadatas") or []
+            if not docs:
+                break
+            for md, doc in zip(mds, docs):
+                if not doc:
+                    continue
+                ci = md.get("chunk_index", 0) if isinstance(md, dict) else 0
+                chunks.append((int(ci), seq, doc))
+                seq += 1
+            if len(docs) < page_limit:
+                break
+            offset += page_limit
+    except Exception as e:
+        return ReadFail(
+            reason="unreachable",
+            detail=(
+                f"chroma.get failed (field={identity_field!r}): "
+                f"{type(e).__name__}: {e}"
+            ),
+        )
+    if not chunks:
+        return ReadFail(
+            reason="empty",
+            detail=f"no chunks for {match_value!r} in {collection!r}",
+        )
+    chunks.sort(key=lambda triple: (triple[0], triple[1]))
+    text = "\n\n".join(doc for _, _, doc in chunks)
+    return ReadOk(
+        text=text,
+        metadata={
+            "scheme": "chroma",
+            "collection": collection,
+            "source_id": source_id,
+            "identity_field": identity_field,
+            "chunk_count": len(chunks),
+        },
+    )
+
+
+def _read_chroma_uri(
+    uri: str,
+    *,
+    t3: Any = None,
+    doc_id_lookup: Callable[[str, str], str] | None = None,
+    **_kw: Any,
+) -> ReadResult:
     """Reassemble a document from chroma chunks.
 
-    URI shape: ``chroma://<collection>/<source-identifier>``. The
-    identity field that ``<source-identifier>`` is matched against is
-    determined by the collection prefix via
-    :data:`CHROMA_IDENTITY_FIELD` — ``source_path`` for
-    rdr__/docs__/code__, ``title`` for knowledge__.
+    URI shape: ``chroma://<collection>/<source-identifier>``. Post
+    RDR-101 Phase 4 (nexus-o6aa.10.1), the ``<source-identifier>`` is
+    resolved to the catalog-stable ``doc_id`` via the caller's
+    ``doc_id_lookup`` projection, and the chunk lookup keys on
+    ``doc_id`` only. When no ``doc_id_lookup`` is provided the reader
+    falls back to the legacy ``(source_path, title)`` multi-field probe
+    so callers without catalog access (tests, ad-hoc CLI runs) keep
+    working.
+
+    ``doc_id_lookup`` is ``Callable[[collection, source_id], doc_id]``
+    where an empty-string return signals "no catalog entry maps this
+    source_id". An empty doc_id surfaces as
+    ``ReadFail(reason='unreachable')``, a structural failure shape
+    distinct from ``ReadFail(reason='empty')`` so the Phase 4 dry-run
+    gate can distinguish "chunk-set exists but unbacked by a catalog
+    row" (orphan / pre-backfill) from "no chunks at all".
 
     ``t3`` may be a ``T3Database`` instance, a raw chromadb client
     (``EphemeralClient`` / ``PersistentClient`` / ``CloudClient``),
@@ -236,7 +345,6 @@ def _read_chroma_uri(uri: str, *, t3: Any = None, **_kw: Any) -> ReadResult:
                 f"source_id={source_id!r})"
             ),
         )
-    identity_fields = _identity_fields_for(collection)
     try:
         coll = t3.get_collection(collection)
     except Exception as e:
@@ -244,75 +352,58 @@ def _read_chroma_uri(uri: str, *, t3: Any = None, **_kw: Any) -> ReadResult:
             reason="unreachable",
             detail=f"get_collection({collection!r}) failed: {type(e).__name__}: {e}",
         )
-    # Try each identity field in order; first non-empty result wins.
-    # Empirically (P2.0 spike survey 2026-04-27): knowledge__delos and
-    # knowledge__art chunks identify via ``source_path``; only
-    # knowledge__knowledge (slug-shaped MCP-promoted notes) identify via
-    # ``title``. The fallback list lets one reader handle both shapes.
-    matched_field = ""
-    chunks: list[tuple[int, int, str]] = []
-    page_limit = QUOTAS.MAX_QUERY_RESULTS
-    for identity_field in identity_fields:
-        # Tuple is (chunk_index, insertion_seq, text). The insertion
-        # sequence is the secondary sort key so chunks with missing
-        # or duplicate ``chunk_index`` values fall back to a
-        # deterministic arrival-order tiebreak rather than relying on
-        # chromadb's within-page ordering, which is not contractually
-        # stable.
-        chunks = []
-        seq = 0
-        offset = 0
+
+    # nexus-o6aa.10.1 doc_id-keyed path: resolve source_id → doc_id and
+    # query strictly on doc_id. An empty doc_id is a structural failure
+    # (catalog gap), not "no chunks".
+    if doc_id_lookup is not None:
         try:
-            while True:
-                page = coll.get(
-                    where={identity_field: source_id},
-                    limit=page_limit,
-                    offset=offset,
-                    include=["documents", "metadatas"],
-                )
-                docs = page.get("documents") or []
-                mds = page.get("metadatas") or []
-                if not docs:
-                    break
-                for md, doc in zip(mds, docs):
-                    if not doc:
-                        continue
-                    ci = md.get("chunk_index", 0) if isinstance(md, dict) else 0
-                    chunks.append((int(ci), seq, doc))
-                    seq += 1
-                if len(docs) < page_limit:
-                    break
-                offset += page_limit
+            doc_id = doc_id_lookup(collection, source_id) or ""
         except Exception as e:
             return ReadFail(
                 reason="unreachable",
                 detail=(
-                    f"chroma.get failed (field={identity_field!r}): "
+                    f"doc_id_lookup({collection!r}, {source_id!r}) raised "
                     f"{type(e).__name__}: {e}"
                 ),
             )
-        if chunks:
-            matched_field = identity_field
-            break
-    if not chunks:
-        return ReadFail(
-            reason="empty",
-            detail=(
-                f"no chunks for {source_id!r} in {collection!r} "
-                f"(identity_fields tried={list(identity_fields)})"
-            ),
+        if not doc_id:
+            return ReadFail(
+                reason="unreachable",
+                detail=(
+                    f"no doc_id mapped for {source_id!r} in {collection!r} "
+                    f"(catalog gap or pre-backfill chunk; the prune verb "
+                    f"requires --t3-doc-id-coverage=100% before running)"
+                ),
+            )
+        return _gather_chroma_chunks_by_field(
+            coll=coll, collection=collection, source_id=source_id,
+            identity_field="doc_id", match_value=doc_id,
         )
-    chunks.sort(key=lambda triple: (triple[0], triple[1]))
-    text = "\n\n".join(doc for _, _, doc in chunks)
-    return ReadOk(
-        text=text,
-        metadata={
-            "scheme": "chroma",
-            "collection": collection,
-            "source_id": source_id,
-            "identity_field": matched_field,
-            "chunk_count": len(chunks),
-        },
+
+    # Legacy multi-field probe (back-compat for callers without
+    # catalog access). Removed in Phase 5b once chunks uniformly carry
+    # doc_id and the prune verb has dropped source_path / title.
+    identity_fields = _legacy_identity_fields_for(collection)
+    last_fail: ReadFail | None = None
+    for identity_field in identity_fields:
+        result = _gather_chroma_chunks_by_field(
+            coll=coll, collection=collection, source_id=source_id,
+            identity_field=identity_field, match_value=source_id,
+        )
+        if isinstance(result, ReadOk):
+            return result
+        last_fail = result
+        # Only ``empty`` is retriable across the next legacy field;
+        # ``unreachable`` (chroma.get raised) means stop probing.
+        if result.reason != "empty":
+            return result
+    return last_fail or ReadFail(
+        reason="empty",
+        detail=(
+            f"no chunks for {source_id!r} in {collection!r} "
+            f"(identity_fields tried={list(identity_fields)})"
+        ),
     )
 
 
@@ -636,6 +727,7 @@ def read_source(
     *,
     t3: Any = None,
     scratch: Any = None,
+    doc_id_lookup: Callable[[str, str], str] | None = None,
 ) -> ReadResult:
     """Dispatch ``uri`` to its registered reader by scheme.
 
@@ -643,6 +735,10 @@ def read_source(
     upsert-guard in ``commands/enrich.py`` (Phase 1.3) logs and skips
     on any ``ReadFail``, so a missing reader is a visible-but-graceful
     failure mode, not a crash.
+
+    ``doc_id_lookup`` (RDR-101 Phase 4 / nexus-o6aa.10.1) is forwarded
+    to the chroma reader as the source-identifier → ``doc_id``
+    projection. Other readers ignore it.
     """
     if not uri:
         return ReadFail(reason="unreachable", detail="empty uri")
@@ -656,4 +752,4 @@ def read_source(
             reason="scheme_unknown",
             detail=f"no reader for scheme {scheme!r}",
         )
-    return reader(uri, t3=t3, scratch=scratch)
+    return reader(uri, t3=t3, scratch=scratch, doc_id_lookup=doc_id_lookup)
