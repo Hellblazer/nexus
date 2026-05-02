@@ -53,24 +53,30 @@ COLL_REPO_DOCS="docs__$GATE_PREFIX-repo"
 COLL_RDR=""  # filled in after `nx index rdr` based on its repo-hash convention
 
 CLEANUP_COLLECTIONS=()
-CLEANUP_SANDBOX=true
+SUCCESS=false  # set true at the very end of the happy path
 
 _die() { printf 'ERROR: %s\n' "$*" >&2; exit 3; }
 _say() { printf '\n=== %s ===\n' "$*"; }
 _log() { printf '  %s\n' "$*"; }
 
+# Trap discipline: only clean up on the explicit happy-path completion.
+# Signal-induced exits (SIGTERM, SIGINT) and set -e failures must leave
+# the sandbox + temp collections in place for forensics. Use an explicit
+# SUCCESS flag set at the script's tail rather than the exit code, which
+# can be 0 for the last command run before a signal.
 cleanup() {
-  local rc=$?
-  if [[ $rc -ne 0 ]]; then
-    printf '\n!!! Failure (exit %d) — sandbox left at %s for forensics\n' "$rc" "$SANDBOX" >&2
-    printf '!!! Temp T3 collections (delete manually if you like):\n' >&2
-    for c in "${CLEANUP_COLLECTIONS[@]}"; do printf '!!!   %s\n' "$c" >&2; done
+  if ! $SUCCESS; then
+    printf '\n!!! Run did not complete successfully — sandbox left at %s for forensics\n' "$SANDBOX" >&2
+    if (( ${#CLEANUP_COLLECTIONS[@]} > 0 )); then
+      printf '!!! Temp T3 collections (delete manually):\n' >&2
+      for c in "${CLEANUP_COLLECTIONS[@]}"; do
+        printf '!!!   nx collection delete %s --yes\n' "$c" >&2
+      done
+    fi
     return
   fi
-  if $CLEANUP_SANDBOX; then
-    printf '\nCleaning up sandbox at %s\n' "$SANDBOX"
-    rm -rf "$SANDBOX"
-  fi
+  printf '\nCleaning up sandbox at %s\n' "$SANDBOX"
+  rm -rf "$SANDBOX"
   if (( ${#CLEANUP_COLLECTIONS[@]} > 0 )); then
     printf 'Cleaning up %d temp T3 collections\n' "${#CLEANUP_COLLECTIONS[@]}"
     for c in "${CLEANUP_COLLECTIONS[@]}"; do
@@ -223,29 +229,67 @@ nx index repo "$REPO_FIXTURE" --corpus "$GATE_PREFIX-repo" >/dev/null 2>&1 || {
 }
 CLEANUP_COLLECTIONS+=("$COLL_REPO_CODE" "$COLL_REPO_DOCS")
 
-# Verify each collection: no source_path, doc_id populated.
+# Verify each collection: no source_path, doc_id populated. Direct
+# chunk inspection via Python — bypasses the doctor coverage path
+# (which only sees collections with non-orphan ChunkIndexed events
+# in events.jsonl, and fresh writes haven't been synthesize-log'd
+# yet) and the prune-deprecated-keys verb (which requires the
+# --i-have-completed-the-reader-migration acknowledgement and is
+# the wrong tool to gate on for this purpose).
 GATE_1_PASS=true
-echo "| collection | source_path leaks | doc_id coverage | verdict |" >>"$REPORT"
-echo "|------------|-------------------|-----------------|---------|" >>"$REPORT"
+echo "| collection | total chunks | source_path leaks | missing doc_id | verdict |" >>"$REPORT"
+echo "|------------|--------------|-------------------|----------------|---------|" >>"$REPORT"
 
 for COLL in "$COLL_PDF" "$COLL_MD" "$COLL_RDR" "$COLL_REPO_CODE" "$COLL_REPO_DOCS"; do
-  # source_path leak check: prune-deprecated-keys --dry-run
-  PRUNE_JSON="$(nx catalog prune-deprecated-keys \
-    --dry-run --collection "$COLL" --json 2>/dev/null || echo '{}')"
-  SP_LEAKS="$(printf '%s' "$PRUNE_JSON" | jq -r '.chunks_updated // 0')"
+  CHECK_JSON="$(uv run python -c "
+import json
+import sys
+from nexus.db import make_t3
+t3 = make_t3()
+try:
+    col = t3._client.get_collection(name='$COLL')
+except Exception as exc:
+    print(json.dumps({'error': f'open: {exc}'}))
+    sys.exit(0)
+total, sp_leaks, missing_docid = 0, 0, 0
+offset = 0
+while True:
+    page = col.get(limit=300, offset=offset, include=['metadatas'])
+    ids = page.get('ids') or []
+    metas = page.get('metadatas') or []
+    if not ids:
+        break
+    for m in metas:
+        m = m or {}
+        total += 1
+        if 'source_path' in m:
+            sp_leaks += 1
+        if not m.get('doc_id'):
+            missing_docid += 1
+    if len(ids) < 300:
+        break
+    offset += 300
+print(json.dumps({'total': total, 'source_path_leaks': sp_leaks, 'missing_doc_id': missing_docid}))
+" 2>&1 | tail -1)"
 
-  # doc_id coverage check: doctor --t3-doc-id-coverage filtered to coll
-  COV_JSON="$(nx catalog doctor --t3-doc-id-coverage --json 2>/dev/null || echo '{}')"
-  COV="$(printf '%s' "$COV_JSON" | jq -r ".t3_doc_id_coverage.tables[\"$COLL\"].coverage // \"-\"")"
-
-  if [[ "$SP_LEAKS" == "0" ]] && [[ "$COV" == "1.0" || "$COV" == "1" ]]; then
-    VERDICT="PASS"
-  else
-    VERDICT="FAIL"
+  if printf '%s' "$CHECK_JSON" | jq -e '.error' >/dev/null 2>&1; then
+    TOTAL="-"; SP_LEAKS="-"; MISSING="-"
+    VERDICT="ERROR: $(printf '%s' "$CHECK_JSON" | jq -r '.error')"
     GATE_1_PASS=false
+  else
+    TOTAL="$(printf '%s' "$CHECK_JSON" | jq -r '.total // "-"')"
+    SP_LEAKS="$(printf '%s' "$CHECK_JSON" | jq -r '.source_path_leaks // "-"')"
+    MISSING="$(printf '%s' "$CHECK_JSON" | jq -r '.missing_doc_id // "-"')"
+    if [[ "$TOTAL" != "0" && "$TOTAL" != "-" ]] && \
+       [[ "$SP_LEAKS" == "0" ]] && [[ "$MISSING" == "0" ]]; then
+      VERDICT="PASS"
+    else
+      VERDICT="FAIL"
+      GATE_1_PASS=false
+    fi
   fi
-  echo "| \`$COLL\` | $SP_LEAKS | $COV | $VERDICT |" >>"$REPORT"
-  _log "  $COLL  source_path=$SP_LEAKS  coverage=$COV  $VERDICT"
+  echo "| \`$COLL\` | $TOTAL | $SP_LEAKS | $MISSING | $VERDICT |" >>"$REPORT"
+  _log "  $COLL  total=$TOTAL  source_path_leaks=$SP_LEAKS  missing_doc_id=$MISSING  $VERDICT"
 done
 echo "" >>"$REPORT"
 
@@ -360,3 +404,9 @@ echo "Report saved to: $REPORT (will be deleted on cleanup; copy if you want to 
 PERMANENT_REPORT="$HOME/rdr-102-phase-d-report-$TS.md"
 cp "$REPORT" "$PERMANENT_REPORT"
 echo "Report also copied to: $PERMANENT_REPORT (survives cleanup)"
+
+# Mark success so the EXIT trap performs cleanup. Any failure path
+# above (set -e exit, exit 1/2 on gate FAIL, signal-induced exit)
+# leaves SUCCESS=false and the trap preserves the sandbox + temp
+# collections for forensics.
+SUCCESS=true
