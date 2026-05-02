@@ -13,9 +13,9 @@ from voyageai.object.contextualized_embeddings import (
 from voyageai.object.embeddings import EmbeddingsObject
 
 from nexus.doc_indexer import (
-    _batch_chunks_for_cce, _embed_with_fallback, _markdown_chunks,
-    _TokenBucket, batch_index_markdowns, batch_index_pdfs,
-    index_markdown, index_pdf,
+    _batch_chunks_for_cce, _embed_with_fallback, _identity_where,
+    _lookup_existing_doc_id, _markdown_chunks, _TokenBucket,
+    batch_index_markdowns, batch_index_pdfs, index_markdown, index_pdf,
 )
 from tests.conftest import set_credentials
 
@@ -147,6 +147,70 @@ def voyage_client():
     client = MagicMock()
     _add_cce_mock(client)
     return client
+
+
+# ── nexus-dcym: doc_id-keyed identity helpers ──────────────────────────────
+
+
+def test_lookup_existing_doc_id_returns_empty_when_catalog_absent(tmp_path, monkeypatch):
+    """nexus-dcym: catalog uninitialized → "". Caller falls back to source_path."""
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "no-catalog"))
+    assert _lookup_existing_doc_id("/some/file.pdf", "any-corpus") == ""
+
+
+def test_lookup_existing_doc_id_finds_registered_entry(tmp_path, monkeypatch):
+    """When the catalog already registered *file_path* under *corpus*'s
+    owner, the helper returns the tumbler stringified as the doc_id."""
+    from nexus.catalog.catalog import Catalog
+    cat_dir = tmp_path / "cat"
+    cat = Catalog.init(cat_dir)
+    owner = cat.register_owner("mybook", "curator")
+    file_path = "/abs/path/paper.pdf"
+    doc = cat.register(
+        owner, "Paper Title", content_type="paper",
+        file_path=file_path, corpus="mybook",
+        physical_collection="docs__mybook",
+    )
+
+    monkeypatch.setattr("nexus.config.catalog_path", lambda: cat_dir)
+    result = _lookup_existing_doc_id(file_path, "mybook")
+    assert result == str(doc)
+
+
+def test_identity_where_prefers_doc_id(tmp_path, monkeypatch):
+    """nexus-dcym: when a catalog entry exists, the where filter keys
+    on doc_id; missing entries fall back to source_path. WITH TEETH:
+    if the helper accidentally drops the doc_id branch the test fails.
+    """
+    from nexus.catalog.catalog import Catalog
+    cat_dir = tmp_path / "cat"
+    cat = Catalog.init(cat_dir)
+    owner = cat.register_owner("mybook", "curator")
+    file_path = "/abs/path/paper.pdf"
+    doc = cat.register(
+        owner, "Paper", content_type="paper", file_path=file_path,
+        corpus="mybook", physical_collection="docs__mybook",
+    )
+
+    monkeypatch.setattr("nexus.config.catalog_path", lambda: cat_dir)
+
+    # Registered file → doc_id branch.
+    where = _identity_where(file_path, "mybook")
+    assert where == {"doc_id": str(doc)}
+
+    # Unregistered file → source_path branch (back-compat).
+    where_legacy = _identity_where("/abs/path/other.pdf", "mybook")
+    assert where_legacy == {"source_path": "/abs/path/other.pdf"}
+
+
+def test_identity_where_falls_back_when_corpus_owner_missing(tmp_path, monkeypatch):
+    """corpus that has no owner row → "" → source_path fallback."""
+    from nexus.catalog.catalog import Catalog
+    cat_dir = tmp_path / "cat"
+    Catalog.init(cat_dir)
+    monkeypatch.setattr("nexus.config.catalog_path", lambda: cat_dir)
+    where = _identity_where("/abs/path/x.pdf", "missing-corpus")
+    assert where == {"source_path": "/abs/path/x.pdf"}
 
 
 def test_index_md_falls_back_to_local_embedder_when_no_credentials(
