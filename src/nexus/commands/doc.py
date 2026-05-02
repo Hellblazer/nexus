@@ -546,13 +546,14 @@ def _phase4_catalog_t3_chash() -> tuple[Any, Any, Any]:
     T3 comes from ``nexus.db.make_t3``. ChashIndex opens the same T2
     path used by every other T2 store.
     """
-    from nexus.catalog.catalog import Catalog
+    from nexus.catalog import open_cached
     from nexus.db import make_t3
     from nexus.db.t2.chash_index import ChashIndex
 
     db_path = default_db_path()
     cat_path = db_path.parent / "catalog"
-    cat: Any = Catalog(cat_path, cat_path / ".catalog.db")
+    # nexus-6xqk follow-up: read-mostly catalog accessor for doc query.
+    cat: Any = open_cached(cat_path)
     t3: Any = make_t3()
     chash_index: Any = ChashIndex(db_path)
     return cat, t3, chash_index

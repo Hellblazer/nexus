@@ -21,13 +21,16 @@ def _doc_id_to_file_path(doc_id: str) -> str:
     returns "" and the caller treats the chunk as sourceless.
     """
     try:
-        from nexus.catalog import Catalog
+        from nexus.catalog import Catalog, open_cached
         from nexus.config import catalog_path
 
         cat_path = catalog_path()
         if not Catalog.is_initialized(cat_path):
             return ""
-        cat = Catalog(cat_path, cat_path / ".catalog.db")
+        # nexus-6xqk follow-up: process-cached singleton avoids the
+        # storm of _ensure_consistent rebuilds when this helper fires
+        # per-chunk on a large collection.
+        cat = open_cached(cat_path)
         entry = cat.by_doc_id(doc_id)
         if entry is None:
             return ""

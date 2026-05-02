@@ -695,12 +695,15 @@ def _check_chroma_pagination(client: object, db_name: str) -> list[HealthResult]
 
 def _check_catalog() -> list[HealthResult]:
     try:
+        from nexus.catalog import open_cached
         from nexus.catalog.catalog import Catalog
         from nexus.config import catalog_path
 
         cat_path = catalog_path()
         if Catalog.is_initialized(cat_path):
-            cat = Catalog(cat_path, cat_path / ".catalog.db")
+            # nexus-6xqk follow-up: read-only health check uses the
+            # process-cached singleton, avoiding the rebuild contention.
+            cat = open_cached(cat_path)
             doc_count = cat._db.execute("SELECT count(*) FROM documents").fetchone()[0]
             link_count = cat._db.execute("SELECT count(*) FROM links").fetchone()[0]
             return [HealthResult(

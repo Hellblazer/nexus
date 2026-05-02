@@ -467,7 +467,9 @@ def _resolve_dt_uri_from_tumbler(tumbler: str) -> str | None:
         raise click.ClickException(
             "Catalog not initialized. Run 'nx catalog setup' first.",
         )
-    cat = Catalog(path, path / ".catalog.db")
+    # nexus-6xqk follow-up: read-only resolve uses the process cache.
+    from nexus.catalog import open_cached
+    cat = open_cached(path)
     try:
         t, err = resolve_tumbler(cat, tumbler)
         if err:
