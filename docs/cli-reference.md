@@ -629,6 +629,34 @@ Standard catalog management. Run `nx catalog COMMAND --help` for details.
 
 ---
 
+## nx t3
+
+T3 (ChromaDB) maintenance commands. Distinct from `nx catalog gc`: `nx t3` operates on T3 chunks, the catalog command operates on catalog rows.
+
+### nx t3 prune-stale
+
+```
+nx t3 prune-stale [-c COLLECTION] [--no-dry-run --confirm]
+```
+
+Sweep T3 chunks whose `source_path` is missing from disk. Default is report-only; both `--no-dry-run` AND `--confirm` are required to delete.
+
+### nx t3 gc
+
+```
+nx t3 gc -c COLLECTION [--orphan-window 30d] [--no-dry-run --yes]
+```
+
+Garbage-collect orphaned T3 chunks (RDR-101 Phase 6 / nexus-r5eo). A chunk is an orphan when its `doc_id` metadata is no longer in the catalog projection's alive set for the collection AND its `indexed_at` predates the orphan window (default 30 days).
+
+Per RF-101-3, `nx t3 gc` is the SOLE post-Phase-3 emitter of `ChunkOrphaned` events and the SOLE path that physically deletes T3 chunks. The strict per-candidate order is: append `ChunkOrphaned(chunk_id, reason)` to the event log, THEN call `T3Database.delete_by_chunk_ids`. A crash between the two leaves the log consistent with T3 (event present, delete pending), and the next run idempotently retries the delete.
+
+Default is report-only; both `--no-dry-run` AND `--yes` are required to actually delete. Chunks without a `doc_id` (legacy pre-Phase-2 backfill) are undecidable here and skipped; use a maintenance backfill verb to address them, not GC.
+
+`--orphan-window` accepts `s`, `m`, `h`, `d`, `w` suffixes (e.g. `30d`, `12h`, `2w`); a bare integer is rejected so a typo cannot silently mean 30 seconds.
+
+---
+
 ## nx taxonomy
 
 Topic taxonomy — HDBSCAN clustering of T3 collection embeddings into topics for navigation, search grouping, and relevance boosting.

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import threading
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -1173,6 +1174,67 @@ class T3Database:
         if ids:
             self._delete_batch(col, collection_name, ids)
         return len(ids)
+
+    def list_chunks_with_metadata(
+        self,
+        collection_name: str,
+        *,
+        fields: tuple[str, ...] = ("doc_id", "indexed_at"),
+    ) -> Iterator[tuple[str, dict[str, str]]]:
+        """Yield ``(chunk_id, metadata_subset)`` for every chunk in a collection.
+
+        Paginates ``col.get()`` to respect the ChromaDB Cloud 300-record
+        limit. ``metadata_subset`` contains only the requested ``fields``,
+        with empty strings for missing keys, so callers do not need to
+        guard each key access. The default fields support RDR-101 Phase 6
+        ``nx t3 gc`` (``doc_id`` for orphan detection, ``indexed_at`` for
+        the orphan-window filter).
+        """
+        try:
+            col = self._client_for(collection_name).get_collection(collection_name)
+        except _ChromaNotFoundError:
+            return
+        offset = 0
+        page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
+        while True:
+            result = _chroma_with_retry(
+                col.get,
+                include=["metadatas"],
+                limit=page_limit,
+                offset=offset,
+            )
+            page_ids = result.get("ids") or []
+            page_metas = result.get("metadatas") or []
+            if not page_ids:
+                break
+            for cid, meta in zip(page_ids, page_metas):
+                if not isinstance(meta, dict):
+                    meta = {}
+                yield cid, {f: str(meta.get(f, "")) for f in fields}
+            offset += len(page_ids)
+            if len(page_ids) < page_limit:
+                break
+
+    def delete_by_chunk_ids(
+        self, collection_name: str, chunk_ids: list[str],
+    ) -> int:
+        """Delete chunks by explicit Chroma id. Returns count deleted.
+
+        The per-chunk-id deletion primitive used by ``nx t3 gc`` (RDR-101
+        Phase 6) and any future maintenance verb that selects orphan
+        candidates outside the ``source_path``/``doc_id`` join paths.
+        Empty ``chunk_ids`` is a no-op (returns 0); missing collection
+        returns 0 without raising. Same paginated batching as
+        :meth:`delete_by_source` via :meth:`_delete_batch`.
+        """
+        if not chunk_ids:
+            return 0
+        try:
+            col = self._client_for(collection_name).get_collection(collection_name)
+        except _ChromaNotFoundError:
+            return 0
+        self._delete_batch(col, collection_name, chunk_ids)
+        return len(chunk_ids)
 
     def update_source_path(
         self, collection_name: str, old_path: str, new_path: str
