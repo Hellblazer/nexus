@@ -1540,6 +1540,97 @@ class Catalog:
         ).fetchone()
         return bool(row and row[0])
 
+    def update_document_collection(
+        self, tumbler: str, new_collection: str,
+    ) -> bool:
+        """Re-point a single document's ``physical_collection``.
+
+        Per-row analog of :meth:`rename_collection` for migrations
+        where each document gets a different target (e.g. RDR-101
+        Phase 6 ``nx catalog migrate-fallback``). Emits
+        DocumentRegistered v: 0 with the new ``physical_collection``;
+        the projector's INSERT OR REPLACE updates the SQLite row.
+
+        Returns True if the doc was re-pointed, False if not found or
+        already pointed at ``new_collection`` (idempotent).
+        """
+        from nexus.catalog.synthesizer import _owner_prefix_of  # noqa: PLC0415
+
+        row = self._db.execute(
+            "SELECT tumbler, title, author, year, content_type, file_path, "
+            "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
+            "metadata, source_mtime, source_uri, alias_of "
+            "FROM documents WHERE tumbler = ?",
+            (tumbler,),
+        ).fetchone()
+        if row is None:
+            return False
+        if (row[7] or "") == new_collection:
+            return False
+
+        meta_dict = json.loads(row[11]) if row[11] else {}
+        event = _make_event(
+            _DocumentRegisteredPayload(
+                doc_id=row[0],
+                owner_id=_owner_prefix_of(row[0]),
+                content_type=row[4] or "",
+                source_uri=row[13] or "",
+                coll_id=new_collection,
+                title=row[1] or "",
+                source_mtime=float(row[12] or 0.0),
+                indexed_at_doc=row[10] or "",
+                tumbler=row[0],
+                author=row[2] or "",
+                year=int(row[3] or 0),
+                file_path=row[5] or "",
+                corpus=row[6] or "",
+                physical_collection=new_collection,
+                chunk_count=int(row[8] or 0),
+                head_hash=row[9] or "",
+                indexed_at=row[10] or "",
+                alias_of=row[14] or "",
+                meta=dict(meta_dict),
+            ),
+            v=0,
+        )
+        rec = {
+            "tumbler": row[0],
+            "title": row[1],
+            "author": row[2],
+            "year": row[3],
+            "content_type": row[4],
+            "file_path": row[5],
+            "corpus": row[6],
+            "physical_collection": new_collection,
+            "chunk_count": row[8],
+            "head_hash": row[9] or "",
+            "indexed_at": row[10] or "",
+            "meta": meta_dict,
+            "source_mtime": row[12] or 0.0,
+            "source_uri": row[13] or "",
+            "alias_of": row[14] or "",
+        }
+
+        dir_fd = self._acquire_lock()
+        try:
+            if self._event_sourced_enabled:
+                self._write_to_event_log(event)
+                self._projector.apply(event)
+                self._db.commit()
+                self._append_jsonl(self._documents_path, rec)
+            else:
+                self._append_jsonl(self._documents_path, rec)
+                self._db.execute(
+                    "UPDATE documents SET physical_collection = ? "
+                    "WHERE tumbler = ?",
+                    (new_collection, row[0]),
+                )
+                self._db.commit()
+                self._emit_shadow_event(event)
+        finally:
+            self._release_lock(dir_fd)
+        return True
+
     def supersede_collection(
         self,
         old_name: str,

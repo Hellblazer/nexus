@@ -385,6 +385,189 @@ def backfill_collections_cmd(dry_run: bool) -> None:
     )
 
 
+@catalog.command("migrate-fallback")
+@click.argument("source")
+@click.option(
+    "--target-model",
+    default="",
+    help="Override the target embedding model. Default: derived from "
+    "the source's content-type prefix (knowledge__/docs__/rdr__ → "
+    "voyage-context-3; code__ → voyage-code-3).",
+)
+@click.option(
+    "--target-version",
+    default="v1",
+    show_default=True,
+    help="Target model_version segment for new collections.",
+)
+@click.option(
+    "--dry-run/--no-dry-run",
+    default=False,
+    help="Report the migration proposal without writing.",
+)
+@click.option(
+    "--yes",
+    is_flag=True,
+    default=False,
+    help="Required to actually migrate. Without --yes, the command "
+    "falls back to report-only.",
+)
+def migrate_fallback_cmd(
+    source: str,
+    target_model: str,
+    target_version: str,
+    dry_run: bool,
+    yes: bool,
+) -> None:
+    """Migrate documents from a fallback collection to per-owner targets.
+
+    \b
+    Walks every document in SOURCE (a fallback like ``docs__default``
+    or ``knowledge__knowledge``) and proposes a target collection per
+    document, computed as
+    ``<content_type>__<owner>__<embedding_model>__<version>`` where
+    ``content_type`` and ``embedding_model`` come from the source's
+    prefix and ``owner`` comes from each document's tumbler.
+
+    \b
+    With --yes, re-points each document's physical_collection in the
+    catalog and auto-registers the target rows in the collections
+    projection. T3 chunks are NOT moved; the catalog-side migration
+    is enough to deprecate the fallback over time. Operators
+    repopulate the target by re-running ``nx index`` against the
+    source files; old chunks become orphans whose ``nx t3 gc`` will
+    sweep on the next cycle (catalog now points elsewhere, so the
+    chunk's doc_id is no longer alive in the source collection).
+
+    \b
+    Source must NOT already be conformant; conformant collections are
+    not fallbacks. Source must be registered in the projection (run
+    ``nx catalog backfill-collections`` first if needed).
+
+    \b
+    When the migration empties the source AND every doc landed in the
+    same target, the source row is marked superseded_by that target.
+    Multiple targets leave the source NOT superseded; the operator
+    deprecates manually.
+
+    \b
+    Examples:
+      nx catalog migrate-fallback knowledge__knowledge --dry-run
+      nx catalog migrate-fallback docs__default --yes
+    """
+    from nexus.corpus import (  # noqa: PLC0415
+        is_conformant_collection_name, voyage_model_for_collection,
+    )
+
+    cat = _get_catalog()
+
+    src_row = cat.get_collection(source)
+    if src_row is None:
+        raise click.ClickException(
+            f"source {source!r} is not registered in the collections "
+            f"projection. Run 'nx catalog backfill-collections' first."
+        )
+    if is_conformant_collection_name(source):
+        raise click.ClickException(
+            f"source {source!r} is already conformant; this is not a "
+            f"fallback collection."
+        )
+
+    if "__" not in source:
+        raise click.ClickException(
+            f"source {source!r} has no content-type prefix; cannot "
+            f"derive a migration target."
+        )
+    content_type = source.split("__", 1)[0]
+
+    if not target_model:
+        target_model = voyage_model_for_collection(source)
+
+    rows = cat._db.execute(
+        "SELECT tumbler FROM documents WHERE physical_collection = ? "
+        "ORDER BY tumbler",
+        (source,),
+    ).fetchall()
+
+    if not rows:
+        click.echo(f"{source}: 0 doc(s) to migrate.")
+        return
+
+    proposals: list[tuple[str, str]] = []
+    for (tumbler,) in rows:
+        owner = _owner_segment_for_tumbler(tumbler)
+        if not owner:
+            click.echo(
+                f"  WARN: could not derive owner from tumbler {tumbler!r}; "
+                f"skipping",
+                err=True,
+            )
+            continue
+        target = f"{content_type}__{owner}__{target_model}__{target_version}"
+        proposals.append((tumbler, target))
+
+    click.echo(
+        f"{source}: {len(proposals)} doc(s) -> "
+        f"{len({t for _, t in proposals})} target collection(s)"
+    )
+    for tumbler, target in proposals:
+        click.echo(f"  {tumbler}  ->  {target}")
+
+    if dry_run:
+        return
+    if not yes:
+        click.echo(
+            "\n--no-dry-run alone is treated as report-only. "
+            "Add --yes to actually migrate."
+        )
+        return
+
+    targets_seen: set[str] = set()
+    for tumbler, target in proposals:
+        if target not in targets_seen:
+            from nexus.corpus import parse_conformant_collection_name  # noqa: PLC0415
+            segments = parse_conformant_collection_name(target)
+            cat.register_collection(
+                target,
+                content_type=segments["content_type"],
+                owner_id=segments["owner_id"],
+                embedding_model=segments["embedding_model"],
+                model_version=segments["model_version"],
+            )
+            targets_seen.add(target)
+        cat.update_document_collection(tumbler, target)
+
+    if len(targets_seen) == 1:
+        only_target = next(iter(targets_seen))
+        cat.supersede_collection(
+            source, only_target, reason="migrate-fallback",
+        )
+        click.echo(
+            f"\nMigrated {len(proposals)} doc(s); source {source!r} "
+            f"superseded by {only_target!r}."
+        )
+    else:
+        click.echo(
+            f"\nMigrated {len(proposals)} doc(s) across "
+            f"{len(targets_seen)} target collection(s). Source "
+            f"{source!r} retained (multiple targets); operator "
+            f"deprecates manually if appropriate."
+        )
+
+
+def _owner_segment_for_tumbler(tumbler: str) -> str:
+    """Return the collection-name owner segment for a tumbler.
+
+    ``1.5.42`` → ``1-5`` (owner prefix with dots replaced by hyphens
+    so the result fits ChromaDB's name regex).
+    """
+    from nexus.catalog.synthesizer import _owner_prefix_of  # noqa: PLC0415
+    prefix = _owner_prefix_of(tumbler)
+    if not prefix:
+        return ""
+    return prefix.replace(".", "-")
+
+
 @catalog.command("rename-collection")
 @click.argument("old")
 @click.argument("new")
