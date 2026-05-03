@@ -4,7 +4,7 @@
 
 The collections projection (Phase 6 deliverable) is canonical: every
 collection name that T3 or the catalog documents knows about must
-have a row. Drift is a release blocker — a missing projection row
+have a row. Drift is a release blocker: a missing projection row
 means downstream Phase 6 work (rename-collection, supersede invariants,
 strict naming validation) silently sees the collection as "unknown"
 and either skips it or emits incorrect events.

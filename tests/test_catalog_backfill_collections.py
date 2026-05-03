@@ -10,7 +10,7 @@ collection-name sets, and emits a CollectionCreated event for each
 name not already in the projection.
 
 Conformance is decided by the projector via
-``is_conformant_collection_name`` — we don't pre-decide here. The
+``is_conformant_collection_name``, not by the caller. The
 backfill writer supplies empty canonical fields, which the projector
 preserves verbatim; conformant names that callers want decomposed
 into segments should re-register with the parsed segments after
