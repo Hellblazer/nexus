@@ -172,6 +172,79 @@ def delete_cmd(name: str, yes: bool) -> None:
         click.echo(f"Deleted: {name}")
 
 
+def rename_collection_data_plane(
+    old: str,
+    new: str,
+    *,
+    t3_db=None,
+    catalog=None,
+    on_warn: Callable[[str], None] | None = None,
+) -> dict[str, int]:
+    """Rename a collection across T3 + T2 + catalog cascades.
+
+    Extracted from ``rename_cmd`` so RDR-101 Phase 6's
+    ``nx catalog rename-collection`` can reuse the data-plane logic
+    without re-implementing the cascade. Pure function shape: takes
+    explicit T3 / Catalog handles, returns counts, raises only on the
+    hard validation failures (collection missing, already exists). T2
+    + catalog cascades are best-effort (T3 is already renamed by the
+    time they run, and rolling back a rename is nontrivial).
+
+    Returns a dict with keys ``tax_topics``, ``tax_assignments``,
+    ``tax_meta``, ``chash``, ``catalog_docs`` so callers can render
+    their own summaries.
+
+    ``on_warn`` is invoked with a string message when a cascade
+    fails open. The CLI default routes it to ``click.echo(...,
+    err=True)``; callers in non-CLI contexts can pass their own.
+    """
+    if on_warn is None:
+        on_warn = lambda msg: click.echo(msg, err=True)  # noqa: E731
+
+    if t3_db is None:
+        t3_db = _t3()
+
+    if not t3_db.collection_exists(old):
+        raise click.ClickException(f"collection not found: {old!r}")
+    if t3_db.collection_exists(new):
+        raise click.ClickException(f"collection already exists: {new!r}")
+
+    t3_db.rename_collection(old, new)
+
+    counts = {
+        "tax_topics": 0,
+        "tax_assignments": 0,
+        "tax_meta": 0,
+        "chash": 0,
+        "catalog_docs": 0,
+    }
+
+    try:
+        from nexus.commands._helpers import default_db_path  # noqa: PLC0415
+        from nexus.db.t2 import T2Database  # noqa: PLC0415
+
+        with T2Database(default_db_path()) as t2db:
+            tax = t2db.taxonomy.rename_collection(old, new)
+            counts["tax_topics"] = tax.get("topics", 0)
+            counts["tax_assignments"] = tax.get("assignments", 0)
+            counts["tax_meta"] = tax.get("meta", 0)
+            counts["chash"] = t2db.chash_index.rename_collection(old=old, new=new)
+    except Exception as exc:
+        on_warn(f"warn: T3 rename succeeded but T2 cascade failed: {exc}")
+
+    try:
+        if catalog is None:
+            from nexus.catalog.catalog import Catalog  # noqa: PLC0415
+            from nexus.config import catalog_path  # noqa: PLC0415
+            cat_path = catalog_path()
+            catalog = Catalog(cat_path, cat_path / ".catalog.db")
+        counts["catalog_docs"] = catalog.rename_collection(old, new)
+    except Exception as exc:
+        on_warn(f"warn: T3 rename succeeded but catalog cascade failed: {exc}")
+
+    return counts
+
+
 @collection.command("rename")
 @click.argument("old")
 @click.argument("new")
@@ -206,55 +279,19 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
             f"an orphaned collection with the wrong prefix)."
         )
 
-    db = _t3()
-    if not db.collection_exists(old):
-        raise click.ClickException(f"collection not found: {old!r}")
-    if db.collection_exists(new):
-        raise click.ClickException(f"collection already exists: {new!r}")
-
-    db.rename_collection(old, new)
-
-    # Cascade T2 + catalog. Fail-open: log and continue — T3 is already
-    # renamed, and rolling back a rename is nontrivial (would need a
-    # second modify(name=old)).
-    tax_counts: dict[str, int] | None = None
-    chash_updated = 0
-    cat_updated = 0
-    try:
-        from nexus.commands._helpers import default_db_path
-        from nexus.db.t2 import T2Database
-
-        with T2Database(default_db_path()) as t2db:
-            tax_counts = t2db.taxonomy.rename_collection(old, new)
-            chash_updated = t2db.chash_index.rename_collection(old=old, new=new)
-    except Exception as exc:
-        click.echo(
-            f"warn: T3 rename succeeded but T2 cascade failed: {exc}",
-            err=True,
-        )
-
-    try:
-        from nexus.catalog.catalog import Catalog
-        from nexus.config import catalog_path
-        cat_path = catalog_path()
-        cat_updated = Catalog(cat_path, cat_path / ".catalog.db").rename_collection(old, new)
-    except Exception as exc:
-        click.echo(
-            f"warn: T3 rename succeeded but catalog cascade failed: {exc}",
-            err=True,
-        )
+    counts = rename_collection_data_plane(old, new)
 
     parts: list[str] = []
-    if tax_counts and any(tax_counts.values()):
+    if counts["tax_topics"] or counts["tax_assignments"] or counts["tax_meta"]:
         parts.append(
-            f"{tax_counts['topics']} topics, "
-            f"{tax_counts['assignments']} assignments, "
-            f"{tax_counts['meta']} meta"
+            f"{counts['tax_topics']} topics, "
+            f"{counts['tax_assignments']} assignments, "
+            f"{counts['tax_meta']} meta"
         )
-    if chash_updated:
-        parts.append(f"{chash_updated} chash rows")
-    if cat_updated:
-        parts.append(f"{cat_updated} catalog docs")
+    if counts["chash"]:
+        parts.append(f"{counts['chash']} chash rows")
+    if counts["catalog_docs"]:
+        parts.append(f"{counts['catalog_docs']} catalog docs")
     if parts:
         click.echo(f"Renamed: {old} → {new} ({'; '.join(parts)})")
     else:

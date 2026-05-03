@@ -385,6 +385,143 @@ def backfill_collections_cmd(dry_run: bool) -> None:
     )
 
 
+@catalog.command("rename-collection")
+@click.argument("old")
+@click.argument("new")
+@click.option(
+    "--dry-run/--no-dry-run",
+    default=False,
+    help="Report the rename plan without writing.",
+)
+@click.option(
+    "--yes",
+    is_flag=True,
+    default=False,
+    help="Required to actually rename. Without --yes (and without "
+    "--dry-run), the command falls back to report-only.",
+)
+@click.option(
+    "--allow-legacy",
+    is_flag=True,
+    default=False,
+    help="Skip the is_conformant_collection_name gate on the new name. "
+    "The renamed collection still gets a row in the projection but is "
+    "flagged legacy_grandfathered=True. Use only when migrating between "
+    "two grandfathered names (rare).",
+)
+def rename_collection_cmd(
+    old: str, new: str, dry_run: bool, yes: bool, allow_legacy: bool,
+) -> None:
+    """Rename a collection with full RDR-101 Phase 6 lifecycle.
+
+    \b
+    Combines the data-plane rename (T3 native modify + T2 cascade +
+    catalog documents re-point) with the Phase 6 control-plane work
+    (collections-projection update + CollectionSuperseded event
+    emission). Operators wanting only the data plane can use
+    ``nx collection rename`` instead; this verb is the canonical
+    Phase 6 path that keeps the event log and projection in sync.
+
+    \b
+    Validation gates fire BEFORE any side effect:
+      - new name must be conformant (or pass --allow-legacy)
+      - old name must be in the collections projection
+      - old name must not already be superseded
+      - new name must not already exist in T3
+
+    \b
+    Examples:
+      nx catalog rename-collection knowledge__delos \\
+          knowledge__1-1__voyage-context-3__v1 --yes
+      nx catalog rename-collection docs__nexus-571b8edd ... --dry-run
+    """
+    from nexus.commands.collection import (  # noqa: PLC0415
+        rename_collection_data_plane,
+    )
+    from nexus.corpus import (  # noqa: PLC0415
+        is_conformant_collection_name,
+        parse_conformant_collection_name,
+    )
+    from nexus.db import make_t3  # noqa: PLC0415
+
+    cat = _get_catalog()
+    t3_db = make_t3()
+
+    if not is_conformant_collection_name(new) and not allow_legacy:
+        raise click.ClickException(
+            f"new name {new!r} is not conformant. Expected "
+            f"<content_type>__<owner_id>__<embedding_model>__v<n>. "
+            f"Pass --allow-legacy to rename to a grandfathered name "
+            f"(rare; only when migrating between two legacy names)."
+        )
+
+    old_row = cat.get_collection(old)
+    if old_row is None:
+        raise click.ClickException(
+            f"old name {old!r} is not registered in the collections "
+            f"projection. Run 'nx catalog backfill-collections' if this "
+            f"is an existing collection that has not been registered."
+        )
+    if old_row.get("superseded_by"):
+        raise click.ClickException(
+            f"old name {old!r} is already superseded by "
+            f"{old_row['superseded_by']!r}. Refusing to rename a stale entry."
+        )
+
+    if t3_db.collection_exists(new):
+        raise click.ClickException(
+            f"new name {new!r} already exists in T3. "
+            f"Refusing to rename {old!r} on top of an existing collection."
+        )
+    if not t3_db.collection_exists(old):
+        raise click.ClickException(f"old name {old!r} does not exist in T3.")
+
+    will_run = yes and not dry_run
+    if dry_run:
+        click.echo(f"would rename: {old} -> {new}")
+        return
+    if not yes:
+        click.echo(
+            f"would rename: {old} -> {new}\n"
+            f"--no-dry-run alone is treated as report-only. "
+            f"Add --yes to actually rename."
+        )
+        return
+
+    counts = rename_collection_data_plane(
+        old, new, t3_db=t3_db, catalog=cat,
+        on_warn=lambda msg: click.echo(msg, err=True),
+    )
+
+    if is_conformant_collection_name(new):
+        segments = parse_conformant_collection_name(new)
+        cat.register_collection(
+            new,
+            content_type=segments["content_type"],
+            owner_id=segments["owner_id"],
+            embedding_model=segments["embedding_model"],
+            model_version=segments["model_version"],
+        )
+    else:
+        cat.register_collection(new)
+    cat.supersede_collection(old, new, reason="rename-collection")
+
+    parts: list[str] = []
+    if counts["tax_topics"] or counts["tax_assignments"] or counts["tax_meta"]:
+        parts.append(
+            f"{counts['tax_topics']} topics, "
+            f"{counts['tax_assignments']} assignments, "
+            f"{counts['tax_meta']} meta"
+        )
+    if counts["chash"]:
+        parts.append(f"{counts['chash']} chash rows")
+    if counts["catalog_docs"]:
+        parts.append(f"{counts['catalog_docs']} catalog docs")
+    suffix = f" ({'; '.join(parts)})" if parts else ""
+    click.echo(f"Renamed: {old} -> {new}{suffix}")
+    click.echo(f"Emitted CollectionSuperseded({old} -> {new})")
+
+
 @catalog.command("list")
 @click.option("--owner", default="")
 @click.option("--type", "content_type", default="")
