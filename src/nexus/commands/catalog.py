@@ -3525,6 +3525,17 @@ def prune_stale_cmd(
     ),
 )
 @click.option(
+    "--collections-drift",
+    "collections_drift",
+    is_flag=True,
+    help=(
+        "Phase 6 check: every T3 collection and every distinct "
+        "documents.physical_collection has a row in the collections "
+        "projection. Drift is a release blocker; remediate with "
+        "'nx catalog backfill-collections'."
+    ),
+)
+@click.option(
     "--json", "as_json", is_flag=True,
     help="Emit machine-readable JSON instead of text output.",
 )
@@ -3532,23 +3543,26 @@ def doctor_cmd(
     replay_equality: bool,
     t3_doc_id_coverage: bool,
     strict_not_in_t3: bool,
+    collections_drift: bool,
     as_json: bool,
 ) -> None:
     """RDR-101 catalog doctor surface.
 
-    Supports two checks today:
+    Supports three checks today:
       - ``--replay-equality`` (Phase 1, PR C): synthesizer + projector
         round-trip against the live SQLite.
       - ``--t3-doc-id-coverage`` (Phase 2, PR δ): T3 chunks carry the
         doc_id metadata that events.jsonl claims.
+      - ``--collections-drift`` (Phase 6, nexus-o6aa.14): every T3
+        collection and every documents.physical_collection has a row
+        in the collections projection.
 
-    Future flags (``--legacy-collection-grandfather``, etc.) land in
-    later phases.
+    Future flags land in later phases.
     """
-    if not replay_equality and not t3_doc_id_coverage:
+    if not replay_equality and not t3_doc_id_coverage and not collections_drift:
         raise click.UsageError(
-            "Pass a check flag: --replay-equality or "
-            "--t3-doc-id-coverage."
+            "Pass a check flag: --replay-equality, "
+            "--t3-doc-id-coverage, or --collections-drift."
         )
     if strict_not_in_t3 and not t3_doc_id_coverage:
         raise click.UsageError(
@@ -3605,11 +3619,120 @@ def doctor_cmd(
         if not report["pass"]:
             overall_pass = False
 
+    if collections_drift:
+        report = _run_collections_drift()
+        if as_json:
+            json_payload["collections_drift"] = report
+        else:
+            if replay_equality or t3_doc_id_coverage:
+                click.echo("")
+            _print_collections_drift_text(report)
+        if not report["pass"]:
+            overall_pass = False
+
     if as_json:
         click.echo(json.dumps(json_payload, indent=2))
 
     if not overall_pass:
         raise click.exceptions.Exit(1)
+
+
+def _run_collections_drift() -> dict:
+    """Phase 6 check: collections projection vs T3 + documents.physical_collection.
+
+    Returns ``{"pass": bool, "t3_not_in_projection": list,
+    "doc_collections_not_in_projection": list, "projection_not_in_t3": list}``.
+
+    A projection row whose ``superseded_by`` is set is allowed to be
+    absent from T3 (post-rename state). Bypass-schema collections
+    (``taxonomy__*``) are out of scope for this check.
+    """
+    from nexus.db import make_t3  # noqa: PLC0415
+
+    cat = _get_catalog()
+    try:
+        t3_db = make_t3()
+        t3_names = {
+            c["name"] for c in t3_db.list_collections()
+            if not c["name"].startswith("taxonomy__")
+        }
+    except Exception as exc:
+        return {
+            "pass": False,
+            "t3_not_in_projection": [],
+            "doc_collections_not_in_projection": [],
+            "projection_not_in_t3": [],
+            "error": f"Failed to list T3 collections: {exc}",
+        }
+
+    projection = cat.list_collections()
+    projection_names = {r["name"] for r in projection}
+    superseded_names = {
+        r["name"] for r in projection if r.get("superseded_by")
+    }
+
+    rows = cat._db.execute(
+        "SELECT DISTINCT physical_collection FROM documents "
+        "WHERE physical_collection != ''"
+    ).fetchall()
+    doc_collections = {r[0] for r in rows if r[0]}
+
+    t3_not_in_projection = sorted(t3_names - projection_names)
+    doc_not_in_projection = sorted(doc_collections - projection_names)
+    projection_not_in_t3 = sorted(
+        projection_names - t3_names - superseded_names
+    )
+
+    passed = (
+        not t3_not_in_projection
+        and not doc_not_in_projection
+        and not projection_not_in_t3
+    )
+    return {
+        "pass": passed,
+        "t3_not_in_projection": t3_not_in_projection,
+        "doc_collections_not_in_projection": doc_not_in_projection,
+        "projection_not_in_t3": projection_not_in_t3,
+    }
+
+
+def _print_collections_drift_text(report: dict) -> None:
+    if report.get("error"):
+        click.echo(f"collections-drift: ERROR - {report['error']}")
+        return
+    status = "PASS" if report["pass"] else "FAIL"
+    click.echo(f"collections-drift: {status}")
+    if report["t3_not_in_projection"]:
+        click.echo(
+            f"  T3 collections without projection rows "
+            f"({len(report['t3_not_in_projection'])}):"
+        )
+        for n in report["t3_not_in_projection"]:
+            click.echo(f"    {n}")
+        click.echo(
+            "  Remediate: nx catalog backfill-collections"
+        )
+    if report["doc_collections_not_in_projection"]:
+        click.echo(
+            f"  documents.physical_collection without projection rows "
+            f"({len(report['doc_collections_not_in_projection'])}):"
+        )
+        for n in report["doc_collections_not_in_projection"]:
+            click.echo(f"    {n}")
+        click.echo(
+            "  Remediate: nx catalog backfill-collections"
+        )
+    if report["projection_not_in_t3"]:
+        click.echo(
+            f"  Projection rows whose T3 collection is gone and not "
+            f"superseded ({len(report['projection_not_in_t3'])}):"
+        )
+        for n in report["projection_not_in_t3"]:
+            click.echo(f"    {n}")
+        click.echo(
+            "  Remediate: nx catalog rename-collection (mark superseded) "
+            "or remove the row manually if the gap is intentional."
+        )
 
 
 def _check_bootstrap_status() -> dict:
