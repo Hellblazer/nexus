@@ -704,3 +704,163 @@ def test_make_chunk_metadata_does_not_emit_source_path() -> None:
         f"source_path must not appear in chunk metadata after Phase B; "
         f"got keys: {sorted(meta.keys())}"
     )
+
+
+# ── RDR-101 Phase 5a: [catalog].event_sourced opt-in flag (nexus-o6aa.11) ────
+
+
+class TestEventSourcedFlag:
+    """RDR-101 Phase 5a: when ``[catalog].event_sourced`` is true,
+    deprecated chunk metadata fields are dropped at write time.
+
+    Deprecated set (readers no longer depend on them post-Phase-4):
+    ``title``, ``corpus``, ``store_type``, ``git_meta``. Phase 4
+    reader migration switched to catalog-resolved ``_display_path``
+    and ``doc_id``-keyed dispatch.
+
+    Phase 5a is the WRITE-side switch — opt-in, default false.
+    Phase 5b will flip the default; Phase 5c removes from
+    ``ALLOWED_TOP_LEVEL`` entirely.
+    """
+
+    def test_default_false_keeps_deprecated_fields(self) -> None:
+        from nexus.metadata_schema import normalize
+
+        raw = {
+            "content_type": "code",
+            "chunk_index": 0, "chunk_count": 1,
+            "chunk_text_hash": "abc", "content_hash": "def",
+            "indexed_at": "2026-05-03T00:00:00Z",
+            "embedding_model": "voyage-code-3",
+            "store_type": "code",
+            "title": "src/foo.py:1-10",
+            "corpus": "nexus",
+            "git_project_name": "nexus",
+            "git_branch": "main",
+        }
+        out = normalize(raw, content_type="code", event_sourced=False)
+        assert out["title"] == "src/foo.py:1-10"
+        assert out["corpus"] == "nexus"
+        assert out["store_type"] == "code"
+        assert "git_meta" in out
+        assert "project" in out["git_meta"]
+
+    def test_event_sourced_drops_deprecated_fields(self) -> None:
+        from nexus.metadata_schema import normalize
+
+        raw = {
+            "content_type": "code",
+            "chunk_index": 0, "chunk_count": 1,
+            "chunk_text_hash": "abc", "content_hash": "def",
+            "indexed_at": "2026-05-03T00:00:00Z",
+            "embedding_model": "voyage-code-3",
+            "store_type": "code",
+            "title": "src/foo.py:1-10",
+            "corpus": "nexus",
+            "git_project_name": "nexus",
+            "git_branch": "main",
+        }
+        out = normalize(raw, content_type="code", event_sourced=True)
+        for dropped in ("title", "corpus", "store_type", "git_meta"):
+            assert dropped not in out, (
+                f"event_sourced=True must drop {dropped!r}; "
+                f"got keys: {sorted(out.keys())}"
+            )
+        # Identity + spans + lifecycle remain. ``doc_id`` is absent
+        # because the caller didn't populate it (Step 4c drop).
+        assert "doc_id" not in out
+        assert out["chunk_text_hash"] == "abc"
+        assert out["content_hash"] == "def"
+        assert out["content_type"] == "code"
+        assert out["embedding_model"] == "voyage-code-3"
+
+    def test_event_sourced_default_consults_config(self, monkeypatch) -> None:
+        from nexus.metadata_schema import normalize
+        import nexus.config
+        monkeypatch.setattr(nexus.config, "is_catalog_event_sourced", lambda: True)
+
+        raw = {
+            "content_type": "code",
+            "chunk_index": 0, "chunk_count": 1,
+            "chunk_text_hash": "abc", "content_hash": "def",
+            "indexed_at": "2026-05-03T00:00:00Z",
+            "embedding_model": "voyage-code-3",
+            "store_type": "code",
+            "title": "src/foo.py:1-10",
+            "corpus": "nexus",
+        }
+        out = normalize(raw, content_type="code")
+        assert "title" not in out
+        assert "corpus" not in out
+        assert "store_type" not in out
+
+    def test_make_chunk_metadata_factory_passes_through(
+        self, monkeypatch
+    ) -> None:
+        from nexus.metadata_schema import make_chunk_metadata
+        import nexus.config
+        monkeypatch.setattr(nexus.config, "is_catalog_event_sourced", lambda: True)
+
+        meta = make_chunk_metadata(
+            content_type="code",
+            chunk_index=0, chunk_count=1,
+            chunk_text_hash="abc", content_hash="def",
+            indexed_at="2026-05-03T00:00:00Z",
+            embedding_model="voyage-code-3",
+            store_type="code",
+            title="src/foo.py:1-10",
+            corpus="nexus",
+            git_meta={"git_project_name": "nexus", "git_branch": "main"},
+        )
+        for dropped in ("title", "corpus", "store_type", "git_meta"):
+            assert dropped not in meta, (
+                f"make_chunk_metadata under event_sourced=True must drop "
+                f"{dropped!r}; got keys: {sorted(meta.keys())}"
+            )
+
+    def test_config_helper_default_false(self, monkeypatch, tmp_path) -> None:
+        from nexus.config import is_catalog_event_sourced
+        # Empty NEXUS_CONFIG_DIR — no config.yml, no env override.
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.delenv("NEXUS_CATALOG_EVENT_SOURCED", raising=False)
+        # Run from a tmp cwd so per-repo .nexus.yml doesn't bleed in.
+        monkeypatch.chdir(tmp_path)
+        assert is_catalog_event_sourced() is False
+
+    def test_config_helper_reads_yaml(self, monkeypatch, tmp_path) -> None:
+        """``[catalog].event_sourced: true`` in the global config.yml
+        opts the process into Phase 5a's gated drops."""
+        from nexus.config import is_catalog_event_sourced
+
+        # nexus_config_dir() honors NEXUS_CONFIG_DIR directly; the
+        # config file is ``config.yml`` (not .yaml) per load_config.
+        (tmp_path / "config.yml").write_text(
+            "catalog:\n  event_sourced: true\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.delenv("NEXUS_CATALOG_EVENT_SOURCED", raising=False)
+        monkeypatch.chdir(tmp_path)  # avoid per-repo .nexus.yml override
+        assert is_catalog_event_sourced() is True
+
+    def test_env_override_takes_precedence(self, monkeypatch, tmp_path) -> None:
+        """``NEXUS_CATALOG_EVENT_SOURCED`` env var overrides config.yml."""
+        from nexus.config import is_catalog_event_sourced
+
+        # config.yml says false; env says true → true wins.
+        (tmp_path / "config.yml").write_text(
+            "catalog:\n  event_sourced: false\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setenv("NEXUS_CATALOG_EVENT_SOURCED", "1")
+        monkeypatch.chdir(tmp_path)
+        assert is_catalog_event_sourced() is True
+
+        # config.yml says true; env says false → false wins.
+        (tmp_path / "config.yml").write_text(
+            "catalog:\n  event_sourced: true\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("NEXUS_CATALOG_EVENT_SOURCED", "0")
+        assert is_catalog_event_sourced() is False
