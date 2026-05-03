@@ -125,6 +125,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-100](rdr-100-plan-cache-cacherag-improvements.md) | Plan-Cache Improvements Inspired by CacheRAG (Diversity, Floor, Dispatcher, Hierarchy) | Architecture | Closed (deferred) | 2026-04-30 |
 | [RDR-101](rdr-101-catalog-t3-metadata-design.md) | Event-Sourced Catalog with Immutable Document Identity (Greenfield Catalog/T3 Architecture) | Architecture | Accepted | 2026-04-30 |
 | [RDR-102](rdr-102-phase4-completion.md) | RDR-101 Phase 4 Completion — doc_indexer Wiring, Write-Side source_path Retirement, Doctor Visibility | Architecture | Closed | 2026-05-02 |
+| [RDR-103](rdr-103-catalog-collection-name-authority.md) | Catalog as Collection-Name Authority | Architecture | Draft | 2026-05-03 |
 
 ---
 
