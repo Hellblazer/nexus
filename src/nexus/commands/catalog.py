@@ -2085,9 +2085,18 @@ def suggest_links_cmd(limit: int, threshold: float) -> None:
 
 
 def _owner_by_name(cat: Catalog, name: str) -> Tumbler | None:
-    """Look up owner by name."""
+    """Look up a CURATOR owner by name.
+
+    Filters on ``owner_type = 'curator'`` so a same-named REPO owner
+    (e.g. a repo whose root path basename happens to be ``knowledge``
+    or ``papers``) cannot silently shadow the intended curator. The
+    namespaces are separate; repo owners are reachable only via
+    ``Catalog.owner_for_repo(repo_hash)``.
+    """
     row = cat._db.execute(
-        "SELECT tumbler_prefix FROM owners WHERE name = ?", (name,)
+        "SELECT tumbler_prefix FROM owners WHERE name = ? "
+        "AND owner_type = 'curator'",
+        (name,),
     ).fetchone()
     return Tumbler.parse(row[0]) if row else None
 
