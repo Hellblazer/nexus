@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.22.0] - 2026-05-03
+
+Plugin version aligned with conexus 4.22.0. No plugin-specific changes — all of v4.22.0's surface (RDR-101 event-sourced catalog migration through Phase 4, plus the cherry-pick bug-fix tail) is in the underlying conexus library. See root `CHANGELOG.md` for the full release notes.
+
 ## [4.21.2] - 2026-04-30
 
 Plugin version aligned with conexus 4.21.2. Refines the v4.21.1 OpenAlex title-validation heuristic after live shakeout: pure Jaccard over-rejected legitimate matches when the source title was a 1-2 token filename derivative. Replaced with an asymmetric rule that accepts short-source single-token matches when the smaller token set is essentially the intersection. Net result on a 15-doc test collection: 6 correct enrichments (up from 3 in 4.21.1) and 1 known false-positive shape (filed as nexus-5cez for follow-up).
