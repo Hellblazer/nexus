@@ -24,15 +24,23 @@ This RDR consolidates naming authority in `Catalog`. The collection name becomes
 
 ## Problem Statement
 
-The current collection-name surface has three structural problems that compound over time:
+The current collection-name surface has three structural gaps that compound over time, plus a migration constraint that has stalled prior remediation attempts.
 
-1. **Authority is split.** `registry.py:64-91`'s `_collection_name` / `_docs_collection_name` / `_rdr_collection_name` build names from `_repo_identity()` (a git-remote-URL hash). The indexer passes the constructed name to `db.get_or_create_collection(name)`. The catalog learns the name only at hook-time when a `Document` is registered with `physical_collection=name`. Two writers pick names; the catalog passively records both choices.
+#### Gap 1: Authority is split
 
-2. **Embedding model is implicit.** A `code__nexus-8c2e74c0` collection embedded with `voyage-code-3` and a separate `code__nexus-8c2e74c0` collection embedded with a future `voyage-code-3.5` would have the same physical name. Switching models requires either re-indexing in place (which mixes incompatible vectors during the transition) or operator-driven rename. The conformant `__voyage-code-3__v1` schema makes the model part of the identity but only *projects* the value the indexer happened to use; nothing forces consistency.
+`registry.py:64-91`'s `_collection_name` / `_docs_collection_name` / `_rdr_collection_name` build names from `_repo_identity()` (a path-derived hash, not remote-derived). The indexer passes the constructed name to `db.get_or_create_collection(name)`. The catalog learns the name only at hook-time when a `Document` is registered with `physical_collection=name`. Two writers pick names; the catalog passively records both choices. There is no single point that enforces conformance, so any indexer (today or future) is free to mint legacy-shaped names regardless of catalog state.
 
-3. **Strict-naming enforcement scales linearly with caller count.** Phase 6 shipped `T3Database.strict_collection_naming` as an opt-in flag. Flipping the default means every existing caller must explicitly opt out (~30 production sites + ~26 test mocks per the `nexus-qpet` audit). Threading the flag is preparation work with no user-visible value at the time of the threading commit. Catalog-side authority replaces this with one helper: the helper always emits conformant names; non-conformant names are unreachable from new writes regardless of any flag state.
+#### Gap 2: Embedding model is implicit
 
-The migration path for existing legacy collections is the design question that has stalled progress on this in past attempts. The operator has a working catalog with hundreds of legacy-named collections, real chunks in T3 keyed off those names. Any migration that requires a corpus-wide re-index is a non-starter.
+A `code__nexus-8c2e74c0` collection embedded with `voyage-code-3` and a separate `code__nexus-8c2e74c0` collection embedded with a future `voyage-code-3.5` would have the same physical name. Switching models requires either re-indexing in place (which mixes incompatible vectors during the transition) or operator-driven rename. The conformant `__voyage-code-3__v1` schema makes the model part of the identity but only *projects* the value the indexer happened to use; nothing forces consistency, and no path bumps the version when the model changes.
+
+#### Gap 3: Strict-naming enforcement scales linearly with caller count
+
+Phase 6 shipped `T3Database.strict_collection_naming` as an opt-in flag. Flipping the default means every existing caller must explicitly opt out (~30 production sites + ~26 test mocks per the `nexus-qpet` audit). Threading the flag is preparation work with no user-visible value at the time of the threading commit. Catalog-side authority replaces this with one helper: the helper always emits conformant names; non-conformant names are unreachable from new writes regardless of any flag state.
+
+#### Gap 4: Migration path constrains the design
+
+The operator has a working catalog with hundreds of legacy-named collections, real chunks in T3 keyed off those names. Any migration that requires a corpus-wide re-index is a non-starter. Prior attempts at this rewrite stalled on this constraint; the design must use the existing `Catalog.rename_collection` primitive (atomic 1:1 T3-then-catalog rename with rollback) rather than retargeting documents.
 
 ## Context
 
