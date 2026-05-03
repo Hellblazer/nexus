@@ -1105,6 +1105,37 @@ class Catalog:
         ).fetchone()
         return Tumbler.parse(row[0]) if row else None
 
+    def ensure_owner_for_repo(
+        self, repo: Path, *, repo_name: str = "", description: str = "",
+    ) -> Tumbler:
+        """Look up or register the owner for ``repo``.
+
+        RDR-103 Phase 4: extracts the owner-registration step from
+        :func:`nexus.indexer._catalog_hook` so callers that need the
+        owner BEFORE the indexer's hook fires (e.g. ``nx index repo``
+        registering the registry entry) can mint it up front. Lookup
+        is keyed by ``_repo_identity(repo)`` for stability across
+        worktrees.
+
+        Idempotent: existing owners are returned without re-registering.
+        ``repo_name`` defaults to the basename returned by
+        :func:`nexus.registry._repo_identity`; ``description`` defaults
+        to ``"Git repository: {repo_name}"``.
+        """
+        from nexus.registry import _repo_identity  # noqa: PLC0415
+
+        derived_name, repo_hash = _repo_identity(repo)
+        existing = self.owner_for_repo(repo_hash)
+        if existing is not None:
+            return existing
+        return self.register_owner(
+            name=repo_name or derived_name,
+            owner_type="repo",
+            repo_hash=repo_hash,
+            repo_root=str(repo),
+            description=description or f"Git repository: {repo_name or derived_name}",
+        )
+
     # ── Documents ──────────────────────────────────────────────────────────
 
     def _owner_repo_root(self, owner: Tumbler) -> str:

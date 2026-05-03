@@ -224,17 +224,25 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
     reg = _registry()
     path = path.resolve()
     if reg.get(path) is None:
-        # RDR-103 Phase 3a: pass the catalog so the registry's
-        # collection-name fields are populated with conformant shapes
-        # when a catalog is initialized. The catalog must already know
-        # the repo's owner; the indexer's _catalog_hook normally
-        # registers it, but `nx index repo` runs the registry add
-        # BEFORE _catalog_hook fires. So at this point the owner may
-        # not exist yet, and `_resolve_repo_collection` will fall back
-        # to the legacy helper. The next index run produces conformant
-        # names; greenfield with explicit pre-registration uses them
-        # directly.
+        # RDR-103 Phase 3a/4: pass the catalog so the registry's
+        # collection-name fields are populated with conformant shapes.
+        # Phase 4 closes the order-of-operations gap by ensuring the
+        # owner row exists BEFORE ``reg.add`` consults the catalog;
+        # otherwise the catalog's owner_for_repo lookup misses on first
+        # index and the registry persists legacy names that Phase 4's
+        # in-pipeline migration then has to clean up. Calling
+        # ``ensure_owner_for_repo`` here is idempotent: existing owners
+        # are returned as-is.
         cat = _open_catalog_or_none()
+        if cat is not None:
+            try:
+                cat.ensure_owner_for_repo(path)
+            except Exception:
+                # ``ensure_owner_for_repo`` is best-effort here; the
+                # indexer's ``_catalog_hook`` registers the owner on
+                # this run regardless, so a failure at this point only
+                # delays conformant naming to the next index run.
+                pass
         reg.add(path, cat=cat)
         click.echo(f"Registered {path}.")
 
