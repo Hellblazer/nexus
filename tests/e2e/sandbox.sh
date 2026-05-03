@@ -25,20 +25,24 @@ rm -rf "$SANDBOX"
 mkdir -p "$SANDBOX/.claude/plugins"
 echo '{"hasCompletedOnboarding":true}' > "$SANDBOX/.claude.json"
 
-# Activate script
-cat > "$SANDBOX/activate" <<EOF
-export SANDBOX_ORIG_HOME="\$HOME"
-export HOME="$SANDBOX"
-export PATH="$SANDBOX/.local/bin:\$PATH"
-export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}"
-export VOYAGE_API_KEY="${VOYAGE_API_KEY:-}"
-export CHROMA_API_KEY="${CHROMA_API_KEY:-}"
-export CHROMA_TENANT="${CHROMA_TENANT:-}"
-export CHROMA_DATABASE="${CHROMA_DATABASE:-default_database}"
-unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
-echo "sandbox active — HOME=\$HOME"
-echo "deactivate: export HOME=\$SANDBOX_ORIG_HOME"
-EOF
+# Activate script. Built via printf rather than a here-doc because
+# bash here-docs hang in some non-interactive contexts (Claude Code
+# harness shells, certain CI runners) where the parent stdin is
+# attached to a pipe that bash's here-doc machinery never closes.
+# printf has no such dependency.
+{
+    printf '%s\n' 'export SANDBOX_ORIG_HOME="$HOME"'
+    printf 'export HOME="%s"\n' "$SANDBOX"
+    printf 'export PATH="%s/.local/bin:$PATH"\n' "$SANDBOX"
+    printf 'export ANTHROPIC_API_KEY="%s"\n' "${ANTHROPIC_API_KEY:-}"
+    printf 'export VOYAGE_API_KEY="%s"\n' "${VOYAGE_API_KEY:-}"
+    printf 'export CHROMA_API_KEY="%s"\n' "${CHROMA_API_KEY:-}"
+    printf 'export CHROMA_TENANT="%s"\n' "${CHROMA_TENANT:-}"
+    printf 'export CHROMA_DATABASE="%s"\n' "${CHROMA_DATABASE:-default_database}"
+    printf '%s\n' 'unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT'
+    printf '%s\n' 'echo "sandbox active — HOME=$HOME"'
+    printf '%s\n' 'echo "deactivate: export HOME=$SANDBOX_ORIG_HOME"'
+} > "$SANDBOX/activate"
 chmod 600 "$SANDBOX/activate"
 
 echo "Sandbox ready. Enter with:"
