@@ -120,10 +120,14 @@ class TestRoundTrip:
         assert restored.count() == 5
 
     def test_round_trip_preserves_metadata(self, populated_db: T3Database, tmp_path: Path):
+        """RDR-102 D2: source_path is dropped by normalize() at the
+        canonical write boundary, so the import path strips it. Verify
+        round-trip via ``title`` (which is in ALLOWED_TOP_LEVEL and
+        unaffected). The fixture seeds ``title="File N"`` per chunk."""
         _export_import(populated_db, "code__test", tmp_path, target="code__meta_check")
         col = populated_db._client_for("code__meta_check").get_collection("code__meta_check")
-        paths = {m["source_path"] for m in col.get(include=["metadatas"])["metadatas"]}
-        assert "/repo/file_0.py" in paths and "/repo/file_4.py" in paths
+        titles = {m.get("title", "") for m in col.get(include=["metadatas"])["metadatas"]}
+        assert "File 0" in titles and "File 4" in titles
 
     def test_round_trip_preserves_embeddings(self, populated_db: T3Database, tmp_path: Path):
         orig_col = populated_db._client_for("code__test").get_collection("code__test")
@@ -353,6 +357,22 @@ class TestPathRemapping:
         ([("/repo", "/new_root")], "/new_root/"),
         ([("/nonexistent", "/other")], "/repo/"),
     ])
+    @pytest.mark.xfail(
+        reason=(
+            "RDR-102 D2 (Phase B) dropped source_path from "
+            "ALLOWED_TOP_LEVEL; the import path's normalize() funnel now "
+            "strips it, so the remap-on-import effect on T3 chunk "
+            "metadata is no longer observable. The remap logic itself "
+            "still operates on the export stream (exporter.py is on the "
+            "RF-4 'what stays' list — back-compat for legacy .nxexp "
+            "files), but its end-to-end effect on chunks has been "
+            "obsoleted by the schema removal. Re-test scope: a future "
+            "exporter-internal test that asserts the .nxexp on-disk "
+            "form carries the remapped source_path before normalize "
+            "strips it, OR a wholesale removal of the remap feature."
+        ),
+        strict=True,
+    )
     def test_remap_on_import(self, populated_db: T3Database, tmp_path: Path, remaps, prefix_check):
         target = f"code__remap_{prefix_check.strip('/')}"
         out, _ = _export(populated_db, "code__test", tmp_path, fname=f"{target}.nxexp")

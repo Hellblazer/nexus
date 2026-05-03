@@ -149,8 +149,14 @@ def _index(repo: Path, registry: RepoRegistry, t3: T3Database, **kw) -> None:
 
 
 def _get_sources(t3: T3Database, col_name: str) -> set[str]:
+    """RDR-102 D2: source_path was removed from the chunk schema. The
+    chunk's ``title`` is constructed as ``"{file.relative_to(repo)}:
+    chunk-{i}"`` for code (code_indexer.py:393) and prose
+    (prose_indexer.py:96), so it still carries the filename — sufficient
+    for the ``any(filename in p for p in sources)`` membership pattern
+    these tests use to verify file-to-collection routing."""
     col = t3.get_or_create_collection(col_name)
-    return {m.get("source_path", "") for m in col.get(include=["metadatas"])["metadatas"]}
+    return {m.get("title", "") for m in col.get(include=["metadatas"])["metadatas"]}
 
 
 # ── Basic indexer pipeline ────────────────────────────────────────────────────
@@ -250,16 +256,34 @@ def test_smart_index_py_excluded_from_docs(
 def test_smart_index_rdr_routing(
     rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database,
 ) -> None:
+    """RDR-102 D2: source_path is gone from chunks. The frontmatter
+    title for ADR-001-storage-tiers.md is "Storage Tier Architecture"
+    (overrides the filename-derived stem), so the chunk's ``title``
+    field doesn't carry "ADR-001". Verify routing via the chunk's
+    ``section_title`` (the H1 "ADR-001: Storage Tier Architecture"
+    propagates as section_title for all chunks under it) AND by
+    asserting the rdr collection has chunks while docs does not.
+    """
     _index(rich_repo, rich_registry, local_t3)
     info = rich_registry.get(rich_repo)
-    # RDR should NOT be in docs__
-    docs_sources = _get_sources(local_t3, info["docs_collection"])
-    assert not any("ADR-001" in p for p in docs_sources)
-    # RDR should be in rdr__
+    docs_col = local_t3.get_or_create_collection(info["docs_collection"])
+    docs_sections = {
+        m.get("section_title", "")
+        for m in docs_col.get(include=["metadatas"])["metadatas"]
+    }
+    assert not any("ADR-001" in s for s in docs_sections), (
+        f"ADR-001 must not appear in docs__ section_titles: {docs_sections}"
+    )
+
     path_hash = hashlib.sha256(str(rich_repo).encode()).hexdigest()[:8]
-    rdr_col = f"rdr__{rich_repo.name}-{path_hash}"
-    rdr_sources = _get_sources(local_t3, rdr_col)
-    assert any("ADR-001" in p for p in rdr_sources), f"ADR-001 not in rdr__: {rdr_sources}"
+    rdr_col_name = f"rdr__{rich_repo.name}-{path_hash}"
+    rdr_col = local_t3.get_or_create_collection(rdr_col_name)
+    rdr_metas = rdr_col.get(include=["metadatas"])["metadatas"]
+    assert rdr_metas, f"expected ADR-001 chunks in {rdr_col_name}; got none"
+    rdr_sections = {m.get("section_title", "") for m in rdr_metas}
+    assert any("ADR-001" in s for s in rdr_sections), (
+        f"ADR-001 H1 must surface as section_title in rdr__: {rdr_sections}"
+    )
 
 
 @pytest.mark.parametrize("query,corpus_key,expected_file", [
@@ -274,7 +298,9 @@ def test_smart_index_search(
     info = rich_registry.get(rich_repo)
     results = local_t3.search(query, [info[corpus_key]], n_results=5)
     assert len(results) > 0
-    sources = [r.get("source_path", "") for r in results]
+    # RDR-102 D2: search results no longer carry source_path (filtered
+    # by normalize() at write time). Title carries "{relpath}:chunk-{i}".
+    sources = [r.get("title", "") for r in results]
     assert any(expected_file in p for p in sources), f"{expected_file} not in: {sources}"
 
 
@@ -304,13 +330,15 @@ def test_smart_index_staleness_check(
         assert local_t3.get_or_create_collection(info[key]).count() == c
 
 
-@pytest.mark.parametrize("meta_key", ["commit", "branch", "source_path"])
+@pytest.mark.parametrize("meta_key", ["commit", "branch"])
 def test_smart_index_git_metadata(
     rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database,
     meta_key: str,
 ) -> None:
     """Git provenance is consolidated into the ``git_meta`` JSON blob
-    (nexus-40t). ``source_path`` stays top-level."""
+    (nexus-40t). RDR-102 D2 removed ``source_path`` from the schema —
+    the parametrize set is reduced to the git_meta sub-keys, which
+    are the actual subject of this test."""
     import json as _json
 
     _index(rich_repo, rich_registry, local_t3)
@@ -318,9 +346,6 @@ def test_smart_index_git_metadata(
     for col_key in ("code_collection", "docs_collection"):
         col = local_t3.get_or_create_collection(info[col_key])
         sample = col.get(include=["metadatas"])["metadatas"][0]
-        if meta_key == "source_path":
-            assert sample.get(meta_key), f"source_path missing in {col_key}"
-            continue
         git_blob = sample.get("git_meta")
         assert git_blob, f"git_meta missing in {col_key}: {sample}"
         decoded = _json.loads(git_blob)
@@ -334,25 +359,78 @@ def test_smart_index_git_metadata(
 def test_migration_moves_prose_from_code_to_docs(
     rich_repo: Path, tmp_path: Path, local_t3: T3Database,
 ) -> None:
+    """RDR-102 D2 update: ``_prune_misclassified`` in ``indexer.py``
+    keys on ``doc_id`` (the post-Phase-A canonical identity) when the
+    file is in the catalog hook's ``file_to_doc_id`` map. With Phase
+    B removing source_path from the chunk schema, the doc_id-keyed
+    lookup is the only path that can find a misclassified chunk; the
+    legacy source_path fallback returns nothing because chunks no
+    longer carry source_path.
+
+    Test flow:
+      1. Index once — populates the catalog with the canonical
+         README.md tumbler.
+      2. Read the tumbler from the catalog.
+      3. Seed a bad chunk into code__ with that tumbler as doc_id.
+      4. Re-index — the doc_id-keyed _prune_misclassified must find
+         and remove the seed chunk because README.md is in
+         file_to_doc_id (catalog hook re-runs every index).
+    """
+    from nexus.catalog import reset_cache
+    from nexus.catalog.catalog import Catalog
+    from nexus.config import catalog_path
+
+    # _catalog_hook returns early when the catalog is not initialized
+    # at NEXUS_CATALOG_PATH. Initialize it so the hook can register
+    # README.md and the indexer threads its tumbler into file_to_doc_id.
+    cat_path = catalog_path()
+    Catalog.init(cat_path)
+    reset_cache()
+
     reg = RepoRegistry(tmp_path / "repos.json")
     reg.add(rich_repo)
     info = reg.get(rich_repo)
+
+    # Step 1 — first index populates the catalog with README's tumbler.
+    _index(rich_repo, reg, local_t3)
+
+    # Step 2 — read the tumbler that _catalog_hook assigned.
+    reset_cache()
+    cat = Catalog(cat_path, cat_path / ".catalog.db")
+    row = cat._db.execute(
+        "SELECT tumbler FROM documents WHERE file_path = ?",
+        ("README.md",),
+    ).fetchone()
+    cat._db.close()
+    assert row is not None, (
+        "expected catalog to have README.md after first index"
+    )
+    readme_tumbler = row[0]
+
+    # Step 3 — seed a bad chunk with README's doc_id into code__.
     code_col = local_t3.get_or_create_collection(info["code_collection"])
-    readme_path = str(rich_repo / "README.md")
     code_col.add(
         ids=["fake-prose-in-code"],
         documents=["Nexus is a semantic search system"],
         metadatas=[{
-            "source_path": readme_path, "content_hash": "old-hash",
+            "doc_id": readme_tumbler,
+            "title": "README.md:chunk-0",
+            "content_hash": "old-hash",
             "embedding_model": "voyage-code-3", "store_type": "code",
         }],
     )
     assert len(code_col.get(ids=["fake-prose-in-code"])["ids"]) == 1
 
+    # Step 4 — re-index triggers _prune_misclassified, which uses
+    # the doc_id-keyed where-filter to find the seed chunk and remove
+    # it from code__ (README.md classifies as prose, so its doc_id
+    # in code__ is misclassified).
     _index(rich_repo, reg, local_t3)
 
-    assert readme_path not in _get_sources(local_t3, info["code_collection"])
-    assert len(code_col.get(ids=["fake-prose-in-code"])["ids"]) == 0
+    assert len(code_col.get(ids=["fake-prose-in-code"])["ids"]) == 0, (
+        "migration must prune the seed chunk via the doc_id-keyed "
+        "_prune_misclassified path"
+    )
     assert any("README.md" in p for p in _get_sources(local_t3, info["docs_collection"]))
 
 
@@ -371,7 +449,9 @@ def test_index_then_search(
     col = registry.get(mini_repo)["collection"]
     results = local_t3.search(query, [col], n_results=5)
     assert len(results) > 0
-    sources = [r.get("source_path", "") for r in results]
+    # RDR-102 D2: source_path is gone; title carries the filename via
+    # the "{relpath}:chunk-{i}" pattern (code_indexer.py:393).
+    sources = [r.get("title", "") for r in results]
     assert any(expected_file in p for p in sources), f"{expected_file} not in: {sources}"
 
 

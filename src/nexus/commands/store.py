@@ -161,9 +161,12 @@ def _catalog_store_hook(title: str, doc_id: str, collection_name: str) -> str:
         if existing is not None:
             return str(existing.tumbler)
 
-        # Get or create "knowledge" curator owner
+        # Get or create "knowledge" curator owner. Filter on owner_type
+        # so a same-named REPO owner cannot shadow the intended curator
+        # (same bug shape as the doc_indexer family fix).
         rows = cat._db.execute(
-            "SELECT tumbler_prefix FROM owners WHERE name = 'knowledge'"
+            "SELECT tumbler_prefix FROM owners WHERE name = 'knowledge' "
+            "AND owner_type = 'curator'"
         ).fetchone()
         if rows:
             from nexus.catalog.tumbler import Tumbler

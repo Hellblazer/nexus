@@ -82,8 +82,13 @@ def _lookup_existing_doc_id(file_path: str, corpus: str) -> str:
         # write lock with concurrent _ensure_consistent rebuilds.
         cat = open_cached(cat_path)
         owner_name = corpus or "standalone-pdfs"
+        # Curator-only lookup — see _register_or_lookup_doc_id for
+        # rationale (repo and curator owners can share names; lookups
+        # from the doc_indexer family must use the curator namespace).
         row = cat._db.execute(
-            "SELECT tumbler_prefix FROM owners WHERE name = ?", (owner_name,)
+            "SELECT tumbler_prefix FROM owners WHERE name = ? "
+            "AND owner_type = 'curator'",
+            (owner_name,),
         ).fetchone()
         if not row:
             return ""
@@ -107,6 +112,113 @@ def _identity_where(file_path: str, corpus: str) -> dict:
     """
     doc_id = _lookup_existing_doc_id(file_path, corpus)
     return {"doc_id": doc_id} if doc_id else {"source_path": file_path}
+
+
+def _register_or_lookup_doc_id(
+    file_path: Path,
+    corpus: str,
+    *,
+    content_type: str,
+    physical_collection: str,
+    title: str = "",
+    author: str = "",
+    year: int = 0,
+    base_path: Path | None = None,
+) -> str:
+    """RDR-102 D1 pre-flight catalog registration for the doc_indexer family.
+
+    Mirrors the ``indexer.py:run`` upfront pattern: open the catalog,
+    resolve (or create) the curator owner for *corpus*, look up the
+    Document by ``(owner, file_path)`` and either return the existing
+    tumbler or register a fresh one. The returned tumbler string is the
+    ``doc_id`` that ``_pdf_chunks`` / ``_markdown_chunks`` thread to
+    ``make_chunk_metadata`` so chunks land in T3 with ``doc_id``
+    populated at write time — closing the gap that ChromaDB's
+    undocumented upsert metadata-merge was masking pre-RDR-102.
+
+    Returns ``""`` when the catalog is absent (no-catalog ingest contract
+    preserved) or when any unexpected error occurs (best-effort: the
+    caller falls back to the legacy ``source_path``-keyed identity).
+
+    Re-registration is event-idempotent via ``Catalog.register``'s
+    ``by_file_path`` early-return at ``catalog.py:1218-1234``: a second
+    call for the same ``(owner, file_path)`` returns the existing
+    tumbler without writing a new ``DocumentRegistered`` event. RDR-102
+    R1 + the ``test_preflight_registration_idempotent_on_staleness_skip``
+    test pin this invariant.
+    """
+    try:
+        from nexus.catalog import Catalog  # noqa: PLC0415
+        from nexus.catalog.catalog import make_relative  # noqa: PLC0415
+        from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415
+        from nexus.config import catalog_path  # noqa: PLC0415
+
+        cat_path = catalog_path()
+        if not Catalog.is_initialized(cat_path):
+            return ""
+        cat = Catalog(cat_path, cat_path / ".catalog.db")
+
+        # Owner resolution mirrors _catalog_pdf_hook / _catalog_markdown_hook
+        # so a re-index after the post-hook ran for the same file lands on
+        # the SAME owner row (otherwise by_file_path would miss and we'd
+        # double-register). PDFs default to ``standalone-pdfs`` when corpus
+        # is empty; markdown defaults to ``standalone-docs``. content_type
+        # ``paper`` selects the PDF default; everything else (``prose``,
+        # ``rdr``) picks the docs default.
+        if corpus:
+            owner_name = corpus
+        elif content_type == "paper":
+            owner_name = "standalone-pdfs"
+        else:
+            owner_name = "standalone-docs"
+        # Curator-only lookup. A REPO owner can share the same name
+        # (e.g. "scheme-evolution-research" exists as both a repo
+        # owner created by ``nx index repo`` AND as a target for
+        # ``nx index pdf --corpus scheme-evolution-research``). Picking
+        # up the repo owner here triggers the cross-project guard at
+        # ``catalog.py:_check_source_uri_in_repo_root`` when the file
+        # lives outside the repo's tree (e.g. a DEVONthink-sourced
+        # PDF), the resulting ValueError gets caught broadly below
+        # and returns "" — silently breaking Phase A pre-flight
+        # registration for cross-source ingest. Filtering on
+        # owner_type='curator' keeps the namespaces separate; repo
+        # owners are reachable only via owner_for_repo(repo_hash)
+        # from the repo indexer, never via a corpus-name lookup here.
+        row = cat._db.execute(
+            "SELECT tumbler_prefix FROM owners WHERE name = ? "
+            "AND owner_type = 'curator'",
+            (owner_name,),
+        ).fetchone()
+        if row:
+            owner = Tumbler.parse(row[0])
+        else:
+            owner = cat.register_owner(owner_name, "curator")
+
+        fp = make_relative(file_path, base_path) if base_path else str(file_path)
+        existing = cat.by_file_path(owner, fp)
+        if existing is not None:
+            return str(existing.tumbler)
+
+        try:
+            source_mtime = file_path.stat().st_mtime
+        except OSError:
+            source_mtime = 0.0
+        tumbler = cat.register(
+            owner=owner,
+            title=title or file_path.stem,
+            content_type=content_type,
+            file_path=fp,
+            corpus=corpus,
+            physical_collection=physical_collection,
+            chunk_count=0,
+            year=year,
+            author=author,
+            source_mtime=source_mtime,
+        )
+        return str(tumbler)
+    except Exception:
+        _log.debug("preflight_register_failed", exc_info=True)
+        return ""
 
 
 def _missing_credentials() -> list[str]:
@@ -722,6 +834,7 @@ def _pdf_chunks(
     bib_enrich_enabled: bool = False,
     extractor: str = "auto",
     git_meta: dict | None = None,
+    doc_id: str = "",
 ) -> list[tuple[str, str, dict]]:
     """Chunk a PDF and return (id, text, metadata) tuples.
 
@@ -791,7 +904,6 @@ def _pdf_chunks(
         chunk_id = f"{content_hash[:16]}_{chunk.chunk_index}"
         meta = make_chunk_metadata(
             content_type="pdf",
-            source_path=str(pdf_path),
             chunk_index=chunk.chunk_index,
             chunk_count=len(chunks),
             chunk_text_hash=hashlib.sha256(chunk.text.encode()).hexdigest(),
@@ -814,6 +926,7 @@ def _pdf_chunks(
             bib_venue=bib.get("venue", ""),
             bib_citation_count=bib.get("citation_count", 0),
             git_meta=git_meta,
+            doc_id=doc_id,
         )
         prepared.append((chunk_id, chunk.text, meta))
     return prepared
@@ -828,6 +941,7 @@ def _markdown_chunks(
     *,
     base_path: Path | None = None,
     git_meta: dict | None = None,
+    doc_id: str = "",
 ) -> list[tuple[str, str, dict]]:
     """Chunk a Markdown file and return (id, text, metadata) tuples.
 
@@ -846,9 +960,15 @@ def _markdown_chunks(
     frontmatter, body = parse_frontmatter(raw_text)
     frontmatter_len = len(raw_text) - len(body)
 
-    sp = make_relative(md_path, base_path) if base_path else str(md_path)
+    # RDR-102 D2: source_path is no longer carried at any layer of the
+    # chunk-write path (schema-removed). The chunker's base_metadata
+    # spread (md_chunker.py:380) propagates whatever is in this dict to
+    # each chunk's intermediate metadata, but ``_markdown_chunks``
+    # builds the final T3 metadata from scratch via
+    # ``make_chunk_metadata`` and reads only chunk_start_char /
+    # chunk_end_char / header_path / section_type from
+    # ``chunk.metadata`` — source_path was always dead in the output.
     base_meta: dict = {
-        "source_path": sp,
         "corpus": corpus,
     }
     chunks = SemanticMarkdownChunker().chunk(body, base_meta)
@@ -871,7 +991,6 @@ def _markdown_chunks(
         chunk_id = f"{content_hash[:16]}_{chunk.chunk_index}"
         meta = make_chunk_metadata(
             content_type="markdown",
-            source_path=sp,
             chunk_index=chunk.chunk_index,
             chunk_count=len(chunks),
             chunk_text_hash=hashlib.sha256(chunk.text.encode()).hexdigest(),
@@ -890,6 +1009,7 @@ def _markdown_chunks(
             tags="markdown",
             category="prose",
             git_meta=git_meta,
+            doc_id=doc_id,
         )
         prepared.append((chunk_id, chunk.text, meta))
     return prepared
@@ -970,6 +1090,26 @@ def index_pdf(
         # model so repeat-indexes are no-ops.
         target_model = local_target_model
 
+    # RDR-102 Phase A: pre-flight catalog registration. Resolve doc_id BEFORE
+    # the staleness check so a fresh index lands chunks with doc_id populated
+    # at write time (not via ChromaDB's undocumented upsert metadata-merge).
+    # Idempotent on re-index via Catalog.register's by_file_path early-return
+    # (no duplicate DocumentRegistered events). Returns "" when the catalog
+    # is absent — preserves the no-catalog ingest contract.
+    #
+    # ``content_type="paper"`` here is the CATALOG content_type (used by
+    # ``_register_or_lookup_doc_id`` to derive the curator owner default
+    # ``standalone-pdfs`` and to populate ``Document.content_type``).
+    # The chunk-metadata content_type at write time below is ``"pdf"``
+    # (set inside ``_pdf_chunks`` via ``make_chunk_metadata(content_type=
+    # "pdf", ...)``). The two namespaces are distinct: catalog tracks
+    # source typing; chunk metadata tracks T3 routing.
+    doc_id = _register_or_lookup_doc_id(
+        pdf_path, corpus,
+        content_type="paper",
+        physical_collection=col_name,
+    )
+
     # Incremental sync: skip if file is already indexed with the same hash AND model.
     # nexus-dcym: prefer doc_id-keyed lookup; falls back to source_path
     # for first-time registrations and legacy chunks.
@@ -1007,6 +1147,7 @@ def index_pdf(
                 embed_fn=embed_fn, extractor=extractor,
                 corpus=corpus, target_model=target_model,
                 force=force,
+                doc_id=doc_id,
             )
             if return_metadata:
                 # Query T3 for metadata after streaming upload.
@@ -1052,7 +1193,7 @@ def index_pdf(
 
     # Extract and chunk the entire document
     now_iso = datetime.now(UTC).isoformat()
-    chunk_fn = partial(_pdf_chunks, bib_enrich_enabled=enrich, extractor=extractor)
+    chunk_fn = partial(_pdf_chunks, bib_enrich_enabled=enrich, extractor=extractor, doc_id=doc_id)
     prepared = chunk_fn(pdf_path, content_hash, target_model, now_iso, corpus)
     if not prepared:
         return _empty_meta if return_metadata else 0
@@ -1200,8 +1341,12 @@ def _catalog_markdown_hook(
             pass
 
         owner_name = corpus if corpus else "standalone-docs"
+        # Curator-only lookup — see _register_or_lookup_doc_id for
+        # rationale.
         rows = cat._db.execute(
-            "SELECT tumbler_prefix FROM owners WHERE name = ?", (owner_name,)
+            "SELECT tumbler_prefix FROM owners WHERE name = ? "
+            "AND owner_type = 'curator'",
+            (owner_name,),
         ).fetchone()
         if rows:
             from nexus.catalog.tumbler import Tumbler
@@ -1222,12 +1367,32 @@ def _catalog_markdown_hook(
             source_mtime = md_path.stat().st_mtime
         except OSError:
             source_mtime = 0.0
-        cat.register(
-            owner=owner, title=title, content_type=content_type,
-            file_path=fp, physical_collection=collection_name,
-            chunk_count=chunk_count, year=year,
-            source_mtime=source_mtime,
-        )
+        # RDR-102 Phase A: mirror _catalog_pdf_hook's existing-vs-fresh
+        # branch. The pre-flight _register_or_lookup_doc_id already wrote
+        # the Document row with chunk_count=0, so the unconditional
+        # cat.register() this used to do hits Catalog.register's
+        # by_file_path early-return and never updates chunk_count off
+        # zero. Use cat.update() on the existing tumbler to write the
+        # final chunk_count + indexed_at + source_mtime; fall through to
+        # cat.register() only when no row exists yet (no-pre-flight
+        # branch — preserves the no-catalog ingest contract for callers
+        # that bypass the public entry points).
+        existing = cat.by_file_path(owner, fp)
+        if existing is not None:
+            cat.update(
+                existing.tumbler,
+                physical_collection=collection_name,
+                chunk_count=chunk_count,
+                indexed_at=datetime.now(UTC).isoformat(),
+                source_mtime=source_mtime,
+            )
+        else:
+            cat.register(
+                owner=owner, title=title, content_type=content_type,
+                file_path=fp, physical_collection=collection_name,
+                chunk_count=chunk_count, year=year,
+                source_mtime=source_mtime,
+            )
     except Exception:
         _log.debug("catalog_markdown_hook_failed", exc_info=True)
 
@@ -1277,7 +1442,22 @@ def index_markdown(
     md_path = md_path.resolve()
 
     col_name = collection_name if collection_name is not None else f"docs__{corpus}"
-    chunk_fn = partial(_markdown_chunks, base_path=base_path) if base_path else _markdown_chunks
+    # RDR-102 Phase A: pre-flight catalog registration. Resolve doc_id BEFORE
+    # _index_document's staleness check so a fresh index lands chunks with
+    # doc_id populated at write time. Idempotent on re-index via
+    # Catalog.register's by_file_path early-return. Returns "" when the
+    # catalog is absent (no-catalog ingest contract preserved).
+    doc_id = _register_or_lookup_doc_id(
+        md_path, corpus,
+        content_type=content_type,
+        physical_collection=col_name,
+        base_path=base_path,
+    )
+    chunk_fn = partial(
+        _markdown_chunks,
+        base_path=base_path,
+        doc_id=doc_id,
+    ) if base_path else partial(_markdown_chunks, doc_id=doc_id)
     source_key = make_relative(md_path, base_path) if base_path else None
     raw = _index_document(
         md_path, corpus, chunk_fn, t3=t3,

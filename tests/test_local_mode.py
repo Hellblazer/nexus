@@ -126,6 +126,35 @@ class TestT3DatabaseLocalMode:
         assert len(results) >= 1
         assert any("Python" in r.get("content", "") for r in results)
 
+    def test_local_mode_put_does_not_emit_source_path(
+        self, local_db: T3Database,
+    ) -> None:
+        """RDR-102 D2 / Phase B per-writer absence guard for the MCP
+        ``store_put`` path (db/t3.py:627). MCP-stored docs are
+        single-chunk and route through ``make_chunk_metadata`` like
+        every other writer; after Phase B they MUST land without
+        source_path. Closes the RF-4 inventory: 6 indexer call sites
+        + this MCP put site = 7 writer paths verified absent.
+        """
+        local_db.put(
+            collection="knowledge__source_path_check",
+            content="MCP put has no on-disk source",
+            title="mcp-no-source-path",
+        )
+        col = local_db.get_or_create_collection(
+            "knowledge__source_path_check",
+        )
+        rows = col.get(include=["metadatas"])
+        assert rows["metadatas"], "expected MCP put to land at least one chunk"
+        leaked = [m for m in rows["metadatas"] if "source_path" in m]
+        assert not leaked, (
+            f"{len(leaked)}/{len(rows['metadatas'])} MCP store_put "
+            f"chunks still carry source_path. Phase B dropped the "
+            f"source_path= kwarg from db/t3.py:627; if this test fails "
+            f"a regression has re-added it OR ALLOWED_TOP_LEVEL has "
+            f"re-acquired source_path."
+        )
+
     def test_local_mode_search_skips_cce(self, local_db: T3Database) -> None:
         assert local_db._voyage_client is None
         local_db.put(collection="knowledge__test", content="test content", title="t1")
@@ -215,17 +244,26 @@ class TestLocalStaleness:
         from nexus.indexer_utils import check_staleness
 
         col = local_db.get_or_create_collection("code__test")
+        # RDR-102 D2 dropped source_path from ALLOWED_TOP_LEVEL, so
+        # normalize() filters it out at write time — the staleness
+        # check now keys on doc_id (the catalog tumbler) rather than
+        # source_path. Stamp doc_id at upsert and pass it to
+        # check_staleness so the test exercises the post-Phase-A /
+        # post-Phase-B identity path.
         local_db.upsert_chunks(
             "code__test",
             ids=["chunk1"],
             documents=["def hello(): pass"],
             metadatas=[{
-                "source_path": "/repo/hello.py",
+                "doc_id": "1.7.42",
                 "content_hash": "abc123",
                 "embedding_model": "all-MiniLM-L6-v2",
             }],
         )
-        assert check_staleness(col, "/repo/hello.py", query_hash, query_model) is expected
+        assert check_staleness(
+            col, "/repo/hello.py", query_hash, query_model,
+            doc_id="1.7.42",
+        ) is expected
 
 
 # ── Collection lifecycle ──────────────────────────────────────────────────────
@@ -267,7 +305,7 @@ class TestLocalCollectionLifecycle:
             ids=["temp-id"],
             documents=["temporary data"],
             metadatas=[make_chunk_metadata(
-                content_type="prose", source_path="",
+                content_type="prose",
                 chunk_index=0, chunk_count=1,
                 chunk_text_hash=h_temp, content_hash=h_temp,
                 chunk_end_char=14,

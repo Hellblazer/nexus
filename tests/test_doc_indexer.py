@@ -229,9 +229,23 @@ def test_index_md_falls_back_to_local_embedder_when_no_credentials(
     own integration test requires a real PDF fixture (the existing
     ``sample_pdf`` is fake bytes; PDF tests in this file mock the
     extractor). The codepath itself is tested at the source level.
+
+    RDR-102 D2: source_path was removed from the chunk schema, so the
+    re-index no-op contract now relies on the doc_id-keyed staleness
+    check (chunks must carry doc_id for identity_where to find them).
+    The test initializes a catalog at the autouse-fixture path so the
+    Phase A pre-flight registration writes doc_id at chunk-write time;
+    without that, no-catalog ingest writes chunks with neither
+    source_path nor doc_id and the staleness check correctly cannot
+    detect "unchanged" — re-index would proceed every time.
     """
     import chromadb
+    from nexus.catalog import reset_cache
+    from nexus.catalog.catalog import Catalog
 
+    cat_dir = tmp_path / "test-catalog"
+    Catalog.init(cat_dir)
+    reset_cache()
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
     monkeypatch.setattr(
@@ -439,8 +453,12 @@ def pdf_extract_patches_ctx():
 
 
 _BASE_REQUIRED_FIELDS = {
-    # Identity / position / spans (post source_title→title collapse, expires_at→indexed_at swap)
-    "source_path", "content_hash", "chunk_text_hash", "chunk_index", "chunk_count",
+    # Identity / position / spans — RDR-102 D2 dropped source_path; the
+    # catalog tumbler in doc_id is the canonical reference. doc_id is
+    # drop-when-empty (the no-catalog ingest contract), so it is NOT
+    # in this required set — chunks indexed without a catalog have
+    # neither source_path nor doc_id.
+    "content_hash", "chunk_text_hash", "chunk_index", "chunk_count",
     "chunk_start_char", "chunk_end_char", "page_number",
     # Display / routing
     "title", "source_author", "section_title", "section_type",
@@ -1510,3 +1528,358 @@ class TestSectionTypeInPipeline:
         tuples = _markdown_chunks(md, "abc123", "voyage-context-3", "2026-01-01", "docs__test")
         typed = [m for _, _, m in tuples if m["section_type"] == expected_type]
         assert typed, f"Expected at least one chunk classified as '{expected_type}'"
+
+
+# ── RDR-102 Phase A: pre-flight catalog registration writes doc_id ──────────
+#
+# These tests pin the Phase A invariant: every doc_indexer entry point
+# (index_pdf, index_markdown, batch_index_markdowns) must populate the
+# ``doc_id`` field on every chunk it writes when the catalog is initialized.
+# Pre-Phase-A behaviour: chunks ship to T3 with no ``doc_id`` because the
+# catalog hook fires AFTER the upsert. Post-Phase-A: pre-flight registration
+# resolves the catalog tumbler before chunks are built and threads it
+# through ``make_chunk_metadata(..., doc_id=...)``.
+
+
+def _setup_phase_a_catalog(tmp_path, monkeypatch):
+    """Initialize a fresh catalog at the path the autouse ``_isolate_catalog``
+    fixture configures via ``NEXUS_CATALOG_PATH`` and return an EphemeralClient
+    T3 with the local ONNX embedder.
+
+    Forces local-mode ingest by clearing Voyage/Chroma credentials so the
+    indexer does not attempt to call the real cloud APIs.
+    """
+    import chromadb
+    from nexus.catalog import reset_cache
+    from nexus.catalog.catalog import Catalog
+    from nexus.db.t3 import T3Database
+
+    cat_dir = tmp_path / "test-catalog"
+    Catalog.init(cat_dir)
+    reset_cache()
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    monkeypatch.delenv("CHROMA_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "nexus.config._global_config_path", lambda: Path("/nonexistent"),
+    )
+    client = chromadb.EphemeralClient()
+    return cat_dir, T3Database(_client=client, local_mode=True)
+
+
+def _doc_registered_count(cat_dir: Path, file_path: str) -> int:
+    """Count ``DocumentRegistered`` events in events.jsonl that match
+    *file_path* via either the ``file_path`` payload field or the
+    ``source_uri`` (``file://``-normalized) payload field.
+
+    Returns 0 when events.jsonl is missing or empty.
+    """
+    import json as _json
+    events_path = cat_dir / "events.jsonl"
+    if not events_path.exists():
+        return 0
+    file_uri = f"file://{file_path}"
+    count = 0
+    for raw in events_path.read_text().splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            obj = _json.loads(line)
+        except _json.JSONDecodeError:
+            continue
+        if obj.get("type") != "DocumentRegistered":
+            continue
+        payload = obj.get("payload", {})
+        if (
+            payload.get("file_path") == file_path
+            or payload.get("source_uri") in (file_uri, file_path)
+        ):
+            count += 1
+    return count
+
+
+def test_index_pdf_does_not_emit_source_path(
+    sample_pdf, tmp_path, monkeypatch,
+):
+    """RDR-102 Phase B / D2: index_pdf at doc_indexer.py:794 (the
+    _pdf_chunks make_chunk_metadata call) must drop source_path from
+    its kwargs. After Phase B, every PDF chunk carries no source_path
+    key; the catalog tumbler in doc_id is the canonical reference and
+    normalize() filters source_path at the schema-level removal.
+    """
+    cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
+
+    with pdf_extract_patches_ctx():
+        index_pdf(sample_pdf, corpus="rdr102_pdf_b", t3=t3, embed_fn=_fake_embed)
+
+    col = t3.get_or_create_collection("docs__rdr102_pdf_b")
+    rows = col.get(include=["metadatas"])
+    assert rows["metadatas"], "expected at least one chunk"
+    leaked = [m for m in rows["metadatas"] if "source_path" in m]
+    assert not leaked, (
+        f"{len(leaked)}/{len(rows['metadatas'])} index_pdf chunks still "
+        f"carry source_path. Phase B must drop source_path= from "
+        f"_pdf_chunks (doc_indexer.py:794) AND remove source_path from "
+        f"ALLOWED_TOP_LEVEL so normalize() filters any residual writes."
+    )
+
+
+def test_index_markdown_does_not_emit_source_path(
+    sample_md, tmp_path, monkeypatch,
+):
+    """RDR-102 Phase B / D2: index_markdown at doc_indexer.py:874 (the
+    _markdown_chunks make_chunk_metadata call) must drop source_path
+    from its kwargs.
+    """
+    cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
+
+    n = index_markdown(sample_md, corpus="rdr102_md_b", t3=t3)
+    assert n > 0
+
+    col = t3.get_or_create_collection("docs__rdr102_md_b")
+    rows = col.get(include=["metadatas"])
+    assert rows["metadatas"], "expected at least one chunk"
+    leaked = [m for m in rows["metadatas"] if "source_path" in m]
+    assert not leaked, (
+        f"{len(leaked)}/{len(rows['metadatas'])} index_markdown chunks "
+        f"still carry source_path. Phase B must drop source_path= from "
+        f"_markdown_chunks (doc_indexer.py:874)."
+    )
+
+
+def test_index_pdf_writes_doc_id_when_catalog_initialized(
+    sample_pdf, tmp_path, monkeypatch,
+):
+    """RDR-102 D4 #2: ``index_pdf`` must populate ``doc_id`` on chunk
+    metadata when the catalog is initialized.
+
+    Pre-Phase-A this fails because ``_pdf_chunks`` builds metadata via
+    ``make_chunk_metadata()`` with no ``doc_id`` kwarg; the catalog
+    Document is registered AFTER chunks are upserted so ``doc_id`` is
+    never threaded down. Phase A registers upfront and passes the
+    resolved tumbler through to the chunker.
+    """
+    cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
+
+    with pdf_extract_patches_ctx():
+        index_pdf(sample_pdf, corpus="rdr102_pdf", t3=t3, embed_fn=_fake_embed)
+
+    col = t3.get_or_create_collection("docs__rdr102_pdf")
+    rows = col.get(include=["metadatas"])
+    assert rows["metadatas"], (
+        "expected at least one chunk in docs__rdr102_pdf — staleness "
+        "skip would mask the real bug"
+    )
+    missing_doc_id = [m for m in rows["metadatas"] if not m.get("doc_id")]
+    assert not missing_doc_id, (
+        f"{len(missing_doc_id)}/{len(rows['metadatas'])} index_pdf chunks "
+        f"missing doc_id. Phase A pre-flight catalog registration must "
+        f"thread doc_id to make_chunk_metadata so chunks land with the "
+        f"catalog tumbler at write time, not via the post-upsert "
+        f"ChromaDB metadata-merge fallback."
+    )
+
+
+def test_index_markdown_writes_doc_id_when_catalog_initialized(
+    sample_md, tmp_path, monkeypatch,
+):
+    """RDR-102 D4 #2: ``index_markdown`` must populate ``doc_id`` on
+    chunk metadata when the catalog is initialized.
+
+    Same structural gap as ``index_pdf``: ``_markdown_chunks`` builds
+    metadata with no ``doc_id`` and the catalog hook fires after upsert.
+    """
+    cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
+
+    n = index_markdown(sample_md, corpus="rdr102_md", t3=t3)
+    assert n > 0, "expected index_markdown to upsert chunks"
+
+    col = t3.get_or_create_collection("docs__rdr102_md")
+    rows = col.get(include=["metadatas"])
+    assert rows["metadatas"], (
+        "expected at least one chunk in docs__rdr102_md"
+    )
+    missing_doc_id = [m for m in rows["metadatas"] if not m.get("doc_id")]
+    assert not missing_doc_id, (
+        f"{len(missing_doc_id)}/{len(rows['metadatas'])} index_markdown "
+        f"chunks missing doc_id. Phase A pre-flight catalog registration "
+        f"must thread doc_id to make_chunk_metadata."
+    )
+
+
+def test_batch_index_markdowns_rdr_mode_writes_doc_id_when_catalog_initialized(
+    tmp_path, monkeypatch,
+):
+    """RDR-102 D4 #2: ``batch_index_markdowns`` in RDR mode (``rdr__``
+    collection, ``content_type='rdr'``) must populate ``doc_id`` on
+    chunk metadata. This is the ``nx index rdr`` standalone path and it
+    suffers the same gap as the ``nx index md`` path.
+    """
+    cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
+    rdr_path = tmp_path / "rdr-102-test.md"
+    rdr_path.write_text(
+        "---\ntitle: RDR-102 Test\nstatus: draft\n---\n\n"
+        "# Section A\n\nBody text alpha.\n\n"
+        "# Section B\n\nBody text beta.\n"
+    )
+
+    batch_index_markdowns(
+        [rdr_path], corpus="rdr102_rdrmode",
+        collection_name="rdr__rdr102-rdrmode",
+        content_type="rdr",
+        t3=t3,
+    )
+
+    col = t3.get_or_create_collection("rdr__rdr102-rdrmode")
+    rows = col.get(include=["metadatas"])
+    assert rows["metadatas"], (
+        "expected at least one chunk in rdr__rdr102-rdrmode"
+    )
+    missing_doc_id = [m for m in rows["metadatas"] if not m.get("doc_id")]
+    assert not missing_doc_id, (
+        f"{len(missing_doc_id)}/{len(rows['metadatas'])} "
+        f"batch_index_markdowns RDR-mode chunks missing doc_id. The "
+        f"nx index rdr standalone path must register the catalog "
+        f"Document upfront and thread doc_id to make_chunk_metadata."
+    )
+
+
+def test_index_markdown_post_hook_updates_chunk_count_after_preflight(
+    sample_md, tmp_path, monkeypatch,
+):
+    """RDR-102 Phase A regression guard: pre-flight registration writes
+    a catalog Document with ``chunk_count=0``; the post-hook
+    ``_catalog_markdown_hook`` MUST update the existing tumbler with
+    the real chunk_count, not call ``cat.register()`` unconditionally
+    (which hits the by_file_path early-return and silently leaves
+    chunk_count at 0).
+
+    Mirrors the if-existing/update branch ``_catalog_pdf_hook`` already
+    has at line 519. Without this branch in the markdown hook, every
+    markdown re-index leaves chunk_count stuck at 0 in the catalog —
+    invisible to operators who never read the Document row but a
+    structural drift between catalog + T3 chunk counts.
+    """
+    from nexus.catalog import reset_cache
+    from nexus.catalog.catalog import Catalog
+
+    cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
+
+    n = index_markdown(sample_md, corpus="rdr102_chunkcount", t3=t3)
+    assert n > 0, "expected index_markdown to upsert at least one chunk"
+
+    reset_cache()
+    cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+    rows = cat._db.execute(
+        "SELECT chunk_count FROM documents WHERE file_path = ?",
+        (str(sample_md.resolve()),),
+    ).fetchall()
+    assert len(rows) == 1, (
+        f"expected exactly 1 catalog Document for the markdown file; "
+        f"got {len(rows)} rows. Pre-flight + post-hook double-register "
+        f"would show >1 here (file_path-form mismatch); a missing "
+        f"post-hook would leave chunk_count at 0."
+    )
+    cat_chunk_count = rows[0][0]
+    assert cat_chunk_count == n, (
+        f"catalog chunk_count={cat_chunk_count} but T3 has n={n} chunks. "
+        f"_catalog_markdown_hook must call cat.update() on the existing "
+        f"tumbler when pre-flight already registered it; the previous "
+        f"unconditional cat.register() hit by_file_path's early-return "
+        f"and never updated chunk_count off zero."
+    )
+
+
+def test_preflight_registration_idempotent_on_staleness_skip(
+    sample_md, tmp_path, monkeypatch,
+):
+    """RDR-102 D4 #4 / R1: re-indexing an unchanged file must not write
+    a duplicate ``DocumentRegistered`` event to ``events.jsonl``.
+
+    Phase A pre-flight registration calls ``Catalog.register()`` on every
+    index attempt, but the ``by_file_path`` early-return at
+    ``catalog.py:1218-1234`` keeps the event count at exactly one — re-
+    registration of the same ``(owner, file_path)`` pair returns the
+    existing tumbler without writing a new event.
+
+    Also asserts ``nx catalog doctor --replay-equality`` does NOT flag
+    the resulting state as drift. The R1 edge case (a first-time index
+    that staleness skips because content_hash already exists from
+    another path) produces a ``DocumentRegistered`` with no companion
+    ``ChunkIndexed`` events; replay-equality must accept that as valid
+    because the Document row IS reproducible from the event stream.
+    """
+    import json as _json
+
+    from click.testing import CliRunner
+
+    from nexus.catalog import reset_cache
+    from nexus.commands.catalog import doctor_cmd
+
+    cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
+    sp = str(sample_md.resolve())
+
+    n1 = index_markdown(sample_md, corpus="rdr102_idem", t3=t3)
+    assert n1 > 0, "expected first index_markdown to upsert chunks"
+
+    after_first = _doc_registered_count(cat_dir, sp)
+    # Expected count is 1 OR 2 — Catalog.update() also writes a
+    # DocumentRegistered event (lossless replay model at
+    # catalog.py:1865-1888), so the post-hook's existing-row update
+    # for chunk_count adds a second event. The exact count depends on
+    # whether the post-hook fired (it does for count > 0). Either
+    # value is fine; the load-bearing assertion is the delta-0 check
+    # below — re-indexing an unchanged file must add ZERO events.
+    assert 1 <= after_first <= 2, (
+        f"expected 1 or 2 DocumentRegistered events after first index "
+        f"(pre-flight register + optional post-hook update); got "
+        f"{after_first}. A value > 2 indicates pre-flight or post-hook "
+        f"is double-registering — the by_file_path early-return / the "
+        f"if-existing/update branch is broken."
+    )
+
+    # Drop the process-cached Catalog so the second call re-reads the
+    # owner row written by the first call's _catalog_markdown_hook
+    # rather than reusing a stale in-memory snapshot.
+    reset_cache()
+
+    n2 = index_markdown(sample_md, corpus="rdr102_idem", t3=t3)
+    assert n2 == 0, (
+        f"re-index against unchanged content must be a no-op via the "
+        f"staleness check; got {n2} chunks. If non-zero, the doc_id-keyed "
+        f"identity_where lookup may have failed and the indexer fell "
+        f"back to writing a fresh chunk set."
+    )
+
+    after_second = _doc_registered_count(cat_dir, sp)
+    assert after_second == after_first, (
+        f"re-indexing an unchanged file must add ZERO DocumentRegistered "
+        f"events (event-count delta 0). Got {after_first} after first "
+        f"index, {after_second} after second. Pre-flight "
+        f"Catalog.register() must early-return via by_file_path when the "
+        f"(owner, file_path) pair is already registered, AND the post-hook "
+        f"must skip its update branch when staleness check returned 0 "
+        f"chunks (gate: `if count > 0` at index_markdown line ~1394)."
+    )
+
+    # Replay-equality must pass. The live SQLite snapshot reflects the
+    # single DocumentRegistered + (post-impl) the pre-flight Document
+    # row; the projector must produce the identical state from
+    # events.jsonl.
+    reset_cache()
+    runner = CliRunner()
+    result = runner.invoke(
+        doctor_cmd, ["--replay-equality", "--json"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, (
+        f"doctor --replay-equality exited {result.exit_code}: "
+        f"{result.output[:500]}"
+    )
+    payload = _json.loads(result.output)["replay_equality"]
+    assert payload["pass"] is True, (
+        f"replay-equality flagged drift after pre-flight registration + "
+        f"staleness skip; the projector must accept a "
+        f"DocumentRegistered-without-ChunkIndexed state as non-drift. "
+        f"Report: {_json.dumps(payload, indent=2)[:1000]}"
+    )

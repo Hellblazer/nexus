@@ -154,31 +154,35 @@ def test_code_indexer_writes_doc_id_into_t3_chunk_metadata(
     result = code_col.get(include=["metadatas"])
     assert result["ids"], "expected at least one code chunk in T3 code collection"
 
-    by_source: dict[str, list[dict]] = {}
+    # RDR-102 D2 dropped source_path from the chunk schema; group
+    # chunks by doc_id (the post-Phase-A canonical identity) and
+    # verify each doc_id resolves to a real catalog Document via the
+    # tumbler-keyed reverse lookup.
+    by_doc_id: dict[str, list[dict]] = {}
     for meta in result["metadatas"]:
-        by_source.setdefault(meta["source_path"], []).append(meta)
+        doc_id = meta.get("doc_id", "")
+        assert doc_id, (
+            f"chunk metadata lacks doc_id (Phase A pre-flight "
+            f"registration regression): {meta}"
+        )
+        by_doc_id.setdefault(doc_id, []).append(meta)
 
-    assert by_source, "expected metadatas to carry source_path"
+    assert by_doc_id, "expected metadatas to carry doc_id"
 
     owner_row = cat._db.execute(
         "SELECT tumbler_prefix FROM owners LIMIT 1"
     ).fetchone()
     assert owner_row is not None, "expected catalog owner registered by indexer"
-    owner_t = Tumbler.parse(owner_row[0])
 
-    for source_path, metas in by_source.items():
-        rel_path = str(Path(source_path).relative_to(code_repo))
-        entry = cat.by_file_path(owner_t, rel_path)
+    for doc_id in by_doc_id:
+        # doc_id is the catalog tumbler; resolve confirms the catalog
+        # row exists. Phase A's pre-flight registration guarantees one
+        # Document per file-path with a stable tumbler.
+        entry = cat.resolve(Tumbler.parse(doc_id))
         assert entry is not None, (
-            f"catalog has no entry for {rel_path!r} - "
+            f"catalog has no Document for doc_id={doc_id!r} - "
             "pre-index registration should have created one"
         )
-        expected_doc_id = str(entry.tumbler)
-        for m in metas:
-            assert m.get("doc_id") == expected_doc_id, (
-                f"chunk for {rel_path} carries doc_id={m.get('doc_id')!r}, "
-                f"expected {expected_doc_id!r} (catalog tumbler)"
-            )
 
 
 def test_code_indexer_doc_id_absent_when_catalog_uninitialized(

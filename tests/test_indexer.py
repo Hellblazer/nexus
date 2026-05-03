@@ -162,9 +162,19 @@ def test_run_index_skips_hidden_files(tmp_path, monkeypatch):
     assert any("main.py" in str(p) for p in seen)
 
 
-# ── Absolute source_path ────────────────────────────────────────────────────
+# ── source_path absent (RDR-102 D2) ─────────────────────────────────────────
 
-def test_run_index_source_path_is_absolute(tmp_path):
+def test_run_index_chunks_have_no_source_path(tmp_path):
+    """RDR-102 D2 retired ``source_path`` from the chunk schema. The
+    canonical reference for "which file did this chunk come from" is
+    now the catalog tumbler in ``doc_id`` (Phase A wires this for
+    standalone indexers; ``nx index repo`` already wired it via
+    indexer.py's ``_catalog_hook`` + ``doc_id_resolver`` closure
+    pattern). The legacy ``source_path`` key MUST be absent from
+    freshly-written chunks; a regression that re-introduces it would
+    re-create the prune-vs-write regression cycle this RDR closes
+    (RF-8).
+    """
     from nexus.indexer import _run_index
     repo = tmp_path / "repo"; repo.mkdir()
     (repo / "main.py").write_text("x = 1\n")
@@ -175,8 +185,12 @@ def test_run_index_source_path_is_absolute(tmp_path):
     with _patches(db, extra={"nexus.chunker.chunk_file": {"return_value": [_chunk()]},
                               "voyageai.Client": {"return_value": v}}):
         _run_index(repo, _reg())
-    assert cap and Path(cap[0]["source_path"]).is_absolute()
-    assert cap[0]["source_path"] == str(repo / "main.py")
+    assert cap, "expected at least one chunk to be upserted"
+    leaked = [m for m in cap if "source_path" in m]
+    assert not leaked, (
+        f"{len(leaked)}/{len(cap)} chunks still carry source_path "
+        f"(RDR-102 Phase B regression)"
+    )
 
 
 # ── Content-hash dedup ──────────────────────────────────────────────────────
@@ -334,7 +348,9 @@ def test_run_index_excludes_rdr_paths_from_docs(tmp_path):
                               "nexus.doc_indexer.batch_index_markdowns": {}}) as mocks:
         _run_index(repo, _reg())
     if "docs__repo" in ups:
-        paths = [m["source_path"] for m in ups["docs__repo"]]
+        # RDR-102 D2: source_path is gone; title carries
+        # "{relpath}:chunk-{i}" per prose_indexer.py:96.
+        paths = [m.get("title", "") for m in ups["docs__repo"]]
         assert any("README.md" in p for p in paths) and not any("ADR-001" in p for p in paths)
     mb = mocks["batch_index_markdowns"]; mb.assert_called_once()
     assert any("ADR-001.md" in str(p) for p in mb.call_args[0][0])
@@ -385,8 +401,10 @@ def test_run_index_mixed_repo(tmp_path):
         "nexus.doc_indexer._embed_with_fallback": {"return_value": ([[0.1]*10], "voyage-context-3")},
     }):
         _run_index(repo, _reg())
-    assert any("main.py" in m["source_path"] for m in ups["code__repo"])
-    dp = {m["source_path"] for m in ups["docs__repo"]}
+    # RDR-102 D2: source_path is gone; title carries
+    # "{relpath}:chunk-{i}" per code_indexer.py:393 / prose_indexer.py:96.
+    assert any("main.py" in m.get("title", "") for m in ups["code__repo"])
+    dp = {m.get("title", "") for m in ups["docs__repo"]}
     assert any("README.md" in p for p in dp) and any("notes.rst" in p for p in dp)
     assert not any("data.txt" in p for p in dp), ".txt files should be SKIP"
 
@@ -394,6 +412,11 @@ def test_run_index_mixed_repo(tmp_path):
 # ── Prune helpers ────────────────────────────────────────────────────────────
 
 def test_run_index_prune_deleted_files(tmp_path):
+    """Legacy fallback path: chunks pre-date Phase A doc_id wiring AND
+    were written before Phase B dropped source_path. ``_prune_deleted_files``
+    must still detect deleted-file chunks via the source_path lookup
+    (Phase 5b cleanup will drop this branch once the prune verb has
+    swept every collection)."""
     from nexus.indexer import _prune_deleted_files
     col = MagicMock()
     col.get.return_value = {"ids": ["a1","b1","b2"], "metadatas": [
@@ -404,6 +427,53 @@ def test_run_index_prune_deleted_files(tmp_path):
         ids = dc.kwargs.get("ids") or dc[1].get("ids") if dc[1] else dc[0][0]
         if isinstance(ids, list):
             assert "a1" not in ids and ("b1" in ids or "b2" in ids)
+
+
+def test_run_index_prune_deleted_files_doc_id_keyed(tmp_path):
+    """RDR-102 D2 / Phase B regression guard: post-Phase-B chunks carry
+    no source_path; ``_prune_deleted_files`` must use the doc_id-keyed
+    identity (via the file_to_doc_id map the catalog hook always
+    populates) to identify deleted-file chunks. A regression where the
+    function still keys only on source_path would silently no-op for
+    every post-Phase-B repo and let deleted-file chunks accumulate
+    indefinitely.
+    """
+    from nexus.indexer import _prune_deleted_files
+    # Three chunks: a1's doc_id matches a current file, b1's and b2's
+    # doc_ids point to a Document for a file that was deleted from
+    # the repo (the file_to_doc_id map only carries a.py).
+    col = MagicMock()
+    col.get.return_value = {
+        "ids": ["a1", "b1", "b2"],
+        "metadatas": [
+            {"doc_id": "1.7.10"},  # current file
+            {"doc_id": "1.7.99"},  # deleted file
+            {"doc_id": "1.7.99"},
+        ],
+    }
+    db = MagicMock(); db.get_or_create_collection.return_value = col
+    file_to_doc_id = {Path("/repo/a.py"): "1.7.10"}  # b.py is gone
+
+    _prune_deleted_files(
+        "code__repo", "docs__repo",
+        all_current_paths={"/repo/a.py"},  # source_path fallback would also work
+        db=db,
+        file_to_doc_id=file_to_doc_id,
+    )
+
+    deleted_ids: list[str] = []
+    for dc in col.delete.call_args_list:
+        ids = dc.kwargs.get("ids") or (dc[1].get("ids") if dc[1] else dc[0][0])
+        if isinstance(ids, list):
+            deleted_ids.extend(ids)
+    assert "a1" not in deleted_ids, (
+        "current-file chunk was incorrectly pruned"
+    )
+    assert "b1" in deleted_ids and "b2" in deleted_ids, (
+        f"deleted-file chunks were not pruned via doc_id-keyed lookup; "
+        f"deleted={deleted_ids}. Phase B regression: chunks lacking "
+        f"source_path must be reachable via the file_to_doc_id map."
+    )
 
 
 def test_run_index_prune_misclassified(tmp_path):

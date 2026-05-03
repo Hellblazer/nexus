@@ -192,10 +192,14 @@ class TestChunkerLoop:
         out = db.read_ready_chunks("h1")
         assert len(out) == 2
         meta = json.loads(out[0]["metadata_json"])
-        for k, v in [("source_path", "/a.pdf"), ("corpus", "test"),
+        # RDR-102 D2 dropped source_path; corpus / content_hash /
+        # embedding_model / store_type / page_number remain as the
+        # canonical chunk-time identity / routing fields.
+        for k, v in [("corpus", "test"),
                      ("content_hash", "h1"), ("embedding_model", "voyage-context-3"),
                      ("store_type", "pdf"), ("page_number", 1)]:
             assert meta[k] == v
+        assert "source_path" not in meta
         assert "indexed_at" in meta
         assert out[0]["chunk_id"] == "h1_0" and out[1]["chunk_id"] == "h1_1"
 
@@ -478,6 +482,130 @@ class TestPipelineIndexPdf:
             with pytest.raises(RuntimeError, match="voyage_api_key not configured"):
                 pipeline_index_pdf(Path("/a.pdf"), "h1", "docs__test", mock_t3, db=db)
 
+    def test_streaming_pdf_does_not_emit_source_path(
+        self, db, tmp_path, monkeypatch,
+    ) -> None:
+        """RDR-102 Phase B / D2: pipeline_stages._build_chunk_metadata
+        at line 145 (the make_chunk_metadata call inside the streaming
+        chunker_loop) must drop source_path from its kwargs. The
+        streaming PDF write path was missed in the original RDR-102
+        draft and added at the substantive-critic gate (RF-4 row 4).
+        Without this drop, every PDF indexed via the streaming pipeline
+        would continue regressing source_path post-Phase-B.
+        """
+        import chromadb
+        from nexus.catalog import reset_cache
+        from nexus.catalog.catalog import Catalog
+        from nexus.db.t3 import T3Database
+
+        cat_dir = tmp_path / "test-catalog"
+        Catalog.init(cat_dir)
+        reset_cache()
+        monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+        monkeypatch.delenv("CHROMA_API_KEY", raising=False)
+        monkeypatch.setattr(
+            "nexus.config._global_config_path",
+            lambda: Path("/nonexistent"),
+        )
+
+        pdf_path = tmp_path / "stream_b.pdf"
+        pdf_path.write_bytes(b"fake pdf bytes for Phase B streaming test")
+        client = chromadb.EphemeralClient()
+        t3 = T3Database(_client=client, local_mode=True)
+
+        fc = _tc(
+            ("chunk B0", 0, {"page_number": 1, "chunk_type": "text",
+                              "chunk_start_char": 0, "chunk_end_char": 8}),
+            ("chunk B1", 1, {"page_number": 2, "chunk_type": "text",
+                              "chunk_start_char": 8, "chunk_end_char": 16}),
+        )
+        fr = _er(2)
+        with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
+            ME.return_value.extract.side_effect = _fx(2, fr)
+            MC.return_value.chunk.return_value = fc
+            pipeline_index_pdf(
+                pdf_path, "rdr102streamhash_b", "docs__rdr102_stream_b",
+                t3, db=db, embed_fn=_embed,
+                corpus="rdr102_stream_b",
+            )
+
+        col = t3.get_or_create_collection("docs__rdr102_stream_b")
+        rows = col.get(include=["metadatas"])
+        assert rows["metadatas"], "expected chunks to land"
+        leaked = [m for m in rows["metadatas"] if "source_path" in m]
+        assert not leaked, (
+            f"{len(leaked)}/{len(rows['metadatas'])} streaming-pipeline "
+            f"chunks still carry source_path. Phase B must drop "
+            f"source_path=pdf_path from _build_chunk_metadata at "
+            f"pipeline_stages.py:145 — the streaming PDF write path."
+        )
+
+    def test_writes_doc_id_when_catalog_initialized(
+        self, db, tmp_path, monkeypatch,
+    ) -> None:
+        """RDR-102 D4 #2 (streaming pipeline mirror): pipeline_index_pdf
+        must populate ``doc_id`` on every chunk it uploads when the
+        catalog is initialized.
+
+        Pre-Phase-A this fails because the streaming pipeline registers
+        the catalog Document via ``_catalog_pdf_hook`` AFTER the upload
+        completes (line 729 of pipeline_stages.py); ``chunker_loop``
+        builds chunk metadata via ``_build_chunk_metadata`` →
+        ``make_chunk_metadata()`` with no ``doc_id`` argument. Phase A
+        registers the Document at the streaming-entry boundary and
+        threads doc_id through chunker_loop's metadata builder.
+        """
+        import chromadb
+        from nexus.catalog import reset_cache
+        from nexus.catalog.catalog import Catalog
+        from nexus.db.t3 import T3Database
+
+        cat_dir = tmp_path / "test-catalog"
+        Catalog.init(cat_dir)
+        reset_cache()
+        monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+        monkeypatch.delenv("CHROMA_API_KEY", raising=False)
+        monkeypatch.setattr(
+            "nexus.config._global_config_path",
+            lambda: Path("/nonexistent"),
+        )
+
+        pdf_path = tmp_path / "stream.pdf"
+        pdf_path.write_bytes(b"fake pdf bytes for streaming pipeline test")
+        client = chromadb.EphemeralClient()
+        t3 = T3Database(_client=client, local_mode=True)
+
+        fc = _tc(
+            ("chunk 0 text", 0, {"page_number": 1, "chunk_type": "text",
+                                  "chunk_start_char": 0, "chunk_end_char": 12}),
+            ("chunk 1 text", 1, {"page_number": 2, "chunk_type": "text",
+                                  "chunk_start_char": 12, "chunk_end_char": 24}),
+        )
+        fr = _er(2)
+        with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
+            ME.return_value.extract.side_effect = _fx(2, fr)
+            MC.return_value.chunk.return_value = fc
+            total = pipeline_index_pdf(
+                pdf_path, "rdr102streamhash", "docs__rdr102_stream",
+                t3, db=db, embed_fn=_embed,
+                corpus="rdr102_stream",
+            )
+        assert total == 2, f"expected 2 chunks uploaded; got {total}"
+
+        col = t3.get_or_create_collection("docs__rdr102_stream")
+        rows = col.get(include=["metadatas"])
+        assert rows["metadatas"], (
+            "expected at least one chunk in docs__rdr102_stream"
+        )
+        missing_doc_id = [m for m in rows["metadatas"] if not m.get("doc_id")]
+        assert not missing_doc_id, (
+            f"{len(missing_doc_id)}/{len(rows['metadatas'])} streaming "
+            f"pipeline chunks missing doc_id. Phase A must register the "
+            f"catalog Document at the pipeline_index_pdf entry boundary "
+            f"and thread doc_id through chunker_loop's metadata builder, "
+            f"not via the post-upload _catalog_pdf_hook."
+        )
+
 
 
 class TestBufferEdgeCases:
@@ -498,8 +626,10 @@ class TestBufferEdgeCases:
 
 
 _REQUIRED_META = {
-    # Identity / spans / position
-    "source_path", "content_hash", "chunk_text_hash", "chunk_index", "chunk_count",
+    # Identity / spans / position — RDR-102 D2 dropped source_path.
+    # doc_id is drop-when-empty so it's not in this required set
+    # (the chunker_loop test below has no catalog).
+    "content_hash", "chunk_text_hash", "chunk_index", "chunk_count",
     "chunk_start_char", "chunk_end_char", "line_start", "line_end", "page_number",
     # Display / routing (post source_title→title collapse, expires_at→indexed_at swap)
     "title", "source_author", "section_title", "section_type", "tags", "category",

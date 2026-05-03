@@ -399,7 +399,6 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
         section_type = "method" if method_ctx else ("class" if class_ctx else "")
         metadata = make_chunk_metadata(
             content_type="code",
-            source_path=str(file_path),
             chunk_index=chunk.get("chunk_index", i),
             chunk_count=chunk.get("chunk_count", total_chunks),
             chunk_text_hash=_hl.sha256(chunk["text"].encode()).hexdigest(),

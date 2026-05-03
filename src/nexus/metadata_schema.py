@@ -48,8 +48,11 @@ __all__ = [
 #: ``where=`` filter, every ``meta.get(...)`` / ``metadata[...]`` read,
 #: and every display formatter in the codebase.
 ALLOWED_TOP_LEVEL: frozenset[str] = frozenset({
-    # Identity (5)
-    "source_path",
+    # Identity (4) — RDR-102 D2 dropped ``source_path``. The catalog
+    # tumbler in ``doc_id`` is the canonical reference; ``source_path``
+    # was a regression vector against the prune verb (RF-8: it was the
+    # only key in both ALLOWED_TOP_LEVEL and _PRUNE_DEPRECATED_KEYS,
+    # which created a write-strip-rewrite cycle that never terminated).
     "content_hash",
     "chunk_text_hash",
     "chunk_index",
@@ -114,12 +117,11 @@ CONTENT_TYPES: frozenset[str] = frozenset({"code", "pdf", "markdown", "prose"})
 #: Safety margin below Chroma's 32-key cap (:data:`~nexus.db.chroma_quotas.
 #: QUOTAS.MAX_RECORD_METADATA_KEYS`). Any write producing more than this
 #: many keys raises :class:`MetadataSchemaError`. RDR-101 Phase 3 PR δ
-#: bumped this to 32 to admit the new ``doc_id`` field; the schema is
-#: now AT the Chroma cap. Phase 5b plans to drop legacy ``source_path``
-#: in favour of ``source_uri`` (RDR-096 P5.1/P5.2), which restores
-#: headroom. Until then, the ``bib_*`` placeholder-drop and
+#: bumped this to 32 to admit the new ``doc_id`` field; RDR-102 D2 then
+#: dropped ``source_path`` from the schema (one-key headroom restored,
+#: schema sits at 31 of 32). The ``bib_*`` placeholder-drop and
 #: ``git_meta``-omitted-when-empty filters in :func:`normalize` keep
-#: typical chunks well under the cap (no-bib + no-git ≈ 26 keys).
+#: typical chunks well under the cap (no-bib + no-git ≈ 25 keys).
 MAX_SAFE_TOP_LEVEL_KEYS: int = 32
 
 #: Git provenance sub-keys — packed into ``git_meta`` as a JSON string.
@@ -281,8 +283,11 @@ def validate(metadata: dict[str, Any]) -> None:
 def make_chunk_metadata(
     *,
     content_type: str,
-    # Identity (always required)
-    source_path: str,
+    # Identity (always required) — RDR-102 D2 hard-removed the
+    # ``source_path`` parameter (Alternative A3 rejected at the
+    # substantive-critic gate). A caller that still passes
+    # ``source_path=...`` raises ``TypeError`` so the regression is
+    # caught at the call site rather than silently dropped downstream.
     chunk_index: int,
     chunk_count: int,
     chunk_text_hash: str,
@@ -339,7 +344,6 @@ def make_chunk_metadata(
     is a single edit, not seven separate indexer changes.
     """
     raw: dict[str, Any] = {
-        "source_path": source_path,
         "content_hash": content_hash,
         "chunk_text_hash": chunk_text_hash,
         "chunk_index": chunk_index,
