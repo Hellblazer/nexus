@@ -818,29 +818,44 @@ class TestEventSourcedFlag:
                 f"{dropped!r}; got keys: {sorted(meta.keys())}"
             )
 
-    def test_config_helper_default_false(self, monkeypatch, tmp_path) -> None:
+    def test_config_helper_default_true_post_phase_5b(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """Phase 5b (nexus-o6aa.12) flipped the default to true. Empty
+        config + no env override → returns True. The 4 gated keys
+        get dropped at write time by default."""
         from nexus.config import is_catalog_event_sourced
-        # Empty NEXUS_CONFIG_DIR — no config.yml, no env override.
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.delenv("NEXUS_CATALOG_EVENT_SOURCED", raising=False)
-        # Run from a tmp cwd so per-repo .nexus.yml doesn't bleed in.
+        monkeypatch.chdir(tmp_path)
+        assert is_catalog_event_sourced() is True
+
+    def test_config_helper_yaml_can_disable(self, monkeypatch, tmp_path) -> None:
+        """REVERSIBLE escape: ``[catalog].event_sourced: false`` in
+        config.yml opts back out of the Phase 5b default."""
+        from nexus.config import is_catalog_event_sourced
+        (tmp_path / "config.yml").write_text(
+            "catalog:\n  event_sourced: false\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.delenv("NEXUS_CATALOG_EVENT_SOURCED", raising=False)
         monkeypatch.chdir(tmp_path)
         assert is_catalog_event_sourced() is False
 
-    def test_config_helper_reads_yaml(self, monkeypatch, tmp_path) -> None:
-        """``[catalog].event_sourced: true`` in the global config.yml
-        opts the process into Phase 5a's gated drops."""
+    def test_config_helper_yaml_can_enable_explicitly(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """``[catalog].event_sourced: true`` in config.yml is now
+        redundant with the default but still resolves correctly."""
         from nexus.config import is_catalog_event_sourced
-
-        # nexus_config_dir() honors NEXUS_CONFIG_DIR directly; the
-        # config file is ``config.yml`` (not .yaml) per load_config.
         (tmp_path / "config.yml").write_text(
             "catalog:\n  event_sourced: true\n",
             encoding="utf-8",
         )
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.delenv("NEXUS_CATALOG_EVENT_SOURCED", raising=False)
-        monkeypatch.chdir(tmp_path)  # avoid per-repo .nexus.yml override
+        monkeypatch.chdir(tmp_path)
         assert is_catalog_event_sourced() is True
 
     def test_env_override_takes_precedence(self, monkeypatch, tmp_path) -> None:
@@ -863,4 +878,16 @@ class TestEventSourcedFlag:
             encoding="utf-8",
         )
         monkeypatch.setenv("NEXUS_CATALOG_EVENT_SOURCED", "0")
+        assert is_catalog_event_sourced() is False
+
+    def test_env_disable_overrides_post_phase_5b_default(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """The Phase 5b REVERSIBLE escape hatch: even with config
+        unset (so default would be True), ``NEXUS_CATALOG_EVENT_SOURCED=0``
+        still opts the process back out."""
+        from nexus.config import is_catalog_event_sourced
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))  # empty
+        monkeypatch.setenv("NEXUS_CATALOG_EVENT_SOURCED", "0")
+        monkeypatch.chdir(tmp_path)
         assert is_catalog_event_sourced() is False

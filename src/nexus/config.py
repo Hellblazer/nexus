@@ -351,17 +351,17 @@ def is_catalog_event_sourced() -> bool:
     """Return True if ``[catalog].event_sourced`` is enabled in the
     nexus config (or via env override).
 
-    RDR-101 Phase 5a opt-in flag (``nexus-o6aa.11``). When true, the
-    chunk-metadata write path drops deprecated fields (``title``,
-    ``corpus``, ``store_type``, ``git_meta``) — readers route through
-    the catalog ``doc_id`` instead. Default false until Phase 5b
-    (``nexus-o6aa.12``) flips it.
+    RDR-101 Phase 5b (``nexus-o6aa.12``) flipped the default to True:
+    new chunks are written WITHOUT the 4 deprecated metadata fields
+    (``title``, ``corpus``, ``store_type``, ``git_meta``). Readers
+    route through the catalog ``doc_id`` instead.
 
     Decision logic:
       - ``NEXUS_CATALOG_EVENT_SOURCED=1`` → True (explicit opt-in)
-      - ``NEXUS_CATALOG_EVENT_SOURCED=0`` → False (explicit opt-out)
+      - ``NEXUS_CATALOG_EVENT_SOURCED=0`` → False (REVERSIBLE escape
+        hatch — chunks written under flag-on remain readable)
       - Otherwise: read ``[catalog].event_sourced`` from config YAML;
-        default false when absent.
+        default True (Phase 5b flip).
     """
     raw = os.environ.get("NEXUS_CATALOG_EVENT_SOURCED", "").strip().lower()
     if raw in ("1", "true", "yes", "on"):
@@ -376,14 +376,22 @@ def is_catalog_event_sourced() -> bool:
 
 _DEFAULTS: dict[str, Any] = {
     "catalog": {
-        # RDR-101 Phase 5a (nexus-o6aa.11): opt-in flag for the
-        # event-sourced write path. When true, deprecated chunk
-        # metadata fields (``title``, ``corpus``, ``store_type``,
-        # ``git_meta``) are dropped at write time — readers route
-        # through catalog → ``doc_id`` instead. Default false until
-        # Phase 5b (nexus-o6aa.12) flips it; Phase 5c removes the
-        # fields from ALLOWED_TOP_LEVEL.
-        "event_sourced": False,
+        # RDR-101 Phase 5b (nexus-o6aa.12) IRREVERSIBLE flip: default
+        # is now true. New chunks are written WITHOUT the 4 deprecated
+        # fields (``title``, ``corpus``, ``store_type``, ``git_meta``);
+        # readers route through catalog → ``doc_id`` instead. Phase 4
+        # reader migration completed, so dropping these fields on the
+        # write side does not break any consumer.
+        #
+        # REVERSIBLE escape hatch retained: operators can opt back out
+        # via ``NEXUS_CATALOG_EVENT_SOURCED=0`` env var or
+        # ``[catalog].event_sourced: false`` in config.yml. Existing
+        # chunks indexed under either mode remain readable.
+        #
+        # Phase 5c (nexus-o6aa.13) will remove the deprecated fields
+        # from ALLOWED_TOP_LEVEL entirely, at which point the dual-
+        # write back-compat path goes away.
+        "event_sourced": True,
     },
     "embeddings": {
         "rerankerModel": "rerank-2.5",

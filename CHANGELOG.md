@@ -6,13 +6,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **RDR-101 Phase 5b — IRREVERSIBLE: `[catalog].event_sourced` default flipped to `true`** (`nexus-o6aa.12`). New chunks are written WITHOUT the 4 deprecated metadata fields (`title`, `corpus`, `store_type`, `git_meta`) by default. Readers route through the catalog `doc_id` instead — Phase 4 reader migration completed (`_display_path` resolution, `doc_id`-keyed dispatch), so dropping these fields on the write side is safe.
+
+  REVERSIBLE escape hatch: operators who need the legacy chunk shape can opt back out via `NEXUS_CATALOG_EVENT_SOURCED=0` env var or `[catalog].event_sourced: false` in config.yml. Existing chunks indexed under either mode remain readable.
+
+  Phase 5c (`nexus-o6aa.13`) will remove the deprecated fields from `ALLOWED_TOP_LEVEL` entirely; the dual-write back-compat path goes away at that point and the env-var escape stops working.
+
 ### Added
 
-- **RDR-101 Phase 5a — `[catalog].event_sourced` opt-in flag** (`nexus-o6aa.11`). New config knob (default `false`) that, when set to `true`, drops 4 deprecated chunk-metadata fields at write time: `title`, `corpus`, `store_type`, and the consolidated `git_meta` JSON blob. The Phase 4 reader migration switched to catalog-resolved `_display_path` and `doc_id`-keyed dispatch, so these per-chunk copies are no-longer load-bearing. Two ways to enable:
-  - Config: add `catalog: { event_sourced: true }` to `~/.config/nexus/config.yml` (or per-repo `.nexus.yml`).
-  - Env: `NEXUS_CATALOG_EVENT_SOURCED=1` (overrides config, useful for testing).
-
-  REVERSIBLE — flipping back to `false` resumes dual-write. Chunks indexed under either mode are readable by current readers. Phase 5b (`nexus-o6aa.12`) will flip the default; Phase 5c (`nexus-o6aa.13`) will remove the fields from `ALLOWED_TOP_LEVEL` entirely.
+- **RDR-101 Phase 5a — `[catalog].event_sourced` opt-in flag** (`nexus-o6aa.11`). New config knob (originally default `false`, flipped to `true` by Phase 5b above) that gates the write-side drop of 4 deprecated chunk-metadata fields: `title`, `corpus`, `store_type`, and the consolidated `git_meta` JSON blob. Two ways to set:
+  - Config: `catalog: { event_sourced: <bool> }` in `~/.config/nexus/config.yml` (or per-repo `.nexus.yml`).
+  - Env: `NEXUS_CATALOG_EVENT_SOURCED=0|1` (overrides config).
 
 ## [4.22.0] - 2026-05-03
 
