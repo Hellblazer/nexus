@@ -242,18 +242,23 @@ def test_greenfield_index_writes_no_deprecated_keys(
     rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database
 ) -> None:
     """nexus-e5uw acceptance: a fresh greenfield index must not write
-    chunks carrying any of the 5 deprecated chunk-metadata keys that
+    chunks carrying any of the 8 deprecated chunk-metadata keys that
     ``nx catalog migrate``'s prune-deprecated-keys verb targets
-    (``source_path``, ``git_branch``, ``git_commit_hash``,
-    ``git_project_name``, ``git_remote_url``). The bead's acceptance
-    is that a clean greenfield repro + ``nx catalog migrate`` produces
-    0 chunks_updated, which is equivalent to: no chunk written by
-    ``index_repository`` carries any of those keys.
+    (5 from RDR-101 Phase 4: ``source_path``, ``git_branch``,
+    ``git_commit_hash``, ``git_project_name``, ``git_remote_url``;
+    plus 3 from Phase 5c: ``corpus``, ``store_type``, ``git_meta``).
+    The bead's acceptance is that a clean greenfield repro +
+    ``nx catalog migrate`` produces 0 chunks_updated, which is
+    equivalent to: no chunk written by ``index_repository`` carries
+    any of those keys.
 
     RDR-102 Phase B drops ``source_path`` from
     :data:`ALLOWED_TOP_LEVEL`; ``normalize()`` packs the four
     ``git_*`` fields into a single ``git_meta`` JSON blob and drops
-    the flat keys. This test is the post-Phase-B contract.
+    the flat keys. RDR-101 Phase 5c subsequently dropped ``corpus``,
+    ``store_type``, and ``git_meta`` itself from
+    :data:`ALLOWED_TOP_LEVEL`. This test is the post-Phase-5c
+    contract.
     """
     from nexus.commands.catalog import _PRUNE_DEPRECATED_KEYS
     from nexus.registry import _repo_identity

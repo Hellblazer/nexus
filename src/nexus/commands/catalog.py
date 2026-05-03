@@ -5551,7 +5551,7 @@ def repair_orphan_chunks_cmd(
     default=False,
     help=(
         "Phase 4 finisher. When set, migrate also runs "
-        "prune-deprecated-keys (drops 5 legacy chunk-metadata keys) "
+        "prune-deprecated-keys (drops 8 legacy chunk-metadata keys) "
         "and a second t3-backfill-doc-id pass to drain the deferred "
         "class. Without this flag the verb stops after Phase 3. "
         "Acknowledges that every audit-listed reader (see "
@@ -5579,7 +5579,7 @@ def migrate_cmd(
          existing T3 chunks (skipped under --no-chunks).
       3. **Phase 4 finisher** (only when
          ``--i-have-completed-the-reader-migration`` is set):
-         ``nx catalog prune-deprecated-keys`` drops 5 legacy chunk-
+         ``nx catalog prune-deprecated-keys`` drops 8 legacy chunk-
          metadata keys, then a second ``t3-backfill-doc-id`` pass
          drains the deferred class.
       4. ``nx catalog doctor --replay-equality [--t3-doc-id-coverage
@@ -5871,17 +5871,24 @@ def migrate_cmd(
 # ── RDR-101 Phase 4: prune-deprecated-keys verb (nexus-o6aa.10.3) ─────────
 
 
-# Five legacy chunk-metadata keys that the Phase 4 reader migrations
-# stopped depending on. ``title`` is intentionally NOT in this set; the
-# .10.2 audit (docs/migration/rdr-101-phase4-reader-audit.md, Category C)
-# kept it permanently as the slug-shaped identity for ``knowledge__knowledge``
-# and the universal display field across formatters.
+# Eight legacy chunk-metadata keys: 5 from RDR-101 Phase 4 reader migrations
+# (.10.2 audit, Category B) + 3 dropped from ALLOWED_TOP_LEVEL by Phase 5c
+# (nexus-o6aa.13). Pre-5c collections retain the Phase 5c trio until pruned;
+# omitting them here would leave the verb unable to fully reshape pre-5c
+# chunks. ``title`` is intentionally NOT in this set; the .10.2 audit
+# (Category C) kept it permanently as the slug-shaped identity for
+# ``knowledge__knowledge`` and the universal display field across formatters.
 _PRUNE_DEPRECATED_KEYS: frozenset[str] = frozenset({
+    # RDR-101 Phase 4 (.10.2 audit, Category B).
     "source_path",
     "git_branch",
     "git_commit_hash",
     "git_project_name",
     "git_remote_url",
+    # RDR-101 Phase 5c (nexus-o6aa.13).
+    "corpus",
+    "store_type",
+    "git_meta",
 })
 
 
@@ -5941,17 +5948,20 @@ def prune_deprecated_keys_cmd(
     reader_migration_done: bool,
     skip_coverage_check: bool,
 ) -> None:
-    """RDR-101 Phase 4: drop legacy metadata keys from every T3 chunk.
+    """RDR-101 Phase 4 + 5c: drop legacy metadata keys from every T3 chunk.
 
-    Removes the five keys whose readers migrated to doc_id-keyed
-    catalog lookups in Phase 4: ``source_path``, ``git_branch``,
-    ``git_commit_hash``, ``git_project_name``, ``git_remote_url``.
-    Idempotent: chunks that already lack the keys are no-ops.
+    Removes eight keys: 5 whose readers migrated to doc_id-keyed
+    catalog lookups in Phase 4 (``source_path``, ``git_branch``,
+    ``git_commit_hash``, ``git_project_name``, ``git_remote_url``)
+    plus 3 dropped from ``ALLOWED_TOP_LEVEL`` by Phase 5c
+    (``corpus``, ``store_type``, ``git_meta``). Pre-5c collections
+    retain the latter three until pruned. Idempotent: chunks that
+    already lack the keys are no-ops.
 
     The chunk metadata key budget on ChromaDB Cloud is 32 top-level
     keys (``MAX_SAFE_TOP_LEVEL_KEYS``). Over-cap chunks on Hal's
-    catalog carry 35-36 keys; dropping these five brings them to
-    30-31 keys and leaves room for ``doc_id`` + future additions.
+    catalog carry 35-36 keys; dropping these eight brings them well
+    under the cap and leaves room for ``doc_id`` + future additions.
 
     Pre-flight gates (refuse to proceed unless overridden):
     - ``--i-have-completed-the-reader-migration`` is required. Without

@@ -5,7 +5,7 @@
 Coverage:
 - Refuses without ``--i-have-completed-the-reader-migration``.
 - Refuses on doc_id coverage gap (``--skip-coverage-check`` overrides).
-- Drops the 5 deprecated keys, preserves ``title`` + all other keys.
+- Drops the 8 deprecated keys, preserves ``title`` + all other keys.
 - Idempotent: a second run on already-pruned chunks is a no-op.
 - ``--collection`` filter scopes the prune.
 - ``--dry-run`` reports without writing.
@@ -85,14 +85,19 @@ def _chunk_event(
 
 
 def _full_meta(doc_id: str = "ART-x") -> dict:
-    """Pre-prune chunk metadata: 5 deprecated keys + title + a few survivors."""
+    """Pre-prune chunk metadata: 8 deprecated keys + title + a few survivors."""
     return {
-        # The 5 keys this verb drops.
+        # The 5 RDR-101 Phase 4 keys this verb drops.
         "source_path": "/abs/path/file.py",
         "git_branch": "main",
         "git_commit_hash": "deadbeef",
         "git_project_name": "nexus",
         "git_remote_url": "https://github.com/Hellblazer/nexus.git",
+        # Phase 5c additionally removed these from ALLOWED_TOP_LEVEL.
+        # Pre-5c collections retain them until pruned.
+        "corpus": "code",
+        "store_type": "code",
+        "git_meta": '{"branch":"main","commit":"deadbeef"}',
         # Permanently kept (per the .10.2 audit, Category C).
         "title": "file.py:1-10",
         # Other survivors.
@@ -205,14 +210,15 @@ class TestCoverageGate:
 
 
 class TestPruneBehaviour:
-    def test_drops_five_keys_preserves_title_and_others(
+    def test_drops_eight_keys_preserves_title_and_others(
         self, isolated_nexus, runner, chroma_client,
         monkeypatch: pytest.MonkeyPatch,
     ):
-        """WITH TEETH: the post-prune chunk has none of the 5 deprecated
-        keys, but ``title`` and every other key are preserved verbatim.
-        A regression that drops ``title`` (per the original 6-key design,
-        rejected by the .10.2 audit) fails here.
+        """WITH TEETH: the post-prune chunk has none of the 8 deprecated
+        keys (5 from RDR-101 Phase 4 + 3 from Phase 5c), but ``title``
+        and every other key are preserved verbatim. A regression that
+        drops ``title`` (per the original 6-key design, rejected by the
+        .10.2 audit) fails here.
         """
         Catalog.init(isolated_nexus)
         _seed(chroma_client, "code__test", [
@@ -240,7 +246,7 @@ class TestPruneBehaviour:
 
         col = chroma_client.get_collection("code__test")
         meta = col.get(ids=["ch1"], include=["metadatas"])["metadatas"][0]
-        # All 5 deprecated keys gone.
+        # All 8 deprecated keys gone.
         for k in _PRUNE_DEPRECATED_KEYS:
             assert k not in meta, (
                 f"deprecated key {k!r} still present after prune"
@@ -385,15 +391,22 @@ class TestCollectionFilter:
 
 class TestKeyConstants:
     def test_deprecated_keys_match_audit(self):
-        """Lock the 5-key set against the .10.2 audit's Category B
-        recommendation. Title is intentionally absent (Category C).
+        """Lock the 8-key set: 5 from the .10.2 audit (Category B,
+        RDR-101 Phase 4) + 3 dropped from ALLOWED_TOP_LEVEL by
+        Phase 5c (corpus, store_type, git_meta). Title is
+        intentionally absent (Category C).
         """
         assert _PRUNE_DEPRECATED_KEYS == frozenset({
+            # RDR-101 Phase 4 (.10.2 audit, Category B).
             "source_path",
             "git_branch",
             "git_commit_hash",
             "git_project_name",
             "git_remote_url",
+            # RDR-101 Phase 5c (nexus-o6aa.13).
+            "corpus",
+            "store_type",
+            "git_meta",
         })
         assert "title" not in _PRUNE_DEPRECATED_KEYS, (
             "title is load-bearing (slug-shaped knowledge identity + "
