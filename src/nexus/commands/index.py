@@ -6,6 +6,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import click
 import structlog
@@ -24,6 +25,25 @@ def _registry_path() -> Path:
 
 def _registry() -> RepoRegistry:
     return RepoRegistry(_registry_path())
+
+
+def _open_catalog_or_none() -> Any:
+    """Return a ``Catalog`` instance when one is initialized, else None.
+
+    RDR-103 Phase 3a: callers that want to consult the catalog for
+    conformant collection names but tolerate its absence (e.g. fresh
+    operator workstation, pytest temp dirs) use this helper.
+    """
+    from nexus.catalog import Catalog
+    from nexus.config import catalog_path
+
+    try:
+        cat_path = catalog_path()
+        if Catalog.is_initialized(cat_path):
+            return Catalog(cat_path, cat_path / ".catalog.db")
+    except Exception:
+        return None
+    return None
 
 
 @click.group()
@@ -204,7 +224,18 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
     reg = _registry()
     path = path.resolve()
     if reg.get(path) is None:
-        reg.add(path)
+        # RDR-103 Phase 3a: pass the catalog so the registry's
+        # collection-name fields are populated with conformant shapes
+        # when a catalog is initialized. The catalog must already know
+        # the repo's owner; the indexer's _catalog_hook normally
+        # registers it, but `nx index repo` runs the registry add
+        # BEFORE _catalog_hook fires. So at this point the owner may
+        # not exist yet, and `_resolve_repo_collection` will fall back
+        # to the legacy helper. The next index run produces conformant
+        # names; greenfield with explicit pre-registration uses them
+        # directly.
+        cat = _open_catalog_or_none()
+        reg.add(path, cat=cat)
         click.echo(f"Registered {path}.")
 
     if force:
@@ -686,7 +717,12 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             click.echo("No chunks produced (file may already be indexed or extraction failed).")
             return
 
-        # Retrieve indexed chunks from the ephemeral collection for preview
+        # Retrieve indexed chunks from the ephemeral collection for preview.
+        # RDR-103 Phase 3a: dry-run uses an EphemeralClient with no
+        # catalog context, so the conformant helper does not apply
+        # here. The fallback shape mirrors doc_indexer's leaf fallback;
+        # both are removed in Phase 5 by making ``collection`` required
+        # in dry-run.
         col_name = collection if collection else f"docs__{corpus}"
         col = local_t3.get_or_create_collection(col_name)
         result = col.get(include=["documents", "metadatas"])
@@ -816,7 +852,8 @@ def index_rdr_cmd(path: Path, force: bool, monitor: bool) -> None:
     one RDR changed, e.g. at rdr-close time).
     """
     from nexus.doc_indexer import batch_index_markdowns
-    from nexus.registry import _repo_identity, _rdr_collection_name
+    from nexus.indexer import _repo_collection_or_legacy
+    from nexus.registry import _repo_identity
 
     path = path.resolve()
 
@@ -855,7 +892,9 @@ def index_rdr_cmd(path: Path, force: bool, monitor: bool) -> None:
             return
 
     basename, _ = _repo_identity(repo_root)
-    collection = _rdr_collection_name(repo_root)
+    # RDR-103 Phase 3a: catalog-first resolution; legacy fallback
+    # retained for catalog-absent invocations (Phase 5 drops fallback).
+    collection = _repo_collection_or_legacy(repo_root, "rdr")
     label = "Force re-indexing" if force else "Indexing"
     click.echo(f"{label} {len(rdr_files)} RDR document(s) into {collection}…")
 

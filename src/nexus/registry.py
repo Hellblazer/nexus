@@ -91,6 +91,46 @@ def _rdr_collection_name(repo: Path) -> str:
     return _safe_collection("rdr__", name, path_hash)
 
 
+def _resolve_repo_collection(
+    repo: Path, content_type: str, *, cat: Any = None,
+) -> str:
+    """Return the collection name for ``(repo, content_type)``.
+
+    RDR-103 Phase 3a: when ``cat`` is supplied AND has an owner
+    registered for ``repo``, returns the conformant
+    ``<ct>__<owner>__<model>__v<n>`` name minted by
+    :meth:`Catalog.collection_for_repo`. Otherwise falls back to the
+    pre-RDR-103 ``<ct>__<basename>-<hash8>`` shape.
+
+    Used by :meth:`RepoRegistry.add` (passed catalog explicitly) and is
+    intentionally a thin façade that the indexer's
+    ``_repo_collection_or_legacy`` mirrors. Phase 5 removes both the
+    fallback branch here and the legacy helper definitions above.
+    """
+    if cat is not None:
+        try:
+            return cat.collection_for_repo(repo, content_type).render()
+        except LookupError:
+            # Owner not registered; fall through to legacy.
+            pass
+        except Exception as exc:
+            _log.debug(
+                "registry_resolve_catalog_failed",
+                repo=str(repo),
+                content_type=content_type,
+                error=str(exc),
+            )
+    if content_type == "code":
+        return _collection_name(repo)
+    if content_type == "docs":
+        return _docs_collection_name(repo)
+    if content_type == "rdr":
+        return _rdr_collection_name(repo)
+    raise ValueError(
+        f"_resolve_repo_collection: unknown content_type {content_type!r}"
+    )
+
+
 def list_sibling_collections(
     collection_name: str,
     t3_client: Any,
@@ -151,12 +191,21 @@ class RepoRegistry:
 
     # ── public API ────────────────────────────────────────────────────────────
 
-    def add(self, repo: Path) -> None:
-        """Register *repo*, initialising collection names and head_hash."""
+    def add(self, repo: Path, *, cat: Any = None) -> None:
+        """Register *repo*, initialising collection names and head_hash.
+
+        RDR-103 Phase 3a: when ``cat`` is supplied, collection names are
+        sourced from the catalog as conformant
+        ``<ct>__<owner>__<model>__v1`` shapes. When ``cat`` is None
+        (default) or the lookup raises (owner not yet registered), the
+        legacy ``_collection_name`` / ``_docs_collection_name`` helpers
+        produce the pre-RDR-103 names. Phase 5 drops the legacy branch
+        together with the helper definitions.
+        """
         key = str(repo)
         name = repo.name
-        code_col = _collection_name(repo)
-        docs_col = _docs_collection_name(repo)
+        code_col = _resolve_repo_collection(repo, "code", cat=cat)
+        docs_col = _resolve_repo_collection(repo, "docs", cat=cat)
         with self._lock:
             self._data["repos"][key] = {
                 "name": name,
