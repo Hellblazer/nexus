@@ -314,6 +314,77 @@ def setup_cmd(remote: str) -> None:
         click.echo("Setup complete.")
 
 
+@catalog.command("backfill-collections")
+@click.option(
+    "--dry-run/--no-dry-run",
+    default=False,
+    help="Report names that would be registered without writing.",
+)
+def backfill_collections_cmd(dry_run: bool) -> None:
+    """Populate the Phase 6 collections projection from existing state.
+
+    \b
+    Walks both T3 (live ChromaDB collections) and the catalog
+    documents.physical_collection column, unions the two sets, and
+    registers each name not already in the projection. The projector's
+    is_conformant_collection_name regex decides each row's
+    legacy_grandfathered flag automatically.
+
+    \b
+    Idempotent: re-running adds only the names that appeared since the
+    last run. The conventional first-time invocation is dry-run, then
+    --no-dry-run after operator review.
+
+    \b
+    Examples:
+      nx catalog backfill-collections --dry-run
+      nx catalog backfill-collections
+    """
+    from nexus.db import make_t3  # noqa: PLC0415
+
+    cat = _get_catalog()
+
+    try:
+        t3_db = make_t3()
+        t3_names = {c["name"] for c in t3_db.list_collections()}
+    except Exception as exc:
+        click.echo(f"Failed to list T3 collections: {exc}")
+        t3_names = set()
+
+    rows = cat._db.execute(
+        "SELECT DISTINCT physical_collection FROM documents "
+        "WHERE physical_collection != ''"
+    ).fetchall()
+    catalog_names = {r[0] for r in rows if r[0]}
+
+    candidate_names = sorted(t3_names | catalog_names)
+    already = {r["name"] for r in cat.list_collections()}
+    to_register = [n for n in candidate_names if n not in already]
+
+    if not to_register:
+        click.echo(
+            f"Nothing to backfill: {len(already)} collection(s) already registered, "
+            f"0 new."
+        )
+        return
+
+    verb = "would register" if dry_run else "registering"
+    click.echo(f"{verb} {len(to_register)} new collection(s):")
+    for name in to_register:
+        click.echo(f"  {name}")
+
+    if dry_run:
+        return
+
+    for name in to_register:
+        cat.register_collection(name)
+
+    click.echo(
+        f"\nDone: {len(to_register)} new, "
+        f"{len(already)} already registered."
+    )
+
+
 @catalog.command("list")
 @click.option("--owner", default="")
 @click.option("--type", "content_type", default="")
