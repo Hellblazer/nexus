@@ -877,6 +877,7 @@ def store_put(
     collection: str = "knowledge",
     title: str = "",
     tags: str = "",
+    category: str = "",
     ttl: str = "permanent",
 ) -> str:
     """Store content in the T3 permanent knowledge store.
@@ -886,6 +887,10 @@ def store_put(
         collection: Collection name or prefix (default: knowledge)
         title: Document title (recommended for deduplication)
         tags: Comma-separated tags
+        category: Document category for filtered queries (e.g.
+            ``rdr_postmortem``). Stamped on the chunk metadata so callers
+            can filter via ``where={"category": "<value>"}`` without
+            isolating the documents in their own collection.
         ttl: Time-to-live: Nd (days), Nw (weeks), or "permanent"
     """
     try:
@@ -923,6 +928,7 @@ def store_put(
             content=content,
             title=title,
             tags=tags,
+            category=category,
             ttl_days=ttl_days,
             catalog_doc_id=catalog_doc_id,
         )

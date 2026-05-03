@@ -240,6 +240,53 @@ def _remove_stale(lock_path: Path) -> None:
         pass
 
 
+def _repo_collection_or_legacy(repo: Path, content_type: str) -> str:
+    """Return the conformant collection name for ``(repo, content_type)``,
+    falling back to the legacy registry helper when the catalog is not
+    available or the owner is not yet registered.
+
+    RDR-103 Phase 3a transitional helper. Phase 5 removes the legacy
+    fallback together with the registry helper definitions; from then on
+    the catalog is the only source of collection names.
+    """
+    from nexus.catalog import Catalog  # noqa: PLC0415
+    from nexus.config import catalog_path  # noqa: PLC0415
+
+    try:
+        cat_path = catalog_path()
+        if Catalog.is_initialized(cat_path):
+            cat = Catalog(cat_path, cat_path / ".catalog.db")
+            try:
+                return cat.collection_for_repo(repo, content_type).render()
+            except LookupError:
+                # Owner not yet registered; fall through to legacy
+                # helper. This happens for callers that bypass the
+                # ``_catalog_hook`` upfront flow (e.g. ad-hoc CLI
+                # invocations on a fresh repo).
+                pass
+    except Exception:
+        _log.debug(
+            "repo_collection_catalog_lookup_failed",
+            repo=str(repo),
+            content_type=content_type,
+            exc_info=True,
+        )
+    from nexus.registry import (  # noqa: PLC0415
+        _collection_name,
+        _docs_collection_name,
+        _rdr_collection_name,
+    )
+    if content_type == "code":
+        return _collection_name(repo)
+    if content_type == "docs":
+        return _docs_collection_name(repo)
+    if content_type == "rdr":
+        return _rdr_collection_name(repo)
+    raise ValueError(
+        f"_repo_collection_or_legacy: unknown content_type {content_type!r}"
+    )
+
+
 def _catalog_hook(
     repo: Path,
     repo_name: str,
@@ -614,15 +661,16 @@ def _run_index_frecency_only(repo: Path, registry: "RepoRegistry") -> None:
     from nexus.config import get_credential
     from nexus.frecency import batch_frecency
     from nexus.db import make_t3
-    from nexus.registry import _docs_collection_name
 
     info = registry.get(repo)
     if info is None:
         return
 
-    # C2: use deterministic naming function as fallback
+    # RDR-103 Phase 3a: registry value preserves the legacy name when the
+    # repo was added before the migration; fallback queries the catalog
+    # for a conformant name (Phase 5 drops the legacy branch entirely).
     code_collection = info.get("code_collection", info["collection"])
-    docs_collection = info.get("docs_collection") or _docs_collection_name(repo)
+    docs_collection = info.get("docs_collection") or _repo_collection_or_legacy(repo, "docs")
 
     from nexus.config import is_local_mode
     if not is_local_mode():
@@ -999,10 +1047,13 @@ def _discover_and_index_rdrs(
         _log.debug("no RDR files found", rdr_paths=[str(p) for p in rdr_abs_paths])
         return 0, 0, 0
 
-    # Collection: rdr__{basename}-{hash8} — uses worktree-stable identity
-    from nexus.registry import _repo_identity, _rdr_collection_name
+    # RDR-103 Phase 3a: ``_repo_collection_or_legacy`` queries the
+    # catalog for a conformant ``rdr__<owner>__voyage-context-3__v<n>``,
+    # falling back to the legacy ``rdr__<basename>-<hash8>`` shape when
+    # the catalog is not initialized or the owner is not yet registered.
+    from nexus.registry import _repo_identity
     basename, _ = _repo_identity(repo)
-    collection = _rdr_collection_name(repo)
+    collection = _repo_collection_or_legacy(repo, "rdr")
 
     _log.info("indexing RDR files", count=len(md_paths), collection=collection)
     results = batch_index_markdowns(md_paths, corpus=basename, t3=db,
@@ -1201,16 +1252,17 @@ def _run_index(
     from nexus.classifier import ContentClass, classify_file
     from nexus.config import get_credential, load_config
     from nexus.frecency import batch_frecency
-    from nexus.registry import _docs_collection_name
     from nexus.ripgrep_cache import build_cache
 
     info = registry.get(repo)
     if info is None:
         return {}
 
-    # C2: use deterministic naming function as fallback
+    # RDR-103 Phase 3a: registry value preserves the legacy name when
+    # the repo was added before the migration; fallback queries the
+    # catalog for a conformant name.
     code_collection = info.get("code_collection", info["collection"])
-    docs_collection = info.get("docs_collection") or _docs_collection_name(repo)
+    docs_collection = info.get("docs_collection") or _repo_collection_or_legacy(repo, "docs")
 
     # Load config (picks up per-repo .nexus.yml if present)
     cfg = load_config(repo_root=repo)
@@ -1396,7 +1448,6 @@ def _run_index(
     # are determined by the file LIST not by indexing OUTCOME, so
     # running them up front is safe; on a CTRL-C mid-index, the next
     # run re-derives them idempotently.
-    from nexus.registry import _rdr_collection_name as _rdr_coll_name_for_repo
     indexed_for_catalog: list[tuple[Path, str, str]] = []
     for _, f in code_files:
         indexed_for_catalog.append((f, "code", code_collection))
@@ -1409,7 +1460,9 @@ def _run_index(
     for _, f in pdf_files:
         indexed_for_catalog.append((f, "pdf", docs_collection))
     if rdr_abs_paths:
-        rdr_col_name = _rdr_coll_name_for_repo(repo)
+        # RDR-103 Phase 3a: catalog-first resolution; legacy registry
+        # helper is the fallback. Phase 5 drops the fallback.
+        rdr_col_name = _repo_collection_or_legacy(repo, "rdr")
         for rdr_dir in rdr_abs_paths:
             if rdr_dir.is_dir():
                 for md_file in sorted(rdr_dir.rglob("*.md")):
@@ -1589,8 +1642,9 @@ def _run_index(
             stamp_collection_version(docs_col)
             # Stamp RDR collection if it was indexed
             if rdr_indexed > 0:
-                from nexus.registry import _rdr_collection_name
-                rdr_col_name = _rdr_collection_name(repo)
+                # RDR-103 Phase 3a: catalog-first resolution; legacy
+                # fallback retained for catalog-absent test paths.
+                rdr_col_name = _repo_collection_or_legacy(repo, "rdr")
                 try:
                     rdr_col = db.get_or_create_collection(rdr_col_name)
                     stamp_collection_version(rdr_col)

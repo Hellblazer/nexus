@@ -317,19 +317,26 @@ class Projector:
     def _v0_collection_created(self, payload: Any) -> None:
         """Materialize a row in the ``collections`` projection.
 
-        ``legacy_grandfathered`` is derived from
-        :func:`nexus.corpus.is_conformant_collection_name`, not from
-        the event payload. This keeps the v: 0 schema stable; the only
-        cost is one regex per replay step, which the projector already
-        does for every DocumentRegistered (FTS sync).
+        ``legacy_grandfathered`` is read from the payload (nexus-7m8n).
+        Pre-7m8n events without the field fall back to a live regex
+        evaluation via :func:`nexus.corpus.is_conformant_collection_name`,
+        accepting that those replays are coupled to whatever regex
+        ships at replay time. New writes freeze the value on the event
+        so future regex changes cannot drift projected rows.
 
         Idempotent via ``INSERT OR REPLACE`` on the ``name`` PK.
         """
-        from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415
-
         if not payload.coll_id:
             return
-        legacy = 0 if is_conformant_collection_name(payload.coll_id) else 1
+        # nexus-7m8n: payload field is the source of truth when set;
+        # ``None`` (older event without the field) falls back to the
+        # live regex.
+        payload_legacy = getattr(payload, "legacy_grandfathered", None)
+        if payload_legacy is None:
+            from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415
+            legacy = 0 if is_conformant_collection_name(payload.coll_id) else 1
+        else:
+            legacy = 1 if payload_legacy else 0
         self._db.execute(
             "INSERT OR REPLACE INTO collections "
             "(name, content_type, owner_id, embedding_model, model_version, "
@@ -373,19 +380,18 @@ class Projector:
 
         ``superseded_at`` is read from the payload so replay is
         deterministic. Pre-payload-field events (synthesized before
-        ``CollectionSupersededPayload.superseded_at`` was added) default
-        to empty string here; we populate "now" in that case so the
-        column is never empty and the doctor's projection-vs-T3 drift
-        check has a consistent shape to read.
+        ``CollectionSupersededPayload.superseded_at`` was added) fall
+        back to "" (the SQLite column default), mirroring the
+        ``_v0_collection_created`` pattern for ``created_at``.
+        nexus-qpet.1: the prior fallback to ``datetime.now(UTC)`` was
+        non-deterministic; each replay drifted. Production today
+        always populates the field, so the fallback is dead code in
+        practice; the empty-string default keeps replay-equality
+        invariant if a future synthesizer ever emits older shapes.
         """
-        from datetime import UTC, datetime  # noqa: PLC0415
-
         if not payload.old_coll_id or not payload.new_coll_id:
             return
-        ts = (
-            getattr(payload, "superseded_at", "")
-            or datetime.now(UTC).isoformat()
-        )
+        ts = getattr(payload, "superseded_at", "") or ""
         self._db.execute(
             "UPDATE collections SET superseded_by = ?, superseded_at = ? "
             "WHERE name = ?",

@@ -291,6 +291,90 @@ def test_index_md_falls_back_to_local_embedder_when_no_credentials(
     )
 
 
+def test_index_markdown_auto_inits_catalog_when_absent_and_prunes_on_reindex(
+    sample_md, tmp_path, monkeypatch,
+):
+    """nexus-fq3b regression: pre-flight registration must auto-init the
+    catalog when none exists, so chunks land with ``doc_id`` and a
+    subsequent re-index after a content edit prunes the prior chunk set.
+
+    Pre-fix shape: the autouse ``_isolate_catalog`` fixture redirects
+    ``NEXUS_CATALOG_PATH`` to a tmp path that is *not* initialised;
+    ``_register_or_lookup_doc_id`` saw the missing catalog and returned
+    ``""`` silently; chunks were written with neither ``doc_id`` nor
+    (post-Phase-5c) ``source_path``; the prune at the end of the second
+    index iterated ``col.get(where={"source_path": file_path})`` which
+    matched zero chunks; stale chunks accumulated forever.
+
+    Post-fix shape: ``_register_or_lookup_doc_id`` auto-inits the
+    catalog at ``catalog_path()`` on first call, registers the file,
+    and chunks land with ``doc_id``; the re-index after edit finds the
+    same ``doc_id`` and prunes stale chunks via the doc_id-keyed where
+    filter.
+    """
+    import chromadb
+
+    from nexus.catalog import reset_cache
+    from nexus.catalog.catalog import Catalog
+    from nexus.config import catalog_path
+    from nexus.db.t3 import T3Database
+
+    cat_path = catalog_path()
+    assert not Catalog.is_initialized(cat_path), (
+        "precondition: tmp catalog path should be unitialized before the "
+        "index call. The autouse _isolate_catalog fixture redirects "
+        "NEXUS_CATALOG_PATH but does not initialize the catalog."
+    )
+
+    reset_cache()
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    monkeypatch.delenv("CHROMA_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "nexus.config._global_config_path", lambda: Path("/nonexistent"),
+    )
+    client = chromadb.EphemeralClient()
+    local_t3 = T3Database(_client=client, local_mode=True)
+
+    # First index: no catalog yet. Auto-init must fire.
+    n1 = index_markdown(sample_md, corpus="autoinit_probe", t3=local_t3)
+    assert n1 > 0, "expected first index to upsert chunks"
+
+    assert Catalog.is_initialized(cat_path), (
+        "post-condition: the catalog must be initialized after the first "
+        "index call. Auto-init in _register_or_lookup_doc_id is the fix "
+        "for nexus-fq3b: without it, chunks land without doc_id and the "
+        "prune fallback (post-Phase-5c) matches zero stale chunks."
+    )
+
+    col = local_t3.get_or_create_collection("docs__autoinit_probe")
+    metas_before = col.get(include=["metadatas"])["metadatas"]
+    assert metas_before and all(m.get("doc_id") for m in metas_before), (
+        "every chunk must carry doc_id when the catalog is auto-init'd; "
+        "without doc_id the doc_id-keyed prune at re-index time silently "
+        "matches zero chunks (the nexus-fq3b symptom)."
+    )
+    chunk_count_before = len(metas_before)
+
+    # Edit the file so chunks change. Make it shorter to force at least
+    # one stale chunk that should be pruned.
+    sample_md.write_text(
+        "---\ntitle: Test Doc\nauthor: Alice\n---\n\n# Hi\n",
+    )
+
+    n2 = index_markdown(sample_md, corpus="autoinit_probe", t3=local_t3)
+    assert n2 > 0, "edited file should produce a non-zero re-index"
+
+    metas_after = col.get(include=["metadatas"])["metadatas"]
+    chunk_count_after = len(metas_after)
+    assert chunk_count_after <= chunk_count_before, (
+        f"re-index of an edited (shorter) file should not leave stale "
+        f"chunks; before={chunk_count_before}, after={chunk_count_after}. "
+        f"This was the nexus-fq3b accumulation bug: the source_path "
+        f"fallback in _identity_where matched zero chunks post-Phase-5c "
+        f"in no-catalog mode, so stale chunks were never pruned."
+    )
+
+
 def test_make_local_embed_fn_returns_consistent_model_name():
     """Sanity: ``_make_local_embed_fn`` returns an embed_fn AND a
     model_name. Calling the embed_fn returns embeddings tagged with

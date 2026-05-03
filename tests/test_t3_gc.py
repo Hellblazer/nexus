@@ -150,7 +150,7 @@ def _register_doc(catalog: Catalog, *, tumbler: str, collection: str) -> None:
     owner prefix). GC only cares that ``list_by_collection`` reports
     alive doc_ids, and the SQLite projection is the read path.
     """
-    catalog._db.execute(
+    catalog._db.execute(  # epsilon-allow: GC alive_set fixture; Catalog.register would mint its own tumbler instead of pinning to the test value
         "INSERT INTO documents "
         "(tumbler, title, author, year, content_type, file_path, "
         "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
@@ -447,6 +447,75 @@ def test_gc_paginates_above_300_chunk_boundary(
     assert result.exit_code == 0, result.output
     assert f"deleted {chunk_count}" in result.output
     assert t3_db._client.get_collection(coll).count() == 0
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "nexus-krhr contract lock: today GC builds alive_set from "
+        "CatalogEntry.tumbler only (commands/t3.py:302). When Phase 3 "
+        "ships native UUID7 doc_id writes to T3 chunk metadata while "
+        "the catalog still keys documents by tumbler, the alive_set "
+        "intersection misses every UUID7-keyed chunk and GC silently "
+        "sweeps live data after the orphan window. The fix unions both "
+        "tumbler and uuid7 columns when constructing alive_set. This "
+        "test fails today (UUID7 chunks classified as orphans, deleted) "
+        "and starts passing once the union lands. The strict=True flag "
+        "ensures CI fails when the fix is in place but the marker has "
+        "not been removed, forcing the contract lock to ratchet forward."
+    ),
+)
+def test_gc_uuid7_keyed_chunks_with_alive_catalog_entry_must_survive(
+    t3_db, catalog, tmp_path, runner,
+):
+    """nexus-krhr forward-proof: when chunk doc_id is a UUID7 string
+    that the catalog's projection treats as alive (under whatever
+    schema extension lands), GC must not classify the chunk as an
+    orphan.
+
+    Today's behaviour: alive_set = {tumbler}; chunk doc_id (UUID7) not
+    in alive_set; chunk swept after orphan window. This test fails.
+
+    Future behaviour: alive_set = {tumbler} | {uuid7}; chunk doc_id
+    matches; chunk survives. This test passes; remove the xfail marker.
+    """
+    coll = "knowledge__test_gc_uuid7"
+    long_ago = _iso(datetime.now(UTC) - timedelta(days=60))
+
+    # The catalog has the document keyed by tumbler "1.1.1" today.
+    # In a future native-UUID7-writes world, the SAME document would
+    # ALSO carry the UUID7. Simulate that future by stuffing the UUID7
+    # into a synthetic field; the GC fix must read it.
+    uuid7 = "01900000-0000-7000-8000-000000000000"
+    _register_doc(catalog, tumbler="1.1.1", collection=coll)
+
+    # Seed a T3 chunk whose doc_id is the UUID7 (the Phase 3 native
+    # write shape). Today's GC, walking alive = {tumbler}, classifies
+    # this as an orphan because UUID7 != "1.1.1".
+    _seed_chunk(
+        t3_db, collection=coll, chunk_id="alive-uuid7", content="x",
+        doc_id=uuid7, indexed_at=long_ago,
+    )
+
+    with patch("nexus.db.make_t3", return_value=t3_db), \
+         patch("nexus.commands.t3._make_catalog", return_value=catalog):
+        result = runner.invoke(
+            main,
+            ["t3", "gc", "-c", coll, "--no-dry-run", "--yes"],
+        )
+
+    assert result.exit_code == 0, result.output
+
+    # Future contract: the UUID7-keyed chunk must survive because the
+    # catalog projection treats it as alive. Today this assertion fails
+    # (the chunk was deleted as an orphan).
+    surviving = t3_db._client.get_collection(coll).get()["ids"]
+    assert "alive-uuid7" in surviving, (
+        f"UUID7-keyed chunk was swept; alive_set construction in "
+        f"commands/t3.py:302 only reads e.tumbler. Fix: union with "
+        f"the future uuid7 column when it lands. Surviving ids: "
+        f"{surviving!r}."
+    )
 
 
 def test_gc_no_yes_flag_reports_only(t3_db, catalog, tmp_path, runner):

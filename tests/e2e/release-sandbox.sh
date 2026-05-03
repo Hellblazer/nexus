@@ -239,9 +239,11 @@ case "$MODE" in
         # 0 chunks needing prune. The dry-run prune-deprecated-keys verb
         # walks every collection and reports how many chunks carry any of
         # {source_path, git_branch, git_commit_hash, git_project_name,
-        # git_remote_url}. RDR-102 Phase B drops source_path from
-        # ALLOWED_TOP_LEVEL; normalize() drops the four flat git_* keys.
-        # On a properly-migrated indexer, chunks_updated must be 0.
+        # git_remote_url, corpus, store_type, git_meta}. RDR-102 Phase B
+        # drops source_path; normalize() drops the four flat git_* keys.
+        # RDR-101 Phase 5c additionally dropped corpus, store_type, git_meta
+        # from ALLOWED_TOP_LEVEL. On a properly-migrated indexer,
+        # chunks_updated must be 0.
         PRUNE_OUT=$(nx catalog prune-deprecated-keys --dry-run \
             --i-have-completed-the-reader-migration 2>&1 || true)
         echo "$PRUNE_OUT" | tail -8 | sed 's/^/  /'

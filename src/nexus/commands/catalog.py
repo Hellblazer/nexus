@@ -516,10 +516,20 @@ def migrate_fallback_cmd(
         target = f"{content_type}__{owner}__{target_model}__{target_version}"
         proposals.append((tumbler, target))
 
+    # nexus-qpet.3: aggregate by target so the operator can scan the
+    # mapping at a glance. Per-doc lines below are kept for tests +
+    # operators who want the full proposal.
+    target_counts: dict[str, int] = {}
+    for _, target in proposals:
+        target_counts[target] = target_counts.get(target, 0) + 1
+
     click.echo(
         f"{source}: {len(proposals)} doc(s) -> "
-        f"{len({t for _, t in proposals})} target collection(s)"
+        f"{len(target_counts)} target collection(s)"
     )
+    for target in sorted(target_counts):
+        click.echo(f"  {target}: {target_counts[target]} doc(s)")
+    click.echo("")
     for tumbler, target in proposals:
         click.echo(f"  {tumbler}  ->  {target}")
 
@@ -532,20 +542,31 @@ def migrate_fallback_cmd(
         )
         return
 
+    # Register every unique target ONCE (each register_collection
+    # acquires its own flock; the targets count is small relative to
+    # the document count so no batched register is needed yet).
     targets_seen: set[str] = set()
-    for tumbler, target in proposals:
-        if target not in targets_seen:
-            from nexus.corpus import parse_conformant_collection_name  # noqa: PLC0415
-            segments = parse_conformant_collection_name(target)
-            cat.register_collection(
-                target,
-                content_type=segments["content_type"],
-                owner_id=segments["owner_id"],
-                embedding_model=segments["embedding_model"],
-                model_version=segments["model_version"],
-            )
-            targets_seen.add(target)
-        cat.update_document_collection(tumbler, target)
+    for _, target in proposals:
+        if target in targets_seen:
+            continue
+        from nexus.corpus import parse_conformant_collection_name  # noqa: PLC0415
+        segments = parse_conformant_collection_name(target)
+        cat.register_collection(
+            target,
+            content_type=segments["content_type"],
+            owner_id=segments["owner_id"],
+            embedding_model=segments["embedding_model"],
+            model_version=segments["model_version"],
+        )
+        targets_seen.add(target)
+
+    # nexus-qpet.3: single flock + single commit for the per-doc
+    # re-point loop. Pre-fix shape was N flocks + N commits per
+    # update_document_collection call; a 1000-doc fallback paid the
+    # SQLite commit overhead 1000 times. Batch keeps the operation
+    # deterministic and order-preserving (proposals is already
+    # sorted by tumbler).
+    cat.update_documents_collection_batch(proposals)
 
     if len(targets_seen) == 1:
         only_target = next(iter(targets_seen))
@@ -582,17 +603,56 @@ def migrate_fallback_cmd(
     )
 
 
-def _owner_segment_for_tumbler(tumbler: str) -> str:
-    """Return the collection-name owner segment for a tumbler.
+# RDR-103 Phase 2: ``_owner_segment_for_tumbler`` was promoted to
+# ``nexus.catalog.collection_name.owner_segment_for_tumbler``. The
+# command-module alias below preserves the import surface so existing
+# call sites in this file (and any importers) continue to resolve while
+# the rest of the codebase migrates to the public helper.
+from nexus.catalog.collection_name import (  # noqa: E402
+    owner_segment_for_tumbler as _owner_segment_for_tumbler,
+)
 
-    ``1.5.42`` → ``1-5`` (owner prefix with dots replaced by hyphens
-    so the result fits ChromaDB's name regex).
+
+@catalog.command("collection-name")
+@click.option(
+    "--content-type",
+    required=True,
+    type=click.Choice(["code", "docs", "rdr", "knowledge"]),
+    help="Content type to resolve (code | docs | rdr | knowledge).",
+)
+@click.option(
+    "--repo",
+    type=click.Path(file_okay=False, exists=True, path_type=Path),
+    default=None,
+    help="Repository root (default: current working directory).",
+)
+def collection_name_cmd(content_type: str, repo: Path | None) -> None:
+    """Resolve and emit the conformant T3 collection name for ``--content-type`` in ``--repo``.
+
+    \b
+    Plugin-layer call sites (rdr-close SKILL.md post-mortem archival,
+    rdr_hook status reporting) use this to look up the canonical
+    ``CollectionName`` without constructing the legacy 2-segment shape
+    themselves. The catalog must be initialized AND the repo must have
+    a registered owner (typically populated by the indexer's
+    ``_catalog_hook`` on first index).
+
+    Output is a single line: the rendered ``CollectionName``. Operators
+    can capture it via shell substitution:
+
+        nx store put --collection "$(nx catalog collection-name --content-type knowledge)" ...
     """
-    from nexus.catalog.synthesizer import _owner_prefix_of  # noqa: PLC0415
-    prefix = _owner_prefix_of(tumbler)
-    if not prefix:
-        return ""
-    return prefix.replace(".", "-")
+    cat = _get_catalog()
+    target_repo = repo if repo is not None else Path.cwd()
+    try:
+        name = cat.collection_for_repo(target_repo, content_type)
+    except LookupError as exc:
+        raise click.ClickException(
+            f"{exc}\n\n"
+            f"Run 'nx index repo {target_repo}' first; the indexer's "
+            f"_catalog_hook registers the owner row that this command needs."
+        ) from exc
+    click.echo(name.render())
 
 
 @catalog.command("rename-collection")
@@ -5551,7 +5611,7 @@ def repair_orphan_chunks_cmd(
     default=False,
     help=(
         "Phase 4 finisher. When set, migrate also runs "
-        "prune-deprecated-keys (drops 5 legacy chunk-metadata keys) "
+        "prune-deprecated-keys (drops 8 legacy chunk-metadata keys) "
         "and a second t3-backfill-doc-id pass to drain the deferred "
         "class. Without this flag the verb stops after Phase 3. "
         "Acknowledges that every audit-listed reader (see "
@@ -5579,7 +5639,7 @@ def migrate_cmd(
          existing T3 chunks (skipped under --no-chunks).
       3. **Phase 4 finisher** (only when
          ``--i-have-completed-the-reader-migration`` is set):
-         ``nx catalog prune-deprecated-keys`` drops 5 legacy chunk-
+         ``nx catalog prune-deprecated-keys`` drops 8 legacy chunk-
          metadata keys, then a second ``t3-backfill-doc-id`` pass
          drains the deferred class.
       4. ``nx catalog doctor --replay-equality [--t3-doc-id-coverage
@@ -5871,17 +5931,24 @@ def migrate_cmd(
 # ── RDR-101 Phase 4: prune-deprecated-keys verb (nexus-o6aa.10.3) ─────────
 
 
-# Five legacy chunk-metadata keys that the Phase 4 reader migrations
-# stopped depending on. ``title`` is intentionally NOT in this set; the
-# .10.2 audit (docs/migration/rdr-101-phase4-reader-audit.md, Category C)
-# kept it permanently as the slug-shaped identity for ``knowledge__knowledge``
-# and the universal display field across formatters.
+# Eight legacy chunk-metadata keys: 5 from RDR-101 Phase 4 reader migrations
+# (.10.2 audit, Category B) + 3 dropped from ALLOWED_TOP_LEVEL by Phase 5c
+# (nexus-o6aa.13). Pre-5c collections retain the Phase 5c trio until pruned;
+# omitting them here would leave the verb unable to fully reshape pre-5c
+# chunks. ``title`` is intentionally NOT in this set; the .10.2 audit
+# (Category C) kept it permanently as the slug-shaped identity for
+# ``knowledge__knowledge`` and the universal display field across formatters.
 _PRUNE_DEPRECATED_KEYS: frozenset[str] = frozenset({
+    # RDR-101 Phase 4 (.10.2 audit, Category B).
     "source_path",
     "git_branch",
     "git_commit_hash",
     "git_project_name",
     "git_remote_url",
+    # RDR-101 Phase 5c (nexus-o6aa.13).
+    "corpus",
+    "store_type",
+    "git_meta",
 })
 
 
@@ -5941,17 +6008,20 @@ def prune_deprecated_keys_cmd(
     reader_migration_done: bool,
     skip_coverage_check: bool,
 ) -> None:
-    """RDR-101 Phase 4: drop legacy metadata keys from every T3 chunk.
+    """RDR-101 Phase 4 + 5c: drop legacy metadata keys from every T3 chunk.
 
-    Removes the five keys whose readers migrated to doc_id-keyed
-    catalog lookups in Phase 4: ``source_path``, ``git_branch``,
-    ``git_commit_hash``, ``git_project_name``, ``git_remote_url``.
-    Idempotent: chunks that already lack the keys are no-ops.
+    Removes eight keys: 5 whose readers migrated to doc_id-keyed
+    catalog lookups in Phase 4 (``source_path``, ``git_branch``,
+    ``git_commit_hash``, ``git_project_name``, ``git_remote_url``)
+    plus 3 dropped from ``ALLOWED_TOP_LEVEL`` by Phase 5c
+    (``corpus``, ``store_type``, ``git_meta``). Pre-5c collections
+    retain the latter three until pruned. Idempotent: chunks that
+    already lack the keys are no-ops.
 
     The chunk metadata key budget on ChromaDB Cloud is 32 top-level
     keys (``MAX_SAFE_TOP_LEVEL_KEYS``). Over-cap chunks on Hal's
-    catalog carry 35-36 keys; dropping these five brings them to
-    30-31 keys and leaves room for ``doc_id`` + future additions.
+    catalog carry 35-36 keys; dropping these eight brings them well
+    under the cap and leaves room for ``doc_id`` + future additions.
 
     Pre-flight gates (refuse to proceed unless overridden):
     - ``--i-have-completed-the-reader-migration`` is required. Without

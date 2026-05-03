@@ -127,6 +127,10 @@ _SPAN_PATTERN = re.compile(
 )
 
 from nexus.catalog.catalog_db import CatalogDB
+from nexus.catalog.collection_name import (
+    CollectionName,
+    owner_segment_for_tumbler,
+)
 from nexus.catalog.tumbler import (
     DocumentRecord,
     LinkRecord,
@@ -135,6 +139,11 @@ from nexus.catalog.tumbler import (
     read_documents,
     read_links,
     read_owners,
+)
+from nexus.corpus import (
+    CANONICAL_EMBEDDING_MODELS,
+    CONTENT_TYPES,
+    canonical_embedding_model,
 )
 
 _log = structlog.get_logger()
@@ -1487,23 +1496,10 @@ class Catalog:
         if not name:
             raise ValueError("register_collection: name must be non-empty")
 
-        # Short-circuit: if the row already exists with the same
-        # canonical fields, do not re-emit. Event log was previously
-        # appended unconditionally on every call; for hot paths
-        # (backfill on a 100-collection catalog re-run on every CI
-        # build) this produced duplicate CollectionCreated events with
-        # no projection effect.
-        existing = self.get_collection(name)
-        if existing is not None and (
-            existing["content_type"] == content_type
-            and existing["owner_id"] == owner_id
-            and existing["embedding_model"] == embedding_model
-            and existing["model_version"] == model_version
-            and existing["display_name"] == (display_name or name)
-        ):
-            return
-
         ts = datetime.now(UTC).isoformat()
+        # nexus-7m8n: freeze legacy_grandfathered on the event at write
+        # time so future regex changes do not drift projected rows.
+        legacy_grandfathered = not is_conformant_collection_name(name)
         event = _make_event(
             _CollectionCreatedPayload(
                 coll_id=name,
@@ -1513,12 +1509,33 @@ class Catalog:
                 model_version=model_version,
                 name=display_name or name,
                 created_at=ts,
+                legacy_grandfathered=legacy_grandfathered,
             ),
             v=0,
             ts=ts,
         )
         dir_fd = self._acquire_lock()
         try:
+            # Short-circuit: if the row already exists with the same
+            # canonical fields, do not re-emit. Event log was previously
+            # appended unconditionally on every call; for hot paths
+            # (backfill on a 100-collection catalog re-run on every CI
+            # build) this produced duplicate CollectionCreated events
+            # with no projection effect.
+            #
+            # nexus-qpet.2: re-check inside the locked block so a
+            # concurrent register_collection of the same name cannot
+            # slip a duplicate event into the log between the read and
+            # the lock acquisition.
+            existing = self.get_collection(name)
+            if existing is not None and (
+                existing["content_type"] == content_type
+                and existing["owner_id"] == owner_id
+                and existing["embedding_model"] == embedding_model
+                and existing["model_version"] == model_version
+                and existing["display_name"] == (display_name or name)
+            ):
+                return
             if self._event_sourced_enabled:
                 self._write_to_event_log(event)
                 self._projector.apply(event)
@@ -1584,19 +1601,155 @@ class Catalog:
         ).fetchone()
         return bool(row and row[0])
 
-    def update_document_collection(
+    def collection_for(
+        self,
+        content_type: str,
+        owner: Tumbler | str,
+        embedding_model: str,
+        *,
+        bump: bool = False,
+    ) -> CollectionName:
+        """Resolve the canonical ``CollectionName`` for a tuple.
+
+        RDR-103 Phase 2. The catalog is the authority for collection
+        naming: callers describe the tuple they want, the catalog renders
+        the physical name. Validation is strict at the public boundary
+        (per pinned decision #4): ``content_type`` must be in
+        :data:`nexus.corpus.CONTENT_TYPES`, ``embedding_model`` must be in
+        :data:`nexus.corpus.CANONICAL_EMBEDDING_MODELS`, and the derived
+        owner segment must be non-empty.
+
+        Version handling:
+
+        - New tuple ``(c, o, m)`` returns ``v1``.
+        - Existing tuple at ``vN`` returns ``vN`` (idempotent).
+        - With ``bump=True``, an existing ``vN`` returns ``vN+1``; a
+          new tuple still returns ``v1`` (bump only fires when prior
+          versions exist).
+
+        Pinned decision #2: a new ``embedding_model`` is NOT a version
+        bump. ``(c, o, m_new)`` is a different tuple from ``(c, o, m_old)``
+        and naturally lands in ``v1``. The operator runs
+        ``nx catalog supersede-collection`` to retire the old tuple.
+
+        Grandfathered legacy rows do NOT contribute to the version
+        lookup: their canonical fields are typically empty strings, and
+        the WHERE clause filters them out via ``legacy_grandfathered = 0``
+        belt-and-suspenders. Pinned decision #1.
+
+        This method does NOT register the returned name in the catalog
+        projection. Callers must follow up with
+        :meth:`register_collection` once they have actually created (or
+        otherwise materialised) the T3 collection. The indexer's
+        ``_catalog_hook_repo`` already pairs creation with registration;
+        Phase 3 wires that pattern through every indexer call site.
+
+        The returned ``CollectionName`` is constructed directly rather
+        than round-tripped through ``CollectionName.parse(render(...))``;
+        the fields are validated above against the same closed sets,
+        making the round-trip redundant.
+        """
+        if content_type not in CONTENT_TYPES:
+            raise ValueError(
+                f"collection_for: unknown content_type {content_type!r}; "
+                f"expected one of {CONTENT_TYPES}"
+            )
+        if embedding_model not in CANONICAL_EMBEDDING_MODELS:
+            raise ValueError(
+                f"collection_for: non-canonical embedding_model "
+                f"{embedding_model!r}; expected one of "
+                f"{sorted(CANONICAL_EMBEDDING_MODELS)}"
+            )
+        owner_id = owner_segment_for_tumbler(owner)
+        if not owner_id:
+            raise ValueError(
+                f"collection_for: cannot derive owner_id segment from "
+                f"owner {owner!r}"
+            )
+        # The compound index ``idx_collections_tuple`` covers this lookup.
+        # ``model_version`` is stored as TEXT (``v1``..``vN``). SUBSTR
+        # strips the ``v`` prefix so SQLite can CAST the digit string to
+        # INTEGER; ``CAST('v3' AS INTEGER)`` returns 0 because SQLite
+        # cannot parse a leading non-digit. The INTEGER cast is what
+        # gives MAX integer ordering rather than lexical (otherwise
+        # ``v10`` would sort before ``v9``).
+        row = self._db.execute(
+            "SELECT MAX(CAST(SUBSTR(model_version, 2) AS INTEGER)) "
+            "FROM collections "
+            "WHERE content_type = ? AND owner_id = ? "
+            "AND embedding_model = ? AND legacy_grandfathered = 0",
+            (content_type, owner_id, embedding_model),
+        ).fetchone()
+        existing_version = int(row[0]) if row and row[0] is not None else 0
+        if existing_version == 0:
+            new_version = 1
+        elif bump:
+            new_version = existing_version + 1
+        else:
+            new_version = existing_version
+        return CollectionName(
+            content_type=content_type,
+            owner_id=owner_id,
+            embedding_model=embedding_model,
+            model_version=new_version,
+        )
+
+    def collection_for_repo(
+        self,
+        repo: Path,
+        content_type: str,
+        *,
+        bump: bool = False,
+    ) -> CollectionName:
+        """Resolve the canonical ``CollectionName`` for ``content_type`` in ``repo``.
+
+        Convenience wrapper around :meth:`collection_for` that handles
+        the repo-to-owner-to-collection-name pipeline:
+
+        1. Compute ``repo_hash`` via
+           :func:`nexus.registry._repo_identity`.
+        2. Look up the owner via :meth:`owner_for_repo`. Raises
+           ``LookupError`` when no owner exists; the indexer's
+           ``_catalog_hook`` flow registers the owner up front, so a
+           missing owner indicates a bypass of the standard write path.
+        3. Resolve the canonical embedding model via
+           :func:`nexus.corpus.canonical_embedding_model`.
+        4. Delegate to :meth:`collection_for`.
+
+        This is the helper that Phase 3 indexer call sites use; replacing
+        ``_docs_collection_name(repo)`` and similar legacy helpers.
+        """
+        from nexus.registry import _repo_identity  # noqa: PLC0415
+
+        _, repo_hash = _repo_identity(repo)
+        owner = self.owner_for_repo(repo_hash)
+        if owner is None:
+            raise LookupError(
+                f"collection_for_repo: no owner registered for "
+                f"repo_hash {repo_hash!r} (repo {repo!s}). "
+                f"Call register_owner(...) before requesting a "
+                f"collection name; the indexer's _catalog_hook normally "
+                f"registers owners up front."
+            )
+        return self.collection_for(
+            content_type=content_type,
+            owner=owner,
+            embedding_model=canonical_embedding_model(content_type),
+            bump=bump,
+        )
+
+    def _update_document_collection_locked(
         self, tumbler: str, new_collection: str,
     ) -> bool:
-        """Re-point a single document's ``physical_collection``.
+        """Read+validate+write the per-row re-point WITHOUT acquiring
+        the flock or committing SQLite. Caller is responsible for both.
 
-        Per-row analog of :meth:`rename_collection` for migrations
-        where each document gets a different target (e.g. RDR-101
-        Phase 6 ``nx catalog migrate-fallback``). Emits
-        DocumentRegistered v: 0 with the new ``physical_collection``;
-        the projector's INSERT OR REPLACE updates the SQLite row.
-
-        Returns True if the doc was re-pointed, False if not found or
-        already pointed at ``new_collection`` (idempotent).
+        Returns True on a write, False on the not-found or
+        same-target idempotency short-circuits. Used by both the
+        single-row :meth:`update_document_collection` (one acquire,
+        one commit per call) and the batch
+        :meth:`update_documents_collection_batch` (one acquire, one
+        commit per N calls).
         """
         from nexus.catalog.synthesizer import _owner_prefix_of  # noqa: PLC0415
 
@@ -1654,36 +1807,89 @@ class Catalog:
             "source_uri": row[13] or "",
             "alias_of": row[14] or "",
         }
+        if self._event_sourced_enabled:
+            self._write_to_event_log(event)
+            self._projector.apply(event)
+            self._append_jsonl(self._documents_path, rec)
+        else:
+            self._append_jsonl(self._documents_path, rec)
+            self._db.execute(
+                "UPDATE documents SET physical_collection = ? "
+                "WHERE tumbler = ?",
+                (new_collection, row[0]),
+            )
+            self._emit_shadow_event(event)
+        return True
 
+    def update_document_collection(
+        self, tumbler: str, new_collection: str,
+    ) -> bool:
+        """Re-point a single document's ``physical_collection``.
+
+        Per-row analog of :meth:`rename_collection` for migrations
+        where each document gets a different target (e.g. RDR-101
+        Phase 6 ``nx catalog migrate-fallback``). Emits
+        DocumentRegistered v: 0 with the new ``physical_collection``;
+        the projector's INSERT OR REPLACE updates the SQLite row.
+
+        Returns True if the doc was re-pointed, False if not found or
+        already pointed at ``new_collection`` (idempotent).
+
+        nexus-qpet.2: read + validate + construct payload all inside
+        the lock so two concurrent re-points of the same tumbler
+        resolve to a deterministic last-write-wins on ONE writer.
+
+        Crash-window discipline (event-sourced mode) matches
+        rename_collection: event -> projector apply -> JSONL append,
+        with the SQLite commit last. A crash between projector apply
+        and JSONL append leaves SQLite uncommitted and JSONL unwritten
+        (both old). A crash between JSONL append and commit leaves
+        JSONL ahead of SQLite; on rebuild-from-JSONL the new line
+        wins; on rebuild-from-events the projector replays correctly.
+        """
         dir_fd = self._acquire_lock()
         try:
-            if self._event_sourced_enabled:
-                # Crash-window discipline matches rename_collection's
-                # per-row loop (catalog.py:2253-2255 + batched commit at
-                # 2264): event -> projector apply -> JSONL append, with
-                # the SQLite commit last. A crash between projector apply
-                # and JSONL append leaves SQLite uncommitted and JSONL
-                # unwritten - both old. A crash between JSONL append and
-                # commit leaves JSONL ahead of SQLite; on
-                # rebuild-from-JSONL the new line wins; on
-                # rebuild-from-events the projector replays correctly.
-                # Either way, no torn state.
-                self._write_to_event_log(event)
-                self._projector.apply(event)
-                self._append_jsonl(self._documents_path, rec)
+            wrote = self._update_document_collection_locked(
+                tumbler, new_collection,
+            )
+            if wrote:
                 self._db.commit()
-            else:
-                self._append_jsonl(self._documents_path, rec)
-                self._db.execute(
-                    "UPDATE documents SET physical_collection = ? "
-                    "WHERE tumbler = ?",
-                    (new_collection, row[0]),
-                )
-                self._db.commit()
-                self._emit_shadow_event(event)
+            return wrote
         finally:
             self._release_lock(dir_fd)
-        return True
+
+    def update_documents_collection_batch(
+        self, pairs: list[tuple[str, str]],
+    ) -> int:
+        """Re-point N documents' ``physical_collection`` in one
+        flock + one SQLite commit (nexus-qpet.3).
+
+        Each *pair* is ``(tumbler, new_collection)``. Returns the
+        count of documents actually re-pointed (no-ops via not-found
+        or same-target idempotency are excluded).
+
+        Used by ``nx catalog migrate-fallback`` for the per-document
+        re-point loop. Single-row callers should still use
+        :meth:`update_document_collection` (which uses this method's
+        helper internally so semantics match).
+        """
+        if not pairs:
+            return 0
+        dir_fd = self._acquire_lock()
+        wrote_any = False
+        updated = 0
+        try:
+            for tumbler, new_collection in pairs:
+                if self._update_document_collection_locked(
+                    tumbler, new_collection,
+                ):
+                    updated += 1
+                    wrote_any = True
+            if wrote_any:
+                self._db.commit()
+            return updated
+        finally:
+            self._release_lock(dir_fd)
 
     def supersede_collection(
         self,
@@ -1714,23 +1920,6 @@ class Catalog:
         """
         from datetime import UTC, datetime  # noqa: PLC0415
 
-        existing = self.get_collection(old_name)
-        if existing is None:
-            raise ValueError(
-                f"supersede_collection: {old_name!r} not registered"
-            )
-        if existing.get("superseded_by"):
-            raise ValueError(
-                f"supersede_collection: {old_name!r} is already "
-                f"superseded by {existing['superseded_by']!r}; refusing "
-                f"to chain a second supersede event"
-            )
-        if self.get_collection(new_name) is None:
-            raise ValueError(
-                f"supersede_collection: new {new_name!r} is not "
-                f"registered. Call register_collection({new_name!r}, ...) "
-                f"first so the projection has a row to point at."
-            )
         ts = datetime.now(UTC).isoformat()
         event = _make_event(
             _CollectionSupersededPayload(
@@ -1744,6 +1933,29 @@ class Catalog:
         )
         dir_fd = self._acquire_lock()
         try:
+            # nexus-qpet.2: re-validate inside the locked block. Two
+            # concurrent supersedes of the same old_name now produce
+            # one success + one ValueError rather than a silent
+            # last-write-wins (the in-process projection was
+            # last-writer determined; replay was order-deterministic
+            # but operator-confusing).
+            existing = self.get_collection(old_name)
+            if existing is None:
+                raise ValueError(
+                    f"supersede_collection: {old_name!r} not registered"
+                )
+            if existing.get("superseded_by"):
+                raise ValueError(
+                    f"supersede_collection: {old_name!r} is already "
+                    f"superseded by {existing['superseded_by']!r}; "
+                    f"refusing to chain a second supersede event"
+                )
+            if self.get_collection(new_name) is None:
+                raise ValueError(
+                    f"supersede_collection: new {new_name!r} is not "
+                    f"registered. Call register_collection({new_name!r}, ...) "
+                    f"first so the projection has a row to point at."
+                )
             if self._event_sourced_enabled:
                 self._write_to_event_log(event)
                 self._projector.apply(event)
