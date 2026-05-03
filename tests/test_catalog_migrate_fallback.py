@@ -50,7 +50,7 @@ def _seed_doc(
     collection: str,
     title: str = "doc",
 ) -> None:
-    catalog._db.execute(
+    catalog._db.execute(  # epsilon-allow: fixture seeds a documents row with caller-pinned tumbler; Catalog.register mints its own owner-prefixed tumbler
         "INSERT INTO documents "
         "(tumbler, title, author, year, content_type, file_path, "
         "corpus, physical_collection, chunk_count, head_hash, indexed_at, "

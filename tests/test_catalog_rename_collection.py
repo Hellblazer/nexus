@@ -74,7 +74,7 @@ def _seed_t3_collection(t3_db: T3Database, name: str) -> None:
 
 
 def _seed_catalog_doc(catalog: Catalog, *, tumbler: str, collection: str) -> None:
-    catalog._db.execute(
+    catalog._db.execute(  # epsilon-allow: fixture seeds a documents row with caller-pinned tumbler; Catalog.register mints its own owner-prefixed tumbler
         "INSERT INTO documents "
         "(tumbler, title, author, year, content_type, file_path, "
         "corpus, physical_collection, chunk_count, head_hash, indexed_at, "

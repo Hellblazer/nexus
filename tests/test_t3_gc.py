@@ -150,7 +150,7 @@ def _register_doc(catalog: Catalog, *, tumbler: str, collection: str) -> None:
     owner prefix). GC only cares that ``list_by_collection`` reports
     alive doc_ids, and the SQLite projection is the read path.
     """
-    catalog._db.execute(
+    catalog._db.execute(  # epsilon-allow: GC alive_set fixture; Catalog.register would mint its own tumbler instead of pinning to the test value
         "INSERT INTO documents "
         "(tumbler, title, author, year, content_type, file_path, "
         "corpus, physical_collection, chunk_count, head_hash, indexed_at, "

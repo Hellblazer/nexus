@@ -405,7 +405,7 @@ def test_legacy_grandfathered_frozen_on_event_survives_regex_change(catalog, mon
 
     # Reset the projection so we can replay from the event log into a
     # fresh state and observe what the projector materialises.
-    catalog._db.execute("DELETE FROM collections")
+    catalog._db.execute("DELETE FROM collections")  # epsilon-allow: test resets projection state to observe a fresh replay through the projector
     catalog._db.commit()
 
     # Mutate the regex to a degenerate "everything is non-conformant"
@@ -505,7 +505,7 @@ def test_v0_collection_superseded_replay_is_deterministic(catalog):
 
     # Reset the row's superseded_at column without re-emitting an event,
     # then replay the same event. Deterministic projector means same ts.
-    catalog._db.execute(
+    catalog._db.execute(  # epsilon-allow: test resets a single column to observe deterministic projector replay
         "UPDATE collections SET superseded_at = '' WHERE name = ?",
         ("docs__nexus-571b8edd",),
     )
@@ -536,7 +536,7 @@ def test_update_document_collection_idempotent_on_same_target(catalog):
     """Re-pointing a doc to its current physical_collection is a no-op
     (returns False; no event written).
     """
-    catalog._db.execute(
+    catalog._db.execute(  # epsilon-allow: fixture seeds a documents row with caller-pinned tumbler; Catalog.register mints its own owner-prefixed tumbler
         "INSERT INTO documents "
         "(tumbler, title, author, year, content_type, file_path, "
         "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
