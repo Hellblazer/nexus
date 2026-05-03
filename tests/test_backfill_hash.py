@@ -91,6 +91,29 @@ class TestBackfillChunkTextHash:
         assert updated == 0
         assert skipped == 0
 
+    def test_backfill_skips_documentless_collections(self):
+        """nexus-uebj: ``taxonomy__centroids`` (and any other collection in
+        ``_DOCUMENTLESS_COLLECTIONS``) stores embedding + label metadata only,
+        no document text. Walking it would emit one
+        ``backfill_chunk_text_hash_none_doc`` warning per chunk with no
+        actionable signal. The early-return guard skips these collections
+        entirely without touching the collection at all.
+        """
+        from unittest.mock import MagicMock
+
+        from nexus.commands.collection import _backfill_chunk_text_hash
+
+        col = MagicMock()
+        col.name = "taxonomy__centroids"
+
+        updated, skipped, total = _backfill_chunk_text_hash(col)
+
+        assert (updated, skipped, total) == (0, 0, 0)
+        # The early-return must avoid touching the collection — no fetches,
+        # no updates, nothing logged about None documents.
+        col.get.assert_not_called()
+        col.update.assert_not_called()
+
     def test_backfill_skips_none_documents_without_crash(self):
         """nexus-p03z Issue 1: when T3 returns ``documents[i] is None``
         (an inconsistency that occurs in practice on rare chunks), the

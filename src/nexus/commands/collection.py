@@ -492,6 +492,12 @@ def verify_cmd(name: str, deep: bool) -> None:
 
 _BACKFILL_BATCH = 300
 
+# Collections whose rows store embedding + label metadata only — no document
+# text — so chunk_text_hash backfill cannot meaningfully process them. Walking
+# them produces one ``backfill_chunk_text_hash_none_doc`` warning per row with
+# no actionable signal. nexus-uebj.
+_DOCUMENTLESS_COLLECTIONS: frozenset[str] = frozenset({"taxonomy__centroids"})
+
 
 def _backfill_chunk_text_hash(
     col,
@@ -511,6 +517,9 @@ def _backfill_chunk_text_hash(
             ``None`` (default) to preserve the T3-only behaviour that legacy
             callers in ``commands/catalog.py`` still rely on.
     """
+    if getattr(col, "name", "") in _DOCUMENTLESS_COLLECTIONS:
+        return (0, 0, 0)
+
     from nexus.db.t2.chash_index import dual_write_chash_index
 
     updated = 0
