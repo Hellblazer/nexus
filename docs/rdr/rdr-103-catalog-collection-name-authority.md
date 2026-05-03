@@ -2,12 +2,12 @@
 title: "RDR-103: Catalog as Collection-Name Authority"
 id: RDR-103
 type: Architecture
-status: draft
+status: accepted
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-03
-accepted_date:
+accepted_date: 2026-05-03
 related_issues: [nexus-qpet, nexus-qpet.4, nexus-2r71]
 related_tests: []
 implementation_notes: ""
