@@ -239,16 +239,19 @@ def test_event_sourced_flag_drops_phase5a_gated_keys(
 
 
 def test_event_sourced_flag_off_keeps_keys(
+    monkeypatch: pytest.MonkeyPatch,
     rich_repo: Path,
     rich_registry: RepoRegistry,
     local_t3: T3Database,
 ) -> None:
-    """REVERSIBLE check: with the flag off (default), the deprecated
-    fields still flow through to chunk metadata — back-compat for
-    operators who haven't opted in."""
+    """REVERSIBLE escape (Phase 5b): an operator who needs to keep
+    writing the deprecated fields can opt out via
+    ``NEXUS_CATALOG_EVENT_SOURCED=0``. Chunks indexed under flag-off
+    retain ``title``, ``corpus``, ``store_type`` for back-compat."""
     from nexus.registry import _repo_identity
 
-    # NEXUS_CATALOG_EVENT_SOURCED unset → default-false path.
+    # Phase 5b flipped default to true; explicit opt-out for this test.
+    monkeypatch.setenv("NEXUS_CATALOG_EVENT_SOURCED", "0")
     _index(rich_repo, rich_registry, local_t3)
 
     _, path_hash = _repo_identity(rich_repo)

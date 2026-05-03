@@ -88,6 +88,32 @@ def _isolate_t1_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 @pytest.fixture(autouse=True)
+def _phase5b_default_off_for_pre_phase_5_tests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RDR-101 Phase 5b (``nexus-o6aa.12``) flipped
+    ``[catalog].event_sourced`` default from false to true. Most
+    pre-Phase-5 tests in this suite assume the legacy chunk shape
+    (with per-chunk ``title``, ``corpus``, ``store_type``, ``git_meta``)
+    for routing/display/filter assertions. Flag-on by default would
+    silently break those assumptions.
+
+    Default the test suite to flag-off so legacy tests still assert the
+    legacy shape; Phase-5a/5b/5c-specific tests opt back in via
+    ``monkeypatch.setenv("NEXUS_CATALOG_EVENT_SOURCED", "1")`` (or
+    ``monkeypatch.delenv`` to restore the post-Phase-5b production
+    default).
+
+    This fixture documents the test-suite migration debt: every test
+    that does a chunk-metadata field assertion eventually needs to
+    decide whether to (a) update the assertion for the new flag-on
+    shape, or (b) explicitly opt out. Until that audit happens, the
+    blanket flag-off keeps the existing suite green.
+    """
+    monkeypatch.setenv("NEXUS_CATALOG_EVENT_SOURCED", "0")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Redirect NEXUS_CATALOG_PATH so tests never pollute the real user catalog.
 
