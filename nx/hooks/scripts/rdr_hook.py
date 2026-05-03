@@ -48,14 +48,41 @@ def _repo_root() -> Path | None:
     return None
 
 
-def _collection_exists(repo_name: str) -> bool:
+def _resolve_rdr_collection(repo_root: Path) -> str:
+    """Resolve the indexed RDR collection name for ``repo_root``.
+
+    RDR-103 Phase 3b: the hook used to construct ``f"rdr__{repo_name}"``
+    inline. The conformant shape is
+    ``rdr__<owner_id>__voyage-context-3__v1`` and lives in the catalog,
+    not in the file path. Resolve via ``Catalog.collection_for_repo``
+    when both the catalog and an owner row exist; fall back to the
+    legacy 2-segment ``rdr__{repo.name}`` shape otherwise so SessionStart
+    keeps working on operator workstations that have not run
+    ``nx catalog setup`` yet. Phase 5 tightens this fallback.
+    """
+    try:
+        from nexus.catalog import Catalog  # noqa: PLC0415
+        from nexus.config import catalog_path  # noqa: PLC0415
+
+        cat_dir = catalog_path()
+        if Catalog.is_initialized(cat_dir):
+            cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+            try:
+                return cat.collection_for_repo(repo_root, "rdr").render()
+            except LookupError:
+                pass  # owner not registered yet, fall through
+    except Exception:
+        pass
+    return f"rdr__{repo_root.name}"
+
+
+def _collection_exists(target: str) -> bool:
     try:
         result = subprocess.run(
             ["nx", "collection", "list"],
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode == 0:
-            target = f"rdr__{repo_name}"
             return target in result.stdout
     except Exception:
         pass
@@ -245,7 +272,8 @@ def main() -> None:
         sys.exit(0)
 
     repo_name = root.name
-    indexed = _collection_exists(repo_name)
+    rdr_collection = _resolve_rdr_collection(root)
+    indexed = _collection_exists(rdr_collection)
 
     # Batch-load T2 statuses once (used by both reconcile and status counts)
     t2_statuses = _load_all_t2_statuses(repo_name)
@@ -266,7 +294,7 @@ def main() -> None:
         status_info = f"{len(rdr_files)} document(s)"
 
     if indexed:
-        print(f"RDR: {status_info}, indexed in rdr__{repo_name}")
+        print(f"RDR: {status_info}, indexed in {rdr_collection}")
     else:
         print(f"RDR: {status_info} in {rdr_dir.relative_to(root)} but NOT indexed.")
         print(f"     Run: nx index rdr {root}")

@@ -613,6 +613,48 @@ from nexus.catalog.collection_name import (  # noqa: E402
 )
 
 
+@catalog.command("collection-name")
+@click.option(
+    "--content-type",
+    required=True,
+    type=click.Choice(["code", "docs", "rdr", "knowledge"]),
+    help="Content type to resolve (code | docs | rdr | knowledge).",
+)
+@click.option(
+    "--repo",
+    type=click.Path(file_okay=False, exists=True, path_type=Path),
+    default=None,
+    help="Repository root (default: current working directory).",
+)
+def collection_name_cmd(content_type: str, repo: Path | None) -> None:
+    """Resolve and emit the conformant T3 collection name for ``--content-type`` in ``--repo``.
+
+    \b
+    Plugin-layer call sites (rdr-close SKILL.md post-mortem archival,
+    rdr_hook status reporting) use this to look up the canonical
+    ``CollectionName`` without constructing the legacy 2-segment shape
+    themselves. The catalog must be initialized AND the repo must have
+    a registered owner (typically populated by the indexer's
+    ``_catalog_hook`` on first index).
+
+    Output is a single line: the rendered ``CollectionName``. Operators
+    can capture it via shell substitution:
+
+        nx store put --collection "$(nx catalog collection-name --content-type knowledge)" ...
+    """
+    cat = _get_catalog()
+    target_repo = repo if repo is not None else Path.cwd()
+    try:
+        name = cat.collection_for_repo(target_repo, content_type)
+    except LookupError as exc:
+        raise click.ClickException(
+            f"{exc}\n\n"
+            f"Run 'nx index repo {target_repo}' first; the indexer's "
+            f"_catalog_hook registers the owner row that this command needs."
+        ) from exc
+    click.echo(name.render())
+
+
 @catalog.command("rename-collection")
 @click.argument("old")
 @click.argument("new")

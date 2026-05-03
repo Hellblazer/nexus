@@ -315,6 +315,45 @@ def test_store_put_empty_content(t3):
     assert result.startswith("Error:") and "content" in result.lower()
 
 
+def test_store_put_category_persisted_in_metadata(t3):
+    """RDR-103 Phase 3b: ``store_put(..., category=X)`` stamps the
+    ``category`` field on the chunk metadata so post-mortems can be
+    queried via ``where={"category": "rdr_postmortem"}`` against the
+    conformant knowledge collection (replacing the old per-collection
+    isolation in ``knowledge__rdr_postmortem__<repo>``).
+    """
+    store_put(
+        content="post-mortem body",
+        collection="knowledge__1-1__voyage-context-3__v1",
+        title="rdr-103-postmortem",
+        category="rdr_postmortem",
+    )
+    # Pull the stored chunk back and confirm category is on the metadata.
+    col = t3.get_or_create_collection("knowledge__1-1__voyage-context-3__v1")
+    rows = col.get(where={"category": "rdr_postmortem"}, include=["metadatas"])
+    assert rows["ids"], (
+        "category=rdr_postmortem chunk should be retrievable via where filter"
+    )
+    assert rows["metadatas"][0]["category"] == "rdr_postmortem"
+
+
+def test_store_put_category_default_empty(t3):
+    """When ``category`` is not passed, the chunk metadata has no
+    populated category (the make_chunk_metadata default drops empty
+    optionals from the written metadata).
+    """
+    store_put(
+        content="ordinary body",
+        collection="knowledge__1-1__voyage-context-3__v1",
+        title="no-category",
+    )
+    col = t3.get_or_create_collection("knowledge__1-1__voyage-context-3__v1")
+    # where filters with non-empty values miss; without filter we see all.
+    rows = col.get(where={"title": "no-category"}, include=["metadatas"])
+    assert rows["ids"], "stored chunk must be retrievable"
+    assert rows["metadatas"][0].get("category", "") == ""
+
+
 def test_memory_put_empty_content(t2_path):
     result = memory_put(content="", project="testproj", title="empty.md")
     assert result.startswith("Error:") and "content" in result.lower()
