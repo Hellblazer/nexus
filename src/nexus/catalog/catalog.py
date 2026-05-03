@@ -1504,6 +1504,9 @@ class Catalog:
             return
 
         ts = datetime.now(UTC).isoformat()
+        # nexus-7m8n: freeze legacy_grandfathered on the event at write
+        # time so future regex changes do not drift projected rows.
+        legacy_grandfathered = not is_conformant_collection_name(name)
         event = _make_event(
             _CollectionCreatedPayload(
                 coll_id=name,
@@ -1513,6 +1516,7 @@ class Catalog:
                 model_version=model_version,
                 name=display_name or name,
                 created_at=ts,
+                legacy_grandfathered=legacy_grandfathered,
             ),
             v=0,
             ts=ts,

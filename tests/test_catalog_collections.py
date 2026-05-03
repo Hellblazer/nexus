@@ -375,6 +375,98 @@ def test_v0_collection_superseded_blank_id_guard(catalog):
     assert catalog.get_collection("docs__nexus-571b8edd")["superseded_by"] == ""
 
 
+def test_legacy_grandfathered_frozen_on_event_survives_regex_change(catalog, monkeypatch):
+    """nexus-7m8n: ``legacy_grandfathered`` is frozen on the
+    ``CollectionCreated`` event at write time. A subsequent change to
+    :func:`nexus.corpus.is_conformant_collection_name` does NOT flip
+    the projected row when the event log is replayed.
+
+    Pre-fix shape: the projector evaluated the regex live on every
+    replay. Extending the regex (e.g. to allow a new content type)
+    silently re-classified historic rows; same log produced different
+    projected state across releases.
+
+    Post-fix shape: the writer populates
+    ``CollectionCreatedPayload.legacy_grandfathered`` with the regex
+    result at write time; the projector reads from the payload and
+    only falls back to the live regex for older events that lack the
+    field (``legacy_grandfathered`` is ``None``).
+    """
+    from nexus.catalog import events as ev
+    from nexus.catalog.event_log import EventLog
+    from nexus.catalog.projector import Projector
+
+    catalog.register_collection("docs__1-1__voyage-context-3__v1")
+    row_before = catalog.get_collection("docs__1-1__voyage-context-3__v1")
+    assert row_before is not None
+    assert row_before["legacy_grandfathered"] == 0, (
+        "precondition: a conformant name must register as not-legacy"
+    )
+
+    # Reset the projection so we can replay from the event log into a
+    # fresh state and observe what the projector materialises.
+    catalog._db.execute("DELETE FROM collections")
+    catalog._db.commit()
+
+    # Mutate the regex to a degenerate "everything is non-conformant"
+    # form. Pre-fix this would flip the projected row on replay; post-
+    # fix the payload's frozen value wins.
+    import nexus.corpus
+    monkeypatch.setattr(
+        nexus.corpus, "is_conformant_collection_name", lambda _name: False,
+    )
+
+    # Replay the event log through a fresh projector instance bound
+    # to the same DB.
+    projector = Projector(catalog._db)
+    for event in EventLog(catalog._dir).replay():
+        projector.apply(event)
+    catalog._db.commit()
+
+    row_after = catalog.get_collection("docs__1-1__voyage-context-3__v1")
+    assert row_after is not None, "row must materialise from the replay"
+    assert row_after["legacy_grandfathered"] == 0, (
+        f"replay must read legacy_grandfathered from the payload, not "
+        f"the live regex; got {row_after['legacy_grandfathered']!r}. "
+        f"Pre-7m8n the regex monkeypatch would have flipped this to 1."
+    )
+
+
+def test_legacy_grandfathered_falls_back_to_regex_for_pre_7m8n_events(catalog):
+    """nexus-7m8n: events synthesized before the payload field landed
+    deserialize with ``legacy_grandfathered=None``. The projector
+    falls back to evaluating ``is_conformant_collection_name`` so
+    pre-7m8n event logs continue to project correctly.
+    """
+    from nexus.catalog.events import CollectionCreatedPayload, make_event
+
+    # Manually craft a payload with legacy_grandfathered=None to
+    # simulate a pre-7m8n synthesized event (Event.from_dict on a
+    # JSONL line lacking the field would land here).
+    payload = CollectionCreatedPayload(
+        coll_id="docs__legacy-style-name",
+        owner_id="owner",
+        content_type="docs",
+        embedding_model="voyage-context-3",
+        model_version="1",
+        legacy_grandfathered=None,
+    )
+    event = make_event(payload, v=0)
+
+    catalog._projector.apply(event)
+    catalog._db.commit()
+
+    row = catalog.get_collection("docs__legacy-style-name")
+    assert row is not None
+    # The fallback evaluates the live regex; "docs__legacy-style-name"
+    # is not conformant under the current regex, so the projector
+    # marks it legacy.
+    assert row["legacy_grandfathered"] == 1, (
+        "pre-7m8n event (legacy_grandfathered=None) must fall back to "
+        "the live regex; a non-conformant name should project as legacy."
+    )
+
+
 def test_v0_collection_superseded_replay_is_deterministic(catalog):
     """nexus-qpet.1: replaying the same supersede event twice must
     produce the same ``superseded_at`` value.
