@@ -112,6 +112,30 @@ def parse_conformant_collection_name(name: str) -> dict[str, str]:
     }
 
 
+def canonical_embedding_model(content_type: str) -> str:
+    """Return the RDR-103 canonical embedding model for ``content_type``.
+
+    Single source of truth for the per-content-type model policy:
+
+    - ``code`` to ``voyage-code-3``
+    - ``docs`` / ``rdr`` / ``knowledge`` to ``voyage-context-3`` (CCE)
+
+    Raises ``ValueError`` for unknown content types so the caller does
+    not silently fall through to a wrong model.
+    ``Catalog.collection_for_repo`` uses this; legacy
+    :func:`voyage_model_for_collection` continues to dispatch off the
+    physical name for read paths.
+    """
+    if content_type == "code":
+        return "voyage-code-3"
+    if content_type in ("docs", "rdr", "knowledge"):
+        return "voyage-context-3"
+    raise ValueError(
+        f"canonical_embedding_model: unknown content_type {content_type!r}; "
+        f"expected one of {CONTENT_TYPES}"
+    )
+
+
 def voyage_model_for_collection(collection_name: str) -> str:
     """Return the Voyage AI model for a T3 collection (index and query).
 

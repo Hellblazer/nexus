@@ -140,7 +140,11 @@ from nexus.catalog.tumbler import (
     read_links,
     read_owners,
 )
-from nexus.corpus import CANONICAL_EMBEDDING_MODELS, CONTENT_TYPES
+from nexus.corpus import (
+    CANONICAL_EMBEDDING_MODELS,
+    CONTENT_TYPES,
+    canonical_embedding_model,
+)
 
 _log = structlog.get_logger()
 
@@ -1688,6 +1692,50 @@ class Catalog:
             owner_id=owner_id,
             embedding_model=embedding_model,
             model_version=new_version,
+        )
+
+    def collection_for_repo(
+        self,
+        repo: Path,
+        content_type: str,
+        *,
+        bump: bool = False,
+    ) -> CollectionName:
+        """Resolve the canonical ``CollectionName`` for ``content_type`` in ``repo``.
+
+        Convenience wrapper around :meth:`collection_for` that handles
+        the repo-to-owner-to-collection-name pipeline:
+
+        1. Compute ``repo_hash`` via
+           :func:`nexus.registry._repo_identity`.
+        2. Look up the owner via :meth:`owner_for_repo`. Raises
+           ``LookupError`` when no owner exists; the indexer's
+           ``_catalog_hook`` flow registers the owner up front, so a
+           missing owner indicates a bypass of the standard write path.
+        3. Resolve the canonical embedding model via
+           :func:`nexus.corpus.canonical_embedding_model`.
+        4. Delegate to :meth:`collection_for`.
+
+        This is the helper that Phase 3 indexer call sites use; replacing
+        ``_docs_collection_name(repo)`` and similar legacy helpers.
+        """
+        from nexus.registry import _repo_identity  # noqa: PLC0415
+
+        _, repo_hash = _repo_identity(repo)
+        owner = self.owner_for_repo(repo_hash)
+        if owner is None:
+            raise LookupError(
+                f"collection_for_repo: no owner registered for "
+                f"repo_hash {repo_hash!r} (repo {repo!s}). "
+                f"Call register_owner(...) before requesting a "
+                f"collection name; the indexer's _catalog_hook normally "
+                f"registers owners up front."
+            )
+        return self.collection_for(
+            content_type=content_type,
+            owner=owner,
+            embedding_model=canonical_embedding_model(content_type),
+            bump=bump,
         )
 
     def _update_document_collection_locked(

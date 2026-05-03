@@ -301,3 +301,123 @@ def test_collections_compound_index_columns(catalog) -> None:
     ).fetchall()
     cols = [row[2] for row in rows]
     assert cols == ["content_type", "owner_id", "embedding_model"]
+
+
+# ── canonical_embedding_model ────────────────────────────────────────────
+
+def test_canonical_embedding_model_code() -> None:
+    from nexus.corpus import canonical_embedding_model
+    assert canonical_embedding_model("code") == "voyage-code-3"
+
+
+def test_canonical_embedding_model_docs() -> None:
+    from nexus.corpus import canonical_embedding_model
+    assert canonical_embedding_model("docs") == "voyage-context-3"
+
+
+def test_canonical_embedding_model_rdr() -> None:
+    from nexus.corpus import canonical_embedding_model
+    assert canonical_embedding_model("rdr") == "voyage-context-3"
+
+
+def test_canonical_embedding_model_knowledge() -> None:
+    from nexus.corpus import canonical_embedding_model
+    assert canonical_embedding_model("knowledge") == "voyage-context-3"
+
+
+def test_canonical_embedding_model_unknown_raises() -> None:
+    from nexus.corpus import canonical_embedding_model
+    with pytest.raises(ValueError, match="content_type"):
+        canonical_embedding_model("other")
+
+
+# ── Catalog.collection_for_repo ────────────────────────────────────────
+
+def test_collection_for_repo_uses_registered_owner(catalog, tmp_path) -> None:
+    """Given a registered repo owner, ``collection_for_repo`` returns
+    the conformant ``CollectionName`` with the canonical model."""
+    repo_root = tmp_path / "myrepo"
+    repo_root.mkdir()
+    # Stable identity: register an owner under a fixed repo_hash, then
+    # patch _repo_identity to return that hash for the repo path.
+    catalog.register_owner(
+        name="myrepo",
+        owner_type="repo",
+        repo_hash="deadbeef",
+        repo_root=str(repo_root),
+    )
+    import nexus.registry as reg_mod
+    original = reg_mod._repo_identity
+    reg_mod._repo_identity = lambda r: ("myrepo", "deadbeef")
+    try:
+        name = catalog.collection_for_repo(repo_root, "code")
+    finally:
+        reg_mod._repo_identity = original
+    assert name.content_type == "code"
+    assert name.embedding_model == "voyage-code-3"
+    assert name.model_version == 1
+    assert name.owner_id  # whatever the owner segment is, it must not be empty
+
+
+def test_collection_for_repo_docs_uses_voyage_context_3(catalog, tmp_path) -> None:
+    repo_root = tmp_path / "docs-repo"
+    repo_root.mkdir()
+    catalog.register_owner(
+        name="docs-repo",
+        owner_type="repo",
+        repo_hash="cafe1234",
+        repo_root=str(repo_root),
+    )
+    import nexus.registry as reg_mod
+    original = reg_mod._repo_identity
+    reg_mod._repo_identity = lambda r: ("docs-repo", "cafe1234")
+    try:
+        name = catalog.collection_for_repo(repo_root, "docs")
+    finally:
+        reg_mod._repo_identity = original
+    assert name.embedding_model == "voyage-context-3"
+
+
+def test_collection_for_repo_unregistered_owner_raises(catalog, tmp_path) -> None:
+    """Without a prior owner registration, the helper raises rather
+    than silently emitting a malformed name. The indexer's
+    ``_catalog_hook`` flow registers owners up front; callers that
+    bypass that flow get a loud failure instead of bad data.
+    """
+    repo_root = tmp_path / "unregistered"
+    repo_root.mkdir()
+    import nexus.registry as reg_mod
+    original = reg_mod._repo_identity
+    reg_mod._repo_identity = lambda r: ("unregistered", "unknown1")
+    try:
+        with pytest.raises(LookupError, match="owner"):
+            catalog.collection_for_repo(repo_root, "code")
+    finally:
+        reg_mod._repo_identity = original
+
+
+def test_collection_for_repo_bump_propagates(catalog, tmp_path) -> None:
+    """``bump=True`` flag is forwarded to ``collection_for``."""
+    repo_root = tmp_path / "bumprepo"
+    repo_root.mkdir()
+    owner = catalog.register_owner(
+        name="bumprepo",
+        owner_type="repo",
+        repo_hash="b00b1e55",
+        repo_root=str(repo_root),
+    )
+    catalog.register_collection(
+        f"code__{owner.store}-{owner.owner}__voyage-code-3__v1",
+        content_type="code",
+        owner_id=f"{owner.store}-{owner.owner}",
+        embedding_model="voyage-code-3",
+        model_version="v1",
+    )
+    import nexus.registry as reg_mod
+    original = reg_mod._repo_identity
+    reg_mod._repo_identity = lambda r: ("bumprepo", "b00b1e55")
+    try:
+        name = catalog.collection_for_repo(repo_root, "code", bump=True)
+    finally:
+        reg_mod._repo_identity = original
+    assert name.model_version == 2
