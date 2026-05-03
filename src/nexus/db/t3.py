@@ -35,6 +35,63 @@ from nexus.metadata_schema import CONTENT_TYPES, normalize, validate
 _log = structlog.get_logger(__name__)
 
 
+# ── Chroma HTTP timeout override (nexus-jgjw) ────────────────────────────────
+#
+# chromadb >=1.5 hardcodes ``httpx.Client(timeout=None, ...)`` at
+# ``chromadb/api/fastapi.py:86,91``. With ``timeout=None``, a Chroma op blocks
+# indefinitely on any read where the server has closed the connection — the
+# failure mode observed during the 2026-05-03 orphan recovery (10+ min CPU=0%
+# process state, one TCP socket in CLOSE_WAIT, no recovery without SIGTERM).
+#
+# Until chromadb exposes a ``Settings.chroma_http_request_timeout_seconds``
+# field that propagates to the underlying httpx.Client (track upstream), we
+# override the timeout once after construction. After this patch, a stalled
+# read raises ``httpx.ReadTimeout`` — already classified retryable by
+# ``nexus.retry._is_retryable_chroma_error`` — so the existing retry helper
+# converts the hang into a bounded retry-then-fail loop.
+#
+# Defensive on shape: the override only fires for clients that expose
+# ``client._server._session`` (CloudClient + HttpClient via FastAPI backend).
+# PersistentClient and EphemeralClient have no HTTP session and are skipped.
+
+#: Connect timeout (s) — TCP handshake. Generous; cloud handshakes are sub-sec.
+CHROMA_HTTP_CONNECT_TIMEOUT_S: float = 10.0
+#: Read timeout (s) — single response read window. Sized for ``col.get`` of
+#: a 300-id batch with full metadata; longer than typical (~1s) to absorb
+#: cloud-side jitter without false-positive retries.
+CHROMA_HTTP_READ_TIMEOUT_S: float = 120.0
+#: Write timeout (s) — request-body upload. ``col.update`` payloads are small
+#: enough that 60 s is generous.
+CHROMA_HTTP_WRITE_TIMEOUT_S: float = 60.0
+#: Pool timeout (s) — wait time to acquire a connection from the pool.
+CHROMA_HTTP_POOL_TIMEOUT_S: float = 10.0
+
+
+def _apply_chroma_http_timeout(client: object) -> None:
+    """Override chromadb's hardcoded ``httpx.Client(timeout=None)``.
+
+    Called once after ``T3Database`` constructs (or is handed) a chroma
+    client. No-op for clients that don't carry an HTTP session
+    (PersistentClient, EphemeralClient, test mocks shaped without
+    ``_server._session``).
+    """
+    server = getattr(client, "_server", None)
+    if server is None:
+        return
+    session = getattr(server, "_session", None)
+    if session is None:
+        return
+    try:
+        session.timeout = httpx.Timeout(
+            connect=CHROMA_HTTP_CONNECT_TIMEOUT_S,
+            read=CHROMA_HTTP_READ_TIMEOUT_S,
+            write=CHROMA_HTTP_WRITE_TIMEOUT_S,
+            pool=CHROMA_HTTP_POOL_TIMEOUT_S,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        _log.warning("chroma_http_timeout_override_failed", error=str(exc))
+
+
 # Legacy store_type values accepted on input (nexus-40t). All map to a
 # :data:`nexus.metadata_schema.CONTENT_TYPES` value so the canonical
 # schema stays compact.
@@ -270,6 +327,7 @@ class T3Database:
             self._client = chromadb.CloudClient(
                 tenant=tenant or None, database=database, api_key=api_key
             )
+        _apply_chroma_http_timeout(self._client)
 
     # ── Context manager (no-op: CloudClient is stateless REST) ───────────────
 

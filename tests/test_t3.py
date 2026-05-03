@@ -712,13 +712,14 @@ def test_upsert_chunks_passes_all_metadata_fields(mock_db):
     """Canonical schema fields (nexus-40t) survive the normalize pass;
     ``indexed_at`` is now in ALLOWED_TOP_LEVEL (replaces dropped
     ``expires_at``); ``content_type`` is injected from the collection
-    prefix."""
+    prefix. RDR-102 Phase B drops ``source_path`` — it is normalized
+    out and must not appear in the written record."""
     db, mock_col, _ = mock_db
     rich_meta = {
         "title": "f.py:1-5", "tags": "py", "category": "code", "session_id": "",
         "source_agent": "nexus-indexer", "store_type": "code",
         "indexed_at": "2026-01-01T00:00:00+00:00", "ttl_days": 0,
-        "source_path": "src/foo.py", "line_start": 1, "line_end": 5, "frecency_score": 0.42,
+        "line_start": 1, "line_end": 5, "frecency_score": 0.42,
     }
     db.upsert_chunks(
         collection="code__myrepo", ids=["abc123"],
@@ -734,9 +735,9 @@ def test_upsert_chunks_passes_all_metadata_fields(mock_db):
     assert written["ttl_days"] == 0
     assert written["indexed_at"] == "2026-01-01T00:00:00+00:00"
     assert "expires_at" not in written
+    assert "source_path" not in written  # RDR-102 Phase B: dropped
     assert written["line_start"] == 1
     assert written["line_end"] == 5
-    assert written["source_path"] == "src/foo.py"
     assert written["frecency_score"] == 0.42
 
 
@@ -955,9 +956,11 @@ def test_upsert_chunks_with_embeddings_stores(mock_db):
     embeddings = [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
     ids = ["chunk-1", "chunk-2"]
     docs = ["first chunk text", "second chunk text"]
+    # RDR-102 Phase B: source_path is dropped by normalize. Use page_number
+    # as the schema-stable distinguishing field.
     metas = [
-        {"source_path": "doc.pdf", "page_number": 1},
-        {"source_path": "doc.pdf", "page_number": 2},
+        {"page_number": 1},
+        {"page_number": 2},
     ]
     db.upsert_chunks_with_embeddings(
         collection_name="docs__corpus", ids=ids, documents=docs,
@@ -965,8 +968,8 @@ def test_upsert_chunks_with_embeddings_stores(mock_db):
     )
     # docs__ collections route to the prose content_type by default.
     expected_metas = [
-        {"source_path": "doc.pdf", "page_number": 1, "content_type": "prose"},
-        {"source_path": "doc.pdf", "page_number": 2, "content_type": "prose"},
+        {"page_number": 1, "content_type": "prose"},
+        {"page_number": 2, "content_type": "prose"},
     ]
     mock_col.upsert.assert_called_once_with(
         ids=ids, documents=docs, embeddings=embeddings, metadatas=expected_metas,
@@ -988,12 +991,14 @@ def test_upsert_chunks_with_embeddings_uses_get_or_create(mock_db):
 
 def test_update_chunks_calls_col_update_without_documents(mock_db):
     db, mock_col, _ = mock_db
-    metas = [{"frecency_score": 0.9, "source_path": "src/foo.py"}] * 2
+    # RDR-102 Phase B: source_path is dropped by normalize. frecency_score
+    # is schema-stable and round-trips through the canonical pass.
+    metas = [{"frecency_score": 0.9}] * 2
     db.update_chunks(collection="code__myrepo", ids=["id-1", "id-2"], metadatas=metas)
     # update_chunks funnels through canonical metadata (nexus-40t),
     # injecting ``content_type`` for every record.
     normalised = [
-        {"frecency_score": 0.9, "source_path": "src/foo.py", "content_type": "code"}
+        {"frecency_score": 0.9, "content_type": "code"}
     ] * 2
     mock_col.update.assert_called_once_with(
         ids=["id-1", "id-2"], metadatas=normalised,
