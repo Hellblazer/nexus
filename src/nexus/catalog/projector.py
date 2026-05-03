@@ -366,12 +366,22 @@ class Projector:
         If the old name has no row, the UPDATE is a safe no-op; the
         rename verb's caller is responsible for surfacing
         "unknown old collection" errors before the event is appended.
+
+        ``superseded_at`` is read from the payload so replay is
+        deterministic. Pre-payload-field events (synthesized before
+        ``CollectionSupersededPayload.superseded_at`` was added) default
+        to empty string here; we populate "now" in that case so the
+        column is never empty and the doctor's projection-vs-T3 drift
+        check has a consistent shape to read.
         """
         from datetime import UTC, datetime  # noqa: PLC0415
 
         if not payload.old_coll_id or not payload.new_coll_id:
             return
-        ts = datetime.now(UTC).isoformat()
+        ts = (
+            getattr(payload, "superseded_at", "")
+            or datetime.now(UTC).isoformat()
+        )
         self._db.execute(
             "UPDATE collections SET superseded_by = ?, superseded_at = ? "
             "WHERE name = ?",

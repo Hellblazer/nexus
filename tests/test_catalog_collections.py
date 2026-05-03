@@ -233,11 +233,125 @@ def test_supersede_collection_marks_old_and_emits_event(catalog):
 
 
 def test_supersede_unknown_old_collection_raises(catalog):
+    catalog.register_collection("docs__1-1__voyage-context-3__v1",
+                                content_type="docs", owner_id="1-1",
+                                embedding_model="voyage-context-3",
+                                model_version="v1")
     with pytest.raises(ValueError, match="not registered"):
         catalog.supersede_collection(
             "never_seen",
             "docs__1-1__voyage-context-3__v1",
         )
+
+
+def test_supersede_already_superseded_raises(catalog):
+    """Superseding a name that already has superseded_by set is rejected;
+    silently overwriting would orphan the prior CollectionSuperseded
+    event in the log.
+    """
+    catalog.register_collection("docs__nexus-571b8edd")
+    catalog.register_collection(
+        "docs__1-1__voyage-context-3__v1",
+        content_type="docs", owner_id="1-1",
+        embedding_model="voyage-context-3", model_version="v1",
+    )
+    catalog.register_collection(
+        "docs__1-1__voyage-context-3__v2",
+        content_type="docs", owner_id="1-1",
+        embedding_model="voyage-context-3", model_version="v2",
+    )
+    catalog.supersede_collection(
+        "docs__nexus-571b8edd", "docs__1-1__voyage-context-3__v1",
+    )
+    with pytest.raises(ValueError, match="already superseded"):
+        catalog.supersede_collection(
+            "docs__nexus-571b8edd", "docs__1-1__voyage-context-3__v2",
+        )
+
+
+def test_supersede_unregistered_new_raises(catalog):
+    """Refuse to point superseded_by at a non-existent collection;
+    that produces a dangling pointer no foreign-key-style join can
+    resolve.
+    """
+    catalog.register_collection("docs__nexus-571b8edd")
+    with pytest.raises(ValueError, match="new .* is not.*registered"):
+        catalog.supersede_collection(
+            "docs__nexus-571b8edd", "docs__never-registered",
+        )
+
+
+def test_register_collection_short_circuits_on_identical_re_call(catalog):
+    """Re-calling register_collection with identical canonical fields
+    must NOT append a duplicate event (log-bloat smell).
+    """
+    catalog.register_collection(
+        "code__1-1__voyage-code-3__v1",
+        content_type="code", owner_id="1-1",
+        embedding_model="voyage-code-3", model_version="v1",
+    )
+    events_after_first = [
+        e for e in EventLog(catalog._dir).replay()
+        if e.type == TYPE_COLLECTION_CREATED
+    ]
+    catalog.register_collection(
+        "code__1-1__voyage-code-3__v1",
+        content_type="code", owner_id="1-1",
+        embedding_model="voyage-code-3", model_version="v1",
+    )
+    events_after_second = [
+        e for e in EventLog(catalog._dir).replay()
+        if e.type == TYPE_COLLECTION_CREATED
+    ]
+    assert len(events_after_first) == 1
+    assert len(events_after_second) == 1
+
+
+def test_register_collection_re_emits_on_field_change(catalog):
+    """If a canonical field changes between calls, the new event is
+    emitted so the projection picks up the new value.
+    """
+    catalog.register_collection("code__nexus-571b8edd")  # legacy form, empty fields
+    catalog.register_collection(
+        "code__nexus-571b8edd",
+        embedding_model="voyage-code-3",  # operator filling in metadata
+    )
+    events = [
+        e for e in EventLog(catalog._dir).replay()
+        if e.type == TYPE_COLLECTION_CREATED
+    ]
+    assert len(events) == 2  # both calls emitted
+
+
+def test_idempotent_supersede_skipped_due_to_already_superseded(catalog):
+    """A second supersede on the same name must NOT silently extend
+    the chain; the test_supersede_already_superseded_raises test covers
+    the raise. This case also confirms no extra event lands in the
+    log if the call raised.
+    """
+    catalog.register_collection("docs__nexus-571b8edd")
+    catalog.register_collection(
+        "docs__1-1__voyage-context-3__v1",
+        content_type="docs", owner_id="1-1",
+        embedding_model="voyage-context-3", model_version="v1",
+    )
+    catalog.register_collection(
+        "docs__1-1__voyage-context-3__v2",
+        content_type="docs", owner_id="1-1",
+        embedding_model="voyage-context-3", model_version="v2",
+    )
+    catalog.supersede_collection(
+        "docs__nexus-571b8edd", "docs__1-1__voyage-context-3__v1",
+    )
+    with pytest.raises(ValueError):
+        catalog.supersede_collection(
+            "docs__nexus-571b8edd", "docs__1-1__voyage-context-3__v2",
+        )
+    events = [
+        e for e in EventLog(catalog._dir).replay()
+        if e.type == TYPE_COLLECTION_SUPERSEDED
+    ]
+    assert len(events) == 1  # second call raised, did not write
 
 
 # ── Projector replay ─────────────────────────────────────────────────────

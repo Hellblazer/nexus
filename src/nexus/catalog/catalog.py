@@ -1464,22 +1464,45 @@ class Catalog:
     ) -> None:
         """Register a ChromaDB collection in the catalog projection.
 
-        Idempotent on ``name`` (re-registering the same name is a no-op
-        at the SQLite level via INSERT OR REPLACE in the projector).
-        Writes a CollectionCreated v: 0 event to the event log; the
-        projector materializes the row including the
-        ``legacy_grandfathered`` flag derived from
-        :func:`nexus.corpus.is_conformant_collection_name`.
+        Idempotent on ``name``. The first call writes the row + emits a
+        ``CollectionCreated`` event; subsequent calls with identical
+        canonical fields short-circuit (no duplicate event, no log
+        bloat). Subsequent calls that change a canonical field re-emit
+        the event so the projection picks up the new value.
 
         For non-conformant names, the canonical fields (``content_type``
         etc.) may be left empty; the row is still written and flagged
-        as legacy. For conformant names, callers are encouraged to
-        supply the segments so they round-trip exactly.
+        as legacy via the projector's regex. For conformant names,
+        callers are encouraged to supply the segments so they round-trip
+        exactly.
+
+        Honors the ``_event_sourced_enabled`` split that ``register_owner``
+        and the other writers use: in event-sourced mode the event is
+        canonical and the projector writes SQLite; in legacy mode SQLite
+        is written directly and the event is shadow-emitted.
         """
         from datetime import UTC, datetime  # noqa: PLC0415
+        from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415
 
         if not name:
             raise ValueError("register_collection: name must be non-empty")
+
+        # Short-circuit: if the row already exists with the same
+        # canonical fields, do not re-emit. Event log was previously
+        # appended unconditionally on every call; for hot paths
+        # (backfill on a 100-collection catalog re-run on every CI
+        # build) this produced duplicate CollectionCreated events with
+        # no projection effect.
+        existing = self.get_collection(name)
+        if existing is not None and (
+            existing["content_type"] == content_type
+            and existing["owner_id"] == owner_id
+            and existing["embedding_model"] == embedding_model
+            and existing["model_version"] == model_version
+            and existing["display_name"] == (display_name or name)
+        ):
+            return
+
         ts = datetime.now(UTC).isoformat()
         event = _make_event(
             _CollectionCreatedPayload(
@@ -1495,18 +1518,43 @@ class Catalog:
         )
         dir_fd = self._acquire_lock()
         try:
-            self._write_to_event_log(event)
-            self._projector.apply(event)
-            # The projector sets created_at via a COALESCE that
-            # preserves the existing value on re-insert; for fresh rows
-            # we write it explicitly here so the row records its first
-            # registration timestamp.
-            self._db.execute(
-                "UPDATE collections SET created_at = ? "
-                "WHERE name = ? AND (created_at IS NULL OR created_at = '')",
-                (ts, name),
-            )
-            self._db.commit()
+            if self._event_sourced_enabled:
+                self._write_to_event_log(event)
+                self._projector.apply(event)
+                # The projector sets created_at via a COALESCE that
+                # preserves the existing value on re-insert; for fresh
+                # rows we write it explicitly here so the row records
+                # its first registration timestamp.
+                self._db.execute(
+                    "UPDATE collections SET created_at = ? "
+                    "WHERE name = ? AND (created_at IS NULL OR created_at = '')",
+                    (ts, name),
+                )
+                self._db.commit()
+            else:
+                # Legacy mode: SQLite is canonical, no JSONL backing
+                # file for collections (they did not exist pre-Phase-6).
+                # Direct INSERT OR REPLACE matches the projector handler
+                # except for the regex-derived legacy_grandfathered flag,
+                # which we compute the same way here.
+                legacy = 0 if is_conformant_collection_name(name) else 1
+                self._db.execute(
+                    "INSERT OR REPLACE INTO collections "
+                    "(name, content_type, owner_id, embedding_model, "
+                    "model_version, display_name, legacy_grandfathered, "
+                    "superseded_by, superseded_at, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, "
+                    "COALESCE((SELECT superseded_by FROM collections WHERE name = ?), ''), "
+                    "COALESCE((SELECT superseded_at FROM collections WHERE name = ?), ''), "
+                    "COALESCE((SELECT created_at FROM collections WHERE name = ?), ?))",
+                    (
+                        name, content_type, owner_id, embedding_model,
+                        model_version, display_name or name, legacy,
+                        name, name, name, ts,
+                    ),
+                )
+                self._db.commit()
+                self._emit_shadow_event(event)
         finally:
             self._release_lock(dir_fd)
 
@@ -1614,10 +1662,20 @@ class Catalog:
         dir_fd = self._acquire_lock()
         try:
             if self._event_sourced_enabled:
+                # Crash-window discipline matches rename_collection's
+                # per-row loop (catalog.py:2253-2255 + batched commit at
+                # 2264): event -> projector apply -> JSONL append, with
+                # the SQLite commit last. A crash between projector apply
+                # and JSONL append leaves SQLite uncommitted and JSONL
+                # unwritten - both old. A crash between JSONL append and
+                # commit leaves JSONL ahead of SQLite; on
+                # rebuild-from-JSONL the new line wins; on
+                # rebuild-from-events the projector replays correctly.
+                # Either way, no torn state.
                 self._write_to_event_log(event)
                 self._projector.apply(event)
-                self._db.commit()
                 self._append_jsonl(self._documents_path, rec)
+                self._db.commit()
             else:
                 self._append_jsonl(self._documents_path, rec)
                 self._db.execute(
@@ -1642,33 +1700,70 @@ class Catalog:
 
         Writes a CollectionSuperseded v: 0 event and updates the old
         collection's ``superseded_by`` / ``superseded_at`` columns. The
-        new collection must already be registered (callers usually pair
-        ``register_collection`` for the new name with a
-        ``supersede_collection`` for the old).
+        new collection MUST already be registered (the docstring used
+        to say "callers usually pair register_collection with
+        supersede_collection"; that contract is now enforced).
 
-        Raises ``ValueError`` if ``old_name`` is not registered; this
-        is the rare case where read-time fail-loud is appropriate, the
-        operator is taking an explicit action and would expect a
-        no-op-on-typo to surface as an error.
+        Raises ``ValueError`` when:
+          - ``old_name`` is not registered (typo-on-explicit-action path)
+          - ``new_name`` is not registered (would create a dangling
+            ``superseded_by`` pointer that no foreign-key-style join
+            can resolve)
+          - ``old_name`` is already superseded (silently overwriting
+            the previous supersession would orphan the prior
+            CollectionSuperseded event in the log)
+
+        Honors the ``_event_sourced_enabled`` split that the rest of the
+        catalog writers use.
         """
+        from datetime import UTC, datetime  # noqa: PLC0415
+
         existing = self.get_collection(old_name)
         if existing is None:
             raise ValueError(
                 f"supersede_collection: {old_name!r} not registered"
             )
+        if existing.get("superseded_by"):
+            raise ValueError(
+                f"supersede_collection: {old_name!r} is already "
+                f"superseded by {existing['superseded_by']!r}; refusing "
+                f"to chain a second supersede event"
+            )
+        if self.get_collection(new_name) is None:
+            raise ValueError(
+                f"supersede_collection: new {new_name!r} is not "
+                f"registered. Call register_collection({new_name!r}, ...) "
+                f"first so the projection has a row to point at."
+            )
+        ts = datetime.now(UTC).isoformat()
         event = _make_event(
             _CollectionSupersededPayload(
                 old_coll_id=old_name,
                 new_coll_id=new_name,
                 reason=reason,
+                superseded_at=ts,
             ),
             v=0,
+            ts=ts,
         )
         dir_fd = self._acquire_lock()
         try:
-            self._write_to_event_log(event)
-            self._projector.apply(event)
-            self._db.commit()
+            if self._event_sourced_enabled:
+                self._write_to_event_log(event)
+                self._projector.apply(event)
+                self._db.commit()
+            else:
+                # Legacy mode: SQLite is canonical, no JSONL backing.
+                # Reuse the same ``ts`` as the event payload so the row
+                # records exactly what the event records (deterministic
+                # under replay-equality even in legacy mode).
+                self._db.execute(
+                    "UPDATE collections SET superseded_by = ?, "
+                    "superseded_at = ? WHERE name = ?",
+                    (new_name, ts, old_name),
+                )
+                self._db.commit()
+                self._emit_shadow_event(event)
         finally:
             self._release_lock(dir_fd)
 

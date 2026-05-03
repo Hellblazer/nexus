@@ -184,11 +184,19 @@ class CollectionCreatedPayload:
 
 @dataclass(frozen=True, slots=True)
 class CollectionSupersededPayload:
-    """One collection replaced by another (re-embed, rename, grandfather)."""
+    """One collection replaced by another (re-embed, rename, grandfather).
+
+    ``superseded_at`` is populated by the writer (typically equal to the
+    event envelope's ``ts``) so projection is deterministic across
+    replay machines. Older events that pre-date the field default to
+    empty string; in that case the projector falls back to "now" so the
+    column is always populated even for legacy events.
+    """
 
     old_coll_id: str
     new_coll_id: str
     reason: str = ""
+    superseded_at: str = ""
 
 
 @dataclass(frozen=True, slots=True)
