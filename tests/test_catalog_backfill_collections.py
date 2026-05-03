@@ -84,7 +84,7 @@ def test_backfill_registers_t3_and_catalog_collections(catalog, runner):
 
     with patch("nexus.db.make_t3", return_value=fake_t3), \
          patch("nexus.commands.catalog._get_catalog", return_value=catalog):
-        result = runner.invoke(main, ["catalog", "backfill-collections"])
+        result = runner.invoke(main, ["catalog", "backfill-collections", "--no-dry-run"])
 
     assert result.exit_code == 0, result.output
     rows = catalog.list_collections()
@@ -110,7 +110,7 @@ def test_backfill_marks_legacy_via_projector(catalog, runner):
 
     with patch("nexus.db.make_t3", return_value=fake_t3), \
          patch("nexus.commands.catalog._get_catalog", return_value=catalog):
-        result = runner.invoke(main, ["catalog", "backfill-collections"])
+        result = runner.invoke(main, ["catalog", "backfill-collections", "--no-dry-run"])
 
     assert result.exit_code == 0, result.output
     assert catalog.is_legacy_collection("knowledge__delos") is True
@@ -125,8 +125,8 @@ def test_backfill_idempotent(catalog, runner):
 
     with patch("nexus.db.make_t3", return_value=fake_t3), \
          patch("nexus.commands.catalog._get_catalog", return_value=catalog):
-        runner.invoke(main, ["catalog", "backfill-collections"])
-        result = runner.invoke(main, ["catalog", "backfill-collections"])
+        runner.invoke(main, ["catalog", "backfill-collections", "--no-dry-run"])
+        result = runner.invoke(main, ["catalog", "backfill-collections", "--no-dry-run"])
 
     assert result.exit_code == 0
     rows = catalog._db.execute(
@@ -160,10 +160,11 @@ def test_backfill_empty_t3_and_catalog(catalog, runner):
 
     with patch("nexus.db.make_t3", return_value=fake_t3), \
          patch("nexus.commands.catalog._get_catalog", return_value=catalog):
-        result = runner.invoke(main, ["catalog", "backfill-collections"])
+        result = runner.invoke(main, ["catalog", "backfill-collections", "--no-dry-run"])
 
     assert result.exit_code == 0
-    assert "0" in result.output
+    assert "Nothing to backfill" in result.output
+    assert "0 new" in result.output
 
 
 def test_backfill_skips_already_registered(catalog, runner):
@@ -173,10 +174,37 @@ def test_backfill_skips_already_registered(catalog, runner):
 
     with patch("nexus.db.make_t3", return_value=fake_t3), \
          patch("nexus.commands.catalog._get_catalog", return_value=catalog):
-        result = runner.invoke(main, ["catalog", "backfill-collections"])
+        result = runner.invoke(main, ["catalog", "backfill-collections", "--no-dry-run"])
 
     assert result.exit_code == 0, result.output
     rows = catalog.list_collections()
     names = sorted(r["name"] for r in rows)
     assert names == ["docs__nexus-571b8edd", "knowledge__delos"]
-    assert "1 new" in result.output or "1 collection" in result.output
+    assert "Done: 1 new" in result.output
+
+
+def test_backfill_aborts_on_t3_failure(catalog, runner):
+    """T3 list_collections raising must abort the verb with a non-zero
+    exit, NOT silently fall back to a catalog-only partial backfill.
+
+    A partial backfill is operationally hostile: the operator gets a
+    green exit and half the projection missing. Re-running the verb
+    after T3 recovers would silently fix it, but the operator never
+    learned T3 was down to begin with.
+    """
+    class _BrokenT3:
+        def list_collections(self):
+            raise RuntimeError("t3 unreachable")
+
+    _seed_document(catalog, tumbler="1.1.1", collection="docs__nexus-571b8edd")
+
+    with patch("nexus.db.make_t3", return_value=_BrokenT3()), \
+         patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+        result = runner.invoke(
+            main, ["catalog", "backfill-collections", "--no-dry-run"],
+        )
+    assert result.exit_code != 0
+    assert "Failed to list T3 collections" in result.output
+    # No partial backfill happened
+    rows = catalog._db.execute("SELECT COUNT(*) FROM collections").fetchone()
+    assert rows[0] == 0

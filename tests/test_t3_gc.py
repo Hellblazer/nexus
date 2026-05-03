@@ -323,7 +323,7 @@ def test_gc_no_orphans_clean_summary(t3_db, catalog, runner):
         result = runner.invoke(main, ["t3", "gc", "-c", coll])
 
     assert result.exit_code == 0
-    assert "0 orphan" in result.output
+    assert "0 orphan(s)" in result.output  # parenthetical-plural form
     log_path = catalog._dir / EVENTS_FILENAME
     if log_path.exists():
         events = [e for e in EventLog(catalog._dir).replay()
@@ -358,6 +358,78 @@ def test_gc_chunk_with_missing_doc_id_skipped(
 
     assert result.exit_code == 0
     assert t3_db._client.get_collection(coll).count() == 1
+
+
+def test_gc_orphan_window_rejects_zero(runner):
+    """A zero-or-negative orphan window is rejected at parse time.
+
+    Without this guard ``--orphan-window 0d`` would treat every
+    orphaned chunk as immediately eligible, which is dangerous when
+    paired with --no-dry-run --yes.
+    """
+    result = runner.invoke(
+        main,
+        ["t3", "gc", "-c", "knowledge__test", "--orphan-window", "0d"],
+    )
+    assert result.exit_code != 0
+    assert "must be positive" in result.output.lower()
+
+
+def test_gc_malformed_indexed_at_is_skipped(t3_db, catalog, tmp_path, runner):
+    """Chunks with malformed ``indexed_at`` (non-ISO string) are
+    undecidable for the orphan-window filter and must be skipped, not
+    crash the GC.
+    """
+    coll = "knowledge__test_gc_bad_indexed_at"
+    col = t3_db._client.get_or_create_collection(coll)
+    col.add(
+        ids=["bad_chunk"],
+        documents=["x"],
+        metadatas=[{"doc_id": "1.1.99", "indexed_at": "not-an-iso-timestamp"}],
+    )
+
+    with patch("nexus.db.make_t3", return_value=t3_db), \
+         patch("nexus.commands.t3._make_catalog", return_value=catalog):
+        result = runner.invoke(
+            main,
+            ["t3", "gc", "-c", coll, "--no-dry-run", "--yes"],
+        )
+
+    assert result.exit_code == 0, result.output
+    # Chunk preserved (not deleted): undecidable indexed_at
+    assert t3_db._client.get_collection(coll).count() == 1
+
+
+def test_gc_paginates_above_300_chunk_boundary(
+    t3_db, catalog, tmp_path, runner,
+):
+    """`list_chunks_with_metadata` paginates at the 300-record Cloud
+    limit. Seed 305 chunks (all orphans past window) and verify all
+    305 are detected and deleted, not silently truncated to 300.
+    """
+    coll = "knowledge__test_gc_pagination"
+    col = t3_db._client.get_or_create_collection(coll)
+    long_ago = _iso(datetime.now(UTC) - timedelta(days=60))
+    chunk_count = 305
+    col.add(
+        ids=[f"orphan_{i:04d}" for i in range(chunk_count)],
+        documents=[f"chunk {i}" for i in range(chunk_count)],
+        metadatas=[
+            {"doc_id": "1.1.99", "indexed_at": long_ago}
+            for _ in range(chunk_count)
+        ],
+    )
+
+    with patch("nexus.db.make_t3", return_value=t3_db), \
+         patch("nexus.commands.t3._make_catalog", return_value=catalog):
+        result = runner.invoke(
+            main,
+            ["t3", "gc", "-c", coll, "--no-dry-run", "--yes"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert f"deleted {chunk_count}" in result.output
+    assert t3_db._client.get_collection(coll).count() == 0
 
 
 def test_gc_no_yes_flag_reports_only(t3_db, catalog, tmp_path, runner):

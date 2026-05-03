@@ -52,7 +52,10 @@ def _parse_orphan_window(spec: str) -> timedelta:
 
     Supports s/m/h/d/w suffixes. A bare integer is rejected: operators
     must be explicit about the unit so a typo cannot silently mean
-    ``30 seconds`` instead of ``30 days``.
+    ``30 seconds`` instead of ``30 days``. Zero (``"0d"``) is rejected:
+    a zero window means every chunk older than "now" is eligible,
+    which is rarely intentional and is dangerous when paired with
+    ``--no-dry-run --yes``.
     """
     match = _WINDOW_PATTERN.match(spec)
     if not match:
@@ -60,6 +63,12 @@ def _parse_orphan_window(spec: str) -> timedelta:
             f"--orphan-window must be e.g. '30d' / '12h' / '2w', got {spec!r}"
         )
     n = int(match.group(1))
+    if n <= 0:
+        raise click.BadParameter(
+            f"--orphan-window must be positive, got {spec!r}. "
+            f"A zero or negative window would treat every orphaned chunk "
+            f"as immediately eligible for deletion."
+        )
     unit = match.group(2).lower()
     return timedelta(seconds=n * _WINDOW_UNIT_SECONDS[unit])
 

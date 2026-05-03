@@ -263,6 +263,31 @@ def test_rename_no_yes_falls_back_to_report_only(t3_db, catalog, runner):
     assert t3_db.collection_exists("knowledge__delos")
 
 
+def test_rename_to_self_rejected(t3_db, catalog, runner):
+    """Renaming OLD to itself is a no-op; reject with a clear message
+    rather than running the full data plane that would then trip the
+    ``new already exists`` gate (misleading).
+    """
+    catalog.register_collection(
+        "knowledge__1-1__voyage-context-3__v1",
+        content_type="knowledge", owner_id="1-1",
+        embedding_model="voyage-context-3", model_version="v1",
+    )
+    _seed_t3_collection(t3_db, "knowledge__1-1__voyage-context-3__v1")
+
+    with patch("nexus.db.make_t3", return_value=t3_db), \
+         patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+        result = runner.invoke(
+            main,
+            ["catalog", "rename-collection",
+             "knowledge__1-1__voyage-context-3__v1",
+             "knowledge__1-1__voyage-context-3__v1",
+             "--yes"],
+        )
+    assert result.exit_code != 0
+    assert "identical" in result.output.lower()
+
+
 def test_rename_allow_legacy_lets_non_conformant_through(t3_db, catalog, runner):
     """``--allow-legacy`` skips the conformance gate; the new collection
     is registered as legacy_grandfathered=True via the projector regex.

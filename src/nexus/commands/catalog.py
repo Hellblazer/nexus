@@ -317,8 +317,10 @@ def setup_cmd(remote: str) -> None:
 @catalog.command("backfill-collections")
 @click.option(
     "--dry-run/--no-dry-run",
-    default=False,
-    help="Report names that would be registered without writing.",
+    default=True,
+    help="Report-only (default). Use --no-dry-run to actually register. "
+    "Matches the safe-default convention of the other Phase 6 verbs "
+    "(rename-collection, migrate-fallback, t3 gc).",
 )
 def backfill_collections_cmd(dry_run: bool) -> None:
     """Populate the Phase 6 collections projection from existing state.
@@ -348,8 +350,16 @@ def backfill_collections_cmd(dry_run: bool) -> None:
         t3_db = make_t3()
         t3_names = {c["name"] for c in t3_db.list_collections()}
     except Exception as exc:
-        click.echo(f"Failed to list T3 collections: {exc}")
-        t3_names = set()
+        # Refusing to do a "partial" backfill that registers only the
+        # catalog-side names: an operator running this during a T3
+        # outage would get a green exit code and half the projection
+        # missing, then think the verb is idempotent (it is, but the
+        # second run after T3 recovers would silently fix it). Better
+        # to fail loud here so the operator knows to retry.
+        raise click.ClickException(
+            f"Failed to list T3 collections: {exc}. Aborting to avoid a "
+            f"partial backfill. Re-run after T3 is reachable."
+        ) from exc
 
     rows = cat._db.execute(
         "SELECT DISTINCT physical_collection FROM documents "
@@ -554,6 +564,23 @@ def migrate_fallback_cmd(
             f"deprecates manually if appropriate."
         )
 
+    # Split-brain warning: catalog now points at the new collections,
+    # but T3 chunks are still in the source. Searches against the new
+    # collections return empty for migrated docs until they are
+    # re-indexed. This is the trade-off the verb makes per the bead
+    # spec ("T3 chunks are NOT moved"); making it explicit at the
+    # output prevents an operator from silently missing it.
+    click.echo(
+        f"\nWARNING: {len(proposals)} document(s) are now SPLIT-BRAIN: "
+        f"catalog points at the new target collection(s) but T3 chunks "
+        f"remain in {source!r}. Searches against the new collection(s) "
+        f"will return empty for these docs until you run:\n"
+        f"  nx index repo .   # re-populate the target with new chunks\n"
+        f"After re-index completes, the old chunks become orphans and "
+        f"'nx t3 gc -c {source} --no-dry-run --yes' will sweep them.",
+        err=True,
+    )
+
 
 def _owner_segment_for_tumbler(tumbler: str) -> str:
     """Return the collection-name owner segment for a tumbler.
@@ -651,13 +678,20 @@ def rename_collection_cmd(
             f"{old_row['superseded_by']!r}. Refusing to rename a stale entry."
         )
 
+    # Source-exists check fires BEFORE collision check so an operator
+    # who typoes the old name gets "old not found" rather than "new
+    # already exists" (the latter is misleading when old never existed).
+    if not t3_db.collection_exists(old):
+        raise click.ClickException(f"old name {old!r} does not exist in T3.")
+    if old == new:
+        raise click.ClickException(
+            f"old and new names are identical ({old!r}); rename is a no-op."
+        )
     if t3_db.collection_exists(new):
         raise click.ClickException(
             f"new name {new!r} already exists in T3. "
             f"Refusing to rename {old!r} on top of an existing collection."
         )
-    if not t3_db.collection_exists(old):
-        raise click.ClickException(f"old name {old!r} does not exist in T3.")
 
     will_run = yes and not dry_run
     if dry_run:
@@ -676,18 +710,38 @@ def rename_collection_cmd(
         on_warn=lambda msg: click.echo(msg, err=True),
     )
 
-    if is_conformant_collection_name(new):
-        segments = parse_conformant_collection_name(new)
-        cat.register_collection(
-            new,
-            content_type=segments["content_type"],
-            owner_id=segments["owner_id"],
-            embedding_model=segments["embedding_model"],
-            model_version=segments["model_version"],
+    # T3 has been renamed by this point. If projection writes raise,
+    # we end up with T3 ahead of the projection. Catch and surface so
+    # the operator knows what state the system is in - a half-applied
+    # rename is recoverable but only if the operator has the recovery
+    # plan in front of them.
+    try:
+        if is_conformant_collection_name(new):
+            segments = parse_conformant_collection_name(new)
+            cat.register_collection(
+                new,
+                content_type=segments["content_type"],
+                owner_id=segments["owner_id"],
+                embedding_model=segments["embedding_model"],
+                model_version=segments["model_version"],
+            )
+        else:
+            cat.register_collection(new)
+        cat.supersede_collection(old, new, reason="rename-collection")
+    except Exception as exc:
+        click.echo(
+            f"WARN: T3 was renamed {old!r} -> {new!r} but the projection "
+            f"update failed: {exc}. Recover by running:\n"
+            f"  nx catalog backfill-collections --no-dry-run  "
+            f"# registers {new!r}\n"
+            f"  python -c \"from nexus.catalog.catalog import Catalog; "
+            f"from nexus.config import catalog_path; "
+            f"p=catalog_path(); "
+            f"Catalog(p, p / '.catalog.db').supersede_collection("
+            f"{old!r}, {new!r})\"",
+            err=True,
         )
-    else:
-        cat.register_collection(new)
-    cat.supersede_collection(old, new, reason="rename-collection")
+        raise click.exceptions.Exit(2) from exc
 
     parts: list[str] = []
     if counts["tax_topics"] or counts["tax_assignments"] or counts["tax_meta"]:
@@ -3831,13 +3885,14 @@ def _run_collections_drift() -> dict:
     (``taxonomy__*``) are out of scope for this check.
     """
     from nexus.db import make_t3  # noqa: PLC0415
+    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415
 
     cat = _get_catalog()
     try:
         t3_db = make_t3()
         t3_names = {
             c["name"] for c in t3_db.list_collections()
-            if not c["name"].startswith("taxonomy__")
+            if not c["name"].startswith(_BYPASS_SCHEMA_PREFIXES)
         }
     except Exception as exc:
         return {
