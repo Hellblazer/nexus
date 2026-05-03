@@ -63,19 +63,24 @@ ALLOWED_TOP_LEVEL: frozenset[str] = frozenset({
     "line_start",
     "line_end",
     "page_number",
-    # Display / user-facing (6) — ``source_title`` collapsed into
-    # ``title`` (consumers already used ``source_title or title`` as a
-    # fallback chain; one canonical field is simpler).
+    # Display / user-facing (6) — ``title`` is intentionally KEPT
+    # per the rdr-101-phase4-reader-audit + 2026-05-03 re-verification:
+    # ``find_ids_by_title`` (db/t3.py:1256) is load-bearing for
+    # ``nx store delete --title`` and the MCP ``store_get`` title-
+    # fallback path. Dropping it would silently break title-keyed
+    # retrieval for MCP-promoted notes in ``knowledge__knowledge``.
     "title",
     "source_author",
     "section_title",
     "section_type",
     "tags",
     "category",
-    # Routing (4)
+    # Routing (2) — RDR-101 Phase 5c (nexus-o6aa.13) dropped
+    # ``store_type`` (legacy duplicate of ``content_type``; only
+    # fallback reader at db/t3.py:122 remains for legacy chunks)
+    # and ``corpus`` (zero non-write readers; catalog Document
+    # carries the corpus binding at the document level).
     "content_type",
-    "store_type",
-    "corpus",
     "embedding_model",
     # Bibliographic (filtered via where=bib_year; displayed in results) (5).
     # ``bib_semantic_scholar_id`` is the load-bearing "this title was
@@ -95,8 +100,10 @@ ALLOWED_TOP_LEVEL: frozenset[str] = frozenset({
     "frecency_score",
     "source_agent",
     "session_id",
-    # Consolidated provenance — JSON string, opaque to filters (1)
-    "git_meta",
+    # RDR-101 Phase 5c dropped ``git_meta`` (consolidated git
+    # provenance JSON blob): zero non-self-referential readers in
+    # src/. Catalog Document carries source git provenance at the
+    # document level.
     # RDR-101 Phase 3 PR δ — catalog cross-reference (1).
     # ``doc_id`` carries the catalog Tumbler string for the document
     # this chunk belongs to (Phase 1 stand-in: ``str(tumbler)``;
@@ -156,54 +163,25 @@ class MetadataSchemaError(ValueError):
 # ── Normalise ───────────────────────────────────────────────────────────────
 
 
-#: RDR-101 Phase 5a (nexus-o6aa.11): deprecated chunk-metadata fields
-#: that the post-Phase-4 reader migration no longer depends on. When the
-#: ``[catalog].event_sourced`` config flag is true, these are dropped
-#: from chunk metadata at write time. Phase 5b will flip the default;
-#: Phase 5c will remove them from :data:`ALLOWED_TOP_LEVEL` entirely.
-#:
-#: - ``title``: catalog-resolved ``_display_path`` superseded chunk-
-#:   level title for formatters (#472).
-#: - ``corpus``: catalog Document already carries the corpus binding;
-#:   chunks reach it through ``doc_id``.
-#: - ``store_type``: ``content_type`` is the canonical routing field
-#:   (nexus-40t); ``store_type`` is the legacy duplicate.
-#: - ``git_meta``: catalog Document carries the source's git provenance
-#:   at the document level; the per-chunk JSON blob is redundant copy.
-_GATED_BY_EVENT_SOURCED: frozenset[str] = frozenset({
-    "title",
-    "corpus",
-    "store_type",
-    "git_meta",
-})
-
-
-def normalize(
-    raw: dict[str, Any],
-    *,
-    content_type: str,
-    event_sourced: bool | None = None,
-) -> dict[str, Any]:
+def normalize(raw: dict[str, Any], *, content_type: str) -> dict[str, Any]:
     """Return a canonical metadata dict for a T3 record.
 
     Operations (in order):
 
     1. Validate ``content_type`` against :data:`CONTENT_TYPES`.
-    2. Unpack any existing ``git_meta`` JSON blob so that subsequent
-       updates to individual ``git_*`` keys still take effect (idempotent
-       round-trip).
-    3. Pack every populated ``git_*`` field into a single ``git_meta``
-       JSON string (omit entirely when all four are empty, saving a slot).
-    4. Drop cargo keys — anything outside :data:`ALLOWED_TOP_LEVEL`.
+    2. Drop cargo keys — anything outside :data:`ALLOWED_TOP_LEVEL`.
        Then drop the four ``bib_*`` slots together when every value is
-       the placeholder (``0`` / ``""``) — consistent with the
-       git_meta-omitted-when-empty pattern.
-    5. Inject ``content_type`` so routing code has a single canonical
+       the placeholder (``0`` / ``""``).
+    3. Drop ``doc_id`` when the call site did not populate it (RDR-101
+       PR δ — empty values consume metadata slots for no payload).
+    4. Inject ``content_type`` so routing code has a single canonical
        field to read.
-    6. RDR-101 Phase 5a (``nexus-o6aa.11``): when *event_sourced* is true,
-       drop :data:`_GATED_BY_EVENT_SOURCED` keys. Defaults to consulting
-       :func:`nexus.config.is_catalog_event_sourced` so indexers don't
-       need to thread the flag through every call site.
+
+    RDR-101 Phase 5c (``nexus-o6aa.13``) removed ``corpus``,
+    ``store_type``, ``git_meta`` from :data:`ALLOWED_TOP_LEVEL`. The
+    Step 2 cargo filter drops them. The Phase 5a/5b
+    ``[catalog].event_sourced`` flag machinery is gone — there's no
+    flag, the schema just doesn't have those fields.
 
     The function never raises on unknown keys (cargo is silently dropped).
     The companion :func:`validate` performs the strict post-write check.
@@ -216,66 +194,34 @@ def normalize(
 
     working = dict(raw)
 
-    # Step 2: unpack existing git_meta so downstream updates can merge.
-    if (blob := working.pop("git_meta", None)) and isinstance(blob, str):
-        try:
-            decoded = json.loads(blob)
-        except json.JSONDecodeError:
-            decoded = {}
-        for raw_key, short_key in _GIT_FIELD_MAP.items():
-            if short_key in decoded and raw_key not in working:
-                working[raw_key] = decoded[short_key]
-
-    # Step 3: repack git_* → git_meta.
-    git_payload = {
-        short_key: working.pop(raw_key)
-        for raw_key, short_key in _GIT_FIELD_MAP.items()
-        if working.get(raw_key)
-    }
-    # Remove any git_* keys that were zero/empty but still present.
+    # Drop the legacy flat ``git_*`` keys before the cargo filter so
+    # they don't consume metadata budget. Pre-Phase-5c they were
+    # consolidated into a ``git_meta`` JSON blob; post-5c they're
+    # discarded entirely (catalog Document carries git provenance at
+    # the document level).
     for raw_key in _GIT_FIELD_MAP:
         working.pop(raw_key, None)
 
-    # Step 4: drop cargo.
+    # Step 2: drop cargo.
     normalised = {k: v for k, v in working.items() if k in ALLOWED_TOP_LEVEL}
 
-    # Step 4b: drop the bib_* placeholder set when every slot is empty.
+    # Step 2b: drop the bib_* placeholder set when every slot is empty.
     # When ``--enrich`` is off the indexer writes the four bib_* keys
     # with ``0`` / ``""`` defaults; without this filter they consume four
-    # metadata slots for no payload (nexus-2my fix #2). Mirrors the
-    # git_meta-omitted-when-empty pattern.
+    # metadata slots for no payload (nexus-2my fix #2).
     if not any(normalised.get(field) for field in _BIB_FIELDS):
         for field in _BIB_FIELDS:
             normalised.pop(field, None)
 
-    # Step 4c (RDR-101 PR δ): drop ``doc_id`` when the call site did not
+    # Step 3 (RDR-101 PR δ): drop ``doc_id`` when the call site did not
     # populate it. Pre-PR-δ chunks have no doc_id; the field is opt-in
     # for indexers that have a Catalog handle. Empty value would
-    # otherwise consume a metadata slot for no payload, costing the
-    # last bit of headroom under the 32-key Chroma cap.
+    # otherwise consume a metadata slot for no payload.
     if not normalised.get("doc_id"):
         normalised.pop("doc_id", None)
 
-    # Step 3 (cont.): write git_meta only when at least one field has
-    # a truthy value.
-    if git_payload:
-        normalised["git_meta"] = json.dumps(
-            git_payload, sort_keys=True, separators=(",", ":")
-        )
-
-    # Step 5: stamp content_type.
+    # Step 4: stamp content_type.
     normalised["content_type"] = content_type
-
-    # Step 6: RDR-101 Phase 5a — drop deprecated fields when the
-    # ``[catalog].event_sourced`` flag is on. Resolved lazily so call
-    # sites that pre-date Phase 5a continue to behave as before
-    # (default false until Phase 5b).
-    if event_sourced is None:
-        from nexus.config import is_catalog_event_sourced  # noqa: PLC0415
-        event_sourced = is_catalog_event_sourced()
-    if event_sourced:
-        for k in _GATED_BY_EVENT_SOURCED:
-            normalised.pop(k, None)
 
     return normalised
 
@@ -325,26 +271,25 @@ def validate(metadata: dict[str, Any]) -> None:
 def make_chunk_metadata(
     *,
     content_type: str,
-    # Identity (always required) — RDR-102 D2 hard-removed the
-    # ``source_path`` parameter (Alternative A3 rejected at the
-    # substantive-critic gate). A caller that still passes
-    # ``source_path=...`` raises ``TypeError`` so the regression is
-    # caught at the call site rather than silently dropped downstream.
+    # Identity (always required) — RDR-102 D2 hard-removed
+    # ``source_path``; RDR-101 Phase 5c (nexus-o6aa.13) hard-removed
+    # ``corpus``, ``store_type``, and ``git_meta``. Callers that still
+    # pass any of those raise ``TypeError`` so the regression is caught
+    # at the call site rather than silently dropped downstream.
     chunk_index: int,
     chunk_count: int,
     chunk_text_hash: str,
     content_hash: str,
     indexed_at: str,
     embedding_model: str,
-    store_type: str,
-    corpus: str = "",
     # Position (required where meaningful, default 0 elsewhere)
     chunk_start_char: int = 0,
     chunk_end_char: int = 0,
     line_start: int = 0,
     line_end: int = 0,
     page_number: int = 0,
-    # Display
+    # Display — ``title`` kept (find_ids_by_title is load-bearing for
+    # nx store / MCP store_get title-fallback per the .10.2 audit).
     title: str = "",
     source_author: str = "",
     section_title: str = "",
@@ -362,14 +307,12 @@ def make_chunk_metadata(
     frecency_score: float = 0.0,
     source_agent: str = "nexus-indexer",
     session_id: str = "",
-    # Provenance — flat git_* keys; normalize() packs them into git_meta JSON
-    git_meta: dict[str, Any] | None = None,
     # RDR-101 Phase 3 PR δ — catalog cross-reference. Empty string is
     # the "not registered" sentinel; live-indexing call sites populate
     # it from ``Catalog.by_file_path(owner, rel_path).tumbler``. Empty
     # values flow through normalize() unchanged but are dropped from
     # the written metadata by the same cargo-key filter that handles
-    # other empty optionals (see normalize() Step 4).
+    # other empty optionals (see normalize() Step 3).
     doc_id: str = "",
 ) -> dict[str, Any]:
     """Build a complete chunk metadata dict and route through
@@ -377,9 +320,7 @@ def make_chunk_metadata(
 
     Every :data:`ALLOWED_TOP_LEVEL` key gets a value (either explicit
     or a documented default). Bib placeholders are dropped together
-    when all-empty (see :func:`normalize`); ``git_meta`` is packed
-    from the optional ``git_meta`` dict (flat ``{"project": ...}``
-    short keys or ``{"git_project_name": ...}`` long keys both work).
+    when all-empty (see :func:`normalize`).
 
     Indexers should never build chunk metadata dicts by hand — route
     through this factory so adding a new ``ALLOWED_TOP_LEVEL`` key
@@ -401,8 +342,6 @@ def make_chunk_metadata(
         "section_type": section_type,
         "tags": tags,
         "category": category,
-        "store_type": store_type,
-        "corpus": corpus,
         "embedding_model": embedding_model,
         "bib_year": bib_year,
         "bib_authors": bib_authors,
@@ -416,20 +355,6 @@ def make_chunk_metadata(
         "session_id": session_id,
         "doc_id": doc_id,
     }
-    if git_meta:
-        # Accept both short keys ({"project", "branch", ...}) and long
-        # keys ({"git_project_name", ...}) — normalize() repacks either.
-        for k, v in git_meta.items():
-            if k in _GIT_FIELD_MAP:
-                raw[k] = v
-            elif f"git_{k}_name" in _GIT_FIELD_MAP:
-                raw[f"git_{k}_name"] = v
-            elif k in {"project", "branch", "commit", "remote"}:
-                # Short-key form from existing call sites.
-                long = {v: k for k, v in _GIT_FIELD_MAP.items()}[k]
-                raw[long] = v
-            else:
-                raw[k] = v  # let normalize handle / drop unknown
     return normalize(raw, content_type=content_type)
 
 

@@ -208,7 +208,11 @@ def test_store_put_permanent_metadata(mock_db):
     # expires_at removed; expiry derived from indexed_at + ttl_days
     assert "expires_at" not in meta
     assert meta["indexed_at"]  # ISO timestamp
-    assert meta["store_type"] == "knowledge"
+    # RDR-101 Phase 5c (nexus-o6aa.13) dropped store_type from the schema;
+    # content_type is the canonical routing field. ``knowledge__`` →
+    # ``prose`` per _STORE_TYPE_TO_CONTENT_TYPE in db/t3.py.
+    assert meta["content_type"] == "prose"
+    assert "store_type" not in meta
     assert meta["embedding_model"] == "voyage-context-3"
 
 
@@ -717,7 +721,7 @@ def test_upsert_chunks_passes_all_metadata_fields(mock_db):
     db, mock_col, _ = mock_db
     rich_meta = {
         "title": "f.py:1-5", "tags": "py", "category": "code", "session_id": "",
-        "source_agent": "nexus-indexer", "store_type": "code",
+        "source_agent": "nexus-indexer",
         "indexed_at": "2026-01-01T00:00:00+00:00", "ttl_days": 0,
         "line_start": 1, "line_end": 5, "frecency_score": 0.42,
     }
@@ -730,12 +734,17 @@ def test_upsert_chunks_passes_all_metadata_fields(mock_db):
     assert written["tags"] == "py"
     assert written["category"] == "code"
     assert written["source_agent"] == "nexus-indexer"
-    assert written["store_type"] == "code"
     assert written["content_type"] == "code"  # injected
     assert written["ttl_days"] == 0
     assert written["indexed_at"] == "2026-01-01T00:00:00+00:00"
     assert "expires_at" not in written
-    assert "source_path" not in written  # RDR-102 Phase B: dropped
+    # RDR-102 Phase B dropped source_path; RDR-101 Phase 5c dropped
+    # store_type, corpus, git_meta. ``content_type`` is the canonical
+    # routing field; the legacy duplicates are normalized out.
+    assert "source_path" not in written
+    assert "store_type" not in written
+    assert "corpus" not in written
+    assert "git_meta" not in written
     assert written["line_start"] == 1
     assert written["line_end"] == 5
     assert written["frecency_score"] == 0.42

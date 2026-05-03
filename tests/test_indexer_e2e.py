@@ -185,31 +185,23 @@ def test_index_chunks_carry_source_path(
     assert any(expected_file in p for p in sources), f"{expected_file} missing from: {sources}"
 
 
-def test_event_sourced_flag_drops_phase5a_gated_keys(
-    monkeypatch: pytest.MonkeyPatch,
+def test_phase_5c_index_drops_corpus_store_type_git_meta(
     rich_repo: Path,
     rich_registry: RepoRegistry,
     local_t3: T3Database,
 ) -> None:
-    """nexus-o6aa.11 (Phase 5a) acceptance: when ``[catalog].event_sourced``
-    is on, freshly-indexed chunks must NOT carry the 4 deprecated keys
-    (``title``, ``corpus``, ``store_type``, ``git_meta``).
+    """nexus-o6aa.13 (Phase 5c) acceptance: freshly-indexed chunks must
+    NOT carry the 3 dropped keys (``corpus``, ``store_type``, ``git_meta``).
+    ``title`` is intentionally KEPT — find_ids_by_title is load-bearing
+    for nx store / MCP store_get title-fallback.
 
     Scoped to *this test's* collections only because EphemeralClient
-    shares process-level state across tests; chunks indexed by prior
-    tests under the default-false path are visible here and would
-    falsely trip the assertion if checked indiscriminately.
+    shares process-level state across tests.
     """
-    from nexus.metadata_schema import _GATED_BY_EVENT_SOURCED
     from nexus.registry import _repo_identity
 
-    monkeypatch.setenv("NEXUS_CATALOG_EVENT_SOURCED", "1")
     _index(rich_repo, rich_registry, local_t3)
 
-    # Only this test's collections — filter by rich_repo's 8-char hash.
-    # EphemeralClient is process-shared, so other tests' chunks (which
-    # ran under default-false) live alongside ours and would falsely
-    # trip the assertion if we walked every collection.
     _, path_hash = _repo_identity(rich_repo)
     my_cols = [
         e["name"]
@@ -218,61 +210,31 @@ def test_event_sourced_flag_drops_phase5a_gated_keys(
     ]
 
     leaks: dict[str, list[str]] = {}
+    titles_seen = 0
     total_chunks = 0
+    dropped_keys = ("corpus", "store_type", "git_meta")
     for col_name in my_cols:
         col = local_t3.get_or_create_collection(col_name)
         metadatas = col.get(include=["metadatas"])["metadatas"]
         total_chunks += len(metadatas)
         for m in metadatas:
-            for k in _GATED_BY_EVENT_SOURCED:
+            for k in dropped_keys:
                 if k in m:
                     leaks.setdefault(f"{col_name}:{k}", []).append(
                         m.get("doc_id", "<no-doc-id>")
                     )
+            if m.get("title"):
+                titles_seen += 1
 
     assert total_chunks > 0, "expected at least one chunk in fresh index"
     assert not leaks, (
-        f"event_sourced=True greenfield index leaked Phase 5a gated keys "
-        f"(nexus-o6aa.11 regression). Indexed {total_chunks} chunks; "
-        f"keys present in: {sorted(leaks)}."
+        f"Phase 5c greenfield index leaked dropped keys (nexus-o6aa.13 "
+        f"regression). Indexed {total_chunks} chunks; keys present in: "
+        f"{sorted(leaks)}."
     )
-
-
-def test_event_sourced_flag_off_keeps_keys(
-    monkeypatch: pytest.MonkeyPatch,
-    rich_repo: Path,
-    rich_registry: RepoRegistry,
-    local_t3: T3Database,
-) -> None:
-    """REVERSIBLE escape (Phase 5b): an operator who needs to keep
-    writing the deprecated fields can opt out via
-    ``NEXUS_CATALOG_EVENT_SOURCED=0``. Chunks indexed under flag-off
-    retain ``title``, ``corpus``, ``store_type`` for back-compat."""
-    from nexus.registry import _repo_identity
-
-    # Phase 5b flipped default to true; explicit opt-out for this test.
-    monkeypatch.setenv("NEXUS_CATALOG_EVENT_SOURCED", "0")
-    _index(rich_repo, rich_registry, local_t3)
-
-    _, path_hash = _repo_identity(rich_repo)
-    my_cols = [
-        e["name"]
-        for e in local_t3.list_collections()
-        if path_hash in e["name"]
-    ]
-
-    found_at_least_one = {"title": False, "corpus": False, "store_type": False}
-    for col_name in my_cols:
-        col = local_t3.get_or_create_collection(col_name)
-        metadatas = col.get(include=["metadatas"])["metadatas"]
-        for m in metadatas:
-            for k in found_at_least_one:
-                if k in m:
-                    found_at_least_one[k] = True
-
-    assert any(found_at_least_one.values()), (
-        f"flag-off run should preserve deprecated fields; "
-        f"none found: {found_at_least_one}"
+    assert titles_seen > 0, (
+        "Phase 5c kept title in the schema (audit / find_ids_by_title); "
+        "at least one indexed chunk must carry one."
     )
 
 
@@ -294,15 +256,24 @@ def test_greenfield_index_writes_no_deprecated_keys(
     the flat keys. This test is the post-Phase-B contract.
     """
     from nexus.commands.catalog import _PRUNE_DEPRECATED_KEYS
+    from nexus.registry import _repo_identity
 
     _index(rich_repo, rich_registry, local_t3)
 
+    # Scope to *this test's* collections only — chromadb's EphemeralClient
+    # shares process-level state, so collections seeded by sibling test
+    # modules (e.g. test_exporter.py's raw col.upsert with source_path)
+    # leak into this view of list_collections().
+    _, path_hash = _repo_identity(rich_repo)
+    my_cols = [
+        e["name"]
+        for e in local_t3.list_collections()
+        if path_hash in e["name"]
+    ]
+
     leaks: dict[str, list[str]] = {}
     total_chunks = 0
-    for entry in local_t3.list_collections():
-        col_name = entry["name"]
-        if not col_name.startswith(("code__", "docs__", "rdr__")):
-            continue
+    for col_name in my_cols:
         col = local_t3.get_or_create_collection(col_name)
         metadatas = col.get(include=["metadatas"])["metadatas"]
         total_chunks += len(metadatas)
@@ -467,28 +438,13 @@ def test_smart_index_staleness_check(
         assert local_t3.get_or_create_collection(info[key]).count() == c
 
 
-@pytest.mark.parametrize("meta_key", ["commit", "branch"])
-def test_smart_index_git_metadata(
-    rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database,
-    meta_key: str,
-) -> None:
-    """Git provenance is consolidated into the ``git_meta`` JSON blob
-    (nexus-40t). RDR-102 D2 removed ``source_path`` from the schema —
-    the parametrize set is reduced to the git_meta sub-keys, which
-    are the actual subject of this test."""
-    import json as _json
-
-    _index(rich_repo, rich_registry, local_t3)
-    info = rich_registry.get(rich_repo)
-    for col_key in ("code_collection", "docs_collection"):
-        col = local_t3.get_or_create_collection(info[col_key])
-        sample = col.get(include=["metadatas"])["metadatas"][0]
-        git_blob = sample.get("git_meta")
-        assert git_blob, f"git_meta missing in {col_key}: {sample}"
-        decoded = _json.loads(git_blob)
-        assert decoded.get(meta_key), (
-            f"git_meta.{meta_key} missing in {col_key}: {decoded}"
-        )
+# test_smart_index_git_metadata removed by RDR-101 Phase 5c (nexus-o6aa.13).
+# The test asserted that git provenance ("commit", "branch") flows into
+# the per-chunk ``git_meta`` JSON blob. Phase 5c removed ``git_meta``
+# from ALLOWED_TOP_LEVEL — git provenance is now carried at the catalog
+# Document level instead. A meaningful replacement would query the
+# catalog for the document's git metadata; that's covered by the catalog
+# Document tests rather than the indexer tests.
 
 
 # ── Migration ─────────────────────────────────────────────────────────────────
@@ -647,10 +603,14 @@ def test_cli_index_frecency_only(
 def test_index_repository_pdf_routing(
     rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database,
 ) -> None:
+    """Verify PDF chunks land in docs__ collection. Phase 5c dropped
+    ``store_type`` from chunk metadata; ``content_type=='pdf'`` is the
+    canonical replacement (always set by ``make_chunk_metadata``).
+    """
     from nexus.registry import _docs_collection_name
     _index(rich_repo, rich_registry, local_t3)
     docs_col = _docs_collection_name(rich_repo)
     results = local_t3.search("Hello World test document PDF ingest", [docs_col], n_results=5)
-    pdf_results = [r for r in results if r.get("store_type") == "pdf"]
-    assert pdf_results, f"No PDF chunks; store_types: {[r.get('store_type') for r in results]}"
+    pdf_results = [r for r in results if r.get("content_type") == "pdf"]
+    assert pdf_results, f"No PDF chunks; content_types: {[r.get('content_type') for r in results]}"
     assert isinstance(pdf_results[0]["title"], str)

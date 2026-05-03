@@ -682,6 +682,9 @@ class T3Database:
         # MCP-stored docs are single-chunk: chunk_index=0, chunk_count=1,
         # chunk_text_hash matches content_hash because content == chunk text.
         content_hash = hashlib.sha256(content.encode()).hexdigest()
+        # RDR-101 Phase 5c dropped store_type, corpus, git_meta. Title kept
+        # — find_ids_by_title is the load-bearing reader for nx store
+        # delete --title and MCP store_get title-fallback.
         metadata = make_chunk_metadata(
             content_type=content_type,
             chunk_index=0,
@@ -692,8 +695,6 @@ class T3Database:
             chunk_end_char=len(content),
             indexed_at=now_iso,
             embedding_model=index_model_for_collection(collection),
-            store_type=store_type,
-            corpus="",
             title=title,
             tags=tags,
             category=category,

@@ -311,7 +311,7 @@ class TestLocalCollectionLifecycle:
                 chunk_end_char=14,
                 indexed_at=old, ttl_days=1,
                 embedding_model="local-onnx-minilm-l6-v2",
-                store_type="knowledge", title="temp",
+                title="temp",
             )],
         )
         # Permanent entry — still alive after expire().

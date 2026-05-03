@@ -50,14 +50,12 @@ def _expected_keys_for_content_type(content_type: str) -> set[str]:
 def test_factory_emits_full_keyset_for_code() -> None:
     meta = make_chunk_metadata(
         content_type="code",
-        source_path="/x/y.py",
         chunk_index=0,
         chunk_count=1,
         chunk_text_hash="a" * 64,
         content_hash="b" * 64,
         indexed_at="2026-04-26T00:00:00+00:00",
         embedding_model="voyage-code-3",
-        store_type="code",
     )
     expected = _expected_keys_for_content_type("code")
     assert set(meta.keys()) >= expected, (
@@ -68,14 +66,12 @@ def test_factory_emits_full_keyset_for_code() -> None:
 def test_factory_emits_full_keyset_for_pdf() -> None:
     meta = make_chunk_metadata(
         content_type="pdf",
-        source_path="/x/y.pdf",
         chunk_index=0,
         chunk_count=1,
         chunk_text_hash="a" * 64,
         content_hash="b" * 64,
         indexed_at="2026-04-26T00:00:00+00:00",
         embedding_model="voyage-context-3",
-        store_type="pdf",
     )
     expected = _expected_keys_for_content_type("pdf")
     assert set(meta.keys()) >= expected, (
@@ -86,14 +82,12 @@ def test_factory_emits_full_keyset_for_pdf() -> None:
 def test_factory_emits_full_keyset_for_markdown() -> None:
     meta = make_chunk_metadata(
         content_type="markdown",
-        source_path="/x/y.md",
         chunk_index=0,
         chunk_count=1,
         chunk_text_hash="a" * 64,
         content_hash="b" * 64,
         indexed_at="2026-04-26T00:00:00+00:00",
         embedding_model="voyage-context-3",
-        store_type="markdown",
     )
     expected = _expected_keys_for_content_type("markdown")
     assert set(meta.keys()) >= expected, (
@@ -104,14 +98,12 @@ def test_factory_emits_full_keyset_for_markdown() -> None:
 def test_factory_emits_full_keyset_for_prose() -> None:
     meta = make_chunk_metadata(
         content_type="prose",
-        source_path="/x/y.txt",
         chunk_index=0,
         chunk_count=1,
         chunk_text_hash="a" * 64,
         content_hash="b" * 64,
         indexed_at="2026-04-26T00:00:00+00:00",
         embedding_model="voyage-context-3",
-        store_type="prose",
     )
     expected = _expected_keys_for_content_type("prose")
     assert set(meta.keys()) >= expected, (
@@ -124,11 +116,10 @@ def test_factory_drops_bib_when_empty() -> None:
     as zero/empty placeholders eating metadata budget."""
     meta = make_chunk_metadata(
         content_type="pdf",
-        source_path="/x.pdf",
         chunk_index=0, chunk_count=1,
         chunk_text_hash="a"*64, content_hash="b"*64,
         indexed_at="2026-04-26T00:00:00+00:00",
-        embedding_model="voyage-context-3", store_type="pdf",
+        embedding_model="voyage-context-3",
     )
     for k in ("bib_year", "bib_authors", "bib_venue", "bib_citation_count"):
         assert k not in meta
@@ -138,11 +129,10 @@ def test_factory_keeps_bib_when_populated() -> None:
     """When at least one bib field is populated the whole quad rides."""
     meta = make_chunk_metadata(
         content_type="pdf",
-        source_path="/x.pdf",
         chunk_index=0, chunk_count=1,
         chunk_text_hash="a"*64, content_hash="b"*64,
         indexed_at="2026-04-26T00:00:00+00:00",
-        embedding_model="voyage-context-3", store_type="pdf",
+        embedding_model="voyage-context-3",
         bib_year=2026,
     )
     assert meta["bib_year"] == 2026
@@ -151,34 +141,13 @@ def test_factory_keeps_bib_when_populated() -> None:
     assert meta["bib_citation_count"] == 0
 
 
-def test_factory_packs_git_meta_when_provided() -> None:
-    meta = make_chunk_metadata(
-        content_type="code",
-        source_path="/src/x.py",
-        chunk_index=0, chunk_count=1,
-        chunk_text_hash="a"*64, content_hash="b"*64,
-        indexed_at="2026-04-26T00:00:00+00:00",
-        embedding_model="voyage-code-3", store_type="code",
-        git_meta={"git_project_name": "nexus", "git_branch": "main",
-                  "git_commit_hash": "abc123", "git_remote_url": "x"},
-    )
-    assert "git_meta" in meta
-    import json
-    decoded = json.loads(meta["git_meta"])
-    assert decoded["project"] == "nexus"
-    assert decoded["branch"] == "main"
-
-
-def test_factory_drops_git_meta_when_empty() -> None:
-    meta = make_chunk_metadata(
-        content_type="code",
-        source_path="/src/x.py",
-        chunk_index=0, chunk_count=1,
-        chunk_text_hash="a"*64, content_hash="b"*64,
-        indexed_at="2026-04-26T00:00:00+00:00",
-        embedding_model="voyage-code-3", store_type="code",
-    )
-    assert "git_meta" not in meta
+# RDR-101 Phase 5c (nexus-o6aa.13) removed ``git_meta`` from
+# ALLOWED_TOP_LEVEL and the ``git_meta=`` kwarg from
+# ``make_chunk_metadata``. The two tests previously here
+# (``test_factory_packs_git_meta_when_provided``,
+# ``test_factory_drops_git_meta_when_empty``) tested behavior that no
+# longer exists. Catalog Document carries git provenance at the
+# document level; chunks no longer carry it at all.
 
 
 def test_factory_rejects_deprecated_keys_via_normalize() -> None:
@@ -286,7 +255,6 @@ def test_t3_put_emits_full_keyset_for_mcp_stored_doc() -> None:
     content_hash = hashlib.sha256(content.encode()).hexdigest()
     meta = make_chunk_metadata(
         content_type="prose",
-        source_path="",
         chunk_index=0,
         chunk_count=1,
         chunk_text_hash=content_hash,
@@ -295,7 +263,6 @@ def test_t3_put_emits_full_keyset_for_mcp_stored_doc() -> None:
         chunk_end_char=len(content),
         indexed_at="2026-04-26T00:00:00+00:00",
         embedding_model="voyage-context-3",
-        store_type="knowledge",
         title="My Note",
         tags="user",
         category="note",

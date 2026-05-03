@@ -254,9 +254,12 @@ class TestMarkdownChunksRelativePath:
 class TestIndexDocumentSourceKey:
     """_index_document uses source_key for staleness check and pruning."""
 
-    def test_staleness_check_uses_source_key(self, tmp_path: Path, monkeypatch) -> None:
-        """When source_key is provided, staleness check uses it instead of abs path."""
-        from unittest.mock import MagicMock, call
+    def test_staleness_check_uses_content_hash_when_catalog_absent(self, tmp_path: Path, monkeypatch) -> None:
+        """RDR-101 Phase 5c: source_path is gone from chunk metadata.
+        When no catalog is initialised (no doc_id), the staleness check
+        falls back to content_hash — which uniquely identifies an
+        unchanged file just as well as the legacy source_path key."""
+        from unittest.mock import MagicMock
 
         from tests.conftest import set_credentials
         from nexus.doc_indexer import _index_document
@@ -265,24 +268,22 @@ class TestIndexDocumentSourceKey:
 
         md = tmp_path / "doc.md"
         md.write_text("# Test\n\nContent for staleness check.")
+        expected_hash = hashlib.sha256(md.read_bytes()).hexdigest()
 
         mock_col = MagicMock()
-        # Simulate staleness hit — same hash and model
         mock_col.get.return_value = {
             "ids": ["existing"],
-            "metadatas": [{"content_hash": hashlib.sha256(md.read_bytes()).hexdigest(), "embedding_model": "voyage-context-3"}],
+            "metadatas": [{"content_hash": expected_hash, "embedding_model": "voyage-context-3"}],
         }
         mock_t3 = MagicMock()
         mock_t3.get_or_create_collection.return_value = mock_col
 
         def dummy_chunk_fn(file_path, content_hash, target_model, now_iso, corpus):
-            return [("id1", "text", {"source_path": "relative/doc.md"})]
+            return [("id1", "text", {})]
 
         with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
             result = _index_document(md, "corp", dummy_chunk_fn, t3=mock_t3, source_key="relative/doc.md")
 
-        # Staleness check should use source_key, not str(md)
         staleness_call = mock_col.get.call_args
-        assert staleness_call.kwargs["where"] == {"source_path": "relative/doc.md"}
-        # Skipped (same hash) — returns 0
+        assert staleness_call.kwargs["where"] == {"content_hash": expected_hash}
         assert result == 0

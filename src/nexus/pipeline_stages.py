@@ -146,6 +146,7 @@ def _build_chunk_metadata(
     """
     from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415
 
+    # RDR-101 Phase 5c dropped corpus, store_type, git_meta. Title kept.
     return make_chunk_metadata(
         content_type="pdf",
         chunk_index=chunk.chunk_index,
@@ -157,15 +158,12 @@ def _build_chunk_metadata(
         page_number=chunk.metadata.get("page_number", 0),
         indexed_at=now_iso,
         embedding_model=embedding_model,
-        store_type="pdf",
-        corpus=corpus,
         title="",                 # post-pass: from ExtractionResult
         source_author="",         # post-pass: from ExtractionResult
         section_title=chunk.metadata.get("section_title", ""),
         section_type=chunk.metadata.get("section_type", ""),
         tags="pdf",
         category="paper",
-        git_meta=git_meta,
         doc_id=doc_id,
     )
 

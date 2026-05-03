@@ -150,8 +150,8 @@ def test_pdf_indexer_writes_doc_id_into_t3_chunk_metadata(
     assert result["ids"], "expected at least one PDF chunk in T3 docs collection"
 
     # Filter to PDF chunks (the docs__ collection holds prose + PDF mixed).
-    pdf_metas = [m for m in result["metadatas"] if m.get("store_type") == "pdf"]
-    assert pdf_metas, "expected at least one chunk with store_type='pdf'"
+    pdf_metas = [m for m in result["metadatas"] if m.get("content_type") == "pdf"]
+    assert pdf_metas, "expected at least one chunk with content_type='pdf'"
 
     # Resolve the catalog owner and the PDF's catalog entry.
     owner_row = cat._db.execute(
@@ -200,7 +200,7 @@ def test_pdf_indexer_doc_id_absent_when_catalog_uninitialized(
     result = docs_col.get(include=["metadatas"])
     assert result["ids"], "indexer should still write chunks when catalog absent"
 
-    pdf_metas = [m for m in result["metadatas"] if m.get("store_type") == "pdf"]
+    pdf_metas = [m for m in result["metadatas"] if m.get("content_type") == "pdf"]
     assert pdf_metas, "expected at least one PDF chunk"
 
     for m in pdf_metas:

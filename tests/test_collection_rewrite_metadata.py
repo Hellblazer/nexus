@@ -107,9 +107,11 @@ def _make_t3_mock(collection_name: str, chunks: list[dict]) -> tuple:
 # ── Behaviour ───────────────────────────────────────────────────────────────
 
 
-def test_rewrite_drops_cargo_and_packs_git_meta() -> None:
-    """A legacy chunk with flat git_* + cargo keys becomes canonical
-    (git_meta JSON; no store_type/indexed_at/format/etc. dropped)."""
+def test_rewrite_drops_cargo_and_legacy_git_keys() -> None:
+    """RDR-101 Phase 5c: a legacy chunk with flat git_* + cargo keys
+    becomes canonical — flat git_* and git_meta are DROPPED (catalog
+    Document carries git provenance now), source_path is DROPPED, and
+    store_type is DROPPED."""
     from nexus.db.t3 import _rewrite_collection_metadata
 
     chunks = [_legacy_meta()]
@@ -123,18 +125,19 @@ def test_rewrite_drops_cargo_and_packs_git_meta() -> None:
     assert updated == 1
     assert skipped == 0
 
-    # The col.update call carries the canonicalised metadata.
     written = mock_col.update.call_args.kwargs["metadatas"][0]
-    assert "git_meta" in written
-    import json as _j
-    assert _j.loads(written["git_meta"])["project"] == "myproj"
-    assert "git_project_name" not in written
-    # indexed_at is now in ALLOWED_TOP_LEVEL (replaces dropped expires_at;
-    # paired with ttl_days for derived expiry via is_expired()).
+    # Phase 5c — chunks no longer carry git provenance.
+    assert "git_meta" not in written
+    for k in ("git_project_name", "git_branch", "git_commit_hash", "git_remote_url"):
+        assert k not in written
+    # Phase 5c — source_path / store_type dropped.
+    assert "source_path" not in written
+    assert "store_type" not in written
+    # indexed_at is canonical (paired with ttl_days for derived expiry).
     assert written["indexed_at"] == "2026-01-01T00:00:00+00:00"
     assert "format" not in written
     assert "extraction_method" not in written
-    assert written["content_type"]  # injected
+    assert written["content_type"]
 
 
 def test_rewrite_skips_already_canonical_chunks() -> None:

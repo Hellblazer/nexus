@@ -397,6 +397,9 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
         section_chain = [s for s in (class_ctx, method_ctx) if s]
         section_title = " > ".join(section_chain)
         section_type = "method" if method_ctx else ("class" if class_ctx else "")
+        # RDR-101 Phase 5c (nexus-o6aa.13) dropped corpus, store_type,
+        # git_meta from the chunk schema. Title kept (find_ids_by_title
+        # is load-bearing for nx store / MCP store_get).
         metadata = make_chunk_metadata(
             content_type="code",
             chunk_index=chunk.get("chunk_index", i),
@@ -409,15 +412,12 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
             line_end=_le,
             indexed_at=ctx.now_iso,
             embedding_model=ctx.embedding_model,
-            store_type="code",
-            corpus=ctx.corpus,
             title=title,
             section_title=section_title,
             section_type=section_type,
             tags=ext.lstrip("."),
             category="code",
             frecency_score=float(ctx.score),
-            git_meta=ctx.git_meta,
             doc_id=catalog_doc_id,
         )
         ids.append(chunk_chroma_id)

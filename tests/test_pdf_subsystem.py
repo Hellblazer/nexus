@@ -94,7 +94,12 @@ class TestPdfChunksMetadata:
         )
         assert result, "Expected at least one chunk from simple.pdf"
         for chunk_id, text, meta in result:
-            assert meta["store_type"] == "pdf"
+            # RDR-101 Phase 5c (nexus-o6aa.13) dropped store_type, corpus,
+            # git_meta. content_type is the canonical routing field.
+            assert meta["content_type"] == "pdf"
+            assert "store_type" not in meta
+            assert "corpus" not in meta
+            assert "git_meta" not in meta
             assert meta["content_hash"] == content_hash
             # page_count + extraction_method are dropped by normalize() —
             # not in ALLOWED_TOP_LEVEL.
@@ -105,7 +110,6 @@ class TestPdfChunksMetadata:
             assert isinstance(meta["title"], str)
             # source_author: Docling does not expose XMP author; may be empty
             assert isinstance(meta["source_author"], str)
-            assert meta["corpus"] == "mybook"
             assert meta["embedding_model"] == "voyage-context-3"
             assert isinstance(chunk_id, str) and chunk_id
             assert isinstance(text, str) and text.strip()

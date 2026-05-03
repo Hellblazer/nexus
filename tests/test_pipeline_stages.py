@@ -192,14 +192,17 @@ class TestChunkerLoop:
         out = db.read_ready_chunks("h1")
         assert len(out) == 2
         meta = json.loads(out[0]["metadata_json"])
-        # RDR-102 D2 dropped source_path; corpus / content_hash /
-        # embedding_model / store_type / page_number remain as the
-        # canonical chunk-time identity / routing fields.
-        for k, v in [("corpus", "test"),
-                     ("content_hash", "h1"), ("embedding_model", "voyage-context-3"),
-                     ("store_type", "pdf"), ("page_number", 1)]:
+        # RDR-102 D2 dropped source_path; RDR-101 Phase 5c (nexus-o6aa.13)
+        # dropped store_type, corpus, git_meta. content_type / content_hash
+        # / embedding_model / page_number remain as the canonical chunk-
+        # time identity / routing fields.
+        for k, v in [("content_type", "pdf"),
+                     ("content_hash", "h1"),
+                     ("embedding_model", "voyage-context-3"),
+                     ("page_number", 1)]:
             assert meta[k] == v
-        assert "source_path" not in meta
+        for dropped in ("source_path", "store_type", "corpus", "git_meta"):
+            assert dropped not in meta
         assert "indexed_at" in meta
         assert out[0]["chunk_id"] == "h1_0" and out[1]["chunk_id"] == "h1_1"
 
@@ -631,12 +634,14 @@ _REQUIRED_META = {
     # (the chunker_loop test below has no catalog).
     "content_hash", "chunk_text_hash", "chunk_index", "chunk_count",
     "chunk_start_char", "chunk_end_char", "line_start", "line_end", "page_number",
-    # Display / routing (post source_title→title collapse, expires_at→indexed_at swap)
+    # Display / routing — RDR-101 Phase 5c (nexus-o6aa.13) dropped
+    # ``store_type``, ``corpus``, ``git_meta``. ``title`` kept (audit
+    # finding: find_ids_by_title is load-bearing).
     "title", "source_author", "section_title", "section_type", "tags", "category",
-    "content_type", "store_type", "corpus", "embedding_model",
+    "content_type", "embedding_model",
     # Lifecycle
     "indexed_at", "ttl_days", "frecency_score", "source_agent", "session_id",
-    # bib_* and git_meta intentionally omitted (drop-when-empty by normalize)
+    # bib_* intentionally omitted (drop-when-empty by normalize)
 }
 
 
