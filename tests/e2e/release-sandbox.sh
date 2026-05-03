@@ -39,49 +39,52 @@ shift || true
 _die() { echo "ERROR: $*" >&2; exit 1; }
 
 _print_help() {
-    cat <<EOF
-Usage: $0 <mode> [options]
-
-Modes:
-  smoke      Reinstall + activate + run nx upgrade --dry-run + nx doctor checks.
-             Verifies the wheel install + migrations + health surface. ~2 min.
-  shakedown  Full ensemble: smoke + nx index repo/pdf/rdr + cross-corpus search
-             + T2 memory roundtrip + T1 scratch use + catalog link readback +
-             T1 turd sniff. Exercises every pipeline against a fresh install.
-             ~5–10 min. Uses tests/fixtures/tc-sql.pdf as the PDF probe.
-  shell      Reinstall + activate + drop into a subshell with HOME=\$SANDBOX.
-             Use this for manual nx index, nx search, etc. Exit normally to
-             tear down.
-  tmux       Reinstall + activate + launch Claude Code interactively in tmux.
-             Useful for end-to-end exercises against MCP / plugin / hooks.
-             Requires tests/e2e/.claude-auth/.credentials.json (run
-             tests/e2e/auth-login.sh first).
-  reset      Remove ~/nexus-sandbox. Does NOT reinstall.
-  help       Print this message.
-
-Common options (post-mode):
-  --skip-install   Skip the reinstall step. Useful when the tool venv is
-                   already at the version you want to exercise.
-  --keep-existing  Reuse \$HOME/nexus-sandbox if it exists (default: blow away
-                   and recreate so state is reproducible).
-
-Examples:
-  # Pre-merge smoke after a refactor
-  $0 smoke
-
-  # Hand-test indexing into the sandbox
-  $0 shell
-  (sandbox) nx index repo /path/to/test-repo
-  (sandbox) nx taxonomy status
-  (sandbox) exit
-
-  # Spin up Claude Code against the sandbox
-  $0 tmux
-
-  # Skip reinstall (e.g. iterating on shell flow)
-  $0 shell --skip-install
-
-EOF
+    # printf rather than here-doc: bash here-docs hang in some non-
+    # interactive shell contexts (Claude Code harness, certain CI
+    # runners) where parent stdin is wired to a pipe the here-doc
+    # machinery never closes. printf has no such dependency.
+    printf '%s\n' \
+        "Usage: $0 <mode> [options]" \
+        "" \
+        "Modes:" \
+        "  smoke      Reinstall + activate + run nx upgrade --dry-run + nx doctor checks." \
+        "             Verifies the wheel install + migrations + health surface. ~2 min." \
+        "  shakedown  Full ensemble: smoke + nx index repo/pdf/rdr + cross-corpus search" \
+        "             + T2 memory roundtrip + T1 scratch use + catalog link readback +" \
+        "             T1 turd sniff. Exercises every pipeline against a fresh install." \
+        "             ~5–10 min. Uses tests/fixtures/tc-sql.pdf as the PDF probe." \
+        "  shell      Reinstall + activate + drop into a subshell with HOME=\$SANDBOX." \
+        "             Use this for manual nx index, nx search, etc. Exit normally to" \
+        "             tear down." \
+        "  tmux       Reinstall + activate + launch Claude Code interactively in tmux." \
+        "             Useful for end-to-end exercises against MCP / plugin / hooks." \
+        "             Requires tests/e2e/.claude-auth/.credentials.json (run" \
+        "             tests/e2e/auth-login.sh first)." \
+        "  reset      Remove ~/nexus-sandbox. Does NOT reinstall." \
+        "  help       Print this message." \
+        "" \
+        "Common options (post-mode):" \
+        "  --skip-install   Skip the reinstall step. Useful when the tool venv is" \
+        "                   already at the version you want to exercise." \
+        "  --keep-existing  Reuse \$HOME/nexus-sandbox if it exists (default: blow away" \
+        "                   and recreate so state is reproducible)." \
+        "" \
+        "Examples:" \
+        "  # Pre-merge smoke after a refactor" \
+        "  $0 smoke" \
+        "" \
+        "  # Hand-test indexing into the sandbox" \
+        "  $0 shell" \
+        "  (sandbox) nx index repo /path/to/test-repo" \
+        "  (sandbox) nx taxonomy status" \
+        "  (sandbox) exit" \
+        "" \
+        "  # Spin up Claude Code against the sandbox" \
+        "  $0 tmux" \
+        "" \
+        "  # Skip reinstall (e.g. iterating on shell flow)" \
+        "  $0 shell --skip-install" \
+        ""
 }
 
 # ── Option parsing ───────────────────────────────────────────────────────────
