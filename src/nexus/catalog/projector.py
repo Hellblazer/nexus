@@ -373,19 +373,18 @@ class Projector:
 
         ``superseded_at`` is read from the payload so replay is
         deterministic. Pre-payload-field events (synthesized before
-        ``CollectionSupersededPayload.superseded_at`` was added) default
-        to empty string here; we populate "now" in that case so the
-        column is never empty and the doctor's projection-vs-T3 drift
-        check has a consistent shape to read.
+        ``CollectionSupersededPayload.superseded_at`` was added) fall
+        back to "" (the SQLite column default), mirroring the
+        ``_v0_collection_created`` pattern for ``created_at``.
+        nexus-qpet.1: the prior fallback to ``datetime.now(UTC)`` was
+        non-deterministic; each replay drifted. Production today
+        always populates the field, so the fallback is dead code in
+        practice; the empty-string default keeps replay-equality
+        invariant if a future synthesizer ever emits older shapes.
         """
-        from datetime import UTC, datetime  # noqa: PLC0415
-
         if not payload.old_coll_id or not payload.new_coll_id:
             return
-        ts = (
-            getattr(payload, "superseded_at", "")
-            or datetime.now(UTC).isoformat()
-        )
+        ts = getattr(payload, "superseded_at", "") or ""
         self._db.execute(
             "UPDATE collections SET superseded_by = ?, superseded_at = ? "
             "WHERE name = ?",

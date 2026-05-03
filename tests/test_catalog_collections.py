@@ -375,6 +375,61 @@ def test_v0_collection_superseded_blank_id_guard(catalog):
     assert catalog.get_collection("docs__nexus-571b8edd")["superseded_by"] == ""
 
 
+def test_v0_collection_superseded_replay_is_deterministic(catalog):
+    """nexus-qpet.1: replaying the same supersede event twice must
+    produce the same ``superseded_at`` value.
+
+    Pre-fix shape: an event with empty payload.superseded_at fell back
+    to ``datetime.now(UTC).isoformat()``. Each replay produced a
+    different timestamp; replay-equality drifted.
+
+    Post-fix shape: empty payload.superseded_at falls back to "" (the
+    schema default), matching the pattern used by
+    ``_v0_collection_created`` for ``created_at``. Two replays produce
+    identical projected rows.
+
+    The fallback is dead code in production today (Phase 6 always
+    populates the field). The fix protects against future synthesizers
+    that might emit pre-amendment-shaped events.
+    """
+    catalog.register_collection("docs__nexus-571b8edd")
+    catalog.register_collection("docs__1-1__voyage-context-3__v1")
+
+    # Manually craft an event with EMPTY superseded_at to exercise the
+    # fallback. Production callers always set it, but a synthesizer
+    # replaying older event logs might not.
+    blank_ts_event = make_event(
+        CollectionSupersededPayload(
+            old_coll_id="docs__nexus-571b8edd",
+            new_coll_id="docs__1-1__voyage-context-3__v1",
+            superseded_at="",
+        ),
+        v=0,
+    )
+
+    catalog._projector.apply(blank_ts_event)
+    catalog._db.commit()
+    first_ts = catalog.get_collection("docs__nexus-571b8edd")["superseded_at"]
+
+    # Reset the row's superseded_at column without re-emitting an event,
+    # then replay the same event. Deterministic projector means same ts.
+    catalog._db.execute(
+        "UPDATE collections SET superseded_at = '' WHERE name = ?",
+        ("docs__nexus-571b8edd",),
+    )
+    catalog._db.commit()
+
+    catalog._projector.apply(blank_ts_event)
+    catalog._db.commit()
+    second_ts = catalog.get_collection("docs__nexus-571b8edd")["superseded_at"]
+
+    assert first_ts == second_ts, (
+        f"replay must be deterministic; got first={first_ts!r}, "
+        f"second={second_ts!r}. The pre-fix fallback was "
+        f"datetime.now(UTC).isoformat() which changed per call."
+    )
+
+
 def test_update_document_collection_returns_false_on_unknown_tumbler(catalog):
     """update_document_collection must return False (no-op) when the
     document is not registered. Documented contract; pass-#2 review
