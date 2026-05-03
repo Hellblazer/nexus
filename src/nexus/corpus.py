@@ -42,6 +42,57 @@ def validate_collection_name(name: str) -> None:
         )
 
 
+_CONTENT_TYPES = ("code", "docs", "rdr", "knowledge")
+_CONFORMANT_COLLECTION_RE = re.compile(
+    r"^(?P<ct>code|docs|rdr|knowledge)"
+    r"__(?P<owner>[a-zA-Z0-9-]+)"
+    r"__(?P<model>[a-z][a-z0-9-]*)"
+    r"__v(?P<ver>\d+)$"
+)
+
+
+def is_conformant_collection_name(name: str) -> bool:
+    """Return True if ``name`` matches the RDR-101 §"Collection naming"
+    canonical schema ``<content_type>__<owner_id>__<embedding_model>__v<n>``.
+
+    The bead spec uses ``@`` as the version separator; ChromaDB's name
+    regex disallows ``@``, so this implementation encodes the ``@`` as a
+    fourth ``__`` separator. Tumbler-style owner IDs (which contain
+    dots, e.g. ``1.1``) must be supplied with dots replaced by hyphens
+    so the segment fits ChromaDB's charset.
+
+    Returns False for legacy 2-segment names (``docs__nexus-571b8edd``),
+    fallback names (``docs__default``, ``knowledge__knowledge``), and
+    taxonomy-prefixed names. Such names are valid grandfathered
+    identities; this predicate only describes whether a name conforms
+    to the post-Phase-6 canonical schema. Read paths must continue to
+    accept legacy names per RDR-101 (failing-loud at read time is
+    rejected as operationally hostile).
+    """
+    return bool(_CONFORMANT_COLLECTION_RE.match(name))
+
+
+def parse_conformant_collection_name(name: str) -> dict[str, str]:
+    """Decompose a conformant name into its four canonical segments.
+
+    Raises ValueError if ``name`` is not conformant; callers wanting a
+    safe parse should gate with :func:`is_conformant_collection_name`.
+    """
+    match = _CONFORMANT_COLLECTION_RE.match(name)
+    if not match:
+        raise ValueError(
+            f"Collection name {name!r} is not conformant: "
+            f"expected <content_type>__<owner_id>__<embedding_model>__v<n>"
+        )
+    g = match.groupdict()
+    return {
+        "content_type": g["ct"],
+        "owner_id": g["owner"],
+        "embedding_model": g["model"],
+        "model_version": f"v{g['ver']}",
+    }
+
+
 def voyage_model_for_collection(collection_name: str) -> str:
     """Return the Voyage AI model for a T3 collection (index and query).
 

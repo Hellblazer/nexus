@@ -99,6 +99,8 @@ def _read_event_sourced_gate() -> bool:
 # events on behalf of the caller). The PR-F initial comment described
 # these as "lazy" imports — they are not, they run at import time.
 from nexus.catalog.events import (  # noqa: E402
+    CollectionCreatedPayload as _CollectionCreatedPayload,
+    CollectionSupersededPayload as _CollectionSupersededPayload,
     DocumentAliasedPayload as _DocumentAliasedPayload,
     DocumentDeletedPayload as _DocumentDeletedPayload,
     DocumentEnrichedPayload as _DocumentEnrichedPayload,
@@ -1429,6 +1431,155 @@ class Catalog:
             )
             for row in rows
         ]
+
+    # ── RDR-101 Phase 6: Collections projection (nexus-o6aa.14) ─────────
+
+    _COLLECTION_COLUMNS = (
+        "name",
+        "content_type",
+        "owner_id",
+        "embedding_model",
+        "model_version",
+        "display_name",
+        "legacy_grandfathered",
+        "superseded_by",
+        "superseded_at",
+        "created_at",
+    )
+
+    def _row_to_collection_dict(self, row: tuple) -> dict:
+        d = dict(zip(self._COLLECTION_COLUMNS, row))
+        d["legacy_grandfathered"] = bool(d.get("legacy_grandfathered") or 0)
+        return d
+
+    def register_collection(
+        self,
+        name: str,
+        *,
+        content_type: str = "",
+        owner_id: str = "",
+        embedding_model: str = "",
+        model_version: str = "",
+        display_name: str = "",
+    ) -> None:
+        """Register a ChromaDB collection in the catalog projection.
+
+        Idempotent on ``name`` (re-registering the same name is a no-op
+        at the SQLite level via INSERT OR REPLACE in the projector).
+        Writes a CollectionCreated v: 0 event to the event log; the
+        projector materializes the row including the
+        ``legacy_grandfathered`` flag derived from
+        :func:`nexus.corpus.is_conformant_collection_name`.
+
+        For non-conformant names, the canonical fields (``content_type``
+        etc.) may be left empty; the row is still written and flagged
+        as legacy. For conformant names, callers are encouraged to
+        supply the segments so they round-trip exactly.
+        """
+        from datetime import UTC, datetime  # noqa: PLC0415
+
+        if not name:
+            raise ValueError("register_collection: name must be non-empty")
+        ts = datetime.now(UTC).isoformat()
+        event = _make_event(
+            _CollectionCreatedPayload(
+                coll_id=name,
+                owner_id=owner_id,
+                content_type=content_type,
+                embedding_model=embedding_model,
+                model_version=model_version,
+                name=display_name or name,
+            ),
+            v=0,
+            ts=ts,
+        )
+        dir_fd = self._acquire_lock()
+        try:
+            self._write_to_event_log(event)
+            self._projector.apply(event)
+            # The projector sets created_at via a COALESCE that
+            # preserves the existing value on re-insert; for fresh rows
+            # we write it explicitly here so the row records its first
+            # registration timestamp.
+            self._db.execute(
+                "UPDATE collections SET created_at = ? "
+                "WHERE name = ? AND (created_at IS NULL OR created_at = '')",
+                (ts, name),
+            )
+            self._db.commit()
+        finally:
+            self._release_lock(dir_fd)
+
+    def list_collections(self) -> list[dict]:
+        """Return every row in the ``collections`` projection, ordered by name."""
+        sql = (
+            "SELECT " + ", ".join(self._COLLECTION_COLUMNS) + " "
+            "FROM collections ORDER BY name"
+        )
+        rows = self._db.execute(sql).fetchall()
+        return [self._row_to_collection_dict(r) for r in rows]
+
+    def get_collection(self, name: str) -> dict | None:
+        sql = (
+            "SELECT " + ", ".join(self._COLLECTION_COLUMNS) + " "
+            "FROM collections WHERE name = ?"
+        )
+        row = self._db.execute(sql, (name,)).fetchone()
+        return self._row_to_collection_dict(row) if row else None
+
+    def is_legacy_collection(self, name: str) -> bool:
+        """Return True if ``name`` is registered AND flagged legacy.
+
+        Unknown names return False (read paths are operationally hostile
+        to fail-loud per RDR-101 §"Phase 6"). Callers wanting strict
+        membership should query :meth:`get_collection` and check for None.
+        """
+        row = self._db.execute(
+            "SELECT legacy_grandfathered FROM collections WHERE name = ?",
+            (name,),
+        ).fetchone()
+        return bool(row and row[0])
+
+    def supersede_collection(
+        self,
+        old_name: str,
+        new_name: str,
+        *,
+        reason: str = "",
+    ) -> None:
+        """Mark ``old_name`` as superseded by ``new_name``.
+
+        Writes a CollectionSuperseded v: 0 event and updates the old
+        collection's ``superseded_by`` / ``superseded_at`` columns. The
+        new collection must already be registered (callers usually pair
+        ``register_collection`` for the new name with a
+        ``supersede_collection`` for the old).
+
+        Raises ``ValueError`` if ``old_name`` is not registered; this
+        is the rare case where read-time fail-loud is appropriate, the
+        operator is taking an explicit action and would expect a
+        no-op-on-typo to surface as an error.
+        """
+        existing = self.get_collection(old_name)
+        if existing is None:
+            raise ValueError(
+                f"supersede_collection: {old_name!r} not registered"
+            )
+        event = _make_event(
+            _CollectionSupersededPayload(
+                old_coll_id=old_name,
+                new_coll_id=new_name,
+                reason=reason,
+            ),
+            v=0,
+        )
+        dir_fd = self._acquire_lock()
+        try:
+            self._write_to_event_log(event)
+            self._projector.apply(event)
+            self._db.commit()
+        finally:
+            self._release_lock(dir_fd)
 
     def resolve_alias(self, tumbler: Tumbler, *, max_hops: int = 16) -> Tumbler:
         """Walk the alias chain to its canonical terminus.

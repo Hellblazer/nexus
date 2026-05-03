@@ -125,6 +125,34 @@ CREATE INDEX IF NOT EXISTS idx_links_created_by_type
 CREATE INDEX IF NOT EXISTS idx_documents_tumbler
     ON documents(tumbler);
 
+-- RDR-101 Phase 6 (nexus-o6aa.14): first-class Collections projection.
+-- One row per ChromaDB collection name. Materialized from
+-- CollectionCreated events; legacy_grandfathered is projection-derived
+-- from corpus.is_conformant_collection_name (no event-payload extension
+-- required, v: 0 stays stable). Read paths consult this table to
+-- distinguish post-Phase-6 canonical names from grandfathered legacy
+-- names; write paths consult it to short-circuit re-registration.
+CREATE TABLE IF NOT EXISTS collections (
+    name TEXT PRIMARY KEY,
+    content_type TEXT NOT NULL DEFAULT '',
+    owner_id TEXT NOT NULL DEFAULT '',
+    embedding_model TEXT NOT NULL DEFAULT '',
+    model_version TEXT NOT NULL DEFAULT '',
+    display_name TEXT NOT NULL DEFAULT '',
+    -- 1 = name does NOT match is_conformant_collection_name; the row
+    -- exists only because the collection predates RDR-101 Phase 6 or
+    -- was manually registered by the operator. Read paths accept it.
+    legacy_grandfathered INTEGER NOT NULL DEFAULT 0,
+    superseded_by TEXT NOT NULL DEFAULT '',
+    superseded_at TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_collections_legacy
+    ON collections(legacy_grandfathered);
+CREATE INDEX IF NOT EXISTS idx_collections_owner
+    ON collections(owner_id);
+
 -- RDR-101 Phase 1 PR D (nexus-knn3) partial indexes on bib backend IDs
 -- live in the post-migration block in __init__: the legacy-DB upgrade
 -- path has to ALTER TABLE the bib columns into existence before the
