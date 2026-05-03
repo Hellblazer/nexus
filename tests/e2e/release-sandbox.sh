@@ -214,28 +214,50 @@ case "$MODE" in
         nx upgrade 2>&1 | sed 's/^/  /' || true
 
         echo
-        echo "── 1/9 nx catalog setup (seeds plan library) ──"
+        echo "── 1/10 nx catalog setup (seeds plan library) ──"
         nx catalog setup 2>&1 | tail -5 | sed 's/^/  /' || true
 
         echo
-        echo "── 2/9 nx index repo ($REPO_ROOT) ──"
+        echo "── 2/10 nx index repo ($REPO_ROOT) ──"
         nx index repo "$REPO_ROOT" 2>&1 | tail -5 | sed 's/^/  /' || true
 
         echo
-        echo "── 3/9 nx index pdf (tests/fixtures/tc-sql.pdf) ──"
+        echo "── 3/10 nx index pdf (tests/fixtures/tc-sql.pdf) ──"
         nx index pdf "$REPO_ROOT/tests/fixtures/tc-sql.pdf" \
             --collection knowledge__shakedown 2>&1 | tail -5 | sed 's/^/  /' || true
 
         echo
-        echo "── 4/9 nx index rdr ──"
+        echo "── 4/10 nx index rdr ──"
         nx index rdr "$REPO_ROOT" 2>&1 | tail -5 | sed 's/^/  /' || true
 
         echo
-        echo "── 5/9 cross-corpus search ──"
+        echo "── 5/10 nexus-e5uw greenfield acceptance: no deprecated chunk keys ──"
+        # Bead nexus-e5uw acceptance: a fresh greenfield index must produce
+        # 0 chunks needing prune. The dry-run prune-deprecated-keys verb
+        # walks every collection and reports how many chunks carry any of
+        # {source_path, git_branch, git_commit_hash, git_project_name,
+        # git_remote_url}. RDR-102 Phase B drops source_path from
+        # ALLOWED_TOP_LEVEL; normalize() drops the four flat git_* keys.
+        # On a properly-migrated indexer, chunks_updated must be 0.
+        PRUNE_OUT=$(nx catalog prune-deprecated-keys --dry-run \
+            --i-have-completed-the-reader-migration 2>&1 || true)
+        echo "$PRUNE_OUT" | tail -8 | sed 's/^/  /'
+        E5UW_UPDATED=$(echo "$PRUNE_OUT" | grep -E '^\s*chunks_updated:' | \
+            awk '{print $2}' | head -1)
+        if [[ "$E5UW_UPDATED" == "0" ]]; then
+            echo "  [pass] greenfield index produced 0 chunks needing prune"
+        else
+            echo "  [FAIL] greenfield index leaked ${E5UW_UPDATED:-?} chunks needing prune"
+            echo "         nexus-e5uw regression — code-indexer or doc-indexer is writing"
+            echo "         deprecated keys. Investigate before merge."
+        fi
+
+        echo
+        echo "── 6/10 cross-corpus search ──"
         nx search "catalog link graph" -m 3 2>&1 | tail -10 | sed 's/^/  /' || true
 
         echo
-        echo "── 6/9 T2 memory roundtrip ──"
+        echo "── 7/10 T2 memory roundtrip ──"
         SHAKE_TS=$(date +%s)
         nx memory put "shakedown marker $SHAKE_TS" \
             --project nexus_shakedown --title shakedown.md 2>&1 | tail -2 | sed 's/^/  /' || true
@@ -243,7 +265,7 @@ case "$MODE" in
             | head -3 | sed 's/^/  /' || true
 
         echo
-        echo "── 7/9 T1 scratch use (write + readback) ──"
+        echo "── 8/10 T1 scratch use (write + readback) ──"
         # Note: outside a Claude Code session, no SessionStart hook fires to
         # spawn the per-session ChromaDB HTTP server, so each `nx scratch *`
         # invocation falls back to its own EphemeralClient. Cross-invocation
@@ -259,11 +281,11 @@ case "$MODE" in
         echo "  note: cross-invocation readback only works inside a Claude Code session"
 
         echo
-        echo "── 8/9 catalog stats (registry + link graph readback) ──"
+        echo "── 9/10 catalog stats (registry + link graph readback) ──"
         nx catalog stats 2>&1 | head -15 | sed 's/^/  /' || true
 
         echo
-        echo "── 9/9 nx doctor (all checks, post-activity) ──"
+        echo "── 10/10 nx doctor (all checks, post-activity) ──"
         for check in --check-schema --check-plan-library --check-taxonomy \
                      --check-tmpdirs; do
             echo "  $check:"
