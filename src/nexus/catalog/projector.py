@@ -338,6 +338,10 @@ class Projector:
             "VALUES (?, ?, ?, ?, ?, ?, ?, "
             "COALESCE((SELECT superseded_by FROM collections WHERE name = ?), ''), "
             "COALESCE((SELECT superseded_at FROM collections WHERE name = ?), ''), "
+            # ``created_at`` prefers an existing row's value (re-register
+            # preserves the first-registration timestamp); falls back to
+            # ``payload.created_at`` for fresh inserts. Pre-amendment
+            # events without the field default to empty string.
             "COALESCE((SELECT created_at FROM collections WHERE name = ?), ?))",
             (
                 payload.coll_id,

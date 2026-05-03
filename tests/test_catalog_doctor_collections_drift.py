@@ -173,6 +173,25 @@ def test_doctor_collections_drift_orphan_without_supersede_fails(
     assert "knowledge__delos" in result.output
 
 
+def test_doctor_collections_drift_handles_t3_failure(catalog, runner):
+    """When T3 list_collections raises, the check returns ``error``-keyed
+    payload and the doctor exits non-zero. Pass-#2 review found this
+    path had no test; without it, a silent T3 outage produces a green
+    PASS.
+    """
+    class _BrokenT3:
+        def list_collections(self):
+            raise RuntimeError("t3 unreachable")
+
+    with patch("nexus.db.make_t3", return_value=_BrokenT3()), \
+         patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+        result = runner.invoke(
+            main, ["catalog", "doctor", "--collections-drift"],
+        )
+    assert result.exit_code != 0
+    assert "Failed to list T3" in result.output
+
+
 def test_doctor_collections_drift_json_payload(t3_db, catalog, runner):
     """``--json`` emits machine-readable shape."""
     _seed_t3(t3_db, "knowledge__delos")

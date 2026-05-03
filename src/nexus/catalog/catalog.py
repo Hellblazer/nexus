@@ -1512,6 +1512,7 @@ class Catalog:
                 embedding_model=embedding_model,
                 model_version=model_version,
                 name=display_name or name,
+                created_at=ts,
             ),
             v=0,
             ts=ts,
@@ -1521,15 +1522,10 @@ class Catalog:
             if self._event_sourced_enabled:
                 self._write_to_event_log(event)
                 self._projector.apply(event)
-                # The projector sets created_at via a COALESCE that
-                # preserves the existing value on re-insert; for fresh
-                # rows we write it explicitly here so the row records
-                # its first registration timestamp.
-                self._db.execute(
-                    "UPDATE collections SET created_at = ? "
-                    "WHERE name = ? AND (created_at IS NULL OR created_at = '')",
-                    (ts, name),
-                )
+                # ``created_at`` lands via the projector's COALESCE
+                # using ``payload.created_at`` (RDR-101 Phase 6
+                # prophylactic-review fix #2 / nexus-qpet); replay
+                # equality holds without an out-of-band UPDATE.
                 self._db.commit()
             else:
                 # Legacy mode: SQLite is canonical, no JSONL backing

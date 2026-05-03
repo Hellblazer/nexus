@@ -30,10 +30,15 @@ import pytest
 from nexus.catalog.catalog import Catalog
 from nexus.catalog.event_log import EventLog
 from nexus.catalog.events import (
+    CollectionSupersededPayload,
     TYPE_COLLECTION_CREATED,
     TYPE_COLLECTION_SUPERSEDED,
+    make_event,
 )
-from nexus.corpus import is_conformant_collection_name
+from nexus.corpus import (
+    is_conformant_collection_name,
+    parse_conformant_collection_name,
+)
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
@@ -321,6 +326,84 @@ def test_register_collection_re_emits_on_field_change(catalog):
         if e.type == TYPE_COLLECTION_CREATED
     ]
     assert len(events) == 2  # both calls emitted
+
+
+def test_parse_conformant_collection_name_raises_on_legacy(catalog):
+    """parse_conformant_collection_name must raise on non-conformant names.
+
+    Pass-#2 review (2026-05-03) found this raise path had no direct
+    test coverage. The regex gate makes false-non-conformant impossible
+    in production, but the docstring documents the contract.
+    """
+    with pytest.raises(ValueError, match="not conformant"):
+        parse_conformant_collection_name("docs__nexus-571b8edd")
+    with pytest.raises(ValueError, match="not conformant"):
+        parse_conformant_collection_name("knowledge__delos")
+    with pytest.raises(ValueError, match="not conformant"):
+        parse_conformant_collection_name("totally__malformed__weird")
+
+
+def test_v0_collection_superseded_blank_id_guard(catalog):
+    """Direct projector test: a malformed CollectionSuperseded event
+    with empty old_coll_id or new_coll_id is treated as a no-op,
+    not crashed.
+
+    Pass-#2 review found the guard was untested; if it were silently
+    removed the doctor's replay-equality check would still pass
+    against well-formed events while crashing on a single replay of a
+    malformed line.
+    """
+    catalog.register_collection("docs__nexus-571b8edd")
+
+    # Both fields missing
+    event_blank_old = make_event(
+        CollectionSupersededPayload(old_coll_id="", new_coll_id="x"), v=0,
+    )
+    catalog._projector.apply(event_blank_old)
+    catalog._db.commit()
+    # Row unchanged
+    assert catalog.get_collection("docs__nexus-571b8edd")["superseded_by"] == ""
+
+    event_blank_new = make_event(
+        CollectionSupersededPayload(
+            old_coll_id="docs__nexus-571b8edd", new_coll_id="",
+        ),
+        v=0,
+    )
+    catalog._projector.apply(event_blank_new)
+    catalog._db.commit()
+    assert catalog.get_collection("docs__nexus-571b8edd")["superseded_by"] == ""
+
+
+def test_update_document_collection_returns_false_on_unknown_tumbler(catalog):
+    """update_document_collection must return False (no-op) when the
+    document is not registered. Documented contract; pass-#2 review
+    found no direct test.
+    """
+    assert catalog.update_document_collection(
+        "1.99.99", "knowledge__1-1__voyage-context-3__v1",
+    ) is False
+
+
+def test_update_document_collection_idempotent_on_same_target(catalog):
+    """Re-pointing a doc to its current physical_collection is a no-op
+    (returns False; no event written).
+    """
+    catalog._db.execute(
+        "INSERT INTO documents "
+        "(tumbler, title, author, year, content_type, file_path, "
+        "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
+        "metadata, source_mtime, alias_of, source_uri) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "1.5.1", "doc-1.5.1", "", 0, "text", "/tmp/x.md",
+            "", "knowledge__delos", 1, "", "", "{}", 0.0, "", "",
+        ),
+    )
+    catalog._db.commit()
+    assert catalog.update_document_collection(
+        "1.5.1", "knowledge__delos",  # already at this collection
+    ) is False
 
 
 def test_idempotent_supersede_skipped_due_to_already_superseded(catalog):

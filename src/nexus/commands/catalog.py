@@ -3967,9 +3967,17 @@ def _print_collections_drift_text(report: dict) -> None:
         )
         for n in report["projection_not_in_t3"]:
             click.echo(f"    {n}")
+        # 'rename-collection' would refuse here (it requires the old
+        # T3 collection to exist). Direct supersede is the correct
+        # recovery; a future 'nx catalog supersede-collection' verb
+        # would wrap this script.
         click.echo(
-            "  Remediate: nx catalog rename-collection (mark superseded) "
-            "or remove the row manually if the gap is intentional."
+            "  Remediate: register a target collection and supersede manually:\n"
+            "    python -c \"from nexus.catalog.catalog import Catalog; "
+            "from nexus.config import catalog_path; "
+            "p=catalog_path(); c=Catalog(p, p / '.catalog.db'); "
+            "c.register_collection('<TARGET>'); "
+            "c.supersede_collection('<OLD>', '<TARGET>')\""
         )
 
 
@@ -4172,6 +4180,10 @@ def _run_replay_equality() -> dict:
             "owners": _snapshot_table(live_conn, "owners"),
             "documents": _snapshot_table(live_conn, "documents"),
             "links": _snapshot_table(live_conn, "links", exclude_cols=LINKS_EXCLUDE),
+            # RDR-101 Phase 6 prophylactic-review fix: include the
+            # collections projection in replay-equality. Pre-fix this
+            # gate was blind to Phase 6's new projection state.
+            "collections": _snapshot_table(live_conn, "collections"),
         }
 
     # ── Project + snapshot ────────────────────────────────────────────
@@ -4198,12 +4210,13 @@ def _run_replay_equality() -> dict:
                 "owners": _snapshot_table(proj_conn, "owners"),
                 "documents": _snapshot_table(proj_conn, "documents"),
                 "links": _snapshot_table(proj_conn, "links", exclude_cols=LINKS_EXCLUDE),
+                "collections": _snapshot_table(proj_conn, "collections"),
             }
 
     # ── Diff ──────────────────────────────────────────────────────────
     table_diffs: dict[str, dict] = {}
     overall_pass = True
-    for table in ("owners", "documents", "links"):
+    for table in ("owners", "documents", "links", "collections"):
         live_rows = live_snap[table]
         proj_rows = projected_snap[table]
         live_set = set(live_rows)

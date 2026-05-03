@@ -360,6 +360,23 @@ def test_gc_chunk_with_missing_doc_id_skipped(
     assert t3_db._client.get_collection(coll).count() == 1
 
 
+def test_gc_aborts_on_uninitialized_catalog(t3_db, tmp_path, runner, monkeypatch):
+    """nx t3 gc on an uninitialized catalog must raise a clear error,
+    not crash with an opaque traceback or silently produce an empty
+    alive-set (which would treat every chunk as orphan).
+    """
+    bare_path = tmp_path / "no-such-catalog"
+    monkeypatch.setattr(
+        "nexus.config.catalog_path", lambda: bare_path,
+    )
+    with patch("nexus.db.make_t3", return_value=t3_db):
+        result = runner.invoke(
+            main, ["t3", "gc", "-c", "knowledge__test", "--dry-run"],
+        )
+    assert result.exit_code != 0
+    assert "not initialized" in result.output.lower()
+
+
 def test_gc_orphan_window_rejects_zero(runner):
     """A zero-or-negative orphan window is rejected at parse time.
 

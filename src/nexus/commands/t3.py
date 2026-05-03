@@ -74,11 +74,24 @@ def _parse_orphan_window(spec: str) -> timedelta:
 
 
 def _make_catalog():
-    """Construct the default Catalog. Patched in tests for isolation."""
+    """Construct the default Catalog with the same init-gate that
+    ``commands/catalog.py:_get_catalog`` enforces.
+
+    Without the init gate, running ``nx t3 gc`` on a fresh install
+    either crashes with an opaque traceback inside ``Catalog.__init__``
+    or, worse, silently produces an empty alive-set so every chunk is
+    treated as orphan (catastrophic when paired with --no-dry-run --yes).
+
+    Patched in tests for isolation.
+    """
     from nexus.catalog.catalog import Catalog  # noqa: PLC0415
     from nexus.config import catalog_path  # noqa: PLC0415
 
     path = catalog_path()
+    if not Catalog.is_initialized(path):
+        raise click.ClickException(
+            "Catalog not initialized. Run 'nx catalog setup' before 'nx t3 gc'."
+        )
     return Catalog(path, path / ".catalog.db")
 
 
@@ -352,12 +365,23 @@ def gc_cmd(
         )
         return
 
+    # Strict order (RF-101-3): event first, then delete. The event-emit
+    # loop runs per-chunk so the log records each ChunkOrphaned BEFORE
+    # any chunk is deleted; the actual delete is BATCHED into one call
+    # afterward (delete_by_chunk_ids paginates internally at 300). A
+    # crash between event-emit and batch-delete leaves the log
+    # consistent with T3 (events present, all chunks still in T3); the
+    # next gc run idempotently re-emits and retries the batch.
+    #
+    # NOTE on the alive snapshot: ``alive_str`` was sampled at the top
+    # of this command. A doc registered concurrently between snapshot
+    # and execution would not appear in the alive set, so its chunks
+    # could be GC'd despite the doc being live again. Operators
+    # SHOULD NOT run gc concurrently with active indexing. The window
+    # is single-operator-driven and acceptably small in practice.
     event_log = EventLog(cat._dir)
-    deleted_total = 0
+    pending_chunk_ids: list[str] = []
     for chunk_id, doc_id in candidates:
-        # Strict order (RF-101-3): event first, then delete. A crash
-        # between them leaves the log consistent with T3 (event
-        # present, delete pending → next gc retries).
         event = make_event(
             ChunkOrphanedPayload(
                 chunk_id=chunk_id,
@@ -365,9 +389,26 @@ def gc_cmd(
             )
         )
         event_log.append(event)
-        try:
-            deleted_total += t3_db.delete_by_chunk_ids(collection, [chunk_id])
-        except Exception as exc:
-            click.echo(f"  delete failed for {chunk_id}: {exc}")
+        pending_chunk_ids.append(chunk_id)
 
-    click.echo(f"\nSummary: deleted {deleted_total} chunk(s) from {collection}.")
+    deleted_total = 0
+    delete_failed = 0
+    try:
+        deleted_total = t3_db.delete_by_chunk_ids(collection, pending_chunk_ids)
+    except Exception as exc:
+        delete_failed = len(pending_chunk_ids)
+        click.echo(
+            f"  batch delete failed ({len(pending_chunk_ids)} chunk(s)): "
+            f"{exc}. Events were emitted; next 'nx t3 gc' run will retry.",
+            err=True,
+        )
+
+    if delete_failed:
+        click.echo(
+            f"\nSummary: emitted {len(pending_chunk_ids)} ChunkOrphaned "
+            f"event(s); batch delete FAILED for {delete_failed} chunk(s)."
+        )
+    else:
+        click.echo(
+            f"\nSummary: deleted {deleted_total} chunk(s) from {collection}."
+        )
