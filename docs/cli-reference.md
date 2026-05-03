@@ -627,6 +627,85 @@ Per-collection report of outgoing-link counts at the depth-N BFS frontier (defau
 
 Standard catalog management. Run `nx catalog COMMAND --help` for details.
 
+### nx catalog backfill-collections
+
+```
+nx catalog backfill-collections [--dry-run]
+```
+
+Populate the RDR-101 Phase 6 collections projection from existing state. Walks both T3 (live ChromaDB) and the catalog `documents.physical_collection` column, unions the two sets, and registers each name not already in the projection. The projector's `is_conformant_collection_name` regex decides each row's `legacy_grandfathered` flag automatically.
+
+Idempotent. Conventional first invocation is `--dry-run` for operator review, then `--no-dry-run` to apply.
+
+### nx catalog rename-collection
+
+```
+nx catalog rename-collection OLD NEW [--dry-run/--no-dry-run] [--yes] [--allow-legacy]
+```
+
+Combined verb that does both the data-plane rename (T3 native `modify(name=)` + T2 cascade + catalog documents re-point) and the RDR-101 Phase 6 control-plane work (collections-projection update + `CollectionSuperseded` event emission). `nx collection rename` (data plane only) remains available for operators who want it without the Phase 6 layer.
+
+Validation gates fire BEFORE any side effect:
+- new name must be conformant (`<content_type>__<owner_id>__<embedding_model>__v<n>`) or pass `--allow-legacy`
+- old name must be in the collections projection
+- old name must not already be superseded
+- new name must not already exist in T3
+
+Default is report-only; both `--no-dry-run` AND `--yes` are required to actually rename.
+
+### nx catalog migrate-fallback
+
+```
+nx catalog migrate-fallback SOURCE [--target-model M] [--target-version v1] [--dry-run/--no-dry-run] [--yes]
+```
+
+Walk a fallback collection (`docs__default`, `knowledge__knowledge`, etc.) and propose a per-document target conformant collection. With `--yes`, re-points each document's `physical_collection` in the catalog and auto-registers the target rows in the projection. Fallback collections are deprecated when the migration empties them (single-target case auto-emits `CollectionSuperseded`); never silently nuked, per RDR-101 §"Phase 6".
+
+Target form: `<content_type>__<owner>__<model>__<version>` where content_type comes from the source's prefix, owner comes from each tumbler (`1.5.42` → `1-5`; tumbler dots become hyphens for ChromaDB's name regex), model defaults to the source's Voyage family.
+
+T3 chunks are NOT moved by this verb. Operators repopulate the target via `nx index` on the source files; old chunks become orphans (catalog now points elsewhere) and get swept by `nx t3 gc` on the next cycle.
+
+### nx catalog doctor
+
+```
+nx catalog doctor [--replay-equality] [--t3-doc-id-coverage] [--collections-drift] [--json]
+```
+
+RDR-101 catalog doctor surface; pass at least one check flag.
+- `--replay-equality`: synthesizer + projector round-trip against live SQLite (Phase 1).
+- `--t3-doc-id-coverage`: every non-orphan T3 chunk carries a `doc_id` matching the event log (Phase 2).
+- `--collections-drift`: every T3 collection and every distinct `documents.physical_collection` has a row in the collections projection (Phase 6 release gate).
+
+Returns non-zero on any check failure. `--json` emits the per-check result for CI consumption.
+
+---
+
+## nx t3
+
+T3 (ChromaDB) maintenance commands. Distinct from `nx catalog gc`: `nx t3` operates on T3 chunks, the catalog command operates on catalog rows.
+
+### nx t3 prune-stale
+
+```
+nx t3 prune-stale [-c COLLECTION] [--no-dry-run --confirm]
+```
+
+Sweep T3 chunks whose `source_path` is missing from disk. Default is report-only; both `--no-dry-run` AND `--confirm` are required to delete.
+
+### nx t3 gc
+
+```
+nx t3 gc -c COLLECTION [--orphan-window 30d] [--no-dry-run --yes]
+```
+
+Garbage-collect orphaned T3 chunks (RDR-101 Phase 6 / nexus-r5eo). A chunk is an orphan when its `doc_id` metadata is no longer in the catalog projection's alive set for the collection AND its `indexed_at` predates the orphan window (default 30 days).
+
+Per RF-101-3, `nx t3 gc` is the SOLE post-Phase-3 emitter of `ChunkOrphaned` events and the SOLE path that physically deletes T3 chunks. The strict per-candidate order is: append `ChunkOrphaned(chunk_id, reason)` to the event log, THEN call `T3Database.delete_by_chunk_ids`. A crash between the two leaves the log consistent with T3 (event present, delete pending), and the next run idempotently retries the delete.
+
+Default is report-only; both `--no-dry-run` AND `--yes` are required to actually delete. Chunks without a `doc_id` (legacy pre-Phase-2 backfill) are undecidable here and skipped; use a maintenance backfill verb to address them, not GC.
+
+`--orphan-window` accepts `s`, `m`, `h`, `d`, `w` suffixes (e.g. `30d`, `12h`, `2w`); a bare integer is rejected so a typo cannot silently mean 30 seconds.
+
 ---
 
 ## nx taxonomy

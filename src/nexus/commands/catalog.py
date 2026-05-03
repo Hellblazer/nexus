@@ -314,6 +314,451 @@ def setup_cmd(remote: str) -> None:
         click.echo("Setup complete.")
 
 
+@catalog.command("backfill-collections")
+@click.option(
+    "--dry-run/--no-dry-run",
+    default=True,
+    help="Report-only (default). Use --no-dry-run to actually register. "
+    "Matches the safe-default convention of the other Phase 6 verbs "
+    "(rename-collection, migrate-fallback, t3 gc).",
+)
+def backfill_collections_cmd(dry_run: bool) -> None:
+    """Populate the Phase 6 collections projection from existing state.
+
+    \b
+    Walks both T3 (live ChromaDB collections) and the catalog
+    documents.physical_collection column, unions the two sets, and
+    registers each name not already in the projection. The projector's
+    is_conformant_collection_name regex decides each row's
+    legacy_grandfathered flag automatically.
+
+    \b
+    Idempotent: re-running adds only the names that appeared since the
+    last run. The conventional first-time invocation is dry-run, then
+    --no-dry-run after operator review.
+
+    \b
+    Examples:
+      nx catalog backfill-collections --dry-run
+      nx catalog backfill-collections
+    """
+    from nexus.db import make_t3  # noqa: PLC0415
+
+    cat = _get_catalog()
+
+    try:
+        t3_db = make_t3()
+        t3_names = {c["name"] for c in t3_db.list_collections()}
+    except Exception as exc:
+        # Refusing to do a "partial" backfill that registers only the
+        # catalog-side names: an operator running this during a T3
+        # outage would get a green exit code and half the projection
+        # missing, then think the verb is idempotent (it is, but the
+        # second run after T3 recovers would silently fix it). Better
+        # to fail loud here so the operator knows to retry.
+        raise click.ClickException(
+            f"Failed to list T3 collections: {exc}. Aborting to avoid a "
+            f"partial backfill. Re-run after T3 is reachable."
+        ) from exc
+
+    rows = cat._db.execute(
+        "SELECT DISTINCT physical_collection FROM documents "
+        "WHERE physical_collection != ''"
+    ).fetchall()
+    catalog_names = {r[0] for r in rows if r[0]}
+
+    candidate_names = sorted(t3_names | catalog_names)
+    already = {r["name"] for r in cat.list_collections()}
+    to_register = [n for n in candidate_names if n not in already]
+
+    if not to_register:
+        click.echo(
+            f"Nothing to backfill: {len(already)} collection(s) already registered, "
+            f"0 new."
+        )
+        return
+
+    verb = "would register" if dry_run else "registering"
+    click.echo(f"{verb} {len(to_register)} new collection(s):")
+    for name in to_register:
+        click.echo(f"  {name}")
+
+    if dry_run:
+        return
+
+    for name in to_register:
+        cat.register_collection(name)
+
+    click.echo(
+        f"\nDone: {len(to_register)} new, "
+        f"{len(already)} already registered."
+    )
+
+
+@catalog.command("migrate-fallback")
+@click.argument("source")
+@click.option(
+    "--target-model",
+    default="",
+    help="Override the target embedding model. Default: derived from "
+    "the source's content-type prefix (knowledge__/docs__/rdr__ → "
+    "voyage-context-3; code__ → voyage-code-3).",
+)
+@click.option(
+    "--target-version",
+    default="v1",
+    show_default=True,
+    help="Target model_version segment for new collections.",
+)
+@click.option(
+    "--dry-run/--no-dry-run",
+    default=False,
+    help="Report the migration proposal without writing.",
+)
+@click.option(
+    "--yes",
+    is_flag=True,
+    default=False,
+    help="Required to actually migrate. Without --yes, the command "
+    "falls back to report-only.",
+)
+def migrate_fallback_cmd(
+    source: str,
+    target_model: str,
+    target_version: str,
+    dry_run: bool,
+    yes: bool,
+) -> None:
+    """Migrate documents from a fallback collection to per-owner targets.
+
+    \b
+    Walks every document in SOURCE (a fallback like ``docs__default``
+    or ``knowledge__knowledge``) and proposes a target collection per
+    document, computed as
+    ``<content_type>__<owner>__<embedding_model>__<version>`` where
+    ``content_type`` and ``embedding_model`` come from the source's
+    prefix and ``owner`` comes from each document's tumbler.
+
+    \b
+    With --yes, re-points each document's physical_collection in the
+    catalog and auto-registers the target rows in the collections
+    projection. T3 chunks are NOT moved; the catalog-side migration
+    is enough to deprecate the fallback over time. Operators
+    repopulate the target by re-running ``nx index`` against the
+    source files; old chunks become orphans whose ``nx t3 gc`` will
+    sweep on the next cycle (catalog now points elsewhere, so the
+    chunk's doc_id is no longer alive in the source collection).
+
+    \b
+    Source must NOT already be conformant; conformant collections are
+    not fallbacks. Source must be registered in the projection (run
+    ``nx catalog backfill-collections`` first if needed).
+
+    \b
+    When the migration empties the source AND every doc landed in the
+    same target, the source row is marked superseded_by that target.
+    Multiple targets leave the source NOT superseded; the operator
+    deprecates manually.
+
+    \b
+    Examples:
+      nx catalog migrate-fallback knowledge__knowledge --dry-run
+      nx catalog migrate-fallback docs__default --yes
+    """
+    from nexus.corpus import (  # noqa: PLC0415
+        is_conformant_collection_name, voyage_model_for_collection,
+    )
+
+    cat = _get_catalog()
+
+    src_row = cat.get_collection(source)
+    if src_row is None:
+        raise click.ClickException(
+            f"source {source!r} is not registered in the collections "
+            f"projection. Run 'nx catalog backfill-collections' first."
+        )
+    if is_conformant_collection_name(source):
+        raise click.ClickException(
+            f"source {source!r} is already conformant; this is not a "
+            f"fallback collection."
+        )
+
+    if "__" not in source:
+        raise click.ClickException(
+            f"source {source!r} has no content-type prefix; cannot "
+            f"derive a migration target."
+        )
+    content_type = source.split("__", 1)[0]
+
+    if not target_model:
+        target_model = voyage_model_for_collection(source)
+
+    rows = cat._db.execute(
+        "SELECT tumbler FROM documents WHERE physical_collection = ? "
+        "ORDER BY tumbler",
+        (source,),
+    ).fetchall()
+
+    if not rows:
+        click.echo(f"{source}: 0 doc(s) to migrate.")
+        return
+
+    proposals: list[tuple[str, str]] = []
+    for (tumbler,) in rows:
+        owner = _owner_segment_for_tumbler(tumbler)
+        if not owner:
+            click.echo(
+                f"  WARN: could not derive owner from tumbler {tumbler!r}; "
+                f"skipping",
+                err=True,
+            )
+            continue
+        target = f"{content_type}__{owner}__{target_model}__{target_version}"
+        proposals.append((tumbler, target))
+
+    click.echo(
+        f"{source}: {len(proposals)} doc(s) -> "
+        f"{len({t for _, t in proposals})} target collection(s)"
+    )
+    for tumbler, target in proposals:
+        click.echo(f"  {tumbler}  ->  {target}")
+
+    if dry_run:
+        return
+    if not yes:
+        click.echo(
+            "\n--no-dry-run alone is treated as report-only. "
+            "Add --yes to actually migrate."
+        )
+        return
+
+    targets_seen: set[str] = set()
+    for tumbler, target in proposals:
+        if target not in targets_seen:
+            from nexus.corpus import parse_conformant_collection_name  # noqa: PLC0415
+            segments = parse_conformant_collection_name(target)
+            cat.register_collection(
+                target,
+                content_type=segments["content_type"],
+                owner_id=segments["owner_id"],
+                embedding_model=segments["embedding_model"],
+                model_version=segments["model_version"],
+            )
+            targets_seen.add(target)
+        cat.update_document_collection(tumbler, target)
+
+    if len(targets_seen) == 1:
+        only_target = next(iter(targets_seen))
+        cat.supersede_collection(
+            source, only_target, reason="migrate-fallback",
+        )
+        click.echo(
+            f"\nMigrated {len(proposals)} doc(s); source {source!r} "
+            f"superseded by {only_target!r}."
+        )
+    else:
+        click.echo(
+            f"\nMigrated {len(proposals)} doc(s) across "
+            f"{len(targets_seen)} target collection(s). Source "
+            f"{source!r} retained (multiple targets); operator "
+            f"deprecates manually if appropriate."
+        )
+
+    # Split-brain warning: catalog now points at the new collections,
+    # but T3 chunks are still in the source. Searches against the new
+    # collections return empty for migrated docs until they are
+    # re-indexed. This is the trade-off the verb makes per the bead
+    # spec ("T3 chunks are NOT moved"); making it explicit at the
+    # output prevents an operator from silently missing it.
+    click.echo(
+        f"\nWARNING: {len(proposals)} document(s) are now SPLIT-BRAIN: "
+        f"catalog points at the new target collection(s) but T3 chunks "
+        f"remain in {source!r}. Searches against the new collection(s) "
+        f"will return empty for these docs until you run:\n"
+        f"  nx index repo .   # re-populate the target with new chunks\n"
+        f"After re-index completes, the old chunks become orphans and "
+        f"'nx t3 gc -c {source} --no-dry-run --yes' will sweep them.",
+        err=True,
+    )
+
+
+def _owner_segment_for_tumbler(tumbler: str) -> str:
+    """Return the collection-name owner segment for a tumbler.
+
+    ``1.5.42`` → ``1-5`` (owner prefix with dots replaced by hyphens
+    so the result fits ChromaDB's name regex).
+    """
+    from nexus.catalog.synthesizer import _owner_prefix_of  # noqa: PLC0415
+    prefix = _owner_prefix_of(tumbler)
+    if not prefix:
+        return ""
+    return prefix.replace(".", "-")
+
+
+@catalog.command("rename-collection")
+@click.argument("old")
+@click.argument("new")
+@click.option(
+    "--dry-run/--no-dry-run",
+    default=False,
+    help="Report the rename plan without writing.",
+)
+@click.option(
+    "--yes",
+    is_flag=True,
+    default=False,
+    help="Required to actually rename. Without --yes (and without "
+    "--dry-run), the command falls back to report-only.",
+)
+@click.option(
+    "--allow-legacy",
+    is_flag=True,
+    default=False,
+    help="Skip the is_conformant_collection_name gate on the new name. "
+    "The renamed collection still gets a row in the projection but is "
+    "flagged legacy_grandfathered=True. Use only when migrating between "
+    "two grandfathered names (rare).",
+)
+def rename_collection_cmd(
+    old: str, new: str, dry_run: bool, yes: bool, allow_legacy: bool,
+) -> None:
+    """Rename a collection with full RDR-101 Phase 6 lifecycle.
+
+    \b
+    Combines the data-plane rename (T3 native modify + T2 cascade +
+    catalog documents re-point) with the Phase 6 control-plane work
+    (collections-projection update + CollectionSuperseded event
+    emission). Operators wanting only the data plane can use
+    ``nx collection rename`` instead; this verb is the canonical
+    Phase 6 path that keeps the event log and projection in sync.
+
+    \b
+    Validation gates fire BEFORE any side effect:
+      - new name must be conformant (or pass --allow-legacy)
+      - old name must be in the collections projection
+      - old name must not already be superseded
+      - new name must not already exist in T3
+
+    \b
+    Examples:
+      nx catalog rename-collection knowledge__delos \\
+          knowledge__1-1__voyage-context-3__v1 --yes
+      nx catalog rename-collection docs__nexus-571b8edd ... --dry-run
+    """
+    from nexus.commands.collection import (  # noqa: PLC0415
+        rename_collection_data_plane,
+    )
+    from nexus.corpus import (  # noqa: PLC0415
+        is_conformant_collection_name,
+        parse_conformant_collection_name,
+    )
+    from nexus.db import make_t3  # noqa: PLC0415
+
+    cat = _get_catalog()
+    t3_db = make_t3()
+
+    if not is_conformant_collection_name(new) and not allow_legacy:
+        raise click.ClickException(
+            f"new name {new!r} is not conformant. Expected "
+            f"<content_type>__<owner_id>__<embedding_model>__v<n>. "
+            f"Pass --allow-legacy to rename to a grandfathered name "
+            f"(rare; only when migrating between two legacy names)."
+        )
+
+    old_row = cat.get_collection(old)
+    if old_row is None:
+        raise click.ClickException(
+            f"old name {old!r} is not registered in the collections "
+            f"projection. Run 'nx catalog backfill-collections' if this "
+            f"is an existing collection that has not been registered."
+        )
+    if old_row.get("superseded_by"):
+        raise click.ClickException(
+            f"old name {old!r} is already superseded by "
+            f"{old_row['superseded_by']!r}. Refusing to rename a stale entry."
+        )
+
+    # Source-exists check fires BEFORE collision check so an operator
+    # who typoes the old name gets "old not found" rather than "new
+    # already exists" (the latter is misleading when old never existed).
+    if not t3_db.collection_exists(old):
+        raise click.ClickException(f"old name {old!r} does not exist in T3.")
+    if old == new:
+        raise click.ClickException(
+            f"old and new names are identical ({old!r}); rename is a no-op."
+        )
+    if t3_db.collection_exists(new):
+        raise click.ClickException(
+            f"new name {new!r} already exists in T3. "
+            f"Refusing to rename {old!r} on top of an existing collection."
+        )
+
+    will_run = yes and not dry_run
+    if dry_run:
+        click.echo(f"would rename: {old} -> {new}")
+        return
+    if not yes:
+        click.echo(
+            f"would rename: {old} -> {new}\n"
+            f"--no-dry-run alone is treated as report-only. "
+            f"Add --yes to actually rename."
+        )
+        return
+
+    counts = rename_collection_data_plane(
+        old, new, t3_db=t3_db, catalog=cat,
+        on_warn=lambda msg: click.echo(msg, err=True),
+    )
+
+    # T3 has been renamed by this point. If projection writes raise,
+    # we end up with T3 ahead of the projection. Catch and surface so
+    # the operator knows what state the system is in - a half-applied
+    # rename is recoverable but only if the operator has the recovery
+    # plan in front of them.
+    try:
+        if is_conformant_collection_name(new):
+            segments = parse_conformant_collection_name(new)
+            cat.register_collection(
+                new,
+                content_type=segments["content_type"],
+                owner_id=segments["owner_id"],
+                embedding_model=segments["embedding_model"],
+                model_version=segments["model_version"],
+            )
+        else:
+            cat.register_collection(new)
+        cat.supersede_collection(old, new, reason="rename-collection")
+    except Exception as exc:
+        click.echo(
+            f"WARN: T3 was renamed {old!r} -> {new!r} but the projection "
+            f"update failed: {exc}. Recover by running:\n"
+            f"  nx catalog backfill-collections --no-dry-run  "
+            f"# registers {new!r}\n"
+            f"  python -c \"from nexus.catalog.catalog import Catalog; "
+            f"from nexus.config import catalog_path; "
+            f"p=catalog_path(); "
+            f"Catalog(p, p / '.catalog.db').supersede_collection("
+            f"{old!r}, {new!r})\"",
+            err=True,
+        )
+        raise click.exceptions.Exit(2) from exc
+
+    parts: list[str] = []
+    if counts["tax_topics"] or counts["tax_assignments"] or counts["tax_meta"]:
+        parts.append(
+            f"{counts['tax_topics']} topics, "
+            f"{counts['tax_assignments']} assignments, "
+            f"{counts['tax_meta']} meta"
+        )
+    if counts["chash"]:
+        parts.append(f"{counts['chash']} chash rows")
+    if counts["catalog_docs"]:
+        parts.append(f"{counts['catalog_docs']} catalog docs")
+    suffix = f" ({'; '.join(parts)})" if parts else ""
+    click.echo(f"Renamed: {old} -> {new}{suffix}")
+    click.echo(f"Emitted CollectionSuperseded({old} -> {new})")
+
+
 @catalog.command("list")
 @click.option("--owner", default="")
 @click.option("--type", "content_type", default="")
@@ -3317,6 +3762,17 @@ def prune_stale_cmd(
     ),
 )
 @click.option(
+    "--collections-drift",
+    "collections_drift",
+    is_flag=True,
+    help=(
+        "Phase 6 check: every T3 collection and every distinct "
+        "documents.physical_collection has a row in the collections "
+        "projection. Drift is a release blocker; remediate with "
+        "'nx catalog backfill-collections'."
+    ),
+)
+@click.option(
     "--json", "as_json", is_flag=True,
     help="Emit machine-readable JSON instead of text output.",
 )
@@ -3324,23 +3780,26 @@ def doctor_cmd(
     replay_equality: bool,
     t3_doc_id_coverage: bool,
     strict_not_in_t3: bool,
+    collections_drift: bool,
     as_json: bool,
 ) -> None:
     """RDR-101 catalog doctor surface.
 
-    Supports two checks today:
+    Supports three checks today:
       - ``--replay-equality`` (Phase 1, PR C): synthesizer + projector
         round-trip against the live SQLite.
       - ``--t3-doc-id-coverage`` (Phase 2, PR δ): T3 chunks carry the
         doc_id metadata that events.jsonl claims.
+      - ``--collections-drift`` (Phase 6, nexus-o6aa.14): every T3
+        collection and every documents.physical_collection has a row
+        in the collections projection.
 
-    Future flags (``--legacy-collection-grandfather``, etc.) land in
-    later phases.
+    Future flags land in later phases.
     """
-    if not replay_equality and not t3_doc_id_coverage:
+    if not replay_equality and not t3_doc_id_coverage and not collections_drift:
         raise click.UsageError(
-            "Pass a check flag: --replay-equality or "
-            "--t3-doc-id-coverage."
+            "Pass a check flag: --replay-equality, "
+            "--t3-doc-id-coverage, or --collections-drift."
         )
     if strict_not_in_t3 and not t3_doc_id_coverage:
         raise click.UsageError(
@@ -3397,11 +3856,129 @@ def doctor_cmd(
         if not report["pass"]:
             overall_pass = False
 
+    if collections_drift:
+        report = _run_collections_drift()
+        if as_json:
+            json_payload["collections_drift"] = report
+        else:
+            if replay_equality or t3_doc_id_coverage:
+                click.echo("")
+            _print_collections_drift_text(report)
+        if not report["pass"]:
+            overall_pass = False
+
     if as_json:
         click.echo(json.dumps(json_payload, indent=2))
 
     if not overall_pass:
         raise click.exceptions.Exit(1)
+
+
+def _run_collections_drift() -> dict:
+    """Phase 6 check: collections projection vs T3 + documents.physical_collection.
+
+    Returns ``{"pass": bool, "t3_not_in_projection": list,
+    "doc_collections_not_in_projection": list, "projection_not_in_t3": list}``.
+
+    A projection row whose ``superseded_by`` is set is allowed to be
+    absent from T3 (post-rename state). Bypass-schema collections
+    (``taxonomy__*``) are out of scope for this check.
+    """
+    from nexus.db import make_t3  # noqa: PLC0415
+    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415
+
+    cat = _get_catalog()
+    try:
+        t3_db = make_t3()
+        t3_names = {
+            c["name"] for c in t3_db.list_collections()
+            if not c["name"].startswith(_BYPASS_SCHEMA_PREFIXES)
+        }
+    except Exception as exc:
+        return {
+            "pass": False,
+            "t3_not_in_projection": [],
+            "doc_collections_not_in_projection": [],
+            "projection_not_in_t3": [],
+            "error": f"Failed to list T3 collections: {exc}",
+        }
+
+    projection = cat.list_collections()
+    projection_names = {r["name"] for r in projection}
+    superseded_names = {
+        r["name"] for r in projection if r.get("superseded_by")
+    }
+
+    rows = cat._db.execute(
+        "SELECT DISTINCT physical_collection FROM documents "
+        "WHERE physical_collection != ''"
+    ).fetchall()
+    doc_collections = {r[0] for r in rows if r[0]}
+
+    t3_not_in_projection = sorted(t3_names - projection_names)
+    doc_not_in_projection = sorted(doc_collections - projection_names)
+    projection_not_in_t3 = sorted(
+        projection_names - t3_names - superseded_names
+    )
+
+    passed = (
+        not t3_not_in_projection
+        and not doc_not_in_projection
+        and not projection_not_in_t3
+    )
+    return {
+        "pass": passed,
+        "t3_not_in_projection": t3_not_in_projection,
+        "doc_collections_not_in_projection": doc_not_in_projection,
+        "projection_not_in_t3": projection_not_in_t3,
+    }
+
+
+def _print_collections_drift_text(report: dict) -> None:
+    if report.get("error"):
+        click.echo(f"collections-drift: ERROR - {report['error']}")
+        return
+    status = "PASS" if report["pass"] else "FAIL"
+    click.echo(f"collections-drift: {status}")
+    if report["t3_not_in_projection"]:
+        click.echo(
+            f"  T3 collections without projection rows "
+            f"({len(report['t3_not_in_projection'])}):"
+        )
+        for n in report["t3_not_in_projection"]:
+            click.echo(f"    {n}")
+        click.echo(
+            "  Remediate: nx catalog backfill-collections"
+        )
+    if report["doc_collections_not_in_projection"]:
+        click.echo(
+            f"  documents.physical_collection without projection rows "
+            f"({len(report['doc_collections_not_in_projection'])}):"
+        )
+        for n in report["doc_collections_not_in_projection"]:
+            click.echo(f"    {n}")
+        click.echo(
+            "  Remediate: nx catalog backfill-collections"
+        )
+    if report["projection_not_in_t3"]:
+        click.echo(
+            f"  Projection rows whose T3 collection is gone and not "
+            f"superseded ({len(report['projection_not_in_t3'])}):"
+        )
+        for n in report["projection_not_in_t3"]:
+            click.echo(f"    {n}")
+        # 'rename-collection' would refuse here (it requires the old
+        # T3 collection to exist). Direct supersede is the correct
+        # recovery; a future 'nx catalog supersede-collection' verb
+        # would wrap this script.
+        click.echo(
+            "  Remediate: register a target collection and supersede manually:\n"
+            "    python -c \"from nexus.catalog.catalog import Catalog; "
+            "from nexus.config import catalog_path; "
+            "p=catalog_path(); c=Catalog(p, p / '.catalog.db'); "
+            "c.register_collection('<TARGET>'); "
+            "c.supersede_collection('<OLD>', '<TARGET>')\""
+        )
 
 
 def _check_bootstrap_status() -> dict:
@@ -3603,6 +4180,10 @@ def _run_replay_equality() -> dict:
             "owners": _snapshot_table(live_conn, "owners"),
             "documents": _snapshot_table(live_conn, "documents"),
             "links": _snapshot_table(live_conn, "links", exclude_cols=LINKS_EXCLUDE),
+            # RDR-101 Phase 6 prophylactic-review fix: include the
+            # collections projection in replay-equality. Pre-fix this
+            # gate was blind to Phase 6's new projection state.
+            "collections": _snapshot_table(live_conn, "collections"),
         }
 
     # ── Project + snapshot ────────────────────────────────────────────
@@ -3629,12 +4210,13 @@ def _run_replay_equality() -> dict:
                 "owners": _snapshot_table(proj_conn, "owners"),
                 "documents": _snapshot_table(proj_conn, "documents"),
                 "links": _snapshot_table(proj_conn, "links", exclude_cols=LINKS_EXCLUDE),
+                "collections": _snapshot_table(proj_conn, "collections"),
             }
 
     # ── Diff ──────────────────────────────────────────────────────────
     table_diffs: dict[str, dict] = {}
     overall_pass = True
-    for table in ("owners", "documents", "links"):
+    for table in ("owners", "documents", "links", "collections"):
         live_rows = live_snap[table]
         proj_rows = projected_snap[table]
         live_set = set(live_rows)

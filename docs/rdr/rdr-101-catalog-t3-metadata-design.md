@@ -109,7 +109,7 @@ The five Open Questions enumerated below are answered here with structured findi
 1. **Immutable document identity.** Every document has a `doc_id` (UUID7, sortable, never reused, never derived from path). Assigned at first registration. Survives renames, file moves, content edits. Surrogate identity is the only valid join key between catalog and T3.
 2. **Append-only event log is the truth.** Catalog SQLite, T3 chunk metadata, and any future T2 derived table are deterministic projections. The log is the only authoritative store; everything else is a reproducible cache.
 3. **One canonical fact per attribute.** No field exists in two stores. The log holds the fact; the projection that needs it materializes it; readers query the projection that owns it.
-4. **Schema-encoded collection invariants.** Collection name = `<content_type>__<owner_id>__<embedding_model>@<model_version>`. Triple-keyed. Mixed content types, mixed owners, or embedding-model swaps in place are rejected at create time.
+4. **Schema-encoded collection invariants.** Collection name = `<content_type>__<owner_id>__<embedding_model>__v<n>` (the bead spec used `@<model_version>`; ChromaDB's name regex disallows `@`, so the implementation uses `__v<n>` as the fourth `__` separator. See §"Collection naming and invariants" for the binding amendment). Triple-keyed. Mixed content types, mixed owners, or embedding-model swaps in place are rejected at create time.
 5. **No fallback or default destinations.** Every write specifies its target collection. `docs__default`, `knowledge__knowledge`, and any other catch-all are removed.
 
 ### Entities
@@ -303,13 +303,15 @@ The projector is a deterministic function: `events → SQLite state`. Idempotent
 ### Collection naming and invariants
 
 ```
-<content_type>__<owner_id>__<embedding_model>@<model_version>
+<content_type>__<owner_id>__<embedding_model>__v<n>
 ```
 
-Examples:
-- `code__ART-8c2e74c0__voyage-3@2024-08`
-- `docs__nexus-571b8edd__voyage-context-3@2024-09`
-- `papers__art-curator__voyage-context-3@2024-09`
+Examples (post-Phase-6 conformant form):
+- `code__1-1__voyage-code-3__v1`
+- `docs__1-1__voyage-context-3__v2`
+- `knowledge__1-1__voyage-context-3__v1`
+
+**Phase 6 amendment (2026-05-03):** The original schema used `@<model_version>` as the version separator. ChromaDB's collection-name regex disallows `@`, so the canonical encoding uses `__v<n>` as a fourth `__` separator instead. Tumbler-style owner IDs (which contain dots, e.g. `1.1`) are encoded with dots replaced by hyphens (`1-1`) so the segment fits ChromaDB's charset. The four-segment split is preserved; only the separator and version-segment shape changed. The implementation is in `nexus.corpus.is_conformant_collection_name` and `parse_conformant_collection_name`. Legacy two-segment names (`code__ART-8c2e74c0`, `docs__nexus-571b8edd`, `knowledge__delos`, `docs__default`, etc.) are grandfathered via the projection's `legacy_grandfathered` flag and continue to be readable.
 
 Enforced at `CollectionCreated` time:
 - One owner per collection.

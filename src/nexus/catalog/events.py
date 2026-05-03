@@ -167,11 +167,18 @@ class CollectionCreatedPayload:
 
     ``coll_id`` is the canonical identifier. Per RDR-101 §"Collection naming
     and invariants" the canonical form is
-    ``<content_type>__<owner_id>__<embedding_model>@<model_version>``; legacy
-    grandfathered names (e.g. ``code__ART-8c2e74c0``) are also valid coll_id
-    values and Phase 1 stores them verbatim. The four split-out fields make
-    the invariants pattern-matchable at projection time without parsing the
+    ``<content_type>__<owner_id>__<embedding_model>__v<n>`` (Phase 6
+    amendment to the original ``@<model_version>`` form, which ChromaDB
+    rejects); legacy grandfathered names (e.g. ``code__ART-8c2e74c0``)
+    are also valid coll_id values and the projector flags them via the
+    ``legacy_grandfathered`` column. The four split-out fields make the
+    invariants pattern-matchable at projection time without parsing the
     composite name.
+
+    ``created_at`` is populated by the writer (typically equal to the
+    event envelope's ``ts``) so replay-equality is deterministic. Older
+    events that pre-date the field default to empty string; the
+    projector preserves whatever lived in the row before via COALESCE.
     """
 
     coll_id: str
@@ -180,15 +187,24 @@ class CollectionCreatedPayload:
     embedding_model: str
     model_version: str
     name: str = ""  # display name; defaults to coll_id
+    created_at: str = ""
 
 
 @dataclass(frozen=True, slots=True)
 class CollectionSupersededPayload:
-    """One collection replaced by another (re-embed, rename, grandfather)."""
+    """One collection replaced by another (re-embed, rename, grandfather).
+
+    ``superseded_at`` is populated by the writer (typically equal to the
+    event envelope's ``ts``) so projection is deterministic across
+    replay machines. Older events that pre-date the field default to
+    empty string; in that case the projector falls back to "now" so the
+    column is always populated even for legacy events.
+    """
 
     old_coll_id: str
     new_coll_id: str
     reason: str = ""
+    superseded_at: str = ""
 
 
 @dataclass(frozen=True, slots=True)

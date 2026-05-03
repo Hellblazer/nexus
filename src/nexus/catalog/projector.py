@@ -307,13 +307,90 @@ class Projector:
         return
 
     def _v0_owner_or_collection_noop(self, payload: Any) -> None:
-        # ``CollectionCreated`` / ``CollectionSuperseded`` have no
-        # corresponding row in the Phase 1 SQLite schema (the existing
-        # ``documents.physical_collection`` column carries the collection
-        # name). The projector accepts these events so the dispatch table
-        # is complete; future schema gains a ``collections`` table that
-        # consumes them.
+        # Reserved for future no-op event types in the
+        # owner-or-collection family. Phase 6 split CollectionCreated
+        # and CollectionSuperseded out into their own materializing
+        # handlers (``_v0_collection_created`` /
+        # ``_v0_collection_superseded``).
         return
+
+    def _v0_collection_created(self, payload: Any) -> None:
+        """Materialize a row in the ``collections`` projection.
+
+        ``legacy_grandfathered`` is derived from
+        :func:`nexus.corpus.is_conformant_collection_name`, not from
+        the event payload. This keeps the v: 0 schema stable; the only
+        cost is one regex per replay step, which the projector already
+        does for every DocumentRegistered (FTS sync).
+
+        Idempotent via ``INSERT OR REPLACE`` on the ``name`` PK.
+        """
+        from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415
+
+        if not payload.coll_id:
+            return
+        legacy = 0 if is_conformant_collection_name(payload.coll_id) else 1
+        self._db.execute(
+            "INSERT OR REPLACE INTO collections "
+            "(name, content_type, owner_id, embedding_model, model_version, "
+            "display_name, legacy_grandfathered, superseded_by, "
+            "superseded_at, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, "
+            "COALESCE((SELECT superseded_by FROM collections WHERE name = ?), ''), "
+            "COALESCE((SELECT superseded_at FROM collections WHERE name = ?), ''), "
+            # ``created_at`` prefers an existing row's value (re-register
+            # preserves the first-registration timestamp); falls back to
+            # ``payload.created_at`` for fresh inserts. Pre-amendment
+            # events without the field default to empty string.
+            "COALESCE((SELECT created_at FROM collections WHERE name = ?), ?))",
+            (
+                payload.coll_id,
+                payload.content_type,
+                payload.owner_id,
+                payload.embedding_model,
+                payload.model_version,
+                payload.name or payload.coll_id,
+                legacy,
+                payload.coll_id,
+                payload.coll_id,
+                payload.coll_id,
+                getattr(payload, "created_at", "") or "",
+            ),
+        )
+
+    def _v0_collection_superseded(self, payload: Any) -> None:
+        """Mark the old collection's row as superseded; emit no new row.
+
+        ``new_coll_id`` is expected to have its own ``CollectionCreated``
+        already (or to follow shortly); the projector does not
+        bootstrap a row for it from the supersede event alone, which
+        would lose the canonical fields (``content_type``, ``owner_id``,
+        ``embedding_model``, ``model_version``).
+
+        If the old name has no row, the UPDATE is a safe no-op; the
+        rename verb's caller is responsible for surfacing
+        "unknown old collection" errors before the event is appended.
+
+        ``superseded_at`` is read from the payload so replay is
+        deterministic. Pre-payload-field events (synthesized before
+        ``CollectionSupersededPayload.superseded_at`` was added) default
+        to empty string here; we populate "now" in that case so the
+        column is never empty and the doctor's projection-vs-T3 drift
+        check has a consistent shape to read.
+        """
+        from datetime import UTC, datetime  # noqa: PLC0415
+
+        if not payload.old_coll_id or not payload.new_coll_id:
+            return
+        ts = (
+            getattr(payload, "superseded_at", "")
+            or datetime.now(UTC).isoformat()
+        )
+        self._db.execute(
+            "UPDATE collections SET superseded_by = ?, superseded_at = ? "
+            "WHERE name = ?",
+            (payload.new_coll_id, ts, payload.old_coll_id),
+        )
 
     def _v0_chunk_indexed(self, payload: Any) -> None:
         # Phase 1 SQLite has no ``chunks`` table. The chunk count is
@@ -399,8 +476,8 @@ def _build_dispatch() -> dict[tuple[str, int], Any]:
         # v: 0 — synthesized from existing JSONL
         (ev.TYPE_OWNER_REGISTERED, 0):       Projector._v0_owner_registered,
         (ev.TYPE_OWNER_DELETED, 0):          Projector._v0_owner_deleted,
-        (ev.TYPE_COLLECTION_CREATED, 0):     Projector._v0_owner_or_collection_noop,
-        (ev.TYPE_COLLECTION_SUPERSEDED, 0):  Projector._v0_owner_or_collection_noop,
+        (ev.TYPE_COLLECTION_CREATED, 0):     Projector._v0_collection_created,
+        (ev.TYPE_COLLECTION_SUPERSEDED, 0):  Projector._v0_collection_superseded,
         (ev.TYPE_DOCUMENT_REGISTERED, 0):    Projector._v0_document_registered,
         (ev.TYPE_DOCUMENT_RENAMED, 0):       Projector._v0_document_renamed,
         (ev.TYPE_DOCUMENT_ALIASED, 0):       Projector._v0_document_aliased,

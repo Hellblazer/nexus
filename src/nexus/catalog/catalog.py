@@ -99,6 +99,8 @@ def _read_event_sourced_gate() -> bool:
 # events on behalf of the caller). The PR-F initial comment described
 # these as "lazy" imports — they are not, they run at import time.
 from nexus.catalog.events import (  # noqa: E402
+    CollectionCreatedPayload as _CollectionCreatedPayload,
+    CollectionSupersededPayload as _CollectionSupersededPayload,
     DocumentAliasedPayload as _DocumentAliasedPayload,
     DocumentDeletedPayload as _DocumentDeletedPayload,
     DocumentEnrichedPayload as _DocumentEnrichedPayload,
@@ -1429,6 +1431,337 @@ class Catalog:
             )
             for row in rows
         ]
+
+    # ── RDR-101 Phase 6: Collections projection (nexus-o6aa.14) ─────────
+
+    _COLLECTION_COLUMNS = (
+        "name",
+        "content_type",
+        "owner_id",
+        "embedding_model",
+        "model_version",
+        "display_name",
+        "legacy_grandfathered",
+        "superseded_by",
+        "superseded_at",
+        "created_at",
+    )
+
+    def _row_to_collection_dict(self, row: tuple) -> dict:
+        d = dict(zip(self._COLLECTION_COLUMNS, row))
+        d["legacy_grandfathered"] = bool(d.get("legacy_grandfathered") or 0)
+        return d
+
+    def register_collection(
+        self,
+        name: str,
+        *,
+        content_type: str = "",
+        owner_id: str = "",
+        embedding_model: str = "",
+        model_version: str = "",
+        display_name: str = "",
+    ) -> None:
+        """Register a ChromaDB collection in the catalog projection.
+
+        Idempotent on ``name``. The first call writes the row + emits a
+        ``CollectionCreated`` event; subsequent calls with identical
+        canonical fields short-circuit (no duplicate event, no log
+        bloat). Subsequent calls that change a canonical field re-emit
+        the event so the projection picks up the new value.
+
+        For non-conformant names, the canonical fields (``content_type``
+        etc.) may be left empty; the row is still written and flagged
+        as legacy via the projector's regex. For conformant names,
+        callers are encouraged to supply the segments so they round-trip
+        exactly.
+
+        Honors the ``_event_sourced_enabled`` split that ``register_owner``
+        and the other writers use: in event-sourced mode the event is
+        canonical and the projector writes SQLite; in legacy mode SQLite
+        is written directly and the event is shadow-emitted.
+        """
+        from datetime import UTC, datetime  # noqa: PLC0415
+        from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415
+
+        if not name:
+            raise ValueError("register_collection: name must be non-empty")
+
+        # Short-circuit: if the row already exists with the same
+        # canonical fields, do not re-emit. Event log was previously
+        # appended unconditionally on every call; for hot paths
+        # (backfill on a 100-collection catalog re-run on every CI
+        # build) this produced duplicate CollectionCreated events with
+        # no projection effect.
+        existing = self.get_collection(name)
+        if existing is not None and (
+            existing["content_type"] == content_type
+            and existing["owner_id"] == owner_id
+            and existing["embedding_model"] == embedding_model
+            and existing["model_version"] == model_version
+            and existing["display_name"] == (display_name or name)
+        ):
+            return
+
+        ts = datetime.now(UTC).isoformat()
+        event = _make_event(
+            _CollectionCreatedPayload(
+                coll_id=name,
+                owner_id=owner_id,
+                content_type=content_type,
+                embedding_model=embedding_model,
+                model_version=model_version,
+                name=display_name or name,
+                created_at=ts,
+            ),
+            v=0,
+            ts=ts,
+        )
+        dir_fd = self._acquire_lock()
+        try:
+            if self._event_sourced_enabled:
+                self._write_to_event_log(event)
+                self._projector.apply(event)
+                # ``created_at`` lands via the projector's COALESCE
+                # using ``payload.created_at`` (RDR-101 Phase 6
+                # prophylactic-review fix #2 / nexus-qpet); replay
+                # equality holds without an out-of-band UPDATE.
+                self._db.commit()
+            else:
+                # Legacy mode: SQLite is canonical, no JSONL backing
+                # file for collections (they did not exist pre-Phase-6).
+                # Direct INSERT OR REPLACE matches the projector handler
+                # except for the regex-derived legacy_grandfathered flag,
+                # which we compute the same way here.
+                legacy = 0 if is_conformant_collection_name(name) else 1
+                self._db.execute(
+                    "INSERT OR REPLACE INTO collections "
+                    "(name, content_type, owner_id, embedding_model, "
+                    "model_version, display_name, legacy_grandfathered, "
+                    "superseded_by, superseded_at, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, "
+                    "COALESCE((SELECT superseded_by FROM collections WHERE name = ?), ''), "
+                    "COALESCE((SELECT superseded_at FROM collections WHERE name = ?), ''), "
+                    "COALESCE((SELECT created_at FROM collections WHERE name = ?), ?))",
+                    (
+                        name, content_type, owner_id, embedding_model,
+                        model_version, display_name or name, legacy,
+                        name, name, name, ts,
+                    ),
+                )
+                self._db.commit()
+                self._emit_shadow_event(event)
+        finally:
+            self._release_lock(dir_fd)
+
+    def list_collections(self) -> list[dict]:
+        """Return every row in the ``collections`` projection, ordered by name."""
+        sql = (
+            "SELECT " + ", ".join(self._COLLECTION_COLUMNS) + " "
+            "FROM collections ORDER BY name"
+        )
+        rows = self._db.execute(sql).fetchall()
+        return [self._row_to_collection_dict(r) for r in rows]
+
+    def get_collection(self, name: str) -> dict | None:
+        sql = (
+            "SELECT " + ", ".join(self._COLLECTION_COLUMNS) + " "
+            "FROM collections WHERE name = ?"
+        )
+        row = self._db.execute(sql, (name,)).fetchone()
+        return self._row_to_collection_dict(row) if row else None
+
+    def is_legacy_collection(self, name: str) -> bool:
+        """Return True if ``name`` is registered AND flagged legacy.
+
+        Unknown names return False (read paths are operationally hostile
+        to fail-loud per RDR-101 §"Phase 6"). Callers wanting strict
+        membership should query :meth:`get_collection` and check for None.
+        """
+        row = self._db.execute(
+            "SELECT legacy_grandfathered FROM collections WHERE name = ?",
+            (name,),
+        ).fetchone()
+        return bool(row and row[0])
+
+    def update_document_collection(
+        self, tumbler: str, new_collection: str,
+    ) -> bool:
+        """Re-point a single document's ``physical_collection``.
+
+        Per-row analog of :meth:`rename_collection` for migrations
+        where each document gets a different target (e.g. RDR-101
+        Phase 6 ``nx catalog migrate-fallback``). Emits
+        DocumentRegistered v: 0 with the new ``physical_collection``;
+        the projector's INSERT OR REPLACE updates the SQLite row.
+
+        Returns True if the doc was re-pointed, False if not found or
+        already pointed at ``new_collection`` (idempotent).
+        """
+        from nexus.catalog.synthesizer import _owner_prefix_of  # noqa: PLC0415
+
+        row = self._db.execute(
+            "SELECT tumbler, title, author, year, content_type, file_path, "
+            "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
+            "metadata, source_mtime, source_uri, alias_of "
+            "FROM documents WHERE tumbler = ?",
+            (tumbler,),
+        ).fetchone()
+        if row is None:
+            return False
+        if (row[7] or "") == new_collection:
+            return False
+
+        meta_dict = json.loads(row[11]) if row[11] else {}
+        event = _make_event(
+            _DocumentRegisteredPayload(
+                doc_id=row[0],
+                owner_id=_owner_prefix_of(row[0]),
+                content_type=row[4] or "",
+                source_uri=row[13] or "",
+                coll_id=new_collection,
+                title=row[1] or "",
+                source_mtime=float(row[12] or 0.0),
+                indexed_at_doc=row[10] or "",
+                tumbler=row[0],
+                author=row[2] or "",
+                year=int(row[3] or 0),
+                file_path=row[5] or "",
+                corpus=row[6] or "",
+                physical_collection=new_collection,
+                chunk_count=int(row[8] or 0),
+                head_hash=row[9] or "",
+                indexed_at=row[10] or "",
+                alias_of=row[14] or "",
+                meta=dict(meta_dict),
+            ),
+            v=0,
+        )
+        rec = {
+            "tumbler": row[0],
+            "title": row[1],
+            "author": row[2],
+            "year": row[3],
+            "content_type": row[4],
+            "file_path": row[5],
+            "corpus": row[6],
+            "physical_collection": new_collection,
+            "chunk_count": row[8],
+            "head_hash": row[9] or "",
+            "indexed_at": row[10] or "",
+            "meta": meta_dict,
+            "source_mtime": row[12] or 0.0,
+            "source_uri": row[13] or "",
+            "alias_of": row[14] or "",
+        }
+
+        dir_fd = self._acquire_lock()
+        try:
+            if self._event_sourced_enabled:
+                # Crash-window discipline matches rename_collection's
+                # per-row loop (catalog.py:2253-2255 + batched commit at
+                # 2264): event -> projector apply -> JSONL append, with
+                # the SQLite commit last. A crash between projector apply
+                # and JSONL append leaves SQLite uncommitted and JSONL
+                # unwritten - both old. A crash between JSONL append and
+                # commit leaves JSONL ahead of SQLite; on
+                # rebuild-from-JSONL the new line wins; on
+                # rebuild-from-events the projector replays correctly.
+                # Either way, no torn state.
+                self._write_to_event_log(event)
+                self._projector.apply(event)
+                self._append_jsonl(self._documents_path, rec)
+                self._db.commit()
+            else:
+                self._append_jsonl(self._documents_path, rec)
+                self._db.execute(
+                    "UPDATE documents SET physical_collection = ? "
+                    "WHERE tumbler = ?",
+                    (new_collection, row[0]),
+                )
+                self._db.commit()
+                self._emit_shadow_event(event)
+        finally:
+            self._release_lock(dir_fd)
+        return True
+
+    def supersede_collection(
+        self,
+        old_name: str,
+        new_name: str,
+        *,
+        reason: str = "",
+    ) -> None:
+        """Mark ``old_name`` as superseded by ``new_name``.
+
+        Writes a CollectionSuperseded v: 0 event and updates the old
+        collection's ``superseded_by`` / ``superseded_at`` columns. The
+        new collection MUST already be registered (the docstring used
+        to say "callers usually pair register_collection with
+        supersede_collection"; that contract is now enforced).
+
+        Raises ``ValueError`` when:
+          - ``old_name`` is not registered (typo-on-explicit-action path)
+          - ``new_name`` is not registered (would create a dangling
+            ``superseded_by`` pointer that no foreign-key-style join
+            can resolve)
+          - ``old_name`` is already superseded (silently overwriting
+            the previous supersession would orphan the prior
+            CollectionSuperseded event in the log)
+
+        Honors the ``_event_sourced_enabled`` split that the rest of the
+        catalog writers use.
+        """
+        from datetime import UTC, datetime  # noqa: PLC0415
+
+        existing = self.get_collection(old_name)
+        if existing is None:
+            raise ValueError(
+                f"supersede_collection: {old_name!r} not registered"
+            )
+        if existing.get("superseded_by"):
+            raise ValueError(
+                f"supersede_collection: {old_name!r} is already "
+                f"superseded by {existing['superseded_by']!r}; refusing "
+                f"to chain a second supersede event"
+            )
+        if self.get_collection(new_name) is None:
+            raise ValueError(
+                f"supersede_collection: new {new_name!r} is not "
+                f"registered. Call register_collection({new_name!r}, ...) "
+                f"first so the projection has a row to point at."
+            )
+        ts = datetime.now(UTC).isoformat()
+        event = _make_event(
+            _CollectionSupersededPayload(
+                old_coll_id=old_name,
+                new_coll_id=new_name,
+                reason=reason,
+                superseded_at=ts,
+            ),
+            v=0,
+            ts=ts,
+        )
+        dir_fd = self._acquire_lock()
+        try:
+            if self._event_sourced_enabled:
+                self._write_to_event_log(event)
+                self._projector.apply(event)
+                self._db.commit()
+            else:
+                # Legacy mode: SQLite is canonical, no JSONL backing.
+                # Reuse the same ``ts`` as the event payload so the row
+                # records exactly what the event records (deterministic
+                # under replay-equality even in legacy mode).
+                self._db.execute(
+                    "UPDATE collections SET superseded_by = ?, "
+                    "superseded_at = ? WHERE name = ?",
+                    (new_name, ts, old_name),
+                )
+                self._db.commit()
+                self._emit_shadow_event(event)
+        finally:
+            self._release_lock(dir_fd)
 
     def resolve_alias(self, tumbler: Tumbler, *, max_hops: int = 16) -> Tumbler:
         """Walk the alias chain to its canonical terminus.
