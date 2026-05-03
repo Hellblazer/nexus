@@ -113,7 +113,7 @@ The `nx/` plugin tree carries its own references. Two kinds:
 **Active name-constructing code** (treat like the indexer family):
 
 - `nx/hooks/scripts/rdr_hook.py:58, 269`: writes `target = f"rdr__{repo_name}"`. Constructs a legacy 2-segment name; needs to go through `Catalog.collection_for(...)` like the indexer family does.
-- `nx/skills/rdr-close/SKILL.md`: writes post-mortems to `knowledge__rdr_postmortem__{repo}` (lines 220, 231, 244, 278, 296, 309). This is a curated per-repo knowledge collection template that the skill instructs the agent to populate. Decision in scope for this RDR: does `rdr_postmortem` collapse into the conformant `knowledge__<owner>__<model>__v1` shape (folding the `rdr_postmortem` semantic into the `owner_id` segment), or is `knowledge__rdr_postmortem__*` a *fallback*-shaped collection that stays legacy by design?
+- `nx/skills/rdr-close/SKILL.md`: writes post-mortems to `knowledge__rdr_postmortem__{repo}` (lines 220, 231, 244, 278, 296, 309). **Decision (pinned)**: this collapses into the conformant `knowledge__<owner_id>__<model>__v1` shape, where `owner_id` is the repo's tumbler segment (same as every other knowledge collection for that repo). The `rdr_postmortem` semantic is encoded at the document level via the `category` field (or `tags`), NOT in the collection name. Rationale: the conformant schema's `owner_id` segment is a single tumbler-derived identifier; mixing in a literal `rdr_postmortem-` prefix would require a new escape rule and would diverge from how every other curated knowledge collection is named. Document-level routing via `where={"category": "rdr_postmortem"}` is already a supported retrieval pattern. This pulls `rdr_hook.py` and `rdr-close/SKILL.md` into Phase 3 (indexer rewrite) scope, not Phase 6.
 
 **Documentation and examples** (search-and-replace pass):
 
@@ -161,6 +161,8 @@ class CollectionName:
 
 Lives in `src/nexus/catalog/collection_name.py` (new module so the type is importable from both `Catalog` and the indexer family without circulating through `corpus.py`).
 
+**Parse-vs-readable contract**: `CollectionName.parse(name)` is for new conformant names only and raises `ValueError` on legacy 2-segment names or unknown embedding models. Code paths that receive a `physical_collection` field from catalog rows (where legacy values still appear during the migration window) must gate with `is_conformant_collection_name(name)` before calling `CollectionName.parse(name)`. Legacy collection names remain valid T3 strings and remain readable per RDR-101 Phase 6's grandfathering invariant; they are simply not valid `CollectionName` instances. `is_conformant_collection_name` is the bridge for any caller that needs to operate generically across both shapes.
+
 ### Canonical embedding names
 
 A new module-level constant in `src/nexus/corpus.py` enumerates the embedding models that may appear in a `CollectionName.embedding_model` segment:
@@ -196,7 +198,12 @@ The strict-naming enforcement collapses to a property of `CollectionName.render`
 1. **Operator-initiated re-index with explicit version flag** (`nx index repo --bump-version`). Catalog assigns `vN+1`. Existing `vN` collection remains for the migration window; operator supersedes via existing verbs when ready.
 2. **Embedding-model schema break** within the same model name (e.g. dimensionality change). Detected at write-time by the embedder; raises a clear error pointing at the bump verb.
 
-What does NOT bump the version: routine re-index of the same model, content-type changes (those produce a different `content_type` segment), repo identity changes (those produce a different `owner_id`).
+A model-NAME change (e.g. Voyage renames `voyage-code-3` to `voyage-code-3-fast`) is NOT a version bump on the existing tuple. The new name is a different `embedding_model` value, so `Catalog.collection_for(c, o, "voyage-code-3-fast")` finds no existing row and naturally returns `v1` for the new tuple. The old `(c, o, "voyage-code-3")` `v1` collection persists alongside until the operator supersedes it. Operator workflow when adding a new model to `CANONICAL_EMBEDDING_MODELS`:
+
+- For each affected `(content_type, owner_id)` pair, run `nx catalog supersede-collection <old> <new>` once the new collection has been populated.
+- The doctor's `--collections-drift` check surfaces any orphaned old-model collections that have not been superseded.
+
+What does NOT bump the version: routine re-index of the same model, content-type changes (those produce a different `content_type` segment), repo identity changes (those produce a different `owner_id`), model-name changes (those produce a different `embedding_model` segment and a fresh `v1` per the workflow above).
 
 ### Repo-owner identity stability
 
@@ -221,12 +228,15 @@ Validation: a regression test asserts that two `_repo_identity` calls against th
 
 On first `nx index` after RDR-103 lands, the indexer:
 
-1. Computes the conformant target via `cat.collection_for(...)`.
+1. Computes the conformant target via `cat.collection_for(content_type, repo_owner, current_model)`. The `current_model` is **the indexer's current canonical model for the content-type prefix**, NOT a value parsed from the legacy collection name. This sidesteps the case where a legacy collection's embedding model is unknown to `CANONICAL_EMBEDDING_MODELS` (e.g. an old `voyage-3` from before the canonical set existed): the migration always renames into a current-model conformant target.
 2. Looks up the legacy name via the existing repo registry (`_collection_name(repo)`).
 3. If the legacy collection exists in T3 and the conformant target does not: invoke `Catalog.rename_collection(legacy, conformant)` atomically. Single one-line operator message: `Upgraded legacy collection X to Y.`
-4. If the conformant target already exists: index proceeds against it directly; legacy collection (if present) is left for the operator to clean up via existing tools (`nx t3 gc`, `nx catalog rename-collection`, etc.).
+4. If the conformant target already exists AND the legacy collection is absent: index proceeds against the conformant target; no message. (This is the steady state on subsequent indexes.)
+5. If both exist: the conformant target was created by a prior partial run. Skip the rename and index against the conformant target. The legacy collection is left for the operator to clean up via existing tools (`nx t3 gc`, `nx catalog rename-collection`, etc.).
 
 The migration is one-shot per repo per content-type. Operators with hundreds of legacy collections see one upgrade message per collection, then the message stops appearing on subsequent indexes.
+
+Idempotency check: the absence of the legacy collection in T3 is the sufficient signal. After `rename_collection` succeeds, the legacy collection no longer exists, so step 3's precondition fails and the indexer falls through to step 4. No second message.
 
 ### Legacy-name compatibility: accept the breakage
 
@@ -292,22 +302,22 @@ Rationale: building and maintaining a `superseded_by` chain-follow at every read
 8. Update `doc_indexer.py:599/1102/1463` inline name construction.
 9. Update `pipeline_stages.py`, `indexer.py`, `commands/index.py`.
 10. Update `nx/hooks/scripts/rdr_hook.py:58, 269` to use the same naming authority.
+11. Update `nx/skills/rdr-close/SKILL.md` so post-mortems land in the conformant `knowledge__<owner_id>__<model>__v1` shape with `category="rdr_postmortem"` set at the document level. Migrate any existing `knowledge__rdr_postmortem__*` collections via `nx catalog rename-collection` as a one-time operator step; document the rename in the skill's migration note.
 
 ### Phase 4: migration on first index
 
-11. In `_catalog_hook_repo`: detect legacy collection, compute conformant target, invoke `rename_collection` if needed.
-12. Operator-visible one-line "upgraded" message; idempotent (no second message on subsequent indexes).
-13. Lock in a test that re-indexing after the upgrade does not re-emit the message.
+12. In `_catalog_hook_repo`: detect legacy collection, compute conformant target, invoke `rename_collection` if needed.
+13. Operator-visible one-line "upgraded" message; idempotent (legacy-absent in T3 is the sufficient signal; subsequent indexes fall through to step 4 of the migration path with no message).
+14. Lock in a test that re-indexing after the upgrade does not re-emit the message and that a partial-state "both exist" recovery skips the rename and indexes against the conformant target.
 
 ### Phase 5: strict-flip + flag drop
 
-14. Flip `T3Database.strict_collection_naming` default to True (`nexus-2r71` collapses to this commit).
-15. Remove the flag in a follow-up.
-16. Drop the legacy registry helpers from the codebase.
+15. Flip `T3Database.strict_collection_naming` default to True (`nexus-2r71` collapses to this commit).
+16. Remove the flag in a follow-up.
+17. Drop the legacy registry helpers from the codebase.
 
 ### Phase 6: plugin-layer documentation pass
 
-17. Decide the `knowledge__rdr_postmortem__{repo}` shape (rdr-close skill): collapse to conformant `knowledge__<owner>__<model>__v1` with the `rdr_postmortem` semantic encoded elsewhere, or keep as a fallback-shaped legacy collection by design. Document the choice in the skill's SKILL.md.
 18. Sweep `nx/agents/*.md`, `nx/agents/_shared/*.md`, `nx/skills/*/SKILL.md`, `nx/skills/*/reference.md`, `nx/commands/*.md` for legacy-shape illustrative examples (`code__<repo>`, `knowledge__art`, `rdr__nexus`, etc.). Replace with conformant examples that reflect the post-RDR-103 reality.
 19. Update `nx/skills/nexus/SKILL.md` and `reference.md` collection-naming sections to describe the canonical 4-segment shape as the public contract.
 
@@ -330,4 +340,5 @@ Rationale: building and maintaining a `superseded_by` chain-follow at every read
 
 - Should `CollectionName` be exposed in `nexus.catalog`'s public `__all__`, or kept module-internal? Plugins consuming chunk metadata may want to introspect the tuple.
 - Operator UX for the upgrade message: stderr line per collection is fine for ~10 collections. Operators with hundreds of collections (the current state for the project) may want a single summary line with a count plus a `--quiet` flag.
-- Deprecation window for the legacy registry helpers (one release? two?). The helpers are not part of the public API but external plugins may import them.
+- When promoting `_owner_segment_for_tumbler` to a `Catalog` method, should `synthesizer._owner_prefix_of` (a private symbol it currently imports) be promoted alongside, or inlined into the new method? Removing the cross-module private-symbol import is the right cleanup; the choice is about where the canonical implementation lives.
+- Test churn audit: of the 64 hits across 12 files for hardcoded legacy collection patterns, how many are load-bearing assertions vs. comment references? The Phase 3 audit answers this before the rewrite begins.
