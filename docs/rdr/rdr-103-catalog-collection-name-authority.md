@@ -99,7 +99,7 @@ Surveys (verified):
 - Search routing in `src/nexus/search/` and CLI commands accept collection names directly. Same compatibility concern.
 - Plugin index files (`nx/`, `sn/`): some reference legacy-style names in fixtures. Counted in the 78 above.
 
-Compatibility design implication: the `Catalog.collection_for` accessor and any name-resolution helper must transparently follow the `superseded_by` chain when given a legacy name, so a user typing `knowledge__notes` after the rename to `knowledge__notes__voyage-context-3__v1` still hits the right collection. This is one extra SQL hop per resolve and lands the same as the existing alias-chain follow in `Catalog.resolve_alias` (`catalog.py:1770-1799`). Without it, the migration is operator-disruptive in a way the draft did not initially capture.
+Compatibility implication accepted as breakage: with a user base of two operators, scripted MCP calls and saved CLI invocations referencing legacy names are expected to fail loudly post-rename. The operator updates the call once. No transparent-redirect shim; no deprecation chain follow. The surface audit above stands as a guide for *what to update*, not as a list of compat surfaces to preserve.
 
 ## Proposed Solution
 
@@ -204,17 +204,11 @@ On first `nx index` after RDR-103 lands, the indexer:
 
 The migration is one-shot per repo per content-type. Operators with hundreds of legacy collections see one upgrade message per collection, then the message stops appearing on subsequent indexes.
 
-### Legacy-name redirect for user-facing accessors
+### Legacy-name compatibility: accept the breakage
 
-The `rename_collection` verb already populates `collections.superseded_by` with the new name. To keep MCP calls, CLI invocations, and search routing working after the rename, every user-facing name accessor follows the `superseded_by` chain when given a legacy name:
+User base is two operators. Scripted MCP calls and saved CLI invocations that reference legacy collection names will fail with `Collection not found` after the rename. The operator updates the call. No transparent-redirect shim, no deprecation chain follow.
 
-- New helper `Catalog.resolve_collection_name(name)` returns the chain terminus: given `knowledge__notes`, returns `knowledge__notes__voyage-context-3__v1`. Idempotent for already-conformant names.
-- MCP tools (`collection_info`, `store_get`, `store_put`, `search`) call this helper before passing the name to T3. A debug-level log records the redirect; user output stays unchanged.
-- CLI search and collection commands do the same.
-
-This mirrors the existing `Catalog.resolve_alias` chain-follow pattern (`catalog.py:1770-1799`) for tumbler aliases. The cycle and max-hop guards from that pattern are reused. The redirect is at most one hop in practice (a single rename) but the chain pattern protects against multi-step renames that may accumulate over time.
-
-Without this redirect, the rename is operator-disruptive: every scripted MCP call, every saved CLI invocation, every plugin manifest referencing legacy names breaks silently with "Collection not found." With it, the rename is transparent at the read surface; users see legacy names continue to work for the deprecation window.
+Rationale: building and maintaining a `superseded_by` chain-follow at every read surface (MCP tools, CLI commands, search routing) costs more lines than the one-time rename audit it would replace. Loud breakage on the read side is a feature at this scale.
 
 ## Alternatives Considered
 
@@ -280,13 +274,6 @@ Without this redirect, the rename is operator-disruptive: every scripted MCP cal
 11. Operator-visible one-line "upgraded" message; idempotent (no second message on subsequent indexes).
 12. Lock in a test that re-indexing after the upgrade does not re-emit the message.
 
-### Phase 4b: legacy-name redirect for read surfaces
-
-13. New `Catalog.resolve_collection_name(name)` that follows the `superseded_by` chain to the terminus. Idempotent on conformant names. Cycle and max-hop guards mirror `resolve_alias`.
-14. Wire it into MCP tools that accept a `name` argument (`collection_info`, `store_get`, `store_put`, `search`). Debug-level log on redirect; user output unchanged.
-15. Wire it into CLI commands that accept collection names (`nx search`, `nx collection`, etc.).
-16. Tests: legacy name lookup after rename returns the same row as direct conformant lookup; cycle in the chain bails gracefully; multi-step rename chains terminate at the latest target.
-
 ### Phase 5: strict-flip + flag drop
 
 13. Flip `T3Database.strict_collection_naming` default to True (`nexus-2r71` collapses to this commit).
@@ -304,7 +291,7 @@ Without this redirect, the rename is operator-disruptive: every scripted MCP cal
 - `tests/test_catalog_collection_name.py` (new): locks the tuple type contract.
 - `tests/test_catalog_collection_for.py` (new): locks the catalog naming-authority contract including version-bump semantics.
 - `tests/test_indexer_conformant_names.py` (new): locks the indexer family on conformant naming.
-- `tests/test_collection_name_migration.py` (new): locks the legacy-to-conformant rename on first index, the idempotency of the upgrade message, and the redirect via `resolve_collection_name`.
+- `tests/test_collection_name_migration.py` (new): locks the legacy-to-conformant rename on first index and the idempotency of the upgrade message.
 - `tests/test_repo_identity_stability.py` (new or extension of an existing test): locks the path-derived identity invariant; same path returns the same hash; worktrees resolve to the main repo's hash.
 - Existing tests update to drop hardcoded legacy strings. Survey: 64 hits across 12 distinct test files (`grep -rn 'code__nexus-\|docs__nexus-\|rdr__nexus-' tests/`). Many are cluster references not literal sites; the load-bearing rewrite count is smaller but the audit is the count of files that need a pass.
 
