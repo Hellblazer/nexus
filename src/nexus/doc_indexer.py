@@ -142,9 +142,22 @@ def _register_or_lookup_doc_id(
     populated at write time — closing the gap that ChromaDB's
     undocumented upsert metadata-merge was masking pre-RDR-102.
 
-    Returns ``""`` when the catalog is absent (no-catalog ingest contract
-    preserved) or when any unexpected error occurs (best-effort: the
-    caller falls back to the legacy ``source_path``-keyed identity).
+    Auto-initializes the catalog if absent (nexus-fq3b). Pre-fix, this
+    function silently returned ``""`` for users without a catalog,
+    chunks landed without ``doc_id``, and the post-Phase-5c prune
+    fallback matched zero stale chunks because ``source_path`` was
+    dropped from ALLOWED_TOP_LEVEL. Auto-init means every PDF/markdown
+    indexing call results in a registered ``doc_id``, and subsequent
+    re-indexes find prior chunks via the doc_id-keyed where filter.
+    The catalog directory follows ``catalog_path()`` (env or XDG
+    default), so users without an explicit ``nx catalog init`` get one
+    on first index.
+
+    Returns ``""`` only when an unexpected error occurs (best-effort:
+    the caller falls back to the legacy identity path, which on
+    Phase 5c collections will not match by source_path; the surrounding
+    ``except Exception`` at the bottom of this function logs the
+    failure for diagnosis).
 
     Re-registration is event-idempotent via ``Catalog.register``'s
     ``by_file_path`` early-return at ``catalog.py:1218-1234``: a second
@@ -161,7 +174,11 @@ def _register_or_lookup_doc_id(
 
         cat_path = catalog_path()
         if not Catalog.is_initialized(cat_path):
-            return ""
+            # nexus-fq3b: auto-init so chunks land with doc_id and the
+            # post-Phase-5c prune (which can no longer key on the
+            # dropped source_path field) finds stale chunks via the
+            # doc_id-keyed where filter on re-index. Idempotent.
+            Catalog.init(cat_path)
         cat = Catalog(cat_path, cat_path / ".catalog.db")
 
         # Owner resolution mirrors _catalog_pdf_hook / _catalog_markdown_hook
