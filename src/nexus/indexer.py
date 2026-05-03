@@ -399,6 +399,17 @@ def _migrate_legacy_collections(
 
         if legacy_exists and not conformant_exists:
             # Decision tree case 1: rename legacy → conformant.
+            #
+            # The data-plane rename (T3 native modify) is the load-bearing
+            # step: once it succeeds, the chunks live at ``conformant`` and
+            # the catalog has been re-pointed. Subsequent
+            # ``register_collection`` and ``supersede_collection`` calls
+            # update the projections; if either raises, the data is still
+            # at conformant and we MUST return ``conformant``, not legacy.
+            # Returning legacy here would cause the caller to write fresh
+            # chunks to an empty re-created legacy collection while the
+            # actual data sits unreachable at conformant.
+            data_plane_succeeded = False
             try:
                 rename_collection_data_plane(
                     legacy, conformant, t3_db=t3_db, catalog=cat_obj,
@@ -406,10 +417,22 @@ def _migrate_legacy_collections(
                         "phase4_migration_cascade_warn", message=msg,
                     ),
                 )
-                # Register the conformant target in the collections
-                # projection and supersede the legacy entry. Mirrors
-                # what ``nx catalog rename-collection`` CLI does on
-                # top of the data plane.
+                data_plane_succeeded = True
+            except Exception as exc:
+                _log.warning(
+                    "phase4_migration_data_plane_failed",
+                    repo=str(repo), ct=ct, legacy=legacy,
+                    conformant=conformant, error=str(exc),
+                )
+                # Data-plane failed; T3 still has the legacy collection.
+                # Fall back so the caller indexes against existing data.
+                result[ct] = legacy
+                continue
+
+            # Data plane succeeded; data now lives at conformant. From
+            # this point onward any failure is non-fatal for the caller's
+            # write path: ``conformant`` is the right name to use.
+            try:
                 from nexus.corpus import (  # noqa: PLC0415
                     is_conformant_collection_name,
                     parse_conformant_collection_name,
@@ -425,44 +448,40 @@ def _migrate_legacy_collections(
                     )
                 else:
                     cat_obj.register_collection(conformant)
-                try:
-                    cat_obj.supersede_collection(
-                        legacy, conformant, reason="rdr-103-phase4-migration",
-                    )
-                except Exception:
-                    # Old name may not be in the collections projection
-                    # for legacy-shape collections that pre-date Phase 6
-                    # backfill. Non-fatal: the data-plane rename has
-                    # already moved everything; the supersede event is
-                    # a graph-completeness add-on.
-                    _log.debug(
-                        "phase4_supersede_failed_nonfatal",
-                        old=legacy, new=conformant, exc_info=True,
-                    )
-                if on_message is not None:
-                    on_message(
-                        f"Upgraded legacy collection {legacy} to {conformant}."
-                    )
-                # Update the registry so subsequent runs read the
-                # conformant name directly.
-                key = f"{ct}_collection"
-                try:
-                    registry.update(repo, **{key: conformant})  # type: ignore[attr-defined]
-                except Exception:
-                    _log.debug(
-                        "phase4_registry_update_failed",
-                        repo=str(repo), ct=ct, exc_info=True,
-                    )
-                result[ct] = conformant
-            except Exception as exc:
+            except Exception:
                 _log.warning(
-                    "phase4_migration_failed",
-                    repo=str(repo), ct=ct, legacy=legacy,
-                    conformant=conformant, error=str(exc),
+                    "phase4_register_collection_failed_after_rename",
+                    old=legacy, new=conformant, exc_info=True,
                 )
-                # Fall back to legacy name so the caller can still
-                # index against existing data; next run will retry.
-                result[ct] = legacy
+            try:
+                cat_obj.supersede_collection(
+                    legacy, conformant, reason="rdr-103-phase4-migration",
+                )
+            except Exception:
+                # Old name may not be in the collections projection
+                # for legacy-shape collections that pre-date Phase 6
+                # backfill. Non-fatal: the data-plane rename has
+                # already moved everything; the supersede event is
+                # a graph-completeness add-on.
+                _log.debug(
+                    "phase4_supersede_failed_nonfatal",
+                    old=legacy, new=conformant, exc_info=True,
+                )
+            if on_message is not None:
+                on_message(
+                    f"Upgraded legacy collection {legacy} to {conformant}."
+                )
+            # Update the registry so subsequent runs read the
+            # conformant name directly.
+            key = f"{ct}_collection"
+            try:
+                registry.update(repo, **{key: conformant})  # type: ignore[attr-defined]
+            except Exception:
+                _log.debug(
+                    "phase4_registry_update_failed",
+                    repo=str(repo), ct=ct, exc_info=True,
+                )
+            result[ct] = conformant
         elif conformant_exists and legacy_exists:
             # Decision tree case 3: both exist (partial state).
             if on_message is not None:
@@ -1645,7 +1664,13 @@ def _run_index(
         if _migrated_names.get("docs"):
             docs_collection = _migrated_names["docs"]
     except Exception:
-        _log.debug("phase4_migration_failed", exc_info=True)
+        # Unexpected failure outside _migrate_legacy_collections's own
+        # exception handling (which catches per-content-type rename
+        # errors and returns legacy names). This catch is the safety
+        # net for catalog-open / import / unforeseen failures; warn
+        # so the operator can act, but proceed with pre-migration
+        # collection names so the indexing run still completes.
+        _log.warning("phase4_migration_failed", exc_info=True)
 
     _log.debug("creating collections", code=code_collection, docs=docs_collection)
     code_col = db.get_or_create_collection(code_collection)

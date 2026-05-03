@@ -345,6 +345,66 @@ def test_migration_no_op_when_owner_unregistered(
     assert t3.collection_exists(legacy)
 
 
+# ── Greenfield (no T3 collections yet) ─────────────────────────────────────
+
+
+def test_migration_returns_conformant_rdr_on_greenfield(
+    repo_with_owner: Path, catalog: Catalog, t3, registry: RepoRegistry,
+) -> None:
+    """Greenfield repo: catalog has owner, registry is empty, T3 has
+    no collections yet. The migration must return the conformant rdr
+    name so the indexer creates the conformant collection on first
+    write rather than re-creating a legacy one. This pins the case-4
+    branch (neither legacy nor conformant exists).
+    """
+    from nexus.indexer import _migrate_legacy_collections
+
+    # No collections in T3, no registry entry beyond the empty repo.
+    registry.add(repo_with_owner)
+
+    result = _migrate_legacy_collections(
+        repo_with_owner, cat=catalog, t3_db=t3, registry=registry,
+    )
+    assert result["rdr"] == "rdr__1-1__voyage-context-3__v1"
+    assert result["code"] == "code__1-1__voyage-code-3__v1"
+    assert result["docs"] == "docs__1-1__voyage-context-3__v1"
+
+
+# ── Partial migration failure: data-plane succeeds, projection fails ────────
+
+
+def test_migration_returns_conformant_when_register_fails_after_rename(
+    repo_with_owner: Path, catalog: Catalog, t3, registry: RepoRegistry,
+) -> None:
+    """If ``rename_collection_data_plane`` succeeds (data is now at
+    conformant in T3) but the subsequent ``register_collection``
+    raises, the migration MUST return the conformant name so the
+    caller writes fresh chunks to the same collection that holds the
+    migrated data. Returning the legacy name here would create a
+    fresh empty legacy collection alongside the conformant one and
+    split the data.
+    """
+    from nexus.indexer import _migrate_legacy_collections
+
+    legacy = _collection_name(repo_with_owner)
+    _seed_collection_with_chunk(t3, legacy)
+    registry.add(repo_with_owner)
+
+    with patch.object(
+        catalog, "register_collection",
+        side_effect=RuntimeError("simulated projection failure"),
+    ):
+        result = _migrate_legacy_collections(
+            repo_with_owner, cat=catalog, t3_db=t3, registry=registry,
+        )
+
+    # Conformant name returned: data lives there now.
+    assert result["code"] == "code__1-1__voyage-code-3__v1"
+    # T3 reflects the rename even though register_collection raised.
+    assert t3.collection_exists("code__1-1__voyage-code-3__v1")
+    assert not t3.collection_exists(legacy)
+
+
 # ── Multiple content types in one pass ─────────────────────────────────────
 
 
