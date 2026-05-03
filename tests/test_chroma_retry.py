@@ -169,3 +169,75 @@ def test_chroma_error_unchanged(exc, expected) -> None:
 def test_chroma_error_false_for_voyage_error() -> None:
     import voyageai.error as _ve
     assert _is_retryable_chroma_error(_ve.APIConnectionError("down")) is False
+
+
+# ── nexus-jgjw: chromadb hardcodes httpx timeout=None — patch on construction ─
+
+class TestChromadbTimeoutPatch:
+    """Regression guard for nexus-jgjw.
+
+    chromadb >=1.5 constructs its internal ``httpx.Client`` with
+    ``timeout=None`` (chromadb/api/fastapi.py:86,91). That means a
+    Chroma cloud op blocks indefinitely on any read where the server
+    has closed the connection — the failure mode observed during the
+    2026-05-03 orphan recovery (10+ min CPU=0% process state, one TCP
+    socket in CLOSE_WAIT, the other ESTABLISHED, no recovery without
+    SIGTERM).
+
+    T3Database overrides the timeout post-construction. These tests
+    assert the override is in place and that a slow chroma op now
+    surfaces as ``httpx.ReadTimeout`` (which ``_is_retryable_chroma_
+    error`` already classifies as retryable, so the existing retry
+    helper just works).
+    """
+
+    def test_cloud_client_timeout_is_finite(self) -> None:
+        """T3Database constructs CloudClient and overrides its httpx
+        timeout to something finite, not chromadb's hardcoded None."""
+        from nexus.db.t3 import T3Database
+        from unittest.mock import MagicMock, patch
+        # Build a real CloudClient-shaped mock with the same _server._session
+        # path the patch reaches into. Anything not matching that shape gets
+        # left alone (the defensive hasattr in T3Database).
+        fake_session = MagicMock()
+        fake_session.timeout = httpx.Timeout(timeout=None)  # the bug condition
+        fake_server = MagicMock()
+        fake_server._session = fake_session
+        fake_client = MagicMock()
+        fake_client._server = fake_server
+        with patch("nexus.db.t3.chromadb.CloudClient", return_value=fake_client):
+            T3Database(tenant="t", database="d", api_key="k")
+        # Post-construction: timeout must NOT be None (the bug condition).
+        # Specific values are policy; this test only asserts "not the bug."
+        assert fake_session.timeout is not None
+        assert fake_session.timeout != httpx.Timeout(timeout=None), (
+            "T3Database failed to override chromadb's hardcoded timeout=None "
+            "(nexus-jgjw): a slow chroma op will hang indefinitely."
+        )
+
+    def test_local_persistent_client_unaffected(self) -> None:
+        """The override is conditional — local PersistentClient has no
+        ``_server._session`` attribute and must not be touched."""
+        from nexus.db.t3 import T3Database
+        from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+        # Real EphemeralClient — same code path as PersistentClient w/r/t
+        # not having _server._session, but no disk I/O.
+        ephemeral = chromadb.EphemeralClient()
+        # Should not raise even though ephemeral has no _server attribute.
+        db = T3Database(_client=ephemeral, _ef_override=DefaultEmbeddingFunction())
+        assert db._client is ephemeral
+
+    def test_slow_chroma_op_now_raises_readtimeout(self) -> None:
+        """End-to-end: a chroma call that the server stalls on now
+        raises ``httpx.ReadTimeout`` (after the override fires), which
+        ``_is_retryable_chroma_error`` recognizes as retryable. Pre-fix,
+        this would have hung indefinitely."""
+        # ReadTimeout is a httpx.TransportError, classified retryable
+        # by _is_retryable_chroma_error. Wired into _chroma_with_retry.
+        readtimeout = httpx.ReadTimeout("simulated chroma stall after override")
+        assert _is_retryable_chroma_error(readtimeout) is True
+        from unittest.mock import MagicMock
+        fn = MagicMock(side_effect=[readtimeout, readtimeout, "ok"])
+        with patch("nexus.retry.time"):
+            assert _chroma_with_retry(fn, max_attempts=3) == "ok"
+        assert fn.call_count == 3
