@@ -6,6 +6,101 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.22.0] - 2026-05-03
+
+Minor release. Headline: **RDR-101 — Event-sourced catalog with immutable document identity**, landed across Phases 0 → 4 (~70 PRs). The catalog is now backed by an append-only `events.jsonl` event log; SQLite is a derived projection; chunks carry `doc_id` (UUID7-stamped at chunk-write time) as the canonical identity field; the legacy `source_path` keying is on the deprecation glide path. Plus a bug-fix tail covering recovery-time hangs, owner-name collision silent failures, and catalog UX progress visibility.
+
+This release rolls up untagged 4.21.3 + 4.21.4 work (the version bumps in main never made it to a tag) into a single 4.22.0 cut.
+
+### RDR-101 Phase 0 — Foundation (PRs #404–#413)
+
+- **Event log infrastructure** (#414, `events.py` + `event_log.py`). Defines the canonical event types (`OwnerRegistered`, `DocumentRegistered`, `DocumentDeleted`, `LinkCreated`, `LinkDeleted`, `ChunkIndexed`, `DocumentAliased`, `OwnerDeleted`) and the append-only writer with fcntl-flocked atomic appends.
+- **Projector + JSONL synthesizer + replay-equality test** (#416). Projector replays events into SQLite; synthesizer rebuilds `events.jsonl` from legacy JSONL. The replay-equality test asserts `live_db == projected_from_events` for every catalog state — the load-bearing invariant of event-sourcing.
+- **`nx catalog doctor --replay-equality`** (#417). Operator surface for the replay-equality invariant.
+- **Frecency projection + Document bib columns** (#419). New T2 table `frecency_projection` decouples frecency scoring from the catalog row; bib-enrichment columns split out of `documents.metadata` JSON into typed columns.
+- **chash_index column rename** (#418). `chash_index.doc_id` → `chunk_chroma_id` to free `doc_id` for its real role; resolves naming collision noted in `docs/rdr/post-mortem/rdr-101-rdr086-collision.md`.
+- **T2Database self-recording fix** (#413). `_upgrade_done` now records its own `path_key`, fixing version-tracking on parallel-database setups (nexus-avwe).
+- **Phase 0 deliverables** — field-by-field disposition audit (#405), bib_semantic_scholar_id migration plan (#406), chash_index doc_id naming collision (#407), chunk_id generation rule (#408), downstream caller survey (#409), direct T3 metadata access survey (#410), nexus-3e4s post-mortem (#411), index (#412).
+
+### RDR-101 Phase 2 — Synthesis + backfill verbs (PRs #421–#426)
+
+- **`nx catalog synthesize-log`** (#421, #423). Synthesizes `events.jsonl` from legacy JSONL state and (with `--chunks`) extends to T3 chunk synthesis with `ChunkIndexed` events. The `--prefer-live-catalog` flag (added in #480 family below) prefers the live catalog's `doc_id` over the chunk metadata's `doc_id` when reconciling.
+- **`nx catalog t3-backfill-doc-id`** (#424). Walks T3 chunks lacking `doc_id`, looks up their owning Document via the event log, and writes `doc_id` into the chunk metadata. Idempotent.
+- **`nx catalog doctor --t3-doc-id-coverage`** (#425). Operator-runnable per-collection orphan/coverage report.
+- **`nx catalog repair-orphan-chunks`** (#426). Manual identity assignment for chunks the synthesize-log path couldn't recover — for cases where the source has been deleted or the catalog Document never existed.
+
+### RDR-101 Phase 1 — Shadow-emit + opt-in event sourcing (PRs #414, #420)
+
+- **Shadow-emit events alongside JSONL writes (gated)** (#420). `NEXUS_EVENT_SOURCED=1` enables side-by-side emission so events.jsonl can be validated against the legacy JSONL canonical state before the canonical flip in Phase 3.
+
+### RDR-101 Phase 3 — Event-sourced read/write paths (PRs #427–#457)
+
+- **Event-sourced register path (gated, opt-in)** (#430). With `NEXUS_EVENT_SOURCED=1`, `Catalog.register` writes through the projector instead of directly to JSONL+SQLite.
+- **Event-sourced update / delete / set_alias / rename_collection** (#431). Mutating ops also funnel through the projector under the gate.
+- **Round-3 + 4 correctness fixes** (#432, #433). link/unlink event-source, atomic rebuild, bootstrap guard, doctor, alias, projector cache. Failure-mode coverage (mtime races, owner crash window, alias_of threading, doctor schema).
+- **Phase 3 PR γ — link/unlink merge semantics deep-clean** (#434). Replay-equality hardening for the relational case.
+- **Phase 3 PR δ — schema gate + chunk-write doc_id wiring** (#438–#445). Stage A: schema gate forbids chunk writes without `doc_id`. Stages B.1–B.6: wire `prose_indexer` (#439), `code_indexer` (#441), PDF path + register (#442), store put (#443, #444), MCP `store_put` (#444), doctor end-to-end coverage (#445).
+- **Phase 3 PR ε — lint gate forbidding direct catalog writes outside projector module** (#446). Prevents architectural regression: only `nexus.catalog.projector` may write to the SQLite catalog DB.
+- **Phase 3 — dedupe through projector** (#447). Emits `LinkDeleted` / `DocumentDeleted` / `OwnerDeleted` from the dedupe path under the gate.
+- **Phase 3 PR ζ — flip `NEXUS_EVENT_SOURCED` default to ON** (#448). Irreversibility window opens — the canonical state of new catalogs is the event log.
+- **Atomic dedupe** (#449). flock + batched events + transactional projection.
+- **Bootstrap guardrail floor + operator-visible signal** (#453). Prevents silent corruption when running event-sourced reads against a sparse / mid-migration catalog state.
+- **Phase 3 cleanup — lint gate hardening + cascade + ES coverage gaps** (#454).
+- **Phase 3 sandbox e2e migration validation harness** (#455). Operator-runnable migration smoke against a temporary catalog + T3.
+- **`nx catalog migrate` + TTY upgrade prompt + migration guide** (#456). One-verb operator path through the full Phase 0 → 4 migration sequence.
+- **Phase 3 extended e2e — scaled soak + partial-failure recovery** (#457).
+
+### RDR-101 Phase 4 ramp — UX + resilience (PRs #458–#487)
+
+- **Clean migration UX — sync live SQLite + import vector-only collections** (#458, nexus-o6aa.9.14, .9.15).
+- **t3-backfill per-chunk retry + deferred-class quota differentiation** (#459, nexus-o6aa.9.18). On batch-update failure falls back to per-chunk retry; over-cap chunks land in a separate `chunks_deferred` class so they don't poison the success metric.
+- **Per-verb progress output** (#460, nexus-o6aa.9.17). `nx catalog migrate`, `synthesize-log`, `t3-backfill-doc-id` now emit per-collection progress to stderr — required for cloud T3 ops that take tens of minutes.
+- **t3-backfill batch-bisect O(log N) recovery** (#461, nexus-o6aa.9.19). On a persistent batch-quota failure the verb halves and recurses, isolating failing chunks in O(log N) update calls instead of O(N) per-chunk retry.
+- **Catalog `Catalog.update()` None-coercion fix** (#463, nexus-ga48). `cat.update(doc, fields=None)` no longer crashes — coerces to `{}`.
+- **MCP smoke test under bootstrap-fallback** (#465, nexus-o6aa.9.13). MCP server stays serviceable when the catalog is in the bootstrap-fallback state.
+- **T3 import — bypass canonical schema for taxonomy collections** (#464, nexus-o6aa.9.16). Taxonomy collections carry centroid embeddings without underlying chunk text — they don't fit the canonical chunk-metadata schema and now bypass it.
+- **doc_id-keyed dispatch / lookups / safety checks across the codebase**:
+  - Aspects: queue + hook + 9 fire sites (#478, nexus-tdgc); chroma reader dispatch (#471, nexus-o6aa.10.1); transitional fallback when `doc_id` query empty (#476).
+  - Search: catalog prefilter narrows on `doc_id` not `source_path` (#467, nexus-ufyl); catalog-resolved `_display_path` for formatters (#472, nexus-1qed); link boost + display_path priority (#473).
+  - Indexer: doc_id-keyed frecency-only update (#479, nexus-f4z9); doc_id-aware reindex safety check (#477, nexus-7b5n).
+  - Document indexer: doc_id-keyed chunk lookups in PDF/MD indexing (#470, nexus-dcym PR-B).
+  - T3: doc_id-keyed chunk lookups for incremental sync (#469, nexus-dcym PR-A).
+  - Catalog: doc_id-aware walks for import-from-t3 + auto-link (#474, nexus-7b5n).
+- **`nx catalog prune-deprecated-keys`** (#480, nexus-o6aa.10.3). Operator verb that strips the 5 legacy chunk-metadata keys (`source_path`, `git_branch`, `git_commit_hash`, `git_project_name`, `git_remote_url`) — the post-Phase-4 reader-migration cleanup.
+- **Show progress on prune verb's coverage gate + dry run** (#481).
+- **Fold Phase 4 into `nx catalog migrate` + doctor next-verb hint** (#482). One-verb path now includes the Phase 4 prune; doctor's failure messages name the next verb to run.
+- **Catalog hook + staleness escape route for ghost chunks** (#484). Indexer can re-stamp chunks whose source file moved without producing ghost catalog entries.
+- **`nx catalog migrate` runs Phase 4 finisher when Phase 3 already done** (#483). Idempotent forward-progress.
+- **Indexer progress UX**: cumulative chunks + skipped count on progress bar (#485, nexus-6xqk); ETA ticker stops when post-pass phases begin (#486).
+- **Catalog process cache + read-side helper migration** (#487). `Catalog.open_cached(path)` returns a process-shared instance to prevent per-call SQLite write-lock storms on bursty operations.
+
+### Fixed (cherry-pick tail — independent of the schema arc)
+
+- **Catalog owner lookups now filter by `owner_type='curator'`** (commits `45758118`, `bbc46ed0`). Repo and curator owners can share names (e.g. `scheme-evolution-research` exists as a REPO owner from `nx index repo` and as a target for `nx index pdf --corpus scheme-evolution-research`). The bare `WHERE name = ?` lookup used by `_lookup_existing_doc_id`, `_catalog_markdown_hook`, and the `_catalog_pdf_hook` in pipeline_stages picked up whichever was registered first — typically the repo owner. When the file then lived outside that repo's tree (e.g. a DEVONthink-sourced PDF), `Catalog.register`'s cross-project guard raised `ValueError`, the lookup caught broadly and returned `""`, and chunks orphaned silently. All 5 sites now filter by `owner_type='curator'`. Discovered during the RDR-102 post-merge live shakeout.
+- **`nx collection backfill-hash` skips `taxonomy__centroids`** (commit `035f30b0`, supersedes #488). Centroid embeddings have no underlying text — `chunk_text_hash` is computed from `documents`, which is empty for synthetic centroids. Pre-fix the backfill walked the centroids collection, computed empty hashes, and emitted misleading "0 backfilled" lines that obscured actual progress on the real-content collections.
+- **`tests/e2e/sandbox.sh` and `release-sandbox.sh` no longer hang on heredocs** (commit `4ed26272`). Bash here-docs blocked indefinitely in non-interactive shell contexts (Claude Code harness, some CI runners) where parent stdin was wired to a pipe the here-doc machinery never closed. Symptom: scripts returned `rc=124` (timeout) with a 0-byte target file. Replaced both here-docs with `printf` chains. `release-sandbox.sh smoke --skip-install` now completes cleanly in ~30s.
+- **Chroma cloud operations now bound by per-request timeout (nexus-jgjw)** (commit `83daa8b4`). chromadb >=1.5 hardcodes `httpx.Client(timeout=None, ...)` at `chromadb/api/fastapi.py:86,91` — Chroma ops block indefinitely on any read where the server has closed the connection. Observed during the 2026-05-03 orphan recovery: `nx catalog t3-backfill-doc-id` hung for 10+ minutes at 91% on a 63K-chunk collection (CPU=0%, one TCP socket in `CLOSE_WAIT`, no recovery without SIGTERM). `T3Database.__init__` now overrides the timeout via `_apply_chroma_http_timeout(client)` to `httpx.Timeout(connect=10, read=120, write=60, pool=10)`. After the override, a stalled read raises `httpx.ReadTimeout` — already classified retryable by `_is_retryable_chroma_error` — so the existing retry helper converts the hang into a bounded retry-then-fail loop. Defensive on shape: skips PersistentClient/EphemeralClient that have no `_server._session`. Removable once chromadb exposes a settings knob for httpx timeout (track upstream).
+
+### Other
+
+- **t3 import path creates taxonomy collections with cosine, not L2** (#468, nexus-18wz). Taxonomy similarity uses cosine; L2 was a writer-side bug.
+- **Skip integration tests by default; dodge bash 5.3 heredoc deadlock in subagent hook** (#440).
+- **Test coverage stub** (#415).
+- **Documentation** — fire_store_chains consumer audit (#475, nexus-buv0); RDR-101 live-migration post-mortem (#462); Phase 4 reader audit (#466).
+
+### Holding on develop (RDR-102 Phase 4 closeout)
+
+The schema-changing tail of RDR-102 Phase 4 stays on `integration/rdr-102-phase4` + `develop` until RDR-101 Phase 5 catches up:
+
+- Phase A — pre-flight catalog registration writes `doc_id` at chunk-write time
+- Phase B — drop `source_path` from `ALLOWED_TOP_LEVEL` (cleans up 5 deprecated keys for new chunks)
+- Phase C — doctor surfaces orphan ratio with WARN threshold
+- Phase D — operator-runnable e2e gate
+- Synthesizer title-prefix orphan recovery (nexus-olhr)
+- Greenfield acceptance pytest + shakedown step (Phase B-coupled)
+
+Phase 5a opt-in flag (`nexus-o6aa.11`) → 5b default flip (`nexus-o6aa.12`) → 5c final schema removal (`nexus-o6aa.13`) → Phase 6 enforcement (`nexus-o6aa.14`). Bundled with Phase 4 closeout in a future release.
+
 ## [4.21.2] - 2026-04-30
 
 Hotfix release. Refines the v4.21.1 title-validation heuristic after live shakeout against `knowledge__delos` showed pure Jaccard over-rejected legitimate matches with short filename-derived source titles (continuation of nexus-yy1m).
