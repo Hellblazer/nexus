@@ -516,10 +516,20 @@ def migrate_fallback_cmd(
         target = f"{content_type}__{owner}__{target_model}__{target_version}"
         proposals.append((tumbler, target))
 
+    # nexus-qpet.3: aggregate by target so the operator can scan the
+    # mapping at a glance. Per-doc lines below are kept for tests +
+    # operators who want the full proposal.
+    target_counts: dict[str, int] = {}
+    for _, target in proposals:
+        target_counts[target] = target_counts.get(target, 0) + 1
+
     click.echo(
         f"{source}: {len(proposals)} doc(s) -> "
-        f"{len({t for _, t in proposals})} target collection(s)"
+        f"{len(target_counts)} target collection(s)"
     )
+    for target in sorted(target_counts):
+        click.echo(f"  {target}: {target_counts[target]} doc(s)")
+    click.echo("")
     for tumbler, target in proposals:
         click.echo(f"  {tumbler}  ->  {target}")
 
@@ -532,20 +542,31 @@ def migrate_fallback_cmd(
         )
         return
 
+    # Register every unique target ONCE (each register_collection
+    # acquires its own flock; the targets count is small relative to
+    # the document count so no batched register is needed yet).
     targets_seen: set[str] = set()
-    for tumbler, target in proposals:
-        if target not in targets_seen:
-            from nexus.corpus import parse_conformant_collection_name  # noqa: PLC0415
-            segments = parse_conformant_collection_name(target)
-            cat.register_collection(
-                target,
-                content_type=segments["content_type"],
-                owner_id=segments["owner_id"],
-                embedding_model=segments["embedding_model"],
-                model_version=segments["model_version"],
-            )
-            targets_seen.add(target)
-        cat.update_document_collection(tumbler, target)
+    for _, target in proposals:
+        if target in targets_seen:
+            continue
+        from nexus.corpus import parse_conformant_collection_name  # noqa: PLC0415
+        segments = parse_conformant_collection_name(target)
+        cat.register_collection(
+            target,
+            content_type=segments["content_type"],
+            owner_id=segments["owner_id"],
+            embedding_model=segments["embedding_model"],
+            model_version=segments["model_version"],
+        )
+        targets_seen.add(target)
+
+    # nexus-qpet.3: single flock + single commit for the per-doc
+    # re-point loop. Pre-fix shape was N flocks + N commits per
+    # update_document_collection call; a 1000-doc fallback paid the
+    # SQLite commit overhead 1000 times. Batch keeps the operation
+    # deterministic and order-preserving (proposals is already
+    # sorted by tumbler).
+    cat.update_documents_collection_batch(proposals)
 
     if len(targets_seen) == 1:
         only_target = next(iter(targets_seen))

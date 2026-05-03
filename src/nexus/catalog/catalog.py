@@ -1592,6 +1592,89 @@ class Catalog:
         ).fetchone()
         return bool(row and row[0])
 
+    def _update_document_collection_locked(
+        self, tumbler: str, new_collection: str,
+    ) -> bool:
+        """Read+validate+write the per-row re-point WITHOUT acquiring
+        the flock or committing SQLite. Caller is responsible for both.
+
+        Returns True on a write, False on the not-found or
+        same-target idempotency short-circuits. Used by both the
+        single-row :meth:`update_document_collection` (one acquire,
+        one commit per call) and the batch
+        :meth:`update_documents_collection_batch` (one acquire, one
+        commit per N calls).
+        """
+        from nexus.catalog.synthesizer import _owner_prefix_of  # noqa: PLC0415
+
+        row = self._db.execute(
+            "SELECT tumbler, title, author, year, content_type, file_path, "
+            "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
+            "metadata, source_mtime, source_uri, alias_of "
+            "FROM documents WHERE tumbler = ?",
+            (tumbler,),
+        ).fetchone()
+        if row is None:
+            return False
+        if (row[7] or "") == new_collection:
+            return False
+
+        meta_dict = json.loads(row[11]) if row[11] else {}
+        event = _make_event(
+            _DocumentRegisteredPayload(
+                doc_id=row[0],
+                owner_id=_owner_prefix_of(row[0]),
+                content_type=row[4] or "",
+                source_uri=row[13] or "",
+                coll_id=new_collection,
+                title=row[1] or "",
+                source_mtime=float(row[12] or 0.0),
+                indexed_at_doc=row[10] or "",
+                tumbler=row[0],
+                author=row[2] or "",
+                year=int(row[3] or 0),
+                file_path=row[5] or "",
+                corpus=row[6] or "",
+                physical_collection=new_collection,
+                chunk_count=int(row[8] or 0),
+                head_hash=row[9] or "",
+                indexed_at=row[10] or "",
+                alias_of=row[14] or "",
+                meta=dict(meta_dict),
+            ),
+            v=0,
+        )
+        rec = {
+            "tumbler": row[0],
+            "title": row[1],
+            "author": row[2],
+            "year": row[3],
+            "content_type": row[4],
+            "file_path": row[5],
+            "corpus": row[6],
+            "physical_collection": new_collection,
+            "chunk_count": row[8],
+            "head_hash": row[9] or "",
+            "indexed_at": row[10] or "",
+            "meta": meta_dict,
+            "source_mtime": row[12] or 0.0,
+            "source_uri": row[13] or "",
+            "alias_of": row[14] or "",
+        }
+        if self._event_sourced_enabled:
+            self._write_to_event_log(event)
+            self._projector.apply(event)
+            self._append_jsonl(self._documents_path, rec)
+        else:
+            self._append_jsonl(self._documents_path, rec)
+            self._db.execute(
+                "UPDATE documents SET physical_collection = ? "
+                "WHERE tumbler = ?",
+                (new_collection, row[0]),
+            )
+            self._emit_shadow_event(event)
+        return True
+
     def update_document_collection(
         self, tumbler: str, new_collection: str,
     ) -> bool:
@@ -1605,97 +1688,62 @@ class Catalog:
 
         Returns True if the doc was re-pointed, False if not found or
         already pointed at ``new_collection`` (idempotent).
-        """
-        from nexus.catalog.synthesizer import _owner_prefix_of  # noqa: PLC0415
 
+        nexus-qpet.2: read + validate + construct payload all inside
+        the lock so two concurrent re-points of the same tumbler
+        resolve to a deterministic last-write-wins on ONE writer.
+
+        Crash-window discipline (event-sourced mode) matches
+        rename_collection: event -> projector apply -> JSONL append,
+        with the SQLite commit last. A crash between projector apply
+        and JSONL append leaves SQLite uncommitted and JSONL unwritten
+        (both old). A crash between JSONL append and commit leaves
+        JSONL ahead of SQLite; on rebuild-from-JSONL the new line
+        wins; on rebuild-from-events the projector replays correctly.
+        """
         dir_fd = self._acquire_lock()
         try:
-            # nexus-qpet.2: read + validate + construct payload all
-            # inside the lock so two concurrent re-points of the same
-            # tumbler resolve to a deterministic last-write-wins on
-            # ONE writer (the second one observes the first's effect
-            # and short-circuits via the same-target idempotency check).
-            row = self._db.execute(
-                "SELECT tumbler, title, author, year, content_type, file_path, "
-                "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
-                "metadata, source_mtime, source_uri, alias_of "
-                "FROM documents WHERE tumbler = ?",
-                (tumbler,),
-            ).fetchone()
-            if row is None:
-                return False
-            if (row[7] or "") == new_collection:
-                return False
-
-            meta_dict = json.loads(row[11]) if row[11] else {}
-            event = _make_event(
-                _DocumentRegisteredPayload(
-                    doc_id=row[0],
-                    owner_id=_owner_prefix_of(row[0]),
-                    content_type=row[4] or "",
-                    source_uri=row[13] or "",
-                    coll_id=new_collection,
-                    title=row[1] or "",
-                    source_mtime=float(row[12] or 0.0),
-                    indexed_at_doc=row[10] or "",
-                    tumbler=row[0],
-                    author=row[2] or "",
-                    year=int(row[3] or 0),
-                    file_path=row[5] or "",
-                    corpus=row[6] or "",
-                    physical_collection=new_collection,
-                    chunk_count=int(row[8] or 0),
-                    head_hash=row[9] or "",
-                    indexed_at=row[10] or "",
-                    alias_of=row[14] or "",
-                    meta=dict(meta_dict),
-                ),
-                v=0,
+            wrote = self._update_document_collection_locked(
+                tumbler, new_collection,
             )
-            rec = {
-                "tumbler": row[0],
-                "title": row[1],
-                "author": row[2],
-                "year": row[3],
-                "content_type": row[4],
-                "file_path": row[5],
-                "corpus": row[6],
-                "physical_collection": new_collection,
-                "chunk_count": row[8],
-                "head_hash": row[9] or "",
-                "indexed_at": row[10] or "",
-                "meta": meta_dict,
-                "source_mtime": row[12] or 0.0,
-                "source_uri": row[13] or "",
-                "alias_of": row[14] or "",
-            }
-            if self._event_sourced_enabled:
-                # Crash-window discipline matches rename_collection's
-                # per-row loop (catalog.py:2253-2255 + batched commit at
-                # 2264): event -> projector apply -> JSONL append, with
-                # the SQLite commit last. A crash between projector apply
-                # and JSONL append leaves SQLite uncommitted and JSONL
-                # unwritten - both old. A crash between JSONL append and
-                # commit leaves JSONL ahead of SQLite; on
-                # rebuild-from-JSONL the new line wins; on
-                # rebuild-from-events the projector replays correctly.
-                # Either way, no torn state.
-                self._write_to_event_log(event)
-                self._projector.apply(event)
-                self._append_jsonl(self._documents_path, rec)
+            if wrote:
                 self._db.commit()
-            else:
-                self._append_jsonl(self._documents_path, rec)
-                self._db.execute(
-                    "UPDATE documents SET physical_collection = ? "
-                    "WHERE tumbler = ?",
-                    (new_collection, row[0]),
-                )
-                self._db.commit()
-                self._emit_shadow_event(event)
+            return wrote
         finally:
             self._release_lock(dir_fd)
-        return True
+
+    def update_documents_collection_batch(
+        self, pairs: list[tuple[str, str]],
+    ) -> int:
+        """Re-point N documents' ``physical_collection`` in one
+        flock + one SQLite commit (nexus-qpet.3).
+
+        Each *pair* is ``(tumbler, new_collection)``. Returns the
+        count of documents actually re-pointed (no-ops via not-found
+        or same-target idempotency are excluded).
+
+        Used by ``nx catalog migrate-fallback`` for the per-document
+        re-point loop. Single-row callers should still use
+        :meth:`update_document_collection` (which uses this method's
+        helper internally so semantics match).
+        """
+        if not pairs:
+            return 0
+        dir_fd = self._acquire_lock()
+        wrote_any = False
+        updated = 0
+        try:
+            for tumbler, new_collection in pairs:
+                if self._update_document_collection_locked(
+                    tumbler, new_collection,
+                ):
+                    updated += 1
+                    wrote_any = True
+            if wrote_any:
+                self._db.commit()
+            return updated
+        finally:
+            self._release_lock(dir_fd)
 
     def supersede_collection(
         self,

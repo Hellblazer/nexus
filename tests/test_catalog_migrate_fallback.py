@@ -231,6 +231,98 @@ def test_no_yes_falls_back_to_report_only(catalog, runner):
     assert rows[0] == "knowledge__knowledge"
 
 
+def test_dry_run_aggregates_targets_in_summary_header(catalog, runner):
+    """nexus-qpet.3: dry-run output groups documents by target so the
+    operator can scan the proposal at a glance.
+
+    Without aggregation, a 1000-doc proposal emits 1000 lines and the
+    operator has to mentally count target collections. With
+    aggregation, a per-target summary header lands before the per-doc
+    lines.
+    """
+    catalog.register_collection("knowledge__knowledge")
+    _seed_doc(catalog, tumbler="1.5.1", collection="knowledge__knowledge")
+    _seed_doc(catalog, tumbler="1.5.2", collection="knowledge__knowledge")
+    _seed_doc(catalog, tumbler="1.7.1", collection="knowledge__knowledge")
+
+    with patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+        result = runner.invoke(
+            main,
+            ["catalog", "migrate-fallback",
+             "knowledge__knowledge", "--dry-run"],
+        )
+    assert result.exit_code == 0, result.output
+    # Summary header lists each target with its count.
+    assert "knowledge__1-5__voyage-context-3__v1: 2 doc(s)" in result.output
+    assert "knowledge__1-7__voyage-context-3__v1: 1 doc(s)" in result.output
+    # Per-doc lines are still present (operators may want them).
+    assert "1.5.1" in result.output
+    assert "1.7.1" in result.output
+
+
+def test_apply_uses_batch_update_single_lock(catalog, runner):
+    """nexus-qpet.3: --yes routes the per-doc re-point through
+    ``Catalog.update_documents_collection_batch`` so the operation
+    takes ONE flock + ONE SQLite commit regardless of doc count.
+
+    Spy on ``update_document_collection`` (the single-row method) AND
+    ``update_documents_collection_batch`` (the batch). The CLI must
+    call the batch exactly once and the single-row variant zero
+    times.
+    """
+    catalog.register_collection("knowledge__knowledge")
+    _seed_doc(catalog, tumbler="1.5.1", collection="knowledge__knowledge")
+    _seed_doc(catalog, tumbler="1.5.2", collection="knowledge__knowledge")
+    _seed_doc(catalog, tumbler="1.7.1", collection="knowledge__knowledge")
+
+    single_calls = 0
+    batch_calls = 0
+    original_single = catalog.update_document_collection
+    original_batch = catalog.update_documents_collection_batch
+
+    def spy_single(*args, **kwargs):
+        nonlocal single_calls
+        single_calls += 1
+        return original_single(*args, **kwargs)
+
+    def spy_batch(*args, **kwargs):
+        nonlocal batch_calls
+        batch_calls += 1
+        return original_batch(*args, **kwargs)
+
+    catalog.update_document_collection = spy_single
+    catalog.update_documents_collection_batch = spy_batch
+
+    with patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+        result = runner.invoke(
+            main,
+            ["catalog", "migrate-fallback",
+             "knowledge__knowledge", "--yes"],
+        )
+    assert result.exit_code == 0, result.output
+
+    assert batch_calls == 1, (
+        f"expected exactly 1 batch call, got {batch_calls}. The verb "
+        f"must use update_documents_collection_batch to avoid N flock "
+        f"+ N commit cycles per nexus-qpet.3."
+    )
+    assert single_calls == 0, (
+        f"expected 0 single-row calls, got {single_calls}. The per-doc "
+        f"loop must route through the batch method, not the single "
+        f"method (each single call cycles the flock + commits)."
+    )
+
+    # And the migration actually happened.
+    by_tumbler = {
+        r[0]: r[1] for r in catalog._db.execute(
+            "SELECT tumbler, physical_collection FROM documents",
+        ).fetchall()
+    }
+    assert by_tumbler["1.5.1"] == "knowledge__1-5__voyage-context-3__v1"
+    assert by_tumbler["1.5.2"] == "knowledge__1-5__voyage-context-3__v1"
+    assert by_tumbler["1.7.1"] == "knowledge__1-7__voyage-context-3__v1"
+
+
 def test_owner_with_dot_replaced_by_hyphen_in_target(catalog, runner):
     """Tumbler dots become hyphens in the collection-name segment.
 
