@@ -256,7 +256,9 @@ NEW=$(nx catalog collection-name --content-type knowledge)
 nx catalog rename-collection "knowledge__rdr_postmortem__<repo>" "$NEW" --yes
 ```
 
-If the target collection already has documents (rare, only when `nx index repo` ran before the rename), use `nx catalog migrate-fallback` per-document instead so existing rows survive. The renamed documents do not automatically gain `category="rdr_postmortem"`; backfill with `nx catalog update --tumbler <t> --category rdr_postmortem` per document, or accept that pre-RDR-103 post-mortems are tagged via the tags column instead.
+If the target collection already has documents (rare, only when `nx index repo` ran before the rename), use `nx catalog migrate-fallback` per-document instead so existing rows survive.
+
+Renamed documents do not automatically gain `category="rdr_postmortem"` on their chunk metadata, since the chunks were written before the category field was stamped at write time. Pre-RDR-103 post-mortems remain findable via their original `tags="rdr,post-mortem,..."` field (which is searchable as a string contain). The cleanest backfill is to re-archive each post-mortem by rerunning `mcp__plugin_nx_nexus__store_put` with `category="rdr_postmortem"` against the conformant collection, overwriting the legacy chunk by title. Operators that do not need the category-filtered slice can leave the legacy chunks as-is.
 
 ## Flow: Reverted or Abandoned
 

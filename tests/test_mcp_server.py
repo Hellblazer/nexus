@@ -338,9 +338,11 @@ def test_store_put_category_persisted_in_metadata(t3):
 
 
 def test_store_put_category_default_empty(t3):
-    """When ``category`` is not passed, the chunk metadata has no
-    populated category (the make_chunk_metadata default drops empty
-    optionals from the written metadata).
+    """When ``category`` is not passed, the stored chunk metadata
+    treats it as empty so a category-filtered ``where`` query (e.g.
+    ``where={"category": "rdr_postmortem"}``) does not match. This
+    pins the absence of category leakage between unrelated store_put
+    calls in the same collection.
     """
     store_put(
         content="ordinary body",
