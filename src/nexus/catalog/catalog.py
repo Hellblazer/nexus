@@ -1487,22 +1487,6 @@ class Catalog:
         if not name:
             raise ValueError("register_collection: name must be non-empty")
 
-        # Short-circuit: if the row already exists with the same
-        # canonical fields, do not re-emit. Event log was previously
-        # appended unconditionally on every call; for hot paths
-        # (backfill on a 100-collection catalog re-run on every CI
-        # build) this produced duplicate CollectionCreated events with
-        # no projection effect.
-        existing = self.get_collection(name)
-        if existing is not None and (
-            existing["content_type"] == content_type
-            and existing["owner_id"] == owner_id
-            and existing["embedding_model"] == embedding_model
-            and existing["model_version"] == model_version
-            and existing["display_name"] == (display_name or name)
-        ):
-            return
-
         ts = datetime.now(UTC).isoformat()
         # nexus-7m8n: freeze legacy_grandfathered on the event at write
         # time so future regex changes do not drift projected rows.
@@ -1523,6 +1507,26 @@ class Catalog:
         )
         dir_fd = self._acquire_lock()
         try:
+            # Short-circuit: if the row already exists with the same
+            # canonical fields, do not re-emit. Event log was previously
+            # appended unconditionally on every call; for hot paths
+            # (backfill on a 100-collection catalog re-run on every CI
+            # build) this produced duplicate CollectionCreated events
+            # with no projection effect.
+            #
+            # nexus-qpet.2: re-check inside the locked block so a
+            # concurrent register_collection of the same name cannot
+            # slip a duplicate event into the log between the read and
+            # the lock acquisition.
+            existing = self.get_collection(name)
+            if existing is not None and (
+                existing["content_type"] == content_type
+                and existing["owner_id"] == owner_id
+                and existing["embedding_model"] == embedding_model
+                and existing["model_version"] == model_version
+                and existing["display_name"] == (display_name or name)
+            ):
+                return
             if self._event_sourced_enabled:
                 self._write_to_event_log(event)
                 self._projector.apply(event)
@@ -1604,63 +1608,67 @@ class Catalog:
         """
         from nexus.catalog.synthesizer import _owner_prefix_of  # noqa: PLC0415
 
-        row = self._db.execute(
-            "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
-            "metadata, source_mtime, source_uri, alias_of "
-            "FROM documents WHERE tumbler = ?",
-            (tumbler,),
-        ).fetchone()
-        if row is None:
-            return False
-        if (row[7] or "") == new_collection:
-            return False
-
-        meta_dict = json.loads(row[11]) if row[11] else {}
-        event = _make_event(
-            _DocumentRegisteredPayload(
-                doc_id=row[0],
-                owner_id=_owner_prefix_of(row[0]),
-                content_type=row[4] or "",
-                source_uri=row[13] or "",
-                coll_id=new_collection,
-                title=row[1] or "",
-                source_mtime=float(row[12] or 0.0),
-                indexed_at_doc=row[10] or "",
-                tumbler=row[0],
-                author=row[2] or "",
-                year=int(row[3] or 0),
-                file_path=row[5] or "",
-                corpus=row[6] or "",
-                physical_collection=new_collection,
-                chunk_count=int(row[8] or 0),
-                head_hash=row[9] or "",
-                indexed_at=row[10] or "",
-                alias_of=row[14] or "",
-                meta=dict(meta_dict),
-            ),
-            v=0,
-        )
-        rec = {
-            "tumbler": row[0],
-            "title": row[1],
-            "author": row[2],
-            "year": row[3],
-            "content_type": row[4],
-            "file_path": row[5],
-            "corpus": row[6],
-            "physical_collection": new_collection,
-            "chunk_count": row[8],
-            "head_hash": row[9] or "",
-            "indexed_at": row[10] or "",
-            "meta": meta_dict,
-            "source_mtime": row[12] or 0.0,
-            "source_uri": row[13] or "",
-            "alias_of": row[14] or "",
-        }
-
         dir_fd = self._acquire_lock()
         try:
+            # nexus-qpet.2: read + validate + construct payload all
+            # inside the lock so two concurrent re-points of the same
+            # tumbler resolve to a deterministic last-write-wins on
+            # ONE writer (the second one observes the first's effect
+            # and short-circuits via the same-target idempotency check).
+            row = self._db.execute(
+                "SELECT tumbler, title, author, year, content_type, file_path, "
+                "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
+                "metadata, source_mtime, source_uri, alias_of "
+                "FROM documents WHERE tumbler = ?",
+                (tumbler,),
+            ).fetchone()
+            if row is None:
+                return False
+            if (row[7] or "") == new_collection:
+                return False
+
+            meta_dict = json.loads(row[11]) if row[11] else {}
+            event = _make_event(
+                _DocumentRegisteredPayload(
+                    doc_id=row[0],
+                    owner_id=_owner_prefix_of(row[0]),
+                    content_type=row[4] or "",
+                    source_uri=row[13] or "",
+                    coll_id=new_collection,
+                    title=row[1] or "",
+                    source_mtime=float(row[12] or 0.0),
+                    indexed_at_doc=row[10] or "",
+                    tumbler=row[0],
+                    author=row[2] or "",
+                    year=int(row[3] or 0),
+                    file_path=row[5] or "",
+                    corpus=row[6] or "",
+                    physical_collection=new_collection,
+                    chunk_count=int(row[8] or 0),
+                    head_hash=row[9] or "",
+                    indexed_at=row[10] or "",
+                    alias_of=row[14] or "",
+                    meta=dict(meta_dict),
+                ),
+                v=0,
+            )
+            rec = {
+                "tumbler": row[0],
+                "title": row[1],
+                "author": row[2],
+                "year": row[3],
+                "content_type": row[4],
+                "file_path": row[5],
+                "corpus": row[6],
+                "physical_collection": new_collection,
+                "chunk_count": row[8],
+                "head_hash": row[9] or "",
+                "indexed_at": row[10] or "",
+                "meta": meta_dict,
+                "source_mtime": row[12] or 0.0,
+                "source_uri": row[13] or "",
+                "alias_of": row[14] or "",
+            }
             if self._event_sourced_enabled:
                 # Crash-window discipline matches rename_collection's
                 # per-row loop (catalog.py:2253-2255 + batched commit at
@@ -1718,23 +1726,6 @@ class Catalog:
         """
         from datetime import UTC, datetime  # noqa: PLC0415
 
-        existing = self.get_collection(old_name)
-        if existing is None:
-            raise ValueError(
-                f"supersede_collection: {old_name!r} not registered"
-            )
-        if existing.get("superseded_by"):
-            raise ValueError(
-                f"supersede_collection: {old_name!r} is already "
-                f"superseded by {existing['superseded_by']!r}; refusing "
-                f"to chain a second supersede event"
-            )
-        if self.get_collection(new_name) is None:
-            raise ValueError(
-                f"supersede_collection: new {new_name!r} is not "
-                f"registered. Call register_collection({new_name!r}, ...) "
-                f"first so the projection has a row to point at."
-            )
         ts = datetime.now(UTC).isoformat()
         event = _make_event(
             _CollectionSupersededPayload(
@@ -1748,6 +1739,29 @@ class Catalog:
         )
         dir_fd = self._acquire_lock()
         try:
+            # nexus-qpet.2: re-validate inside the locked block. Two
+            # concurrent supersedes of the same old_name now produce
+            # one success + one ValueError rather than a silent
+            # last-write-wins (the in-process projection was
+            # last-writer determined; replay was order-deterministic
+            # but operator-confusing).
+            existing = self.get_collection(old_name)
+            if existing is None:
+                raise ValueError(
+                    f"supersede_collection: {old_name!r} not registered"
+                )
+            if existing.get("superseded_by"):
+                raise ValueError(
+                    f"supersede_collection: {old_name!r} is already "
+                    f"superseded by {existing['superseded_by']!r}; "
+                    f"refusing to chain a second supersede event"
+                )
+            if self.get_collection(new_name) is None:
+                raise ValueError(
+                    f"supersede_collection: new {new_name!r} is not "
+                    f"registered. Call register_collection({new_name!r}, ...) "
+                    f"first so the projection has a row to point at."
+                )
             if self._event_sourced_enabled:
                 self._write_to_event_log(event)
                 self._projector.apply(event)
