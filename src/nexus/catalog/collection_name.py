@@ -15,12 +15,38 @@ grandfathering invariant.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from nexus.corpus import (
     CANONICAL_EMBEDDING_MODELS,
     CONTENT_TYPES,
     parse_conformant_collection_name,
 )
+
+if TYPE_CHECKING:
+    from nexus.catalog.tumbler import Tumbler
+
+
+def owner_segment_for_tumbler(tumbler: str | Tumbler) -> str:
+    """Return the collection-name owner segment for a tumbler.
+
+    ``1.7.42`` to ``1-7`` (the first two dot-segments joined with a
+    hyphen so the result fits ChromaDB's collection-name regex).
+    Tumbler instances are converted via ``str()``.
+
+    Returns the empty string for malformed input (single-segment
+    tumblers, empty strings) rather than raising; the ``migrate`` verb
+    relies on the empty string to skip the row with a warning instead
+    of aborting the loop. ``Catalog.collection_for`` then promotes the
+    empty-segment case into a ``ValueError`` at the public boundary.
+    """
+    s = str(tumbler) if not isinstance(tumbler, str) else tumbler
+    if not s:
+        return ""
+    parts = s.split(".")
+    if len(parts) < 2:
+        return ""
+    return "-".join(parts[:2])
 
 
 @dataclass(frozen=True, slots=True)

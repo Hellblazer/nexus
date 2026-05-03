@@ -603,17 +603,14 @@ def migrate_fallback_cmd(
     )
 
 
-def _owner_segment_for_tumbler(tumbler: str) -> str:
-    """Return the collection-name owner segment for a tumbler.
-
-    ``1.5.42`` → ``1-5`` (owner prefix with dots replaced by hyphens
-    so the result fits ChromaDB's name regex).
-    """
-    from nexus.catalog.synthesizer import _owner_prefix_of  # noqa: PLC0415
-    prefix = _owner_prefix_of(tumbler)
-    if not prefix:
-        return ""
-    return prefix.replace(".", "-")
+# RDR-103 Phase 2: ``_owner_segment_for_tumbler`` was promoted to
+# ``nexus.catalog.collection_name.owner_segment_for_tumbler``. The
+# command-module alias below preserves the import surface so existing
+# call sites in this file (and any importers) continue to resolve while
+# the rest of the codebase migrates to the public helper.
+from nexus.catalog.collection_name import (  # noqa: E402
+    owner_segment_for_tumbler as _owner_segment_for_tumbler,
+)
 
 
 @catalog.command("rename-collection")

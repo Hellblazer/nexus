@@ -127,6 +127,10 @@ _SPAN_PATTERN = re.compile(
 )
 
 from nexus.catalog.catalog_db import CatalogDB
+from nexus.catalog.collection_name import (
+    CollectionName,
+    owner_segment_for_tumbler,
+)
 from nexus.catalog.tumbler import (
     DocumentRecord,
     LinkRecord,
@@ -136,6 +140,7 @@ from nexus.catalog.tumbler import (
     read_links,
     read_owners,
 )
+from nexus.corpus import CANONICAL_EMBEDDING_MODELS, CONTENT_TYPES
 
 _log = structlog.get_logger()
 
@@ -1591,6 +1596,99 @@ class Catalog:
             (name,),
         ).fetchone()
         return bool(row and row[0])
+
+    def collection_for(
+        self,
+        content_type: str,
+        owner: Tumbler | str,
+        embedding_model: str,
+        *,
+        bump: bool = False,
+    ) -> CollectionName:
+        """Resolve the canonical ``CollectionName`` for a tuple.
+
+        RDR-103 Phase 2. The catalog is the authority for collection
+        naming: callers describe the tuple they want, the catalog renders
+        the physical name. Validation is strict at the public boundary
+        (per pinned decision #4): ``content_type`` must be in
+        :data:`nexus.corpus.CONTENT_TYPES`, ``embedding_model`` must be in
+        :data:`nexus.corpus.CANONICAL_EMBEDDING_MODELS`, and the derived
+        owner segment must be non-empty.
+
+        Version handling:
+
+        - New tuple ``(c, o, m)`` returns ``v1``.
+        - Existing tuple at ``vN`` returns ``vN`` (idempotent).
+        - With ``bump=True``, an existing ``vN`` returns ``vN+1``; a
+          new tuple still returns ``v1`` (bump only fires when prior
+          versions exist).
+
+        Pinned decision #2: a new ``embedding_model`` is NOT a version
+        bump. ``(c, o, m_new)`` is a different tuple from ``(c, o, m_old)``
+        and naturally lands in ``v1``. The operator runs
+        ``nx catalog supersede-collection`` to retire the old tuple.
+
+        Grandfathered legacy rows do NOT contribute to the version
+        lookup: their canonical fields are typically empty strings, and
+        the WHERE clause filters them out via ``legacy_grandfathered = 0``
+        belt-and-suspenders. Pinned decision #1.
+
+        This method does NOT register the returned name in the catalog
+        projection. Callers must follow up with
+        :meth:`register_collection` once they have actually created (or
+        otherwise materialised) the T3 collection. The indexer's
+        ``_catalog_hook_repo`` already pairs creation with registration;
+        Phase 3 wires that pattern through every indexer call site.
+
+        The returned ``CollectionName`` is constructed directly rather
+        than round-tripped through ``CollectionName.parse(render(...))``;
+        the fields are validated above against the same closed sets,
+        making the round-trip redundant.
+        """
+        if content_type not in CONTENT_TYPES:
+            raise ValueError(
+                f"collection_for: unknown content_type {content_type!r}; "
+                f"expected one of {CONTENT_TYPES}"
+            )
+        if embedding_model not in CANONICAL_EMBEDDING_MODELS:
+            raise ValueError(
+                f"collection_for: non-canonical embedding_model "
+                f"{embedding_model!r}; expected one of "
+                f"{sorted(CANONICAL_EMBEDDING_MODELS)}"
+            )
+        owner_id = owner_segment_for_tumbler(owner)
+        if not owner_id:
+            raise ValueError(
+                f"collection_for: cannot derive owner_id segment from "
+                f"owner {owner!r}"
+            )
+        # The compound index ``idx_collections_tuple`` covers this lookup.
+        # ``model_version`` is stored as TEXT (``v1``..``vN``). SUBSTR
+        # strips the ``v`` prefix so SQLite can CAST the digit string to
+        # INTEGER; ``CAST('v3' AS INTEGER)`` returns 0 because SQLite
+        # cannot parse a leading non-digit. The INTEGER cast is what
+        # gives MAX integer ordering rather than lexical (otherwise
+        # ``v10`` would sort before ``v9``).
+        row = self._db.execute(
+            "SELECT MAX(CAST(SUBSTR(model_version, 2) AS INTEGER)) "
+            "FROM collections "
+            "WHERE content_type = ? AND owner_id = ? "
+            "AND embedding_model = ? AND legacy_grandfathered = 0",
+            (content_type, owner_id, embedding_model),
+        ).fetchone()
+        existing_version = int(row[0]) if row and row[0] is not None else 0
+        if existing_version == 0:
+            new_version = 1
+        elif bump:
+            new_version = existing_version + 1
+        else:
+            new_version = existing_version
+        return CollectionName(
+            content_type=content_type,
+            owner_id=owner_id,
+            embedding_model=embedding_model,
+            model_version=new_version,
+        )
 
     def _update_document_collection_locked(
         self, tumbler: str, new_collection: str,
