@@ -101,17 +101,23 @@ def _lookup_existing_doc_id(file_path: str, corpus: str) -> str:
         return ""
 
 
-def _identity_where(file_path: str, corpus: str) -> dict:
+def _identity_where(file_path: str, corpus: str, *, content_hash: str = "") -> dict:
     """nexus-dcym: chunk-identity where-filter for incremental sync sites.
 
     Prefers a ``doc_id``-keyed lookup when the catalog already has an
-    entry for *file_path* under *corpus*; otherwise emits the legacy
-    ``source_path`` filter so chunks indexed before the catalog backfill
-    keep being detected. RDR-101 Phase 5b drops the ``source_path``
-    branch once the prune verb has run on every collection.
+    entry for *file_path* under *corpus*. RDR-101 Phase 5c removed
+    ``source_path`` from chunk metadata, so the staleness fallback
+    keys on *content_hash* when the catalog is absent (e.g. local-mode
+    ingest without a catalog initialised). Pass ``content_hash`` only
+    for staleness checks — pruning by content_hash is incorrect because
+    matching chunks are by definition not stale.
     """
     doc_id = _lookup_existing_doc_id(file_path, corpus)
-    return {"doc_id": doc_id} if doc_id else {"source_path": file_path}
+    if doc_id:
+        return {"doc_id": doc_id}
+    if content_hash:
+        return {"content_hash": content_hash}
+    return {"source_path": file_path}
 
 
 def _register_or_lookup_doc_id(
@@ -586,9 +592,9 @@ def _index_document(
         target_model = local_target_model
 
     # Incremental sync: skip if file is already indexed with the same hash AND model.
-    # nexus-dcym: prefer doc_id-keyed lookup; falls back to source_path
-    # for first-time registrations and legacy chunks.
-    incremental_where = _identity_where(sp, corpus)
+    # nexus-dcym: prefer doc_id-keyed lookup; content_hash fallback when
+    # the catalog is absent (RDR-101 Phase 5c — source_path is gone).
+    incremental_where = _identity_where(sp, corpus, content_hash=content_hash)
     existing = _chroma_with_retry(
         col.get,
         where=incremental_where,
@@ -902,6 +908,7 @@ def _pdf_chunks(
     prepared: list[tuple[str, str, dict]] = []
     for chunk in chunks:
         chunk_id = f"{content_hash[:16]}_{chunk.chunk_index}"
+        # RDR-101 Phase 5c dropped corpus, store_type, git_meta. Title kept.
         meta = make_chunk_metadata(
             content_type="pdf",
             chunk_index=chunk.chunk_index,
@@ -913,8 +920,6 @@ def _pdf_chunks(
             page_number=chunk.metadata.get("page_number", 0),
             indexed_at=now_iso,
             embedding_model=target_model,
-            store_type="pdf",
-            corpus=corpus,
             title=source_title,
             source_author=result.metadata.get("pdf_author", ""),
             section_title=chunk.metadata.get("section_title", ""),
@@ -925,7 +930,6 @@ def _pdf_chunks(
             bib_authors=bib.get("authors", ""),
             bib_venue=bib.get("venue", ""),
             bib_citation_count=bib.get("citation_count", 0),
-            git_meta=git_meta,
             doc_id=doc_id,
         )
         prepared.append((chunk_id, chunk.text, meta))
@@ -989,6 +993,7 @@ def _markdown_chunks(
     prepared: list[tuple[str, str, dict]] = []
     for chunk in chunks:
         chunk_id = f"{content_hash[:16]}_{chunk.chunk_index}"
+        # RDR-101 Phase 5c dropped corpus, store_type, git_meta. Title kept.
         meta = make_chunk_metadata(
             content_type="markdown",
             chunk_index=chunk.chunk_index,
@@ -1000,15 +1005,12 @@ def _markdown_chunks(
             page_number=chunk.metadata.get("page_number", 0),
             indexed_at=now_iso,
             embedding_model=target_model,
-            store_type="markdown",
-            corpus=corpus,
             title=source_title,
             source_author=str(frontmatter.get("author", "")),
             section_title=chunk.metadata.get("header_path", ""),
             section_type=chunk.metadata.get("section_type", ""),
             tags="markdown",
             category="prose",
-            git_meta=git_meta,
             doc_id=doc_id,
         )
         prepared.append((chunk_id, chunk.text, meta))
@@ -1111,9 +1113,9 @@ def index_pdf(
     )
 
     # Incremental sync: skip if file is already indexed with the same hash AND model.
-    # nexus-dcym: prefer doc_id-keyed lookup; falls back to source_path
-    # for first-time registrations and legacy chunks.
-    incremental_where = _identity_where(str(pdf_path), corpus)
+    # nexus-dcym: prefer doc_id-keyed lookup; content_hash fallback when
+    # the catalog is absent (RDR-101 Phase 5c — source_path is gone).
+    incremental_where = _identity_where(str(pdf_path), corpus, content_hash=content_hash)
     existing = _chroma_with_retry(
         col.get,
         where=incremental_where,

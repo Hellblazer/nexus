@@ -110,7 +110,14 @@ def test_load_ignore_patterns_merges_config(tmp_path: Path) -> None:
 # ── Path resolution in index_pdf ────────────────────────────────────────────
 
 def test_index_pdf_resolves_path(tmp_path: Path, monkeypatch) -> None:
-    """index_pdf normalizes pdf_path to absolute before staleness check."""
+    """index_pdf normalizes pdf_path to absolute before pre-flight registration.
+
+    Probe via the path passed to ``_register_or_lookup_doc_id`` (the
+    Phase-A pre-flight call that lands BEFORE the staleness check, see
+    ``doc_indexer.index_pdf:1076-1107``). RDR-101 Phase 5c moved the
+    staleness ``where`` filter from ``source_path`` to ``content_hash``,
+    so the legacy probe of inspecting the where clause no longer works.
+    """
     import hashlib
     from nexus.doc_indexer import index_pdf
 
@@ -119,26 +126,21 @@ def test_index_pdf_resolves_path(tmp_path: Path, monkeypatch) -> None:
     pdf.write_bytes(content)
     real_hash = hashlib.sha256(content).hexdigest()
 
-    # Mock credentials away. Also force is_local_mode() to False so
-    # the local-embedder fallback (GH #336) doesn't fire — this test
-    # exercises the cloud-path staleness check, which expects to
-    # reach the staleness comparison without a fallback diversion.
     monkeypatch.setattr("nexus.doc_indexer._has_credentials", lambda: True)
     monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
 
-    captured_source_paths: list[str] = []
+    captured_paths: list[Path] = []
+
+    def fake_register(file_path, corpus, *, content_type, physical_collection, **kw):
+        captured_paths.append(file_path)
+        return ""
 
     def fake_chroma_retry(fn, **kwargs):
-        if "where" in kwargs:
-            sp = kwargs["where"].get("source_path", "")
-            captured_source_paths.append(sp)
-        # Return matching hash+model so staleness check says "skip"
         return {
             "metadatas": [{"content_hash": real_hash, "embedding_model": "model"}],
             "ids": ["x"],
         }
 
-    # col.get is passed to _chroma_with_retry as the fn argument
     mock_col = type("FakeCol", (), {"get": lambda self, **kw: None})()
     mock_db = type("FakeDB", (), {
         "get_or_create_collection": lambda self, name: mock_col,
@@ -147,14 +149,14 @@ def test_index_pdf_resolves_path(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("nexus.doc_indexer.make_t3", lambda: mock_db)
     monkeypatch.setattr("nexus.doc_indexer.index_model_for_collection", lambda n: "model")
     monkeypatch.setattr("nexus.doc_indexer._chroma_with_retry", fake_chroma_retry)
+    monkeypatch.setattr("nexus.doc_indexer._register_or_lookup_doc_id", fake_register)
 
     result = index_pdf(pdf, "test")
 
-    # Staleness check skipped (returned 0) and used the resolved absolute path
     assert result == 0
-    assert captured_source_paths
-    assert Path(captured_source_paths[0]).is_absolute()
-    assert captured_source_paths[0] == str(pdf.resolve())
+    assert captured_paths
+    assert captured_paths[0].is_absolute()
+    assert captured_paths[0] == pdf.resolve()
 
 
 # ── backward compat: indexer._should_ignore ─────────────────────────────────

@@ -132,12 +132,14 @@ def test_normalize_drops_unknown_keys() -> None:
     assert out["chunk_index"] == 0
 
 
-def test_normalize_consolidates_git_meta() -> None:
-    """git_* keys collapse into a single JSON string under ``git_meta``."""
+def test_normalize_drops_flat_git_keys() -> None:
+    """RDR-101 Phase 5c removed ``git_meta`` from ALLOWED_TOP_LEVEL.
+    The flat ``git_*`` keys are dropped at normalize time too — no
+    consolidation, no JSON blob, no slot consumed. Catalog Document
+    carries git provenance at the document level instead."""
     from nexus.metadata_schema import normalize
 
     raw = {
-        "source_path": "src/foo.py",
         "content_hash": "x",
         "chunk_text_hash": "y",
         "chunk_index": 0,
@@ -148,35 +150,9 @@ def test_normalize_consolidates_git_meta() -> None:
         "git_remote_url": "https://github.com/example/nexus.git",
     }
     out = normalize(raw, content_type="code")
-    assert "git_project_name" not in out
-    assert "git_branch" not in out
-    assert "git_meta" in out
-    decoded = json.loads(out["git_meta"])
-    assert decoded == {
-        "project": "nexus",
-        "branch": "main",
-        "commit": "deadbeef",
-        "remote": "https://github.com/example/nexus.git",
-    }
-
-
-def test_normalize_omits_git_meta_when_all_empty() -> None:
-    """No git data → no ``git_meta`` key (headroom conservation)."""
-    from nexus.metadata_schema import normalize
-
-    raw = {
-        "source_path": "a.md",
-        "content_hash": "x",
-        "chunk_text_hash": "y",
-        "chunk_index": 0,
-        "chunk_count": 1,
-        "git_project_name": "",
-        "git_branch": "",
-        "git_commit_hash": "",
-        "git_remote_url": "",
-    }
-    out = normalize(raw, content_type="markdown")
-    assert "git_meta" not in out
+    for k in ("git_project_name", "git_branch", "git_commit_hash",
+              "git_remote_url", "git_meta"):
+        assert k not in out
 
 
 def test_normalize_injects_content_type() -> None:
@@ -249,30 +225,26 @@ def test_normalize_is_idempotent() -> None:
     assert first == second
 
 
-def test_normalize_unpacks_git_meta_on_reprocess() -> None:
-    """Re-normalising unpacks ``git_meta`` back so downstream updates
-    can merge with git fields without losing data."""
+def test_normalize_idempotent_on_reprocess() -> None:
+    """Re-normalising a previously-normalised dict is idempotent.
+    RDR-101 Phase 5c: the git_meta unpack/repack round-trip is gone
+    (git_meta is no longer in the schema), so this verifies the
+    simpler post-5c invariant — round-trip preserves load-bearing
+    fields."""
     from nexus.metadata_schema import normalize
 
     raw = {
-        "source_path": "src/foo.py",
         "content_hash": "x",
         "chunk_text_hash": "y",
         "chunk_index": 0,
         "chunk_count": 1,
-        "git_project_name": "nexus",
-        "git_branch": "main",
-        "git_commit_hash": "abc",
-        "git_remote_url": "https://example.com",
     }
     first = normalize(raw, content_type="code")
-
-    # Simulate a post-pass that merges new fields with the existing row.
     merged = {**first, "bib_year": 2024, "bib_authors": "Doe"}
     second = normalize(merged, content_type="code")
-    decoded = json.loads(second["git_meta"])
-    assert decoded["commit"] == "abc"
     assert second["bib_year"] == 2024
+    assert second["content_hash"] == "x"
+    assert second["content_type"] == "code"
 
 
 def test_normalize_keeps_ttl_and_indexed_at() -> None:
@@ -415,11 +387,14 @@ def test_validate_rejects_unknown_key() -> None:
 
 
 def test_validate_rejects_non_primitive_values() -> None:
-    """Chroma metadata only accepts str/int/float/bool/None — enforce upstream."""
+    """Chroma metadata only accepts str/int/float/bool/None — enforce upstream.
+    Use a key in :data:`ALLOWED_TOP_LEVEL` (so the key-set check passes)
+    with a non-primitive value to exercise the type check specifically.
+    """
     from nexus.metadata_schema import MetadataSchemaError, validate
 
     with pytest.raises(MetadataSchemaError, match="non-primitive"):
-        validate({"content_hash": "x", "git_meta": {"branch": "main"}})
+        validate({"content_hash": "x", "tags": ["list", "instead", "of", "string"]})
 
 
 # ── Write path protection ───────────────────────────────────────────────────
@@ -535,7 +510,6 @@ class TestDocIdInSchema:
             content_hash="def",
             indexed_at="2026-05-01T00:00:00+00:00",
             embedding_model="voyage-context-3",
-            store_type="docs",
             doc_id="1.1.42",
         )
         assert meta["doc_id"] == "1.1.42"
@@ -555,7 +529,6 @@ class TestDocIdInSchema:
             content_hash="def",
             indexed_at="2026-05-01T00:00:00+00:00",
             embedding_model="voyage-context-3",
-            store_type="docs",
             # doc_id omitted (defaults to "")
         )
         assert "doc_id" not in meta
@@ -698,7 +671,6 @@ def test_make_chunk_metadata_does_not_emit_source_path() -> None:
         content_hash="def",
         indexed_at="2026-05-02T00:00:00Z",
         embedding_model="voyage-code-3",
-        store_type="code",
     )
     assert "source_path" not in meta, (
         f"source_path must not appear in chunk metadata after Phase B; "
@@ -706,188 +678,120 @@ def test_make_chunk_metadata_does_not_emit_source_path() -> None:
     )
 
 
-# ── RDR-101 Phase 5a: [catalog].event_sourced opt-in flag (nexus-o6aa.11) ────
+# ── RDR-101 Phase 5c: final schema removal (nexus-o6aa.13) ───────────────────
 
 
-class TestEventSourcedFlag:
-    """RDR-101 Phase 5a: when ``[catalog].event_sourced`` is true,
-    deprecated chunk metadata fields are dropped at write time.
+class TestPhase5cSchemaRemoval:
+    """Phase 5c removes 3 deprecated chunk-metadata fields from
+    ``ALLOWED_TOP_LEVEL`` entirely: ``corpus``, ``store_type``,
+    ``git_meta``. The schema rejects them, the factory refuses the
+    kwargs, and ``validate()`` raises on dicts that carry them.
 
-    Deprecated set (readers no longer depend on them post-Phase-4):
-    ``title``, ``corpus``, ``store_type``, ``git_meta``. Phase 4
-    reader migration switched to catalog-resolved ``_display_path``
-    and ``doc_id``-keyed dispatch.
+    ``title`` is INTENTIONALLY KEPT — the audit at
+    ``docs/migration/rdr-101-phase4-reader-audit.md`` flagged it as
+    load-bearing for ``find_ids_by_title`` (the canonical reader
+    routing ``nx store delete --title`` and the MCP ``store_get``
+    title-fallback path). A deeper analysis on 2026-05-03 confirmed
+    the audit's call: dropping title would silently break those
+    user-facing surfaces.
 
-    Phase 5a is the WRITE-side switch — opt-in, default false.
-    Phase 5b will flip the default; Phase 5c removes from
-    ``ALLOWED_TOP_LEVEL`` entirely.
+    The Phase 5a/5b ``[catalog].event_sourced`` flag machinery is
+    REMOVED entirely as part of this phase. The flag was always a
+    transitional structure to gate the same drops we're now making
+    unconditionally; with the schema doing the work, no flag is
+    needed.
     """
 
-    def test_default_false_keeps_deprecated_fields(self) -> None:
-        from nexus.metadata_schema import normalize
-
-        raw = {
-            "content_type": "code",
-            "chunk_index": 0, "chunk_count": 1,
-            "chunk_text_hash": "abc", "content_hash": "def",
-            "indexed_at": "2026-05-03T00:00:00Z",
-            "embedding_model": "voyage-code-3",
-            "store_type": "code",
-            "title": "src/foo.py:1-10",
-            "corpus": "nexus",
-            "git_project_name": "nexus",
-            "git_branch": "main",
-        }
-        out = normalize(raw, content_type="code", event_sourced=False)
-        assert out["title"] == "src/foo.py:1-10"
-        assert out["corpus"] == "nexus"
-        assert out["store_type"] == "code"
-        assert "git_meta" in out
-        assert "project" in out["git_meta"]
-
-    def test_event_sourced_drops_deprecated_fields(self) -> None:
-        from nexus.metadata_schema import normalize
-
-        raw = {
-            "content_type": "code",
-            "chunk_index": 0, "chunk_count": 1,
-            "chunk_text_hash": "abc", "content_hash": "def",
-            "indexed_at": "2026-05-03T00:00:00Z",
-            "embedding_model": "voyage-code-3",
-            "store_type": "code",
-            "title": "src/foo.py:1-10",
-            "corpus": "nexus",
-            "git_project_name": "nexus",
-            "git_branch": "main",
-        }
-        out = normalize(raw, content_type="code", event_sourced=True)
-        for dropped in ("title", "corpus", "store_type", "git_meta"):
-            assert dropped not in out, (
-                f"event_sourced=True must drop {dropped!r}; "
-                f"got keys: {sorted(out.keys())}"
+    def test_dropped_keys_not_in_allowed_top_level(self) -> None:
+        """The 3 Phase 5c keys are gone from the schema. ``title``
+        is kept (audit / find_ids_by_title)."""
+        from nexus.metadata_schema import ALLOWED_TOP_LEVEL
+        for k in ("corpus", "store_type", "git_meta"):
+            assert k not in ALLOWED_TOP_LEVEL, (
+                f"{k!r} must be removed from ALLOWED_TOP_LEVEL "
+                f"(Phase 5c). Current: {sorted(ALLOWED_TOP_LEVEL)}"
             )
-        # Identity + spans + lifecycle remain. ``doc_id`` is absent
-        # because the caller didn't populate it (Step 4c drop).
-        assert "doc_id" not in out
-        assert out["chunk_text_hash"] == "abc"
-        assert out["content_hash"] == "def"
-        assert out["content_type"] == "code"
-        assert out["embedding_model"] == "voyage-code-3"
+        # Title MUST stay — find_ids_by_title is load-bearing.
+        assert "title" in ALLOWED_TOP_LEVEL, (
+            "title must remain in ALLOWED_TOP_LEVEL — "
+            "find_ids_by_title (nx store, MCP store_get) reads it."
+        )
 
-    def test_event_sourced_default_consults_config(self, monkeypatch) -> None:
+    def test_normalize_drops_phase_5c_keys(self) -> None:
+        """``normalize()`` drops the 3 keys via the Step 4 cargo
+        filter (anything outside ALLOWED_TOP_LEVEL gets dropped)."""
         from nexus.metadata_schema import normalize
-        import nexus.config
-        monkeypatch.setattr(nexus.config, "is_catalog_event_sourced", lambda: True)
+        out = normalize(
+            {
+                "content_type": "code",
+                "chunk_index": 0, "chunk_count": 1,
+                "chunk_text_hash": "abc", "content_hash": "def",
+                "indexed_at": "2026-05-03T00:00:00Z",
+                "embedding_model": "voyage-code-3",
+                "title": "src/foo.py:1-10",
+                "corpus": "nexus",
+                "store_type": "code",
+                "git_project_name": "nexus",
+            },
+            content_type="code",
+        )
+        for k in ("corpus", "store_type", "git_meta"):
+            assert k not in out, (
+                f"{k!r} survived normalize() — Phase 5c should drop it. "
+                f"Got keys: {sorted(out.keys())}"
+            )
+        # Title kept.
+        assert out.get("title") == "src/foo.py:1-10"
 
-        raw = {
-            "content_type": "code",
-            "chunk_index": 0, "chunk_count": 1,
-            "chunk_text_hash": "abc", "content_hash": "def",
-            "indexed_at": "2026-05-03T00:00:00Z",
-            "embedding_model": "voyage-code-3",
-            "store_type": "code",
-            "title": "src/foo.py:1-10",
-            "corpus": "nexus",
-        }
-        out = normalize(raw, content_type="code")
-        assert "title" not in out
-        assert "corpus" not in out
-        assert "store_type" not in out
+    def test_make_chunk_metadata_rejects_dropped_kwargs(self) -> None:
+        """``corpus``, ``store_type``, ``git_meta`` kwargs are removed
+        from the factory signature. Passing any of them raises
+        ``TypeError`` — re-introduction is a build break.
 
-    def test_make_chunk_metadata_factory_passes_through(
-        self, monkeypatch
-    ) -> None:
+        ``title`` kwarg remains accepted.
+        """
         from nexus.metadata_schema import make_chunk_metadata
-        import nexus.config
-        monkeypatch.setattr(nexus.config, "is_catalog_event_sourced", lambda: True)
-
-        meta = make_chunk_metadata(
+        common_kwargs = dict(
             content_type="code",
             chunk_index=0, chunk_count=1,
             chunk_text_hash="abc", content_hash="def",
             indexed_at="2026-05-03T00:00:00Z",
             embedding_model="voyage-code-3",
-            store_type="code",
-            title="src/foo.py:1-10",
-            corpus="nexus",
-            git_meta={"git_project_name": "nexus", "git_branch": "main"},
         )
-        for dropped in ("title", "corpus", "store_type", "git_meta"):
-            assert dropped not in meta, (
-                f"make_chunk_metadata under event_sourced=True must drop "
-                f"{dropped!r}; got keys: {sorted(meta.keys())}"
-            )
+        for kwarg, value in [
+            ("corpus", "nexus"),
+            ("store_type", "code"),
+            ("git_meta", {"git_project_name": "nexus"}),
+        ]:
+            with pytest.raises(TypeError):
+                make_chunk_metadata(**common_kwargs, **{kwarg: value})
+        # title kwarg still works.
+        meta = make_chunk_metadata(**common_kwargs, title="src/foo.py")
+        assert meta.get("title") == "src/foo.py"
 
-    def test_config_helper_default_true_post_phase_5b(
-        self, monkeypatch, tmp_path
-    ) -> None:
-        """Phase 5b (nexus-o6aa.12) flipped the default to true. Empty
-        config + no env override → returns True. The 4 gated keys
-        get dropped at write time by default."""
-        from nexus.config import is_catalog_event_sourced
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        monkeypatch.delenv("NEXUS_CATALOG_EVENT_SOURCED", raising=False)
-        monkeypatch.chdir(tmp_path)
-        assert is_catalog_event_sourced() is True
+    def test_validate_rejects_dropped_keys(self) -> None:
+        """``validate()`` enforces ALLOWED_TOP_LEVEL membership; the
+        3 dropped keys trigger MetadataSchemaError. ``title`` does not."""
+        from nexus.metadata_schema import validate, MetadataSchemaError
+        good_base = {
+            "content_type": "code",
+            "chunk_index": 0, "chunk_count": 1,
+            "chunk_text_hash": "abc", "content_hash": "def",
+            "indexed_at": "2026-05-03T00:00:00Z",
+            "embedding_model": "voyage-code-3",
+        }
+        for dropped in ("corpus", "store_type", "git_meta"):
+            with pytest.raises(MetadataSchemaError):
+                validate({**good_base, dropped: "value"})
+        # title stays — must NOT raise.
+        validate({**good_base, "title": "src/foo.py"})
 
-    def test_config_helper_yaml_can_disable(self, monkeypatch, tmp_path) -> None:
-        """REVERSIBLE escape: ``[catalog].event_sourced: false`` in
-        config.yml opts back out of the Phase 5b default."""
-        from nexus.config import is_catalog_event_sourced
-        (tmp_path / "config.yml").write_text(
-            "catalog:\n  event_sourced: false\n",
-            encoding="utf-8",
-        )
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        monkeypatch.delenv("NEXUS_CATALOG_EVENT_SOURCED", raising=False)
-        monkeypatch.chdir(tmp_path)
-        assert is_catalog_event_sourced() is False
-
-    def test_config_helper_yaml_can_enable_explicitly(
-        self, monkeypatch, tmp_path
-    ) -> None:
-        """``[catalog].event_sourced: true`` in config.yml is now
-        redundant with the default but still resolves correctly."""
-        from nexus.config import is_catalog_event_sourced
-        (tmp_path / "config.yml").write_text(
-            "catalog:\n  event_sourced: true\n",
-            encoding="utf-8",
-        )
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        monkeypatch.delenv("NEXUS_CATALOG_EVENT_SOURCED", raising=False)
-        monkeypatch.chdir(tmp_path)
-        assert is_catalog_event_sourced() is True
-
-    def test_env_override_takes_precedence(self, monkeypatch, tmp_path) -> None:
-        """``NEXUS_CATALOG_EVENT_SOURCED`` env var overrides config.yml."""
-        from nexus.config import is_catalog_event_sourced
-
-        # config.yml says false; env says true → true wins.
-        (tmp_path / "config.yml").write_text(
-            "catalog:\n  event_sourced: false\n",
-            encoding="utf-8",
-        )
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        monkeypatch.setenv("NEXUS_CATALOG_EVENT_SOURCED", "1")
-        monkeypatch.chdir(tmp_path)
-        assert is_catalog_event_sourced() is True
-
-        # config.yml says true; env says false → false wins.
-        (tmp_path / "config.yml").write_text(
-            "catalog:\n  event_sourced: true\n",
-            encoding="utf-8",
-        )
-        monkeypatch.setenv("NEXUS_CATALOG_EVENT_SOURCED", "0")
-        assert is_catalog_event_sourced() is False
-
-    def test_env_disable_overrides_post_phase_5b_default(
-        self, monkeypatch, tmp_path
-    ) -> None:
-        """The Phase 5b REVERSIBLE escape hatch: even with config
-        unset (so default would be True), ``NEXUS_CATALOG_EVENT_SOURCED=0``
-        still opts the process back out."""
-        from nexus.config import is_catalog_event_sourced
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))  # empty
-        monkeypatch.setenv("NEXUS_CATALOG_EVENT_SOURCED", "0")
-        monkeypatch.chdir(tmp_path)
-        assert is_catalog_event_sourced() is False
+    def test_event_sourced_machinery_removed(self) -> None:
+        """Phase 5c removes the Phase 5a/5b flag wiring entirely:
+        ``_GATED_BY_EVENT_SOURCED`` is gone, ``is_catalog_event_sourced``
+        is gone, ``[catalog].event_sourced`` config key is gone. The
+        schema enforces the drop unconditionally."""
+        import nexus.metadata_schema
+        import nexus.config
+        assert not hasattr(nexus.metadata_schema, "_GATED_BY_EVENT_SOURCED")
+        assert not hasattr(nexus.config, "is_catalog_event_sourced")

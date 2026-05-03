@@ -49,7 +49,8 @@ class TestIndexPdfE2E:
         results = local_t3.search("hello world test document", ["docs__pdf-e2e-simple"])
         assert results, "Expected search results after indexing"
         assert results[0]["distance"] < 1.0, f"distance={results[0]['distance']} too large"
-        assert results[0]["store_type"] == "pdf"
+        # RDR-101 Phase 5c: store_type dropped; content_type is canonical.
+        assert results[0]["content_type"] == "pdf"
 
     def test_e2e_multipage_page_attribution(self, multipage_pdf: Path, local_t3) -> None:
         """AC-E2: multipage.pdf → query for 'database transactions' returns page 2 chunk."""
@@ -106,10 +107,17 @@ def pdf_git_repo_e2e(tmp_path_factory: pytest.TempPathFactory, simple_pdf: Path)
 class TestIndexPdfFileE2E:
     """AC-E4: _index_pdf_file E2E with real git repo + local embedding."""
 
-    def test_git_project_name_in_results(
+    def test_pdf_chunks_queryable_after_e2e_index(
         self, pdf_git_repo_e2e: Path, local_t3
     ) -> None:
-        """AC-E4: indexed PDF chunks are queryable; git_project_name equals repo dir name."""
+        """AC-E4: indexed PDF chunks are queryable.
+
+        RDR-101 Phase 5c (nexus-o6aa.13) dropped ``git_meta`` from the
+        chunk schema; git provenance is now carried at the catalog
+        Document level. The git_project_name assertion is removed —
+        if needed, query the catalog Document by doc_id instead of
+        the chunk metadata.
+        """
         pdf = pdf_git_repo_e2e / "docs" / "simple.pdf"
         collection_name = "docs__pdf-e2e-git"
         model = index_model_for_collection(collection_name)
@@ -135,10 +143,6 @@ class TestIndexPdfFileE2E:
         assert results, "Expected search results after indexing"
         assert results[0].get("source_agent") == "nexus-indexer"
         assert results[0].get("tags") == "pdf"
-        # Git provenance now rides in the consolidated ``git_meta`` JSON
-        # blob (nexus-40t) to keep top-level key count under Chroma's
-        # 32-key cap.
-        import json as _json
-        git_blob = results[0].get("git_meta")
-        assert git_blob, f"git_meta missing: {results[0]}"
-        assert _json.loads(git_blob)["project"] == pdf_git_repo_e2e.name
+        # git_meta is dropped post-Phase-5c — chunk metadata carries
+        # only schema-canonical fields now.
+        assert "git_meta" not in results[0]

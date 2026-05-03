@@ -98,6 +98,7 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
             # (sha256-derived) — disambiguated from the catalog
             # ``Document.doc_id`` per RDR-101 Phase 0 nexus-o6aa.3.
             chunk_chroma_id = _hl.sha256(f"{ctx.corpus}:{title}".encode()).hexdigest()[:32]
+            # RDR-101 Phase 5c dropped corpus, store_type, git_meta. Title kept.
             metadata = make_chunk_metadata(
                 content_type="markdown",
                 chunk_index=chunk.chunk_index,
@@ -108,15 +109,12 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
                 chunk_end_char=chunk.metadata.get("chunk_end_char", 0) + frontmatter_len,
                 indexed_at=ctx.now_iso,
                 embedding_model=ctx.embedding_model,
-                store_type="prose",
-                corpus=ctx.corpus,
                 title=title,
                 section_title=chunk.metadata.get("header_path", ""),
                 section_type=chunk.metadata.get("section_type", ""),
                 tags="markdown",
                 category="prose",
                 frecency_score=float(ctx.score),
-                git_meta=ctx.git_meta,
                 doc_id=catalog_doc_id,
             )
             ids.append(chunk_chroma_id)
@@ -177,6 +175,7 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
                 if _h_idx >= 0:
                     section_title = _headings[_h_idx][1]
                     section_type = classify_section_type([section_title])
+            # RDR-101 Phase 5c dropped corpus, store_type, git_meta. Title kept.
             metadata = make_chunk_metadata(
                 content_type="prose",
                 chunk_index=i,
@@ -189,15 +188,12 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
                 line_end=le,
                 indexed_at=ctx.now_iso,
                 embedding_model=ctx.embedding_model,
-                store_type="prose",
-                corpus=ctx.corpus,
                 title=title,
                 section_title=section_title,
                 section_type=section_type,
                 tags=ext.lstrip("."),
                 category="prose",
                 frecency_score=float(ctx.score),
-                git_meta=ctx.git_meta,
                 doc_id=catalog_doc_id,
             )
             ids.append(chunk_chroma_id)

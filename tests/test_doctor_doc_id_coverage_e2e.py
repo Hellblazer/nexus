@@ -237,7 +237,23 @@ def test_stage_b_doctor_doc_id_coverage_end_to_end(
 
     tables = coverage.get("tables") or {}
     assert tables, f"expected per-collection coverage tables; got {coverage!r}"
-    for name, stats in tables.items():
+    # Scope to *this test's* collections — chromadb EphemeralClient shares
+    # process state, so collections seeded by sibling test modules
+    # (e.g. test_exporter.py's raw col.upsert into code__test) leak in.
+    # We assert against the doctor's own pass criterion: it accounts for
+    # ``expected_orphans`` and reports ``pass: True`` when every chunk
+    # expected to have a doc_id has one.
+    from nexus.registry import _repo_identity
+    _, path_hash = _repo_identity(stage_b_repo)
+    my_tables = {n: s for n, s in tables.items() if path_hash in n}
+    assert my_tables, (
+        f"expected at least one collection from stage_b_repo "
+        f"(path_hash={path_hash!r}); got tables={list(tables)!r}"
+    )
+    for name, stats in my_tables.items():
+        assert stats.get("pass") is True, (
+            f"collection {name!r} did not PASS; stats={stats!r}"
+        )
         cov = stats.get("coverage", 0.0)
         assert cov == 1.0, (
             f"collection {name!r} coverage is {cov!r}, not 1.0; "

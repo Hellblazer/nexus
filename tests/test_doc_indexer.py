@@ -460,9 +460,11 @@ _BASE_REQUIRED_FIELDS = {
     # neither source_path nor doc_id.
     "content_hash", "chunk_text_hash", "chunk_index", "chunk_count",
     "chunk_start_char", "chunk_end_char", "page_number",
-    # Display / routing
+    # Display / routing — RDR-101 Phase 5c (nexus-o6aa.13) dropped
+    # ``corpus``, ``store_type``, ``git_meta``. ``title`` kept (audit
+    # finding: find_ids_by_title is load-bearing for nx store).
     "title", "source_author", "section_title", "section_type",
-    "tags", "category", "content_type", "store_type", "corpus", "embedding_model",
+    "tags", "category", "content_type", "embedding_model",
     # Lifecycle
     "indexed_at", "ttl_days", "frecency_score", "source_agent", "session_id",
 }
@@ -535,7 +537,7 @@ def test_sha256_does_not_call_read_bytes(tmp_path: Path):
 
 
 @pytest.mark.parametrize("indexer,expected_type", [("pdf", "pdf"), ("markdown", "markdown")])
-def test_index_sets_store_type(indexer, expected_type, sample_pdf, sample_md, monkeypatch, voyage_client):
+def test_index_sets_content_type(indexer, expected_type, sample_pdf, sample_md, monkeypatch, voyage_client):
     set_credentials(monkeypatch)
     captured: list[dict] = []
     mock_col = MagicMock()
@@ -566,7 +568,9 @@ def test_index_sets_store_type(indexer, expected_type, sample_pdf, sample_md, mo
                     chk_cls.return_value.chunk.return_value = [mock_chunk]
                     index_markdown(sample_md, corpus="docs")
     assert captured
-    assert captured[0]["store_type"] == expected_type
+    # RDR-101 Phase 5c: ``store_type`` dropped from chunk schema;
+    # ``content_type`` is the canonical routing field.
+    assert captured[0]["content_type"] == expected_type
 
 
 @pytest.mark.parametrize("has_fm,fm_text,body,expected_start,expected_end", [

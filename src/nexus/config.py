@@ -347,52 +347,16 @@ def is_local_mode() -> bool:
     return not (chroma_key and voyage_key)
 
 
-def is_catalog_event_sourced() -> bool:
-    """Return True if ``[catalog].event_sourced`` is enabled in the
-    nexus config (or via env override).
+# RDR-101 Phase 5c (nexus-o6aa.13) removed ``is_catalog_event_sourced``.
+# The Phase 5a/5b flag was a transitional gate for the deprecated chunk-
+# metadata fields; with the schema now enforcing the drop unconditionally
+# (corpus / store_type / git_meta gone from ALLOWED_TOP_LEVEL), no flag
+# is needed. ``NEXUS_CATALOG_EVENT_SOURCED`` env var no longer consulted.
 
-    RDR-101 Phase 5b (``nexus-o6aa.12``) flipped the default to True:
-    new chunks are written WITHOUT the 4 deprecated metadata fields
-    (``title``, ``corpus``, ``store_type``, ``git_meta``). Readers
-    route through the catalog ``doc_id`` instead.
-
-    Decision logic:
-      - ``NEXUS_CATALOG_EVENT_SOURCED=1`` → True (explicit opt-in)
-      - ``NEXUS_CATALOG_EVENT_SOURCED=0`` → False (REVERSIBLE escape
-        hatch — chunks written under flag-on remain readable)
-      - Otherwise: read ``[catalog].event_sourced`` from config YAML;
-        default True (Phase 5b flip).
-    """
-    raw = os.environ.get("NEXUS_CATALOG_EVENT_SOURCED", "").strip().lower()
-    if raw in ("1", "true", "yes", "on"):
-        return True
-    if raw in ("0", "false", "no", "off"):
-        return False
-    # Fall through to config file.
-    cfg = load_config()
-    return bool(cfg.get("catalog", {}).get("event_sourced", False))
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 
 _DEFAULTS: dict[str, Any] = {
-    "catalog": {
-        # RDR-101 Phase 5b (nexus-o6aa.12) IRREVERSIBLE flip: default
-        # is now true. New chunks are written WITHOUT the 4 deprecated
-        # fields (``title``, ``corpus``, ``store_type``, ``git_meta``);
-        # readers route through catalog → ``doc_id`` instead. Phase 4
-        # reader migration completed, so dropping these fields on the
-        # write side does not break any consumer.
-        #
-        # REVERSIBLE escape hatch retained: operators can opt back out
-        # via ``NEXUS_CATALOG_EVENT_SOURCED=0`` env var or
-        # ``[catalog].event_sourced: false`` in config.yml. Existing
-        # chunks indexed under either mode remain readable.
-        #
-        # Phase 5c (nexus-o6aa.13) will remove the deprecated fields
-        # from ALLOWED_TOP_LEVEL entirely, at which point the dual-
-        # write back-compat path goes away.
-        "event_sourced": True,
-    },
     "embeddings": {
         "rerankerModel": "rerank-2.5",
     },
