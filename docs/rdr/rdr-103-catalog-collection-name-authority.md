@@ -43,7 +43,7 @@ This RDR originated from the RDR-101 Phase 6 prophylactic-review remediation arc
 
 Both beads block on the same architectural decision: where naming authority lives. The skill-level fix is "rewrite each indexer to construct conformant names." The RDR-level fix is "the catalog constructs the name; the indexer asks for it." Doing the former without the latter just reshuffles the duplicate logic.
 
-RDR-101 Phase 6 defined the conformant schema regex (`src/nexus/corpus.py:46-51`) and the parse helper (`parse_conformant_collection_name`). It also added `Catalog.tumbler_to_collection_segment` (a tumbler dotted form like `1.5` becomes the conformant segment `1-5`). The infrastructure for the rewrite is in place; only the authority shift is pending.
+RDR-101 Phase 6 defined the conformant schema regex (`src/nexus/corpus.py:46-51`) and the parse helper (`parse_conformant_collection_name`). The tumbler-to-segment translation lives as a module-private helper `_owner_segment_for_tumbler` at `src/nexus/commands/catalog.py:606` (it converts `1.5.42` to `1-5` by calling `_owner_prefix_of` from `nexus.catalog.synthesizer` and replacing dots with hyphens). It is currently used only by the migrate-fallback verb. Promoting it to a `Catalog` method (or to a module-level helper in `nexus.catalog`) is part of this RDR's scope; the logic exists but its location is not yet a contract surface.
 
 ## Research Findings
 
@@ -85,8 +85,21 @@ Verified primitives already on develop:
 - `Catalog.rename_collection` (Phase 6): atomic T3-then-catalog rename with rollback. Already tested (`tests/test_catalog_rename_collection.py`, 14 cases).
 - `Catalog.update_documents_collection_batch` (`nexus-qpet.3`): single-flock per-document re-point.
 - `nx catalog migrate-fallback` (Phase 6): full per-document retarget path. Overkill for the legacy-to-conformant case where every document of one repo lands in the same target.
+- `collections.superseded_by` column (Phase 6 schema): set by `Catalog.supersede_collection` and by `Catalog.rename_collection` internally. Reverse lookup of "what is the conformant successor of legacy name X?" is a single SQL query.
 
 The `rename_collection` verb is the right primitive: legacy-to-conformant is a 1:1 rename, not a 1:N retarget.
+
+### Affected user-facing and internal surfaces
+
+Surveys (verified):
+
+- `grep -rn 'physical_collection\b' src/nexus/ | wc -l`: 246 occurrences. Most are projector reads or test assertions; the field is widely consumed.
+- `grep -rn '_collection_name\|_docs_collection_name\|_rdr_collection_name' src/ nx/ sn/`: 78 callers across the repo, plugins, and skills. All must switch to the new path or stop importing.
+- MCP surface (`src/nexus/mcp/core.py`): `collection_info`, `store_get`, `store_put`, `search`, and several other tools accept a literal `name` argument. Users with scripted MCP calls referencing legacy collection names see "Collection not found" errors post-rename unless the lookup honors the `superseded_by` redirect.
+- Search routing in `src/nexus/search/` and CLI commands accept collection names directly. Same compatibility concern.
+- Plugin index files (`nx/`, `sn/`): some reference legacy-style names in fixtures. Counted in the 78 above.
+
+Compatibility design implication: the `Catalog.collection_for` accessor and any name-resolution helper must transparently follow the `superseded_by` chain when given a legacy name, so a user typing `knowledge__notes` after the rename to `knowledge__notes__voyage-context-3__v1` still hits the right collection. This is one extra SQL hop per resolve and lands the same as the existing alias-chain follow in `Catalog.resolve_alias` (`catalog.py:1770-1799`). Without it, the migration is operator-disruptive in a way the draft did not initially capture.
 
 ## Proposed Solution
 
@@ -148,7 +161,7 @@ Add `Catalog.collection_for(content_type, owner, embedding_model)` that returns 
 3. The catalog looks up the highest existing `model_version` for `(content_type, owner_id, embedding_model)` in the `collections` projection. New `(c, o, m)` tuple returns `v1`. Existing tuple at `vN` returns `vN` (re-index of the same model continues to land in the same collection).
 4. Caller writes to the collection using the rendered name. The collection is registered in the catalog at the point of first write via the existing `register_collection` flow.
 
-Indexer family change: replace every `registry._collection_name(repo)` and `f"docs__{corpus}"` call site with `cat.collection_for(content_type, repo_owner, model).render()`. The repo-owner lookup uses the existing `Catalog.owner_for_repo(repo_hash)` path; if no owner exists yet, the indexer registers one (the same upfront `_catalog_hook_repo` flow that already exists for the doc_id-resolver closure).
+Indexer family change: replace every `registry._collection_name(repo)` and `f"docs__{corpus}"` call site with `cat.collection_for(content_type, repo_owner, model).render()`. The repo-owner lookup uses the existing `Catalog.owner_for_repo(repo_hash)` path (`catalog.py:1093-1097`); if no owner exists yet, the indexer registers one (the same upfront `_catalog_hook_repo` flow that already exists for the doc_id-resolver closure). The tumbler-to-segment translation is the existing `_owner_segment_for_tumbler` (`commands/catalog.py:606`), promoted to a `Catalog` method as part of this RDR so it has a stable import path.
 
 The strict-naming enforcement collapses to a property of `CollectionName.render`: any name produced by `render()` is conformant by construction, no flag needed. The `T3Database.strict_collection_naming` flag stays as a defensive guard against direct callers (tests, plugins, future code paths) that try to pass non-conformant strings, but it becomes a backstop, not a contract surface.
 
@@ -163,7 +176,22 @@ What does NOT bump the version: routine re-index of the same model, content-type
 
 ### Repo-owner identity stability
 
-`_repo_identity()` in `src/nexus/registry.py` derives the repo hash from `git config --get remote.origin.url`. Cross-clone of the same repo (different absolute path, same remote) produces the same hash, the same tumbler, the same `owner_id` segment, and therefore the same conformant collection name. This invariant is implicit today; the conformant name surface makes it user-visible and an explicit test locks it in.
+`_repo_identity()` in `src/nexus/registry.py:17-48` derives the repo hash from `git rev-parse --git-common-dir` (resolving worktrees to their main repo path) then SHA-256 of the resolved path string, truncated to 8 hex characters. Identity is **path-derived, not remote-derived**: two clones of the same repo on different absolute paths produce different `repo_hash` values, different `Catalog.owner_for_repo` rows, different tumblers, and therefore different conformant `owner_id` segments.
+
+What stays stable:
+
+- Worktrees of the same repo (the `--git-common-dir` resolution).
+- Re-indexing the same repo at the same path (deterministic SHA-256).
+- The owner row in `Catalog.owner_for_repo` once it has been minted: even if `_repo_identity`'s scheme changes in a future release, existing rows keyed by the old hash continue to resolve via the row's `repo_root` column (`catalog_db.py:26-28`).
+
+What does NOT stay stable:
+
+- Cross-machine clones (different absolute paths produce different hashes).
+- Renamed repo directories (the basename component of the rendered path changes the hash).
+
+The conformant name surface exposes this previously-implicit behavior. Users who clone the same repo to two machines today already get separate `code__nexus-XXXXXXXX` collections with different `XXXXXXXX` hashes; the conformant rewrite continues that semantics with the suffix replaced by tumbler-derived `owner_id`. A separate decision (out of scope for this RDR) could shift `_repo_identity` to hash the git remote URL for cross-machine identity, but that would invalidate every existing repo's tumbler and is not part of the catalog-as-naming-authority refactor.
+
+Validation: a regression test asserts that two `_repo_identity` calls against the same path return the same hash, and that `--git-common-dir` resolution makes worktrees produce the main repo's hash.
 
 ### Migration path
 
@@ -175,6 +203,18 @@ On first `nx index` after RDR-103 lands, the indexer:
 4. If the conformant target already exists: index proceeds against it directly; legacy collection (if present) is left for the operator to clean up via existing tools (`nx t3 gc`, `nx catalog rename-collection`, etc.).
 
 The migration is one-shot per repo per content-type. Operators with hundreds of legacy collections see one upgrade message per collection, then the message stops appearing on subsequent indexes.
+
+### Legacy-name redirect for user-facing accessors
+
+The `rename_collection` verb already populates `collections.superseded_by` with the new name. To keep MCP calls, CLI invocations, and search routing working after the rename, every user-facing name accessor follows the `superseded_by` chain when given a legacy name:
+
+- New helper `Catalog.resolve_collection_name(name)` returns the chain terminus: given `knowledge__notes`, returns `knowledge__notes__voyage-context-3__v1`. Idempotent for already-conformant names.
+- MCP tools (`collection_info`, `store_get`, `store_put`, `search`) call this helper before passing the name to T3. A debug-level log records the redirect; user output stays unchanged.
+- CLI search and collection commands do the same.
+
+This mirrors the existing `Catalog.resolve_alias` chain-follow pattern (`catalog.py:1770-1799`) for tumbler aliases. The cycle and max-hop guards from that pattern are reused. The redirect is at most one hop in practice (a single rename) but the chain pattern protects against multi-step renames that may accumulate over time.
+
+Without this redirect, the rename is operator-disruptive: every scripted MCP call, every saved CLI invocation, every plugin manifest referencing legacy names breaks silently with "Collection not found." With it, the rename is transparent at the read surface; users see legacy names continue to work for the deprecation window.
 
 ## Alternatives Considered
 
@@ -200,7 +240,7 @@ The migration is one-shot per repo per content-type. Operators with hundreds of 
 
 - One new module (`catalog/collection_name.py`) and one new method on `Catalog` (`collection_for`).
 - Indexer family touches 4 modules at ~5 sites each. Mechanical.
-- Test churn: every test that hardcodes a legacy collection name needs updating. Estimated ~20-30 test sites.
+- Test churn: every test that hardcodes a legacy collection name needs updating. Surveyed via `grep -rn 'code__nexus-\|docs__nexus-\|rdr__nexus-' tests/`: 64 hits across 12 distinct files. Many are cluster references (`code__nexus-XXXXXXXX-foo`) rather than literal sites needing rewrites, but the cleanup surface is non-trivial.
 - Migration message is operator-visible, which means it has to be documented and locked into a test (the operator should not see it twice for the same collection).
 
 **Risks:**
@@ -240,6 +280,13 @@ The migration is one-shot per repo per content-type. Operators with hundreds of 
 11. Operator-visible one-line "upgraded" message; idempotent (no second message on subsequent indexes).
 12. Lock in a test that re-indexing after the upgrade does not re-emit the message.
 
+### Phase 4b: legacy-name redirect for read surfaces
+
+13. New `Catalog.resolve_collection_name(name)` that follows the `superseded_by` chain to the terminus. Idempotent on conformant names. Cycle and max-hop guards mirror `resolve_alias`.
+14. Wire it into MCP tools that accept a `name` argument (`collection_info`, `store_get`, `store_put`, `search`). Debug-level log on redirect; user output unchanged.
+15. Wire it into CLI commands that accept collection names (`nx search`, `nx collection`, etc.).
+16. Tests: legacy name lookup after rename returns the same row as direct conformant lookup; cycle in the chain bails gracefully; multi-step rename chains terminate at the latest target.
+
 ### Phase 5: strict-flip + flag drop
 
 13. Flip `T3Database.strict_collection_naming` default to True (`nexus-2r71` collapses to this commit).
@@ -257,8 +304,9 @@ The migration is one-shot per repo per content-type. Operators with hundreds of 
 - `tests/test_catalog_collection_name.py` (new): locks the tuple type contract.
 - `tests/test_catalog_collection_for.py` (new): locks the catalog naming-authority contract including version-bump semantics.
 - `tests/test_indexer_conformant_names.py` (new): locks the indexer family on conformant naming.
-- `tests/test_collection_name_migration.py` (new): locks the legacy-to-conformant rename on first index.
-- Existing tests update to use `CollectionName(...)` instead of hardcoded legacy strings (~20-30 sites).
+- `tests/test_collection_name_migration.py` (new): locks the legacy-to-conformant rename on first index, the idempotency of the upgrade message, and the redirect via `resolve_collection_name`.
+- `tests/test_repo_identity_stability.py` (new or extension of an existing test): locks the path-derived identity invariant; same path returns the same hash; worktrees resolve to the main repo's hash.
+- Existing tests update to drop hardcoded legacy strings. Survey: 64 hits across 12 distinct test files (`grep -rn 'code__nexus-\|docs__nexus-\|rdr__nexus-' tests/`). Many are cluster references not literal sites; the load-bearing rewrite count is smaller but the audit is the count of files that need a pass.
 
 ## Open Questions
 
