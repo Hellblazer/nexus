@@ -185,6 +185,52 @@ def test_index_chunks_carry_source_path(
     assert any(expected_file in p for p in sources), f"{expected_file} missing from: {sources}"
 
 
+def test_greenfield_index_writes_no_deprecated_keys(
+    rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database
+) -> None:
+    """nexus-e5uw acceptance: a fresh greenfield index must not write
+    chunks carrying any of the 5 deprecated chunk-metadata keys that
+    ``nx catalog migrate``'s prune-deprecated-keys verb targets
+    (``source_path``, ``git_branch``, ``git_commit_hash``,
+    ``git_project_name``, ``git_remote_url``). The bead's acceptance
+    is that a clean greenfield repro + ``nx catalog migrate`` produces
+    0 chunks_updated, which is equivalent to: no chunk written by
+    ``index_repository`` carries any of those keys.
+
+    RDR-102 Phase B drops ``source_path`` from
+    :data:`ALLOWED_TOP_LEVEL`; ``normalize()`` packs the four
+    ``git_*`` fields into a single ``git_meta`` JSON blob and drops
+    the flat keys. This test is the post-Phase-B contract.
+    """
+    from nexus.commands.catalog import _PRUNE_DEPRECATED_KEYS
+
+    _index(rich_repo, rich_registry, local_t3)
+
+    leaks: dict[str, list[str]] = {}
+    total_chunks = 0
+    for entry in local_t3.list_collections():
+        col_name = entry["name"]
+        if not col_name.startswith(("code__", "docs__", "rdr__")):
+            continue
+        col = local_t3.get_or_create_collection(col_name)
+        metadatas = col.get(include=["metadatas"])["metadatas"]
+        total_chunks += len(metadatas)
+        for m in metadatas:
+            for k in _PRUNE_DEPRECATED_KEYS:
+                if k in m:
+                    leaks.setdefault(f"{col_name}:{k}", []).append(
+                        m.get("title", "<no-title>")
+                    )
+
+    assert total_chunks > 0, "expected at least one chunk in fresh index"
+    assert not leaks, (
+        f"Greenfield index leaked deprecated keys (nexus-e5uw regression). "
+        f"Indexed {total_chunks} chunks across code/docs/rdr collections; "
+        f"prune-target keys present in: {sorted(leaks)}. "
+        f"`nx catalog migrate` should be a no-op on a fresh greenfield."
+    )
+
+
 def test_index_staleness_skips_unchanged(
     mini_repo: Path, registry: RepoRegistry, local_t3: T3Database
 ) -> None:
