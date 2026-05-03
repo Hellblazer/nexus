@@ -95,9 +95,25 @@ Surveys (verified):
 
 - `grep -rn 'physical_collection\b' src/nexus/ | wc -l`: 246 occurrences. Most are projector reads or test assertions; the field is widely consumed.
 - `grep -rn '_collection_name\|_docs_collection_name\|_rdr_collection_name' src/ nx/ sn/`: 78 callers across the repo, plugins, and skills. All must switch to the new path or stop importing.
-- MCP surface (`src/nexus/mcp/core.py`): `collection_info`, `store_get`, `store_put`, `search`, and several other tools accept a literal `name` argument. Users with scripted MCP calls referencing legacy collection names see "Collection not found" errors post-rename unless the lookup honors the `superseded_by` redirect.
-- Search routing in `src/nexus/search/` and CLI commands accept collection names directly. Same compatibility concern.
-- Plugin index files (`nx/`, `sn/`): some reference legacy-style names in fixtures. Counted in the 78 above.
+- MCP surface (`src/nexus/mcp/core.py`): `collection_info`, `store_get`, `store_put`, `search`, and several other tools accept a literal `name` argument.
+- Search routing in `src/nexus/search/` and CLI commands accept collection names directly.
+
+### Plugin layer surfaces
+
+The `nx/` plugin tree carries its own references. Two kinds:
+
+**Active name-constructing code** (treat like the indexer family):
+
+- `nx/hooks/scripts/rdr_hook.py:58, 269`: writes `target = f"rdr__{repo_name}"`. Constructs a legacy 2-segment name; needs to go through `Catalog.collection_for(...)` like the indexer family does.
+- `nx/skills/rdr-close/SKILL.md`: writes post-mortems to `knowledge__rdr_postmortem__{repo}` (lines 220, 231, 244, 278, 296, 309). This is a curated per-repo knowledge collection template that the skill instructs the agent to populate. Decision in scope for this RDR: does `rdr_postmortem` collapse into the conformant `knowledge__<owner>__<model>__v1` shape (folding the `rdr_postmortem` semantic into the `owner_id` segment), or is `knowledge__rdr_postmortem__*` a *fallback*-shaped collection that stays legacy by design?
+
+**Documentation and examples** (search-and-replace pass):
+
+- `nx/agents/codebase-deep-analyzer.md:96`: example `code__<repo>`.
+- `nx/agents/deep-research-synthesizer.md:112, 116`: examples `knowledge__art`, `code__<repo>`.
+- `nx/agents/_shared/ERROR_HANDLING.md:97`, `_shared/CONTEXT_PROTOCOL.md:131`: example shapes in agent docstrings.
+- `nx/skills/nexus/SKILL.md`, `nexus/reference.md`, `review/SKILL.md`, `debug/SKILL.md`, `rdr-gate/SKILL.md`: example collection names in skill instructions.
+- `nx/commands/pdf-process.md:39`: example `--collection knowledge__<corpus>`.
 
 Compatibility implication accepted as breakage: with a user base of two operators, scripted MCP calls and saved CLI invocations referencing legacy names are expected to fail loudly post-rename. The operator updates the call once. No transparent-redirect shim; no deprecation chain follow. The surface audit above stands as a guide for *what to update*, not as a list of compat surfaces to preserve.
 
@@ -262,23 +278,30 @@ Rationale: building and maintaining a `superseded_by` chain-follow at every read
 5. Internal version-bump helper that reads the highest existing `model_version` from the projection.
 6. Tests: new (c, o, m) returns v1; existing returns same vN; explicit `--bump` returns vN+1.
 
-### Phase 3: indexer rewrite
+### Phase 3: indexer rewrite (src + plugin)
 
-7. Replace `registry._collection_name` family with calls to `cat.collection_for(...).render()`. Keep the legacy helpers exported with a deprecation warning for one release cycle so external plugins have a window.
+7. Replace `registry._collection_name` family with calls to `cat.collection_for(...).render()`. Drop the legacy helpers as soon as call sites switch (no deprecation window; user base is two operators).
 8. Update `doc_indexer.py:599/1102/1463` inline name construction.
 9. Update `pipeline_stages.py`, `indexer.py`, `commands/index.py`.
+10. Update `nx/hooks/scripts/rdr_hook.py:58, 269` to use the same naming authority.
 
 ### Phase 4: migration on first index
 
-10. In `_catalog_hook_repo`: detect legacy collection, compute conformant target, invoke `rename_collection` if needed.
-11. Operator-visible one-line "upgraded" message; idempotent (no second message on subsequent indexes).
-12. Lock in a test that re-indexing after the upgrade does not re-emit the message.
+11. In `_catalog_hook_repo`: detect legacy collection, compute conformant target, invoke `rename_collection` if needed.
+12. Operator-visible one-line "upgraded" message; idempotent (no second message on subsequent indexes).
+13. Lock in a test that re-indexing after the upgrade does not re-emit the message.
 
 ### Phase 5: strict-flip + flag drop
 
-13. Flip `T3Database.strict_collection_naming` default to True (`nexus-2r71` collapses to this commit).
-14. Remove the flag in a follow-up.
-15. Drop the legacy registry helpers after their deprecation window.
+14. Flip `T3Database.strict_collection_naming` default to True (`nexus-2r71` collapses to this commit).
+15. Remove the flag in a follow-up.
+16. Drop the legacy registry helpers from the codebase.
+
+### Phase 6: plugin-layer documentation pass
+
+17. Decide the `knowledge__rdr_postmortem__{repo}` shape (rdr-close skill): collapse to conformant `knowledge__<owner>__<model>__v1` with the `rdr_postmortem` semantic encoded elsewhere, or keep as a fallback-shaped legacy collection by design. Document the choice in the skill's SKILL.md.
+18. Sweep `nx/agents/*.md`, `nx/agents/_shared/*.md`, `nx/skills/*/SKILL.md`, `nx/skills/*/reference.md`, `nx/commands/*.md` for legacy-shape illustrative examples (`code__<repo>`, `knowledge__art`, `rdr__nexus`, etc.). Replace with conformant examples that reflect the post-RDR-103 reality.
+19. Update `nx/skills/nexus/SKILL.md` and `reference.md` collection-naming sections to describe the canonical 4-segment shape as the public contract.
 
 ### Day 2 operations
 
