@@ -156,7 +156,34 @@ class MetadataSchemaError(ValueError):
 # ── Normalise ───────────────────────────────────────────────────────────────
 
 
-def normalize(raw: dict[str, Any], *, content_type: str) -> dict[str, Any]:
+#: RDR-101 Phase 5a (nexus-o6aa.11): deprecated chunk-metadata fields
+#: that the post-Phase-4 reader migration no longer depends on. When the
+#: ``[catalog].event_sourced`` config flag is true, these are dropped
+#: from chunk metadata at write time. Phase 5b will flip the default;
+#: Phase 5c will remove them from :data:`ALLOWED_TOP_LEVEL` entirely.
+#:
+#: - ``title``: catalog-resolved ``_display_path`` superseded chunk-
+#:   level title for formatters (#472).
+#: - ``corpus``: catalog Document already carries the corpus binding;
+#:   chunks reach it through ``doc_id``.
+#: - ``store_type``: ``content_type`` is the canonical routing field
+#:   (nexus-40t); ``store_type`` is the legacy duplicate.
+#: - ``git_meta``: catalog Document carries the source's git provenance
+#:   at the document level; the per-chunk JSON blob is redundant copy.
+_GATED_BY_EVENT_SOURCED: frozenset[str] = frozenset({
+    "title",
+    "corpus",
+    "store_type",
+    "git_meta",
+})
+
+
+def normalize(
+    raw: dict[str, Any],
+    *,
+    content_type: str,
+    event_sourced: bool | None = None,
+) -> dict[str, Any]:
     """Return a canonical metadata dict for a T3 record.
 
     Operations (in order):
@@ -173,6 +200,10 @@ def normalize(raw: dict[str, Any], *, content_type: str) -> dict[str, Any]:
        git_meta-omitted-when-empty pattern.
     5. Inject ``content_type`` so routing code has a single canonical
        field to read.
+    6. RDR-101 Phase 5a (``nexus-o6aa.11``): when *event_sourced* is true,
+       drop :data:`_GATED_BY_EVENT_SOURCED` keys. Defaults to consulting
+       :func:`nexus.config.is_catalog_event_sourced` so indexers don't
+       need to thread the flag through every call site.
 
     The function never raises on unknown keys (cargo is silently dropped).
     The companion :func:`validate` performs the strict post-write check.
@@ -234,6 +265,17 @@ def normalize(raw: dict[str, Any], *, content_type: str) -> dict[str, Any]:
 
     # Step 5: stamp content_type.
     normalised["content_type"] = content_type
+
+    # Step 6: RDR-101 Phase 5a — drop deprecated fields when the
+    # ``[catalog].event_sourced`` flag is on. Resolved lazily so call
+    # sites that pre-date Phase 5a continue to behave as before
+    # (default false until Phase 5b).
+    if event_sourced is None:
+        from nexus.config import is_catalog_event_sourced  # noqa: PLC0415
+        event_sourced = is_catalog_event_sourced()
+    if event_sourced:
+        for k in _GATED_BY_EVENT_SOURCED:
+            normalised.pop(k, None)
 
     return normalised
 

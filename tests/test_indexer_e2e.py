@@ -185,6 +185,94 @@ def test_index_chunks_carry_source_path(
     assert any(expected_file in p for p in sources), f"{expected_file} missing from: {sources}"
 
 
+def test_event_sourced_flag_drops_phase5a_gated_keys(
+    monkeypatch: pytest.MonkeyPatch,
+    rich_repo: Path,
+    rich_registry: RepoRegistry,
+    local_t3: T3Database,
+) -> None:
+    """nexus-o6aa.11 (Phase 5a) acceptance: when ``[catalog].event_sourced``
+    is on, freshly-indexed chunks must NOT carry the 4 deprecated keys
+    (``title``, ``corpus``, ``store_type``, ``git_meta``).
+
+    Scoped to *this test's* collections only because EphemeralClient
+    shares process-level state across tests; chunks indexed by prior
+    tests under the default-false path are visible here and would
+    falsely trip the assertion if checked indiscriminately.
+    """
+    from nexus.metadata_schema import _GATED_BY_EVENT_SOURCED
+    from nexus.registry import _repo_identity
+
+    monkeypatch.setenv("NEXUS_CATALOG_EVENT_SOURCED", "1")
+    _index(rich_repo, rich_registry, local_t3)
+
+    # Only this test's collections — filter by rich_repo's 8-char hash.
+    # EphemeralClient is process-shared, so other tests' chunks (which
+    # ran under default-false) live alongside ours and would falsely
+    # trip the assertion if we walked every collection.
+    _, path_hash = _repo_identity(rich_repo)
+    my_cols = [
+        e["name"]
+        for e in local_t3.list_collections()
+        if path_hash in e["name"]
+    ]
+
+    leaks: dict[str, list[str]] = {}
+    total_chunks = 0
+    for col_name in my_cols:
+        col = local_t3.get_or_create_collection(col_name)
+        metadatas = col.get(include=["metadatas"])["metadatas"]
+        total_chunks += len(metadatas)
+        for m in metadatas:
+            for k in _GATED_BY_EVENT_SOURCED:
+                if k in m:
+                    leaks.setdefault(f"{col_name}:{k}", []).append(
+                        m.get("doc_id", "<no-doc-id>")
+                    )
+
+    assert total_chunks > 0, "expected at least one chunk in fresh index"
+    assert not leaks, (
+        f"event_sourced=True greenfield index leaked Phase 5a gated keys "
+        f"(nexus-o6aa.11 regression). Indexed {total_chunks} chunks; "
+        f"keys present in: {sorted(leaks)}."
+    )
+
+
+def test_event_sourced_flag_off_keeps_keys(
+    rich_repo: Path,
+    rich_registry: RepoRegistry,
+    local_t3: T3Database,
+) -> None:
+    """REVERSIBLE check: with the flag off (default), the deprecated
+    fields still flow through to chunk metadata — back-compat for
+    operators who haven't opted in."""
+    from nexus.registry import _repo_identity
+
+    # NEXUS_CATALOG_EVENT_SOURCED unset → default-false path.
+    _index(rich_repo, rich_registry, local_t3)
+
+    _, path_hash = _repo_identity(rich_repo)
+    my_cols = [
+        e["name"]
+        for e in local_t3.list_collections()
+        if path_hash in e["name"]
+    ]
+
+    found_at_least_one = {"title": False, "corpus": False, "store_type": False}
+    for col_name in my_cols:
+        col = local_t3.get_or_create_collection(col_name)
+        metadatas = col.get(include=["metadatas"])["metadatas"]
+        for m in metadatas:
+            for k in found_at_least_one:
+                if k in m:
+                    found_at_least_one[k] = True
+
+    assert any(found_at_least_one.values()), (
+        f"flag-off run should preserve deprecated fields; "
+        f"none found: {found_at_least_one}"
+    )
+
+
 def test_greenfield_index_writes_no_deprecated_keys(
     rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database
 ) -> None:

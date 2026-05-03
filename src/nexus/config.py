@@ -346,9 +346,45 @@ def is_local_mode() -> bool:
     voyage_key = get_credential("voyage_api_key")
     return not (chroma_key and voyage_key)
 
+
+def is_catalog_event_sourced() -> bool:
+    """Return True if ``[catalog].event_sourced`` is enabled in the
+    nexus config (or via env override).
+
+    RDR-101 Phase 5a opt-in flag (``nexus-o6aa.11``). When true, the
+    chunk-metadata write path drops deprecated fields (``title``,
+    ``corpus``, ``store_type``, ``git_meta``) — readers route through
+    the catalog ``doc_id`` instead. Default false until Phase 5b
+    (``nexus-o6aa.12``) flips it.
+
+    Decision logic:
+      - ``NEXUS_CATALOG_EVENT_SOURCED=1`` → True (explicit opt-in)
+      - ``NEXUS_CATALOG_EVENT_SOURCED=0`` → False (explicit opt-out)
+      - Otherwise: read ``[catalog].event_sourced`` from config YAML;
+        default false when absent.
+    """
+    raw = os.environ.get("NEXUS_CATALOG_EVENT_SOURCED", "").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    # Fall through to config file.
+    cfg = load_config()
+    return bool(cfg.get("catalog", {}).get("event_sourced", False))
+
 # ── Defaults ──────────────────────────────────────────────────────────────────
 
 _DEFAULTS: dict[str, Any] = {
+    "catalog": {
+        # RDR-101 Phase 5a (nexus-o6aa.11): opt-in flag for the
+        # event-sourced write path. When true, deprecated chunk
+        # metadata fields (``title``, ``corpus``, ``store_type``,
+        # ``git_meta``) are dropped at write time — readers route
+        # through catalog → ``doc_id`` instead. Default false until
+        # Phase 5b (nexus-o6aa.12) flips it; Phase 5c removes the
+        # fields from ALLOWED_TOP_LEVEL.
+        "event_sourced": False,
+    },
     "embeddings": {
         "rerankerModel": "rerank-2.5",
     },

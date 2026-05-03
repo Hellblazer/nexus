@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **RDR-101 Phase 5a — `[catalog].event_sourced` opt-in flag** (`nexus-o6aa.11`). New config knob (default `false`) that, when set to `true`, drops 4 deprecated chunk-metadata fields at write time: `title`, `corpus`, `store_type`, and the consolidated `git_meta` JSON blob. The Phase 4 reader migration switched to catalog-resolved `_display_path` and `doc_id`-keyed dispatch, so these per-chunk copies are no-longer load-bearing. Two ways to enable:
+  - Config: add `catalog: { event_sourced: true }` to `~/.config/nexus/config.yml` (or per-repo `.nexus.yml`).
+  - Env: `NEXUS_CATALOG_EVENT_SOURCED=1` (overrides config, useful for testing).
+
+  REVERSIBLE — flipping back to `false` resumes dual-write. Chunks indexed under either mode are readable by current readers. Phase 5b (`nexus-o6aa.12`) will flip the default; Phase 5c (`nexus-o6aa.13`) will remove the fields from `ALLOWED_TOP_LEVEL` entirely.
+
 ## [4.22.0] - 2026-05-03
 
 Minor release. Headline: **RDR-101 — Event-sourced catalog with immutable document identity**, landed across Phases 0 → 4 (~70 PRs). The catalog is now backed by an append-only `events.jsonl` event log; SQLite is a derived projection; chunks carry `doc_id` (UUID7-stamped at chunk-write time) as the canonical identity field; the legacy `source_path` keying is on the deprecation glide path. Plus a bug-fix tail covering recovery-time hangs, owner-name collision silent failures, and catalog UX progress visibility.
