@@ -544,7 +544,9 @@ class T3Database:
 
     # ── Collection access ─────────────────────────────────────────────────────
 
-    def get_or_create_collection(self, name: str) -> chromadb.Collection:
+    def get_or_create_collection(
+        self, name: str, *, strict: bool | None = None,
+    ) -> chromadb.Collection:
         """Get or create a T3 collection with the appropriate embedding function.
 
         In local mode, the collection is created with ``hnsw:search_ef`` set to
@@ -559,9 +561,45 @@ class T3Database:
         ``nx store import`` of a ``.nxexp`` for a taxonomy collection
         recreate the right shape; without it the import would silently
         default to L2 and break cosine queries against the imported centroids.
+
+        RDR-101 Phase 6 strict mode (nexus-o6aa.14):
+        ``strict=True`` rejects NEW collection names that fail
+        :func:`nexus.corpus.is_conformant_collection_name`. Existing
+        collections (any name) are always allowed; the validator only
+        gates first-time creation. ``strict=None`` (default) reads
+        ``[catalog].strict_collection_naming`` from config; absent or
+        false keeps the existing permissive behavior so indexers and
+        tests do not break before the irreversible flip ships.
+        Operators wanting to opt out of strict mode in a config-on
+        environment can pass ``strict=False`` explicitly (the
+        backfill / migration verbs do this).
         """
-        from nexus.corpus import validate_collection_name
+        from nexus.corpus import (
+            is_conformant_collection_name, validate_collection_name,
+        )
         validate_collection_name(name)
+
+        if strict is None:
+            from nexus.config import load_config
+            strict = bool(
+                load_config().get("catalog", {}).get(
+                    "strict_collection_naming", False,
+                )
+            )
+
+        if (
+            strict
+            and not _bypass_canonical_schema(name)
+            and not self.collection_exists(name)
+            and not is_conformant_collection_name(name)
+        ):
+            raise ValueError(
+                f"Collection name {name!r} is not conformant. Expected "
+                f"<content_type>__<owner_id>__<embedding_model>__v<n>. "
+                f"Pass strict=False (or unset [catalog].strict_collection_naming) "
+                f"to allow grandfathered creation; pre-existing legacy "
+                f"collections continue to be readable regardless of strict mode."
+            )
 
         if _bypass_canonical_schema(name):
             metadata: dict = {"hnsw:space": "cosine"}
