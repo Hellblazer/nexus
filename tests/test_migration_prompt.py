@@ -45,7 +45,8 @@ def test_prompt_fires_once_when_fallback_active_and_tty(capsys):
 
     captured = capsys.readouterr()
     assert "bootstrap-fallback active" in captured.err
-    assert "nx catalog migrate" in captured.err
+    assert "nx catalog setup" in captured.err
+    assert "retired post Phase 5b" in captured.err
     assert "NEXUS_NO_PROMPTS" in captured.err
 
 

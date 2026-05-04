@@ -6,19 +6,54 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Changed
+## [4.23.0] - 2026-05-04
 
-- **RDR-101 Phase 5b — IRREVERSIBLE: `[catalog].event_sourced` default flipped to `true`** (`nexus-o6aa.12`). New chunks are written WITHOUT the 4 deprecated metadata fields (`title`, `corpus`, `store_type`, `git_meta`) by default. Readers route through the catalog `doc_id` instead — Phase 4 reader migration completed (`_display_path` resolution, `doc_id`-keyed dispatch), so dropping these fields on the write side is safe.
+Minor release. Headline: **RDR-101 closed end-to-end (Phases 4-6 + irreversible flip + cleanup)** and **RDR-103 closed** (Catalog as Collection-Name Authority). The catalog is now the sole authority for collection names, the conformant 4-segment shape `<content_type>__<owner_id>__<embedding_model>__v<n>` is the only collection name reachable from new writes, and the five transitional migration verbs are retired. The chunk-metadata schema is reduced (`source_path`, `corpus`, `store_type`, `git_meta` all dropped); chunks carry `doc_id` as the canonical identity field. Six new operator verbs (catalog `doctor --collections-drift`, `rename-collection`, `supersede-collection`, `backfill-collections`, `migrate-fallback`, `nx t3 gc`) ship as the post-cleanup operator surface. Plus follow-up bug fixes surfaced in sandbox shakedown, the chromadb httpx-timeout fix, and a thorough post-arc doc/code cleanup sweep.
 
-  REVERSIBLE escape hatch: operators who need the legacy chunk shape can opt back out via `NEXUS_CATALOG_EVENT_SOURCED=0` env var or `[catalog].event_sourced: false` in config.yml. Existing chunks indexed under either mode remain readable.
+### Changed (potentially breaking)
 
-  Phase 5c (`nexus-o6aa.13`) will remove the deprecated fields from `ALLOWED_TOP_LEVEL` entirely; the dual-write back-compat path goes away at that point and the env-var escape stops working.
+- **RDR-101 Phase 5b: IRREVERSIBLE: `[catalog].event_sourced` default flipped to `true`** (`nexus-o6aa.12`). New chunks are written WITHOUT the deprecated metadata fields (`corpus`, `store_type`, `git_meta`) by default. Readers route through the catalog `doc_id` instead; Phase 4 reader migration completed (`_display_path` resolution, `doc_id`-keyed dispatch), so dropping these fields on the write side is safe. Escape hatch: `NEXUS_CATALOG_EVENT_SOURCED=0` env var still falls back to the legacy direct-write path at runtime.
+- **RDR-101 Phase 5c: chunk-metadata schema reduction** (`nexus-o6aa.13`, PR #80071934). Removes `corpus`, `store_type`, and `git_meta` from `ALLOWED_TOP_LEVEL`. `title` is intentionally KEPT (load-bearing for `find_ids_by_title` + the MCP `store_get` title-fallback path). The schema goes from 31 keys to 28 keys.
+- **RDR-103 Phase 5: IRREVERSIBLE: strict collection-naming default-on** (`nexus-yqnr.7`). `T3Database.get_or_create_collection` now requires conformant 4-segment names by default. The opt-in `strict_collection_naming` flag is gone; the single guard at `src/nexus/db/t3.py:547` is the only enforcement site. Operators who type the short legacy form (`knowledge__topic`) at the `--collection` boundary get auto-promoted by `t3_collection_name`; pre-existing legacy 2-segment collections remain readable.
+- **Auto-migration on first index** (`nexus-yqnr.6`). The first `nx index repo` per content_type after upgrade detects legacy collections (both pre-RDR-101 2-segment and pre-strict 4-segment path-derived) and renames them to the conformant tuple-derived shape via `Catalog.rename_collection`. Idempotent: re-running after migration emits zero migration lines.
+- **Five transitional catalog verbs retired** (`nexus-iftc`, PRs #496+#497). `nx catalog migrate`, `synthesize-log`, `t3-backfill-doc-id`, `repair-orphan-chunks`, and `prune-deprecated-keys` are gone. Their function (one-shot migration scaffolding) is complete after Phase 5b; the operator playbook for any remaining edge case is "delete the catalog directory and re-run `nx catalog setup`" for legacy catalogs and "re-index" for orphan recovery on collections written under post-Phase-4 contracts. Net `commands/catalog.py` reduction: ~6,100 LOC.
 
 ### Added
 
-- **RDR-101 Phase 5a — `[catalog].event_sourced` opt-in flag** (`nexus-o6aa.11`). New config knob (originally default `false`, flipped to `true` by Phase 5b above) that gates the write-side drop of 4 deprecated chunk-metadata fields: `title`, `corpus`, `store_type`, and the consolidated `git_meta` JSON blob. Two ways to set:
-  - Config: `catalog: { event_sourced: <bool> }` in `~/.config/nexus/config.yml` (or per-repo `.nexus.yml`).
-  - Env: `NEXUS_CATALOG_EVENT_SOURCED=0|1` (overrides config).
+- **RDR-101 Phase 5a: `[catalog].event_sourced` opt-in flag** (`nexus-o6aa.11`). Predecessor to the Phase 5b irreversible flip; landed first to give operators a soak window.
+- **`nx catalog doctor --collections-drift`** (`nexus-o6aa.14`). Release-gate: enforces the projection ⊇ T3 ⊇ documents.physical_collection invariant. Wired into `tests/e2e/release-sandbox.sh` step 11; any drift is a deterministic failure rather than an audit finding.
+- **`nx catalog rename-collection`** (`nexus-o6aa.14`). Atomic 1:1 T3-then-catalog rename with rollback. Chunks become orphans for `nx t3 gc` to sweep; operator re-indexes the target. (No background re-embed; that's a possible follow-up.)
+- **`nx catalog supersede-collection`** (`nexus-o6aa.14`). Marks a collection as superseded by another (e.g. when an embedding model changes); routes new writes to the successor.
+- **`nx catalog backfill-collections`** (`nexus-o6aa.14`). One-shot projection backfill from existing T3 + documents state. Defaults to `--dry-run`; `--no-dry-run` actually writes. Filters `taxonomy__*` via the same `_BYPASS_SCHEMA_PREFIXES` set the drift check uses.
+- **`nx catalog migrate-fallback`** (`nexus-o6aa.14`). Operator-driven fallback for collections that the auto-migration on first index cannot resolve.
+- **`nx t3 gc`** (`nexus-r5eo`). T3 garbage collector: sweeps chunks left orphaned by catalog operations (rename, supersede, document deletion) once they exit the orphan window.
+- **RDR-103 conformant collection-name shape** (`nexus-yqnr.1` through `nexus-yqnr.6`). `CollectionName` tuple type + `Catalog.collection_for_repo` convenience + indexer + plugin-layer rewrites + Phase 4 auto-migration. The catalog is the sole authority for collection names; the indexer asks rather than constructs.
+- **RDR-103 OpenQ Q2 resolution** (`nexus-yqnr.9`, PR #493). Per-collection upgrade messages remain (no `--quiet` flag). The migration loop iterates over `("code", "docs", "rdr")`, so a single `nx index repo` invocation emits at most 3 `Upgraded legacy collection` lines, then 0 thereafter.
+
+### Fixed
+
+- **chromadb httpx timeout=None hang** (`nexus-jgjw`, commit `83daa8b4`). chromadb >=1.5 hardcodes `httpx.Client(timeout=None, ...)`; observed during 2026-05-03 orphan recovery as a 10+ minute hang at 91% on a 63K-chunk collection (CPU=0%, one TCP socket in `CLOSE_WAIT`). `T3Database.__init__` now overrides via `_apply_chroma_http_timeout(client)` to `httpx.Timeout(connect=10, read=120, write=60, pool=10)`. Stalled reads now raise `httpx.ReadTimeout` (already classified retryable) so the existing retry helper converts the hang into a bounded retry-then-fail loop. Defensive on shape: skips PersistentClient/EphemeralClient that have no `_server._session`.
+- **`owners.UNIQUE(name)` schema bug: split rdr collections** (`nexus-7vuw`, PR #494). The single-column UNIQUE on `owners.name` produced split rdr collections via INSERT OR REPLACE silently obliterating the repo owner when a Phase-4 path-derived synthetic owner registered under the same name. Fixed by composite `UNIQUE(name, owner_type)` with an in-place migration that detects the legacy single-column index and rebuilds the table.
+- **t3-aware grandfathering for legacy `--collection` input** (`nexus-hmxi`, PR #495). `nx store list --collection knowledge__delos` auto-promoted 2-segment input to conformant; `nx search --corpus knowledge__delos` used the input as-is. Operators got split read/write views of legacy collections. Fixed by threading `t3=` explicitly through MCP/CLI surfaces so `t3_collection_name` can grandfather only collections that actually exist in T3.
+- **`_migration_source_candidates` enumerates BOTH legacy shapes** (`nexus-7vuw`). The Phase 4 migration originally only detected 2-segment legacy names. Sandbox shakedown surfaced that pre-strict runs had also produced path-derived 4-segment names; both shapes now enumerate per `(repo, content_type)` and the existing `Catalog.rename_collection` handles whichever exists.
+- **RDR-102 Phase B: `source_path` retired from chunk schema** (`nexus-ejs4`). Hard-removed from `make_chunk_metadata` signature in lockstep with 7 writer call sites. `_PRUNE_DEPRECATED_KEYS ∩ ALLOWED_TOP_LEVEL == ∅` enforced by unit test.
+- **RDR-102 Phase A: doc_indexer family pre-flight catalog registration** (`nexus-uusi`). PDF + markdown indexers register catalog Documents before chunk-write so chunks land in T3 with `doc_id` at write time, not via a backfill verb.
+- **RDR-102 Phase C: orphan-ratio surface in doctor** (`nexus-2nls`). Per-collection + global `orphan_ratio` in JSON; new "Orphan ratio" text section emits WARN > 50%.
+- **`_prune_deleted_files` doc_id-keyed** (Phase B critical regression). Previously read `meta.get("source_path", "")` and would silently no-op for post-Phase-B repos.
+- **Deleted-file cleanup + curator-filter coverage gaps** (PRs #487, #488). `taxonomy__centroids` correctly skipped in `chunk_text_hash` backfill; doc_indexer + bare-name catalog/store owner lookups filter by curator type.
+
+### Documentation
+
+- **RDR-101 closed** (`nexus-o6aa`, PR #498). Post-mortem at `docs/rdr/post-mortem/101-event-sourced-catalog-migration.md`. 14/14 child beads complete; phases 0-6 shipped.
+- **RDR-103 closed** (`nexus-yqnr`, PR #499). Post-mortem at `docs/rdr/post-mortem/103-catalog-collection-name-authority.md`. 9/9 child beads complete; single-day arc on top of RDR-101's irreversibility.
+- **Post-RDR-101/103 doc/code drift cleanup** (PRs #500-504, 5 passes):
+  - PR #500: 4 surfaces (cli-reference, repo-indexing, metadata-consistency-matrix, catalog source messages).
+  - PR #501: 8 surfaces (top-level AGENTS.md identity column, catalog AGENTS.md invariants, source comments + docstrings + ReadFail/ClickException strings).
+  - PR #502: 2 dead validation scripts (`scripts/validate/rdr-101-migration-e2e*.sh`).
+  - PR #503: 2 operator-playbook docs deleted (`docs/migration/rdr-101.md`, `rdr-101-phase4-orphan-recovery.md`); `docs/migration/README.md` flags surviving 5 audit artifacts as historical record; 2 source-side broken-link fixes (`_migration_prompt.py`, `commands/catalog.py`).
+  - PR #504: `tests/test_abstract_themes_plan_integration.py` refactored to drop hardcoded `dominant_themes` fixtures; coverage gate now corpus-grounded against runtime BERTopic labels (top-K by doc_count). Author-curated theme lists moved to `bench/queries/abstract-themes.yml` as evaluation harness. Closes `nexus-igzg`.
+- **`docs/migration/README.md`** (new). Flags the directory as historical forensic record paralleling `docs/rdr/post-mortem/`.
+- Zero "Run nx catalog [retired-verb]" guidance remains anywhere in `src/`.
 
 ## [4.22.0] - 2026-05-03
 

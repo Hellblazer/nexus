@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.23.0] - 2026-05-04
+
+Plugin version aligned with conexus 4.23.0. Plugin-side updates for the RDR-103 conformant collection-naming arc (`nexus-yqnr.8`): example collection names in `nx/skills/nexus/SKILL.md` and `nx/skills/nexus/reference.md` reshaped to the 4-segment form `<content_type>__<owner_id>__<embedding_model>__v<n>` (e.g. `code__nexus-1-1__voyage-code-3__v1`); `nx/agents/_shared/ERROR_HANDLING.md` carries the same shape for error-recovery surfaces. Operators may still type the short legacy form (`knowledge__topic`) at the `--collection` boundary; `t3_collection_name` auto-promotes before any T3 write. See root `CHANGELOG.md` for the underlying conexus library changes (RDR-101 Phase 4-6 closure, RDR-103 close, chunk-metadata schema reduction, six new operator verbs, five retired migration verbs).
+
 ## [4.22.0] - 2026-05-03
 
 Plugin version aligned with conexus 4.22.0. No plugin-specific changes — all of v4.22.0's surface (RDR-101 event-sourced catalog migration through Phase 4, plus the cherry-pick bug-fix tail) is in the underlying conexus library. See root `CHANGELOG.md` for the full release notes.

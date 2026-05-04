@@ -268,7 +268,9 @@ def test_cce_query_retrieves_cce_indexed_markdown():
     from nexus.doc_indexer import index_markdown
 
     uid = uuid.uuid4().hex[:8]
-    collection = f"docs__int-cce-{uid}"
+    # RDR-103 Phase 5 strict naming: index_markdown synthesises the
+    # conformant 4-segment collection at write time. Mirror it here.
+    collection = f"docs__int-cce-{uid}__voyage-context-3__v1"
     md_content = (
         f"# Authentication Module {uid}\n\n"
         f"This document describes the user authentication system for test {uid}.\n\n"
