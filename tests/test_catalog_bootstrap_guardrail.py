@@ -180,8 +180,11 @@ def test_bootstrap_fallback_clears_when_log_catches_up(
     tmp_path, monkeypatch,
 ):
     """Once events.jsonl carries ≥ ``int(legacy_doc_count * 0.95)``
-    DocumentRegistered events (e.g. after ``nx catalog synthesize-log
-    --force``), the next rebuild promotes to ES and the flag clears.
+    DocumentRegistered events (accumulated organically as the indexer
+    re-registers documents after the Phase 5b flip), the next rebuild
+    promotes to ES and the flag clears. The synthesize-log seeding
+    verb that originally seeded events.jsonl was retired post Phase 5b
+    (nexus-iftc).
     """
     monkeypatch.setenv("NEXUS_EVENT_SOURCED", "0")
     d = _init_catalog(tmp_path)
@@ -252,10 +255,13 @@ def test_doctor_surfaces_bootstrap_fallback_in_text_output(
     # output for older Click semantics so the test is robust.
     text = (result.stderr or "") + (result.output or "")
     assert "bootstrap-fallback" in text, text
-    assert "synthesize-log --force" in text, (
-        "remediation hint must include --force; pre-fix the warning "
-        "told operators to run synthesize-log without --force, which "
-        "fails on a non-empty events.jsonl."
+    # nexus-iftc: synthesize-log + t3-backfill-doc-id were retired
+    # post Phase 5b; the warning now points operators at the
+    # nx-catalog-setup-from-T3 recovery path instead.
+    assert "nx catalog setup" in text, (
+        "remediation hint must point at the nx catalog setup recovery "
+        "path now that the synthesize-log + t3-backfill-doc-id verbs "
+        "are gone."
     )
 
 
