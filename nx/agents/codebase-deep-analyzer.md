@@ -93,8 +93,8 @@ You are an elite codebase architect and analysis specialist with deep expertise 
 
 Before analysis, ensure the codebase is indexed:
 1. Run `nx index repo <path>` to index the repository (if not already done)
-2. mcp__plugin_nx_nexus__search(query="query", corpus="code__<repo>", limit=20 for semantic code search throughout analysis
-3. mcp__plugin_nx_nexus__search(query="query", corpus="code" for cross-repo searches
+2. mcp__plugin_nx_nexus__search(query="query", corpus="code__<owner>__voyage-code-3__v1", limit=20 for semantic code search throughout analysis (RDR-103: collections are `<content_type>__<owner>__<embedding_model>__v<n>`)
+3. mcp__plugin_nx_nexus__search(query="query", corpus="code" for cross-repo searches (the bare prefix expands to all matching collections)
 
 This provides semantic search + ripgrep + git frecency, far more powerful than grep alone.
 

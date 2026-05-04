@@ -53,8 +53,9 @@ falls through to an inline `claude -p` planner.
 
 A single-corpus RDR lookup — e.g. "find the RDR that covers this
 module's error-handling approach" — is fine via
-`mcp__plugin_nx_nexus__search(query=..., corpus="rdr__<repo>")`. Fast,
-cheap, and the chunks often contain the design rationale directly.
+`mcp__plugin_nx_nexus__search(query=..., corpus="rdr__<owner>__voyage-context-3__v1")`
+(or the bare `rdr` prefix to fan out to all matching collections).
+Fast, cheap, and the chunks often contain the design rationale directly.
 
 Use this skill when: the question needs to *walk* the catalog's
 per-file links (code → RDR → related RDRs) or synthesize across

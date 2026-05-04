@@ -31,7 +31,7 @@ Semantic search across T3 knowledge collections.
 mcp__plugin_nx_nexus__search(query="query"                                  # knowledge + code + docs (default)
 mcp__plugin_nx_nexus__search(query="query", corpus="all"                    # all T3 collections
 mcp__plugin_nx_nexus__search(query="query", corpus="code"                   # code collections only
-mcp__plugin_nx_nexus__search(query="query", corpus="knowledge__art", limit=15  # specific collection
+mcp__plugin_nx_nexus__search(query="query", corpus="knowledge__art-1-1__voyage-context-3__v1", limit=15  # specific collection (RDR-103: 4-segment)
 mcp__plugin_nx_nexus__search(query="query", where="bib_year>=2023"          # filter by year
 mcp__plugin_nx_nexus__search(query="query", where="section_type!=references" # exclude reference sections
 mcp__plugin_nx_nexus__search(query="query", cluster_by="semantic"           # group results by topic
@@ -52,7 +52,7 @@ Document-level semantic search for analytical questions. Unlike `search` which r
 
 ```
 mcp__plugin_nx_nexus__query(question="adaptive resonance theory cortical maps"
-mcp__plugin_nx_nexus__query(question="speech processing", corpus="knowledge__art", where="page_count>=50"
+mcp__plugin_nx_nexus__query(question="speech processing", corpus="knowledge__art-1-1__voyage-context-3__v1", where="page_count>=50"
 mcp__plugin_nx_nexus__query(question="error handling patterns", corpus="code", limit=5
 ```
 
@@ -112,8 +112,8 @@ Batch-hydrate document content by ID past the ChromaDB 300-record read cap (RDR-
 | `structured` | bool | `false` | Return `{contents, missing}` dict when True; human-readable string when False |
 
 ```
-mcp__plugin_nx_nexus__store_get_many(ids=["id1","id2"], collections="knowledge__art"
-mcp__plugin_nx_nexus__store_get_many(ids="id1,id2", collections="rdr__nexus", structured=True
+mcp__plugin_nx_nexus__store_get_many(ids=["id1","id2"], collections="knowledge__art-1-1__voyage-context-3__v1"
+mcp__plugin_nx_nexus__store_get_many(ids="id1,id2", collections="rdr__nexus-1-1__voyage-context-3__v1", structured=True
 ```
 
 ### operator_summarize
@@ -254,9 +254,9 @@ List entries in a T3 knowledge collection.
 | `docs` | bool | `false` | Show unique documents instead of individual chunks. Deduplicates by content_hash, shows title, chunk count, page count, extraction method |
 
 ```
-mcp__plugin_nx_nexus__store_list(collection="knowledge"
-mcp__plugin_nx_nexus__store_list(collection="knowledge__art", docs=true       # document-level view
-mcp__plugin_nx_nexus__store_list(collection="knowledge__notes", limit=50, offset=100
+mcp__plugin_nx_nexus__store_list(collection="knowledge"                       # auto-promoted to conformant
+mcp__plugin_nx_nexus__store_list(collection="knowledge__art-1-1__voyage-context-3__v1", docs=true  # document-level view (RDR-103: 4-segment)
+mcp__plugin_nx_nexus__store_list(collection="knowledge__notes-1-1__voyage-context-3__v1", limit=50, offset=100
 ```
 
 ### memory_put
@@ -444,7 +444,7 @@ nx index repo <path>                       # register and index a repo
 nx index repo <path> --frecency-only       # refresh git frecency scores only (fast)
 nx index repo <path> --chunk-size 80       # smaller chunks for better precision
 nx index pdf <path> --corpus my-papers
-nx index pdf --dir <path> --collection knowledge__art  # batch index directory
+nx index pdf --dir <path> --collection knowledge__art  # auto-promoted to conformant 4-segment
 nx index md  <path> --corpus notes
 ```
 
@@ -471,7 +471,7 @@ nx mineru stop                             # stop server
 - **T2 memory**: cross-session state, agent relay notes, active project context
 - **T3 knowledge**: validated findings, architectural decisions, reusable patterns — anything worth keeping permanently
 
-**Collection naming**: always `__` as separator — `code__myrepo`, `docs__corpus`, `knowledge__topic`. Colons are invalid in ChromaDB collection names.
+**Collection naming** (RDR-103): always `__` as separator (colons are invalid in ChromaDB collection names). The conformant shape is `<content_type>__<owner>__<embedding_model>__v<n>`, for example `code__nexus-1-1__voyage-code-3__v1`, `docs__nexus-1-1__voyage-context-3__v1`, `knowledge__art-1-1__voyage-context-3__v1`. Operators may type the short legacy form (`knowledge__topic`) at the `--collection` boundary; `t3_collection_name` auto-promotes to the 4-segment shape before any T3 write. Pre-existing legacy 2-segment collections remain readable; only NEW non-conformant creations are blocked at `T3Database.get_or_create_collection`.
 
 **Title conventions** (use hyphens, not colons):
 - `research-{topic}` — research findings
