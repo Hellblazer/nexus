@@ -217,52 +217,56 @@ case "$MODE" in
         nx upgrade 2>&1 | sed 's/^/  /' || true
 
         echo
-        echo "── 1/10 nx catalog setup (seeds plan library) ──"
+        echo "── 1/11 nx catalog setup (seeds plan library) ──"
         nx catalog setup 2>&1 | tail -5 | sed 's/^/  /' || true
 
         echo
-        echo "── 2/10 nx index repo ($REPO_ROOT) ──"
+        echo "── 2/11 nx index repo ($REPO_ROOT) ──"
         nx index repo "$REPO_ROOT" 2>&1 | tail -5 | sed 's/^/  /' || true
 
         echo
-        echo "── 3/10 nx index pdf (tests/fixtures/tc-sql.pdf) ──"
+        echo "── 3/11 nx index pdf (tests/fixtures/tc-sql.pdf) ──"
         nx index pdf "$REPO_ROOT/tests/fixtures/tc-sql.pdf" \
             --collection knowledge__shakedown 2>&1 | tail -5 | sed 's/^/  /' || true
 
         echo
-        echo "── 4/10 nx index rdr ──"
+        echo "── 4/11 nx index rdr ──"
         nx index rdr "$REPO_ROOT" 2>&1 | tail -5 | sed 's/^/  /' || true
 
         echo
-        echo "── 5/10 nexus-e5uw greenfield acceptance: no deprecated chunk keys ──"
+        echo "── 5/11 nexus-e5uw greenfield acceptance: no deprecated chunk keys ──"
         # Bead nexus-e5uw acceptance: a fresh greenfield index must produce
-        # 0 chunks needing prune. The dry-run prune-deprecated-keys verb
-        # walks every collection and reports how many chunks carry any of
-        # {source_path, git_branch, git_commit_hash, git_project_name,
-        # git_remote_url, corpus, store_type, git_meta}. RDR-102 Phase B
-        # drops source_path; normalize() drops the four flat git_* keys.
-        # RDR-101 Phase 5c additionally dropped corpus, store_type, git_meta
-        # from ALLOWED_TOP_LEVEL. On a properly-migrated indexer,
-        # chunks_updated must be 0.
-        PRUNE_OUT=$(nx catalog prune-deprecated-keys --dry-run \
-            --i-have-completed-the-reader-migration 2>&1 || true)
-        echo "$PRUNE_OUT" | tail -8 | sed 's/^/  /'
-        E5UW_UPDATED=$(echo "$PRUNE_OUT" | grep -E '^\s*chunks_updated:' | \
-            awk '{print $2}' | head -1)
-        if [[ "$E5UW_UPDATED" == "0" ]]; then
-            echo "  [pass] greenfield index produced 0 chunks needing prune"
+        # 0 chunks carrying any of {source_path, git_branch, git_commit_hash,
+        # git_project_name, git_remote_url, corpus, store_type, git_meta}.
+        # RDR-102 Phase B drops source_path; normalize() drops the four
+        # flat git_* keys; RDR-101 Phase 5c additionally dropped corpus,
+        # store_type, git_meta from ALLOWED_TOP_LEVEL.
+        #
+        # nexus-iftc retired ``nx catalog prune-deprecated-keys``. Delegate
+        # to the canonical pytest regression guard at
+        # tests/test_indexer_e2e.py::test_greenfield_index_writes_no_deprecated_keys,
+        # which walks T3 via ``col.get(include=["metadatas"])`` and asserts
+        # zero leaks across all collections this test produced. Running
+        # under ``uv run`` from REPO_ROOT picks up the editable install
+        # so the assertion runs against the same in-tree code the
+        # sandbox's nx wheel was built from.
+        if (cd "$REPO_ROOT" && uv run pytest -x -q --no-header \
+                tests/test_indexer_e2e.py::test_greenfield_index_writes_no_deprecated_keys \
+                2>&1) | tail -5 | sed 's/^/  /'; then
+            echo "  [pass] greenfield index produced 0 chunks with deprecated keys"
         else
-            echo "  [FAIL] greenfield index leaked ${E5UW_UPDATED:-?} chunks needing prune"
-            echo "         nexus-e5uw regression — code-indexer or doc-indexer is writing"
-            echo "         deprecated keys. Investigate before merge."
+            echo "  [FAIL] greenfield index leaked deprecated keys"
+            echo "         nexus-e5uw regression: indexer is writing pruned keys."
+            echo "         Investigate before merge."
+            exit 1
         fi
 
         echo
-        echo "── 6/10 cross-corpus search ──"
+        echo "── 6/11 cross-corpus search ──"
         nx search "catalog link graph" -m 3 2>&1 | tail -10 | sed 's/^/  /' || true
 
         echo
-        echo "── 7/10 T2 memory roundtrip ──"
+        echo "── 7/11 T2 memory roundtrip ──"
         SHAKE_TS=$(date +%s)
         nx memory put "shakedown marker $SHAKE_TS" \
             --project nexus_shakedown --title shakedown.md 2>&1 | tail -2 | sed 's/^/  /' || true
@@ -270,7 +274,7 @@ case "$MODE" in
             | head -3 | sed 's/^/  /' || true
 
         echo
-        echo "── 8/10 T1 scratch use (write + readback) ──"
+        echo "── 8/11 T1 scratch use (write + readback) ──"
         # Note: outside a Claude Code session, no SessionStart hook fires to
         # spawn the per-session ChromaDB HTTP server, so each `nx scratch *`
         # invocation falls back to its own EphemeralClient. Cross-invocation
@@ -286,16 +290,43 @@ case "$MODE" in
         echo "  note: cross-invocation readback only works inside a Claude Code session"
 
         echo
-        echo "── 9/10 catalog stats (registry + link graph readback) ──"
+        echo "── 9/11 catalog stats (registry + link graph readback) ──"
         nx catalog stats 2>&1 | head -15 | sed 's/^/  /' || true
 
         echo
-        echo "── 10/10 nx doctor (all checks, post-activity) ──"
+        echo "── 10/11 nx doctor (all checks, post-activity) ──"
         for check in --check-schema --check-plan-library --check-taxonomy \
                      --check-tmpdirs; do
             echo "  $check:"
             nx doctor "$check" 2>&1 | tail -5 | sed 's/^/    /' || true
         done
+
+        echo
+        echo "── 11/11 nx catalog doctor (collections-drift release gate, nexus-o6aa.14) ──"
+        # RDR-101 Phase 6: collections-drift is a release blocker.
+        #
+        # The indexer creates T3 collections on first write; the
+        # collections projection is populated by ``nx catalog
+        # backfill-collections`` (the documented remediation in the
+        # doctor's own output). Run backfill THEN drift so the gate
+        # validates the full create-register-check sequence rather
+        # than failing on the transient unregistered window. A genuine
+        # drift (orphan projection rows, missing T3 collections, or a
+        # backfill that cannot reach a clean state) still surfaces
+        # because the second check runs WITHOUT ``|| true`` and exits
+        # non-zero on FAIL.
+        echo "  [pre] nx catalog backfill-collections --no-dry-run:"
+        # The verb defaults to --dry-run; the gate needs the actual
+        # registration so the doctor's drift check sees the populated
+        # projection on the next call.
+        nx catalog backfill-collections --no-dry-run 2>&1 | tail -5 | sed 's/^/    /' || true
+        echo "  [check] nx catalog doctor --collections-drift:"
+        if ! nx catalog doctor --collections-drift 2>&1 | sed 's/^/    /'; then
+            echo "  [fail] collections-drift survived backfill: release blocked"
+            echo "         The projection cannot reach a steady state vs T3."
+            echo "         Investigate before tagging."
+            exit 1
+        fi
 
         echo
         echo "── T1 sniff: AFTER ──"
