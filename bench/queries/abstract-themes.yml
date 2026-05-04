@@ -1,0 +1,118 @@
+# Abstract-themes plan benchmark fixtures.
+#
+# Originally scaffolded as parametrized fixtures in
+# tests/test_abstract_themes_plan_integration.py with hardcoded
+# dominant_themes substring lists. Moved here because the theme lists
+# were a 2026-05-03 snapshot of two specific paper collections, and
+# substring coverage against author-curated themes is subjective
+# evaluation, not behavioral testing.
+#
+# The contract checks (RF-2 grounding, search-step sanity, summary
+# coverage of the corpus's runtime BERTopic label set) live in
+# tests/test_abstract_themes_plan_integration.py and are content-
+# independent. This file is the operator-runnable benchmark for
+# evaluating summary quality on specific question/corpus pairings.
+#
+# Schema:
+#   schema_version: 1
+#   queries: list of
+#     - qid: short ID
+#       corpus: T3 collection name
+#       text: the question
+#       dominant_themes_2026_05_03: list of substrings the LLM
+#         used at the time the fixture was authored (informational;
+#         not a pass/fail gate). Use as a delta inspection signal
+#         when re-running.
+schema_version: 1
+queries:
+  - qid: grossberg-neural-networks
+    corpus: docs__art-grossberg-papers
+    text: "What are the main themes in Grossberg's work on neural networks?"
+    dominant_themes_2026_05_03:
+      - neural
+      - ART
+      - adaptive resonance
+      - learning
+      - attention
+
+  - qid: grossberg-perception
+    corpus: docs__art-grossberg-papers
+    text: "Give an overview of Grossberg's perception research."
+    dominant_themes_2026_05_03:
+      - perception
+      - boundary
+      - binocular
+      - visual
+      - cortex
+
+  - qid: grossberg-memory
+    corpus: docs__art-grossberg-papers
+    text: "What does this corpus say about memory mechanisms?"
+    dominant_themes_2026_05_03:
+      - memory
+      - short-term
+      - working
+      - recall
+
+  - qid: grossberg-speech
+    corpus: docs__art-grossberg-papers
+    text: "Summarize the dominant topics in speech and language processing."
+    dominant_themes_2026_05_03:
+      - speech
+      - phoneme
+      - vowel
+      - auditory
+
+  - qid: grossberg-reward-conditioning
+    corpus: docs__art-grossberg-papers
+    text: "What are the key findings about reward, motivation, and conditioning?"
+    dominant_themes_2026_05_03:
+      - reward
+      - amygdala
+      - conditioning
+      - stimulus
+
+  - qid: grossberg-motor-saccade
+    corpus: docs__art-grossberg-papers
+    text: "What are the main themes around motor control and saccades?"
+    dominant_themes_2026_05_03:
+      - motor
+      - saccade
+      - eye
+      - movement
+
+  - qid: delos-distributed-systems
+    corpus: knowledge__delos
+    text: "What are the main themes in this distributed-systems corpus?"
+    dominant_themes_2026_05_03:
+      - consensus
+      - Paxos
+      - Byzantine
+      - replica
+
+  - qid: delos-byzantine-fault-tolerance
+    corpus: knowledge__delos
+    text: "Give an overview of Byzantine fault tolerance work here."
+    dominant_themes_2026_05_03:
+      - Byzantine
+      - BFT
+      - fault
+      - PBFT
+
+  - qid: delos-cluster-membership
+    corpus: knowledge__delos
+    text: "What does this collection say about cluster membership and gossip?"
+    dominant_themes_2026_05_03:
+      - membership
+      - gossip
+      - cluster
+      - Fireflies
+
+  - qid: delos-authorization
+    corpus: knowledge__delos
+    text: "Summarize the dominant topics around authentication and access control."
+    dominant_themes_2026_05_03:
+      - authorization
+      - access
+      - permission
+      - Zanzibar
