@@ -273,8 +273,10 @@ def test_promote_calls_t3_put(runner: CliRunner, mem_home: Path, db: T2Database)
     assert result.exit_code == 0, result.output
     mt3.put.assert_called_once()
     kw = mt3.put.call_args.kwargs
+    # RDR-103 Phase 5: ``t3_collection_name`` auto-promotes
+    # ``--collection knowledge__proj`` to a conformant 4-segment name.
     assert (kw["collection"], kw["content"], kw["title"], kw["ttl_days"]) == (
-        "knowledge__proj", "the content", "doc.md", 7
+        "knowledge__proj__voyage-context-3__v1", "the content", "doc.md", 7
     )
     assert "abc123" in result.output
 

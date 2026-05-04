@@ -43,8 +43,27 @@ def validate_collection_name(name: str) -> None:
 
 
 _CONTENT_TYPES = ("code", "docs", "rdr", "knowledge")
+CONTENT_TYPES: tuple[str, ...] = _CONTENT_TYPES
+"""Public alias for the canonical content_type values used in the
+RDR-103 ``<content_type>__<owner_id>__<embedding_model>__v<n>`` schema.
+``CollectionName`` validates against this tuple."""
+
+CANONICAL_EMBEDDING_MODELS: frozenset[str] = frozenset({
+    "voyage-context-3",
+    "voyage-code-3",
+})
+"""RDR-103 canonical-set guard. Any embedding-model segment NOT in this
+set is treated as legacy/unknown by ``CollectionName.parse``. Pinned
+decision #1: migrations use the indexer's CURRENT canonical model rather
+than parsing the model out of the legacy collection name; allowing
+non-canonical models here would defeat that invariant. The
+``_CONFORMANT_COLLECTION_RE`` regex stays permissive so legacy names
+remain readable as strings; canonical-set validation lives in
+``CollectionName.parse``."""
+
+_CT_ALTERNATION = "|".join(_CONTENT_TYPES)
 _CONFORMANT_COLLECTION_RE = re.compile(
-    r"^(?P<ct>code|docs|rdr|knowledge)"
+    rf"^(?P<ct>{_CT_ALTERNATION})"
     r"__(?P<owner>[a-zA-Z0-9-]+)"
     r"__(?P<model>[a-z][a-z0-9-]*)"
     r"__v(?P<ver>\d+)$"
@@ -91,6 +110,30 @@ def parse_conformant_collection_name(name: str) -> dict[str, str]:
         "embedding_model": g["model"],
         "model_version": f"v{g['ver']}",
     }
+
+
+def canonical_embedding_model(content_type: str) -> str:
+    """Return the RDR-103 canonical embedding model for ``content_type``.
+
+    Single source of truth for the per-content-type model policy:
+
+    - ``code`` to ``voyage-code-3``
+    - ``docs`` / ``rdr`` / ``knowledge`` to ``voyage-context-3`` (CCE)
+
+    Raises ``ValueError`` for unknown content types so the caller does
+    not silently fall through to a wrong model.
+    ``Catalog.collection_for_repo`` uses this; legacy
+    :func:`voyage_model_for_collection` continues to dispatch off the
+    physical name for read paths.
+    """
+    if content_type == "code":
+        return "voyage-code-3"
+    if content_type in ("docs", "rdr", "knowledge"):
+        return "voyage-context-3"
+    raise ValueError(
+        f"canonical_embedding_model: unknown content_type {content_type!r}; "
+        f"expected one of {CONTENT_TYPES}"
+    )
 
 
 def voyage_model_for_collection(collection_name: str) -> str:
@@ -144,14 +187,36 @@ index_model_for_collection = voyage_model_for_collection
 
 
 def t3_collection_name(user_arg: str) -> str:
-    """Resolve a --collection argument to a T3 collection name.
+    """Resolve a --collection argument to a conformant T3 collection name.
 
-    If the argument already contains ``__``, it is used as-is (fully-qualified).
-    Otherwise the content is stored under ``knowledge__{user_arg}``.
+    Inputs land in one of three shapes:
+
+    - ``foo`` (no underscores) becomes
+      ``knowledge__foo__voyage-context-3__v1``.
+    - ``knowledge__foo`` (legacy 2-segment) is auto-promoted to
+      ``knowledge__foo__voyage-context-3__v1``.
+    - ``knowledge__foo__voyage-context-3__v1`` (already 4-segment
+      conformant) passes through untouched.
+
+    Auto-promotion satisfies ``T3Database``'s strict-naming guard
+    (RDR-103 Phase 5) while preserving the operator habit of typing
+    short ``--collection`` arguments. Pre-existing legacy collections
+    remain readable via T3's existing-collection bypass; new writes
+    go to the conformant name.
     """
-    if "__" in user_arg:
+    if is_conformant_collection_name(user_arg):
         return user_arg
-    return f"knowledge__{user_arg}"
+
+    if "__" in user_arg:
+        ct, _, rest = user_arg.partition("__")
+    else:
+        ct, rest = "knowledge", user_arg
+
+    if ct not in CONTENT_TYPES:
+        return user_arg
+
+    owner_segment = rest.replace("_", "-")
+    return f"{ct}__{owner_segment}__{canonical_embedding_model(ct)}__v1"
 
 
 def resolve_corpus(corpus: str, all_collections: list[str]) -> list[str]:

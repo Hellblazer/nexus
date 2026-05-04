@@ -201,7 +201,7 @@ def test_enrich_preserves_doc_id_round_trip(
     # Set up: a fake docs__ collection with a pre-Stage-B.4 chunk that
     # already carries doc_id (simulating a Stage B.1 / B.2 / B.3 ingest).
     coll_name = "docs__test-enrich-roundtrip"
-    col = local_t3.get_or_create_collection(coll_name)
+    col = local_t3.get_or_create_collection(coll_name, strict=False)
     chunk_meta = {
         "content_type": "prose",
         "source_path": "/tmp/fake.md",

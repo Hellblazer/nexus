@@ -376,13 +376,14 @@ class TestPassthroughFlags:
 
 
 class TestDefaultCollectionByExtension:
-    """nexus-cvaw: nx dt index without --collection should pick a
-    paper-shaped home for PDFs (knowledge__<corpus>-papers, where
-    aspect extraction routes to scholarly-paper-v1) and a doc-shaped
-    home for markdown (docs__<corpus>). Pre-fix, both extensions
-    landed in docs__<corpus>, which after nexus-z70w (PR #393)
-    cannot route to any aspect extractor. PDFs ingested by the
-    default were stranded.
+    """nexus-cvaw + RDR-103 Phase 5: nx dt index without --collection
+    picks a paper-shaped home for PDFs
+    (``knowledge__<corpus>-papers__voyage-context-3__v1``, where aspect
+    extraction routes to scholarly-paper-v1) and a doc-shaped home for
+    markdown (``docs__<corpus>__voyage-context-3__v1``). Phase 5
+    promoted both defaults from the legacy 2-segment shape to the
+    conformant 4-segment shape so the strict-naming guard at
+    ``T3Database.get_or_create_collection`` accepts them.
 
     Tests assert the resolved collection_name passed to the
     fake dispatcher, since the per-record routing is what determines
@@ -397,8 +398,12 @@ class TestDefaultCollectionByExtension:
         fake_selectors["selection"].return_value = [("U", "/foo/paper.pdf")]
         result = runner.invoke(main, ["dt", "index", "--selection"])
         assert result.exit_code == 0, result.output
-        # No --collection: PDF default is knowledge__dt-papers.
-        assert fake_dispatcher[0]["collection"] == "knowledge__dt-papers"
+        # No --collection: PDF default is the conformant
+        # knowledge__dt-papers__voyage-context-3__v1 shape.
+        assert (
+            fake_dispatcher[0]["collection"]
+            == "knowledge__dt-papers__voyage-context-3__v1"
+        )
 
     def test_pdf_with_corpus_routes_to_knowledge_papers_corpus(
         self, runner, fake_selectors, fake_dispatcher,
@@ -410,7 +415,10 @@ class TestDefaultCollectionByExtension:
             "dt", "index", "--selection", "--corpus", "rag",
         ])
         assert result.exit_code == 0, result.output
-        assert fake_dispatcher[0]["collection"] == "knowledge__rag-papers"
+        assert (
+            fake_dispatcher[0]["collection"]
+            == "knowledge__rag-papers__voyage-context-3__v1"
+        )
 
     def test_markdown_default_routes_to_docs_dt(
         self, runner, fake_selectors, fake_dispatcher,
@@ -422,8 +430,12 @@ class TestDefaultCollectionByExtension:
         assert result.exit_code == 0, result.output
         # Markdown notes go to docs__<corpus> (current behavior, but
         # corpus default flipped from "default" to "dt" so the note
-        # corpus matches the paper corpus by convention).
-        assert fake_dispatcher[0]["collection"] == "docs__dt"
+        # corpus matches the paper corpus by convention). Phase 5
+        # added the conformant model+version trailer.
+        assert (
+            fake_dispatcher[0]["collection"]
+            == "docs__dt__voyage-context-3__v1"
+        )
 
     def test_markdown_with_corpus_routes_to_docs_corpus(
         self, runner, fake_selectors, fake_dispatcher,
@@ -435,7 +447,10 @@ class TestDefaultCollectionByExtension:
             "dt", "index", "--selection", "--corpus", "rag",
         ])
         assert result.exit_code == 0, result.output
-        assert fake_dispatcher[0]["collection"] == "docs__rag"
+        assert (
+            fake_dispatcher[0]["collection"]
+            == "docs__rag__voyage-context-3__v1"
+        )
 
     def test_explicit_collection_overrides_default(
         self, runner, fake_selectors, fake_dispatcher,

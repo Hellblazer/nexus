@@ -6,6 +6,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import click
 import structlog
@@ -24,6 +25,25 @@ def _registry_path() -> Path:
 
 def _registry() -> RepoRegistry:
     return RepoRegistry(_registry_path())
+
+
+def _open_catalog_or_none() -> Any:
+    """Return a ``Catalog`` instance when one is initialized, else None.
+
+    RDR-103 Phase 3a: callers that want to consult the catalog for
+    conformant collection names but tolerate its absence (e.g. fresh
+    operator workstation, pytest temp dirs) use this helper.
+    """
+    from nexus.catalog import Catalog
+    from nexus.config import catalog_path
+
+    try:
+        cat_path = catalog_path()
+        if Catalog.is_initialized(cat_path):
+            return Catalog(cat_path, cat_path / ".catalog.db")
+    except Exception:
+        return None
+    return None
 
 
 @click.group()
@@ -204,7 +224,26 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
     reg = _registry()
     path = path.resolve()
     if reg.get(path) is None:
-        reg.add(path)
+        # RDR-103 Phase 3a/4: pass the catalog so the registry's
+        # collection-name fields are populated with conformant shapes.
+        # Phase 4 closes the order-of-operations gap by ensuring the
+        # owner row exists BEFORE ``reg.add`` consults the catalog;
+        # otherwise the catalog's owner_for_repo lookup misses on first
+        # index and the registry persists legacy names that Phase 4's
+        # in-pipeline migration then has to clean up. Calling
+        # ``ensure_owner_for_repo`` here is idempotent: existing owners
+        # are returned as-is.
+        cat = _open_catalog_or_none()
+        if cat is not None:
+            try:
+                cat.ensure_owner_for_repo(path)
+            except Exception:
+                # ``ensure_owner_for_repo`` is best-effort here; the
+                # indexer's ``_catalog_hook`` registers the owner on
+                # this run regardless, so a failure at this point only
+                # delays conformant naming to the next index run.
+                pass
+        reg.add(path, cat=cat)
         click.echo(f"Registered {path}.")
 
     if force:
@@ -686,8 +725,20 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             click.echo("No chunks produced (file may already be indexed or extraction failed).")
             return
 
-        # Retrieve indexed chunks from the ephemeral collection for preview
-        col_name = collection if collection else f"docs__{corpus}"
+        # Retrieve indexed chunks from the ephemeral collection for preview.
+        # RDR-103 Phase 5: dry-run uses an EphemeralClient with no
+        # catalog context, so the catalog-aware helper does not apply
+        # here. Synthesise a conformant 4-segment name to mirror the
+        # post-flip ``doc_indexer`` leaf fallback so the strict-naming
+        # guard at ``T3Database.get_or_create_collection`` is satisfied.
+        if collection:
+            col_name = collection
+        else:
+            from nexus.corpus import canonical_embedding_model  # noqa: PLC0415
+            owner_segment = corpus.replace("_", "-")
+            col_name = (
+                f"docs__{owner_segment}__{canonical_embedding_model('docs')}__v1"
+            )
         col = local_t3.get_or_create_collection(col_name)
         result = col.get(include=["documents", "metadatas"])
         docs: list[str] = result.get("documents") or []
@@ -816,7 +867,8 @@ def index_rdr_cmd(path: Path, force: bool, monitor: bool) -> None:
     one RDR changed, e.g. at rdr-close time).
     """
     from nexus.doc_indexer import batch_index_markdowns
-    from nexus.registry import _repo_identity, _rdr_collection_name
+    from nexus.indexer import _repo_collection_or_legacy
+    from nexus.registry import _repo_identity
 
     path = path.resolve()
 
@@ -855,7 +907,9 @@ def index_rdr_cmd(path: Path, force: bool, monitor: bool) -> None:
             return
 
     basename, _ = _repo_identity(repo_root)
-    collection = _rdr_collection_name(repo_root)
+    # RDR-103 Phase 3a: catalog-first resolution; legacy fallback
+    # retained for catalog-absent invocations (Phase 5 drops fallback).
+    collection = _repo_collection_or_legacy(repo_root, "rdr")
     label = "Force re-indexing" if force else "Indexing"
     click.echo(f"{label} {len(rdr_files)} RDR document(s) into {collection}…")
 

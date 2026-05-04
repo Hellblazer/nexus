@@ -1273,3 +1273,149 @@ class TestGcCommand:
         assert "Deleted 1" in result.output
         assert cat.resolve(t_keep) is not None
         assert cat.resolve(t_del) is None
+
+
+class TestCollectionNameCommand:
+    """RDR-103 Phase 3b: ``nx catalog collection-name --content-type X``
+    resolves the conformant ``CollectionName`` for the current repo and
+    echoes its rendered string. Plugin-layer call sites (rdr-close
+    SKILL.md) use this to look up the post-mortem target collection
+    without constructing the legacy 2-segment shape themselves.
+    """
+
+    def test_emits_conformant_name_for_registered_repo(
+        self, catalog_env, tmp_path, monkeypatch,
+    ):
+        cat = Catalog.init(catalog_env)
+        repo = tmp_path / "myproject"
+        repo.mkdir()
+        cat.register_owner(
+            name="myproject",
+            owner_type="repo",
+            repo_hash="cafef00d",
+            repo_root=str(repo),
+        )
+        monkeypatch.setattr(
+            "nexus.registry._repo_identity",
+            lambda r: ("myproject", "cafef00d"),
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "catalog", "collection-name",
+            "--content-type", "knowledge",
+            "--repo", str(repo),
+        ])
+        assert result.exit_code == 0, result.output
+        # Tumbler 1.1 to owner_segment 1-1; canonical model for knowledge
+        # is voyage-context-3; new tuple lands at v1.
+        assert result.output.strip() == "knowledge__1-1__voyage-context-3__v1"
+
+    def test_emits_conformant_name_for_code(
+        self, catalog_env, tmp_path, monkeypatch,
+    ):
+        cat = Catalog.init(catalog_env)
+        repo = tmp_path / "myproject"
+        repo.mkdir()
+        cat.register_owner(
+            name="myproject",
+            owner_type="repo",
+            repo_hash="cafef00d",
+            repo_root=str(repo),
+        )
+        monkeypatch.setattr(
+            "nexus.registry._repo_identity",
+            lambda r: ("myproject", "cafef00d"),
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "catalog", "collection-name",
+            "--content-type", "code",
+            "--repo", str(repo),
+        ])
+        assert result.exit_code == 0, result.output
+        # Code uses voyage-code-3.
+        assert result.output.strip() == "code__1-1__voyage-code-3__v1"
+
+    def test_rejects_unknown_content_type(
+        self, catalog_env, tmp_path, monkeypatch,
+    ):
+        Catalog.init(catalog_env)
+        repo = tmp_path / "anywhere"
+        repo.mkdir()
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "catalog", "collection-name",
+            "--content-type", "garbage",
+            "--repo", str(repo),
+        ])
+        assert result.exit_code != 0
+
+    def test_fails_when_owner_not_registered(
+        self, catalog_env, tmp_path, monkeypatch,
+    ):
+        """No owner row for the repo: helper raises ``LookupError``;
+        the CLI surfaces that as a non-zero exit with a clear message
+        instructing the user to index first.
+        """
+        Catalog.init(catalog_env)
+        repo = tmp_path / "fresh"
+        repo.mkdir()
+        monkeypatch.setattr(
+            "nexus.registry._repo_identity",
+            lambda r: ("fresh", "deadbeef"),
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "catalog", "collection-name",
+            "--content-type", "knowledge",
+            "--repo", str(repo),
+        ])
+        assert result.exit_code != 0
+        # The message should be specific enough that operators realise
+        # the repo needs to be indexed before the conformant name can be
+        # resolved (the indexer's _catalog_hook is what registers the
+        # owner row).
+        assert "owner" in result.output.lower() or "index" in result.output.lower()
+
+    def test_fails_when_catalog_not_initialized(
+        self, catalog_env, tmp_path,
+    ):
+        repo = tmp_path / "anywhere"
+        repo.mkdir()
+        runner = CliRunner()
+        # catalog_env points NEXUS_CATALOG_PATH at tmp_path/catalog but
+        # no init has been run.
+        result = runner.invoke(main, [
+            "catalog", "collection-name",
+            "--content-type", "knowledge",
+            "--repo", str(repo),
+        ])
+        assert result.exit_code != 0
+        assert "not initialized" in result.output.lower()
+
+    def test_default_repo_is_cwd(
+        self, catalog_env, tmp_path, monkeypatch,
+    ):
+        """When ``--repo`` is omitted, the command resolves the current
+        working directory."""
+        cat = Catalog.init(catalog_env)
+        repo = tmp_path / "myproject"
+        repo.mkdir()
+        cat.register_owner(
+            name="myproject",
+            owner_type="repo",
+            repo_hash="cafef00d",
+            repo_root=str(repo),
+        )
+        monkeypatch.setattr(
+            "nexus.registry._repo_identity",
+            lambda r: ("myproject", "cafef00d"),
+        )
+        monkeypatch.chdir(repo)
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "catalog", "collection-name",
+            "--content-type", "rdr",
+        ])
+        assert result.exit_code == 0, result.output
+        assert result.output.strip() == "rdr__1-1__voyage-context-3__v1"

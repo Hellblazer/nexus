@@ -173,7 +173,11 @@ def test_store_list_shows_entries_and_tags(runner, mock_store):
 def test_store_list_custom_collection(runner, mock_store):
     mock_store.list_store.return_value = []
     runner.invoke(main, ["store", "list", "--collection", "knowledge__notes"])
-    assert mock_store.list_store.call_args[0][0] == "knowledge__notes"
+    # RDR-103 Phase 5: t3_collection_name auto-promotes 2-segment.
+    assert (
+        mock_store.list_store.call_args[0][0]
+        == "knowledge__notes__voyage-context-3__v1"
+    )
 
 
 def test_store_list_limit_flag(runner, mock_store):
@@ -403,4 +407,7 @@ def test_store_get_json_output(runner, mock_store):
 def test_store_get_custom_collection(runner, mock_store):
     mock_store.get_by_id.return_value = {"id": "abc123", "content": "x", "title": "t"}
     runner.invoke(main, ["store", "get", "abc123", "-c", "code__myrepo"])
-    mock_store.get_by_id.assert_called_once_with("code__myrepo", "abc123")
+    # RDR-103 Phase 5: t3_collection_name auto-promotes 2-segment.
+    mock_store.get_by_id.assert_called_once_with(
+        "code__myrepo__voyage-code-3__v1", "abc123",
+    )

@@ -199,6 +199,32 @@ class AspectExtractionQueue:
                     }
                     if "doc_id" not in cols_after:
                         raise
+            # Same in-place migration shape for the ``content`` column
+            # added after the original schema. INSERT statements include
+            # ``content`` so legacy DBs that only have CREATE TABLE
+            # IF NOT EXISTS without the migration would raise
+            # ``no such column: content`` at runtime.
+            cols = {
+                r[1] for r in self.conn.execute(
+                    "PRAGMA table_info(aspect_extraction_queue)"
+                ).fetchall()
+            }
+            if "content" not in cols:
+                try:
+                    self.conn.execute(
+                        "ALTER TABLE aspect_extraction_queue "
+                        "ADD COLUMN content TEXT NOT NULL DEFAULT ''"
+                    )
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column" not in str(exc).lower():
+                        raise
+                    cols_after = {
+                        r[1] for r in self.conn.execute(
+                            "PRAGMA table_info(aspect_extraction_queue)"
+                        ).fetchall()
+                    }
+                    if "content" not in cols_after:
+                        raise
             self.conn.commit()
 
     # ── Public API ────────────────────────────────────────────────────────

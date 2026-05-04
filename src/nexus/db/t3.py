@@ -562,17 +562,17 @@ class T3Database:
         recreate the right shape; without it the import would silently
         default to L2 and break cosine queries against the imported centroids.
 
-        RDR-101 Phase 6 strict mode (nexus-o6aa.14):
-        ``strict=True`` rejects NEW collection names that fail
+        RDR-101 Phase 6 strict mode (nexus-o6aa.14) + RDR-103 Phase 5
+        (nexus-yqnr.7): NEW collection names must satisfy
         :func:`nexus.corpus.is_conformant_collection_name`. Existing
         collections (any name) are always allowed; the validator only
-        gates first-time creation. ``strict=None`` (default) reads
-        ``[catalog].strict_collection_naming`` from config; absent or
-        false keeps the existing permissive behavior so indexers and
-        tests do not break before the irreversible flip ships.
-        Operators wanting to opt out of strict mode in a config-on
-        environment can pass ``strict=False`` explicitly (the
-        backfill / migration verbs do this).
+        gates first-time creation. The default (``strict=None``) is
+        unconditional strict. The post-Phase-5 flip removed the
+        ``[catalog].strict_collection_naming`` config gate so a stale
+        ``false`` setting cannot silently downgrade enforcement.
+        Backfill / migration verbs that legitimately need to construct
+        legacy collections opt out via an explicit ``strict=False``
+        keyword argument.
         """
         from nexus.corpus import (
             is_conformant_collection_name, validate_collection_name,
@@ -580,12 +580,7 @@ class T3Database:
         validate_collection_name(name)
 
         if strict is None:
-            from nexus.config import load_config
-            strict = bool(
-                load_config().get("catalog", {}).get(
-                    "strict_collection_naming", False,
-                )
-            )
+            strict = True
 
         if (
             strict
@@ -596,9 +591,10 @@ class T3Database:
             raise ValueError(
                 f"Collection name {name!r} is not conformant. Expected "
                 f"<content_type>__<owner_id>__<embedding_model>__v<n>. "
-                f"Pass strict=False (or unset [catalog].strict_collection_naming) "
-                f"to allow grandfathered creation; pre-existing legacy "
-                f"collections continue to be readable regardless of strict mode."
+                f"Pre-existing legacy collections remain readable; only "
+                f"creation of new non-conformant names is blocked. "
+                f"Backfill / migration verbs may pass strict=False to "
+                f"override."
             )
 
         if _bypass_canonical_schema(name):
@@ -743,7 +739,15 @@ class T3Database:
             doc_id=catalog_doc_id,
         )
 
-        col = self.get_or_create_collection(collection)
+        # ``put`` is the operator / MCP single-document write path. The
+        # user-facing ``--collection`` arg gets canonicalised by
+        # :func:`nexus.corpus.t3_collection_name` before reaching
+        # ``put``; internal test callers pass arbitrary literals. Keep
+        # strict-mode-bypass localised to this method so test fixtures
+        # do not need to know about RDR-103 conformance, while pipeline
+        # writers (``upsert_chunks``, ``upsert_chunks_with_embeddings``,
+        # ``update_chunks``) still get the strict default.
+        col = self.get_or_create_collection(collection, strict=False)
         if is_cce:
             vec = self._cce_embed(content)
             self._write_batch(
@@ -769,10 +773,16 @@ class T3Database:
         Validates each record against ChromaDB Cloud quota limits before any
         network call.  Splits the batch into ≤300-record chunks automatically.
         All metadata fields are passed through verbatim.
+
+        ``strict=False`` on the underlying ``get_or_create_collection`` call
+        because the indexer's direct ``get_or_create_collection`` calls (the
+        canonical write path) already enforce conformant naming; this bulk
+        writer is also called by import / migration verbs that legitimately
+        operate on pre-existing legacy collections.
         """
         for doc_id, doc, meta in zip(ids, documents, metadatas):
             self._validate_record(id=doc_id, document=doc, embedding=None, metadata=meta)
-        col = self.get_or_create_collection(collection)
+        col = self.get_or_create_collection(collection, strict=False)
         self._write_batch(col, collection, ids, documents, metadatas)
 
     def upsert_chunks_with_embeddings(
@@ -795,8 +805,10 @@ class T3Database:
 
         Note: Per-record quota validation is intentionally skipped — callers are
         responsible for compliance (source data, e.g. from migration, is presumed valid).
+
+        See ``upsert_chunks`` for why ``strict=False`` here.
         """
-        col = self.get_or_create_collection(collection_name)
+        col = self.get_or_create_collection(collection_name, strict=False)
         self._write_batch(col, collection_name, ids, documents, metadatas, embeddings=embeddings)
 
     def update_chunks(
@@ -823,7 +835,11 @@ class T3Database:
             metadatas = [_normalize_for_write(m, collection) for m in metadatas]
             for m in metadatas:
                 validate(m)
-        col = self.get_or_create_collection(collection)
+        # See ``upsert_chunks`` for why ``strict=False`` here. Update
+        # paths typically operate on existing collections (where the
+        # strict guard is a no-op anyway), but a missing collection on
+        # first frecency update should not raise.
+        col = self.get_or_create_collection(collection, strict=False)
         size = QUOTAS.MAX_RECORDS_PER_WRITE
         with self._write_sem(collection):
             for start in range(0, len(ids), size):

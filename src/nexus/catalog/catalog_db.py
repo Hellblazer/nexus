@@ -153,6 +153,13 @@ CREATE INDEX IF NOT EXISTS idx_collections_legacy
 CREATE INDEX IF NOT EXISTS idx_collections_owner
     ON collections(owner_id);
 
+-- RDR-103 Phase 2: ``Catalog.collection_for`` resolves a
+-- ``(content_type, owner_id, embedding_model)`` triple to the
+-- highest-versioned conformant collection. Without this index the
+-- lookup is a full scan over the projection.
+CREATE INDEX IF NOT EXISTS idx_collections_tuple
+    ON collections(content_type, owner_id, embedding_model);
+
 -- RDR-101 Phase 1 PR D (nexus-knn3) partial indexes on bib backend IDs
 -- live in the post-migration block in __init__: the legacy-DB upgrade
 -- path has to ALTER TABLE the bib columns into existence before the

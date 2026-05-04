@@ -26,6 +26,22 @@ def _expected_hash(repo: Path) -> str:
     return hashlib.sha256(str(repo).encode()).hexdigest()[:8]
 
 
+def _expected_code_collection(repo: Path) -> str:
+    """RDR-103 Phase 5: ``RepoRegistry.add`` synthesises a conformant
+    4-segment name from the path-derived ``<basename>-<hash8>`` identity
+    when no catalog is supplied. Helper centralises the expected shape
+    so test assertions stay readable."""
+    return f"code__{repo.name}-{_expected_hash(repo)}__voyage-code-3__v1"
+
+
+def _expected_docs_collection(repo: Path) -> str:
+    return f"docs__{repo.name}-{_expected_hash(repo)}__voyage-context-3__v1"
+
+
+def _expected_rdr_collection(repo: Path) -> str:
+    return f"rdr__{repo.name}-{_expected_hash(repo)}__voyage-context-3__v1"
+
+
 # ── add / get / remove ──────────────────────────────────────────────────────
 
 
@@ -34,7 +50,7 @@ def test_add_and_get(reg, repo) -> None:
     assert str(repo) in reg.all()
     info = reg.get(repo)
     assert info is not None
-    assert info["collection"] == f"code__myrepo-{_expected_hash(repo)}"
+    assert info["collection"] == _expected_code_collection(repo)
     assert info["name"] == "myrepo"
     assert info["head_hash"] == ""
 
@@ -122,7 +138,7 @@ def test_get_returns_copy(reg, repo) -> None:
     entry["collection"] = "code__MUTATED"
     entry["injected"] = True
     fresh = reg.get(repo)
-    assert fresh["collection"] == f"code__myrepo-{_expected_hash(repo)}"
+    assert fresh["collection"] == _expected_code_collection(repo)
     assert "injected" not in fresh
 
 
@@ -132,19 +148,9 @@ def test_get_returns_copy(reg, repo) -> None:
 def test_dual_collection_names(reg, repo) -> None:
     reg.add(repo)
     info = reg.get(repo)
-    assert info["code_collection"].startswith("code__")
-    assert info["docs_collection"].startswith("docs__")
-    code_suffix = info["code_collection"].split("code__")[1]
-    docs_suffix = info["docs_collection"].split("docs__")[1]
-    assert code_suffix == docs_suffix
+    assert info["code_collection"] == _expected_code_collection(repo)
+    assert info["docs_collection"] == _expected_docs_collection(repo)
     assert info["collection"] == info["code_collection"]
-
-
-def test_docs_collection_name_function() -> None:
-    from nexus.registry import _docs_collection_name
-    name = _docs_collection_name(Path("/some/path/myrepo"))
-    assert name.startswith("docs__myrepo-")
-    assert len(name.split("-")[-1]) == 8
 
 
 # ── worktree-stable hashing ────────────────────────────────────────────────
@@ -195,61 +201,65 @@ def test_worktree_matches_main(tmp_path) -> None:
 
 
 def test_collection_names_stable_across_worktrees(tmp_path) -> None:
-    from nexus.registry import _collection_name, _docs_collection_name
+    from nexus.registry import _resolve_repo_collection
     main_repo = tmp_path / "repo"
     _init_git_repo(main_repo)
     wt = tmp_path / "wt"
     subprocess.run(["git", "worktree", "add", str(wt), "-b", "wt-branch"],
                    cwd=main_repo, capture_output=True, check=True)
-    assert _collection_name(main_repo) == _collection_name(wt)
-    assert _docs_collection_name(main_repo) == _docs_collection_name(wt)
+    assert _resolve_repo_collection(main_repo, "code") == _resolve_repo_collection(wt, "code")
+    assert _resolve_repo_collection(main_repo, "docs") == _resolve_repo_collection(wt, "docs")
 
 
-# ── _rdr_collection_name ───────────────────────────────────────────────────
+# ── conformant fallback synthesis (RDR-103 Phase 5) ────────────────────────
 
 
-def test_rdr_collection_name() -> None:
-    from nexus.registry import _rdr_collection_name
-    name = _rdr_collection_name(Path("/some/path/myrepo"))
-    assert name.startswith("rdr__myrepo-")
-    assert len(name.split("-")[-1]) == 8
-
-
-def test_all_collection_names_same_hash() -> None:
-    from nexus.registry import _collection_name, _docs_collection_name, _rdr_collection_name
+def test_resolve_repo_collection_synthesises_conformant_for_rdr() -> None:
+    """No-catalog fallback synthesises a conformant 4-segment name for
+    each content_type."""
+    from nexus.corpus import is_conformant_collection_name
+    from nexus.registry import _resolve_repo_collection
     repo = Path("/some/path/myrepo")
-    suffixes = [fn(repo).split("-")[-1] for fn in (_collection_name, _docs_collection_name, _rdr_collection_name)]
-    assert len(set(suffixes)) == 1
+    for ct in ("code", "docs", "rdr"):
+        assert is_conformant_collection_name(_resolve_repo_collection(repo, ct))
 
 
-# ── long basename truncation ──────────────────────────────────────────────
+def test_resolve_repo_collection_owner_segment_shared_across_types() -> None:
+    """All three content_types share the same ``<basename>-<hash8>``
+    owner segment so a repo's collections collapse to one identity."""
+    from nexus.registry import _resolve_repo_collection
+    repo = Path("/some/path/myrepo")
+    owners = []
+    for ct in ("code", "docs", "rdr"):
+        name = _resolve_repo_collection(repo, ct)
+        # Owner segment is the second double-underscore-separated chunk.
+        owners.append(name.split("__", 2)[1])
+    assert len(set(owners)) == 1
 
 
-@pytest.mark.parametrize("fn_name", ["_collection_name", "_docs_collection_name", "_rdr_collection_name"])
-def test_truncates_long_basename(fn_name) -> None:
-    import nexus.registry as reg_mod
-    fn = getattr(reg_mod, fn_name)
-    col_name = fn(Path(f"/tmp/{'a' * 60}"))
-    assert len(col_name) <= 63
-    prefix = fn_name.split("_")[1]  # "collection" or "docs" or "rdr"
-    if prefix == "collection":
-        prefix = "code"
-    assert col_name.startswith(f"{prefix}__")
+# ── long basename truncation (via _safe_collection) ────────────────────────
 
 
-def test_truncated_names_valid() -> None:
+@pytest.mark.parametrize("ct", ["code", "docs", "rdr"])
+def test_truncates_long_basename(ct) -> None:
+    """Conformant fallback truncates the basename to keep the rendered
+    name within ChromaDB's 63-char limit."""
     from nexus.corpus import validate_collection_name
-    from nexus.registry import _collection_name, _docs_collection_name, _rdr_collection_name
-    repo = Path(f"/tmp/{'a' * 60}")
-    for fn in (_collection_name, _docs_collection_name, _rdr_collection_name):
-        validate_collection_name(fn(repo))
+    from nexus.registry import _resolve_repo_collection
+    name = _resolve_repo_collection(Path(f"/tmp/{'a' * 60}"), ct)
+    assert len(name) <= 63
+    assert name.startswith(f"{ct}__")
+    validate_collection_name(name)
 
 
 def test_short_basename_not_truncated() -> None:
-    from nexus.registry import _collection_name
-    assert "myrepo" in _collection_name(Path("/tmp/myrepo"))
+    from nexus.registry import _resolve_repo_collection
+    assert "myrepo" in _resolve_repo_collection(Path("/tmp/myrepo"), "code")
 
 
 def test_truncated_names_still_unique() -> None:
-    from nexus.registry import _collection_name
-    assert _collection_name(Path("/tmp/" + "a" * 60)) != _collection_name(Path("/other/" + "a" * 60))
+    from nexus.registry import _resolve_repo_collection
+    assert (
+        _resolve_repo_collection(Path("/tmp/" + "a" * 60), "code")
+        != _resolve_repo_collection(Path("/other/" + "a" * 60), "code")
+    )

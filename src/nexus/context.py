@@ -57,16 +57,23 @@ def _repo_collections(repo_path: Path | None) -> set[str] | None:
         entry = reg.get(repo_path)
         if not entry:
             return None
-        colls = set()
+        colls: set[str] = set()
         for key in ("collection", "docs_collection"):
             if entry.get(key):
                 colls.add(entry[key])
-        # Also include rdr__ and knowledge__ for this repo
-        # (they use the same hash suffix)
-        for coll_name in colls.copy():
-            suffix = coll_name.split("__", 1)[1] if "__" in coll_name else ""
-            if suffix:
-                colls.add(f"rdr__{suffix}")
+        # Also include the rdr__ collection for this repo. Source it
+        # from the catalog when available so conformant repos pick up
+        # the catalog-minted name; fall back to the indexer's
+        # name-resolver when the catalog is absent so the fallback
+        # synthesises a conformant 4-segment shape (RDR-103 Phase 5)
+        # rather than splicing the legacy 2-segment suffix from a
+        # registry value that may now itself be conformant.
+        try:
+            from nexus.indexer import _repo_collection_or_legacy  # noqa: PLC0415
+
+            colls.add(_repo_collection_or_legacy(repo_path, "rdr"))
+        except Exception:
+            pass
         return colls if colls else None
     except Exception:
         return None

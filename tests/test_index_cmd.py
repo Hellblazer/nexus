@@ -361,8 +361,12 @@ def test_md_monitor_return_metadata(runner, fake_md):
 # ── --collection normalization ───────────────────────────────────────────────
 
 @pytest.mark.parametrize("flag_val,expected", [
-    ("knowledge", "knowledge__knowledge"),
-    ("knowledge__delos", "knowledge__delos"),
+    # RDR-103 Phase 5: ``t3_collection_name`` auto-promotes
+    # 1-segment / 2-segment user input to a conformant 4-segment name
+    # so the strict-naming guard at ``T3Database.get_or_create_collection``
+    # passes for fresh writes.
+    ("knowledge", "knowledge__knowledge__voyage-context-3__v1"),
+    ("knowledge__delos", "knowledge__delos__voyage-context-3__v1"),
 ])
 def test_pdf_collection_flag_normalization(runner, fake_pdf, flag_val, expected):
     rv = {"chunks": 5, "pages": [1], "title": "T", "author": "A"}

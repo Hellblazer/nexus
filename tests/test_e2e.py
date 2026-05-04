@@ -86,7 +86,12 @@ def test_t3_expire_removes_expired_entries(local_t3: T3Database) -> None:
 
     uid = _uid()
     # Insert already-expired entry by manually setting expires_at in the past
-    col = local_t3.get_or_create_collection("knowledge__expire")
+    # RDR-103 Phase 5: ``expire`` predates the conformant-naming
+    # contract; this test fixture pre-creates the collection with
+    # ``strict=False`` to keep the legacy 2-segment shape that
+    # ``T3Database.expire`` walks. ``put`` below uses the same name
+    # via ``strict=False`` internally.
+    col = local_t3.get_or_create_collection("knowledge__expire", strict=False)
     past = (datetime.now(UTC) - timedelta(days=1)).isoformat()
     col.upsert(
         ids=["expired-doc"],

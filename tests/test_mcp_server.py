@@ -127,8 +127,15 @@ def _put_id(content: str, collection: str = "knowledge", title: str = "t") -> st
 # ── Search ───────────────────────────────────────────────────────────────────
 
 def test_search_returns_results(t3):
-    t3.put(collection="knowledge__test", content="chromadb vector database", title="doc1")
-    result = search(query="vector database", corpus="knowledge__test", limit=5)
+    t3.put(
+        collection="knowledge__test__voyage-context-3__v1",
+        content="chromadb vector database", title="doc1",
+    )
+    result = search(
+        query="vector database",
+        corpus="knowledge__test__voyage-context-3__v1",
+        limit=5,
+    )
     assert not result.startswith("Error:")
     assert "vector database" in result.lower() or "doc1" in result
 
@@ -315,6 +322,47 @@ def test_store_put_empty_content(t3):
     assert result.startswith("Error:") and "content" in result.lower()
 
 
+def test_store_put_category_persisted_in_metadata(t3):
+    """RDR-103 Phase 3b: ``store_put(..., category=X)`` stamps the
+    ``category`` field on the chunk metadata so post-mortems can be
+    queried via ``where={"category": "rdr_postmortem"}`` against the
+    conformant knowledge collection (replacing the old per-collection
+    isolation in ``knowledge__rdr_postmortem__<repo>``).
+    """
+    store_put(
+        content="post-mortem body",
+        collection="knowledge__1-1__voyage-context-3__v1",
+        title="rdr-103-postmortem",
+        category="rdr_postmortem",
+    )
+    # Pull the stored chunk back and confirm category is on the metadata.
+    col = t3.get_or_create_collection("knowledge__1-1__voyage-context-3__v1")
+    rows = col.get(where={"category": "rdr_postmortem"}, include=["metadatas"])
+    assert rows["ids"], (
+        "category=rdr_postmortem chunk should be retrievable via where filter"
+    )
+    assert rows["metadatas"][0]["category"] == "rdr_postmortem"
+
+
+def test_store_put_category_default_empty(t3):
+    """When ``category`` is not passed, the stored chunk metadata
+    treats it as empty so a category-filtered ``where`` query (e.g.
+    ``where={"category": "rdr_postmortem"}``) does not match. This
+    pins the absence of category leakage between unrelated store_put
+    calls in the same collection.
+    """
+    store_put(
+        content="ordinary body",
+        collection="knowledge__1-1__voyage-context-3__v1",
+        title="no-category",
+    )
+    col = t3.get_or_create_collection("knowledge__1-1__voyage-context-3__v1")
+    # where filters with non-empty values miss; without filter we see all.
+    rows = col.get(where={"title": "no-category"}, include=["metadatas"])
+    assert rows["ids"], "stored chunk must be retrievable"
+    assert rows["metadatas"][0].get("category", "") == ""
+
+
 def test_memory_put_empty_content(t2_path):
     result = memory_put(content="", project="testproj", title="empty.md")
     assert result.startswith("Error:") and "content" in result.lower()
@@ -482,17 +530,19 @@ def test_collection_cache_thread_safe():
 # ── Pagination ───────────────────────────────────────────────────────────────
 
 def test_search_pagination_first_page(t3):
+    coll = "knowledge__pag__voyage-context-3__v1"
     for i in range(5):
-        t3.put(collection="knowledge__pag", content=f"document about topic {i}", title=f"doc{i}")
-    result = search(query="topic", corpus="knowledge__pag", limit=2, offset=0)
+        t3.put(collection=coll, content=f"document about topic {i}", title=f"doc{i}")
+    result = search(query="topic", corpus=coll, limit=2, offset=0)
     assert "showing 1-2" in result and "offset=2" in result
 
 
 def test_search_pagination_pages_differ(t3):
+    coll = "knowledge__pag2__voyage-context-3__v1"
     for i in range(6):
-        t3.put(collection="knowledge__pag2", content=f"unique searchable content number {i}", title=f"doc{i}")
-    page1 = search(query="searchable content", corpus="knowledge__pag2", limit=2, offset=0)
-    page2 = search(query="searchable content", corpus="knowledge__pag2", limit=2, offset=2)
+        t3.put(collection=coll, content=f"unique searchable content number {i}", title=f"doc{i}")
+    page1 = search(query="searchable content", corpus=coll, limit=2, offset=0)
+    page2 = search(query="searchable content", corpus=coll, limit=2, offset=2)
     assert not page2.startswith("Error:")
     p1 = {l.split("]")[0] for l in page1.split("\n") if l.startswith("[")}
     p2 = {l.split("]")[0] for l in page2.split("\n") if l.startswith("[")}
@@ -500,13 +550,15 @@ def test_search_pagination_pages_differ(t3):
 
 
 def test_search_pagination_last_page(t3):
-    t3.put(collection="knowledge__pag3", content="only document about finality", title="solo")
-    assert "(end)" in search(query="finality", corpus="knowledge__pag3", limit=10, offset=0)
+    coll = "knowledge__pag3__voyage-context-3__v1"
+    t3.put(collection=coll, content="only document about finality", title="solo")
+    assert "(end)" in search(query="finality", corpus=coll, limit=10, offset=0)
 
 
 def test_search_pagination_offset_beyond_end(t3):
-    t3.put(collection="knowledge__pag4", content="small collection", title="one")
-    assert "No results at offset 100" in search(query="small", corpus="knowledge__pag4", limit=10, offset=100)
+    coll = "knowledge__pag4__voyage-context-3__v1"
+    t3.put(collection=coll, content="small collection", title="one")
+    assert "No results at offset 100" in search(query="small", corpus=coll, limit=10, offset=100)
 
 
 def test_store_list_pagination(t3):
@@ -582,13 +634,13 @@ def catalog_with_docs(tmp_path):
     o1 = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
     o2 = cat.register_owner("papers", "curator")
     cat.register(o1, "indexer.py", content_type="code", file_path="src/nexus/indexer.py",
-                 physical_collection="code__nexus", chunk_count=10, author="hal")
+                 physical_collection="code__nexus__voyage-code-3__v1", chunk_count=10, author="hal")
     cat.register(o1, "chunker.py", content_type="code", file_path="src/nexus/chunker.py",
-                 physical_collection="code__nexus", chunk_count=5, author="hal")
+                 physical_collection="code__nexus__voyage-code-3__v1", chunk_count=5, author="hal")
     cat.register(o2, "Attention Paper", content_type="paper",
-                 physical_collection="knowledge__papers", chunk_count=20, author="Vaswani")
+                 physical_collection="knowledge__papers__voyage-context-3__v1", chunk_count=20, author="Vaswani")
     cat.register(o2, "BERT Paper", content_type="paper",
-                 physical_collection="knowledge__papers", chunk_count=15, author="Devlin")
+                 physical_collection="knowledge__papers__voyage-context-3__v1", chunk_count=15, author="Devlin")
     cat.link(cat.find("Attention Paper")[0].tumbler,
              cat.find("BERT Paper")[0].tumbler, "cites", created_by="test")
     _inject_catalog(cat)
@@ -597,17 +649,21 @@ def catalog_with_docs(tmp_path):
 
 class TestQueryCatalogRouting:
     def test_backward_compat(self, t3):
-        t3.put(collection="knowledge__test", content="vector database chunking", title="doc1")
+        t3.put(
+            collection="knowledge__test__voyage-context-3__v1",
+            content="vector database chunking", title="doc1",
+        )
         assert not query(question="vector database", corpus="knowledge__test").startswith("Error:")
 
     @pytest.mark.parametrize("kwargs, collection, content, expect_in", [
-        pytest.param({"author": "Vaswani"}, "knowledge__papers",
-                     "transformer attention mechanism", ["knowledge__papers"], id="author"),
-        pytest.param({"content_type": "code"}, "code__nexus",
+        pytest.param({"author": "Vaswani"}, "knowledge__papers__voyage-context-3__v1",
+                     "transformer attention mechanism",
+                     ["knowledge__papers__voyage-context-3__v1"], id="author"),
+        pytest.param({"content_type": "code"}, "code__nexus__voyage-code-3__v1",
                      "def index_repo(): chunking pipeline", [], id="content-type"),
-        pytest.param({"subtree": "1.1"}, "code__nexus",
+        pytest.param({"subtree": "1.1"}, "code__nexus__voyage-code-3__v1",
                      "def chunk_file(): ast parsing", [], id="subtree"),
-        pytest.param({"follow_links": "cites"}, "knowledge__papers",
+        pytest.param({"follow_links": "cites"}, "knowledge__papers__voyage-context-3__v1",
                      "transformer attention is all you need", [], id="follow-links"),
     ])
     def test_catalog_filter(self, t3, catalog_with_docs, kwargs, collection, content, expect_in):

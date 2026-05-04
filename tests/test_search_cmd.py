@@ -431,7 +431,9 @@ def search_corpus() -> T3Database:
     ef = DefaultEmbeddingFunction()
     db = T3Database(_client=client, _ef_override=ef)
 
-    code_col = db.get_or_create_collection("code__snapshot")
+    # RDR-103 Phase 5: search-cmd snapshot fixtures use legacy
+    # 2-segment names; pre-create with strict=False.
+    code_col = db.get_or_create_collection("code__snapshot", strict=False)
     code_col.add(
         ids=[f"code-{t}" for t, _ in _CODE_DOCS],
         documents=[txt for _, txt in _CODE_DOCS],
@@ -441,7 +443,7 @@ def search_corpus() -> T3Database:
         } for t, txt in _CODE_DOCS],
     )
 
-    know_col = db.get_or_create_collection("knowledge__snapshot")
+    know_col = db.get_or_create_collection("knowledge__snapshot", strict=False)
     know_col.add(
         ids=[f"know-{t}" for t, _ in _KNOWLEDGE_DOCS],
         documents=[txt for _, txt in _KNOWLEDGE_DOCS],
@@ -675,7 +677,7 @@ def test_silent_zero_end_to_end_real_engine(
     # Seed a collection with three documents whose raw distances will
     # exceed a tiny threshold. MiniLM distances are deterministic for
     # the same (query, corpus) pair — stability follows.
-    col = real_t3.get_or_create_collection(coll_name)
+    col = real_t3.get_or_create_collection(coll_name, strict=False)
     col.add(
         ids=["d1", "d2", "d3"],
         documents=[

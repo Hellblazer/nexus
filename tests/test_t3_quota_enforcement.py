@@ -28,7 +28,9 @@ def _make_real_db(col_name: str) -> tuple[T3Database, object]:
     client = chromadb.EphemeralClient()
     ef = DefaultEmbeddingFunction()
     db = T3Database(_client=client, _ef_override=ef)
-    col = db.get_or_create_collection(col_name)
+    # RDR-103 Phase 5: quota tests use legacy 2-segment fixture names;
+    # pre-create with strict=False since quota validation is naming-agnostic.
+    col = db.get_or_create_collection(col_name, strict=False)
     return db, col
 
 

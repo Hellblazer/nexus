@@ -242,18 +242,23 @@ def test_greenfield_index_writes_no_deprecated_keys(
     rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database
 ) -> None:
     """nexus-e5uw acceptance: a fresh greenfield index must not write
-    chunks carrying any of the 5 deprecated chunk-metadata keys that
+    chunks carrying any of the 8 deprecated chunk-metadata keys that
     ``nx catalog migrate``'s prune-deprecated-keys verb targets
-    (``source_path``, ``git_branch``, ``git_commit_hash``,
-    ``git_project_name``, ``git_remote_url``). The bead's acceptance
-    is that a clean greenfield repro + ``nx catalog migrate`` produces
-    0 chunks_updated, which is equivalent to: no chunk written by
-    ``index_repository`` carries any of those keys.
+    (5 from RDR-101 Phase 4: ``source_path``, ``git_branch``,
+    ``git_commit_hash``, ``git_project_name``, ``git_remote_url``;
+    plus 3 from Phase 5c: ``corpus``, ``store_type``, ``git_meta``).
+    The bead's acceptance is that a clean greenfield repro +
+    ``nx catalog migrate`` produces 0 chunks_updated, which is
+    equivalent to: no chunk written by ``index_repository`` carries
+    any of those keys.
 
     RDR-102 Phase B drops ``source_path`` from
     :data:`ALLOWED_TOP_LEVEL`; ``normalize()`` packs the four
     ``git_*`` fields into a single ``git_meta`` JSON blob and drops
-    the flat keys. This test is the post-Phase-B contract.
+    the flat keys. RDR-101 Phase 5c subsequently dropped ``corpus``,
+    ``store_type``, and ``git_meta`` itself from
+    :data:`ALLOWED_TOP_LEVEL`. This test is the post-Phase-5c
+    contract.
     """
     from nexus.commands.catalog import _PRUNE_DEPRECATED_KEYS
     from nexus.registry import _repo_identity
@@ -383,8 +388,8 @@ def test_smart_index_rdr_routing(
         f"ADR-001 must not appear in docs__ section_titles: {docs_sections}"
     )
 
-    path_hash = hashlib.sha256(str(rich_repo).encode()).hexdigest()[:8]
-    rdr_col_name = f"rdr__{rich_repo.name}-{path_hash}"
+    from nexus.indexer import _repo_collection_or_legacy
+    rdr_col_name = _repo_collection_or_legacy(rich_repo, "rdr")
     rdr_col = local_t3.get_or_create_collection(rdr_col_name)
     rdr_metas = rdr_col.get(include=["metadatas"])["metadatas"]
     assert rdr_metas, f"expected ADR-001 chunks in {rdr_col_name}; got none"
@@ -607,9 +612,8 @@ def test_index_repository_pdf_routing(
     ``store_type`` from chunk metadata; ``content_type=='pdf'`` is the
     canonical replacement (always set by ``make_chunk_metadata``).
     """
-    from nexus.registry import _docs_collection_name
     _index(rich_repo, rich_registry, local_t3)
-    docs_col = _docs_collection_name(rich_repo)
+    docs_col = rich_registry.get(rich_repo)["docs_collection"]
     results = local_t3.search("Hello World test document PDF ingest", [docs_col], n_results=5)
     pdf_results = [r for r in results if r.get("content_type") == "pdf"]
     assert pdf_results, f"No PDF chunks; content_types: {[r.get('content_type') for r in results]}"

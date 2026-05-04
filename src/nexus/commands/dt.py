@@ -43,24 +43,27 @@ def _resolve_dt_collection(
 
     ``--collection X`` always wins (operator override). Otherwise:
 
-    * PDF (``.pdf``) -> ``knowledge__<corpus>-papers``. Paper-shaped
-      content goes to a knowledge__ collection so scholarly-paper-v1
-      can aspect-extract it.
-    * Markdown (``.md``) -> ``docs__<corpus>``. Notes / clippings /
-      doc-shaped content goes to docs__, which deliberately doesn't
-      route to any aspect extractor (nexus-z70w).
+    * PDF (``.pdf``) -> ``knowledge__<corpus>-papers__voyage-context-3__v1``.
+      Paper-shaped content goes to a knowledge__ collection so
+      scholarly-paper-v1 can aspect-extract it.
+    * Markdown (``.md``) -> ``docs__<corpus>__voyage-context-3__v1``.
+      Notes / clippings / doc-shaped content goes to docs__, which
+      deliberately doesn't route to any aspect extractor (nexus-z70w).
 
-    Pre-nexus-cvaw default was ``docs__default`` for both extensions,
-    which stranded paper PDFs ingested via ``nx dt index`` (no aspect
-    eligibility, no curated home). The split-by-extension default
-    matches the corpus split established by nexus-olg5 (ART papers
-    in knowledge__art-papers, ART repo docs in docs__ART-...).
+    RDR-103 Phase 5: the legacy 2-segment defaults
+    (``knowledge__<corpus>-papers`` / ``docs__<corpus>``) are promoted
+    to conformant 4-segment names so the strict-naming guard at
+    ``T3Database.get_or_create_collection`` accepts them.
     """
+    from nexus.corpus import canonical_embedding_model  # noqa: PLC0415
+
     if collection:
         return collection
+    owner = corpus.replace("_", "-")
+    model = canonical_embedding_model("knowledge" if ext == ".pdf" else "docs")
     if ext == ".pdf":
-        return f"knowledge__{corpus}-papers"
-    return f"docs__{corpus}"
+        return f"knowledge__{owner}-papers__{model}__v1"
+    return f"docs__{owner}__{model}__v1"
 
 
 def _index_record(

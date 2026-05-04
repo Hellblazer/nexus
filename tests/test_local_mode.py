@@ -243,7 +243,9 @@ class TestLocalStaleness:
     ) -> None:
         from nexus.indexer_utils import check_staleness
 
-        col = local_db.get_or_create_collection("code__test")
+        # RDR-103 Phase 5: pre-create with strict=False so the test
+        # can keep its legacy 2-segment fixture name.
+        col = local_db.get_or_create_collection("code__test", strict=False)
         # RDR-102 D2 dropped source_path from ALLOWED_TOP_LEVEL, so
         # normalize() filters it out at write time — the staleness
         # check now keys on doc_id (the catalog tumbler) rather than
@@ -299,7 +301,7 @@ class TestLocalCollectionLifecycle:
 
         # Backdate the indexed_at by 100 days with ttl_days=1 → expired.
         old = (datetime.now(UTC) - timedelta(days=100)).isoformat()
-        col = local_db.get_or_create_collection("knowledge__expire_test")
+        col = local_db.get_or_create_collection("knowledge__expire_test", strict=False)
         h_temp = hashlib.sha256(b"temporary data").hexdigest()
         col.upsert(
             ids=["temp-id"],
@@ -355,11 +357,14 @@ class TestFrecencyOnlyLocalMode:
 
         from nexus.indexer import _run_index_frecency_only
 
+        # RDR-103 Phase 5: registry values are conformant 4-segment
+        # post-flip; the frecency path goes through the strict
+        # get_or_create_collection which rejects legacy 2-segment.
         registry = MagicMock()
         registry.get.return_value = {
-            "collection": "code__repo",
-            "code_collection": "code__repo",
-            "docs_collection": "docs__repo",
+            "collection": "code__repo__voyage-code-3__v1",
+            "code_collection": "code__repo__voyage-code-3__v1",
+            "docs_collection": "docs__repo__voyage-context-3__v1",
         }
         with patch("nexus.frecency.batch_frecency", return_value={}):
             _run_index_frecency_only(tmp_path, registry)

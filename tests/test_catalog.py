@@ -83,6 +83,92 @@ class TestRegisterOwner:
         assert str(cat.register_owner("notes", "corpus")) == "1.2"
 
 
+class TestEnsureOwnerForRepo:
+    """RDR-103 Phase 4: ``Catalog.ensure_owner_for_repo`` extracts the
+    owner-lookup-or-register pattern from ``_catalog_hook`` so callers
+    that need the owner BEFORE the indexer hook fires (e.g.
+    ``nx index repo`` registering the registry entry) can mint it up
+    front. Idempotent: existing owners are returned without re-creating.
+    """
+
+    def test_creates_owner_when_missing(self, cat, tmp_path, monkeypatch):
+        repo = tmp_path / "alpha"
+        repo.mkdir()
+        monkeypatch.setattr(
+            "nexus.registry._repo_identity",
+            lambda r: ("alpha", "deadbeef"),
+        )
+        owner = cat.ensure_owner_for_repo(repo)
+        # First owner in a fresh catalog lands at 1.1.
+        assert str(owner) == "1.1"
+        # Persisted: a second call returns the same tumbler.
+        again = cat.ensure_owner_for_repo(repo)
+        assert str(again) == str(owner)
+
+    def test_returns_existing_owner_idempotently(
+        self, cat, tmp_path, monkeypatch,
+    ):
+        """Pre-registered owner is returned without re-registering, so
+        no orphan-owner duplicates are created."""
+        repo = tmp_path / "preregistered"
+        repo.mkdir()
+        monkeypatch.setattr(
+            "nexus.registry._repo_identity",
+            lambda r: ("preregistered", "feedface"),
+        )
+        first = cat.register_owner(
+            name="preregistered",
+            owner_type="repo",
+            repo_hash="feedface",
+            repo_root=str(repo),
+        )
+        owner = cat.ensure_owner_for_repo(repo)
+        assert str(owner) == str(first)
+        # Verify exactly ONE owner row exists with this repo_hash.
+        rows = cat._db.execute(
+            "SELECT COUNT(*) FROM owners WHERE repo_hash = ?",
+            ("feedface",),
+        ).fetchone()
+        assert rows[0] == 1
+
+    def test_uses_repo_basename_when_repo_name_omitted(
+        self, cat, tmp_path, monkeypatch,
+    ):
+        """The default ``repo_name`` is sourced from ``_repo_identity``'s
+        basename, matching the pre-Phase-4 inline pattern in
+        ``_catalog_hook``.
+        """
+        repo = tmp_path / "myrepo"
+        repo.mkdir()
+        monkeypatch.setattr(
+            "nexus.registry._repo_identity",
+            lambda r: ("myrepo", "abcd1234"),
+        )
+        owner = cat.ensure_owner_for_repo(repo)
+        # Confirm the owner row carries the basename name.
+        row = cat._db.execute(
+            "SELECT name FROM owners WHERE tumbler_prefix = ?",
+            (str(owner),),
+        ).fetchone()
+        assert row[0] == "myrepo"
+
+    def test_explicit_repo_name_overrides_basename(
+        self, cat, tmp_path, monkeypatch,
+    ):
+        repo = tmp_path / "auto-derived-name"
+        repo.mkdir()
+        monkeypatch.setattr(
+            "nexus.registry._repo_identity",
+            lambda r: ("auto-derived-name", "11223344"),
+        )
+        owner = cat.ensure_owner_for_repo(repo, repo_name="explicit-override")
+        row = cat._db.execute(
+            "SELECT name FROM owners WHERE tumbler_prefix = ?",
+            (str(owner),),
+        ).fetchone()
+        assert row[0] == "explicit-override"
+
+
 class TestRegisterDocument:
     def test_first_document(self, cat_with_owner):
         cat, owner = cat_with_owner

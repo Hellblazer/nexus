@@ -188,6 +188,16 @@ class CollectionCreatedPayload:
     model_version: str
     name: str = ""  # display name; defaults to coll_id
     created_at: str = ""
+    # nexus-7m8n: legacy_grandfathered is frozen on the event at write
+    # time so a regex change in is_conformant_collection_name does not
+    # flip projected rows under replay. ``None`` is the "field absent on
+    # the original event" sentinel; older events deserialize with this
+    # default (Event.from_dict filters unknown payload keys, so a JSONL
+    # line that lacks the field instantiates the dataclass with None).
+    # The projector falls back to a live regex evaluation in that case,
+    # accepting that pre-7m8n logs are coupled to whatever regex shipped
+    # at the time they were synthesized.
+    legacy_grandfathered: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)

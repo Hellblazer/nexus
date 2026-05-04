@@ -20,8 +20,14 @@ def _make_db() -> T3Database:
 
 
 def _add_docs(db: T3Database, collection: str, docs: list[tuple[str, str]]) -> None:
-    """Add (id, text) pairs to a collection via get_or_create_collection."""
-    col = db.get_or_create_collection(collection)
+    """Add (id, text) pairs to a collection via get_or_create_collection.
+
+    RDR-103 Phase 5: pre-create with ``strict=False`` so verify-probe
+    tests can exercise legacy 2-segment fixture names without bumping
+    each one to a conformant 4-segment shape (the verify code path is
+    naming-agnostic).
+    """
+    col = db.get_or_create_collection(collection, strict=False)
     ids = [d[0] for d in docs]
     documents = [d[1] for d in docs]
     metadatas = [{"title": d[0], "source_path": f"/test/{d[0]}.txt", "file_path": f"/test/{d[0]}.txt"} for d in docs]
@@ -172,7 +178,7 @@ def test_empty_collection_skipped() -> None:
     """Empty collection → status='skipped', probe_hit_rate=None."""
     db = _make_db()
     col_name = "knowledge__multiprobe_empty"
-    db.get_or_create_collection(col_name)  # create but don't add docs
+    db.get_or_create_collection(col_name, strict=False)  # create but don't add docs
 
     result = verify_collection_deep(db, col_name)
 

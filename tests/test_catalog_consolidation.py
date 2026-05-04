@@ -91,10 +91,13 @@ class TestMergeCorpus:
         assert result["errors"] == []
         # Target should have had upsert called twice
         assert target_col.upsert.call_count == 2
-        # Catalog pointers should be updated
+        # Catalog pointers should be updated. RDR-103 Phase 5 promotes
+        # the merge target to a conformant 4-segment shape so the
+        # downstream ``get_or_create_collection`` satisfies the
+        # strict-naming guard.
         entries = cat.by_corpus("test")
         for e in entries:
-            assert e.physical_collection == "docs__test"
+            assert e.physical_collection == "docs__test__voyage-context-3__v1"
 
     def test_dry_run_no_changes(self, tmp_path):
         from nexus.catalog.consolidation import merge_corpus

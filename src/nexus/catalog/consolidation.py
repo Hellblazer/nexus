@@ -29,7 +29,17 @@ def merge_corpus(
     if not source_entries:
         return {"merged": 0, "would_merge": 0, "errors": [f"No entries with corpus={corpus!r}"]}
 
-    target_col_name = f"docs__{corpus}"
+    # RDR-103 Phase 5: emit a conformant 4-segment target so the
+    # downstream ``get_or_create_collection`` satisfies the
+    # strict-naming guard. The owner segment is the corpus tag with
+    # underscores rewritten to hyphens (the conformant grammar's owner
+    # segment disallows ``_``).
+    from nexus.corpus import canonical_embedding_model  # noqa: PLC0415
+
+    owner_segment = corpus.replace("_", "-")
+    target_col_name = (
+        f"docs__{owner_segment}__{canonical_embedding_model('docs')}__v1"
+    )
 
     if dry_run:
         for entry in source_entries:

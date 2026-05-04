@@ -286,8 +286,11 @@ def test_store_put_registers_in_catalog(tmp_path, monkeypatch):
     assert "Stored" in result
     # The catalog now stores the deterministic chunk_chroma_id, matching
     # what the real T3Database.put returns (independent of the mock).
+    # RDR-103 Phase 5: ``t3_collection_name`` auto-promotes the
+    # 1-segment ``knowledge`` arg to a conformant 4-segment name; the
+    # chunk_chroma_id is derived from that promoted name + title.
     expected_chunk_chroma_id = _hl.sha256(
-        b"knowledge__knowledge:research-vector-indexing"
+        b"knowledge__knowledge__voyage-context-3__v1:research-vector-indexing"
     ).hexdigest()[:16]
     entry = Catalog(catalog_dir, catalog_dir / ".catalog.db").by_doc_id(
         expected_chunk_chroma_id,

@@ -240,6 +240,285 @@ def _remove_stale(lock_path: Path) -> None:
         pass
 
 
+def _repo_collection_or_legacy(repo: Path, content_type: str) -> str:
+    """Return the conformant collection name for ``(repo, content_type)``.
+
+    Catalog-aware path: when the catalog is initialized and the repo
+    owner is registered, returns the catalog-minted conformant name.
+
+    No-catalog / unregistered-owner path: synthesizes a conformant
+    name from the path-derived ``<basename>-<hash8>`` identity so the
+    no-catalog ad-hoc workflow (tests, single-shot CLI runs on a fresh
+    repo) continues to satisfy ``T3Database``'s strict-naming guard.
+    """
+    from nexus.catalog import Catalog  # noqa: PLC0415
+    from nexus.config import catalog_path  # noqa: PLC0415
+
+    try:
+        cat_path = catalog_path()
+        if Catalog.is_initialized(cat_path):
+            cat = Catalog(cat_path, cat_path / ".catalog.db")
+            try:
+                return cat.collection_for_repo(repo, content_type).render()
+            except LookupError:
+                # Owner not yet registered; fall through to the
+                # path-derived synthesis below. This happens for
+                # callers that bypass the ``_catalog_hook`` upfront
+                # flow (e.g. ad-hoc CLI invocations on a fresh repo).
+                pass
+    except Exception:
+        _log.debug(
+            "repo_collection_catalog_lookup_failed",
+            repo=str(repo),
+            content_type=content_type,
+            exc_info=True,
+        )
+    return _conformant_name_for_repo(repo, content_type)
+
+
+def _conformant_name_for_repo(repo: Path, content_type: str) -> str:
+    """Synthesize a conformant collection name from path-derived identity.
+
+    Owner segment uses the ``<basename>-<hash8>`` shape produced by
+    :func:`nexus.registry._repo_identity` so two worktrees of the same
+    repo collapse to the same collection. Embedding model is the
+    canonical model for ``content_type``; version is always v1 for
+    ad-hoc fallbacks.
+    """
+    from nexus.corpus import canonical_embedding_model  # noqa: PLC0415
+    from nexus.registry import _repo_identity, _safe_collection  # noqa: PLC0415
+
+    if content_type not in ("code", "docs", "rdr"):
+        raise ValueError(
+            f"_conformant_name_for_repo: unknown content_type {content_type!r}"
+        )
+    basename, repo_hash = _repo_identity(repo)
+    # See ``_resolve_repo_collection``: the conformant grammar treats
+    # ``_`` as the segment separator, so basenames containing
+    # underscores must be sanitised to ``-`` before composing the owner
+    # segment. The two synthesis points share the same rule so a repo
+    # gets the same name from either entry point.
+    sanitised = basename.replace("_", "-")
+    model = canonical_embedding_model(content_type)
+    return _safe_collection(
+        prefix=f"{content_type}__",
+        name=sanitised,
+        path_hash=repo_hash,
+        suffix=f"__{model}__v1",
+    )
+
+
+# RDR-103 Phase 4: legacy-to-conformant migration on first index ────────────
+
+
+_MIGRATION_CONTENT_TYPES = ("code", "docs", "rdr")
+
+
+def _legacy_collection_name(repo: "Path", content_type: str) -> str:
+    """Return the pre-RDR-103 ``<ct>__<basename>-<hash8>`` shape for
+    ``(repo, content_type)``. Used by :func:`_migrate_legacy_collections`
+    to detect existing legacy collections in T3 so they can be renamed
+    in place to the conformant 4-segment shape on the first index after
+    the catalog upgrade. The migration helper is the only legitimate
+    consumer of the legacy shape post Phase 5; all name-minting paths
+    emit conformant.
+    """
+    from nexus.registry import _repo_identity, _safe_collection  # noqa: PLC0415
+
+    if content_type not in ("code", "docs", "rdr"):
+        raise ValueError(
+            f"_legacy_collection_name: unknown content_type {content_type!r}"
+        )
+    basename, repo_hash = _repo_identity(repo)
+    return _safe_collection(f"{content_type}__", basename, repo_hash)
+
+
+def _migrate_legacy_collections(
+    repo: "Path",
+    *,
+    cat: object | None,
+    t3_db: object,
+    registry: object,
+    on_message: "Callable[[str], None] | None" = None,
+) -> dict[str, str]:
+    """RDR-103 Phase 4: rename legacy T3 collections to conformant
+    names atomically on the first index after the catalog upgrade.
+
+    Returns a ``{content_type: collection_name}`` map for the caller
+    to use throughout the rest of the indexing run. The map values
+    are conformant when the catalog is initialized and the owner is
+    registered; otherwise they fall back to the legacy shape so the
+    caller can still index against existing collections.
+
+    Decision tree per pinned design (`nexus-yqnr.6` bead):
+
+    1. legacy in T3, conformant absent → atomic rename via
+       :func:`nexus.commands.collection.rename_collection_data_plane`
+       (T3 native ``modify(name=)`` + T2 cascade + catalog re-point +
+       collections projection update + ``CollectionSuperseded``
+       event). Emits one ``Upgraded`` message via ``on_message``.
+    2. conformant present, legacy absent → steady state. No message.
+    3. both present → partial state from a prior interrupted run.
+       Skip the rename to avoid the data-plane's
+       ``collection already exists`` guard, return the conformant
+       name, leave the legacy collection for operator cleanup.
+       Emits one advisory message.
+    4. neither present → greenfield, no migration needed.
+
+    Catalog absent OR owner unregistered: returns the legacy-shape
+    name for every content_type so the caller can still index.
+    The next run (after :func:`_catalog_hook` registers the owner)
+    will perform the migration.
+
+    Pinned decision #1: the conformant target is computed using the
+    indexer's CURRENT canonical model (via
+    :meth:`Catalog.collection_for`), NOT parsed from the legacy
+    collection name. Sidesteps unknown legacy models like ``voyage-3``
+    that pre-date :data:`CANONICAL_EMBEDDING_MODELS`.
+    """
+    from typing import cast  # noqa: PLC0415
+
+    from nexus.catalog.catalog import Catalog  # noqa: PLC0415
+    from nexus.commands.collection import (  # noqa: PLC0415
+        rename_collection_data_plane,
+    )
+    from nexus.corpus import canonical_embedding_model  # noqa: PLC0415
+    from nexus.registry import _repo_identity  # noqa: PLC0415
+
+    result: dict[str, str] = {}
+
+    # Catalog-absent: nothing to migrate. Return an empty map so the
+    # caller falls back to its own resolution (registry value or the
+    # path-derived legacy helper).
+    if cat is None:
+        return result
+
+    cat_obj = cast(Catalog, cat)
+
+    # Owner-unregistered: nothing to migrate yet. The _catalog_hook
+    # registers the owner later in this run; the migration happens on
+    # the NEXT run. Return empty so the caller's existing fallback
+    # handles this run.
+    _, repo_hash = _repo_identity(repo)
+    owner = cat_obj.owner_for_repo(repo_hash)
+    if owner is None:
+        return result
+
+    for ct in _MIGRATION_CONTENT_TYPES:
+        legacy = _legacy_collection_name(repo, ct)
+        conformant = cat_obj.collection_for(
+            content_type=ct,
+            owner=owner,
+            embedding_model=canonical_embedding_model(ct),
+        ).render()
+
+        legacy_exists = bool(t3_db.collection_exists(legacy))  # type: ignore[attr-defined]
+        conformant_exists = bool(t3_db.collection_exists(conformant))  # type: ignore[attr-defined]
+
+        if legacy_exists and not conformant_exists:
+            # Decision tree case 1: rename legacy → conformant.
+            #
+            # The data-plane rename (T3 native modify) is the load-bearing
+            # step: once it succeeds, the chunks live at ``conformant`` and
+            # the catalog has been re-pointed. Subsequent
+            # ``register_collection`` and ``supersede_collection`` calls
+            # update the projections; if either raises, the data is still
+            # at conformant and we MUST return ``conformant``, not legacy.
+            # Returning legacy here would cause the caller to write fresh
+            # chunks to an empty re-created legacy collection while the
+            # actual data sits unreachable at conformant.
+            data_plane_succeeded = False
+            try:
+                rename_collection_data_plane(
+                    legacy, conformant, t3_db=t3_db, catalog=cat_obj,
+                    on_warn=lambda msg: _log.warning(
+                        "phase4_migration_cascade_warn", message=msg,
+                    ),
+                )
+                data_plane_succeeded = True
+            except Exception as exc:
+                _log.warning(
+                    "phase4_migration_data_plane_failed",
+                    repo=str(repo), ct=ct, legacy=legacy,
+                    conformant=conformant, error=str(exc),
+                )
+                # Data-plane failed; T3 still has the legacy collection.
+                # Fall back so the caller indexes against existing data.
+                result[ct] = legacy
+                continue
+
+            # Data plane succeeded; data now lives at conformant. From
+            # this point onward any failure is non-fatal for the caller's
+            # write path: ``conformant`` is the right name to use.
+            try:
+                from nexus.corpus import (  # noqa: PLC0415
+                    is_conformant_collection_name,
+                    parse_conformant_collection_name,
+                )
+                if is_conformant_collection_name(conformant):
+                    segments = parse_conformant_collection_name(conformant)
+                    cat_obj.register_collection(
+                        conformant,
+                        content_type=segments["content_type"],
+                        owner_id=segments["owner_id"],
+                        embedding_model=segments["embedding_model"],
+                        model_version=segments["model_version"],
+                    )
+                else:
+                    cat_obj.register_collection(conformant)
+            except Exception:
+                _log.warning(
+                    "phase4_register_collection_failed_after_rename",
+                    old=legacy, new=conformant, exc_info=True,
+                )
+            try:
+                cat_obj.supersede_collection(
+                    legacy, conformant, reason="rdr-103-phase4-migration",
+                )
+            except Exception:
+                # Old name may not be in the collections projection
+                # for legacy-shape collections that pre-date Phase 6
+                # backfill. Non-fatal: the data-plane rename has
+                # already moved everything; the supersede event is
+                # a graph-completeness add-on.
+                _log.debug(
+                    "phase4_supersede_failed_nonfatal",
+                    old=legacy, new=conformant, exc_info=True,
+                )
+            if on_message is not None:
+                on_message(
+                    f"Upgraded legacy collection {legacy} to {conformant}."
+                )
+            # Update the registry so subsequent runs read the
+            # conformant name directly.
+            key = f"{ct}_collection"
+            try:
+                registry.update(repo, **{key: conformant})  # type: ignore[attr-defined]
+            except Exception:
+                _log.debug(
+                    "phase4_registry_update_failed",
+                    repo=str(repo), ct=ct, exc_info=True,
+                )
+            result[ct] = conformant
+        elif conformant_exists and legacy_exists:
+            # Decision tree case 3: both exist (partial state).
+            if on_message is not None:
+                on_message(
+                    f"Both legacy {legacy} and conformant {conformant} "
+                    f"exist; skipping rename. Operator cleanup of the "
+                    f"legacy collection is recommended via "
+                    f"'nx collection delete {legacy}' once verified empty."
+                )
+            result[ct] = conformant
+        else:
+            # Decision tree cases 2 + 4: conformant present (steady
+            # state) or neither present (greenfield). No message,
+            # caller proceeds with conformant name.
+            result[ct] = conformant
+
+    return result
+
+
 def _catalog_hook(
     repo: Path,
     repo_name: str,
@@ -268,6 +547,13 @@ def _catalog_hook(
 
         cat = Catalog(cat_path, cat_path / ".catalog.db")
 
+        # ``_catalog_hook`` accepts an explicit ``repo_hash`` (and
+        # ``repo_name``) so callers and tests can override the
+        # path-derived identity. ``ensure_owner_for_repo`` would
+        # recompute the hash from ``repo`` and ignore the explicit
+        # arg, so the inline lookup-or-register is preserved. The
+        # idempotency guarantee matches ``ensure_owner_for_repo``:
+        # existing owners short-circuit without a re-register.
         owner = cat.owner_for_repo(repo_hash)
         if owner is None:
             owner = cat.register_owner(
@@ -614,15 +900,16 @@ def _run_index_frecency_only(repo: Path, registry: "RepoRegistry") -> None:
     from nexus.config import get_credential
     from nexus.frecency import batch_frecency
     from nexus.db import make_t3
-    from nexus.registry import _docs_collection_name
 
     info = registry.get(repo)
     if info is None:
         return
 
-    # C2: use deterministic naming function as fallback
+    # RDR-103 Phase 3a: registry value preserves the legacy name when the
+    # repo was added before the migration; fallback queries the catalog
+    # for a conformant name (Phase 5 drops the legacy branch entirely).
     code_collection = info.get("code_collection", info["collection"])
-    docs_collection = info.get("docs_collection") or _docs_collection_name(repo)
+    docs_collection = info.get("docs_collection") or _repo_collection_or_legacy(repo, "docs")
 
     from nexus.config import is_local_mode
     if not is_local_mode():
@@ -999,10 +1286,13 @@ def _discover_and_index_rdrs(
         _log.debug("no RDR files found", rdr_paths=[str(p) for p in rdr_abs_paths])
         return 0, 0, 0
 
-    # Collection: rdr__{basename}-{hash8} — uses worktree-stable identity
-    from nexus.registry import _repo_identity, _rdr_collection_name
+    # RDR-103 Phase 3a: ``_repo_collection_or_legacy`` queries the
+    # catalog for a conformant ``rdr__<owner>__voyage-context-3__v<n>``,
+    # falling back to the legacy ``rdr__<basename>-<hash8>`` shape when
+    # the catalog is not initialized or the owner is not yet registered.
+    from nexus.registry import _repo_identity
     basename, _ = _repo_identity(repo)
-    collection = _rdr_collection_name(repo)
+    collection = _repo_collection_or_legacy(repo, "rdr")
 
     _log.info("indexing RDR files", count=len(md_paths), collection=collection)
     results = batch_index_markdowns(md_paths, corpus=basename, t3=db,
@@ -1201,16 +1491,20 @@ def _run_index(
     from nexus.classifier import ContentClass, classify_file
     from nexus.config import get_credential, load_config
     from nexus.frecency import batch_frecency
-    from nexus.registry import _docs_collection_name
     from nexus.ripgrep_cache import build_cache
 
     info = registry.get(repo)
     if info is None:
         return {}
 
-    # C2: use deterministic naming function as fallback
+    # RDR-103 Phase 3a: registry value preserves the legacy name when
+    # the repo was added before the migration; fallback queries the
+    # catalog for a conformant name. Phase 4 migration runs further
+    # down (after credentials check + T3 connect) and may overwrite
+    # these with conformant names before the indexer reads from T3.
     code_collection = info.get("code_collection", info["collection"])
-    docs_collection = info.get("docs_collection") or _docs_collection_name(repo)
+    docs_collection = info.get("docs_collection") or _repo_collection_or_legacy(repo, "docs")
+    _migrated_names: dict[str, str] = {}
 
     # Load config (picks up per-repo .nexus.yml if present)
     cfg = load_config(repo_root=repo)
@@ -1363,6 +1657,46 @@ def _run_index(
     _log.debug("ChromaDB connected")
     now_iso = _dt.now(UTC).isoformat()
 
+    # RDR-103 Phase 4: legacy-to-conformant migration on first index
+    # after the catalog upgrade. Runs BEFORE the conformant collection
+    # creation below so the rest of the pipeline only ever sees the
+    # conformant name. Idempotent: subsequent runs are a no-op (legacy
+    # absent from T3). Catalog-absent is a safe no-op (returns legacy).
+    try:
+        from nexus.catalog.catalog import Catalog as _Catalog
+        from nexus.config import catalog_path as _catalog_path
+
+        _cat_path = _catalog_path()
+        _cat: object | None = None
+        if _Catalog.is_initialized(_cat_path):
+            _cat = _Catalog(_cat_path, _cat_path / ".catalog.db")
+
+        def _emit_migration_msg(msg: str) -> None:
+            _log.info("phase4_migration", message=msg)
+            if on_phase is not None:
+                on_phase(msg)
+
+        _migrated_names = _migrate_legacy_collections(
+            repo, cat=_cat, t3_db=db, registry=registry,
+            on_message=_emit_migration_msg,
+        )
+        # Migration may have promoted legacy names to conformant. Pick
+        # up the new names so the rest of the pipeline (collection
+        # creation, indexing, catalog hook) sees the post-migration
+        # state.
+        if _migrated_names.get("code"):
+            code_collection = _migrated_names["code"]
+        if _migrated_names.get("docs"):
+            docs_collection = _migrated_names["docs"]
+    except Exception:
+        # Unexpected failure outside _migrate_legacy_collections's own
+        # exception handling (which catches per-content-type rename
+        # errors and returns legacy names). This catch is the safety
+        # net for catalog-open / import / unforeseen failures; warn
+        # so the operator can act, but proceed with pre-migration
+        # collection names so the indexing run still completes.
+        _log.warning("phase4_migration_failed", exc_info=True)
+
     _log.debug("creating collections", code=code_collection, docs=docs_collection)
     code_col = db.get_or_create_collection(code_collection)
     docs_col = db.get_or_create_collection(docs_collection)
@@ -1396,7 +1730,6 @@ def _run_index(
     # are determined by the file LIST not by indexing OUTCOME, so
     # running them up front is safe; on a CTRL-C mid-index, the next
     # run re-derives them idempotently.
-    from nexus.registry import _rdr_collection_name as _rdr_coll_name_for_repo
     indexed_for_catalog: list[tuple[Path, str, str]] = []
     for _, f in code_files:
         indexed_for_catalog.append((f, "code", code_collection))
@@ -1409,7 +1742,13 @@ def _run_index(
     for _, f in pdf_files:
         indexed_for_catalog.append((f, "pdf", docs_collection))
     if rdr_abs_paths:
-        rdr_col_name = _rdr_coll_name_for_repo(repo)
+        # RDR-103 Phase 3a + Phase 4: prefer the migrated-name dict
+        # populated above; fall through to the catalog-first resolver
+        # when migration did not run (catalog absent or owner missing).
+        rdr_col_name = (
+            _migrated_names.get("rdr")
+            or _repo_collection_or_legacy(repo, "rdr")
+        )
         for rdr_dir in rdr_abs_paths:
             if rdr_dir.is_dir():
                 for md_file in sorted(rdr_dir.rglob("*.md")):
@@ -1589,8 +1928,9 @@ def _run_index(
             stamp_collection_version(docs_col)
             # Stamp RDR collection if it was indexed
             if rdr_indexed > 0:
-                from nexus.registry import _rdr_collection_name
-                rdr_col_name = _rdr_collection_name(repo)
+                # RDR-103 Phase 3a: catalog-first resolution; legacy
+                # fallback retained for catalog-absent test paths.
+                rdr_col_name = _repo_collection_or_legacy(repo, "rdr")
                 try:
                     rdr_col = db.get_or_create_collection(rdr_col_name)
                     stamp_collection_version(rdr_col)

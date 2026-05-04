@@ -142,9 +142,22 @@ def _register_or_lookup_doc_id(
     populated at write time — closing the gap that ChromaDB's
     undocumented upsert metadata-merge was masking pre-RDR-102.
 
-    Returns ``""`` when the catalog is absent (no-catalog ingest contract
-    preserved) or when any unexpected error occurs (best-effort: the
-    caller falls back to the legacy ``source_path``-keyed identity).
+    Auto-initializes the catalog if absent (nexus-fq3b). Pre-fix, this
+    function silently returned ``""`` for users without a catalog,
+    chunks landed without ``doc_id``, and the post-Phase-5c prune
+    fallback matched zero stale chunks because ``source_path`` was
+    dropped from ALLOWED_TOP_LEVEL. Auto-init means every PDF/markdown
+    indexing call results in a registered ``doc_id``, and subsequent
+    re-indexes find prior chunks via the doc_id-keyed where filter.
+    The catalog directory follows ``catalog_path()`` (env or XDG
+    default), so users without an explicit ``nx catalog init`` get one
+    on first index.
+
+    Returns ``""`` only when an unexpected error occurs (best-effort:
+    the caller falls back to the legacy identity path, which on
+    Phase 5c collections will not match by source_path; the surrounding
+    ``except Exception`` at the bottom of this function logs the
+    failure for diagnosis).
 
     Re-registration is event-idempotent via ``Catalog.register``'s
     ``by_file_path`` early-return at ``catalog.py:1218-1234``: a second
@@ -161,7 +174,11 @@ def _register_or_lookup_doc_id(
 
         cat_path = catalog_path()
         if not Catalog.is_initialized(cat_path):
-            return ""
+            # nexus-fq3b: auto-init so chunks land with doc_id and the
+            # post-Phase-5c prune (which can no longer key on the
+            # dropped source_path field) finds stale chunks via the
+            # doc_id-keyed where filter on re-index. Idempotent.
+            Catalog.init(cat_path)
         cat = Catalog(cat_path, cat_path / ".catalog.db")
 
         # Owner resolution mirrors _catalog_pdf_hook / _catalog_markdown_hook
@@ -579,7 +596,24 @@ def _index_document(
     sp = source_key if source_key is not None else str(file_path)
     content_hash = _sha256(file_path)
     if collection_name is None:
-        collection_name = f"docs__{corpus}"
+        # RDR-103 Phase 5 leaf fallback. ``corpus`` is a string (the
+        # repo basename or operator-supplied corpus tag), not a Path;
+        # the conformant ``cat.collection_for_repo`` requires a Path
+        # and an initialized catalog with the owner registered.
+        # Production hot paths always pass ``collection_name`` from
+        # the indexer; this fallback fires for ad-hoc/test invocations
+        # and synthesises a conformant 4-segment name so it satisfies
+        # ``T3Database.get_or_create_collection``'s strict-naming
+        # guard. The owner segment is the corpus tag with underscores
+        # rewritten to hyphens (``_`` is the conformant grammar's
+        # segment separator); an explicit owner row is not required
+        # for ad-hoc paths.
+        from nexus.corpus import canonical_embedding_model  # noqa: PLC0415
+
+        owner_segment = corpus.replace("_", "-")
+        collection_name = (
+            f"docs__{owner_segment}__{canonical_embedding_model('docs')}__v1"
+        )
     db = t3 if t3 is not None else make_t3()
     col = db.get_or_create_collection(collection_name)
 
@@ -1082,7 +1116,18 @@ def index_pdf(
     pdf_path = pdf_path.resolve()
 
     content_hash = _sha256(pdf_path)
-    col_name = collection_name if collection_name is not None else f"docs__{corpus}"
+    # RDR-103 Phase 5 leaf fallback (see _index_document for the
+    # full rationale). Synthesises a conformant 4-segment name for
+    # ad-hoc invocations; production hot paths always pass
+    # ``collection_name``.
+    if collection_name is not None:
+        col_name = collection_name
+    else:
+        from nexus.corpus import canonical_embedding_model  # noqa: PLC0415
+        owner_segment = corpus.replace("_", "-")
+        col_name = (
+            f"docs__{owner_segment}__{canonical_embedding_model('docs')}__v1"
+        )
     db = t3 if t3 is not None else make_t3()  # T3Database instance (not PipelineDB)
     col = db.get_or_create_collection(col_name)
     target_model = index_model_for_collection(col_name)
@@ -1443,7 +1488,18 @@ def index_markdown(
     # Normalize to absolute so staleness checks are path-form-independent.
     md_path = md_path.resolve()
 
-    col_name = collection_name if collection_name is not None else f"docs__{corpus}"
+    # RDR-103 Phase 5 leaf fallback (see _index_document for the
+    # full rationale). Synthesises a conformant 4-segment name for
+    # ad-hoc invocations; production hot paths always pass
+    # ``collection_name``.
+    if collection_name is not None:
+        col_name = collection_name
+    else:
+        from nexus.corpus import canonical_embedding_model  # noqa: PLC0415
+        owner_segment = corpus.replace("_", "-")
+        col_name = (
+            f"docs__{owner_segment}__{canonical_embedding_model('docs')}__v1"
+        )
     # RDR-102 Phase A: pre-flight catalog registration. Resolve doc_id BEFORE
     # _index_document's staleness check so a fresh index lands chunks with
     # doc_id populated at write time. Idempotent on re-index via

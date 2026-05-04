@@ -1151,7 +1151,7 @@ def test_verify_deep_reports_distance(local_t3: T3Database):
 
 def test_verify_deep_skips_tiny_collection(local_t3: T3Database):
     col = "knowledge__tiny_test"
-    local_t3.get_or_create_collection(col)
+    local_t3.get_or_create_collection(col, strict=False)
     from nexus.db.t3 import verify_collection_deep
     result = verify_collection_deep(local_t3, col)
     assert result.status == "skipped"
