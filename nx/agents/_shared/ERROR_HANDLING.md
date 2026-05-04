@@ -93,9 +93,11 @@ ttl_days > 0 AND expires_at < now
 - Fallback: Store in T2 with `tags="pending-t3-promotion"` for later batch upload
 
 **Collection name validation**:
-- Collection names use `__` as separator (NOT `::`)
-- Valid: `knowledge__myproject`, `code__nexus`
-- Invalid: `knowledge::myproject` (colons are invalid in ChromaDB collection names)
+- Collection names use `__` as separator (NOT `::`).
+- Conformant shape (RDR-103): `<content_type>__<owner>__<embedding_model>__v<n>`, e.g. `knowledge__myproject-1-1__voyage-context-3__v1`, `code__nexus-1-1__voyage-code-3__v1`.
+- Operators may type the short form `knowledge__myproject` to MCP / `nx` commands; `t3_collection_name` auto-promotes it to the conformant 4-segment shape before any T3 write.
+- Pre-existing legacy 2-segment collections remain readable; only NEW non-conformant creations are blocked at `T3Database.get_or_create_collection`.
+- Invalid: `knowledge::myproject` (colons are not permitted in ChromaDB collection names).
 
 **Duplicate document ID**:
 - Error: `Document ID already exists`

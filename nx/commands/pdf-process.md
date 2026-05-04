@@ -36,6 +36,8 @@ $ARGUMENTS
 Run `nx index pdf <file> --collection <name>` for each PDF. For batch processing, use a loop:
 
 ```bash
+# Short form: t3_collection_name auto-promotes to the conformant
+# 4-segment shape knowledge__<corpus>__voyage-context-3__v1.
 for f in *.pdf; do nx index pdf "$f" --collection knowledge__<corpus>; done
 ```
 

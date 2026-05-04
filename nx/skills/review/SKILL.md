@@ -52,7 +52,9 @@ when it exists, falling back to `strategy:default` otherwise.
 
 If you just need to find the RDR or chunk that defines something — e.g.
 "show me where RDR-053 states the auth middleware contract" —
-`mcp__plugin_nx_nexus__search` against `rdr__<repo>` is the right tool.
+`mcp__plugin_nx_nexus__search` against `rdr__<owner>__voyage-context-3__v1`
+(or the bare `rdr` prefix, which expands to all matching collections)
+is the right tool.
 This skill earns its cost when the review has to *align* multiple
 RDRs against a change set and extract drift claims.
 

@@ -29,8 +29,8 @@ mcp__plugin_nx_nexus__search(query="query", structured=True         # returns {i
 mcp__plugin_nx_nexus__query(question="...", corpus="knowledge", follow_links="cites"    # catalog-aware, document-level
 
 # Batch hydrate chunks past the ChromaDB 300-record quota
-mcp__plugin_nx_nexus__store_get_many(ids=["id1","id2","id3"], collections="knowledge__art"
-mcp__plugin_nx_nexus__store_get_many(ids="id1,id2", collections="rdr__nexus", structured=True
+mcp__plugin_nx_nexus__store_get_many(ids=["id1","id2","id3"], collections="knowledge__art-1-1__voyage-context-3__v1"
+mcp__plugin_nx_nexus__store_get_many(ids="id1,id2", collections="rdr__nexus-1-1__voyage-context-3__v1", structured=True
 
 # Walk the catalog link graph (depth capped at 3 — SC-4)
 mcp__plugin_nx_nexus__traverse(seeds=["1.1.635"], link_types=["implements","cites"], depth=2
@@ -112,7 +112,7 @@ nx index repo <path>                 # index repo (classifies into code + docs c
 
 ## Collection Naming
 
-Always `__` as separator: `code__myrepo`, `docs__corpus`, `knowledge__topic`
+RDR-103 conformant shape: `<content_type>__<owner>__<embedding_model>__v<n>`. Examples: `code__nexus-1-1__voyage-code-3__v1`, `docs__nexus-1-1__voyage-context-3__v1`, `knowledge__art-1-1__voyage-context-3__v1`. The short legacy form (`knowledge__topic`) is accepted at the `--collection` boundary and auto-promoted by `t3_collection_name`. Pre-existing legacy 2-segment collections remain readable. Always `__` as the segment separator (colons are invalid in ChromaDB names).
 
 ## Title Conventions
 
