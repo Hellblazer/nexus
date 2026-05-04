@@ -2,12 +2,19 @@
 title: "RDR-101: Event-Sourced Catalog with Immutable Document Identity (Greenfield Catalog/T3 Architecture)"
 id: RDR-101
 type: Architecture
-status: accepted
+status: closed
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-04-30
 accepted_date: 2026-04-30
+closed_date: 2026-05-04
+closed_reason: implemented
+post_mortem: docs/rdr/post-mortem/101-event-sourced-catalog-migration.md
+gap_pointers:
+  Gap1: src/nexus/catalog/projector.py:77
+  Gap2: src/nexus/catalog/event_log.py:43
+  Gap3: src/nexus/catalog/catalog.py:951
 related_issues: [nexus-3e4s, nexus-p03z, nexus-v9az, ART-lhk1]
 related_tests: []
 related: [RDR-004, RDR-060, RDR-086, RDR-087, RDR-096]
