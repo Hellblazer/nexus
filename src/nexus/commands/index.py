@@ -644,6 +644,14 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             click.echo(f"Filtered {skipped} PDF(s) via gitignore/.nexus.yml patterns")
 
         if collection is not None:
+            # nexus-hmxi note: this call site intentionally does NOT
+            # probe T3 (no ``t3=`` kwarg). Bulk index targets land on
+            # the auto-promoted conformant shape so a fresh ``nx index
+            # pdf --dir`` does not add a network round-trip and a
+            # credential dependency just to grandfather a legacy
+            # collection. Operators wanting to keep indexing into a
+            # legacy 2-segment collection rename it first via
+            # ``nx catalog rename-collection``.
             collection = t3_collection_name(collection)
 
         total = len(pdfs)
@@ -697,6 +705,8 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
     # Normalize --collection through t3_collection_name() so bare names like
     # "knowledge" become "knowledge__knowledge", matching search conventions.
     # Without this, chunks end up in unsearchable bare collections.
+    # nexus-hmxi note: no ``t3=`` probe here either; see the batch-mode
+    # path above for the rationale.
     if collection is not None:
         collection = t3_collection_name(collection)
 

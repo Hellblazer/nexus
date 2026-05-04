@@ -369,6 +369,9 @@ def test_md_monitor_return_metadata(runner, fake_md):
     ("knowledge__delos", "knowledge__delos__voyage-context-3__v1"),
 ])
 def test_pdf_collection_flag_normalization(runner, fake_pdf, flag_val, expected):
+    # nexus-hmxi: ``nx index pdf --collection`` does NOT probe T3 for
+    # legacy grandfathering (see ``pdf_cmd`` in ``commands/index.py``);
+    # the auto-promoted conformant shape is the bulk-index target.
     rv = {"chunks": 5, "pages": [1], "title": "T", "author": "A"}
     with patch("nexus.doc_indexer.index_pdf", return_value=rv) as m:
         result = runner.invoke(main, ["index", "pdf", str(fake_pdf), "--collection", flag_val])

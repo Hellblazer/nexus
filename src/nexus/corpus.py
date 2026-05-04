@@ -186,8 +186,8 @@ embedding_model_for_collection = voyage_model_for_collection
 index_model_for_collection = voyage_model_for_collection
 
 
-def t3_collection_name(user_arg: str) -> str:
-    """Resolve a --collection argument to a conformant T3 collection name.
+def t3_collection_name(user_arg: str, *, t3: object | None = None) -> str:
+    """Resolve a --collection argument to a T3 collection name.
 
     Inputs land in one of three shapes:
 
@@ -200,9 +200,20 @@ def t3_collection_name(user_arg: str) -> str:
 
     Auto-promotion satisfies ``T3Database``'s strict-naming guard
     (RDR-103 Phase 5) while preserving the operator habit of typing
-    short ``--collection`` arguments. Pre-existing legacy collections
-    remain readable via T3's existing-collection bypass; new writes
-    go to the conformant name.
+    short ``--collection`` arguments.
+
+    nexus-hmxi: when *t3* is supplied, the resolver checks for an
+    existing T3 collection at the user-typed name BEFORE returning
+    the auto-promoted target. If the legacy 2-segment collection
+    exists in T3 and the conformant target does not, the legacy name
+    is returned so the operator continues to read and write the same
+    collection across all CLI tools (``nx store list``, ``nx store
+    put``, ``nx search``). Without *t3*, the function stays pure and
+    always auto-promotes (used by static contexts and tests). The
+    transparent grandfathering matches RDR-103's stated read-side
+    policy ("pre-existing legacy collections remain readable") and
+    extends it to operator-typed write inputs so a put + list
+    round-trip cannot land in two different collections.
     """
     if is_conformant_collection_name(user_arg):
         return user_arg
@@ -216,7 +227,20 @@ def t3_collection_name(user_arg: str) -> str:
         return user_arg
 
     owner_segment = rest.replace("_", "-")
-    return f"{ct}__{owner_segment}__{canonical_embedding_model(ct)}__v1"
+    promoted = f"{ct}__{owner_segment}__{canonical_embedding_model(ct)}__v1"
+
+    if t3 is None or user_arg == promoted:
+        return promoted
+    try:
+        if not t3.collection_exists(promoted) and t3.collection_exists(user_arg):  # type: ignore[attr-defined]
+            return user_arg
+    except Exception:
+        # collection_exists probe is best-effort. On failure (cloud
+        # quota error, transient network) fall through to the
+        # auto-promoted shape; legacy reads still work via T3's
+        # existing-collection bypass on read paths.
+        pass
+    return promoted
 
 
 def resolve_corpus(corpus: str, all_collections: list[str]) -> list[str]:

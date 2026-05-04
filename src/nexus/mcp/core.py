@@ -464,7 +464,16 @@ def search(
             if not part:
                 continue
             if "__" in part:
-                target.append(part)  # fully qualified — include directly
+                # nexus-hmxi: route the qualified-with-__ form through
+                # ``t3_collection_name`` (with t3) so 2-segment legacy
+                # input is grandfathered to an existing legacy
+                # collection or auto-promoted to the conformant target,
+                # matching ``store_list`` / ``store_put`` resolution.
+                # Pre-fix this branch always used the user input as-is,
+                # so a 2-segment ``--corpus knowledge__art`` could hit
+                # a legacy collection that ``store_list --collection
+                # knowledge__art`` was missing.
+                target.append(t3_collection_name(part, t3=t3))
             else:
                 target.extend(resolve_corpus(part, all_names))
 
@@ -898,8 +907,12 @@ def store_put(
             return "Error: content is required"
         days = parse_ttl(ttl)
         ttl_days = days if days is not None else 0
-        col_name = t3_collection_name(collection)
         t3 = _get_t3()
+        # nexus-hmxi: pass t3 so the resolver grandfathers an existing
+        # legacy 2-segment collection ahead of the auto-promoted
+        # conformant shape, matching the read-path behaviour and
+        # preventing put/list/search split-brain.
+        col_name = t3_collection_name(collection, t3=t3)
 
         # RDR-101 Phase 3 PR δ Stage B.5: pre-register the catalog entry
         # so the T3 chunk can carry the resulting tumbler as ``doc_id``
@@ -1002,8 +1015,8 @@ def store_get(doc_id: str, collection: str = "knowledge") -> str:
     try:
         if not doc_id:
             return "Error: doc_id is required"
-        col_name = t3_collection_name(collection)
         t3 = _get_t3()
+        col_name = t3_collection_name(collection, t3=t3)
         entry = t3.get_by_id(col_name, doc_id)
         if entry is None:
             # Title fallback: 16 lowercase hex chars looks like a hash;
@@ -1190,7 +1203,7 @@ def store_get_many(
 
             entry = None
             for cand in candidates:
-                col_name = t3_collection_name(cand)
+                col_name = t3_collection_name(cand, t3=t3)
                 try:
                     entry = t3.get_by_id(col_name, doc_id)
                 except Exception:
@@ -1240,8 +1253,8 @@ def store_list(
               and extraction method. Ignores offset/limit (scans full collection).
     """
     try:
-        col_name = t3_collection_name(collection)
         t3 = _get_t3()
+        col_name = t3_collection_name(collection, t3=t3)
         try:
             info = t3.collection_info(col_name)
             total = info["count"]
@@ -1808,8 +1821,8 @@ def store_delete(doc_id: str, collection: str = "knowledge") -> str:
     try:
         if not doc_id:
             return "Error: doc_id is required"
-        col_name = t3_collection_name(collection)
         t3 = _get_t3()
+        col_name = t3_collection_name(collection, t3=t3)
         deleted = t3.delete_by_id(col_name, doc_id)
         if deleted:
             return f"Deleted: {doc_id} from {col_name}"

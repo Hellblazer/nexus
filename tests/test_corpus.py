@@ -280,6 +280,76 @@ def test_t3_collection_name_other_prefix_promotes_to_canonical_model() -> None:
     )
 
 
+# ── nexus-hmxi: t3-aware grandfathering ──────────────────────────────────────
+
+
+class _FakeT3:
+    """Minimal T3 stand-in for the legacy-grandfathering probe."""
+
+    def __init__(self, collections: set[str]) -> None:
+        self._collections = set(collections)
+
+    def collection_exists(self, name: str) -> bool:
+        return name in self._collections
+
+
+def test_t3_collection_name_grandfathers_existing_legacy_when_t3_supplied() -> None:
+    """nexus-hmxi: with a t3 probe, an existing legacy 2-segment
+    collection wins over the auto-promoted conformant target so put /
+    list / search all resolve to the same physical collection.
+    """
+    legacy = "knowledge__art"
+    conformant = "knowledge__art__voyage-context-3__v1"
+    t3 = _FakeT3({legacy})  # operator's pre-Phase-5 collection
+    assert t3_collection_name(legacy, t3=t3) == legacy
+
+
+def test_t3_collection_name_promotes_when_legacy_absent() -> None:
+    """When the legacy collection does not exist in T3, the resolver
+    returns the auto-promoted conformant target so new writes land
+    on the conformant shape and satisfy the strict-naming guard.
+    """
+    legacy = "knowledge__art"
+    conformant = "knowledge__art__voyage-context-3__v1"
+    t3 = _FakeT3(set())
+    assert t3_collection_name(legacy, t3=t3) == conformant
+
+
+def test_t3_collection_name_prefers_conformant_when_both_exist() -> None:
+    """When BOTH legacy and conformant collections exist (mid-migration
+    state), the resolver returns the conformant target so the
+    in-progress migration converges instead of forking new writes back
+    onto the legacy shape.
+    """
+    legacy = "knowledge__art"
+    conformant = "knowledge__art__voyage-context-3__v1"
+    t3 = _FakeT3({legacy, conformant})
+    assert t3_collection_name(legacy, t3=t3) == conformant
+
+
+def test_t3_collection_name_no_t3_always_promotes() -> None:
+    """Without a t3 probe (static / test contexts), the resolver
+    auto-promotes unconditionally; matches the pre-nexus-hmxi
+    contract."""
+    assert (
+        t3_collection_name("knowledge__art")
+        == "knowledge__art__voyage-context-3__v1"
+    )
+
+
+def test_t3_collection_name_t3_probe_failure_falls_through_to_promoted() -> None:
+    """When the t3 probe raises (cloud transient / quota error), the
+    resolver falls through to the auto-promoted shape; legacy reads
+    still work via T3's existing-collection bypass on read paths."""
+    class _RaisingT3:
+        def collection_exists(self, name):  # noqa: D401
+            raise RuntimeError("transient cloud error")
+    assert (
+        t3_collection_name("knowledge__art", t3=_RaisingT3())
+        == "knowledge__art__voyage-context-3__v1"
+    )
+
+
 # ── A3: Cross-model invariant regression ─────────────────────────────────────
 
 def test_cce_index_query_model_invariant() -> None:
