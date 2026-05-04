@@ -106,14 +106,12 @@ ALLOWED_TOP_LEVEL: frozenset[str] = frozenset({
     # document level.
     # RDR-101 Phase 3 PR δ — catalog cross-reference (1).
     # ``doc_id`` carries the catalog Tumbler string for the document
-    # this chunk belongs to (Phase 1 stand-in: ``str(tumbler)``;
-    # Phase 3+ will mint UUID7 doc_ids via the new write path,
-    # see ``Catalog.register`` doc_id stand-in comment).
-    # The Phase 2 ``nx catalog t3-backfill-doc-id`` verb writes this
-    # field retroactively for legacy chunks; PR δ writes it at
-    # chunk-write time so live re-indexing carries the field through
-    # the funnel (``_write_batch`` calls ``validate()`` which would
-    # otherwise strip a non-whitelisted key).
+    # this chunk belongs to. RDR-101 Phase 4: every indexer writes
+    # ``doc_id`` at chunk-creation time via ``make_chunk_metadata``;
+    # ``_write_batch`` calls ``validate()`` which would otherwise
+    # strip a non-whitelisted key. The Phase 2 t3-backfill-doc-id
+    # migration verb was retired post Phase 5b (nexus-iftc); legacy
+    # chunks predating Phase 4 are repopulated by re-indexing.
     "doc_id",
 })
 

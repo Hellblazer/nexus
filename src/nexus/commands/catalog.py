@@ -4445,8 +4445,11 @@ def _run_t3_doc_id_coverage(
     log = EventLog(cat_dir)
     if not log.path.exists() or log.path.stat().st_size == 0:
         raise click.ClickException(
-            f"events.jsonl is empty at {log.path}. Run 'nx catalog "
-            "synthesize-log --chunks' first."
+            f"events.jsonl is empty at {log.path}. The synthesize-log "
+            "migration verb that historically populated it was retired "
+            "post Phase 5b (nexus-iftc); restore by deleting the "
+            "catalog directory and re-running 'nx catalog setup' to "
+            "bootstrap from current T3 state."
         )
 
     # Build expected (coll_id, chunk_id) → doc_id; track orphans.
@@ -4754,4 +4757,4 @@ def _print_t3_doc_id_coverage_text(report: dict) -> None:
         )
 
 
-# ── RDR-101 Phase 2: repair-orphan-chunks verb ───────────────────────────
+# ── Catalog t3-doc-id-coverage support helpers ───────────────────────────

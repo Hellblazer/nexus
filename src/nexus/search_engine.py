@@ -165,9 +165,9 @@ def _catalog_doc_ids_for_predicates(
     Returns the list of ``Document.doc_id`` values (extracted from
     ``documents.metadata`` via ``json_extract($.doc_id)``) used as the
     ``doc_id`` $in filter in ChromaDB. Rows whose metadata lacks a
-    ``doc_id`` are excluded — the prefilter relies on the catalog being
-    backfilled (``nx catalog t3-backfill-doc-id``) before it can narrow
-    against them; legacy rows fall through to standard search.
+    ``doc_id`` are excluded; the prefilter relies on the catalog
+    carrying ``doc_id`` for the document (RDR-101 Phase 4 wrote it at
+    register time; pre-Phase-4 rows fall through to standard search).
     """
     clauses: list[str] = []
     params: list[Any] = []
@@ -209,10 +209,12 @@ def _prefilter_from_catalog(
     ``None`` to fall through to standard post-filtering otherwise.
 
     RDR-101 Phase 4 (nexus-ufyl) replaces the legacy ``source_path``-keyed
-    filter so the prune of deprecated chunk-metadata keys
-    (nexus-o6aa.10.3) can drop ``source_path`` without breaking catalog
-    prefiltering. The chunk-side identity field is the new ``doc_id``
-    metadata column populated by ``t3-backfill-doc-id``.
+    filter so the prune of deprecated chunk-metadata keys could drop
+    ``source_path`` without breaking catalog prefiltering. The chunk-
+    side identity field is the ``doc_id`` metadata column written at
+    chunk-creation time by every indexer (the t3-backfill-doc-id
+    migration verb that historically populated it for legacy chunks
+    was retired post Phase 5b, nexus-iftc).
     """
     if not where or catalog is None:
         return None

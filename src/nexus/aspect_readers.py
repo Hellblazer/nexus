@@ -357,11 +357,10 @@ def _read_chroma_uri(
     # query on doc_id first. An empty doc_id (catalog gap) is a
     # structural failure, NOT "no chunks". When the strict doc_id query
     # returns no chunks, fall back to the legacy multi-field probe:
-    # catalog metadata may carry a doc_id that hasn't been backfilled
-    # into T3 chunk metadata yet (Phase 4 transitional shape). The
-    # fallback path goes away in Phase 5b once t3-backfill-doc-id has
-    # run on every collection and the prune verb's coverage gate
-    # turns green.
+    # catalog metadata may carry a doc_id that pre-Phase-4 chunks lack.
+    # Post-iftc the t3-backfill-doc-id migration verb is gone; the
+    # fallback survives for in-the-wild pre-Phase-4 collections until
+    # they re-index.
     if doc_id_lookup is not None:
         try:
             doc_id = doc_id_lookup(collection, source_id) or ""
@@ -378,8 +377,8 @@ def _read_chroma_uri(
                 reason="unreachable",
                 detail=(
                     f"no doc_id mapped for {source_id!r} in {collection!r} "
-                    f"(catalog gap or pre-backfill chunk; the prune verb "
-                    f"requires --t3-doc-id-coverage=100% before running)"
+                    f"(catalog gap or pre-Phase-4 chunk; re-index the "
+                    f"affected collection to populate doc_id metadata)"
                 ),
             )
         result = _gather_chroma_chunks_by_field(
@@ -389,9 +388,9 @@ def _read_chroma_uri(
         if isinstance(result, ReadOk):
             return result
         # doc_id mapped but T3 query returned empty: chunks predate
-        # t3-backfill-doc-id. Fall through to legacy probe rather than
-        # report ``empty`` so the Phase 4 gate doesn't fail on the
-        # transitional shape. Phase 5b removes this fallback.
+        # the Phase 4 doc_id write contract. Fall through to legacy
+        # probe rather than report ``empty`` so legacy chunks remain
+        # readable until re-indexed.
 
     # Legacy multi-field probe (back-compat for callers without
     # catalog access). Removed in Phase 5b once chunks uniformly carry

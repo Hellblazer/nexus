@@ -346,9 +346,11 @@ def reindex_cmd(name: str, force: bool) -> None:
                     source_paths.add(resolved)
                 else:
                     # Catalog gap: treat as sourceless so the safety
-                    # check fires. Operator runs ``nx catalog
-                    # synthesize-log`` + ``t3-backfill-doc-id`` before
-                    # reindex.
+                    # check fires. Post-iftc, operator restores the
+                    # catalog by deleting the catalog directory and
+                    # re-running ``nx catalog setup`` (the
+                    # synthesize-log + t3-backfill-doc-id verbs that
+                    # historically repaired this case were retired).
                     sourceless.append(mid)
             else:
                 sourceless.append(mid)
