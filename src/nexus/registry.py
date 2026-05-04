@@ -48,70 +48,47 @@ def _repo_identity(repo: Path) -> tuple[str, str]:
     return main_repo.name, path_hash
 
 
-def _safe_collection(prefix: str, name: str, path_hash: str) -> str:
-    """Build ``{prefix}{name}-{hash8}``, truncating *name* to stay within 63 chars.
+def _safe_collection(
+    prefix: str, name: str, path_hash: str, *, suffix: str = "",
+) -> str:
+    """Build ``{prefix}{name}-{hash8}{suffix}``, truncating *name* to
+    stay within 63 chars.
 
-    ChromaDB enforces a 63-character limit on collection names.  The fixed
-    overhead is ``len(prefix) + 1 (hyphen) + 8 (hash)``, leaving the remainder
-    for the basename.  When truncation occurs the full name is still recoverable
-    via the hash.
+    ChromaDB enforces a 63-character limit on collection names.  The
+    fixed overhead is ``len(prefix) + 1 (hyphen) + 8 (hash) + len(suffix)``,
+    leaving the remainder for the basename.  When truncation occurs the
+    full name is still recoverable via the hash.
+
+    The optional *suffix* is appended verbatim so callers that need to
+    emit conformant ``__<model>__v<n>`` trailers (RDR-103) can share
+    this truncation logic instead of recomputing the budget themselves.
     """
-    max_name = 63 - len(prefix) - 1 - len(path_hash)  # 1 for the hyphen
+    max_name = 63 - len(prefix) - 1 - len(path_hash) - len(suffix)
     truncated = name[:max_name]
-    return f"{prefix}{truncated}-{path_hash}"
-
-
-def _collection_name(repo: Path) -> str:
-    """Return a unique ChromaDB collection name for *repo*.
-
-    The collection name is ``code__{basename}-{hash8}`` where *hash8* is the
-    first 8 hex characters of the SHA-256 digest of the main repository path
-    (resolved via git, stable across worktrees).  Long basenames are truncated
-    to stay within the 63-character ChromaDB limit.
-    """
-    name, path_hash = _repo_identity(repo)
-    return _safe_collection("code__", name, path_hash)
-
-
-def _docs_collection_name(repo: Path) -> str:
-    """Return the docs__ ChromaDB collection name for *repo*.
-
-    Uses the same identity scheme as _collection_name() for consistency.
-    """
-    name, path_hash = _repo_identity(repo)
-    return _safe_collection("docs__", name, path_hash)
-
-
-def _rdr_collection_name(repo: Path) -> str:
-    """Return the rdr__ ChromaDB collection name for *repo*.
-
-    Uses the same identity scheme as _collection_name() for consistency.
-    """
-    name, path_hash = _repo_identity(repo)
-    return _safe_collection("rdr__", name, path_hash)
+    return f"{prefix}{truncated}-{path_hash}{suffix}"
 
 
 def _resolve_repo_collection(
     repo: Path, content_type: str, *, cat: Any = None,
 ) -> str:
-    """Return the collection name for ``(repo, content_type)``.
+    """Return the conformant collection name for ``(repo, content_type)``.
 
-    RDR-103 Phase 3a: when ``cat`` is supplied AND has an owner
-    registered for ``repo``, returns the conformant
-    ``<ct>__<owner>__<model>__v<n>`` name minted by
-    :meth:`Catalog.collection_for_repo`. Otherwise falls back to the
-    pre-RDR-103 ``<ct>__<basename>-<hash8>`` shape.
+    Catalog-aware path: when ``cat`` is supplied AND has an owner
+    registered for ``repo``, returns the catalog-minted
+    ``<ct>__<owner>__<model>__v<n>`` name from
+    :meth:`Catalog.collection_for_repo`.
 
-    Used by :meth:`RepoRegistry.add` (passed catalog explicitly) and is
-    intentionally a thin façade that the indexer's
-    ``_repo_collection_or_legacy`` mirrors. Phase 5 removes both the
-    fallback branch here and the legacy helper definitions above.
+    No-catalog / unregistered-owner path: synthesizes a conformant
+    name from the path-derived ``<basename>-<hash8>`` identity. This
+    keeps tests and ad-hoc CLI runs working post Phase-5 strict-flip
+    while still emitting a 4-segment conformant shape that satisfies
+    :meth:`T3Database.get_or_create_collection`'s strict-naming guard.
     """
     if cat is not None:
         try:
             return cat.collection_for_repo(repo, content_type).render()
         except LookupError:
-            # Owner not registered; fall through to legacy.
+            # Owner not registered; fall through to synthesis.
             pass
         except Exception as exc:
             _log.debug(
@@ -120,14 +97,20 @@ def _resolve_repo_collection(
                 content_type=content_type,
                 error=str(exc),
             )
-    if content_type == "code":
-        return _collection_name(repo)
-    if content_type == "docs":
-        return _docs_collection_name(repo)
-    if content_type == "rdr":
-        return _rdr_collection_name(repo)
-    raise ValueError(
-        f"_resolve_repo_collection: unknown content_type {content_type!r}"
+    from nexus.corpus import canonical_embedding_model  # noqa: PLC0415
+
+    if content_type not in ("code", "docs", "rdr"):
+        raise ValueError(
+            f"_resolve_repo_collection: unknown content_type {content_type!r}"
+        )
+    name, path_hash = _repo_identity(repo)
+    # The conformant collection-name grammar disallows ``_`` inside the
+    # owner segment (it is the segment separator). Sanitise the basename
+    # so repos like ``my_special_repo`` still produce a parseable name.
+    sanitised = name.replace("_", "-")
+    model = canonical_embedding_model(content_type)
+    return _safe_collection(
+        f"{content_type}__", sanitised, path_hash, suffix=f"__{model}__v1",
     )
 
 
@@ -194,13 +177,12 @@ class RepoRegistry:
     def add(self, repo: Path, *, cat: Any = None) -> None:
         """Register *repo*, initialising collection names and head_hash.
 
-        RDR-103 Phase 3a: when ``cat`` is supplied, collection names are
-        sourced from the catalog as conformant
-        ``<ct>__<owner>__<model>__v1`` shapes. When ``cat`` is None
-        (default) or the lookup raises (owner not yet registered), the
-        legacy ``_collection_name`` / ``_docs_collection_name`` helpers
-        produce the pre-RDR-103 names. Phase 5 drops the legacy branch
-        together with the helper definitions.
+        Collection names always come back conformant. When ``cat`` is
+        supplied AND has an owner row for ``repo``, the catalog-minted
+        ``<ct>__<owner>__<model>__v1`` name is used. Otherwise
+        :func:`_resolve_repo_collection` synthesises the conformant
+        4-segment name from the path-derived ``<basename>-<hash8>``
+        identity (RDR-103 Phase 5).
         """
         key = str(repo)
         name = repo.name

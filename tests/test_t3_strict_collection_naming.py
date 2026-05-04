@@ -1,16 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""RDR-101 Phase 6: write-time collection naming enforcement.
+"""RDR-101 Phase 6 + RDR-103 Phase 5: write-time collection naming enforcement.
 
-When the ``[catalog].strict_collection_naming`` config flag is true (or
-the operator passes ``strict=True`` explicitly), creating a NEW
-collection with a non-conformant name raises ValueError at the
-``T3Database.get_or_create_collection`` boundary. Existing collections
-are allowed regardless of conformance (read paths must accept legacy
-names per RDR-101 §"Phase 6").
+Creating a NEW collection with a non-conformant name raises ValueError
+at the ``T3Database.get_or_create_collection`` boundary. Existing
+collections are allowed regardless of conformance (read paths must
+accept legacy names per RDR-101 §"Phase 6").
 
-Default is opt-in OFF so existing tests and indexers do not break.
-The flip to default-ON is a separate, irreversible Phase 6 step.
+RDR-103 Phase 5 (``nexus-yqnr.7``) flipped the default from opt-in
+permissive to unconditional strict. The ``strict`` parameter and the
+``[catalog].strict_collection_naming`` config flag are slated for
+removal alongside the legacy registry helpers; until they go, an
+explicit ``strict=False`` argument still functions as the operator
+escape hatch (used by backfill / migration verbs).
 """
 from __future__ import annotations
 
@@ -67,44 +69,53 @@ def test_strict_true_accepts_existing_non_conformant(t3_db):
     assert col is not None
 
 
-def test_strict_false_default_allows_non_conformant_new(t3_db):
-    """Default ``strict=False`` keeps the existing permissive behavior."""
-    col = t3_db.get_or_create_collection("knowledge__delos")
-    assert col is not None
-    assert t3_db.collection_exists("knowledge__delos")
+def test_default_rejects_legacy_two_segment(t3_db):
+    """RDR-103 Phase 5 invariant: a NEW legacy 2-segment name is
+    rejected without any caller-side opt-in. Pins the irreversible
+    flip from permissive to strict default.
+    """
+    with pytest.raises(ValueError, match="not conformant"):
+        t3_db.get_or_create_collection("code__legacy-cafe1234")
+
+
+def test_default_rejects_non_conformant_new(t3_db):
+    """Default behavior post Phase 5 flip: non-conformant new
+    collections are rejected even without any config flag set.
+    """
+    with pytest.raises(ValueError, match="not conformant"):
+        t3_db.get_or_create_collection("knowledge__delos")
 
 
 # ── config flag default ──────────────────────────────────────────────────
 
 
-def test_config_flag_strict_collection_naming_defaults_strict(t3_db, monkeypatch):
-    """When ``[catalog].strict_collection_naming`` is true, callers that
-    do NOT pass ``strict=`` get ``strict=True`` by default.
+def test_config_flag_does_not_re_enable_permissive(t3_db, monkeypatch):
+    """Even with the legacy ``[catalog].strict_collection_naming=false``
+    flag, the post-flip default cannot be downgraded back to permissive.
+    Only an explicit ``strict=False`` keyword argument escapes the guard.
     """
-    def fake_load_config(repo_root=None):
-        return {"catalog": {"strict_collection_naming": True}}
-
-    monkeypatch.setattr("nexus.config.load_config", fake_load_config)
-
+    monkeypatch.setattr(
+        "nexus.config.load_config",
+        lambda repo_root=None: {"catalog": {"strict_collection_naming": False}},
+    )
     with pytest.raises(ValueError, match="not conformant"):
         t3_db.get_or_create_collection("knowledge__delos")
 
 
-def test_config_flag_absent_keeps_permissive_default(t3_db, monkeypatch):
-    """No flag in config → permissive default (existing behavior preserved)."""
+def test_config_flag_absent_uses_strict_default(t3_db, monkeypatch):
+    """No flag in config → strict default (post Phase 5 flip)."""
     monkeypatch.setattr(
         "nexus.config.load_config",
         lambda repo_root=None: {"catalog": {}},
     )
-    col = t3_db.get_or_create_collection("knowledge__delos")
-    assert col is not None
+    with pytest.raises(ValueError, match="not conformant"):
+        t3_db.get_or_create_collection("knowledge__delos")
 
 
-def test_explicit_strict_false_overrides_config_flag(t3_db, monkeypatch):
-    """An explicit ``strict=False`` argument wins over a strict config flag.
-
-    Backfill / migration verbs need to construct legacy collections
-    even when the flag is on; explicit-false-wins is the escape hatch.
+def test_explicit_strict_false_escape_hatch(t3_db, monkeypatch):
+    """An explicit ``strict=False`` argument remains the operator
+    escape hatch for backfill / migration verbs that need to construct
+    legacy collections after the default flipped.
     """
     monkeypatch.setattr(
         "nexus.config.load_config",

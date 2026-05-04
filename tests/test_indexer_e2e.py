@@ -388,8 +388,8 @@ def test_smart_index_rdr_routing(
         f"ADR-001 must not appear in docs__ section_titles: {docs_sections}"
     )
 
-    path_hash = hashlib.sha256(str(rich_repo).encode()).hexdigest()[:8]
-    rdr_col_name = f"rdr__{rich_repo.name}-{path_hash}"
+    from nexus.indexer import _repo_collection_or_legacy
+    rdr_col_name = _repo_collection_or_legacy(rich_repo, "rdr")
     rdr_col = local_t3.get_or_create_collection(rdr_col_name)
     rdr_metas = rdr_col.get(include=["metadatas"])["metadatas"]
     assert rdr_metas, f"expected ADR-001 chunks in {rdr_col_name}; got none"
@@ -612,9 +612,8 @@ def test_index_repository_pdf_routing(
     ``store_type`` from chunk metadata; ``content_type=='pdf'`` is the
     canonical replacement (always set by ``make_chunk_metadata``).
     """
-    from nexus.registry import _docs_collection_name
     _index(rich_repo, rich_registry, local_t3)
-    docs_col = _docs_collection_name(rich_repo)
+    docs_col = rich_registry.get(rich_repo)["docs_collection"]
     results = local_t3.search("Hello World test document PDF ingest", [docs_col], n_results=5)
     pdf_results = [r for r in results if r.get("content_type") == "pdf"]
     assert pdf_results, f"No PDF chunks; content_types: {[r.get('content_type') for r in results]}"

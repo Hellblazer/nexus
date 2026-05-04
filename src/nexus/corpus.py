@@ -187,14 +187,36 @@ index_model_for_collection = voyage_model_for_collection
 
 
 def t3_collection_name(user_arg: str) -> str:
-    """Resolve a --collection argument to a T3 collection name.
+    """Resolve a --collection argument to a conformant T3 collection name.
 
-    If the argument already contains ``__``, it is used as-is (fully-qualified).
-    Otherwise the content is stored under ``knowledge__{user_arg}``.
+    Inputs land in one of three shapes:
+
+    - ``foo`` (no underscores) becomes
+      ``knowledge__foo__voyage-context-3__v1``.
+    - ``knowledge__foo`` (legacy 2-segment) is auto-promoted to
+      ``knowledge__foo__voyage-context-3__v1``.
+    - ``knowledge__foo__voyage-context-3__v1`` (already 4-segment
+      conformant) passes through untouched.
+
+    Auto-promotion satisfies ``T3Database``'s strict-naming guard
+    (RDR-103 Phase 5) while preserving the operator habit of typing
+    short ``--collection`` arguments. Pre-existing legacy collections
+    remain readable via T3's existing-collection bypass; new writes
+    go to the conformant name.
     """
-    if "__" in user_arg:
+    if is_conformant_collection_name(user_arg):
         return user_arg
-    return f"knowledge__{user_arg}"
+
+    if "__" in user_arg:
+        ct, _, rest = user_arg.partition("__")
+    else:
+        ct, rest = "knowledge", user_arg
+
+    if ct not in CONTENT_TYPES:
+        return user_arg
+
+    owner_segment = rest.replace("_", "-")
+    return f"{ct}__{owner_segment}__{canonical_embedding_model(ct)}__v1"
 
 
 def resolve_corpus(corpus: str, all_collections: list[str]) -> list[str]:

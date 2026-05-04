@@ -1,20 +1,22 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for the RDR SessionStart hook.
 
-RDR-103 Phase 3b: ``rdr_hook.py`` resolves the indexed collection name
-through the catalog (via ``Catalog.collection_for_repo``) instead of
-constructing the legacy 2-segment ``rdr__{repo_name}`` shape inline.
+RDR-103 Phase 3b + Phase 5: ``rdr_hook.py`` resolves the indexed
+collection name through the catalog (via
+``Catalog.collection_for_repo``) when both the catalog and the owner
+exist. Without a catalog or owner row, the helper falls back to
+:func:`nexus.indexer._repo_collection_or_legacy` which synthesises a
+conformant 4-segment name from the path-derived identity (Phase 5
+tightening; pre-Phase-5 the fallback was the legacy 2-segment shape).
 The test surface pins:
 
   - The hook helper returns the conformant ``CollectionName.render()``
     when the catalog is initialized and the repo has a registered owner.
-  - The helper falls back to the legacy 2-segment name when the catalog
-    is absent (so the hook continues to function on operator
-    workstations that have not yet run ``nx catalog setup``). Phase 5
-    will tighten this fallback.
-  - The helper returns the legacy shape when the catalog is initialized
-    but the repo has no owner row (the case before the first
-    ``nx index repo`` populates the owner via ``_catalog_hook``).
+  - The helper synthesises a conformant 4-segment name when the catalog
+    is absent (operator workstations that have not run
+    ``nx catalog setup``).
+  - The helper synthesises a conformant 4-segment name when the catalog
+    is initialized but the repo has no owner row.
 """
 from __future__ import annotations
 
@@ -73,13 +75,14 @@ def test_resolve_rdr_collection_uses_catalog_when_initialized(
     assert name == "rdr__1-1__voyage-context-3__v1"
 
 
-def test_resolve_rdr_collection_falls_back_when_catalog_absent(
+def test_resolve_rdr_collection_synthesises_conformant_when_catalog_absent(
     rdr_hook_module, tmp_path, monkeypatch,
 ):
     """No catalog at the configured path: helper falls back to the
-    legacy 2-segment shape. This keeps the SessionStart hook functional
-    on operator workstations that have not initialized the catalog.
-    Phase 5 tightens this.
+    indexer's path-derived conformant synthesis. Keeps SessionStart
+    functional on workstations that have not initialized the catalog
+    while still emitting a 4-segment name that satisfies T3's
+    strict-naming guard (RDR-103 Phase 5).
     """
     repo = tmp_path / "isolated"
     repo.mkdir()
@@ -87,16 +90,21 @@ def test_resolve_rdr_collection_falls_back_when_catalog_absent(
         "nexus.config.catalog_path",
         lambda: tmp_path / "no_such_catalog",
     )
+    monkeypatch.setattr(
+        "nexus.registry._repo_identity",
+        lambda r: ("isolated", "abcdef12"),
+    )
     name = rdr_hook_module._resolve_rdr_collection(repo)
-    assert name == "rdr__isolated"
+    assert name == "rdr__isolated-abcdef12__voyage-context-3__v1"
 
 
-def test_resolve_rdr_collection_falls_back_when_owner_unregistered(
+def test_resolve_rdr_collection_synthesises_conformant_when_owner_unregistered(
     rdr_hook_module, tmp_path, monkeypatch,
 ):
     """Catalog initialized but no owner registered for this repo:
-    helper falls back to legacy. Mirrors the order-of-operations
-    fallback in indexer.py's ``_repo_collection_or_legacy``.
+    helper falls back to the indexer's path-derived conformant
+    synthesis (Phase 5; pre-Phase-5 returned the legacy 2-segment
+    shape).
     """
     from nexus.catalog.catalog import Catalog
 
@@ -111,4 +119,4 @@ def test_resolve_rdr_collection_falls_back_when_owner_unregistered(
         lambda r: ("fresh", "deadbeef"),
     )
     name = rdr_hook_module._resolve_rdr_collection(repo)
-    assert name == "rdr__fresh"
+    assert name == "rdr__fresh-deadbeef__voyage-context-3__v1"

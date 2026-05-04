@@ -32,7 +32,12 @@ import pytest
 from nexus.catalog.catalog import Catalog
 from nexus.corpus import is_conformant_collection_name
 from nexus.db.t3 import T3Database
-from nexus.registry import RepoRegistry, _collection_name
+from nexus.indexer import _legacy_collection_name
+from nexus.registry import RepoRegistry
+
+
+def _collection_name(repo):
+    return _legacy_collection_name(repo, "code")
 
 
 @pytest.fixture()
@@ -89,14 +94,22 @@ def registry(tmp_path: Path) -> RepoRegistry:
 
 
 def _make_collection(t3: T3Database, name: str) -> None:
-    """Create an empty collection in T3 so the migration sees it."""
-    t3.get_or_create_collection(name)
+    """Create an empty collection in T3 so the migration sees it.
+
+    Uses ``strict=False`` so test fixtures may seed pre-RDR-103 legacy
+    2-segment names (the very thing the migration helper exists to
+    rename); production callers go through the strict default.
+    """
+    t3.get_or_create_collection(name, strict=False)
 
 
 def _seed_collection_with_chunk(t3: T3Database, name: str) -> None:
     """Create a collection and seed one document so the migration's
     rename has data to move (smoke-tests that data survives the
-    rename)."""
+    rename). Pre-creates with ``strict=False`` so legacy fixture names
+    bypass the strict-naming guard before ``t3.put`` lands the chunk.
+    """
+    t3.get_or_create_collection(name, strict=False)
     t3.put(collection=name, content="seed body", title="seed", tags="seed")
 
 
@@ -415,7 +428,6 @@ def test_migration_handles_code_and_docs_independently(
     legacy code collection AND a steady-state conformant docs
     collection migrates only the code one and emits one message."""
     from nexus.indexer import _migrate_legacy_collections
-    from nexus.registry import _docs_collection_name
 
     legacy_code = _collection_name(repo_with_owner)
     conformant_docs = "docs__1-1__voyage-context-3__v1"

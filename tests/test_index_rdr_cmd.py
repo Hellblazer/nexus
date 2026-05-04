@@ -54,11 +54,11 @@ def test_index_rdr_uses_correct_collection_name(
     runner: CliRunner, repo_with_rdrs: Path
 ) -> None:
     """Collection is rdr__{basename}-{hash8}, not docs__rdr__."""
-    from nexus.registry import _rdr_collection_name
+    from nexus.indexer import _repo_collection_or_legacy
 
-    expected_collection = _rdr_collection_name(repo_with_rdrs)
+    expected_collection = _repo_collection_or_legacy(repo_with_rdrs, "rdr")
     assert expected_collection.startswith("rdr__")
-    assert "-" in expected_collection  # basename-hash8
+    assert "voyage-context-3" in expected_collection
 
     with patch("nexus.doc_indexer.batch_index_markdowns", return_value={}) as mock_batch:
         result = runner.invoke(main, ["index", "rdr", str(repo_with_rdrs)])
@@ -153,8 +153,10 @@ def test_index_rdr_single_file_scope(
     assert paths_arg[0].name == "001-use-sqlite.md"
     # Collection still uses the repo-root identity, not the file's parent
     _, kwargs = mock_batch.call_args
-    from nexus.registry import _rdr_collection_name
-    assert kwargs["collection_name"] == _rdr_collection_name(repo_with_rdrs.resolve())
+    from nexus.indexer import _repo_collection_or_legacy
+    assert kwargs["collection_name"] == _repo_collection_or_legacy(
+        repo_with_rdrs.resolve(), "rdr",
+    )
 
 
 def test_index_rdr_single_file_rejects_non_markdown(

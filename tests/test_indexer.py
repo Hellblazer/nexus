@@ -487,10 +487,14 @@ def test_run_index_prune_misclassified(tmp_path):
 
 
 def test_registry_c2_fallback(tmp_path):
-    from nexus.indexer import _run_index; from nexus.registry import _docs_collection_name
+    from nexus.indexer import _repo_collection_or_legacy, _run_index
     repo = tmp_path / "repo"; repo.mkdir()
     reg = _reg({"collection": "code__repo", "code_collection": "code__repo"})
-    expected = _docs_collection_name(repo)
+    # RDR-103 Phase 5: registry's docs_collection is missing, so the
+    # indexer falls back to ``_repo_collection_or_legacy`` which now
+    # synthesises a conformant 4-segment name from the path-derived
+    # identity instead of returning the pre-Phase-5 legacy 2-segment shape.
+    expected = _repo_collection_or_legacy(repo, "docs")
     names: list[str] = []
     col = MagicMock(); col.get.return_value = {"metadatas": [], "ids": []}
     db = MagicMock(); db.get_or_create_collection.side_effect = lambda n: (names.append(n), col)[1]

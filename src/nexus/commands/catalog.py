@@ -503,9 +503,11 @@ def migrate_fallback_cmd(
         click.echo(f"{source}: 0 doc(s) to migrate.")
         return
 
+    from nexus.catalog.collection_name import owner_segment_for_tumbler  # noqa: PLC0415
+
     proposals: list[tuple[str, str]] = []
     for (tumbler,) in rows:
-        owner = _owner_segment_for_tumbler(tumbler)
+        owner = owner_segment_for_tumbler(tumbler)
         if not owner:
             click.echo(
                 f"  WARN: could not derive owner from tumbler {tumbler!r}; "
@@ -601,16 +603,6 @@ def migrate_fallback_cmd(
         f"'nx t3 gc -c {source} --no-dry-run --yes' will sweep them.",
         err=True,
     )
-
-
-# RDR-103 Phase 2: ``_owner_segment_for_tumbler`` was promoted to
-# ``nexus.catalog.collection_name.owner_segment_for_tumbler``. The
-# command-module alias below preserves the import surface so existing
-# call sites in this file (and any importers) continue to resolve while
-# the rest of the codebase migrates to the public helper.
-from nexus.catalog.collection_name import (  # noqa: E402
-    owner_segment_for_tumbler as _owner_segment_for_tumbler,
-)
 
 
 @catalog.command("collection-name")
@@ -2907,7 +2899,15 @@ def consolidate_cmd(corpus: str, dry_run: bool) -> None:
         entries = cat.by_corpus(corpus)
         if not entries:
             raise click.ClickException(f"No entries with corpus={corpus!r}")
-        target = f"docs__{corpus}"
+        # RDR-103 Phase 5: mirror the conformant target shape that
+        # ``merge_corpus`` will use when run for real so the dry-run
+        # message reports the same name.
+        from nexus.corpus import canonical_embedding_model  # noqa: PLC0415
+
+        owner_segment = corpus.replace("_", "-")
+        target = (
+            f"docs__{owner_segment}__{canonical_embedding_model('docs')}__v1"
+        )
         click.echo(f"[dry-run] Would merge {result['would_merge']} collections into {target}:")
         for e in entries:
             click.echo(f"  {e.physical_collection} ({e.chunk_count} chunks) → {target}")

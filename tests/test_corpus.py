@@ -35,17 +35,30 @@ def test_embedding_model_unknown_prefix_defaults_voyage_code3() -> None:
 # ── Collection name resolution from --collection arg ─────────────────────────
 
 def test_t3_collection_name_no_separator() -> None:
-    """--collection knowledge → knowledge__knowledge."""
-    assert t3_collection_name("knowledge") == "knowledge__knowledge"
+    """--collection knowledge promotes to a conformant 4-segment name
+    (RDR-103 Phase 5 auto-promotion)."""
+    assert (
+        t3_collection_name("knowledge")
+        == "knowledge__knowledge__voyage-context-3__v1"
+    )
 
 
 def test_t3_collection_name_with_separator() -> None:
-    """--collection knowledge__security → used as-is."""
-    assert t3_collection_name("knowledge__security") == "knowledge__security"
+    """--collection knowledge__security auto-promotes the 2-segment
+    legacy shape to a conformant 4-segment name (RDR-103 Phase 5)."""
+    assert (
+        t3_collection_name("knowledge__security")
+        == "knowledge__security__voyage-context-3__v1"
+    )
 
 
 def test_t3_collection_name_code_no_separator() -> None:
-    assert t3_collection_name("code") == "knowledge__code"
+    """Bare arg is treated as the owner segment of a knowledge
+    collection (the historical default), promoted to conformant."""
+    assert (
+        t3_collection_name("code")
+        == "knowledge__code__voyage-context-3__v1"
+    )
 
 
 # ── Corpus prefix resolution ──────────────────────────────────────────────────
@@ -242,14 +255,29 @@ def test_resolve_corpus_multiple_separators_exact_match() -> None:
 
 # ── t3_collection_name edge cases ────────────────────────────────────────────
 
-def test_t3_collection_name_already_prefixed_knowledge() -> None:
-    """Arg already containing __ is used as-is, even if knowledge__ prefix."""
-    assert t3_collection_name("knowledge__existing") == "knowledge__existing"
+def test_t3_collection_name_already_conformant_passthrough() -> None:
+    """A 4-segment conformant name is returned untouched (no double
+    promotion)."""
+    name = "knowledge__existing__voyage-context-3__v1"
+    assert t3_collection_name(name) == name
 
 
-def test_t3_collection_name_other_prefix_passthrough() -> None:
-    """Arg with code__ prefix is preserved as-is."""
-    assert t3_collection_name("code__myrepo") == "code__myrepo"
+def test_t3_collection_name_two_segment_knowledge_promotes() -> None:
+    """Legacy 2-segment ``knowledge__`` arg promotes to conformant."""
+    assert (
+        t3_collection_name("knowledge__existing")
+        == "knowledge__existing__voyage-context-3__v1"
+    )
+
+
+def test_t3_collection_name_other_prefix_promotes_to_canonical_model() -> None:
+    """``code__myrepo`` promotes to ``code__myrepo__voyage-code-3__v1``;
+    the canonical embedding model is selected from the content_type
+    prefix, not assumed."""
+    assert (
+        t3_collection_name("code__myrepo")
+        == "code__myrepo__voyage-code-3__v1"
+    )
 
 
 # ── A3: Cross-model invariant regression ─────────────────────────────────────

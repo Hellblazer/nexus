@@ -726,12 +726,19 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             return
 
         # Retrieve indexed chunks from the ephemeral collection for preview.
-        # RDR-103 Phase 3a: dry-run uses an EphemeralClient with no
-        # catalog context, so the conformant helper does not apply
-        # here. The fallback shape mirrors doc_indexer's leaf fallback;
-        # both are removed in Phase 5 by making ``collection`` required
-        # in dry-run.
-        col_name = collection if collection else f"docs__{corpus}"
+        # RDR-103 Phase 5: dry-run uses an EphemeralClient with no
+        # catalog context, so the catalog-aware helper does not apply
+        # here. Synthesise a conformant 4-segment name to mirror the
+        # post-flip ``doc_indexer`` leaf fallback so the strict-naming
+        # guard at ``T3Database.get_or_create_collection`` is satisfied.
+        if collection:
+            col_name = collection
+        else:
+            from nexus.corpus import canonical_embedding_model  # noqa: PLC0415
+            owner_segment = corpus.replace("_", "-")
+            col_name = (
+                f"docs__{owner_segment}__{canonical_embedding_model('docs')}__v1"
+            )
         col = local_t3.get_or_create_collection(col_name)
         result = col.get(include=["documents", "metadatas"])
         docs: list[str] = result.get("documents") or []

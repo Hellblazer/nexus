@@ -1747,8 +1747,9 @@ class Catalog:
            :func:`nexus.corpus.canonical_embedding_model`.
         4. Delegate to :meth:`collection_for`.
 
-        This is the helper that Phase 3 indexer call sites use; replacing
-        ``_docs_collection_name(repo)`` and similar legacy helpers.
+        This is the helper that Phase 3 indexer call sites use. The
+        pre-RDR-103 ``_docs_collection_name(repo)`` family that this
+        replaced was removed in Phase 5.
         """
         from nexus.registry import _repo_identity  # noqa: PLC0415
 

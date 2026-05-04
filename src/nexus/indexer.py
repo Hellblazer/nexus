@@ -241,13 +241,15 @@ def _remove_stale(lock_path: Path) -> None:
 
 
 def _repo_collection_or_legacy(repo: Path, content_type: str) -> str:
-    """Return the conformant collection name for ``(repo, content_type)``,
-    falling back to the legacy registry helper when the catalog is not
-    available or the owner is not yet registered.
+    """Return the conformant collection name for ``(repo, content_type)``.
 
-    RDR-103 Phase 3a transitional helper. Phase 5 removes the legacy
-    fallback together with the registry helper definitions; from then on
-    the catalog is the only source of collection names.
+    Catalog-aware path: when the catalog is initialized and the repo
+    owner is registered, returns the catalog-minted conformant name.
+
+    No-catalog / unregistered-owner path: synthesizes a conformant
+    name from the path-derived ``<basename>-<hash8>`` identity so the
+    no-catalog ad-hoc workflow (tests, single-shot CLI runs on a fresh
+    repo) continues to satisfy ``T3Database``'s strict-naming guard.
     """
     from nexus.catalog import Catalog  # noqa: PLC0415
     from nexus.config import catalog_path  # noqa: PLC0415
@@ -259,10 +261,10 @@ def _repo_collection_or_legacy(repo: Path, content_type: str) -> str:
             try:
                 return cat.collection_for_repo(repo, content_type).render()
             except LookupError:
-                # Owner not yet registered; fall through to legacy
-                # helper. This happens for callers that bypass the
-                # ``_catalog_hook`` upfront flow (e.g. ad-hoc CLI
-                # invocations on a fresh repo).
+                # Owner not yet registered; fall through to the
+                # path-derived synthesis below. This happens for
+                # callers that bypass the ``_catalog_hook`` upfront
+                # flow (e.g. ad-hoc CLI invocations on a fresh repo).
                 pass
     except Exception:
         _log.debug(
@@ -271,19 +273,38 @@ def _repo_collection_or_legacy(repo: Path, content_type: str) -> str:
             content_type=content_type,
             exc_info=True,
         )
-    from nexus.registry import (  # noqa: PLC0415
-        _collection_name,
-        _docs_collection_name,
-        _rdr_collection_name,
-    )
-    if content_type == "code":
-        return _collection_name(repo)
-    if content_type == "docs":
-        return _docs_collection_name(repo)
-    if content_type == "rdr":
-        return _rdr_collection_name(repo)
-    raise ValueError(
-        f"_repo_collection_or_legacy: unknown content_type {content_type!r}"
+    return _conformant_name_for_repo(repo, content_type)
+
+
+def _conformant_name_for_repo(repo: Path, content_type: str) -> str:
+    """Synthesize a conformant collection name from path-derived identity.
+
+    Owner segment uses the ``<basename>-<hash8>`` shape produced by
+    :func:`nexus.registry._repo_identity` so two worktrees of the same
+    repo collapse to the same collection. Embedding model is the
+    canonical model for ``content_type``; version is always v1 for
+    ad-hoc fallbacks.
+    """
+    from nexus.corpus import canonical_embedding_model  # noqa: PLC0415
+    from nexus.registry import _repo_identity, _safe_collection  # noqa: PLC0415
+
+    if content_type not in ("code", "docs", "rdr"):
+        raise ValueError(
+            f"_conformant_name_for_repo: unknown content_type {content_type!r}"
+        )
+    basename, repo_hash = _repo_identity(repo)
+    # See ``_resolve_repo_collection``: the conformant grammar treats
+    # ``_`` as the segment separator, so basenames containing
+    # underscores must be sanitised to ``-`` before composing the owner
+    # segment. The two synthesis points share the same rule so a repo
+    # gets the same name from either entry point.
+    sanitised = basename.replace("_", "-")
+    model = canonical_embedding_model(content_type)
+    return _safe_collection(
+        prefix=f"{content_type}__",
+        name=sanitised,
+        path_hash=repo_hash,
+        suffix=f"__{model}__v1",
     )
 
 
@@ -295,24 +316,21 @@ _MIGRATION_CONTENT_TYPES = ("code", "docs", "rdr")
 
 def _legacy_collection_name(repo: "Path", content_type: str) -> str:
     """Return the pre-RDR-103 ``<ct>__<basename>-<hash8>`` shape for
-    ``(repo, content_type)``. Phase 5 removes both the helper imports
-    and the call sites; Phase 4 keeps them as a one-shot migration
-    utility (see Phase 5 follow-up `nexus-yqnr.7`).
+    ``(repo, content_type)``. Used by :func:`_migrate_legacy_collections`
+    to detect existing legacy collections in T3 so they can be renamed
+    in place to the conformant 4-segment shape on the first index after
+    the catalog upgrade. The migration helper is the only legitimate
+    consumer of the legacy shape post Phase 5; all name-minting paths
+    emit conformant.
     """
-    from nexus.registry import (  # noqa: PLC0415
-        _collection_name,
-        _docs_collection_name,
-        _rdr_collection_name,
-    )
-    if content_type == "code":
-        return _collection_name(repo)
-    if content_type == "docs":
-        return _docs_collection_name(repo)
-    if content_type == "rdr":
-        return _rdr_collection_name(repo)
-    raise ValueError(
-        f"_legacy_collection_name: unknown content_type {content_type!r}"
-    )
+    from nexus.registry import _repo_identity, _safe_collection  # noqa: PLC0415
+
+    if content_type not in ("code", "docs", "rdr"):
+        raise ValueError(
+            f"_legacy_collection_name: unknown content_type {content_type!r}"
+        )
+    basename, repo_hash = _repo_identity(repo)
+    return _safe_collection(f"{content_type}__", basename, repo_hash)
 
 
 def _migrate_legacy_collections(
@@ -529,15 +547,13 @@ def _catalog_hook(
 
         cat = Catalog(cat_path, cat_path / ".catalog.db")
 
-        owner = cat.owner_for_repo(repo_hash)
-        if owner is None:
-            owner = cat.register_owner(
-                name=repo_name,
-                owner_type="repo",
-                repo_hash=repo_hash,
-                repo_root=str(repo),
-                description=f"Git repository: {repo_name}",
-            )
+        # RDR-103 Phase 5: collapse the inline lookup-or-register
+        # pattern into the catalog's canonical helper so there is one
+        # owner-registration path. ``ensure_owner_for_repo`` is
+        # idempotent and stable across worktrees.
+        before = cat.owner_for_repo(repo_hash)
+        owner = cat.ensure_owner_for_repo(repo, repo_name=repo_name)
+        if before is None:
             _log.info("catalog_owner_created", owner=str(owner), repo=repo_name)
 
         import sys

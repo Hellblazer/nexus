@@ -94,13 +94,16 @@ def test_repo_registry_add_with_catalog_lands_at_v1(
     assert info["docs_collection"].endswith("__v1")
 
 
-# ── RepoRegistry.add: cat=None (legacy fallback) ────────────────────────
+# ── RepoRegistry.add: cat=None (no-catalog conformant synthesis) ────────
 
-def test_repo_registry_add_without_catalog_preserves_legacy(tmp_path: Path) -> None:
-    """When ``cat=None``, the legacy ``code__<basename>-<hash8>`` /
-    ``docs__<basename>-<hash8>`` shape is preserved. This keeps callers
-    that have not yet wired in the catalog working through the
-    transitional Phase 3a window."""
+def test_repo_registry_add_without_catalog_synthesises_conformant(tmp_path: Path) -> None:
+    """RDR-103 Phase 5: when ``cat=None``, ``add`` synthesises a
+    conformant 4-segment name from the path-derived
+    ``<basename>-<hash8>`` identity. The pre-Phase-5 behaviour
+    preserved the legacy 2-segment shape; that fallback is removed
+    so every name written to the registry satisfies T3's strict
+    naming guard.
+    """
     repo = tmp_path / "legacyrepo"
     repo.mkdir()
     reg = RepoRegistry(tmp_path / "repos.json")
@@ -109,19 +112,22 @@ def test_repo_registry_add_without_catalog_preserves_legacy(tmp_path: Path) -> N
     assert info is not None
     assert info["code_collection"].startswith("code__")
     assert info["docs_collection"].startswith("docs__")
-    # Legacy 2-segment shape; not conformant per RDR-103.
-    assert not is_conformant_collection_name(info["code_collection"])
-    assert not is_conformant_collection_name(info["docs_collection"])
+    # Conformant 4-segment shape; satisfies the strict-naming guard.
+    assert is_conformant_collection_name(info["code_collection"])
+    assert is_conformant_collection_name(info["docs_collection"])
 
 
-def test_repo_registry_add_catalog_without_owner_falls_back(
+def test_repo_registry_add_catalog_without_owner_synthesises_conformant(
     catalog: Catalog, tmp_path: Path, monkeypatch,
 ) -> None:
-    """When a catalog is supplied but no owner is registered for the
-    repo, ``add`` falls back to the legacy helper instead of raising.
-    This handles the order-of-operations case in
-    ``commands/index.py:_index_repo`` where ``reg.add`` runs BEFORE
-    ``_catalog_hook`` registers the owner.
+    """RDR-103 Phase 5: when a catalog is supplied but no owner is
+    registered for the repo, ``add`` synthesises a conformant 4-segment
+    name from the path-derived identity instead of returning the
+    pre-Phase-5 legacy 2-segment shape. This handles the
+    order-of-operations case in ``commands/index.py:_index_repo`` where
+    ``reg.add`` runs BEFORE ``_catalog_hook`` registers the owner; the
+    next index after the owner lands picks up the catalog-minted name
+    via the standard catalog-aware path.
     """
     repo = tmp_path / "no_owner_repo"
     repo.mkdir()
@@ -133,8 +139,8 @@ def test_repo_registry_add_catalog_without_owner_falls_back(
     reg.add(repo, cat=catalog)
     info = reg.get(repo)
     assert info is not None
-    # Legacy fallback fires; not conformant.
-    assert not is_conformant_collection_name(info["code_collection"])
+    # Conformant fallback fires; satisfies T3 strict-naming guard.
+    assert is_conformant_collection_name(info["code_collection"])
 
 
 # ── _repo_collection_or_legacy ─────────────────────────────────────────
@@ -153,11 +159,16 @@ def test_repo_collection_or_legacy_uses_catalog_when_initialized(
     assert is_conformant_collection_name(name)
 
 
-def test_repo_collection_or_legacy_falls_back_when_catalog_absent(
+def test_repo_collection_or_legacy_synthesises_conformant_when_catalog_absent(
     tmp_path: Path, monkeypatch,
 ) -> None:
-    """When no catalog is initialized at the configured path, the
-    helper falls back to the legacy registry function."""
+    """RDR-103 Phase 5: when no catalog is initialized at the configured
+    path, the helper synthesises a conformant 4-segment name from the
+    path-derived identity instead of returning the pre-Phase-5 legacy
+    2-segment shape. The owner segment preserves the same
+    ``<basename>-<hash8>`` identity so collections are stable across
+    the catalog-absent / catalog-present boundary on a given repo.
+    """
     repo = tmp_path / "isolated"
     repo.mkdir()
     monkeypatch.setattr("nexus.config.catalog_path", lambda: tmp_path / "no_such_catalog")
@@ -169,5 +180,5 @@ def test_repo_collection_or_legacy_falls_back_when_catalog_absent(
     from nexus.indexer import _repo_collection_or_legacy
 
     name = _repo_collection_or_legacy(repo, "docs")
-    assert name == "docs__isolated-abcdef12"
-    assert not is_conformant_collection_name(name)
+    assert name == "docs__isolated-abcdef12__voyage-context-3__v1"
+    assert is_conformant_collection_name(name)

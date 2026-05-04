@@ -260,7 +260,7 @@ def test_index_md_falls_back_to_local_embedder_when_no_credentials(
     from nexus.db.t3 import T3Database
     local_t3 = T3Database(_client=client, local_mode=True)
 
-    n = index_markdown(sample_md, corpus="local_fallback_test", t3=local_t3)
+    n = index_markdown(sample_md, corpus="local-fallback-test", t3=local_t3)
     assert n > 0, (
         f"local-mode markdown index should produce chunks; got {n}. "
         f"This is the GH #336 contract: ingestion works without keys "
@@ -269,7 +269,9 @@ def test_index_md_falls_back_to_local_embedder_when_no_credentials(
 
     # Verify chunks landed AND were tagged with the local model name
     # (not voyage-context-3 — staleness check on re-run depends on it).
-    col = local_t3.get_or_create_collection("docs__local_fallback_test")
+    col = local_t3.get_or_create_collection(
+        "docs__local-fallback-test__voyage-context-3__v1",
+    )
     rows = col.get(limit=1, include=["metadatas"])
     assert rows["metadatas"], "expected at least one chunk in collection"
     embedding_model = rows["metadatas"][0].get("embedding_model", "")
@@ -282,7 +284,7 @@ def test_index_md_falls_back_to_local_embedder_when_no_credentials(
 
     # Re-index against unchanged content: should skip (return 0)
     # because hash + model match.
-    n2 = index_markdown(sample_md, corpus="local_fallback_test", t3=local_t3)
+    n2 = index_markdown(sample_md, corpus="local-fallback-test", t3=local_t3)
     assert n2 == 0, (
         f"re-index against unchanged content should be a no-op; got {n2}. "
         f"If this fails, the staleness check is comparing the local "
@@ -336,7 +338,7 @@ def test_index_markdown_auto_inits_catalog_when_absent_and_prunes_on_reindex(
     local_t3 = T3Database(_client=client, local_mode=True)
 
     # First index: no catalog yet. Auto-init must fire.
-    n1 = index_markdown(sample_md, corpus="autoinit_probe", t3=local_t3)
+    n1 = index_markdown(sample_md, corpus="autoinit-probe", t3=local_t3)
     assert n1 > 0, "expected first index to upsert chunks"
 
     assert Catalog.is_initialized(cat_path), (
@@ -346,7 +348,9 @@ def test_index_markdown_auto_inits_catalog_when_absent_and_prunes_on_reindex(
         "prune fallback (post-Phase-5c) matches zero stale chunks."
     )
 
-    col = local_t3.get_or_create_collection("docs__autoinit_probe")
+    col = local_t3.get_or_create_collection(
+        "docs__autoinit-probe__voyage-context-3__v1",
+    )
     metas_before = col.get(include=["metadatas"])["metadatas"]
     assert metas_before and all(m.get("doc_id") for m in metas_before), (
         "every chunk must carry doc_id when the catalog is auto-init'd; "
@@ -361,7 +365,7 @@ def test_index_markdown_auto_inits_catalog_when_absent_and_prunes_on_reindex(
         "---\ntitle: Test Doc\nauthor: Alice\n---\n\n# Hi\n",
     )
 
-    n2 = index_markdown(sample_md, corpus="autoinit_probe", t3=local_t3)
+    n2 = index_markdown(sample_md, corpus="autoinit-probe", t3=local_t3)
     assert n2 > 0, "edited file should produce a non-zero re-index"
 
     metas_after = col.get(include=["metadatas"])["metadatas"]
@@ -504,7 +508,7 @@ def test_index_pdf_fires_document_hook_exactly_once(
     # CLI ingest path passes content="" per the P0.1 contract; the
     # source_path is the PDF path.
     assert captured_source == str(sample_pdf.resolve())
-    assert captured_coll == "docs__mybook"
+    assert captured_coll == "docs__mybook__voyage-context-3__v1"
     assert captured_content == ""
 
 
@@ -1396,7 +1400,7 @@ def test_index_pdf_incremental_resumes_from_checkpoint(incr_setup):
     n = incr_setup.threshold + 50
     already_done = 64
     write_checkpoint(CheckpointData(
-        pdf=str(incr_setup.path), collection="docs__test",
+        pdf=str(incr_setup.path), collection="docs__test__voyage-context-3__v1",
         content_hash=incr_setup.content_hash, chunks_upserted=already_done,
         total_chunks=n, embedding_model="voyage-context-3",
     ))
@@ -1411,7 +1415,7 @@ def test_index_pdf_incremental_deletes_checkpoint_on_success(incr_setup):
     n = incr_setup.threshold + 10
     result, _ = incr_setup.run(n)
     assert result == n
-    assert not checkpoint_path(incr_setup.content_hash, "docs__test").exists()
+    assert not checkpoint_path(incr_setup.content_hash, "docs__test__voyage-context-3__v1").exists()
 
 
 def test_index_pdf_small_doc_uses_original_path(incr_setup):
@@ -1461,7 +1465,7 @@ def test_index_pdf_incremental_stale_checkpoint_deleted(incr_setup):
     from nexus.checkpoint import CheckpointData, write_checkpoint
     n = incr_setup.threshold + 10
     write_checkpoint(CheckpointData(
-        pdf=str(incr_setup.path), collection="docs__test",
+        pdf=str(incr_setup.path), collection="docs__test__voyage-context-3__v1",
         content_hash="wrong_hash_from_old_version", chunks_upserted=50,
         total_chunks=200, embedding_model="voyage-context-3",
     ))
@@ -1484,7 +1488,7 @@ def test_index_pdf_incremental_checkpoint_exceeds_total(incr_setup):
     from nexus.checkpoint import CheckpointData, write_checkpoint
     n = incr_setup.threshold + 10
     write_checkpoint(CheckpointData(
-        pdf=str(incr_setup.path), collection="docs__test",
+        pdf=str(incr_setup.path), collection="docs__test__voyage-context-3__v1",
         content_hash=incr_setup.content_hash, chunks_upserted=n + 100,
         total_chunks=n + 100, embedding_model="voyage-context-3",
     ))
@@ -1698,9 +1702,11 @@ def test_index_pdf_does_not_emit_source_path(
     cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
 
     with pdf_extract_patches_ctx():
-        index_pdf(sample_pdf, corpus="rdr102_pdf_b", t3=t3, embed_fn=_fake_embed)
+        index_pdf(sample_pdf, corpus="rdr102-pdf-b", t3=t3, embed_fn=_fake_embed)
 
-    col = t3.get_or_create_collection("docs__rdr102_pdf_b")
+    col = t3.get_or_create_collection(
+        "docs__rdr102-pdf-b__voyage-context-3__v1",
+    )
     rows = col.get(include=["metadatas"])
     assert rows["metadatas"], "expected at least one chunk"
     leaked = [m for m in rows["metadatas"] if "source_path" in m]
@@ -1721,10 +1727,12 @@ def test_index_markdown_does_not_emit_source_path(
     """
     cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
 
-    n = index_markdown(sample_md, corpus="rdr102_md_b", t3=t3)
+    n = index_markdown(sample_md, corpus="rdr102-md-b", t3=t3)
     assert n > 0
 
-    col = t3.get_or_create_collection("docs__rdr102_md_b")
+    col = t3.get_or_create_collection(
+        "docs__rdr102-md-b__voyage-context-3__v1",
+    )
     rows = col.get(include=["metadatas"])
     assert rows["metadatas"], "expected at least one chunk"
     leaked = [m for m in rows["metadatas"] if "source_path" in m]
@@ -1750,12 +1758,14 @@ def test_index_pdf_writes_doc_id_when_catalog_initialized(
     cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
 
     with pdf_extract_patches_ctx():
-        index_pdf(sample_pdf, corpus="rdr102_pdf", t3=t3, embed_fn=_fake_embed)
+        index_pdf(sample_pdf, corpus="rdr102-pdf", t3=t3, embed_fn=_fake_embed)
 
-    col = t3.get_or_create_collection("docs__rdr102_pdf")
+    col = t3.get_or_create_collection(
+        "docs__rdr102-pdf__voyage-context-3__v1",
+    )
     rows = col.get(include=["metadatas"])
     assert rows["metadatas"], (
-        "expected at least one chunk in docs__rdr102_pdf — staleness "
+        "expected at least one chunk in docs__rdr102-pdf; staleness "
         "skip would mask the real bug"
     )
     missing_doc_id = [m for m in rows["metadatas"] if not m.get("doc_id")]
@@ -1779,13 +1789,15 @@ def test_index_markdown_writes_doc_id_when_catalog_initialized(
     """
     cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
 
-    n = index_markdown(sample_md, corpus="rdr102_md", t3=t3)
+    n = index_markdown(sample_md, corpus="rdr102-md", t3=t3)
     assert n > 0, "expected index_markdown to upsert chunks"
 
-    col = t3.get_or_create_collection("docs__rdr102_md")
+    col = t3.get_or_create_collection(
+        "docs__rdr102-md__voyage-context-3__v1",
+    )
     rows = col.get(include=["metadatas"])
     assert rows["metadatas"], (
-        "expected at least one chunk in docs__rdr102_md"
+        "expected at least one chunk in docs__rdr102-md"
     )
     missing_doc_id = [m for m in rows["metadatas"] if not m.get("doc_id")]
     assert not missing_doc_id, (
@@ -1812,13 +1824,15 @@ def test_batch_index_markdowns_rdr_mode_writes_doc_id_when_catalog_initialized(
     )
 
     batch_index_markdowns(
-        [rdr_path], corpus="rdr102_rdrmode",
-        collection_name="rdr__rdr102-rdrmode",
+        [rdr_path], corpus="rdr102-rdrmode",
+        collection_name="rdr__rdr102-rdrmode__voyage-context-3__v1",
         content_type="rdr",
         t3=t3,
     )
 
-    col = t3.get_or_create_collection("rdr__rdr102-rdrmode")
+    col = t3.get_or_create_collection(
+        "rdr__rdr102-rdrmode__voyage-context-3__v1",
+    )
     rows = col.get(include=["metadatas"])
     assert rows["metadatas"], (
         "expected at least one chunk in rdr__rdr102-rdrmode"
@@ -1853,7 +1867,7 @@ def test_index_markdown_post_hook_updates_chunk_count_after_preflight(
 
     cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
 
-    n = index_markdown(sample_md, corpus="rdr102_chunkcount", t3=t3)
+    n = index_markdown(sample_md, corpus="rdr102-chunkcount", t3=t3)
     assert n > 0, "expected index_markdown to upsert at least one chunk"
 
     reset_cache()
@@ -1907,7 +1921,7 @@ def test_preflight_registration_idempotent_on_staleness_skip(
     cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
     sp = str(sample_md.resolve())
 
-    n1 = index_markdown(sample_md, corpus="rdr102_idem", t3=t3)
+    n1 = index_markdown(sample_md, corpus="rdr102-idem", t3=t3)
     assert n1 > 0, "expected first index_markdown to upsert chunks"
 
     after_first = _doc_registered_count(cat_dir, sp)
@@ -1931,7 +1945,7 @@ def test_preflight_registration_idempotent_on_staleness_skip(
     # rather than reusing a stale in-memory snapshot.
     reset_cache()
 
-    n2 = index_markdown(sample_md, corpus="rdr102_idem", t3=t3)
+    n2 = index_markdown(sample_md, corpus="rdr102-idem", t3=t3)
     assert n2 == 0, (
         f"re-index against unchanged content must be a no-op via the "
         f"staleness check; got {n2} chunks. If non-zero, the doc_id-keyed "

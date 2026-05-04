@@ -596,17 +596,24 @@ def _index_document(
     sp = source_key if source_key is not None else str(file_path)
     content_hash = _sha256(file_path)
     if collection_name is None:
-        # RDR-103 Phase 3a leaf fallback. ``corpus`` is a string (the
-        # repo basename), not a Path; the conformant
-        # ``cat.collection_for_repo`` requires a Path and an initialized
-        # catalog with the owner registered. Production hot paths
-        # always pass ``collection_name`` from
-        # ``_repo_collection_or_legacy``; this fallback fires for
-        # ad-hoc/test invocations and produces a grandfathered legacy
-        # name per RDR-101 Phase 6. Phase 5 either threads the catalog
-        # through these signatures or makes ``collection_name``
-        # required.
-        collection_name = f"docs__{corpus}"
+        # RDR-103 Phase 5 leaf fallback. ``corpus`` is a string (the
+        # repo basename or operator-supplied corpus tag), not a Path;
+        # the conformant ``cat.collection_for_repo`` requires a Path
+        # and an initialized catalog with the owner registered.
+        # Production hot paths always pass ``collection_name`` from
+        # the indexer; this fallback fires for ad-hoc/test invocations
+        # and synthesises a conformant 4-segment name so it satisfies
+        # ``T3Database.get_or_create_collection``'s strict-naming
+        # guard. The owner segment is the corpus tag with underscores
+        # rewritten to hyphens (``_`` is the conformant grammar's
+        # segment separator); an explicit owner row is not required
+        # for ad-hoc paths.
+        from nexus.corpus import canonical_embedding_model  # noqa: PLC0415
+
+        owner_segment = corpus.replace("_", "-")
+        collection_name = (
+            f"docs__{owner_segment}__{canonical_embedding_model('docs')}__v1"
+        )
     db = t3 if t3 is not None else make_t3()
     col = db.get_or_create_collection(collection_name)
 
@@ -1109,10 +1116,18 @@ def index_pdf(
     pdf_path = pdf_path.resolve()
 
     content_hash = _sha256(pdf_path)
-    # RDR-103 Phase 3a leaf fallback (see _index_document for full note).
-    # Production paths always pass collection_name from
-    # _repo_collection_or_legacy; this fires for ad-hoc invocations.
-    col_name = collection_name if collection_name is not None else f"docs__{corpus}"
+    # RDR-103 Phase 5 leaf fallback (see _index_document for the
+    # full rationale). Synthesises a conformant 4-segment name for
+    # ad-hoc invocations; production hot paths always pass
+    # ``collection_name``.
+    if collection_name is not None:
+        col_name = collection_name
+    else:
+        from nexus.corpus import canonical_embedding_model  # noqa: PLC0415
+        owner_segment = corpus.replace("_", "-")
+        col_name = (
+            f"docs__{owner_segment}__{canonical_embedding_model('docs')}__v1"
+        )
     db = t3 if t3 is not None else make_t3()  # T3Database instance (not PipelineDB)
     col = db.get_or_create_collection(col_name)
     target_model = index_model_for_collection(col_name)
@@ -1473,10 +1488,18 @@ def index_markdown(
     # Normalize to absolute so staleness checks are path-form-independent.
     md_path = md_path.resolve()
 
-    # RDR-103 Phase 3a leaf fallback (see _index_document for full note).
-    # Production paths always pass collection_name from
-    # _repo_collection_or_legacy; this fires for ad-hoc invocations.
-    col_name = collection_name if collection_name is not None else f"docs__{corpus}"
+    # RDR-103 Phase 5 leaf fallback (see _index_document for the
+    # full rationale). Synthesises a conformant 4-segment name for
+    # ad-hoc invocations; production hot paths always pass
+    # ``collection_name``.
+    if collection_name is not None:
+        col_name = collection_name
+    else:
+        from nexus.corpus import canonical_embedding_model  # noqa: PLC0415
+        owner_segment = corpus.replace("_", "-")
+        col_name = (
+            f"docs__{owner_segment}__{canonical_embedding_model('docs')}__v1"
+        )
     # RDR-102 Phase A: pre-flight catalog registration. Resolve doc_id BEFORE
     # _index_document's staleness check so a fresh index lands chunks with
     # doc_id populated at write time. Idempotent on re-index via
