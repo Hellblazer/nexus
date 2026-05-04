@@ -33,15 +33,16 @@ _SHADOW_EMIT_ENV = "NEXUS_EVENT_LOG_SHADOW"
 # (PR F) optionally appends to events.jsonl after the fact.
 #
 # RDR-101 Phase 3 PR ζ (nexus-o6aa.9.5): default flipped to ON. The
-# irreversibility window opens here — the catalog event log is now the
+# irreversibility window opens here: the catalog event log is now the
 # canonical write path by default. Existing catalogs without an
 # events.jsonl fall through to the legacy rebuild via the
 # ``_event_log_covers_legacy`` bootstrap guardrail in
-# ``_ensure_consistent``, so the flip is safe for catalogs that have
-# not yet run ``nx catalog synthesize-log`` — they keep operating in
-# legacy mode until an operator runs the migration. Set
+# ``_ensure_consistent``. The synthesize-log migration verb was
+# retired post Phase 5b (nexus-iftc); operators with sparse-log
+# catalogs restore by deleting the catalog directory and re-running
+# ``nx catalog setup`` to bootstrap from current T3 state. Set
 # ``NEXUS_EVENT_SOURCED=0`` (or ``false``/``no``/``off``) to opt back
-# into the legacy path.
+# into the legacy direct-write path at runtime.
 _EVENT_SOURCED_ENV = "NEXUS_EVENT_SOURCED"
 
 
@@ -607,11 +608,13 @@ class Catalog:
         **Bootstrap guardrail.** When the gate is on but the legacy
         JSONL holds substantially more documents than events.jsonl
         carries DocumentRegistered events, we are looking at a freshly-
-        flipped catalog that has not yet run ``nx catalog
-        synthesize-log`` — the event-sourced rebuild would DELETE every
-        legacy row and replay only the few new events, silently wiping
-        the catalog. Refuse the event-sourced path in that scenario
-        (fall through to legacy + emit a structured warning).
+        flipped catalog whose log is sparse against the legacy state:
+        the event-sourced rebuild would DELETE every legacy row and
+        replay only the few new events, silently wiping the catalog.
+        Refuse the event-sourced path in that scenario (fall through to
+        legacy + emit a structured warning). The synthesize-log
+        migration verb that historically populated the log was retired
+        post Phase 5b (nexus-iftc).
 
         **Atomicity.** The DELETE+replay sequence runs inside
         ``CatalogDB.transaction()`` so a malformed event, a
@@ -659,13 +662,9 @@ class Catalog:
                 # Refuse to wipe the legacy rows; fall through to the
                 # legacy rebuild and flag the state so operators see
                 # it via ``nx catalog doctor`` (not just structlog).
-                #
-                # RDR-101 Phase 3 follow-up B (nexus-o6aa.9.7): the
-                # remediation hint must say ``--force`` because
-                # ``synthesize-log`` refuses non-empty events.jsonl
-                # without it. Pre-fix the message read "Run 'nx
-                # catalog synthesize-log'", which sent operators into
-                # a "log is non-empty, --force required" error loop.
+                # nexus-iftc retired the synthesize-log migration
+                # verb; the warning now points operators at the
+                # ``nx catalog setup`` rebuild path.
                 self.bootstrap_fallback_active = True
                 _log.warning(
                     "catalog_event_log_incomplete_falling_back_to_legacy",

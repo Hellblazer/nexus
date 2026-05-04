@@ -24,13 +24,13 @@ Three storage tiers, by lifetime:
 - **T2** — SQLite + FTS5, seven domain stores behind a `T2Database` facade. Persistent notes, plans, taxonomy, telemetry, chash, aspects, aspect queue.
 - **T3** — `chromadb.PersistentClient` + local ONNX (local mode) **or** `chromadb.CloudClient` + Voyage (cloud mode). Permanent knowledge (`nx store`, `nx search`).
 
-Collection prefixes coexist in one T3 database. Always `__` (double underscore) as separator — colons are invalid in ChromaDB collection names:
+Collection prefixes coexist in one T3 database. Always `__` (double underscore) as separator (colons are invalid in ChromaDB collection names). Conformant collection-name shape (RDR-103) is `<content_type>__<owner_id>__<embedding_model>__v<n>`, e.g. `code__nexus-1-1__voyage-code-3__v1`:
 
-| Prefix | Embedder | Identity field |
-|---|---|---|
-| `code__*` | `voyage-code-3` | `source_path` |
-| `docs__*`, `rdr__*` | `voyage-context-3` (CCE) | `source_path` |
-| `knowledge__*` | `voyage-context-3` | `source_path` then `title` (fallback) |
+| Prefix | Embedder | Document identity (catalog) | Chunk join key |
+|---|---|---|---|
+| `code__*` | `voyage-code-3` | `source_uri` (file path) | `doc_id` (RDR-101 tumbler) |
+| `docs__*`, `rdr__*` | `voyage-context-3` (CCE) | `source_uri` (file path) | `doc_id` |
+| `knowledge__*` | `voyage-context-3` | `source_uri` then `title` (fallback for MCP-stored notes) | `doc_id` |
 
 For the full module map, post-store hook contracts, T2 schema, and design heritage see [`docs/architecture.md`](docs/architecture.md). For module-local guidance see the `AGENTS.md` files inside `src/nexus/catalog/`, `src/nexus/db/`, and `src/nexus/mcp/`.
 
