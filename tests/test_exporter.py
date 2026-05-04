@@ -35,7 +35,11 @@ def ephemeral_db() -> Generator[T3Database, None, None]:
 
 @pytest.fixture
 def populated_db(ephemeral_db: T3Database):
-    col = ephemeral_db.get_or_create_collection("code__test")
+    # RDR-103 Phase 5: exporter tests legitimately operate on legacy
+    # 2-segment names (the round-trip surface includes pre-conformant
+    # backups). Pre-create with ``strict=False`` so the test fixture
+    # can keep using the historical ``code__test`` shape.
+    col = ephemeral_db.get_or_create_collection("code__test", strict=False)
     docs = [f"document {i}" for i in range(5)]
     ids = [f"id-{i:03d}" for i in range(5)]
     metadatas = [
@@ -61,7 +65,8 @@ def _export_import(db, src_col, tmp_path, target=None, fname="rt.nxexp", **kwarg
 
 
 def _seed_collection(db, name, docs, ids, metadatas):
-    col = db.get_or_create_collection(name)
+    # See ``populated_db`` for why ``strict=False``.
+    col = db.get_or_create_collection(name, strict=False)
     embeddings = [_EF([d])[0] for d in docs]
     col.upsert(ids=ids, documents=docs, embeddings=embeddings, metadatas=metadatas)
     return col
@@ -322,7 +327,8 @@ class TestPagination:
     def _seed_large(self, db, col_name, prefix):
         from nexus.db.chroma_quotas import QUOTAS
         n = QUOTAS.MAX_RECORDS_PER_WRITE + 50
-        col = db.get_or_create_collection(col_name)
+        # See ``populated_db`` for why ``strict=False``.
+        col = db.get_or_create_collection(col_name, strict=False)
         docs = [f"doc {i}" for i in range(n)]
         ids = [f"{prefix}-{i:04d}" for i in range(n)]
         metadatas = [{"source_path": f"/f{i}.py"} for i in range(n)]
@@ -611,7 +617,7 @@ class TestErrorTypes:
 
 class TestEmptyCollectionRoundTrip:
     def test_empty_export_and_import(self, ephemeral_db: T3Database, tmp_path: Path):
-        ephemeral_db.get_or_create_collection("knowledge__empty")
+        ephemeral_db.get_or_create_collection("knowledge__empty", strict=False)
         out, stats = _export(ephemeral_db, "knowledge__empty", tmp_path)
         assert stats["exported_count"] == 0 and out.exists()
         with open(out, "rb") as f:
@@ -641,7 +647,7 @@ class TestCorruptMsgpackBody:
             f.write(json.dumps(header).encode() + b"\n")
             with gzip.GzipFile(fileobj=f, mode="wb") as gz:
                 gz.write(b"this is not valid msgpack data at all!!")
-        ephemeral_db.get_or_create_collection("knowledge__corrupt")
+        ephemeral_db.get_or_create_collection("knowledge__corrupt", strict=False)
         with pytest.raises(Exception):
             import_collection(ephemeral_db, out)
 

@@ -71,7 +71,12 @@ class TestBatchIndexDiscovery:
 
         assert result.exit_code == 0, result.output
         for call in mock_idx.call_args_list:
-            assert call.kwargs.get("collection_name") == "knowledge__papers"
+            # RDR-103 Phase 5: ``t3_collection_name`` auto-promotes
+            # ``--collection knowledge__papers`` to conformant.
+            assert (
+                call.kwargs.get("collection_name")
+                == "knowledge__papers__voyage-context-3__v1"
+            )
 
     def test_alphabetical_order(
         self, runner: CliRunner, pdf_dir: Path,

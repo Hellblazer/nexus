@@ -773,10 +773,16 @@ class T3Database:
         Validates each record against ChromaDB Cloud quota limits before any
         network call.  Splits the batch into ≤300-record chunks automatically.
         All metadata fields are passed through verbatim.
+
+        ``strict=False`` on the underlying ``get_or_create_collection`` call
+        because the indexer's direct ``get_or_create_collection`` calls (the
+        canonical write path) already enforce conformant naming; this bulk
+        writer is also called by import / migration verbs that legitimately
+        operate on pre-existing legacy collections.
         """
         for doc_id, doc, meta in zip(ids, documents, metadatas):
             self._validate_record(id=doc_id, document=doc, embedding=None, metadata=meta)
-        col = self.get_or_create_collection(collection)
+        col = self.get_or_create_collection(collection, strict=False)
         self._write_batch(col, collection, ids, documents, metadatas)
 
     def upsert_chunks_with_embeddings(
@@ -799,8 +805,10 @@ class T3Database:
 
         Note: Per-record quota validation is intentionally skipped — callers are
         responsible for compliance (source data, e.g. from migration, is presumed valid).
+
+        See ``upsert_chunks`` for why ``strict=False`` here.
         """
-        col = self.get_or_create_collection(collection_name)
+        col = self.get_or_create_collection(collection_name, strict=False)
         self._write_batch(col, collection_name, ids, documents, metadatas, embeddings=embeddings)
 
     def update_chunks(
@@ -827,7 +835,11 @@ class T3Database:
             metadatas = [_normalize_for_write(m, collection) for m in metadatas]
             for m in metadatas:
                 validate(m)
-        col = self.get_or_create_collection(collection)
+        # See ``upsert_chunks`` for why ``strict=False`` here. Update
+        # paths typically operate on existing collections (where the
+        # strict guard is a no-op anyway), but a missing collection on
+        # first frecency update should not raise.
+        col = self.get_or_create_collection(collection, strict=False)
         size = QUOTAS.MAX_RECORDS_PER_WRITE
         with self._write_sem(collection):
             for start in range(0, len(ids), size):

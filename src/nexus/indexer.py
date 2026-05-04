@@ -547,13 +547,22 @@ def _catalog_hook(
 
         cat = Catalog(cat_path, cat_path / ".catalog.db")
 
-        # RDR-103 Phase 5: collapse the inline lookup-or-register
-        # pattern into the catalog's canonical helper so there is one
-        # owner-registration path. ``ensure_owner_for_repo`` is
-        # idempotent and stable across worktrees.
-        before = cat.owner_for_repo(repo_hash)
-        owner = cat.ensure_owner_for_repo(repo, repo_name=repo_name)
-        if before is None:
+        # ``_catalog_hook`` accepts an explicit ``repo_hash`` (and
+        # ``repo_name``) so callers and tests can override the
+        # path-derived identity. ``ensure_owner_for_repo`` would
+        # recompute the hash from ``repo`` and ignore the explicit
+        # arg, so the inline lookup-or-register is preserved. The
+        # idempotency guarantee matches ``ensure_owner_for_repo``:
+        # existing owners short-circuit without a re-register.
+        owner = cat.owner_for_repo(repo_hash)
+        if owner is None:
+            owner = cat.register_owner(
+                name=repo_name,
+                owner_type="repo",
+                repo_hash=repo_hash,
+                repo_root=str(repo),
+                description=f"Git repository: {repo_name}",
+            )
             _log.info("catalog_owner_created", owner=str(owner), repo=repo_name)
 
         import sys

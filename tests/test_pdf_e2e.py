@@ -46,7 +46,7 @@ class TestIndexPdfE2E:
             count = index_pdf(simple_pdf, "pdf-e2e-simple", t3=local_t3)
 
         assert count > 0, "Expected at least one chunk indexed"
-        results = local_t3.search("hello world test document", ["docs__pdf-e2e-simple"])
+        results = local_t3.search("hello world test document", ["docs__pdf-e2e-simple__voyage-context-3__v1"])
         assert results, "Expected search results after indexing"
         assert results[0]["distance"] < 1.0, f"distance={results[0]['distance']} too large"
         # RDR-101 Phase 5c: store_type dropped; content_type is canonical.
@@ -63,7 +63,7 @@ class TestIndexPdfE2E:
         )
         results = local_t3.search(
             "database transactions ACID consistency storage systems",
-            ["docs__pdf-e2e-multipage"],
+            ["docs__pdf-e2e-multipage__voyage-context-3__v1"],
             n_results=3,
         )
         assert results, "Expected search results for database transactions query"
@@ -81,7 +81,7 @@ class TestIndexPdfE2E:
 
         assert first > 0
         assert second == 0, "Second index of unchanged PDF must return 0"
-        col = local_t3.get_or_create_collection("docs__pdf-e2e-staleness")
+        col = local_t3.get_or_create_collection("docs__pdf-e2e-staleness__voyage-context-3__v1")
         assert col.count() == first, "Document count must not change after staleness skip"
 
 
@@ -119,7 +119,7 @@ class TestIndexPdfFileE2E:
         the chunk metadata.
         """
         pdf = pdf_git_repo_e2e / "docs" / "simple.pdf"
-        collection_name = "docs__pdf-e2e-git"
+        collection_name = "docs__pdf-e2e-git__voyage-context-3__v1"
         model = index_model_for_collection(collection_name)
         col = local_t3.get_or_create_collection(collection_name)
         git_meta = _git_metadata(pdf_git_repo_e2e)
