@@ -57,7 +57,10 @@ class TestGetOrCreateCollectionHnswMetadata:
     def test_local_mode_passes_hnsw_search_ef_metadata(self) -> None:
         """get_or_create_collection passes hnsw:search_ef metadata in local mode."""
         db = _local_db_with_ef()
-        col = db.get_or_create_collection(_unique("code__ef"))
+        # RDR-103 Phase 5: tests of HNSW metadata don't care about
+        # naming conformance; pre-create with strict=False so the
+        # legacy 2-segment fixture name is allowed.
+        col = db.get_or_create_collection(_unique("code__ef"), strict=False)
         meta = col.metadata or {}
         assert "hnsw:search_ef" in meta
         assert meta["hnsw:search_ef"] == 256
@@ -65,13 +68,13 @@ class TestGetOrCreateCollectionHnswMetadata:
     def test_local_mode_hnsw_ef_matches_config(self) -> None:
         """hnsw:search_ef value matches config search.hnsw_ef default (256)."""
         db = _local_db_with_ef()
-        col = db.get_or_create_collection(_unique("knowledge__ef"))
+        col = db.get_or_create_collection(_unique("knowledge__ef"), strict=False)
         assert col.metadata["hnsw:search_ef"] == 256
 
     def test_cloud_mode_does_not_pass_hnsw_metadata(self) -> None:
         """get_or_create_collection does NOT pass hnsw metadata in cloud mode."""
         db = _cloud_db_with_ef()
-        col = db.get_or_create_collection(_unique("code__cloud"))
+        col = db.get_or_create_collection(_unique("code__cloud"), strict=False)
         meta = col.metadata or {}
         assert "hnsw:search_ef" not in meta
 
