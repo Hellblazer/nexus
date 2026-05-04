@@ -35,7 +35,6 @@ import click
 # never reset; it dies with the process.
 _PROMPTED: bool = False
 
-# Env var name documented at the top of `docs/migration/rdr-101.md`.
 # When set to a truthy value, suppresses the prompt unconditionally.
 # Same semantics as pip's --quiet or npm's NPM_CONFIG_LOGLEVEL.
 _NO_PROMPTS_ENV = "NEXUS_NO_PROMPTS"
@@ -85,9 +84,11 @@ def maybe_emit_bootstrap_prompt() -> None:
     click.echo(
         "WARNING: catalog bootstrap-fallback active.\n"
         "  events.jsonl is sparse vs documents.jsonl; ES writes are\n"
-        "  landing in the log but reads come from legacy JSONL. Run\n"
-        "  `nx catalog migrate` to rebuild events.jsonl from the\n"
-        "  legacy state and align T3 chunks. See docs/migration/rdr-101.md.\n"
-        "  Suppress this prompt with NEXUS_NO_PROMPTS=1.",
+        "  landing in the log but reads come from legacy JSONL. The\n"
+        "  synthesize-log / t3-backfill-doc-id / migrate verbs that\n"
+        "  historically rebuilt the log were retired post Phase 5b\n"
+        "  (nexus-iftc). Restore by deleting the catalog directory\n"
+        "  and re-running `nx catalog setup` to bootstrap from current\n"
+        "  T3 state. Suppress this prompt with NEXUS_NO_PROMPTS=1.",
         err=True,
     )

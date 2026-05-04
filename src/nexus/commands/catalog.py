@@ -4751,9 +4751,8 @@ def _print_t3_doc_id_coverage_text(report: dict) -> None:
             "to bootstrap a fresh event log from current T3 state."
         )
         click.echo(
-            "See docs/migration/rdr-101.md § 'Post-Phase-4 cleanup' for "
-            "the historical remediation walk-through (verbs retired "
-            "post Phase 5b)."
+            "See docs/rdr/post-mortem/101-event-sourced-catalog-migration.md "
+            "for the arc record (verbs retired post Phase 5b)."
         )
 
 
