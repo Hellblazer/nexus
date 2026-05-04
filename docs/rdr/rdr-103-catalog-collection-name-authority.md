@@ -2,13 +2,21 @@
 title: "RDR-103: Catalog as Collection-Name Authority"
 id: RDR-103
 type: Architecture
-status: accepted
+status: closed
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-03
 accepted_date: 2026-05-03
-related_issues: [nexus-qpet, nexus-qpet.4, nexus-2r71]
+closed_date: 2026-05-04
+closed_reason: implemented
+post_mortem: post-mortem/103-catalog-collection-name-authority.md
+gap_pointers:
+  Gap1: src/nexus/catalog/collection_name.py:53
+  Gap2: src/nexus/corpus.py:115
+  Gap3: src/nexus/db/t3.py:547
+  Gap4: src/nexus/indexer.py:387
+related_issues: [nexus-qpet, nexus-qpet.4, nexus-2r71, nexus-yqnr, nexus-7vuw, nexus-hmxi]
 related_tests: []
 implementation_notes: ""
 related: [RDR-101]
