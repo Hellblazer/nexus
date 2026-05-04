@@ -1,5 +1,9 @@
 # T3 Chunk Metadata Consistency Matrix
 
+> **HISTORICAL (2026-04-26)**: this audit predates RDR-101 Phase 4 (`source_path` removed from chunk metadata) and Phase 5c (`corpus`, `store_type`, `git_meta` removed from the chunk-level allow-list). Several rows below describe fields that no longer exist in chunk metadata. For the current `ALLOWED_TOP_LEVEL` set see `src/nexus/metadata_schema.py`; for the rationale of the field reductions see `docs/rdr/rdr-101-catalog-t3-metadata-design.md`, `docs/rdr/rdr-102-phase4-completion.md`, and the post-mortems under `docs/rdr/post-mortem/`.
+>
+> Kept in-tree as the audit artifact that drove the RDR-101 / RDR-102 reductions; do NOT use as a current-state reference.
+
 **Date**: 2026-04-26
 **Branch**: `feature/nexus-b9g1-rdr-089-aspect-extraction`
 **Scope**: every `ALLOWED_TOP_LEVEL` field in `src/nexus/metadata_schema.py:49–88` × every indexer / chunker that writes T3 chunk metadata.

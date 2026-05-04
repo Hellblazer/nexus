@@ -230,8 +230,8 @@ version is bumped. This enables targeted re-indexing:
 In cloud mode, `nx doctor` reports the pipeline version status of each collection. In local mode, pipeline version is not checked — run `nx index repo --force-stale` after an upgrade to refresh any outdated collections.
 
 ```
-✓ pipeline (code__nexus-571b8edd): v4
-✓ pipeline (code__myrepo-abc12345): no version stamp (index with --force to stamp)
+✓ pipeline (code__nexus-1-1__voyage-code-3__v1): v4
+✓ pipeline (code__myrepo-1-1__voyage-code-3__v1): no version stamp (index with --force to stamp)
 ```
 
 Collections without a version stamp were indexed before pipeline versioning was introduced.

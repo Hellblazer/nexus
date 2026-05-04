@@ -674,12 +674,13 @@ class Catalog:
                         "events.jsonl is non-empty but has fewer "
                         "DocumentRegistered events than documents.jsonl "
                         "has rows. ES writes are landing in the log "
-                        "but reads come from legacy JSONL — replay "
-                        "equality is silently broken until the log "
-                        "catches up. Run 'nx catalog synthesize-log "
-                        "--force' to rebuild events.jsonl from the "
-                        "legacy state, then 'nx catalog t3-backfill-"
-                        "doc-id' to align T3 chunks."
+                        "but reads come from legacy JSONL; replay "
+                        "equality is silently broken. The synthesize-log "
+                        "and t3-backfill-doc-id remediation verbs were "
+                        "retired post Phase 5b (nexus-iftc). Restore by "
+                        "deleting the catalog directory and re-running "
+                        "'nx catalog setup' to bootstrap from current "
+                        "T3 state."
                     ),
                 )
                 use_event_log = False

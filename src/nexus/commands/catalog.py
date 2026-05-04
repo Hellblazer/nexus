@@ -4726,32 +4726,31 @@ def _print_t3_doc_id_coverage_text(report: dict) -> None:
         for line in warn_lines:
             click.echo(line)
         click.echo(
-            "  Run 'nx catalog synthesize-log --force --chunks "
-            "--prefer-live-catalog' followed by 'nx catalog "
-            "t3-backfill-doc-id' to recover content_hash-matchable "
-            "orphans. See docs/migration/rdr-101-phase4-orphan-recovery.md."
+            "  The synthesize-log and t3-backfill-doc-id remediation "
+            "verbs were retired post Phase 5b (nexus-iftc). Re-index the "
+            "affected collections to repopulate orphan chunks with "
+            "current doc_id metadata; see docs/migration/"
+            "rdr-101-phase4-orphan-recovery.md for historical context."
         )
     click.echo("")
     if report["pass"]:
         click.echo("PASS — every non-orphan chunk carries the expected doc_id.")
     else:
         click.echo("FAIL — T3 doc_id metadata diverges from the event log.")
-        # nexus-o6aa.10.4: surface the next operator verb. The most
-        # common cause of a coverage FAIL is a pre-Phase-4 catalog
-        # whose chunks lack doc_id metadata; ``nx catalog migrate``
-        # is the single-command remediation. Mismatched doc_ids point
-        # at a different (rarer) class (synthesize-log drift)
-        # which is caught by the same verb's projection rebuild step.
+        # Post-iftc (RDR-101 Phase 5b irreversibility): the migrate /
+        # synthesize-log / t3-backfill-doc-id verbs are gone. A FAIL
+        # today means the catalog holds pre-Phase-4 state; restore by
+        # bootstrapping a fresh catalog from current T3.
         click.echo("")
         click.echo("Next step:")
-        click.echo("  nx catalog migrate --i-have-completed-the-reader-migration")
         click.echo(
-            "  (or 'nx catalog t3-backfill-doc-id' alone if you have not "
-            "shipped the Phase 4 reader migration yet)"
+            "  Delete the catalog directory and re-run 'nx catalog setup' "
+            "to bootstrap a fresh event log from current T3 state."
         )
         click.echo(
             "See docs/migration/rdr-101.md § 'Post-Phase-4 cleanup' for "
-            "the full remediation walk-through."
+            "the historical remediation walk-through (verbs retired "
+            "post Phase 5b)."
         )
 
 
