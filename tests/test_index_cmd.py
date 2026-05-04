@@ -368,17 +368,10 @@ def test_md_monitor_return_metadata(runner, fake_md):
     ("knowledge", "knowledge__knowledge__voyage-context-3__v1"),
     ("knowledge__delos", "knowledge__delos__voyage-context-3__v1"),
 ])
-def test_pdf_collection_flag_normalization(runner, fake_pdf, flag_val, expected, monkeypatch):
-    # nexus-hmxi: ``t3_collection_name`` now probes T3 for a legacy
-    # 2-segment collection and grandfathers it ahead of the auto-
-    # promoted target. Stub ``nexus.db.make_t3`` (imported lazily
-    # by ``commands.index``) so the test stays deterministic
-    # regardless of cloud / local T3 state.
-    class _StubT3:
-        def collection_exists(self, name):  # noqa: D401
-            return False
-    import nexus.db as _nexus_db
-    monkeypatch.setattr(_nexus_db, "make_t3", lambda: _StubT3())
+def test_pdf_collection_flag_normalization(runner, fake_pdf, flag_val, expected):
+    # nexus-hmxi: ``nx index pdf --collection`` does NOT probe T3 for
+    # legacy grandfathering (see ``pdf_cmd`` in ``commands/index.py``);
+    # the auto-promoted conformant shape is the bulk-index target.
     rv = {"chunks": 5, "pages": [1], "title": "T", "author": "A"}
     with patch("nexus.doc_indexer.index_pdf", return_value=rv) as m:
         result = runner.invoke(main, ["index", "pdf", str(fake_pdf), "--collection", flag_val])

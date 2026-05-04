@@ -181,10 +181,6 @@ def expire_cmd() -> None:
 def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None:
     """Promote a T2 memory entry to T3 ChromaDB permanent storage."""
     from nexus.corpus import t3_collection_name
-    # nexus-hmxi: probe T3 so promote targets land in the same
-    # collection that ``nx store list`` / ``nx search`` resolve to.
-    from nexus.db import make_t3 as _make_t3
-    collection = t3_collection_name(collection, t3=_make_t3())
 
     with T2Database(_default_db_path()) as db:
         entry = db.get(id=entry_id)
@@ -204,6 +200,22 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
                 raise click.ClickException(
                     f"{', '.join(missing)} not set — run: nx config init"
                 )
+
+        # nexus-hmxi: probe T3 so promote targets land in the same
+        # collection that ``nx store list`` / ``nx search`` resolve to.
+        # Resolution runs AFTER the credential-missing fail-fast so
+        # operators with incomplete config see the actionable message
+        # instead of a generic T3 connection error.
+        t3_for_probe = make_t3()
+        try:
+            collection = t3_collection_name(collection, t3=t3_for_probe)
+        finally:
+            close = getattr(t3_for_probe, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
 
         # Translate TTL: T2 ttl=None (permanent) -> T3 ttl_days=0; T2 ttl=N -> T3 ttl_days=N
         ttl_days: int = entry["ttl"] if entry["ttl"] is not None else 0  # type: ignore[assignment]
