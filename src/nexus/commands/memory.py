@@ -181,8 +181,10 @@ def expire_cmd() -> None:
 def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None:
     """Promote a T2 memory entry to T3 ChromaDB permanent storage."""
     from nexus.corpus import t3_collection_name
-
-    collection = t3_collection_name(collection)
+    # nexus-hmxi: probe T3 so promote targets land in the same
+    # collection that ``nx store list`` / ``nx search`` resolve to.
+    from nexus.db import make_t3 as _make_t3
+    collection = t3_collection_name(collection, t3=_make_t3())
 
     with T2Database(_default_db_path()) as db:
         entry = db.get(id=entry_id)

@@ -140,6 +140,60 @@ def test_search_returns_results(t3):
     assert "vector database" in result.lower() or "doc1" in result
 
 
+class TestNexusHmxiRoundTripGrandfathering:
+    """nexus-hmxi: ``store_list`` and ``search`` must resolve the same
+    user-typed legacy 2-segment ``--collection`` / ``--corpus`` to
+    the same target collection. Pre-fix, ``store_list`` auto-promoted
+    to conformant (miss for legacy data) while ``search`` used the
+    qualified form as-is (hit for legacy data); the two CLI surfaces
+    diverged on the same input.
+    """
+
+    def test_legacy_collection_grandfathered_when_present(self, t3):
+        # Pre-create a legacy 2-segment collection (simulating
+        # operator's pre-Phase-5 state).
+        t3.get_or_create_collection("knowledge__art", strict=False)
+        t3.put(
+            collection="knowledge__art",
+            content="Pre-Phase-5 ART data",
+            title="art-overview",
+        )
+        # ``store_put`` with the same short form must add to the
+        # legacy collection (no split).
+        result = store_put(
+            content="Post-Phase-5 ART addition",
+            collection="knowledge__art",
+            title="art-followup",
+        )
+        assert "Stored" in result
+        # Both docs reachable via ``store_list``.
+        listing = store_list(collection="knowledge__art", limit=10)
+        assert "art-overview" in listing
+        assert "art-followup" in listing
+        # And via ``search``.
+        sresult = search(
+            query="ART data Phase-5",
+            corpus="knowledge__art",
+            limit=5,
+        )
+        assert not sresult.startswith("Error:")
+        assert "art-overview" in sresult or "art-followup" in sresult
+
+    def test_no_legacy_collection_promotes_to_conformant(self, t3):
+        # No pre-existing collection; ``store_put`` auto-promotes to
+        # conformant.
+        result = store_put(
+            content="Greenfield content",
+            collection="knowledge__greenfield",
+            title="greenfield-doc",
+        )
+        assert "Stored" in result
+        assert "knowledge__greenfield__voyage-context-3__v1" in result
+        # ``store_list`` resolves to the same conformant target.
+        listing = store_list(collection="knowledge__greenfield", limit=10)
+        assert "greenfield-doc" in listing
+
+
 def test_search_no_results(t3):
     result = search(query="nonexistent topic", corpus="knowledge__empty")
     assert not result.startswith("Error:")
@@ -412,9 +466,14 @@ def test_t1_isolated_prefix(t1_isolated):
         id="all-alias",
     ),
     pytest.param(
-        "knowledge__notes",
-        [{"name": "knowledge__notes", "count": 5}, {"name": "knowledge__other", "count": 2}],
-        ["knowledge__notes"], ["knowledge__other"],
+        # nexus-hmxi: a true fully-qualified 4-segment name passes
+        # through the search corpus router untouched and ends up in
+        # the target list verbatim.
+        "knowledge__notes__voyage-context-3__v1",
+        [{"name": "knowledge__notes__voyage-context-3__v1", "count": 5},
+         {"name": "knowledge__other__voyage-context-3__v1", "count": 2}],
+        ["knowledge__notes__voyage-context-3__v1"],
+        ["knowledge__other__voyage-context-3__v1"],
         id="fully-qualified-collection",
     ),
 ])

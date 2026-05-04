@@ -98,8 +98,11 @@ def put_cmd(
         raise click.ClickException(str(exc)) from exc
     ttl_days = days if days is not None else 0
 
-    col_name = t3_collection_name(collection)
     db = _t3()
+    # nexus-hmxi: pass t3 so the resolver grandfathers an existing
+    # legacy 2-segment collection ahead of the auto-promoted
+    # conformant shape, keeping store/list/search aligned.
+    col_name = t3_collection_name(collection, t3=db)
 
     # RDR-101 Phase 3 PR δ Stage B.4: pre-register the catalog entry
     # so the T3 chunk can carry the resulting tumbler as ``doc_id``
@@ -196,8 +199,8 @@ def _catalog_store_hook(title: str, doc_id: str, collection_name: str) -> str:
               help="Show unique documents instead of individual chunks")
 def list_cmd(collection: str, limit: int, offset: int, docs: bool) -> None:
     """List entries in a T3 knowledge collection."""
-    col_name = t3_collection_name(collection)
     db = _t3()
+    col_name = t3_collection_name(collection, t3=db)
 
     if docs:
         _list_documents(db, col_name)
@@ -297,8 +300,9 @@ def get_cmd(doc_id: str, collection: str, json_out: bool) -> None:
       nx store get a1b2c3d4e5f6g7h8
       nx store get a1b2c3d4e5f6g7h8 --collection code__myrepo --json
     """
-    col_name = t3_collection_name(collection)
-    entry = _t3().get_by_id(col_name, doc_id)
+    db = _t3()
+    col_name = t3_collection_name(collection, t3=db)
+    entry = db.get_by_id(col_name, doc_id)
     if entry is None:
         raise click.ClickException(f"Entry {doc_id!r} not found in {col_name}")
 
@@ -364,8 +368,8 @@ def delete_cmd(collection: str, doc_id: str | None, title: str | None, yes: bool
     if doc_id and title:
         raise click.UsageError("--id and --title are mutually exclusive")
 
-    col_name = t3_collection_name(collection)
     db = _t3()
+    col_name = t3_collection_name(collection, t3=db)
 
     if doc_id:
         if not db.delete_by_id(col_name, doc_id):

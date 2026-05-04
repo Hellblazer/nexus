@@ -644,7 +644,12 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             click.echo(f"Filtered {skipped} PDF(s) via gitignore/.nexus.yml patterns")
 
         if collection is not None:
-            collection = t3_collection_name(collection)
+            # nexus-hmxi: pass t3 so the resolver grandfathers an existing
+            # legacy 2-segment collection ahead of the auto-promoted
+            # conformant shape, keeping bulk index targets aligned with
+            # store list / search resolution for the same user input.
+            from nexus.db import make_t3 as _make_t3
+            collection = t3_collection_name(collection, t3=_make_t3())
 
         total = len(pdfs)
         total_chunks = 0
@@ -697,8 +702,12 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
     # Normalize --collection through t3_collection_name() so bare names like
     # "knowledge" become "knowledge__knowledge", matching search conventions.
     # Without this, chunks end up in unsearchable bare collections.
+    # nexus-hmxi: pass t3 so existing legacy 2-segment collections are
+    # grandfathered ahead of the auto-promoted conformant shape, keeping
+    # nx index targets aligned with store list / search.
     if collection is not None:
-        collection = t3_collection_name(collection)
+        from nexus.db import make_t3 as _make_t3
+        collection = t3_collection_name(collection, t3=_make_t3())
 
     path = path.resolve()
 
