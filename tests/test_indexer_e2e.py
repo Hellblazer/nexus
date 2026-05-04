@@ -529,6 +529,10 @@ def test_migration_moves_prose_from_code_to_docs(
         "migration must prune the seed chunk via the doc_id-keyed "
         "_prune_misclassified path"
     )
+    # nexus-7vuw: ``_migrate_legacy_collections`` may have renamed the
+    # registry's path-derived ``docs_collection`` to the catalog-derived
+    # conformant shape; re-read the registry to follow the rename.
+    info = reg.get(rich_repo)
     assert any("README.md" in p for p in _get_sources(local_t3, info["docs_collection"]))
 
 

@@ -21,11 +21,21 @@ PRAGMA journal_mode=WAL;
 
 CREATE TABLE IF NOT EXISTS owners (
     tumbler_prefix TEXT PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
     owner_type TEXT NOT NULL,
     repo_hash TEXT,
     description TEXT,
-    repo_root TEXT DEFAULT ''
+    repo_root TEXT DEFAULT '',
+    -- nexus-7vuw: name UNIQUE was a too-strict invariant. A repo and a
+    -- curator are different namespaces, so a repo named "nexus" should
+    -- coexist with a curator named "nexus" (e.g. ``nx index pdf
+    -- --corpus nexus`` after ``nx index repo .``). Pre-fix, the second
+    -- INSERT OR REPLACE silently obliterated the first row via the
+    -- name UNIQUE conflict, leaving owner_for_repo(repo_hash) returning
+    -- None and the indexer falling through to path-derived collection
+    -- naming. Composite UNIQUE keeps name-collision detection where it
+    -- belongs (within an owner_type).
+    UNIQUE(name, owner_type)
 );
 
 CREATE TABLE IF NOT EXISTS documents (
@@ -192,6 +202,62 @@ class CatalogDB:
         except sqlite3.OperationalError:
             with self._conn:
                 self._conn.execute("ALTER TABLE owners ADD COLUMN repo_root TEXT DEFAULT ''")
+
+        # nexus-7vuw: drop the legacy single-column UNIQUE(name) index
+        # on owners (replaced with composite UNIQUE(name, owner_type) in
+        # the schema above). Pre-fix DBs carry a sqlite_autoindex_owners_*
+        # index backing the old single-column constraint; SQLite cannot
+        # ALTER a constraint in place, so the migration rebuilds the
+        # owners table from existing rows. Idempotent: skipped when the
+        # auto-index is already absent.
+        legacy_unique = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' "
+            "AND tbl_name='owners' AND name LIKE 'sqlite_autoindex_owners_%' "
+            "AND sql IS NULL"
+        ).fetchall()
+        if legacy_unique:
+            # Detect: probe the auto-index. If it indexes only ``name``,
+            # we have the pre-fix shape and need to rebuild. The
+            # composite UNIQUE(name, owner_type) declared in the schema
+            # above creates an auto-index on TWO columns, so single-column
+            # auto-indexes can only mean the legacy constraint survived
+            # from an older DB.
+            needs_rebuild = False
+            for (idx_name,) in legacy_unique:
+                cols = self._conn.execute(
+                    f"PRAGMA index_info({idx_name!r})"
+                ).fetchall()
+                if len(cols) == 1 and cols[0][2] == "name":
+                    needs_rebuild = True
+                    break
+            if needs_rebuild:
+                with self._conn:
+                    self._conn.execute(
+                        "CREATE TABLE owners_nexus7vuw_new ("
+                        "    tumbler_prefix TEXT PRIMARY KEY, "
+                        "    name TEXT NOT NULL, "
+                        "    owner_type TEXT NOT NULL, "
+                        "    repo_hash TEXT, "
+                        "    description TEXT, "
+                        "    repo_root TEXT DEFAULT '', "
+                        "    UNIQUE(name, owner_type)"
+                        ")"
+                    )
+                    # INSERT OR IGNORE so any pre-existing colliding rows
+                    # (which the legacy UNIQUE name constraint would have
+                    # already prevented) are dropped silently rather than
+                    # tripping the new composite constraint.
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO owners_nexus7vuw_new "
+                        "(tumbler_prefix, name, owner_type, repo_hash, "
+                        " description, repo_root) "
+                        "SELECT tumbler_prefix, name, owner_type, repo_hash, "
+                        "       description, repo_root FROM owners"
+                    )
+                    self._conn.execute("DROP TABLE owners")
+                    self._conn.execute(
+                        "ALTER TABLE owners_nexus7vuw_new RENAME TO owners"
+                    )
 
         # nexus-8luh: add source_mtime column to existing databases so
         # RDR-087 Phase 3.4's stale_source_ratio has something to read

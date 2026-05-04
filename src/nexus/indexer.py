@@ -319,9 +319,7 @@ def _legacy_collection_name(repo: "Path", content_type: str) -> str:
     ``(repo, content_type)``. Used by :func:`_migrate_legacy_collections`
     to detect existing legacy collections in T3 so they can be renamed
     in place to the conformant 4-segment shape on the first index after
-    the catalog upgrade. The migration helper is the only legitimate
-    consumer of the legacy shape post Phase 5; all name-minting paths
-    emit conformant.
+    the catalog upgrade.
     """
     from nexus.registry import _repo_identity, _safe_collection  # noqa: PLC0415
 
@@ -331,6 +329,59 @@ def _legacy_collection_name(repo: "Path", content_type: str) -> str:
         )
     basename, repo_hash = _repo_identity(repo)
     return _safe_collection(f"{content_type}__", basename, repo_hash)
+
+
+def _migration_source_candidates(
+    repo: "Path", content_type: str,
+) -> list[str]:
+    """Return ordered candidate "source" collection names that the
+    migration helper should consider for rename to the catalog-derived
+    target.
+
+    Two shapes can carry pre-migration data for ``(repo, content_type)``:
+
+    - The pre-RDR-103 legacy 2-segment ``<ct>__<basename>-<hash8>``
+      (older installs that indexed before Phase 1 introduced
+      ``CollectionName``).
+    - The Phase-5 path-derived 4-segment synth
+      ``<ct>__<basename>-<hash8>__<canonical_model>__v1``
+      (post-Phase-5 installs that indexed before the catalog owner
+      was registered, so ``_repo_collection_or_legacy`` fell through
+      to :func:`_conformant_name_for_repo`).
+
+    nexus-7vuw: the Phase-5 synth shape was missed by the original
+    migration helper, leaving operator data orphaned at the
+    path-derived collection while the indexer wrote fresh chunks to
+    the catalog-derived ``<ct>__<owner-tumbler>__<canonical_model>__v1``
+    target. Both shapes now flow through the same migration path.
+
+    Order matters: the 2-segment legacy is checked first so existing
+    Phase 4 migration semantics are preserved on pre-Phase-5 installs;
+    the path-derived 4-segment is the fallback for installs that have
+    already crossed the Phase-5 strict-flip and accumulated synth-shape
+    collections.
+    """
+    from nexus.corpus import canonical_embedding_model  # noqa: PLC0415
+    from nexus.registry import _repo_identity, _safe_collection  # noqa: PLC0415
+
+    if content_type not in ("code", "docs", "rdr"):
+        raise ValueError(
+            f"_migration_source_candidates: unknown content_type {content_type!r}"
+        )
+    basename, repo_hash = _repo_identity(repo)
+    sanitised = basename.replace("_", "-")
+    model = canonical_embedding_model(content_type)
+    return [
+        # Pre-RDR-103 legacy 2-segment.
+        _safe_collection(f"{content_type}__", basename, repo_hash),
+        # Phase-5 path-derived 4-segment synth (mirrors the synthesis
+        # in ``_conformant_name_for_repo``: underscores in the
+        # basename are sanitised to hyphens for owner-segment grammar).
+        _safe_collection(
+            f"{content_type}__", sanitised, repo_hash,
+            suffix=f"__{model}__v1",
+        ),
+    ]
 
 
 def _migrate_legacy_collections(
@@ -405,14 +456,34 @@ def _migrate_legacy_collections(
         return result
 
     for ct in _MIGRATION_CONTENT_TYPES:
-        legacy = _legacy_collection_name(repo, ct)
         conformant = cat_obj.collection_for(
             content_type=ct,
             owner=owner,
             embedding_model=canonical_embedding_model(ct),
         ).render()
 
-        legacy_exists = bool(t3_db.collection_exists(legacy))  # type: ignore[attr-defined]
+        # nexus-7vuw: pick the first source candidate that exists in T3.
+        # Two shapes can carry pre-migration data:
+        #   1. legacy 2-segment ``<ct>__<basename>-<hash8>`` (pre-RDR-103)
+        #   2. Phase-5 path-derived 4-segment synth.
+        # If both exist, prefer the legacy 2-segment (rename happens
+        # first; the synth becomes the case-3 partial-state collision
+        # message and is left for operator cleanup).
+        legacy = None
+        for candidate in _migration_source_candidates(repo, ct):
+            if candidate == conformant:
+                # The candidate IS the target; no migration needed
+                # because the indexer is already writing to the right
+                # place.
+                continue
+            if t3_db.collection_exists(candidate):  # type: ignore[attr-defined]
+                legacy = candidate
+                break
+        if legacy is None:
+            legacy = _legacy_collection_name(repo, ct)
+            legacy_exists = False
+        else:
+            legacy_exists = True
         conformant_exists = bool(t3_db.collection_exists(conformant))  # type: ignore[attr-defined]
 
         if legacy_exists and not conformant_exists:

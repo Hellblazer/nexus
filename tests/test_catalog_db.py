@@ -274,3 +274,122 @@ class TestClose:
         db.close()
         with pytest.raises(Exception):
             db._conn.execute("SELECT 1")
+
+
+class TestNexus7vuwOwnerNameUniqueRelaxation:
+    """nexus-7vuw: a repo and a curator with the same name must coexist.
+
+    Pre-fix the ``owners`` table had a single-column ``UNIQUE(name)``
+    that caused INSERT OR REPLACE on the second registration to
+    silently obliterate the first row (SQLite resolves UNIQUE conflicts
+    by deleting the conflicting row before inserting the new one).
+    The visible symptom: ``Catalog.owner_for_repo(repo_hash)`` returned
+    None even though events.jsonl carried the OwnerRegistered event,
+    causing the indexer to fall back to path-derived collection naming
+    while a peer code path used the catalog tumbler, splitting RDR
+    chunks across two conformant collections.
+    """
+
+    def test_repo_and_curator_with_same_name_coexist(self, tmp_path):
+        db = CatalogDB(tmp_path / ".catalog.db")
+        # Register a repo owner.
+        db._conn.execute(
+            "INSERT INTO owners "
+            "(tumbler_prefix, name, owner_type, repo_hash, description, repo_root) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("1.1", "nexus", "repo", "571b8edd", "Git repository: nexus",
+             "/Users/hal/git/nexus"),
+        )
+        # Register a curator owner with the same name.
+        db._conn.execute(
+            "INSERT INTO owners "
+            "(tumbler_prefix, name, owner_type, repo_hash, description, repo_root) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("1.2", "nexus", "curator", "", "", ""),
+        )
+        rows = db._conn.execute(
+            "SELECT tumbler_prefix, name, owner_type, repo_hash "
+            "FROM owners ORDER BY tumbler_prefix"
+        ).fetchall()
+        assert rows == [
+            ("1.1", "nexus", "repo", "571b8edd"),
+            ("1.2", "nexus", "curator", ""),
+        ]
+
+    def test_same_name_same_type_still_collides(self, tmp_path):
+        """Composite UNIQUE(name, owner_type) keeps the within-type
+        collision check that protected register_owner from creating
+        duplicate curators with the same name.
+        """
+        db = CatalogDB(tmp_path / ".catalog.db")
+        db._conn.execute(
+            "INSERT INTO owners "
+            "(tumbler_prefix, name, owner_type, repo_hash, description, repo_root) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("1.1", "papers", "curator", "", "", ""),
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            db._conn.execute(
+                "INSERT INTO owners "
+                "(tumbler_prefix, name, owner_type, repo_hash, description, repo_root) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                ("1.2", "papers", "curator", "", "", ""),
+            )
+
+    def test_legacy_unique_name_index_migrated(self, tmp_path):
+        """Pre-fix DBs (with the legacy single-column UNIQUE(name) auto-
+        index) get the table rebuilt to the new composite UNIQUE on
+        first open, preserving existing rows.
+        """
+        # Hand-craft a pre-fix DB: build the legacy schema, insert one
+        # row, then close. The migration in CatalogDB.__init__ should
+        # detect the auto-index and rebuild.
+        db_path = tmp_path / ".catalog.db"
+        legacy = sqlite3.connect(str(db_path))
+        legacy.execute(
+            "CREATE TABLE owners ("
+            "    tumbler_prefix TEXT PRIMARY KEY, "
+            "    name TEXT NOT NULL UNIQUE, "
+            "    owner_type TEXT NOT NULL, "
+            "    repo_hash TEXT, "
+            "    description TEXT, "
+            "    repo_root TEXT DEFAULT ''"
+            ")"
+        )
+        legacy.execute(
+            "INSERT INTO owners VALUES (?, ?, ?, ?, ?, ?)",
+            ("1.1", "nexus", "repo", "571b8edd", "Git repository: nexus", ""),
+        )
+        legacy.commit()
+        legacy.close()
+
+        # Open through CatalogDB; migration runs.
+        db = CatalogDB(db_path)
+        rows = db._conn.execute(
+            "SELECT tumbler_prefix, name, owner_type FROM owners"
+        ).fetchall()
+        assert rows == [("1.1", "nexus", "repo")]
+        # Verify the legacy single-column UNIQUE auto-index is gone.
+        legacy_indexes = db._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' "
+            "AND tbl_name='owners' AND name LIKE 'sqlite_autoindex_owners_%' "
+            "AND sql IS NULL"
+        ).fetchall()
+        for (idx_name,) in legacy_indexes:
+            cols = db._conn.execute(
+                f"PRAGMA index_info({idx_name!r})"
+            ).fetchall()
+            assert len(cols) > 1 or cols[0][2] != "name", (
+                f"Legacy single-column UNIQUE(name) auto-index "
+                f"{idx_name!r} survived migration: {cols}"
+            )
+        # And the post-migration repo+curator coexistence holds.
+        db._conn.execute(
+            "INSERT INTO owners "
+            "(tumbler_prefix, name, owner_type, repo_hash, description, repo_root) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("1.2", "nexus", "curator", "", "", ""),
+        )
+        assert db._conn.execute(
+            "SELECT COUNT(*) FROM owners WHERE name = 'nexus'"
+        ).fetchone()[0] == 2
