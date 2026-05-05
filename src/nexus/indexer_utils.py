@@ -12,6 +12,7 @@ from __future__ import annotations
 import fnmatch
 import re
 import subprocess
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import structlog
@@ -235,6 +236,88 @@ def is_gitignored(path: Path, repo_root: Path) -> bool:
         return False
 
 
+@dataclass
+class StalenessCache:
+    """Pre-fetched ``{lookup_key: (content_hash, embedding_model)}`` map
+    for a single ChromaDB collection.
+
+    Built once by :func:`build_staleness_cache` from a single paginated
+    sweep of the collection's chunk metadata; consumed many times by
+    :func:`check_staleness` so per-file checks become O(1) dict lookups
+    instead of O(N) ChromaDB roundtrips.
+
+    Two indexes:
+
+    - ``by_doc_id`` keys on the catalog tumbler stored in chunk
+      metadata. Populated only for chunks whose stored ``doc_id`` field
+      is non-empty. The post-RDR-101-Phase-4 write path stamps
+      ``doc_id`` on every new chunk; legacy chunks predating the
+      backfill are absent from this index, which the cached
+      ``check_staleness`` correctly treats as a cache miss → "stale" →
+      re-index → ghost-chunk healed.
+    - ``by_source_path`` keys on the chunk's ``source_path`` metadata.
+      Populated for every chunk that carries a non-empty source_path
+      (most of them; RDR-102 D2 dropped source_path from the canonical
+      schema, so post-D2 chunks won't appear here — they live only in
+      ``by_doc_id``). Used only when the caller has no doc_id (legacy /
+      catalog absent code path).
+
+    Why the cache exists: ``nx index repo`` on a healthy repo where
+    nothing has changed is dominated by per-file
+    ``col.get(where={doc_id})`` roundtrips just to confirm "yes,
+    current, skip." On ART (~4,800 files) that's ~4,800 sequential
+    ChromaDB Cloud calls at 50-200 ms each — 8-30 minutes of pure
+    network latency before any actual indexing work. With the cache,
+    the entire staleness phase is a single paginated sweep
+    (~ceil(total_chunks / 300) calls) plus per-file dict lookups.
+    """
+
+    by_doc_id: dict[str, tuple[str, str]] = field(default_factory=dict)
+    by_source_path: dict[str, tuple[str, str]] = field(default_factory=dict)
+
+
+def build_staleness_cache(col: object) -> StalenessCache:
+    """Walk *col* once and index its chunks for fast staleness lookup.
+
+    Pulls every chunk's ``include=["metadatas"]`` via the standard
+    paginated helper. Calls per pull are ChromaDB Cloud's 300-record
+    cap, so the total round-trip count is ``ceil(N / 300)`` where N is
+    the collection's chunk count — independent of the number of files
+    being indexed.
+
+    Errors are tolerated: a build failure returns an empty cache and
+    callers fall through to the per-file Chroma path. Failing to
+    populate the cache must never block indexing; it just costs latency.
+    """
+    cache = StalenessCache()
+    try:
+        # Local import to avoid a circular dependency at module-load
+        # time. ``_paginated_get`` lives in nexus.indexer (the
+        # orchestrator), which itself imports from this module.
+        from nexus.indexer import _paginated_get
+
+        all_chunks = _paginated_get(col, include=["metadatas"])
+    except Exception:
+        return cache
+
+    metadatas = all_chunks.get("metadatas") or []
+    for meta in metadatas:
+        if not meta:
+            continue
+        content_hash = meta.get("content_hash", "")
+        model = meta.get("embedding_model", "")
+        if not (content_hash and model):
+            continue
+        value = (content_hash, model)
+        doc_id = meta.get("doc_id", "")
+        if doc_id:
+            cache.by_doc_id[doc_id] = value
+        source_path = meta.get("source_path", "")
+        if source_path:
+            cache.by_source_path[source_path] = value
+    return cache
+
+
 def check_staleness(
     col: object,
     source_file: object,
@@ -242,14 +325,28 @@ def check_staleness(
     embedding_model: str,
     *,
     doc_id: str = "",
+    cache: StalenessCache | None = None,
 ) -> bool:
     """Return True if the file is already indexed with an identical hash and model.
 
-    Performs a ChromaDB get() wrapped in _chroma_with_retry.  The retry logic
-    is part of the staleness check's contract — callers must NOT wrap this call.
+    Two execution modes:
+
+    - **Cached (preferred when the orchestrator passes a cache).**
+      Looks up ``doc_id`` in :attr:`StalenessCache.by_doc_id` (or
+      ``source_file`` in :attr:`StalenessCache.by_source_path` for
+      legacy / no-catalog callers). Pure dict lookup, no ChromaDB
+      roundtrip. The orchestrator builds the cache once per collection
+      via :func:`build_staleness_cache` before the per-file loop, so
+      ``nx index repo`` on a healthy repo (most files current) pays
+      one paginated sweep instead of one Chroma query per file.
+    - **Per-file (back-compat).** When *cache* is ``None``, performs a
+      ChromaDB ``get()`` wrapped in ``_chroma_with_retry``. The retry
+      logic is part of the staleness check's contract — callers must
+      NOT wrap this call. Direct test callers and any caller that has
+      not migrated to the cache stay on this path.
 
     Args:
-        col: ChromaDB collection object.
+        col: ChromaDB collection object. Unused when *cache* is supplied.
         source_file: Path (or string) of the source file being checked.
         content_hash: SHA-256 hex digest of the current file content.
         embedding_model: Target embedding model name.
@@ -259,11 +356,31 @@ def check_staleness(
             owner-scope changes. Empty falls back to the legacy
             ``source_path``-keyed lookup for chunks predating the
             doc_id backfill.
+        cache: Optional :class:`StalenessCache`. When supplied the
+            check is a dict lookup; when ``None`` the check is a Chroma
+            roundtrip.
 
     Returns:
         True when the stored chunk has the same content_hash AND embedding_model,
         meaning the file is current and can be skipped.  False otherwise.
     """
+    if cache is not None:
+        if doc_id:
+            stored = cache.by_doc_id.get(doc_id)
+            # Cache miss when the caller has a doc_id heals a ghost
+            # chunk by treating the file as stale: re-index will write
+            # a chunk carrying doc_id metadata and the next sweep
+            # populates by_doc_id for it. Mirrors the Chroma-path
+            # behaviour at indexer_utils.check_staleness:291.
+            if stored is None:
+                return False
+            return stored == (content_hash, embedding_model)
+        # Legacy / no-doc_id caller: fall back to source_path lookup.
+        stored = cache.by_source_path.get(str(source_file))
+        if stored is None:
+            return False
+        return stored == (content_hash, embedding_model)
+
     where: dict = {"doc_id": doc_id} if doc_id else {"source_path": str(source_file)}
     existing = _chroma_with_retry(
         col.get,  # type: ignore[attr-defined]

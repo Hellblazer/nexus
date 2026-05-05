@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from nexus.config import TuningConfig
+    from nexus.indexer_utils import StalenessCache
 
 
 @dataclass
@@ -77,6 +78,13 @@ class IndexContext:
     # builds a fresh instance per file and appends to the caller-side
     # collector so end-of-run aggregation is deterministic.
     stage_timers: "StageTimers | None" = field(default=None)
+
+    # Pre-computed staleness map for *col*. When supplied, the per-file
+    # ``check_staleness`` becomes a dict lookup instead of a ChromaDB
+    # roundtrip — turning a no-op ``nx index repo`` (everything already
+    # current) from O(N) round-trips into a single paginated sweep.
+    # ``None`` is the legacy / fall-through path.
+    staleness_cache: "StalenessCache | None" = field(default=None)
 
 
 if TYPE_CHECKING:

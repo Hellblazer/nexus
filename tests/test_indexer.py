@@ -946,6 +946,11 @@ def test_prune_misclassified_uses_doc_id_when_supplied(tmp_path):
     catalog hook's ``file_to_doc_id`` map is supplied. WITH TEETH:
     a stash-revert to the source_path-keyed form makes the assertion
     on the ``where`` filter fail.
+
+    Updated for the batched ``$in`` form (~300x roundtrip reduction
+    on large repos): the where clause is now
+    ``{"doc_id": {"$in": [<id>, ...]}}``. The intent — that doc_id is
+    the lookup column, not source_path — is preserved.
     """
     from nexus.indexer import _prune_misclassified
     repo = tmp_path / "repo"
@@ -964,7 +969,7 @@ def test_prune_misclassified_uses_doc_id_when_supplied(tmp_path):
         file_to_doc_id={bp: "ART-deadbeef"},
     )
     where = cc.get.call_args.kwargs["where"]
-    assert where == {"doc_id": "ART-deadbeef"}
+    assert where == {"doc_id": {"$in": ["ART-deadbeef"]}}
     cc.delete.assert_called_once_with(ids=["chunk-abc"])
 
 
