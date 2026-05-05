@@ -5,7 +5,12 @@ from unittest.mock import patch
 
 import pytest
 
+from unittest.mock import MagicMock, patch
+
 from nexus.indexer_utils import (
+    StalenessCache,
+    build_staleness_cache,
+    check_staleness,
     find_repo_root,
     is_gitignored,
     load_ignore_patterns,
@@ -216,3 +221,212 @@ def test_indexer_default_ignore_matches() -> None:
     from nexus.indexer import DEFAULT_IGNORE
     from nexus.indexer_utils import _DEFAULT_IGNORE
     assert DEFAULT_IGNORE is _DEFAULT_IGNORE
+
+
+# ── StalenessCache + cached check_staleness ──────────────────────────────────
+
+
+class TestStalenessCache:
+    """Pre-built staleness cache replaces N per-file Chroma roundtrips
+    with one paginated sweep. Caller-side ``check_staleness(cache=…)``
+    becomes a dict lookup.
+    """
+
+    def test_build_indexes_doc_id_and_source_path(self) -> None:
+        """One sweep of the collection populates both the doc_id-keyed
+        and source_path-keyed indexes from chunk metadata."""
+        col = MagicMock()
+        # Two chunks per file is realistic; both chunks share the same
+        # content_hash + embedding_model so they collapse to a single
+        # cache entry per (doc_id, source_path) pair.
+        col.get.return_value = {
+            "ids": ["c1", "c2", "c3"],
+            "metadatas": [
+                {
+                    "doc_id": "1.1.1",
+                    "source_path": "src/a.py",
+                    "content_hash": "hash-a",
+                    "embedding_model": "voyage-code-3",
+                },
+                {
+                    "doc_id": "1.1.1",
+                    "source_path": "src/a.py",
+                    "content_hash": "hash-a",
+                    "embedding_model": "voyage-code-3",
+                },
+                # Legacy chunk: source_path only, no doc_id
+                {
+                    "doc_id": "",
+                    "source_path": "legacy/old.py",
+                    "content_hash": "hash-l",
+                    "embedding_model": "voyage-code-3",
+                },
+            ],
+        }
+
+        cache = build_staleness_cache(col)
+
+        assert cache.by_doc_id == {"1.1.1": ("hash-a", "voyage-code-3")}
+        assert cache.by_source_path == {
+            "src/a.py": ("hash-a", "voyage-code-3"),
+            "legacy/old.py": ("hash-l", "voyage-code-3"),
+        }
+
+    def test_build_skips_chunks_missing_required_fields(self) -> None:
+        """Chunks without content_hash or embedding_model (corrupted
+        metadata, partial backfill) are skipped — the cache only holds
+        rows with both load-bearing fields, so a hit always implies a
+        real comparison can succeed."""
+        col = MagicMock()
+        col.get.return_value = {
+            "ids": ["good", "no-hash", "no-model"],
+            "metadatas": [
+                {
+                    "doc_id": "1.1.1",
+                    "content_hash": "hash-a",
+                    "embedding_model": "voyage-code-3",
+                },
+                {"doc_id": "1.1.2", "content_hash": "", "embedding_model": "x"},
+                {"doc_id": "1.1.3", "content_hash": "h", "embedding_model": ""},
+            ],
+        }
+
+        cache = build_staleness_cache(col)
+        assert cache.by_doc_id == {"1.1.1": ("hash-a", "voyage-code-3")}
+
+    def test_build_returns_empty_on_chroma_error(self) -> None:
+        """A failure inside the paginated sweep yields an empty cache
+        rather than raising — callers fall through to the per-file
+        Chroma path. Failing to populate the cache must never block
+        indexing."""
+        col = MagicMock()
+        col.get.side_effect = RuntimeError("network glitch")
+
+        cache = build_staleness_cache(col)
+
+        assert cache.by_doc_id == {}
+        assert cache.by_source_path == {}
+
+    def test_check_staleness_with_cache_hit_returns_true(self) -> None:
+        """Cache hit + matching hash + matching model = stale (skip)."""
+        cache = StalenessCache(
+            by_doc_id={"1.1.1": ("hash-a", "voyage-code-3")},
+        )
+        result = check_staleness(
+            col=MagicMock(),
+            source_file="src/a.py",
+            content_hash="hash-a",
+            embedding_model="voyage-code-3",
+            doc_id="1.1.1",
+            cache=cache,
+        )
+        assert result is True
+
+    def test_check_staleness_with_cache_hit_wrong_hash_returns_false(self) -> None:
+        """Cache hit but content has changed = NOT stale (re-index)."""
+        cache = StalenessCache(
+            by_doc_id={"1.1.1": ("hash-OLD", "voyage-code-3")},
+        )
+        result = check_staleness(
+            col=MagicMock(),
+            source_file="src/a.py",
+            content_hash="hash-NEW",
+            embedding_model="voyage-code-3",
+            doc_id="1.1.1",
+            cache=cache,
+        )
+        assert result is False
+
+    def test_check_staleness_with_cache_miss_returns_false(self) -> None:
+        """No cache entry = NOT stale (re-index, possibly heals a ghost
+        chunk by writing new metadata that includes doc_id)."""
+        cache = StalenessCache()  # empty
+        result = check_staleness(
+            col=MagicMock(),
+            source_file="src/a.py",
+            content_hash="hash-a",
+            embedding_model="voyage-code-3",
+            doc_id="1.1.1",
+            cache=cache,
+        )
+        assert result is False
+
+    def test_check_staleness_cache_does_not_call_chroma(self) -> None:
+        """The whole point of the cache is to avoid the per-file Chroma
+        roundtrip. A cache argument must short-circuit the network
+        call entirely. Pin it explicitly so a future refactor that
+        accidentally falls through to ``col.get`` is caught.
+        """
+        col = MagicMock()
+        cache = StalenessCache(
+            by_doc_id={"1.1.1": ("hash-a", "voyage-code-3")},
+        )
+
+        # Hit
+        check_staleness(
+            col=col, source_file="src/a.py",
+            content_hash="hash-a", embedding_model="voyage-code-3",
+            doc_id="1.1.1", cache=cache,
+        )
+        # Miss
+        check_staleness(
+            col=col, source_file="src/b.py",
+            content_hash="hash-b", embedding_model="voyage-code-3",
+            doc_id="1.1.99", cache=cache,
+        )
+
+        assert col.get.call_count == 0, (
+            f"cache path leaked to col.get: {col.get.call_args_list}"
+        )
+
+    def test_check_staleness_falls_back_to_chroma_when_no_cache(self) -> None:
+        """``cache=None`` (the default) preserves the legacy per-file
+        Chroma roundtrip. Critical for back-compat: any direct caller
+        that has not migrated to the cache stays on the original
+        path with the same retry/quota semantics.
+        """
+        col = MagicMock()
+        col.get.return_value = {
+            "metadatas": [
+                {
+                    "doc_id": "1.1.1",
+                    "content_hash": "hash-a",
+                    "embedding_model": "voyage-code-3",
+                },
+            ],
+        }
+
+        with patch(
+            "nexus.indexer_utils._chroma_with_retry",
+            side_effect=lambda fn, **kw: fn(**kw),
+        ):
+            result = check_staleness(
+                col=col, source_file="src/a.py",
+                content_hash="hash-a", embedding_model="voyage-code-3",
+                doc_id="1.1.1",
+                # no cache=
+            )
+
+        assert result is True
+        assert col.get.call_count == 1
+
+    def test_check_staleness_legacy_path_uses_source_path(self) -> None:
+        """Caller with ``doc_id=''`` (legacy / no catalog) uses the
+        source_path index."""
+        cache = StalenessCache(
+            by_source_path={"legacy/old.py": ("hash-l", "voyage-code-3")},
+        )
+
+        # Hit on source_path
+        assert check_staleness(
+            col=MagicMock(), source_file="legacy/old.py",
+            content_hash="hash-l", embedding_model="voyage-code-3",
+            doc_id="", cache=cache,
+        ) is True
+
+        # Miss on source_path
+        assert check_staleness(
+            col=MagicMock(), source_file="legacy/missing.py",
+            content_hash="hash-x", embedding_model="voyage-code-3",
+            doc_id="", cache=cache,
+        ) is False

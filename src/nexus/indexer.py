@@ -31,6 +31,7 @@ from nexus.corpus import index_model_for_collection
 from nexus.retry import _chroma_with_retry, _voyage_with_retry  # noqa: F401 — re-exported for any existing imports
 from nexus.errors import CredentialsMissingError  # re-exported for backward compatibility
 from nexus.indexer_utils import (
+    build_staleness_cache,
     check_credentials,
     check_local_path_writable,
     check_staleness,
@@ -52,6 +53,7 @@ _log = structlog.get_logger(__name__)
 if TYPE_CHECKING:
     from nexus.catalog.catalog import Catalog
     from nexus.catalog.tumbler import Tumbler
+    from nexus.indexer_utils import StalenessCache
     from nexus.registry import RepoRegistry
     from nexus.stage_timers import StageTimers
 
@@ -1053,6 +1055,7 @@ def _index_code_file(
     embed_fn: Callable | None = None,
     stage_timers: "StageTimers | None" = None,
     doc_id_resolver: Callable[[Path], str] | None = None,
+    staleness_cache: "StalenessCache | None" = None,
 ) -> int:
     """Index a single code file.  Delegates to nexus.code_indexer.index_code_file.
 
@@ -1067,6 +1070,10 @@ def _index_code_file(
     catalog ``Document.doc_id`` for *file* so code chunks land in T3
     with a back-reference to the catalog. ``None`` is the legacy /
     no-catalog path.
+
+    ``staleness_cache`` is the orchestrator-built collection-wide
+    staleness map. When supplied, the per-file ``check_staleness`` is
+    a dict lookup instead of a Chroma roundtrip.
     """
     from nexus.code_indexer import index_code_file
     from nexus.index_context import IndexContext
@@ -1087,6 +1094,7 @@ def _index_code_file(
         embed_fn=embed_fn,
         stage_timers=stage_timers,
         doc_id_resolver=doc_id_resolver,
+        staleness_cache=staleness_cache,
     )
     return index_code_file(ctx, file)
 
@@ -1108,6 +1116,7 @@ def _index_prose_file(
     embed_fn: Callable | None = None,
     stage_timers: "StageTimers | None" = None,
     doc_id_resolver: Callable[[Path], str] | None = None,
+    staleness_cache: "StalenessCache | None" = None,
 ) -> int:
     """Index a single prose file.  Delegates to nexus.prose_indexer.index_prose_file.
 
@@ -1142,6 +1151,7 @@ def _index_prose_file(
         embed_fn=embed_fn,
         stage_timers=stage_timers,
         doc_id_resolver=doc_id_resolver,
+        staleness_cache=staleness_cache,
     )
     return index_prose_file(ctx, file)
 
@@ -1423,6 +1433,75 @@ def _batched_delete(col: object, ids: list[str]) -> int:
     return deleted
 
 
+def _prune_misclassified_in_collection(
+    col: object,
+    target_paths: set[Path],
+    file_to_doc_id: dict[Path, str],
+    *,
+    kind: str,
+) -> int:
+    """Find and delete chunks in *col* whose ``doc_id`` matches any
+    file in *target_paths*. Returns the number of chunks pruned.
+
+    Batched over ``where={"doc_id": {"$in": [batch]}}``. ChromaDB
+    accepts list-valued ``$in`` against a metadata column with a
+    single round-trip; ``_paginated_get`` then walks the full match
+    set in 300-chunk pages. Net result: ~ceil(N / _CHROMA_PAGE_SIZE)
+    queries instead of N — for ART (~4,800 files) that's ~17 calls
+    per collection-direction instead of ~4,800.
+
+    Files not present in *file_to_doc_id* (legacy / pre-RDR-102 D2
+    rows) fall back to per-path ``source_path`` lookup so collections
+    that pre-date the catalog backfill keep getting cleaned up. The
+    legacy set is typically small post-backfill.
+    """
+    doc_ids: list[str] = []
+    legacy_paths: list[str] = []
+    for path in target_paths:
+        d = file_to_doc_id.get(path, "")
+        if d:
+            doc_ids.append(d)
+        else:
+            legacy_paths.append(str(path))
+
+    pruned = 0
+
+    # Batched doc_id sweep — the load-bearing optimization. _CHROMA_PAGE_SIZE
+    # caps the ``$in`` list per query (matches the doc-id pagination cap
+    # and stays well within ChromaDB Cloud's where-predicate budget).
+    for i in range(0, len(doc_ids), _CHROMA_PAGE_SIZE):
+        batch = doc_ids[i : i + _CHROMA_PAGE_SIZE]
+        if not batch:
+            continue
+        existing = _paginated_get(
+            col, include=[], where={"doc_id": {"$in": batch}},
+        )
+        if existing["ids"]:
+            _batched_delete(col, existing["ids"])
+            pruned += len(existing["ids"])
+            _log.debug(
+                f"pruned misclassified chunks from {kind} collection",
+                count=len(existing["ids"]),
+                doc_id_batch_size=len(batch),
+            )
+
+    # Legacy fallback — one query per unmapped path. Cardinality is
+    # bounded by the number of files indexed before catalog backfill,
+    # which on a repo that has been on a recent nexus is typically zero.
+    for src in legacy_paths:
+        existing = _paginated_get(col, include=[], where={"source_path": src})
+        if existing["ids"]:
+            _batched_delete(col, existing["ids"])
+            pruned += len(existing["ids"])
+            _log.debug(
+                f"pruned misclassified chunks from {kind} collection (legacy)",
+                count=len(existing["ids"]),
+                source_path=src,
+            )
+
+    return pruned
+
+
 def _prune_misclassified(
     repo: Path,
     code_collection: str,
@@ -1443,37 +1522,49 @@ def _prune_misclassified(
     the catalog hook), the chunk-prune lookup keys on ``doc_id``. Files
     not in the map fall back to the legacy ``source_path`` lookup so
     chunks indexed before catalog backfill keep getting cleaned up.
+
+    Pre-batching history: this function used to do one
+    ``col.get(where={"doc_id": <id>})`` per file. For ART (~4,800 files)
+    that meant ~9,600 sequential ChromaDB Cloud roundtrips at
+    50-200 ms each — 8 to 30 minutes of pure round-trip cost where the
+    actual work (chunks to delete) was almost always zero. The batched
+    ``where={"doc_id": {"$in": [batch]}}`` form collapses that to
+    ~ceil(N / _CHROMA_PAGE_SIZE) queries per direction (~34 total for
+    ART) — about a 300x reduction in roundtrips.
     """
+    from tqdm import tqdm
+
     code_col = db.get_or_create_collection(code_collection)
     docs_col = db.get_or_create_collection(docs_collection)
     file_to_doc_id = file_to_doc_id or {}
 
-    def _prune_one(col: object, path: Path, kind: str) -> None:
-        doc_id = file_to_doc_id.get(path, "")
-        where: dict
-        log_field: dict
-        if doc_id:
-            where = {"doc_id": doc_id}
-            log_field = {"doc_id": doc_id, "source_path": str(path)}
-        else:
-            where = {"source_path": str(path)}
-            log_field = {"source_path": str(path)}
-        existing = _paginated_get(col, include=[], where=where)
-        if existing["ids"]:
-            _batched_delete(col, existing["ids"])
-            _log.debug(
-                f"pruned misclassified chunks from {kind} collection",
-                count=len(existing["ids"]),
-                **log_field,
-            )
+    # Prose + PDF files should NOT have chunks in the code__ collection.
+    # Code files should NOT have chunks in the docs__ collection. Each
+    # sweep runs as one batched operation against the relevant collection.
+    code_targets = set(prose_files) | set(pdf_files)
+    docs_targets = set(code_files)
+    pruned_chunks = 0
 
-    # Prose + PDF files should NOT have chunks in the code__ collection
-    for path in set(prose_files) | set(pdf_files):
-        _prune_one(code_col, path, "code")
+    bar = tqdm(
+        total=2,
+        disable=None,  # auto-disable on non-tty
+        desc="Pruning misclassified",
+        unit="sweep",
+    )
+    try:
+        pruned_chunks += _prune_misclassified_in_collection(
+            code_col, code_targets, file_to_doc_id, kind="code",
+        )
+        bar.set_postfix_str(f"chunks={pruned_chunks}", refresh=False)
+        bar.update(1)
 
-    # Code files should NOT have chunks in the docs__ collection
-    for path in set(code_files):
-        _prune_one(docs_col, path, "docs")
+        pruned_chunks += _prune_misclassified_in_collection(
+            docs_col, docs_targets, file_to_doc_id, kind="docs",
+        )
+        bar.set_postfix_str(f"chunks={pruned_chunks}", refresh=False)
+        bar.update(1)
+    finally:
+        bar.close()
 
 
 def _prune_deleted_files(
@@ -1844,6 +1935,36 @@ def _run_index(
     def _doc_id_resolver(path: Path) -> str:
         return file_to_doc_id.get(path, "")
 
+    # Pre-build the per-collection staleness cache (nexus-rr0u follow-up).
+    # One paginated sweep per collection up front replaces N per-file
+    # ``col.get(where={doc_id})`` round-trips inside the indexing loop.
+    # The orchestrator builds the caches AFTER catalog registration so a
+    # fresh ``doc_id`` for a just-registered file is already present in
+    # the metadata sweep below — no race against the registration write.
+    # On a healthy repo (most files current) this turns ``nx index repo``
+    # from O(N) Chroma round-trips into O(total_chunks / 300) — minutes
+    # become seconds.
+    if on_phase is not None:
+        on_phase("Building staleness caches…")
+    _staleness_t0 = time.monotonic()
+    code_staleness = build_staleness_cache(code_col)
+    docs_staleness = build_staleness_cache(docs_col)
+    _log.info(
+        "staleness_caches_built",
+        code_doc_ids=len(code_staleness.by_doc_id),
+        code_source_paths=len(code_staleness.by_source_path),
+        docs_doc_ids=len(docs_staleness.by_doc_id),
+        docs_source_paths=len(docs_staleness.by_source_path),
+        elapsed_seconds=time.monotonic() - _staleness_t0,
+    )
+    if on_phase is not None:
+        on_phase(
+            f"Staleness caches built — "
+            f"code: {len(code_staleness.by_doc_id):,} docs, "
+            f"docs: {len(docs_staleness.by_doc_id):,} docs "
+            f"({time.monotonic() - _staleness_t0:.1f}s)"
+        )
+
     # Index code files → code__ (voyage-code-3, AST chunking)
     # NOTE: calls _index_code_file (the module-level wrapper) so that tests
     # patching nexus.indexer._index_code_file continue to intercept correctly.
@@ -1866,6 +1987,7 @@ def _run_index(
             embed_fn=_embed_fn,
             stage_timers=timers,
             doc_id_resolver=_doc_id_resolver,
+            staleness_cache=code_staleness,
         )
         if on_file:
             on_file(file, chunks, time.monotonic() - t0)
@@ -1891,6 +2013,7 @@ def _run_index(
             embed_fn=_embed_fn,
             stage_timers=timers,
             doc_id_resolver=_doc_id_resolver,
+            staleness_cache=docs_staleness,
         )
         if on_file:
             on_file(file, chunks, time.monotonic() - t0)

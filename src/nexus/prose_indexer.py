@@ -56,6 +56,7 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
     if not ctx.force and check_staleness(
         ctx.col, file_path, content_hash, ctx.embedding_model,
         doc_id=catalog_doc_id_for_staleness,
+        cache=ctx.staleness_cache,
     ):
         return 0
 
