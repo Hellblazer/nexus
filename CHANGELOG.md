@@ -6,6 +6,39 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.24.0] - 2026-05-05
+
+Minor release. Promotes math-aware PDF extraction from optional to default, replaces silent formula loss with a loud failure, and cuts CI runtime by ~50% per push.
+
+### Changed
+
+- **`mineru[all]` is now a default dependency** (nexus-2fyb). Was previously an optional extra. Adds ~500 MB of Python deps (PyTorch CPU, transformers, OCR libs) to the wheel; first PDF extraction downloads ~2-3 GB of models. The trade-off: math-paper indexing is now correct by default. Users who do not want it can still pass `--extractor docling` to opt out per-PDF.
+- **`PDFExtractor.extract(extractor="auto")` on a formula-bearing PDF now raises `RuntimeError` instead of silently returning Docling output** (nexus-2fyb). Pre-fix, every install without the `mineru` extra silently received formula-stripped Docling output stamped with `formula_count=0`. The error message includes the formula count, the reinstall command, and the explicit opt-out flag. `extractor="docling"` and `extractor="mineru"` paths are unchanged.
+
+### Added
+
+- **`nx doctor --check-mineru`** surfaces install + server state for the math extractor before users hit it via `nx index pdf`. Reports import status, `do_parse` reachability, and the configured `mineru-api` server endpoint when present.
+- **Test fixtures `tests/fixtures/distributed-bloom-filter.pdf`, `bft-to-smr.pdf`, `tc-sql.pdf` are now committed.** The first is the canonical witness for the formula-preservation regression guard; the other two are referenced by the release-sandbox shakedown step 3a/3b. Whitelist additions to `.gitignore` keep developer-local PDFs ignored.
+- **Release-sandbox shakedown step 3b probes the MinerU path** with `bft-to-smr.pdf`. Previously the shakedown only ran Docling against `tc-sql.pdf`, so a MinerU regression would not surface until production indexing.
+
+### Fixed
+
+- **DEVONthink batch indexing no longer aborts on a single failed PDF** (`commands/dt.py`, code-review R4-I2). Catches `RuntimeError` / `ImportError` per record so one math PDF that hits the new fail-loud path does not kill the rest of the smart-group run. Failures are listed at the end of the batch summary.
+- **`pipeline_stages.extractor_loop` signals `extraction_done` in `finally`** (code-review C-int-1). Prevents `chunker_loop` from blocking on `extraction_done.wait(timeout=0.5)` when extraction raises.
+- **Pipeline failure clears orphan WAL rows** (`pipeline_buffer.clear_orphan_wal`, code-review C-int-2). Prevents the `failed → resuming → re-fail` loop on deterministic failures (math PDF without MinerU). The pipeline row stays `failed` for audit; the orphan `pdf_pages` / `pdf_chunks` rows are dropped so the next run extracts from scratch.
+- **Formula counter restructured** (`pdf_extractor._count_formula_markers`, code-review C1). Pre-fix the regex alternation undercounted: each `$$..$$` block consumed whole, and `\frac` instances inside were never separately counted. Now block-style and command-token patterns are counted independently. The fixture-regression guard `_EXPECTED_REGEX_MARKERS` was relocked from 4 to 16 (4 blocks + 12 `\frac` commands) to reflect the corrected count.
+- **URL credentials redacted from error messages** (code-review R5-I2). If a user configures `pdf.mineru_server_url` with embedded `user:pass@host`, those credentials no longer leak into chained exception messages or structured logs.
+- **`scripts/reinstall-tool.sh` passes the receipt path via env var** rather than shell-interpolating it into a `python -c` heredoc (code-review R5-I1). Removes a Python-injection vector if the receipt path ever contained a quote.
+- **`nx index pdf` surfaces extraction `RuntimeError` as `ClickException`** (`commands/index.py`, code-review R4-I1). Users see an actionable message instead of a raw Python traceback.
+- **`pdf_extractor._progress` routed through structlog** (code-review R1-I3). The interactive stderr write is preserved (gated by `NEXUS_PDF_PROGRESS_QUIET=1`) but the event also goes to the structured-logging chain, so library and MCP-server callers no longer lose progress in their log capture.
+
+### CI
+
+- **`tests/test_indexer_e2e.py` and `tests/test_taxonomy_e2e.py` now carry module-level `@pytest.mark.integration`.** Both files are textbook integration suites (real ChromaDB, real local embeddings, real CLI subprocesses); they were running on every PR push despite `pyproject.toml addopts` already deselecting `integration`.
+- **Three pagination-boundary tests marked `@pytest.mark.slow`**: `test_t3.py::test_existing_ids_pagination_respects_300_cap`, `test_exporter.py::TestPagination::test_export_pagination`, `test_exporter.py::TestPagination::test_import_pagination`. Each seeds >300 records to cross `QUOTAS._PAGE`; the boundary they guard does not drift between releases.
+- **Result: CI pytest 14m42s → ~8m, total job 17m → ~9m.** Coverage preserved by `tests/e2e/release-sandbox.sh shakedown` running every release tag.
+- **Six type-system theatre tests deleted** (PR #511). They asserted `isinstance(_, frozenset/set/list/T2Database/T3Database)` against values whose type annotation already enforced exactly that. A test that would still pass if the production type became the ground truth is theatre by definition.
+
 ## [4.23.3] - 2026-05-05
 
 Patch release. Fixes a misplaced stamp gate that wasted operator embedding budget.

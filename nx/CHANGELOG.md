@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.24.0] - 2026-05-05
+
+Plugin version aligned with conexus 4.24.0. No plugin-specific changes; the underlying conexus library promotes `mineru[all]` from optional to default, replaces silent formula loss with a loud failure, adds `nx doctor --check-mineru`, and cuts CI pytest runtime ~50% per push by marking integration suites and pagination-boundary tests with their existing markers. See root `CHANGELOG.md` for the full release notes.
+
 ## [4.23.3] - 2026-05-05
 
 Plugin version aligned with conexus 4.23.3. No plugin-specific changes; the underlying conexus library fixes a misplaced `pipeline_version` stamp gate that was wasting operator embedding budget (`nexus-7yfm`). See root `CHANGELOG.md` for the fix description.
