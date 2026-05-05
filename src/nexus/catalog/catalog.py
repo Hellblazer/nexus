@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import sqlite3
@@ -168,6 +169,41 @@ _SHADOW_EMIT_ENV = "NEXUS_EVENT_LOG_SHADOW"
 # ``NEXUS_EVENT_SOURCED=0`` (or ``false``/``no``/``off``) to opt back
 # into the legacy direct-write path at runtime.
 _EVENT_SOURCED_ENV = "NEXUS_EVENT_SOURCED"
+
+# RDR-104 Step 2: incremental-rebuild marker constants.
+#
+# ``_HEADER_HASH_BYTES`` is the prefix size hashed to detect
+# events.jsonl rewrites (truncate, atomic-replace, ``git reset``). Any
+# rewrite that touches the first 64 KB makes the hash drift, which the
+# orchestrator treats as cache invalidation and falls through to full
+# rebuild. The window value is persisted alongside the hash so a future
+# bump of this constant invalidates prior markers cleanly via the
+# ``last_applied_event_header_window`` row rather than silently
+# comparing hashes computed over different windows (Round 1 gate
+# observation #3).
+_HEADER_HASH_BYTES = 64 * 1024
+_META_KEY_LAST_OFFSET = "last_applied_event_offset"
+_META_KEY_HEADER_HASH = "last_applied_event_header_hash"
+_META_KEY_HEADER_WINDOW = "last_applied_event_header_window"
+
+
+def _compute_header_hash(events_path: Path) -> str:
+    """Return ``sha256(open(events_path, 'rb').read(_HEADER_HASH_BYTES)).hexdigest()``.
+
+    RDR-104 Step 2: detection signal for events.jsonl rewrites. Reading
+    only the first window avoids a full file scan on every rebuild
+    decision; an appender leaves the prefix unchanged so the hash
+    matches and the marker stays valid; a truncate/replace/reset
+    typically touches early bytes so the hash drifts and the
+    orchestrator falls through to full rebuild.
+
+    The pathological adversarial case (rewrite preserving first 64 KB)
+    is bounded by the v0 projector verbs' idempotency: redundant
+    re-application yields the same projection, no semantic drift,
+    documented as known-cost-not-known-corruption.
+    """
+    with events_path.open("rb") as f:
+        return hashlib.sha256(f.read(_HEADER_HASH_BYTES)).hexdigest()
 
 
 def _read_shadow_gate() -> bool:
@@ -782,7 +818,97 @@ class Catalog:
                 ("last_consistency_mtime", f"{mtime}"),
             )
         except sqlite3.OperationalError:
+            # RDR-104 Round 2 Significant #1: the OperationalError
+            # swallow is intentional. Marker-write failure is rare
+            # (transient SQLite lock contention is the most likely
+            # cause), idempotent re-replay corrects the next run, and
+            # propagating would degrade the catalog (``degraded=True``)
+            # for a recoverable cause. The in-memory mirror
+            # ``self._last_consistency_mtime`` is assigned post-
+            # ``with`` so this instance still short-circuits its own
+            # subsequent rebuilds; the next process reads the un-
+            # advanced DB row and re-rebuilds, which is correct.
             pass
+
+    def _write_offset_marker(
+        self, *, offset: int, header_hash: str, window: int,
+    ) -> None:
+        """Persist the three RDR-104 incremental marker rows atomically.
+
+        RDR-104 Step 2: writes ``last_applied_event_offset``,
+        ``last_applied_event_header_hash``, and
+        ``last_applied_event_header_window`` to ``_meta``. All three
+        rows must commit together with the projector writes (and the
+        ``last_consistency_mtime`` row from
+        ``_write_consistency_marker``) so the marker is consistent
+        with the projection state.
+
+        Caller contract: this method is invoked from inside an active
+        ``CatalogDB.transaction()`` block. The connection-as-context-
+        manager commits all four marker rows atomically with the
+        projection writes on successful exit; rolls them all back
+        together on any exception. Do NOT call ``self._db.commit()``
+        here — see ``_write_consistency_marker`` for the same atomicity
+        contract.
+
+        Tolerates ``sqlite3.OperationalError`` for the same reasoning
+        as ``_write_consistency_marker``: rare transient lock
+        contention is corrected by the next idempotent re-replay.
+        """
+        try:
+            self._db.execute(
+                "INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)",
+                (_META_KEY_LAST_OFFSET, str(offset)),
+            )
+            self._db.execute(
+                "INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)",
+                (_META_KEY_HEADER_HASH, header_hash),
+            )
+            self._db.execute(
+                "INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)",
+                (_META_KEY_HEADER_WINDOW, str(window)),
+            )
+        except sqlite3.OperationalError:
+            # See _write_consistency_marker for the rationale on the
+            # silent OperationalError swallow (RDR-104 Round 2 #1).
+            pass
+
+    def _read_offset_marker(self) -> tuple[int, str, int] | None:
+        """Return ``(offset, header_hash, window)`` or ``None``.
+
+        RDR-104 Step 2: returns ``None`` when any of the three rows is
+        missing OR when the offset / window string is unparseable as
+        ``int``. The orchestrator (Step 3) treats ``None`` as the
+        bootstrap signal and falls through to full rebuild.
+
+        Returning a partial tuple would let the orchestrator act on
+        inconsistent metadata; full rebuild is the correctness-
+        preserving fallback.
+        """
+        try:
+            rows = self._db.execute(
+                "SELECT key, value FROM _meta WHERE key IN (?, ?, ?)",
+                (
+                    _META_KEY_LAST_OFFSET,
+                    _META_KEY_HEADER_HASH,
+                    _META_KEY_HEADER_WINDOW,
+                ),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return None
+        by_key = {key: value for key, value in rows}
+        if (
+            _META_KEY_LAST_OFFSET not in by_key
+            or _META_KEY_HEADER_HASH not in by_key
+            or _META_KEY_HEADER_WINDOW not in by_key
+        ):
+            return None
+        try:
+            offset = int(by_key[_META_KEY_LAST_OFFSET])
+            window = int(by_key[_META_KEY_HEADER_WINDOW])
+        except (TypeError, ValueError):
+            return None
+        return (offset, by_key[_META_KEY_HEADER_HASH], window)
 
     @staticmethod
     def _prefix_sql(prefix: str) -> tuple[str, list]:

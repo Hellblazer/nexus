@@ -281,3 +281,198 @@ def test_marker_does_not_advance_when_rebuild_raises(
         f"rolled-back rebuild should have replayed will be skipped "
         f"on the next run"
     )
+
+
+# ── RDR-104 Step 2: header-hash + offset marker ──────────────────────────
+
+
+def test_compute_header_hash_small_file(tmp_path: Path) -> None:
+    """A file smaller than the window hashes to the sha256 of its full bytes."""
+    import hashlib
+    from nexus.catalog.catalog import _compute_header_hash, _HEADER_HASH_BYTES
+
+    p = tmp_path / "small.jsonl"
+    payload = b'{"type":"X","v":1,"payload":{},"ts":"t"}\n' * 10
+    assert len(payload) < _HEADER_HASH_BYTES
+    p.write_bytes(payload)
+    expected = hashlib.sha256(payload).hexdigest()
+    assert _compute_header_hash(p) == expected
+
+
+def test_compute_header_hash_large_file_uses_only_first_window(
+    tmp_path: Path,
+) -> None:
+    """A file larger than the window hashes the first ``_HEADER_HASH_BYTES`` only."""
+    import hashlib
+    from nexus.catalog.catalog import _compute_header_hash, _HEADER_HASH_BYTES
+
+    p = tmp_path / "big.jsonl"
+    head = b"H" * _HEADER_HASH_BYTES
+    tail = b"T" * 1024
+    p.write_bytes(head + tail)
+    expected = hashlib.sha256(head).hexdigest()
+    assert _compute_header_hash(p) == expected
+    # Sanity: tail mutation does NOT change the hash.
+    p.write_bytes(head + b"DIFFERENT" * 100)
+    assert _compute_header_hash(p) == expected
+
+
+def test_compute_header_hash_constant_window_size() -> None:
+    """RDR-104 Round 1 gate observation #3: the window is 64 KB."""
+    from nexus.catalog.catalog import _HEADER_HASH_BYTES
+    assert _HEADER_HASH_BYTES == 64 * 1024
+
+
+def test_offset_marker_round_trips_through_meta(seeded_catalog_dir: Path) -> None:
+    """Writing the three offset-marker rows then reading returns the same tuple."""
+    cat = _make_catalog(seeded_catalog_dir)
+    expected_offset = 12345
+    expected_hash = "a" * 64
+    expected_window = 64 * 1024
+
+    with cat._db.transaction():
+        cat._write_offset_marker(
+            offset=expected_offset,
+            header_hash=expected_hash,
+            window=expected_window,
+        )
+
+    got = cat._read_offset_marker()
+    assert got == (expected_offset, expected_hash, expected_window)
+
+
+def test_offset_marker_read_returns_none_when_missing(
+    seeded_catalog_dir: Path,
+) -> None:
+    """Bootstrap: no offset marker rows → reader returns None.
+
+    Step 3's incremental-path branch consumes this signal to fall
+    through to full rebuild.
+    """
+    cat = _make_catalog(seeded_catalog_dir)
+    # Seeded fixture rebuilds on construction but the offset-marker rows
+    # are written by Step 3, not Step 2 alone — so they must be absent
+    # right now even after construction.
+    assert cat._read_offset_marker() is None
+
+
+@pytest.mark.parametrize(
+    "missing_key",
+    [
+        "last_applied_event_offset",
+        "last_applied_event_header_hash",
+        "last_applied_event_header_window",
+    ],
+)
+def test_offset_marker_read_returns_none_when_any_row_missing(
+    seeded_catalog_dir: Path, missing_key: str,
+) -> None:
+    """Reader treats any missing row as 'no marker' so caller falls back."""
+    cat = _make_catalog(seeded_catalog_dir)
+    with cat._db.transaction():
+        cat._write_offset_marker(
+            offset=42, header_hash="b" * 64, window=64 * 1024,
+        )
+    assert cat._read_offset_marker() == (42, "b" * 64, 64 * 1024)
+
+    with cat._db.transaction():
+        cat._db.execute("DELETE FROM _meta WHERE key = ?", (missing_key,))
+
+    assert cat._read_offset_marker() is None, (
+        f"reader must return None when {missing_key} is absent so the "
+        f"orchestrator falls through to full rebuild rather than acting "
+        f"on a partial marker"
+    )
+
+
+def test_offset_marker_read_returns_none_on_unparseable_value(
+    seeded_catalog_dir: Path,
+) -> None:
+    """Non-int offset / window string → reader returns None (defensive)."""
+    cat = _make_catalog(seeded_catalog_dir)
+    with cat._db.transaction():
+        cat._db.execute(
+            "INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)",
+            ("last_applied_event_offset", "not-an-int"),
+        )
+        cat._db.execute(
+            "INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)",
+            ("last_applied_event_header_hash", "x" * 64),
+        )
+        cat._db.execute(
+            "INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)",
+            ("last_applied_event_header_window", "65536"),
+        )
+    assert cat._read_offset_marker() is None
+
+
+def test_offset_marker_atomic_rollback_on_transaction_raise(
+    seeded_catalog_dir: Path,
+) -> None:
+    """A transaction that writes the offset marker then raises rolls back all rows.
+
+    The 4.24.4 atomicity contract applies to every marker write. The
+    Step 2 helper does not open its own transaction — it expects the
+    caller to be inside one. This test confirms the rollback shape so
+    Step 3's orchestrator can rely on it.
+    """
+    cat = _make_catalog(seeded_catalog_dir)
+    # Seed a known-good marker first.
+    with cat._db.transaction():
+        cat._write_offset_marker(
+            offset=100, header_hash="c" * 64, window=64 * 1024,
+        )
+    assert cat._read_offset_marker() == (100, "c" * 64, 64 * 1024)
+
+    # Now write an updated marker but raise mid-transaction.
+    with pytest.raises(RuntimeError, match="simulated"):
+        with cat._db.transaction():
+            cat._write_offset_marker(
+                offset=999, header_hash="d" * 64, window=128 * 1024,
+            )
+            raise RuntimeError("simulated mid-tx crash")
+
+    # All three rows must have rolled back to the prior values.
+    assert cat._read_offset_marker() == (100, "c" * 64, 64 * 1024), (
+        "transaction rollback must revert all three offset-marker rows "
+        "atomically; partial-row state would let Step 3's incremental "
+        "path act on inconsistent metadata"
+    )
+
+
+def test_offset_marker_atomic_with_consistency_marker(
+    seeded_catalog_dir: Path,
+) -> None:
+    """All FOUR marker rows roll back together when the transaction raises.
+
+    Step 3's incremental path writes the mtime marker AND the offset
+    marker inside the same transaction. The atomicity contract means
+    a mid-transaction raise reverts all four rows atomically.
+    """
+    cat = _make_catalog(seeded_catalog_dir)
+    initial_mtime = cat._last_consistency_mtime
+    with cat._db.transaction():
+        cat._write_offset_marker(
+            offset=50, header_hash="e" * 64, window=64 * 1024,
+        )
+    assert cat._read_offset_marker() == (50, "e" * 64, 64 * 1024)
+
+    with pytest.raises(RuntimeError, match="simulated"):
+        with cat._db.transaction():
+            cat._write_consistency_marker(initial_mtime + 100)
+            cat._write_offset_marker(
+                offset=200, header_hash="f" * 64, window=64 * 1024,
+            )
+            raise RuntimeError("simulated mid-tx crash")
+
+    # Mtime row must be at the prior value, offset marker likewise.
+    row = cat._db.execute(
+        "SELECT value FROM _meta WHERE key = ?",
+        ("last_consistency_mtime",),
+    ).fetchone()
+    assert row is not None
+    persisted_mtime = float(row[0])
+    assert persisted_mtime == initial_mtime, (
+        "mtime must roll back when its co-transaction raises"
+    )
+    assert cat._read_offset_marker() == (50, "e" * 64, 64 * 1024)
