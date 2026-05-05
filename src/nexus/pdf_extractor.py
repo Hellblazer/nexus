@@ -213,28 +213,32 @@ class PDFExtractor:
                     on_page(page_num - 1, page_text, {"page_number": page_num, "text_length": length})
             return fast_result
 
-        # Math paper detected — switch to MinerU for formula-aware extraction
+        # Math paper detected — switch to MinerU for formula-aware extraction.
+        # nexus-2fyb: previously, a MinerU failure here silently returned the
+        # non-enriched Docling probe (formulas already stripped). That hid
+        # extraction corruption from every caller — the result was
+        # indistinguishable from a paper that legitimately had no math. Auto
+        # mode now fails loudly so the user installs MinerU or explicitly opts
+        # into formula-stripped extraction with --extractor docling.
         _progress(f"  Formulas detected ({formula_count}) — switching to MinerU: {pdf_path.name}")
         try:
             return self._extract_with_mineru(pdf_path, formula_count=formula_count, on_page=on_page)
         except Exception as exc:
-            _progress(f"  MinerU failed ({type(exc).__name__}), using Docling result: {pdf_path.name}")
-            _log.debug("mineru_extraction_failed", error=str(exc), path=str(pdf_path))
-            # nexus-7ne1: replay on_page from fast_result.page_boundaries when
-            # falling back. The probe pass (`_extract_with_docling(..., enriched=False)`
-            # above) is intentionally invoked WITHOUT on_page so callbacks aren't
-            # double-fired if MinerU takes over. When MinerU then fails and we
-            # return fast_result, the streaming pipeline (only sees pages via
-            # on_page) gets nothing → 0 chunks. Mirror the replay logic from the
-            # formula_count < 5 branch above.
-            if on_page is not None:
-                for boundary in fast_result.metadata.get("page_boundaries", []):
-                    page_num = boundary["page_number"]
-                    start = boundary["start_char"]
-                    length = boundary["page_text_length"] - 1  # -1 for \n separator
-                    page_text = fast_result.text[start : start + length]
-                    on_page(page_num - 1, page_text, {"page_number": page_num, "text_length": length})
-            return fast_result
+            _log.error(
+                "mineru_required_but_unavailable",
+                error=str(exc),
+                error_type=type(exc).__name__,
+                formula_count=formula_count,
+                path=str(pdf_path),
+            )
+            raise RuntimeError(
+                f"PDF {pdf_path.name} contains formulas (detected {formula_count}) "
+                f"but the formula-aware extractor MinerU is unavailable: "
+                f"{type(exc).__name__}: {exc} "
+                f"Rerun with `--extractor docling` to explicitly accept "
+                f"formula-stripped extraction, or install MinerU "
+                f"(`uv pip install 'conexus[mineru]'`)."
+            ) from exc
 
     # ── internal extraction methods ───────────────────────────────────────────
 

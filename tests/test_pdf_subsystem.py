@@ -319,3 +319,71 @@ class TestDoclingRegressionGuard:
         assert result.metadata["extraction_method"] == "docling", (
             f"Expected docling; got {result.metadata['extraction_method']!r}"
         )
+
+
+# ── nexus-2fyb: real-fixture formula-preservation regression guard ──────────
+
+class TestFormulaPreservationOnRealPdf:
+    """End-to-end formula extraction on a real math paper.
+
+    The fixture ``tests/fixtures/distributed-bloom-filter.pdf`` is an academic
+    paper containing visible LaTeX-renderable formulas (false-positive-rate
+    derivation for Bloom filters). It is the canonical witness that the auto
+    extractor either preserves formulas or fails loudly — never silently
+    strips them.
+
+    Pre-fix history: this fixture was committed to ``tests/fixtures/`` but
+    never imported by any test, which is why a regression that wiped formulas
+    from every indexed PDF for weeks went undetected. Adding these assertions
+    closes the gap.
+    """
+
+    _FIXTURE = Path(__file__).parent / "fixtures" / "distributed-bloom-filter.pdf"
+
+    def test_fixture_quick_screen_detects_formulas(self) -> None:
+        """Sanity: the fixture must trigger formula detection. If this fails,
+        the fixture has changed and downstream assertions are meaningless."""
+        from nexus.pdf_extractor import _has_formulas_quick
+
+        assert self._FIXTURE.exists(), f"missing fixture: {self._FIXTURE}"
+        assert _has_formulas_quick(self._FIXTURE) >= 5, (
+            "fixture no longer trips the formula-detection threshold; "
+            "regression-guard assumptions invalidated"
+        )
+
+    def test_auto_raises_when_mineru_unavailable(self) -> None:
+        """Auto mode on a formula-bearing PDF must raise when the
+        formula-aware extractor (MinerU) is unavailable. Before this fix,
+        every install without the ``mineru`` extra silently received
+        formula-stripped Docling output stamped with formula_count=0."""
+        from nexus.pdf_extractor import PDFExtractor
+
+        extractor = PDFExtractor()
+        with patch.object(
+            extractor,
+            "_extract_with_mineru",
+            side_effect=ImportError("No module named 'mineru'"),
+        ):
+            with pytest.raises(RuntimeError) as excinfo:
+                extractor.extract(self._FIXTURE, extractor="auto")
+        msg = str(excinfo.value)
+        assert "formulas" in msg
+        assert "conexus[mineru]" in msg
+        assert "--extractor docling" in msg
+
+    def test_mineru_path_preserves_formulas(self) -> None:
+        """When MinerU is available, auto mode produces text containing
+        recognisable LaTeX formula markers. Skipped when the ``mineru`` extra
+        is not installed (the default dev environment)."""
+        pytest.importorskip("mineru.cli.common")
+        from nexus.pdf_extractor import PDFExtractor, _count_formula_markers
+
+        result = PDFExtractor().extract(self._FIXTURE, extractor="auto")
+        assert result.metadata["extraction_method"] == "mineru", (
+            f"expected mineru; got {result.metadata['extraction_method']!r}"
+        )
+        marker_count = _count_formula_markers(result.text)
+        assert marker_count > 0, (
+            "MinerU extraction produced text with zero LaTeX markers — "
+            f"formulas appear to have been stripped (text length: {len(result.text)})"
+        )
