@@ -556,8 +556,8 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
     help=(
         "PDF extraction backend (default: from .nexus.yml pdf.extractor, or 'auto'). "
         "'auto' detects formulas via Docling and switches to MinerU when found. "
-        "'docling' forces Docling. 'mineru' forces MinerU "
-        "(requires: uv pip install 'conexus[mineru]')."
+        "'docling' forces Docling (formula-stripped — opt-out of math handling). "
+        "'mineru' forces MinerU."
     ),
 )
 @click.option(
@@ -728,7 +728,11 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         click.echo(f"Indexing {path}…")
         try:
             n = index_pdf(path, corpus=corpus, t3=local_t3, collection_name=collection, embed_fn=_local_embed, enrich=enrich, extractor=extractor, streaming=streaming)
-        except ImportError as e:
+        except (ImportError, RuntimeError) as e:
+            # nexus-2fyb code-review R4-I1: RuntimeError from extract() on
+            # formula-detected PDFs without MinerU (or with MinerU operational
+            # failures) must surface as a ClickException — otherwise the user
+            # sees a raw Python traceback instead of an actionable message.
             raise click.ClickException(str(e)) from e
 
         if n == 0:
@@ -789,7 +793,11 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         try:
             meta = index_pdf(path, corpus=corpus, collection_name=collection, force=force,
                              return_metadata=True, on_progress=on_chunk_progress, enrich=enrich, extractor=extractor, streaming=streaming)
-        except ImportError as e:
+        except (ImportError, RuntimeError) as e:
+            # nexus-2fyb code-review R4-I1: RuntimeError from extract() on
+            # formula-detected PDFs without MinerU (or with MinerU operational
+            # failures) must surface as a ClickException — otherwise the user
+            # sees a raw Python traceback instead of an actionable message.
             raise click.ClickException(str(e)) from e
         chunk_bar.close()
         n = meta["chunks"]  # type: ignore[index]
@@ -806,7 +814,11 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
     else:
         try:
             n = index_pdf(path, corpus=corpus, collection_name=collection, force=force, enrich=enrich, extractor=extractor, streaming=streaming)
-        except ImportError as e:
+        except (ImportError, RuntimeError) as e:
+            # nexus-2fyb code-review R4-I1: RuntimeError from extract() on
+            # formula-detected PDFs without MinerU (or with MinerU operational
+            # failures) must surface as a ClickException — otherwise the user
+            # sees a raw Python traceback instead of an actionable message.
             raise click.ClickException(str(e)) from e
     result_label = "Force re-indexed" if force else "Indexed"
     click.echo(f"{result_label} {n} chunk(s).")

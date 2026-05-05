@@ -1,15 +1,21 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """PDF text extraction with auto-detect math routing.
 
-Extraction backends (three tiers, selected by ``extractor`` param):
+Extraction backends (selected by ``extractor`` param):
 1. Docling — neural layout model for multi-column academic PDFs, Type3 fonts,
    and complex tables.  Enriched mode enables formula detection via FormulaItem.
-2. MinerU — math-aware extraction (optional ``mineru`` extra).  Used when auto
-   mode detects formulas in the Docling pass.
-3. PyMuPDF normalized — final fallback for all extraction failures.
+2. MinerU — math-aware extraction. Default-installed since nexus-2fyb (was
+   previously an optional ``[mineru]`` extra; the extras gate produced silent
+   formula loss for weeks because fresh installs never picked it up). Used
+   when auto mode detects formulas in the Docling probe pass.
+3. PyMuPDF normalized — fallback for the explicit ``extractor='docling'``
+   path when Docling itself fails.
 
-Auto mode (default): Docling pass → if formulas detected → try MinerU → fallback
-to Docling → fallback to PyMuPDF normalized.
+Auto mode (default): non-enriched Docling probe → if formulas detected, route
+to MinerU. If MinerU fails on a formula-bearing PDF, raise ``RuntimeError``
+rather than silently returning the formula-stripped probe (the original
+silent-corruption bug). Users who explicitly accept stripped extraction can
+opt out with ``--extractor docling``.
 """
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -56,26 +62,82 @@ os._exit(0)
 _log = structlog.get_logger(__name__)
 
 
+# nexus-2fyb code-review R1-I3: progress messages are interactive UX for
+# long-running PDF extractions (Docling layout pass, MinerU per-page
+# inference). They MUST also go through structlog so non-interactive
+# callers (library use, MCP server, batch jobs) capture them in structured
+# logs. Setting NEXUS_PDF_PROGRESS_QUIET=1 disables the stderr write
+# entirely (e.g. for tests that capture stderr).
+import os as _os
+
+
 def _progress(msg: str) -> None:
-    """Write progress message to stderr, flushed immediately."""
-    print(msg, file=sys.stderr, flush=True)
+    """Emit a progress event via structlog AND optionally to stderr.
+
+    Stderr writes are gated by ``NEXUS_PDF_PROGRESS_QUIET`` env var so
+    tests and library callers can suppress the interactive output without
+    losing the structured log event. This replaces the prior plain
+    ``print()`` which violated the project's no-print-in-library-code
+    rule and made tests that captured stderr brittle.
+    """
+    _log.info("pdf_extractor_progress", message=msg.strip())
+    if _os.environ.get("NEXUS_PDF_PROGRESS_QUIET") != "1":
+        print(msg, file=sys.stderr, flush=True)
 
 
-_FORMULA_PATTERN = re.compile(
-    r"\$\$.+?\$\$"           # display math $$...$$
-    r"|\\\(.+?\\\)"          # inline \(...\)
-    r"|\\\[.+?\\\]"          # display \[...\]
-    r"|\\begin\{equation\}"  # LaTeX equation env
-    r"|\\begin\{align"       # align/align*
-    r"|\\frac\{"             # fraction
-    r"|\\sum[_^{\s]"         # summation
-    r"|\\int[_^{\s]"         # integral
-    r"|\\prod[_^{\s]"        # product
-    r"|\\partial"            # partial derivative
-    r"|\\nabla"              # nabla/gradient
-    r"|\\mathbb\{"           # blackboard bold
-    r"|\\mathcal\{"          # calligraphic
-, re.DOTALL)
+# nexus-2fyb code-review R5-I2: chained exceptions from MinerU/httpx can
+# include the configured pdf.mineru_server_url. If a user (mis-)configured
+# that URL with embedded credentials (http://user:pass@host/...), those
+# credentials would surface in error messages, structlog events, and
+# downstream log sinks. Redact userinfo from any URL we surface.
+_URL_CREDENTIALS_PATTERN = re.compile(
+    r"(https?://)([^/\s@]+)@",  # capture scheme + userinfo segment
+)
+
+
+def _redact_url_credentials(text: str) -> str:
+    """Replace ``http://user:pass@host`` with ``http://[redacted]@host`` in *text*.
+
+    Used in error-message construction to avoid leaking credentials that
+    a user may have configured into ``pdf.mineru_server_url``.
+    """
+    return _URL_CREDENTIALS_PATTERN.sub(r"\1[redacted]@", text)
+
+
+# Block-style formula delimiters — counted once per block.
+_FORMULA_BLOCK_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\$\$.+?\$\$", re.DOTALL),                                  # $$...$$
+    re.compile(r"\\\(.+?\\\)", re.DOTALL),                                  # \(...\)
+    re.compile(r"\\\[.+?\\\]", re.DOTALL),                                  # \[...\]
+    re.compile(r"\\begin\{equation\*?\}.+?\\end\{equation\*?\}", re.DOTALL),
+    re.compile(r"\\begin\{align\*?\}.+?\\end\{align\*?\}", re.DOTALL),
+)
+
+# Command tokens — counted independently of containing blocks. Each
+# occurrence inside or outside a block is one marker. This is intentional:
+# the original nexus-2fyb bug shape was the alternation pattern below,
+# which used a single re.findall and let `\$\$.+?\$\$` consume the whole
+# block — `\frac` instances inside were never separately counted (4 markers
+# returned for a paper with 12 \frac calls). Counting commands independently
+# avoids that undercount and gives the routing decision a true signal.
+#
+# Patterns use \b (word boundary) rather than requiring an immediate `{`
+# because MinerU emits LaTeX with whitespace between the command and its
+# argument: ``\\frac { 1 } { m }`` (note spaces), so `\\frac\{` would
+# match zero of those. \b matches between the word `\\frac` and the
+# subsequent non-word character (space, `{`, `(`, etc.). This was an
+# adjacent regression to the C1 bug — the regex assumed Docling-shaped
+# LaTeX and silently undercounted on MinerU output.
+_FORMULA_COMMAND_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\\frac\b"),       # fraction
+    re.compile(r"\\sum\b"),        # summation
+    re.compile(r"\\int\b"),        # integral
+    re.compile(r"\\prod\b"),       # product
+    re.compile(r"\\partial\b"),    # partial derivative
+    re.compile(r"\\nabla\b"),      # nabla/gradient
+    re.compile(r"\\mathbb\b"),     # blackboard bold
+    re.compile(r"\\mathcal\b"),    # calligraphic
+)
 
 # Unicode math symbols that indicate formula content in raw PDF text.
 # These are present in the PDF's embedded text even without enrichment.
@@ -83,8 +145,30 @@ _MATH_UNICODE = frozenset("∑∫∏∀∃∈∉∪∩⊆⊇⊂⊃→←↔∧�
 
 
 def _count_formula_markers(text: str) -> int:
-    """Count LaTeX formula markers in text. Fast heuristic for formula detection."""
-    return len(_FORMULA_PATTERN.findall(text))
+    """Count LaTeX formula markers in *text*.
+
+    Used as the routing heuristic in auto-mode extraction; ``count >= 5``
+    escalates to MinerU. The count is the sum of two independent measures:
+
+    1. **Block delimiters** (``$$..$$``, ``\\(..\\)``, ``\\[..\\]``, equation
+       and align environments) — each delimited block contributes 1.
+    2. **Command tokens** (``\\frac``, ``\\sum``, ``\\int``, etc.) — each
+       occurrence contributes 1, *including* occurrences inside delimited
+       blocks. A ``$$..$$`` block with three ``\\frac`` calls inside
+       therefore contributes 4 (1 block + 3 fracs).
+
+    The deliberate double-counting of commands inside blocks is the fix for
+    nexus-2fyb's adjacent bug shape: prior versions used one alternation
+    pattern with ``re.findall``, which would consume the whole block as a
+    single match and skip the commands inside, undercounting by an order
+    of magnitude on math papers.
+    """
+    count = 0
+    for pat in _FORMULA_BLOCK_PATTERNS:
+        count += len(pat.findall(text))
+    for pat in _FORMULA_COMMAND_PATTERNS:
+        count += len(pat.findall(text))
+    return count
 
 
 def _has_formulas_quick(pdf_path: Path) -> int:
@@ -169,6 +253,15 @@ class PDFExtractor:
                 f"extractor must be 'auto', 'docling', or 'mineru'; got {extractor!r}"
             )
 
+        # nexus-2fyb code-review R1-I2: validate the path is readable before
+        # dispatching. Without this, a directory or dangling symlink reaches
+        # pymupdf/Docling and produces an opaque internal error that leaks
+        # library paths through the message.
+        if not pdf_path.is_file():
+            raise FileNotFoundError(
+                f"PDF not found or not a regular file: {pdf_path}"
+            )
+
         if extractor == "docling":
             _progress(f"  Docling: extracting {pdf_path.name}…")
             try:
@@ -213,28 +306,51 @@ class PDFExtractor:
                     on_page(page_num - 1, page_text, {"page_number": page_num, "text_length": length})
             return fast_result
 
-        # Math paper detected — switch to MinerU for formula-aware extraction
+        # Math paper detected — switch to MinerU for formula-aware extraction.
+        # nexus-2fyb: previously, a MinerU failure here silently returned the
+        # non-enriched Docling probe (formulas already stripped). That hid
+        # extraction corruption from every caller — the result was
+        # indistinguishable from a paper that legitimately had no math. Auto
+        # mode now fails loudly so the user installs MinerU or explicitly opts
+        # into formula-stripped extraction with --extractor docling.
         _progress(f"  Formulas detected ({formula_count}) — switching to MinerU: {pdf_path.name}")
         try:
             return self._extract_with_mineru(pdf_path, formula_count=formula_count, on_page=on_page)
+        except ImportError as exc:
+            # do_parse is None — mineru is a default dep since nexus-2fyb so a
+            # missing import means the conexus install itself is corrupt.
+            _log.error(
+                "mineru_import_failed",
+                error=str(exc),
+                formula_count=formula_count,
+                path=str(pdf_path),
+            )
+            raise RuntimeError(
+                f"PDF {pdf_path.name} contains formulas (detected {formula_count}) "
+                f"but MinerU is not importable: {exc}. "
+                f"MinerU is a required dependency since nexus-2fyb; if it is "
+                f"missing your conexus install is corrupt — reinstall with "
+                f"`uv tool install --reinstall conexus`. To bypass formula "
+                f"extraction entirely, rerun with `--extractor docling`."
+            ) from exc
         except Exception as exc:
-            _progress(f"  MinerU failed ({type(exc).__name__}), using Docling result: {pdf_path.name}")
-            _log.debug("mineru_extraction_failed", error=str(exc), path=str(pdf_path))
-            # nexus-7ne1: replay on_page from fast_result.page_boundaries when
-            # falling back. The probe pass (`_extract_with_docling(..., enriched=False)`
-            # above) is intentionally invoked WITHOUT on_page so callbacks aren't
-            # double-fired if MinerU takes over. When MinerU then fails and we
-            # return fast_result, the streaming pipeline (only sees pages via
-            # on_page) gets nothing → 0 chunks. Mirror the replay logic from the
-            # formula_count < 5 branch above.
-            if on_page is not None:
-                for boundary in fast_result.metadata.get("page_boundaries", []):
-                    page_num = boundary["page_number"]
-                    start = boundary["start_char"]
-                    length = boundary["page_text_length"] - 1  # -1 for \n separator
-                    page_text = fast_result.text[start : start + length]
-                    on_page(page_num - 1, page_text, {"page_number": page_num, "text_length": length})
-            return fast_result
+            # MinerU is installed but extraction failed — subprocess timeout,
+            # OOM kill, mineru-api server error, etc. Do NOT advise reinstall;
+            # the install is fine and the failure is operational.
+            sanitized_msg = _redact_url_credentials(str(exc))
+            _log.error(
+                "mineru_extraction_failed",
+                error=sanitized_msg,
+                error_type=type(exc).__name__,
+                formula_count=formula_count,
+                path=str(pdf_path),
+            )
+            raise RuntimeError(
+                f"PDF {pdf_path.name} contains formulas (detected {formula_count}) "
+                f"but MinerU extraction failed: {type(exc).__name__}: {sanitized_msg}. "
+                f"To bypass formula extraction and accept formula-stripped "
+                f"output for this PDF, rerun with `--extractor docling`."
+            ) from exc
 
     # ── internal extraction methods ───────────────────────────────────────────
 
@@ -388,7 +504,8 @@ class PDFExtractor:
         """
         if do_parse is None:
             raise ImportError(
-                "MinerU is not installed. Install with: uv pip install 'conexus[mineru]'"
+                "MinerU is not importable but is a required dependency since "
+                "nexus-2fyb. Reinstall conexus: `uv tool install --reinstall conexus`."
             )
 
         import pymupdf  # lightweight — only used for page count
@@ -415,6 +532,12 @@ class PDFExtractor:
         md_parts: list[str] = []
         all_content_list: list[dict] = []
         all_pdf_info: list[dict] = []
+        # nexus-2fyb code-review C2: track real per-page markdown lengths
+        # so page_boundaries reflect actual content distribution, not a
+        # uniform char/page average. Each entry: (page_index_0based, length).
+        # OOM retry loop appends per-page entries directly; batch-mode
+        # appends one entry covering the batch span.
+        per_page_lengths: list[tuple[int, int]] = []
 
         fname = pdf_path.name
         for batch_idx, (start, end) in enumerate(batches):
@@ -451,6 +574,7 @@ class PDFExtractor:
                     md_parts.append(md)
                     all_content_list.extend(content_list)
                     all_pdf_info.extend(pdf_info)
+                    per_page_lengths.append((page, len(md)))
                 continue
             if on_page is not None:
                 # Note: for batch_size > 1, fires once per batch with the batch's
@@ -461,6 +585,20 @@ class PDFExtractor:
             md_parts.append(md)
             all_content_list.extend(content_list)
             all_pdf_info.extend(pdf_info)
+            # For batch_size==1 (the default), end == start+1 and this is
+            # exact. For batch_size>1, the batch md covers `batch_pages`
+            # pages and we distribute it uniformly within the batch (the
+            # only resolution available without per-page md from MinerU).
+            batch_end = end if end is not None else total_pages
+            batch_pages = batch_end - start
+            if batch_pages == 1:
+                per_page_lengths.append((start, len(md)))
+            elif batch_pages > 1:
+                per_page = len(md) // batch_pages
+                remainder = len(md) % batch_pages
+                for offset in range(batch_pages):
+                    extra = 1 if offset < remainder else 0
+                    per_page_lengths.append((start + offset, per_page + extra))
 
         if batches:
             _progress(f"  MinerU: {total_pages}/{total_pages} done ({fname})")
@@ -468,6 +606,8 @@ class PDFExtractor:
         md_text = "\n".join(md_parts)
         return self._mineru_build_result(
             pdf_path, md_text, all_content_list, all_pdf_info,
+            per_page_lengths=per_page_lengths,
+            formula_count_floor=formula_count,
         )
 
     def _mineru_server_available(self) -> bool:
@@ -578,15 +718,23 @@ class PDFExtractor:
         from nexus.commands.mineru import (
             _HEALTH_POLL_INTERVAL,
             _find_free_port,
+            _mineru_output_root,
             _server_env,
         )
         from nexus.config import set_config_value
 
         port = _find_free_port()
         cmd = ["mineru-api", "--host", "127.0.0.1", "--port", str(port)]
+        # nexus-2fyb code-review C-sec-1: previously called _server_env() with
+        # no arguments, but the function signature requires output_root. This
+        # was a TypeError waiting to fire on the first server crash during a
+        # multi-PDF run, AND a security bug — without MINERU_API_OUTPUT_ROOT
+        # set, MinerU falls back to its default world-writable /tmp/mineru-
+        # output instead of the per-user 0o700 directory.
+        output_root = _mineru_output_root()
         try:
             proc = _sp.Popen(
-                cmd, env=_server_env(),
+                cmd, env=_server_env(output_root),
                 stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
                 start_new_session=True,
             )
@@ -751,8 +899,27 @@ class PDFExtractor:
     def _mineru_build_result(
         pdf_path: Path, md_text: str,
         content_list: list[dict], pdf_info: list[dict],
+        *,
+        per_page_lengths: list[tuple[int, int]] | None = None,
+        formula_count_floor: int = 0,
     ) -> ExtractionResult:
-        """Assemble an ExtractionResult from (merged) MinerU outputs."""
+        """Assemble an ExtractionResult from (merged) MinerU outputs.
+
+        *per_page_lengths* (nexus-2fyb code-review C2): list of
+        ``(page_index_0based, markdown_char_length)`` tuples captured from
+        the batch loop. Used to build accurate ``page_boundaries`` so
+        chunks get correct ``page_number`` attribution. When ``None``
+        (legacy callers, defensive), falls back to uniform char/page
+        distribution — but logs a warning because that path produces
+        wrong page_number metadata for any non-uniform document.
+
+        *formula_count_floor* (nexus-2fyb code-review R1): the count
+        produced by the auto-mode probe, used as a lower bound. If
+        MinerU's structured response is missing or empty (e.g. server
+        returned content_list=[] under degraded conditions), the
+        recomputed formula_count would otherwise be 0, breaking the
+        ``has_formulas`` flag downstream for confirmed math papers.
+        """
         display_count = sum(1 for e in content_list if e.get("type") == "equation")
 
         inline_count = 0
@@ -763,12 +930,36 @@ class PDFExtractor:
                         if span.get("type") == "inline_equation":
                             inline_count += 1
 
-        formula_count = display_count + inline_count
+        formula_count = max(display_count + inline_count, formula_count_floor)
         page_count = len(pdf_info)
         total_len = len(md_text)
 
         page_boundaries: list[dict] = []
-        if page_count > 0 and total_len > 0:
+        if per_page_lengths is not None and page_count > 0:
+            # Use the real per-page lengths captured from the batch loop.
+            # md_text is "\n".join(md_parts), so each per-page segment has
+            # +1 separator except the last. start_char accumulates.
+            page_lengths_by_idx = {idx: length for idx, length in per_page_lengths}
+            pos = 0
+            for i in range(page_count):
+                length = page_lengths_by_idx.get(i, 0)
+                # Add +1 for the "\n" separator (matches the join), except final.
+                stored_length = length + (1 if i < page_count - 1 else 0)
+                page_boundaries.append({
+                    "page_number": i + 1,
+                    "start_char": pos,
+                    "page_text_length": stored_length,
+                })
+                pos += stored_length
+        elif page_count > 0 and total_len > 0:
+            # Fallback (legacy callers, no per-batch tracking). Uniform
+            # distribution gives wrong page_number for non-uniform docs.
+            _log.warning(
+                "mineru_uniform_page_boundaries",
+                path=str(pdf_path),
+                page_count=page_count,
+                reason="per_page_lengths not provided",
+            )
             chars_per_page = total_len / page_count
             for i in range(page_count):
                 start = int(i * chars_per_page)

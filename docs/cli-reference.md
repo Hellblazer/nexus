@@ -129,13 +129,7 @@ Most PDFs work fine with the default (`auto`). You only need to think about this
 - Large PDFs are automatically split into 5-page batches, each processed in
   an isolated subprocess to prevent OOM on formula-dense documents
 
-**Installing MinerU:**
-
-```bash
-uv pip install 'conexus[mineru]'
-```
-
-First run downloads the unimernet model (~2-3 GB). After that, `auto` mode automatically routes math-heavy PDFs through MinerU.
+**MinerU is included by default** since nexus-2fyb. Previously gated behind a `[mineru]` extra; the extras gate produced silent formula loss because fresh installs never picked it up. First use of `auto` or `mineru` modes downloads the unimernet model (~2-3 GB). If MinerU is missing at runtime, your install is corrupt — reinstall with `uv tool install --reinstall conexus`.
 
 **Setting a default backend (sticky config):**
 
@@ -1357,7 +1351,7 @@ The per-repo cache is stored at `~/.config/nexus/context/<repo>-<hash>.txt`. The
 
 ## nx mineru
 
-MinerU server lifecycle management for PDF extraction. Requires `conexus[mineru]` extra.
+MinerU server lifecycle management for PDF extraction. MinerU is a default dependency since nexus-2fyb.
 
 ### nx mineru start
 

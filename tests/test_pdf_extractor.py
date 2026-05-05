@@ -399,82 +399,69 @@ class TestAutoDetectRouting:
         assert result.metadata["extraction_method"] == "mineru"
         m.assert_called_once_with(dummy_pdf, formula_count=10, on_page=None)
 
-    def test_auto_falls_back_when_mineru_fails(self, extractor, dummy_pdf):
+    def test_auto_raises_when_mineru_import_fails_on_formula_pdf(self, extractor, dummy_pdf):
+        """nexus-2fyb: ImportError branch — mineru is a default dep, so the
+        message MUST advise reinstalling conexus (corrupt install) and not a
+        non-existent ``[mineru]`` extra.
+        """
         with (
             patch("nexus.pdf_extractor._has_formulas_quick", return_value=10),
             patch.object(extractor, "_extract_with_docling", return_value=self._docling_f),
-            patch.object(extractor, "_extract_with_mineru", side_effect=RuntimeError("download failed")),
-            patch("nexus.pdf_extractor._log") as mock_log,
+            patch.object(extractor, "_extract_with_mineru", side_effect=ImportError("No module named 'mineru'")),
         ):
-            result = extractor.extract(dummy_pdf, extractor="auto")
-        assert result is self._docling_f
-        mock_log.debug.assert_any_call(
-            "mineru_extraction_failed", error="download failed", path=str(dummy_pdf),
-        )
+            with pytest.raises(RuntimeError) as excinfo:
+                extractor.extract(dummy_pdf, extractor="auto")
+        msg = str(excinfo.value)
+        assert "formulas" in msg
+        assert "10" in msg  # formula count surfaced
+        assert "uv tool install --reinstall conexus" in msg  # corrupt-install hint
+        assert "--extractor docling" in msg  # opt-out hint
+        assert isinstance(excinfo.value.__cause__, ImportError)
 
-    def test_auto_fallback_replays_on_page_after_mineru_fails(self, extractor, dummy_pdf):
-        """nexus-7ne1 regression: the MinerU-failed fallback must replay on_page
-        from fast_result.page_boundaries, mirroring the formula_count < 5 happy
-        path. Without this replay, the streaming pipeline never sees pages and
-        the chunker emits 0 chunks for the entire document — the bug that
-        masqueraded as MinerU brokenness during the 2026-04-17 Delos re-index.
+    def test_auto_raises_when_mineru_runtime_fails_on_formula_pdf(self, extractor, dummy_pdf):
+        """nexus-2fyb code-review C1: non-import failures (subprocess timeout,
+        OOM kill, mineru-api 5xx, httpx errors) MUST NOT advise reinstalling
+        — the install is fine and the failure is operational. The opt-out
+        hint stays so users with a one-off bad PDF can skip formula extraction.
         """
-        # Three pages joined with "\n" → text = "Page A\nPage B\nPage C" (20 chars).
-        # page_text_length includes the +1 for the joining "\n" except the final page.
-        page_a = "Page A"   # 6 chars, boundary length = 7 (+1 for \n)
-        page_b = "Page B"   # 6 chars, boundary length = 7
-        page_c = "Page C"   # 6 chars, boundary length = 7 (final, but convention preserves +1)
-        full_text = "\n".join([page_a, page_b, page_c])
-        fast_result = ExtractionResult(
-            text=full_text,
-            metadata={
-                "extraction_method": "docling",
-                "page_count": 3,
-                "page_boundaries": [
-                    {"page_number": 1, "start_char": 0,  "page_text_length": 7},
-                    {"page_number": 2, "start_char": 7,  "page_text_length": 7},
-                    {"page_number": 3, "start_char": 14, "page_text_length": 7},
-                ],
-                "format": "markdown",
-                "formula_count": 10,
-            },
-        )
+        with (
+            patch("nexus.pdf_extractor._has_formulas_quick", return_value=10),
+            patch.object(extractor, "_extract_with_docling", return_value=self._docling_f),
+            patch.object(
+                extractor, "_extract_with_mineru",
+                side_effect=RuntimeError("MinerU subprocess timed out after 600s"),
+            ),
+        ):
+            with pytest.raises(RuntimeError) as excinfo:
+                extractor.extract(dummy_pdf, extractor="auto")
+        msg = str(excinfo.value)
+        assert "formulas" in msg
+        assert "10" in msg  # formula count surfaced
+        assert "MinerU extraction failed" in msg  # operational, not install
+        assert "subprocess timed out" in msg  # underlying cause surfaced
+        # MUST NOT misdirect the user to reinstall a healthy install:
+        assert "reinstall" not in msg.lower()
+        assert "--extractor docling" in msg  # opt-out hint
+        assert isinstance(excinfo.value.__cause__, RuntimeError)
+
+    def test_auto_raises_with_callback_does_not_replay(self, extractor, dummy_pdf):
+        """nexus-2fyb: the prior nexus-7ne1 on_page replay was a layered patch
+        on the silent-fallback bug. With the loud-raise fix the replay path is
+        moot — auto must abort cleanly without calling on_page when MinerU
+        fails on a formula-bearing PDF.
+        """
         received: list[tuple] = []
         def _on_page(page_idx: int, page_text: str, page_meta: dict) -> None:
             received.append((page_idx, page_text, page_meta))
 
         with (
             patch("nexus.pdf_extractor._has_formulas_quick", return_value=10),
-            patch.object(extractor, "_extract_with_docling", return_value=fast_result),
-            patch.object(extractor, "_extract_with_mineru", side_effect=RuntimeError("MinerU 409")),
-        ):
-            result = extractor.extract(dummy_pdf, extractor="auto", on_page=_on_page)
-
-        # Returned the fast_result (existing contract — preserved).
-        assert result is fast_result
-        # AND now the on_page callback fired once per page, with the
-        # right text for each page (the pre-fix behavior produced 0 callbacks).
-        assert len(received) == 3, f"expected 3 callbacks, got {len(received)}"
-        # 0-indexed page positions per RDR-048 callback contract.
-        assert [r[0] for r in received] == [0, 1, 2]
-        assert [r[1] for r in received] == [page_a, page_b, page_c]
-        # Page metadata uses 1-based page_number.
-        assert [r[2]["page_number"] for r in received] == [1, 2, 3]
-        # text_length matches the page text (length-1 from page_text_length).
-        assert [r[2]["text_length"] for r in received] == [6, 6, 6]
-
-    def test_auto_fallback_no_callback_when_on_page_is_none(self, extractor, dummy_pdf):
-        """nexus-7ne1: ensure the replay loop is gated on on_page being non-None,
-        so callers that don't supply a callback still get the existing fast_result
-        return without errors.
-        """
-        with (
-            patch("nexus.pdf_extractor._has_formulas_quick", return_value=10),
             patch.object(extractor, "_extract_with_docling", return_value=self._docling_f),
             patch.object(extractor, "_extract_with_mineru", side_effect=RuntimeError("MinerU 409")),
         ):
-            result = extractor.extract(dummy_pdf, extractor="auto", on_page=None)
-        assert result is self._docling_f  # contract preserved when no callback
+            with pytest.raises(RuntimeError):
+                extractor.extract(dummy_pdf, extractor="auto", on_page=_on_page)
+        assert received == [], "on_page must not fire when extraction is aborting"
 
     def test_forced_docling_skips_mineru(self, extractor, dummy_pdf):
         with (
@@ -493,6 +480,18 @@ class TestAutoDetectRouting:
             result = extractor.extract(dummy_pdf, extractor="mineru")
         assert result.metadata["extraction_method"] == "mineru"
         mock_docling.assert_not_called()
+
+    def test_forced_mineru_propagates_import_error(self, extractor, dummy_pdf):
+        """nexus-2fyb code-review I1: ``extractor='mineru'`` delegates straight
+        to ``_extract_with_mineru`` and propagates ImportError undecorated. The
+        message comes from ``_extract_with_mineru`` (the do_parse-is-None
+        branch), so this test pins down the entry-point contract: forced-mineru
+        ImportError surfaces ``uv tool install --reinstall conexus`` to the
+        caller, not the auto-mode RuntimeError-wrapping shape.
+        """
+        with patch("nexus.pdf_extractor.do_parse", None):
+            with pytest.raises(ImportError, match="uv tool install --reinstall conexus"):
+                extractor.extract(dummy_pdf, extractor="mineru")
 
     def test_invalid_extractor_raises_value_error(self, extractor, dummy_pdf):
         with pytest.raises(ValueError, match="extractor"):

@@ -58,14 +58,18 @@ dependencies = [
     # Python 3.14 lands uuid.uuid7() in stdlib; on 3.13 use uuid7-standard
     # (NOT the older "uuid7" package, which uses pre-RFC encoding).
     "uuid7-standard>=1.1.0; python_version<'3.14'",
+    # nexus-2fyb: MinerU is the formula-aware PDF extractor required by
+    # auto-mode whenever a PDF contains math. Previously gated behind a
+    # [mineru] extra; the extras game produced silent formula loss for
+    # weeks because fresh installs and reinstall-tool both skipped it.
+    # Default-on is the only configuration that doesn't foot-cannon the
+    # next install. mineru[all] pulls formula + table models (~2-3 GB
+    # downloaded on first use, not at install time).
+    "mineru[all]",
 ]
 
 [project.optional-dependencies]
 local = ["fastembed>=0.7.0"]
-# mineru[all] includes formula + table models (~2-3 GB on first run)
-# Models are downloaded on first use, not at install time
-# PyPI package "mineru" (v2.0+); import namespace is "mineru"
-mineru = ["mineru[all]"]
 
 [project.urls]
 Homepage = "https://github.com/Hellblazer/nexus"
