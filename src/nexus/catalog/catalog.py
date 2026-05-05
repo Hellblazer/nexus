@@ -754,19 +754,33 @@ class Catalog:
     def _write_consistency_marker(self, mtime: float) -> None:
         """Persist the highest successfully-projected canonical mtime.
 
-        nexus-wehp: stored inside the catalog SQLite. Commits explicitly
-        so other connections (in-process tests, cross-process MCP+CLI)
-        see the new marker on their next SELECT. Tolerate write failures
-        silently. Failing to update the marker means the next process
-        will re-do the rebuild; functionally identical to pre-fix
-        behaviour.
+        nexus-wehp: stored inside the catalog SQLite. Tolerates write
+        failures silently — failing to update the marker means the next
+        process will re-do the rebuild, which is correctness-preserving
+        (the rebuild is idempotent at the projection level).
+
+        RDR-104 critic Critical #2 fix: this write MUST live inside the
+        same transaction as the projector writes. Pre-fix it called
+        ``self._db.commit()`` independently, which created an asymmetric
+        failure window: a crash AFTER the marker commit but BEFORE the
+        outer transaction's projection writes committed (or while the
+        outer ``with self._conn:`` rolled back) advanced the marker
+        without advancing the projection. The next ``_ensure_consistent``
+        run would observe the new marker, conclude "nothing to do", and
+        permanently skip the events that should have been applied —
+        silent corruption with no recovery path.
+
+        Caller contract: this method is invoked from inside an active
+        ``CatalogDB.transaction()`` block. The connection-as-context-manager
+        commits the marker write atomically with the projection writes
+        on successful exit; rolls both back together on any exception.
+        Do NOT call ``self._db.commit()`` here.
         """
         try:
             self._db.execute(
                 "INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)",
                 ("last_consistency_mtime", f"{mtime}"),
             )
-            self._db.commit()
         except sqlite3.OperationalError:
             pass
 
@@ -931,6 +945,18 @@ class Catalog:
                             self._projector.apply_all(
                                 EventLog(self._dir).replay(), commit=False,
                             )
+                        # RDR-104 critic Critical #2 fix: consistency marker
+                        # is written INSIDE the same transaction as the
+                        # projection writes. The transaction context commits
+                        # both atomically on success, rolls both back together
+                        # on any exception. Pre-fix the marker write lived
+                        # OUTSIDE this block in _write_consistency_marker()'s
+                        # own commit(), which left a refactoring hazard:
+                        # any rearrangement that put the marker commit before
+                        # the projection commit would silently skip events on
+                        # the next run (rollback of projection without rolling
+                        # back the marker).
+                        self._write_consistency_marker(current_mtime)
             else:
                 owners = read_owners(self._owners_path) if self._owners_path.exists() else {}
                 documents = read_documents(self._documents_path) if self._documents_path.exists() else {}
@@ -954,11 +980,18 @@ class Catalog:
                 with _rebuild_heartbeat(
                     "rebuilding projection", summary_builder=_summary,
                 ):
-                    self._db.rebuild(owners, documents, list(links_dict.values()))
+                    # RDR-104 critic Critical #2 fix: pass current_mtime so
+                    # the marker write happens INSIDE rebuild's transaction
+                    # block, atomic with the projection writes.
+                    self._db.rebuild(
+                        owners, documents, list(links_dict.values()),
+                        consistency_mtime=current_mtime,
+                    )
+            # In-memory mirror of the persisted marker. The DB write is
+            # already inside the rebuild transaction (event-sourced and
+            # legacy paths both); this assignment exists so subsequent
+            # in-process construction short-circuits without a SELECT.
             self._last_consistency_mtime = current_mtime
-            # nexus-wehp: persist the marker so next-process construction
-            # short-circuits this rebuild when nothing has changed.
-            self._write_consistency_marker(current_mtime)
             self.degraded = False
         except Exception as exc:
             _log.warning("catalog_consistency_rebuild_failed", error=str(exc), exc_info=True)

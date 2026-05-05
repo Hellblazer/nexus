@@ -383,6 +383,8 @@ class CatalogDB:
         owners: dict[str, OwnerRecord],
         documents: dict[str, DocumentRecord],
         links: list[LinkRecord],
+        *,
+        consistency_mtime: float | None = None,
     ) -> None:
         """Truncate all tables and reload from JSONL-derived dicts.
 
@@ -392,6 +394,17 @@ class CatalogDB:
         for tens of minutes on a catalog with hundreds of thousands of
         rows. With the fence, FTS5 segments are built once at the end
         in source order. See ``bulk_load_documents`` docstring.
+
+        ``consistency_mtime`` (RDR-104 critic Critical #2 fix): when
+        supplied, the consistency-marker write happens INSIDE the same
+        ``with self._lock, self._conn:`` block as the projection writes
+        — atomic. Pre-fix the marker was written by an independent
+        ``commit()`` after rebuild returned, which left a refactoring
+        hazard (any future code that put the marker write before the
+        projection commit would silently corrupt the projection by
+        skipping events on the next run). Putting both writes in the
+        same transaction makes the atomicity invariant trivially
+        true regardless of caller ordering.
         """
         with self._lock, self._conn, self.bulk_load_documents():
             # Delete from base tables. Triggers are dropped for the
@@ -450,6 +463,19 @@ class CatalogDB:
                         lnk.created_at,
                         json.dumps(lnk.meta),
                     ),
+                )
+
+            # RDR-104 critic Critical #2 fix: consistency marker write
+            # is part of the same transaction as the projection writes.
+            # On a mid-rebuild crash, the projection rolls back AND the
+            # marker stays at its pre-rebuild value — next run sees the
+            # stale marker and re-rebuilds correctly. Pre-fix this lived
+            # outside the transaction in `_write_consistency_marker`'s
+            # own commit().
+            if consistency_mtime is not None:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)",
+                    ("last_consistency_mtime", f"{consistency_mtime}"),
                 )
 
         _log.debug("catalog_db.rebuild", owners=len(owners), documents=len(documents), links=len(links))

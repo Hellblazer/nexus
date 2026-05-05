@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -205,4 +206,78 @@ def test_rebuild_silent_under_one_second(
     err = capsys.readouterr().err
     assert "Catalog: rebuild" not in err, (
         f"fast rebuild leaked progress line: {err!r}"
+    )
+
+
+def test_marker_does_not_advance_when_rebuild_raises(
+    seeded_catalog_dir: Path,
+) -> None:
+    """RDR-104 critic Critical #2: marker write must be atomic with
+    projection writes. Pre-fix the marker lived in its own ``commit()``
+    after the rebuild transaction closed; a refactor that put the marker
+    write before the projection commit would silently corrupt the
+    projection by skipping events on the next run (rolled-back
+    projection + advanced marker).
+
+    Test simulates the dangerous direction: ``Projector.apply_all`` (or
+    ``CatalogDB.rebuild``, depending on which path fires) raises
+    mid-transaction. Asserts that the marker stored in ``_meta`` did
+    NOT advance — same value as before the failed rebuild attempt.
+
+    Patches BOTH the event-sourced and legacy mid-transaction sites so
+    the invariant is pinned regardless of which path the seeded fixture
+    happens to exercise (depends on NEXUS_EVENT_SOURCED gating). This
+    is the load-bearing test for the atomicity fix.
+    """
+    cat1 = _make_catalog(seeded_catalog_dir)
+    initial_marker = cat1._last_consistency_mtime
+    assert initial_marker > 0
+    cat1._db.close()
+
+    # Force a rebuild — bump documents.jsonl mtime past the marker
+    docs_path = seeded_catalog_dir / "documents.jsonl"
+    future = initial_marker + 10
+    os.utime(docs_path, (future, future))
+
+    from nexus.catalog.catalog_db import CatalogDB
+    from nexus.catalog.projector import Projector
+
+    def db_rebuild_boom(self, *a, **kw):
+        # Open transaction, write something, raise — simulates a
+        # mid-rebuild crash on the legacy path. The transaction's
+        # __exit__ rollback fires.
+        with self._lock, self._conn:
+            self._conn.execute("DELETE FROM documents")
+            raise RuntimeError("simulated mid-rebuild crash (legacy)")
+
+    def projector_apply_all_boom(self, *a, **kw):
+        # The event-sourced path is wrapped in self._db.transaction()
+        # by _ensure_consistent. Raising here triggers that block's
+        # rollback before the marker write would have fired.
+        raise RuntimeError("simulated mid-rebuild crash (event-sourced)")
+
+    with patch.object(CatalogDB, "rebuild", db_rebuild_boom), \
+         patch.object(Projector, "apply_all", projector_apply_all_boom):
+        cat2 = _make_catalog(seeded_catalog_dir)
+
+    # _ensure_consistent's outer try/except catches the raise and
+    # sets degraded=True regardless of which path fired.
+    assert cat2.degraded is True, (
+        "rebuild raised — degraded must be set so callers know the "
+        "projection is potentially stale"
+    )
+
+    # Marker must NOT have advanced. This is the invariant the
+    # atomicity fix guarantees.
+    row = cat2._db.execute(
+        "SELECT value FROM _meta WHERE key = ?",
+        ("last_consistency_mtime",),
+    ).fetchone()
+    stored_marker = float(row[0]) if row else 0.0
+    assert stored_marker == initial_marker, (
+        f"rebuild raised but marker advanced from {initial_marker} "
+        f"to {stored_marker} — projection rollback would now be "
+        f"silently masked by the advanced marker; events that the "
+        f"rolled-back rebuild should have replayed will be skipped "
+        f"on the next run"
     )
