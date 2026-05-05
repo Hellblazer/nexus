@@ -234,10 +234,21 @@ def test_marker_does_not_advance_when_rebuild_raises(
     assert initial_marker > 0
     cat1._db.close()
 
-    # Force a rebuild — bump documents.jsonl mtime past the marker
+    # Force a rebuild that hits apply_all / rebuild — append an event
+    # so the next construction takes the incremental or full path
+    # (NOT the RDR-104 empty-delta fast path, which doesn't invoke
+    # the projector). Bump documents.jsonl mtime to make sure mtime
+    # advances across the marker too.
+    events_path = seeded_catalog_dir / "events.jsonl"
+    with events_path.open("a") as f:
+        f.write(
+            '{"type":"DocumentDeleted","v":1,'
+            '"payload":{"doc_id":"x","reason":"r"},"ts":"t"}\n'
+        )
     docs_path = seeded_catalog_dir / "documents.jsonl"
     future = initial_marker + 10
     os.utime(docs_path, (future, future))
+    os.utime(events_path, (future, future))
 
     from nexus.catalog.catalog_db import CatalogDB
     from nexus.catalog.projector import Projector
@@ -342,17 +353,18 @@ def test_offset_marker_round_trips_through_meta(seeded_catalog_dir: Path) -> Non
 
 
 def test_offset_marker_read_returns_none_when_missing(
-    seeded_catalog_dir: Path,
+    tmp_path: Path,
 ) -> None:
-    """Bootstrap: no offset marker rows → reader returns None.
+    """Fresh tmp_path with no documents.jsonl: no rebuild fires → no marker.
 
-    Step 3's incremental-path branch consumes this signal to fall
-    through to full rebuild.
+    A truly-bootstrap catalog (no canonical files yet, so
+    ``_ensure_consistent`` short-circuits before constructing any
+    rebuild path) must report no offset marker. After Step 3, every
+    rebuild path that DOES fire writes the marker; this test guards
+    the "no rebuild ran yet" reader-returns-None invariant by
+    constructing against an empty dir.
     """
-    cat = _make_catalog(seeded_catalog_dir)
-    # Seeded fixture rebuilds on construction but the offset-marker rows
-    # are written by Step 3, not Step 2 alone — so they must be absent
-    # right now even after construction.
+    cat = _make_catalog(tmp_path)
     assert cat._read_offset_marker() is None
 
 
@@ -376,7 +388,9 @@ def test_offset_marker_read_returns_none_when_any_row_missing(
     assert cat._read_offset_marker() == (42, "b" * 64, 64 * 1024)
 
     with cat._db.transaction():
-        cat._db.execute("DELETE FROM _meta WHERE key = ?", (missing_key,))
+        cat._db.execute(  # epsilon-allow: simulate partial-marker by deleting one of three RDR-104 offset-marker rows; public API has no negative-test surface
+            "DELETE FROM _meta WHERE key = ?", (missing_key,),
+        )
 
     assert cat._read_offset_marker() is None, (
         f"reader must return None when {missing_key} is absent so the "
@@ -391,15 +405,15 @@ def test_offset_marker_read_returns_none_on_unparseable_value(
     """Non-int offset / window string → reader returns None (defensive)."""
     cat = _make_catalog(seeded_catalog_dir)
     with cat._db.transaction():
-        cat._db.execute(
+        cat._db.execute(  # epsilon-allow: poison the offset row to test defensive int() in _read_offset_marker; no public API for marker injection
             "INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)",
             ("last_applied_event_offset", "not-an-int"),
         )
-        cat._db.execute(
+        cat._db.execute(  # epsilon-allow: companion to the poison-offset write above
             "INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)",
             ("last_applied_event_header_hash", "x" * 64),
         )
-        cat._db.execute(
+        cat._db.execute(  # epsilon-allow: companion to the poison-offset write above
             "INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)",
             ("last_applied_event_header_window", "65536"),
         )
