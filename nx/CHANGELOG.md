@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.24.4] - 2026-05-05
+
+Plugin version aligned with conexus 4.24.4. No plugin-specific changes; the underlying conexus library closes a latent silent-corruption hazard in the catalog consistency-marker write by moving the marker into the rebuild transaction so projection + marker commit atomically. Standalone atomicity fix; the broader incremental-rebuild design (RDR-104, bead nexus-rr0u) builds on this baseline. See root ``CHANGELOG.md``.
+
 ## [4.24.3] - 2026-05-05
 
 Plugin version aligned with conexus 4.24.3. No plugin-specific changes; the underlying conexus library closes two per-file ChromaDB-roundtrip blowups in ``nx index repo`` (batched misclassified-chunk prune, pre-built per-collection staleness cache), enriches the catalog-rebuild summary line with trigger file and projection size, and fixes a generator-contextmanager ``finally`` that was swallowing exceptions on the rebuild path. See root ``CHANGELOG.md``.

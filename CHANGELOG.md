@@ -6,6 +6,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.24.4] - 2026-05-05
+
+Patch release. Closes a latent silent-corruption hazard in the catalog consistency-marker write surfaced by the RDR-104 critic.
+
+### Fixed
+
+- **Consistency marker is now written inside the catalog rebuild transaction.** Pre-fix, ``Catalog._write_consistency_marker`` ran its own ``self._db.commit()`` after the rebuild's ``with self._db.transaction():`` block had already closed, making the marker write a separate atomic unit from the projection writes. Under the *current* call ordering (projection-then-marker) the failure direction is benign — projection commits first, marker second, crash between them re-rebuilds idempotently on the next run. But the *inverse* ordering (marker first, projection rolls back) would silently corrupt the projection by skipping events on the next run. One refactor away. The fix moves the marker write inside the rebuild transaction so the two writes commit atomically; the ordering hazard cannot exist regardless of caller code rearrangement.
+
+  ``CatalogDB.rebuild`` gained ``consistency_mtime: float | None = None`` keyword. When supplied, the marker write is the last statement inside the same ``with self._lock, self._conn, bulk_load_documents()`` block as the projection writes. ``Catalog._ensure_consistent`` was updated for both paths (event-sourced calls ``_write_consistency_marker`` from inside its existing ``transaction()`` block; legacy passes ``consistency_mtime=current_mtime`` to ``rebuild()``).
+
+  Regression test in ``tests/test_catalog_consistency_marker.py``: patches both ``CatalogDB.rebuild`` and ``Projector.apply_all`` to raise mid-transaction, asserts ``Catalog.degraded is True`` AND the persisted marker did NOT advance. Pins the invariant "rebuild raise = marker stays put" regardless of which path the seeded fixture exercises.
+
+### Background
+
+This is the atomicity-only piece of the broader incremental-projection-rebuild work tracked under bead nexus-rr0u and RDR-104. Shipping it as a standalone patch lets RDR-104 land on a clean atomicity baseline.
+
 ## [4.24.3] - 2026-05-05
 
 Patch release. Closes the per-file ChromaDB roundtrip blowups that surfaced once 4.24.2 made the catalog rebuild fast enough to expose them, and adds a richer summary line + crash-safe finally on the catalog-rebuild heartbeat.
