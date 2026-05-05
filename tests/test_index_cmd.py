@@ -403,9 +403,15 @@ def test_extractor_invalid_rejected(runner, fake_pdf):
 
 
 def test_mineru_not_installed_gives_helpful_error(runner, fake_pdf):
+    # nexus-2fyb: mineru is a default dep; the absence indicates a corrupt
+    # install, so the error message points at `uv tool install --reinstall`
+    # rather than a now-removed [mineru] extra.
     with patch(
         "nexus.doc_indexer.index_pdf",
-        side_effect=ImportError("MinerU is not installed. Install with: uv pip install 'conexus[mineru]'"),
+        side_effect=ImportError(
+            "MinerU is not importable but is a required dependency since "
+            "nexus-2fyb. Reinstall conexus: `uv tool install --reinstall conexus`."
+        ),
     ):
         result = runner.invoke(main, ["index", "pdf", str(fake_pdf), "--extractor", "mineru"])
     assert result.exit_code != 0

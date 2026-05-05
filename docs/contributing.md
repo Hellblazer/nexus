@@ -187,7 +187,7 @@ Every step below is **required**. Missing any one of them has caused problems in
 4. **Regenerate `uv.lock` and reinstall the local tool**
    ```bash
    uv sync
-   scripts/reinstall-tool.sh   # preserves [mineru] and other extras
+   scripts/reinstall-tool.sh   # preserves [local] and other extras (mineru is now a default dep)
    nx --version   # must print X.Y.Z before proceeding
    ```
    `uv.lock` **must** be committed — the release pipeline pins exact versions from it.

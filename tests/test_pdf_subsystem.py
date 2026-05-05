@@ -368,7 +368,8 @@ class TestFormulaPreservationOnRealPdf:
                 extractor.extract(self._FIXTURE, extractor="auto")
         msg = str(excinfo.value)
         assert "formulas" in msg
-        assert "conexus[mineru]" in msg
+        # mineru is a default dep since nexus-2fyb — missing = corrupt install
+        assert "uv tool install --reinstall conexus" in msg
         assert "--extractor docling" in msg
 
     def test_mineru_path_preserves_formulas(self) -> None:

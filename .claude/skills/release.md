@@ -23,7 +23,7 @@ Follow every step in order. Do not skip or reorder.
 4. **Regenerate lock and reinstall local tool**
    ```bash
    uv sync
-   scripts/reinstall-tool.sh   # preserves [mineru] and other extras
+   scripts/reinstall-tool.sh   # preserves [local] and other extras (mineru is now a default dep)
    nx --version
    ```
    Verify the printed version matches what you set in step 3. Do not proceed otherwise.

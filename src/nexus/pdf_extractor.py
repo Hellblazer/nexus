@@ -235,9 +235,11 @@ class PDFExtractor:
                 f"PDF {pdf_path.name} contains formulas (detected {formula_count}) "
                 f"but the formula-aware extractor MinerU is unavailable: "
                 f"{type(exc).__name__}: {exc} "
-                f"Rerun with `--extractor docling` to explicitly accept "
-                f"formula-stripped extraction, or install MinerU "
-                f"(`uv pip install 'conexus[mineru]'`)."
+                f"MinerU is a required dependency since nexus-2fyb; if it is "
+                f"missing your conexus install is broken — reinstall with "
+                f"`uv tool install --reinstall conexus`. To explicitly accept "
+                f"formula-stripped extraction without MinerU, rerun with "
+                f"`--extractor docling`."
             ) from exc
 
     # ── internal extraction methods ───────────────────────────────────────────
@@ -392,7 +394,8 @@ class PDFExtractor:
         """
         if do_parse is None:
             raise ImportError(
-                "MinerU is not installed. Install with: uv pip install 'conexus[mineru]'"
+                "MinerU is not importable but is a required dependency since "
+                "nexus-2fyb. Reinstall conexus: `uv tool install --reinstall conexus`."
             )
 
         import pymupdf  # lightweight — only used for page count

@@ -684,6 +684,7 @@ dependencies = [
     { name = "llama-index-core" },
     { name = "markdown-it-py" },
     { name = "mcp" },
+    { name = "mineru", extra = ["all"] },
     { name = "msgpack" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13' or sys_platform == 'linux'" },
     { name = "numpy", version = "2.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13' and sys_platform != 'linux'" },
@@ -703,9 +704,6 @@ dependencies = [
 [package.optional-dependencies]
 local = [
     { name = "fastembed" },
-]
-mineru = [
-    { name = "mineru", extra = ["all"] },
 ]
 
 [package.dev-dependencies]
@@ -728,7 +726,7 @@ requires-dist = [
     { name = "llama-index-core", specifier = "==0.12.7" },
     { name = "markdown-it-py", specifier = ">=4.0.0" },
     { name = "mcp", specifier = ">=1.0" },
-    { name = "mineru", extras = ["all"], marker = "extra == 'mineru'" },
+    { name = "mineru", extras = ["all"] },
     { name = "msgpack", specifier = ">=1.0" },
     { name = "numpy", specifier = ">=1.24" },
     { name = "opencv-python-headless", specifier = ">=4.0.0" },
@@ -743,7 +741,7 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"] },
     { name = "voyageai", specifier = ">=0.2" },
 ]
-provides-extras = ["local", "mineru"]
+provides-extras = ["local"]
 
 [package.metadata.requires-dev]
 dev = [

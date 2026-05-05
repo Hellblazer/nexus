@@ -1,6 +1,12 @@
 #!/bin/bash
-# Reinstall the nx CLI tool while preserving any optional extras
-# (e.g., [mineru], [local]) from the previous installation.
+# Reinstall the nx CLI tool, preserving optional extras (e.g. [local])
+# from the previous installation.
+#
+# nexus-2fyb: mineru was promoted from extras to a default dep. The
+# previous "preserve extras" logic silently propagated empty-extras
+# state for any install that didn't start with [mineru] — which was
+# every fresh install per README. mineru is now always present;
+# only genuinely-optional extras like [local] are receipt-driven.
 #
 # Usage: scripts/reinstall-tool.sh [source]
 #   source: install source (default: "." for local dev, use "conexus" for PyPI)
@@ -10,16 +16,16 @@ set -euo pipefail
 SOURCE="${1:-.}"
 RECEIPT="$(uv tool dir)/conexus/uv-receipt.toml"
 
-# Extract extras from the uv receipt if it exists
 EXTRAS=""
 if [[ -f "$RECEIPT" ]]; then
-    # Parse extras = ["mineru", "local"] from TOML
     EXTRAS=$(python3 -c "
-import re, sys
+import re
 text = open('$RECEIPT').read()
 m = re.search(r'extras\s*=\s*\[([^\]]*)\]', text)
 if m:
     extras = re.findall(r'\"([^\"]+)\"', m.group(1))
+    # 'mineru' is now a default dep — drop it if a stale receipt still lists it
+    extras = [e for e in extras if e != 'mineru']
     if extras:
         print(','.join(extras))
 " 2>/dev/null || true)
@@ -34,14 +40,14 @@ fi
 
 nx --version
 
-# Symlink extra entrypoints that uv tool doesn't expose automatically.
-# uv only symlinks the package's own console_scripts (nx, nx-mcp);
-# dependency console_scripts (mineru-api, mineru, etc.) stay hidden
-# in the tool venv bin dir.
+# Symlink dependency console_scripts (mineru-api, mineru) into ~/.local/bin.
+# uv only auto-symlinks the project's own entrypoints (nx, nx-mcp); deps stay
+# inside the tool venv. mineru is always present now (nexus-2fyb), so
+# unconditionally symlink it if the binaries exist.
 TOOL_BIN="$(uv tool dir)/conexus/bin"
 LOCAL_BIN="${HOME}/.local/bin"
 
-if [[ "$EXTRAS" == *"mineru"* && -d "$TOOL_BIN" ]]; then
+if [[ -d "$TOOL_BIN" ]]; then
     for cmd in mineru-api mineru; do
         if [[ -f "$TOOL_BIN/$cmd" ]]; then
             ln -sf "$TOOL_BIN/$cmd" "$LOCAL_BIN/$cmd"

@@ -556,8 +556,8 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
     help=(
         "PDF extraction backend (default: from .nexus.yml pdf.extractor, or 'auto'). "
         "'auto' detects formulas via Docling and switches to MinerU when found. "
-        "'docling' forces Docling. 'mineru' forces MinerU "
-        "(requires: uv pip install 'conexus[mineru]')."
+        "'docling' forces Docling (formula-stripped — opt-out of math handling). "
+        "'mineru' forces MinerU."
     ),
 )
 @click.option(

@@ -417,7 +417,9 @@ class TestAutoDetectRouting:
         msg = str(excinfo.value)
         assert "formulas" in msg
         assert "10" in msg  # formula count surfaced
-        assert "conexus[mineru]" in msg  # actionable install hint
+        # mineru is a default dep since nexus-2fyb; absence means a corrupt
+        # install, so the hint is "reinstall" not "install the extra".
+        assert "uv tool install --reinstall conexus" in msg
         assert "--extractor docling" in msg  # opt-out hint
         assert isinstance(excinfo.value.__cause__, ImportError)
 

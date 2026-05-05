@@ -236,8 +236,14 @@ class TestMineruRunIsolated:
 class TestMineruErrorHandling:
     """Error paths: missing dependency."""
 
-    def test_raises_import_error_when_mineru_not_installed(self, extractor, dummy_pdf):
-        """ImportError with install instructions when do_parse is None."""
+    def test_raises_import_error_when_mineru_not_importable(self, extractor, dummy_pdf):
+        """ImportError pointing at reinstall when do_parse is None.
+
+        nexus-2fyb: mineru is a default dep; missing import means the install
+        is corrupt, so the actionable hint is `uv tool install --reinstall
+        conexus`, not `pip install conexus[mineru]` (the extras gate that
+        produced silent formula loss for weeks).
+        """
         with patch("nexus.pdf_extractor.do_parse", None):
-            with pytest.raises(ImportError, match="MinerU is not installed"):
+            with pytest.raises(ImportError, match="uv tool install --reinstall conexus"):
                 extractor._extract_with_mineru(dummy_pdf)
