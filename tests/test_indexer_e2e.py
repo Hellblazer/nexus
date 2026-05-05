@@ -318,6 +318,40 @@ def test_index_frecency_only_preserves_count(
     assert col.count() == count
 
 
+def test_index_stamps_pipeline_version_without_force(
+    rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database
+) -> None:
+    """nexus-7yfm: incremental index writes pipeline_version stamp.
+
+    The stamp asserts "these embeddings were produced by PIPELINE_VERSION
+    code." Whether ``--force`` was used does not change which pipeline
+    produced them — both paths run the same chunker + embedder. So the
+    stamp must be written on every successful index, not only on force.
+    """
+    from nexus.indexer import PIPELINE_VERSION, get_collection_pipeline_version
+
+    _index(rich_repo, rich_registry, local_t3)
+    info = rich_registry.get(rich_repo)
+    code_col = local_t3.get_or_create_collection(info["code_collection"])
+    docs_col = local_t3.get_or_create_collection(info["docs_collection"])
+    assert get_collection_pipeline_version(code_col) == PIPELINE_VERSION
+    assert get_collection_pipeline_version(docs_col) == PIPELINE_VERSION
+
+
+def test_index_stamps_pipeline_version_with_force(
+    rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database
+) -> None:
+    """Regression guard — --force still stamps after the always-stamp fix."""
+    from nexus.indexer import PIPELINE_VERSION, get_collection_pipeline_version
+
+    _index(rich_repo, rich_registry, local_t3, force=True)
+    info = rich_registry.get(rich_repo)
+    code_col = local_t3.get_or_create_collection(info["code_collection"])
+    docs_col = local_t3.get_or_create_collection(info["docs_collection"])
+    assert get_collection_pipeline_version(code_col) == PIPELINE_VERSION
+    assert get_collection_pipeline_version(docs_col) == PIPELINE_VERSION
+
+
 # ── Smart indexing: dual collection ───────────────────────────────────────────
 
 def test_smart_index_creates_both_collections(

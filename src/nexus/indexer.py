@@ -1991,23 +1991,26 @@ def _run_index(
         )
         _phase(f"Pruning deleted files done ({time.monotonic() - _t:.1f}s)")
 
-        # Stamp pipeline version on force indexing (after all work completes)
-        if force:
-            _phase("Stamping pipeline version on forced collections…")
-            _t = time.monotonic()
-            stamp_collection_version(code_col)
-            stamp_collection_version(docs_col)
-            # Stamp RDR collection if it was indexed
-            if rdr_indexed > 0:
-                # RDR-103 Phase 3a: catalog-first resolution; legacy
-                # fallback retained for catalog-absent test paths.
-                rdr_col_name = _repo_collection_or_legacy(repo, "rdr")
-                try:
-                    rdr_col = db.get_or_create_collection(rdr_col_name)
-                    stamp_collection_version(rdr_col)
-                except Exception:
-                    _log.debug("rdr_stamp_skipped", collection=rdr_col_name)
-            _phase(f"Pipeline version stamped ({time.monotonic() - _t:.1f}s)")
+        # Stamp pipeline version after all work completes (nexus-7yfm).
+        # Stamps on every successful run, not just --force: the stamp asserts
+        # "these embeddings were produced by PIPELINE_VERSION code", and that
+        # is true regardless of whether --force was used. Gating the stamp on
+        # --force forced operators to re-pay for full re-embedding to repair
+        # a state that should never have existed.
+        _phase("Stamping pipeline version…")
+        _t = time.monotonic()
+        stamp_collection_version(code_col)
+        stamp_collection_version(docs_col)
+        if rdr_indexed > 0:
+            # RDR-103 Phase 3a: catalog-first resolution; legacy
+            # fallback retained for catalog-absent test paths.
+            rdr_col_name = _repo_collection_or_legacy(repo, "rdr")
+            try:
+                rdr_col = db.get_or_create_collection(rdr_col_name)
+                stamp_collection_version(rdr_col)
+            except Exception:
+                _log.debug("rdr_stamp_skipped", collection=rdr_col_name)
+        _phase(f"Pipeline version stamped ({time.monotonic() - _t:.1f}s)")
 
         # Catalog registration ran upfront (RDR-101 Phase 3 PR δ Stage B)
         # so prose chunks could carry ``doc_id`` at chunk-write time.
