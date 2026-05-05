@@ -130,3 +130,79 @@ def test_marker_lives_inside_sqlite_not_on_disk(seeded_catalog_dir: Path) -> Non
         "marker should live inside the SQLite _meta table, not as a "
         "sidecar file on disk"
     )
+
+
+def test_rebuild_emits_rich_summary_on_slow_rebuild(
+    seeded_catalog_dir: Path,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When a rebuild crosses the elapsed-time gate the summary line
+    carries diagnostic detail (trigger file, replay/load counts,
+    elapsed). Pre-fix the rebuild printed only ``done (Ns)``; users
+    seeing a 3.4s rebuild had no signal of what was actually replayed.
+
+    Patches ``time.monotonic`` inside ``nexus.catalog.catalog`` so the
+    fast in-test rebuild fakes ~2 s of elapsed and crosses the
+    1-second progress gate. Verifies the line contains the trigger
+    file name, a count signal (docs/owners/links/events), and the
+    elapsed.
+    """
+    # Force a rebuild — bump mtime past whatever the marker holds.
+    import time
+    for name in ("documents.jsonl", "owners.jsonl"):
+        f = seeded_catalog_dir / name
+        if f.exists():
+            now = time.time()
+            os.utime(f, (now, now))
+
+    # Patch time.monotonic in the catalog module so elapsed reads ~2s
+    # and crosses _PROGRESS_MIN_ELAPSED. Use a list-as-iterator so the
+    # heartbeat thread (which also reads monotonic) doesn't blow up.
+    real_monotonic = time.monotonic
+    base = real_monotonic()
+    call_count = {"n": 0}
+
+    def fake_monotonic() -> float:
+        call_count["n"] += 1
+        # First call: sets started=base. Subsequent calls: return
+        # base + 2.0s so elapsed reads as 2.0.
+        return base if call_count["n"] == 1 else base + 2.0
+
+    monkeypatch.setattr("nexus.catalog.catalog.time.monotonic", fake_monotonic)
+
+    capsys.readouterr()  # drain anything from the seeded fixture
+    _make_catalog(seeded_catalog_dir)
+
+    err = capsys.readouterr().err
+    assert "Catalog: rebuild triggered by" in err, (
+        f"expected trigger label in stderr, got: {err!r}"
+    )
+    # Summary line includes a count signal — what makes the message
+    # useful versus the prior bare "done (Ns)".
+    assert any(token in err for token in (" docs,", " links", " events ")), (
+        f"summary line missing the size signal: {err!r}"
+    )
+    # Elapsed reported.
+    assert "2.0s" in err, (
+        f"elapsed missing or wrong scale: {err!r}"
+    )
+
+
+def test_rebuild_silent_under_one_second(
+    seeded_catalog_dir: Path, capsys: pytest.CaptureFixture,
+) -> None:
+    """Fast rebuilds (sub-second; the common case post-FTS5-fix) emit
+    no summary line. CLI commands that incidentally trigger a rebuild
+    don't scribble progress over their own output.
+
+    The seeded fixture rebuild completes in milliseconds, well below
+    the :data:`_PROGRESS_MIN_ELAPSED` gate.
+    """
+    capsys.readouterr()
+    _make_catalog(seeded_catalog_dir)
+
+    err = capsys.readouterr().err
+    assert "Catalog: rebuild" not in err, (
+        f"fast rebuild leaked progress line: {err!r}"
+    )
