@@ -32,10 +32,18 @@ if TYPE_CHECKING:
 _HEARTBEAT_INTERVAL = 5.0
 
 
+# Summary lines fire only when a rebuild took at least this long. Fast
+# rebuilds (sub-second; the common case post-FTS5-fix) stay completely
+# silent — operators have no diagnostic question to answer. Slow ones
+# get the rich line with event/document/link counts and elapsed time.
+# Same threshold gates the trigger-line emission inside _ensure_consistent.
+_PROGRESS_MIN_ELAPSED = 1.0
+
+
 @contextmanager
-def _rebuild_heartbeat(label: str):
+def _rebuild_heartbeat(label: str, summary_builder=None):
     """Print elapsed-time heartbeats to stderr while a long catalog
-    operation runs.
+    operation runs, plus a one-line summary at completion.
 
     Spawns a daemon thread that wakes every :data:`_HEARTBEAT_INTERVAL`
     seconds and writes ``Catalog: {label} (Ns)\\r`` so the user has a
@@ -49,8 +57,17 @@ def _rebuild_heartbeat(label: str):
     while the catalog DB churned. Indistinguishable from a hang.
 
     The first heartbeat is delayed by one full interval so operations
-    that finish in <5s stay completely silent. On exit, prints a
-    summary line if the operation took >1s.
+    that finish in <:data:`_HEARTBEAT_INTERVAL`s stay completely
+    silent. The exit summary line fires only when the rebuild took at
+    least :data:`_PROGRESS_MIN_ELAPSED` seconds — fast rebuilds (the
+    common case on a healthy projection) emit nothing, so CLI commands
+    that happen to trigger an incidental rebuild don't scribble
+    progress over their own output.
+
+    *summary_builder* is an optional callable ``(elapsed: float) -> str``
+    invoked at exit when the elapsed-time gate fires. Its return value
+    is the summary line. The builder runs after the work is complete,
+    so it can read final counts from the catalog DB.
     """
     stop = threading.Event()
     started = time.monotonic()
@@ -74,9 +91,58 @@ def _rebuild_heartbeat(label: str):
         stop.set()
         thread.join(timeout=1.0)
         elapsed = time.monotonic() - started
-        if elapsed > 1.0:
-            sys.stderr.write(f"  Catalog: {label} done ({elapsed:.1f}s)\n")
+        # NOTE: must not ``return`` from this finally block — a bare
+        # return inside a finally inside a contextmanager generator
+        # swallows any exception that was propagating out of the
+        # ``yield``, masking real failures (e.g. a ``CatalogDB.rebuild``
+        # raise was being silently dropped, leaving ``Catalog.degraded``
+        # un-set). Use an if/else gate around the write instead so the
+        # finally falls off the end and the exception (if any)
+        # continues to propagate.
+        if elapsed >= _PROGRESS_MIN_ELAPSED:
+            if summary_builder is not None:
+                try:
+                    line = summary_builder(elapsed)
+                except Exception:
+                    # Never let a summary-rendering bug mask the real
+                    # work — fall back to the plain message.
+                    line = f"  Catalog: {label} done ({elapsed:.1f}s)"
+            else:
+                line = f"  Catalog: {label} done ({elapsed:.1f}s)"
+            sys.stderr.write(f"{line}\n")
             sys.stderr.flush()
+
+
+def _count_lines(path: Path) -> int:
+    """Return the line count of *path*, or 0 on any error.
+
+    Used to surface the size of an event-log replay or a JSONL rebuild
+    in the operator-visible heartbeat. Errors are swallowed so a
+    permission glitch on the count never prevents the rebuild itself
+    from running.
+    """
+    try:
+        with path.open("rb") as f:
+            return sum(1 for _ in f)
+    except Exception:
+        return 0
+
+
+def _trigger_file_label(
+    paths_with_mtime: list[tuple[Path, float]], threshold: float,
+) -> str:
+    """Return the basename of the canonical-truth file whose mtime is
+    newest above *threshold* — i.e. the one that triggered the rebuild.
+
+    Returns ``unknown`` when no file is over threshold, which only
+    happens on the degraded-state forced rebuild path; in steady state
+    at least one file's mtime is always newer than the persisted marker.
+    """
+    over = [(p, m) for p, m in paths_with_mtime if m > threshold]
+    if not over:
+        return "unknown"
+    p, _ = max(over, key=lambda pm: pm[1])
+    return p.name
 
 # RDR-101 Phase 1 PR F: shadow event-log emit gate. Read once at
 # Catalog.__init__ time. Recognised "on" values match the boolean-env
@@ -665,6 +731,26 @@ class Catalog:
         except (sqlite3.OperationalError, ValueError, TypeError):
             return 0.0
 
+    def _projection_counts(self) -> tuple[int, int]:
+        """Return (document_count, link_count) for the heartbeat summary.
+
+        Read-only; used by the post-rebuild summary line so operators
+        can see the size of what they just rebuilt. Tolerates errors
+        and returns ``(0, 0)`` on failure — the summary is informational
+        and must never mask a real rebuild result.
+        """
+        try:
+            doc_row = self._db.execute(
+                "SELECT COUNT(*) FROM documents"
+            ).fetchone()
+            link_row = self._db.execute(
+                "SELECT COUNT(*) FROM links"
+            ).fetchone()
+            return (int(doc_row[0]) if doc_row else 0,
+                    int(link_row[0]) if link_row else 0)
+        except Exception:
+            return (0, 0)
+
     def _write_consistency_marker(self, mtime: float) -> None:
         """Persist the highest successfully-projected canonical mtime.
 
@@ -745,6 +831,7 @@ class Catalog:
             # the gate ON, events.jsonl is canonical but legacy JSONL is
             # still written (back-compat) and a bootstrap catalog may
             # have JSONL data with an empty events.jsonl.
+            paths_with_mtime: list[tuple[Path, float]] = []
             current_mtime = 0.0
             for p in (
                 self._owners_path,
@@ -753,9 +840,14 @@ class Catalog:
                 self._events_path,
             ):
                 if p.exists():
-                    current_mtime = max(current_mtime, p.stat().st_mtime)
+                    m = p.stat().st_mtime
+                    paths_with_mtime.append((p, m))
+                    current_mtime = max(current_mtime, m)
             if current_mtime <= self._last_consistency_mtime and not self.degraded:
                 return
+            trigger = _trigger_file_label(
+                paths_with_mtime, self._last_consistency_mtime,
+            )
 
             use_event_log = (
                 self._event_sourced_enabled
@@ -815,7 +907,19 @@ class Catalog:
                     "catalog_consistency_rebuild_event_sourced",
                     mtime=current_mtime,
                 )
-                with _rebuild_heartbeat("rebuilding projection"):
+                event_count = _count_lines(self._events_path)
+
+                def _summary(elapsed: float) -> str:
+                    docs, links = self._projection_counts()
+                    return (
+                        f"  Catalog: rebuild triggered by {trigger} — "
+                        f"replayed {event_count:,} events → "
+                        f"{docs:,} docs, {links:,} links in {elapsed:.1f}s"
+                    )
+
+                with _rebuild_heartbeat(
+                    "rebuilding projection", summary_builder=_summary,
+                ):
                     with self._db.transaction() as conn:
                         with self._db.bulk_load_documents():
                             conn.execute("DELETE FROM links")
@@ -832,7 +936,24 @@ class Catalog:
                 documents = read_documents(self._documents_path) if self._documents_path.exists() else {}
                 links_dict = read_links(self._links_path) if self._links_path.exists() else {}
                 _log.debug("catalog_consistency_rebuild", mtime=current_mtime)
-                with _rebuild_heartbeat("rebuilding projection"):
+                # Pre-rebuild sizes (the bulk dicts are about to be
+                # truncated and reloaded). _summary captures these by
+                # closure so the post-rebuild line reports what just
+                # got loaded.
+                n_owners = len(owners)
+                n_docs = len(documents)
+                n_links = len(links_dict)
+
+                def _summary(elapsed: float) -> str:
+                    return (
+                        f"  Catalog: rebuild triggered by {trigger} — "
+                        f"loaded {n_owners:,} owners, {n_docs:,} docs, "
+                        f"{n_links:,} links in {elapsed:.1f}s"
+                    )
+
+                with _rebuild_heartbeat(
+                    "rebuilding projection", summary_builder=_summary,
+                ):
                     self._db.rebuild(owners, documents, list(links_dict.values()))
             self._last_consistency_mtime = current_mtime
             # nexus-wehp: persist the marker so next-process construction
