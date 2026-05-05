@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import sqlite3
@@ -168,6 +169,41 @@ _SHADOW_EMIT_ENV = "NEXUS_EVENT_LOG_SHADOW"
 # ``NEXUS_EVENT_SOURCED=0`` (or ``false``/``no``/``off``) to opt back
 # into the legacy direct-write path at runtime.
 _EVENT_SOURCED_ENV = "NEXUS_EVENT_SOURCED"
+
+# RDR-104 Step 2: incremental-rebuild marker constants.
+#
+# ``_HEADER_HASH_BYTES`` is the prefix size hashed to detect
+# events.jsonl rewrites (truncate, atomic-replace, ``git reset``). Any
+# rewrite that touches the first 64 KB makes the hash drift, which the
+# orchestrator treats as cache invalidation and falls through to full
+# rebuild. The window value is persisted alongside the hash so a future
+# bump of this constant invalidates prior markers cleanly via the
+# ``last_applied_event_header_window`` row rather than silently
+# comparing hashes computed over different windows (Round 1 gate
+# observation #3).
+_HEADER_HASH_BYTES = 64 * 1024
+_META_KEY_LAST_OFFSET = "last_applied_event_offset"
+_META_KEY_HEADER_HASH = "last_applied_event_header_hash"
+_META_KEY_HEADER_WINDOW = "last_applied_event_header_window"
+
+
+def _compute_header_hash(events_path: Path) -> str:
+    """Return ``sha256(open(events_path, 'rb').read(_HEADER_HASH_BYTES)).hexdigest()``.
+
+    RDR-104 Step 2: detection signal for events.jsonl rewrites. Reading
+    only the first window avoids a full file scan on every rebuild
+    decision; an appender leaves the prefix unchanged so the hash
+    matches and the marker stays valid; a truncate/replace/reset
+    typically touches early bytes so the hash drifts and the
+    orchestrator falls through to full rebuild.
+
+    The pathological adversarial case (rewrite preserving first 64 KB)
+    is bounded by the v0 projector verbs' idempotency: redundant
+    re-application yields the same projection, no semantic drift,
+    documented as known-cost-not-known-corruption.
+    """
+    with events_path.open("rb") as f:
+        return hashlib.sha256(f.read(_HEADER_HASH_BYTES)).hexdigest()
 
 
 def _read_shadow_gate() -> bool:
@@ -782,7 +818,97 @@ class Catalog:
                 ("last_consistency_mtime", f"{mtime}"),
             )
         except sqlite3.OperationalError:
+            # RDR-104 Round 2 Significant #1: the OperationalError
+            # swallow is intentional. Marker-write failure is rare
+            # (transient SQLite lock contention is the most likely
+            # cause), idempotent re-replay corrects the next run, and
+            # propagating would degrade the catalog (``degraded=True``)
+            # for a recoverable cause. The in-memory mirror
+            # ``self._last_consistency_mtime`` is assigned post-
+            # ``with`` so this instance still short-circuits its own
+            # subsequent rebuilds; the next process reads the un-
+            # advanced DB row and re-rebuilds, which is correct.
             pass
+
+    def _write_offset_marker(
+        self, *, offset: int, header_hash: str, window: int,
+    ) -> None:
+        """Persist the three RDR-104 incremental marker rows atomically.
+
+        RDR-104 Step 2: writes ``last_applied_event_offset``,
+        ``last_applied_event_header_hash``, and
+        ``last_applied_event_header_window`` to ``_meta``. All three
+        rows must commit together with the projector writes (and the
+        ``last_consistency_mtime`` row from
+        ``_write_consistency_marker``) so the marker is consistent
+        with the projection state.
+
+        Caller contract: this method is invoked from inside an active
+        ``CatalogDB.transaction()`` block. The connection-as-context-
+        manager commits all four marker rows atomically with the
+        projection writes on successful exit; rolls them all back
+        together on any exception. Do NOT call ``self._db.commit()``
+        here — see ``_write_consistency_marker`` for the same atomicity
+        contract.
+
+        Tolerates ``sqlite3.OperationalError`` for the same reasoning
+        as ``_write_consistency_marker``: rare transient lock
+        contention is corrected by the next idempotent re-replay.
+        """
+        try:
+            self._db.execute(
+                "INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)",
+                (_META_KEY_LAST_OFFSET, str(offset)),
+            )
+            self._db.execute(
+                "INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)",
+                (_META_KEY_HEADER_HASH, header_hash),
+            )
+            self._db.execute(
+                "INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)",
+                (_META_KEY_HEADER_WINDOW, str(window)),
+            )
+        except sqlite3.OperationalError:
+            # See _write_consistency_marker for the rationale on the
+            # silent OperationalError swallow (RDR-104 Round 2 #1).
+            pass
+
+    def _read_offset_marker(self) -> tuple[int, str, int] | None:
+        """Return ``(offset, header_hash, window)`` or ``None``.
+
+        RDR-104 Step 2: returns ``None`` when any of the three rows is
+        missing OR when the offset / window string is unparseable as
+        ``int``. The orchestrator (Step 3) treats ``None`` as the
+        bootstrap signal and falls through to full rebuild.
+
+        Returning a partial tuple would let the orchestrator act on
+        inconsistent metadata; full rebuild is the correctness-
+        preserving fallback.
+        """
+        try:
+            rows = self._db.execute(
+                "SELECT key, value FROM _meta WHERE key IN (?, ?, ?)",
+                (
+                    _META_KEY_LAST_OFFSET,
+                    _META_KEY_HEADER_HASH,
+                    _META_KEY_HEADER_WINDOW,
+                ),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return None
+        by_key = {key: value for key, value in rows}
+        if (
+            _META_KEY_LAST_OFFSET not in by_key
+            or _META_KEY_HEADER_HASH not in by_key
+            or _META_KEY_HEADER_WINDOW not in by_key
+        ):
+            return None
+        try:
+            offset = int(by_key[_META_KEY_LAST_OFFSET])
+            window = int(by_key[_META_KEY_HEADER_WINDOW])
+        except (TypeError, ValueError):
+            return None
+        return (offset, by_key[_META_KEY_HEADER_HASH], window)
 
     @staticmethod
     def _prefix_sql(prefix: str) -> tuple[str, list]:
@@ -899,64 +1025,221 @@ class Catalog:
             else:
                 self.bootstrap_fallback_active = False
             if use_event_log:
-                # Replay events.jsonl through the projector into the
-                # live CatalogDB. Atomic: the transaction context
-                # rolls back the DELETEs if apply_all raises.
+                # RDR-104 Step 3: five-way dispatch over the event-
+                # sourced rebuild paths.
                 #
-                # The bulk_load_documents fence drops the documents_fts
-                # triggers for the duration of the replay and rebuilds
-                # the FTS5 index in one shot at the end. Without this
-                # fence, every replayed INSERT queues per-row hash
-                # entries that SQLite cannot merge until COMMIT — turning
-                # the COMMIT into a 15-20 min FTS5 merge for a catalog
-                # with hundreds of thousands of events. The heartbeat
-                # surfaces elapsed time during the rebuild so operators
-                # can distinguish "catalog is grinding" from "catalog
-                # has hung." See nexus-rr0u for the deeper architectural
-                # fix (incremental projection against last_applied_event_id)
-                # which would eliminate the rebuild from firing at all
-                # in steady state.
+                #   (a) empty-delta fast path — events.jsonl unchanged,
+                #       only the mtime row advances. Mandatory inside
+                #       transaction() for the 4.24.4 atomicity contract.
+                #   (b) bootstrap full rebuild — no offset marker yet;
+                #       DELETE + replay from offset 0 and write all
+                #       four marker rows.
+                #   (c) invalidated full rebuild — header-hash drift
+                #       OR window-size mismatch; same as bootstrap.
+                #   (d) incremental — marker valid, delta non-empty;
+                #       replay_from(stored_offset, limit_offset=eof)
+                #       inside transaction() with apply_all(commit=
+                #       False), then write all four marker rows.
+                #   (e) corruption escalation — bounded iterator yields
+                #       zero events from a non-empty range; escalate
+                #       to (c) WITHOUT advancing the marker.
+                #
+                # The bulk_load_documents FTS5 fence is preserved on
+                # the full-rebuild path only — the per-event projector
+                # writes there number in the hundreds of thousands and
+                # need the trigger-drop-and-rebuild idiom. Incremental
+                # writes are bounded by the delta size (typically <100
+                # events) so the per-row trigger overhead is
+                # unmeasurable.
                 from nexus.catalog.event_log import EventLog
                 _log.debug(
                     "catalog_consistency_rebuild_event_sourced",
                     mtime=current_mtime,
                 )
-                event_count = _count_lines(self._events_path)
 
-                def _summary(elapsed: float) -> str:
-                    docs, links = self._projection_counts()
-                    return (
-                        f"  Catalog: rebuild triggered by {trigger} — "
-                        f"replayed {event_count:,} events → "
-                        f"{docs:,} docs, {links:,} links in {elapsed:.1f}s"
-                    )
+                eof_offset_now = self._events_path.stat().st_size
+                stored = self._read_offset_marker()
+                header_hash_now: str | None = None
 
-                with _rebuild_heartbeat(
-                    "rebuilding projection", summary_builder=_summary,
-                ):
-                    with self._db.transaction() as conn:
-                        with self._db.bulk_load_documents():
-                            conn.execute("DELETE FROM links")
-                            conn.execute("DELETE FROM documents")
-                            conn.execute("DELETE FROM owners")
-                            # commit=False — the transaction context owns the
-                            # commit boundary; a nested commit() would finalize
-                            # the tx prematurely and defeat the rollback fence.
-                            self._projector.apply_all(
-                                EventLog(self._dir).replay(), commit=False,
+                # Empty-delta fast path (Round 1 Significant #4 / Round 2 #4).
+                # eof_offset_now == stored_offset means events.jsonl has not
+                # been appended to since the last successful rebuild. mtime
+                # ticked elsewhere (a legacy JSONL write, owners.jsonl, etc.)
+                # so we landed in the rebuild branch but there is nothing to
+                # replay. Advance only last_consistency_mtime — inside a
+                # transaction() for the 4.24.4 atomicity contract.
+                if stored is not None and stored[0] == eof_offset_now:
+                    def _summary_empty(elapsed: float) -> str:
+                        return (
+                            f"  Catalog: rebuild triggered by {trigger} — "
+                            f"empty delta → mtime-only marker advance "
+                            f"in {elapsed:.1f}s"
+                        )
+                    with _rebuild_heartbeat(
+                        "advancing consistency marker",
+                        summary_builder=_summary_empty,
+                    ):
+                        with self._db.transaction():
+                            self._write_consistency_marker(current_mtime)
+                else:
+                    # Decide bootstrap / invalidated / incremental.
+                    do_full = False
+                    invalidation: str | None = None
+                    if stored is None:
+                        do_full = True
+                        invalidation = "bootstrap"
+                    else:
+                        stored_offset, stored_hash, stored_window = stored
+                        if stored_window != _HEADER_HASH_BYTES:
+                            do_full = True
+                            invalidation = "window-size mismatch"
+                        else:
+                            header_hash_now = _compute_header_hash(
+                                self._events_path,
                             )
-                        # RDR-104 critic Critical #2 fix: consistency marker
-                        # is written INSIDE the same transaction as the
-                        # projection writes. The transaction context commits
-                        # both atomically on success, rolls both back together
-                        # on any exception. Pre-fix the marker write lived
-                        # OUTSIDE this block in _write_consistency_marker()'s
-                        # own commit(), which left a refactoring hazard:
-                        # any rearrangement that put the marker commit before
-                        # the projection commit would silently skip events on
-                        # the next run (rollback of projection without rolling
-                        # back the marker).
-                        self._write_consistency_marker(current_mtime)
+                            if stored_hash != header_hash_now:
+                                do_full = True
+                                invalidation = "header-hash drift"
+
+                    if not do_full:
+                        # Incremental path: replay only the bytes in
+                        # [stored_offset, eof_offset_now). The bounded
+                        # form is mandatory for concurrent-appender
+                        # safety (Round 2 Critical #1) — without it, a
+                        # writer landing between the stat() above and
+                        # the iterator's read window would extend the
+                        # iterator past eof_offset_now, the marker we
+                        # then persist (eof_offset_now, the pre-append
+                        # snapshot) would be stale below the actual
+                        # applied-event tail, and the empty-delta fast
+                        # path would never settle for that range.
+                        stored_offset, stored_hash, stored_window = stored
+                        delta_events = list(
+                            EventLog(self._dir).replay_from(
+                                stored_offset,
+                                limit_offset=eof_offset_now,
+                            )
+                        )
+                        if not delta_events and stored_offset < eof_offset_now:
+                            # Round 3 Significant #2: zero events from a
+                            # non-empty delta range is the corruption
+                            # signal. Escalate to full rebuild WITHOUT
+                            # advancing the marker so the recovery is
+                            # idempotent under retry.
+                            do_full = True
+                            invalidation = (
+                                "incremental corruption "
+                                "(zero events from non-empty delta)"
+                            )
+                        else:
+                            replayed_count = len(delta_events)
+
+                            def _summary_incremental(elapsed: float) -> str:
+                                docs, links = self._projection_counts()
+                                return (
+                                    f"  Catalog: rebuild triggered by "
+                                    f"{trigger} — replayed "
+                                    f"{replayed_count:,} events "
+                                    f"incrementally → {docs:,} docs, "
+                                    f"{links:,} links in {elapsed:.1f}s"
+                                )
+
+                            with _rebuild_heartbeat(
+                                "applying incremental delta",
+                                summary_builder=_summary_incremental,
+                            ):
+                                with self._db.transaction():
+                                    # commit=False mirrors the full-
+                                    # rebuild path. A nested commit()
+                                    # would defeat the rollback fence
+                                    # and re-introduce the 4.24.4
+                                    # ordering hazard (Round 3
+                                    # Significant #3).
+                                    self._projector.apply_all(
+                                        iter(delta_events), commit=False,
+                                    )
+                                    self._write_consistency_marker(
+                                        current_mtime,
+                                    )
+                                    self._write_offset_marker(
+                                        offset=eof_offset_now,
+                                        header_hash=stored_hash,
+                                        window=stored_window,
+                                    )
+
+                    if do_full:
+                        # Bootstrap, invalidated, or escalated-corruption
+                        # full rebuild. The bulk_load_documents FTS5
+                        # fence is preserved here because the per-event
+                        # projector writes can number in the hundreds of
+                        # thousands; without the fence each replayed
+                        # INSERT queues per-row hash entries that SQLite
+                        # cannot merge mid-transaction (15-20 min COMMIT
+                        # on a hot catalog).
+                        if header_hash_now is None:
+                            header_hash_now = _compute_header_hash(
+                                self._events_path,
+                            )
+                        event_count = _count_lines(self._events_path)
+                        invalidation_label = invalidation
+
+                        def _summary_full(elapsed: float) -> str:
+                            docs, links = self._projection_counts()
+                            qualifier = (
+                                f" ({invalidation_label} → full rebuild)"
+                                if invalidation_label
+                                and invalidation_label != "bootstrap"
+                                else ""
+                            )
+                            return (
+                                f"  Catalog: rebuild triggered by "
+                                f"{trigger} — replayed "
+                                f"{event_count:,} events → {docs:,} "
+                                f"docs, {links:,} links in "
+                                f"{elapsed:.1f}s{qualifier}"
+                            )
+
+                        with _rebuild_heartbeat(
+                            "rebuilding projection",
+                            summary_builder=_summary_full,
+                        ):
+                            with self._db.transaction() as conn:
+                                with self._db.bulk_load_documents():
+                                    conn.execute("DELETE FROM links")
+                                    conn.execute("DELETE FROM documents")
+                                    conn.execute("DELETE FROM owners")
+                                    # Step 0 (Critical #1): see the
+                                    # earlier comment for the rationale
+                                    # and why the COALESCE in
+                                    # _v0_collection_created is
+                                    # retained for the degraded-path
+                                    # retry case (Round 3 Significant
+                                    # #1).
+                                    conn.execute("DELETE FROM collections")
+                                    # commit=False — the transaction
+                                    # context owns the commit boundary;
+                                    # a nested commit() would defeat
+                                    # the rollback fence.
+                                    self._projector.apply_all(
+                                        EventLog(self._dir).replay(),
+                                        commit=False,
+                                    )
+                                # 4.24.4 atomicity contract: marker
+                                # writes happen INSIDE the same
+                                # transaction as the projection writes.
+                                # The transaction context commits all
+                                # rows atomically on success, rolls
+                                # them all back together on any
+                                # exception. Pre-4.24.4 the marker
+                                # write lived OUTSIDE this block in
+                                # _write_consistency_marker()'s own
+                                # commit(), a refactoring hazard.
+                                self._write_consistency_marker(current_mtime)
+                                self._write_offset_marker(
+                                    offset=eof_offset_now,
+                                    header_hash=header_hash_now,
+                                    window=_HEADER_HASH_BYTES,
+                                )
             else:
                 owners = read_owners(self._owners_path) if self._owners_path.exists() else {}
                 documents = read_documents(self._documents_path) if self._documents_path.exists() else {}

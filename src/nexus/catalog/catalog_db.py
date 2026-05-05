@@ -413,6 +413,17 @@ class CatalogDB:
             self._conn.execute("DELETE FROM links")
             self._conn.execute("DELETE FROM documents")
             self._conn.execute("DELETE FROM owners")
+            # RDR-104 Step 0 (Critical #1): clear ``collections`` too.
+            # Legacy rebuild has no ``collections`` dict (collections
+            # are event-sourced exclusively), so this DELETE leaves
+            # the table empty for the event-sourced replay that
+            # always follows when ``events.jsonl`` exists. Pre-fix
+            # the absence of this DELETE combined with
+            # ``_v0_collection_created``'s ``INSERT OR REPLACE`` plus
+            # COALESCE-preservation pattern silently inherited stale
+            # ``superseded_by``/``superseded_at``/``created_at`` from
+            # the prior run.
+            self._conn.execute("DELETE FROM collections")
 
             for prefix, o in owners.items():
                 self._conn.execute(

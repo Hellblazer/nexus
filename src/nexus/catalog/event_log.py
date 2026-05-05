@@ -169,6 +169,110 @@ class EventLog:
                     )
                     continue
 
+    def replay_from(
+        self,
+        offset: int,
+        *,
+        limit_offset: int | None = None,
+    ) -> Iterator[Event]:
+        """Yield events whose start-of-line byte offset is in ``[offset, limit_offset)``.
+
+        RDR-104 Step 1: offset-aware streaming iterator powering the
+        incremental rebuild path in ``Catalog._ensure_consistent``.
+
+        ``offset`` is a raw byte position in the file. The file is opened
+        in **binary mode** + ``seek(offset)`` so byte positions are
+        portable across platforms. Text-mode ``tell()`` returns an
+        opaque cookie under universal-newline translation on Windows,
+        which is NOT a portable offset; binary-mode is the only correct
+        shape for marker round-tripping.
+
+        ``limit_offset`` (when supplied) caps the iterator at the half-
+        open boundary: a line whose start-of-line offset is ``>=
+        limit_offset`` is excluded. The bounded form is **mandatory** for
+        concurrent-appender safety in the incremental orchestrator: a
+        writer landing between the orchestrator's ``stat()`` snapshot
+        and this iterator's read window must not extend the iterator
+        past the captured offset, or the marker the orchestrator
+        persists drifts below the true tail and incremental never
+        settles. The unbounded form (``limit_offset=None``) preserves
+        natural "everything from offset onwards" semantics for any
+        future caller.
+
+        Mid-line / malformed-first-line behaviour follows the existing
+        ``replay()`` pattern: warn-and-skip rather than raise. The
+        orchestrator detects corruption at the caller layer (zero
+        events yielded from a non-empty delta range) and escalates to
+        full rebuild.
+
+        Raises ``ValueError`` when ``offset > file_size`` — the marker
+        is past the end of the file (truncated since marker write), so
+        the caller falls back to full rebuild.
+        """
+        if not self._path.exists():
+            return
+        file_size = self._path.stat().st_size
+        if offset > file_size:
+            raise ValueError(
+                f"replay_from offset {offset} exceeds file size {file_size}",
+            )
+        if offset == file_size:
+            return  # nothing in the half-open range
+        if limit_offset is not None and offset >= limit_offset:
+            return
+        with self._path.open("rb") as f:
+            f.seek(offset)
+            lineno = 0
+            while True:
+                line_start = f.tell()
+                if limit_offset is not None and line_start >= limit_offset:
+                    return
+                raw = f.readline()
+                if not raw:
+                    return
+                lineno += 1
+                try:
+                    line = raw.decode("utf-8").strip()
+                except UnicodeDecodeError as exc:
+                    _log.warning(
+                        "event_log_decode_error",
+                        path=str(self._path),
+                        line_start=line_start,
+                        error=str(exc),
+                    )
+                    continue
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    _log.warning(
+                        "event_log_parse_error",
+                        path=str(self._path),
+                        line_start=line_start,
+                        preview=line[:80],
+                    )
+                    continue
+                if "type" not in obj:
+                    _log.warning(
+                        "event_log_missing_type",
+                        path=str(self._path),
+                        line_start=line_start,
+                        preview=line[:80],
+                    )
+                    continue
+                try:
+                    yield Event.from_dict(obj)
+                except (TypeError, AttributeError, ValueError) as exc:
+                    _log.warning(
+                        "event_log_payload_error",
+                        path=str(self._path),
+                        line_start=line_start,
+                        preview=line[:80],
+                        error=str(exc),
+                    )
+                    continue
+
     def truncate(self) -> None:
         """Drop the entire event log. Test-only — production code never calls."""
         self._path.write_text("")
