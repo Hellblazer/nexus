@@ -939,6 +939,25 @@ class Catalog:
                             conn.execute("DELETE FROM links")
                             conn.execute("DELETE FROM documents")
                             conn.execute("DELETE FROM owners")
+                            # RDR-104 Step 0 (Critical #1): clear
+                            # ``collections`` alongside the other base
+                            # tables so the replay's INSERT OR REPLACE
+                            # plus its COALESCE-preservation pattern
+                            # for ``superseded_by``/``superseded_at``/
+                            # ``created_at`` lands on an empty slate.
+                            # Without this DELETE, stale supersede
+                            # metadata that no replay event re-validates
+                            # leaks across the rebuild. The COALESCE in
+                            # ``_v0_collection_created`` is retained
+                            # because it is load-bearing for the
+                            # degraded-path retry case (Round 3
+                            # Significant #1): an incremental rebuild
+                            # that rolls back mid-delta leaves the
+                            # marker put, and the next retry replays
+                            # the same delta against a non-cleared
+                            # table — the COALESCE preserves supersede
+                            # metadata from events before the marker.
+                            conn.execute("DELETE FROM collections")
                             # commit=False — the transaction context owns the
                             # commit boundary; a nested commit() would finalize
                             # the tx prematurely and defeat the rollback fence.
