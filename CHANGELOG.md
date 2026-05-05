@@ -6,6 +6,36 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.24.3] - 2026-05-05
+
+Patch release. Closes the per-file ChromaDB roundtrip blowups that surfaced once 4.24.2 made the catalog rebuild fast enough to expose them, and adds a richer summary line + crash-safe finally on the catalog-rebuild heartbeat.
+
+### Fixed
+
+- **Catalog rebuild summary line is now informative.** ``Catalog._ensure_consistent`` previously printed a bare ``Catalog: rebuilding projection done (Ns)`` after a slow rebuild — operators had no signal of cause or scale. The summary now reports which canonical-truth file's mtime triggered the rebuild, the number of events replayed (event-sourced path) or the JSONL row counts loaded (legacy path), the resulting projection size (docs, links), and elapsed:
+
+    ```
+    Catalog: rebuild triggered by events.jsonl — replayed 441,917 events
+      → 23,190 docs, 22,238 links in 3.4s
+    ```
+
+  Sub-second rebuilds (the common case on a healthy projection post-FTS5 fix) emit nothing — the gate keeps CLI commands that incidentally trigger a rebuild from scribbling progress over their stdout.
+
+- **Catalog-rebuild heartbeat finally no longer swallows exceptions.** A bare ``return`` inside a generator-contextmanager ``finally`` block in 4.24.2's heartbeat helper discarded any in-flight exception. ``CatalogDB.rebuild`` raising ``RuntimeError`` was being silently dropped, leaving ``Catalog.degraded`` un-set. Replaced with an ``if/else`` gate so the finally falls off the end and exception propagation is preserved (the dedicated regression ``TestEnsureConsistentDegradedFlag::test_degraded_true_on_rebuild_failure`` caught it).
+
+### Performance
+
+- **Misclassified-chunk prune is now batched.** ``_prune_misclassified`` previously did one ``col.get(where={"doc_id": <id>})`` per file, twice (prose+pdf against the code collection, code against the docs collection). On a repo with thousands of files (ART has ~4,800) that was ~9,600 sequential ChromaDB Cloud roundtrips at 50–200 ms each — 8–30 minutes of pure latency where the actual work (chunks to delete) was almost always zero. Replaced with batched ``where={"doc_id": {"$in": batch}}`` capped at ``_CHROMA_PAGE_SIZE`` (300 ids/batch). Round-trips: ``ceil(N / 300)`` per direction — ~34 total instead of ~9,600. Roughly 280× reduction. Legacy chunks predating the doc_id backfill still fall through to per-path ``where={"source_path": …}``. Adds a tqdm progress bar with running chunk count so the phase is visible.
+
+- **Pre-built per-collection staleness cache.** ``check_staleness`` previously did one ``col.get(where={"doc_id": <id>}, limit=1)`` per file before any indexing work fired, just to confirm "yes, current, skip." On a healthy repo (most files unchanged) every one of those calls returned "current" — pure waste. New ``StalenessCache`` and ``build_staleness_cache(col)`` in ``nexus.indexer_utils``. The orchestrator builds one cache per collection (``code_col``, ``docs_col``) AFTER catalog registration so freshly-registered doc_ids are visible to the sweep, then passes them down through ``IndexContext.staleness_cache``. Per-file ``check_staleness`` becomes an O(1) dict lookup instead of a network roundtrip. Round-trips: ``ceil(total_chunks / 300)`` per collection — independent of the file count being indexed. For an "all current, skip" run on ART, the staleness phase went from 8–30 minutes of network latency to ~1 second.
+
+  Ghost-chunk healing preserved: ``by_doc_id`` cache miss when the caller has a non-empty doc_id returns False (stale → re-index → new chunk carries doc_id metadata). Same end-state as the per-file path's ``if doc_id and not stored.get("doc_id"): return False`` branch.
+
+### API stability
+
+- ``check_staleness(cache=None)`` is the back-compat default — direct callers that have not migrated stay on the per-file Chroma path with full ``_chroma_with_retry`` semantics.
+- ``IndexContext.staleness_cache`` defaults to ``None``.
+
 ## [4.24.2] - 2026-05-05
 
 Patch release. Two compounding catalog-rebuild problems surfaced during ART repo indexing once the 4.24.1 ``ignorePatterns`` fix took effect: the rebuild was both slow and silent.
