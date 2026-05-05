@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.23.3] - 2026-05-05
+
+Plugin version aligned with conexus 4.23.3. No plugin-specific changes; the underlying conexus library fixes a misplaced `pipeline_version` stamp gate that was wasting operator embedding budget (`nexus-7yfm`). See root `CHANGELOG.md` for the fix description.
+
 ## [4.23.2] - 2026-05-04
 
 Plugin version aligned with conexus 4.23.2. No plugin-specific changes; the underlying conexus library cleans up a misleading `nx doctor` warning against `taxonomy__*` collections (`nexus-l6mz`). See root `CHANGELOG.md` for the fix description.

@@ -6,6 +6,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.23.3] - 2026-05-05
+
+Patch release. Fixes a misplaced stamp gate that wasted operator embedding budget.
+
+### Fixed
+
+- **`pipeline_version` now stamps on every successful `nx index repo` run, not only on `--force`** (`nexus-7yfm`). The stamp asserts "these embeddings were produced by `PIPELINE_VERSION` code." That is true regardless of whether `--force` was used — `--force` only bypasses the per-file staleness check (`code_indexer.py:329`, `indexer.py:1200`); both paths run the same chunker and embedder. The pre-fix gate (`if force:` at `indexer.py:1995`) meant incremental runs that wrote v4 embeddings produced unstamped collections, which `nx doctor` then nagged about. The suggested remediation forced operators to re-pay for full Voyage re-embedding (potentially thousands of files × API calls) to repair a state that should never have existed. Doctor's "no version stamp" message remediation now reads `(next 'nx index repo' will stamp)` instead of `(index with --force to stamp)`.
+
+### Operator note
+
+After upgrading, an unstamped collection from any prior nexus version will be stamped on its next `nx index repo` run — incremental, no `--force` required. Collections with stale stamps (`v<old>` < current `PIPELINE_VERSION`) still need `--force-stale` because the embeddings genuinely need to be regenerated; the new behaviour applies only to "no stamp" cases.
+
 ## [4.23.2] - 2026-05-04
 
 Patch release. Cleans up a misleading `nx doctor` warning.
