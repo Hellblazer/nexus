@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.25.0] - 2026-05-05
+
+Plugin version aligned with conexus 4.25.0. No plugin-specific changes; the underlying conexus library lands RDR-104 (incremental catalog projection rebuild) so steady-state ``Catalog()`` construction after a single write completes in <100 ms instead of ~4 s on a 452K-event log. Transparent to plugin users; same MCP surface. See root ``CHANGELOG.md``.
+
 ## [4.24.4] - 2026-05-05
 
 Plugin version aligned with conexus 4.24.4. No plugin-specific changes; the underlying conexus library closes a latent silent-corruption hazard in the catalog consistency-marker write by moving the marker into the rebuild transaction so projection + marker commit atomically. Standalone atomicity fix; the broader incremental-rebuild design (RDR-104, bead nexus-rr0u) builds on this baseline. See root ``CHANGELOG.md``.

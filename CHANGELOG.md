@@ -6,6 +6,36 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.25.0] - 2026-05-05
+
+Minor release. Lands RDR-104 (Incremental Catalog Projection Rebuild). Steady-state ``Catalog()`` construction after a single write becomes <100 ms instead of ~4 s on a 452K-event log because the rebuild now replays only the delta of new bytes in ``events.jsonl`` rather than the entire file. Transparent to callers; same API surface.
+
+### Added
+
+- **Incremental rebuild path in ``Catalog._ensure_consistent``.** Five-way dispatch over the event-sourced rebuild branch: existing mtime fast path, new empty-delta fast path (events.jsonl unchanged, advance only ``last_consistency_mtime``), bootstrap full rebuild, invalidated full rebuild (header-hash drift or window-size mismatch), incremental (replay only the byte-range delta), and corruption escalation (zero events from a non-empty range falls back to full rebuild without advancing the marker). The full-rebuild path retains the FTS5 bulk-load fence; incremental writes are bounded by delta size and bypass it. Every marker write (mtime + offset + header-hash + window) commits inside the same ``transaction()`` block as the projector writes for the 4.24.4 atomicity contract.
+
+- **``EventLog.replay_from(offset, *, limit_offset)``.** Offset-aware streaming iterator that yields events whose start-of-line byte offset is in the half-open range ``[offset, limit_offset)`` (or to EOF when ``limit_offset is None``). Binary-mode file open + ``seek(offset)`` so byte positions are portable across platforms. The bounded form is mandatory for concurrent-appender safety: a writer landing between the orchestrator's ``stat()`` snapshot and the iterator's read window must not extend the iterator past the captured offset, or the marker drifts below the true tail and incremental never settles. Mid-line / malformed-first-line behaviour follows the existing ``replay()`` warn-and-skip pattern.
+
+- **Three new ``_meta`` marker rows** (``last_applied_event_offset``, ``last_applied_event_header_hash``, ``last_applied_event_header_window``) plus the existing ``last_consistency_mtime``. The window is persisted alongside the hash so a future bump of ``_HEADER_HASH_BYTES`` (currently 64 KB) invalidates prior markers cleanly via the window-size check rather than silently comparing hashes computed over different windows. The reader returns ``None`` on any incomplete or unparseable state so the orchestrator falls through to full rebuild rather than acting on partial metadata.
+
+### Fixed
+
+- **``DELETE FROM collections`` added to both rebuild paths.** Pre-fix ``Catalog._ensure_consistent`` (event-sourced) and ``CatalogDB.rebuild`` (legacy) both DELETEd ``owners``/``documents``/``links`` before reloading but excluded ``collections``. Combined with ``_v0_collection_created``'s ``INSERT OR REPLACE`` plus its ``COALESCE`` preservation pattern for ``superseded_by``/``superseded_at``/``created_at``, the rebuild silently inherited stale supersede metadata that no replay event re-validated. The COALESCE in the projector verb is retained because it is load-bearing for the degraded-path retry case (incremental rebuild that rolls back mid-delta leaves the marker put; the next retry replays the same delta against an un-cleared table — the COALESCE preserves supersede metadata from events before the marker).
+
+### Tests
+
+- ``tests/test_catalog_incremental_rebuild.py`` (new): 19 tests covering all five branches plus full-rebuild-vs-incremental projection equality, 4.24.4 atomicity on the incremental path, malformed-line warn-and-skip, double-apply idempotency, collections round-trip via incremental, concurrent-appender bounded form (orchestrator-level race simulation), ``CatalogDB.commit``-not-called invariant, the documented same-size-rewrite known-cost case, the split-pair conditional-idempotency case for ``_v0_document_aliased``, and a performance budget pin.
+
+- ``tests/test_catalog_collections_rebuild.py`` (new): event-sourced rebuild clears stale supersede metadata; round-trips ``CollectionSuperseded`` correctly; legacy ``CatalogDB.rebuild`` clears the table even with no events.
+
+- ``tests/test_catalog_event_log.py``: 10 new ``TestReplayFrom`` scenarios covering bounded-form caps, half-open boundary semantics, EOF behaviour, ``ValueError`` on offset > file_size, mid-line offset warn-and-skip, and ``replay_from(0)`` equivalence with ``replay()``.
+
+- ``tests/test_catalog_consistency_marker.py``: extends the 4.24.4 baseline test to append a real event before the patched-rebuild raise so it hits the ``apply_all`` path; adds 11 scenarios for header-hash helper, marker round-trip, partial-marker-returns-None, atomicity rollback under raise.
+
+### Background
+
+The arc was tracked under epic ``nexus-plpv`` with five sequential beads (``nexus-rhvo`` / ``nexus-v386`` / ``nexus-rpgn`` / ``nexus-3sx1`` / ``nexus-0tld``). RDR document at ``docs/rdr/rdr-104-incremental-catalog-projection-rebuild.md``; gate result PASSED on round 3 (0 Critical, 3 Significant addressed in-place). Original motivating bug ``nexus-rr0u`` closed.
+
 ## [4.24.4] - 2026-05-05
 
 Patch release. Closes a latent silent-corruption hazard in the catalog consistency-marker write surfaced by the RDR-104 critic.
