@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.23.2] - 2026-05-04
+
+Patch release. Cleans up a misleading `nx doctor` warning.
+
+### Fixed
+
+- **`nx doctor` no longer reports `pipeline_version` warnings against `taxonomy__*` collections** (`nexus-l6mz`). The taxonomy centroid collection (RDR-070) is a BERTopic c-TF-IDF aggregate computed over existing chunk embeddings, not an indexer output. `PIPELINE_VERSION` semantics (voyage-* + CCE prefixes + RDR-028 language registry) do not describe it, and the indexer's stamp loop only touches `code__` / `docs__` / `rdr__` (`src/nexus/indexer.py:1995-2009`) — so the suggested remediation `nx index repo --force` would never have stamped it. Doctor now skips any collection whose name starts with `taxonomy__`.
+
 ## [4.23.1] - 2026-05-04
 
 Patch release. Fixes a release-day operator-visible regression introduced by 4.23.0's release-gate steering operators directly into a SQLite lock contention.
