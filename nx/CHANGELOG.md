@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.24.1] - 2026-05-05
+
+Plugin version aligned with conexus 4.24.1. No plugin-specific changes; the underlying conexus library fixes a silent no-op in ``.nexus.yml`` ``server.ignorePatterns`` matching that caused path-style globs (``docs/papers/**``) to never exclude anything. See root ``CHANGELOG.md`` for the full fix description.
+
 ## [4.24.0] - 2026-05-05
 
 Plugin version aligned with conexus 4.24.0. No plugin-specific changes; the underlying conexus library promotes `mineru[all]` from optional to default, replaces silent formula loss with a loud failure, adds `nx doctor --check-mineru`, and cuts CI pytest runtime ~50% per push by marking integration suites and pagination-boundary tests with their existing markers. See root `CHANGELOG.md` for the full release notes.

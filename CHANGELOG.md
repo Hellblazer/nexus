@@ -6,6 +6,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.24.1] - 2026-05-05
+
+Patch release. Fixes a silent no-op in ``.nexus.yml`` ``server.ignorePatterns`` matching.
+
+### Fixed
+
+- **``server.ignorePatterns`` now honours path-style globs.** The schema documents path-style patterns like ``docs/papers/**`` and that's the form used in our own examples, but the matcher was iterating over individual path components and feeding each one to ``fnmatch.fnmatch`` against every pattern. ``fnmatch`` treats ``/`` as a literal character; a slash-containing pattern could not match any single-component string, so any rule of the form ``a/b/**`` was a silent no-op. Only single-segment patterns (``papers``, ``*.lock``, ``__pycache__``) actually excluded anything.
+
+  This bit ART. ``ART/.nexus.yml`` shipped ``- docs/papers/**`` for months with a comment block referencing the 10,264-duplicate-chunk cleanup the rule was meant to prevent; the rule never excluded anything. ``nx index repo`` walked the 79 papers every time and re-ingested them into ``docs__ART`` alongside the dedicated ``docs__art-grossberg-papers`` collection.
+
+  The matcher now distinguishes pattern shapes: path-style (contains ``/``) routes through a path-aware component walker where ``*`` does not cross ``/`` and ``**`` matches zero or more components; part-style (no ``/``) keeps the original ``fnmatch``-per-component behaviour, so existing ``_DEFAULT_IGNORE`` patterns and per-repo configs that used single-segment patterns continue working unchanged.
+
+### Operator note
+
+After upgrading, repos whose ``.nexus.yml`` carried a path-style ignore pattern will see those exclusions take effect on the next ``nx index repo`` run. If you previously worked around the bug by using a single-segment pattern (e.g. ``papers`` instead of ``docs/papers/**``), it still works — both forms are honoured. If you indexed against the old, broken matcher and want to drop the now-ignored chunks from T3, the regular maintenance path is the same as any other "files were indexed that shouldn't have been": delete the affected collections and re-index.
+
 ## [4.24.0] - 2026-05-05
 
 Minor release. Promotes math-aware PDF extraction from optional to default, replaces silent formula loss with a loud failure, and cuts CI runtime by ~50% per push.
