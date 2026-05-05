@@ -6,6 +6,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.24.2] - 2026-05-05
+
+Patch release. Two compounding catalog-rebuild problems surfaced during ART repo indexing once the 4.24.1 ``ignorePatterns`` fix took effect: the rebuild was both slow and silent.
+
+### Fixed
+
+- **Catalog projection rebuild now uses the FTS5 bulk-load idiom.** ``Catalog._ensure_consistent`` and ``CatalogDB.rebuild`` both replayed every document through ``INSERT INTO documents`` with the ``documents_ai`` FTS5 trigger active. SQLite's FTS5 cannot merge index entries incrementally during a transaction; per-row trigger inserts queue every term/column in an in-memory hash and merge into on-disk segments at COMMIT. On a project with hundreds of thousands of events the merge alone took 15-20 minutes of CPU on ``fts5IndexCrisismerge`` / ``fts5HashEntrySort`` with a 38+ MB WAL pending the entire time. ART's catalog (435,275 events in events.jsonl, 233 MB) hit this every time the indexer ran.
+
+  New ``CatalogDB.bulk_load_documents`` context manager drops the ``documents_ai`` / ``documents_au`` / ``documents_ad`` triggers, lets the caller perform mass writes, then recreates the triggers and runs FTS5's documented bulk-load idiom (``INSERT INTO documents_fts(documents_fts) VALUES('rebuild')``) which materializes the index in source order from the content table — far cheaper than per-row hash queue plus commit-time merge. Wired into both rebuild paths.
+
+### Added
+
+- **Heartbeat on long catalog rebuilds.** ``Catalog._ensure_consistent`` and ``CatalogDB.rebuild`` previously emitted nothing during the rebuild — operators saw ``Catalog: housekeeping…`` from the indexer hook and then total silence for tens of minutes, indistinguishable from a hang. New ``_rebuild_heartbeat`` helper writes ``Catalog: rebuilding projection (Ns)`` to stderr every 5 s after a 5-second warmup. Operations that finish in <5 s stay completely silent; long ones produce visible elapsed-time signal.
+
+### Operator note
+
+- This release does NOT eliminate the rebuild from firing on every ``Catalog()`` construction when any canonical-truth file is newer than the persisted ``_last_consistency_mtime`` marker. On a hot project, a single new event still re-replays the entire event log — but the FTS5 fence makes that replay much faster, and the heartbeat tells you it is running. The deeper architectural fix (incremental projection against ``last_applied_event_id``) is filed as ``nexus-rr0u`` for the next arc.
+- If your catalog has hundreds of thousands of events and you have been seeing ``nx index repo`` go silent for >5 minutes after the per-file Catalog progress messages, this is the release that explains it. Restart any in-progress indexing after upgrading.
+
 ## [4.24.1] - 2026-05-05
 
 Patch release. Fixes a silent no-op in ``.nexus.yml`` ``server.ignorePatterns`` matching.

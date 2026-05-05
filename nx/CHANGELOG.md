@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.24.2] - 2026-05-05
+
+Plugin version aligned with conexus 4.24.2. No plugin-specific changes; the underlying conexus library fixes a slow + silent catalog rebuild path. ``Catalog._ensure_consistent`` now uses FTS5 bulk-load (drops triggers during mass replay, rebuilds the FTS5 index once at the end) and emits a stderr heartbeat every 5 s during long rebuilds. See root ``CHANGELOG.md``.
+
 ## [4.24.1] - 2026-05-05
 
 Plugin version aligned with conexus 4.24.1. No plugin-specific changes; the underlying conexus library fixes a silent no-op in ``.nexus.yml`` ``server.ignorePatterns`` matching that caused path-style globs (``docs/papers/**``) to never exclude anything. See root ``CHANGELOG.md`` for the full fix description.
