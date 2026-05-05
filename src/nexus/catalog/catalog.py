@@ -7,10 +7,14 @@ import fcntl
 import json
 import os
 import sqlite3
+import sys
+import threading
+import time
 from urllib.parse import urlparse
 import re
 import subprocess
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,6 +24,59 @@ import structlog
 
 if TYPE_CHECKING:
     from chromadb.api import ClientAPI
+
+
+# Heartbeat cadence for long catalog operations. The first heartbeat
+# fires after this delay (so fast operations stay silent) and then every
+# ``_HEARTBEAT_INTERVAL`` until the operation completes.
+_HEARTBEAT_INTERVAL = 5.0
+
+
+@contextmanager
+def _rebuild_heartbeat(label: str):
+    """Print elapsed-time heartbeats to stderr while a long catalog
+    operation runs.
+
+    Spawns a daemon thread that wakes every :data:`_HEARTBEAT_INTERVAL`
+    seconds and writes ``Catalog: {label} (Ns)\\r`` so the user has a
+    visible signal during the projection rebuild — which can run for
+    tens of minutes on a project with hundreds of thousands of events
+    while SQLite FTS5 merges segments at COMMIT.
+
+    Pre-fix the ``_ensure_consistent`` rebuild was completely silent.
+    Operators running ``nx index repo`` saw the indexer hook print
+    ``Catalog: housekeeping…\\r`` and then nothing for 15-20 minutes
+    while the catalog DB churned. Indistinguishable from a hang.
+
+    The first heartbeat is delayed by one full interval so operations
+    that finish in <5s stay completely silent. On exit, prints a
+    summary line if the operation took >1s.
+    """
+    stop = threading.Event()
+    started = time.monotonic()
+
+    def _beat() -> None:
+        # Wait one interval before the first beat so fast ops stay silent.
+        if stop.wait(_HEARTBEAT_INTERVAL):
+            return
+        while not stop.is_set():
+            elapsed = time.monotonic() - started
+            sys.stderr.write(f"  Catalog: {label} ({elapsed:.0f}s)\r")
+            sys.stderr.flush()
+            if stop.wait(_HEARTBEAT_INTERVAL):
+                return
+
+    thread = threading.Thread(target=_beat, daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=1.0)
+        elapsed = time.monotonic() - started
+        if elapsed > 1.0:
+            sys.stderr.write(f"  Catalog: {label} done ({elapsed:.1f}s)\n")
+            sys.stderr.flush()
 
 # RDR-101 Phase 1 PR F: shadow event-log emit gate. Read once at
 # Catalog.__init__ time. Recognised "on" values match the boolean-env
@@ -739,27 +796,44 @@ class Catalog:
                 # Replay events.jsonl through the projector into the
                 # live CatalogDB. Atomic: the transaction context
                 # rolls back the DELETEs if apply_all raises.
+                #
+                # The bulk_load_documents fence drops the documents_fts
+                # triggers for the duration of the replay and rebuilds
+                # the FTS5 index in one shot at the end. Without this
+                # fence, every replayed INSERT queues per-row hash
+                # entries that SQLite cannot merge until COMMIT — turning
+                # the COMMIT into a 15-20 min FTS5 merge for a catalog
+                # with hundreds of thousands of events. The heartbeat
+                # surfaces elapsed time during the rebuild so operators
+                # can distinguish "catalog is grinding" from "catalog
+                # has hung." See nexus-rr0u for the deeper architectural
+                # fix (incremental projection against last_applied_event_id)
+                # which would eliminate the rebuild from firing at all
+                # in steady state.
                 from nexus.catalog.event_log import EventLog
                 _log.debug(
                     "catalog_consistency_rebuild_event_sourced",
                     mtime=current_mtime,
                 )
-                with self._db.transaction() as conn:
-                    conn.execute("DELETE FROM links")
-                    conn.execute("DELETE FROM documents")
-                    conn.execute("DELETE FROM owners")
-                    # commit=False — the transaction context owns the
-                    # commit boundary; a nested commit() would finalize
-                    # the tx prematurely and defeat the rollback fence.
-                    self._projector.apply_all(
-                        EventLog(self._dir).replay(), commit=False,
-                    )
+                with _rebuild_heartbeat("rebuilding projection"):
+                    with self._db.transaction() as conn:
+                        with self._db.bulk_load_documents():
+                            conn.execute("DELETE FROM links")
+                            conn.execute("DELETE FROM documents")
+                            conn.execute("DELETE FROM owners")
+                            # commit=False — the transaction context owns the
+                            # commit boundary; a nested commit() would finalize
+                            # the tx prematurely and defeat the rollback fence.
+                            self._projector.apply_all(
+                                EventLog(self._dir).replay(), commit=False,
+                            )
             else:
                 owners = read_owners(self._owners_path) if self._owners_path.exists() else {}
                 documents = read_documents(self._documents_path) if self._documents_path.exists() else {}
                 links_dict = read_links(self._links_path) if self._links_path.exists() else {}
                 _log.debug("catalog_consistency_rebuild", mtime=current_mtime)
-                self._db.rebuild(owners, documents, list(links_dict.values()))
+                with _rebuild_heartbeat("rebuilding projection"):
+                    self._db.rebuild(owners, documents, list(links_dict.values()))
             self._last_consistency_mtime = current_mtime
             # nexus-wehp: persist the marker so next-process construction
             # short-circuits this rebuild when nothing has changed.

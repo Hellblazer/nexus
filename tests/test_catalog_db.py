@@ -192,6 +192,83 @@ class TestFTS5Search:
         assert isinstance(results, list)
 
 
+class TestBulkLoadDocuments:
+    """Regression tests for the FTS5 bulk-load fence (nexus-rr0u
+    pre-work). The fence drops the documents_ai/au/ad triggers, lets
+    the caller perform mass writes without per-row trigger overhead,
+    then recreates the triggers and runs FTS5's ``rebuild`` command.
+
+    Behavioural invariants:
+      1. Search results after a bulk-load match what they would be
+         with triggers active throughout (no rows missing from the
+         FTS5 index, no stale entries pointing to deleted rowids).
+      2. Triggers are reinstated after the fence so subsequent writes
+         maintain FTS5 incrementally.
+      3. The fence is reentrant within a transaction (the rebuild
+         path uses it nested inside ``transaction()``).
+    """
+
+    def test_rebuild_via_bulk_load_matches_search_results(self, tmp_path):
+        """``CatalogDB.rebuild`` now uses ``bulk_load_documents``.
+        Search results must be identical to a per-row-trigger rebuild.
+        Pre-fix this would have been per-row trigger; now it's a
+        single FTS5 ``rebuild`` at fence-exit. The user-visible behaviour
+        is identical."""
+        db = CatalogDB(tmp_path / ".catalog.db")
+        owners = {"1.1": _make_owner()}
+        docs = {
+            "1.1.1": _make_doc(tumbler="1.1.1", title="authentication module"),
+            "1.1.2": _make_doc(tumbler="1.1.2", title="database schema"),
+            "1.1.3": _make_doc(tumbler="1.1.3", title="payment processor"),
+        }
+        db.rebuild(owners, docs, [])
+
+        assert {r["tumbler"] for r in db.search("authentication")} == {"1.1.1"}
+        assert {r["tumbler"] for r in db.search("schema")} == {"1.1.2"}
+        assert {r["tumbler"] for r in db.search("payment")} == {"1.1.3"}
+
+    def test_triggers_reinstated_after_bulk_load(self, tmp_path):
+        """After ``rebuild`` the documents_ai trigger must fire on a
+        subsequent direct INSERT — otherwise post-rebuild writes silently
+        fall out of the FTS5 index until the next rebuild."""
+        db = CatalogDB(tmp_path / ".catalog.db")
+        db.rebuild({"1.1": _make_owner()}, {}, [])
+
+        # Direct INSERT — bypasses the rebuild path. Trigger must fire.
+        db.execute(
+            "INSERT INTO documents (tumbler, title, author, year, content_type, "
+            "file_path, corpus, physical_collection, chunk_count, head_hash, "
+            "indexed_at, metadata, source_mtime, alias_of, source_uri) "
+            "VALUES (?, 'reinstated-doc', '', 0, 'code', 'src/reinstated.py', "
+            "'', 'code__test', 0, '', '', '{}', 0.0, '', '')",
+            ("1.1.99",),
+        )
+        db.commit()
+
+        results = db.search("reinstated")
+        assert len(results) == 1
+        assert results[0]["tumbler"] == "1.1.99"
+
+    def test_bulk_load_replaces_stale_entries(self, tmp_path):
+        """Two successive rebuilds — the second must produce search
+        results matching only the second's documents (no leftovers
+        from the first). Catches the failure mode where the bulk
+        rebuild forgets to clear the prior FTS5 segments."""
+        db = CatalogDB(tmp_path / ".catalog.db")
+        owners = {"1.1": _make_owner()}
+
+        # First rebuild
+        docs1 = {"1.1.1": _make_doc(tumbler="1.1.1", title="alpha apple")}
+        db.rebuild(owners, docs1, [])
+        assert {r["tumbler"] for r in db.search("apple")} == {"1.1.1"}
+
+        # Second rebuild — completely different content
+        docs2 = {"1.1.2": _make_doc(tumbler="1.1.2", title="beta banana")}
+        db.rebuild(owners, docs2, [])
+        assert db.search("apple") == []
+        assert {r["tumbler"] for r in db.search("banana")} == {"1.1.2"}
+
+
 class TestNextDocumentNumber:
     def test_empty_owner(self, tmp_path):
         db = CatalogDB(tmp_path / ".catalog.db")
