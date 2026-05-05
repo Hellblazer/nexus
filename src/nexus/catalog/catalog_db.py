@@ -16,6 +16,34 @@ from nexus.db.t2 import _sanitize_fts5
 
 _log = structlog.get_logger()
 
+# FTS5 trigger DDL extracted as standalone strings so the bulk-load
+# fence (``CatalogDB.bulk_load_documents``) can drop and recreate them
+# inside a transaction without re-running the entire schema script. Keep
+# in sync with the inline copies in ``_SCHEMA_SQL`` below — the inline
+# ones run on initial schema creation, these run on the rebuild path.
+_DOCUMENTS_FTS_TRIGGERS: tuple[str, ...] = (
+    """\
+CREATE TRIGGER IF NOT EXISTS documents_ai AFTER INSERT ON documents BEGIN
+    INSERT INTO documents_fts(rowid, title, author, corpus, file_path)
+        VALUES (new.rowid, new.title, new.author, new.corpus, new.file_path);
+END
+""",
+    """\
+CREATE TRIGGER IF NOT EXISTS documents_ad AFTER DELETE ON documents BEGIN
+    INSERT INTO documents_fts(documents_fts, rowid, title, author, corpus, file_path)
+        VALUES ('delete', old.rowid, old.title, old.author, old.corpus, old.file_path);
+END
+""",
+    """\
+CREATE TRIGGER IF NOT EXISTS documents_au AFTER UPDATE ON documents BEGIN
+    INSERT INTO documents_fts(documents_fts, rowid, title, author, corpus, file_path)
+        VALUES ('delete', old.rowid, old.title, old.author, old.corpus, old.file_path);
+    INSERT INTO documents_fts(rowid, title, author, corpus, file_path)
+        VALUES (new.rowid, new.title, new.author, new.corpus, new.file_path);
+END
+""",
+)
+
 _SCHEMA_SQL = """\
 PRAGMA journal_mode=WAL;
 
@@ -356,9 +384,19 @@ class CatalogDB:
         documents: dict[str, DocumentRecord],
         links: list[LinkRecord],
     ) -> None:
-        """Truncate all tables and reload from JSONL-derived dicts."""
-        with self._lock, self._conn:
-            # Delete from base tables — triggers sync FTS automatically
+        """Truncate all tables and reload from JSONL-derived dicts.
+
+        Uses the FTS5 bulk-load fence (drop triggers + INSERT-rebuild)
+        so the per-row ``documents_ai`` trigger does NOT queue every
+        column for every replayed document — that pattern stalls COMMIT
+        for tens of minutes on a catalog with hundreds of thousands of
+        rows. With the fence, FTS5 segments are built once at the end
+        in source order. See ``bulk_load_documents`` docstring.
+        """
+        with self._lock, self._conn, self.bulk_load_documents():
+            # Delete from base tables. Triggers are dropped for the
+            # duration of the bulk_load_documents fence; FTS5 is
+            # rebuilt in one pass at fence-exit.
             self._conn.execute("DELETE FROM links")
             self._conn.execute("DELETE FROM documents")
             self._conn.execute("DELETE FROM owners")
@@ -508,6 +546,55 @@ class CatalogDB:
         """
         with self._lock, self._conn:
             yield self._conn
+
+    @contextmanager
+    def bulk_load_documents(self):
+        """FTS5 bulk-load fence around mass document writes.
+
+        Drops the ``documents_ai`` / ``documents_au`` / ``documents_ad``
+        FTS5 triggers, yields to the caller (which performs the writes),
+        then recreates the triggers and runs FTS5's ``rebuild`` command
+        to materialize the index in one pass from the final document
+        rows.
+
+        Why this exists: the projection-rebuild path in
+        ``Catalog._ensure_consistent`` deletes every document and replays
+        the entire event log inside one transaction. With per-row FTS5
+        triggers active, each replayed INSERT queues every term/column
+        in an in-memory hash. SQLite cannot incrementally merge that
+        hash into on-disk segments mid-transaction; the merge happens at
+        COMMIT, in one shot, and walks every queued entry. On a project
+        with hundreds of thousands of events the COMMIT alone takes
+        15-20 minutes of CPU on ``fts5IndexCrisismerge`` /
+        ``fts5HashEntrySort``, with no user-visible signal that anything
+        is happening.
+
+        FTS5's documented bulk-load idiom — ``INSERT INTO fts(fts) VALUES
+        ('rebuild')`` — is dramatically faster because it builds segments
+        directly from the content table in source order, skipping the
+        per-row hash queue entirely.
+
+        MUST be called inside a ``transaction()`` block so the schema
+        changes (DROP/CREATE TRIGGER) and the rebuild are part of the
+        same atomic unit as the DELETE+replay. If the caller's transaction
+        rolls back, the triggers come back too.
+        """
+        with self._lock:
+            for trig in ("documents_ai", "documents_au", "documents_ad"):
+                self._conn.execute(f"DROP TRIGGER IF EXISTS {trig}")
+        try:
+            yield
+        finally:
+            with self._lock:
+                for sql in _DOCUMENTS_FTS_TRIGGERS:
+                    self._conn.execute(sql)
+                # Bulk-rebuild FTS5 from the final state of `documents`.
+                # Cheap when the table is small; orders of magnitude
+                # faster than the per-row trigger path on rebuilds with
+                # >1k documents.
+                self._conn.execute(
+                    "INSERT INTO documents_fts(documents_fts) VALUES ('rebuild')"
+                )
 
     def close(self) -> None:
         with self._lock:
