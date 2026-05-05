@@ -21,6 +21,12 @@ tests/e2e/.claude-auth/
 .worktrees/
 .claude/worktrees/
 tests/fixtures/*.pdf
+# Whitelist fixtures referenced by pytest and the release-sandbox shakedown
+# so CI and fresh-clone shakedowns can run them. Other PDFs in this
+# directory remain gitignored (developer-local papers, ad-hoc probes).
+!tests/fixtures/distributed-bloom-filter.pdf
+!tests/fixtures/bft-to-smr.pdf
+!tests/fixtures/tc-sql.pdf
 .beads/ephemeral.sqlite3
 .beads/*.pid
 .beads/*.pid.lock
