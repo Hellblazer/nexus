@@ -6,6 +6,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.23.1] - 2026-05-04
+
+Patch release. Fixes a release-day operator-visible regression introduced by 4.23.0's release-gate steering operators directly into a SQLite lock contention.
+
+### Fixed
+
+- **`nx catalog backfill-collections --no-dry-run` and other CLI write-side catalog ops fail with `database is locked` while `nx-mcp` is running** (`nexus-wehp`). The new RDR-103 release gate (`nx catalog doctor --collections-drift`) tells operators to run `nx catalog backfill-collections` to register legacy 2-segment collections in the projection. Every v4.23.0 user with pre-RDR-103 collections (everyone) hit this on first upgrade. Root cause: `Catalog.__init__`'s `_ensure_consistent` triggered a heavy `DELETE FROM links` + replay rebuild on every CLI invocation because `_last_consistency_mtime` was per-instance and reset to 0.0 each construction; the rewrite contended with the `nx-mcp`-held SQLite connection. Fix: persist the marker to `.last_consistency_mtime` in the catalog directory; new processes read it and skip the rebuild when no canonical-source file has been written past the recorded mtime. Cross-process safe; failures fall back to pre-fix behaviour.
+
+### Operator workaround for v4.23.0 (no upgrade required)
+
+Stop Claude Code (or kill `nx-mcp` + `nx-mcp-catalog`), run write-side catalog verbs (e.g. `nx catalog backfill-collections --no-dry-run`), then `/reload-plugins` to bring MCP back. Upgrading to 4.23.1 eliminates the workaround.
+
 ## [4.23.0] - 2026-05-04
 
 Minor release. Headline: **RDR-101 closed end-to-end (Phases 4-6 + irreversible flip + cleanup)** and **RDR-103 closed** (Catalog as Collection-Name Authority). The catalog is now the sole authority for collection names, the conformant 4-segment shape `<content_type>__<owner_id>__<embedding_model>__v<n>` is the only collection name reachable from new writes, and the five transitional migration verbs are retired. The chunk-metadata schema is reduced (`source_path`, `corpus`, `store_type`, `git_meta` all dropped); chunks carry `doc_id` as the canonical identity field. Six new operator verbs (catalog `doctor --collections-drift`, `rename-collection`, `supersede-collection`, `backfill-collections`, `migrate-fallback`, `nx t3 gc`) ship as the post-cleanup operator surface. Plus follow-up bug fixes surfaced in sandbox shakedown, the chromadb httpx-timeout fix, and a thorough post-arc doc/code cleanup sweep.

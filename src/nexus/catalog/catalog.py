@@ -6,6 +6,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import sqlite3
 from urllib.parse import urlparse
 import re
 import subprocess
@@ -574,14 +575,13 @@ class Catalog:
         # rebuild when nothing has changed since the last consistency
         # pass.
         #
-        # nexus-wehp: persist the marker to disk so cross-process
-        # invocations (CLI verbs while nx-mcp is running) don't each
-        # trigger a full DELETE+replay rebuild that contends with the
-        # MCP-held SQLite connection. The file holds the highest
-        # canonical-source mtime that was successfully projected; new
-        # processes read it on construction and only rebuild when an
-        # actual write has advanced the mtime past the marker.
-        self._consistency_marker_path = catalog_dir / ".last_consistency_mtime"
+        # nexus-wehp: persist the marker INSIDE the catalog SQLite
+        # itself so cross-process invocations (CLI verbs while nx-mcp
+        # is running) don't each trigger a full DELETE+replay rebuild
+        # that contends with the MCP-held SQLite connection. Storing
+        # in-DB (not in a sidecar file) means a fresh SQLite cache
+        # against an existing catalog dir naturally has no marker,
+        # which correctly forces a rebuild to populate the empty cache.
         self._last_consistency_mtime: float = self._read_consistency_marker()
         if self._documents_path.exists():
             self._ensure_consistent()
@@ -589,28 +589,42 @@ class Catalog:
     def _read_consistency_marker(self) -> float:
         """Return the persisted ``_last_consistency_mtime`` or 0.0.
 
-        nexus-wehp: cross-process consistency cache. Best-effort: any
-        read failure (missing file, malformed content, permission
-        error) returns 0.0 which forces a rebuild on this construction;
-        worst case the rebuild contends with a concurrent MCP-held
-        connection, which is the exact pre-fix behaviour.
+        nexus-wehp: stored inside the catalog SQLite as a row in the
+        ``_meta`` table (created by ``CatalogDB._SCHEMA_SQL``, so reads
+        never issue DDL that would race a concurrent transaction). A
+        fresh SQLite cache (no row) returns 0.0, which forces a rebuild
+        and preserves the pre-fix invariant that a fresh cache always
+        projects from the canonical state. Read failures fall back to
+        0.0 (worst case = pre-fix rebuild).
         """
         try:
-            raw = self._consistency_marker_path.read_text().strip()
-            return float(raw)
-        except (FileNotFoundError, ValueError, OSError):
+            row = self._db.execute(
+                "SELECT value FROM _meta WHERE key = ?",
+                ("last_consistency_mtime",),
+            ).fetchone()
+            if row is None:
+                return 0.0
+            return float(row[0])
+        except (sqlite3.OperationalError, ValueError, TypeError):
             return 0.0
 
     def _write_consistency_marker(self, mtime: float) -> None:
         """Persist the highest successfully-projected canonical mtime.
 
-        nexus-wehp: tolerate write failures silently. Failing to update
-        the marker means the next process will re-do the rebuild;
-        functionally identical to pre-fix behaviour.
+        nexus-wehp: stored inside the catalog SQLite. Commits explicitly
+        so other connections (in-process tests, cross-process MCP+CLI)
+        see the new marker on their next SELECT. Tolerate write failures
+        silently. Failing to update the marker means the next process
+        will re-do the rebuild; functionally identical to pre-fix
+        behaviour.
         """
         try:
-            self._consistency_marker_path.write_text(f"{mtime}")
-        except OSError:
+            self._db.execute(
+                "INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)",
+                ("last_consistency_mtime", f"{mtime}"),
+            )
+            self._db.commit()
+        except sqlite3.OperationalError:
             pass
 
     @staticmethod

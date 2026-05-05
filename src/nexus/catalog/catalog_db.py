@@ -163,6 +163,20 @@ CREATE INDEX IF NOT EXISTS idx_collections_legacy
 CREATE INDEX IF NOT EXISTS idx_collections_owner
     ON collections(owner_id);
 
+-- nexus-wehp: cross-process consistency-marker table. Stores the
+-- highest canonical-source mtime that was successfully projected into
+-- this SQLite cache. Catalog._ensure_consistent reads it on
+-- construction to skip the DELETE+replay rebuild when the projection
+-- is already up to date, eliminating the 'database is locked'
+-- contention that surfaced when CLI write-side verbs raced an
+-- nx-mcp-held connection in v4.23.0. A fresh SQLite cache has no
+-- row, returns 0.0, and the rebuild fires (the e2e test invariant
+-- 'fresh cache against existing catalog dir sees the data').
+CREATE TABLE IF NOT EXISTS _meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
+
 -- RDR-103 Phase 2: ``Catalog.collection_for`` resolves a
 -- ``(content_type, owner_id, embedding_model)`` triple to the
 -- highest-versioned conformant collection. Without this index the
