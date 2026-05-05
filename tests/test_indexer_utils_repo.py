@@ -30,6 +30,50 @@ def test_should_ignore(path: str, expected: bool) -> None:
     assert should_ignore(Path(path), _DEFAULT_IGNORE) == expected
 
 
+# Path-style patterns (contain '/'): match against the full POSIX-form
+# relative path. Pre-fix, these patterns were silent no-ops because the
+# matcher only fed each path COMPONENT to fnmatch, which treats '/' as
+# a literal. ART's .nexus.yml shipped ``docs/papers/**`` for months
+# expecting subtree exclusion; it never excluded anything.
+@pytest.mark.parametrize("path,patterns,expected", [
+    # subtree wildcards
+    ("docs/papers/foo.pdf",         ["docs/papers/**"], True),
+    ("docs/papers/sub/foo.pdf",     ["docs/papers/**"], True),
+    ("docs/architecture.md",        ["docs/papers/**"], False),
+    ("src/main.py",                 ["docs/papers/**"], False),
+    # single-segment wildcard (only direct children)
+    ("src/main.py",                 ["src/*.py"],       True),
+    ("src/sub/main.py",             ["src/*.py"],       False),
+    # explicit nested path
+    ("a/b/c/d.txt",                 ["a/b/c/d.txt"],    True),
+    ("a/b/c/other.txt",             ["a/b/c/d.txt"],    False),
+    # path-style does NOT spuriously match part-style usage
+    ("papers/foo.pdf",              ["docs/papers/**"], False),
+])
+def test_should_ignore_path_style(
+    path: str, patterns: list[str], expected: bool,
+) -> None:
+    """Path-style patterns (with '/') match against the full path."""
+    assert should_ignore(Path(path), patterns) == expected
+
+
+# Part-style patterns (no '/'): match against any single component.
+# Behaviour preserved from pre-fix implementation so existing configs
+# (and _DEFAULT_IGNORE) continue to work.
+@pytest.mark.parametrize("path,patterns,expected", [
+    ("a/b/papers/file.pdf",         ["papers"],         True),
+    ("papers/file.pdf",             ["papers"],         True),
+    ("docs/architecture.md",        ["papers"],         False),
+    ("a/b/foo.lock",                ["*.lock"],         True),
+    ("src/foo.py",                  ["*.lock"],         False),
+])
+def test_should_ignore_part_style(
+    path: str, patterns: list[str], expected: bool,
+) -> None:
+    """Part-style patterns (no '/') match against any path component."""
+    assert should_ignore(Path(path), patterns) == expected
+
+
 # ── find_repo_root ──────────────────────────────────────────────────────────
 
 def test_find_repo_root_in_git_repo(tmp_path: Path) -> None:
