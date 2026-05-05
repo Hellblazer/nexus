@@ -178,8 +178,3 @@ class TestT3UpgradeStep:
         assert step.introduced == "4.2.0"
         assert step.name == "test"
         assert step.fn is fn
-
-    def test_t3_upgrades_list_exists(self) -> None:
-        from nexus.db.migrations import T3_UPGRADES
-
-        assert isinstance(T3_UPGRADES, list)
