@@ -373,9 +373,30 @@ class TestFormulaPreservationOnRealPdf:
         assert "--extractor docling" in msg
 
     def test_mineru_path_preserves_formulas(self) -> None:
-        """When MinerU is available, auto mode produces text containing
-        recognisable LaTeX formula markers. Skipped when the ``mineru`` extra
-        is not installed (the default dev environment)."""
+        """When MinerU is available, auto mode preserves formulas end-to-end.
+
+        nexus-2fyb code-review I3: ``> 0`` is too lenient — a single surviving
+        marker is the same "looks fine, isn't" shape that hid the original
+        silent-corruption bug for weeks. Assert three things, each catching
+        a different degradation mode:
+
+        1. **Extractor metadata** ``formula_count >= 5`` — the structured
+           count emitted by MinerU, matching the auto-route detection
+           threshold. This is the strict signal the bug regressed: 0 →
+           silent corruption.
+        2. **Output text contains LaTeX motifs** — ``$$`` and ``\\frac{``
+           must appear in the rendered text. These are what downstream
+           consumers (chunkers, embedders, search) actually see. The
+           extractor could lie in metadata but ship empty text — these
+           assertions catch that.
+        3. **Regex marker count > 0** — kept as a smoke check; note that
+           ``_count_formula_markers`` undercounts because the alternated
+           pattern consumes whole ``$$..$$`` blocks (4 markers here for
+           a paper with 44 structured formulas). The metadata count is the
+           authoritative number; the regex is a quick-screen heuristic.
+
+        Skipped when MinerU is not importable in the dev environment.
+        """
         pytest.importorskip("mineru.cli.common")
         from nexus.pdf_extractor import PDFExtractor, _count_formula_markers
 
@@ -383,8 +404,33 @@ class TestFormulaPreservationOnRealPdf:
         assert result.metadata["extraction_method"] == "mineru", (
             f"expected mineru; got {result.metadata['extraction_method']!r}"
         )
-        marker_count = _count_formula_markers(result.text)
+
+        # 1. Structured count from MinerU — authoritative.
+        meta_count = result.metadata.get("formula_count", 0)
+        assert meta_count >= 5, (
+            f"MinerU reported formula_count={meta_count}; expected >= 5 "
+            f"(the auto-route threshold). The original silent-corruption bug "
+            f"produced formula_count=0; a degradation below this threshold "
+            f"is the same invisible-failure shape."
+        )
+
+        # 2. Text content motifs — what downstream consumers actually see.
+        text = result.text
+        assert "$$" in text, (
+            f"MinerU output has formula_count={meta_count} in metadata but "
+            f"no `$$` blocks in text — the extractor lied or dropped the "
+            f"rendered output (text length: {len(text)})."
+        )
+        assert r"\frac" in text, (
+            f"MinerU output missing `\\frac` despite formula_count={meta_count}. "
+            f"This paper's false-positive-rate derivation contains fractions; "
+            f"their absence indicates partial extraction."
+        )
+
+        # 3. Regex marker count — smoke check (alternation undercounts).
+        marker_count = _count_formula_markers(text)
         assert marker_count > 0, (
-            "MinerU extraction produced text with zero LaTeX markers — "
-            f"formulas appear to have been stripped (text length: {len(result.text)})"
+            f"_count_formula_markers returned 0 despite metadata count "
+            f"{meta_count} and visible motifs in text — regex is desynced "
+            f"from the actual formula format MinerU emits."
         )

@@ -1,15 +1,21 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """PDF text extraction with auto-detect math routing.
 
-Extraction backends (three tiers, selected by ``extractor`` param):
+Extraction backends (selected by ``extractor`` param):
 1. Docling — neural layout model for multi-column academic PDFs, Type3 fonts,
    and complex tables.  Enriched mode enables formula detection via FormulaItem.
-2. MinerU — math-aware extraction (optional ``mineru`` extra).  Used when auto
-   mode detects formulas in the Docling pass.
-3. PyMuPDF normalized — final fallback for all extraction failures.
+2. MinerU — math-aware extraction. Default-installed since nexus-2fyb (was
+   previously an optional ``[mineru]`` extra; the extras gate produced silent
+   formula loss for weeks because fresh installs never picked it up). Used
+   when auto mode detects formulas in the Docling probe pass.
+3. PyMuPDF normalized — fallback for the explicit ``extractor='docling'``
+   path when Docling itself fails.
 
-Auto mode (default): Docling pass → if formulas detected → try MinerU → fallback
-to Docling → fallback to PyMuPDF normalized.
+Auto mode (default): non-enriched Docling probe → if formulas detected, route
+to MinerU. If MinerU fails on a formula-bearing PDF, raise ``RuntimeError``
+rather than silently returning the formula-stripped probe (the original
+silent-corruption bug). Users who explicitly accept stripped extraction can
+opt out with ``--extractor docling``.
 """
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -223,9 +229,29 @@ class PDFExtractor:
         _progress(f"  Formulas detected ({formula_count}) — switching to MinerU: {pdf_path.name}")
         try:
             return self._extract_with_mineru(pdf_path, formula_count=formula_count, on_page=on_page)
-        except Exception as exc:
+        except ImportError as exc:
+            # do_parse is None — mineru is a default dep since nexus-2fyb so a
+            # missing import means the conexus install itself is corrupt.
             _log.error(
-                "mineru_required_but_unavailable",
+                "mineru_import_failed",
+                error=str(exc),
+                formula_count=formula_count,
+                path=str(pdf_path),
+            )
+            raise RuntimeError(
+                f"PDF {pdf_path.name} contains formulas (detected {formula_count}) "
+                f"but MinerU is not importable: {exc}. "
+                f"MinerU is a required dependency since nexus-2fyb; if it is "
+                f"missing your conexus install is corrupt — reinstall with "
+                f"`uv tool install --reinstall conexus`. To bypass formula "
+                f"extraction entirely, rerun with `--extractor docling`."
+            ) from exc
+        except Exception as exc:
+            # MinerU is installed but extraction failed — subprocess timeout,
+            # OOM kill, mineru-api server error, etc. Do NOT advise reinstall;
+            # the install is fine and the failure is operational.
+            _log.error(
+                "mineru_extraction_failed",
                 error=str(exc),
                 error_type=type(exc).__name__,
                 formula_count=formula_count,
@@ -233,13 +259,9 @@ class PDFExtractor:
             )
             raise RuntimeError(
                 f"PDF {pdf_path.name} contains formulas (detected {formula_count}) "
-                f"but the formula-aware extractor MinerU is unavailable: "
-                f"{type(exc).__name__}: {exc} "
-                f"MinerU is a required dependency since nexus-2fyb; if it is "
-                f"missing your conexus install is broken — reinstall with "
-                f"`uv tool install --reinstall conexus`. To explicitly accept "
-                f"formula-stripped extraction without MinerU, rerun with "
-                f"`--extractor docling`."
+                f"but MinerU extraction failed: {type(exc).__name__}: {exc}. "
+                f"To bypass formula extraction and accept formula-stripped "
+                f"output for this PDF, rerun with `--extractor docling`."
             ) from exc
 
     # ── internal extraction methods ───────────────────────────────────────────
