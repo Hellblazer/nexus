@@ -340,15 +340,45 @@ class TestFormulaPreservationOnRealPdf:
 
     _FIXTURE = Path(__file__).parent / "fixtures" / "distributed-bloom-filter.pdf"
 
+    # Exact empirical counts for this fixture, locked deliberately. Inequalities
+    # were the original bug shape: ``>= 5`` would still pass if MinerU regressed
+    # from 44 formulas to 5, silently dropping 39. Every value below is a
+    # frozen invariant of (this PDF) × (pinned MinerU+conexus versions). If any
+    # number drifts, the test fails and a human reviews the diff — that's the
+    # correct fail-loud contract for fixture-based regression guards.
+    _EXPECTED_QUICK_SCREEN = 11             # _has_formulas_quick() return
+    _EXPECTED_META_FORMULA_COUNT = 44       # MinerU's structured count
+    _EXPECTED_REGEX_MARKERS = 4             # _count_formula_markers (regex
+                                            # alternation undercounts: each
+                                            # $$..$$ block consumes whole)
+    _EXPECTED_DOLLAR_DOLLAR_COUNT = 8       # 8 $$ markers = 4 paired blocks
+    _EXPECTED_FRAC_COUNT = 12               # \frac{...} occurrences
+    _EXPECTED_TEXT_LENGTH = 60135           # full extracted text
+    _EXPECTED_PAGE_COUNT = 33               # PyMuPDF page count
+
+    # The canonical false-positive-rate formula from the paper, in the exact
+    # form MinerU emits. Pinned verbatim so any change to formula rendering
+    # is caught loudly.
+    _EXPECTED_FORMULA_SNIPPET = (
+        r"\left( 1 - { \bigg ( } 1 - { \frac { 1 } { m } } "
+        r"{ \bigg ) } ^ { k n }"
+    )
+
     def test_fixture_quick_screen_detects_formulas(self) -> None:
-        """Sanity: the fixture must trigger formula detection. If this fails,
-        the fixture has changed and downstream assertions are meaningless."""
+        """Sanity: the fixture must produce exactly the locked formula count.
+        Drift indicates either the fixture changed, PyMuPDF behavior shifted,
+        or the math-Unicode set was edited — any of which invalidates the
+        downstream regression assertions and demands a human review.
+        """
         from nexus.pdf_extractor import _has_formulas_quick
 
         assert self._FIXTURE.exists(), f"missing fixture: {self._FIXTURE}"
-        assert _has_formulas_quick(self._FIXTURE) >= 5, (
-            "fixture no longer trips the formula-detection threshold; "
-            "regression-guard assumptions invalidated"
+        actual = _has_formulas_quick(self._FIXTURE)
+        assert actual == self._EXPECTED_QUICK_SCREEN, (
+            f"_has_formulas_quick returned {actual}; locked value is "
+            f"{self._EXPECTED_QUICK_SCREEN}. If this is a legitimate change "
+            f"(fixture replaced, PyMuPDF upgraded, _MATH_UNICODE edited), "
+            f"update the constant and re-derive all sibling expected values."
         )
 
     def test_auto_raises_when_mineru_unavailable(self) -> None:
@@ -373,27 +403,18 @@ class TestFormulaPreservationOnRealPdf:
         assert "--extractor docling" in msg
 
     def test_mineru_path_preserves_formulas(self) -> None:
-        """When MinerU is available, auto mode preserves formulas end-to-end.
+        """End-to-end formula extraction on a real math paper. All assertions
+        are EXACT against locked empirical values.
 
-        nexus-2fyb code-review I3: ``> 0`` is too lenient — a single surviving
-        marker is the same "looks fine, isn't" shape that hid the original
-        silent-corruption bug for weeks. Assert three things, each catching
-        a different degradation mode:
-
-        1. **Extractor metadata** ``formula_count >= 5`` — the structured
-           count emitted by MinerU, matching the auto-route detection
-           threshold. This is the strict signal the bug regressed: 0 →
-           silent corruption.
-        2. **Output text contains LaTeX motifs** — ``$$`` and ``\\frac{``
-           must appear in the rendered text. These are what downstream
-           consumers (chunkers, embedders, search) actually see. The
-           extractor could lie in metadata but ship empty text — these
-           assertions catch that.
-        3. **Regex marker count > 0** — kept as a smoke check; note that
-           ``_count_formula_markers`` undercounts because the alternated
-           pattern consumes whole ``$$..$$`` blocks (4 markers here for
-           a paper with 44 structured formulas). The metadata count is the
-           authoritative number; the regex is a quick-screen heuristic.
+        nexus-2fyb code-review (round 2): inequalities were the original bug
+        shape. ``meta_count > 0`` shipped formula_count=0 silently; even
+        ``meta_count >= 5`` would pass if MinerU regressed from 44 to 5,
+        dropping 39 formulas invisibly. Every assertion here is exact: a
+        locked count, a locked text length, a locked verbatim formula
+        snippet. The test fails loudly on ANY drift; a human reviews and
+        either updates the constants (legit upgrade) or files a bug
+        (regression). This is the only assertion shape that doesn't
+        smuggle the original failure mode back in.
 
         Skipped when MinerU is not importable in the dev environment.
         """
@@ -404,33 +425,35 @@ class TestFormulaPreservationOnRealPdf:
         assert result.metadata["extraction_method"] == "mineru", (
             f"expected mineru; got {result.metadata['extraction_method']!r}"
         )
-
-        # 1. Structured count from MinerU — authoritative.
-        meta_count = result.metadata.get("formula_count", 0)
-        assert meta_count >= 5, (
-            f"MinerU reported formula_count={meta_count}; expected >= 5 "
-            f"(the auto-route threshold). The original silent-corruption bug "
-            f"produced formula_count=0; a degradation below this threshold "
-            f"is the same invisible-failure shape."
-        )
-
-        # 2. Text content motifs — what downstream consumers actually see.
+        assert result.metadata["page_count"] == self._EXPECTED_PAGE_COUNT
         text = result.text
-        assert "$$" in text, (
-            f"MinerU output has formula_count={meta_count} in metadata but "
-            f"no `$$` blocks in text — the extractor lied or dropped the "
-            f"rendered output (text length: {len(text)})."
-        )
-        assert r"\frac" in text, (
-            f"MinerU output missing `\\frac` despite formula_count={meta_count}. "
-            f"This paper's false-positive-rate derivation contains fractions; "
-            f"their absence indicates partial extraction."
+
+        # MinerU's authoritative structured formula count.
+        assert result.metadata["formula_count"] == self._EXPECTED_META_FORMULA_COUNT, (
+            f"MinerU reported formula_count={result.metadata['formula_count']}; "
+            f"locked at {self._EXPECTED_META_FORMULA_COUNT}. Any drift means "
+            f"MinerU's behavior on this fixture changed — investigate before "
+            f"updating the locked value."
         )
 
-        # 3. Regex marker count — smoke check (alternation undercounts).
-        marker_count = _count_formula_markers(text)
-        assert marker_count > 0, (
-            f"_count_formula_markers returned 0 despite metadata count "
-            f"{meta_count} and visible motifs in text — regex is desynced "
-            f"from the actual formula format MinerU emits."
+        # Text length — catches truncation, page drops, whitespace shifts.
+        assert len(text) == self._EXPECTED_TEXT_LENGTH, (
+            f"extracted text is {len(text)} chars; locked at "
+            f"{self._EXPECTED_TEXT_LENGTH}. Length drift indicates partial "
+            f"extraction, encoding shift, or whitespace handling change."
+        )
+
+        # Formula motifs — what chunkers/embedders/search actually see.
+        assert text.count("$$") == self._EXPECTED_DOLLAR_DOLLAR_COUNT
+        assert text.count(r"\frac") == self._EXPECTED_FRAC_COUNT
+        assert _count_formula_markers(text) == self._EXPECTED_REGEX_MARKERS
+
+        # Verbatim snippet — the bloom-filter false-positive-rate formula.
+        # If the symbolic content of the canonical formula in this paper
+        # changes, formula extraction has regressed somewhere.
+        assert self._EXPECTED_FORMULA_SNIPPET in text, (
+            f"locked formula snippet not found in extracted text. The "
+            f"false-positive-rate derivation has changed form — verify "
+            f"the formula is still being extracted correctly before "
+            f"updating the snippet."
         )
