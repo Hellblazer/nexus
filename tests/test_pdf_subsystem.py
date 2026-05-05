@@ -409,9 +409,21 @@ class TestFormulaPreservationOnRealPdf:
         assert "uv tool install --reinstall conexus" in msg
         assert "--extractor docling" in msg
 
+    @pytest.mark.slow
     def test_mineru_path_preserves_formulas(self) -> None:
         """End-to-end formula extraction on a real math paper. All assertions
         are EXACT against locked empirical values.
+
+        Marked ``slow`` because MinerU's first invocation downloads ~2-3 GB
+        of model weights into ``~/.cache/huggingface`` and per-page
+        inference runs for several minutes even on warm cache. Default
+        ``pytest`` deselects this (see pyproject.toml addopts); run
+        explicitly with ``uv run pytest -m slow``. The release-sandbox
+        shakedown step 3b still exercises MinerU end-to-end through the
+        production ``nx index pdf`` path on every release run, so this
+        marker does not regress the user-facing fail-loud regression
+        guard's reach — it only avoids paying the model-download cost in
+        CI, where ``mineru[all]`` is already a default-dep install.
 
         nexus-2fyb code-review (round 2): inequalities were the original bug
         shape. ``meta_count > 0`` shipped formula_count=0 silently; even
