@@ -570,12 +570,48 @@ class Catalog:
         # Storage review S-4: mtime cache so every Catalog() instantiation
         # doesn't re-parse the full JSONL corpus and re-build the SQLite
         # cache. For a 10k-entry catalog this was measurably slow on
-        # every MCP tool invocation — the mtime-guarded check skips the
+        # every MCP tool invocation; the mtime-guarded check skips the
         # rebuild when nothing has changed since the last consistency
         # pass.
-        self._last_consistency_mtime: float = 0.0
+        #
+        # nexus-wehp: persist the marker to disk so cross-process
+        # invocations (CLI verbs while nx-mcp is running) don't each
+        # trigger a full DELETE+replay rebuild that contends with the
+        # MCP-held SQLite connection. The file holds the highest
+        # canonical-source mtime that was successfully projected; new
+        # processes read it on construction and only rebuild when an
+        # actual write has advanced the mtime past the marker.
+        self._consistency_marker_path = catalog_dir / ".last_consistency_mtime"
+        self._last_consistency_mtime: float = self._read_consistency_marker()
         if self._documents_path.exists():
             self._ensure_consistent()
+
+    def _read_consistency_marker(self) -> float:
+        """Return the persisted ``_last_consistency_mtime`` or 0.0.
+
+        nexus-wehp: cross-process consistency cache. Best-effort: any
+        read failure (missing file, malformed content, permission
+        error) returns 0.0 which forces a rebuild on this construction;
+        worst case the rebuild contends with a concurrent MCP-held
+        connection, which is the exact pre-fix behaviour.
+        """
+        try:
+            raw = self._consistency_marker_path.read_text().strip()
+            return float(raw)
+        except (FileNotFoundError, ValueError, OSError):
+            return 0.0
+
+    def _write_consistency_marker(self, mtime: float) -> None:
+        """Persist the highest successfully-projected canonical mtime.
+
+        nexus-wehp: tolerate write failures silently. Failing to update
+        the marker means the next process will re-do the rebuild;
+        functionally identical to pre-fix behaviour.
+        """
+        try:
+            self._consistency_marker_path.write_text(f"{mtime}")
+        except OSError:
+            pass
 
     @staticmethod
     def _prefix_sql(prefix: str) -> tuple[str, list]:
@@ -711,6 +747,9 @@ class Catalog:
                 _log.debug("catalog_consistency_rebuild", mtime=current_mtime)
                 self._db.rebuild(owners, documents, list(links_dict.values()))
             self._last_consistency_mtime = current_mtime
+            # nexus-wehp: persist the marker so next-process construction
+            # short-circuits this rebuild when nothing has changed.
+            self._write_consistency_marker(current_mtime)
             self.degraded = False
         except Exception as exc:
             _log.warning("catalog_consistency_rebuild_failed", error=str(exc), exc_info=True)
