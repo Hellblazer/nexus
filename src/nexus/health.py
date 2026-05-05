@@ -336,7 +336,7 @@ def _check_t3_cloud() -> list[HealthResult]:
                 if stored is None:
                     pipeline_results.append(HealthResult(
                         label=f"pipeline ({col.name})", ok=True,
-                        detail="no version stamp (index with --force to stamp)",
+                        detail="no version stamp (next 'nx index repo' will stamp)",
                     ))
                 elif stored != PIPELINE_VERSION:
                     stale_count += 1
