@@ -140,12 +140,71 @@ def detect_git_metadata(path: Path) -> dict[str, str]:
     }
 
 
+def _path_glob_match(parts: tuple[str, ...], segs: list[str]) -> bool:
+    """Match a tuple of path components against pattern segments.
+
+    Segments are the result of ``pattern.split("/")``. Each non-``**``
+    segment is matched against one path component via ``fnmatch`` (so
+    ``*`` does NOT cross ``/`` boundaries — the path-aware semantic users
+    expect from a slash-separated glob). ``**`` matches zero or more
+    components.
+    """
+    def walk(i: int, j: int) -> bool:
+        while j < len(segs):
+            seg = segs[j]
+            if seg == "**":
+                # ** matches zero or more components — try every split.
+                for k in range(i, len(parts) + 1):
+                    if walk(k, j + 1):
+                        return True
+                return False
+            if i >= len(parts):
+                return False
+            if not fnmatch.fnmatch(parts[i], seg):
+                return False
+            i += 1
+            j += 1
+        return i == len(parts)
+    return walk(0, 0)
+
+
 def should_ignore(rel_path: Path, patterns: list[str]) -> bool:
-    """Return True if any component of *rel_path* matches any of *patterns*."""
-    for part in rel_path.parts:
-        for pattern in patterns:
-            if fnmatch.fnmatch(part, pattern):
+    """Return True if *rel_path* matches any of *patterns*.
+
+    Pattern semantics (.gitignore-flavored, path-aware):
+
+    - **Path-style** patterns (contain ``/``) match against the full
+      relative path component-by-component. ``*`` matches any single
+      component (does not cross ``/``); ``**`` matches zero or more
+      components. ``docs/papers/**`` matches every file under
+      ``docs/papers/`` at any depth; ``src/*.py`` matches Python files
+      directly under ``src/`` only.
+    - **Part-style** patterns (no ``/``) match against each path
+      component independently via ``fnmatch``. ``papers`` matches any
+      file under a ``papers/`` directory anywhere in its path;
+      ``*.lock`` matches any lock file; ``__pycache__`` matches any
+      ``__pycache__`` directory. This preserves the original behaviour
+      and the existing ``_DEFAULT_IGNORE`` patterns.
+
+    Pre-fix history: this function used to feed each path component to
+    ``fnmatch.fnmatch`` against every pattern. ``fnmatch`` treats ``/``
+    as a literal, so a path-style pattern like ``docs/papers/**`` was
+    silently ineffective — the matcher only ever saw the parts ``docs``,
+    ``papers``, and ``foo.pdf`` independently, none of which can match a
+    pattern containing ``/``. Configs that wrote ``docs/papers/**``
+    expecting subtree exclusion were silent no-ops; the only patterns
+    that worked were single-component or extension globs.
+    """
+    rel_parts = rel_path.parts
+    for pattern in patterns:
+        if "/" in pattern:
+            segs = pattern.split("/")
+            if _path_glob_match(rel_parts, segs):
                 return True
+        else:
+            for part in rel_parts:
+                if fnmatch.fnmatch(part, pattern):
+                    return True
     return False
 
 
