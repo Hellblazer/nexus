@@ -328,6 +328,10 @@ def _check_t3_cloud() -> list[HealthResult]:
             )
             cols = client.list_collections()
             for col in cols:
+                # taxonomy__* collections are BERTopic aggregates (RDR-070),
+                # not indexer outputs — PIPELINE_VERSION does not apply.
+                if col.name.startswith("taxonomy__"):
+                    continue
                 stored = get_collection_pipeline_version(col)
                 if stored is None:
                     pipeline_results.append(HealthResult(

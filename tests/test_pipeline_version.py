@@ -200,3 +200,44 @@ def test_doctor_handles_no_version_stamp():
         result = runner.invoke(main, ["doctor"])
 
     assert "no version stamp" in result.output
+
+
+def test_doctor_skips_taxonomy_collections():
+    """Taxonomy collections are not indexer outputs and must be skipped.
+
+    taxonomy__centroids is a BERTopic c-TF-IDF aggregate (RDR-070), not a
+    product of the embedding pipeline. The PIPELINE_VERSION semantics
+    (voyage-* + CCE prefixes + RDR-028 language registry) do not apply,
+    and no code path stamps it — so doctor should not nag about it.
+    """
+    from unittest.mock import patch
+    from click.testing import CliRunner
+
+    runner = CliRunner()
+
+    centroid_col = MagicMock()
+    centroid_col.name = "taxonomy__centroids"
+    centroid_col.metadata = {}
+
+    code_col = MagicMock()
+    code_col.name = "code__myrepo"
+    code_col.metadata = {}
+
+    mock_client = MagicMock()
+    mock_client.list_collections.return_value = [centroid_col, code_col]
+
+    mock_reg = MagicMock()
+    mock_reg.all.return_value = []
+
+    from nexus.cli import main
+    with (
+        patch("nexus.config.is_local_mode", return_value=False),
+        patch("nexus.config.get_credential", return_value="sk-key"),
+        patch("nexus.health.shutil.which", return_value="/usr/bin/rg"),
+        patch("nexus.registry.RepoRegistry", return_value=mock_reg),
+        patch("nexus.health.chromadb.CloudClient", return_value=mock_client),
+    ):
+        result = runner.invoke(main, ["doctor"])
+
+    assert "taxonomy__centroids" not in result.output
+    assert "code__myrepo" in result.output
