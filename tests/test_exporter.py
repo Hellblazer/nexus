@@ -340,11 +340,19 @@ class TestPagination:
                     embeddings=embeddings[mid:], metadatas=metadatas[mid:])
         return n
 
+    # Both pagination tests below seed >300 records to cross the
+    # _PAGE/MAX_QUERY_RESULTS boundary. Real coverage of the 300-cap
+    # contract, but the boundary doesn't drift between releases — paying
+    # ~53s/each on every CI push is overhead, not signal. Marked ``slow``
+    # so default ``pytest`` deselects them; run with
+    # ``uv run pytest -m slow`` or as part of the release shakedown.
+    @pytest.mark.slow
     def test_export_pagination(self, ephemeral_db: T3Database, tmp_path: Path):
         n = self._seed_large(ephemeral_db, "code__large", "id")
         _, result = _export(ephemeral_db, "code__large", tmp_path)
         assert result["exported_count"] == n
 
+    @pytest.mark.slow
     def test_import_pagination(self, ephemeral_db: T3Database, tmp_path: Path):
         n = self._seed_large(ephemeral_db, "code__big_src", "big")
         _, _, import_result = _export_import(

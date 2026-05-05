@@ -22,6 +22,13 @@ from nexus.db.local_ef import LocalEmbeddingFunction
 from nexus.db.t2 import T2Database
 from nexus.types import SearchResult
 
+# Full e2e pipeline: real ChromaDB clients (Ephemeral + Persistent), real
+# MiniLM embeddings, real HDBSCAN clustering. ~2.9s/test average on CI,
+# 43s total. Belongs under the ``integration`` marker per project
+# convention so default ``pytest`` deselects it; run explicitly with
+# ``uv run pytest -m integration``.
+pytestmark = pytest.mark.integration
+
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
