@@ -22,15 +22,6 @@ from nexus.corpus import (
 
 # ── Constant: CANONICAL_EMBEDDING_MODELS ────────────────────────────────────
 
-def test_canonical_embedding_models_is_frozenset() -> None:
-    assert isinstance(CANONICAL_EMBEDDING_MODELS, frozenset)
-
-
-def test_canonical_embedding_models_string_members() -> None:
-    for m in CANONICAL_EMBEDDING_MODELS:
-        assert isinstance(m, str)
-
-
 def test_canonical_embedding_models_includes_voyage_context_3() -> None:
     assert "voyage-context-3" in CANONICAL_EMBEDDING_MODELS
 

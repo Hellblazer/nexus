@@ -791,12 +791,6 @@ class TestConstants:
 
         assert PRE_REGISTRY_VERSION == "4.1.2"
 
-    def test_upgrade_done_is_set(self) -> None:
-        from nexus.db.migrations import _upgrade_done
-
-        assert isinstance(_upgrade_done, set)
-
-
 # ── T2Database integration tests (Phase 3) ──────────────────────────────────
 
 

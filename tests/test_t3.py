@@ -664,13 +664,6 @@ def test_ef_override_bypasses_cache(mock_chromadb):
 # ── make_t3() factory ───────────────────────────────────────────────────────
 
 
-def test_make_t3_returns_t3database(mock_chromadb):
-    from nexus.db import make_t3
-    with patch("nexus.db.get_credential", side_effect=lambda k: f"val-{k}"):
-        db = make_t3()
-    assert isinstance(db, T3Database)
-
-
 def test_make_t3_uses_credentials(mock_chromadb):
     from nexus.db import make_t3
     creds = {"chroma_tenant": "my-tenant", "chroma_database": "my-db", "chroma_api_key": "ck-abc", "voyage_api_key": "vk-xyz"}

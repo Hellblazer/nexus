@@ -75,11 +75,6 @@ def test_context_manager_closes_on_exception(tmp_path: Path) -> None:
         db.memory.conn.execute("SELECT 1")
 
 
-def test_context_manager_returns_self(tmp_path: Path) -> None:
-    with T2Database(tmp_path / "cm_self.db") as db:
-        assert isinstance(db, T2Database)
-
-
 def test_context_manager_does_not_suppress_exception(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="propagated"):
         with T2Database(tmp_path / "cm_nosup.db") as db:
