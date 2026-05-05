@@ -1189,8 +1189,16 @@ def test_existing_ids_missing_collection_is_empty(local_t3: T3Database):
     ) == set()
 
 
+@pytest.mark.slow
 def test_existing_ids_pagination_respects_300_cap(local_t3: T3Database):
-    """existing_ids pages at 300 ids per call (ChromaDB Cloud cap)."""
+    """existing_ids pages at 300 ids per call (ChromaDB Cloud cap).
+
+    Marked ``slow``: seeds 305 entries to cross the 300-cap boundary;
+    runs ~56s on CI (single biggest test in the suite). The boundary it
+    guards (the QUOTAS._PAGE constant) does not drift between releases,
+    so paying the cost on every PR is overhead rather than coverage.
+    Run explicitly with ``uv run pytest -m slow``.
+    """
     col = "knowledge__existing_ids_paging"
     # Seed 305 entries so the sweep must page twice.
     seeded: list[str] = []

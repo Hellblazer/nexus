@@ -14,6 +14,15 @@ from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from nexus.db.t3 import T3Database
 from nexus.registry import RepoRegistry
 
+# All tests in this module are end-to-end: real ChromaDB, real local
+# embeddings, real CLI subprocesses. They average ~5.8s/test on CI and
+# accounted for ~138s (16%) of the pre-marker pytest runtime. Per the
+# project convention (pyproject.toml addopts deselects integration), e2e
+# suites belong under the ``integration`` marker. Run explicitly with
+# ``uv run pytest -m integration``; release-shakedown already exercises
+# the same code paths through ``nx index repo`` end-to-end on every tag.
+pytestmark = pytest.mark.integration
+
 _CORPUS_FILES = [
     "src/nexus/ttl.py",
     "src/nexus/corpus.py",
