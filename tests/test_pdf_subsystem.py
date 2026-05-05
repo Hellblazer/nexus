@@ -348,9 +348,16 @@ class TestFormulaPreservationOnRealPdf:
     # correct fail-loud contract for fixture-based regression guards.
     _EXPECTED_QUICK_SCREEN = 11             # _has_formulas_quick() return
     _EXPECTED_META_FORMULA_COUNT = 44       # MinerU's structured count
-    _EXPECTED_REGEX_MARKERS = 4             # _count_formula_markers (regex
-                                            # alternation undercounts: each
-                                            # $$..$$ block consumes whole)
+    _EXPECTED_REGEX_MARKERS = 16            # _count_formula_markers — sum
+                                            # of 4 $$..$$ blocks (counted as
+                                            # blocks) + 12 \frac\b commands
+                                            # (counted independently). Prior
+                                            # value 4 reflected the
+                                            # alternation-undercount bug
+                                            # (code-review C1) where each
+                                            # $$..$$ consumed whole and
+                                            # \frac instances inside were
+                                            # never separately counted.
     _EXPECTED_DOLLAR_DOLLAR_COUNT = 8       # 8 $$ markers = 4 paired blocks
     _EXPECTED_FRAC_COUNT = 12               # \frac{...} occurrences
     _EXPECTED_TEXT_LENGTH = 60135           # full extracted text

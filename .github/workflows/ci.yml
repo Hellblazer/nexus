@@ -28,6 +28,12 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: ${{ matrix.python-version }}
+          # nexus-2fyb: cache ~/.cache/uv to avoid cold-downloading torch
+          # (~2.8 GB CPU wheel) every CI run. mineru[all] was promoted to
+          # a default dep, so without cache the install + sync takes ~10m
+          # and risks exceeding the job timeout. Key on uv.lock.
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
 
       - name: Cache ChromaDB ONNX model
         uses: actions/cache@v4

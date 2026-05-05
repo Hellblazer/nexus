@@ -85,18 +85,26 @@ def extractor_loop(
 
     ext = PDFExtractor()
     try:
-        result = ext.extract(pdf_path, extractor=extractor, on_page=on_page)
-    except PipelineCancelled:
-        return ExtractionResult(text="", metadata={"page_count": 0, "table_regions": []})
+        try:
+            result = ext.extract(pdf_path, extractor=extractor, on_page=on_page)
+        except PipelineCancelled:
+            return ExtractionResult(text="", metadata={"page_count": 0, "table_regions": []})
 
-    page_count = result.metadata.get("page_count", 0)
-    db.update_progress(content_hash, total_pages=page_count)
-    # Store extraction metadata for resume (avoids re-extraction on crash recovery).
-    db.store_extraction_metadata(content_hash, result.metadata)
-    if extraction_done is not None:
-        extraction_done.set()
-
-    return result
+        page_count = result.metadata.get("page_count", 0)
+        db.update_progress(content_hash, total_pages=page_count)
+        # Store extraction metadata for resume (avoids re-extraction on crash recovery).
+        db.store_extraction_metadata(content_hash, result.metadata)
+        return result
+    finally:
+        # nexus-2fyb code-review C-int-1: must signal extraction_done even on
+        # raise. The chunker_loop spins on extraction_done.wait(timeout=0.5)
+        # and would otherwise block for a full timeout cycle on every
+        # extraction failure (math PDF without MinerU, etc.). The
+        # cancel-set + wait-not_done shutdown path observes this eventually,
+        # so today this is liveness-degradation not deadlock — but raise must
+        # NOT be allowed to leave downstream stages waiting.
+        if extraction_done is not None:
+            extraction_done.set()
 
 
 # ── Stage 2: Chunker ────────────────────────────────────────────────────────
@@ -684,7 +692,17 @@ def pipeline_index_pdf(
                 break
 
     if first_exc is not None:
+        # nexus-2fyb code-review C-int-2: keep the pipeline row marked
+        # 'failed' with the error message (audit trail) BUT clear the
+        # orphan pdf_pages / pdf_chunks rows. Otherwise the next
+        # create_pipeline() transitions failed → resuming and the
+        # chunker_loop seed cache replays the orphaned pages, causing
+        # deterministic failures (math PDF + MinerU unavailable) to cycle
+        # forever: failed → resuming → re-fail with replayed orphans.
+        # The cleared WAL means retry runs extract from scratch — same
+        # RuntimeError fires immediately, which is correct.
         db.mark_failed(content_hash, error=str(first_exc))
+        db.clear_orphan_wal(content_hash)
         raise first_exc
 
     # ── Post-passes (after all three stages complete) ────────────────────────

@@ -26,6 +26,9 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: ${{ matrix.python-version }}
+          # nexus-2fyb: see ci.yml for rationale (cache torch et al.).
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
 
       - name: Cache ChromaDB ONNX model
         uses: actions/cache@v4
@@ -57,6 +60,8 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
 
       - name: Verify tag matches pyproject.toml version
         run: |

@@ -18,10 +18,15 @@ RECEIPT="$(uv tool dir)/conexus/uv-receipt.toml"
 
 EXTRAS=""
 if [[ -f "$RECEIPT" ]]; then
-    EXTRAS=$(python3 -c "
-import re
-text = open('$RECEIPT').read()
-m = re.search(r'extras\s*=\s*\[([^\]]*)\]', text)
+    # nexus-2fyb code-review R5-I1: pass the receipt path via an env var
+    # rather than shell-interpolating it into the python -c heredoc. The
+    # prior `open('$RECEIPT')` form was vulnerable to Python-injection if
+    # $RECEIPT ever contained a quote (low real-world risk via uv tool
+    # dir, but a clean fix).
+    EXTRAS=$(NEXUS_RECEIPT_PATH="$RECEIPT" python3 -c "
+import os, re
+text = open(os.environ['NEXUS_RECEIPT_PATH']).read()
+m = re.search(r'extras\s*=\s*\[([^\]]*)\]', text, re.DOTALL)
 if m:
     extras = re.findall(r'\"([^\"]+)\"', m.group(1))
     # 'mineru' is now a default dep — drop it if a stale receipt still lists it

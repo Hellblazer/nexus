@@ -21,14 +21,27 @@ If you're on 3.14+, install 3.13 with `uv python install 3.13` — uv will use i
 uv tool install conexus
 ```
 
+The default install includes MinerU for math-aware PDF extraction (~500 MB of Python deps; first PDF index downloads ~2-3 GB of models — see [PDF indexing notes](#pdf-indexing-and-mineru-models) below).
+
 Verify:
 
 ```bash
 nx --version
 nx doctor
+nx doctor --check-mineru   # confirms MinerU is importable (since nexus-2fyb)
 ```
 
 `nx doctor` checks dependencies, credentials, and connectivity. Everything should show `✓` except cloud credentials (which are optional).
+
+### PDF indexing and MinerU models
+
+The first time you run `nx index pdf <math-paper.pdf>` MinerU downloads its formula and table models (~2-3 GB). On a typical connection this takes 3–8 minutes; the command appears to hang during the download. This happens once per install. Subsequent indexing is fast.
+
+If you don't intend to index math PDFs and want to skip the download, run with `--extractor docling` to use the formula-stripped path:
+
+```bash
+nx index pdf --extractor docling some.pdf
+```
 
 ## Update
 

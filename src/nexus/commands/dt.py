@@ -331,6 +331,7 @@ def index_cmd(
     indexed = 0
     skipped = 0
     stamp_failed = 0
+    failed: list[tuple[str, str, str]] = []  # (uuid, path, error)
     for uuid, path in records:
         ext = Path(path).suffix.lower()
         if ext not in _SUPPORTED_EXTS:
@@ -343,17 +344,38 @@ def index_cmd(
             skipped += 1
             continue
         resolved_collection = _resolve_dt_collection(collection, corpus, ext)
-        stamped = _index_record(
-            uuid,
-            path,
-            collection=resolved_collection,
-            corpus=corpus,
-            dry_run=False,
-        )
+        try:
+            stamped = _index_record(
+                uuid,
+                path,
+                collection=resolved_collection,
+                corpus=corpus,
+                dry_run=False,
+            )
+        except (RuntimeError, ImportError) as exc:
+            # nexus-2fyb code-review R4-I2: a single indexing failure must
+            # NOT kill the whole DT batch. Pre-fix, formula PDFs silently
+            # produced 0-chunk "successes" and the batch always completed;
+            # post-fix, the loud-raise contract turned that into a strict
+            # regression where one math PDF aborted the entire smart-group
+            # run and left every subsequent record unprocessed. Catch
+            # RuntimeError (extraction failures) and ImportError (corrupt
+            # MinerU install) per-record, log, and continue.
+            _log.error(
+                "dt_index_failed",
+                uuid=uuid,
+                path=path,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            failed.append((uuid, path, f"{type(exc).__name__}: {exc}"))
+            continue
         indexed += 1
         if not stamped:
             stamp_failed += 1
     summary = f"Indexed {indexed} record(s) ({skipped} skipped"
+    if failed:
+        summary += f", {len(failed)} failed"
     if stamp_failed:
         # Stamp failure leaves the entry recoverable via
         # 'nx catalog update --source-uri x-devonthink-item://<UUID>'
@@ -362,6 +384,10 @@ def index_cmd(
         summary += f", {stamp_failed} DT-URI stamp-failed"
     summary += ")."
     click.echo(summary)
+    if failed:
+        click.echo("\nFailures:")
+        for uuid, path, err in failed:
+            click.echo(f"  {uuid}\t{Path(path).name}: {err}")
     if stamp_failed:
         click.echo(
             "Some records were indexed but their catalog entry still "

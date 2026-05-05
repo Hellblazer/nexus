@@ -749,6 +749,67 @@ def _run_check_post_store_hooks() -> None:
     click.echo(f"\nTotal: {total} hook(s) registered across 3 chains.")
 
 
+# ── --check-mineru (nexus-2fyb code-review R3-3) ────────────────────────────
+
+
+def _run_check_mineru() -> None:
+    """Verify MinerU is importable and the formula-aware extractor entry
+    point is reachable.
+
+    nexus-2fyb promoted ``mineru[all]`` from an optional extra to a default
+    dependency. Before this check, a corrupt install (missing wheel,
+    broken import chain) was silent until ``nx index pdf`` ran on a
+    formula-bearing PDF. Surfacing it at doctor-time gives the user an
+    actionable error before they try to use the feature.
+    """
+    try:
+        from mineru.cli.common import do_parse  # noqa: PLC0415
+    except Exception as exc:
+        click.echo(_check("MinerU import", False, f"{type(exc).__name__}: {exc}"))
+        click.echo(
+            "  ↳ MinerU is required since nexus-2fyb. Reinstall with "
+            "`uv tool install --reinstall conexus`."
+        )
+        return
+
+    if do_parse is None:
+        click.echo(_check("MinerU import", False, "do_parse is None"))
+        click.echo(
+            "  ↳ mineru.cli.common imported but do_parse is None — "
+            "the import shim is broken. Reinstall conexus."
+        )
+        return
+
+    click.echo(_check("MinerU import", True, "mineru.cli.common.do_parse OK"))
+
+    # Optional: surface server-side state. The mineru-api server is opt-in;
+    # not running is fine. Just report status.
+    try:
+        from nexus.config import get_mineru_server_url  # noqa: PLC0415
+        url = get_mineru_server_url()
+    except Exception:
+        url = None
+    if url:
+        try:
+            import httpx  # noqa: PLC0415
+            with httpx.Client(timeout=2.0) as client:
+                r = client.get(f"{url}/health")
+            if r.status_code == 200:
+                click.echo(_check("MinerU server", True, f"reachable at {url}"))
+            else:
+                click.echo(_check(
+                    "MinerU server", False,
+                    f"{url} returned HTTP {r.status_code}",
+                ))
+        except Exception as exc:
+            click.echo(_check(
+                "MinerU server", False,
+                f"{url} unreachable: {type(exc).__name__}",
+            ))
+    else:
+        click.echo("  (no mineru-api server configured; subprocess mode in use)")
+
+
 @click.command("doctor")
 @click.option(
     "--clean-checkpoints",
@@ -894,6 +955,16 @@ def _run_check_post_store_hooks() -> None:
          "chains (single-doc / batch / document-grain). nexus-b0ka.",
 )
 @click.option(
+    "--check-mineru",
+    "check_mineru",
+    is_flag=True,
+    default=False,
+    help="Verify MinerU is importable. nexus-2fyb promoted mineru[all] "
+         "from optional extra to default dep; this surfaces a corrupt "
+         "install at doctor-time instead of waiting for the first "
+         "math-PDF index to fail.",
+)
+@click.option(
     "--check-aspect-queue",
     "check_aspect_queue",
     is_flag=True,
@@ -917,6 +988,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                check_plan_library: bool,
                check_tmpdirs: bool, reap_tmpdirs: bool,
                check_mcp_logs: bool, mcp_log_hours: int,
+               check_mineru: bool,
                json_out: bool,
                trim_telemetry: bool, days: int,
                check_post_store_hooks: bool,
@@ -961,6 +1033,10 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
 
     if check_post_store_hooks:
         _run_check_post_store_hooks()
+        return
+
+    if check_mineru:
+        _run_check_mineru()
         return
 
     if check_aspect_queue:

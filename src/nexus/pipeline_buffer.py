@@ -351,6 +351,23 @@ class PipelineDB:
         )
         conn.commit()
 
+    def clear_orphan_wal(self, content_hash: str) -> None:
+        """Delete WAL page and chunk rows for *content_hash* without
+        touching the pipeline row.
+
+        nexus-2fyb code-review C-int-2: invoked on extraction RuntimeError so
+        the pipeline row's ``status='failed'`` audit trail is preserved
+        (with the error message) but the next ``create_pipeline`` call —
+        which transitions failed → resuming — does NOT replay the orphan
+        pages from the chunker_loop seed cache. Without this, deterministic
+        failures (math PDF without MinerU) cycle forever: failed →
+        resuming → re-fail with replayed orphan pages.
+        """
+        conn = self._conn()
+        conn.execute("DELETE FROM pdf_pages WHERE content_hash = ?", (content_hash,))
+        conn.execute("DELETE FROM pdf_chunks WHERE content_hash = ?", (content_hash,))
+        conn.commit()
+
     def count_pipelines(self) -> int:
         """Return the total number of pipeline entries."""
         return self._conn().execute("SELECT COUNT(*) FROM pdf_pipeline").fetchone()[0]

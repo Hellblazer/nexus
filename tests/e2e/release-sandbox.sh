@@ -52,7 +52,8 @@ _print_help() {
         "  shakedown  Full ensemble: smoke + nx index repo/pdf/rdr + cross-corpus search" \
         "             + T2 memory roundtrip + T1 scratch use + catalog link readback +" \
         "             T1 turd sniff. Exercises every pipeline against a fresh install." \
-        "             ~5–10 min. Uses tests/fixtures/tc-sql.pdf as the PDF probe." \
+        "             ~5–10 min on warm cache, +10–15 min if MinerU models are not yet downloaded." \
+        "             Probes tc-sql.pdf (Docling path) AND bft-to-smr.pdf (MinerU path)." \
         "  shell      Reinstall + activate + drop into a subshell with HOME=\$SANDBOX." \
         "             Use this for manual nx index, nx search, etc. Exit normally to" \
         "             tear down." \
@@ -225,8 +226,23 @@ case "$MODE" in
         nx index repo "$REPO_ROOT" 2>&1 | tail -5 | sed 's/^/  /' || true
 
         echo
-        echo "── 3/11 nx index pdf (tests/fixtures/tc-sql.pdf) ──"
+        echo "── 3a/11 nx index pdf (tc-sql.pdf — Docling path, no formulas) ──"
         nx index pdf "$REPO_ROOT/tests/fixtures/tc-sql.pdf" \
+            --collection knowledge__shakedown 2>&1 | tail -5 | sed 's/^/  /' || true
+
+        echo
+        echo "── 3b/11 nx index pdf (bft-to-smr.pdf — MinerU path, formulas) ──"
+        # nexus-2fyb: shakedown previously tested ONLY tc-sql.pdf which has
+        # zero formulas and never invokes MinerU. After mineru was promoted
+        # to a default dep, the shakedown must actually exercise that code
+        # path — otherwise a regression in the formula-routing/MinerU code
+        # would slip through (which is exactly how the original silent-
+        # corruption bug shipped). bft-to-smr.pdf has 9 raw math symbols,
+        # crosses the auto-route threshold, and is the smallest formula
+        # fixture available (~440 KB). First MinerU run downloads ~2-3 GB
+        # of models, so this step pays the model-download cost on cold
+        # sandbox runs.
+        nx index pdf "$REPO_ROOT/tests/fixtures/bft-to-smr.pdf" \
             --collection knowledge__shakedown 2>&1 | tail -5 | sed 's/^/  /' || true
 
         echo
