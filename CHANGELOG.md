@@ -6,6 +6,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.26.2] - 2026-05-06
+
+Patch release. Seven bug fixes plus one prep migration for 4.27.0. All surface from the post-4.26.1 day-2 issue triage: silent failures in CLI surfaces (search, store_list, catalog list), runtime hygiene (line-buffered stdout, legacy session.lock cleanup, WAL growth bounds), and the source_uri backfill required before RDR-096 Phase 5 can drop `source_path`.
+
+### Fixed
+
+- **`store_list` bare-prefix resolver bridges to legacy 2-segment collection** (PR #536, GH #535, nexus-6mr0): when a user passes `store_list(corpus="code__nexus-1-1")` and the conformant 4-segment collection (`code__nexus-1-1__voyage-code-3__v1`) does not yet exist, the resolver now falls back to the bare 2-segment legacy form (`code__nexus-1-1`) instead of returning empty. Bridges installs that have not yet run RDR-103 collection rename; production paths that worked in 4.25.x continue to work in 4.26.x.
+
+- **`nx catalog list --owner` accepts owner name (not just tumbler)** (PR #539, GH #537, nexus-1lx7): `--owner project-foo` previously crashed because the resolver only understood dotted tumbler form (`1.2`). Now resolves the name through `Catalog.owner_tumblers_by_name(name)` and surfaces a clean Click error listing candidate tumblers when the name is ambiguous (UNIQUE constraint is `(name, owner_type)`, so duplicates exist legitimately).
+
+- **`nx search --corpus` accepts comma-separated values** (PR #541, GH #538, nexus-v8cj): the documented form `--corpus a,b,c` worked for some commands but `nx search` only accepted repeated `--corpus` flags. Now the value is CSV-expanded before resolve_corpus runs, restoring parity across the CLI.
+
+- **CLI line-buffers stdout/stderr to flush progress in non-TTY** (PR #542, GH #370): when `nx index repo` was piped or run under a hook, progress messages buffered for minutes at a time, making long indexes appear hung. Calls `sys.stdout.reconfigure(line_buffering=True)` (and stderr) at CLI entry; safe-guarded with try/except for environments where the streams do not support reconfigure.
+
+- **`session_start` cleans up pre-v4.13.0 legacy `session.lock` relic** (PR #543, GH #435): pre-v4.13.0 installs left a sentinel `session.lock` file in `~/.config/nexus/sessions/` that no current code reads or removes. New `_cleanup_legacy_session_lock(sessions_dir)` runs after `sweep_stale_sessions` with a PID liveness probe (`os.kill(pid, 0)`) so a live old install is not disturbed.
+
+- **Catalog DB caps WAL growth via `journal_size_limit`** (PR #544, GH #437): under long-lived MCP-server reader connections, SQLite auto-checkpoint runs only as PASSIVE; PASSIVE folds frames into the main DB but cannot truncate the WAL file. Reporter observed 12 MB WAL after a few hours. Adds `PRAGMA journal_size_limit=67108864` (64 MiB) on the `CatalogDB` connection so the WAL caps at a bounded steady-state size.
+
+### Added
+
+- **`document_aspects.source_uri` backfill migration** (PR #540, nexus-pnje): a Migration entry at version 4.26.2 that fills `source_uri` for any row where it is NULL or empty by deriving it from `source_path` (`file://` prefix). Live audit: 61 of 579 rows had empty `source_uri`. Idempotent. Prerequisite for RDR-096 Phase 5 (nexus-ocu9.11) which drops the redundant `source_path` column.
+
+- **`nx catalog list` resolves `--owner` by name OR tumbler** (PR #539): the new resolver path uses `Catalog.owner_tumblers_by_name(name) -> list[Tumbler]`. Empty list raises a clean ClickException; one match uses it; multiple matches list candidates for the operator to disambiguate.
+
 ## [4.26.1] - 2026-05-06
 
 Patch release. Three bug fixes from the post-4.26.0 round, all surfacing the same theme: silent-failure paths in MCP / runner code that returned plausible-looking results but lost data.
