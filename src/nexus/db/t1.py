@@ -159,6 +159,24 @@ def _find_promote_overlap_candidates(
     return [cand for _, cand in hits]
 
 
+class T1ServerNotFoundError(RuntimeError):
+    """Raised when ``T1Database()`` cannot resolve a live T1 server and the
+    caller did not explicitly opt into ephemeral semantics.
+
+    GH #567: pre-fix the constructor silently fell back to a per-process
+    ``EphemeralClient`` whenever no session record was found. CLI
+    ``nx scratch put`` writes landed in that store and vanished at
+    process exit; the next ``nx scratch list`` invocation spawned a
+    fresh ``EphemeralClient`` and saw nothing.
+
+    Opt-in paths (no exception raised):
+      - ``T1Database(client=...)`` — caller injects the chroma client
+        (tests, MCP server lifespan)
+      - ``NEXUS_SKIP_T1=1`` env var — operator subprocess path that
+        explicitly acknowledges ephemeral semantics
+    """
+
+
 class T1Database:
     """T1 ChromaDB session scratch — shared across all agents in a session tree.
 
@@ -186,7 +204,10 @@ class T1Database:
         self._dead: bool = False
 
         if client is not None:
-            # Test-injection path: use provided client as-is.
+            # Test-injection / MCP-server path: caller supplies a client
+            # explicitly (EphemeralClient, mock, or its own HttpClient).
+            # Used by the FastMCP lifespan to install a server-lifetime
+            # EphemeralClient as the MCP-tool-side T1 store.
             self._client = client
             self._session_id = session_id or str(uuid4())
         else:
@@ -220,19 +241,56 @@ class T1Database:
                     port=record["server_port"],
                 )
                 self._session_id = record["session_id"]
-            else:
-                if not skip_t1:
-                    # Only warn when the absence of a T1 server is unexpected.
-                    # Skip-T1 is the stateless-operator path; the EphemeralClient
-                    # fallback is the documented intended behaviour there.
-                    warnings.warn(
-                        "No T1 server found; falling back to local EphemeralClient. "
-                        "Cross-agent scratch sharing is unavailable for this session.",
-                        stacklevel=2,
-                    )
+            elif skip_t1:
+                # Operator subprocess path: NEXUS_SKIP_T1=1 acknowledges
+                # the ephemeral semantics. Use EphemeralClient.
                 from nexus.session import read_claude_session_id
                 self._client = chromadb.EphemeralClient()
                 self._session_id = session_id or read_claude_session_id() or str(uuid4())
+            else:
+                # GH #567: NO live T1 server, NO opt-in via NEXUS_SKIP_T1,
+                # NO injected client. Pre-fix the constructor silently
+                # fell back to a per-process EphemeralClient. CLI
+                # ``nx scratch put`` writes would land in that ephemeral
+                # store and vanish when the process exited; subsequent
+                # ``nx scratch list`` invocations spawned a fresh
+                # EphemeralClient and saw nothing. The user reported
+                # this as silent data loss.
+                #
+                # Fail loud instead. Callers that want ephemeral
+                # semantics opt in explicitly:
+                #
+                #   - ``T1Database(client=chromadb.EphemeralClient())``
+                #     (tests, MCP-server lifespan)
+                #   - ``NEXUS_SKIP_T1=1`` env var (operator subprocess)
+                #
+                # Detect + clear the stale ``current_session`` pointer
+                # at the same time so the next invocation gets a clean
+                # baseline; structured-log the cleanup so the operator
+                # can correlate.
+                from nexus.session import read_claude_session_id
+                stale_uuid = read_claude_session_id()
+                if stale_uuid:
+                    from nexus.session import CLAUDE_SESSION_FILE
+                    try:
+                        CLAUDE_SESSION_FILE.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    _log.warning(
+                        "t1_stale_current_session_pointer_cleared",
+                        stale_uuid=stale_uuid,
+                        sessions_dir=str(SESSIONS_DIR),
+                    )
+                raise T1ServerNotFoundError(
+                    f"No T1 server found in {SESSIONS_DIR} and no in-process "
+                    f"client supplied. T1 scratch requires either:\n"
+                    f"  - an active Claude Code session (which spawns the MCP "
+                    f"server + chroma via FastMCP lifespan), OR\n"
+                    f"  - NEXUS_SKIP_T1=1 to acknowledge ephemeral per-process "
+                    f"semantics (writes will not persist across invocations).\n"
+                    f"Pre-fix this fell through to a silent EphemeralClient "
+                    f"that lost every write at process exit (GH #567)."
+                )
 
         self._col = self._client.get_or_create_collection(_COLLECTION)
 

@@ -487,3 +487,91 @@ class TestWatchdogLogConfiguration:
         body = log_file.read_text()
         assert "watchdog_started" in body
         assert "claude_pid=1" in body
+
+
+# ── GH #567: session-file disappearance trigger ─────────────────────────────
+
+
+class TestSessionFileRemovedExit:
+    """GH #567: when the session file existed at watchdog startup but
+    is later removed (sweep_stale_sessions uuid-mismatch arm at
+    session.py:286), the watchdog must exit cleanly. Pre-fix it kept
+    polling and leaked until its watched PIDs died.
+    """
+
+    def test_session_file_removed_after_start_triggers_exit(
+        self, tmp_path, monkeypatch, captured_events,
+    ):
+        from nexus import t1_watchdog
+
+        monkeypatch.setattr(t1_watchdog.time, "sleep", lambda _s: None)
+        monkeypatch.setattr(
+            t1_watchdog, "_is_alive", lambda _pid: True,  # everything alive
+        )
+
+        session_file = tmp_path / "s"
+        session_file.write_text("{}")  # exists at startup
+
+        # Remove the file on the FIRST tick so we exercise the
+        # disappearance trigger.
+        original_sleep = t1_watchdog.time.sleep
+        ticks = [0]
+
+        def _tick_then_remove(_s):
+            ticks[0] += 1
+            if ticks[0] == 1:
+                session_file.unlink()
+            return original_sleep(_s)
+
+        monkeypatch.setattr(t1_watchdog.time, "sleep", _tick_then_remove)
+
+        with patch.object(t1_watchdog, "_cleanup"):
+            t1_watchdog.main([
+                "--claude-pid", "100",
+                "--chroma-pid", "200",
+                "--session-file", str(session_file),
+                "--tmpdir", str(tmp_path / "td"),
+            ])
+
+        events = [
+            e for e in captured_events
+            if e.get("reason") == "session_file_removed"
+        ]
+        assert events, (
+            f"expected watchdog_exiting with reason=session_file_removed; "
+            f"got events: {[e.get('event') for e in captured_events]}"
+        )
+
+    def test_session_file_never_existed_does_not_trigger(
+        self, tmp_path, monkeypatch, captured_events,
+    ):
+        """Tests / legacy callers that pass a path that never gets
+        created must NOT see the new exit. The PID-liveness paths
+        keep ownership.
+        """
+        from nexus import t1_watchdog
+
+        monkeypatch.setattr(t1_watchdog.time, "sleep", lambda _s: None)
+
+        # claude dies on first tick so the loop exits via the
+        # claude_pid_disappeared arm; if our new check fired
+        # incorrectly it would beat that path.
+        def _alive(pid: int) -> bool:
+            return pid != 100
+
+        monkeypatch.setattr(t1_watchdog, "_is_alive", _alive)
+        with patch.object(t1_watchdog, "_cleanup"), \
+             patch.object(t1_watchdog, "_signal_then_kill"):
+            t1_watchdog.main([
+                "--claude-pid", "100",
+                "--chroma-pid", "200",
+                "--session-file", str(tmp_path / "never-created"),
+                "--tmpdir", str(tmp_path / "td"),
+            ])
+
+        # claude_pid_disappeared should be the load-bearing event,
+        # NOT session_file_removed.
+        names = [e.get("event") for e in captured_events]
+        reasons = [e.get("reason") for e in captured_events]
+        assert "claude_pid_disappeared" in names
+        assert "session_file_removed" not in reasons
