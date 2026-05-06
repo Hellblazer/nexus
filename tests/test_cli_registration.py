@@ -39,6 +39,7 @@ def test_all_command_modules_registered():
         "mineru": "mineru",
         "search_cmd": "search",
         "taxonomy_cmd": "taxonomy",
+        "tier_status": "tier-status",
     }
 
     missing = []
