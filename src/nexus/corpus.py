@@ -232,8 +232,26 @@ def t3_collection_name(user_arg: str, *, t3: object | None = None) -> str:
     if t3 is None or user_arg == promoted:
         return promoted
     try:
-        if not t3.collection_exists(promoted) and t3.collection_exists(user_arg):  # type: ignore[attr-defined]
-            return user_arg
+        if not t3.collection_exists(promoted):  # type: ignore[attr-defined]
+            if t3.collection_exists(user_arg):  # type: ignore[attr-defined]
+                return user_arg
+            # Bare-prefix legacy fallback (#535 / nexus-6mr0): when the
+            # operator typed only the content_type (``"knowledge"``)
+            # and the conformant target is absent, bridge to the
+            # documented 2-segment legacy shape ``f"{ct}__{owner_segment}"``
+            # if it exists. Without this, the bare-prefix shorthand on
+            # installs with pre-RDR-103 collections (e.g.
+            # ``knowledge__knowledge``) reads from a missing conformant
+            # name and operators see "No entries" while the data is
+            # right there. Symmetric with the nexus-hmxi grandfathering
+            # design intent ("pre-existing legacy collections remain
+            # readable") extended to the shorthand form.
+            legacy_two_segment = f"{ct}__{owner_segment}"
+            if (
+                legacy_two_segment != user_arg
+                and t3.collection_exists(legacy_two_segment)  # type: ignore[attr-defined]
+            ):
+                return legacy_two_segment
     except Exception:
         # collection_exists probe is best-effort. On failure (cloud
         # quota error, transient network) fall through to the
