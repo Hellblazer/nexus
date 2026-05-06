@@ -182,6 +182,8 @@ AUTO-LINK RECIPE (drives store_put -> catalog links):
   3. store_put -- auto-creates catalog links from scratch context
 
 If link-context already in scratch (sibling agent did 1+2), skip to step 3.
+
+AGENT TAG: pass agent="<your-role>" to memory_put so nx tier-status slices writes by agent (nexus-9clx).
 NX_AUTOLINK
 
 # L1 Knowledge Map (per-repo, RDR-072) — outside the heredoc so $(…) expands
