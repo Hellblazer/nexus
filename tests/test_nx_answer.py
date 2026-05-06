@@ -1850,3 +1850,135 @@ class TestSubagentTimeoutFloor:
         assert "tool=nx_plan_audit" in emitted
         assert "requested=180" in emitted
         assert "floor=300" in emitted
+
+
+class TestNxAnswerPlannerRetry:
+    """nexus-wr5o: 1-shot retry on OperatorOutputError from claude_dispatch.
+
+    Transient JSON parse failures (model output drift, partial stream, null
+    structured_output on first attempt) are retried once with a halved
+    timeout. OperatorError (subprocess non-zero) and OperatorTimeoutError
+    are NOT retried — those failure modes are not transient.
+    """
+
+    @pytest.mark.asyncio
+    async def test_retry_succeeds_on_second_attempt(self):
+        """First call raises OperatorOutputError, second returns valid payload."""
+        from nexus.mcp.core import _nx_answer_plan_miss
+        from nexus.operators.dispatch import OperatorOutputError
+
+        valid_payload = {
+            "steps": [
+                {"tool": "search", "args": {"query": "$intent", "corpus": "knowledge"}},
+            ],
+        }
+        mock_dispatch = AsyncMock(side_effect=[
+            OperatorOutputError("transient JSON parse drift"),
+            valid_payload,
+        ])
+
+        with patch(
+            "nexus.operators.dispatch.claude_dispatch", mock_dispatch,
+        ), patch(
+            "nexus.mcp_infra.get_collection_names", return_value=["knowledge"],
+        ):
+            match = await _nx_answer_plan_miss("how does X work?")
+
+        # Synthetic match for inline-planner result.
+        assert match.plan_id == 0
+        assert match.name == "ad-hoc"
+        # Two attempts: first failed, second succeeded.
+        assert mock_dispatch.call_count == 2
+        # Verify the timeouts: 300 then 150.
+        assert mock_dispatch.call_args_list[0].kwargs["timeout"] == 300.0
+        assert mock_dispatch.call_args_list[1].kwargs["timeout"] == 150.0
+
+    @pytest.mark.asyncio
+    async def test_retry_exhausted_raises_second_error(self):
+        """Both attempts raise OperatorOutputError → raise the second one."""
+        from nexus.mcp.core import _nx_answer_plan_miss
+        from nexus.operators.dispatch import OperatorOutputError
+
+        mock_dispatch = AsyncMock(side_effect=[
+            OperatorOutputError("first attempt drift"),
+            OperatorOutputError("second attempt drift, this is the actionable one"),
+        ])
+
+        with patch(
+            "nexus.operators.dispatch.claude_dispatch", mock_dispatch,
+        ), patch(
+            "nexus.mcp_infra.get_collection_names", return_value=["knowledge"],
+        ):
+            with pytest.raises(OperatorOutputError) as excinfo:
+                await _nx_answer_plan_miss("how does X work?")
+
+        assert mock_dispatch.call_count == 2
+        # Caller gets the most recent (most actionable) error.
+        assert "second attempt" in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_no_retry_for_operator_error(self):
+        """OperatorError (subprocess non-zero) raises immediately, no retry."""
+        from nexus.mcp.core import _nx_answer_plan_miss
+        from nexus.operators.dispatch import OperatorError
+
+        mock_dispatch = AsyncMock(
+            side_effect=OperatorError("claude -p exited 1: oops"),
+        )
+
+        with patch(
+            "nexus.operators.dispatch.claude_dispatch", mock_dispatch,
+        ), patch(
+            "nexus.mcp_infra.get_collection_names", return_value=["knowledge"],
+        ):
+            with pytest.raises(OperatorError):
+                await _nx_answer_plan_miss("how does X work?")
+
+        assert mock_dispatch.call_count == 1, (
+            "OperatorError must NOT trigger retry — non-zero exit is "
+            "not transient"
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_retry_for_timeout_error(self):
+        """OperatorTimeoutError raises immediately — hangs are not transient."""
+        from nexus.mcp.core import _nx_answer_plan_miss
+        from nexus.operators.dispatch import OperatorTimeoutError
+
+        mock_dispatch = AsyncMock(
+            side_effect=OperatorTimeoutError("claude -p timed out after 300s"),
+        )
+
+        with patch(
+            "nexus.operators.dispatch.claude_dispatch", mock_dispatch,
+        ), patch(
+            "nexus.mcp_infra.get_collection_names", return_value=["knowledge"],
+        ):
+            with pytest.raises(OperatorTimeoutError):
+                await _nx_answer_plan_miss("how does X work?")
+
+        assert mock_dispatch.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_first_attempt_success_no_retry(self):
+        """If first call succeeds, no second call is made."""
+        from nexus.mcp.core import _nx_answer_plan_miss
+
+        valid_payload = {
+            "steps": [
+                {"tool": "search", "args": {"query": "$intent", "corpus": "knowledge"}},
+            ],
+        }
+        mock_dispatch = AsyncMock(return_value=valid_payload)
+
+        with patch(
+            "nexus.operators.dispatch.claude_dispatch", mock_dispatch,
+        ), patch(
+            "nexus.mcp_infra.get_collection_names", return_value=["knowledge"],
+        ):
+            match = await _nx_answer_plan_miss("how does X work?")
+
+        assert match.plan_id == 0
+        assert mock_dispatch.call_count == 1
+        # First-attempt path uses the full 300s timeout.
+        assert mock_dispatch.call_args.kwargs["timeout"] == 300.0

@@ -25,6 +25,31 @@ class LinkContext:
     link_type: str
 
 
+@dataclass(frozen=True)
+class AutoLinkResult:
+    """Structured outcome of an :func:`auto_link` call.
+
+    Returned instead of a bare ``int`` (nexus-a414) so the caller can
+    distinguish the four states an AUTO-LINK invocation can end in:
+
+    - ``created > 0``: the recipe worked; some links materialised.
+    - ``skipped_invalid_tumbler > 0``: target strings did not parse as a
+      :class:`Tumbler` (e.g. T3 chash hex landed in scratch link-context
+      because the upstream agent didn't extract the tumbler field from
+      ``catalog_search`` results). Operationally actionable; surfaced at
+      WARNING in the auto-linker so recipe-compliant agents see the gap.
+    - ``skipped_missing_endpoint > 0``: tumbler parsed but no catalog
+      entry resolves. Less alarming (legitimate cleanup signal during
+      catalog rebuilds) but still tracked.
+    - all zero with empty input: no link-context in scratch; not a
+      failure, not a write.
+    """
+
+    created: int = 0
+    skipped_invalid_tumbler: int = 0
+    skipped_missing_endpoint: int = 0
+
+
 def read_link_contexts(entries: list[dict[str, Any]]) -> list[LinkContext]:
     """Parse T1 scratch entries into LinkContext objects.
 
@@ -59,25 +84,53 @@ def auto_link(
     cat: Catalog,
     source_tumbler: Tumbler,
     contexts: list[LinkContext],
-) -> int:
+) -> AutoLinkResult:
     """Create catalog links from source to each target in contexts.
 
-    Uses ``link_if_absent`` for idempotency. Skips targets whose tumblers
-    don't resolve. Returns the number of links actually created.
+    Uses ``link_if_absent`` for idempotency. Returns an
+    :class:`AutoLinkResult` with separated counts (nexus-a414) so the
+    caller can distinguish a clean miss (no contexts) from a recipe-
+    compliant call that produced zero links because of bad target data.
+
+    Skip behaviour:
+
+    - Targets that fail :meth:`Tumbler.parse` are logged at WARNING with
+      a recipe-compliance hint and counted in
+      ``skipped_invalid_tumbler``. WARNING (not DEBUG, the prior level)
+      because every recipe-compliant AUTO-LINK call that lands an
+      invalid target was a silent miss before nexus-a414.
+    - Targets whose tumbler parses but whose endpoint is not in the
+      catalog are logged at DEBUG and counted in
+      ``skipped_missing_endpoint``. Lower severity because the
+      legitimate cause (catalog rebuild in progress, link-context
+      pointing at not-yet-indexed target) is non-actionable from the
+      caller's side.
     """
     if not contexts:
-        return 0
+        return AutoLinkResult()
 
-    count = 0
+    created = 0
+    skipped_invalid = 0
+    skipped_missing = 0
+
     for ctx in contexts:
         try:
             target = Tumbler.parse(ctx.target_tumbler)
         except ValueError:
-            _log.debug("auto_link_skip_invalid_tumbler", tumbler=ctx.target_tumbler)
+            skipped_invalid += 1
+            _log.warning(
+                "auto_link_skip_invalid_tumbler",
+                tumbler=ctx.target_tumbler,
+                hint=(
+                    "AUTO-LINK recipe step 2 must scratch_put TUMBLER "
+                    "strings (e.g. '1.2.5'), not T3 chash hex. Extract "
+                    "the 'tumbler' field from catalog_search results."
+                ),
+            )
             continue
 
         try:
-            created = cat.link_if_absent(
+            was_created = cat.link_if_absent(
                 source_tumbler,
                 target,
                 ctx.link_type,
@@ -86,6 +139,7 @@ def auto_link(
         except ValueError as exc:
             # link_if_absent raises ValueError for missing endpoints;
             # log the message to distinguish from unexpected ValueErrors
+            skipped_missing += 1
             _log.debug(
                 "auto_link_skip_missing_endpoint",
                 source=str(source_tumbler),
@@ -94,8 +148,8 @@ def auto_link(
             )
             continue
 
-        if created:
-            count += 1
+        if was_created:
+            created += 1
             _log.debug(
                 "auto_link_created",
                 source=str(source_tumbler),
@@ -103,4 +157,8 @@ def auto_link(
                 link_type=ctx.link_type,
             )
 
-    return count
+    return AutoLinkResult(
+        created=created,
+        skipped_invalid_tumbler=skipped_invalid,
+        skipped_missing_endpoint=skipped_missing,
+    )

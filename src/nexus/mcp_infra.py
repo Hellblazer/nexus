@@ -304,7 +304,15 @@ def require_catalog():
 
 
 def catalog_auto_link(doc_id: str) -> int:
-    """Create catalog links from T1 link-context to the just-stored document."""
+    """Create catalog links from T1 link-context to the just-stored document.
+
+    Returns the number of links actually created (backward-compat int).
+    Skip counts are surfaced via structlog: WARNING for invalid tumbler
+    skips (recipe-compliance gap), DEBUG for missing endpoint skips
+    (legitimate cleanup signal). nexus-a414 made these visible after
+    the prior all-DEBUG behaviour silently swallowed every recipe-
+    compliant call that produced zero links.
+    """
     import structlog
     _log = structlog.get_logger()
 
@@ -325,7 +333,27 @@ def catalog_auto_link(doc_id: str) -> int:
         return 0
     from nexus.catalog.auto_linker import auto_link, read_link_contexts
     contexts = read_link_contexts(link_entries)
-    return auto_link(cat, entry.tumbler, contexts)
+    result = auto_link(cat, entry.tumbler, contexts)
+
+    # nexus-a414: surface non-zero outcomes so operators see what's happening.
+    # The all-zero case (no contexts) is already gated above. The interesting
+    # case is contexts present + zero created — that's the silent failure mode
+    # the bead exists for.
+    if result.created or result.skipped_invalid_tumbler or result.skipped_missing_endpoint:
+        recipe_compliant_zero = (
+            result.created == 0
+            and result.skipped_invalid_tumbler > 0
+        )
+        log_method = _log.warning if recipe_compliant_zero else _log.info
+        log_method(
+            "auto_link_summary",
+            doc_id=doc_id,
+            created=result.created,
+            skipped_invalid_tumbler=result.skipped_invalid_tumbler,
+            skipped_missing_endpoint=result.skipped_missing_endpoint,
+            recipe_compliant_zero=recipe_compliant_zero,
+        )
+    return result.created
 
 
 def resolve_tumbler_mcp(cat, value):

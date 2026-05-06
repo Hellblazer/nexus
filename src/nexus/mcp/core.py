@@ -945,14 +945,29 @@ def store_put(
             ttl_days=ttl_days,
             catalog_doc_id=catalog_doc_id,
         )
-        # Auto-link from T1 scratch link-context
+        # Auto-link from T1 scratch link-context.
+        # nexus-a414: replace prior bare-except with named-exception capture
+        # so unexpected errors surface at WARNING instead of silently passing.
+        # The auto-link path itself stays non-fatal to store_put — the
+        # WARNING makes the failure visible without aborting the user's
+        # write. Specific skip-count observability lives one layer down in
+        # _catalog_auto_link.
         try:
             n = _catalog_auto_link(doc_id)
+        except Exception as auto_link_exc:
+            import structlog
+            structlog.get_logger().warning(
+                "store_put_auto_link_failed",
+                doc_id=doc_id,
+                error=type(auto_link_exc).__name__,
+                detail=str(auto_link_exc)[:200],
+            )
+        else:
             if n:
                 import structlog
-                structlog.get_logger().debug("store_put_auto_linked", doc_id=doc_id, link_count=n)
-        except Exception:
-            pass  # auto-linking is non-fatal
+                structlog.get_logger().debug(
+                    "store_put_auto_linked", doc_id=doc_id, link_count=n,
+                )
         # Both post-store chains fire from every storage event (RDR-095
         # symmetric-fire follow-up). Single-doc chain runs registered
         # per-doc consumers; batch chain runs with a 1-element list so
@@ -2982,7 +2997,38 @@ async def _nx_answer_plan_miss(
     # tool-choice enumeration). 120s was hitting the timeout on
     # non-trivial questions. Callers of nx_answer see the miss path
     # as a hang when this trips.
-    payload = await claude_dispatch(prompt, _PLANNER_SCHEMA, timeout=300.0)
+    #
+    # nexus-wr5o: claude -p occasionally returns malformed JSON despite
+    # --output-format json --json-schema (transient model output drift,
+    # partial stream, null structured_output on first attempt). One retry
+    # on OperatorOutputError catches the transient case; OperatorError
+    # (subprocess non-zero) and OperatorTimeoutError do NOT retry — those
+    # are not transient. Halved timeout on retry so a single hang doesn't
+    # double total wall time.
+    from nexus.operators.dispatch import OperatorOutputError as _OpOutputError
+    payload = None
+    last_output_error: _OpOutputError | None = None
+    for attempt in range(2):
+        attempt_timeout = 300.0 if attempt == 0 else 150.0
+        try:
+            payload = await claude_dispatch(
+                prompt, _PLANNER_SCHEMA, timeout=attempt_timeout,
+            )
+            break
+        except _OpOutputError as exc:
+            last_output_error = exc
+            import structlog as _slog
+            _slog.get_logger().warning(
+                "nx_answer_planner_output_error",
+                attempt=attempt + 1,
+                error=str(exc)[:300],
+            )
+    if payload is None:
+        # Both attempts hit OperatorOutputError. Re-raise the second one
+        # (most recent diagnostic) so the caller's error string carries
+        # the most-actionable snippet.
+        assert last_output_error is not None
+        raise last_output_error
     steps = payload.get("steps", []) if isinstance(payload, dict) else []
     if not steps:
         raise ValueError("planner returned empty plan")
