@@ -11,9 +11,10 @@ effort: high
    - T2 (project): `mcp__plugin_nx_nexus__memory_search(query="<topic>", project="<repo>")`.
    - T1 (siblings, this session): `mcp__plugin_nx_nexus__scratch(action="search", query="<topic>")`.
 2. **Reuse plans** before dispatching multiple agents: `mcp__plugin_nx_nexus__plan_search(query="<task>", limit=3)`.
-3. **Write back at end** — findings not stored are findings lost:
-   - `mcp__plugin_nx_nexus__store_put(...)` for permanent cross-project knowledge.
-   - `mcp__plugin_nx_nexus__memory_put(...)` for project-scoped decisions.
+3. **Write back at end** — findings not stored are findings lost. Pick the tier that matches the audience:
+   - `mcp__plugin_nx_nexus__scratch(action="put", ..., tags="<topic>")` for sibling agents downstream THIS session (T1, narrowest scope, cheapest write).
+   - `mcp__plugin_nx_nexus__memory_put(...)` for project-scoped decisions, future sessions same project (T2).
+   - `mcp__plugin_nx_nexus__store_put(...)` for permanent cross-project knowledge, future sessions everywhere (T3).
    - `mcp__plugin_nx_nexus__plan_save(...)` for multi-agent pipeline outcomes (so future callers hit plan-match).
 
 # Deep Analysis Skill
