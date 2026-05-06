@@ -53,6 +53,48 @@ def _infer_repo() -> str:
         return Path.cwd().name
 
 
+def _cleanup_legacy_session_lock(sessions_dir: Path) -> None:
+    """Remove the pre-v4.13.0 ``session.lock`` PID file if present (#435).
+
+    The lock-acquisition code path was deleted in v4.13.0 (RDR-094
+    Phase F / commit 47dfed4b). Existing installs upgraded from
+    pre-v4.13.0 may carry a stale ``session.lock`` relic forever
+    because no current code path ever reads or writes the file.
+    Best-effort liveness probe before unlink: if the PID is somehow
+    still alive the file is left alone (paranoia, since no current
+    code writes it). On the expected dead-PID case, unlink with a
+    structured log entry so operators see the cleanup happen.
+    """
+    lock_path = sessions_dir / "session.lock"
+    if not lock_path.exists():
+        return
+    try:
+        pid_str = lock_path.read_text().strip()
+        try:
+            pid = int(pid_str)
+        except ValueError:
+            pid = -1  # unreadable PID → treat as dead
+        if pid > 0:
+            try:
+                os.kill(pid, 0)
+                # PID is alive: leave the file alone. Should not
+                # happen for legacy locks (writer code is gone), but
+                # defensive: don't unlink files we can't prove stale.
+                _log.warning(
+                    "legacy_session_lock_skipped_live_pid",
+                    pid=pid, path=str(lock_path),
+                )
+                return
+            except OSError:
+                pass  # ESRCH or permission — treat as dead
+        lock_path.unlink()
+        _log.info("legacy_session_lock_cleaned_up", path=str(lock_path), pid=pid_str)
+    except FileNotFoundError:
+        pass  # raced with another cleanup — fine
+    except Exception as exc:
+        _log.debug("legacy_session_lock_cleanup_failed", error=str(exc))
+
+
 # -- SessionStart -------------------------------------------------------------
 
 def session_start(claude_session_id: str | None = None) -> str:
@@ -69,6 +111,18 @@ def session_start(claude_session_id: str | None = None) -> str:
     # handles the migration: legacy numeric-stem session files written by
     # the old PID-keyed scheme are reaped unconditionally here.
     sweep_stale_sessions(SESSIONS_DIR)
+
+    # Issue #435: remove the pre-v4.13.0 ``session.lock`` PID file if
+    # it survived from an older install. v4.13.0 (RDR-094 Phase F /
+    # commit 47dfed4b) deleted the writer code path; subsequent
+    # installs never create this file, but existing installs may
+    # carry a stale relic from before the upgrade. Without an
+    # explicit cleanup the relic sits forever as a 5-byte "PID file"
+    # that no current code reads or writes — confusing for operators
+    # who notice it. Liveness-probe the PID for safety; on dead PID
+    # (the expected post-v4.13.0 state) unlink with a structured
+    # log so the cleanup is visible in mcp.log.
+    _cleanup_legacy_session_lock(SESSIONS_DIR)
     # RDR-094 Phase 3: sweep orphan nx_t1_* tmpdirs that have no live
     # session record and are older than 24h. The 24h cutoff protects
     # in-flight tmpdirs (mkdtemp -> write_session_record_by_id has a
