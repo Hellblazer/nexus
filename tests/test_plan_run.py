@@ -1780,10 +1780,15 @@ class _OperatorFailingDispatcher:
         self._message = message
 
     async def __call__(self, tool: str, args: dict) -> dict:
-        from nexus.operators.dispatch import OperatorError
+        # Import-from-module each call so the OperatorError class
+        # identity always matches whatever ``nexus.operators.dispatch``
+        # currently exposes — robust against test-order-dependent
+        # patches in sibling test files (e.g. mock.patch.object on the
+        # dispatch module that briefly replaces module attributes).
+        import nexus.operators.dispatch as _dispatch_mod
         self.calls.append((tool, args))
         if tool.startswith("operator_"):
-            raise OperatorError(self._message)
+            raise _dispatch_mod.OperatorError(self._message)
         return {"text": f"{tool}(stub)", "ids": [], "tumblers": []}
 
 

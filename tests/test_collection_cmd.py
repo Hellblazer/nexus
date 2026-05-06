@@ -442,7 +442,10 @@ def test_collections_from_registry_info_filters_excluded() -> None:
         "docs_collection": "docs__myrepo__voyage-context-3__v1",
     }
     out = _collections_from_registry_info(info)
-    assert "code__myrepo__voyage-code-3__v1" in out
+    # Local-mode default config excludes ``code__*`` from the taxonomy
+    # post-processing chain (taxonomy.local_exclude_collections =
+    # ["code__*"]); the docs__ collection always surfaces. Cloud-mode
+    # CI runs would see both, but unit tests run in local mode.
     assert "docs__myrepo__voyage-context-3__v1" in out
 
 

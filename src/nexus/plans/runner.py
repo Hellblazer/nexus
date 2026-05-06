@@ -310,7 +310,27 @@ _STEPREF_RE = re.compile(r"^\$step(\d+)\.([A-Za-z_][A-Za-z0-9_]*)$")
 #: :mod:`nexus.plans.bundle` (``DEFERRED_REF_KEY``) so a rename or typo
 #: on either side can't silently drop the sentinel (substantive-critic C2).
 from nexus.plans.bundle import DEFERRED_REF_KEY as _DEFERRED_REF_KEY  # noqa: E402
-from nexus.operators.dispatch import OperatorError as _OperatorError  # noqa: E402
+import nexus.operators.dispatch as _dispatch_mod  # noqa: E402
+
+
+def _is_operator_error(exc: BaseException) -> bool:
+    """Identify ``OperatorError`` from ``nexus.operators.dispatch`` even
+    when its class identity drifts across test patches.
+
+    Pre-fix the runner caught ``except _OperatorError`` where
+    ``_OperatorError`` was bound at module import time. When
+    ``test_nx_answer.py``'s ``patch.object(_dispatch_mod, "claude_dispatch", ...)``
+    chains run, the dispatch module's attribute table can briefly
+    expose a different ``OperatorError`` class identity (observed
+    intermittently on the ubuntu-latest CI runner; a previously
+    passing local suite reproduced the same fault under full-test-set
+    ordering after the new operator-failure tests landed). Catching
+    by name + module fingerprint is identity-drift-proof.
+    """
+    if isinstance(exc, _dispatch_mod.OperatorError):
+        return True
+    cls = type(exc)
+    return cls.__name__ == "OperatorError" and cls.__module__ == "nexus.operators.dispatch"
 
 
 # nexus-l0yh: sentinel that replaces a step's output when the
@@ -1151,7 +1171,9 @@ async def plan_run(
                             result = await raw
                         else:
                             result = raw
-                    except _OperatorError as exc:
+                    except Exception as exc:
+                        if not _is_operator_error(exc):
+                            raise
                         # nexus-l0yh: graceful degrade — substitute
                         # sentinel, log, continue. Bundle fallback
                         # path: each step gets its own sentinel so the
@@ -1188,7 +1210,9 @@ async def plan_run(
 
             try:
                 bundle_result = await dispatch_bundle(bundle)
-            except _OperatorError as exc:
+            except Exception as exc:
+                if not _is_operator_error(exc):
+                    raise
                 # nexus-l0yh: bundle dispatch covers every plan_index
                 # in the segment, so on failure push one sentinel per
                 # index. Downstream refs to the terminal slot now
@@ -1277,7 +1301,9 @@ async def plan_run(
                 result = await raw
             else:
                 result = raw
-        except _OperatorError as exc:
+        except Exception as exc:
+            if not _is_operator_error(exc):
+                raise
             # nexus-l0yh: graceful degrade for the isolated-step path.
             # Substitute sentinel, log, continue with the next step.
             _log.warning(
