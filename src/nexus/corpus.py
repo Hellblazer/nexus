@@ -250,13 +250,25 @@ def t3_collection_name(user_arg: str, *, t3: object | None = None) -> str:
         # ``{prefix}__*`` collections (e.g. ``code`` matching 22 repos),
         # falling through to the promotion branch produced
         # ``knowledge__code__voyage-context-3__v1`` -- the wrong
-        # namespace, silently. Pick deterministically when multi-match
-        # to avoid that misroute: prefer the conformant
-        # ``{prefix}__{prefix}__<canonical_model>__v1``, then the
-        # legacy 2-segment ``{prefix}__{prefix}``, then alphabetical
-        # first. Log a warning so the operator sees the choice and
-        # can pass a more specific name on subsequent calls.
-        if len(matches) > 1:
+        # namespace, silently.
+        #
+        # Multi-match pick is content-type-specific. For ``knowledge``,
+        # falling through is SAFE because the promotion branch produces
+        # the correct ``knowledge__knowledge__...`` namespace plus the
+        # ``knowledge__knowledge`` legacy fallback from #536 at the
+        # bottom of the function. The historical behaviour the test
+        # suite locks (``store_put(collection="knowledge")`` resolves
+        # to ``knowledge__knowledge``) lives in that fallthrough path.
+        #
+        # For ``code``/``docs``/``rdr``, falling through is the bug:
+        # the promotion produces ``knowledge__<x>__...``, the wrong
+        # namespace. Pick deterministically among the matches:
+        # prefer ``{prefix}__{prefix}__<canonical_model>__v1`` (the
+        # canonical default), then ``{prefix}__{prefix}`` (the legacy
+        # 2-seg default), then alphabetical first. Log a warning so
+        # the operator sees the choice and can pass a more specific
+        # name on subsequent calls.
+        if len(matches) > 1 and user_arg != "knowledge":
             preferred_4seg = (
                 f"{user_arg}__{user_arg}__"
                 f"{canonical_embedding_model(user_arg)}__v1"
@@ -277,8 +289,11 @@ def t3_collection_name(user_arg: str, *, t3: object | None = None) -> str:
                 candidates=matches[:10],
             )
             return picked
-        # zero matches: fall through to the promotion branch so a
-        # greenfield install still gets the conformant target.
+        # zero matches OR bare ``knowledge``: fall through to the
+        # promotion branch. Greenfield installs still get the
+        # conformant target; ``knowledge`` keeps its
+        # ``knowledge__knowledge`` legacy bridge at the bottom of
+        # the function.
 
     if "__" in user_arg:
         ct, _, rest = user_arg.partition("__")
