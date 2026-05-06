@@ -469,6 +469,44 @@ def reindex_cmd(name: str, force: bool) -> None:
         except Exception as exc:
             click.echo(f"Verify failed: {exc}", err=True)
 
+    # GH #369: run the same post-processing chain ``nx index repo``
+    # runs after a successful index — taxonomy discover, Claude
+    # labeling, cross-collection projection, cooccurrence links,
+    # topic-link compute, L1 context refresh. Pre-fix the chain only
+    # fired from index_repo_cmd, so a bulk reindex (e.g. after an
+    # embedding-model upgrade) left the catalog/taxonomy/links stale
+    # and the operator had to know to re-run ``nx index repo`` per
+    # repo. ``run_collection_postprocessing`` is now the shared entry
+    # point.
+    if indexed > 0:
+        try:
+            from nexus.commands.index import run_collection_postprocessing
+            # Resolve repo_path from the registry when available so the
+            # L1 context refresh fires; falls back to ``None`` for
+            # collections with no registered owner (the L1 step is the
+            # only thing in the chain that requires a path, and it
+            # short-circuits cleanly when ``repo_path`` is ``None``).
+            repo_path: Path | None = None
+            try:
+                from nexus.indexer import RepoRegistry
+                from nexus.commands._helpers import default_db_path  # noqa: F401
+                from nexus.config import nexus_config_dir
+                reg = RepoRegistry(nexus_config_dir() / "repos.json")
+                for rp_str, info in reg.all_info().items():
+                    coll = info.get("collection") or info.get("docs_collection")
+                    if coll == name or info.get("docs_collection") == name:
+                        repo_path = Path(rp_str)
+                        break
+            except Exception:
+                pass  # repo-path resolution is best-effort
+            run_collection_postprocessing([name], repo_path=repo_path)
+        except Exception as exc:
+            click.echo(
+                f"Note: post-processing (taxonomy / links / context) "
+                f"failed: {exc}. Run `nx index repo <path>` to retry.",
+                err=True,
+            )
+
 
 @collection.command("verify")
 @click.argument("name")

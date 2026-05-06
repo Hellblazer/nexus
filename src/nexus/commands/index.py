@@ -389,41 +389,109 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
             if rdr_failed:
                 parts.append(f"{rdr_failed} failed")
             click.echo(f"  RDR documents: {', '.join(parts)} (collection rdr__)")
-    # Auto-discover taxonomy topics (RDR-070, nexus-0bg)
+    # Auto-discover taxonomy topics (RDR-070, nexus-0bg).
+    # GH #369: this chain (taxonomy + project + topic-links + L1) used
+    # to live inline here so reindex_cmd silently skipped it after
+    # bulk re-embeds. Extracted into ``run_collection_postprocessing``
+    # so both ``nx index repo`` and ``nx collection reindex`` walk the
+    # same path.
     if not frecency_only and not no_taxonomy and stats:
+        info = reg.get(path) or {}
+        collections = _collections_from_registry_info(info)
+        run_collection_postprocessing(collections, repo_path=path)
+
+    if not frecency_only:
         try:
-            from fnmatch import fnmatch
-
-            from nexus.config import is_local_mode, load_config as _load_cfg
-            from nexus.db import make_t3
-            from nexus.db.t2 import T2Database
-            from nexus.commands._helpers import default_db_path
-
-            t3 = make_t3()
-            info = reg.get(path) or {}
-            cfg = _load_cfg()
-            exclude_patterns = (
-                cfg.get("taxonomy", {}).get("local_exclude_collections", [])
-                if is_local_mode() else []
+            from nexus.commands.hooks import SENTINEL_BEGIN, _effective_hooks_dir
+            hdir = _effective_hooks_dir(path)
+            hook_names = ("post-commit", "post-merge", "post-rewrite")
+            any_managed = any(
+                SENTINEL_BEGIN in (hdir / n).read_text()
+                for n in hook_names
+                if (hdir / n).exists()
             )
-            collections = []
-            for key in ("collection", "docs_collection"):
-                col = info.get(key)
-                if col and not any(fnmatch(col, pat) for pat in exclude_patterns):
-                    collections.append(col)
+            if not any_managed:
+                click.echo("Tip: run `nx hooks install` to auto-index this repo on every commit.")
+        except Exception as exc:
+            _log.debug("hook_detection_failed", error=str(exc))  # Don't let hook detection break indexing
 
-            total_topics = 0
-            with T2Database(default_db_path()) as db:
-                for col_name in collections:
-                    try:
-                        n = _discover_taxonomy(col_name, db.taxonomy, t3._client)
-                        total_topics += n
-                    except Exception:
-                        _log.debug("taxonomy_discover_failed", collection=col_name, exc_info=True)
+    # Retry summary now emitted from the `finally` block around
+    # index_repository (see `_emit_retry_summary`) so it fires on both
+    # success and exception paths — Reviewer A/I-2.
+    click.echo("Done.")
+
+
+def _collections_from_registry_info(info: dict) -> list[str]:
+    """Return the registry's tracked collection names for taxonomy +
+    projection post-processing, filtered by
+    ``taxonomy.local_exclude_collections``. Empty list when
+    *info* is ``{}`` or carries no collection keys.
+    """
+    from fnmatch import fnmatch
+
+    from nexus.config import is_local_mode, load_config as _load_cfg
+
+    cfg = _load_cfg()
+    exclude_patterns = (
+        cfg.get("taxonomy", {}).get("local_exclude_collections", [])
+        if is_local_mode() else []
+    )
+    collections: list[str] = []
+    for key in ("collection", "docs_collection"):
+        col = info.get(key)
+        if col and not any(fnmatch(col, pat) for pat in exclude_patterns):
+            collections.append(col)
+    return collections
+
+
+def run_collection_postprocessing(
+    collections: list[str],
+    *,
+    repo_path: Path | None = None,
+    quiet: bool = False,
+) -> None:
+    """Run the post-index taxonomy + projection + topic-link chain
+    against *collections* and refresh the L1 context cache.
+
+    Extracted from :func:`index_repo_cmd` (GH #369) so
+    :func:`nexus.commands.collection.reindex_cmd` can call the same
+    chain after a bulk re-embed; previously reindex left the catalog,
+    taxonomy, and links stale because only ``nx index repo`` ran the
+    full pipeline. Each step is wrapped so a non-fatal failure (e.g.
+    cloud quota, missing optional dep) doesn't take down the chain.
+
+    *repo_path* enables the L1 context cache refresh (the only step
+    that needs the originating repo path); reindex callers pass it
+    when the registry resolves a path for the collection.
+
+    *quiet* suppresses the human-facing ``click.echo`` lines so
+    callers can drive the chain without operator output.
+    """
+    if not collections:
+        return
+
+    from nexus.config import load_config as _load_cfg
+    from nexus.db import make_t3
+    from nexus.db.t2 import T2Database
+    from nexus.commands._helpers import default_db_path
+
+    def _say(msg: str) -> None:
+        if not quiet:
+            click.echo(msg)
+
+    cfg = _load_cfg()
+    try:
+        t3 = make_t3()
+        total_topics = 0
+        with T2Database(default_db_path()) as db:
+            for col_name in collections:
+                try:
+                    n = _discover_taxonomy(col_name, db.taxonomy, t3._client)
+                    total_topics += n
+                except Exception:
+                    _log.debug("taxonomy_discover_failed", collection=col_name, exc_info=True)
             if total_topics:
-                click.echo(
-                    f"  Taxonomy: {total_topics} topics across {len(collections)} collections."
-                )
+                _say(f"  Taxonomy: {total_topics} topics across {len(collections)} collections.")
                 # Auto-label with Claude if available and enabled
                 auto_label = cfg.get("taxonomy", {}).get("auto_label", True)
                 if auto_label:
@@ -436,14 +504,14 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
                                     db.taxonomy, collection=col_name, only_pending=True,
                                 )
                             if labeled:
-                                click.echo(f"  Labels:   {labeled} topics labeled by Claude haiku.")
+                                _say(f"  Labels:   {labeled} topics labeled by Claude haiku.")
                     except Exception:
                         _log.debug("taxonomy_label_failed", exc_info=True)
 
                 # Count remaining unreviewed
                 unreviewed = len(db.taxonomy.get_unreviewed_topics())
                 if unreviewed:
-                    click.echo(
+                    _say(
                         f"  Review:   {unreviewed} topics pending. "
                         f"Run `nx taxonomy review` to curate."
                     )
@@ -462,7 +530,7 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
                                 _persist_assignments(db.taxonomy, assignments, quiet=True)
                                 proj_total += len(assignments)
                     if proj_total:
-                        click.echo(f"  Project:  {proj_total} cross-collection assignments.")
+                        _say(f"  Project:  {proj_total} cross-collection assignments.")
                 except Exception:
                     _log.debug("taxonomy_projection_failed", exc_info=True)
 
@@ -486,33 +554,14 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
                 except Exception:
                     pass  # Non-fatal
                 # Refresh L1 context cache
-                try:
-                    from nexus.context import generate_context_l1
-                    generate_context_l1(db.taxonomy, repo_path=path)
-                except Exception:
-                    pass  # Non-fatal
-        except Exception:
-            _log.debug("taxonomy_discover_failed", exc_info=True)
-
-    if not frecency_only:
-        try:
-            from nexus.commands.hooks import SENTINEL_BEGIN, _effective_hooks_dir
-            hdir = _effective_hooks_dir(path)
-            hook_names = ("post-commit", "post-merge", "post-rewrite")
-            any_managed = any(
-                SENTINEL_BEGIN in (hdir / n).read_text()
-                for n in hook_names
-                if (hdir / n).exists()
-            )
-            if not any_managed:
-                click.echo("Tip: run `nx hooks install` to auto-index this repo on every commit.")
-        except Exception as exc:
-            _log.debug("hook_detection_failed", error=str(exc))  # Don't let hook detection break indexing
-
-    # Retry summary now emitted from the `finally` block around
-    # index_repository (see `_emit_retry_summary`) so it fires on both
-    # success and exception paths — Reviewer A/I-2.
-    click.echo("Done.")
+                if repo_path is not None:
+                    try:
+                        from nexus.context import generate_context_l1
+                        generate_context_l1(db.taxonomy, repo_path=repo_path)
+                    except Exception:
+                        pass  # Non-fatal
+    except Exception:
+        _log.debug("taxonomy_discover_failed", exc_info=True)
 
 
 @index.command("pdf")
