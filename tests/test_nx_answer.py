@@ -1982,3 +1982,79 @@ class TestNxAnswerPlannerRetry:
         assert mock_dispatch.call_count == 1
         # First-attempt path uses the full 300s timeout.
         assert mock_dispatch.call_args.kwargs["timeout"] == 300.0
+
+
+# ── GH #555: final_text envelope unwrap ─────────────────────────────────────
+
+
+def test_maybe_unwrap_output_envelope_passthrough() -> None:
+    """Plain prose passes through unchanged. Empty string short-circuits."""
+    from nexus.mcp.core import _maybe_unwrap_output_envelope
+
+    assert _maybe_unwrap_output_envelope("plain prose") == "plain prose"
+    assert _maybe_unwrap_output_envelope("") == ""
+
+
+def test_maybe_unwrap_output_envelope_single_layer() -> None:
+    """One-layer ``{"output": "..."}`` envelope unwraps to the inner
+    string. The ``operator_generate`` schema produces this shape;
+    pre-fix the json.dumps fallback in nx_answer's text-key search
+    surfaced it as final_text verbatim.
+    """
+    import json
+    from nexus.mcp.core import _maybe_unwrap_output_envelope
+
+    payload = json.dumps({"output": "actual prose"})
+    assert _maybe_unwrap_output_envelope(payload) == "actual prose"
+
+
+def test_maybe_unwrap_output_envelope_double_wrap() -> None:
+    """GH #555: the extract -> generate bundle path can produce a
+    doubly-wrapped envelope when claude -p treats the prior step's
+    envelope as raw input. The unwrap descends into nested
+    string-valued ``output`` fields.
+    """
+    import json
+    from nexus.mcp.core import _maybe_unwrap_output_envelope
+
+    inner = json.dumps({"output": "deep prose"})
+    outer = json.dumps({"output": inner})
+    assert _maybe_unwrap_output_envelope(outer) == "deep prose"
+
+
+def test_maybe_unwrap_output_envelope_strict_shape_only() -> None:
+    """Multi-key dicts and non-string output values are NOT unwrapped.
+    Only the strict ``{"output": <str>}`` single-key shape triggers
+    descent so legitimate JSON payloads pass through intact.
+    """
+    import json
+    from nexus.mcp.core import _maybe_unwrap_output_envelope
+
+    # Multi-key dict: not unwrapped.
+    multi = json.dumps({"output": "x", "citations": []})
+    assert _maybe_unwrap_output_envelope(multi) == multi
+
+    # Non-string output: not unwrapped.
+    list_val = json.dumps({"output": [1, 2, 3]})
+    assert _maybe_unwrap_output_envelope(list_val) == list_val
+
+    # Different key: not unwrapped.
+    other = json.dumps({"text": "x"})
+    assert _maybe_unwrap_output_envelope(other) == other
+
+
+def test_maybe_unwrap_output_envelope_max_depth_bounded() -> None:
+    """A malformed deeply-recursive payload terminates after max_depth
+    iterations. Chosen so a 3-or-more-deep wrap (unobserved in the
+    wild) returns the partially-unwrapped state rather than looping.
+    """
+    import json
+    from nexus.mcp.core import _maybe_unwrap_output_envelope
+
+    # Build a 4-deep wrap; default max_depth is 3.
+    text = "core"
+    for _ in range(4):
+        text = json.dumps({"output": text})
+    out = _maybe_unwrap_output_envelope(text, max_depth=3)
+    # 3 unwraps from a 4-layer payload leaves one layer remaining.
+    assert "core" in out and out.startswith('{')

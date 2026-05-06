@@ -3031,6 +3031,47 @@ def _nx_answer_needs_operators(match: Any) -> bool:
     return _nx_answer_classify_plan(match) == "needs_operators"
 
 
+def _maybe_unwrap_output_envelope(text: str, *, max_depth: int = 3) -> str:
+    """GH #555: unwrap nested ``{"output": "..."}`` envelopes.
+
+    The ``operator_generate`` schema emits ``{"output": <prose>}``;
+    when an ``extract -> generate`` bundle's terminal step receives a
+    prior step's envelope as its ``context`` argument, claude -p has
+    been observed emitting a recursive ``{"output": "{\\"output\\":
+    \\"...\\"}"}`` shape (the model treats the envelope as raw text
+    and re-wraps). This helper repeatedly tries to JSON-parse *text*;
+    if the parse yields a single-key ``{"output": <str>}`` dict, it
+    pulls the inner string and tries again. Bounded by *max_depth*
+    so a malformed payload cannot infinite-loop.
+
+    Returns *text* unchanged when:
+      - it does not parse as JSON, OR
+      - the parse yields anything other than a single-key dict
+        whose only key is ``"output"`` and whose value is a string.
+
+    Cheap (single ``json.loads`` per depth) and safe (the strict
+    shape check guarantees no false unwraps on legitimate JSON).
+    """
+    current = text
+    for _ in range(max(0, max_depth)):
+        if not current or not current.lstrip().startswith("{"):
+            break
+        try:
+            parsed = json.loads(current)
+        except (json.JSONDecodeError, ValueError):
+            break
+        if (
+            isinstance(parsed, dict)
+            and len(parsed) == 1
+            and "output" in parsed
+            and isinstance(parsed["output"], str)
+        ):
+            current = parsed["output"]
+            continue
+        break
+    return current
+
+
 def _nx_answer_record_run(
     conn: Any,
     *,
@@ -3617,8 +3658,26 @@ async def nx_answer(
     # ── Step 5: extract final answer ─────────────────────────────────────
     elapsed_ms = int((time.monotonic() - start) * 1000)
     final_step = result.steps[-1] if result.steps else {}
-    text_key = next((k for k in ("text", "summary", "answer") if k in final_step), None)
+    # GH #555: include ``output`` (the operator_generate schema's
+    # terminal field) and ``comparison`` (operator_compare) in the
+    # text-key search so a generate-terminal plan returns its raw
+    # prose instead of the JSON-encoded envelope. Pre-fix the search
+    # ran ``("text", "summary", "answer")`` only; ``operator_generate``
+    # emits ``{"output": "..."}`` so the search missed and fell
+    # through to ``json.dumps(final_step)``, producing a wrapped
+    # ``'{"output": "..."}'`` final_text. Plus on extract -> generate
+    # bundles claude -p sometimes emits ``{"output": "<JSON-encoded
+    # {output: prose}>"}`` (the bundle prompt confuses the model into
+    # treating the prior step's envelope as its input string), so an
+    # additional one-level recursive unwrap on a string-valued ``output``
+    # that itself parses to ``{"output": ...}`` recovers the prose.
+    text_key = next(
+        (k for k in ("text", "summary", "answer", "output", "comparison")
+         if k in final_step),
+        None,
+    )
     final_text = str(final_step.get(text_key, "")) if text_key else json.dumps(final_step)
+    final_text = _maybe_unwrap_output_envelope(final_text)
 
     # RDR-086 Phase 3.3: harvest chunk refs from retrieval-op steps so the
     # envelope's ``chunks`` list carries id+chash+collection for every
