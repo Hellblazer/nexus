@@ -144,7 +144,9 @@ def _rg_hit_to_result(hit: dict) -> SearchResult:
 @click.argument("query")
 @click.argument("path", required=False, default=None)
 @click.option("--corpus", multiple=True, default=("knowledge", "code", "docs"),
-              show_default=True, help="Corpus prefix or full collection name (repeatable)")
+              show_default=True,
+              help="Corpus prefix or full collection name "
+                   "(repeatable: --corpus a --corpus b; or comma-separated: --corpus a,b)")
 @click.option("--n", "-m", "--max-results", "n", default=10, show_default=True,
               help="Max results to return")
 @click.option("--hybrid", is_flag=True, default=False,
@@ -267,8 +269,19 @@ def search_cmd(
     db = _t3()
     all_collections = [c["name"] for c in db.list_collections()]
 
+    # Pre-split each --corpus value on commas so the CLI accepts the
+    # same CSV form that MCP search(corpus=...) documents (#538 /
+    # nexus-v8cj). Mixed forms work: `--corpus a,b --corpus c` expands
+    # to ["a", "b", "c"].
+    expanded_corpus: list[str] = []
+    for raw in corpus:
+        for part in raw.split(","):
+            part = part.strip()
+            if part:
+                expanded_corpus.append(part)
+
     target_collections: list[str] = []
-    for c in corpus:
+    for c in expanded_corpus:
         matched = resolve_corpus(c, all_collections)
         if not matched:
             click.echo(f"Warning: no collections match --corpus {c!r}", err=True)

@@ -106,6 +106,71 @@ def test_corpus_long_form_still_works(runner: CliRunner, cloud_env) -> None:
     assert "Error" not in result.output or result.exit_code == 0
 
 
+def test_corpus_csv_form_matches_repeat_form(
+    runner: CliRunner, cloud_env,
+) -> None:
+    """nexus-v8cj (#538): --corpus a,b must hit the same collections
+    as --corpus a --corpus b. Pre-fix the CSV form was treated as a
+    single literal corpus name, emitted 'no collections match', and
+    the search returned no results.
+    """
+    mock_t3 = _mock_t3(["knowledge__test", "rdr__nexus"])
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]) as ms:
+        result = runner.invoke(
+            main, ["search", "query", "--corpus", "knowledge,rdr"],
+        )
+    assert result.exit_code == 0, result.output
+    assert "no collections match" not in result.output.lower()
+    # The CSV expanded into both targets reaching search_cross_corpus.
+    call_kwargs = ms.call_args.kwargs if ms.call_args else {}
+    targets = call_kwargs.get("collections") or (ms.call_args.args[1] if ms.call_args else [])
+    target_names = sorted(targets)
+    assert "knowledge__test" in target_names
+    assert "rdr__nexus" in target_names
+
+
+def test_corpus_csv_and_repeat_forms_can_mix(
+    runner: CliRunner, cloud_env,
+) -> None:
+    """Combined: --corpus a,b --corpus c expands to three corpora."""
+    mock_t3 = _mock_t3(["knowledge__test", "rdr__nexus", "code__one"])
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]) as ms:
+        result = runner.invoke(
+            main, ["search", "query",
+                   "--corpus", "knowledge,rdr",
+                   "--corpus", "code"],
+        )
+    assert result.exit_code == 0, result.output
+    call_kwargs = ms.call_args.kwargs if ms.call_args else {}
+    targets = call_kwargs.get("collections") or (ms.call_args.args[1] if ms.call_args else [])
+    target_names = sorted(targets)
+    assert "knowledge__test" in target_names
+    assert "rdr__nexus" in target_names
+    assert "code__one" in target_names
+
+
+def test_corpus_csv_handles_whitespace(
+    runner: CliRunner, cloud_env,
+) -> None:
+    """Whitespace around comma-separated values is stripped; empty
+    components are dropped (`'a,,b '` → `['a', 'b']`).
+    """
+    mock_t3 = _mock_t3(["knowledge__test", "rdr__nexus"])
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]) as ms:
+        result = runner.invoke(
+            main, ["search", "query", "--corpus", " knowledge , , rdr "],
+        )
+    assert result.exit_code == 0, result.output
+    call_kwargs = ms.call_args.kwargs if ms.call_args else {}
+    targets = call_kwargs.get("collections") or (ms.call_args.args[1] if ms.call_args else [])
+    target_names = sorted(targets)
+    assert "knowledge__test" in target_names
+    assert "rdr__nexus" in target_names
+
+
 def test_m_flag_limits_results(runner: CliRunner, cloud_env) -> None:
     results_pool = [
         _make_result(f"r{i}", f"line {i}", distance=float(i) * 0.1)
