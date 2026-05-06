@@ -310,6 +310,33 @@ _STEPREF_RE = re.compile(r"^\$step(\d+)\.([A-Za-z_][A-Za-z0-9_]*)$")
 #: :mod:`nexus.plans.bundle` (``DEFERRED_REF_KEY``) so a rename or typo
 #: on either side can't silently drop the sentinel (substantive-critic C2).
 from nexus.plans.bundle import DEFERRED_REF_KEY as _DEFERRED_REF_KEY  # noqa: E402
+from nexus.operators.dispatch import OperatorError as _OperatorError  # noqa: E402
+
+
+# nexus-l0yh: sentinel that replaces a step's output when the
+# operator dispatch raised :class:`OperatorError`. The runner stays
+# alive, downstream ``$stepN.<field>`` references resolve to ``""``
+# via the dict fall-through (no KeyError), and the final result
+# carries enough breadcrumbs for the operator to triage in the
+# logs. Mirrors the retrieval-tool short-circuit shape (e.g.
+# catalog_not_initialized => ``{ids:[], error:...}``).
+_OPERATOR_FAILED_SENTINEL_KEYS = ("error", "status", "tool", "step_index")
+def _operator_failed_sentinel(
+    *, tool: str, step_index: int, message: str,
+) -> dict[str, Any]:
+    return {
+        "error": message,
+        "status": "failed",
+        "tool": tool,
+        "step_index": step_index,
+        # Common downstream fields tools usually return; substituting
+        # empty values lets ``$stepN.text`` / ``$stepN.summary`` /
+        # ``$stepN.aggregates`` style refs resolve to a falsy value
+        # instead of raising PlanRunStepRefError.
+        "text": "",
+        "summary": "",
+        "aggregates": [],
+    }
 
 
 def _resolve_value(
@@ -1118,11 +1145,28 @@ async def plan_run(
                         b_raw_args, bindings=merged,
                         step_outputs=step_outputs,
                     )
-                    raw = dispatch(btool, b_resolved)
-                    if inspect.iscoroutine(raw):
-                        result = await raw
-                    else:
-                        result = raw
+                    try:
+                        raw = dispatch(btool, b_resolved)
+                        if inspect.iscoroutine(raw):
+                            result = await raw
+                        else:
+                            result = raw
+                    except _OperatorError as exc:
+                        # nexus-l0yh: graceful degrade — substitute
+                        # sentinel, log, continue. Bundle fallback
+                        # path: each step gets its own sentinel so the
+                        # plan can still surface partial results.
+                        _log.warning(
+                            "operator_step_failed",
+                            kind="bundle_fallback",
+                            step_index=bi,
+                            tool=btool,
+                            error=str(exc),
+                        )
+                        step_outputs.append(_operator_failed_sentinel(
+                            tool=btool, step_index=bi, message=str(exc),
+                        ))
+                        continue
                     if not isinstance(result, dict):
                         raise PlanRunStepRefError(
                             ref=f"step{bi + 1}",
@@ -1142,7 +1186,28 @@ async def plan_run(
                 )
                 continue
 
-            bundle_result = await dispatch_bundle(bundle)
+            try:
+                bundle_result = await dispatch_bundle(bundle)
+            except _OperatorError as exc:
+                # nexus-l0yh: bundle dispatch covers every plan_index
+                # in the segment, so on failure push one sentinel per
+                # index. Downstream refs to the terminal slot now
+                # resolve to the failed-sentinel; the planner sees
+                # ``status: failed`` if it inspects step output, or
+                # falls through to empty fields for $stepN.<field>.
+                _log.warning(
+                    "operator_step_failed",
+                    kind="bundle",
+                    step_indices=list(seg.plan_indices),
+                    error=str(exc),
+                )
+                for bi in seg.plan_indices:
+                    step_outputs.append(_operator_failed_sentinel(
+                        tool=_extract_tool(steps[bi]),
+                        step_index=bi,
+                        message=str(exc),
+                    ))
+                continue
             # Intermediate slots: sentinel. Terminal slot: the real
             # output. Downstream $stepN.<field> refs to an intermediate
             # raise a specific "inside a bundle" error via
@@ -1206,11 +1271,26 @@ async def plan_run(
         # (legacy test fixtures + any caller that prefers the simpler
         # contract). Detect a returned coroutine and await it; treat a
         # returned dict/mapping as the direct result.
-        raw = dispatch(tool, resolved)
-        if inspect.iscoroutine(raw):
-            result = await raw
-        else:
-            result = raw
+        try:
+            raw = dispatch(tool, resolved)
+            if inspect.iscoroutine(raw):
+                result = await raw
+            else:
+                result = raw
+        except _OperatorError as exc:
+            # nexus-l0yh: graceful degrade for the isolated-step path.
+            # Substitute sentinel, log, continue with the next step.
+            _log.warning(
+                "operator_step_failed",
+                kind="isolated",
+                step_index=index,
+                tool=tool,
+                error=str(exc),
+            )
+            step_outputs.append(_operator_failed_sentinel(
+                tool=tool, step_index=index, message=str(exc),
+            ))
+            continue
         if not isinstance(result, dict):
             # Tool authors must follow the documented output contract;
             # surface non-dict returns explicitly rather than letting
