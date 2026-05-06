@@ -218,6 +218,37 @@ def t3_collection_name(user_arg: str, *, t3: object | None = None) -> str:
     if is_conformant_collection_name(user_arg):
         return user_arg
 
+    # GH #545: when the user typed a BARE content-type prefix
+    # (``"code"``, ``"docs"``, ``"rdr"``, ``"knowledge"``) AND no
+    # ``__`` is present, the historical else-branch treated the value
+    # as an owner-name under content_type=``knowledge`` -- so
+    # ``--collection code`` resolved to
+    # ``knowledge__code__voyage-context-3__v1``, the wrong namespace.
+    # The 4.26.2 fix (#536) only covered the special case where the
+    # legacy 2-segment ``knowledge__knowledge`` happened to exist; for
+    # ``code``/``docs``/``rdr`` there's no ``<x>__<x>`` convention, so
+    # the bug stayed silent on those prefixes. Resolve via live-T3
+    # probe instead: if exactly one ``{prefix}__*`` collection exists,
+    # use it; on no/multiple matches fall through to the existing
+    # owner-segment-promotion branch (which then still has the
+    # ``knowledge__knowledge`` legacy fallback from #536).
+    if t3 is not None and "__" not in user_arg and user_arg in CONTENT_TYPES:
+        try:
+            matches = [
+                c["name"]
+                for c in t3.list_collections()  # type: ignore[attr-defined]
+                if c["name"].startswith(f"{user_arg}__")
+            ]
+        except Exception:
+            matches = []
+        if len(matches) == 1:
+            return matches[0]
+        # zero or many: fall through to the promotion branch so a
+        # greenfield install still gets the conformant target and a
+        # multi-collection install still goes through the existing
+        # paths (the existing ``knowledge`` fallback will then catch
+        # ``knowledge__knowledge`` on installs that have it).
+
     if "__" in user_arg:
         ct, _, rest = user_arg.partition("__")
     else:
