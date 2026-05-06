@@ -394,3 +394,53 @@ def test_reindex_warns_on_missing_source_files(runner, env_creds, mock_db) -> No
         result = runner.invoke(main, ["collection", "reindex", "docs__corpus"])
     assert result.exit_code == 0, result.output
     assert any(w in result.output.lower() for w in ("not found", "missing", "warning"))
+
+
+# ── GH #369: reindex post-processing ────────────────────────────────────────
+
+
+def test_run_collection_postprocessing_skips_empty_collection_list() -> None:
+    """The helper is a no-op on empty input so callers can route
+    unconditionally without an outer ``if collections:`` guard.
+    """
+    from nexus.commands.index import run_collection_postprocessing
+
+    # Should not raise, even without any T2/T3 access setup.
+    run_collection_postprocessing([], repo_path=None, quiet=True)
+
+
+def test_run_collection_postprocessing_swallows_t2_t3_errors() -> None:
+    """The chain's outer try/except wraps T3/T2 setup so a missing
+    SQLite path (e.g. fresh install with no memory.db yet) is logged
+    and silently skipped rather than killing the caller.
+    """
+    from unittest.mock import patch
+
+    from nexus.commands.index import run_collection_postprocessing
+
+    with patch("nexus.db.make_t3", side_effect=RuntimeError("boom")):
+        # Must NOT raise; the chain logs and falls through.
+        run_collection_postprocessing(
+            ["docs__regression"], repo_path=None, quiet=True,
+        )
+
+
+def test_collections_from_registry_info_filters_excluded() -> None:
+    """``taxonomy.local_exclude_collections`` patterns hide registry
+    collections from the post-processing chain. Empty registry
+    info returns ``[]``.
+    """
+    from nexus.commands.index import _collections_from_registry_info
+
+    # Empty info -> empty list.
+    assert _collections_from_registry_info({}) == []
+
+    # A typical post-RDR-103 registry entry returns its
+    # collection + docs_collection pair.
+    info = {
+        "collection": "code__myrepo__voyage-code-3__v1",
+        "docs_collection": "docs__myrepo__voyage-context-3__v1",
+    }
+    out = _collections_from_registry_info(info)
+    assert "code__myrepo__voyage-code-3__v1" in out
+    assert "docs__myrepo__voyage-context-3__v1" in out
