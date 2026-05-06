@@ -3268,6 +3268,17 @@ async def nx_answer(
     3. **Execute plan**: run via ``plan_run``.
     4. **Record**: write run metrics to T2 ``nx_answer_runs``.
 
+    **Latency.** This is NOT a sub-second call in the general case.
+    Each operator step (extract, rank, summarize, generate, …) spawns a
+    ``claude -p`` subprocess with a 300-second timeout. Empirical
+    distribution from 100 production runs (memory: tier-discipline-
+    audit-2026-05-06): 32% finish under 5s, 5% in 5–30s, 40% in
+    30s–2min, 23% in 2–5min. The plan-miss path adds an inline-planner
+    subprocess (also up to 300s) on top. ``plan_run`` emits per-step
+    structured ``nx_answer_step_start`` / ``nx_answer_step_complete``
+    events to ``structlog`` (nexus-0qi9) so callers tailing
+    ``~/.config/nexus/logs/mcp.log`` can see progress in real time.
+
     Args:
         question: Natural-language question to answer.
         scope: Catalog subtree or corpus filter (e.g. ``"1.2"`` or ``"knowledge"``).

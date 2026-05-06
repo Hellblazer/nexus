@@ -1676,3 +1676,89 @@ class TestPlanRunBundledAggregateCount:
         for agg in aggregate_out["aggregates"]:
             assert isinstance(agg.get("key_value"), str)
             assert isinstance(agg.get("summary"), str)
+
+
+# ── nx_answer step progress logs (nexus-0qi9) ───────────────────────────────
+
+
+class TestPlanRunStepProgressLogs:
+    """Per-step structured log events for nx_answer progress visibility.
+
+    Pre-fix: a multi-step plan run was indistinguishable from a hang
+    from the caller's seat. With these events on structlog, downstream
+    log readers (mcp.log tail, ``nx tier-status`` joins, etc.) can see
+    where the run is in real time.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _info_level(self):
+        """Default conftest sets structlog to WARNING; the progress
+        events fire at INFO. Lower the threshold for this class so
+        capture_logs sees them. The autouse _restore_structlog_after_test
+        in conftest.py undoes this between tests."""
+        import logging
+        import structlog
+        structlog.configure(
+            wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+        )
+
+    @pytest.mark.asyncio
+    async def test_isolated_steps_emit_start_and_complete(self) -> None:
+        """Each isolated segment emits paired start + complete events
+        with step indices, tool names, and elapsed_ms on completion."""
+        import structlog.testing
+
+        from nexus.plans.runner import plan_run
+
+        plan = {
+            "steps": [
+                {"tool": "search", "args": {"query": "x"}},
+                {"tool": "query",  "args": {"question": "y"}},
+            ],
+        }
+        disp = _FakeDispatcher([
+            {"text": "r1"}, {"text": "r2"},
+        ])
+        with structlog.testing.capture_logs() as captured:
+            await plan_run(_match(plan), {}, dispatcher=disp)
+
+        starts = [
+            e for e in captured if e.get("event") == "nx_answer_step_start"
+        ]
+        completes = [
+            e for e in captured if e.get("event") == "nx_answer_step_complete"
+        ]
+        assert len(starts) == 2, f"expected 2 starts, got {captured}"
+        assert len(completes) == 2, f"expected 2 completes, got {captured}"
+        # Step indices monotonically increase.
+        assert starts[0]["step_indices"] == [0]
+        assert starts[1]["step_indices"] == [1]
+        # Tools land in the event.
+        assert starts[0]["tools"] == ["search"]
+        assert starts[1]["tools"] == ["query"]
+
+    @pytest.mark.asyncio
+    async def test_complete_event_carries_elapsed_ms(self) -> None:
+        """The complete event must include elapsed_ms so callers can
+        diagnose slow steps after the fact."""
+        import structlog.testing
+
+        from nexus.plans.runner import plan_run
+
+        plan = {"steps": [{"tool": "search", "args": {"query": "x"}}]}
+        disp = _FakeDispatcher([{"text": "r"}])
+
+        with structlog.testing.capture_logs() as captured:
+            await plan_run(_match(plan), {}, dispatcher=disp)
+
+        completes = [
+            e for e in captured if e.get("event") == "nx_answer_step_complete"
+        ]
+        assert len(completes) == 1
+        ev = completes[0]
+        assert "elapsed_ms" in ev, (
+            f"complete event missing elapsed_ms: {ev!r}"
+        )
+        assert isinstance(ev["elapsed_ms"], int)
+        assert ev["elapsed_ms"] >= 0
+        assert ev["kind"] == "isolated"
