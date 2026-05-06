@@ -21,6 +21,7 @@ from nexus.commands.search_cmd import search_cmd
 from nexus.commands.store import store
 from nexus.commands.t3 import t3 as t3_group
 from nexus.commands.taxonomy_cmd import taxonomy
+from nexus.commands.tier_status import tier_status_cmd
 from nexus.commands.upgrade import upgrade
 
 @click.group()
@@ -67,4 +68,5 @@ main.add_command(search_cmd, name="search")
 main.add_command(store)
 main.add_command(t3_group, name="t3")
 main.add_command(taxonomy)
+main.add_command(tier_status_cmd, name="tier-status")
 main.add_command(upgrade)

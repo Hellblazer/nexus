@@ -700,6 +700,91 @@ def _run_check_aspect_queue() -> None:
         conn.close()
 
 
+# ── --check-tier-discipline (nexus-a52i) ─────────────────────────────────────
+
+
+def _run_check_tier_discipline() -> None:
+    """Audit tier-write activity for the current session.
+
+    Reads ``tier_writes`` from T2 and prints the same summary as
+    ``nx tier-status`` for the current session, plus a structured
+    warning when a session has zero tier writes (a soft signal that
+    the session may have produced findings without persisting them).
+
+    Heuristic only — does NOT exit non-zero. Visibility, not
+    enforcement.
+    """
+    import os as _os
+    import sqlite3 as _sqlite3
+    from pathlib import Path as _Path
+
+    from nexus.commands._helpers import default_db_path as _default_db_path
+    from nexus.session import read_claude_session_id as _read_claude_session_id
+
+    session_id = (
+        _os.environ.get("NX_SESSION_ID", "").strip()
+        or _read_claude_session_id()
+    )
+    if not session_id:
+        click.echo("Tier-discipline check:")
+        click.echo("  No current session resolvable (skip).")
+        return
+
+    db_path = _default_db_path()
+    if not _Path(db_path).exists():
+        click.echo("Tier-discipline check:")
+        click.echo(f"  T2 database not found at {db_path} (skip).")
+        return
+
+    conn = _sqlite3.connect(str(db_path))
+    try:
+        has_table = conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name='tier_writes'"
+        ).fetchone()
+        if not has_table:
+            click.echo("Tier-discipline check:")
+            click.echo("  tier_writes table not yet initialised (no writes seen).")
+            return
+        rows = conn.execute(
+            "SELECT tier, COUNT(*) FROM tier_writes "
+            "WHERE session_id = ? GROUP BY tier",
+            (session_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    by_tier = {tier: n for tier, n in rows}
+    total = sum(by_tier.values())
+
+    click.echo(f"Tier-discipline check (session {session_id}):")
+    if total == 0:
+        click.echo(
+            "  WARNING: zero tier writes recorded for this session. "
+            "Findings produced (if any) have not been persisted."
+        )
+        click.echo(
+            "  Run with `nx tier-status --session " + session_id +
+            "` for the structured view."
+        )
+        click.echo(
+            "  Pass --json for downstream tooling. Use `nx memory put`, "
+            "`nx scratch put`, or the MCP equivalents to write back."
+        )
+        return
+
+    click.echo(f"  total writes: {total}")
+    for tier in ("T1", "T2", "T3", "plan"):
+        n = by_tier.get(tier, 0)
+        if n:
+            click.echo(f"    {tier:<6} {n}")
+    if all(by_tier.get(t, 0) == 0 for t in ("T2", "T3")):
+        click.echo(
+            "  NOTE: writes are T1/plan only. No persistent (T2/T3) "
+            "write-back yet — durable findings are not surfaced."
+        )
+
+
 # ── --check-post-store-hooks (nexus-b0ka) ────────────────────────────────────
 
 
@@ -915,6 +1000,16 @@ def _run_check_mineru() -> None:
          "Linux/Windows. RDR-094 Phase H (nexus-50u5).",
 )
 @click.option(
+    "--check-tier-discipline",
+    "check_tier_discipline",
+    is_flag=True,
+    default=False,
+    help="Audit tier-write activity for the current session: prints "
+         "the tier-write summary from the tier_writes table and "
+         "warns when a substantive session has no write-back. "
+         "Phase 1B nexus-a52i.",
+)
+@click.option(
     "--mcp-log-hours",
     "mcp_log_hours",
     default=24,
@@ -992,7 +1087,8 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                json_out: bool,
                trim_telemetry: bool, days: int,
                check_post_store_hooks: bool,
-               check_aspect_queue: bool) -> None:
+               check_aspect_queue: bool,
+               check_tier_discipline: bool) -> None:
     """Verify that all required services and credentials are available."""
     if check_schema:
         _run_check_schema()
@@ -1041,6 +1137,10 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
 
     if check_aspect_queue:
         _run_check_aspect_queue()
+        return
+
+    if check_tier_discipline:
+        _run_check_tier_discipline()
         return
 
     if fix:
