@@ -6,6 +6,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.25.4] - 2026-05-06
+
+Patch release. Fixes two aspect-extraction worker bugs surfaced by the 4.25.3 live shakeout. Both bugs caused silent worker failure modes that left rows wedged in the queue.
+
+### Fixed
+
+- **Aspect-extraction worker batches mixed-collection rows together, marking the whole batch failed** (nexus-nncy, P2): ``claim_batch`` grabs FIFO across collection boundaries, so a ``knowledge__*`` row enqueued before an ``rdr__*`` row lands in the same claim. ``extract_aspects_batch`` enforces single-``ExtractorConfig`` homogeneity per its docstring contract and raises ``ValueError``, marking every row in the batch failed even though each row would have succeeded individually. The worker's ``_process_batch`` now detects heterogeneity at the top of the function (``configs = {select_config(row.collection) for row in rows}``), logs ``aspect_worker_batch_heterogeneous_fallback`` with row count and observed config names, and falls back to per-row processing via the existing single-row path. Homogeneous batches keep the cost-amortised path. Verified live during the shakeout: a 13-row queue (8 reset-pending plus 5 reclaimed orphans) drained cleanly with the fallback firing twice on mixed batches.
+
+- **`reclaim_stale` SQL never matches production timestamps, dead-worker orphans persist forever** (nexus-7yoz, P2): production writes ``last_attempt_at`` via ``datetime.now(UTC).isoformat()`` (``2026-05-06T03:01:51.332866+00:00``, T separator, ``+00:00`` suffix, microseconds). The reclaim SQL compared against ``datetime('now', '-N seconds')``, which returns ``2026-05-06 10:01:54`` (space separator, no timezone, no fractional seconds). String comparison fails because ``'T' (0x54) > ' ' (0x20)``, so production-formatted ``in_progress`` rows always sort after the cutoff and never match the WHERE clause. Effect: a worker that died after claiming rows orphaned them forever, regardless of the 300-second reclaim timeout. The shakeout exposed this with 5 rows stuck ``in_progress`` for 6.85 hours. Existing tests masked the bug because they injected ``last_attempt_at`` via SQL ``datetime('now', '-N minutes')``, which already matches the cutoff format. Fix wraps ``last_attempt_at`` in SQLite's ``datetime()`` so both formats normalise before the compare; new test injects via Python ``datetime.now(UTC).isoformat()`` to mirror production writes.
+
+### Verified end-to-end
+
+- Live shakeout drain: 13-row queue cleared in one worker session, ``aspect_worker_batch_heterogeneous_fallback`` event fired twice, ``document_aspects`` grew by 4 net new rows plus 6 upserts of existing aspects.
+- Unit suite: 6549 pass, 33 skip, 3 xfail, 0 fail.
+- Targeted aspect tests: ``test_aspect_worker.py`` 14/14 pass; ``test_aspect_extraction_queue.py`` 27/27 pass; ``test_aspect_extractor.py`` clean.
+
 ## [4.25.3] - 2026-05-05
 
 Patch release. Fixes two observability bugs surfaced by the live shakeout of 4.25.2's hooks/agents reinforcement (PRs #519 + #520) and tightens the agent / skill prompts the shakeout exposed as escapable.

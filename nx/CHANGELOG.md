@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.25.4] - 2026-05-06
+
+Plugin version aligned with conexus 4.25.4. No plugin-side changes; the release ships two aspect-worker fixes in the conexus package. See root ``CHANGELOG.md`` for details.
+
 ## [4.25.3] - 2026-05-05
 
 Plugin version aligned with conexus 4.25.3. Two prompt-side changes ship with the plugin:
