@@ -117,3 +117,23 @@ def test_catalog_mcp_tools_registered():
     }
     missing = expected - tools
     assert not missing, f"Missing catalog MCP tools: {missing}"
+
+
+def test_cli_import_enables_line_buffered_stdio():
+    """Issue #370: importing nexus.cli must reconfigure stdout/stderr
+    to line-buffered so long-running commands flush progress lines
+    in non-interactive contexts (background, piped, subprocess).
+
+    Python's default in non-TTY contexts is FULL buffering, which
+    swallows 10+ minutes of progress on large repo indexes.
+    """
+    import sys
+    # Re-import is a no-op if already imported, but the side effect
+    # (reconfigure) ran once at module load time.
+    import nexus.cli  # noqa: F401
+    assert sys.stdout.line_buffering, (
+        "nexus.cli import must enable line-buffering on stdout"
+    )
+    assert sys.stderr.line_buffering, (
+        "nexus.cli import must enable line-buffering on stderr"
+    )
