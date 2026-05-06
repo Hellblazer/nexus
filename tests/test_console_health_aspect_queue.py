@@ -22,9 +22,26 @@ def isolated_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
     return tmp_path
 
 
+# nexus-ybvl: each helper used to open its own short-lived sqlite3
+# connection (open → INSERT → commit → close). On the GH Actions Linux
+# Python 3.12 runner (system sqlite 3.37 + ext4) the cross-connection
+# fsync visibility window between commit and the next open's read was
+# wide enough to make ``_collect_aspect_queue_data()`` miss a just-
+# committed row roughly 5-10% of releases. Repro is platform-locked:
+# Python 3.13 on the same runner (deadsnakes Python links a newer
+# sqlite3) and macOS local Python 3.12 (APFS) both pass without any
+# pragma tuning. Fix: WAL + synchronous=FULL on the writer, plus an
+# explicit ``wal_checkpoint(FULL)`` after each commit so subsequent
+# readers always see the row before connection close.
+def _tune_writer(conn: sqlite3.Connection) -> None:
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=FULL")
+
+
 def _create_queue_table(db_path: Path) -> None:
     conn = sqlite3.connect(str(db_path))
     try:
+        _tune_writer(conn)
         conn.executescript(
             """
             CREATE TABLE aspect_extraction_queue (
@@ -42,6 +59,7 @@ def _create_queue_table(db_path: Path) -> None:
             """
         )
         conn.commit()
+        conn.execute("PRAGMA wal_checkpoint(FULL)")
     finally:
         conn.close()
 
@@ -56,6 +74,7 @@ def _insert_row(
 ) -> None:
     conn = sqlite3.connect(str(db_path))
     try:
+        _tune_writer(conn)
         conn.execute(
             "INSERT INTO aspect_extraction_queue "
             "(collection, source_path, status, enqueued_at) "
@@ -63,6 +82,7 @@ def _insert_row(
             (collection, source_path, status, enqueued_at),
         )
         conn.commit()
+        conn.execute("PRAGMA wal_checkpoint(FULL)")
     finally:
         conn.close()
 
