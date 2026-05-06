@@ -5,6 +5,8 @@ import re
 
 import structlog
 
+_log = structlog.get_logger(__name__)
+
 # ChromaDB collection name constraints:
 # - 3–63 characters
 # - Must start and end with an alphanumeric character
@@ -243,11 +245,40 @@ def t3_collection_name(user_arg: str, *, t3: object | None = None) -> str:
             matches = []
         if len(matches) == 1:
             return matches[0]
-        # zero or many: fall through to the promotion branch so a
-        # greenfield install still gets the conformant target and a
-        # multi-collection install still goes through the existing
-        # paths (the existing ``knowledge`` fallback will then catch
-        # ``knowledge__knowledge`` on installs that have it).
+        # nexus-0f3h: GH #545 follow-up. The original 4.26.3 fix only
+        # handled the unique-match case. On installs with MANY
+        # ``{prefix}__*`` collections (e.g. ``code`` matching 22 repos),
+        # falling through to the promotion branch produced
+        # ``knowledge__code__voyage-context-3__v1`` -- the wrong
+        # namespace, silently. Pick deterministically when multi-match
+        # to avoid that misroute: prefer the conformant
+        # ``{prefix}__{prefix}__<canonical_model>__v1``, then the
+        # legacy 2-segment ``{prefix}__{prefix}``, then alphabetical
+        # first. Log a warning so the operator sees the choice and
+        # can pass a more specific name on subsequent calls.
+        if len(matches) > 1:
+            preferred_4seg = (
+                f"{user_arg}__{user_arg}__"
+                f"{canonical_embedding_model(user_arg)}__v1"
+            )
+            preferred_2seg = f"{user_arg}__{user_arg}"
+            picked: str | None = None
+            if preferred_4seg in matches:
+                picked = preferred_4seg
+            elif preferred_2seg in matches:
+                picked = preferred_2seg
+            else:
+                picked = sorted(matches)[0]
+            _log.warning(
+                "t3_collection_name_bare_prefix_ambiguous",
+                user_arg=user_arg,
+                match_count=len(matches),
+                picked=picked,
+                candidates=matches[:10],
+            )
+            return picked
+        # zero matches: fall through to the promotion branch so a
+        # greenfield install still gets the conformant target.
 
     if "__" in user_arg:
         ct, _, rest = user_arg.partition("__")

@@ -493,3 +493,68 @@ def test_cce_index_query_model_invariant() -> None:
             f"{prefix}: index model ({idx}) must match query model ({qry}). "
             f"Mismatched models produce random noise. See RDR-059."
         )
+
+
+def test_t3_collection_name_bare_prefix_multi_match_picks_4seg() -> None:
+    """nexus-0f3h: when multiple ``{prefix}__*`` collections exist AND the
+    conformant ``{prefix}__{prefix}__<canonical_model>__v1`` is among
+    them, pick that one. This honours the RDR-103 conformant default
+    and avoids the wrong-namespace fall-through that the 4.26.3 partial
+    fix produced for the multi-match case.
+    """
+    t3 = _FakeT3({
+        "code__nexus-1__voyage-code-3__v1",
+        "code__myrepo__voyage-code-3__v1",
+        "code__code__voyage-code-3__v1",  # the conformant default
+    })
+    assert (
+        t3_collection_name("code", t3=t3)
+        == "code__code__voyage-code-3__v1"
+    )
+
+
+def test_t3_collection_name_bare_prefix_multi_match_picks_2seg_legacy() -> None:
+    """nexus-0f3h: when no conformant default exists but the legacy
+    2-segment ``{prefix}__{prefix}`` does, pick that. Mirrors the
+    nexus-6mr0 fallback for the unique-match path.
+    """
+    t3 = _FakeT3({
+        "code__nexus-1__voyage-code-3__v1",
+        "code__myrepo__voyage-code-3__v1",
+        "code__code",  # legacy 2-segment default
+    })
+    assert t3_collection_name("code", t3=t3) == "code__code"
+
+
+def test_t3_collection_name_bare_prefix_multi_match_picks_alphabetical_first() -> None:
+    """nexus-0f3h: when no canonical default exists, fall back to
+    alphabetical first. Deterministic so callers get a stable choice
+    across runs and the warning log gives the operator the candidate
+    list for disambiguation on subsequent calls.
+    """
+    t3 = _FakeT3({
+        "code__myrepo-bbb__voyage-code-3__v1",
+        "code__myrepo-aaa__voyage-code-3__v1",
+        "code__myrepo-ccc__voyage-code-3__v1",
+    })
+    assert (
+        t3_collection_name("code", t3=t3)
+        == "code__myrepo-aaa__voyage-code-3__v1"
+    )
+
+
+def test_t3_collection_name_bare_prefix_multi_match_picks_alphabetical_when_no_canonical() -> None:
+    """nexus-0f3h: 2 matches, neither is the canonical default; pick
+    alphabetical first deterministically. Pre-fix this fell through to
+    promotion and produced ``knowledge__code__voyage-context-3__v1``
+    (wrong namespace) — the load-bearing assertion is that we land on
+    a real ``code__*`` instead.
+    """
+    t3 = _FakeT3({
+        "code__b__voyage-code-3__v1",
+        "code__a__voyage-code-3__v1",
+    })
+    out = t3_collection_name("code", t3=t3)
+    assert out == "code__a__voyage-code-3__v1"
+    # Anti-regression: must never land in the wrong knowledge__ namespace.
+    assert not out.startswith("knowledge__"), out
