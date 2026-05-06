@@ -1668,6 +1668,70 @@ def migrate_document_aspects_source_uri(conn: sqlite3.Connection) -> None:
         )
 
 
+def migrate_document_aspects_source_uri_backfill_empty(conn: sqlite3.Connection) -> None:
+    """nexus-pnje: backfill ``document_aspects`` rows where
+    ``source_uri = ''`` (in addition to NULL).
+
+    The original RDR-096 P2.1 migration (``migrate_document_aspects_
+    source_uri`` above) only touched rows where ``source_uri IS NULL``.
+    Subsequent writer paths landed empty-string rows after the
+    migration ran; the live audit on production T2 (2026-05-06)
+    showed 61 of 579 rows (10.5%) with empty ``source_uri`` and
+    populated ``source_path``.
+
+    Prerequisite for ``nexus-ocu9.11`` (RDR-096 P5.2 — DROP COLUMN
+    ``source_path`` in 4.27.0). That migration's strict-audit step
+    blocks if any row has ``source_uri`` NULL or empty; this backfill
+    drops the count to zero so 4.27.0 ships cleanly without manual
+    triage.
+
+    Idempotent: only updates rows where source_uri is NULL OR ''
+    AND source_path is populated. Skipped rows (empty source_path
+    too) are left for manual triage and surfaced in the WARN log.
+    """
+    from nexus.aspect_readers import uri_for  # noqa: PLC0415
+
+    cols = {
+        r[1]
+        for r in conn.execute("PRAGMA table_info(document_aspects)").fetchall()
+    }
+    if not cols or "source_uri" not in cols:
+        return
+
+    rows = conn.execute(
+        "SELECT rowid, collection, source_path FROM document_aspects "
+        "WHERE (source_uri IS NULL OR source_uri = '') "
+        "  AND source_path IS NOT NULL "
+        "  AND source_path != ''",
+    ).fetchall()
+
+    backfilled = 0
+    skipped_uri_for_returned_none = 0
+    conn.execute("BEGIN")
+    try:
+        for rowid, collection, source_path in rows:
+            uri = uri_for(collection, source_path)
+            if uri is None:
+                skipped_uri_for_returned_none += 1
+                continue
+            conn.execute(
+                "UPDATE document_aspects SET source_uri = ? WHERE rowid = ?",
+                (uri, rowid),
+            )
+            backfilled += 1
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    if backfilled or skipped_uri_for_returned_none:
+        _log.info(
+            "migrate_document_aspects_source_uri_backfill_empty",
+            backfilled=backfilled,
+            skipped_uri_for_returned_none=skipped_uri_for_returned_none,
+        )
+
+
 def migrate_drop_null_aspect_rows(conn: sqlite3.Connection) -> None:
     """RDR-096 P2.2: drop pre-RDR-096 read-failure rows from
     ``document_aspects`` using the seven-clause discriminator from
@@ -1884,6 +1948,11 @@ MIGRATIONS: list[Migration] = [
         "4.25.5",
         "Create tier_writes table (Phase 1A tier-discipline telemetry, nexus-kren)",
         migrate_tier_writes,
+    ),
+    Migration(
+        "4.26.2",
+        "Backfill document_aspects.source_uri rows where empty string (nexus-pnje)",
+        migrate_document_aspects_source_uri_backfill_empty,
     ),
 ]
 
