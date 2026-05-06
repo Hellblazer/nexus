@@ -337,6 +337,57 @@ def test_t3_collection_name_no_t3_always_promotes() -> None:
     )
 
 
+def test_t3_collection_name_bare_prefix_falls_back_to_2segment_legacy() -> None:
+    """Bare-prefix arg ('knowledge') must reach the documented
+    legacy 2-segment collection ('knowledge__knowledge') when that's
+    the only physical collection that exists (#535, nexus-6mr0).
+
+    Pre-fix: nx store list (no args, default --collection knowledge)
+    on installs with knowledge__knowledge from before the RDR-103
+    transition returned 'No entries' because the resolver promoted
+    to knowledge__knowledge__voyage-context-3__v1 (which does not
+    exist) and never tried the 2-segment legacy fallback.
+
+    The grandfathering branch must probe the synthesised legacy
+    shape f'{ct}__{owner_segment}' in addition to user_arg itself,
+    so the bare-prefix shorthand bridges to the legacy collection
+    when the conformant target is absent.
+    """
+    legacy_2seg = "knowledge__knowledge"
+    conformant = "knowledge__knowledge__voyage-context-3__v1"
+    t3 = _FakeT3({legacy_2seg})  # only legacy exists, no conformant
+    # The user typed the bare prefix 'knowledge'. The resolver should
+    # bridge to 'knowledge__knowledge' (the 2-segment legacy shape)
+    # rather than returning the missing conformant name.
+    assert t3_collection_name("knowledge", t3=t3) == legacy_2seg
+
+
+def test_t3_collection_name_bare_prefix_promotes_when_no_legacy() -> None:
+    """Symmetric: bare-prefix on a fresh install (no legacy 2-segment
+    collection on disk) promotes to the conformant shape so new
+    writes satisfy the strict-naming guard. Only the legacy install
+    case grandfathers; greenfield installs land on conformant.
+    """
+    t3 = _FakeT3(set())  # nothing on disk
+    assert (
+        t3_collection_name("knowledge", t3=t3)
+        == "knowledge__knowledge__voyage-context-3__v1"
+    )
+
+
+def test_t3_collection_name_bare_prefix_prefers_conformant_when_both_exist() -> None:
+    """Mid-migration state: both legacy 2-segment AND conformant
+    exist for the bare-prefix shorthand. The resolver returns the
+    conformant target so new writes converge instead of forking
+    back to the legacy shape (matches the existing both-exist
+    behaviour for the 2-segment input form).
+    """
+    legacy_2seg = "knowledge__knowledge"
+    conformant = "knowledge__knowledge__voyage-context-3__v1"
+    t3 = _FakeT3({legacy_2seg, conformant})
+    assert t3_collection_name("knowledge", t3=t3) == conformant
+
+
 def test_t3_collection_name_t3_probe_failure_falls_through_to_promoted() -> None:
     """When the t3 probe raises (cloud transient / quota error), the
     resolver falls through to the auto-promoted shape; legacy reads
