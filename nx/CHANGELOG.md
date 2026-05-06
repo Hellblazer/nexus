@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.26.6] - 2026-05-06
+
+Plugin version aligned with conexus 4.26.6. No plugin-side changes; the release ships two T1-discovery follow-ups in the conexus package: post-spawn pointer reconciliation when the lifespan races SessionStart (PR #573 closes #572), and watchdog sticky-has-existed flag for the session-file-removed exit (PR #574). See root ``CHANGELOG.md`` for details.
+
 ## [4.26.5] - 2026-05-06
 
 Plugin version aligned with conexus 4.26.5. No plugin-side changes; the release ships three fixes in the conexus package: `nx index repo` file-size guard (closes long-deferred #371 OOM + #436 progress halt), T1 raise-loud on missing session file (closes #567 silent write-loss), and `nx catalog list --type` SQL pushdown (#568). See root ``CHANGELOG.md`` for details.

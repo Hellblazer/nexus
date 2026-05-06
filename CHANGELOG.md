@@ -6,6 +6,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.26.6] - 2026-05-06
+
+Patch release. Two T1-discovery follow-ups to the 4.26.5 silent-write-loss fixes (#567 + race fix #571), both surfaced during the 4.26.5 sandbox shakeout.
+
+### Fixed
+
+- **T1 record key drifts from `current_session` after lifespan-vs-SessionStart race** (PR #573, GH #572): the lifespan can spawn chroma under a stale pointer and SessionStart can write the canonical conversation UUID afterwards, leaving `current_session != sessions/<key>.session`. Pre-fix every later `T1Database()` reads the canonical pointer, looks for `sessions/<canonical>.session`, fails -- entire conversation's T1 broken until manual `NX_SESSION_ID=` recovery. Fix: `reconcile_owned_chroma` re-reads the pointer and renames `sessions/<old>.session` -> `sessions/<canonical>.session` when they've drifted. Wired post-spawn in `_t1_chroma_init_if_owner` (closest race window) AND at first-tool-call via `get_t1` (wider window: SessionStart fired AFTER spawn but BEFORE first tool call). Subagent + reused/nested chroma paths opt out (not their record to rename).
+
+- **T1 watchdog never exited on session-file removal** (PR #574): companion to PR #569's session-file-removed exit. The startup-snapshot flag (`session_file_existed_at_start`) was always False because `_t1_chroma_init_if_owner` spawns the watchdog BEFORE writing the record (so the watchdog can be PID-watched even if the record write fails). Sticky in-loop flag instead: once we observe the file in any poll, the flag stays True; later disappearance triggers exit. Direct watchdog test confirms exit within `POLL_INTERVAL` of file removal.
+
 ## [4.26.5] - 2026-05-06
 
 Patch release. Three fixes from the post-4.26.4 day-2 issue triage. Two close long-deferred GH issues (#371 OOM, #436 progress halt) that share a single root cause; one closes a critical T1 silent-write-loss bug surfaced during the 4.26.4 shake-out (#567); one mirrors PR #533's MCP fix into the matching CLI surface (#568).
