@@ -33,9 +33,11 @@ class TestAutoLink:
         target_t = cat.register(owner, "Target Doc", content_type="knowledge")
 
         ctx = LinkContext(target_tumbler=str(target_t), link_type="relates")
-        count = auto_link(cat, source_t, [ctx])
+        result = auto_link(cat, source_t, [ctx])
 
-        assert count == 1
+        assert result.created == 1
+        assert result.skipped_invalid_tumbler == 0
+        assert result.skipped_missing_endpoint == 0
         links = cat.links_from(source_t, link_type="relates")
         assert len(links) == 1
         assert links[0].created_by == "auto-linker"
@@ -46,22 +48,29 @@ class TestAutoLink:
         owner = cat.register_owner("test", "curator")
         source_t = cat.register(owner, "Source Doc", content_type="knowledge")
 
-        count = auto_link(cat, source_t, [])
+        result = auto_link(cat, source_t, [])
 
-        assert count == 0
+        assert result.created == 0
+        assert result.skipped_invalid_tumbler == 0
+        assert result.skipped_missing_endpoint == 0
         links = cat.links_from(source_t)
         assert links == []
 
     def test_nonexistent_tumbler_graceful_skip(self, tmp_path):
-        """A LinkContext referencing a non-existent tumbler is silently skipped."""
+        """A LinkContext with valid-format-but-non-existent tumbler is counted in skipped_missing_endpoint."""
         cat = _make_catalog(tmp_path)
         owner = cat.register_owner("test", "curator")
         source_t = cat.register(owner, "Source Doc", content_type="knowledge")
 
         ctx = LinkContext(target_tumbler="99.99.99", link_type="relates")
-        count = auto_link(cat, source_t, [ctx])
+        result = auto_link(cat, source_t, [ctx])
 
-        assert count == 0
+        # nexus-a414: separate counts so the caller distinguishes
+        # parseable-but-missing (cleanup signal) from non-parseable
+        # (recipe-compliance gap).
+        assert result.created == 0
+        assert result.skipped_invalid_tumbler == 0
+        assert result.skipped_missing_endpoint == 1
         links = cat.links_from(source_t)
         assert links == []
 
@@ -77,9 +86,11 @@ class TestAutoLink:
             LinkContext(target_tumbler=str(target1_t), link_type="relates"),
             LinkContext(target_tumbler=str(target2_t), link_type="relates"),
         ]
-        count = auto_link(cat, source_t, contexts)
+        result = auto_link(cat, source_t, contexts)
 
-        assert count == 2
+        assert result.created == 2
+        assert result.skipped_invalid_tumbler == 0
+        assert result.skipped_missing_endpoint == 0
         links = cat.links_from(source_t, link_type="relates")
         assert len(links) == 2
 
@@ -133,9 +144,14 @@ class TestAutoLink:
 
         ctx = LinkContext(target_tumbler=str(target_t), link_type="relates")
         auto_link(cat, source_t, [ctx])
-        count2 = auto_link(cat, source_t, [ctx])
+        result2 = auto_link(cat, source_t, [ctx])
 
-        assert count2 == 0
+        # Idempotent: the second call re-attempts the same target, finds
+        # link already present (link_if_absent returns False), counts 0
+        # created. No skip — the tumbler resolves and the row exists.
+        assert result2.created == 0
+        assert result2.skipped_invalid_tumbler == 0
+        assert result2.skipped_missing_endpoint == 0
         links = cat.links_from(source_t, link_type="relates")
         assert len(links) == 1
 
@@ -157,6 +173,85 @@ class TestAutoLink:
         assert len(links) == 2
         for link in links:
             assert link.created_by == "auto-linker"
+
+
+class TestAutoLinkResult:
+    """nexus-a414: structured AutoLinkResult separates the silent-failure modes.
+
+    Before this change, ``auto_link`` returned a bare ``int`` (the created
+    count). Recipe-compliant agents calling ``store_put`` after the AUTO-LINK
+    recipe (catalog_search → scratch put with link-context tag → store_put)
+    landed bad target data (T3 chash hex instead of tumbler strings) and
+    saw zero links created with no error signal. The new dataclass surfaces
+    invalid-tumbler vs missing-endpoint as separate counts so the caller
+    layer can WARN on the recipe-compliance gap.
+    """
+
+    def test_invalid_tumbler_counts_as_invalid_skip(self, tmp_path):
+        """Non-parseable tumbler strings (e.g. T3 chash hex) → skipped_invalid_tumbler."""
+        from nexus.catalog.auto_linker import AutoLinkResult
+
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("test", "curator")
+        source_t = cat.register(owner, "Source Doc", content_type="knowledge")
+
+        # T3 chash hex (16 hex chars) is the canonical bug-causing input
+        # surfaced by the live shakeout. Tumbler.parse rejects it.
+        ctx = LinkContext(
+            target_tumbler="aca95577feec25d1", link_type="relates",
+        )
+        result = auto_link(cat, source_t, [ctx])
+
+        assert isinstance(result, AutoLinkResult)
+        assert result.created == 0
+        assert result.skipped_invalid_tumbler == 1
+        assert result.skipped_missing_endpoint == 0
+
+    def test_mixed_invalid_and_missing_separate_counts(self, tmp_path):
+        """A batch with both failure modes counts them separately."""
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("test", "curator")
+        source_t = cat.register(owner, "Source Doc", content_type="knowledge")
+
+        contexts = [
+            # Invalid tumbler format
+            LinkContext(target_tumbler="not-a-tumbler", link_type="relates"),
+            LinkContext(target_tumbler="ddbff7f16e4454e2", link_type="relates"),
+            # Valid tumbler format, missing endpoint
+            LinkContext(target_tumbler="99.99.99", link_type="relates"),
+        ]
+        result = auto_link(cat, source_t, contexts)
+
+        assert result.created == 0
+        assert result.skipped_invalid_tumbler == 2
+        assert result.skipped_missing_endpoint == 1
+
+    def test_partial_success_counts_correctly(self, tmp_path):
+        """Mixed valid + invalid + missing in one batch: each counted in its bucket."""
+        cat = _make_catalog(tmp_path)
+        owner = cat.register_owner("test", "curator")
+        source_t = cat.register(owner, "Source Doc", content_type="knowledge")
+        target_t = cat.register(owner, "Target Doc", content_type="knowledge")
+
+        contexts = [
+            LinkContext(target_tumbler=str(target_t), link_type="relates"),
+            LinkContext(target_tumbler="not-a-tumbler", link_type="relates"),
+            LinkContext(target_tumbler="99.99.99", link_type="cites"),
+        ]
+        result = auto_link(cat, source_t, contexts)
+
+        assert result.created == 1
+        assert result.skipped_invalid_tumbler == 1
+        assert result.skipped_missing_endpoint == 1
+
+    def test_default_construction_is_all_zero(self):
+        """AutoLinkResult() with no args defaults all counts to 0."""
+        from nexus.catalog.auto_linker import AutoLinkResult
+
+        result = AutoLinkResult()
+        assert result.created == 0
+        assert result.skipped_invalid_tumbler == 0
+        assert result.skipped_missing_endpoint == 0
 
 
 class TestCatalogAutoLinkIntegration:
