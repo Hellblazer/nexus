@@ -423,6 +423,14 @@ class AspectExtractionQueue:
         timeout matches a generous extraction wall-clock.
 
         Returns the number of rows reclaimed.
+
+        ``last_attempt_at`` is wrapped in ``datetime()`` to normalize
+        the comparison: production writes ISO 8601 with ``T`` separator
+        and ``+00:00`` suffix (``datetime.now(UTC).isoformat()``), while
+        SQLite's ``datetime('now', ...)`` returns space-separated, no-tz
+        format. Without normalization, lexicographic compare fails
+        (``'T' (0x54) > ' ' (0x20)``) and reclaim matches zero rows
+        regardless of staleness.
         """
         cutoff_clause = f"datetime('now', '-{int(timeout_seconds)} seconds')"
         with self._lock:
@@ -430,7 +438,7 @@ class AspectExtractionQueue:
                 "UPDATE aspect_extraction_queue "
                 "SET status = 'pending', last_attempt_at = NULL "
                 "WHERE status = 'in_progress' "
-                f"  AND last_attempt_at < {cutoff_clause}",
+                f"  AND datetime(last_attempt_at) < {cutoff_clause}",
             )
             self.conn.commit()
             return cur.rowcount

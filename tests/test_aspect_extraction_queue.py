@@ -375,6 +375,55 @@ class TestReclaimStale:
         assert reclaimed == 0
         assert row[0] == "in_progress"
 
+    def test_reclaim_stale_handles_iso8601_timezone_format(
+        self, tmp_path: Path,
+    ) -> None:
+        """Production writes ``last_attempt_at`` as
+        ``datetime.now(UTC).isoformat()`` which produces e.g.
+        ``2026-05-06T03:01:51.332866+00:00`` (T separator, +00:00
+        suffix, microseconds). SQLite's ``datetime('now', '-N seconds')``
+        returns ``2026-05-06 10:01:54`` (space, no timezone). String
+        compare fails: ``'T' (0x54) > ' ' (0x20)``, so all in_progress
+        rows of production format sort AFTER the cutoff and never
+        match the WHERE clause — reclaim returns 0 regardless of
+        staleness.
+
+        Pre-fix repro: this test fails (reclaim_stale returns 0).
+        Bug found in 4.25.3 shakeout 2026-05-06 (nexus-7yoz).
+        """
+        from datetime import datetime, timedelta, timezone
+
+        from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
+
+        store = AspectExtractionQueue(tmp_path / "t2.db")
+        try:
+            store.enqueue("knowledge__delos", "/p1.pdf")
+            store.claim_next()
+            # Inject a stale timestamp using the EXACT format production
+            # uses (datetime.now(UTC).isoformat() — T separator, +00:00).
+            stale_ts = (
+                datetime.now(timezone.utc) - timedelta(seconds=600)
+            ).isoformat()
+            store.conn.execute(
+                "UPDATE aspect_extraction_queue SET last_attempt_at = ?",
+                (stale_ts,),
+            )
+            store.conn.commit()
+
+            reclaimed = store.reclaim_stale(timeout_seconds=60)
+            row = store.conn.execute(
+                "SELECT status, last_attempt_at "
+                "FROM aspect_extraction_queue"
+            ).fetchone()
+        finally:
+            store.close()
+        assert reclaimed == 1, (
+            "reclaim_stale must match production-formatted ISO 8601 "
+            "timestamps with timezone suffix"
+        )
+        assert row[0] == "pending"
+        assert row[1] is None
+
 
 # ── Pending count + listing ──────────────────────────────────────────────────
 
