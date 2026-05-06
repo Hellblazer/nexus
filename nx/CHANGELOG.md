@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.26.3] - 2026-05-06
+
+Plugin version aligned with conexus 4.26.3. No plugin-side changes; the release ships twelve fixes in the conexus package, including two load-bearing user-facing fixes: the chromadb 1.5.9 regression that silently disabled session-level plan caching on every ``nx_answer`` call, and the double-JSON-wrapped ``final_text`` on generate-terminal plans that broke every prose-rendering skill. See root ``CHANGELOG.md`` for the full list.
+
 ## [4.26.2] - 2026-05-06
 
 Plugin version aligned with conexus 4.26.2. No plugin-side changes; the release ships seven bug fixes plus one prep migration in the conexus package (store_list bare-prefix resolver, catalog list owner-name, search CSV corpus, CLI line-buffering, legacy session.lock cleanup, catalog WAL bound, and a document_aspects.source_uri backfill prerequisite for RDR-096 Phase 5). See root ``CHANGELOG.md`` for details.
