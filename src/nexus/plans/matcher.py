@@ -156,9 +156,69 @@ class PlanCache(Protocol):
         ...
 
 
+#: nexus-qi8t: verb-synonym equivalence classes for the dimension
+#: filter. The historical strict-equality gate at :func:`_superset`
+#: rejected high-confidence cosine matches whenever the caller's
+#: inferred verb (``query``) and the plan's declared verb
+#: (``research``) used different vocabulary for what is semantically
+#: the same intent. Live repro 2026-05-06: ``nx_answer`` with
+#: question 'Find papers by Grossberg about ART resonance' and
+#: ``dimensions={"verb":"research"}`` did NOT match the builtin
+#: ``find-by-author`` plan (verb=research) because the inline planner
+#: classified the question as ``verb=query`` and the strict filter
+#: dropped the cosine hit before it reached scoring.
+#:
+#: Each class lists verb names that should be treated as
+#: interchangeable for filter purposes; verbs not in any class only
+#: match themselves (strict-equality preserved). Classes are
+#: deliberately conservative -- ``debug`` (failure investigation),
+#: ``document`` (gap-finding), and ``plan-*`` (plan lifecycle ops)
+#: all stay isolated since swapping them with a research-verb plan
+#: would produce wrong answers.
+_VERB_SYNONYMS: tuple[frozenset[str], ...] = (
+    # Information-retrieval intents -- "tell me about X", "how does X
+    # work", "find papers by Y". The user's question shape rarely
+    # disambiguates between these and the plan-author's verb choice
+    # is similarly fuzzy in practice.
+    frozenset({"query", "research", "lookup"}),
+    # Critique / synthesis intents -- "what tradeoffs", "compare X
+    # across projects", "review this design".
+    frozenset({"analyze", "review", "compare"}),
+)
+
+
+def _verbs_compatible(plan_verb: Any, filter_verb: Any) -> bool:
+    """Return True when *plan_verb* and *filter_verb* should be
+    treated as equivalent under the synonym map. Falls back to
+    strict equality when either verb is empty or neither appears in
+    any class.
+    """
+    if plan_verb == filter_verb:
+        return True
+    if not plan_verb or not filter_verb:
+        return False
+    for klass in _VERB_SYNONYMS:
+        if plan_verb in klass and filter_verb in klass:
+            return True
+    return False
+
+
 def _superset(plan_dims: dict[str, Any], filter_dims: dict[str, Any]) -> bool:
-    """Return True when ``plan_dims ⊇ filter_dims`` by equality."""
-    return all(plan_dims.get(k) == v for k, v in filter_dims.items())
+    """Return True when ``plan_dims ⊇ filter_dims`` (nexus-qi8t).
+
+    The ``verb`` dimension uses the synonym-class equality at
+    :func:`_verbs_compatible`; other dimensions (scope, strategy,
+    taxonomy_domain, ...) keep strict equality so cross-domain plans
+    cannot accidentally match.
+    """
+    for k, v in filter_dims.items():
+        plan_v = plan_dims.get(k)
+        if k == "verb":
+            if not _verbs_compatible(plan_v, v):
+                return False
+        elif plan_v != v:
+            return False
+    return True
 
 
 def plan_match(

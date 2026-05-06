@@ -942,3 +942,70 @@ class TestRdr092Canaries:
             f"attractor ratio telemetry: {max_single}/{total} "
             f"(= {ratio:.2f}) across {len(landings)} distinct plans"
         )
+
+
+# ── nexus-qi8t: verb-synonym equivalence in dimension filter ───────────────
+
+
+def test_superset_verbs_research_query_lookup_are_compatible() -> None:
+    """nexus-qi8t: a plan with verb=research must match a filter with
+    verb=query (or lookup) since these are all retrieval intents.
+    Pre-fix the strict-equality gate dropped the match at the dimension
+    filter stage, even when the cosine confidence was high.
+    """
+    from nexus.plans.matcher import _superset
+
+    plan_dims = {"verb": "research"}
+    assert _superset(plan_dims, {"verb": "query"}) is True
+    assert _superset(plan_dims, {"verb": "lookup"}) is True
+    assert _superset(plan_dims, {"verb": "research"}) is True
+
+
+def test_superset_verbs_analyze_review_compare_are_compatible() -> None:
+    """nexus-qi8t: critique / synthesis intents share a class."""
+    from nexus.plans.matcher import _superset
+
+    plan_dims = {"verb": "analyze"}
+    assert _superset(plan_dims, {"verb": "review"}) is True
+    assert _superset(plan_dims, {"verb": "compare"}) is True
+
+
+def test_superset_verbs_isolated_classes_stay_strict() -> None:
+    """nexus-qi8t: ``debug`` / ``document`` / ``plan-*`` are isolated.
+    Swapping them with a research-verb plan would produce wrong
+    answers, so they must NOT match.
+    """
+    from nexus.plans.matcher import _superset
+
+    plan_dims = {"verb": "debug"}
+    assert _superset(plan_dims, {"verb": "research"}) is False
+    assert _superset(plan_dims, {"verb": "document"}) is False
+
+    plan_dims = {"verb": "document"}
+    assert _superset(plan_dims, {"verb": "research"}) is False
+
+
+def test_superset_non_verb_dimensions_stay_strict() -> None:
+    """nexus-qi8t: only the verb dimension carves out synonyms.
+    ``scope``, ``strategy``, ``taxonomy_domain`` etc. keep strict
+    equality so cross-domain plans cannot accidentally match.
+    """
+    from nexus.plans.matcher import _superset
+
+    plan_dims = {"verb": "research", "scope": "global"}
+    assert _superset(plan_dims, {"verb": "query", "scope": "global"}) is True
+    # Same verb-synonym match but scope differs => reject.
+    assert _superset(plan_dims, {"verb": "query", "scope": "project"}) is False
+
+
+def test_superset_empty_verb_falls_back_to_strict_equality() -> None:
+    """A missing verb (None / "") falls back to strict equality so a
+    legacy NULL-verb plan cannot accidentally match a verb-tagged
+    filter.
+    """
+    from nexus.plans.matcher import _superset
+
+    plan_dims: dict = {"verb": ""}
+    assert _superset(plan_dims, {"verb": "research"}) is False
+    plan_dims = {"verb": None}
+    assert _superset(plan_dims, {"verb": "research"}) is False
