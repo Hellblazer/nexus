@@ -6,6 +6,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.25.3] - 2026-05-05
+
+Plugin version aligned with conexus 4.25.3. Two prompt-side changes ship with the plugin:
+
+- **10 agent files** + **8 producing skill files**: tightened ``## Pre-flight`` lead now explicitly names the rationalization the using-nx-skills Red Flags table warns about (skipping pre-flight on grounds "the code is the answer / tiers won't help"). ``## Post-flight`` write-back is now audience-aware — T1 ``scratch_put`` added as a first-class write target for sibling agents downstream THIS session (the original 4.25.2 wording omitted T1 entirely from the write-back menu, framing all three tiers as "future sessions"; the live shakeout's sibling-sharing probe confirmed T1 IS the bus for in-session promotion).
+
+The agent / skill changes make rationalizations VISIBLE in the agent's self-report but do NOT prevent them at the prompt-strength tried so far. Honest finding documented in root ``CHANGELOG.md`` for the 4.25.3 release notes; behavioral enforcement is a follow-up.
+
+See root ``CHANGELOG.md`` for the AUTO-LINK observability + nx_answer planner retry fixes that ship in the same release.
+
 ## [4.25.2] - 2026-05-05
 
 Plugin version aligned with conexus 4.25.2. Same composed-retrieval guidance from 4.25.1's SubagentStart hook restoration, now reinforced in the agents' and skills' own role descriptions:

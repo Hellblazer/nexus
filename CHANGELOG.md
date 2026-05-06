@@ -6,6 +6,32 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.25.3] - 2026-05-05
+
+Patch release. Fixes two observability bugs surfaced by the live shakeout of 4.25.2's hooks/agents reinforcement (PRs #519 + #520) and tightens the agent / skill prompts the shakeout exposed as escapable.
+
+### Fixed
+
+- **AUTO-LINK silent failure** (nexus-a414, P1): recipe-compliant agents calling ``store_put`` after the ``catalog_search → scratch put with link-context tag → store_put`` recipe could land zero links and get no error signal when targets failed ``Tumbler.parse`` (e.g. T3 chash hex landed in scratch instead of tumbler strings, the canonical bug-causing pattern surfaced by the live shakeout). ``auto_link()`` now returns an ``AutoLinkResult`` dataclass with separated counts (``created``, ``skipped_invalid_tumbler``, ``skipped_missing_endpoint``); invalid-tumbler skips upgrade from DEBUG to WARNING with an actionable hint pointing at the correct ``catalog_search`` field; ``catalog_auto_link`` emits an ``auto_link_summary`` log per non-trivial outcome (WARNING when contexts present + zero created + invalid-tumbler skips > 0); the bare-except wrapper in ``mcp/core.py:948-955`` is replaced with named-exception capture that logs unexpected failures at WARNING via ``store_put_auto_link_failed``. End-to-end verified live: a recipe-compliant call against RDR-104 tumblers materialised two catalog edges (``relates``, ``cites``) on the spot.
+
+- **nx_answer planner transient JSON parse failures** (nexus-wr5o, P2): ``_nx_answer_plan_miss`` now retries once on ``OperatorOutputError`` (transient model-output drift, partial stream, null ``structured_output`` on first attempt) with a halved 150 s timeout so a single hang doesn't double total wall time. ``OperatorError`` (subprocess non-zero) and ``OperatorTimeoutError`` do NOT retry — those failure modes are not transient. WARN log on first failure with attempt number; the second exception (most actionable diagnostic) propagates on exhaustion.
+
+### Changed
+
+- **10 agent files** + **8 producing skill files**: tightened ``## Pre-flight`` lead to explicitly name the rationalization the using-nx-skills Red Flags table warns about (skipping pre-flight on grounds "the code is the answer / tiers won't help"). Reframed ``## Post-flight`` write-back from "what a future session would benefit from" to audience-aware language, with T1 ``scratch_put`` added as a first-class write target for sibling agents downstream THIS session (the original wording omitted T1 entirely from the write-back menu, framing all three tiers as "future sessions"; the live shakeout's sibling-sharing probe confirmed T1 IS the bus for in-session promotion).
+
+### Verified end-to-end
+
+- ``tests/cc-validation/scenarios/12_real_nx_subagent.sh`` (hook injection): pass.
+- ``tests/cc-validation/scenarios/13_disambiguate_subagent_inject.sh`` (3 sub-scenarios: project bash multi-line, plugin bash multi-line, JSON envelope): all pass.
+- AUTO-LINK happy path via live MCP toolchain: two catalog edges materialised against RDR-104 tumblers ``1.2188.863`` and ``1.2189.146``.
+- AUTO-LINK error path via direct Python: WARNING emitted with actionable hint for both T3 chash strings (``aca95577feec25d1``, ``ddbff7f16e4454e2``) used in the original shakeout failure.
+- ``auto_link()`` and ``_nx_answer_plan_miss`` retry: 16 + 5 new unit tests, all pass; 1714 affected-suite tests pass post-change.
+
+### Honest finding
+
+The agent / skill prompt changes make pre-flight rationalizations VISIBLE in the agent's self-report ("this is a rationalization the prompt warns about, I should have run it") but do NOT prevent them at the prompt-strength tried so far (including the existing ``<HARD-GATE>`` block with "MUST", "STOP", "Do NOT return without persisting"). Behaviorally enforcing the discipline requires harness-level mechanisms (Stop hook inspecting tool-call history, etc.) rather than further prompt wordsmithing — left as follow-up. The transparency improvement remains a real win: silent-skip is now acknowledged-skip, which is the precondition for any future enforcement work.
+
 ## [4.25.2] - 2026-05-05
 
 Patch release. Reinforces the hook-side composed-retrieval guidance shipped in 4.25.1 — same signal landed in the agents' and skills' own role descriptions, so the guidance reaches both ambient subagent context (SubagentStart hook) AND the agent-file surface that subagents reason about as their role definition.
