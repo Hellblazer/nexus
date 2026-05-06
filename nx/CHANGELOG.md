@@ -6,6 +6,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.25.2] - 2026-05-05
+
+Plugin version aligned with conexus 4.25.2. Same composed-retrieval guidance from 4.25.1's SubagentStart hook restoration, now reinforced in the agents' and skills' own role descriptions:
+
+- **10 agent files** get ``## Pre-flight (plan reuse + tier check)`` + ``## Post-flight (write-back)`` blocks (architect-planner, code-review-expert, codebase-deep-analyzer, debugger, deep-analyst, deep-research-synthesizer, developer, strategic-planner, substantive-critic, test-validator).
+- **8 skill files** get a ``**Tier-aware discipline**`` block (research, research-synthesis, deep-analysis, analyze, query, document, knowledge-tidying, debug).
+
+The 4.25.1 hook signal already drives behavior end-to-end (probes A and B confirmed verb-shape routing → ``nx_answer``, full 3-step AUTO-LINK recipe, and WRITE-BACK persistence). This release ships the same signal in the agents' own voice — redundant by design.
+
+See root ``CHANGELOG.md``.
+
 ## [4.25.1] - 2026-05-05
 
 Plugin version aligned with conexus 4.25.1. Two fixes ship together — a catalog-rebuild perf fix (transparent to plugin users) and a plugin-side restoration of behavior-driving signal in the agent-guidance hooks.

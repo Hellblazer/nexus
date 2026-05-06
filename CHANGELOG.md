@@ -6,6 +6,36 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.25.2] - 2026-05-05
+
+Patch release. Reinforces the hook-side composed-retrieval guidance shipped in 4.25.1 — same signal landed in the agents' and skills' own role descriptions, so the guidance reaches both ambient subagent context (SubagentStart hook) AND the agent-file surface that subagents reason about as their role definition.
+
+The 4.25.1 SubagentStart hook restoration was already verified driving behavior end-to-end (probe A: subagent on a verb-shape question called ``nx_answer`` and ``memory_put``, citing verbatim hook lines; probe B: subagent on a research-and-link task followed the full 3-step AUTO-LINK recipe ``catalog_search → scratch put → store_put``, citing each step). 4.25.2 reinforces in the agent's own voice — redundant by design, not the primary lever.
+
+### Added
+
+- **10 non-stub agent files** get a ``## Pre-flight (plan reuse + tier check)`` + ``## Post-flight (write-back — mandatory before returning)`` block (~17 lines each, inserted before ``## Relay Reception``):
+
+  - architect-planner, code-review-expert, codebase-deep-analyzer, debugger, deep-analyst, deep-research-synthesizer, developer, strategic-planner, substantive-critic, test-validator.
+
+  Pre-flight: ``plan_search`` → ``memory_search`` (T2) → ``nx_answer`` for verb-shape questions → ``scratch search`` for sibling work-in-progress. Post-flight: ``store_put`` (T3 cross-project), ``memory_put`` (T2 project), ``plan_save`` for pipeline outcomes. *"Findings not stored are findings lost."*
+
+- **8 producing skill files** get a ``**Tier-aware discipline**`` block (~12 lines each, inserted right after frontmatter):
+
+  - research, research-synthesis, deep-analysis, analyze, query, document, knowledge-tidying, debug.
+
+  Same shape as the agent block, more compact: read widest → narrowest, reuse plans before dispatch, write back at end.
+
+### Out of scope (intentionally untouched)
+
+- Stub agents (knowledge-tidier, plan-auditor, plan-enricher) — already MCP-delegated; agent file is a thin redirect.
+- Reference skills (serena-code-nav, nexus, cli-controller) — describe tooling, don't produce findings.
+- Discipline gates (brainstorming-gate, finishing-branch, git-worktrees, plan-first, plan-validation) — process gates, not retrieval/synthesis.
+
+### Token cost
+
+~150 tokens per agent invocation when *that* agent is dispatched. Subagent dispatch cost (SubagentStart hook content) is unchanged — agent files only weigh in when the agent is selected. (nexus-t4ke)
+
 ## [4.25.1] - 2026-05-05
 
 Patch release. Two fixes: a pre-RDR-104 catalog-rebuild perf cap, and an over-correction in the April 25 startup-hook trim that quietly broke the agent guidance for composed retrieval (``nx_answer``, ``plan_search``, ``catalog_search``, ``store_put``).
