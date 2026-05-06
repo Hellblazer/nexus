@@ -127,6 +127,57 @@ def test_list_by_owner(cat) -> None:
     assert len(catalog_list(owner="1.1")) == 1
 
 
+def test_list_filters_by_content_type_with_pagination(cat) -> None:
+    """catalog_list(content_type=X) must push the filter into SQL so
+    pagination is correct (nexus-blk2 Part 1).
+
+    Pre-fix: filtering happened in Python AFTER the SQL LIMIT/OFFSET,
+    so catalog_list(content_type='rdr', limit=5) returned [] when the
+    first 5 entries weren't rdr. Live repro: catalog had 2,270 rdr
+    docs but list(content_type='rdr', limit=5) returned [] because
+    the LIMIT 5 saw 5 non-rdr docs and the post-filter dropped them
+    all.
+
+    This test reproduces the bug at small scale: 10 code docs +
+    2 rdr docs, limit=5. Pre-fix list(content_type='rdr', limit=5)
+    returns [] because the SQL grabs the first 5 (all code) then the
+    Python filter empties them. Post-fix the SQL filter is applied
+    first so the rdr docs are returned.
+    """
+    # Front-load 10 code docs so they fill the LIMIT 5 page.
+    for i in range(10):
+        catalog_register(title=f"code-{i}", owner="1.1", content_type="code")
+    # Add 2 rdr docs at the end (would fall outside LIMIT 5 without
+    # SQL-side filter).
+    catalog_register(title="rdr-A", owner="1.1", content_type="rdr")
+    catalog_register(title="rdr-B", owner="1.1", content_type="rdr")
+
+    rdr_paged = catalog_list(content_type="rdr", limit=5)
+    titles = sorted(r["title"] for r in rdr_paged if "title" in r)
+    assert titles == ["rdr-A", "rdr-B"], (
+        f"content_type filter not pushed into SQL: got {titles!r}"
+    )
+
+
+def test_resolve_dashed_owner_returns_typed_error(cat) -> None:
+    """catalog_resolve(owner='1-2188') used to leak ValueError from
+    Tumbler.parse (nexus-blk2 Part 2). The dashed format is the
+    *collection-prefix* shape produced by ``nx doctor``, not the
+    tumbler shape resolve expects. The handler must catch the
+    parse failure and return a useful diagnostic instead of the
+    raw int() error.
+    """
+    result = catalog_resolve(owner="1-2188", corpus="code")
+    assert len(result) == 1
+    assert result[0].startswith("Error:")
+    # The error message must point at the actionable cause: dotted-tumbler
+    # form expected. Do NOT leak the raw int() ValueError.
+    err_lower = result[0].lower()
+    assert (
+        "tumbler" in err_lower or "dotted" in err_lower
+    ), f"unhelpful error: {result[0]!r}"
+
+
 def test_update(cat) -> None:
     catalog_register(title="Old Title", owner="1.1")
     catalog_update(tumbler="1.1.1", title="New Title")
