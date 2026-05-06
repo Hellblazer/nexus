@@ -205,12 +205,30 @@ class _ETATicker:
                    "(chunking / embed / upload / retry). Silent without the "
                    "flag — nexus-7niu, vatx Gap 4b. Currently code files only; "
                    "prose + PDF stages instrumented in follow-up PRs.")
-def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, force_stale: bool, on_locked: str, no_taxonomy: bool, debug_timing: bool) -> None:
+@click.option(
+    "--corpus",
+    "corpus_choice",
+    type=click.Choice(["docs", "knowledge"]),
+    default="docs",
+    show_default=True,
+    help=(
+        "Route prose / PDF files to docs__<owner>__... (default; for "
+        "code-repo prose) or knowledge__<owner>__... (for curated "
+        "knowledge bases, ADR collections, doc sites). Code files always "
+        "go to code__. GH #451."
+    ),
+)
+def index_repo_cmd(
+    path: Path, frecency_only: bool, force: bool, monitor: bool,
+    force_stale: bool, on_locked: str, no_taxonomy: bool,
+    debug_timing: bool, corpus_choice: str,
+) -> None:
     """Register and immediately index a code repository at PATH.
 
     Classifies files by extension: code files get voyage-code-3 embeddings (code__),
-    prose and PDFs get voyage-context-3 embeddings (docs__), RDR documents are
-    auto-discovered and indexed into rdr__.
+    prose and PDFs get voyage-context-3 embeddings (docs__ or knowledge__ when
+    ``--corpus knowledge``), RDR documents are auto-discovered and indexed
+    into rdr__.
     """
     from nexus.indexer import index_repository
 
@@ -245,6 +263,26 @@ def index_repo_cmd(path: Path, frecency_only: bool, force: bool, monitor: bool, 
                 pass
         reg.add(path, cat=cat)
         click.echo(f"Registered {path}.")
+
+    # GH #451: when the operator opts into ``--corpus knowledge``,
+    # rewrite the registered ``docs_collection`` field to use the
+    # ``knowledge__`` prefix instead of ``docs__``. This single edit
+    # is enough for every downstream layer (index_repository,
+    # _index_prose_file, _index_pdf_file) to route prose at the new
+    # destination, since they all read the field directly from the
+    # registry. Idempotent on re-runs: the rewrite only fires when
+    # the registry currently holds the docs__ default. Code routing
+    # is unaffected (the rewrite touches only the docs_collection
+    # field, never code_collection).
+    if corpus_choice == "knowledge":
+        info = reg.get(path) or {}
+        existing_docs = info.get("docs_collection", "")
+        if existing_docs.startswith("docs__"):
+            new_docs = "knowledge__" + existing_docs.removeprefix("docs__")
+            reg.update(path, docs_collection=new_docs)
+            click.echo(
+                f"Routing prose to {new_docs} (--corpus knowledge)."
+            )
 
     if force:
         label = "Force-indexing"

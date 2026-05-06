@@ -444,3 +444,93 @@ def test_collections_from_registry_info_filters_excluded() -> None:
     out = _collections_from_registry_info(info)
     assert "code__myrepo__voyage-code-3__v1" in out
     assert "docs__myrepo__voyage-context-3__v1" in out
+
+
+# ── GH #451: --corpus flag for nx index repo ────────────────────────────────
+
+
+def test_index_repo_cmd_help_shows_corpus_flag(runner) -> None:
+    """GH #451: ``nx index repo --help`` advertises the new ``--corpus``
+    choice flag for routing prose to ``knowledge__`` instead of ``docs__``.
+    """
+    from nexus.commands.index import index_repo_cmd
+
+    result = runner.invoke(index_repo_cmd, ["--help"])
+    assert result.exit_code == 0
+    assert "--corpus" in result.output
+    assert "knowledge" in result.output
+
+
+def test_corpus_knowledge_rewrites_docs_collection(tmp_path, monkeypatch) -> None:
+    """GH #451: ``--corpus knowledge`` mutates the registry's
+    ``docs_collection`` field so the indexer routes prose to
+    ``knowledge__<owner>__...`` instead of ``docs__<owner>__...``.
+
+    Pure registry-level test; the indexer call is mocked so we
+    isolate the routing decision from the embed pipeline.
+    """
+    import json
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+    from nexus.commands.index import index_repo_cmd
+
+    # Set up an isolated config dir so the registry path is sandboxed.
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()  # so _git_ls_files won't crash; not strictly
+    (repo / "README.md").write_text("# repo\n")
+
+    runner = CliRunner()
+    with patch("nexus.indexer.index_repository", return_value={}) as _idx:
+        result = runner.invoke(
+            index_repo_cmd,
+            [str(repo), "--corpus", "knowledge", "--no-taxonomy"],
+            catch_exceptions=False,
+        )
+
+    # The registry should now hold a knowledge__ docs_collection.
+    repos_json = tmp_path / "repos.json"
+    assert repos_json.exists(), "registry never written"
+    data = json.loads(repos_json.read_text())
+    entry = data["repos"][str(repo.resolve())]
+    assert entry["docs_collection"].startswith("knowledge__"), (
+        f"--corpus knowledge did not rewrite docs_collection; "
+        f"registry holds {entry['docs_collection']!r}"
+    )
+    assert entry["code_collection"].startswith("code__"), (
+        "code_collection must NOT be touched by --corpus knowledge"
+    )
+    # Output mentions the routing decision.
+    assert "knowledge__" in result.output
+
+
+def test_corpus_default_keeps_docs_collection(tmp_path, monkeypatch) -> None:
+    """GH #451: omitting ``--corpus`` (or passing ``--corpus docs``)
+    is the default; prose continues to route to ``docs__``.
+    """
+    import json
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+    from nexus.commands.index import index_repo_cmd
+
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    (repo / "README.md").write_text("# repo\n")
+
+    runner = CliRunner()
+    with patch("nexus.indexer.index_repository", return_value={}):
+        runner.invoke(
+            index_repo_cmd, [str(repo), "--no-taxonomy"], catch_exceptions=False,
+        )
+
+    repos_json = tmp_path / "repos.json"
+    data = json.loads(repos_json.read_text())
+    entry = data["repos"][str(repo.resolve())]
+    assert entry["docs_collection"].startswith("docs__"), (
+        f"default routing changed; got {entry['docs_collection']!r}"
+    )
