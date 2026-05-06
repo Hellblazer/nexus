@@ -558,3 +558,23 @@ def test_t3_collection_name_bare_prefix_multi_match_picks_alphabetical_when_no_c
     assert out == "code__a__voyage-code-3__v1"
     # Anti-regression: must never land in the wrong knowledge__ namespace.
     assert not out.startswith("knowledge__"), out
+
+
+def test_t3_collection_name_bare_knowledge_falls_through_to_legacy_default() -> None:
+    """nexus-0f3h regression guard: bare ``knowledge`` on an install
+    with multiple ``knowledge__*`` collections (none of which is the
+    ``knowledge__knowledge`` 2-seg default) MUST NOT pick alphabetical
+    first. The historical contract — ``knowledge`` resolves to the
+    auto-promoted ``knowledge__knowledge__voyage-context-3__v1`` (or
+    the legacy 2-seg ``knowledge__knowledge`` if it exists) — is the
+    one the test suite + production tooling locks.
+    """
+    # Multiple knowledge__ matches, none is knowledge__knowledge.
+    t3 = _FakeT3({
+        "knowledge__art",
+        "knowledge__delos",
+        "knowledge__greenfield__voyage-context-3__v1",
+    })
+    out = t3_collection_name("knowledge", t3=t3)
+    # MUST be the auto-promoted shape (no knowledge__knowledge on disk).
+    assert out == "knowledge__knowledge__voyage-context-3__v1"
