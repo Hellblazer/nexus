@@ -4,6 +4,18 @@ description: Use when researching unfamiliar topics, comparing technology approa
 effort: medium
 ---
 
+**Tier-aware discipline** — apply at session start and before every major step:
+
+1. **Read** widest → narrowest before duplicating effort:
+   - T3 (cross-project): `mcp__plugin_nx_nexus__nx_answer(...)` for verb-shape questions; `mcp__plugin_nx_nexus__search(...)` for keyword lookup.
+   - T2 (project): `mcp__plugin_nx_nexus__memory_search(query="<topic>", project="<repo>")`.
+   - T1 (siblings, this session): `mcp__plugin_nx_nexus__scratch(action="search", query="<topic>")`.
+2. **Reuse plans** before dispatching multiple agents: `mcp__plugin_nx_nexus__plan_search(query="<task>", limit=3)`.
+3. **Write back at end** — findings not stored are findings lost:
+   - `mcp__plugin_nx_nexus__store_put(...)` for permanent cross-project knowledge.
+   - `mcp__plugin_nx_nexus__memory_put(...)` for project-scoped decisions.
+   - `mcp__plugin_nx_nexus__plan_save(...)` for multi-agent pipeline outcomes (so future callers hit plan-match).
+
 # Research Synthesis Skill
 
 Delegates to the **deep-research-synthesizer** agent.
