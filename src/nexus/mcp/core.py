@@ -362,6 +362,65 @@ def _clamp_subagent_timeout(requested: float, tool_name: str) -> float:
         return _SUBAGENT_TIMEOUT_FLOOR
     return requested
 
+
+# ── Tier-discipline telemetry (Phase 1A nexus-kren) ─────────────────────────
+
+
+def _record_tier_write(
+    *,
+    tool: str,
+    tier: str,
+    agent: str | None = None,
+    project: str | None = None,
+    target_title: str | None = None,
+) -> None:
+    """Append one row to ``tier_writes`` recording a tier-write call.
+
+    Best-effort: any exception is swallowed. Telemetry must NEVER break
+    the hot path of the calling tool. ``session_id`` resolves from
+    ``NX_SESSION_ID`` env, then ``read_claude_session_id()``, then
+    ``"unknown"`` as a last-resort sentinel so rows are never lost.
+
+    Phase 1A of the tier-discipline restoration initiative
+    (memory: tier-discipline-audit-2026-05-06).
+
+    Lazy imports inside this function so monkey-patches of
+    ``nexus.mcp_infra.t2_ctx`` in tests are picked up at call time
+    rather than frozen at module-import time.
+    """
+    try:
+        import os
+        from datetime import datetime, timezone
+
+        from nexus.db.migrations import migrate_tier_writes
+        from nexus.mcp_infra import t2_ctx
+        from nexus.session import read_claude_session_id
+
+        session_id = (
+            os.environ.get("NX_SESSION_ID", "").strip()
+            or read_claude_session_id()
+            or "unknown"
+        )
+        ts = datetime.now(timezone.utc).isoformat()
+        with t2_ctx() as t2:
+            # Any domain conn points at the same SQLite file; reuse the
+            # taxonomy connection because it is constructed eagerly and
+            # carries the per-store lock semantics this insert needs.
+            conn = t2.taxonomy.conn
+            with t2.taxonomy._lock:
+                migrate_tier_writes(conn)
+                conn.execute(
+                    "INSERT INTO tier_writes "
+                    "(session_id, ts, tool, tier, agent, project, target_title) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (session_id, ts, tool, tier, agent, project, target_title),
+                )
+                conn.commit()
+    except Exception:
+        # Best-effort. Telemetry breaking a tool call is the worst kind of regression.
+        pass
+
+
 # ── Post-store hooks (register once at import) ──────────────────────────────
 #
 # RDR-095 + symmetric-fire follow-up: every storage event (MCP store_put or
@@ -1011,6 +1070,10 @@ def store_put(
         except Exception:
             import structlog
             structlog.get_logger().debug("relevance_log_store_failed", exc_info=True)
+        _record_tier_write(
+            tool="store_put", tier="T3",
+            target_title=title or doc_id,
+        )
         return f"Stored: {doc_id} -> {col_name}"
     except Exception as e:
         return f"Error: {e}"
@@ -1383,6 +1446,10 @@ def memory_put(
                 tags=tags,
                 ttl=ttl if ttl > 0 else None,
             )
+        _record_tier_write(
+            tool="memory_put", tier="T2",
+            project=project, target_title=title,
+        )
         return f"Stored: [{row_id}] {project}/{title}"
     except Exception as e:
         return f"Error: {e}"
@@ -1633,6 +1700,10 @@ def scratch(
             if not content:
                 return "Error: content is required for put"
             doc_id = t1.put(content=content, tags=tags)
+            _record_tier_write(
+                tool="scratch_put", tier="T1",
+                target_title=tags or doc_id,
+            )
             return f"{prefix}Stored: {doc_id}"
 
         elif action == "search":
@@ -1778,6 +1849,10 @@ def plan_save(
                 ttl=ttl,
                 scope_tags=scope_tags or None,
             )
+        _record_tier_write(
+            tool="plan_save", tier="plan",
+            project=project, target_title=query[:80],
+        )
         return f"Saved plan: [{row_id}] {query[:80]}"
     except Exception as e:
         return f"Error: {e}"
