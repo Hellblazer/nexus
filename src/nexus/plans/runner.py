@@ -43,6 +43,7 @@ import asyncio
 import inspect
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
@@ -1036,6 +1037,30 @@ async def plan_run(
         segments = flat
 
     for seg in segments:
+        # nexus-0qi9: per-step progress visibility. Emit start/complete
+        # log events at each segment boundary so the silent claude -p
+        # chain becomes audible. Without this, a 4-step plan that takes
+        # 10+ minutes is indistinguishable from a hang from the caller's
+        # seat. Events flow to structlog which the MCP server's logger
+        # routes to ~/.config/nexus/logs/mcp.log; downstream ``nx
+        # tier-status``-style commands can join on the same session_id.
+        _seg_started_at = time.monotonic()
+        if isinstance(seg, OperatorBundleSlice):
+            _seg_kind = "bundle"
+            _seg_indices = list(seg.plan_indices)
+            _seg_tools = [_extract_tool(steps[bi]) for bi in seg.plan_indices]
+        else:
+            _seg_kind = "isolated"
+            _seg_indices = [seg.plan_index]
+            _seg_tools = [_extract_tool(seg.step)]
+        _log.info(
+            "nx_answer_step_start",
+            kind=_seg_kind,
+            step_indices=_seg_indices,
+            tools=_seg_tools,
+            total_steps=len(steps),
+        )
+
         if isinstance(seg, OperatorBundleSlice):
             # ── Bundle path: ≥2 contiguous operator steps → single dispatch ──
             deferred_indices = set(seg.plan_indices)
@@ -1108,6 +1133,13 @@ async def plan_run(
                             ),
                         )
                     step_outputs.append(result)
+                _log.info(
+                    "nx_answer_step_complete",
+                    kind="bundle_fallback",
+                    step_indices=_seg_indices,
+                    tools=_seg_tools,
+                    elapsed_ms=int((time.monotonic() - _seg_started_at) * 1000),
+                )
                 continue
 
             bundle_result = await dispatch_bundle(bundle)
@@ -1126,6 +1158,13 @@ async def plan_run(
                     ),
                 )
             step_outputs.append(bundle_result)
+            _log.info(
+                "nx_answer_step_complete",
+                kind="bundle",
+                step_indices=_seg_indices,
+                tools=_seg_tools,
+                elapsed_ms=int((time.monotonic() - _seg_started_at) * 1000),
+            )
             continue
 
         # ── Isolated path: IsolatedStep → one dispatcher call ──
@@ -1184,6 +1223,13 @@ async def plan_run(
                 ),
             )
         step_outputs.append(result)
+        _log.info(
+            "nx_answer_step_complete",
+            kind="isolated",
+            step_indices=_seg_indices,
+            tools=_seg_tools,
+            elapsed_ms=int((time.monotonic() - _seg_started_at) * 1000),
+        )
 
     return PlanResult(
         steps=step_outputs,
