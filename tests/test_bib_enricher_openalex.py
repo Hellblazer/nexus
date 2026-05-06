@@ -399,6 +399,46 @@ def test_titles_compatible_single_overlap_in_long_titles_rejects():
     )
 
 
+def test_titles_compatible_single_token_source_rejects():
+    """nexus-5cez: a 1-token source title (e.g. "Survey", "Methods")
+    must NOT auto-accept on common-word coincidence. The short-source
+    relaxation (2026-04-21) was designed for 2-token cases like
+    "Pbeegees" matching "pBeeGees: A Prudent Approach to ...", not
+    for genuinely single-substantive-token titles where any OpenAlex
+    paper that mentions the word would auto-accept.
+
+    Both ``a < 2`` and ``b < 2`` must reject so the caller falls
+    through to fuzzy search instead of stamping the coincidence.
+    """
+    from nexus.bib_enricher_openalex import _titles_compatible
+
+    # 1-token source ("Survey", post-tokenize) vs unrelated long
+    # title that happens to mention "survey" must reject.
+    assert not _titles_compatible(
+        "Survey",
+        "A Survey of Distributed Consensus Algorithms in Practice",
+    )
+
+    # Symmetric: 1-token returned title that coincidentally shares
+    # one word with a multi-token source must also reject.
+    assert not _titles_compatible(
+        "Distributed Consensus Algorithms in Practice",
+        "Algorithms",
+    )
+
+    # Both single-token: 100% intersection of single shared word
+    # is still a coincidence reject.
+    assert not _titles_compatible("Methods", "Methods")
+
+    # Existing 2-token case (filename-derived "Pbeegees") still
+    # accepts: the relaxation gate is "≥2 substantive tokens BOTH
+    # sides", not "≥2 in either".
+    assert _titles_compatible(
+        "Pbeegees Consensus",
+        "pBeeGees A Prudent Approach Consensus",
+    )
+
+
 def test_titles_compatible_helper_basics():
     """The helper is exported so callers (commands/enrich._resolve_bib_for_title)
     can validate title shapes outside the OpenAlex backend too. Source-paper
