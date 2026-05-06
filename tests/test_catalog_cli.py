@@ -192,6 +192,68 @@ class TestListCommand:
         assert "A" in result.output
         assert "B" in result.output
 
+    def test_list_type_filter_pushed_to_sql(
+        self, initialized_catalog, catalog_env,
+    ):
+        """GH #568: --type filter must be pushed into the SQL WHERE
+        clause. Pre-fix, the CLI fetched LIMIT+OFFSET rows then
+        Python-filtered, so a small-cardinality content_type (rdr in
+        a code/docs-heavy catalog) returned empty even when matching
+        rows existed.
+
+        Construct the worst case: register many code rows + 2 rdr rows.
+        Without the SQL push, ``--type rdr -n 3`` returns 0 because
+        the first 51 rows fetched are all code.
+        """
+        runner = CliRunner()
+        # Register 20 code rows.
+        for i in range(20):
+            runner.invoke(main, [
+                "catalog", "register", "--title", f"code-{i}",
+                "--owner", "1.1", "--type", "code",
+            ])
+        # Register 2 rdr rows.
+        runner.invoke(main, [
+            "catalog", "register", "--title", "rdr-A",
+            "--owner", "1.1", "--type", "rdr",
+        ])
+        runner.invoke(main, [
+            "catalog", "register", "--title", "rdr-B",
+            "--owner", "1.1", "--type", "rdr",
+        ])
+        # Crucially, fetch -n 3 (smaller than the code-row prefix).
+        result = runner.invoke(main, [
+            "catalog", "list", "--type", "rdr", "-n", "3",
+        ])
+        assert result.exit_code == 0, result.output
+        assert "rdr-A" in result.output, result.output
+        assert "rdr-B" in result.output, result.output
+        # And no code rows leaked.
+        assert "code-" not in result.output, result.output
+
+    def test_list_type_filter_with_owner(
+        self, initialized_catalog, catalog_env,
+    ):
+        """GH #568 sanity: --owner + --type combined still works.
+        The owner path applies the type filter Python-side (small
+        cardinality per owner makes that safe).
+        """
+        runner = CliRunner()
+        runner.invoke(main, [
+            "catalog", "register", "--title", "owner-code",
+            "--owner", "1.1", "--type", "code",
+        ])
+        runner.invoke(main, [
+            "catalog", "register", "--title", "owner-rdr",
+            "--owner", "1.1", "--type", "rdr",
+        ])
+        result = runner.invoke(main, [
+            "catalog", "list", "--owner", "test-repo", "--type", "rdr",
+        ])
+        assert result.exit_code == 0, result.output
+        assert "owner-rdr" in result.output
+        assert "owner-code" not in result.output
+
     def test_list_owner_unknown_emits_clean_error(
         self, initialized_catalog, catalog_env,
     ):

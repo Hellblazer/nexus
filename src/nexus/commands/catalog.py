@@ -859,10 +859,20 @@ def list_cmd(owner: str, content_type: str, limit: int, offset: int, as_json: bo
                 )
             owner_tumbler = matches[0]
         entries = cat.by_owner(owner_tumbler)
+        # GH #568: --owner path is by-owner-then-Python-filter (the
+        # owner cardinality is naturally small so the post-filter is
+        # safe). Apply the type filter here too if provided.
+        if content_type:
+            entries = [e for e in entries if e.content_type == content_type]
     else:
-        entries = cat.all_documents(limit=limit + offset + 1)
-    if content_type:
-        entries = [e for e in entries if e.content_type == content_type]
+        # GH #568: push --type into SQL so pagination on a small-
+        # cardinality content_type doesn't return empty. Pre-fix the
+        # filter ran Python-side AFTER LIMIT/OFFSET; a 15K-entry
+        # catalog with only 2 rdr rows had ``--type rdr -n 3`` return
+        # 0. Mirrors PR #533's fix for the MCP catalog_list surface.
+        entries = cat.all_documents(
+            limit=limit + offset + 1, content_type=content_type,
+        )
     total = len(entries)
     entries = entries[offset:offset + limit]
 
