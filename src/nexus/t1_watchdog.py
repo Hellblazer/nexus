@@ -148,11 +148,16 @@ def main(argv: list[str] | None = None) -> int:
     log = structlog.get_logger("nexus.t1_watchdog")
 
     session_file = Path(args.session_file) if args.session_file else None
-    # GH #567: snapshot whether the session file was present when the
-    # watchdog started. The poll loop's session-file-removed exit only
-    # fires when the file existed at startup -- avoids breaking
-    # callers (tests, legacy) that pass a path that never gets created.
-    session_file_existed_at_start = (
+    # GH #567 + #572 follow-up: track whether the session file has EVER
+    # existed during this watchdog's lifetime, not just at startup.
+    # ``_t1_chroma_init_if_owner`` spawns the watchdog BEFORE writing
+    # the record (so the watchdog can be PID-watched even if the
+    # record write fails); using a startup-only snapshot meant
+    # ``session_file_existed_at_start`` was always False and the
+    # session-file-removed exit never fired. Sticky flag: once True,
+    # stays True; the file-removed exit only fires after we've
+    # observed the file exist at least once.
+    session_file_has_existed = (
         session_file is not None and session_file.exists()
     )
     tmpdir = Path(args.tmpdir) if args.tmpdir else None
@@ -197,12 +202,14 @@ def main(argv: list[str] | None = None) -> int:
         # chroma server we were watching can be reaped by whatever
         # path replaced our session record.
         #
-        # Only fire when the file EXISTED at watchdog startup; tests
-        # and legacy callers may pass ``--session-file`` paths that
-        # never get created, and the existing behaviour there is to
-        # rely on PID liveness alone.
+        # Only fire when the file has EVER existed in this watchdog's
+        # lifetime (sticky flag). Tests and legacy callers that pass
+        # a path that never gets created continue to rely on
+        # PID liveness alone.
+        if session_file is not None and session_file.exists():
+            session_file_has_existed = True
         if (
-            session_file_existed_at_start
+            session_file_has_existed
             and session_file is not None
             and not session_file.exists()
         ):
