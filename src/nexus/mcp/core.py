@@ -1772,6 +1772,18 @@ def scratch(
                 return "Error: entry_id is required for get"
             entry = t1.get(entry_id)
             if entry is None:
+                # nexus-zpw6: surface candidate list when the prefix
+                # was ambiguous so the operator can disambiguate
+                # instead of staring at "Not found" while the entry
+                # IS there under a 9-char-prefix sibling.
+                candidates = t1.resolve_prefix_candidates(entry_id)
+                if len(candidates) > 1:
+                    listed = ", ".join(c[:8] for c in candidates[:5])
+                    more = "" if len(candidates) <= 5 else f" (+{len(candidates) - 5} more)"
+                    return (
+                        f"{prefix}Ambiguous prefix {entry_id!r}; "
+                        f"matches: {listed}{more}. Pass a longer prefix or full UUID."
+                    )
                 return f"{prefix}Not found: {entry_id}"
             return f"{prefix}{entry['content']}"
 
@@ -1781,6 +1793,15 @@ def scratch(
             deleted = t1.delete(entry_id)
             if deleted:
                 return f"{prefix}Deleted: {entry_id}"
+            # nexus-zpw6: same disambiguation surface as get.
+            candidates = t1.resolve_prefix_candidates(entry_id)
+            if len(candidates) > 1:
+                listed = ", ".join(c[:8] for c in candidates[:5])
+                more = "" if len(candidates) <= 5 else f" (+{len(candidates) - 5} more)"
+                return (
+                    f"{prefix}Ambiguous prefix {entry_id!r}; "
+                    f"matches: {listed}{more}. Pass a longer prefix or full UUID."
+                )
             return f"{prefix}Not found or not owned: {entry_id}"
 
         else:
