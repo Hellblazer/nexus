@@ -33,6 +33,72 @@ def test_session_start_returns_session_id(_mock_sid, tmp_path: Path) -> None:
     assert "Nexus ready" in output
 
 
+# ── #435 legacy session.lock cleanup ─────────────────────────────────────────
+
+
+class TestLegacySessionLockCleanup:
+    """The pre-v4.13.0 ``session.lock`` PID file is removed at
+    session_start so it doesn't accumulate forever on existing
+    installs upgraded from pre-v4.13.0 (#435).
+    """
+
+    def test_cleanup_removes_dead_pid_lock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from nexus.hooks import _cleanup_legacy_session_lock
+
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+        lock = sessions_dir / "session.lock"
+        # PID 1 is init; we use a high impossible PID to guarantee it's dead.
+        # 999999 is unlikely to be in use.
+        lock.write_text("999999")
+
+        _cleanup_legacy_session_lock(sessions_dir)
+        assert not lock.exists()
+
+    def test_cleanup_no_op_when_lock_absent(
+        self, tmp_path: Path,
+    ) -> None:
+        from nexus.hooks import _cleanup_legacy_session_lock
+
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+        # No lock file at all — must not raise.
+        _cleanup_legacy_session_lock(sessions_dir)
+
+    def test_cleanup_handles_unparseable_pid(
+        self, tmp_path: Path,
+    ) -> None:
+        """Empty / garbage PID is treated as dead — file is removed."""
+        from nexus.hooks import _cleanup_legacy_session_lock
+
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+        lock = sessions_dir / "session.lock"
+        lock.write_text("not-a-number")
+
+        _cleanup_legacy_session_lock(sessions_dir)
+        assert not lock.exists()
+
+    def test_cleanup_skips_when_pid_alive(
+        self, tmp_path: Path,
+    ) -> None:
+        """Defensive: if the PID is somehow alive (shouldn't happen
+        post-v4.13.0), leave the file. Don't unlink locks we can't
+        prove stale."""
+        from nexus.hooks import _cleanup_legacy_session_lock
+
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+        lock = sessions_dir / "session.lock"
+        lock.write_text(str(os.getpid()))  # ourselves — definitely alive
+
+        _cleanup_legacy_session_lock(sessions_dir)
+        # File still there; no current code re-creates it.
+        assert lock.exists()
+
+
 def test_session_start_does_not_overwrite_current_session_when_inherited(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
