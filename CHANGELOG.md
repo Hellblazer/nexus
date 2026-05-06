@@ -6,6 +6,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.25.1] - 2026-05-05
+
+Patch release. Two fixes: a pre-RDR-104 catalog-rebuild perf cap, and an over-correction in the April 25 startup-hook trim that quietly broke the agent guidance for composed retrieval (``nx_answer``, ``plan_search``, ``catalog_search``, ``store_put``).
+
+The catalog change removes a ``_event_log_covers_legacy()`` O(N) scan from the rebuild dispatch path on catalogs whose event log is already steady-state. On a 460K-event production catalog the post-write rebuild path drops from ~850 ms to ~1 ms; the MCP server's per-tool-call latency floor immediately after any catalog write moves with it. RDR-104's advertised <100 ms incremental target is now achievable at production scale.
+
+The hook change restores the behavior-driving content (analytical-question routing examples, tier "when to check" cues, AUTO-LINK recipe, WRITE-BACK exhortation) that was over-trimmed in commit e2fc2408 (PR #320). Telemetry from 795 session transcripts (10-day pre/post-trim windows) showed `nx_answer` use dropped 78%, `plan_search` 90%, `catalog_search` 100%, `store_put` 100% — exactly the tools whose recipes/examples/reasoning had been most condensed. Bare tool listings drove T1 and raw-search use just fine; composed retrieval needed trigger phrasings and a "why".
+
+### Fixed
+
+- **``Catalog._ensure_consistent`` skips ``_event_log_covers_legacy()`` once the offset marker is established.** The bootstrap guardrail's job is to refuse the event-sourced rebuild while bootstrap is still in progress (sparse event log against a populated legacy JSONL). ``_write_offset_marker`` is only reached from rebuild branches that ran after the guardrail accepted the event log, so the existence of ``_meta.last_applied_event_offset`` proves the guardrail has already passed at least once. The O(N) line+JSON scan of both ``events.jsonl`` and ``documents.jsonl`` (~838 ms on a 460K-event log) was running on every post-write rebuild dispatch and capping the RDR-104 incremental fast path well above its <100 ms target. The marker check is a single ``SELECT key, value FROM _meta`` and short-circuits before the scan, so the steady-state path is microseconds. Bootstrap and marker-loss-recovery semantics are unchanged: when the marker is absent, the guardrail still fires and ``bootstrap_fallback_active`` still flips on sparse logs. (nexus-1sy5)
+
+- **``nx/skills/using-nx-skills/SKILL.md``: behavior-driving signal restored.** Brought back the "ALL analytical questions go through ``nx_answer``" header with verb-shape paragraph and "composed > raw chunks" reasoning; the tier "when to check" cues ("check before researching" / "before project work" / "before duplicating sibling work"); three specific ``search``→``nx_answer`` phrasings in Common Mistakes ("how does X work", "tradeoffs in Y", "compare X across projects"); the "Findings not stored are findings lost" exhortation; and a five-row tool-skipping Red Flags table (down from twelve — the seven meta/skill-priority rows that weren't behavior-driving stay cut). Net 5803 chars vs 8681 pre-trim — 33% smaller while restoring the load-bearing content. (nexus-xxsj)
+
+- **``nx/hooks/scripts/subagent-start.sh``: same restoration on the SubagentStart side, now wrapped in the documented JSON envelope.** ``NX_TIERS`` heredoc carries the tier "when to check" cues inline; ``NX_T3`` heredoc adds the verb-shape routing line and WRITE-BACK exhortation; new ``NX_AUTOLINK`` heredoc restores the ``catalog_search → scratch put → store_put`` 3-step recipe as a discoverable workflow. The script now emits its content via the documented ``{"hookSpecificOutput": {"hookEventName": "SubagentStart", "additionalContext": "..."}}`` envelope (plain stdout works today per ``tests/cc-validation/scenarios/13_disambiguate_subagent_inject.sh`` 13a/13b, but the JSON envelope is the explicit contract — future-proof against parser tightening). FD-redirection wrapper at the top of the script captures body stdout into a tempfile; an EXIT trap restores stdout and emits the envelope. All heredoc bodies remain under the 500-byte bash 5.3 deadlock guard. (nexus-xxsj)
+
+### Tests
+
+- ``tests/test_catalog_bootstrap_guardrail.py``: two new tests pin the optimization invariant and the bootstrap invariant. ``test_covers_legacy_skipped_when_marker_established`` patches ``_event_log_covers_legacy`` to record invocations and asserts it is not called once the marker exists; ``test_covers_legacy_runs_when_marker_absent`` builds a sparse-log fixture, asserts the guardrail still fires, and pins ``bootstrap_fallback_active = True``. The four pre-existing bootstrap tests (C1 floor, C2 fallback flag set, fallback flag clear, doctor surface text+JSON) continue to pass unchanged.
+
+- ``tests/cc-validation/scenarios/12_real_nx_subagent.sh``: real plugin end-to-end injection probe — passes with the JSON envelope wrapper, confirming hook content delivery to dispatched subagents.
+
+- ``tests/cc-validation/scenarios/13_disambiguate_subagent_inject.sh``: 3 sub-scenarios (project-level plain stdout, plugin-level plain stdout, JSON envelope positive control) — all pass, definitively answering "is the SubagentStart hook silently broken" in the negative.
+
 ## [4.25.0] - 2026-05-05
 
 Minor release. Lands RDR-104 (Incremental Catalog Projection Rebuild). Steady-state ``Catalog()`` construction after a single write becomes <100 ms instead of ~4 s on a 452K-event log because the rebuild now replays only the delta of new bytes in ``events.jsonl`` rather than the entire file. Transparent to callers; same API surface.

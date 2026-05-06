@@ -6,6 +6,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.25.1] - 2026-05-05
+
+Plugin version aligned with conexus 4.25.1. Two fixes ship together — a catalog-rebuild perf fix (transparent to plugin users) and a plugin-side restoration of behavior-driving signal in the agent-guidance hooks.
+
+The catalog change removes a pre-RDR-104 ``_event_log_covers_legacy()`` O(N) scan from the rebuild dispatch path on catalogs whose event log is already steady-state. Post-write ``Catalog()`` construction on a 460K-event production catalog drops from ~850 ms to ~1 ms; the MCP server's per-tool-call latency floor immediately after any catalog write moves with it. Transparent to plugin users; same MCP surface.
+
+The hook change restores prose that was over-trimmed in commit e2fc2408 (PR #320). Telemetry from 795 session transcripts (10-day pre/post-trim windows) showed agents stopped reaching for composed-retrieval tools after the trim — `nx_answer` use dropped 78%, `plan_search` 90%, `catalog_search` 100%, `store_put` 100% — exactly the tools whose recipes/examples/reasoning had been most condensed. This release restores:
+
+- **``nx/skills/using-nx-skills/SKILL.md``**: the "ALL analytical questions go through ``nx_answer``" header with verb-shape paragraph and reasoning; tier "when to check" cues; three specific ``search``→``nx_answer`` phrasings in Common Mistakes; the "Findings not stored are findings lost" exhortation; a focused five-row tool-skipping Red Flags table. 5803 chars vs 8681 pre-trim — 33% smaller while restoring the load-bearing content.
+
+- **``nx/hooks/scripts/subagent-start.sh``**: tier "when to check" cues; verb-shape routing line; WRITE-BACK exhortation; the ``catalog_search → scratch put → store_put`` AUTO-LINK 3-step recipe. Now emits via the documented ``{"hookSpecificOutput": {"hookEventName": "SubagentStart", "additionalContext": "..."}}`` envelope (plain stdout works today per cc-validation scenarios 13a/13b, but the JSON envelope is the explicit contract). All heredoc bodies remain under the 500-byte bash 5.3 deadlock guard. Verified end-to-end via ``tests/cc-validation/scenarios/12_real_nx_subagent.sh``.
+
+See root ``CHANGELOG.md``.
+
 ## [4.25.0] - 2026-05-05
 
 Plugin version aligned with conexus 4.25.0. No plugin-specific changes; the underlying conexus library lands RDR-104 (incremental catalog projection rebuild) so steady-state ``Catalog()`` construction after a single write completes in <100 ms instead of ~4 s on a 452K-event log. Transparent to plugin users; same MCP surface. See root ``CHANGELOG.md``.
