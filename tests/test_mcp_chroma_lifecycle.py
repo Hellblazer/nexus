@@ -460,3 +460,66 @@ class TestLifespanWiring:
         assert not hasattr(core_mod, "_flag_enabled"), (
             "_flag_enabled was removed with the gate"
         )
+
+
+# ── GH #567 follow-up: lifespan-vs-SessionStart race ─────────────────────────
+
+
+def test_t1_chroma_init_self_mints_session_id_when_pointer_missing(
+    tmp_path, monkeypatch,
+) -> None:
+    """GH #567 follow-up: lifespan boots before SessionStart writes
+    current_session pointer (race observed locally on 4.26.4, mcp.log
+    boot at 14:29:40 had no chroma_init log because the pointer was
+    empty). Pre-fix _t1_chroma_init_if_owner returned silently on
+    'no own_id'; chroma never spawned; .session never written. Post-
+    fix it self-mints a UUID and writes current_session so the lazy
+    chroma comes up regardless of hook order.
+
+    Mocks start_t1_server so the test does not actually spawn chroma.
+    """
+    from unittest.mock import patch
+
+    from nexus.mcp.core import _t1_chroma_init_if_owner, _OWNED_CHROMA
+
+    # Sandbox config dir so we don't touch the operator's real
+    # current_session.
+    pointer = tmp_path / "current_session"
+    monkeypatch.setattr("nexus.session.CLAUDE_SESSION_FILE", pointer)
+
+    # Confirm pointer is absent at start.
+    assert not pointer.exists()
+
+    # Reset _OWNED_CHROMA singleton between tests.
+    _OWNED_CHROMA.clear()
+
+    fake_record_writes: list[tuple] = []
+
+    def _fake_start():
+        return ("127.0.0.1", 54321, 99999, str(tmp_path / "fake-tmpdir"))
+
+    def _fake_write_record(sessions_dir, session_id, host, port, server_pid, tmpdir, **kwargs):
+        fake_record_writes.append((session_id, host, port))
+
+    with patch("nexus.session.start_t1_server", side_effect=_fake_start), \
+         patch("nexus.session.write_session_record_by_id", side_effect=_fake_write_record), \
+         patch("nexus.session.find_claude_root_pid", return_value=None), \
+         patch("nexus.session.spawn_t1_watchdog", return_value=0):
+        _t1_chroma_init_if_owner()
+
+    # Self-minted UUID written to current_session.
+    assert pointer.exists(), "current_session pointer must be written"
+    minted_uuid = pointer.read_text().strip()
+    assert len(minted_uuid) == 36, f"expected UUID, got {minted_uuid!r}"
+
+    # Chroma spawn fired with that UUID.
+    assert fake_record_writes, "no record write fired"
+    session_id, host, port = fake_record_writes[0]
+    assert session_id == minted_uuid, (
+        f"record session_id {session_id!r} must match minted UUID {minted_uuid!r}"
+    )
+    assert host == "127.0.0.1"
+
+    # _OWNED_CHROMA reflects the spawn.
+    assert _OWNED_CHROMA.get("session_id") == minted_uuid
+    _OWNED_CHROMA.clear()  # cleanup
