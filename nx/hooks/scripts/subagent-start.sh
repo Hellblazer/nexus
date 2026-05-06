@@ -110,23 +110,41 @@ if [[ $SKIP_STORAGE_DOCS -eq 0 ]]; then
 # already sees in the live MCP tool list.
 cat <<'NX_TIERS'
 
-## nx storage (call as mcp__plugin_nx_nexus__<tool>; pagination: footer shows offset=N)
+## nx storage (call as mcp__plugin_nx_nexus__<tool>; paged: footer shows offset=N)
 
-Tiers: T1 scratch (session, sibling-shared) -> T2 memory (project, persistent) -> T3 knowledge (semantic).
+Read widest -> narrowest BEFORE any work; check before duplicating effort:
+  T3 search/nx_answer  all sessions/projects   <- check before researching
+  T2 memory            project-scoped          <- check before project work
+  T1 scratch           shared with siblings    <- check before duplicating sibling work
+NX_TIERS
+
+cat <<'NX_TOOLS'
 
 T1: scratch, scratch_manage
 T2: memory_get, memory_search, memory_put, memory_delete
-NX_TIERS
+NX_TOOLS
 
 cat <<'NX_T3'
-T3: search (where, cluster_by="semantic", topic), query (catalog-aware; follow_links, depth, subtree),
-    store_list, store_get, store_put (AUTO-LINKS via T1 tag "link-context"),
-    collection_list
+T3: search (where, cluster_by, topic), query (catalog-aware; follow_links, depth, subtree),
+    store_list, store_get, store_put, collection_list
 Plans (T2): plan_search, plan_save
-
 Hint: where="section_type!=references" filters noise.
-Findings not stored are findings lost - call store_put before returning.
+
+Verb-shape question (how / why / tradeoffs / compare)? -> nx_answer (composed > raw).
+Raw search is for keyword lookup only ("find X in collection Y").
+
+WRITE-BACK: findings not stored = findings lost. store_put (T3) or memory_put (T2) before returning.
 NX_T3
+
+cat <<'NX_AUTOLINK'
+
+AUTO-LINK RECIPE (drives store_put -> catalog links):
+  1. catalog_search your task references -> get target tumblers
+  2. scratch put (tag: "link-context") with target tumblers
+  3. store_put -- auto-creates catalog links from scratch context
+
+If link-context already in scratch (sibling agent did 1+2), skip to step 3.
+NX_AUTOLINK
 
 # L1 Knowledge Map (per-repo, RDR-072) — outside the heredoc so $(…) expands
 CONTEXT_DIR="$HOME/.config/nexus/context"
