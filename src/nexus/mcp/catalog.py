@@ -181,16 +181,28 @@ def catalog_list(
 
         if owner:
             entries = cat.by_owner(Tumbler.parse(owner))
-            entries = entries[offset:offset + limit]
+            if content_type:
+                entries = [e for e in entries if e.content_type == content_type]
+            entries = entries[offset:offset + limit + 1]
         else:
             import json as _json
 
-            rows = cat._db.execute(
+            # Push content_type into the SQL WHERE so pagination is correct.
+            # nexus-blk2 Part 1: previously filtered in Python AFTER LIMIT,
+            # so list(content_type='rdr', limit=5) returned [] when the first
+            # 5 rows happened not to be rdr.
+            sql = (
                 "SELECT tumbler, title, author, year, content_type, file_path, "
                 "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
-                "FROM documents LIMIT ? OFFSET ?",
-                (limit, offset),
-            ).fetchall()
+                "FROM documents"
+            )
+            params: list = []
+            if content_type:
+                sql += " WHERE content_type = ?"
+                params.append(content_type)
+            sql += " LIMIT ? OFFSET ?"
+            params.extend([limit + 1, offset])
+            rows = cat._db.execute(sql, params).fetchall()
             from nexus.catalog.catalog import CatalogEntry
 
             entries = [
@@ -202,11 +214,10 @@ def catalog_list(
                 )
                 for r in rows
             ]
-        if content_type:
-            entries = [e for e in entries if e.content_type == content_type]
+        has_more = len(entries) > limit
         page = entries[:limit]
         result = [e.to_dict() for e in page]
-        if len(entries) > limit:
+        if has_more:
             result.append({"_pagination": {"next_offset": offset + limit, "limit": limit}})
         return result
     except Exception as e:
@@ -451,13 +462,30 @@ def catalog_resolve(
     try:
         from nexus.catalog.tumbler import Tumbler
 
+        # nexus-blk2 Part 2: dotted-tumbler form is required (e.g. "1.2.3"
+        # for a document, "1.2" for an owner). The dashed format produced
+        # by ``nx doctor`` (e.g. "1-2188", "Luciferase-f2d57dbc") is the
+        # physical-collection prefix shape, NOT a tumbler. Tumbler.parse
+        # used to leak its int() ValueError to the caller; catch and
+        # surface an actionable diagnostic instead.
+        def _parse_tumbler_or_raise(raw: str, field: str) -> Tumbler:
+            try:
+                return Tumbler.parse(raw)
+            except (ValueError, TypeError) as exc:
+                raise ValueError(
+                    f"{field}={raw!r}: not a dotted tumbler (e.g. '1.2.3'). "
+                    f"If you have a physical collection prefix like "
+                    f"'1-2188' from `nx doctor`, that is NOT a tumbler. "
+                    f"underlying: {exc}"
+                ) from exc
+
         collections: set[str] = set()
         if tumbler:
-            entry = cat.resolve(Tumbler.parse(tumbler))
+            entry = cat.resolve(_parse_tumbler_or_raise(tumbler, "tumbler"))
             if entry and entry.physical_collection:
                 collections.add(entry.physical_collection)
         if owner:
-            entries = cat.by_owner(Tumbler.parse(owner))
+            entries = cat.by_owner(_parse_tumbler_or_raise(owner, "owner"))
             for e in entries:
                 if e.physical_collection:
                     collections.add(e.physical_collection)
