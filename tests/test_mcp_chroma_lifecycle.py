@@ -523,3 +523,115 @@ def test_t1_chroma_init_self_mints_session_id_when_pointer_missing(
     # _OWNED_CHROMA reflects the spawn.
     assert _OWNED_CHROMA.get("session_id") == minted_uuid
     _OWNED_CHROMA.clear()  # cleanup
+
+
+# ── GH #572: post-spawn pointer reconciliation ──────────────────────────────
+
+
+class TestReconcileOwnedChroma:
+    """GH #572: SessionStart can fire AFTER the lifespan spawn.
+    ``reconcile_owned_chroma`` renames the session record file when
+    the canonical pointer drifts post-spawn so discovery via
+    ``find_session_by_id`` succeeds.
+    """
+
+    def test_reconcile_renames_when_pointer_drifts_after_spawn(
+        self, tmp_path, monkeypatch,
+    ):
+        from nexus.mcp import core as core_mod
+
+        # Set up a synthetic _OWNED_CHROMA + session record on disk.
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+        old_id = "old-uuid-aaaa-bbbb-cccc-dddddddddddd"
+        new_id = "new-uuid-aaaa-bbbb-cccc-dddddddddddd"
+        old_record = sessions_dir / f"{old_id}.session"
+        old_record.write_text('{"session_id": "old"}')
+
+        pointer = tmp_path / "current_session"
+        pointer.write_text(new_id)
+
+        monkeypatch.setattr("nexus.db.t1.SESSIONS_DIR", sessions_dir)
+        monkeypatch.setattr("nexus.session.CLAUDE_SESSION_FILE", pointer)
+
+        # Reset module state.
+        core_mod._OWNED_CHROMA.clear()
+        core_mod._OWNED_CHROMA.update({
+            "session_id": old_id,
+            "server_pid": 99999,
+            "tmpdir": str(tmp_path / "tmp"),
+            "session_file": str(old_record),
+        })
+
+        # Drive the reconcile.
+        renamed = core_mod.reconcile_owned_chroma()
+
+        assert renamed, "expected reconcile to fire"
+        assert not old_record.exists(), "old record must be moved"
+        new_record = sessions_dir / f"{new_id}.session"
+        assert new_record.exists(), "new record must be present"
+        assert core_mod._OWNED_CHROMA["session_id"] == new_id
+        assert core_mod._OWNED_CHROMA["session_file"] == str(new_record)
+
+        core_mod._OWNED_CHROMA.clear()
+
+    def test_reconcile_noop_when_pointer_matches(
+        self, tmp_path, monkeypatch,
+    ):
+        """Steady-state: pointer already matches our record. No-op."""
+        from nexus.mcp import core as core_mod
+
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+        sid = "stable-uuid-xxxx"
+        record = sessions_dir / f"{sid}.session"
+        record.write_text("{}")
+        pointer = tmp_path / "current_session"
+        pointer.write_text(sid)
+
+        monkeypatch.setattr("nexus.db.t1.SESSIONS_DIR", sessions_dir)
+        monkeypatch.setattr("nexus.session.CLAUDE_SESSION_FILE", pointer)
+
+        core_mod._OWNED_CHROMA.clear()
+        core_mod._OWNED_CHROMA.update({
+            "session_id": sid,
+            "server_pid": 99999,
+            "tmpdir": str(tmp_path / "tmp"),
+            "session_file": str(record),
+        })
+
+        assert core_mod.reconcile_owned_chroma() is False
+        assert record.exists()  # unchanged
+
+        core_mod._OWNED_CHROMA.clear()
+
+    def test_reconcile_noop_for_subagent_path(
+        self, tmp_path, monkeypatch,
+    ):
+        """Subagent (NX_SESSION_ID set) MUST NOT rename the parent's
+        session record. The subagent inherits the parent's record key.
+        """
+        from nexus.mcp import core as core_mod
+
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+        parent_id = "parent-uuid"
+        record = sessions_dir / f"{parent_id}.session"
+        record.write_text("{}")
+        pointer = tmp_path / "current_session"
+        pointer.write_text("different-uuid")  # would normally trigger
+
+        monkeypatch.setattr("nexus.db.t1.SESSIONS_DIR", sessions_dir)
+        monkeypatch.setattr("nexus.session.CLAUDE_SESSION_FILE", pointer)
+        monkeypatch.setenv("NX_SESSION_ID", parent_id)
+
+        core_mod._OWNED_CHROMA.clear()
+        core_mod._OWNED_CHROMA.update({
+            "session_id": parent_id,
+            "session_file": str(record),
+        })
+
+        assert core_mod.reconcile_owned_chroma() is False
+        assert record.exists(), "subagent must not rename parent record"
+
+        core_mod._OWNED_CHROMA.clear()
