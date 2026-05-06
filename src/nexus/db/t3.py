@@ -939,6 +939,28 @@ class T3Database:
                 qr["metadatas"][0],
                 qr["distances"][0],
             ):
+                # GH #373: ChromaDB can return None metadata entries for
+                # corrupted or upsert-without-meta rows. The bare ``**meta``
+                # then raises ``TypeError: 'NoneType' object is not a
+                # mapping`` and kills the entire query, even though the
+                # other rows in the result set are valid. Defensively
+                # coerce + log so the row still surfaces with empty
+                # metadata fields.
+                if meta is None:
+                    _log.warning(
+                        "t3_query_meta_none",
+                        doc_id=doc_id,
+                        collection=name,
+                    )
+                    meta = {}
+                elif not isinstance(meta, dict):
+                    _log.warning(
+                        "t3_query_meta_corrupt",
+                        doc_id=doc_id,
+                        collection=name,
+                        meta_type=type(meta).__name__,
+                    )
+                    meta = {}
                 results.append({"id": doc_id, "content": doc, "distance": dist, **meta})
         return sorted(results, key=lambda r: r["distance"])
 
@@ -1025,8 +1047,10 @@ class T3Database:
             result = _chroma_with_retry(
                 col.get, include=["metadatas"], limit=clamped, offset=offset,
             )
+        # GH #373 mirror: same None-meta defence as the query path; a
+        # single corrupted row should not blank the whole listing.
         return [
-            {"id": doc_id, **meta}
+            {"id": doc_id, **(meta if isinstance(meta, dict) else {})}
             for doc_id, meta in zip(result["ids"], result["metadatas"])
         ]
 
