@@ -1,5 +1,25 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import sys
+
 import click
+
+# Issue #370: line-buffer stdout/stderr at CLI entry so progress lines
+# from long-running commands (nx index repo, nx enrich aspects) flush
+# immediately when running in non-interactive contexts (background
+# process, piped output, subprocess). Python's default stdout buffering
+# is line-buffered when attached to a terminal but FULLY buffered
+# otherwise, which leaves progress invisible for 10+ minutes on large
+# repos. ``reconfigure(line_buffering=True)`` lands the same flush-on-
+# newline behaviour regardless of terminal attachment.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(line_buffering=True)
+    except (AttributeError, OSError):
+        # AttributeError: pre-3.7 ``reconfigure`` is missing (we're 3.12+
+        # so this branch is dead, but defensive); OSError: stream is
+        # closed or doesn't support reconfigure (e.g. captured by pytest's
+        # capsys, which monkey-patches stdout/stderr to non-text streams).
+        pass
 
 from nexus.commands.catalog import catalog
 from nexus.commands.collection import collection
