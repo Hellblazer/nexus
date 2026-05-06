@@ -263,3 +263,62 @@ def test_truncated_names_still_unique() -> None:
         _resolve_repo_collection(Path("/tmp/" + "a" * 60), "code")
         != _resolve_repo_collection(Path("/other/" + "a" * 60), "code")
     )
+
+
+# ── GH #551: dotted basename sanitization ──────────────────────────────────
+
+
+def test_sanitise_owner_segment_replaces_dots() -> None:
+    """GH #551: Java reverse-domain repo names (``com.foo.bar``) must
+    be sanitised so the conformant collection name passes
+    validate_collection_name. Pre-fix only ``_`` was replaced."""
+    from nexus.registry import _sanitise_owner_segment
+
+    assert _sanitise_owner_segment("com.conductor.sys.monitoring") == \
+        "com-conductor-sys-monitoring"
+
+
+def test_sanitise_owner_segment_collapses_multi_separators() -> None:
+    """Adjacent rejected chars collapse to a single hyphen so the
+    output stays compact and avoids ``--`` runs that look ugly in
+    operator output (e.g. ``foo..bar`` -> ``foo-bar`` not ``foo--bar``)."""
+    from nexus.registry import _sanitise_owner_segment
+
+    assert _sanitise_owner_segment("foo..bar") == "foo-bar"
+    assert _sanitise_owner_segment("foo_._bar") == "foo-bar"
+    assert _sanitise_owner_segment("a/b/c") == "a-b-c"
+
+
+def test_sanitise_owner_segment_strips_leading_trailing_hyphens() -> None:
+    """validate_collection_name requires alphanumeric start AND end.
+    A basename like ``.foo-bar.`` must come back as ``foo-bar``."""
+    from nexus.registry import _sanitise_owner_segment
+
+    assert _sanitise_owner_segment(".foo-bar.") == "foo-bar"
+    assert _sanitise_owner_segment("__foo__") == "foo"
+
+
+def test_sanitise_owner_segment_preserves_alnum_and_hyphens() -> None:
+    """Already-clean inputs pass through unchanged."""
+    from nexus.registry import _sanitise_owner_segment
+
+    assert _sanitise_owner_segment("clean-repo-123") == "clean-repo-123"
+    assert _sanitise_owner_segment("FooBar123") == "FooBar123"
+
+
+def test_resolve_repo_collection_dotted_basename_passes_validation() -> None:
+    """GH #551 end-to-end: the conformant name produced for a dotted
+    basename must pass validate_collection_name (the regex enforced by
+    ChromaDB on get_or_create). Pre-fix this raised because the dot
+    survived sanitisation; the registry then persisted an invalid
+    name and every subsequent index attempt crashed."""
+    from nexus.corpus import validate_collection_name
+    from nexus.registry import _resolve_repo_collection
+
+    repo = Path("/Users/hal/git/com.conductor.sys.monitoring")
+    for ct in ("code", "docs", "rdr"):
+        name = _resolve_repo_collection(repo, ct)
+        # Must start with ``ct__``, must validate, must NOT contain dots.
+        assert name.startswith(f"{ct}__")
+        validate_collection_name(name)
+        assert "." not in name
