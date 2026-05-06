@@ -6,6 +6,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.26.4] - 2026-05-06
+
+Patch release. Four fixes from the post-4.26.3 P3-deferral cleanup round, plus a self-correcting follow-up to one of them. All small, isolated; no schema or migration changes.
+
+### Fixed
+
+- **`store_list` bare prefix `code`/`docs`/`rdr` still misrouted on multi-collection installs** (PR #561 + PR #565, GH #563): the 4.26.3 fix in PR #550 only handled the unique-match case. On installs with multiple `{prefix}__*` collections, the resolver fell through to the existing promotion branch and silently produced `knowledge__code__voyage-context-3__v1` (wrong namespace). PR #561 picks deterministically when 2+ matches: prefer the conformant `{prefix}__{prefix}__<canonical_model>__v1`, then the legacy 2-segment `{prefix}__{prefix}`, then alphabetical first. Logs a `t3_collection_name_bare_prefix_ambiguous` warning so the operator sees the choice. PR #565 carve-out: the deterministic-pick path skips bare `knowledge` so the historical `knowledge__knowledge` legacy fallback (#536) still fires (test_store_put + test_store_get_round_trip locked this contract).
+
+- **Builtin-plan matcher missed common-shape questions even with verb-dimension hint** (PR #562, nexus-qi8t): live repro 2026-05-06 -- `nx_answer` with question "Find papers by Grossberg about ART resonance" and `dimensions={"verb":"research"}` did NOT match the builtin `find-by-author` plan. Routed to inline-planner instead and ran 80s. Root cause: `matcher.py:_superset` enforced strict equality on every dimension. The inline planner classified the question as `verb=query`, the plan declared `verb=research`, so the filter rejected the cosine hit before scoring even when confidence was high. Fix: carve out the verb dimension specifically. Equivalence classes `{query, research, lookup}` (retrieval intents) and `{analyze, review, compare}` (critique intents) are interchangeable for filter purposes. Other verbs (`debug`, `document`, `plan-*`) stay isolated. Other dimensions (`scope`, `strategy`, `taxonomy_domain`) keep strict equality.
+
+- **Smoke-test plan accumulating use_count from production traffic** (no PR, manual fence-off, nexus-w7sg): `weather-tokyo-right-now` (plan id 80, project=nexus) accumulated 10+ uses against real `nx_answer` calls. Disabled via `nx plan disable 80 --reason "smoke-test plan getting matched against production traffic (nexus-w7sg)"`. The `disabled_at` filter in `list_active_plans` keeps it out of `plan_match` candidates going forward. No code change.
+
+### Added
+
+- **`nx catalog link-generate` deprecation alias** (PR #564, nexus-2297 partial): `link-generate` and `generate-links` were near-equivalent verbs that confused operators with no semantic distinction. `link-generate` becomes a hidden, deprecated alias that emits a stderr warning and delegates to `generate_links_cmd` with `citations=False, filepath=True` to preserve historical behaviour. The verb-noun order matches sibling commands (`link`, `unlink`, `links`). Scope B from nexus-2297 (folding diagnostic verbs into `nx doctor`) is deferred -- requires a deprecation cycle on user-facing commands documented in `cli-reference.md`.
+
 ## [4.26.3] - 2026-05-06
 
 Patch release. Twelve fixes from the post-4.26.2 day-2 issue triage and shake-out, plus a CI test-order-dependency fix that was masking real failures on the runner. Most user-facing impact: `nx_answer` had been silently disabled session-side on every call (chromadb 1.5.9 regression in the text-side query path), and a generate-terminal plan returned a double-JSON-wrapped `final_text` that broke every prose-rendering skill. Both fixed.
