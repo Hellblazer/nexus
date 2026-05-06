@@ -39,6 +39,52 @@ class OperatorOutputError(OperatorError):
     """Raised when stdout cannot be parsed as JSON."""
 
 
+async def _drain_pipe(pipe: asyncio.StreamReader | None) -> bytes:
+    """Read whatever bytes are currently buffered in *pipe*.
+
+    Used by the timeout path (nexus-1at5) AFTER the subprocess has
+    been killed and reaped. The writer is dead, so ``read()`` returns
+    EOF immediately for whatever was buffered without blocking.
+    Returns an empty ``bytes`` on any error so the caller can still
+    raise the timeout exception cleanly.
+    """
+    if pipe is None:
+        return b""
+    try:
+        return await pipe.read()
+    except Exception:
+        return b""
+
+
+def _persist_timeout_log(
+    timeout: float, stdout: bytes, stderr: bytes,
+) -> str:
+    """Persist partial subprocess output to a timestamped log file.
+
+    Returns the file path as a string for inclusion in the timeout
+    exception message. Failures to write the log are swallowed so
+    that the timeout exception (the load-bearing signal) always
+    surfaces; the absent log is a soft loss.
+    """
+    from datetime import datetime, timezone
+    from nexus.config import nexus_config_dir
+
+    try:
+        logs_dir = nexus_config_dir() / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        path = logs_dir / f"operator-timeout-{ts}.log"
+        path.write_bytes(
+            f"[operator-timeout {timeout}s] {ts}Z\n".encode()
+            + b"--- stdout ---\n" + stdout + b"\n"
+            + b"--- stderr ---\n" + stderr + b"\n"
+        )
+        return str(path)
+    except Exception as exc:
+        _log.warning("operator_timeout_log_failed", error=str(exc))
+        return "(log write failed)"
+
+
 async def claude_dispatch(
     prompt: str,
     json_schema: dict[str, Any],
@@ -134,8 +180,22 @@ async def claude_dispatch(
             await proc.wait()
         except Exception:
             pass
+        # nexus-1at5: drain whatever bytes already landed in the pipe
+        # buffers BEFORE raising. ``communicate()`` was cancelled mid-
+        # await so its return value is gone, but the kernel-side pipe
+        # still holds whatever the subprocess wrote. After kill+wait
+        # the writer is dead, so the read drains cleanly without
+        # blocking. Persist to a per-call log file so the operator can
+        # see what claude was producing when the timeout fired -
+        # otherwise a 5-minute timeout discards 5 minutes of analytical
+        # output and the next debugging session starts from zero.
+        partial_stdout = await _drain_pipe(proc.stdout)
+        partial_stderr = await _drain_pipe(proc.stderr)
+        log_path = _persist_timeout_log(timeout, partial_stdout, partial_stderr)
         raise OperatorTimeoutError(
-            f"claude -p timed out after {timeout}s"
+            f"claude -p timed out after {timeout}s; "
+            f"partial output ({len(partial_stdout)}B stdout, "
+            f"{len(partial_stderr)}B stderr) logged to {log_path}"
         )
 
     if proc.returncode != 0:

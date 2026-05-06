@@ -1762,3 +1762,62 @@ class TestPlanRunStepProgressLogs:
         assert isinstance(ev["elapsed_ms"], int)
         assert ev["elapsed_ms"] >= 0
         assert ev["kind"] == "isolated"
+
+
+# ── nexus-l0yh: OperatorError graceful fallback ────────────────────────────
+
+
+class _OperatorFailingDispatcher:
+    """Dispatcher that raises ``OperatorError`` on any operator step.
+
+    Retrieval steps return a stub dict so step-output binding still
+    works for downstream refs. Used to verify the runner's graceful
+    degradation behavior (nexus-l0yh).
+    """
+
+    def __init__(self, message: str = "claude -p exited 1") -> None:
+        self.calls: list[tuple[str, dict]] = []
+        self._message = message
+
+    async def __call__(self, tool: str, args: dict) -> dict:
+        from nexus.operators.dispatch import OperatorError
+        self.calls.append((tool, args))
+        if tool.startswith("operator_"):
+            raise OperatorError(self._message)
+        return {"text": f"{tool}(stub)", "ids": [], "tumblers": []}
+
+
+@pytest.mark.asyncio
+async def test_run_substitutes_sentinel_on_operator_error_isolated() -> None:
+    """nexus-l0yh: an isolated operator step that raises OperatorError
+    must NOT propagate; the runner substitutes a failure sentinel into
+    step_outputs and continues with the next step.
+    """
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "search", "args": {"query": "x"}},
+            {"tool": "operator_summarize", "args": {"text": "$step1.text"}},
+            {"tool": "search", "args": {"query": "y"}},
+        ],
+    }
+    disp = _OperatorFailingDispatcher("simulated dispatch failure")
+    result = await plan_run(_match(plan), {}, dispatcher=disp)
+
+    # All three steps must have run — failure on step 2 must NOT
+    # short-circuit step 3.
+    assert len(disp.calls) == 3
+    assert disp.calls[0][0] == "search"
+    assert disp.calls[1][0] == "operator_summarize"
+    assert disp.calls[2][0] == "search"
+
+    # step 2's output is the sentinel.
+    s2 = result.steps[1]
+    assert s2["status"] == "failed"
+    assert s2["tool"] == "operator_summarize"
+    assert s2["step_index"] == 1
+    assert "simulated dispatch failure" in s2["error"]
+    # Empty downstream-ref fields so $stepN.<field> resolves to "" not raises.
+    assert s2["text"] == ""
+    assert s2["summary"] == ""
