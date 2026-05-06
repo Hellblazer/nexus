@@ -347,9 +347,78 @@ class T1Database:
 
     # ── Read ──────────────────────────────────────────────────────────────────
 
+    def _resolve_id(self, id: str) -> tuple[str | None, list[str]]:
+        """Exact-then-prefix id resolution scoped to this session.
+
+        Mirrors :meth:`MemoryStore.resolve_title` (nexus-e59o):
+
+        * Exact session-owned match found: returns ``(id, [])``.
+        * No exact match, exactly one session-owned id whose value
+          starts with *id*: returns ``(full_id, [])``.
+        * Multiple session-owned prefix candidates: returns
+          ``(None, [candidate_ids])`` so the caller can list them.
+        * Nothing matches: returns ``(None, [])``.
+
+        Used by :meth:`get` and :meth:`delete` so the operator can paste
+        back the 8-char prefix that ``scratch list`` displays
+        (nexus-zpw6) instead of being forced to type the full UUID.
+        Ownership check: the prefix scan is constrained to the current
+        ``session_id`` so a sibling session's id never leaks into the
+        candidate list.
+        """
+        # Exact lookup against the FULL collection — ChromaDB's
+        # ``ids=[id]`` filter is the cheapest path. A non-empty hit
+        # short-circuits before the prefix scan, but we still verify
+        # ownership downstream in get/delete (this method does NOT do
+        # the access-count side effect; callers do).
+        try:
+            exact = self._exec(
+                lambda: self._col.get(ids=[id], include=["metadatas"])
+            )
+        except Exception:
+            exact = {"ids": []}
+        if exact["ids"]:
+            owned = (
+                (exact["metadatas"][0] or {}).get("session_id")
+                == self._session_id
+            )
+            if owned:
+                return id, []
+
+        # Prefix fallback: enumerate this session's ids and filter.
+        # Cheap because list_entries is already paginated to 300/page
+        # and a session typically holds dozens of entries, not
+        # thousands. The ergonomic case (8-char prefix unique) is
+        # the common one; the ambiguous case surfaces a candidate list.
+        try:
+            session_ids = [e["id"] for e in self.list_entries()]
+        except Exception:
+            return None, []
+        candidates = [sid for sid in session_ids if sid.startswith(id)]
+        if len(candidates) == 1:
+            return candidates[0], []
+        return None, candidates
+
     def get(self, id: str) -> dict | None:
-        """Return the document dict for *id*, or None if not found."""
-        result = self._exec(lambda: self._col.get(ids=[id], include=["documents", "metadatas"]))
+        """Return the document dict for *id*, or None if not found.
+
+        nexus-zpw6: ``id`` may be the full UUID (legacy / strict) OR a
+        unique session-owned prefix matching the 8-char form
+        ``scratch list`` displays. Ambiguous prefixes return None and
+        log the candidates so the MCP layer can surface them; this
+        method never picks silently.
+        """
+        resolved, ambiguous = self._resolve_id(id)
+        if resolved is None:
+            if ambiguous:
+                _log.warning(
+                    "t1_get_ambiguous_prefix",
+                    requested_id=id,
+                    candidates=ambiguous,
+                    session_id=self._session_id,
+                )
+            return None
+        result = self._exec(lambda: self._col.get(ids=[resolved], include=["documents", "metadatas"]))
         if not result["ids"]:
             # Bug 1 (nexus-bug-report-2026-04-22): users hit Not-found on
             # ids freshly returned by put(). The path is unreproducible in
@@ -373,9 +442,9 @@ class T1Database:
             "last_accessed": _now_iso(),
         }
         try:
-            self._exec(lambda: self._col.update(ids=[id], metadatas=[updated_meta]))
+            self._exec(lambda: self._col.update(ids=[resolved], metadatas=[updated_meta]))
         except Exception:
-            _log.warning("t1_access_count_update_failed", id=id)
+            _log.warning("t1_access_count_update_failed", id=resolved)
         return self._to_row(result["ids"][0], result["documents"][0], updated_meta)
 
     def search(self, query: str, n_results: int = 10) -> list[dict]:
@@ -561,22 +630,51 @@ class T1Database:
 
 
     def delete(self, id: str) -> bool:
-        """Delete a scratch entry by its full ID.
+        """Delete a scratch entry by its full ID OR unique session-owned prefix.
 
-        Verifies session ownership before deleting — entries belonging to
-        other sessions return False without deleting.  Returns False when the
-        entry does not exist or the session does not own it; True on success.
+        nexus-zpw6: ``id`` may be the full UUID OR a unique session-
+        owned prefix (matches the 8-char form ``scratch list``
+        displays). Ambiguous prefixes return False without deleting
+        and log the candidate ids so the MCP layer can surface them
+        instead of silently picking. Verifies session ownership
+        before deleting; entries belonging to other sessions return
+        False without deleting.
         """
+        resolved, ambiguous = self._resolve_id(id)
+        if resolved is None:
+            if ambiguous:
+                _log.warning(
+                    "t1_delete_ambiguous_prefix",
+                    requested_id=id,
+                    candidates=ambiguous,
+                    session_id=self._session_id,
+                )
+            return False
+
         def _do() -> bool:
-            result = self._col.get(ids=[id], include=["metadatas"])
+            result = self._col.get(ids=[resolved], include=["metadatas"])
             if not result["ids"]:
                 return False
             if result["metadatas"][0].get("session_id") != self._session_id:
                 return False
-            self._col.delete(ids=[id])
+            self._col.delete(ids=[resolved])
             return True
 
         return self._exec(_do)
+
+    def resolve_prefix_candidates(self, id: str) -> list[str]:
+        """Return session-owned ids matching *id* as exact or prefix.
+
+        Public companion to :meth:`_resolve_id` — exposes the
+        ambiguous-candidate list so MCP / CLI wrappers can surface a
+        clean disambiguation message rather than just "not found".
+        Empty list when nothing matches; one-element list when a
+        unique resolution exists; multi-element when ambiguous.
+        """
+        resolved, ambiguous = self._resolve_id(id)
+        if resolved is not None:
+            return [resolved]
+        return ambiguous
 
     # ── Clear ─────────────────────────────────────────────────────────────────
 

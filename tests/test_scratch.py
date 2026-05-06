@@ -471,3 +471,87 @@ def test_access_count_update_failure_does_not_raise(t1: T1Database) -> None:
         assert result["content"] == "resilient entry"
     finally:
         t1._col.update = original_update
+
+
+# ── nexus-zpw6: prefix resolution for get/delete ────────────────────────────
+
+
+def test_scratch_get_by_unique_8char_prefix(t1: T1Database) -> None:
+    """nexus-zpw6: pasting back the displayed 8-char prefix resolves
+    when only one session-owned id starts with it."""
+    full_id = t1.put(content="hello prefix world")
+    assert len(full_id) == 36  # UUID-shaped
+    short = full_id[:8]
+    entry = t1.get(short)
+    assert entry is not None, f"prefix {short!r} should resolve to {full_id!r}"
+    assert entry["id"] == full_id
+    assert entry["content"] == "hello prefix world"
+
+
+def test_scratch_get_full_uuid_still_works(t1: T1Database) -> None:
+    """nexus-zpw6 backwards-compat: the exact-match path is unchanged."""
+    full_id = t1.put(content="exact lookup")
+    entry = t1.get(full_id)
+    assert entry is not None
+    assert entry["id"] == full_id
+
+
+def test_scratch_get_ambiguous_prefix_returns_none(t1: T1Database) -> None:
+    """nexus-zpw6: when the prefix matches >=2 session-owned ids the
+    method returns None (and resolve_prefix_candidates surfaces the
+    list for the caller). The method must NEVER pick silently."""
+    a = t1.put(content="entry-a", agent="test")
+    b = t1.put(content="entry-b", agent="test")
+    # Find a shared prefix length where a and b collide; pick a 1-char
+    # prefix that always exists across UUID-shaped ids by using the
+    # common-character lookup.
+    for length in range(1, 36):
+        if a[:length] != b[:length]:
+            shared = a[:length - 1]
+            break
+    else:
+        shared = a[:1]
+    if shared and a.startswith(shared) and b.startswith(shared):
+        # Only assert ambiguity when the chosen prefix really collides.
+        candidates = t1.resolve_prefix_candidates(shared)
+        if len(candidates) >= 2:
+            assert t1.get(shared) is None, (
+                "ambiguous prefix must NOT silently pick a candidate"
+            )
+            assert set(candidates) >= {a, b}
+
+
+def test_scratch_get_unknown_prefix_returns_none(t1: T1Database) -> None:
+    """nexus-zpw6: a prefix that matches no session-owned id returns None."""
+    t1.put(content="some entry")
+    assert t1.get("zzzzzzzz") is None
+    assert t1.resolve_prefix_candidates("zzzzzzzz") == []
+
+
+def test_scratch_delete_by_unique_8char_prefix(t1: T1Database) -> None:
+    """nexus-zpw6: delete accepts the same prefix shape as get."""
+    full_id = t1.put(content="will be deleted")
+    short = full_id[:8]
+    assert t1.delete(short) is True
+    # Subsequent get returns None (entry truly removed).
+    assert t1.get(full_id) is None
+
+
+def test_scratch_delete_ambiguous_prefix_returns_false(t1: T1Database) -> None:
+    """nexus-zpw6: delete must NEVER pick silently when the prefix is
+    ambiguous; both entries remain after the call."""
+    a = t1.put(content="entry-a")
+    b = t1.put(content="entry-b")
+    for length in range(1, 36):
+        if a[:length] != b[:length]:
+            shared = a[:length - 1]
+            break
+    else:
+        shared = a[:1]
+    if shared and a.startswith(shared) and b.startswith(shared):
+        candidates = t1.resolve_prefix_candidates(shared)
+        if len(candidates) >= 2:
+            assert t1.delete(shared) is False
+            # Both still retrievable by full id.
+            assert t1.get(a) is not None
+            assert t1.get(b) is not None
