@@ -6,6 +6,34 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.26.0] - 2026-05-06
+
+Minor release. Ships the tier-discipline observability subsystem: per-call telemetry of T1/T2/T3/plan writes, a CLI to audit them, agent attribution kwargs, and hook + agent-file guidance that teaches subagents to tag their writes. Closes the empirical-loop gap that PR #519 had to recreate from external transcript mining: the next time discipline regresses, the data to spot it lives in the same database the writes do.
+
+### Added
+
+- **``tier_writes`` T2 telemetry table** (PR #525, nexus-kren). One row per call to a tier-write MCP tool. Columns: ``id``, ``session_id``, ``ts``, ``tool``, ``tier``, ``agent``, ``project``, ``target_title``. Three indexes (session_id, ts, tool). Migration registered at 4.25.5; created lazily by the recorder so installs without writes never see it.
+- **``_record_tier_write`` helper in ``mcp/core.py``** (PR #525). Best-effort: any failure swallowed so telemetry can never break the hot path of the calling tool. Wired into ``memory_put`` (T2), ``store_put`` (T3), ``scratch put`` (T1), ``plan_save`` (plan).
+- **``nx tier-status`` CLI** (PR #526, nexus-a52i). Default reports the current session via ``NX_SESSION_ID`` env or ``read_claude_session_id()``; ``--session``, ``--last N``, ``--since <iso>`` override (mutually exclusive); ``--json`` for downstream tooling.
+- **``nx doctor --check-tier-discipline``** (PR #526). Audits current session: prints the tier-write summary and emits a soft warning when zero writes are recorded for a substantive session. Heuristic only; never exits non-zero.
+- **``memory_put`` accepts ``agent`` and ``session`` kwargs** (PR #527, nexus-9clx). Schema columns existed since project Phase 1 but were never wired through the MCP layer; 1012 of 1012 production rows had both NULL. Empty-string defaults translate to None so the existing ``MemoryStore.put`` fall-back chain runs (``NX_AGENT`` env, then NULL). Session resolution now happens at the MCP layer so ``NX_SESSION_ID`` env wins over the legacy getsid file.
+- **``scratch`` (T1) accepts ``agent`` kwarg** (PR #531). T1 metadata model differs from T2 (chroma metadata dict, not SQL columns) so it shipped separately. ``T1Database.put`` accepts ``agent`` (default ``""``); empty falls back to ``NX_AGENT`` env. Persisted in chroma metadata; ``nx tier-status`` slices T1 writes by agent via the ``tier_writes`` mirror.
+- **SubagentStart hook AGENT TAG injection** (PR #528). One line added to the NX_AUTOLINK heredoc reaches every dispatched subagent: ``AGENT TAG: pass agent="<your-role>" to memory_put so nx tier-status slices writes by agent``. Single point of injection beats updating 10+ agent files individually. Heredoc stays under the 500-byte bash 5.3 deadlock guard.
+- **Per-role agent kwarg in 10 agent files** (PR #530). The canonical Post-flight ``memory_put`` example in each producing-findings agent now includes ``agent="<role>"`` matching the agent's filename stem, plus a one-sentence pointer at ``nx tier-status``. Belt-and-braces with the hook injection. Stub agents (knowledge-tidier, plan-auditor, plan-enricher) excluded; already MCP-delegated.
+- **SessionEnd tier-write summary** (PR #529). The launcher now prints a one-line stderr summary BEFORE the daemonization fork so the operator sees their own session's contribution count without invoking ``nx tier-status``. Suppressed when no session resolvable, no DB, no table, or zero writes (transactional sessions stay quiet).
+
+### Verified end-to-end
+
+- 4 PRs of empirical mining preceded the implementation: 2274 pre-trim sessions surveyed, 2622 transcripts parsed, top-discipline sessions analysed for the synthesis-flywheel and artifact-driven patterns. Findings persisted in T2 (tier-discipline-audit-2026-05-06, past-conversation-mining-2026-05-06, past-working-patterns-2026-05-06).
+- Live smoke against production T2 confirms ``nx tier-status`` returns realistic per-tier summaries and ``nx doctor --check-tier-discipline`` audits the current session.
+- Unit + integration suite green.
+
+### Why
+
+Past mining showed only **5.8% of pre-trim sessions used any tier tool, and 1.7% wrote back**. PR #519's surgical hook restoration was only possible because the prior trim left a measurable footprint via search_telemetry + nx_answer_runs. Today's restorations had no equivalent measurement rung for tier-discipline specifically. This release builds it: every write is now visible, attributable, and aggregable per session and per agent.
+
+The discipline still lives in a small high-value tail (synthesis flywheels, RDR-driven workflows). The next iteration's job is to make it easier for those sessions to start and harder to abandon, but first you need the data to know which interventions move the needle. This release delivers the data.
+
 ## [4.25.4] - 2026-05-06
 
 Patch release. Fixes two aspect-extraction worker bugs surfaced by the 4.25.3 live shakeout. Both bugs caused silent worker failure modes that left rows wedged in the queue.

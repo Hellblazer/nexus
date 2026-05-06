@@ -6,6 +6,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.26.0] - 2026-05-06
+
+Plugin version aligned with conexus 4.26.0. Ships two plugin-side changes for the tier-discipline observability subsystem:
+
+- **SubagentStart hook AGENT TAG injection**: one line added to the NX_AUTOLINK heredoc reaches every dispatched subagent. The line: ``AGENT TAG: pass agent="<your-role>" to memory_put so nx tier-status slices writes by agent``. Heredoc stays under the 500-byte bash 5.3 deadlock guard (322 → 428 bytes).
+- **Per-role agent kwarg in 10 producing-findings agent files**: architect-planner, code-review-expert, codebase-deep-analyzer, debugger, deep-analyst, deep-research-synthesizer, developer, strategic-planner, substantive-critic, test-validator. Each agent's canonical Post-flight ``memory_put`` example now includes its role name baked in.
+
+See root ``CHANGELOG.md`` for the full release notes including the conexus-side telemetry table, CLI surface, and MCP API additions.
+
 ## [4.25.4] - 2026-05-06
 
 Plugin version aligned with conexus 4.25.4. No plugin-side changes; the release ships two aspect-worker fixes in the conexus package. See root ``CHANGELOG.md`` for details.
