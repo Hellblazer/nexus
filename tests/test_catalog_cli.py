@@ -1171,14 +1171,23 @@ class TestLinkDensity:
 
 
 class TestLinkGenerate:
-    """Tests for `nx catalog link-generate` command."""
+    """Tests for `nx catalog link-generate` deprecation alias (nexus-2297).
+
+    The canonical verb is now ``generate-links``; ``link-generate``
+    delegates to it and emits a deprecation warning. Tests verify the
+    delegation works end-to-end (dry-run path, empty-catalog path,
+    idempotent path) and that the deprecation warning fires.
+    """
 
     def test_link_generate_dry_run(self, initialized_catalog, catalog_env):
         """--dry-run outputs a message and exits cleanly without writing."""
         runner = CliRunner()
         result = runner.invoke(main, ["catalog", "link-generate", "--dry-run"])
         assert result.exit_code == 0
-        assert "dry-run" in result.output.lower()
+        # Deprecation warning fires from the alias.
+        assert "deprecated" in result.output.lower()
+        # The canonical command's dry-run message lands.
+        assert "would generate" in result.output.lower()
 
     def test_link_generate_empty_catalog(self, initialized_catalog, catalog_env):
         """Running on a catalog with no entries produces 0 links."""
@@ -1193,7 +1202,25 @@ class TestLinkGenerate:
         result = runner.invoke(main, ["catalog", "link-generate"])
         result = runner.invoke(main, ["catalog", "link-generate"])
         assert result.exit_code == 0
-        assert "0 filepath" in result.output
+        # Canonical generate_links_cmd phrases the count as
+        # "RDR filepath links created: 0" (was "Generated 0 filepath links."
+        # in the pre-deprecation impl).
+        assert "filepath links created: 0" in result.output
+
+
+class TestLinkGenerateDeprecation:
+    """nexus-2297: alias must emit the deprecation warning on stderr."""
+
+    def test_link_generate_alias_emits_deprecation_warning(
+        self, initialized_catalog, catalog_env,
+    ):
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "link-generate"])
+        assert result.exit_code == 0
+        assert "link-generate" in result.output
+        assert "deprecated" in result.output.lower()
+        # Points the operator at the canonical name.
+        assert "generate-links" in result.output
 
 
 class TestAgentIntegration:
