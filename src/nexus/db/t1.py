@@ -311,17 +311,27 @@ class T1Database:
         persist: bool = False,
         flush_project: str = "",
         flush_title: str = "",
+        agent: str = "",
     ) -> str:
         """Store *content* in T1. Returns the new document ID.
 
         If *persist* is True the entry is pre-flagged for SessionEnd flush.
         Auto-destination (when no explicit project/title): ``scratch_sessions``
         / ``{session_id}_{doc_id}``.
+
+        ``agent`` (Phase 1B follow-up nexus-9clx) attributes the write to
+        a subagent role for the tier-discipline observability loop. Empty
+        string falls back to ``NX_AGENT`` env, then empty. Stored on
+        chroma metadata; ``nx tier-status`` slices by agent via the
+        ``tier_writes`` T2 mirror.
         """
+        import os as _os
         doc_id = str(uuid4())
         if persist:
             flush_project = flush_project or "scratch_sessions"
             flush_title = flush_title or f"{self._session_id}_{doc_id}"
+        if not agent:
+            agent = _os.environ.get("NX_AGENT", "")
         meta = {
             "session_id": self._session_id,
             "tags": tags,
@@ -330,6 +340,7 @@ class T1Database:
             "flush_title": flush_title,
             "access_count": 0,
             "last_accessed": "",
+            "agent": agent,
         }
         self._exec(lambda: self._col.add(ids=[doc_id], documents=[content], metadatas=[meta]))
         return doc_id
