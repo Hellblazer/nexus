@@ -307,6 +307,49 @@ def _add_projection_quality_columns(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 
+def migrate_tier_writes(conn: sqlite3.Connection) -> None:
+    """Create the ``tier_writes`` table for tier-discipline telemetry (nexus-kren).
+
+    One row per call to a tier-write MCP tool (memory_put, scratch put,
+    store_put, plan_save). Records (session_id, ts, tool, tier, agent,
+    project, target_title) so that ``nx tier-status`` can audit per-
+    session discipline and ``nx doctor --check-tier-discipline`` can
+    flag substantive sessions with no write-back.
+
+    Phase 1 of the tier-discipline restoration initiative. Past mining
+    of 2622 transcripts (memory: past-conversation-mining-2026-05-06)
+    showed only 1.7% of pre-trim sessions wrote back; PR #519's
+    surgical hook restoration was only possible because the trim left
+    a measurable footprint. This table is the equivalent measurement
+    rung for today's restorations.
+
+    Idempotent — no-op if the table already exists. Called lazily from
+    ``_record_tier_write`` so the table is created on first use.
+    """
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='tier_writes'"
+    ).fetchone()
+    if row is not None:
+        return
+    conn.executescript("""
+        CREATE TABLE tier_writes (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id   TEXT    NOT NULL,
+            ts           TEXT    NOT NULL,
+            tool         TEXT    NOT NULL,
+            tier         TEXT    NOT NULL,
+            agent        TEXT,
+            project      TEXT,
+            target_title TEXT
+        );
+        CREATE INDEX idx_tier_writes_session ON tier_writes(session_id);
+        CREATE INDEX idx_tier_writes_ts      ON tier_writes(ts);
+        CREATE INDEX idx_tier_writes_tool    ON tier_writes(tool);
+    """)
+    conn.commit()
+    _log.info("Migrated: created tier_writes table (nexus-kren)")
+
+
 def migrate_nx_answer_runs(conn: sqlite3.Connection) -> None:
     """Create the ``nx_answer_runs`` table for RDR-080 run telemetry.
 
@@ -1836,6 +1879,11 @@ MIGRATIONS: list[Migration] = [
         "4.21.4",
         "Create frecency projection table (RDR-101 Phase 1 PR D nexus-knn3)",
         migrate_frecency_projection_table,
+    ),
+    Migration(
+        "4.25.5",
+        "Create tier_writes table (Phase 1A tier-discipline telemetry, nexus-kren)",
+        migrate_tier_writes,
     ),
 ]
 
