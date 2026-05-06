@@ -77,12 +77,30 @@ class PlanSessionCache:
         return self._available and self._col is not None
 
     def query(self, intent: str, n: int) -> list[tuple[int, float]]:
-        """Return ``(plan_id, distance)`` pairs ordered closest-first."""
+        """Return ``(plan_id, distance)`` pairs ordered closest-first.
+
+        GH #554: pre-embed the intent here and pass
+        ``query_embeddings=`` to chromadb. Pre-fix this called
+        ``query_texts=[intent]`` which routes through chromadb 1.5.9's
+        text-side path; that path unconditionally calls
+        ``convert_np_embeddings_to_list`` on the post-embed result and
+        crashes when the embedding function returns ``list[list[float]]``
+        (every conexus install: LocalEmbeddingFunction returns plain
+        Python lists, not numpy arrays). The crash was caught by the
+        outer ``except`` and silently disabled session-level plan
+        caching on every ``nx_answer`` invocation.
+
+        Routing the embed call through ``LocalEmbeddingFunction``
+        directly bypasses chromadb's text-side adapter and keeps the
+        cache live.
+        """
         if not self.is_available or not intent:
             return []
         try:
+            ef = LocalEmbeddingFunction()
+            query_emb = ef([intent])  # list[list[float]] of length 1
             result = self._col.query(
-                query_texts=[intent],
+                query_embeddings=query_emb,
                 n_results=min(n, 300),
                 where={"session_id": self._session_id},
                 include=["metadatas", "distances"],
