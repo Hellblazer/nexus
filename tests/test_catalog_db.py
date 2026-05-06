@@ -82,6 +82,21 @@ class TestSchemaCreation:
         mode = db._conn.execute("PRAGMA journal_mode").fetchone()[0]
         assert mode == "wal"
 
+    def test_journal_size_limit_set(self, tmp_path):
+        """Issue #437: journal_size_limit caps WAL growth under
+        long-lived MCP-server reader connections. SQLite's auto-
+        checkpoint runs only as PASSIVE while readers hold pre-
+        checkpoint snapshots; PASSIVE folds frames into the main DB
+        but cannot truncate the WAL file. Without journal_size_limit
+        the WAL grows unbounded over multi-hour sessions.
+        """
+        db = CatalogDB(tmp_path / ".catalog.db")
+        limit = db._conn.execute("PRAGMA journal_size_limit").fetchone()[0]
+        # 64 MiB cap from the issue's recommended value.
+        assert limit == 67108864, (
+            f"journal_size_limit should cap WAL at 64 MiB; got {limit}"
+        )
+
     def test_indexes_exist(self, tmp_path):
         db = CatalogDB(tmp_path / ".catalog.db")
         indexes = {
