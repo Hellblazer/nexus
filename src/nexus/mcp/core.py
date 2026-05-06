@@ -1703,6 +1703,7 @@ def scratch(
     tags: str = "",
     entry_id: str = "",
     limit: int = 10,
+    agent: str = "",
 ) -> str:
     """T1 session scratch pad — ephemeral within-session storage.
 
@@ -1716,6 +1717,10 @@ def scratch(
         tags: Comma-separated tags (for "put")
         entry_id: Entry ID (for "get", "delete")
         limit: Max results for search/list (default 10)
+        agent: Optional subagent / role attribution for "put" (e.g.
+            "developer"). Empty falls back to ``NX_AGENT`` env, then
+            unspecified. Phase 1B follow-up (nexus-9clx) — lets
+            ``nx tier-status`` slice T1 writes by agent.
     """
     try:
         t1, isolated = _get_t1()
@@ -1724,9 +1729,11 @@ def scratch(
         if action == "put":
             if not content:
                 return "Error: content is required for put"
-            doc_id = t1.put(content=content, tags=tags)
+            agent_arg = agent if agent else ""  # T1.put falls back to NX_AGENT env
+            doc_id = t1.put(content=content, tags=tags, agent=agent_arg)
             _record_tier_write(
                 tool="scratch_put", tier="T1",
+                agent=agent_arg or None,
                 target_title=tags or doc_id,
             )
             return f"{prefix}Stored: {doc_id}"
