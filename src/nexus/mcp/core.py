@@ -1425,6 +1425,8 @@ def memory_put(
     title: str,
     tags: str = "",
     ttl: int = 30,
+    agent: str = "",
+    session: str = "",
 ) -> str:
     """Store a memory entry in T2 (SQLite). Upserts by (project, title).
 
@@ -1434,10 +1436,31 @@ def memory_put(
         title: Entry title (unique within project)
         tags: Comma-separated tags
         ttl: Time-to-live in days (default 30, 0 for permanent)
+        agent: Optional subagent / role attribution (e.g. "developer",
+            "architect-planner"). When empty, falls back to
+            ``NX_AGENT`` env, then NULL. Phase 1B (nexus-9clx) — lets
+            ``nx tier-status`` slice tier writes by which agent did
+            the persisting.
+        session: Optional explicit session_id override. When empty,
+            falls back to the parent's session_id resolution chain
+            (``NX_SESSION_ID`` env → claude session file → NULL).
     """
     try:
         if not content:
             return "Error: content is required"
+        # Translate empty strings to None so MemoryStore.put's
+        # fall-back chain (NX_AGENT env, _read_session_id) takes
+        # over rather than persisting literal empty strings.
+        agent_arg = agent if agent else None
+        # Resolve session at the MCP layer so NX_SESSION_ID env wins
+        # over MemoryStore's legacy getsid-file fall-back. Subagents
+        # carry NX_SESSION_ID set by claude_dispatch (RDR-094); the
+        # legacy file is only present in non-MCP contexts.
+        if session:
+            session_arg: str | None = session
+        else:
+            import os as _os
+            session_arg = _os.environ.get("NX_SESSION_ID", "").strip() or None
         with _t2_ctx() as db:
             row_id = db.put(
                 project=project,
@@ -1445,10 +1468,12 @@ def memory_put(
                 content=content,
                 tags=tags,
                 ttl=ttl if ttl > 0 else None,
+                agent=agent_arg,
+                session=session_arg,
             )
         _record_tier_write(
             tool="memory_put", tier="T2",
-            project=project, target_title=title,
+            agent=agent_arg, project=project, target_title=title,
         )
         return f"Stored: [{row_id}] {project}/{title}"
     except Exception as e:
