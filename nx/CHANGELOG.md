@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.26.1] - 2026-05-06
+
+Plugin version aligned with conexus 4.26.1. No plugin-side changes; the release ships three MCP / runner bug fixes in the conexus package (catalog_search routing, catalog_list filter pushdown, catalog_resolve typed error, plan_run step-progress events). See root ``CHANGELOG.md`` for details.
+
 ## [4.26.0] - 2026-05-06
 
 Plugin version aligned with conexus 4.26.0. Ships two plugin-side changes for the tier-discipline observability subsystem:

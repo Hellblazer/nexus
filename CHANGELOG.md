@@ -6,6 +6,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.26.1] - 2026-05-06
+
+Patch release. Three bug fixes from the post-4.26.0 round, all surfacing the same theme: silent-failure paths in MCP / runner code that returned plausible-looking results but lost data.
+
+### Fixed
+
+- **catalog_search ignored `query` when `content_type` was also set** (PR #532, nexus-a414 Part 1): the SQL filter path triggered on `content_type` alone and never incorporated `query` into the WHERE clause, so `catalog_search(query='RDR-104', content_type='rdr')` returned the first N rdr rows regardless of query content. Live consequence: agents following the AUTO-LINK recipe got back the wrong tumblers (or fell back to T3 chunk doc-IDs that don't parse as Tumbler), the auto-linker silently skipped them, and the catalog graph stayed empty. Routing fixed: when `query` is non-empty, fall through to the FTS5 path which already supports `content_type` via `cat.find(query, content_type=...)`. Together with the auto-linker observability fix already in 4.25.3, this closes both halves of nexus-a414's silent-zero-link path.
+
+- **catalog_list ignored `content_type` at the SQL layer** (PR #533, nexus-blk2 Part 1): the docstring promised the filter; the SQL had no `WHERE` clause for it. Filtering happened in Python AFTER the SQL `LIMIT/OFFSET`, so `catalog_list(content_type='rdr', limit=5)` returned `[]` whenever the first 5 rows were any other type. Production catalog had 2,270 rdr docs and the matching list call returned nothing. Pushed `content_type` into the SQL `WHERE` so pagination is correct regardless of filter ratio. Both no-owner and by-owner branches updated; `limit+1`/`has_more` pattern brings the `_pagination` footer in line with `catalog_search`.
+
+- **catalog_resolve leaked `Tumbler.parse` `ValueError`** (PR #533, nexus-blk2 Part 2): the dashed format produced by `nx doctor` (e.g. `1-2188`, `Luciferase-f2d57dbc`) is the physical-collection prefix, not a tumbler. `Tumbler.parse` called `int()` on the dashed string and leaked the raw `invalid literal for int() with base 10` error. Tutorials point at `catalog_resolve` as the entry for semantic-identity → physical-collection routing; the bare `ValueError` silently broke downstream skills. Wraps `Tumbler.parse` with a typed diagnostic that explains the dotted-tumbler requirement and explicitly notes that `nx doctor` output is NOT a tumbler.
+
+### Added
+
+- **`plan_run` emits per-segment progress events** (PR #534, nexus-0qi9): paired `nx_answer_step_start` / `nx_answer_step_complete` structured logs at INFO, with `kind`, `step_indices`, `tools`, `total_steps`, and `elapsed_ms` (on completion). Closes the visibility gap that made multi-step `nx_answer` runs feel like a hang. Empirical from 100 production runs (memory: tier-discipline-audit-2026-05-06): 32% under 5s, 5% in 5–30s, 40% in 30s–2min, 23% in 2–5min. With zero per-step signal, anything past 5s looked wedged. Events flow to `~/.config/nexus/logs/mcp.log` for tail-style consumers; the `nx_answer` docstring now documents the empirical latency so callers do not assume sub-second.
+
 ## [4.26.0] - 2026-05-06
 
 Minor release. Ships the tier-discipline observability subsystem: per-call telemetry of T1/T2/T3/plan writes, a CLI to audit them, agent attribution kwargs, and hook + agent-file guidance that teaches subagents to tag their writes. Closes the empirical-loop gap that PR #519 had to recreate from external transcript mining: the next time discipline regresses, the data to spot it lives in the same database the writes do.
