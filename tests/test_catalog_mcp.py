@@ -116,6 +116,36 @@ def test_search_by_content_type_alone(cat) -> None:
     assert titles == ["alpha", "gamma"]
 
 
+def test_search_query_plus_content_type_filters_both(cat) -> None:
+    """Query + content_type must filter on BOTH (nexus-a414 Part 1).
+
+    Pre-fix: the routing condition treated content_type as a SQL-path
+    trigger that ignored ``query``. Live repro: ``catalog_search(
+    query="incremental catalog projection rebuild", content_type="rdr")``
+    returned the first N rdr entries regardless of query content.
+
+    Expected: results match both filters; non-matching entries excluded
+    even when they share the content_type.
+    """
+    catalog_register(title="incremental catalog projection rebuild",
+                     owner="1.1", content_type="rdr")
+    catalog_register(title="unrelated rdr about something else",
+                     owner="1.1", content_type="rdr")
+    catalog_register(title="incremental catalog projection rebuild as code",
+                     owner="1.1", content_type="code")  # query match, wrong type
+
+    results = catalog_search(
+        query="incremental catalog projection",
+        content_type="rdr",
+    )
+    titles = sorted(r["title"] for r in results if "title" in r)
+    # Only the query+type match should land. The unrelated rdr (query miss)
+    # and the code entry (type miss) must both be excluded.
+    assert titles == ["incremental catalog projection rebuild"], (
+        f"query+content_type filtered wrong: {titles!r}"
+    )
+
+
 def test_list_all(cat) -> None:
     catalog_register(title="A", owner="1.1")
     catalog_register(title="B", owner="1.1")
