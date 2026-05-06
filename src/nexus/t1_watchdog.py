@@ -148,6 +148,13 @@ def main(argv: list[str] | None = None) -> int:
     log = structlog.get_logger("nexus.t1_watchdog")
 
     session_file = Path(args.session_file) if args.session_file else None
+    # GH #567: snapshot whether the session file was present when the
+    # watchdog started. The poll loop's session-file-removed exit only
+    # fires when the file existed at startup -- avoids breaking
+    # callers (tests, legacy) that pass a path that never gets created.
+    session_file_existed_at_start = (
+        session_file is not None and session_file.exists()
+    )
     tmpdir = Path(args.tmpdir) if args.tmpdir else None
     dual_watch = args.mcp_pid > 0
 
@@ -177,6 +184,32 @@ def main(argv: list[str] | None = None) -> int:
                 "watchdog_exiting",
                 reason="chroma_died_externally",
                 chroma_pid=args.chroma_pid,
+            )
+            return 0
+        # GH #567: session-file disappearance trigger. The session
+        # record may be removed by sweep_stale_sessions (uuid-mismatch
+        # arm at session.py:286) when the same Claude process rolls to
+        # a new conversation UUID via /clear or /resume. Pre-fix, the
+        # watchdog kept polling on its old session's chroma_pid and
+        # leaked until that PID died -- the reporter saw a stale
+        # watchdog for a session whose .session file was gone. Exit
+        # cleanly when our session file disappears so the kept-alive
+        # chroma server we were watching can be reaped by whatever
+        # path replaced our session record.
+        #
+        # Only fire when the file EXISTED at watchdog startup; tests
+        # and legacy callers may pass ``--session-file`` paths that
+        # never get created, and the existing behaviour there is to
+        # rely on PID liveness alone.
+        if (
+            session_file_existed_at_start
+            and session_file is not None
+            and not session_file.exists()
+        ):
+            log.info(
+                "watchdog_exiting",
+                reason="session_file_removed",
+                session_file=str(session_file),
             )
             return 0
         # Dual-watch mode (RDR-094 FM-NEW-1): MCP server died without

@@ -85,6 +85,14 @@ def _isolate_t1_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
 
     monkeypatch.setattr("nexus.db.t1.SESSIONS_DIR", sessions)
     monkeypatch.setattr("nexus.hooks.SESSIONS_DIR", sessions)
+    # GH #567: T1Database() now raises T1ServerNotFoundError when no
+    # record is found and no client is injected, to prevent the silent
+    # CLI write-loss bug. Tests that previously relied on the implicit
+    # EphemeralClient fallback opt in via NEXUS_SKIP_T1=1, the same
+    # env var the operator subprocess path uses. Test fixtures that
+    # want to share a chroma client across two T1Database instances
+    # (e.g. ``two_sessions``) still pass ``client=...`` explicitly.
+    monkeypatch.setenv("NEXUS_SKIP_T1", "1")
 
 
 @pytest.fixture(autouse=True)

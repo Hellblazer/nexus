@@ -15,6 +15,22 @@ import pytest
 from nexus.db.t1 import T1Database
 
 
+@pytest.fixture(autouse=True)
+def _allow_t1_record_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
+    """GH #567: tests in this file exercise T1Database's record-
+    resolution + raise-loud paths directly. The conftest's autouse
+    ``_isolate_t1_sessions`` fixture sets ``NEXUS_SKIP_T1=1`` to keep
+    other test files using ephemeral fallback semantics; here we
+    UNSET it so tests reach the post-fix behaviour:
+      - constructor raises ``T1ServerNotFoundError`` when no record
+      - finds a record when one is written
+      - exercises the resolver-retry loop
+    Tests that explicitly want ``NEXUS_SKIP_T1=1`` opt back in
+    locally via ``monkeypatch.setenv`` inside the test body.
+    """
+    monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+
+
 def _ephemeral_t1(session_id: str | None = None) -> T1Database:
     return T1Database(session_id=session_id or str(uuid4()), client=chromadb.EphemeralClient())
 
@@ -41,15 +57,33 @@ class TestT1DatabaseConstructor:
         assert t1._session_id == "parent-session-uuid"
         assert t1._client is mock_http
 
-    def test_falls_back_to_ephemeral_when_no_record(self) -> None:
+    def test_raises_when_no_record_and_no_opt_in(self) -> None:
+        """GH #567: pre-fix the constructor silently fell back to
+        EphemeralClient. That broke ``nx scratch put`` -> ``nx scratch
+        list`` across CLI invocations because each CLI process got its
+        own EphemeralClient and lost every prior write at exit. Post-
+        fix the constructor raises so the silent loss is impossible.
+        """
+        from nexus.db.t1 import T1ServerNotFoundError
+
         with patch("nexus.db.t1._resolve_session_record_with_retry", return_value=None), \
-             patch("nexus.db.t1.find_ancestor_session", return_value=None), \
-             warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
+             patch("nexus.db.t1.find_ancestor_session", return_value=None):
+            with pytest.raises(T1ServerNotFoundError, match="No T1 server found"):
+                T1Database(session_id="fallback-id")
+
+    def test_falls_back_to_ephemeral_when_skip_t1_env_set(
+        self, monkeypatch,
+    ) -> None:
+        """GH #567 opt-in path: ``NEXUS_SKIP_T1=1`` explicitly
+        acknowledges ephemeral semantics so the operator subprocess
+        path keeps working. EphemeralClient, no exception.
+        """
+        monkeypatch.setenv("NEXUS_SKIP_T1", "1")
+        with patch("nexus.db.t1._resolve_session_record_with_retry", return_value=None), \
+             patch("nexus.db.t1.find_ancestor_session", return_value=None):
             t1 = T1Database(session_id="fallback-id")
         assert t1._session_id == "fallback-id"
         assert not hasattr(t1._client, "_api_url")
-        assert any("EphemeralClient" in str(x.message) for x in w)
 
     def test_explicit_client_injection_bypasses_chain(self) -> None:
         client = chromadb.EphemeralClient()
