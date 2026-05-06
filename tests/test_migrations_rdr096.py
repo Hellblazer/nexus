@@ -242,6 +242,135 @@ class TestDocumentAspectsSourceUriMigration:
         migrate_document_aspects_source_uri(conn)  # must not raise
         conn.close()
 
+    def test_backfill_empty_string_rows_in_addition_to_null(
+        self, tmp_path: Path,
+    ) -> None:
+        """nexus-pnje: the original P2.1 migration only touched NULL
+        rows. Subsequent writer paths landed empty-string rows; the
+        live audit on production found 61 of 579 rows (10.5%) with
+        empty source_uri. The follow-up migration must backfill BOTH
+        NULL and '' rows.
+        """
+        from nexus.db.migrations import (
+            migrate_document_aspects_source_uri,
+            migrate_document_aspects_source_uri_backfill_empty,
+        )
+
+        db = tmp_path / "empty_backfill.db"
+        conn = sqlite3.connect(str(db))
+        self._seed_legacy_table(conn)
+        # Insert 3 rows BEFORE P2.1 so they have NULL source_uri after
+        # the column is added.
+        self._insert_row(conn, collection="rdr__a", source_path="x.md")
+        self._insert_row(conn, collection="rdr__b", source_path="y.md")
+        self._insert_row(conn, collection="rdr__c", source_path="z.md")
+
+        # Apply P2.1 — backfills all NULL rows.
+        migrate_document_aspects_source_uri(conn)
+
+        # Simulate the production gap: a writer path lands empty-string
+        # source_uri AFTER P2.1 ran. Mirrors the 61 rows seen on prod.
+        conn.execute(
+            "UPDATE document_aspects SET source_uri = '' "
+            "WHERE collection = 'rdr__a'"
+        )
+        # And one row that's still NULL (didn't get migrated for some
+        # reason — defensive: the new migration must catch this too).
+        conn.execute(
+            "UPDATE document_aspects SET source_uri = NULL "
+            "WHERE collection = 'rdr__b'"
+        )
+        # Third row keeps its valid URI from P2.1.
+        conn.commit()
+
+        # Pre-condition: 1 empty + 1 NULL + 1 valid.
+        before = conn.execute(
+            "SELECT collection, source_uri FROM document_aspects "
+            "ORDER BY collection",
+        ).fetchall()
+        # rdr__a empty, rdr__b NULL, rdr__c populated.
+        assert before[0] == ("rdr__a", "")
+        assert before[1] == ("rdr__b", None)
+        assert before[2][0] == "rdr__c"
+        assert before[2][1] and before[2][1].startswith("file://")
+
+        # Apply the new backfill migration.
+        migrate_document_aspects_source_uri_backfill_empty(conn)
+
+        # Post-condition: rdr__a + rdr__b backfilled to file:// URIs;
+        # rdr__c untouched.
+        after = dict(conn.execute(
+            "SELECT collection, source_uri FROM document_aspects",
+        ).fetchall())
+        conn.close()
+        assert after["rdr__a"].startswith("file://") and after["rdr__a"].endswith("x.md")
+        assert after["rdr__b"].startswith("file://") and after["rdr__b"].endswith("y.md")
+        assert after["rdr__c"] == before[2][1]  # unchanged
+
+    def test_backfill_empty_skips_when_source_path_also_empty(
+        self, tmp_path: Path,
+    ) -> None:
+        """Edge case: row with both source_uri='' AND source_path=''
+        cannot be backfilled. The migration leaves it alone for
+        manual triage rather than synthesising a bad URI.
+        """
+        from nexus.db.migrations import (
+            migrate_document_aspects_source_uri,
+            migrate_document_aspects_source_uri_backfill_empty,
+        )
+
+        db = tmp_path / "edge.db"
+        conn = sqlite3.connect(str(db))
+        self._seed_legacy_table(conn)
+        # P2.1's _insert_row helper requires non-empty source_path; do
+        # the empty insert directly so we exercise the both-empty case.
+        conn.execute(
+            "INSERT INTO document_aspects "
+            "(collection, source_path, extracted_at, model_version, extractor_name) "
+            "VALUES (?, '', ?, ?, ?)",
+            ("rdr__edge", "2026-04-27T00:00:00+00:00",
+             "claude-haiku-4-5-20251001", "scholarly-paper-v1"),
+        )
+        conn.commit()
+
+        migrate_document_aspects_source_uri(conn)
+        # Force empty-string rather than NULL.
+        conn.execute("UPDATE document_aspects SET source_uri = ''")
+        conn.commit()
+
+        migrate_document_aspects_source_uri_backfill_empty(conn)
+
+        row = conn.execute(
+            "SELECT source_path, source_uri FROM document_aspects",
+        ).fetchone()
+        conn.close()
+        # Both still empty — migration left the row for triage.
+        assert row == ("", "")
+
+    def test_backfill_empty_idempotent(self, tmp_path: Path) -> None:
+        """Re-running the backfill is a no-op (no UPDATE on already-
+        populated rows)."""
+        from nexus.db.migrations import (
+            migrate_document_aspects_source_uri,
+            migrate_document_aspects_source_uri_backfill_empty,
+        )
+
+        db = tmp_path / "idem.db"
+        conn = sqlite3.connect(str(db))
+        self._seed_legacy_table(conn)
+        self._insert_row(conn, collection="rdr__a", source_path="x.md")
+        migrate_document_aspects_source_uri(conn)
+        conn.execute("UPDATE document_aspects SET source_uri = ''")
+        conn.commit()
+
+        migrate_document_aspects_source_uri_backfill_empty(conn)
+        first = conn.execute("SELECT source_uri FROM document_aspects").fetchone()[0]
+        migrate_document_aspects_source_uri_backfill_empty(conn)  # re-run
+        second = conn.execute("SELECT source_uri FROM document_aspects").fetchone()[0]
+        conn.close()
+        assert first == second
+        assert first.startswith("file://")
+
 
 # ── catalog documents inline migration ──────────────────────────────────────
 
