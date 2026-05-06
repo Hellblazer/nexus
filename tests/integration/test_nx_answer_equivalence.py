@@ -165,7 +165,7 @@ class TestGracefulDegradation:
             # Inline-planner graceful-degrade: recognises it can't answer
             "no real-time", "no weather", "out of scope",
             "not available", "does not contain", "no information",
-            "cannot answer", "unable to", "no data",
+            "cannot answer", "cannot be answered", "unable to", "no data",
             "no results", "no documents",
         )
         assert any(m in lowered for m in accepted_markers), (
