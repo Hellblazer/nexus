@@ -197,17 +197,131 @@ def _t1_chroma_init_if_owner() -> None:
         mcp_pid=_os.getpid(),  # FM-NEW-1: dual-watch
     ) if claude_root_pid else 0
 
+    # GH #572: post-spawn reconciliation. The SessionStart hook may
+    # race with this lifespan and write a DIFFERENT canonical session
+    # id to ``current_session`` AFTER we read it. Live trace from the
+    # reporter:
+    #
+    #   1. Prior session ended; sessions/ empty; current_session left
+    #      pointing at the prior id (7c5f5331)
+    #   2. New conversation starts. MCP lifespan reads pointer ->
+    #      7c5f5331 (stale but indistinguishable from a fresh
+    #      pre-SessionStart pointer at this point)
+    #   3. We spawn chroma + write sessions/7c5f5331.session
+    #   4. SessionStart fires (after our read), writes
+    #      current_session=b314324c (the canonical conversation id)
+    #   5. Every later T1Database() reads b314324c, looks for
+    #      sessions/b314324c.session, fails -> entire conversation's
+    #      T1 broken
+    #
+    # Reconcile by re-reading the pointer AFTER our record write. If
+    # it differs from own_id, rename the record file + pointer the
+    # _OWNED_CHROMA snapshot at the canonical id. The chroma server
+    # itself doesn't care about the file name; the file is the
+    # discovery surface that ``find_session_by_id`` reads.
     write_session_record_by_id(
         SESSIONS_DIR, own_id, host, port, server_pid, tmpdir,
         claude_root_pid=claude_root_pid,
         watchdog_pid=watchdog_pid,
     )
+
     _OWNED_CHROMA.update({
         "session_id": own_id,
         "server_pid": server_pid,
         "tmpdir": str(tmpdir),
         "session_file": str(session_file),
     })
+
+    # Run a first reconcile pass immediately after spawn. Catches the
+    # case where SessionStart fired between our pointer read and our
+    # spawn (the closest race window). The full reconcile -- which
+    # also catches SessionStart firing AFTER spawn but before the
+    # first tool call -- runs from get_t1 via reconcile_owned_chroma.
+    if not inherited:
+        reconcile_owned_chroma()
+
+
+def reconcile_owned_chroma() -> bool:
+    """GH #572: rename ``_OWNED_CHROMA``'s session record file to
+    match the current ``current_session`` pointer when they've
+    drifted. Idempotent.
+
+    The lifespan spawn path can race with the SessionStart hook:
+
+      1. Prior session ended; ``sessions/`` empty; ``current_session``
+         left pointing at the prior id (call it ``X``).
+      2. New conversation starts. MCP lifespan reads pointer -> ``X``,
+         spawns chroma + writes ``sessions/X.session``.
+      3. SessionStart fires, writes ``current_session=Y`` (the
+         canonical conversation id).
+      4. Every later ``T1Database()`` reads ``Y``, looks for
+         ``sessions/Y.session``, fails -- the conversation's T1 is
+         broken until manual recovery.
+
+    This reconcile pass re-reads ``current_session``. If it differs
+    from ``_OWNED_CHROMA["session_id"]``, rename the record file so
+    discovery via the canonical pointer succeeds. The chroma server
+    itself doesn't care about the file name; it's a discovery
+    surface only.
+
+    Called from two sites:
+      - ``_t1_chroma_init_if_owner`` post-spawn (catches the closest
+        race window: SessionStart fired between pointer read + spawn)
+      - ``get_t1`` first tool call (catches the wider race window:
+        SessionStart fired AFTER spawn but BEFORE first tool call;
+        tool dispatch is sequenced after SessionStart by Claude Code,
+        so by tool-call time the pointer is canonical)
+
+    Returns True when a rename was performed; False when no action
+    was needed.
+    """
+    if not _OWNED_CHROMA:
+        return False
+    if _OWNED_CHROMA.get("nested") or _OWNED_CHROMA.get("reused"):
+        # Subagent path or shared-server path: not our record to rename.
+        return False
+    if _os.environ.get("NX_SESSION_ID", "").strip():
+        # Subagent inheritance: parent owns the record key.
+        return False
+
+    current_id = _OWNED_CHROMA.get("session_id", "")
+    canonical = _resolve_top_level_session_id()
+    if not canonical or canonical == current_id:
+        return False
+
+    from nexus.db.t1 import SESSIONS_DIR
+
+    old_path_str = _OWNED_CHROMA.get("session_file", "")
+    if not old_path_str:
+        return False
+    from pathlib import Path
+    old_path = Path(old_path_str)
+    new_path = SESSIONS_DIR / f"{canonical}.session"
+
+    if not old_path.exists():
+        # Already renamed by a sibling reconcile, or reaped externally.
+        return False
+
+    try:
+        old_path.replace(new_path)
+    except OSError as exc:
+        import structlog
+        structlog.get_logger().warning(
+            "t1_chroma_reconcile_rename_failed",
+            from_id=current_id, to_id=canonical, error=str(exc),
+        )
+        return False
+
+    _OWNED_CHROMA["session_id"] = canonical
+    _OWNED_CHROMA["session_file"] = str(new_path)
+    import structlog
+    structlog.get_logger().info(
+        "t1_chroma_reconciled_session_id",
+        from_id=current_id,
+        to_id=canonical,
+        reason="current_session_pointer_diverged",
+    )
+    return True
 
 
 def _resolve_top_level_session_id() -> str | None:

@@ -131,8 +131,20 @@ def get_t1():
                 # T1Database() probes for it. Idempotent: returns
                 # immediately when _OWNED_CHROMA already set.
                 try:
-                    from nexus.mcp.core import _t1_chroma_init_if_owner
+                    from nexus.mcp.core import (
+                        _t1_chroma_init_if_owner,
+                        reconcile_owned_chroma,
+                    )
                     _t1_chroma_init_if_owner()
+                    # GH #572: reconcile session record file vs the
+                    # current_session pointer. SessionStart can fire
+                    # AFTER our spawn (between lifespan boot and the
+                    # first tool call); the rename here makes the
+                    # record discoverable via the canonical pointer.
+                    # Tool dispatch is sequenced after SessionStart
+                    # by Claude Code, so by this call the pointer is
+                    # canonical. Idempotent: no-op when no drift.
+                    reconcile_owned_chroma()
                 except Exception:
                     # Spawn failure already logs as 't1_chroma_spawn_failed';
                     # let T1Database raise its T1ServerNotFoundError below
