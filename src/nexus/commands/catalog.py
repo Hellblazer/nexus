@@ -2992,17 +2992,33 @@ def generate_links_cmd(citations: bool, filepath: bool, dry_run: bool) -> None:
         click.echo(f"Total links generated: {total}")
 
 
-@catalog.command("link-generate")
+@catalog.command("link-generate", hidden=True)
 @click.option("--dry-run", is_flag=True, default=False, help="Show what would be done without writing")
-def link_generate_cmd(dry_run: bool) -> None:
-    """Run all link generators over the full catalog (batch scan)."""
-    cat = _get_catalog()
-    if dry_run:
-        click.echo("[dry-run] Would run full link generation scan")
-        return
-    from nexus.catalog.link_generator import generate_rdr_filepath_links
-    count = generate_rdr_filepath_links(cat)
-    click.echo(f"Generated {count} filepath links.")
+@click.pass_context
+def link_generate_cmd(ctx: click.Context, dry_run: bool) -> None:
+    """Deprecated alias for ``nx catalog generate-links`` (nexus-2297).
+
+    Pre-fix this verb generated only the RDR filepath links and emitted
+    a different message. To converge on the verb-noun convention used
+    by ``nx catalog link`` / ``unlink`` / ``links``, the canonical name
+    is now ``generate-links`` -- this alias emits a deprecation warning
+    and delegates to it. The alias will be removed in a future release.
+    """
+    click.echo(
+        "WARNING: 'nx catalog link-generate' is deprecated and will be "
+        "removed in a future release. Use 'nx catalog generate-links' "
+        "instead.",
+        err=True,
+    )
+    # Preserve the historical behaviour: filepath links only,
+    # no citations. Operators who want both should switch to the
+    # canonical ``generate-links`` verb.
+    ctx.invoke(
+        generate_links_cmd,
+        citations=False,
+        filepath=True,
+        dry_run=dry_run,
+    )
 
 
 def _make_t3():
