@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.26.5] - 2026-05-06
+
+Plugin version aligned with conexus 4.26.5. No plugin-side changes; the release ships three fixes in the conexus package: `nx index repo` file-size guard (closes long-deferred #371 OOM + #436 progress halt), T1 raise-loud on missing session file (closes #567 silent write-loss), and `nx catalog list --type` SQL pushdown (#568). See root ``CHANGELOG.md`` for details.
+
 ## [4.26.4] - 2026-05-06
 
 Plugin version aligned with conexus 4.26.4. No plugin-side changes; the release ships four fixes in the conexus package: store_list bare-prefix multi-match resolver, plan-matcher verb synonym carve-out, smoke-plan fence-off, and the catalog link-generate deprecation alias. See root ``CHANGELOG.md`` for details.

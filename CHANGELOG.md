@@ -6,6 +6,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.26.5] - 2026-05-06
+
+Patch release. Three fixes from the post-4.26.4 day-2 issue triage. Two close long-deferred GH issues (#371 OOM, #436 progress halt) that share a single root cause; one closes a critical T1 silent-write-loss bug surfaced during the 4.26.4 shake-out (#567); one mirrors PR #533's MCP fix into the matching CLI surface (#568).
+
+### Fixed
+
+- **`nx index repo` parent OOM + progress halt on huge files** (PR #566, GH #371 + GH #436): both issues shared a single root cause -- no file-size check anywhere in classification or per-file index paths. A repo with one multi-megabyte text file (vendored minified bundle, generated payload, large JSON config) loaded its full content into memory in `read_text(encoding='utf-8')` before any decode-error check, allocating 2 GB+ RSS. Symptoms: parent process OOM-killed at 3 GB+ on one repo (#371); progress bar stalled at file N with CPU at 0% on another (#436). Fix: `stat()` each candidate file before classification + read; files larger than `indexing.max_file_bytes` (default 5 MiB, configurable per repo) get skipped with a structured warning naming the largest offender.
+
+- **T1 scratch CLI silent write-loss when session file missing** (PR #569 + PR #571, GH #567): two-part fix. PR #569 closed the silent-loss surface (constructor now RAISES `T1ServerNotFoundError` instead of falling through to `EphemeralClient`); PR #571 closed the underlying lifespan-vs-SessionStart race that caused the missing `.session` file in the first place. The race: FastMCP lifespan calls `_t1_chroma_init_if_owner` BEFORE Claude Code's SessionStart hook writes `current_session`. Pre-fix, `_resolve_top_level_session_id` returned None, the init function returned silently, no chroma spawned. Post-fix: `mcp_infra.get_t1` calls `_t1_chroma_init_if_owner` BEFORE constructing T1Database (lazy init by first tool call); the function self-mints a UUID and writes `current_session` when none is set so the MCP server is self-sufficient. Sandbox-validated end-to-end: empty sandbox → MCP boot → mint UUID + write pointer + spawn chroma + write `.session` → separate-process CLI `nx scratch list` reads the entry MCP wrote. Cross-process T1 sharing restored. Opt-in paths preserved -- `client=...` injection (MCP server lifespan, tests) or `NEXUS_SKIP_T1=1` (operator subprocess). `t1_watchdog` self-exits when its session file disappears.
+
+- **`nx catalog list --type` returned empty on small-cardinality types** (PR #570, GH #568): mirror of #538 (4.26.1, PR #533) which fixed the MCP `catalog_list` surface but missed the matching CLI path. Pre-fix the CLI fetched `LIMIT + OFFSET + 1` rows then Python-filtered, so `nx catalog list --type rdr -n 3` on a 15K-entry catalog with 2 rdr rows returned empty (the first 51 rows fetched were all code/docs). Fix: `Catalog.all_documents` accepts a `content_type=` kwarg that pushes `WHERE content_type = ?` into the SQL. CLI no-owner branch routes through it. Owner-path keeps the Python-side filter (small cardinality per owner).
+
 ## [4.26.4] - 2026-05-06
 
 Patch release. Four fixes from the post-4.26.3 P3-deferral cleanup round, plus a self-correcting follow-up to one of them. All small, isolated; no schema or migration changes.
