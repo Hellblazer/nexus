@@ -104,14 +104,48 @@ def _resolve_repo_collection(
             f"_resolve_repo_collection: unknown content_type {content_type!r}"
         )
     name, path_hash = _repo_identity(repo)
-    # The conformant collection-name grammar disallows ``_`` inside the
-    # owner segment (it is the segment separator). Sanitise the basename
-    # so repos like ``my_special_repo`` still produce a parseable name.
-    sanitised = name.replace("_", "-")
+    # The conformant collection-name grammar accepts only alphanumerics
+    # and hyphens inside the owner segment. Sanitise the basename so
+    # repos with ``_`` (segment separator) AND repos like
+    # ``com.conductor.sys.monitoring`` (Java reverse-domain naming) or
+    # other non-alnum characters in the basename still produce a name
+    # ``validate_collection_name`` accepts.
+    #
+    # GH #551: pre-fix, only ``_`` was replaced; dots and other chars
+    # passed through verbatim, so the registry persisted a name like
+    # ``code__com.conductor.sys.monitoring-b25083f0`` that subsequent
+    # ``get_or_create_collection`` calls then failed to validate -- and
+    # since the registry entry was already written, the failure looped
+    # forever in the index log on every git hook fire.
+    sanitised = _sanitise_owner_segment(name)
     model = canonical_embedding_model(content_type)
     return _safe_collection(
         f"{content_type}__", sanitised, path_hash, suffix=f"__{model}__v1",
     )
+
+
+def _sanitise_owner_segment(name: str) -> str:
+    """Return *name* with any character that ``validate_collection_name``
+    would reject collapsed to ``-``.
+
+    Conformant grammar (RDR-103): owner segment must contain only
+    alphanumerics and hyphens. ``_`` is the segment separator and must
+    not appear inside the segment. Dots, slashes, spaces, and any other
+    glyph map to ``-``. Repeated hyphens collapse to a single hyphen
+    and leading / trailing hyphens are stripped so the resulting
+    segment also satisfies the start-and-end-with-alphanumeric guard
+    in ``validate_collection_name``.
+    """
+    out_chars: list[str] = []
+    for ch in name:
+        if ch.isalnum():
+            out_chars.append(ch)
+        else:
+            out_chars.append("-")
+    collapsed = "".join(out_chars)
+    while "--" in collapsed:
+        collapsed = collapsed.replace("--", "-")
+    return collapsed.strip("-")
 
 
 def list_sibling_collections(
