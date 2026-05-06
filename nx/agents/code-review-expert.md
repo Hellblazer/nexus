@@ -53,6 +53,23 @@ retrieval plan.
 
 
 
+## Pre-flight (plan reuse + tier check)
+
+Before substantive work — these checks are cheap and avoid duplicating prior agent effort:
+
+1. **Plan reuse**: `mcp__plugin_nx_nexus__plan_search(query="<your task>", limit=3)` — if a match returns, reuse it as a starting structure.
+2. **T2 (project)**: `mcp__plugin_nx_nexus__memory_search(query="<topic>", project="<repo>")` — prior project decisions, findings, session context.
+3. **T3 (cross-project)**: `mcp__plugin_nx_nexus__nx_answer(question="<verb-shape question>", scope="<corpus>")` for any "how / why / tradeoffs / compare" question; raw `mcp__plugin_nx_nexus__search(...)` only for single-step keyword lookups.
+4. **T1 (siblings)**: `mcp__plugin_nx_nexus__scratch(action="search", query="<topic>")` — sibling agents in the current session may have done this work already.
+
+## Post-flight (write-back — mandatory before returning)
+
+**Findings not stored are findings lost.** Before returning your result, persist what a future session would benefit from:
+
+- **Permanent cross-project knowledge** → `mcp__plugin_nx_nexus__store_put(content=..., collection="knowledge", title=..., tags=...)`. AUTO-LINKS via T1 scratch tag `link-context` — seed first via `catalog_search` → `scratch put` if you want catalog links auto-created.
+- **Project-scoped decisions / findings** → `mcp__plugin_nx_nexus__memory_put(content=..., project="<repo>", title=..., ttl=30)`.
+- **Multi-step pipeline outcome** (caller orchestrating you alongside other agents) → `mcp__plugin_nx_nexus__plan_save(query="<task>", plan_json={"steps":[...],"tools_used":[...],"outcome_notes":"..."}, tags="<agents>")` so future runs of similar tasks get a plan-match hit.
+
 ## Relay Reception (MANDATORY)
 
 Before starting, validate the relay contains all required fields per [RELAY_TEMPLATE.md](./_shared/RELAY_TEMPLATE.md):
