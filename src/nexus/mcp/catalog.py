@@ -57,11 +57,17 @@ def catalog_search(
         from nexus.catalog.tumbler import Tumbler
         import json as _json
 
-        # Structured filters via SQL when provided. content_type alone (no
-        # query/author/etc.) routes here too — the FTS5 path below requires
-        # a free-text query, but content_type is a perfectly valid sole filter
-        # ("show me everything of type prose") and the docstring promises it.
-        if owner or corpus or file_path or content_type or (author and not query):
+        # Structured filters via SQL when there's NO free-text query. The
+        # SQL path filters by exact-match structural fields (owner, corpus,
+        # file_path, content_type, author). When ``query`` IS provided
+        # alongside content_type, the FTS5 path below handles both via
+        # ``cat.find(query, content_type=...)``. The previous routing put
+        # content_type unconditionally on the SQL side, which silently
+        # dropped the ``query`` filter for the (query + content_type)
+        # combination — nexus-a414 Part 1.
+        if not query.strip() and (
+            owner or corpus or file_path or content_type or author
+        ):
             conditions = ["1=1"]
             params: list = []
             if owner:
