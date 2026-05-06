@@ -215,8 +215,25 @@ class AspectExtractionWorker:
         from nexus.aspect_extractor import (
             _source_content_from_t3,
             extract_aspects_batch,
+            select_config,
         )
         from nexus.mcp_infra import t2_ctx
+
+        # extract_aspects_batch requires every input to share a single
+        # ExtractorConfig. claim_batch grabs FIFO across collections, so
+        # a knowledge__ row enqueued before an rdr__ row lands in the
+        # same claim and crosses the homogeneity boundary. Fall back to
+        # per-row processing instead of marking the whole batch failed.
+        configs = {select_config(row.collection) for row in rows}
+        if len(configs - {None}) > 1:
+            _log.info(
+                "aspect_worker_batch_heterogeneous_fallback",
+                row_count=len(rows),
+                configs=sorted(c.extractor_name for c in configs if c is not None),
+            )
+            for row in rows:
+                self._process_row(row)
+            return
 
         # Per-row content source: prefer queued content, fall back to
         # T3 reassembly (same text we indexed; section-filtered for

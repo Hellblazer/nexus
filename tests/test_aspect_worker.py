@@ -594,3 +594,81 @@ class TestBatchPath:
 
         assert batch_calls == []
         assert single_calls == ["/p1.pdf"]
+
+    def test_worker_falls_through_to_per_row_on_heterogeneous_batch(
+        self, _isolate_t2: Path,
+    ) -> None:
+        """When a claimed batch crosses ExtractorConfig boundaries
+        (e.g. knowledge__ + rdr__ rows in the same claim), the worker
+        falls through to per-row processing rather than letting
+        extract_aspects_batch raise on heterogeneous configs.
+
+        Pre-fix repro: this test would fail because ``_extract_aspects_batch``
+        was invoked once with mixed configs and raised
+        ``ValueError: extract_aspects_batch requires all items to share
+        a single ExtractorConfig``, marking every row in the batch
+        as failed.
+        """
+        from nexus.aspect_extractor import AspectRecord
+        from nexus.aspect_worker import AspectExtractionWorker
+
+        # 3 knowledge__ rows (scholarly-paper config) + 2 rdr__ rows
+        # (rdr-frontmatter config) — claimed together when batch_size=5.
+        with T2Database(_isolate_t2) as db:
+            for i in range(3):
+                db.aspect_queue.enqueue(
+                    "knowledge__delos",
+                    f"/papers/p{i}.pdf",
+                    content=f"paper {i}",
+                )
+            for i in range(2):
+                db.aspect_queue.enqueue(
+                    "rdr__test-aaaaaaaa",
+                    f"/rdrs/r{i}.md",
+                    content=f"---\ntitle: r{i}\n---\nbody",
+                )
+
+        batch_calls: list[int] = []
+        single_calls: list[str] = []
+
+        def fake_batch(items):
+            batch_calls.append(len(items))
+            raise AssertionError(
+                "batch path must NOT fire on heterogeneous configs"
+            )
+
+        def fake_single(content, source_path, collection, **_kw):
+            single_calls.append(source_path)
+            return AspectRecord(
+                collection=collection, source_path=source_path,
+                problem_formulation=f"P-{source_path}",
+                proposed_method="M",
+                experimental_datasets=["d"],
+                experimental_baselines=["b"],
+                experimental_results="R",
+                extras={}, confidence=0.9,
+                extracted_at="2026-05-06T00:00:00+00:00",
+                model_version="claude-haiku-4-5-20251001",
+                extractor_name="scholarly-paper-v1",
+            )
+
+        with patch("nexus.aspect_worker._extract_aspects_batch", fake_batch), \
+             patch("nexus.aspect_worker._extract_aspects", fake_single):
+            worker = AspectExtractionWorker(
+                poll_interval=0.05, batch_size=5,
+            )
+            worker.start()
+            try:
+                _wait_until(
+                    lambda: _queue_size(_isolate_t2) == 0, timeout=5.0,
+                )
+            finally:
+                worker.stop(timeout=5.0)
+
+        # Batch never fired — heterogeneity detected first.
+        assert batch_calls == []
+        # All 5 rows went through the single-row path.
+        assert sorted(single_calls) == sorted([
+            "/papers/p0.pdf", "/papers/p1.pdf", "/papers/p2.pdf",
+            "/rdrs/r0.md", "/rdrs/r1.md",
+        ])
