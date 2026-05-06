@@ -237,6 +237,16 @@ class CatalogDB:
         # an indexing writer.
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.execute("PRAGMA journal_mode=WAL")
+        # Issue #437: cap WAL growth under long-lived MCP-server reader
+        # connections. SQLite's auto-checkpoint can run only as PASSIVE
+        # while readers hold pre-checkpoint snapshots; PASSIVE folds
+        # frames into the main DB but cannot truncate the WAL file.
+        # Without a journal_size_limit the WAL grows unbounded over a
+        # multi-hour session (12 MB observed on the reporter's install
+        # before manual ``PRAGMA wal_checkpoint(TRUNCATE)``). 64 MiB
+        # caps the steady-state size after each successful checkpoint;
+        # SQLite reuses the space rather than growing the file.
+        self._conn.execute("PRAGMA journal_size_limit=67108864")
         self._conn.executescript(_SCHEMA_SQL)
         # Migration: add repo_root column if missing (pre-RDR-060 databases)
         try:
