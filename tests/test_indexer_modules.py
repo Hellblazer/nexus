@@ -413,3 +413,70 @@ def test_index_prose_file_line_chunk_does_not_emit_source_path(
         f"source_path from the make_chunk_metadata call at "
         f"prose_indexer.py:183."
     )
+
+
+# ── GH #371 + #436: oversize file guard ─────────────────────────────────────
+
+
+def test_indexer_oversize_guard_skips_huge_files(tmp_path, monkeypatch) -> None:
+    """GH #371 + #436: a file larger than ``indexing.max_file_bytes``
+    must be skipped BEFORE classification + read_text. Pre-fix, a
+    single huge file (vendored bundle, generated payload) loaded its
+    full content into memory in ``read_text`` -- causing the parent
+    to OOM (#371) or the per-file loop to stall while the buffer
+    allocated under memory pressure (#436).
+
+    Uses the ``include_untracked=True`` path so we can exercise the
+    walker without committing files to git, keeping the test unit-fast.
+    """
+    import subprocess
+
+    from nexus.indexer import index_repository
+    from nexus.registry import RepoRegistry
+
+    repo = tmp_path / "test-repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@x.io"], cwd=repo, check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "test"], cwd=repo, check=True,
+    )
+    (repo / "small.py").write_text("def f():\n    return 1\n")
+    huge = repo / "vendor.min.js"
+    huge.write_bytes(b"x" * (6 * 1024 * 1024))  # 6 MiB
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "init"], cwd=repo, check=True,
+    )
+
+    phases: list[str] = []
+    def on_phase(msg: str) -> None:
+        phases.append(msg)
+
+    # Sandbox config so the registry doesn't pollute the operator's
+    # real ~/.config/nexus.
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir()
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg_dir))
+    monkeypatch.setenv("NEXUS_SKIP_T1", "1")
+    monkeypatch.setenv("NX_LOCAL", "1")  # local mode, no Voyage credentials
+
+    reg = RepoRegistry(cfg_dir / "repos.json")
+    reg.add(repo)
+    try:
+        index_repository(repo, reg, on_phase=on_phase)
+    except Exception:
+        # The indexer may bail on missing credentials or on the
+        # local-only path's pipeline. The oversize guard fires
+        # BEFORE any of that, so the on_phase notice still lands.
+        pass
+
+    oversize_msgs = [p for p in phases if "oversized" in p.lower()]
+    assert oversize_msgs, (
+        f"expected an 'oversized file' phase message; got: {phases}"
+    )
+    assert any("vendor.min.js" in p for p in oversize_msgs), (
+        f"oversize message should name the file; got: {oversize_msgs}"
+    )

@@ -1710,6 +1710,25 @@ def _run_index(
         _log.warning("falling back to rglob file walk", repo=str(repo))
         candidate_files = sorted(p for p in repo.rglob("*") if p.is_file() and not p.is_symlink())
 
+    # GH #371 + #436: skip files larger than MAX_INDEXABLE_FILE_BYTES
+    # before classification. Pre-fix, a single huge file (vendored
+    # minified JS, generated bundle, large JSON config) would be
+    # classified as CODE / PROSE on extension alone and then passed
+    # to ``read_text(encoding="utf-8")`` in the per-file indexer,
+    # which loads the entire content into memory before any check.
+    # Observed symptoms:
+    # - #371: parent process OOM-killed at 3GB+ RSS on a repo with a
+    #   single 2GB+ vendored bundle.
+    # - #436: progress bar stalls at file N where file N+1 is the
+    #   huge file (read_text blocks while allocating the full buffer
+    #   under ext4 + low memory pressure; CPU at 0%).
+    # Cap at 5 MiB by default; configurable per repo via
+    # ``[indexing] max_file_bytes`` so monorepos with legitimately
+    # large indexable files can opt up. Emit a structured warning per
+    # skipped file so the operator can see what got dropped.
+    max_file_bytes = int(indexing_config.get("max_file_bytes", 5 * 1024 * 1024))
+    skipped_oversize: list[tuple[Path, int]] = []
+
     for path in candidate_files:
         if not path.is_file():
             continue  # git ls-files may list deleted files not yet committed
@@ -1723,6 +1742,15 @@ def _run_index(
         # Skip files under RDR paths — they go to rdr__ separately
         resolved = path.resolve()
         if any(resolved == rdr or _is_under(resolved, rdr) for rdr in rdr_abs_paths):
+            continue
+
+        # GH #371 + #436: oversize guard. Cheap stat() before any read.
+        try:
+            file_size = path.stat().st_size
+        except OSError:
+            continue  # broken symlink / permissions — defer to per-file path
+        if file_size > max_file_bytes:
+            skipped_oversize.append((path, file_size))
             continue
 
         score = frecency_map.get(path, 0.0)
@@ -1746,6 +1774,28 @@ def _run_index(
     prose_files.sort(key=lambda x: x[0], reverse=True)
     pdf_files.sort(key=lambda x: x[0], reverse=True)
     all_text_scored.sort(key=lambda x: x[0], reverse=True)
+
+    # GH #371 + #436: surface the oversize-skip set so the operator
+    # knows what got dropped. Single structured log + on_phase line
+    # so it's visible in non-TTY runs (CI, hooks, nohup).
+    if skipped_oversize:
+        _log.warning(
+            "indexer_oversize_skip",
+            count=len(skipped_oversize),
+            max_file_bytes=max_file_bytes,
+            sample=[
+                {"path": str(p.relative_to(repo)), "size": s}
+                for p, s in skipped_oversize[:5]
+            ],
+        )
+        if on_phase is not None:
+            largest = max(skipped_oversize, key=lambda x: x[1])
+            on_phase(
+                f"Skipped {len(skipped_oversize)} oversized file(s) "
+                f"(> {max_file_bytes // (1024 * 1024)} MiB). Largest: "
+                f"{largest[0].relative_to(repo)} at {largest[1] // (1024 * 1024)} MiB. "
+                f"Configure indexing.max_file_bytes to opt up."
+            )
 
     # Fire on_start with total non-RDR file count.
     # Note: this fires before the credential check below.  Phase 2 (CLI) must
