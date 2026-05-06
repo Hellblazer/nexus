@@ -133,6 +133,24 @@ _TITLE_STOPWORDS: frozenset[str] = frozenset({
 _TITLE_MIN_INTERSECTION_FOR_AUTO_ACCEPT: int = 2
 _TITLE_MAX_SHORT_SET_SIZE: int = 2
 
+# nexus-5cez: denylist of common single-word title coincidences.
+# When the source title's only substantive token is one of these
+# (e.g. "Survey", "Methods", "Notes"), the short-source relaxation
+# at len(intersection) == 1 must NOT auto-accept -- the overlap is
+# almost certainly coincidental, since these words appear in the
+# titles of thousands of unrelated papers. Rare invented words
+# ("Pbeegees", "Hex Bloom") are NOT in this list, so the legitimate
+# filename-derived short-title case still accepts. Tokens are stored
+# lowercase to match the tokenizer output (cleaned + lowercased).
+_TITLE_COMMON_SINGLEWORD_DENYLIST: frozenset[str] = frozenset({
+    "survey", "methods", "notes", "model", "system", "paper",
+    "results", "abstract", "review", "study", "report", "data",
+    "analysis", "framework", "approach", "introduction", "summary",
+    "evaluation", "experiment", "experiments", "discussion",
+    "conclusion", "conclusions", "background", "related", "work",
+    "research", "design", "implementation", "comparison", "demo",
+})
+
 
 def _tokenize_title(title: str) -> frozenset[str]:
     """Lowercase, strip non-alphanumerics, drop short / stopword tokens.
@@ -170,16 +188,22 @@ def _titles_compatible(source: str, returned: str) -> bool:
     if len(intersection) >= _TITLE_MIN_INTERSECTION_FOR_AUTO_ACCEPT:
         return True
     if len(intersection) == 1:
-        # nexus-5cez: the short-source relaxation was designed for
-        # filename-derived 2-token titles like "Pbeegees" matching
-        # "pBeeGees: A Prudent Approach to ...", not for genuinely
-        # 1-token source titles ("Survey", "Methods", "Notes") where
-        # any OpenAlex paper that happens to mention the word would
-        # auto-accept. Require BOTH sides to have at least 2
-        # substantive tokens before the relaxation applies; 1-token
-        # sides fall through to reject so the caller takes the fuzzy-
-        # search path instead of stamping a coincidence.
-        if len(a) < 2 or len(b) < 2:
+        # nexus-5cez: when the source title is just ONE substantive
+        # token AND that token is a common research-paper-vocabulary
+        # word ("Survey", "Methods", "Notes"), the 1-overlap case is
+        # almost certainly a coincidence -- thousands of unrelated
+        # papers contain these words, and the matched-bib stamp would
+        # be wrong. Reject so the caller falls through to fuzzy
+        # search, which uses OpenAlex's relevance score rather than
+        # set overlap. Rare invented short titles like "Pbeegees" do
+        # NOT trigger this guard (token not in the denylist), so the
+        # filename-derived legitimate case still accepts under the
+        # original short-set relaxation below.
+        only = next(iter(intersection))
+        if (
+            len(a) == 1
+            and only in _TITLE_COMMON_SINGLEWORD_DENYLIST
+        ):
             return False
         return min(len(a), len(b)) <= _TITLE_MAX_SHORT_SET_SIZE
     return False
