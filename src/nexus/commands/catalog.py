@@ -832,7 +832,33 @@ def list_cmd(owner: str, content_type: str, limit: int, offset: int, as_json: bo
     """List catalog entries."""
     cat = _get_catalog()
     if owner:
-        entries = cat.by_owner(Tumbler.parse(owner))
+        # Resolve --owner to a Tumbler. Try the dotted-tumbler form first
+        # (the canonical input), then fall back to looking up by owner
+        # name (#537 / nexus-1lx7) so operators can paste back the
+        # human-readable name they see in catalog output. Without this
+        # fallback, non-dotted strings leaked the raw int() ValueError
+        # from Tumbler.parse as a stack trace.
+        owner_tumbler: Tumbler | None
+        try:
+            owner_tumbler = Tumbler.parse(owner)
+        except (ValueError, TypeError):
+            matches = cat.owner_tumblers_by_name(owner)
+            if not matches:
+                raise click.ClickException(
+                    f"--owner {owner!r}: not a dotted tumbler "
+                    f"(e.g. '1.2') and no owner has this name. "
+                    f"Use `nx catalog stats` to list known owners."
+                )
+            if len(matches) > 1:
+                candidates = ", ".join(str(t) for t in matches)
+                raise click.ClickException(
+                    f"--owner {owner!r}: ambiguous; "
+                    f"{len(matches)} owners share this name across "
+                    f"types ({candidates}). Pass the dotted tumbler "
+                    f"directly to disambiguate."
+                )
+            owner_tumbler = matches[0]
+        entries = cat.by_owner(owner_tumbler)
     else:
         entries = cat.all_documents(limit=limit + offset + 1)
     if content_type:

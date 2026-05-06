@@ -167,6 +167,63 @@ class TestListCommand:
         assert isinstance(data, list)
         assert len(data) >= 1
 
+    def test_list_owner_by_name_resolves_to_tumbler(
+        self, initialized_catalog, catalog_env,
+    ):
+        """nx catalog list --owner <name> resolves the named owner
+        ('test-repo' from the fixture) to its tumbler prefix and
+        returns its entries (#537, nexus-1lx7).
+
+        Pre-fix: this leaked Tumbler.parse's int() ValueError to the
+        user as a stack trace. Schema has owners.name; CLI should
+        resolve by name when the input doesn't parse as a tumbler.
+        """
+        runner = CliRunner()
+        runner.invoke(main, [
+            "catalog", "register", "--title", "A", "--owner", "1.1",
+        ])
+        runner.invoke(main, [
+            "catalog", "register", "--title", "B", "--owner", "1.1",
+        ])
+        result = runner.invoke(main, [
+            "catalog", "list", "--owner", "test-repo",
+        ])
+        assert result.exit_code == 0, result.output
+        assert "A" in result.output
+        assert "B" in result.output
+
+    def test_list_owner_unknown_emits_clean_error(
+        self, initialized_catalog, catalog_env,
+    ):
+        """An owner that is neither a valid tumbler nor a known name
+        must emit a friendly error, not a Tumbler.parse stack trace.
+        """
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "catalog", "list", "--owner", "no-such-owner-12345",
+        ])
+        # ClickException → exit code 1; output names the owner.
+        assert result.exit_code != 0
+        out_lower = result.output.lower()
+        assert "no-such-owner-12345" in result.output
+        # The raw int() ValueError from Tumbler.parse must NOT leak.
+        assert "invalid literal for int" not in out_lower
+        assert "traceback" not in out_lower
+
+    def test_list_owner_tumbler_form_still_works(
+        self, initialized_catalog, catalog_env,
+    ):
+        """No regression for the documented dotted-tumbler form."""
+        runner = CliRunner()
+        runner.invoke(main, [
+            "catalog", "register", "--title", "A", "--owner", "1.1",
+        ])
+        result = runner.invoke(main, [
+            "catalog", "list", "--owner", "1.1",
+        ])
+        assert result.exit_code == 0, result.output
+        assert "A" in result.output
+
 
 class TestSearchCommand:
     def test_search(self, initialized_catalog, catalog_env):

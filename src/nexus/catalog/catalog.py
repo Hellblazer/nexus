@@ -1687,6 +1687,29 @@ class Catalog:
         ).fetchone()
         return Tumbler.parse(row[0]) if row else None
 
+    def owner_tumblers_by_name(self, name: str) -> list[Tumbler]:
+        """Return tumblers of all owners with this name.
+
+        UNIQUE constraint is ``(name, owner_type)`` per nexus-7vuw, so
+        a single name can map to multiple owners across types (e.g.
+        a repo and a curator both named ``nexus``). Callers that need
+        a unique answer should disambiguate on the returned list
+        (typical CLI flow: error when ``len(...) > 1`` and surface
+        the candidates).
+
+        Returns ``[]`` if no owner has this name. Used by the
+        ``--owner`` CLI flags on ``nx catalog list`` (and friends)
+        to resolve operator-typed names to tumblers without leaking
+        the ``Tumbler.parse → int()`` ``ValueError`` (#537,
+        nexus-1lx7).
+        """
+        rows = self._db.execute(
+            "SELECT tumbler_prefix FROM owners WHERE name = ? "
+            "ORDER BY tumbler_prefix",
+            (name,),
+        ).fetchall()
+        return [Tumbler.parse(r[0]) for r in rows]
+
     def ensure_owner_for_repo(
         self, repo: Path, *, repo_name: str = "", description: str = "",
     ) -> Tumbler:
