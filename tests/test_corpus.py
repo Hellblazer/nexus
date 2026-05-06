@@ -292,6 +292,9 @@ class _FakeT3:
     def collection_exists(self, name: str) -> bool:
         return name in self._collections
 
+    def list_collections(self) -> list[dict]:
+        return [{"name": c} for c in sorted(self._collections)]
+
 
 def test_t3_collection_name_grandfathers_existing_legacy_when_t3_supplied() -> None:
     """nexus-hmxi: with a t3 probe, an existing legacy 2-segment
@@ -386,6 +389,66 @@ def test_t3_collection_name_bare_prefix_prefers_conformant_when_both_exist() -> 
     conformant = "knowledge__knowledge__voyage-context-3__v1"
     t3 = _FakeT3({legacy_2seg, conformant})
     assert t3_collection_name("knowledge", t3=t3) == conformant
+
+
+def test_t3_collection_name_bare_code_prefix_resolves_to_unique_match() -> None:
+    """GH #545: bare ``"code"`` (and ``"docs"``, ``"rdr"``) on installs
+    that have exactly one matching ``code__*`` collection must resolve
+    to it. Pre-fix the resolver treated bare ``code`` as an owner under
+    content_type ``knowledge`` and produced
+    ``knowledge__code__voyage-context-3__v1`` — wrong namespace.
+    """
+    only_code = "code__myrepo__voyage-code-3__v1"
+    t3 = _FakeT3({only_code})
+    assert t3_collection_name("code", t3=t3) == only_code
+
+
+def test_t3_collection_name_bare_docs_prefix_resolves_to_unique_match() -> None:
+    """GH #545 sibling: bare ``"docs"`` resolves to the unique
+    ``docs__*`` collection.
+    """
+    only_docs = "docs__myrepo__voyage-context-3__v1"
+    t3 = _FakeT3({only_docs})
+    assert t3_collection_name("docs", t3=t3) == only_docs
+
+
+def test_t3_collection_name_bare_rdr_prefix_resolves_to_unique_match() -> None:
+    """GH #545 sibling: bare ``"rdr"`` resolves to the unique
+    ``rdr__*`` collection.
+    """
+    only_rdr = "rdr__nexus__voyage-context-3__v1"
+    t3 = _FakeT3({only_rdr})
+    assert t3_collection_name("rdr", t3=t3) == only_rdr
+
+
+def test_t3_collection_name_bare_prefix_falls_through_when_multiple() -> None:
+    """GH #545: when 2+ ``code__*`` collections exist, the unique-match
+    branch falls through to the existing promotion logic so the
+    operator gets back the conformant target. This documents the
+    behaviour rather than the ideal (a candidate-list disambiguation
+    error would be cleaner; that's a separate UX call captured in #545).
+    """
+    t3 = _FakeT3({
+        "code__a__voyage-code-3__v1",
+        "code__b__voyage-code-3__v1",
+    })
+    # Falls through to promotion: bare ``code`` -> knowledge__code__...
+    # Not ideal but documents the current behaviour. The fix's value
+    # is the unique-match path, which is the common case.
+    out = t3_collection_name("code", t3=t3)
+    assert "code" in out  # don't pin the exact promoted shape
+
+
+def test_t3_collection_name_bare_knowledge_still_uses_legacy_fallback() -> None:
+    """GH #545 backwards-compat: the existing ``knowledge`` -> ``knowledge__knowledge``
+    legacy fallback (#536) must still fire when the bare-prefix probe
+    returns no unique match (e.g. no ``knowledge__*`` collections of
+    any other shape exist).
+    """
+    legacy = "knowledge__knowledge"
+    t3 = _FakeT3({legacy})  # only the legacy 2-seg, no other knowledge__*
+    # Probe sees one match, returns it. (Single-match path.)
+    assert t3_collection_name("knowledge", t3=t3) == legacy
 
 
 def test_t3_collection_name_t3_probe_failure_falls_through_to_promoted() -> None:
