@@ -3427,16 +3427,32 @@ class Catalog:
         row = self._db.execute("SELECT COUNT(*) FROM documents").fetchone()
         return row[0] if row else 0
 
-    def all_documents(self, limit: int = 0) -> list[CatalogEntry]:
-        """Return all catalog entries. limit=0 means unlimited."""
+    def all_documents(
+        self, limit: int = 0, *, content_type: str = "",
+    ) -> list[CatalogEntry]:
+        """Return all catalog entries. limit=0 means unlimited.
+
+        GH #568: ``content_type`` pushes the filter into the SQL
+        ``WHERE`` clause so pagination works correctly when the
+        requested content_type is small-cardinality. Pre-fix the
+        CLI ``nx catalog list --type rdr`` filtered Python-side
+        AFTER ``LIMIT/OFFSET`` and returned empty whenever the
+        pre-LIMIT slice held no matching rows -- e.g. 15K-entry
+        catalog with only 2 rdr rows: ``--type rdr -n 3`` got 0.
+        Mirrors PR #533's fix for the MCP ``catalog_list`` surface.
+        """
         sql = (
             "SELECT tumbler, title, author, year, content_type, file_path, "
             "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
             "FROM documents"
         )
+        params: tuple = ()
+        if content_type:
+            sql += " WHERE content_type = ?"
+            params = (content_type,)
         if limit > 0:
             sql += f" LIMIT {limit}"
-        rows = self._db.execute(sql).fetchall()
+        rows = self._db.execute(sql, params).fetchall()
         return [
             CatalogEntry(
                 tumbler=Tumbler.parse(r[0]), title=r[1], author=r[2], year=r[3],
