@@ -121,7 +121,74 @@ def _daemonize_and_run() -> None:
     os._exit(0)
 
 
+def _print_tier_status_summary() -> None:
+    """Print a one-line tier-write summary to stderr BEFORE the fork.
+
+    Phase 1C of the tier-discipline restoration initiative
+    (nexus-a52i). Closes the visibility loop: every session that
+    persists findings now sees its own contribution count at close.
+
+    Best-effort: any failure is swallowed so launcher startup never
+    breaks. Suppressed entirely when there are zero writes (no point
+    printing for a transactional session that didn't intend to
+    persist anything).
+
+    Resolution: NX_SESSION_ID env, then read_claude_session_id from
+    the session file. Mirrors the same chain ``nx tier-status``
+    uses so the two surfaces agree.
+    """
+    try:
+        import sqlite3
+        from pathlib import Path
+
+        from nexus.commands._helpers import default_db_path
+        from nexus.session import read_claude_session_id
+
+        session_id = (
+            os.environ.get("NX_SESSION_ID", "").strip()
+            or read_claude_session_id()
+        )
+        if not session_id:
+            return
+        db_path = default_db_path()
+        if not Path(db_path).exists():
+            return
+        conn = sqlite3.connect(str(db_path))
+        try:
+            has_table = conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name='tier_writes'"
+            ).fetchone()
+            if not has_table:
+                return
+            rows = conn.execute(
+                "SELECT tier, COUNT(*) FROM tier_writes "
+                "WHERE session_id = ? GROUP BY tier",
+                (session_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+        by_tier = {tier: n for tier, n in rows}
+        total = sum(by_tier.values())
+        if total == 0:
+            return
+        parts = [
+            f"{tier}={by_tier.get(tier, 0)}"
+            for tier in ("T1", "T2", "T3", "plan")
+            if by_tier.get(tier, 0)
+        ]
+        sys.stderr.write(
+            f"nx tier writes (session {session_id[:8]}): "
+            f"total={total} {' '.join(parts)}\n"
+        )
+        sys.stderr.flush()
+    except Exception:
+        # Telemetry must never break session close.
+        pass
+
+
 def main() -> None:
+    _print_tier_status_summary()
     if not hasattr(os, "fork"):
         # Windows etc — no fork, run synchronously.
         _run_session_end_synchronously()
