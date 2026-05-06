@@ -994,7 +994,25 @@ class Catalog:
                 and self._events_path.exists()
                 and self._events_path.stat().st_size > 0
             )
-            if use_event_log and not self._event_log_covers_legacy():
+            # nexus-1sy5: once the offset marker is established, the
+            # bootstrap guardrail has already passed at least once —
+            # ``_write_offset_marker`` is only reached from rebuild
+            # branches that ran after the guardrail accepted the event
+            # log. Skip the O(N) ``covers_legacy`` scan in that
+            # steady state; it would otherwise dominate every post-
+            # write rebuild dispatch (~838 ms on a 460K-event log) and
+            # cap the RDR-104 incremental fast path well above its
+            # <100 ms target. The marker check is a single
+            # `SELECT key, value FROM _meta` and short-circuits before
+            # the scan so the perf path is microseconds.
+            marker_established = (
+                use_event_log and self._read_offset_marker() is not None
+            )
+            if (
+                use_event_log
+                and not marker_established
+                and not self._event_log_covers_legacy()
+            ):
                 # Bootstrap guardrail: events.jsonl is non-empty but
                 # the legacy JSONL has materially more documents than
                 # the event log carries DocumentRegistered events for.

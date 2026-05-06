@@ -316,3 +316,138 @@ def test_doctor_surfaces_bootstrap_fallback_in_json_output(
     payload = json.loads(out[start:])
     assert "bootstrap_fallback" in payload, payload
     assert payload["bootstrap_fallback"]["fallback_active"] is True
+
+
+# ─────────────────────────────────────────────────────────────────────
+# nexus-1sy5: skip the O(N) covers_legacy scan once the marker is
+# established. The guardrail's job is to refuse the event-sourced
+# rebuild while bootstrap is still in progress; once the offset marker
+# has been written, the projector has already committed at least one
+# consistent state from the event log, and the guardrail's premise no
+# longer holds. The scan otherwise dominates rebuild dispatch on large
+# catalogs (~838 ms on 460K events / 244 MB), capping the RDR-104
+# incremental fast path well above its <100 ms target.
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_covers_legacy_skipped_when_marker_established(
+    tmp_path, monkeypatch,
+):
+    """Once ``_meta.last_applied_event_offset`` is populated, the
+    bootstrap guardrail must NOT be consulted on subsequent rebuilds.
+    """
+    monkeypatch.setenv("NEXUS_EVENT_SOURCED", "1")
+    d = _init_catalog(tmp_path)
+
+    # Bootstrap construction: covers_legacy fires (no marker yet) and
+    # passes (the legacy JSONL is empty). Marker rows get written.
+    cat1 = Catalog(d, d / ".catalog.db")
+    owner = cat1.register_owner("nexus", "repo", repo_hash="abab")
+    cat1.register(
+        owner, "doc-1.md", content_type="prose", file_path="doc-1.md",
+    )
+    cat1._db.close()
+
+    # Sanity: marker is now established.
+    cat_check = Catalog(d, d / ".catalog.db")
+    assert cat_check._read_offset_marker() is not None, (
+        "fixture precondition: marker must be established before the "
+        "skip optimization can apply"
+    )
+    cat_check._db.close()
+
+    # Force the rebuild path on the next construction by ticking
+    # events.jsonl mtime past _last_consistency_mtime.
+    import os as _os
+    import time as _time
+    future = _time.time() + 60
+    _os.utime(d / "events.jsonl", (future, future))
+
+    # Patch _event_log_covers_legacy to record any invocation.
+    calls: list[None] = []
+    real = Catalog._event_log_covers_legacy
+
+    def _spy(self):
+        calls.append(None)
+        return real(self)
+
+    monkeypatch.setattr(Catalog, "_event_log_covers_legacy", _spy)
+
+    cat2 = Catalog(d, d / ".catalog.db")
+    try:
+        assert calls == [], (
+            "nexus-1sy5: covers_legacy must NOT be called once the "
+            "offset marker is established. Bootstrap is done; the "
+            "O(N) scan only adds latency to every post-write rebuild."
+        )
+        # Steady-state behavior unchanged: fallback flag stays False.
+        assert cat2.bootstrap_fallback_active is False
+    finally:
+        cat2._db.close()
+
+
+def test_covers_legacy_runs_when_marker_absent(
+    tmp_path, monkeypatch,
+):
+    """When the offset marker is absent (bootstrap or marker-loss
+    recovery), the guardrail must still be consulted. Pins the existing
+    bootstrap-fallback semantics so the perf optimization does not
+    regress correctness.
+    """
+    # Build legacy-only state: 5 docs, no events.jsonl.
+    monkeypatch.setenv("NEXUS_EVENT_SOURCED", "0")
+    d = _init_catalog(tmp_path)
+    cat = Catalog(d, d / ".catalog.db")
+    owner = cat.register_owner("nexus", "repo", repo_hash="abab")
+    for i in range(5):
+        cat.register(
+            owner, f"doc-{i}.md", content_type="prose",
+            file_path=f"doc-{i}.md",
+        )
+    cat._db.close()
+
+    # Inject one stray event so events.jsonl is non-empty but sparse.
+    events_path = d / "events.jsonl"
+    _write_event_line(events_path, {
+        "type": "DocumentRegistered", "v": 0,
+        "payload": {
+            "doc_id": "1.1.99", "owner_id": "1.1",
+            "content_type": "prose", "source_uri": "",
+            "coll_id": "", "title": "stray.md", "tumbler": "1.1.99",
+            "author": "", "year": 0, "file_path": "stray.md",
+            "corpus": "", "physical_collection": "",
+            "chunk_count": 0, "head_hash": "", "indexed_at": "",
+            "alias_of": "", "meta": {}, "source_mtime": 0.0,
+            "indexed_at_doc": "",
+        },
+        "ts": "2026-05-01T00:00:00+00:00",
+    })
+
+    # Spy on covers_legacy.
+    calls: list[None] = []
+    real = Catalog._event_log_covers_legacy
+
+    def _spy(self):
+        calls.append(None)
+        return real(self)
+
+    monkeypatch.setattr(Catalog, "_event_log_covers_legacy", _spy)
+
+    # Flip ES on. No marker exists yet → guardrail must fire.
+    monkeypatch.setenv("NEXUS_EVENT_SOURCED", "1")
+    cat2 = Catalog(d, d / ".catalog.db")
+    try:
+        assert len(calls) >= 1, (
+            "covers_legacy must be consulted when the offset marker is "
+            "absent — the bootstrap guardrail still has to refuse the "
+            "ES rebuild against sparse event logs."
+        )
+        # And the existing fallback semantics still hold: 1 stray event
+        # vs 5 legacy docs trips the guardrail.
+        assert cat2.bootstrap_fallback_active is True
+        live = cat2._db.execute(
+            "SELECT count(*) FROM documents",
+        ).fetchone()[0]
+        assert live >= 5
+    finally:
+        cat2._db.close()
