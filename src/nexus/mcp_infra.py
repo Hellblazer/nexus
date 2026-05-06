@@ -97,11 +97,47 @@ def clear_search_traces() -> None:
 
 
 def get_t1():
-    """Return (T1Database, is_isolated) — lazy init on first call."""
+    """Return (T1Database, is_isolated) — lazy init on first call.
+
+    GH #567 + chroma-spawn-race follow-up: the FastMCP lifespan that
+    used to own ``_t1_chroma_init_if_owner`` could fire BEFORE the
+    Claude Code SessionStart hook wrote ``current_session``. When that
+    happened, ``_resolve_top_level_session_id`` returned None,
+    ``_t1_chroma_init_if_owner`` returned silently, no chroma was
+    spawned, and no ``.session`` file was written. CLI tools then had
+    no record to find -- the silent-data-loss fingerprint that #567
+    reported. Live trace 2026-05-06 (mcp.log boot at 14:29:40 had no
+    chroma_init log; current_session was nuked by an earlier stale-
+    cleanup pass; lifespan ran with empty pointer).
+
+    Fix: call ``_t1_chroma_init_if_owner`` from ``get_t1`` BEFORE
+    constructing T1Database. By the time any MCP tool fires, the
+    SessionStart hook has run (Claude Code sequences SessionStart
+    before tool dispatch). The lifespan still calls
+    ``_t1_chroma_init_if_owner`` -- whichever fires first wins
+    (the function is idempotent via the ``if _OWNED_CHROMA: return``
+    guard at its head). This makes chroma spawn robust to lifespan
+    vs SessionStart ordering races.
+
+    The function is also called from ``mcp/catalog.py`` so the
+    catalog-side MCP server's first tool call gets the same robust
+    behaviour.
+    """
     global _t1_instance, _t1_isolated
     if _t1_instance is None:
         with _t1_lock:
             if _t1_instance is None:
+                # Ensure chroma is up + .session record written before
+                # T1Database() probes for it. Idempotent: returns
+                # immediately when _OWNED_CHROMA already set.
+                try:
+                    from nexus.mcp.core import _t1_chroma_init_if_owner
+                    _t1_chroma_init_if_owner()
+                except Exception:
+                    # Spawn failure already logs as 't1_chroma_spawn_failed';
+                    # let T1Database raise its T1ServerNotFoundError below
+                    # if no record landed.
+                    pass
                 with warnings.catch_warnings(record=True) as caught:
                     warnings.simplefilter("always")
                     from nexus.db.t1 import T1Database

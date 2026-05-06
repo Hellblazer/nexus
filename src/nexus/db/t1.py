@@ -264,23 +264,15 @@ class T1Database:
                 #     (tests, MCP-server lifespan)
                 #   - ``NEXUS_SKIP_T1=1`` env var (operator subprocess)
                 #
-                # Detect + clear the stale ``current_session`` pointer
-                # at the same time so the next invocation gets a clean
-                # baseline; structured-log the cleanup so the operator
-                # can correlate.
-                from nexus.session import read_claude_session_id
-                stale_uuid = read_claude_session_id()
-                if stale_uuid:
-                    from nexus.session import CLAUDE_SESSION_FILE
-                    try:
-                        CLAUDE_SESSION_FILE.unlink(missing_ok=True)
-                    except OSError:
-                        pass
-                    _log.warning(
-                        "t1_stale_current_session_pointer_cleared",
-                        stale_uuid=stale_uuid,
-                        sessions_dir=str(SESSIONS_DIR),
-                    )
+                # NOTE: do NOT clear current_session here. An earlier
+                # iteration of this fix unlinked the pointer when no
+                # ``.session`` matched it, but that's racy: the MCP
+                # server's ``_t1_chroma_init_if_owner`` reads the same
+                # pointer to decide what session_id to spawn chroma
+                # under. Nuking it from a CLI invocation defeats an
+                # MCP server that's about to spawn its chroma.
+                # ``_t1_chroma_init_if_owner`` self-mints a UUID when
+                # the pointer is missing (mcp/core.py post-#567 fix).
                 raise T1ServerNotFoundError(
                     f"No T1 server found in {SESSIONS_DIR} and no in-process "
                     f"client supplied. T1 scratch requires either:\n"

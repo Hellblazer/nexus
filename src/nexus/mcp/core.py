@@ -144,8 +144,25 @@ def _t1_chroma_init_if_owner() -> None:
 
     own_id = inherited or _resolve_top_level_session_id()
     if not own_id:
-        # No session id resolvable: skip; T1 falls back to EphemeralClient.
-        return
+        # GH #567 follow-up: no current_session pointer at the time
+        # the lifespan / first-tool-call fires. Pre-fix the function
+        # returned silently and chroma never spawned -- the silent-
+        # data-loss fingerprint #567 reported. The SessionStart hook
+        # may simply not have fired yet (race vs lifespan boot), or
+        # an earlier stale-cleanup pass nuked the pointer. Self-heal:
+        # mint a fresh UUID, write it to current_session as the canonical
+        # pointer, and use it as our session id. SessionStart on the
+        # NEXT boot reads this same pointer and won't overwrite.
+        from uuid import uuid4
+        from nexus.session import write_claude_session_id
+        own_id = str(uuid4())
+        write_claude_session_id(own_id)
+        import structlog
+        structlog.get_logger().info(
+            "t1_chroma_init_minted_session_id",
+            session_id=own_id,
+            reason="no_current_session_at_lifespan_boot",
+        )
 
     # FM-NEW-2: TCP-probe an existing record before spawning. If the
     # prior chroma is still listening, reuse it.
