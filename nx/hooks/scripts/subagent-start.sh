@@ -2,6 +2,44 @@
 
 # SubagentStart Hook — injects storage context + active state for spawned agents.
 # Selectively skips sections based on agent task to save tokens.
+#
+# DELIVERY CONTRACT (Claude Code SubagentStart): Both plain stdout and a JSON
+# envelope of the form
+#   {"hookSpecificOutput": {"hookEventName": "SubagentStart",
+#                            "additionalContext": "<text>"}}
+# inject content into the spawned subagent's initial context (verified by
+# tests/cc-validation/scenarios/13_disambiguate_subagent_inject.sh: 13a/13b/
+# 13c all pass). The JSON envelope is the explicit contract — it makes the
+# emit intent unambiguous and tracks the documented schema, so a future
+# Claude Code change that tightens parsing won't silently drop the content.
+#
+# Implementation: capture all body stdout into a tempfile via FD redirection
+# at the top of the script, then emit the JSON envelope at the end via an
+# EXIT trap. Body code below stays unchanged and continues to use echo /
+# cat heredocs for content generation.
+
+_NX_HOOK_OUTBUF=$(mktemp -t nx-subagent-start.XXXXXX) || _NX_HOOK_OUTBUF=""
+if [[ -n "$_NX_HOOK_OUTBUF" ]]; then
+    exec 3>&1 1>"$_NX_HOOK_OUTBUF"
+fi
+_nx_emit_json_envelope() {
+    local rc=$?
+    if [[ -n "$_NX_HOOK_OUTBUF" ]]; then
+        exec 1>&3 3>&-
+        python3 -c '
+import json, sys
+print(json.dumps({
+    "hookSpecificOutput": {
+        "hookEventName": "SubagentStart",
+        "additionalContext": sys.stdin.read(),
+    },
+}))
+' < "$_NX_HOOK_OUTBUF"
+        rm -f "$_NX_HOOK_OUTBUF"
+    fi
+    return $rc
+}
+trap _nx_emit_json_envelope EXIT
 
 # --- Agent-type detection via stdin ---
 STDIN=$(cat)
