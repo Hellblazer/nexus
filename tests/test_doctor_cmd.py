@@ -727,9 +727,7 @@ class TestCheckTmpdirs:
         backdate = _time.time() - 30 * 3600
         _os.utime(old_orphan, (backdate, backdate))
 
-        with patch(
-            "tempfile.gettempdir", return_value=str(tmproot),
-        ), patch("nexus.db.t1.SESSIONS_DIR", sessions):
+        with patch("tempfile.gettempdir", return_value=str(tmproot)):
             result = runner.invoke(main, ["doctor", "--check-tmpdirs"])
         assert result.exit_code == 0, result.output
         assert "nx_t1_old" in result.output
@@ -751,9 +749,7 @@ class TestCheckTmpdirs:
         backdate = _time.time() - 30 * 3600
         _os.utime(old_orphan, (backdate, backdate))
 
-        with patch(
-            "tempfile.gettempdir", return_value=str(tmproot),
-        ), patch("nexus.db.t1.SESSIONS_DIR", sessions):
+        with patch("tempfile.gettempdir", return_value=str(tmproot)):
             result = runner.invoke(
                 main, ["doctor", "--check-tmpdirs", "--reap-tmpdirs"],
             )
@@ -777,9 +773,7 @@ class TestCheckTmpdirs:
         backdate = _time.time() - 30 * 3600
         _os.utime(orphan, (backdate, backdate))
 
-        with patch(
-            "tempfile.gettempdir", return_value=str(tmproot),
-        ), patch("nexus.db.t1.SESSIONS_DIR", sessions):
+        with patch("tempfile.gettempdir", return_value=str(tmproot)):
             result = runner.invoke(
                 main, ["doctor", "--check-tmpdirs", "--json"],
             )

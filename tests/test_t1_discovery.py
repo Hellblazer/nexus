@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RDR-105 P1 / nexus-4fek: hybrid T1 discovery spike tests.
+"""RDR-105 hybrid T1 discovery tests.
 
-Behind feature flag ``NX_T1_NEW_DISCOVERY=1``. Verifies:
+The single hybrid-discovery code path (RDR-105 P4) is the only T1
+resolution surface. Verifies:
 
 * ``find_immediate_claude_pid`` returns the FIRST ``claude*`` ancestor
   walking up, NOT the topmost (RF-6, the load-bearing fix that prevents
@@ -198,6 +199,103 @@ class TestT1AddrFile:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Periodic orphan reaper (sweep_orphan_t1_addr_files)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestSweepOrphanT1AddrFiles:
+    """RDR-105 P4 (nexus-sp84): top-level MCP startup runs this sweep
+    to reap addr files left by sessions that exited ungracefully.
+    Best-effort cleanup; not load-bearing.
+    """
+
+    def test_reaps_dead_pid(self, tmp_path, monkeypatch):
+        import subprocess as _sub
+
+        from nexus.session import (
+            sweep_orphan_t1_addr_files,
+            t1_addr_path,
+            write_t1_addr,
+        )
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+
+        proc = _sub.Popen(["true"])
+        proc.wait()
+        write_t1_addr(proc.pid, "127.0.0.1", 1234)
+        assert t1_addr_path(proc.pid).exists()
+
+        reaped = sweep_orphan_t1_addr_files()
+        assert reaped == 1
+        assert not t1_addr_path(proc.pid).exists()
+
+    def test_keeps_live_pid(self, tmp_path, monkeypatch):
+        import os as _os
+
+        from nexus.session import (
+            sweep_orphan_t1_addr_files,
+            t1_addr_path,
+            write_t1_addr,
+        )
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+
+        own_pid = _os.getpid()
+        write_t1_addr(own_pid, "127.0.0.1", 9999)
+
+        reaped = sweep_orphan_t1_addr_files()
+        assert reaped == 0
+        assert t1_addr_path(own_pid).exists()
+
+    def test_skips_malformed_suffix(self, tmp_path, monkeypatch):
+        from nexus.session import sweep_orphan_t1_addr_files
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        # Files whose suffix is not an integer must be skipped (not
+        # reaped, not crashed). Belt-and-braces against an operator
+        # leaving stray ``t1_addr.something-weird`` lying around.
+        weird = tmp_path / "t1_addr.not-a-number"
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        weird.write_text("127.0.0.1:5555\n")
+
+        reaped = sweep_orphan_t1_addr_files()
+        assert reaped == 0
+        assert weird.exists()
+
+    def test_no_op_when_config_dir_missing(self, tmp_path, monkeypatch):
+        from nexus.session import sweep_orphan_t1_addr_files
+
+        # Point NEXUS_CONFIG_DIR at a path that does not exist; sweep
+        # must return 0 cleanly.
+        missing = tmp_path / "does-not-exist"
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(missing))
+        assert sweep_orphan_t1_addr_files() == 0
+
+    def test_mixed_dead_and_live(self, tmp_path, monkeypatch):
+        import os as _os
+        import subprocess as _sub
+
+        from nexus.session import (
+            sweep_orphan_t1_addr_files,
+            t1_addr_path,
+            write_t1_addr,
+        )
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+
+        own_pid = _os.getpid()
+        proc = _sub.Popen(["true"])
+        proc.wait()
+        write_t1_addr(own_pid, "127.0.0.1", 1)
+        write_t1_addr(proc.pid, "127.0.0.1", 2)
+
+        reaped = sweep_orphan_t1_addr_files()
+        assert reaped == 1
+        assert t1_addr_path(own_pid).exists()
+        assert not t1_addr_path(proc.pid).exists()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # _t1_state minimal module
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -243,7 +341,6 @@ class TestT1DatabaseFlagOnEnvPath:
         fake_chromadb.HttpClient.return_value = fake_client
         monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
 
-        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
         monkeypatch.setenv("NX_T1_HOST", "127.0.0.1")
         monkeypatch.setenv("NX_T1_PORT", "12345")
         monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
@@ -266,7 +363,6 @@ class TestT1DatabaseFlagOnFilePath:
         monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
         monkeypatch.delenv("NX_T1_HOST", raising=False)
         monkeypatch.delenv("NX_T1_PORT", raising=False)
         monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
@@ -290,7 +386,6 @@ class TestT1DatabaseFlagOffPreservesLegacyBehaviour:
         fake_chromadb.EphemeralClient.return_value = MagicMock()
         monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
 
-        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "0")
         monkeypatch.setenv("NEXUS_SKIP_T1", "1")
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
 
@@ -313,7 +408,6 @@ class TestT1DatabaseFlagOnIsolationPath:
         monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
         monkeypatch.delenv("NX_T1_HOST", raising=False)
         monkeypatch.delenv("NX_T1_PORT", raising=False)
         monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
@@ -339,7 +433,6 @@ class TestT1DatabaseFlagOnIsolationPath:
         monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
         monkeypatch.delenv("NX_T1_HOST", raising=False)
         monkeypatch.delenv("NX_T1_PORT", raising=False)
         monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
@@ -365,7 +458,6 @@ class TestT1DatabaseFlagOnRaisesOnMisconfiguration:
         monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
         monkeypatch.delenv("NX_T1_HOST", raising=False)
         monkeypatch.delenv("NX_T1_PORT", raising=False)
         monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
@@ -386,7 +478,6 @@ class TestT1DatabaseFlagOnRaisesOnMisconfiguration:
         monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
         monkeypatch.setenv("NX_T1_HOST", "127.0.0.1")
         monkeypatch.setenv("NX_T1_PORT", "not-a-port")
         monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
@@ -414,7 +505,6 @@ class TestT1DatabaseFlagOnLegacyDeleted:
         monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
         monkeypatch.setenv("NX_T1_HOST", "127.0.0.1")
         monkeypatch.setenv("NX_T1_PORT", "5555")
         monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
@@ -425,37 +515,7 @@ class TestT1DatabaseFlagOnLegacyDeleted:
         fake_chromadb.HttpClient.assert_called_once_with(host="127.0.0.1", port=5555)
 
 
-class TestT1DatabaseFlagOnReconnectFailsLoud:
-    """RDR-105 P2 follow-up: ``_reconnect`` is not supported in flag-on
-    mode. The legacy resolver consults ``SESSIONS_DIR`` which the new
-    architecture never writes; calling it would always miss. Fail
-    loud and let the caller construct a fresh ``T1Database``.
-    """
 
-    def test_reconnect_raises_when_flag_on(self, tmp_path, monkeypatch):
-        from unittest.mock import MagicMock
-
-        fake_chromadb = MagicMock()
-        fake_chromadb.HttpClient.return_value = MagicMock()
-        monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
-
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
-        monkeypatch.setenv("NX_T1_HOST", "127.0.0.1")
-        monkeypatch.setenv("NX_T1_PORT", "5555")
-        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
-
-        from nexus.db.t1 import T1Database, T1ServerNotFoundError
-        db = T1Database()
-
-        with pytest.raises(T1ServerNotFoundError, match="NX_T1_NEW_DISCOVERY"):
-            db._reconnect()
-        # Subsequent call is a no-op (`_dead` set by the prior raise).
-        # Re-arm and confirm the second call also short-circuits.
-        # (db._dead stayed True, so this call returns silently; the
-        # contract is "raise once, then no-op"; verified by reaching
-        # the next assertion without exception.)
-        db._reconnect()
 
 
 class TestT1DatabaseFlagOnPrecedence:
@@ -469,7 +529,6 @@ class TestT1DatabaseFlagOnPrecedence:
         monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
         monkeypatch.setenv("NX_T1_HOST", "10.0.0.1")
         monkeypatch.setenv("NX_T1_PORT", "1111")
         monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
@@ -494,20 +553,12 @@ class TestDispatcherEnvBuilder:
     ``NX_T1_HOST/PORT`` (share_t1=True + flag-on + parent T1 live) or
     falls back to the legacy ``NEXUS_SKIP_T1=1`` ephemeral path."""
 
-    def test_legacy_path_when_flag_off(self, monkeypatch):
-        from nexus.operators.dispatch import _build_dispatch_env
 
-        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "0")
-        env = _build_dispatch_env(share_t1=False, parent_session_id="parent-uuid")
-        assert env.get("NEXUS_SKIP_T1") == "1"
-        assert "NX_T1_HOST" not in env
-        assert env.get("NX_SESSION_ID") == "parent-uuid"
 
     def test_share_t1_passes_env_when_flag_on(self, monkeypatch):
         from nexus.mcp import _t1_state
         from nexus.operators.dispatch import _build_dispatch_env
 
-        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
         prev = _t1_state.T1_ADDR
         _t1_state.T1_ADDR = ("127.0.0.1", 12345)
         try:
@@ -516,7 +567,6 @@ class TestDispatcherEnvBuilder:
             _t1_state.T1_ADDR = prev
         assert env.get("NX_T1_HOST") == "127.0.0.1"
         assert env.get("NX_T1_PORT") == "12345"
-        assert env.get("NX_T1_NEW_DISCOVERY") == "1"
         assert "NEXUS_SKIP_T1" not in env
         assert env.get("NX_SESSION_ID") == "parent"
 
@@ -524,7 +574,6 @@ class TestDispatcherEnvBuilder:
         from nexus.mcp import _t1_state
         from nexus.operators.dispatch import _build_dispatch_env
 
-        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
         prev = _t1_state.T1_ADDR
         _t1_state.T1_ADDR = None
         try:
@@ -533,16 +582,7 @@ class TestDispatcherEnvBuilder:
         finally:
             _t1_state.T1_ADDR = prev
 
-    def test_share_t1_raises_when_flag_off(self, monkeypatch):
-        """Flag-off does not expose ``_t1_state.T1_ADDR``; silently
-        collapsing ``share_t1=True`` to ephemeral would hide caller
-        intent. Raise instead so the caller learns that share_t1
-        requires the new-discovery flag."""
-        from nexus.operators.dispatch import _build_dispatch_env
 
-        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "0")
-        with pytest.raises(RuntimeError, match="NX_T1_NEW_DISCOVERY"):
-            _build_dispatch_env(share_t1=True, parent_session_id=None)
 
 
 class TestDispatcherEphemeralMode:
@@ -554,7 +594,6 @@ class TestDispatcherEphemeralMode:
     def test_ephemeral_sets_isolated_when_flag_on(self, monkeypatch):
         from nexus.operators.dispatch import _build_dispatch_env
 
-        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
         monkeypatch.setenv("NX_T1_HOST", "10.0.0.1")
         monkeypatch.setenv("NX_T1_PORT", "5555")
         env = _build_dispatch_env(ephemeral=True, parent_session_id="parent")
@@ -564,20 +603,11 @@ class TestDispatcherEphemeralMode:
         assert "NEXUS_SKIP_T1" not in env  # don't leak the deprecated alias
         assert env.get("NX_SESSION_ID") == "parent"
 
-    def test_ephemeral_legacy_when_flag_off(self, monkeypatch):
-        """Flag-off: ``ephemeral=True`` falls back to ``NEXUS_SKIP_T1=1``,
-        the historical operator-dispatch shape."""
-        from nexus.operators.dispatch import _build_dispatch_env
 
-        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "0")
-        env = _build_dispatch_env(ephemeral=True, parent_session_id=None)
-        assert env.get("NEXUS_SKIP_T1") == "1"
-        assert "NX_T1_ISOLATED" not in env
 
     def test_share_and_ephemeral_mutually_exclusive(self, monkeypatch):
         from nexus.operators.dispatch import _build_dispatch_env
 
-        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
         with pytest.raises(ValueError, match="mutually exclusive"):
             _build_dispatch_env(share_t1=True, ephemeral=True)
 
@@ -590,7 +620,6 @@ class TestDispatcherOwnedMode:
     def test_owned_strips_parent_t1_env(self, monkeypatch):
         from nexus.operators.dispatch import _build_dispatch_env
 
-        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
         monkeypatch.setenv("NX_T1_HOST", "10.0.0.1")
         monkeypatch.setenv("NX_T1_PORT", "5555")
         monkeypatch.setenv("NX_T1_ISOLATED", "1")
@@ -600,8 +629,6 @@ class TestDispatcherOwnedMode:
         assert "NX_T1_PORT" not in env
         assert "NX_T1_ISOLATED" not in env
         assert "NEXUS_SKIP_T1" not in env
-        # Flag itself propagates so the subprocess uses new-discovery.
-        assert env.get("NX_T1_NEW_DISCOVERY") == "1"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -622,7 +649,6 @@ class TestLifespanNewDiscoveryGenerator:
 
         from nexus.mcp import core as mcp_core
 
-        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
         monkeypatch.setenv("NX_T1_HOST", "127.0.0.1")
         monkeypatch.setenv("NX_T1_PORT", "5555")
 
@@ -638,7 +664,7 @@ class TestLifespanNewDiscoveryGenerator:
         with patch("nexus.session.start_t1_server", side_effect=fake_start), \
              patch("nexus.session.write_t1_addr", side_effect=fake_write):
             async def _run():
-                async with mcp_core._t1_chroma_lifespan_new_discovery():
+                async with mcp_core._t1_chroma_lifespan(None):
                     pass
             asyncio.run(_run())
 
@@ -651,7 +677,6 @@ class TestLifespanNewDiscoveryGenerator:
 
         from nexus.mcp import core as mcp_core
 
-        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
         monkeypatch.delenv("NX_T1_HOST", raising=False)
         monkeypatch.delenv("NX_T1_PORT", raising=False)
         monkeypatch.setenv("NX_T1_ISOLATED", "1")
@@ -663,7 +688,7 @@ class TestLifespanNewDiscoveryGenerator:
              patch("nexus.session.write_t1_addr",
                    side_effect=lambda *a, **k: called.update(write=called["write"] + 1)):
             async def _run():
-                async with mcp_core._t1_chroma_lifespan_new_discovery():
+                async with mcp_core._t1_chroma_lifespan(None):
                     pass
             asyncio.run(_run())
 
@@ -680,7 +705,6 @@ class TestLifespanNewDiscoveryGenerator:
         from nexus.session import read_t1_addr_for
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
         monkeypatch.delenv("NX_T1_HOST", raising=False)
         monkeypatch.delenv("NX_T1_PORT", raising=False)
         monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
@@ -699,7 +723,7 @@ class TestLifespanNewDiscoveryGenerator:
                  patch("nexus.session.stop_t1_server", side_effect=fake_stop), \
                  patch("nexus.session.find_immediate_claude_pid", return_value=44444):
                 async def _run():
-                    async with mcp_core._t1_chroma_lifespan_new_discovery():
+                    async with mcp_core._t1_chroma_lifespan(None):
                         # During the body: addr file present + state set
                         assert read_t1_addr_for(44444) == ("127.0.0.1", 33333)
                         assert _t1_state.T1_ADDR == ("127.0.0.1", 33333)
@@ -725,7 +749,6 @@ class TestLifespanNewDiscoveryGenerator:
         from nexus.session import read_t1_addr_for
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
         monkeypatch.delenv("NX_T1_HOST", raising=False)
         monkeypatch.delenv("NX_T1_PORT", raising=False)
         monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
@@ -741,7 +764,7 @@ class TestLifespanNewDiscoveryGenerator:
                        side_effect=lambda _p: calls.update(stop=calls["stop"] + 1)), \
                  patch("nexus.session.find_immediate_claude_pid", return_value=0):
                 async def _run():
-                    async with mcp_core._t1_chroma_lifespan_new_discovery():
+                    async with mcp_core._t1_chroma_lifespan(None):
                         # No addr file, no T1_ADDR, but chroma is running.
                         assert _t1_state.T1_ADDR is None
                         # No file at any pid (we mocked walker to 0).
@@ -764,7 +787,6 @@ class TestLifespanNewDiscoveryGenerator:
         from nexus.session import read_t1_addr_for, write_t1_addr
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
 
         prev_owned = dict(mcp_core._OWNED_CHROMA)
         prev_addr = _t1_state.T1_ADDR
@@ -775,7 +797,6 @@ class TestLifespanNewDiscoveryGenerator:
             _t1_state.T1_ADDR = ("127.0.0.1", 7777)
             mcp_core._OWNED_CHROMA.clear()
             mcp_core._OWNED_CHROMA.update({
-                "new_discovery": True,
                 "server_pid": 12345,
                 "tmpdir": str(tmp_path / "chroma_tmpdir"),
                 "t1_addr_claude_pid": 88888,
@@ -816,7 +837,6 @@ class TestLifespanNewDiscoveryGenerator:
         from nexus.mcp import _t1_state, core as mcp_core
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
         monkeypatch.delenv("NX_T1_HOST", raising=False)
         monkeypatch.delenv("NX_T1_PORT", raising=False)
         monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
@@ -837,7 +857,7 @@ class TestLifespanNewDiscoveryGenerator:
                  patch("nexus.session.find_immediate_claude_pid", return_value=11), \
                  patch("nexus.session.write_t1_addr", side_effect=boom):
                 async def _run():
-                    async with mcp_core._t1_chroma_lifespan_new_discovery():
+                    async with mcp_core._t1_chroma_lifespan(None):
                         pass
 
                 with pytest.raises(OSError, match="simulated disk-full"):
@@ -876,7 +896,6 @@ class TestLifespanNewDiscoveryGenerator:
         from nexus.session import read_t1_addr_for, write_t1_addr
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
         monkeypatch.delenv("NX_T1_HOST", raising=False)
         monkeypatch.delenv("NX_T1_PORT", raising=False)
         monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
@@ -893,9 +912,14 @@ class TestLifespanNewDiscoveryGenerator:
             with patch("nexus.session.start_t1_server",
                        return_value=("127.0.0.1", 22222, 99999, str(tmp_path / "owned_chroma_tmpdir"))), \
                  patch("nexus.session.stop_t1_server", side_effect=lambda _p: None), \
-                 patch("nexus.session.find_immediate_claude_pid", return_value=200):
+                 patch("nexus.session.find_immediate_claude_pid", return_value=200), \
+                 patch("nexus.session.sweep_orphan_t1_addr_files", return_value=0):
+                # The orphan-reaper sweep on lifespan entry would
+                # reap the test's fake parent file (pid 100 is not
+                # a live process). Patch it off so the RF-6
+                # invariant under test is exercised cleanly.
                 async def _run():
-                    async with mcp_core._t1_chroma_lifespan_new_discovery():
+                    async with mcp_core._t1_chroma_lifespan(None):
                         # Owned MCP wrote its OWN file at claude_pid=200.
                         assert read_t1_addr_for(200) == ("127.0.0.1", 22222)
                         # Parent's file at claude_pid=100 is UNCHANGED.
@@ -917,7 +941,6 @@ class TestLifespanNewDiscoveryGenerator:
         from nexus.session import read_t1_addr_for
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
         monkeypatch.delenv("NX_T1_HOST", raising=False)
         monkeypatch.delenv("NX_T1_PORT", raising=False)
         monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
@@ -931,7 +954,7 @@ class TestLifespanNewDiscoveryGenerator:
                  patch("nexus.session.stop_t1_server", side_effect=lambda _p: None), \
                  patch("nexus.session.find_immediate_claude_pid", return_value=55555):
                 async def _run():
-                    async with mcp_core._t1_chroma_lifespan_new_discovery():
+                    async with mcp_core._t1_chroma_lifespan(None):
                         raise RuntimeError("body error")
 
                 with pytest.raises(RuntimeError, match="body error"):
@@ -948,106 +971,7 @@ class TestLifespanNewDiscoveryGenerator:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class TestLifespanAugmentation:
-    """When NX_T1_NEW_DISCOVERY=1 AND we own the chroma, the lifespan
-    augmentation publishes the addr file + populates ``_t1_state.T1_ADDR``."""
 
-    def test_publish_writes_addr_and_populates_state(self, tmp_path, monkeypatch):
-        from nexus.mcp import _t1_state, core as mcp_core
-        from nexus.session import read_t1_addr_for
-
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
-
-        prev_owned = dict(mcp_core._OWNED_CHROMA)
-        prev_addr = _t1_state.T1_ADDR
-        try:
-            mcp_core._OWNED_CHROMA.clear()
-            mcp_core._OWNED_CHROMA.update({
-                "server_port": 4242,
-                "session_id": "test-uuid",
-            })
-            _t1_state.T1_ADDR = None
-            with patch("nexus.session.find_immediate_claude_pid",
-                       return_value=77777):
-                mcp_core._t1_publish_addr_for_new_discovery()
-            assert read_t1_addr_for(77777) == ("127.0.0.1", 4242)
-            assert _t1_state.T1_ADDR == ("127.0.0.1", 4242)
-            assert mcp_core._OWNED_CHROMA.get("t1_addr_claude_pid") == 77777
-        finally:
-            mcp_core._OWNED_CHROMA.clear()
-            mcp_core._OWNED_CHROMA.update(prev_owned)
-            _t1_state.T1_ADDR = prev_addr
-
-    def test_publish_no_op_when_flag_off(self, tmp_path, monkeypatch):
-        from nexus.mcp import _t1_state, core as mcp_core
-        from nexus.session import read_t1_addr_for
-
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "0")
-
-        prev_owned = dict(mcp_core._OWNED_CHROMA)
-        prev_addr = _t1_state.T1_ADDR
-        try:
-            mcp_core._OWNED_CHROMA.clear()
-            mcp_core._OWNED_CHROMA.update({"server_port": 4242})
-            _t1_state.T1_ADDR = None
-            mcp_core._t1_publish_addr_for_new_discovery()
-            # No file written, no state change.
-            assert read_t1_addr_for(77777) is None
-            assert _t1_state.T1_ADDR is None
-        finally:
-            mcp_core._OWNED_CHROMA.clear()
-            mcp_core._OWNED_CHROMA.update(prev_owned)
-            _t1_state.T1_ADDR = prev_addr
-
-    def test_cleanup_unlinks_and_resets_state(self, tmp_path, monkeypatch):
-        from nexus.mcp import _t1_state, core as mcp_core
-        from nexus.session import read_t1_addr_for, write_t1_addr
-
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
-
-        prev_owned = dict(mcp_core._OWNED_CHROMA)
-        prev_addr = _t1_state.T1_ADDR
-        try:
-            write_t1_addr(33333, "127.0.0.1", 4242)
-            _t1_state.T1_ADDR = ("127.0.0.1", 4242)
-            mcp_core._OWNED_CHROMA.clear()
-            mcp_core._OWNED_CHROMA.update({"t1_addr_claude_pid": 33333})
-            mcp_core._t1_unpublish_addr_for_new_discovery()
-            assert read_t1_addr_for(33333) is None
-            assert _t1_state.T1_ADDR is None
-        finally:
-            mcp_core._OWNED_CHROMA.clear()
-            mcp_core._OWNED_CHROMA.update(prev_owned)
-            _t1_state.T1_ADDR = prev_addr
-
-    def test_publish_skips_when_chroma_reused(self, tmp_path, monkeypatch):
-        """``reused=True`` means another MCP owns the chroma; we don't
-        publish (and we don't delete on shutdown)."""
-        from nexus.mcp import _t1_state, core as mcp_core
-        from nexus.session import read_t1_addr_for
-
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
-
-        prev_owned = dict(mcp_core._OWNED_CHROMA)
-        prev_addr = _t1_state.T1_ADDR
-        try:
-            mcp_core._OWNED_CHROMA.clear()
-            mcp_core._OWNED_CHROMA.update({
-                "server_port": 4242,
-                "reused": True,
-            })
-            _t1_state.T1_ADDR = None
-            mcp_core._t1_publish_addr_for_new_discovery()
-            assert read_t1_addr_for(77777) is None
-            assert _t1_state.T1_ADDR is None
-        finally:
-            mcp_core._OWNED_CHROMA.clear()
-            mcp_core._OWNED_CHROMA.update(prev_owned)
-            _t1_state.T1_ADDR = prev_addr
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1102,7 +1026,6 @@ class TestE2EFileDiscovery:
                 code = (
                     "import os\n"
                     f"os.environ['NEXUS_CONFIG_DIR'] = {str(tmp_path)!r}\n"
-                    "os.environ['NX_T1_NEW_DISCOVERY'] = '1'\n"
                     "os.environ.pop('NX_T1_HOST', None)\n"
                     "os.environ.pop('NX_T1_PORT', None)\n"
                     "os.environ.pop('NEXUS_SKIP_T1', None)\n"
@@ -1155,7 +1078,6 @@ class TestE2EEnvDiscovery:
             )
             env = {
                 **os.environ,
-                "NX_T1_NEW_DISCOVERY": "1",
                 "NX_T1_HOST": host,
                 "NX_T1_PORT": str(port),
                 "NEXUS_CONFIG_DIR": str(tmp_path),
@@ -1183,56 +1105,7 @@ class TestE2EEnvDiscovery:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class TestNewDiscoveryDefaultOn:
-    """The flag defaults to on as of P3 (``t1_new_discovery_enabled``).
-    Removing the conftest's ``NX_T1_NEW_DISCOVERY=0`` override lets the
-    production default fire and exercises the post-flip behaviour.
-    """
 
-    def test_helper_default_on(self, monkeypatch):
-        from nexus.session import t1_new_discovery_enabled
-
-        monkeypatch.delenv("NX_T1_NEW_DISCOVERY", raising=False)
-        assert t1_new_discovery_enabled() is True
-
-    def test_helper_off_when_explicit_zero(self, monkeypatch):
-        from nexus.session import t1_new_discovery_enabled
-
-        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "0")
-        assert t1_new_discovery_enabled() is False
-
-    def test_helper_on_when_any_non_zero(self, monkeypatch):
-        from nexus.session import t1_new_discovery_enabled
-
-        for val in ("1", "true", "yes", "on", "anything"):
-            monkeypatch.setenv("NX_T1_NEW_DISCOVERY", val)
-            assert t1_new_discovery_enabled() is True, (
-                f"value {val!r} should enable new discovery"
-            )
-
-    def test_constructor_takes_new_path_by_default(self, tmp_path, monkeypatch):
-        """No env var set: production default is the four-branch
-        fail-loud gate. Path C fires via ``NX_T1_ISOLATED=1``."""
-        from unittest.mock import MagicMock
-
-        fake_chromadb = MagicMock()
-        fake_chromadb.EphemeralClient.return_value = MagicMock()
-        monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
-
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        # Remove conftest's flag-off override; use production default.
-        monkeypatch.delenv("NX_T1_NEW_DISCOVERY", raising=False)
-        monkeypatch.delenv("NX_T1_HOST", raising=False)
-        monkeypatch.delenv("NX_T1_PORT", raising=False)
-        # Conftest sets NEXUS_SKIP_T1=1; honour it as the isolation alias.
-        monkeypatch.setenv("NEXUS_SKIP_T1", "1")
-        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
-
-        with patch("nexus.db.t1.find_immediate_claude_pid", return_value=99999):
-            from nexus.db.t1 import T1Database
-            T1Database()
-        # Default-on routed through Path C, not the legacy resolver.
-        fake_chromadb.EphemeralClient.assert_called_once()
 
 
 @pytest.mark.integration
@@ -1272,7 +1145,6 @@ class TestE2EParallelStress:
             )
             base_env = {
                 **os.environ,
-                "NX_T1_NEW_DISCOVERY": "1",
                 "NX_T1_HOST": host,
                 "NX_T1_PORT": str(port),
                 "NEXUS_CONFIG_DIR": str(tmp_path),

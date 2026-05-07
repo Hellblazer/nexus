@@ -118,10 +118,7 @@ class TestSessionIsolatedUnderOverride:
 
         assert CLAUDE_SESSION_FILE == sandbox_dir / "current_session"
 
-    def test_sessions_dir_redirects(self, sandbox_dir: Path):
-        from nexus.session import SESSIONS_DIR
 
-        assert SESSIONS_DIR == sandbox_dir / "sessions"
 
     def test_session_file_path_redirects(self, sandbox_dir: Path):
         from nexus.session import session_file_path

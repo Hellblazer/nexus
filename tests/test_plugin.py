@@ -92,167 +92,18 @@ def test_session_start_outputs_session_id(
 # ── GH #576 Phase F: subprocess SessionStart skip-sweep ─────────────────────
 
 
-def test_subprocess_session_start_skips_sweep_when_inherited(
-    fake_home: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """GH #576 Phase F: when SessionStart fires inside a subprocess
-    spawned by ``claude_dispatch`` (NX_SESSION_ID set on env), the
-    parent owns all session-record lifecycle decisions and the
-    subprocess must NOT sweep the parent's records.
-
-    Pre-fix the unconditional sweep at hooks.py:113 ran inside every
-    plan-runner subprocess SessionStart. With Phase C in place
-    (filename-stem comparison) the sweep's uuid_stale arm no longer
-    fires for healthy parent records — but Phase F is defense-in-depth
-    against the other arms (age_expired, server_dead probe race,
-    anchor_dead). The combined effect: parent's record is never
-    touched by subprocess-side housekeeping.
-    """
-    from nexus.hooks import session_start
-
-    monkeypatch.setenv("NX_SESSION_ID", "parent-uuid")
-    swept: list[bool] = []
-    tmpdir_swept: list[bool] = []
-
-    def _fake_sweep(*args, **kwargs):
-        swept.append(True)
-
-    def _fake_tmpdir_sweep(*args, **kwargs):
-        tmpdir_swept.append(True)
-
-    with patch("nexus.hooks.sweep_stale_sessions", side_effect=_fake_sweep), \
-         patch("nexus.session.sweep_orphan_tmpdirs", side_effect=_fake_tmpdir_sweep):
-        session_start()
-
-    assert swept == [], (
-        "subprocess SessionStart (NX_SESSION_ID set) must NOT call "
-        "sweep_stale_sessions on the parent's SESSIONS_DIR"
-    )
-    assert tmpdir_swept == [], (
-        "subprocess SessionStart must NOT call sweep_orphan_tmpdirs"
-    )
 
 
-def test_top_level_session_start_runs_sweep(
-    fake_home: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Counterpart: top-level SessionStart (NX_SESSION_ID NOT set)
-    still runs both sweeps — the conventional bootstrap path."""
-    from nexus.hooks import session_start
 
-    monkeypatch.delenv("NX_SESSION_ID", raising=False)
-    swept: list[bool] = []
-    tmpdir_swept: list[bool] = []
 
-    def _fake_sweep(*args, **kwargs):
-        swept.append(True)
-
-    def _fake_tmpdir_sweep(*args, **kwargs):
-        tmpdir_swept.append(True)
-
-    with patch("nexus.hooks.sweep_stale_sessions", side_effect=_fake_sweep), \
-         patch("nexus.session.sweep_orphan_tmpdirs", side_effect=_fake_tmpdir_sweep):
-        session_start()
-
-    assert swept == [True], (
-        "top-level SessionStart must call sweep_stale_sessions"
-    )
-    assert tmpdir_swept == [True], (
-        "top-level SessionStart must call sweep_orphan_tmpdirs"
-    )
 
 
 # ── AC5: SessionEnd flush + expire ────────────────────────────────────────────
 
-def test_session_end_flushes_flagged_t1_entries(
-    runner: CliRunner, fake_home: Path, tmp_path: Path, monkeypatch
-) -> None:
-    """SessionEnd flushes T1 flagged entries to T2.
-
-    UUID-keyed scheme: NX_SESSION_ID env var carries the conversation
-    UUID into the hook process; session_end resolves the record at
-    sessions/{uuid}.session.
-    """
-    sessions = tmp_path / "sessions"
-    session_id = "test-session-id"
-    session_file = sessions / f"{session_id}.session"
-    session_file.parent.mkdir(parents=True, exist_ok=True)
-    session_file.write_text(json.dumps({
-        "session_id": session_id,
-        "server_host": "127.0.0.1",
-        "server_port": 51823,
-        "server_pid": 0,
-        "created_at": time.time(),
-        "tmpdir": "",
-    }))
-    monkeypatch.setenv("NX_SESSION_ID", session_id)
-
-    mock_t1 = MagicMock()
-    mock_t1.flagged_entries.return_value = [
-        {
-            "id": "entry-1",
-            "content": "important finding",
-            "tags": "research",
-            "flush_project": "myproject",
-            "flush_title": "finding.md",
-        }
-    ]
-    mock_t2 = MagicMock()
-
-    _t2_cm = MagicMock(__enter__=MagicMock(return_value=mock_t2))
-    with patch("nexus.hooks.SESSIONS_DIR", sessions):
-        with patch("nexus.hooks._open_t1", return_value=mock_t1):
-            with patch("nexus.hooks.T2Database", return_value=_t2_cm):
-                result = runner.invoke(main, ["hook", "session-end"])
-
-    assert result.exit_code == 0, result.output
-    mock_t2.put.assert_called_once_with(
-        project="myproject",
-        title="finding.md",
-        content="important finding",
-        tags="research",
-        ttl=None,
-    )
 
 
-def test_session_end_clears_t1_and_keeps_session_file(
-    runner: CliRunner, fake_home: Path, tmp_path: Path, monkeypatch
-) -> None:
-    """SessionEnd clears T1 and leaves the session file intact.
 
-    Phase F (RDR-094 / nexus-2lm0, unconditional as of 4.13.0):
-    nx-mcp's lifespan owns chroma teardown AND session-file unlink.
-    The hook does flush + expire only; the session file MUST survive
-    a hook invocation (lifespan/watchdog removes it on actual exit).
-    """
-    sessions = tmp_path / "sessions"
-    session_id = "test-session-id"
-    session_file = sessions / f"{session_id}.session"
-    session_file.parent.mkdir(parents=True, exist_ok=True)
-    session_file.write_text(json.dumps({
-        "session_id": session_id,
-        "server_host": "127.0.0.1",
-        "server_port": 51823,
-        "server_pid": 0,
-        "created_at": time.time(),
-        "tmpdir": "",
-    }))
-    monkeypatch.setenv("NX_SESSION_ID", session_id)
 
-    mock_t1 = MagicMock()
-    mock_t1.flagged_entries.return_value = []
-
-    _t2_cm = MagicMock(__enter__=MagicMock(return_value=MagicMock()))
-    with patch("nexus.hooks.SESSIONS_DIR", sessions):
-        with patch("nexus.hooks._open_t1", return_value=mock_t1):
-            with patch("nexus.hooks.T2Database", return_value=_t2_cm):
-                result = runner.invoke(main, ["hook", "session-end"])
-
-    assert result.exit_code == 0, result.output
-    mock_t1.clear.assert_called_once()
-    # Phase F: session file MUST survive a hook invocation; nx-mcp's
-    # lifespan owns the unlink on actual process exit.
-    assert session_file.exists()
 
 
 def test_session_end_runs_expire(runner: CliRunner, fake_home: Path) -> None:

@@ -514,58 +514,59 @@ def _check_index_log() -> list[HealthResult]:
 
 
 def _check_orphan_t1() -> list[HealthResult]:
-    """Report on session files. An "orphan" here means the chroma server PID
-    in the file is no longer alive — that is the only state that warrants
-    cleanup. Live-but-unowned sessions (e.g. server still running after the
-    spawning Claude Code instance exited) are listed but not flagged.
+    """Report on T1 address files left by previous Claude Code sessions.
+
+    RDR-105 P4 replaced the per-session JSON record files with a
+    single-writer ``~/.config/nexus/t1_addr.<claude_pid>`` flat file
+    per live Claude. An orphan here is an addr file whose
+    ``<claude_pid>`` is no longer a running process (typically left
+    behind when Claude Code exits ungracefully so the lifespan
+    finally never ran). The MCP startup sweep
+    (``sweep_orphan_t1_addr_files``) reaps them automatically; this
+    check just surfaces what is currently on disk.
     """
-    from nexus.session import SESSIONS_DIR
+    from nexus.config import nexus_config_dir
 
-    if not SESSIONS_DIR.exists():
-        return [HealthResult(label="T1 sessions", ok=True, detail="no sessions directory")]
+    config_dir = nexus_config_dir()
+    if not config_dir.exists():
+        return [HealthResult(label="T1 sessions", ok=True, detail="no nexus config dir")]
 
-    session_files = list(SESSIONS_DIR.glob("*.session"))
-    if not session_files:
-        return [HealthResult(label="T1 sessions", ok=True, detail="no session files")]
+    addr_files = list(config_dir.glob("t1_addr.*"))
+    if not addr_files:
+        return [HealthResult(label="T1 sessions", ok=True, detail="no live T1 sessions")]
 
     now = time.time()
     orphans: list[str] = []
     live_descriptors: list[str] = []
-    for sf in session_files:
+    for path in addr_files:
+        suffix = path.suffix.lstrip(".")
         try:
-            record = json.loads(sf.read_text())
-        except (json.JSONDecodeError, OSError) as exc:
-            _log.debug("orphan_t1_session_corrupt", path=str(sf), error=str(exc))
+            claude_pid = int(suffix)
+        except ValueError:
+            _log.debug("orphan_t1_addr_unparseable_suffix", path=str(path), suffix=suffix)
             continue
-        pid = record.get("server_pid")
-        age_s = max(0, int(now - sf.stat().st_mtime))
+        age_s = max(0, int(now - path.stat().st_mtime))
         age_str = f"{age_s // 60}m" if age_s < 3600 else f"{age_s // 3600}h"
-        if pid is None:
-            live_descriptors.append(f"{sf.name} (no pid, age {age_str})")
-            continue
         try:
-            os.kill(int(pid), 0)
-            live_descriptors.append(f"{sf.name} (pid {pid} alive, age {age_str})")
+            os.kill(claude_pid, 0)
+            live_descriptors.append(f"{path.name} (claude_pid {claude_pid} alive, age {age_str})")
         except OSError:
-            orphans.append(sf.name)
-        except (ValueError, TypeError):
-            _log.debug("orphan_t1_invalid_pid", path=str(sf), pid=repr(pid))
-            continue
+            orphans.append(path.name)
 
     if orphans:
         return [HealthResult(
             label="T1 sessions",
             ok=False,
-            detail=f"{len(orphans)} orphaned session file(s) (chroma pid dead): {', '.join(orphans)}",
+            detail=f"{len(orphans)} orphan addr file(s) (claude_pid dead): {', '.join(orphans)}",
             fix_suggestions=[
-                "Remove stale files: rm ~/.config/nexus/sessions/*.session",
-                "Or run: nx doctor (sweep runs automatically on session start)",
+                "Remove stale files: rm ~/.config/nexus/t1_addr.*",
+                "Or run nx doctor (the next MCP startup sweeps these automatically).",
             ],
         )]
 
     return [HealthResult(
         label="T1 sessions", ok=True,
-        detail=f"{len(session_files)} session file(s), all chroma servers alive: {', '.join(live_descriptors)}",
+        detail=f"{len(addr_files)} addr file(s), all owning Claudes alive: {', '.join(live_descriptors)}",
     )]
 
 

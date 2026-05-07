@@ -277,8 +277,14 @@ class TestSubprocessContract:
 
         env = captured[0].get("env")
         assert env is not None, "subprocess must be spawned with explicit env (got default inherit)"
-        assert env.get("NEXUS_SKIP_T1") == "1", (
-            f"NEXUS_SKIP_T1=1 missing from subprocess env; got NEXUS_SKIP_T1={env.get('NEXUS_SKIP_T1')!r}"
+        # RDR-105 P4: claude_dispatch defaults to ephemeral=True, which sets
+        # NX_T1_ISOLATED=1 (the canonical name) and strips the deprecated
+        # NEXUS_SKIP_T1 alias.
+        assert env.get("NX_T1_ISOLATED") == "1", (
+            f"NX_T1_ISOLATED=1 missing from subprocess env; got NX_T1_ISOLATED={env.get('NX_T1_ISOLATED')!r}"
+        )
+        assert "NEXUS_SKIP_T1" not in env, (
+            "deprecated NEXUS_SKIP_T1 should not leak into the subprocess env"
         )
 
     @pytest.mark.asyncio

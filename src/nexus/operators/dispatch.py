@@ -47,9 +47,7 @@ def _build_dispatch_env(
 ) -> dict[str, str]:
     """Build the env dict for a dispatched ``claude -p`` subprocess.
 
-    RDR-105 P2 (nexus-4gby). Three modes, gated on the new-discovery
-    code path (default-on as of P3 / nexus-xf5r; opt-out via
-    ``NX_T1_NEW_DISCOVERY=0`` for the deprecation cycle):
+    RDR-105 P4 (nexus-jnx7). Three modes:
 
     Shared T1 (``share_t1=True``)
         Subprocess inherits ``NX_T1_HOST`` / ``NX_T1_PORT`` from the
@@ -69,13 +67,9 @@ def _build_dispatch_env(
     Owned (default, neither flag set)
         Strips ``NX_T1_HOST`` / ``NX_T1_PORT`` / ``NX_T1_ISOLATED`` /
         ``NEXUS_SKIP_T1`` so the subprocess MCP spawns its own
-        chroma (Branch 3 of the new lifespan). The subprocess gets a
+        chroma (lifespan Branch 3). The subprocess gets a
         sealed-from-parent T1 session of its own. Internal Bash tools
         and sub-agents within the subprocess see consistent state.
-
-    When the flag is OFF, all three modes collapse to the historical
-    ``NEXUS_SKIP_T1=1`` ephemeral path. Pre-RDR-105 behaviour
-    preserved for callers that have not yet flipped the flag.
     """
     if share_t1 and ephemeral:
         raise ValueError(
@@ -83,29 +77,7 @@ def _build_dispatch_env(
             "cannot both inherit the parent's T1 and skip T1 entirely."
         )
 
-    from nexus.session import t1_new_discovery_enabled
-
     base = dict(os.environ)
-    flag_on = t1_new_discovery_enabled()
-
-    if not flag_on:
-        # ``share_t1`` is structurally meaningless without the new
-        # discovery flag (the parent has no ``_t1_state.T1_ADDR``
-        # to share). A silent collapse to ephemeral would hide
-        # caller intent. ``ephemeral`` and ``owned`` legitimately
-        # collapse to the historical shape.
-        if share_t1:
-            raise RuntimeError(
-                "share_t1=True requires NX_T1_NEW_DISCOVERY=1 in "
-                "the parent's environment; the legacy session-record "
-                "discovery does not expose a shared T1 address."
-            )
-        # Legacy: every other mode collapses to the historical
-        # NEXUS_SKIP_T1=1 ephemeral subprocess path.
-        base["NEXUS_SKIP_T1"] = "1"
-        if parent_session_id:
-            base["NX_SESSION_ID"] = parent_session_id
-        return base
 
     if share_t1:
         from nexus.mcp import _t1_state
@@ -113,9 +85,8 @@ def _build_dispatch_env(
         if _t1_state.T1_ADDR is None:
             raise RuntimeError(
                 "share_t1=True requires the top-level MCP's T1 to be "
-                "live (NX_T1_NEW_DISCOVERY=1 is set but "
-                "nexus.mcp._t1_state.T1_ADDR is None; the lifespan "
-                "publish path did not run)."
+                "live (nexus.mcp._t1_state.T1_ADDR is None; the "
+                "lifespan publish path did not run)."
             )
         host, port = _t1_state.T1_ADDR
         base["NX_T1_HOST"] = host
@@ -132,7 +103,7 @@ def _build_dispatch_env(
         base.pop("NEXUS_SKIP_T1", None)
     else:
         # Owned: subprocess spawns its own T1. Strip any parent T1
-        # signals so the new lifespan's Branch 3 fires.
+        # signals so the lifespan's Branch 3 fires.
         base.pop("NX_T1_HOST", None)
         base.pop("NX_T1_PORT", None)
         base.pop("NX_T1_ISOLATED", None)

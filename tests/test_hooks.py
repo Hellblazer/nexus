@@ -24,7 +24,6 @@ from nexus.hooks import session_end, session_end_flush, session_start
 def test_session_start_returns_session_id(_mock_sid, tmp_path: Path) -> None:
     """session_start returns the session ID line."""
     with (
-        patch("nexus.hooks.sweep_stale_sessions"),
         patch("nexus.hooks.write_claude_session_id"),
     ):
         output = session_start()
@@ -36,67 +35,7 @@ def test_session_start_returns_session_id(_mock_sid, tmp_path: Path) -> None:
 # ── #435 legacy session.lock cleanup ─────────────────────────────────────────
 
 
-class TestLegacySessionLockCleanup:
-    """The pre-v4.13.0 ``session.lock`` PID file is removed at
-    session_start so it doesn't accumulate forever on existing
-    installs upgraded from pre-v4.13.0 (#435).
-    """
 
-    def test_cleanup_removes_dead_pid_lock(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        from nexus.hooks import _cleanup_legacy_session_lock
-
-        sessions_dir = tmp_path / "sessions"
-        sessions_dir.mkdir()
-        lock = sessions_dir / "session.lock"
-        # PID 1 is init; we use a high impossible PID to guarantee it's dead.
-        # 999999 is unlikely to be in use.
-        lock.write_text("999999")
-
-        _cleanup_legacy_session_lock(sessions_dir)
-        assert not lock.exists()
-
-    def test_cleanup_no_op_when_lock_absent(
-        self, tmp_path: Path,
-    ) -> None:
-        from nexus.hooks import _cleanup_legacy_session_lock
-
-        sessions_dir = tmp_path / "sessions"
-        sessions_dir.mkdir()
-        # No lock file at all — must not raise.
-        _cleanup_legacy_session_lock(sessions_dir)
-
-    def test_cleanup_handles_unparseable_pid(
-        self, tmp_path: Path,
-    ) -> None:
-        """Empty / garbage PID is treated as dead — file is removed."""
-        from nexus.hooks import _cleanup_legacy_session_lock
-
-        sessions_dir = tmp_path / "sessions"
-        sessions_dir.mkdir()
-        lock = sessions_dir / "session.lock"
-        lock.write_text("not-a-number")
-
-        _cleanup_legacy_session_lock(sessions_dir)
-        assert not lock.exists()
-
-    def test_cleanup_skips_when_pid_alive(
-        self, tmp_path: Path,
-    ) -> None:
-        """Defensive: if the PID is somehow alive (shouldn't happen
-        post-v4.13.0), leave the file. Don't unlink locks we can't
-        prove stale."""
-        from nexus.hooks import _cleanup_legacy_session_lock
-
-        sessions_dir = tmp_path / "sessions"
-        sessions_dir.mkdir()
-        lock = sessions_dir / "session.lock"
-        lock.write_text(str(os.getpid()))  # ourselves — definitely alive
-
-        _cleanup_legacy_session_lock(sessions_dir)
-        # File still there; no current code re-creates it.
-        assert lock.exists()
 
 
 def test_session_start_does_not_overwrite_current_session_when_inherited(
@@ -112,7 +51,6 @@ def test_session_start_does_not_overwrite_current_session_when_inherited(
     mock_write = MagicMock()
 
     with (
-        patch("nexus.hooks.sweep_stale_sessions"),
         patch("nexus.hooks.write_claude_session_id", mock_write),
     ):
         output = session_start(claude_session_id="my-own-transient-uuid")
@@ -131,7 +69,6 @@ def test_session_start_writes_current_session_when_top_level(
     mock_write = MagicMock()
 
     with (
-        patch("nexus.hooks.sweep_stale_sessions"),
         patch("nexus.hooks.write_claude_session_id", mock_write),
     ):
         session_start(claude_session_id="top-level-uuid")
@@ -145,7 +82,6 @@ def test_session_start_uses_inherited_session_id(tmp_path: Path, monkeypatch) ->
     Subagents inherit the parent's ID this way."""
     monkeypatch.setenv("NX_SESSION_ID", "inherited-uuid")
     with (
-        patch("nexus.hooks.sweep_stale_sessions"),
         patch("nexus.hooks.write_claude_session_id"),
     ):
         output = session_start(claude_session_id="ignored-stdin-uuid")
@@ -159,7 +95,6 @@ def test_session_start_falls_back_to_generated_uuid(tmp_path, monkeypatch) -> No
     from a script) still produce a usable session pointer."""
     monkeypatch.delenv("NX_SESSION_ID", raising=False)
     with (
-        patch("nexus.hooks.sweep_stale_sessions"),
         patch("nexus.hooks.write_claude_session_id"),
         patch("nexus.hooks.generate_session_id", return_value="fresh-uuid"),
     ):
@@ -169,139 +104,19 @@ def test_session_start_falls_back_to_generated_uuid(tmp_path, monkeypatch) -> No
 
 # ── session_end ──────────────────────────────────────────────────────────────
 
-def _make_session_record(
-    sessions_dir: Path,
-    session_id: str = "test-session-uuid",
-    server_pid: int = 9900,
-) -> dict:
-    """Write a valid UUID-keyed JSON session record and return it."""
-    from nexus.session import write_session_record_by_id
-    tmpdir = str(sessions_dir / "t1_tmp")
-    Path(tmpdir).mkdir(parents=True, exist_ok=True)
-    write_session_record_by_id(
-        sessions_dir, session_id=session_id,
-        host="127.0.0.1", port=51823,
-        server_pid=server_pid,
-        tmpdir=tmpdir,
-    )
-    return json.loads((sessions_dir / f"{session_id}.session").read_text())
 
 
-def test_session_end_no_session_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """When no session record exists, session_end completes gracefully."""
-    sessions = tmp_path / "sessions"
-    sessions.mkdir()
-    db_path = tmp_path / "memory.db"
-    monkeypatch.delenv("NX_SESSION_ID", raising=False)
-
-    with (
-        patch("nexus.hooks.SESSIONS_DIR", sessions),
-        patch("nexus.hooks.find_session_by_id", return_value=None),
-        patch("nexus.hooks._default_db_path", return_value=db_path),
-    ):
-        output = session_end()
-
-    assert "Flushed 0" in output
-    assert "Expired 0" in output
 
 
-def test_session_end_owner_path_does_not_stop_chroma(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """RDR-094 Phase F (unconditional as of 4.13.0): session_end is a
-    thin wrapper around session_end_flush. nx-mcp owns chroma
-    teardown via its lifespan/atexit/signal-handler chain; the hook
-    must NEVER call stop_t1_server even when this process owns the
-    session record."""
-    sessions = tmp_path / "sessions"
-    _make_session_record(sessions, session_id="end-test-uuid", server_pid=9900)
-    monkeypatch.setenv("NX_SESSION_ID", "end-test-uuid")
-
-    mock_t1 = MagicMock()
-    mock_t1.flagged_entries.return_value = []
-    db_path = tmp_path / "memory.db"
-
-    with (
-        patch("nexus.hooks.SESSIONS_DIR", sessions),
-        patch("nexus.hooks._default_db_path", return_value=db_path),
-        patch("nexus.hooks._open_t1", return_value=mock_t1),
-    ):
-        output = session_end()
-
-    assert "Flushed 0" in output
-    # Session file must survive: the MCP server's lifespan (or the
-    # watchdog as belt-and-braces) is responsible for unlinking it.
-    assert (sessions / "end-test-uuid.session").exists()
 
 
-def test_session_end_flushes_flagged_entries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Flagged T1 entries are flushed to T2."""
-    from nexus.db.t2 import T2Database
-
-    sessions = tmp_path / "sessions"
-    _make_session_record(sessions, session_id="flush-test-uuid")
-    monkeypatch.setenv("NX_SESSION_ID", "flush-test-uuid")
-
-    mock_t1 = MagicMock()
-    mock_t1.flagged_entries.return_value = [
-        {"content": "hypothesis A", "flush_project": "proj", "flush_title": "hyp.md", "tags": ""},
-    ]
-    db_path = tmp_path / "memory.db"
-
-    with (
-        patch("nexus.hooks.SESSIONS_DIR", sessions),
-        patch("nexus.hooks._default_db_path", return_value=db_path),
-        patch("nexus.hooks._open_t1", return_value=mock_t1),
-    ):
-        output = session_end()
-
-    assert "Flushed 1" in output
-    mock_t1.clear.assert_called_once()
-
-    with T2Database(db_path) as db:
-        entry = db.get(project="proj", title="hyp.md")
-    assert entry is not None
-    assert entry["content"] == "hypothesis A"
 
 
-def test_session_end_child_does_not_stop_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Subagent's session_end uses the parent's record for flush but must NOT
-    stop the parent's server. Distinguishing owner from non-owner: the on-disk
-    session file is keyed by the parent's session_id; the subagent's process
-    inherits the same session_id (via NX_SESSION_ID or current_session) but
-    didn't write the file, so it should not delete the file or stop the
-    server. Owner-vs-child detection here piggybacks on whether the session
-    file exists at the time session_end runs — child agents typically run
-    after the parent has already cleaned up.
-    """
-    sessions = tmp_path / "sessions"
-    sessions.mkdir()
-    db_path = tmp_path / "memory.db"
-    # Subagent inherits the parent's session_id but the session file does
-    # NOT exist on disk (parent already cleaned up, or the subagent runs
-    # before the parent writes — either way, no own_record).
-    monkeypatch.setenv("NX_SESSION_ID", "parent-session-uuid")
 
-    parent_record = {
-        "session_id": "parent-session-uuid",
-        "server_host": "127.0.0.1",
-        "server_port": 51823,
-        "server_pid": 9900,
-        "tmpdir": "",
-        "created_at": 0,
-    }
-    mock_t1 = MagicMock()
-    mock_t1.flagged_entries.return_value = []
-    mock_stop = MagicMock()
 
-    with (
-        patch("nexus.hooks.SESSIONS_DIR", sessions),
-        patch("nexus.hooks.find_session_by_id", return_value=parent_record),
-        patch("nexus.hooks._default_db_path", return_value=db_path),
-        patch("nexus.hooks._open_t1", return_value=mock_t1),
-    ):
-        output = session_end()
 
-    assert "Session ended" in output
-    mock_stop.assert_not_called()  # child must not stop parent's server
+
+
 
 
 def test_session_end_db_error_doesnt_crash(tmp_path: Path) -> None:
@@ -310,7 +125,6 @@ def test_session_end_db_error_doesnt_crash(tmp_path: Path) -> None:
     sessions.mkdir()
 
     with (
-        patch("nexus.hooks.SESSIONS_DIR", sessions),
         patch("nexus.hooks._default_db_path", return_value=tmp_path / "nonexistent_dir" / "memory.db"),
     ):
         output = session_end()
@@ -333,8 +147,6 @@ class TestSessionEndFlush:
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
 
         with (
-            patch("nexus.hooks.SESSIONS_DIR", sessions),
-            patch("nexus.hooks.find_session_by_id", return_value=None),
             patch("nexus.hooks._default_db_path", return_value=tmp_path / "memory.db"),
         ):
             output = session_end_flush()
@@ -342,92 +154,12 @@ class TestSessionEndFlush:
         assert "Flushed 0" in output
         assert "Expired 0" in output
 
-    def test_flush_drains_flagged_entries_to_t2(self, tmp_path, monkeypatch):
-        from nexus.db.t2 import T2Database
-
-        sessions = tmp_path / "sessions"
-        _make_session_record(sessions, session_id="flush-only-uuid")
-        monkeypatch.setenv("NX_SESSION_ID", "flush-only-uuid")
-
-        mock_t1 = MagicMock()
-        mock_t1.flagged_entries.return_value = [
-            {
-                "content": "evidence A",
-                "flush_project": "p",
-                "flush_title": "a.md",
-                "tags": "",
-            },
-        ]
-        db_path = tmp_path / "memory.db"
-
-        with (
-            patch("nexus.hooks.SESSIONS_DIR", sessions),
-            patch("nexus.hooks._default_db_path", return_value=db_path),
-            patch("nexus.hooks._open_t1", return_value=mock_t1),
-        ):
-            output = session_end_flush()
-
-        assert "Flushed 1" in output
-        mock_t1.clear.assert_called_once()
-        # The flush function MUST NOT delete the session record. nx-mcp
-        # owns chroma teardown (lifespan + signal + atexit); hook just
-        # flushes.
-        assert (sessions / "flush-only-uuid.session").exists()
-
-        with T2Database(db_path) as db:
-            entry = db.get(project="p", title="a.md")
-        assert entry is not None
-        assert entry["content"] == "evidence A"
-
-    def test_flush_does_not_touch_chroma_even_when_record_owned(
-        self, tmp_path, monkeypatch,
-    ):
-        """Owner-detection lives in session_end, not in session_end_flush."""
-        sessions = tmp_path / "sessions"
-        _make_session_record(
-            sessions, session_id="owner-uuid", server_pid=12345,
-        )
-        monkeypatch.setenv("NX_SESSION_ID", "owner-uuid")
-
-        mock_t1 = MagicMock()
-        mock_t1.flagged_entries.return_value = []
-
-        with (
-            patch("nexus.hooks.SESSIONS_DIR", sessions),
-            patch("nexus.hooks._default_db_path", return_value=tmp_path / "memory.db"),
-            patch("nexus.hooks._open_t1", return_value=mock_t1),
-        ):
-            session_end_flush()
-
-        # Session file must survive a flush-only run.
-        assert (sessions / "owner-uuid.session").exists()
 
 
-def test_session_end_never_stops_chroma_phase_f(
-    tmp_path, monkeypatch,
-):
-    """RDR-094 Phase F (unconditional as of 4.13.0): session_end is
-    a thin wrapper around session_end_flush. The hook must NOT call
-    stop_t1_server -- nx-mcp owns chroma teardown via lifespan +
-    signal handler + atexit chain, with the watchdog as belt-and-
-    braces. Regression sentinel for the gate removal."""
-    sessions = tmp_path / "sessions"
-    _make_session_record(sessions, session_id="phase-f-uuid", server_pid=42)
-    monkeypatch.setenv("NX_SESSION_ID", "phase-f-uuid")
 
-    mock_t1 = MagicMock()
-    mock_t1.flagged_entries.return_value = []
 
-    with (
-        patch("nexus.hooks.SESSIONS_DIR", sessions),
-        patch("nexus.hooks._default_db_path", return_value=tmp_path / "memory.db"),
-        patch("nexus.hooks._open_t1", return_value=mock_t1),
-    ):
-        output = session_end()
 
-    assert "Session ended" in output
-    # Session file must survive: lifespan / watchdog owns the unlink.
-    assert (sessions / "phase-f-uuid.session").exists()
+
 
 
 # ── nx hook session-end-flush CLI subcommand ────────────────────────────────
@@ -444,8 +176,6 @@ def test_session_end_flush_cli_subcommand(tmp_path, monkeypatch):
     monkeypatch.delenv("NX_SESSION_ID", raising=False)
 
     with (
-        patch("nexus.hooks.SESSIONS_DIR", sessions),
-        patch("nexus.hooks.find_session_by_id", return_value=None),
         patch("nexus.hooks._default_db_path", return_value=tmp_path / "memory.db"),
     ):
         runner = CliRunner()

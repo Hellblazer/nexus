@@ -109,33 +109,46 @@ def _tcp_probe(host: str, port: int, timeout: float = 0.5) -> bool:
         return False
 
 
-def scan_sessions_sync(sessions_dir: Path) -> list[SessionInfo]:
-    """Scan *.session files and probe each for liveness (synchronous)."""
-    if not sessions_dir.exists():
+def scan_sessions_sync(config_dir: Path) -> list[SessionInfo]:
+    """Scan ``t1_addr.<claude_pid>`` files and probe each for liveness.
+
+    Post-RDR-105 P4 the address surface is one flat file per live
+    Claude Code session. Each file contains ``host:port\\n``; the
+    file's stem suffix encodes the owning Claude's PID (used as the
+    session identifier here for human-readable display).
+    """
+    if not config_dir.exists():
         return []
 
     results: list[SessionInfo] = []
-    for sf in sessions_dir.glob("*.session"):
+    for path in config_dir.glob("t1_addr.*"):
         try:
-            record = json.loads(sf.read_text())
-        except (json.JSONDecodeError, OSError):
+            text = path.read_text().strip()
+        except OSError:
+            continue
+        if ":" not in text:
+            continue
+        host, _, port_str = text.partition(":")
+        try:
+            port = int(port_str)
+        except ValueError:
+            continue
+        try:
+            claude_pid = int(path.suffix.lstrip("."))
+        except ValueError:
             continue
 
-        pid = record.get("server_pid", 0)
-        host = record.get("server_host", "127.0.0.1")
-        port = record.get("server_port", 0)
-
-        pid_alive = _is_pid_alive(pid) if pid else False
+        pid_alive = _is_pid_alive(claude_pid) if claude_pid else False
         tcp_ok = _tcp_probe(host, port) if pid_alive else False
 
         results.append(SessionInfo(
-            session_id=record.get("session_id", sf.stem),
+            session_id=str(claude_pid),
             host=host,
             port=port,
-            pid=pid,
+            pid=claude_pid,
             pid_alive=pid_alive,
             tcp_reachable=tcp_ok,
-            created_at=str(record.get("created_at", "")),
+            created_at="",
         ))
 
     return results

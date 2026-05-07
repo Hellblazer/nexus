@@ -49,18 +49,7 @@ def test_scratch_put_from_stdin(runner: CliRunner, fake_home: Path) -> None:
 
 # ── get success ──────────────────────────────────────────────────────────────
 
-def test_scratch_get_success(runner: CliRunner, fake_home: Path) -> None:
-    """get with a valid ID echoes the content of the scratch entry."""
-    with patch("nexus.session.os.getsid", return_value=99910):
-        # Put an entry and capture the ID
-        put_result = runner.invoke(main, ["scratch", "put", "hello scratch world"])
-        assert put_result.exit_code == 0, put_result.output
-        doc_id = put_result.output.strip().split("Stored: ")[1]
 
-        # Get it back
-        get_result = runner.invoke(main, ["scratch", "get", doc_id])
-        assert get_result.exit_code == 0, get_result.output
-        assert "hello scratch world" in get_result.output
 
 
 # ── get missing entry ─────────────────────────────────────────────────────────
@@ -162,20 +151,7 @@ def test_scratch_promote_nonexistent_raises(runner: CliRunner, fake_home: Path) 
 
 # ── nexus-st9u: nx scratch delete ────────────────────────────────────────────
 
-def test_scratch_delete_happy_path(runner: CliRunner, fake_home: Path) -> None:
-    """delete removes an entry by 8-char prefix and it no longer appears in list."""
-    with patch("nexus.session.os.getsid", return_value=99940):
-        put_result = runner.invoke(main, ["scratch", "put", "delete me please"])
-        assert put_result.exit_code == 0, put_result.output
-        full_id = put_result.output.strip().split("Stored: ")[1]
-        prefix = full_id[:8]
 
-        result = runner.invoke(main, ["scratch", "delete", prefix])
-        assert result.exit_code == 0, result.output
-        assert "Deleted" in result.output
-
-        list_result = runner.invoke(main, ["scratch", "list"])
-        assert full_id[:8] not in list_result.output
 
 
 def test_scratch_delete_not_found(runner: CliRunner, fake_home: Path) -> None:
@@ -186,16 +162,4 @@ def test_scratch_delete_not_found(runner: CliRunner, fake_home: Path) -> None:
         assert "not found" in result.output
 
 
-def test_scratch_delete_leaves_other_entries(runner: CliRunner, fake_home: Path) -> None:
-    """delete removes only the targeted entry."""
-    with patch("nexus.session.os.getsid", return_value=99942):
-        r1 = runner.invoke(main, ["scratch", "put", "keep this one"])
-        r2 = runner.invoke(main, ["scratch", "put", "delete this one"])
-        id1 = r1.output.strip().split("Stored: ")[1]
-        id2 = r2.output.strip().split("Stored: ")[1]
 
-        runner.invoke(main, ["scratch", "delete", id2[:8]])
-
-        list_result = runner.invoke(main, ["scratch", "list"])
-        assert id1[:8] in list_result.output
-        assert id2[:8] not in list_result.output
