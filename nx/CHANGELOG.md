@@ -6,6 +6,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.27.0] - 2026-05-07
+
+Plugin version aligned with conexus 4.27.0. No plugin-side changes;
+the release ships the RDR-105 T1 architecture rewrite in the conexus
+package: a single hybrid-discovery code path (env passdown for
+MCP-dispatched subprocesses + single-writer
+`~/.config/nexus/t1_addr.<claude_pid>` for siblings) replacing the
+multi-writer session-record machinery that produced six consecutive
+bug iterations (#567 / #572 / #574 / #575 / #576 / #579) in seven
+days. ~5000 LOC removed from the conexus package. See root
+`CHANGELOG.md` for the full breakdown.
+
 ## [4.26.8] - 2026-05-07
 
 ### Fixed

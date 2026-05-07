@@ -6,6 +6,87 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.27.0] - 2026-05-07
+
+Minor release. RDR-105 retires the multi-writer T1 coordination layer
+that produced six consecutive bug iterations
+(GH #567 / #572 / #574 / #575 / #576 / #579) in seven days. The new
+hybrid-discovery architecture has a single writer (the top-level MCP
+lifespan), one trivial discovery file per Claude session
+(`~/.config/nexus/t1_addr.<claude_pid>` containing `host:port\n`), and
+a four-branch fail-loud constructor. The class of bugs is structurally
+eliminated because the surface it lived on is gone.
+
+### Changed (RDR-105)
+
+- **T1 discovery is now hybrid.** MCP-dispatched subprocesses
+  (`claude -p` shared, plan-runner) inherit `NX_T1_HOST` /
+  `NX_T1_PORT` from the parent's env. Claude-Code-spawned siblings
+  (Bash tools, hooks, shell `nx scratch`) walk the PPID chain to the
+  FIRST `claude*` ancestor (NOT the topmost; RF-6 fix) and read
+  `~/.config/nexus/t1_addr.<claude_pid>`.
+- **`T1Database.__init__` is fail-loud.** Four-branch gate: explicit
+  client injection, env-HTTP, file-HTTP, explicit isolation, else
+  raise `T1ServerNotFoundError`. No silent fallback to
+  `EphemeralClient` (closes GH #567 by structural elimination).
+- **`claude -p` dispatch grows three modes.** `share_t1=True` for
+  parent-T1 visibility, `ephemeral=True` for stateless one-shots
+  (the historical default), and `owned` (default) for sealed-from-parent
+  subsessions. `share_t1` and `ephemeral` are mutually exclusive.
+- **`NEXUS_SKIP_T1` deprecated** in favour of `NX_T1_ISOLATED`. Both
+  honoured for the 4.27 -> 4.28 cycle; a one-shot deprecation
+  warning fires when only the legacy name is set. Removed in 5.0.
+- **`nx doctor --check-t1`** new flag: diagnoses missing addr file,
+  unreachable chroma, and the `exec -a` / wrapper-rename residual
+  where the PPID walk's `claude*` prefix check misses.
+
+### Removed (RDR-105)
+
+- Multi-writer session-record machinery: per-session `<uuid>.session`
+  JSON files, `sweep_stale_sessions`, `write_session_record_*`,
+  `find_session_by_id`, `find_ancestor_session`, `find_claude_root_pid`
+  (the topmost-walk that broke owned isolation),
+  `_resolve_session_record_with_retry`.
+- `src/nexus/t1_watchdog.py` entire file.
+- `_t1_chroma_init_if_owner`, `reconcile_owned_chroma`,
+  `_resolve_top_level_session_id` from `mcp/core.py`.
+- ~5000 LOC across 30 files.
+
+### Fixed
+
+- **GH #579 closed by structural elimination.** All six bug iterations
+  in the class (#567 / #572 / #574 / #575 / #576 / #579) shared the
+  shape "on-disk session record discovery races with another writer."
+  The new architecture has neither on-disk session records nor a
+  second writer.
+
+### Behavioural changes (user-visible)
+
+- `nx scratch` from a fresh shell with no Claude Code session running
+  now raises `T1ServerNotFoundError` instead of silently landing in a
+  per-shell ephemeral. Operators who want ephemeral semantics opt in
+  via `NX_T1_ISOLATED=1`.
+- `claude -p` plan-runner / non-operator subprocesses default to
+  `owned` mode (their own session-scoped T1, sealed from the parent).
+  Today these implicitly shared with parent via on-disk-record
+  discovery; the new default is sealed-from-parent. Callers needing
+  parent-T1 visibility opt in via `share_t1=True`.
+- Per-session record files (`~/.config/nexus/sessions/<uuid>.session`)
+  are no longer written. The `sessions/` directory will be empty after
+  migration; the one-time post-upgrade sweep at MCP startup removes
+  any leftovers.
+- MCP server crash mid-session loses T1. The pre-RDR-105 architecture
+  nominally preserved it (orphan chroma survived MCP crash), but in
+  practice operators always restart Claude Code, which restarts MCP.
+
+### Migration
+
+Six PRs landed RDR-105 in develop before this release: #581 (P1
+spike), #582 (P2 productionize), #583 (P3 default flip), #584 (P3.1
+shakeout playbook), #585 (P4 deletion), #586 (P5 doctor diagnostic +
+sub-agent contract docs). The shakeout playbook lives at
+`docs/rdr/rdr-105-shakeout.md`.
+
 ## [4.26.8] - 2026-05-07
 
 ### Fixed
