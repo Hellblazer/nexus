@@ -20,6 +20,7 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 from nexus.session import (
     SESSIONS_DIR,
+    _t1_isolated_env,
     find_ancestor_session,
     find_immediate_claude_pid,
     find_session_by_id,
@@ -183,50 +184,73 @@ class T1ServerNotFoundError(RuntimeError):
 
 
 class T1Database:
-    """T1 ChromaDB session scratch — shared across all agents in a session tree.
+    """T1 ChromaDB session scratch, shared across all agents in a session tree.
 
-    On construction, walks the PPID chain to find the session's ChromaDB HTTP
-    server address.  All agents that share a common ancestor Claude Code process
-    connect to the same server and see each other's entries (scoped by
-    ``session_id`` metadata filter).
+    Two discovery regimes coexist behind the ``NX_T1_NEW_DISCOVERY=1``
+    feature flag (RDR-105). Flag-on and flag-off paths are mutually
+    exclusive within a process per the RDR §'Phase 2 flag-isolation
+    contract'.
 
-    Falls back to a local ``EphemeralClient`` (with a warning) when no server
-    record is found — this preserves T1 functionality in restricted environments
-    where the server could not start or ``ps`` is unavailable.
+    Flag-off (legacy)
+        On construction, walks the PPID chain looking for an
+        ancestor ``sessions/<uuid>.session`` record. Falls back to
+        ``EphemeralClient`` only when ``NEXUS_SKIP_T1=1`` is set;
+        otherwise raises ``T1ServerNotFoundError`` (GH #567).
+        Reconnect after a connectivity failure re-resolves the
+        record once before raising.
 
-    If the parent session ends (stopping the ChromaDB server) while a child
-    agent is still running, the first subsequent T1 operation will catch the
-    connectivity error and transparently reconnect — either to a freshly
-    detected server record or to a new local EphemeralClient.  Only one
-    reconnect attempt is made; ``_dead`` is set afterwards to prevent loops.
+    Flag-on (RDR-105 P2)
+        Constructor goes through ``_init_new_discovery`` (a four-
+        branch fail-loud gate): Path A (env), Path B (addr file),
+        Path C (explicit ``NX_T1_ISOLATED=1``), or Path D (raise).
+        No fall-through to legacy resolvers. Reconnect is NOT
+        supported in flag-on mode; callers must construct a fresh
+        ``T1Database`` to re-resolve.
 
-    Pass ``client=`` explicitly to inject a custom client in tests.
+    Pass ``client=`` explicitly to inject a custom client in tests
+    (works in both regimes; bypasses both gates).
     """
 
-    def _try_new_discovery_paths(self, chromadb, session_id: str | None) -> bool:
-        """RDR-105 P1 hybrid discovery: Path A (env) then Path B (file).
+    def _init_new_discovery(self, chromadb, session_id: str | None) -> None:
+        """RDR-105 P2 (nexus-mj2o): four-branch fail-loud constructor.
 
-        Returns True iff one path resolved and ``self._client`` /
-        ``self._session_id`` are populated. False means the caller
-        should fall through to the legacy resolver chain (P1
-        additive-only contract).
+        Branch order (signal hierarchy mirrors the lifespan):
 
-        TODO(P2 / nexus-9fu7): replace the additive fall-through
-        with the four-branch fail-loud constructor. Once the addr
-        file is the canonical sibling-discovery surface, missing
-        env + missing file should raise ``T1ServerNotFoundError``,
-        not silently delegate to the legacy resolver.
+        Path A
+            ``NX_T1_HOST`` + ``NX_T1_PORT`` in env -> ``HttpClient``.
+            Used by MCP-dispatched subprocesses (``claude -p`` shared).
+        Path B
+            ``find_immediate_claude_pid`` resolves to a live addr file
+            at ``~/.config/nexus/t1_addr.<pid>`` -> ``HttpClient``.
+            Used by Claude-Code-spawned siblings (Bash tool, hooks).
+        Path C
+            ``NX_T1_ISOLATED=1`` (or its legacy ``NEXUS_SKIP_T1=1``
+            alias) -> ``EphemeralClient``. The only place
+            ``EphemeralClient`` may be constructed in this code path.
+        Path D
+            None of the above -> raise :class:`T1ServerNotFoundError`.
+
+        The flag-on path does NOT fall through to the legacy resolver.
+        Per the RDR §'Phase 2 flag-isolation contract', flag-on and
+        flag-off paths are mutually exclusive per process.
         """
         host_env = os.environ.get("NX_T1_HOST", "").strip()
         port_env = os.environ.get("NX_T1_PORT", "").strip()
         if host_env and port_env:
             try:
                 port_int = int(port_env)
-            except ValueError:
-                return False
+            except ValueError as exc:
+                raise T1ServerNotFoundError(
+                    f"NX_T1_HOST is set but NX_T1_PORT={port_env!r} is "
+                    "not a valid integer."
+                ) from exc
             self._client = chromadb.HttpClient(host=host_env, port=port_int)
-            self._session_id = session_id or os.environ.get("NX_SESSION_ID", "").strip() or str(uuid4())
-            return True
+            self._session_id = (
+                session_id
+                or os.environ.get("NX_SESSION_ID", "").strip()
+                or str(uuid4())
+            )
+            return
 
         claude_pid = find_immediate_claude_pid()
         if claude_pid > 0:
@@ -234,10 +258,34 @@ class T1Database:
             if addr is not None:
                 host, port = addr
                 self._client = chromadb.HttpClient(host=host, port=port)
-                self._session_id = session_id or os.environ.get("NX_SESSION_ID", "").strip() or str(uuid4())
-                return True
+                self._session_id = (
+                    session_id
+                    or os.environ.get("NX_SESSION_ID", "").strip()
+                    or str(uuid4())
+                )
+                return
 
-        return False
+        if _t1_isolated_env():
+            self._client = chromadb.EphemeralClient()
+            self._session_id = (
+                session_id
+                or os.environ.get("NX_SESSION_ID", "").strip()
+                or str(uuid4())
+            )
+            return
+
+        raise T1ServerNotFoundError(
+            "T1 not configured for this process. Either inherit "
+            "NX_T1_HOST and NX_T1_PORT from a parent MCP server "
+            "(MCP-dispatched subprocess), run as a sibling of a "
+            "top-level MCP server so the address file is "
+            "discoverable via the PPID walk to the immediate "
+            "claude ancestor, or set NX_T1_ISOLATED=1 to opt in "
+            "to an in-process ephemeral T1.\n"
+            "\n"
+            "If you launched Claude Code via 'exec -a' or a custom "
+            "wrapper, ensure the process name starts with 'claude'."
+        )
 
     def __init__(self, session_id: str | None = None, client=None) -> None:
         import chromadb
@@ -251,19 +299,12 @@ class T1Database:
             # EphemeralClient as the MCP-tool-side T1 store.
             self._client = client
             self._session_id = session_id or str(uuid4())
-        elif os.environ.get("NX_T1_NEW_DISCOVERY") == "1" and self._try_new_discovery_paths(chromadb, session_id):
-            # RDR-105 P1 (nexus-4fek): feature-flagged hybrid discovery.
-            # Path A (env): NX_T1_HOST + NX_T1_PORT inherited from parent
-            #   MCP via subprocess env. Used by ``claude -p`` shared
-            #   subprocess dispatch.
-            # Path B (file): ``~/.config/nexus/t1_addr.<claude_pid>`` written
-            #   by the parent MCP at lifespan start. Used by Claude-Code-
-            #   spawned siblings (Bash tools, hooks).
-            # Returns True iff one path resolved; falls through to the
-            # legacy resolver chain otherwise so flag-on is strictly
-            # additive in P1 (legacy code path stays usable when neither
-            # env nor file is present).
-            pass
+        elif os.environ.get("NX_T1_NEW_DISCOVERY") == "1":
+            # RDR-105 P2 (nexus-mj2o): four-branch fail-loud constructor.
+            # Replaces the P1 additive fall-through; flag-on now refuses
+            # to delegate to the legacy resolver per the RDR §'Phase 2
+            # flag-isolation contract'.
+            self._init_new_discovery(chromadb, session_id)
         else:
             # NEXUS_SKIP_T1=1 (set by claude_dispatch for stateless operator
             # subprocesses) → go straight to EphemeralClient without searching
@@ -369,6 +410,25 @@ class T1Database:
         if self._dead:
             return
         self._dead = True  # set before any I/O to prevent loops on re-entry
+
+        if os.environ.get("NX_T1_NEW_DISCOVERY") == "1":
+            # RDR-105 P2 follow-up (review #582): the legacy resolver
+            # consults SESSIONS_DIR + find_session_by_id, which
+            # flag-on processes never write. Trying it would always
+            # miss; reading the addr file here would require a fresh
+            # T1Database to apply the new four-branch gate. Fail
+            # loud and let the caller decide whether to reconstruct.
+            _log.warning(
+                "t1_reconnect_unsupported_in_new_discovery",
+                session_id=self._session_id,
+            )
+            raise T1ServerNotFoundError(
+                "T1 reconnect is not supported under "
+                "NX_T1_NEW_DISCOVERY=1. The chroma server became "
+                "unreachable; construct a new T1Database to "
+                "re-resolve via the four-branch hybrid-discovery "
+                "gate (env -> addr file -> isolation -> raise)."
+            )
 
         prior_session_id = self._session_id
         # Use the same UUID-keyed chain as the constructor (GH #576):

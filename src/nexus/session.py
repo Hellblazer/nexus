@@ -723,6 +723,32 @@ def find_immediate_claude_pid(start_pid: int | None = None) -> int:
     return immediate_ppid
 
 
+_NEXUS_SKIP_T1_DEPRECATION_WARNED: bool = False
+
+
+def _t1_isolated_env() -> bool:
+    """Return True when the current env opts into per-process T1 ephemeral.
+
+    Honours the new ``NX_T1_ISOLATED=1`` name; for the 4.27 -> 4.28
+    deprecation cycle (RF-4) the legacy ``NEXUS_SKIP_T1=1`` is also
+    accepted with a one-shot warning when the new name is absent.
+    Removed in 5.0. The one-shot guard
+    ``_NEXUS_SKIP_T1_DEPRECATION_WARNED`` keeps long-running MCP
+    workflows from spamming the log on every ``T1Database``
+    construction.
+    """
+    global _NEXUS_SKIP_T1_DEPRECATION_WARNED
+    isolated = os.environ.get("NX_T1_ISOLATED", "").strip().lower() in ("1", "true", "yes")
+    legacy = os.environ.get("NEXUS_SKIP_T1", "").strip().lower() in ("1", "true", "yes")
+    if legacy and not isolated and not _NEXUS_SKIP_T1_DEPRECATION_WARNED:
+        _NEXUS_SKIP_T1_DEPRECATION_WARNED = True
+        _log.warning(
+            "nexus_skip_t1_deprecated",
+            message="NEXUS_SKIP_T1 is deprecated; use NX_T1_ISOLATED=1 instead. Will be removed in 5.0.",
+        )
+    return isolated or legacy
+
+
 def t1_addr_path(claude_pid: int) -> Path:
     """Return the path to the address file for *claude_pid*.
 
