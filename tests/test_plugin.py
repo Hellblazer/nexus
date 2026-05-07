@@ -89,6 +89,79 @@ def test_session_start_outputs_session_id(
     assert "Nexus ready" in result.output
 
 
+# ── GH #576 Phase F: subprocess SessionStart skip-sweep ─────────────────────
+
+
+def test_subprocess_session_start_skips_sweep_when_inherited(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GH #576 Phase F: when SessionStart fires inside a subprocess
+    spawned by ``claude_dispatch`` (NX_SESSION_ID set on env), the
+    parent owns all session-record lifecycle decisions and the
+    subprocess must NOT sweep the parent's records.
+
+    Pre-fix the unconditional sweep at hooks.py:113 ran inside every
+    plan-runner subprocess SessionStart. With Phase C in place
+    (filename-stem comparison) the sweep's uuid_stale arm no longer
+    fires for healthy parent records — but Phase F is defense-in-depth
+    against the other arms (age_expired, server_dead probe race,
+    anchor_dead). The combined effect: parent's record is never
+    touched by subprocess-side housekeeping.
+    """
+    from nexus.hooks import session_start
+
+    monkeypatch.setenv("NX_SESSION_ID", "parent-uuid")
+    swept: list[bool] = []
+    tmpdir_swept: list[bool] = []
+
+    def _fake_sweep(*args, **kwargs):
+        swept.append(True)
+
+    def _fake_tmpdir_sweep(*args, **kwargs):
+        tmpdir_swept.append(True)
+
+    with patch("nexus.hooks.sweep_stale_sessions", side_effect=_fake_sweep), \
+         patch("nexus.session.sweep_orphan_tmpdirs", side_effect=_fake_tmpdir_sweep):
+        session_start()
+
+    assert swept == [], (
+        "subprocess SessionStart (NX_SESSION_ID set) must NOT call "
+        "sweep_stale_sessions on the parent's SESSIONS_DIR"
+    )
+    assert tmpdir_swept == [], (
+        "subprocess SessionStart must NOT call sweep_orphan_tmpdirs"
+    )
+
+
+def test_top_level_session_start_runs_sweep(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Counterpart: top-level SessionStart (NX_SESSION_ID NOT set)
+    still runs both sweeps — the conventional bootstrap path."""
+    from nexus.hooks import session_start
+
+    monkeypatch.delenv("NX_SESSION_ID", raising=False)
+    swept: list[bool] = []
+    tmpdir_swept: list[bool] = []
+
+    def _fake_sweep(*args, **kwargs):
+        swept.append(True)
+
+    def _fake_tmpdir_sweep(*args, **kwargs):
+        tmpdir_swept.append(True)
+
+    with patch("nexus.hooks.sweep_stale_sessions", side_effect=_fake_sweep), \
+         patch("nexus.session.sweep_orphan_tmpdirs", side_effect=_fake_tmpdir_sweep):
+        session_start()
+
+    assert swept == [True], (
+        "top-level SessionStart must call sweep_stale_sessions"
+    )
+    assert tmpdir_swept == [True], (
+        "top-level SessionStart must call sweep_orphan_tmpdirs"
+    )
+
+
 # ── AC5: SessionEnd flush + expire ────────────────────────────────────────────
 
 def test_session_end_flushes_flagged_t1_entries(

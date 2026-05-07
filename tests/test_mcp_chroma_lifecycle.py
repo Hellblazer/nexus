@@ -15,6 +15,7 @@ spike harness.
 """
 from __future__ import annotations
 
+import os
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
@@ -105,6 +106,94 @@ class TestInitIfOwner:
             assert core_mod._OWNED_CHROMA.get("nested") is True
             mock_start.assert_not_called()
 
+    def test_subprocess_with_nx_session_id_never_spawns_when_probe_fails(
+        self, monkeypatch,
+    ):
+        """GH #576 Phase D — invariant I1+I5: subprocess MCPs (those
+        with NX_SESSION_ID set) must NEVER spawn their own chroma,
+        even when the parent's probe fails. Pre-fix the function fell
+        through to the spawn path (line 178) and overwrote
+        ``sessions/<inherited>.session`` with the subprocess's own
+        server_pid — the deep-analyst's "fifth bug" (silent
+        spawn-and-overwrite under inherited UUID).
+
+        Two failure modes feed the spawn fall-through:
+          1. ``find_session_by_id`` returns None (parent's record was
+             swept by an earlier subprocess SessionStart).
+          2. TCP probe to parent times out under load.
+
+        Phase D's hard read-only gate kills both modes at the same
+        check: when NX_SESSION_ID is set, never spawn. Period.
+        """
+        from nexus.mcp import core as core_mod
+
+        with _clean_owned_chroma():
+            monkeypatch.setenv("NX_SESSION_ID", "parent-uuid")
+            monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+            # Parent record gone (sweep raced) → find returns None.
+            with patch(
+                "nexus.session.find_session_by_id", return_value=None,
+            ), patch(
+                "nexus.session.start_t1_server",
+            ) as mock_start, patch(
+                "nexus.session.write_session_record_by_id",
+            ) as mock_write, patch(
+                "nexus.session.spawn_t1_watchdog",
+            ) as mock_spawn:
+                core_mod._t1_chroma_init_if_owner()
+
+            mock_start.assert_not_called()
+            mock_write.assert_not_called()
+            mock_spawn.assert_not_called()
+            # _OWNED_CHROMA stays empty: subprocess T1Database falls
+            # back to its NEXUS_SKIP_T1 / EphemeralClient or raises
+            # T1ServerNotFoundError. No silent record overwrite.
+            assert core_mod._OWNED_CHROMA == {}
+
+    def test_subprocess_with_nx_session_id_never_spawns_when_probe_succeeds_no_record(
+        self, monkeypatch,
+    ):
+        """Variant of the above: probe succeeds (parent chroma is
+        reachable in some other guise) but find_session_by_id returns
+        None — still no spawn, no record write."""
+        from nexus.mcp import core as core_mod
+
+        with _clean_owned_chroma():
+            monkeypatch.setenv("NX_SESSION_ID", "parent-uuid")
+            monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+            with patch(
+                "nexus.session.find_session_by_id", return_value=None,
+            ), patch.object(
+                core_mod, "_tcp_probe_alive", return_value=True,
+            ), patch(
+                "nexus.session.start_t1_server",
+            ) as mock_start:
+                core_mod._t1_chroma_init_if_owner()
+            mock_start.assert_not_called()
+            assert core_mod._OWNED_CHROMA.get("nested") is not True
+
+    def test_subprocess_with_nexus_skip_t1_never_spawns(
+        self, monkeypatch,
+    ):
+        """Phase D: NEXUS_SKIP_T1=1 (operator-subprocess opt-in from
+        ``claude_dispatch``) is also a hard read-only gate. The conftest
+        sets it autouse; this test relies on that default rather than
+        opting out."""
+        from nexus.mcp import core as core_mod
+
+        with _clean_owned_chroma():
+            monkeypatch.delenv("NX_SESSION_ID", raising=False)
+            # NEXUS_SKIP_T1 is set autouse by conftest._isolate_t1_sessions.
+            assert os.environ.get("NEXUS_SKIP_T1") == "1"
+            with patch(
+                "nexus.session.start_t1_server",
+            ) as mock_start, patch(
+                "nexus.session.write_session_record_by_id",
+            ) as mock_write:
+                core_mod._t1_chroma_init_if_owner()
+            mock_start.assert_not_called()
+            mock_write.assert_not_called()
+
     def test_reuse_path_when_existing_record_reachable(self, monkeypatch):
         """FM-NEW-2: existing record for own session_id is reachable,
         so reuse instead of spawning. _OWNED_CHROMA is marked reused
@@ -113,6 +202,10 @@ class TestInitIfOwner:
 
         with _clean_owned_chroma():
             monkeypatch.delenv("NX_SESSION_ID", raising=False)
+            # Phase D: NEXUS_SKIP_T1=1 short-circuits to read-only
+            # subprocess mode. The conftest sets it autouse for ALL
+            # tests; top-level-MCP scenarios must opt out explicitly.
+            monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
             existing = {"server_host": "127.0.0.1", "server_port": 22222}
             with patch.object(
                 core_mod, "_resolve_top_level_session_id", return_value="own-id",
@@ -136,6 +229,7 @@ class TestInitIfOwner:
 
         with _clean_owned_chroma():
             monkeypatch.delenv("NX_SESSION_ID", raising=False)
+            monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
             spawn_calls: dict = {}
 
             def _fake_spawn_watchdog(**kwargs):
@@ -175,6 +269,7 @@ class TestInitIfOwner:
 
         with _clean_owned_chroma():
             monkeypatch.delenv("NX_SESSION_ID", raising=False)
+            monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
             with patch.object(
                 core_mod, "_resolve_top_level_session_id",
                 return_value="x",
@@ -487,6 +582,12 @@ def test_t1_chroma_init_self_mints_session_id_when_pointer_missing(
     pointer = tmp_path / "current_session"
     monkeypatch.setattr("nexus.session.CLAUDE_SESSION_FILE", pointer)
 
+    # Phase D: NEXUS_SKIP_T1=1 short-circuits to read-only subprocess
+    # mode. The conftest sets it autouse for ALL tests; top-level-MCP
+    # scenarios (this self-mint test) must opt out explicitly.
+    monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+    monkeypatch.delenv("NX_SESSION_ID", raising=False)
+
     # Confirm pointer is absent at start.
     assert not pointer.exists()
 
@@ -546,7 +647,10 @@ class TestReconcileOwnedChroma:
         old_id = "old-uuid-aaaa-bbbb-cccc-dddddddddddd"
         new_id = "new-uuid-aaaa-bbbb-cccc-dddddddddddd"
         old_record = sessions_dir / f"{old_id}.session"
-        old_record.write_text('{"session_id": "old"}')
+        old_record.write_text(
+            '{"session_id": "' + old_id + '", "server_pid": 99999, '
+            '"server_host": "127.0.0.1", "server_port": 12345}'
+        )
 
         pointer = tmp_path / "current_session"
         pointer.write_text(new_id)
@@ -572,6 +676,24 @@ class TestReconcileOwnedChroma:
         assert new_record.exists(), "new record must be present"
         assert core_mod._OWNED_CHROMA["session_id"] == new_id
         assert core_mod._OWNED_CHROMA["session_file"] == str(new_record)
+
+        # GH #576 Phase B: JSON content must be rewritten too — the
+        # filename rename was historically NOT followed by a content
+        # rewrite, leaving the JSON's ``session_id`` field stale. That
+        # stale field then triggered ``sweep_stale_sessions.uuid_stale``
+        # in any subsequent SessionStart fire (including the plan-runner
+        # subprocess SessionStart from claude_dispatch), which unlinked
+        # the canonical record and caused the silent T1 data loss
+        # reported in #576.
+        import json
+        content = json.loads(new_record.read_text())
+        assert content["session_id"] == new_id, (
+            f"JSON content session_id must be rewritten to canonical; "
+            f"got {content.get('session_id')!r}"
+        )
+        # Other fields preserved.
+        assert content["server_pid"] == 99999
+        assert content["server_host"] == "127.0.0.1"
 
         core_mod._OWNED_CHROMA.clear()
 

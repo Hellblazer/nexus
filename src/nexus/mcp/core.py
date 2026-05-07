@@ -130,17 +130,41 @@ def _t1_chroma_init_if_owner() -> None:
         write_session_record_by_id,
     )
 
-    # Subagent: a nested MCP server (claude_dispatch sets NX_SESSION_ID
-    # on the child env) inherits the parent's chroma via PPID walk. The
-    # T1 client handles the lookup; we just must not spawn a sibling.
+    # GH #576 Phase D: subprocess HARD READ-ONLY init. When
+    # ``NX_SESSION_ID`` (subagent inheritance from claude_dispatch) OR
+    # ``NEXUS_SKIP_T1=1`` (operator-subprocess opt-in) is set, this
+    # process is NEVER the chroma owner and must never spawn a sibling
+    # chroma, write a session record, or unlink anything on shutdown.
+    #
+    # Pre-fix the function had a probe-driven branch (lines 137-143):
+    # if the parent's TCP probe failed (0.5s timeout under load) the
+    # nested guard would miss and control fell through to the spawn
+    # path at line 178, which started a fresh chroma at the inherited
+    # UUID and overwrote ``sessions/<inherited>.session`` with the
+    # subprocess's own server_pid. The subprocess's
+    # ``_t1_chroma_shutdown`` then unlinked the file because
+    # ``_OWNED_CHROMA["nested"]`` was never set. This is the silent
+    # spawn-and-overwrite path the deep-analyst flagged as the
+    # fifth invariant violation.
     inherited = _os.environ.get("NX_SESSION_ID", "").strip()
-    if inherited:
-        ancestor = find_session_by_id(SESSIONS_DIR, inherited)
-        if ancestor and _tcp_probe_alive(
-            ancestor.get("server_host", ""), int(ancestor.get("server_port", 0)),
-        ):
-            _OWNED_CHROMA["nested"] = True
-            return
+    skip_t1 = _os.environ.get(
+        "NEXUS_SKIP_T1", ""
+    ).strip().lower() in ("1", "true", "yes")
+    if inherited or skip_t1:
+        if inherited:
+            ancestor = find_session_by_id(SESSIONS_DIR, inherited)
+            if ancestor and _tcp_probe_alive(
+                ancestor.get("server_host", ""),
+                int(ancestor.get("server_port", 0)),
+            ):
+                _OWNED_CHROMA["nested"] = True
+                return
+        # Probe failed (or no inherited UUID): leave _OWNED_CHROMA
+        # empty. T1Database with NEXUS_SKIP_T1=1 will use
+        # EphemeralClient (operator-subprocess semantics); without
+        # NEXUS_SKIP_T1 the constructor will raise T1ServerNotFoundError
+        # — explicit failure, not a silent record overwrite.
+        return
 
     own_id = inherited or _resolve_top_level_session_id()
     if not own_id:
@@ -311,6 +335,38 @@ def reconcile_owned_chroma() -> bool:
             from_id=current_id, to_id=canonical, error=str(exc),
         )
         return False
+
+    # GH #576 Phase B: rewrite the JSON content's session_id field to
+    # match the new (canonical) filename. Pre-fix ``Path.replace`` only
+    # renamed the file; the JSON content kept the pre-reconcile UUID,
+    # which then triggered ``sweep_stale_sessions.uuid_stale`` (the
+    # JSON-content-vs-current_session comparison at session.py:286)
+    # in any subsequent SessionStart fire — including the plan-runner
+    # subprocess SessionStart. The sweep would unlink the canonical
+    # record, leading to the silent T1 data loss reported in #576.
+    # The atomic write below uses the same shape as
+    # ``write_session_record_by_id`` (O_TRUNC + os.write).
+    import json
+    try:
+        record = json.loads(new_path.read_text())
+        record["session_id"] = canonical
+        fd = _os.open(
+            str(new_path), _os.O_CREAT | _os.O_WRONLY | _os.O_TRUNC, 0o600,
+        )
+        try:
+            _os.write(fd, json.dumps(record).encode())
+        finally:
+            _os.close(fd)
+    except (json.JSONDecodeError, OSError) as exc:
+        import structlog
+        structlog.get_logger().warning(
+            "t1_chroma_reconcile_json_rewrite_failed",
+            from_id=current_id, to_id=canonical, error=str(exc),
+        )
+        # Filename rename succeeded — record is still discoverable via
+        # ``find_session_by_id`` (UUID-keyed lookup). Phase C
+        # (sweep filename-stem comparison) prevents the uuid_stale
+        # arm from firing even with stale JSON content. Continue.
 
     _OWNED_CHROMA["session_id"] = canonical
     _OWNED_CHROMA["session_file"] = str(new_path)
