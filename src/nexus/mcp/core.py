@@ -158,26 +158,36 @@ async def _t1_chroma_lifespan(_app: Any):
     # Best-effort orphan cleanup before we spawn. Two surfaces:
     # (a) addr files from sessions that exited ungracefully (SIGKILL),
     # (b) tmpdirs from chromas reaped before their cleanup completed.
-    # Both are bounded; failures are logged but never block startup.
+    # Both are bounded; failures are logged at debug and never block
+    # startup. The sweep functions log per-file outcomes themselves;
+    # this outer guard catches unexpected sweep-level failures.
+    import structlog
+    _sweep_log = structlog.get_logger(__name__)
     try:
         sweep_orphan_t1_addr_files()
-    except Exception:
-        pass
+    except Exception as exc:
+        _sweep_log.debug("sweep_orphan_t1_addr_files_failed", error=str(exc))
     try:
         sweep_orphan_tmpdirs()
-    except Exception:
-        pass
+    except Exception as exc:
+        _sweep_log.debug("sweep_orphan_tmpdirs_failed", error=str(exc))
 
+    # Reset the ``_SHUTDOWN_IN_FLIGHT`` sentinel BEFORE
+    # ``start_t1_server`` (which can take up to ``_SERVER_READY_TIMEOUT``
+    # seconds). If the prior lifecycle left the flag set and a SIGTERM
+    # arrives mid-spawn, the handler would short-circuit and the
+    # newly-spawned chroma would orphan. The flag is sticky within
+    # one process exit; each lifespan owns its own shutdown lifecycle.
+    # ``_OWNED_CHROMA`` is empty at this point, so a SIGTERM landing
+    # between the reset and the spawn is also safe (the shutdown sees
+    # the empty dict and short-circuits cleanly).
+    global _SHUTDOWN_IN_FLIGHT
+    _SHUTDOWN_IN_FLIGHT = False
     host, port, server_pid, tmpdir = start_t1_server()
     # Record into ``_OWNED_CHROMA`` BEFORE any further work that
     # might raise so the stdio SIGTERM path
     # (``_sigterm_handler`` -> ``_t1_chroma_shutdown``) can still
-    # reap chroma if the publish step explodes. Reset the
-    # ``_SHUTDOWN_IN_FLIGHT`` sentinel so a fresh lifespan gets a
-    # clean cleanup window; the flag is sticky within one process
-    # exit but each lifespan owns its own shutdown lifecycle.
-    global _SHUTDOWN_IN_FLIGHT
-    _SHUTDOWN_IN_FLIGHT = False
+    # reap chroma if the publish step explodes.
     _OWNED_CHROMA.clear()
     _OWNED_CHROMA.update({
         "server_pid": server_pid,

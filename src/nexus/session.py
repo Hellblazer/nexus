@@ -25,8 +25,7 @@ def _nexus_config_dir_at_import() -> Path:
     under sandbox / test isolation. Callers setting ``NEXUS_CONFIG_DIR`` in
     the shell before invoking ``nx`` see the constants resolved against the
     sandbox. Tests that need to flip the dir mid-process still monkeypatch
-    the module attribute (``nexus.session.SESSIONS_DIR`` /
-    ``nexus.session.CLAUDE_SESSION_FILE``) — both access paths work.
+    the module attribute (``nexus.session.CLAUDE_SESSION_FILE``).
     """
     import os as _os
 
@@ -299,7 +298,9 @@ def start_t1_server() -> tuple[str, int, int, str]:
             # since 4.9.1. The chroma server is meant to outlive this
             # process; cleanup is the SessionEnd hook's job. Ungraceful
             # exits (Claude Code SIGKILL/OOM) leak the server until the
-            # next SessionStart's ``sweep_stale_sessions`` reaps it.
+            # next top-level MCP startup, which runs
+            # ``sweep_orphan_t1_addr_files`` + ``sweep_orphan_tmpdirs``
+            # to reap any leftovers.
             return _T1_SERVER_HOST, port, proc.pid, tmpdir
         except OSError:
             time.sleep(0.2)  # intentional: server not yet listening, retry loop
@@ -379,9 +380,9 @@ _NX_SESSION_ID_ENV = "NX_SESSION_ID"
 def _command_name_of(pid: int) -> str:
     """Return the command name (argv[0] basename) of *pid*, or "" if unknown.
 
-    Used by :func:`find_claude_root_pid` to identify which ancestor is
-    Claude Code. Falls back to an empty string on any error — caller
-    treats that as "not a match" and keeps walking.
+    Used by :func:`find_immediate_claude_pid` to identify which ancestor
+    is Claude Code. Falls back to an empty string on any error; the
+    caller treats that as "not a match" and keeps walking.
     """
     try:
         out = subprocess.check_output(
@@ -399,10 +400,10 @@ def _command_name_of(pid: int) -> str:
 
 # ── RDR-105 hybrid-discovery primitives ──────────────────────────────────────
 #
-# Default code path as of P3 (nexus-xf5r). The legacy session-record
-# discovery (and the legacy ``find_claude_root_pid``) runs only when the
-# operator opts out via ``NX_T1_NEW_DISCOVERY=0``. P4 (nexus-jnx7)
-# deletes the legacy paths.
+# The single T1 discovery surface as of P4 (nexus-jnx7). The legacy
+# session-record machinery (multi-writer ``<uuid>.session`` JSON files,
+# the topmost-walk ``find_claude_root_pid``, the watchdog sidecar, the
+# reconcile probe) was deleted along with the bug class it produced.
 
 
 def find_immediate_claude_pid(start_pid: int | None = None) -> int:
