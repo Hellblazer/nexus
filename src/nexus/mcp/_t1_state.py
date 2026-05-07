@@ -3,7 +3,7 @@
 
 RDR-105 RF-7: extracted into its own module so the dispatcher
 (``operators/dispatch.py``) can read it without importing ``mcp/core``,
-which transitively pulls FastMCP, chromadb, corpus, T3 — heavy and
+which transitively pulls FastMCP, chromadb, corpus, T3, heavy and
 circular-prone.
 
 Stdlib-only by contract. Do not add imports beyond ``typing``.

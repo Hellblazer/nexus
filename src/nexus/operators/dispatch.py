@@ -58,7 +58,7 @@ def _build_dispatch_env(
         the new-discovery branch.
 
     Legacy ephemeral (everything else)
-        ``NEXUS_SKIP_T1=1`` — the existing stateless-operator pattern.
+        ``NEXUS_SKIP_T1=1``, the existing stateless-operator pattern.
         Subprocess uses ``EphemeralClient``; no parent T1 visibility.
 
     Raises ``RuntimeError`` when ``share_t1=True`` is requested but the
@@ -74,7 +74,7 @@ def _build_dispatch_env(
             raise RuntimeError(
                 "share_t1=True requires the top-level MCP's T1 to be "
                 "live (NX_T1_NEW_DISCOVERY=1 is set but "
-                "nexus.mcp._t1_state.T1_ADDR is None — the lifespan "
+                "nexus.mcp._t1_state.T1_ADDR is None; the lifespan "
                 "publish path did not run)."
             )
         host, port = _t1_state.T1_ADDR

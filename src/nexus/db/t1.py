@@ -204,12 +204,18 @@ class T1Database:
     """
 
     def _try_new_discovery_paths(self, chromadb, session_id: str | None) -> bool:
-        """RDR-105 P1 hybrid discovery — Path A (env) then Path B (file).
+        """RDR-105 P1 hybrid discovery: Path A (env) then Path B (file).
 
         Returns True iff one path resolved and ``self._client`` /
         ``self._session_id`` are populated. False means the caller
         should fall through to the legacy resolver chain (P1
         additive-only contract).
+
+        TODO(P2 / nexus-9fu7): replace the additive fall-through
+        with the four-branch fail-loud constructor. Once the addr
+        file is the canonical sibling-discovery surface, missing
+        env + missing file should raise ``T1ServerNotFoundError``,
+        not silently delegate to the legacy resolver.
         """
         host_env = os.environ.get("NX_T1_HOST", "").strip()
         port_env = os.environ.get("NX_T1_PORT", "").strip()
@@ -246,7 +252,7 @@ class T1Database:
             self._client = client
             self._session_id = session_id or str(uuid4())
         elif os.environ.get("NX_T1_NEW_DISCOVERY") == "1" and self._try_new_discovery_paths(chromadb, session_id):
-            # RDR-105 P1 (nexus-4fek) — feature-flagged hybrid discovery.
+            # RDR-105 P1 (nexus-4fek): feature-flagged hybrid discovery.
             # Path A (env): NX_T1_HOST + NX_T1_PORT inherited from parent
             #   MCP via subprocess env. Used by ``claude -p`` shared
             #   subprocess dispatch.

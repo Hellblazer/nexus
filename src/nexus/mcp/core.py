@@ -116,7 +116,7 @@ def _t1_publish_addr_for_new_discovery() -> None:
       - ``NX_T1_NEW_DISCOVERY`` is not ``"1"`` (legacy-only path);
       - ``_OWNED_CHROMA`` is empty (we didn't spawn);
       - ``_OWNED_CHROMA`` is ``nested`` or ``reused`` (someone else
-        owns the chroma — they own the addr file too);
+        owns the chroma; they own the addr file too);
       - ``server_port`` is missing.
 
     Records ``t1_addr_claude_pid`` on ``_OWNED_CHROMA`` so the
@@ -139,7 +139,7 @@ def _t1_publish_addr_for_new_discovery() -> None:
 
     claude_pid = find_immediate_claude_pid()
     if claude_pid <= 0:
-        # Can't walk PPID chain — fail-loud is the constructor's job;
+        # Can't walk PPID chain. Fail-loud is the constructor's job;
         # publish is best-effort. Log and bail.
         import structlog
         structlog.get_logger().warning(

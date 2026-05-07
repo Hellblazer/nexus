@@ -27,7 +27,7 @@ import pytest
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# find_immediate_claude_pid (RF-6 — first not topmost)
+# find_immediate_claude_pid (RF-6: first not topmost)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -45,10 +45,10 @@ class TestFindImmediateClaudePid:
         """Process tree::
 
             test pid (1000, python)
-              ppid -> 1100 (python — MCP wrapper of immediate claude)
-                ppid -> 1200 (claude — IMMEDIATE)  ← correct return
-                  ppid -> 1300 (python — MCP wrapper of topmost claude)
-                    ppid -> 1400 (claude — TOPMOST)  ← legacy returns this
+              ppid -> 1100 (python: MCP wrapper of immediate claude)
+                ppid -> 1200 (claude: IMMEDIATE)         (correct return)
+                  ppid -> 1300 (python: MCP wrapper of topmost claude)
+                    ppid -> 1400 (claude: TOPMOST)       (legacy returns this)
                       ppid -> 1 (init; walk stops)
         """
         from nexus.session import find_immediate_claude_pid
@@ -74,7 +74,7 @@ class TestFindImmediateClaudePid:
             result = find_immediate_claude_pid(start_pid=1000)
             assert result == 1200, (
                 f"Expected immediate claude (1200), got {result}. "
-                "Topmost-walk would return 1400 — the bug RF-6 closes."
+                "Topmost-walk would return 1400; that's the bug RF-6 closes."
             )
 
     def test_returns_immediate_ppid_when_no_claude_in_chain(self):
@@ -192,7 +192,7 @@ class TestT1AddrFile:
         write_t1_addr(11, "127.0.0.1", 22)
         path = t1_addr_path(11)
         assert path.exists()
-        # Permissions check — best-effort (the platform may strip group/other bits).
+        # Permissions check (best-effort: the platform may strip group/other bits).
         mode = path.stat().st_mode & 0o777
         assert mode & 0o077 == 0, f"world/group readable: {oct(mode)}"
 
@@ -297,6 +297,42 @@ class TestT1DatabaseFlagOffPreservesLegacyBehaviour:
         from nexus.db.t1 import T1Database
         db = T1Database()
         assert db.session_id  # constructor succeeded
+
+
+class TestT1DatabaseFlagOnFallsThroughToLegacy:
+    """When the flag is on but NEITHER env vars NOR an addr file is
+    present, ``_try_new_discovery_paths`` returns False and the
+    constructor falls through to the legacy resolver. P2 will replace
+    this with fail-loud once the addr-file path is the canonical
+    sibling discovery surface.
+    """
+
+    def test_no_env_no_file_uses_legacy_skip_t1(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+
+        fake_chromadb = MagicMock()
+        fake_chromadb.EphemeralClient.return_value = MagicMock()
+        monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
+        monkeypatch.delenv("NX_T1_HOST", raising=False)
+        monkeypatch.delenv("NX_T1_PORT", raising=False)
+        # Legacy resolver path: NEXUS_SKIP_T1=1 lets the constructor
+        # construct an EphemeralClient cleanly. Without it the legacy
+        # path raises T1ServerNotFoundError.
+        monkeypatch.setenv("NEXUS_SKIP_T1", "1")
+
+        # Mock find_immediate_claude_pid so it doesn't return a real
+        # ancestor whose addr file might exist somewhere.
+        with patch("nexus.db.t1.find_immediate_claude_pid", return_value=99999):
+            from nexus.db.t1 import T1Database
+            db = T1Database()
+
+        # Legacy ephemeral path was taken: no HttpClient call.
+        fake_chromadb.HttpClient.assert_not_called()
+        fake_chromadb.EphemeralClient.assert_called_once()
+        assert db.session_id
 
 
 class TestT1DatabaseFlagOnPrecedence:
@@ -495,16 +531,17 @@ class TestLifespanAugmentation:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _start_real_chroma() -> tuple[str, int, int]:
+def _start_real_chroma() -> tuple[str, int, int, str]:
     """Boot a real chroma HTTP server for spike E2E tests.
 
-    Returns ``(host, port, server_pid)``. Caller cleans up via
-    ``stop_t1_server(server_pid)``.
+    Returns ``(host, port, server_pid, tmpdir)``. The caller is
+    responsible for stopping the server (``stop_t1_server``) AND
+    rmtree-ing the tmpdir; ``stop_t1_server`` only signals the
+    process and does not clean up the on-disk SQLite database.
     """
     from nexus.session import start_t1_server
 
-    host, port, server_pid, _tmpdir = start_t1_server()
-    return host, port, server_pid
+    return start_t1_server()
 
 
 @pytest.mark.integration
@@ -519,6 +556,8 @@ class TestE2EFileDiscovery:
     def test_sibling_subprocess_connects_via_addr_file(
         self, tmp_path, monkeypatch
     ):
+        import shutil
+
         from nexus.session import (
             stop_t1_server,
             unlink_t1_addr,
@@ -527,7 +566,7 @@ class TestE2EFileDiscovery:
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
 
-        host, port, server_pid = _start_real_chroma()
+        host, port, server_pid, chroma_tmpdir = _start_real_chroma()
         own_pid = os.getpid()
         try:
             write_t1_addr(own_pid, host, port)
@@ -567,6 +606,7 @@ class TestE2EFileDiscovery:
                 unlink_t1_addr(own_pid)
         finally:
             stop_t1_server(server_pid)
+            shutil.rmtree(chroma_tmpdir, ignore_errors=True)
 
 
 @pytest.mark.integration
@@ -576,9 +616,11 @@ class TestE2EEnvDiscovery:
     """
 
     def test_subprocess_connects_via_env(self, tmp_path):
+        import shutil
+
         from nexus.session import stop_t1_server
 
-        host, port, server_pid = _start_real_chroma()
+        host, port, server_pid, chroma_tmpdir = _start_real_chroma()
         try:
             code = (
                 "import os\n"
@@ -609,3 +651,4 @@ class TestE2EEnvDiscovery:
             assert proc.stdout.startswith("OK"), proc.stdout
         finally:
             stop_t1_server(server_pid)
+            shutil.rmtree(chroma_tmpdir, ignore_errors=True)

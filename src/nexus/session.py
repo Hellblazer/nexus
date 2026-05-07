@@ -739,24 +739,33 @@ def write_t1_addr(claude_pid: int, host: str, port: int) -> Path:
     Single-writer contract: only the top-level (or owned subprocess)
     MCP at lifespan start writes this file. The atomic rename keeps a
     concurrent reader either on the prior contents or the new
-    contents — never torn.
+    contents, never torn.
     """
     target = t1_addr_path(claude_pid)
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     tmp = target.with_suffix(target.suffix + f".{os.getpid()}.tmp")
     fd = os.open(str(tmp), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
     try:
-        os.write(fd, f"{host}:{port}\n".encode())
-    finally:
-        os.close(fd)
-    tmp.replace(target)
+        try:
+            os.write(fd, f"{host}:{port}\n".encode())
+        finally:
+            os.close(fd)
+        tmp.replace(target)
+    except BaseException:
+        # Disk-full / permissions / interrupt: don't leave the tmp
+        # file behind for the next sweep to clean up.
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+        raise
     return target
 
 
 def read_t1_addr_for(claude_pid: int) -> tuple[str, int] | None:
     """Read the addr file for *claude_pid*. Returns ``(host, port)`` or None.
 
-    None on missing file, malformed contents, or unreadable file —
+    None on missing file, malformed contents, or unreadable file;
     callers fail loud at the next layer (``T1Database`` constructor's
     raise) rather than constructing an EphemeralClient.
     """
