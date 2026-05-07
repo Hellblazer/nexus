@@ -299,15 +299,13 @@ class TestT1DatabaseFlagOffPreservesLegacyBehaviour:
         assert db.session_id  # constructor succeeded
 
 
-class TestT1DatabaseFlagOnFallsThroughToLegacy:
-    """When the flag is on but NEITHER env vars NOR an addr file is
-    present, ``_try_new_discovery_paths`` returns False and the
-    constructor falls through to the legacy resolver. P2 will replace
-    this with fail-loud once the addr-file path is the canonical
-    sibling discovery surface.
+class TestT1DatabaseFlagOnIsolationPath:
+    """Path C (RDR-105 P2 / nexus-mj2o): explicit ``NX_T1_ISOLATED=1``
+    or its legacy alias ``NEXUS_SKIP_T1=1`` opts into a per-process
+    ``EphemeralClient``. No HTTP discovery attempted.
     """
 
-    def test_no_env_no_file_uses_legacy_skip_t1(self, tmp_path, monkeypatch):
+    def test_nx_t1_isolated_uses_ephemeral(self, tmp_path, monkeypatch):
         from unittest.mock import MagicMock
 
         fake_chromadb = MagicMock()
@@ -318,21 +316,113 @@ class TestT1DatabaseFlagOnFallsThroughToLegacy:
         monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
         monkeypatch.delenv("NX_T1_HOST", raising=False)
         monkeypatch.delenv("NX_T1_PORT", raising=False)
-        # Legacy resolver path: NEXUS_SKIP_T1=1 lets the constructor
-        # construct an EphemeralClient cleanly. Without it the legacy
-        # path raises T1ServerNotFoundError.
-        monkeypatch.setenv("NEXUS_SKIP_T1", "1")
+        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+        monkeypatch.setenv("NX_T1_ISOLATED", "1")
 
-        # Mock find_immediate_claude_pid so it doesn't return a real
-        # ancestor whose addr file might exist somewhere.
         with patch("nexus.db.t1.find_immediate_claude_pid", return_value=99999):
             from nexus.db.t1 import T1Database
             db = T1Database()
 
-        # Legacy ephemeral path was taken: no HttpClient call.
         fake_chromadb.HttpClient.assert_not_called()
         fake_chromadb.EphemeralClient.assert_called_once()
         assert db.session_id
+
+    def test_legacy_nexus_skip_t1_alias_uses_ephemeral(
+        self, tmp_path, monkeypatch
+    ):
+        """Per RF-4: ``NEXUS_SKIP_T1=1`` honoured for the 4.27 -> 4.28
+        cycle as a deprecated alias for ``NX_T1_ISOLATED=1``."""
+        from unittest.mock import MagicMock
+
+        fake_chromadb = MagicMock()
+        fake_chromadb.EphemeralClient.return_value = MagicMock()
+        monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
+        monkeypatch.delenv("NX_T1_HOST", raising=False)
+        monkeypatch.delenv("NX_T1_PORT", raising=False)
+        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
+        monkeypatch.setenv("NEXUS_SKIP_T1", "1")
+
+        with patch("nexus.db.t1.find_immediate_claude_pid", return_value=99999):
+            from nexus.db.t1 import T1Database
+            T1Database()
+
+        fake_chromadb.EphemeralClient.assert_called_once()
+
+
+class TestT1DatabaseFlagOnRaisesOnMisconfiguration:
+    """Path D (RDR-105 P2 / nexus-mj2o): no env, no addr file, no
+    isolation flag -> raise ``T1ServerNotFoundError``. Replaces P1's
+    legacy fall-through.
+    """
+
+    def test_raises_when_no_source_available(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+
+        fake_chromadb = MagicMock()
+        monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
+        monkeypatch.delenv("NX_T1_HOST", raising=False)
+        monkeypatch.delenv("NX_T1_PORT", raising=False)
+        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
+        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+
+        with patch("nexus.db.t1.find_immediate_claude_pid", return_value=99999):
+            from nexus.db.t1 import T1Database, T1ServerNotFoundError
+            with pytest.raises(T1ServerNotFoundError, match="NX_T1"):
+                T1Database()
+
+        fake_chromadb.HttpClient.assert_not_called()
+        fake_chromadb.EphemeralClient.assert_not_called()
+
+    def test_raises_when_env_port_malformed(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+
+        fake_chromadb = MagicMock()
+        monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
+        monkeypatch.setenv("NX_T1_HOST", "127.0.0.1")
+        monkeypatch.setenv("NX_T1_PORT", "not-a-port")
+        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+
+        from nexus.db.t1 import T1Database, T1ServerNotFoundError
+        with pytest.raises(T1ServerNotFoundError):
+            T1Database()
+
+
+class TestT1DatabaseFlagOnLegacyDeleted:
+    """Sanity: with the flag on, the constructor must not fall through
+    to the legacy resolver chain. The legacy path is invisible in
+    flag-on processes per the RDR §'Phase 2 flag-isolation contract'.
+    """
+
+    def test_flag_on_with_legacy_session_record_still_uses_new_discovery(
+        self, tmp_path, monkeypatch
+    ):
+        """Even if a legacy session record happens to exist on disk,
+        flag-on goes through the new-discovery code path."""
+        from unittest.mock import MagicMock
+
+        fake_chromadb = MagicMock()
+        fake_chromadb.HttpClient.return_value = MagicMock()
+        monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
+        monkeypatch.setenv("NX_T1_HOST", "127.0.0.1")
+        monkeypatch.setenv("NX_T1_PORT", "5555")
+        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+
+        from nexus.db.t1 import T1Database
+        T1Database()
+        # Should hit Path A (env) directly, not the legacy resolver.
+        fake_chromadb.HttpClient.assert_called_once_with(host="127.0.0.1", port=5555)
 
 
 class TestT1DatabaseFlagOnPrecedence:
@@ -380,14 +470,6 @@ class TestDispatcherEnvBuilder:
         assert "NX_T1_HOST" not in env
         assert env.get("NX_SESSION_ID") == "parent-uuid"
 
-    def test_legacy_path_when_share_t1_false(self, monkeypatch):
-        from nexus.operators.dispatch import _build_dispatch_env
-
-        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
-        env = _build_dispatch_env(share_t1=False, parent_session_id=None)
-        assert env.get("NEXUS_SKIP_T1") == "1"
-        assert "NX_T1_HOST" not in env
-
     def test_share_t1_passes_env_when_flag_on(self, monkeypatch):
         from nexus.mcp import _t1_state
         from nexus.operators.dispatch import _build_dispatch_env
@@ -417,6 +499,263 @@ class TestDispatcherEnvBuilder:
                 _build_dispatch_env(share_t1=True, parent_session_id=None)
         finally:
             _t1_state.T1_ADDR = prev
+
+
+class TestDispatcherEphemeralMode:
+    """RDR-105 P2.5 / nexus-4gby: third dispatcher mode. ``ephemeral=True``
+    sets ``NX_T1_ISOLATED=1`` and strips any inherited host/port; the
+    receiving subprocess opens a per-process ``EphemeralClient``.
+    """
+
+    def test_ephemeral_sets_isolated_when_flag_on(self, monkeypatch):
+        from nexus.operators.dispatch import _build_dispatch_env
+
+        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
+        monkeypatch.setenv("NX_T1_HOST", "10.0.0.1")
+        monkeypatch.setenv("NX_T1_PORT", "5555")
+        env = _build_dispatch_env(ephemeral=True, parent_session_id="parent")
+        assert env.get("NX_T1_ISOLATED") == "1"
+        assert "NX_T1_HOST" not in env
+        assert "NX_T1_PORT" not in env
+        assert "NEXUS_SKIP_T1" not in env  # don't leak the deprecated alias
+        assert env.get("NX_SESSION_ID") == "parent"
+
+    def test_ephemeral_legacy_when_flag_off(self, monkeypatch):
+        """Flag-off: ``ephemeral=True`` falls back to ``NEXUS_SKIP_T1=1``,
+        the historical operator-dispatch shape."""
+        from nexus.operators.dispatch import _build_dispatch_env
+
+        monkeypatch.delenv("NX_T1_NEW_DISCOVERY", raising=False)
+        env = _build_dispatch_env(ephemeral=True, parent_session_id=None)
+        assert env.get("NEXUS_SKIP_T1") == "1"
+        assert "NX_T1_ISOLATED" not in env
+
+    def test_share_and_ephemeral_mutually_exclusive(self, monkeypatch):
+        from nexus.operators.dispatch import _build_dispatch_env
+
+        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            _build_dispatch_env(share_t1=True, ephemeral=True)
+
+
+class TestDispatcherOwnedMode:
+    """Default mode (neither share_t1 nor ephemeral). Subprocess gets
+    its own T1 session; parent's NX_T1_HOST/PORT/ISOLATED are stripped
+    so the subprocess MCP spawns its own chroma."""
+
+    def test_owned_strips_parent_t1_env(self, monkeypatch):
+        from nexus.operators.dispatch import _build_dispatch_env
+
+        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
+        monkeypatch.setenv("NX_T1_HOST", "10.0.0.1")
+        monkeypatch.setenv("NX_T1_PORT", "5555")
+        monkeypatch.setenv("NX_T1_ISOLATED", "1")
+        monkeypatch.setenv("NEXUS_SKIP_T1", "1")
+        env = _build_dispatch_env(share_t1=False, ephemeral=False)
+        assert "NX_T1_HOST" not in env
+        assert "NX_T1_PORT" not in env
+        assert "NX_T1_ISOLATED" not in env
+        assert "NEXUS_SKIP_T1" not in env
+        # Flag itself propagates so the subprocess uses new-discovery.
+        assert env.get("NX_T1_NEW_DISCOVERY") == "1"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Lifespan: 3-branch new-discovery generator + addr-file publish/cleanup
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestLifespanNewDiscoveryGenerator:
+    """RDR-105 P2.4 / nexus-zlus: when flag-on the lifespan dispatches
+    to ``_t1_chroma_lifespan_new_discovery`` (a 3-branch
+    asynccontextmanager). Branches 1 and 2 do not spawn; Branch 3
+    spawns + writes addr file + populates ``_t1_state``.
+    """
+
+    def test_branch1_inherited_env_does_not_spawn(self, monkeypatch):
+        """``NX_T1_HOST`` + ``NX_T1_PORT`` present -> no spawn, no file."""
+        import asyncio
+
+        from nexus.mcp import core as mcp_core
+
+        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
+        monkeypatch.setenv("NX_T1_HOST", "127.0.0.1")
+        monkeypatch.setenv("NX_T1_PORT", "5555")
+
+        called = {"start": 0, "write": 0}
+
+        def fake_start():
+            called["start"] += 1
+            return ("127.0.0.1", 1, 1, "/tmp/x")
+
+        def fake_write(*args, **kwargs):
+            called["write"] += 1
+
+        with patch("nexus.session.start_t1_server", side_effect=fake_start), \
+             patch("nexus.session.write_t1_addr", side_effect=fake_write):
+            async def _run():
+                async with mcp_core._t1_chroma_lifespan_new_discovery():
+                    pass
+            asyncio.run(_run())
+
+        assert called["start"] == 0
+        assert called["write"] == 0
+
+    def test_branch2_isolated_does_not_spawn(self, monkeypatch):
+        """``NX_T1_ISOLATED=1`` -> no spawn, no file."""
+        import asyncio
+
+        from nexus.mcp import core as mcp_core
+
+        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
+        monkeypatch.delenv("NX_T1_HOST", raising=False)
+        monkeypatch.delenv("NX_T1_PORT", raising=False)
+        monkeypatch.setenv("NX_T1_ISOLATED", "1")
+
+        called = {"start": 0, "write": 0}
+
+        with patch("nexus.session.start_t1_server",
+                   side_effect=lambda: called.update(start=called["start"] + 1) or ("h", 1, 1, "/t")), \
+             patch("nexus.session.write_t1_addr",
+                   side_effect=lambda *a, **k: called.update(write=called["write"] + 1)):
+            async def _run():
+                async with mcp_core._t1_chroma_lifespan_new_discovery():
+                    pass
+            asyncio.run(_run())
+
+        assert called["start"] == 0
+        assert called["write"] == 0
+
+    def test_branch3_top_level_spawns_and_publishes(self, tmp_path, monkeypatch):
+        """No env, no isolation -> spawn chroma + write addr file +
+        populate ``_t1_state.T1_ADDR``. Cleanup unlinks file + resets
+        the variable."""
+        import asyncio
+
+        from nexus.mcp import _t1_state, core as mcp_core
+        from nexus.session import read_t1_addr_for
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
+        monkeypatch.delenv("NX_T1_HOST", raising=False)
+        monkeypatch.delenv("NX_T1_PORT", raising=False)
+        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
+        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+
+        prev_addr = _t1_state.T1_ADDR
+        _t1_state.T1_ADDR = None
+        try:
+            calls = {"stop": 0}
+
+            def fake_stop(_pid):
+                calls["stop"] += 1
+
+            with patch("nexus.session.start_t1_server",
+                       return_value=("127.0.0.1", 33333, 99999, str(tmp_path / "chroma_tmpdir"))), \
+                 patch("nexus.session.stop_t1_server", side_effect=fake_stop), \
+                 patch("nexus.session.find_immediate_claude_pid", return_value=44444):
+                async def _run():
+                    async with mcp_core._t1_chroma_lifespan_new_discovery():
+                        # During the body: addr file present + state set
+                        assert read_t1_addr_for(44444) == ("127.0.0.1", 33333)
+                        assert _t1_state.T1_ADDR == ("127.0.0.1", 33333)
+                asyncio.run(_run())
+
+            # After body: cleanup.
+            assert read_t1_addr_for(44444) is None
+            assert _t1_state.T1_ADDR is None
+            assert calls["stop"] == 1
+        finally:
+            _t1_state.T1_ADDR = prev_addr
+
+    def test_owned_respawn_does_not_clobber_parent_file(self, tmp_path, monkeypatch):
+        """RDR-105 RF-6 owned-mode invariant at the lifespan layer.
+
+        Scenario: a top-level Claude (claude_pid=100) is running; its
+        MCP wrote ``t1_addr.100``. An owned ``claude -p`` subprocess
+        starts (its own claude_pid=200). The owned MCP's lifespan
+        spawns its own chroma and writes ``t1_addr.200``.
+
+        Invariant: the owned MCP MUST NOT touch ``t1_addr.100``. If
+        ``find_immediate_claude_pid`` accidentally returned 100 (the
+        topmost-walk bug RF-6 closes), the owned MCP would clobber
+        the parent's file with its own chroma's address.
+
+        This test simulates the scenario and locks the contract at the
+        lifespan layer — companion to the unit test on
+        ``find_immediate_claude_pid`` itself.
+        """
+        import asyncio
+
+        from nexus.mcp import _t1_state, core as mcp_core
+        from nexus.session import read_t1_addr_for, write_t1_addr
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
+        monkeypatch.delenv("NX_T1_HOST", raising=False)
+        monkeypatch.delenv("NX_T1_PORT", raising=False)
+        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
+        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+
+        # Pre-existing parent's addr file.
+        write_t1_addr(100, "127.0.0.1", 11111)
+        parent_before = read_t1_addr_for(100)
+        assert parent_before == ("127.0.0.1", 11111)
+
+        prev_addr = _t1_state.T1_ADDR
+        _t1_state.T1_ADDR = None
+        try:
+            with patch("nexus.session.start_t1_server",
+                       return_value=("127.0.0.1", 22222, 99999, str(tmp_path / "owned_chroma_tmpdir"))), \
+                 patch("nexus.session.stop_t1_server", side_effect=lambda _p: None), \
+                 patch("nexus.session.find_immediate_claude_pid", return_value=200):
+                async def _run():
+                    async with mcp_core._t1_chroma_lifespan_new_discovery():
+                        # Owned MCP wrote its OWN file at claude_pid=200.
+                        assert read_t1_addr_for(200) == ("127.0.0.1", 22222)
+                        # Parent's file at claude_pid=100 is UNCHANGED.
+                        assert read_t1_addr_for(100) == ("127.0.0.1", 11111)
+                asyncio.run(_run())
+
+            # After cleanup: owned's file unlinked, parent's still intact.
+            assert read_t1_addr_for(200) is None
+            assert read_t1_addr_for(100) == ("127.0.0.1", 11111)
+        finally:
+            _t1_state.T1_ADDR = prev_addr
+
+    def test_branch3_cleanup_runs_on_body_exception(self, tmp_path, monkeypatch):
+        """Lifespan must unlink the addr file even when the wrapped
+        body raises. ``async finally`` is the relevant primitive."""
+        import asyncio
+
+        from nexus.mcp import _t1_state, core as mcp_core
+        from nexus.session import read_t1_addr_for
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
+        monkeypatch.delenv("NX_T1_HOST", raising=False)
+        monkeypatch.delenv("NX_T1_PORT", raising=False)
+        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
+        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+
+        prev_addr = _t1_state.T1_ADDR
+        _t1_state.T1_ADDR = None
+        try:
+            with patch("nexus.session.start_t1_server",
+                       return_value=("127.0.0.1", 33333, 99999, str(tmp_path / "chroma_tmpdir"))), \
+                 patch("nexus.session.stop_t1_server", side_effect=lambda _p: None), \
+                 patch("nexus.session.find_immediate_claude_pid", return_value=55555):
+                async def _run():
+                    async with mcp_core._t1_chroma_lifespan_new_discovery():
+                        raise RuntimeError("body error")
+
+                with pytest.raises(RuntimeError, match="body error"):
+                    asyncio.run(_run())
+
+            assert read_t1_addr_for(55555) is None
+            assert _t1_state.T1_ADDR is None
+        finally:
+            _t1_state.T1_ADDR = prev_addr
 
 
 # ─────────────────────────────────────────────────────────────────────────────

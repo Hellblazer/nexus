@@ -20,6 +20,7 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 from nexus.session import (
     SESSIONS_DIR,
+    _t1_isolated_env,
     find_ancestor_session,
     find_immediate_claude_pid,
     find_session_by_id,
@@ -203,30 +204,46 @@ class T1Database:
     Pass ``client=`` explicitly to inject a custom client in tests.
     """
 
-    def _try_new_discovery_paths(self, chromadb, session_id: str | None) -> bool:
-        """RDR-105 P1 hybrid discovery: Path A (env) then Path B (file).
+    def _init_new_discovery(self, chromadb, session_id: str | None) -> None:
+        """RDR-105 P2 (nexus-mj2o): four-branch fail-loud constructor.
 
-        Returns True iff one path resolved and ``self._client`` /
-        ``self._session_id`` are populated. False means the caller
-        should fall through to the legacy resolver chain (P1
-        additive-only contract).
+        Branch order (signal hierarchy mirrors the lifespan):
 
-        TODO(P2 / nexus-9fu7): replace the additive fall-through
-        with the four-branch fail-loud constructor. Once the addr
-        file is the canonical sibling-discovery surface, missing
-        env + missing file should raise ``T1ServerNotFoundError``,
-        not silently delegate to the legacy resolver.
+        Path A
+            ``NX_T1_HOST`` + ``NX_T1_PORT`` in env -> ``HttpClient``.
+            Used by MCP-dispatched subprocesses (``claude -p`` shared).
+        Path B
+            ``find_immediate_claude_pid`` resolves to a live addr file
+            at ``~/.config/nexus/t1_addr.<pid>`` -> ``HttpClient``.
+            Used by Claude-Code-spawned siblings (Bash tool, hooks).
+        Path C
+            ``NX_T1_ISOLATED=1`` (or its legacy ``NEXUS_SKIP_T1=1``
+            alias) -> ``EphemeralClient``. The only place
+            ``EphemeralClient`` may be constructed in this code path.
+        Path D
+            None of the above -> raise :class:`T1ServerNotFoundError`.
+
+        The flag-on path does NOT fall through to the legacy resolver.
+        Per the RDR §'Phase 2 flag-isolation contract', flag-on and
+        flag-off paths are mutually exclusive per process.
         """
         host_env = os.environ.get("NX_T1_HOST", "").strip()
         port_env = os.environ.get("NX_T1_PORT", "").strip()
         if host_env and port_env:
             try:
                 port_int = int(port_env)
-            except ValueError:
-                return False
+            except ValueError as exc:
+                raise T1ServerNotFoundError(
+                    f"NX_T1_HOST is set but NX_T1_PORT={port_env!r} is "
+                    "not a valid integer."
+                ) from exc
             self._client = chromadb.HttpClient(host=host_env, port=port_int)
-            self._session_id = session_id or os.environ.get("NX_SESSION_ID", "").strip() or str(uuid4())
-            return True
+            self._session_id = (
+                session_id
+                or os.environ.get("NX_SESSION_ID", "").strip()
+                or str(uuid4())
+            )
+            return
 
         claude_pid = find_immediate_claude_pid()
         if claude_pid > 0:
@@ -234,10 +251,34 @@ class T1Database:
             if addr is not None:
                 host, port = addr
                 self._client = chromadb.HttpClient(host=host, port=port)
-                self._session_id = session_id or os.environ.get("NX_SESSION_ID", "").strip() or str(uuid4())
-                return True
+                self._session_id = (
+                    session_id
+                    or os.environ.get("NX_SESSION_ID", "").strip()
+                    or str(uuid4())
+                )
+                return
 
-        return False
+        if _t1_isolated_env():
+            self._client = chromadb.EphemeralClient()
+            self._session_id = (
+                session_id
+                or os.environ.get("NX_SESSION_ID", "").strip()
+                or str(uuid4())
+            )
+            return
+
+        raise T1ServerNotFoundError(
+            "T1 not configured for this process. Either inherit "
+            "NX_T1_HOST and NX_T1_PORT from a parent MCP server "
+            "(MCP-dispatched subprocess), run as a sibling of a "
+            "top-level MCP server so the address file is "
+            "discoverable via the PPID walk to the immediate "
+            "claude ancestor, or set NX_T1_ISOLATED=1 to opt in "
+            "to an in-process ephemeral T1.\n"
+            "\n"
+            "If you launched Claude Code via 'exec -a' or a custom "
+            "wrapper, ensure the process name starts with 'claude'."
+        )
 
     def __init__(self, session_id: str | None = None, client=None) -> None:
         import chromadb
@@ -251,19 +292,12 @@ class T1Database:
             # EphemeralClient as the MCP-tool-side T1 store.
             self._client = client
             self._session_id = session_id or str(uuid4())
-        elif os.environ.get("NX_T1_NEW_DISCOVERY") == "1" and self._try_new_discovery_paths(chromadb, session_id):
-            # RDR-105 P1 (nexus-4fek): feature-flagged hybrid discovery.
-            # Path A (env): NX_T1_HOST + NX_T1_PORT inherited from parent
-            #   MCP via subprocess env. Used by ``claude -p`` shared
-            #   subprocess dispatch.
-            # Path B (file): ``~/.config/nexus/t1_addr.<claude_pid>`` written
-            #   by the parent MCP at lifespan start. Used by Claude-Code-
-            #   spawned siblings (Bash tools, hooks).
-            # Returns True iff one path resolved; falls through to the
-            # legacy resolver chain otherwise so flag-on is strictly
-            # additive in P1 (legacy code path stays usable when neither
-            # env nor file is present).
-            pass
+        elif os.environ.get("NX_T1_NEW_DISCOVERY") == "1":
+            # RDR-105 P2 (nexus-mj2o): four-branch fail-loud constructor.
+            # Replaces the P1 additive fall-through; flag-on now refuses
+            # to delegate to the legacy resolver per the RDR §'Phase 2
+            # flag-isolation contract'.
+            self._init_new_discovery(chromadb, session_id)
         else:
             # NEXUS_SKIP_T1=1 (set by claude_dispatch for stateless operator
             # subprocesses) → go straight to EphemeralClient without searching

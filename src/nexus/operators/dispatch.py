@@ -42,32 +42,58 @@ class OperatorOutputError(OperatorError):
 def _build_dispatch_env(
     *,
     share_t1: bool = False,
+    ephemeral: bool = False,
     parent_session_id: str | None = None,
 ) -> dict[str, str]:
     """Build the env dict for a dispatched ``claude -p`` subprocess.
 
-    RDR-105 P1 (nexus-4fek). Two modes, gated on the
+    RDR-105 P2 (nexus-4gby). Three modes, gated on the
     ``NX_T1_NEW_DISCOVERY=1`` feature flag in the parent's env:
 
-    Shared T1 (``share_t1=True`` AND flag-on AND parent T1 live)
-        Inherits ``NX_T1_HOST/PORT`` from the parent's
-        ``nexus.mcp._t1_state.T1_ADDR``. ``NEXUS_SKIP_T1`` is removed
-        so the subprocess connects to the parent's chroma instead of
-        falling through to ``EphemeralClient``. ``NX_T1_NEW_DISCOVERY``
-        propagates so the subprocess's ``T1Database`` constructor takes
-        the new-discovery branch.
+    Shared T1 (``share_t1=True``)
+        Subprocess inherits ``NX_T1_HOST`` / ``NX_T1_PORT`` from the
+        parent's ``nexus.mcp._t1_state.T1_ADDR`` so its ``T1Database``
+        connects to the parent's chroma. ``NX_T1_ISOLATED`` and
+        ``NEXUS_SKIP_T1`` are stripped. Raises ``RuntimeError`` when
+        the parent's T1 isn't live; a silent fallback would defeat
+        the caller's intent.
 
-    Legacy ephemeral (everything else)
-        ``NEXUS_SKIP_T1=1``, the existing stateless-operator pattern.
-        Subprocess uses ``EphemeralClient``; no parent T1 visibility.
+    Ephemeral (``ephemeral=True``)
+        Sets ``NX_T1_ISOLATED=1`` so the receiving MCP's lifespan
+        skips the chroma spawn and the constructor opens a per-process
+        ``EphemeralClient``. Strips inherited ``NX_T1_HOST`` /
+        ``NX_T1_PORT`` so the subprocess does not silently connect to
+        the parent. Mutually exclusive with ``share_t1``.
 
-    Raises ``RuntimeError`` when ``share_t1=True`` is requested but the
-    parent's T1 isn't live (``_t1_state.T1_ADDR is None``). Fail-loud
-    is correct: a silent fallback to ephemeral would defeat the
-    caller's intent.
+    Owned (default, neither flag set)
+        Strips ``NX_T1_HOST`` / ``NX_T1_PORT`` / ``NX_T1_ISOLATED`` /
+        ``NEXUS_SKIP_T1`` so the subprocess MCP spawns its own
+        chroma (Branch 3 of the new lifespan). The subprocess gets a
+        sealed-from-parent T1 session of its own. Internal Bash tools
+        and sub-agents within the subprocess see consistent state.
+
+    When the flag is OFF, all three modes collapse to the historical
+    ``NEXUS_SKIP_T1=1`` ephemeral path. Pre-RDR-105 behaviour
+    preserved for callers that have not yet flipped the flag.
     """
+    if share_t1 and ephemeral:
+        raise ValueError(
+            "share_t1 and ephemeral are mutually exclusive: a subprocess "
+            "cannot both inherit the parent's T1 and skip T1 entirely."
+        )
+
     base = dict(os.environ)
-    if share_t1 and base.get("NX_T1_NEW_DISCOVERY") == "1":
+    flag_on = base.get("NX_T1_NEW_DISCOVERY") == "1"
+
+    if not flag_on:
+        # Legacy: every mode collapses to the historical
+        # NEXUS_SKIP_T1=1 ephemeral subprocess path.
+        base["NEXUS_SKIP_T1"] = "1"
+        if parent_session_id:
+            base["NX_SESSION_ID"] = parent_session_id
+        return base
+
+    if share_t1:
         from nexus.mcp import _t1_state
 
         if _t1_state.T1_ADDR is None:
@@ -80,9 +106,23 @@ def _build_dispatch_env(
         host, port = _t1_state.T1_ADDR
         base["NX_T1_HOST"] = host
         base["NX_T1_PORT"] = str(port)
+        base.pop("NX_T1_ISOLATED", None)
+        base.pop("NEXUS_SKIP_T1", None)
+    elif ephemeral:
+        base["NX_T1_ISOLATED"] = "1"
+        base.pop("NX_T1_HOST", None)
+        base.pop("NX_T1_PORT", None)
+        # Drop the deprecated alias so its presence cannot leak
+        # past this dispatch boundary; the subprocess only sees the
+        # canonical NX_T1_ISOLATED.
         base.pop("NEXUS_SKIP_T1", None)
     else:
-        base["NEXUS_SKIP_T1"] = "1"
+        # Owned: subprocess spawns its own T1. Strip any parent T1
+        # signals so the new lifespan's Branch 3 fires.
+        base.pop("NX_T1_HOST", None)
+        base.pop("NX_T1_PORT", None)
+        base.pop("NX_T1_ISOLATED", None)
+        base.pop("NEXUS_SKIP_T1", None)
 
     if parent_session_id:
         base["NX_SESSION_ID"] = parent_session_id
@@ -189,10 +229,18 @@ async def claude_dispatch(
     # ``read_claude_session_id`` reads the parent's UUID at dispatch time —
     # the parent's SessionStart populated it before any operator runs.
     from nexus.session import read_claude_session_id
-    env = {**os.environ, "NEXUS_SKIP_T1": "1"}
     parent_session_id = read_claude_session_id()
-    if parent_session_id:
-        env["NX_SESSION_ID"] = parent_session_id
+    # RDR-105 P2.5 (nexus-4gby): build the subprocess env via the
+    # three-mode helper. The operator-dispatch caller is the
+    # canonical stateless one-shot, so default to ``ephemeral=True``.
+    # When the new-discovery flag is off, the helper emits the
+    # historical ``NEXUS_SKIP_T1=1`` shape; when the flag is on, it
+    # uses ``NX_T1_ISOLATED=1`` instead. Both signals are honoured by
+    # the receiving subprocess's constructor and lifespan.
+    env = _build_dispatch_env(
+        ephemeral=True,
+        parent_session_id=parent_session_id,
+    )
     proc = await asyncio.create_subprocess_exec(
         "claude", "-p",
         "--output-format", "json",

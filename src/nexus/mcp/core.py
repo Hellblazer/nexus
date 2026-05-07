@@ -583,8 +583,99 @@ from contextlib import asynccontextmanager
 
 
 @asynccontextmanager
+async def _t1_chroma_lifespan_new_discovery():
+    """RDR-105 P2 (nexus-zlus): the flag-on lifespan generator.
+
+    Three branches symmetric with the four-branch fail-loud
+    constructor:
+
+    Branch 1 (env)
+        ``NX_T1_HOST`` + ``NX_T1_PORT`` set: this MCP is a
+        subprocess of a parent MCP that already owns chroma.
+        Yield without spawning.
+    Branch 2 (isolation)
+        ``NX_T1_ISOLATED=1`` (or its legacy ``NEXUS_SKIP_T1=1``
+        alias): this MCP is a stateless one-shot. Yield without
+        spawning.
+    Branch 3 (top-level / owned)
+        Spawn a fresh chroma, write ``~/.config/nexus/t1_addr.<pid>``
+        keyed by ``find_immediate_claude_pid`` (the FIRST claude
+        ancestor; RF-6), publish ``_t1_state.T1_ADDR``, then yield.
+        Cleanup unlinks the file, stops chroma, rmtrees the chroma
+        tmpdir, and resets ``_t1_state.T1_ADDR``.
+
+    No session record file. No watchdog. No reconcile. No reuse
+    probe. All of those are flag-off-only.
+    """
+    if _os.environ.get("NX_T1_HOST", "").strip() and _os.environ.get("NX_T1_PORT", "").strip():
+        # Branch 1: parent MCP owns chroma; subprocess inherits via env.
+        yield
+        return
+
+    # Imported lazily — when flag-on, `_t1_isolated_env` reads the
+    # current env and emits a deprecation warning if the legacy alias
+    # is the only signal.
+    from nexus.session import _t1_isolated_env
+
+    if _t1_isolated_env():
+        # Branch 2: explicit stateless ephemeral.
+        yield
+        return
+
+    # Branch 3: spawn + publish.
+    import shutil
+
+    from nexus.mcp import _t1_state
+    from nexus.session import (
+        find_immediate_claude_pid,
+        start_t1_server,
+        stop_t1_server,
+        unlink_t1_addr,
+        write_t1_addr,
+    )
+
+    host, port, server_pid, tmpdir = start_t1_server()
+    claude_pid = find_immediate_claude_pid()
+    addr_published = False
+    if claude_pid > 0:
+        write_t1_addr(claude_pid, host, port)
+        _t1_state.T1_ADDR = (host, port)
+        addr_published = True
+    else:
+        import structlog
+        structlog.get_logger().warning(
+            "t1_addr_publish_skipped_no_claude_pid",
+            host=host,
+            port=port,
+        )
+
+    try:
+        yield
+    finally:
+        try:
+            stop_t1_server(server_pid)
+        except Exception:
+            pass
+        try:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        except OSError:
+            pass
+        if addr_published:
+            unlink_t1_addr(claude_pid)
+            _t1_state.T1_ADDR = None
+
+
+@asynccontextmanager
 async def _t1_chroma_lifespan(_app: Any):
     """FastMCP lifespan that owns chroma's lifecycle.
+
+    When ``NX_T1_NEW_DISCOVERY=1`` (RDR-105 P2 / nexus-zlus), delegate
+    to the three-branch ``_t1_chroma_lifespan_new_discovery``
+    generator. Otherwise, fall back to the legacy
+    ``_t1_chroma_init_if_owner`` + ``_t1_chroma_shutdown`` path
+    (sessions/, watchdog, reconcile). The two paths are mutually
+    exclusive per process per the RDR §'Phase 2 flag-isolation
+    contract'.
 
     Primary cleanup path on **HTTP / SSE transports**: anyio installs
     a SIGTERM handler that cancels the running task group;
@@ -605,6 +696,11 @@ async def _t1_chroma_lifespan(_app: Any):
     paths firing is safe: lifespan finally on HTTP/SSE, signal
     handler on stdio SIGTERM, atexit on clean exit.
     """
+    if _os.environ.get("NX_T1_NEW_DISCOVERY") == "1":
+        async with _t1_chroma_lifespan_new_discovery():
+            yield
+        return
+
     _t1_chroma_init_if_owner()
     try:
         yield
