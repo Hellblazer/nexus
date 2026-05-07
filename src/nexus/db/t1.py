@@ -184,24 +184,31 @@ class T1ServerNotFoundError(RuntimeError):
 
 
 class T1Database:
-    """T1 ChromaDB session scratch — shared across all agents in a session tree.
+    """T1 ChromaDB session scratch, shared across all agents in a session tree.
 
-    On construction, walks the PPID chain to find the session's ChromaDB HTTP
-    server address.  All agents that share a common ancestor Claude Code process
-    connect to the same server and see each other's entries (scoped by
-    ``session_id`` metadata filter).
+    Two discovery regimes coexist behind the ``NX_T1_NEW_DISCOVERY=1``
+    feature flag (RDR-105). Flag-on and flag-off paths are mutually
+    exclusive within a process per the RDR §'Phase 2 flag-isolation
+    contract'.
 
-    Falls back to a local ``EphemeralClient`` (with a warning) when no server
-    record is found — this preserves T1 functionality in restricted environments
-    where the server could not start or ``ps`` is unavailable.
+    Flag-off (legacy)
+        On construction, walks the PPID chain looking for an
+        ancestor ``sessions/<uuid>.session`` record. Falls back to
+        ``EphemeralClient`` only when ``NEXUS_SKIP_T1=1`` is set;
+        otherwise raises ``T1ServerNotFoundError`` (GH #567).
+        Reconnect after a connectivity failure re-resolves the
+        record once before raising.
 
-    If the parent session ends (stopping the ChromaDB server) while a child
-    agent is still running, the first subsequent T1 operation will catch the
-    connectivity error and transparently reconnect — either to a freshly
-    detected server record or to a new local EphemeralClient.  Only one
-    reconnect attempt is made; ``_dead`` is set afterwards to prevent loops.
+    Flag-on (RDR-105 P2)
+        Constructor goes through ``_init_new_discovery`` (a four-
+        branch fail-loud gate): Path A (env), Path B (addr file),
+        Path C (explicit ``NX_T1_ISOLATED=1``), or Path D (raise).
+        No fall-through to legacy resolvers. Reconnect is NOT
+        supported in flag-on mode; callers must construct a fresh
+        ``T1Database`` to re-resolve.
 
-    Pass ``client=`` explicitly to inject a custom client in tests.
+    Pass ``client=`` explicitly to inject a custom client in tests
+    (works in both regimes; bypasses both gates).
     """
 
     def _init_new_discovery(self, chromadb, session_id: str | None) -> None:
@@ -403,6 +410,25 @@ class T1Database:
         if self._dead:
             return
         self._dead = True  # set before any I/O to prevent loops on re-entry
+
+        if os.environ.get("NX_T1_NEW_DISCOVERY") == "1":
+            # RDR-105 P2 follow-up (review #582): the legacy resolver
+            # consults SESSIONS_DIR + find_session_by_id, which
+            # flag-on processes never write. Trying it would always
+            # miss; reading the addr file here would require a fresh
+            # T1Database to apply the new four-branch gate. Fail
+            # loud and let the caller decide whether to reconstruct.
+            _log.warning(
+                "t1_reconnect_unsupported_in_new_discovery",
+                session_id=self._session_id,
+            )
+            raise T1ServerNotFoundError(
+                "T1 reconnect is not supported under "
+                "NX_T1_NEW_DISCOVERY=1. The chroma server became "
+                "unreachable; construct a new T1Database to "
+                "re-resolve via the four-branch hybrid-discovery "
+                "gate (env -> addr file -> isolation -> raise)."
+            )
 
         prior_session_id = self._session_id
         # Use the same UUID-keyed chain as the constructor (GH #576):

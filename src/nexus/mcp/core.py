@@ -512,6 +512,15 @@ def _t1_chroma_shutdown() -> None:
         return
     if not _OWNED_CHROMA:
         return
+    if _OWNED_CHROMA.get("new_discovery"):
+        # RDR-105 P2 follow-up (review #582): flag-on lifespan
+        # cleanup. The signal-handler / atexit path runs this when
+        # the lifespan's ``async finally`` did not fire (stdio
+        # SIGTERM). The impl is idempotent so calling it from both
+        # sites is safe.
+        _SHUTDOWN_IN_FLIGHT = True
+        _t1_chroma_shutdown_new_discovery_impl()
+        return
     if _OWNED_CHROMA.get("nested") or _OWNED_CHROMA.get("reused"):
         # Nested: parent owns chroma. Reused: another MCP server in the
         # same session owns it. We must not stop it on our exit.
@@ -623,46 +632,88 @@ async def _t1_chroma_lifespan_new_discovery():
         return
 
     # Branch 3: spawn + publish.
+    from nexus.session import start_t1_server
+
+    host, port, server_pid, tmpdir = start_t1_server()
+    # Record into ``_OWNED_CHROMA`` BEFORE any further work that
+    # might raise so the stdio SIGTERM path (``_sigterm_handler`` ->
+    # ``_t1_chroma_shutdown``) can still reap chroma if the lifespan
+    # body or the publish step explodes. The ``new_discovery``
+    # marker dispatches the legacy-vs-new shutdown impl.
+    _OWNED_CHROMA.clear()
+    _OWNED_CHROMA.update({
+        "new_discovery": True,
+        "server_pid": server_pid,
+        "tmpdir": str(tmpdir),
+    })
+    try:
+        from nexus.mcp import _t1_state
+        from nexus.session import find_immediate_claude_pid, write_t1_addr
+
+        claude_pid = find_immediate_claude_pid()
+        if claude_pid > 0:
+            write_t1_addr(claude_pid, host, port)
+            _t1_state.T1_ADDR = (host, port)
+            _OWNED_CHROMA["t1_addr_claude_pid"] = claude_pid
+        else:
+            import structlog
+            structlog.get_logger().warning(
+                "t1_addr_publish_skipped_no_claude_pid",
+                host=host,
+                port=port,
+            )
+        yield
+    finally:
+        # Idempotent cleanup. If the SIGTERM / atexit path already
+        # ran via ``_t1_chroma_shutdown``, ``_OWNED_CHROMA`` is empty
+        # and the impl short-circuits.
+        _t1_chroma_shutdown_new_discovery_impl()
+
+
+def _t1_chroma_shutdown_new_discovery_impl() -> None:
+    """RDR-105 P2 follow-up: idempotent cleanup for the flag-on
+    lifespan. Stops chroma, rmtree's the chroma tmpdir, unlinks the
+    addr file, resets ``_t1_state.T1_ADDR``, and clears
+    ``_OWNED_CHROMA``.
+
+    Called from two sites:
+
+    * The new lifespan's ``async finally`` (HTTP/SSE transports and
+      the clean-stdin-EOF path on stdio).
+    * ``_t1_chroma_shutdown`` (signal handler + atexit) when the
+      lifespan's finally did not run (stdio SIGTERM).
+
+    Each step is independently idempotent so the two callers never
+    interfere; whichever fires first does the work, the other finds
+    ``_OWNED_CHROMA`` empty and short-circuits.
+    """
+    if not _OWNED_CHROMA.get("new_discovery"):
+        return
+
     import shutil
 
     from nexus.mcp import _t1_state
-    from nexus.session import (
-        find_immediate_claude_pid,
-        start_t1_server,
-        stop_t1_server,
-        unlink_t1_addr,
-        write_t1_addr,
-    )
+    from nexus.session import stop_t1_server, unlink_t1_addr
 
-    host, port, server_pid, tmpdir = start_t1_server()
-    claude_pid = find_immediate_claude_pid()
-    addr_published = False
-    if claude_pid > 0:
-        write_t1_addr(claude_pid, host, port)
-        _t1_state.T1_ADDR = (host, port)
-        addr_published = True
-    else:
-        import structlog
-        structlog.get_logger().warning(
-            "t1_addr_publish_skipped_no_claude_pid",
-            host=host,
-            port=port,
-        )
+    server_pid = _OWNED_CHROMA.get("server_pid")
+    tmpdir = _OWNED_CHROMA.get("tmpdir")
+    claude_pid = _OWNED_CHROMA.get("t1_addr_claude_pid")
 
-    try:
-        yield
-    finally:
+    if server_pid:
         try:
-            stop_t1_server(server_pid)
+            stop_t1_server(int(server_pid))
         except Exception:
             pass
+    if tmpdir:
         try:
             shutil.rmtree(tmpdir, ignore_errors=True)
         except OSError:
             pass
-        if addr_published:
-            unlink_t1_addr(claude_pid)
-            _t1_state.T1_ADDR = None
+    if claude_pid:
+        unlink_t1_addr(int(claude_pid))
+
+    _t1_state.T1_ADDR = None
+    _OWNED_CHROMA.clear()
 
 
 @asynccontextmanager

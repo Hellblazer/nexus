@@ -425,6 +425,39 @@ class TestT1DatabaseFlagOnLegacyDeleted:
         fake_chromadb.HttpClient.assert_called_once_with(host="127.0.0.1", port=5555)
 
 
+class TestT1DatabaseFlagOnReconnectFailsLoud:
+    """RDR-105 P2 follow-up: ``_reconnect`` is not supported in flag-on
+    mode. The legacy resolver consults ``SESSIONS_DIR`` which the new
+    architecture never writes; calling it would always miss. Fail
+    loud and let the caller construct a fresh ``T1Database``.
+    """
+
+    def test_reconnect_raises_when_flag_on(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+
+        fake_chromadb = MagicMock()
+        fake_chromadb.HttpClient.return_value = MagicMock()
+        monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
+        monkeypatch.setenv("NX_T1_HOST", "127.0.0.1")
+        monkeypatch.setenv("NX_T1_PORT", "5555")
+        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+
+        from nexus.db.t1 import T1Database, T1ServerNotFoundError
+        db = T1Database()
+
+        with pytest.raises(T1ServerNotFoundError, match="NX_T1_NEW_DISCOVERY"):
+            db._reconnect()
+        # Subsequent call is a no-op (`_dead` set by the prior raise).
+        # Re-arm and confirm the second call also short-circuits.
+        # (db._dead stayed True, so this call returns silently; the
+        # contract is "raise once, then no-op"; verified by reaching
+        # the next assertion without exception.)
+        db._reconnect()
+
+
 class TestT1DatabaseFlagOnPrecedence:
     """When both env and file are present, env wins (RF-5 precedence)."""
 
@@ -499,6 +532,17 @@ class TestDispatcherEnvBuilder:
                 _build_dispatch_env(share_t1=True, parent_session_id=None)
         finally:
             _t1_state.T1_ADDR = prev
+
+    def test_share_t1_raises_when_flag_off(self, monkeypatch):
+        """Flag-off does not expose ``_t1_state.T1_ADDR``; silently
+        collapsing ``share_t1=True`` to ephemeral would hide caller
+        intent. Raise instead so the caller learns that share_t1
+        requires the new-discovery flag."""
+        from nexus.operators.dispatch import _build_dispatch_env
+
+        monkeypatch.delenv("NX_T1_NEW_DISCOVERY", raising=False)
+        with pytest.raises(RuntimeError, match="NX_T1_NEW_DISCOVERY"):
+            _build_dispatch_env(share_t1=True, parent_session_id=None)
 
 
 class TestDispatcherEphemeralMode:
@@ -666,6 +710,147 @@ class TestLifespanNewDiscoveryGenerator:
             assert _t1_state.T1_ADDR is None
             assert calls["stop"] == 1
         finally:
+            _t1_state.T1_ADDR = prev_addr
+
+    def test_branch3_no_claude_pid_skips_publish_but_keeps_chroma(
+        self, tmp_path, monkeypatch
+    ):
+        """When ``find_immediate_claude_pid`` returns 0, the lifespan
+        emits a warning, skips the addr-file write, leaves
+        ``_t1_state.T1_ADDR`` unset, and still tears chroma down on
+        exit. Documents the unusual-process-parentage edge."""
+        import asyncio
+
+        from nexus.mcp import _t1_state, core as mcp_core
+        from nexus.session import read_t1_addr_for
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
+        monkeypatch.delenv("NX_T1_HOST", raising=False)
+        monkeypatch.delenv("NX_T1_PORT", raising=False)
+        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
+        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+
+        prev_addr = _t1_state.T1_ADDR
+        _t1_state.T1_ADDR = None
+        calls = {"stop": 0}
+        try:
+            with patch("nexus.session.start_t1_server",
+                       return_value=("127.0.0.1", 33333, 99999, str(tmp_path / "chroma_tmpdir"))), \
+                 patch("nexus.session.stop_t1_server",
+                       side_effect=lambda _p: calls.update(stop=calls["stop"] + 1)), \
+                 patch("nexus.session.find_immediate_claude_pid", return_value=0):
+                async def _run():
+                    async with mcp_core._t1_chroma_lifespan_new_discovery():
+                        # No addr file, no T1_ADDR, but chroma is running.
+                        assert _t1_state.T1_ADDR is None
+                        # No file at any pid (we mocked walker to 0).
+                        for pid in (0, 1, 100, 99999):
+                            assert read_t1_addr_for(pid) is None
+                asyncio.run(_run())
+
+            assert calls["stop"] == 1
+            assert _t1_state.T1_ADDR is None
+        finally:
+            _t1_state.T1_ADDR = prev_addr
+
+    def test_sigterm_path_cleans_up_via_owned_chroma(self, tmp_path, monkeypatch):
+        """Stdio SIGTERM scenario: lifespan body has populated
+        ``_OWNED_CHROMA``; ``_t1_chroma_shutdown`` runs (signal
+        handler / atexit) and dispatches to the new-discovery impl
+        instead of the legacy one. Idempotent with the lifespan's
+        own finally."""
+        from nexus.mcp import _t1_state, core as mcp_core
+        from nexus.session import read_t1_addr_for, write_t1_addr
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
+
+        prev_owned = dict(mcp_core._OWNED_CHROMA)
+        prev_addr = _t1_state.T1_ADDR
+        prev_inflight = mcp_core._SHUTDOWN_IN_FLIGHT
+        try:
+            # Simulate a populated lifespan-body state.
+            write_t1_addr(88888, "127.0.0.1", 7777)
+            _t1_state.T1_ADDR = ("127.0.0.1", 7777)
+            mcp_core._OWNED_CHROMA.clear()
+            mcp_core._OWNED_CHROMA.update({
+                "new_discovery": True,
+                "server_pid": 12345,
+                "tmpdir": str(tmp_path / "chroma_tmpdir"),
+                "t1_addr_claude_pid": 88888,
+            })
+            mcp_core._SHUTDOWN_IN_FLIGHT = False
+
+            calls = {"stop": 0}
+            with patch("nexus.session.stop_t1_server",
+                       side_effect=lambda _p: calls.update(stop=calls["stop"] + 1)):
+                # SIGTERM-equivalent: atexit / signal handler entry.
+                mcp_core._t1_chroma_shutdown()
+
+            # Cleanup ran: addr file gone, state reset, chroma stopped.
+            assert read_t1_addr_for(88888) is None
+            assert _t1_state.T1_ADDR is None
+            assert calls["stop"] == 1
+            assert not mcp_core._OWNED_CHROMA
+            # _SHUTDOWN_IN_FLIGHT set so a second call short-circuits.
+            assert mcp_core._SHUTDOWN_IN_FLIGHT is True
+
+            # Second call is a no-op.
+            with patch("nexus.session.stop_t1_server",
+                       side_effect=lambda _p: calls.update(stop=calls["stop"] + 1)):
+                mcp_core._t1_chroma_shutdown()
+            assert calls["stop"] == 1  # unchanged
+        finally:
+            mcp_core._OWNED_CHROMA.clear()
+            mcp_core._OWNED_CHROMA.update(prev_owned)
+            _t1_state.T1_ADDR = prev_addr
+            mcp_core._SHUTDOWN_IN_FLIGHT = prev_inflight
+
+    def test_branch3_chroma_reaped_when_publish_raises(self, tmp_path, monkeypatch):
+        """If ``write_t1_addr`` raises, the lifespan's finally still
+        reaps chroma (no orphan process). Validates the spawn-then-
+        try/finally layout."""
+        import asyncio
+
+        from nexus.mcp import _t1_state, core as mcp_core
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")
+        monkeypatch.delenv("NX_T1_HOST", raising=False)
+        monkeypatch.delenv("NX_T1_PORT", raising=False)
+        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
+        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+
+        prev_owned = dict(mcp_core._OWNED_CHROMA)
+        prev_addr = _t1_state.T1_ADDR
+        try:
+            calls = {"stop": 0}
+
+            def boom(*args, **kwargs):
+                raise OSError("simulated disk-full at addr-file write")
+
+            with patch("nexus.session.start_t1_server",
+                       return_value=("127.0.0.1", 4242, 1234, str(tmp_path / "chroma_tmpdir"))), \
+                 patch("nexus.session.stop_t1_server",
+                       side_effect=lambda _p: calls.update(stop=calls["stop"] + 1)), \
+                 patch("nexus.session.find_immediate_claude_pid", return_value=11), \
+                 patch("nexus.session.write_t1_addr", side_effect=boom):
+                async def _run():
+                    async with mcp_core._t1_chroma_lifespan_new_discovery():
+                        pass
+
+                with pytest.raises(OSError, match="simulated disk-full"):
+                    asyncio.run(_run())
+
+            # Chroma was reaped despite the failure.
+            assert calls["stop"] == 1
+            # State reset.
+            assert _t1_state.T1_ADDR is None
+            assert not mcp_core._OWNED_CHROMA
+        finally:
+            mcp_core._OWNED_CHROMA.clear()
+            mcp_core._OWNED_CHROMA.update(prev_owned)
             _t1_state.T1_ADDR = prev_addr
 
     def test_owned_respawn_does_not_clobber_parent_file(self, tmp_path, monkeypatch):

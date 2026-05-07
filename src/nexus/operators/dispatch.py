@@ -86,7 +86,18 @@ def _build_dispatch_env(
     flag_on = base.get("NX_T1_NEW_DISCOVERY") == "1"
 
     if not flag_on:
-        # Legacy: every mode collapses to the historical
+        # ``share_t1`` is structurally meaningless without the new
+        # discovery flag (the parent has no ``_t1_state.T1_ADDR``
+        # to share). A silent collapse to ephemeral would hide
+        # caller intent. ``ephemeral`` and ``owned`` legitimately
+        # collapse to the historical shape.
+        if share_t1:
+            raise RuntimeError(
+                "share_t1=True requires NX_T1_NEW_DISCOVERY=1 in "
+                "the parent's environment; the legacy session-record "
+                "discovery does not expose a shared T1 address."
+            )
+        # Legacy: every other mode collapses to the historical
         # NEXUS_SKIP_T1=1 ephemeral subprocess path.
         base["NEXUS_SKIP_T1"] = "1"
         if parent_session_id:
