@@ -6,6 +6,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.26.8] - 2026-05-07
+
+### Fixed
+
+- **`sn` SubagentStart hook delivery** — `sn/hooks/scripts/mcp-inject.sh` migrated from plain stdout to the documented Claude Code JSON envelope (`hookSpecificOutput.additionalContext`). The `nx` plugin made this migration on 2026-05-05 (commit `68854ca`); `sn` was missed. Symptom: spawned subagents did not reliably receive the Serena + Context7 setup ritual (ToolSearch loading recipe, backend pair handling, task→tool table). Fix mirrors the FD-redirect + EXIT-trap pattern in `nx/hooks/scripts/subagent-start.sh`. Body code unchanged. (nexus-t5q2, PR #578)
+- **Sequential Thinking imperative restored** — the April 25 trim (`e2fc2408` / PR #320) collapsed the `using-nx-skills/SKILL.md` Essential MCP Tools entry from an active imperative to a noun-phrase listing; the May 5 restore (`aa0076a1` / PR #519) targeted `nx_answer` and didn't bring this back. Subagents were unaffected because the SEQTHINK section in `subagent-start.sh` was unchanged across the trim, but main-session use dropped. Fix: restore the imperative ("use for any non-trivial decision"), the four use-case list (adds risk assessment back), the workflow recipe (hypothesis → evidence → evaluate → branch or proceed), and the `branchFromThought` param hint. Single line, deliberately tighter than pre-trim. (PR #578)
+
+### Tests
+
+- `tests/test_sn_plugin.py` — new `test_envelope_is_valid_json`; existing substring assertions retargeted at the unwrapped `additionalContext`. 26 passed.
+- `tests/cc-validation/scenarios/18_real_sn_subagent.sh` — new sandbox scenario, mirrors scenario 12 (real_nx_subagent): installs sn from the working tree, dispatches a real subagent, probes for Serena + Context7 anchor phrases.
+
 ## [4.26.7] - 2026-05-06
 
 Patch release. Closes the T1 data-loss class that escaped three rounds of patches in 4.26.4–4.26.6. Six-phase unified fix plus invariant test scaffolding.

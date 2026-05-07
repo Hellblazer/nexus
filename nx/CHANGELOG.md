@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.26.8] - 2026-05-07
+
+### Fixed
+
+- **Sequential Thinking imperative in `using-nx-skills/SKILL.md`** — the April 25 trim (PR #320) collapsed the Essential MCP Tools entry from an active imperative to a noun-phrase listing; the May 5 restore (PR #519) targeted `nx_answer` and missed this. Restored the imperative ("use for any non-trivial decision"), the four use-case list (risk assessment back), the workflow recipe (hypothesis → evidence → evaluate → branch or proceed), and the `branchFromThought` param hint. Single line, tighter than pre-trim two-line form. Subagents were unaffected by the regression because `nx/hooks/scripts/subagent-start.sh` SEQTHINK section was unchanged across the trim. (PR #578)
+
 ## [4.26.7] - 2026-05-06
 
 Plugin version aligned with conexus 4.26.7. No plugin-side changes; the release ships a six-phase unified fix in the conexus package that closes the T1 data-loss class escaping three rounds of patches in 4.26.4–4.26.6 (PR #577 closes GH #576 silent data loss + GH #575 watchdog leak), plus an invariant regression scaffold (`tests/test_t1_invariants.py`) so the class cannot re-instantiate silently. See root ``CHANGELOG.md`` for the phase-by-phase breakdown.
