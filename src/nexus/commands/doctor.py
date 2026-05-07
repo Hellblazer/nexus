@@ -409,35 +409,16 @@ def _run_check_tmpdirs(*, reap: bool, json_out: bool) -> None:
     import time
     from pathlib import Path
 
-    from nexus.db.t1 import SESSIONS_DIR
     from nexus.session import sweep_orphan_tmpdirs
 
     tmpdir_root = Path(tempfile.gettempdir())
     cutoff_hours = 24.0
     cutoff = time.time() - cutoff_hours * 3600.0
 
-    referenced: set[str] = set()
-    if SESSIONS_DIR.exists():
-        for f in SESSIONS_DIR.glob("*.session"):
-            try:
-                rec = json.loads(f.read_text())
-                if isinstance(rec, dict):
-                    td = rec.get("tmpdir", "")
-                    if td:
-                        referenced.add(str(Path(td).resolve()))
-            except (json.JSONDecodeError, OSError):
-                continue
-
     candidates: list[dict] = []
     if tmpdir_root.exists():
         for d in sorted(tmpdir_root.glob("nx_t1_*")):
             if not d.is_dir():
-                continue
-            try:
-                resolved = str(d.resolve())
-            except OSError:
-                continue
-            if resolved in referenced:
                 continue
             try:
                 mtime = d.stat().st_mtime
@@ -467,7 +448,7 @@ def _run_check_tmpdirs(*, reap: bool, json_out: bool) -> None:
 
     if reap:
         payload["reaped"] = sweep_orphan_tmpdirs(
-            sessions_dir=SESSIONS_DIR, tmpdir_root=tmpdir_root,
+            tmpdir_root=tmpdir_root,
             max_age_hours=cutoff_hours,
         )
 
@@ -1069,6 +1050,17 @@ def _run_check_mineru() -> None:
          "error. nexus-1pfq.",
 )
 @click.option(
+    "--check-t1",
+    "check_t1",
+    is_flag=True,
+    default=False,
+    help="Diagnose T1 addr-file presence + reachability. Detects "
+         "the 'no t1_addr.<claude_pid> when Claude Code is parent' "
+         "case and the exec -a / wrapper-rename residual. RDR-105 "
+         "P5 / nexus-ssdg. Exits 1 when Claude is in the chain "
+         "but the addr file is missing or unreachable.",
+)
+@click.option(
     "--days",
     "days",
     default=30,
@@ -1088,6 +1080,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                trim_telemetry: bool, days: int,
                check_post_store_hooks: bool,
                check_aspect_queue: bool,
+               check_t1: bool,
                check_tier_discipline: bool) -> None:
     """Verify that all required services and credentials are available."""
     if check_schema:
@@ -1137,6 +1130,10 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
 
     if check_aspect_queue:
         _run_check_aspect_queue()
+        return
+
+    if check_t1:
+        _run_check_t1()
         return
 
     if check_tier_discipline:
@@ -1326,6 +1323,116 @@ def _run_check_resources() -> None:
         err=True,
     )
     raise click.exceptions.Exit(2)
+
+
+# ── --check-t1 (RDR-105 P5 / nexus-ssdg) ─────────────────────────────────────
+
+
+def _run_check_t1() -> None:
+    """Diagnostic: T1 addr-file presence + reachability.
+
+    .. note::
+       Imports ``_tcp_probe_alive`` lazily from ``nexus.mcp.core`` to
+       avoid pulling FastMCP / chromadb / corpus into the doctor's
+       cold-start path.
+
+    Three outcomes:
+
+    * **Healthy.** A live ``claude*`` ancestor is reachable via the
+      PPID walk and ``~/.config/nexus/t1_addr.<claude_pid>`` exists
+      AND its host:port responds to a TCP probe.
+    * **Missing addr file under live Claude.** A ``claude*`` ancestor
+      is reachable but the addr file is absent. Two common causes:
+      (a) the MCP server crashed before the lifespan wrote the file,
+      (b) the operator launched Claude Code via ``exec -a`` or a
+      custom wrapper whose process name does not start with
+      ``claude``, defeating the PPID walk's match.
+    * **No Claude in chain.** The current process has no ``claude*``
+      ancestor; ``nx scratch`` from this shell will fail-loud unless
+      the operator opts in via ``NX_T1_ISOLATED=1``.
+
+    Exit code:
+      * 0: healthy or "no Claude in chain" (informational).
+      * 1: Claude in chain but addr file absent or unreachable.
+    """
+    import os as _os
+
+    from nexus.mcp.core import _tcp_probe_alive
+    from nexus.session import (
+        _command_name_of,
+        find_immediate_claude_pid,
+        read_t1_addr_for,
+        t1_addr_path,
+    )
+
+    own_pid = _os.getpid()
+    claude_pid = find_immediate_claude_pid(start_pid=own_pid)
+
+    if claude_pid <= 0:
+        click.echo("[ ] T1: no claude ancestor in PPID chain")
+        click.echo(
+            "    This is informational. ``nx scratch`` from this shell "
+            "will fail-loud unless you opt into per-process ephemeral "
+            "T1 via ``NX_T1_ISOLATED=1``."
+        )
+        return
+
+    comm = _command_name_of(claude_pid)
+    is_claude = comm.lower().startswith("claude")
+    if not is_claude:
+        # find_immediate_claude_pid returned the immediate-PPID
+        # fallback because no ancestor's comm starts with "claude".
+        # Likely an exec -a / wrapper rename.
+        click.echo(
+            f"[!] T1: ancestor PID {claude_pid} (comm={comm!r}) is not "
+            "named 'claude*'; likely launched via exec -a or a "
+            "wrapper. Falling back to the immediate-PPID."
+        )
+        click.echo(
+            "    If you launched Claude Code via ``exec -a`` or a "
+            "custom wrapper, ensure the process name starts with "
+            "``claude`` so the PPID walk can find it."
+        )
+        raise click.exceptions.Exit(1)
+
+    addr_path = t1_addr_path(claude_pid)
+    addr = read_t1_addr_for(claude_pid)
+    if addr is None:
+        click.echo(
+            f"[✗] T1: claude ancestor PID {claude_pid} ({comm!r}) "
+            f"is alive but {addr_path} is missing or unreadable."
+        )
+        click.echo(
+            "    The MCP server's lifespan should have written this "
+            "file at session start. Causes:\n"
+            "      - The MCP server crashed before the lifespan "
+            "completed (check ~/.config/nexus/logs/mcp.log).\n"
+            "      - The MCP server is still booting; retry shortly.\n"
+            "      - The Claude Code binary was launched via "
+            "``exec -a`` with a different process name (the PPID walk "
+            "found the right PID but the comm-prefix check missed)."
+        )
+        raise click.exceptions.Exit(1)
+
+    host, port = addr
+    if _tcp_probe_alive(host, port, timeout=1.0):
+        click.echo(
+            f"[✓] T1: addr file {addr_path.name} -> "
+            f"{host}:{port} (chroma reachable)"
+        )
+        return
+
+    click.echo(
+        f"[✗] T1: addr file {addr_path.name} -> {host}:{port} "
+        "but TCP probe failed."
+    )
+    click.echo(
+        "    The addr file points at a chroma that is not listening. "
+        "The MCP server may have died ungracefully. Restart Claude "
+        "Code; the next MCP startup will sweep this stale addr file "
+        "and spawn a fresh chroma."
+    )
+    raise click.exceptions.Exit(1)
 
 
 # ── --check-quotas (nexus-c590) ──────────────────────────────────────────────

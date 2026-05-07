@@ -97,59 +97,22 @@ def clear_search_traces() -> None:
 
 
 def get_t1():
-    """Return (T1Database, is_isolated) — lazy init on first call.
+    """Return (T1Database, is_isolated), lazy init on first call.
 
-    GH #567 + chroma-spawn-race follow-up: the FastMCP lifespan that
-    used to own ``_t1_chroma_init_if_owner`` could fire BEFORE the
-    Claude Code SessionStart hook wrote ``current_session``. When that
-    happened, ``_resolve_top_level_session_id`` returned None,
-    ``_t1_chroma_init_if_owner`` returned silently, no chroma was
-    spawned, and no ``.session`` file was written. CLI tools then had
-    no record to find -- the silent-data-loss fingerprint that #567
-    reported. Live trace 2026-05-06 (mcp.log boot at 14:29:40 had no
-    chroma_init log; current_session was nuked by an earlier stale-
-    cleanup pass; lifespan ran with empty pointer).
-
-    Fix: call ``_t1_chroma_init_if_owner`` from ``get_t1`` BEFORE
-    constructing T1Database. By the time any MCP tool fires, the
-    SessionStart hook has run (Claude Code sequences SessionStart
-    before tool dispatch). The lifespan still calls
-    ``_t1_chroma_init_if_owner`` -- whichever fires first wins
-    (the function is idempotent via the ``if _OWNED_CHROMA: return``
-    guard at its head). This makes chroma spawn robust to lifespan
-    vs SessionStart ordering races.
-
-    The function is also called from ``mcp/catalog.py`` so the
-    catalog-side MCP server's first tool call gets the same robust
-    behaviour.
+    Post-RDR-105 P4 the FastMCP lifespan owns chroma's lifecycle in
+    full (spawn, addr-file publish, ``_t1_state.T1_ADDR``, cleanup);
+    no get-t1-side init is needed. By the time any MCP tool fires,
+    Claude Code has run the SessionStart hook AND the lifespan has
+    completed its `__aenter__`, so the addr file (or env vars) are
+    already in place for ``T1Database()`` to read. ``T1Database``'s
+    four-branch fail-loud gate raises ``T1ServerNotFoundError`` if
+    the lifespan did not run for any reason, which surfaces a clear
+    error rather than silently degrading.
     """
     global _t1_instance, _t1_isolated
     if _t1_instance is None:
         with _t1_lock:
             if _t1_instance is None:
-                # Ensure chroma is up + .session record written before
-                # T1Database() probes for it. Idempotent: returns
-                # immediately when _OWNED_CHROMA already set.
-                try:
-                    from nexus.mcp.core import (
-                        _t1_chroma_init_if_owner,
-                        reconcile_owned_chroma,
-                    )
-                    _t1_chroma_init_if_owner()
-                    # GH #572: reconcile session record file vs the
-                    # current_session pointer. SessionStart can fire
-                    # AFTER our spawn (between lifespan boot and the
-                    # first tool call); the rename here makes the
-                    # record discoverable via the canonical pointer.
-                    # Tool dispatch is sequenced after SessionStart
-                    # by Claude Code, so by this call the pointer is
-                    # canonical. Idempotent: no-op when no drift.
-                    reconcile_owned_chroma()
-                except Exception:
-                    # Spawn failure already logs as 't1_chroma_spawn_failed';
-                    # let T1Database raise its T1ServerNotFoundError below
-                    # if no record landed.
-                    pass
                 with warnings.catch_warnings(record=True) as caught:
                     warnings.simplefilter("always")
                     from nexus.db.t1 import T1Database

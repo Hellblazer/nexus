@@ -727,9 +727,7 @@ class TestCheckTmpdirs:
         backdate = _time.time() - 30 * 3600
         _os.utime(old_orphan, (backdate, backdate))
 
-        with patch(
-            "tempfile.gettempdir", return_value=str(tmproot),
-        ), patch("nexus.db.t1.SESSIONS_DIR", sessions):
+        with patch("tempfile.gettempdir", return_value=str(tmproot)):
             result = runner.invoke(main, ["doctor", "--check-tmpdirs"])
         assert result.exit_code == 0, result.output
         assert "nx_t1_old" in result.output
@@ -751,9 +749,7 @@ class TestCheckTmpdirs:
         backdate = _time.time() - 30 * 3600
         _os.utime(old_orphan, (backdate, backdate))
 
-        with patch(
-            "tempfile.gettempdir", return_value=str(tmproot),
-        ), patch("nexus.db.t1.SESSIONS_DIR", sessions):
+        with patch("tempfile.gettempdir", return_value=str(tmproot)):
             result = runner.invoke(
                 main, ["doctor", "--check-tmpdirs", "--reap-tmpdirs"],
             )
@@ -777,9 +773,7 @@ class TestCheckTmpdirs:
         backdate = _time.time() - 30 * 3600
         _os.utime(orphan, (backdate, backdate))
 
-        with patch(
-            "tempfile.gettempdir", return_value=str(tmproot),
-        ), patch("nexus.db.t1.SESSIONS_DIR", sessions):
+        with patch("tempfile.gettempdir", return_value=str(tmproot)):
             result = runner.invoke(
                 main, ["doctor", "--check-tmpdirs", "--json"],
             )
@@ -789,3 +783,82 @@ class TestCheckTmpdirs:
         assert len(payload["candidates"]) == 1
         assert payload["candidates"][0]["path"].endswith("nx_t1_x")
         assert payload["reaped"] == 0
+
+
+# ── --check-t1 (RDR-105 P5 / nexus-ssdg) ─────────────────────────────────────
+
+
+class TestCheckT1:
+    """Diagnostic: T1 addr-file presence + reachability."""
+
+    def test_no_claude_ancestor_is_informational(
+        self, runner: CliRunner, tmp_path: Path,
+    ) -> None:
+        from unittest.mock import patch
+        with patch("nexus.session.find_immediate_claude_pid", return_value=0):
+            result = runner.invoke(main, ["doctor", "--check-t1"])
+        assert result.exit_code == 0, result.output
+        assert "no claude ancestor" in result.output.lower()
+
+    def test_exec_a_wrapper_rename_warns(
+        self, runner: CliRunner, tmp_path: Path,
+    ) -> None:
+        """find_immediate_claude_pid returns the immediate-PPID
+        fallback when no ancestor's comm starts with 'claude'."""
+        from unittest.mock import patch
+        with (
+            patch("nexus.session.find_immediate_claude_pid", return_value=4242),
+            patch("nexus.session._command_name_of", return_value="bash"),
+        ):
+            result = runner.invoke(main, ["doctor", "--check-t1"])
+        assert result.exit_code == 1, result.output
+        assert "exec -a" in result.output
+
+    def test_addr_file_missing_under_live_claude(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch,
+    ) -> None:
+        from unittest.mock import patch
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        with (
+            patch("nexus.session.find_immediate_claude_pid", return_value=4242),
+            patch("nexus.session._command_name_of", return_value="claude"),
+        ):
+            result = runner.invoke(main, ["doctor", "--check-t1"])
+        assert result.exit_code == 1, result.output
+        assert "missing or unreadable" in result.output
+
+    def test_addr_file_present_but_unreachable(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch,
+    ) -> None:
+        from unittest.mock import patch
+
+        from nexus.session import write_t1_addr
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        write_t1_addr(4242, "127.0.0.1", 1)
+        with (
+            patch("nexus.session.find_immediate_claude_pid", return_value=4242),
+            patch("nexus.session._command_name_of", return_value="claude"),
+            patch("nexus.mcp.core._tcp_probe_alive", return_value=False),
+        ):
+            result = runner.invoke(main, ["doctor", "--check-t1"])
+        assert result.exit_code == 1, result.output
+        assert "TCP probe failed" in result.output
+
+    def test_healthy(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch,
+    ) -> None:
+        from unittest.mock import patch
+
+        from nexus.session import write_t1_addr
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        write_t1_addr(4242, "127.0.0.1", 12345)
+        with (
+            patch("nexus.session.find_immediate_claude_pid", return_value=4242),
+            patch("nexus.session._command_name_of", return_value="claude"),
+            patch("nexus.mcp.core._tcp_probe_alive", return_value=True),
+        ):
+            result = runner.invoke(main, ["doctor", "--check-t1"])
+        assert result.exit_code == 0, result.output
+        assert "chroma reachable" in result.output

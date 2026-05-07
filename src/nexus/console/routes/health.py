@@ -14,7 +14,7 @@ from nexus.console.watchers import scan_sessions_sync
 
 router = APIRouter(tags=["health"])
 
-from nexus.session import SESSIONS_DIR as _SESSIONS_DIR  # respects NEXUS_CONFIG_DIR
+from nexus.config import nexus_config_dir as _nexus_config_dir
 
 
 def _collect_health_data() -> dict[str, Any]:
@@ -53,7 +53,7 @@ def _collect_health_data() -> dict[str, Any]:
             "tcp_reachable": s.tcp_reachable,
             "created_at": s.created_at,
         }
-        for s in scan_sessions_sync(_SESSIONS_DIR)
+        for s in scan_sessions_sync(_nexus_config_dir())
     ]
     data["active_sessions"] = sum(1 for s in data["sessions"] if s["pid_alive"])
 

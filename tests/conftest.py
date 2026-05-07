@@ -55,43 +55,19 @@ def _restore_structlog_after_test():
 
 @pytest.fixture(autouse=True)
 def _isolate_t1_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Redirect T1 SESSIONS_DIR so tests never discover real live server records.
+    """Force tests onto the explicit-isolation T1 path.
 
-    Before fixing chroma's --log-level flag, start_t1_server() always failed
-    in tests (chroma exited immediately), so no session file was ever written
-    and test isolation held by accident.  Now that the server starts cleanly,
-    test_session_start_prints_ready_message (and similar) actually write a
-    session file to the real SESSIONS_DIR.  Subsequent T1Database() calls in
-    the same pytest process find it via PPID chain walk, hijack the session_id,
-    and break isolation across unrelated tests.
-
-    Solution: redirect both consumers of SESSIONS_DIR to an empty per-test
-    tmp_path so find_ancestor_session() always returns None.  T1Database falls
-    back to the process-wide EphemeralClient singleton (isolated by session_id),
-    and any session files written by session_start() go to tmp_path, not ~/.
+    RDR-105 P4 (nexus-jnx7) collapsed T1 discovery to a single
+    four-branch fail-loud gate. With no env vars and no addr file,
+    the constructor raises ``T1ServerNotFoundError``. Tests that
+    previously relied on the legacy EphemeralClient fallback opt
+    in via the ``NX_T1_ISOLATED=1`` (or its deprecated
+    ``NEXUS_SKIP_T1=1`` alias) Path C; this autouse fixture sets
+    the alias process-wide so the suite gets a per-test
+    EphemeralClient by default. Tests that need a different mode
+    (env-passdown, addr file, fail-loud raise) override the env
+    inside the test.
     """
-    sessions = tmp_path / ".nexus" / "sessions"
-    sessions.mkdir(parents=True, exist_ok=True)
-    # Force-import the modules before monkeypatch.setattr's string-path
-    # resolver walks them. On Python 3.13, package attribute access via
-    # ``getattr(nexus.db, "t1")`` no longer auto-loads submodules — so
-    # if no prior test imported ``nexus.db.t1`` directly, monkeypatch's
-    # walk fails with ``AttributeError: module 'nexus.db' has no
-    # attribute 't1'``. Importing here guarantees the submodules are
-    # registered as parent-package attributes before the lookup.
-    # Python 3.12 was implicitly forgiving; 3.13 is not.
-    import nexus.db.t1  # noqa: F401  -- side effect: registers as attr
-    import nexus.hooks  # noqa: F401  -- side effect: registers as attr
-
-    monkeypatch.setattr("nexus.db.t1.SESSIONS_DIR", sessions)
-    monkeypatch.setattr("nexus.hooks.SESSIONS_DIR", sessions)
-    # GH #567: T1Database() now raises T1ServerNotFoundError when no
-    # record is found and no client is injected, to prevent the silent
-    # CLI write-loss bug. Tests that previously relied on the implicit
-    # EphemeralClient fallback opt in via NEXUS_SKIP_T1=1, the same
-    # env var the operator subprocess path uses. Test fixtures that
-    # want to share a chroma client across two T1Database instances
-    # (e.g. ``two_sessions``) still pass ``client=...`` explicitly.
     monkeypatch.setenv("NEXUS_SKIP_T1", "1")
 
 
