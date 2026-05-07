@@ -123,7 +123,15 @@ def _t1_publish_addr_for_new_discovery() -> None:
     symmetric ``_t1_unpublish_addr_for_new_discovery`` can find the
     file at shutdown.
     """
-    if _os.environ.get("NX_T1_NEW_DISCOVERY") != "1":
+    # P3 NOTE: when default-on, the legacy ``_t1_chroma_init_if_owner``
+    # runs only when the operator opts out via NX_T1_NEW_DISCOVERY=0.
+    # In that case this helper short-circuits (its own flag check
+    # below is symmetric with the lifespan dispatch above). When the
+    # flag is on, the new lifespan handles publishing directly and
+    # this helper is not on the path.
+    from nexus.session import t1_new_discovery_enabled
+
+    if not t1_new_discovery_enabled():
         return
     if not _OWNED_CHROMA:
         return
@@ -747,7 +755,9 @@ async def _t1_chroma_lifespan(_app: Any):
     paths firing is safe: lifespan finally on HTTP/SSE, signal
     handler on stdio SIGTERM, atexit on clean exit.
     """
-    if _os.environ.get("NX_T1_NEW_DISCOVERY") == "1":
+    from nexus.session import t1_new_discovery_enabled
+
+    if t1_new_discovery_enabled():
         async with _t1_chroma_lifespan_new_discovery():
             yield
         return

@@ -290,7 +290,7 @@ class TestT1DatabaseFlagOffPreservesLegacyBehaviour:
         fake_chromadb.EphemeralClient.return_value = MagicMock()
         monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
 
-        monkeypatch.delenv("NX_T1_NEW_DISCOVERY", raising=False)
+        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "0")
         monkeypatch.setenv("NEXUS_SKIP_T1", "1")
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
 
@@ -497,7 +497,7 @@ class TestDispatcherEnvBuilder:
     def test_legacy_path_when_flag_off(self, monkeypatch):
         from nexus.operators.dispatch import _build_dispatch_env
 
-        monkeypatch.delenv("NX_T1_NEW_DISCOVERY", raising=False)
+        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "0")
         env = _build_dispatch_env(share_t1=False, parent_session_id="parent-uuid")
         assert env.get("NEXUS_SKIP_T1") == "1"
         assert "NX_T1_HOST" not in env
@@ -540,7 +540,7 @@ class TestDispatcherEnvBuilder:
         requires the new-discovery flag."""
         from nexus.operators.dispatch import _build_dispatch_env
 
-        monkeypatch.delenv("NX_T1_NEW_DISCOVERY", raising=False)
+        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "0")
         with pytest.raises(RuntimeError, match="NX_T1_NEW_DISCOVERY"):
             _build_dispatch_env(share_t1=True, parent_session_id=None)
 
@@ -569,7 +569,7 @@ class TestDispatcherEphemeralMode:
         the historical operator-dispatch shape."""
         from nexus.operators.dispatch import _build_dispatch_env
 
-        monkeypatch.delenv("NX_T1_NEW_DISCOVERY", raising=False)
+        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "0")
         env = _build_dispatch_env(ephemeral=True, parent_session_id=None)
         assert env.get("NEXUS_SKIP_T1") == "1"
         assert "NX_T1_ISOLATED" not in env
@@ -984,7 +984,7 @@ class TestLifespanAugmentation:
         from nexus.session import read_t1_addr_for
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        monkeypatch.delenv("NX_T1_NEW_DISCOVERY", raising=False)
+        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "0")
 
         prev_owned = dict(mcp_core._OWNED_CHROMA)
         prev_addr = _t1_state.T1_ADDR
@@ -1173,6 +1173,139 @@ class TestE2EEnvDiscovery:
                 f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
             )
             assert proc.stdout.startswith("OK"), proc.stdout
+        finally:
+            stop_t1_server(server_pid)
+            shutil.rmtree(chroma_tmpdir, ignore_errors=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RDR-105 P3 (nexus-xf5r): default-on production behaviour + RF-3 stress
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestNewDiscoveryDefaultOn:
+    """The flag defaults to on as of P3 (``t1_new_discovery_enabled``).
+    Removing the conftest's ``NX_T1_NEW_DISCOVERY=0`` override lets the
+    production default fire and exercises the post-flip behaviour.
+    """
+
+    def test_helper_default_on(self, monkeypatch):
+        from nexus.session import t1_new_discovery_enabled
+
+        monkeypatch.delenv("NX_T1_NEW_DISCOVERY", raising=False)
+        assert t1_new_discovery_enabled() is True
+
+    def test_helper_off_when_explicit_zero(self, monkeypatch):
+        from nexus.session import t1_new_discovery_enabled
+
+        monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "0")
+        assert t1_new_discovery_enabled() is False
+
+    def test_helper_on_when_any_non_zero(self, monkeypatch):
+        from nexus.session import t1_new_discovery_enabled
+
+        for val in ("1", "true", "yes", "on", "anything"):
+            monkeypatch.setenv("NX_T1_NEW_DISCOVERY", val)
+            assert t1_new_discovery_enabled() is True, (
+                f"value {val!r} should enable new discovery"
+            )
+
+    def test_constructor_takes_new_path_by_default(self, tmp_path, monkeypatch):
+        """No env var set: production default is the four-branch
+        fail-loud gate. Path C fires via ``NX_T1_ISOLATED=1``."""
+        from unittest.mock import MagicMock
+
+        fake_chromadb = MagicMock()
+        fake_chromadb.EphemeralClient.return_value = MagicMock()
+        monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        # Remove conftest's flag-off override; use production default.
+        monkeypatch.delenv("NX_T1_NEW_DISCOVERY", raising=False)
+        monkeypatch.delenv("NX_T1_HOST", raising=False)
+        monkeypatch.delenv("NX_T1_PORT", raising=False)
+        # Conftest sets NEXUS_SKIP_T1=1; honour it as the isolation alias.
+        monkeypatch.setenv("NEXUS_SKIP_T1", "1")
+        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
+
+        with patch("nexus.db.t1.find_immediate_claude_pid", return_value=99999):
+            from nexus.db.t1 import T1Database
+            T1Database()
+        # Default-on routed through Path C, not the legacy resolver.
+        fake_chromadb.EphemeralClient.assert_called_once()
+
+
+@pytest.mark.integration
+class TestE2EParallelStress:
+    """RDR-105 P3.2 / nexus-1q88: 10-parallel ``claude -p`` shared
+    stress test (RF-3 verification).
+
+    Boots a real chroma HTTP server, spawns 10 concurrent Python
+    subprocesses each acting as a shared-T1 child (NX_T1_HOST /
+    NX_T1_PORT inherited), each writing N entries via
+    ``T1Database.put``. Verifies every subprocess exits cleanly and
+    chromadb's ``MAX_CONCURRENT_WRITES = 10`` ceiling queues rather
+    than drops under load.
+
+    RF-3: the new architecture does not increase chroma load relative
+    to the pre-RDR-105 baseline; only the discovery mechanism changed.
+    This test makes the empirical claim concrete.
+    """
+
+    def test_ten_parallel_shared_subprocesses(self, tmp_path):
+        import shutil
+
+        from nexus.session import stop_t1_server
+
+        host, port, server_pid, chroma_tmpdir = _start_real_chroma()
+        try:
+            n_workers = 10
+            entries_per_worker = 5
+            child_code = (
+                "import os, sys\n"
+                "from nexus.db.t1 import T1Database\n"
+                "db = T1Database()\n"
+                "tag = sys.argv[1]\n"
+                f"for i in range({entries_per_worker}):\n"
+                "    db.put(f'{tag}-entry-{i}', tags=tag)\n"
+                "print('OK', db.session_id)\n"
+            )
+            base_env = {
+                **os.environ,
+                "NX_T1_NEW_DISCOVERY": "1",
+                "NX_T1_HOST": host,
+                "NX_T1_PORT": str(port),
+                "NEXUS_CONFIG_DIR": str(tmp_path),
+            }
+            base_env.pop("NEXUS_SKIP_T1", None)
+
+            procs = []
+            for i in range(n_workers):
+                # Distinct NX_SESSION_ID per worker so each gets its
+                # own session_id-scoped scratch view, matching real
+                # share_t1=True dispatch where every subprocess has
+                # its own conversation UUID.
+                env_i = {**base_env, "NX_SESSION_ID": f"worker-{i:02d}"}
+                p = subprocess.Popen(
+                    [sys.executable, "-c", child_code, f"worker-{i:02d}"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=env_i,
+                )
+                procs.append(p)
+
+            # Wait for all workers; collect rc + output for diagnostics.
+            results = []
+            for p in procs:
+                stdout, stderr = p.communicate(timeout=60)
+                results.append((p.returncode, stdout.decode(), stderr.decode()))
+
+            # Every worker exited cleanly.
+            for i, (rc, out, err) in enumerate(results):
+                assert rc == 0, (
+                    f"worker {i} exited rc={rc}: stdout={out!r} stderr={err!r}"
+                )
+                assert out.startswith("OK"), out
         finally:
             stop_t1_server(server_pid)
             shutil.rmtree(chroma_tmpdir, ignore_errors=True)

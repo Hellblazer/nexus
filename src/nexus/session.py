@@ -726,6 +726,18 @@ def find_immediate_claude_pid(start_pid: int | None = None) -> int:
 _NEXUS_SKIP_T1_DEPRECATION_WARNED: bool = False
 
 
+def t1_new_discovery_enabled() -> bool:
+    """Return True iff the new RDR-105 hybrid-discovery code path
+    should run for this process.
+
+    Default-on as of P3 (nexus-xf5r). Opt-out via
+    ``NX_T1_NEW_DISCOVERY=0`` for the deprecation cycle; the legacy
+    session-record discovery is removed in P4 (``nexus-jnx7``)
+    along with this helper's no-op branch.
+    """
+    return os.environ.get("NX_T1_NEW_DISCOVERY", "1") != "0"
+
+
 def _t1_isolated_env() -> bool:
     """Return True when the current env opts into per-process T1 ephemeral.
 

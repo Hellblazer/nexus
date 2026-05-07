@@ -82,8 +82,10 @@ def _build_dispatch_env(
             "cannot both inherit the parent's T1 and skip T1 entirely."
         )
 
+    from nexus.session import t1_new_discovery_enabled
+
     base = dict(os.environ)
-    flag_on = base.get("NX_T1_NEW_DISCOVERY") == "1"
+    flag_on = t1_new_discovery_enabled()
 
     if not flag_on:
         # ``share_t1`` is structurally meaningless without the new
