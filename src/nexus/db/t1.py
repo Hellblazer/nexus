@@ -18,7 +18,13 @@ from nexus.db.t2 import T2Database
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
-from nexus.session import SESSIONS_DIR, find_ancestor_session, find_session_by_id
+from nexus.session import (
+    SESSIONS_DIR,
+    find_ancestor_session,
+    find_immediate_claude_pid,
+    find_session_by_id,
+    read_t1_addr_for,
+)
 
 _T = TypeVar("_T")
 
@@ -197,6 +203,36 @@ class T1Database:
     Pass ``client=`` explicitly to inject a custom client in tests.
     """
 
+    def _try_new_discovery_paths(self, chromadb, session_id: str | None) -> bool:
+        """RDR-105 P1 hybrid discovery — Path A (env) then Path B (file).
+
+        Returns True iff one path resolved and ``self._client`` /
+        ``self._session_id`` are populated. False means the caller
+        should fall through to the legacy resolver chain (P1
+        additive-only contract).
+        """
+        host_env = os.environ.get("NX_T1_HOST", "").strip()
+        port_env = os.environ.get("NX_T1_PORT", "").strip()
+        if host_env and port_env:
+            try:
+                port_int = int(port_env)
+            except ValueError:
+                return False
+            self._client = chromadb.HttpClient(host=host_env, port=port_int)
+            self._session_id = session_id or os.environ.get("NX_SESSION_ID", "").strip() or str(uuid4())
+            return True
+
+        claude_pid = find_immediate_claude_pid()
+        if claude_pid > 0:
+            addr = read_t1_addr_for(claude_pid)
+            if addr is not None:
+                host, port = addr
+                self._client = chromadb.HttpClient(host=host, port=port)
+                self._session_id = session_id or os.environ.get("NX_SESSION_ID", "").strip() or str(uuid4())
+                return True
+
+        return False
+
     def __init__(self, session_id: str | None = None, client=None) -> None:
         import chromadb
 
@@ -209,6 +245,19 @@ class T1Database:
             # EphemeralClient as the MCP-tool-side T1 store.
             self._client = client
             self._session_id = session_id or str(uuid4())
+        elif os.environ.get("NX_T1_NEW_DISCOVERY") == "1" and self._try_new_discovery_paths(chromadb, session_id):
+            # RDR-105 P1 (nexus-4fek) — feature-flagged hybrid discovery.
+            # Path A (env): NX_T1_HOST + NX_T1_PORT inherited from parent
+            #   MCP via subprocess env. Used by ``claude -p`` shared
+            #   subprocess dispatch.
+            # Path B (file): ``~/.config/nexus/t1_addr.<claude_pid>`` written
+            #   by the parent MCP at lifespan start. Used by Claude-Code-
+            #   spawned siblings (Bash tools, hooks).
+            # Returns True iff one path resolved; falls through to the
+            # legacy resolver chain otherwise so flag-on is strictly
+            # additive in P1 (legacy code path stays usable when neither
+            # env nor file is present).
+            pass
         else:
             # NEXUS_SKIP_T1=1 (set by claude_dispatch for stateless operator
             # subprocesses) → go straight to EphemeralClient without searching

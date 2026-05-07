@@ -100,6 +100,77 @@ def _tcp_probe_alive(host: str, port: int, timeout: float = 0.5) -> bool:
         return False
 
 
+#: Default chroma host (hardcoded throughout: chroma always binds to
+#: localhost). Used by the RDR-105 P1 publish helper when the spawn
+#: path didn't record an explicit host on ``_OWNED_CHROMA``.
+_T1_DEFAULT_HOST = "127.0.0.1"
+
+
+def _t1_publish_addr_for_new_discovery() -> None:
+    """RDR-105 P1 (nexus-4fek): publish the address file + populate
+    ``_t1_state.T1_ADDR`` so siblings (Path B) and dispatched
+    subprocesses (Path A via dispatcher reading the module variable)
+    can discover this MCP's chroma.
+
+    No-op when:
+      - ``NX_T1_NEW_DISCOVERY`` is not ``"1"`` (legacy-only path);
+      - ``_OWNED_CHROMA`` is empty (we didn't spawn);
+      - ``_OWNED_CHROMA`` is ``nested`` or ``reused`` (someone else
+        owns the chroma — they own the addr file too);
+      - ``server_port`` is missing.
+
+    Records ``t1_addr_claude_pid`` on ``_OWNED_CHROMA`` so the
+    symmetric ``_t1_unpublish_addr_for_new_discovery`` can find the
+    file at shutdown.
+    """
+    if _os.environ.get("NX_T1_NEW_DISCOVERY") != "1":
+        return
+    if not _OWNED_CHROMA:
+        return
+    if _OWNED_CHROMA.get("nested") or _OWNED_CHROMA.get("reused"):
+        return
+    port = _OWNED_CHROMA.get("server_port")
+    if not port:
+        return
+    host = _OWNED_CHROMA.get("server_host") or _T1_DEFAULT_HOST
+
+    from nexus.mcp import _t1_state
+    from nexus.session import find_immediate_claude_pid, write_t1_addr
+
+    claude_pid = find_immediate_claude_pid()
+    if claude_pid <= 0:
+        # Can't walk PPID chain — fail-loud is the constructor's job;
+        # publish is best-effort. Log and bail.
+        import structlog
+        structlog.get_logger().warning(
+            "t1_addr_publish_skipped_no_claude_pid",
+            server_port=port,
+        )
+        return
+
+    write_t1_addr(claude_pid, host, int(port))
+    _t1_state.T1_ADDR = (host, int(port))
+    _OWNED_CHROMA["t1_addr_claude_pid"] = claude_pid
+
+
+def _t1_unpublish_addr_for_new_discovery() -> None:
+    """Symmetric counterpart to ``_t1_publish_addr_for_new_discovery``.
+
+    Unlinks the addr file and resets ``_t1_state.T1_ADDR`` when the
+    publish path ran for this lifecycle. No-op when nothing was
+    published (flag was off, chroma was reused/nested, or publish
+    bailed due to no claude_pid).
+    """
+    claude_pid = _OWNED_CHROMA.get("t1_addr_claude_pid")
+    if not claude_pid:
+        return
+    from nexus.mcp import _t1_state
+    from nexus.session import unlink_t1_addr
+
+    unlink_t1_addr(int(claude_pid))
+    _t1_state.T1_ADDR = None
+
+
 def _t1_chroma_init_if_owner() -> None:
     """Spawn (or reuse) chroma for this MCP server's session.
 
@@ -254,6 +325,8 @@ def _t1_chroma_init_if_owner() -> None:
         "server_pid": server_pid,
         "tmpdir": str(tmpdir),
         "session_file": str(session_file),
+        "server_host": host,
+        "server_port": port,
     })
 
     # Run a first reconcile pass immediately after spawn. Catches the
@@ -263,6 +336,11 @@ def _t1_chroma_init_if_owner() -> None:
     # first tool call -- runs from get_t1 via reconcile_owned_chroma.
     if not inherited:
         reconcile_owned_chroma()
+
+    # RDR-105 P1 (nexus-4fek): publish addr file + populate _t1_state
+    # for the new-discovery paths when the feature flag is on. No-op
+    # when flag-off, so legacy installs see no behaviour change.
+    _t1_publish_addr_for_new_discovery()
 
 
 def reconcile_owned_chroma() -> bool:
@@ -454,6 +532,9 @@ def _t1_chroma_shutdown() -> None:
             Path(session_file).unlink(missing_ok=True)
         except OSError:
             pass
+    # RDR-105 P1 (nexus-4fek): unlink addr file + reset _t1_state when
+    # the publish path ran. No-op otherwise.
+    _t1_unpublish_addr_for_new_discovery()
     _OWNED_CHROMA.clear()
 
 

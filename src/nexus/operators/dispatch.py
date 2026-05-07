@@ -39,6 +39,56 @@ class OperatorOutputError(OperatorError):
     """Raised when stdout cannot be parsed as JSON."""
 
 
+def _build_dispatch_env(
+    *,
+    share_t1: bool = False,
+    parent_session_id: str | None = None,
+) -> dict[str, str]:
+    """Build the env dict for a dispatched ``claude -p`` subprocess.
+
+    RDR-105 P1 (nexus-4fek). Two modes, gated on the
+    ``NX_T1_NEW_DISCOVERY=1`` feature flag in the parent's env:
+
+    Shared T1 (``share_t1=True`` AND flag-on AND parent T1 live)
+        Inherits ``NX_T1_HOST/PORT`` from the parent's
+        ``nexus.mcp._t1_state.T1_ADDR``. ``NEXUS_SKIP_T1`` is removed
+        so the subprocess connects to the parent's chroma instead of
+        falling through to ``EphemeralClient``. ``NX_T1_NEW_DISCOVERY``
+        propagates so the subprocess's ``T1Database`` constructor takes
+        the new-discovery branch.
+
+    Legacy ephemeral (everything else)
+        ``NEXUS_SKIP_T1=1`` — the existing stateless-operator pattern.
+        Subprocess uses ``EphemeralClient``; no parent T1 visibility.
+
+    Raises ``RuntimeError`` when ``share_t1=True`` is requested but the
+    parent's T1 isn't live (``_t1_state.T1_ADDR is None``). Fail-loud
+    is correct: a silent fallback to ephemeral would defeat the
+    caller's intent.
+    """
+    base = dict(os.environ)
+    if share_t1 and base.get("NX_T1_NEW_DISCOVERY") == "1":
+        from nexus.mcp import _t1_state
+
+        if _t1_state.T1_ADDR is None:
+            raise RuntimeError(
+                "share_t1=True requires the top-level MCP's T1 to be "
+                "live (NX_T1_NEW_DISCOVERY=1 is set but "
+                "nexus.mcp._t1_state.T1_ADDR is None — the lifespan "
+                "publish path did not run)."
+            )
+        host, port = _t1_state.T1_ADDR
+        base["NX_T1_HOST"] = host
+        base["NX_T1_PORT"] = str(port)
+        base.pop("NEXUS_SKIP_T1", None)
+    else:
+        base["NEXUS_SKIP_T1"] = "1"
+
+    if parent_session_id:
+        base["NX_SESSION_ID"] = parent_session_id
+    return base
+
+
 async def _drain_pipe(pipe: asyncio.StreamReader | None) -> bytes:
     """Read whatever bytes are currently buffered in *pipe*.
 
