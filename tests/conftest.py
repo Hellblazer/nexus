@@ -93,6 +93,19 @@ def _isolate_t1_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     # want to share a chroma client across two T1Database instances
     # (e.g. ``two_sessions``) still pass ``client=...`` explicitly.
     monkeypatch.setenv("NEXUS_SKIP_T1", "1")
+    # RDR-105 P3 (nexus-xf5r): the production default flips to
+    # flag-on. Default the test suite to legacy (flag-off) so the
+    # large body of pre-RDR-105 tests keeps exercising the same
+    # code paths it always did. Two opt-in mechanisms for tests
+    # that target the new discovery
+    # (``tests/test_t1_discovery.py``):
+    #   - ``monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "1")`` for
+    #     explicit flag-on (the typical pattern in the spike + P2
+    #     test classes);
+    #   - ``monkeypatch.delenv("NX_T1_NEW_DISCOVERY", raising=False)``
+    #     to surface the production default-on shape (used by the
+    #     P3 ``TestNewDiscoveryDefaultOn`` cases).
+    monkeypatch.setenv("NX_T1_NEW_DISCOVERY", "0")
 
 
 @pytest.fixture(autouse=True)

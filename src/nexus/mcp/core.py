@@ -113,7 +113,9 @@ def _t1_publish_addr_for_new_discovery() -> None:
     can discover this MCP's chroma.
 
     No-op when:
-      - ``NX_T1_NEW_DISCOVERY`` is not ``"1"`` (legacy-only path);
+      - ``NX_T1_NEW_DISCOVERY=0`` (operator opted out of the new
+        discovery path; legacy session-record machinery owns the
+        addr surface in that case, which is to say nothing owns it);
       - ``_OWNED_CHROMA`` is empty (we didn't spawn);
       - ``_OWNED_CHROMA`` is ``nested`` or ``reused`` (someone else
         owns the chroma; they own the addr file too);
@@ -123,7 +125,16 @@ def _t1_publish_addr_for_new_discovery() -> None:
     symmetric ``_t1_unpublish_addr_for_new_discovery`` can find the
     file at shutdown.
     """
-    if _os.environ.get("NX_T1_NEW_DISCOVERY") != "1":
+    # P3 NOTE: in normal operation the new lifespan
+    # (``_t1_chroma_lifespan_new_discovery``) handles publishing
+    # directly when the flag is on (default), and this helper is
+    # not reached because the legacy ``_t1_chroma_init_if_owner``
+    # path runs only on explicit opt-out (NX_T1_NEW_DISCOVERY=0).
+    # The flag check below stays as belt-and-braces in case the
+    # legacy path is ever called from a flag-on context.
+    from nexus.session import t1_new_discovery_enabled
+
+    if not t1_new_discovery_enabled():
         return
     if not _OWNED_CHROMA:
         return
@@ -747,7 +758,9 @@ async def _t1_chroma_lifespan(_app: Any):
     paths firing is safe: lifespan finally on HTTP/SSE, signal
     handler on stdio SIGTERM, atexit on clean exit.
     """
-    if _os.environ.get("NX_T1_NEW_DISCOVERY") == "1":
+    from nexus.session import t1_new_discovery_enabled
+
+    if t1_new_discovery_enabled():
         async with _t1_chroma_lifespan_new_discovery():
             yield
         return

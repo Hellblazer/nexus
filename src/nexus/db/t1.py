@@ -25,6 +25,7 @@ from nexus.session import (
     find_immediate_claude_pid,
     find_session_by_id,
     read_t1_addr_for,
+    t1_new_discovery_enabled,
 )
 
 _T = TypeVar("_T")
@@ -299,11 +300,10 @@ class T1Database:
             # EphemeralClient as the MCP-tool-side T1 store.
             self._client = client
             self._session_id = session_id or str(uuid4())
-        elif os.environ.get("NX_T1_NEW_DISCOVERY") == "1":
+        elif t1_new_discovery_enabled():
             # RDR-105 P2 (nexus-mj2o): four-branch fail-loud constructor.
-            # Replaces the P1 additive fall-through; flag-on now refuses
-            # to delegate to the legacy resolver per the RDR §'Phase 2
-            # flag-isolation contract'.
+            # Default-on as of P3 (nexus-xf5r); opt-out via
+            # NX_T1_NEW_DISCOVERY=0. P4 deletes the legacy branch.
             self._init_new_discovery(chromadb, session_id)
         else:
             # NEXUS_SKIP_T1=1 (set by claude_dispatch for stateless operator
@@ -411,13 +411,14 @@ class T1Database:
             return
         self._dead = True  # set before any I/O to prevent loops on re-entry
 
-        if os.environ.get("NX_T1_NEW_DISCOVERY") == "1":
+        if t1_new_discovery_enabled():
             # RDR-105 P2 follow-up (review #582): the legacy resolver
             # consults SESSIONS_DIR + find_session_by_id, which
-            # flag-on processes never write. Trying it would always
-            # miss; reading the addr file here would require a fresh
-            # T1Database to apply the new four-branch gate. Fail
-            # loud and let the caller decide whether to reconstruct.
+            # new-discovery processes never write. Trying it would
+            # always miss; reading the addr file here would require
+            # a fresh T1Database to apply the new four-branch gate.
+            # Fail loud and let the caller decide whether to
+            # reconstruct.
             _log.warning(
                 "t1_reconnect_unsupported_in_new_discovery",
                 session_id=self._session_id,
