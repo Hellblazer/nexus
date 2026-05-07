@@ -282,7 +282,18 @@ def sweep_stale_sessions(
             # fires. Requires claude_root_pid to be alive — otherwise the
             # anchor_dead arm owns the reap and reports the more specific
             # reason.
-            record_uuid = record.get("session_id", "")
+            #
+            # GH #576 Phase C: compare ``f.stem`` (the canonical
+            # filename, kept in sync with the conversation UUID by
+            # ``reconcile_owned_chroma``'s rename) against
+            # ``current_session``. Pre-fix this read ``record["session_id"]``
+            # from JSON content, which ``Path.replace`` did NOT rewrite
+            # — leading to a uuid_stale=True false positive on every
+            # subprocess SessionStart fire post-reconcile, which then
+            # unlinked the parent's canonical record (the silent T1
+            # data-loss trigger). Filename-stem is canonical; JSON
+            # content is incidental metadata.
+            record_uuid = f.stem
             uuid_stale = bool(
                 current_uuid
                 and record_uuid

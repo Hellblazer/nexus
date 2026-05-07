@@ -295,29 +295,67 @@ class TestT1DatabaseReconnect:
                 t1._exec(lambda: (_ for _ in ()).throw(ValueError("unrelated")))
         mock.assert_not_called()
 
-    def test_reconnect_falls_back_to_ephemeral_when_no_record(self) -> None:
+    def test_reconnect_raises_when_no_record_no_silent_ephemeral_fallback(
+        self,
+    ) -> None:
+        """GH #576 Phase A invariant I3+I7: reconnect must match the
+        constructor's PR #569 fail-loud contract. Pre-fix this path
+        fell back to EphemeralClient with a single warning, silently
+        dropping every prior scratch entry under a misleading
+        ``t1_reconnect_ephemeral_fallback_data_lost`` log line.
+        """
+        from nexus.db.t1 import T1ServerNotFoundError
+
         record = {"session_id": "orig-session", "server_host": "127.0.0.1", "server_port": 54321}
         mock_http = MagicMock()
         mock_http.get_or_create_collection.return_value = MagicMock()
-        with patch("nexus.db.t1.find_ancestor_session", return_value=record), \
+        with patch("nexus.db.t1._resolve_session_record_with_retry", return_value=record), \
              patch("chromadb.HttpClient", return_value=mock_http):
             t1 = T1Database()
         assert t1._client is mock_http
-        with patch("nexus.db.t1.find_ancestor_session", return_value=None):
-            t1._reconnect()
-        assert t1._dead is True and t1._client is not mock_http
-
-    def test_reconnect_sets_dead_flag(self) -> None:
-        t1 = _ephemeral_t1()
-        with patch("nexus.db.t1.find_ancestor_session", return_value=None):
-            t1._reconnect()
+        with patch("nexus.db.t1._resolve_session_record_with_retry", return_value=None), \
+             patch("nexus.db.t1.find_ancestor_session", return_value=None):
+            with pytest.raises(T1ServerNotFoundError):
+                t1._reconnect()
         assert t1._dead is True
+        # _client untouched — no silent EphemeralClient swap.
+        assert t1._client is mock_http
+
+    def test_reconnect_uses_uuid_keyed_resolution(self) -> None:
+        """GH #576 Phase A invariant I7: reconnect must use the same
+        UUID-keyed resolution chain as the constructor. Pre-fix
+        ``_reconnect`` called ``find_ancestor_session`` (legacy
+        PID-keyed PPID walker) which never finds records written by
+        post-v4.13 ``write_session_record_by_id`` — so reconnect was
+        effectively guaranteed to miss in any current install.
+        """
+        # Initial record (constructor-time).
+        rec_a = {"session_id": "sess-a", "server_host": "127.0.0.1", "server_port": 11111}
+        # Post-reconnect record (only resolvable via UUID-keyed
+        # ``_resolve_session_record_with_retry``, NOT via legacy
+        # ``find_ancestor_session``).
+        rec_b = {"session_id": "sess-b", "server_host": "127.0.0.1", "server_port": 22222}
+        mock_http_a = MagicMock(); mock_http_a.get_or_create_collection.return_value = MagicMock()
+        mock_http_b = MagicMock(); mock_http_b.get_or_create_collection.return_value = MagicMock()
+        with patch("nexus.db.t1._resolve_session_record_with_retry", return_value=rec_a), \
+             patch("chromadb.HttpClient", return_value=mock_http_a):
+            t1 = T1Database()
+        # Reconnect: UUID-keyed lookup returns rec_b, PID-keyed returns
+        # None. Pre-fix t1._reconnect would have ignored rec_b and hit
+        # the EphemeralClient fallback.
+        with patch("nexus.db.t1._resolve_session_record_with_retry", return_value=rec_b), \
+             patch("nexus.db.t1.find_ancestor_session", return_value=None), \
+             patch("chromadb.HttpClient", return_value=mock_http_b):
+            t1._reconnect()
+        assert t1._client is mock_http_b
+        assert t1._session_id == "sess-b"
+        assert t1._dead is False  # successful reconnect re-arms
 
     def test_reconnect_noop_when_already_dead(self) -> None:
         t1 = _ephemeral_t1()
         t1._dead = True
         original = t1._client
-        with patch("nexus.db.t1.find_ancestor_session") as mock:
+        with patch("nexus.db.t1._resolve_session_record_with_retry") as mock:
             t1._reconnect()
         mock.assert_not_called()
         assert t1._client is original

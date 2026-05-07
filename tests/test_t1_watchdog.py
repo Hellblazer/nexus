@@ -493,24 +493,40 @@ class TestWatchdogLogConfiguration:
 
 
 class TestSessionFileRemovedExit:
-    """GH #567: when the session file existed at watchdog startup but
-    is later removed (sweep_stale_sessions uuid-mismatch arm at
-    session.py:286), the watchdog must exit cleanly. Pre-fix it kept
-    polling and leaked until its watched PIDs died.
+    """GH #567 / #575: when the watchdog's chroma server's session
+    record disappears (sweep_stale_sessions, /clear, /resume, or any
+    other reaper), the watchdog must exit cleanly.
+
+    Phase E: lookup is by ``server_pid`` JSON match instead of the
+    CLI-arg ``--session-file`` path. Pre-fix the existence check was
+    bound to a path captured at spawn time, which became stale 88ms
+    after spawn when ``reconcile_owned_chroma`` renamed the file —
+    the sticky flag never flipped True and the exit branch was
+    unreachable in the canonical lifespan-then-SessionStart flow.
     """
 
-    def test_session_file_removed_after_start_triggers_exit(
+    @staticmethod
+    def _write_record(sessions_dir, session_id, server_pid):
+        import json
+        f = sessions_dir / f"{session_id}.session"
+        f.write_text(json.dumps({
+            "session_id": session_id, "server_pid": server_pid,
+            "server_host": "127.0.0.1", "server_port": 11111,
+        }))
+        return f
+
+    def test_session_record_removed_after_start_triggers_exit(
         self, tmp_path, monkeypatch, captured_events,
     ):
         from nexus import t1_watchdog
+        from nexus.db.t1 import SESSIONS_DIR
 
         monkeypatch.setattr(t1_watchdog.time, "sleep", lambda _s: None)
         monkeypatch.setattr(
             t1_watchdog, "_is_alive", lambda _pid: True,  # everything alive
         )
 
-        session_file = tmp_path / "s"
-        session_file.write_text("{}")  # exists at startup
+        record = self._write_record(SESSIONS_DIR, "abc", server_pid=200)
 
         # Remove the file on the FIRST tick so we exercise the
         # disappearance trigger.
@@ -520,7 +536,7 @@ class TestSessionFileRemovedExit:
         def _tick_then_remove(_s):
             ticks[0] += 1
             if ticks[0] == 1:
-                session_file.unlink()
+                record.unlink()
             return original_sleep(_s)
 
         monkeypatch.setattr(t1_watchdog.time, "sleep", _tick_then_remove)
@@ -529,7 +545,7 @@ class TestSessionFileRemovedExit:
             t1_watchdog.main([
                 "--claude-pid", "100",
                 "--chroma-pid", "200",
-                "--session-file", str(session_file),
+                "--session-file", str(record),
                 "--tmpdir", str(tmp_path / "td"),
             ])
 
@@ -540,6 +556,64 @@ class TestSessionFileRemovedExit:
         assert events, (
             f"expected watchdog_exiting with reason=session_file_removed; "
             f"got events: {[e.get('event') for e in captured_events]}"
+        )
+        assert events[0]["chroma_pid"] == 200
+
+    def test_session_record_renamed_then_removed_triggers_exit(
+        self, tmp_path, monkeypatch, captured_events,
+    ):
+        """GH #575 Phase E: reconcile renames the record file post-
+        spawn (sessions/<lifespan-uuid>.session →
+        sessions/<canonical>.session). The watchdog must track via
+        server_pid (not filename) so the renamed record is still
+        recognised; when the canonical record is later unlinked
+        (e.g. /clear), the exit fires.
+
+        Pre-fix this scenario was the load-bearing #575 reproducer:
+        sticky flag never flipped True because the watchdog's CLI-arg
+        path snapshot was the pre-rename filename, which was already
+        gone by the first poll.
+        """
+        from nexus import t1_watchdog
+        from nexus.db.t1 import SESSIONS_DIR
+
+        monkeypatch.setattr(t1_watchdog.time, "sleep", lambda _s: None)
+        monkeypatch.setattr(t1_watchdog, "_is_alive", lambda _pid: True)
+
+        lifespan_record = self._write_record(
+            SESSIONS_DIR, "lifespan-uuid", server_pid=200,
+        )
+        canonical_record = SESSIONS_DIR / "canonical-uuid.session"
+
+        original_sleep = t1_watchdog.time.sleep
+        ticks = [0]
+
+        def _tick(_s):
+            ticks[0] += 1
+            if ticks[0] == 1:
+                lifespan_record.replace(canonical_record)
+            elif ticks[0] == 3:
+                canonical_record.unlink()
+            return original_sleep(_s)
+
+        monkeypatch.setattr(t1_watchdog.time, "sleep", _tick)
+
+        with patch.object(t1_watchdog, "_cleanup"):
+            t1_watchdog.main([
+                "--claude-pid", "100",
+                "--chroma-pid", "200",
+                "--session-file", str(lifespan_record),
+                "--tmpdir", str(tmp_path / "td"),
+            ])
+
+        events = [
+            e for e in captured_events
+            if e.get("reason") == "session_file_removed"
+        ]
+        assert events, (
+            f"expected exit reason=session_file_removed after rename + "
+            f"unlink; got events: "
+            f"{[(e.get('event'), e.get('reason')) for e in captured_events]}"
         )
 
     def test_session_file_never_existed_does_not_trigger(

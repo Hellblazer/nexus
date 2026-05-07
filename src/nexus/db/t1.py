@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import warnings
 from collections.abc import Callable
 from typing import TypeVar
 from uuid import uuid4
@@ -291,10 +290,24 @@ class T1Database:
     def _reconnect(self) -> None:
         """Re-resolve the T1 server connection after a connectivity failure.
 
-        Walks the PPID chain for a (possibly restarted) server record.
-        Falls back to EphemeralClient when no record is found — but this
-        loses all prior scratch entries including flagged ones (nexus-uhch).
-        Sets ``_dead=True`` immediately to prevent cascading reconnect loops.
+        Uses the same UUID-keyed resolution chain as the constructor
+        (``_resolve_session_record_with_retry`` then legacy
+        ``find_ancestor_session`` for pre-v4.13 records). On miss,
+        raises :class:`T1ServerNotFoundError` — symmetric with the
+        constructor's PR #569 fail-loud contract (GH #576).
+
+        Pre-fix this path silently fell back to a per-process
+        EphemeralClient, which dropped every prior scratch entry under
+        a single misleading WARNING. Live trace 2026-05-06 (issue
+        #576): ``nx_answer`` plan-runner subprocess SessionStart fired
+        ``sweep_stale_sessions`` against the parent's record before
+        Phase B/C landed; main MCP's next reconnect found no record
+        and silently switched to ephemeral. After Phase A, the same
+        sequence raises and the user sees the failure immediately
+        instead of after they've lost data.
+
+        Sets ``_dead=True`` immediately to prevent cascading reconnect
+        loops on re-entry.
         """
         import chromadb
 
@@ -303,13 +316,23 @@ class T1Database:
         self._dead = True  # set before any I/O to prevent loops on re-entry
 
         prior_session_id = self._session_id
-        record = find_ancestor_session(SESSIONS_DIR)
+        # Use the same UUID-keyed chain as the constructor (GH #576):
+        # legacy ``find_ancestor_session`` (PID-keyed) cannot find
+        # records written by post-v4.13 ``write_session_record_by_id``,
+        # so reconnect was effectively guaranteed to miss in any
+        # current install. The retry helper additionally covers the
+        # CA-2 race where reconnect lands inside a respawn window.
+        record = (
+            _resolve_session_record_with_retry(SESSIONS_DIR)
+            or find_ancestor_session(SESSIONS_DIR)
+        )
         if record is not None:
             self._client = chromadb.HttpClient(
                 host=record["server_host"],
                 port=record["server_port"],
             )
             self._session_id = record["session_id"]
+            self._dead = False  # successful reconnect — re-arm
             _log.warning(
                 "t1_reconnect_to_different_server",
                 prior_session_id=prior_session_id,
@@ -317,18 +340,26 @@ class T1Database:
                 new_host=record["server_host"],
                 new_port=record["server_port"],
             )
-        else:
-            warnings.warn(
-                "T1 reconnect falling back to EphemeralClient — "
-                "all prior scratch entries (including flagged ones) are lost.",
-                stacklevel=2,
-            )
-            _log.warning("t1_reconnect_ephemeral_fallback_data_lost",
-                         session_id=self._session_id)
-            self._client = chromadb.EphemeralClient()
-            # session_id intentionally preserved from original construction.
+            self._col = self._client.get_or_create_collection(_COLLECTION)
+            return
 
-        self._col = self._client.get_or_create_collection(_COLLECTION)
+        # No record. Fail loud — match constructor's PR #569 contract.
+        # The ``_dead=True`` flag set above prevents cascading reconnect
+        # loops; subsequent ``_exec`` calls will re-raise the original
+        # connection error rather than retrying.
+        _log.warning(
+            "t1_reconnect_no_record_raising",
+            session_id=self._session_id,
+        )
+        raise T1ServerNotFoundError(
+            f"T1 reconnect failed: no session record in {SESSIONS_DIR} "
+            f"for session_id={self._session_id}. The chroma server may "
+            f"have been reaped (sweep_stale_sessions, /clear, /resume) "
+            f"or the session record was unlinked by another process. "
+            f"Pre-fix this path silently fell back to EphemeralClient "
+            f"and lost every scratch entry written before the reconnect "
+            f"(GH #576)."
+        )
 
     @property
     def session_id(self) -> str:

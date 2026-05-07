@@ -107,10 +107,23 @@ def session_start(claude_session_id: str | None = None) -> str:
 
     Returns the output string to be printed.
     """
-    # Sweep orphaned server processes from previous crashed sessions. Also
-    # handles the migration: legacy numeric-stem session files written by
-    # the old PID-keyed scheme are reaped unconditionally here.
-    sweep_stale_sessions(SESSIONS_DIR)
+    # GH #576 Phase F: sweep_stale_sessions runs against the parent's
+    # SESSIONS_DIR. When this SessionStart fires inside a subprocess
+    # spawned by claude_dispatch (NX_SESSION_ID set), the parent owns
+    # all session-record lifecycle decisions and the subprocess must
+    # not touch them. Pre-fix the unconditional sweep would scan the
+    # parent's records and reap any with sweep-arm matches (age,
+    # server_dead probe race, anchor_dead, uuid_stale) — directly
+    # causing the silent T1 data loss in #576. Phase C closes the
+    # uuid_stale arm by switching to filename-stem comparison; Phase F
+    # is defense-in-depth against the other arms.
+    inherited_session = os.environ.get("NX_SESSION_ID", "").strip()
+    if not inherited_session:
+        # Sweep orphaned server processes from previous crashed sessions.
+        # Also handles the migration: legacy numeric-stem session files
+        # written by the old PID-keyed scheme are reaped unconditionally
+        # here.
+        sweep_stale_sessions(SESSIONS_DIR)
 
     # Issue #435: remove the pre-v4.13.0 ``session.lock`` PID file if
     # it survived from an older install. v4.13.0 (RDR-094 Phase F /
@@ -128,11 +141,15 @@ def session_start(claude_session_id: str | None = None) -> str:
     # in-flight tmpdirs (mkdtemp -> write_session_record_by_id has a
     # small window; legitimate tmpdirs from active sessions never reach
     # the cutoff because their record reaches the filter first).
-    try:
-        from nexus.session import sweep_orphan_tmpdirs
-        sweep_orphan_tmpdirs(SESSIONS_DIR)
-    except Exception as exc:
-        _log.debug("sweep_orphan_tmpdirs_failed", error=str(exc))
+    # Phase F: subprocess SessionStart skips tmpdir sweep — same
+    # rationale as the session-record sweep above (parent owns
+    # lifecycle).
+    if not inherited_session:
+        try:
+            from nexus.session import sweep_orphan_tmpdirs
+            sweep_orphan_tmpdirs(SESSIONS_DIR)
+        except Exception as exc:
+            _log.debug("sweep_orphan_tmpdirs_failed", error=str(exc))
 
     # Resolve session_id with this precedence:
     #   1. ``NX_SESSION_ID`` env  — we're a nested subprocess our parent

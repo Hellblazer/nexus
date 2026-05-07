@@ -431,6 +431,57 @@ def test_sweep_reaps_on_uuid_mismatch_with_live_claude(
     )
 
 
+def test_sweep_uses_filename_stem_not_json_session_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GH #576 Phase C: when ``reconcile_owned_chroma`` renames a
+    session record file (lifespan A → canonical B), only the filename
+    stem ends up at B; the JSON content's ``session_id`` field stays
+    at A unless Phase B's content rewrite is also in place.
+
+    Pre-fix the sweep's ``uuid_stale`` arm compared
+    ``record["session_id"]`` (JSON content, stale → 'A') against
+    ``current_session`` (canonical → 'B'). They mismatched, the arm
+    fired, and the canonical record was unlinked — the immediate
+    trigger for the silent T1 data loss in #576 (sweep ran inside
+    every plan-runner subprocess SessionStart).
+
+    Phase C closes this by comparing ``f.stem`` (filename, kept in
+    sync with the conversation UUID by reconcile's rename) instead.
+    Even if JSON content is stale (Phase B not in place yet, or
+    Phase B's atomic rewrite raced), the sweep no longer reaps a
+    canonical record under a healthy parent.
+    """
+    sessions = tmp_path / "sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+
+    own = os.getpid()
+    monkeypatch.setattr("nexus.session._is_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(
+        "nexus.session.read_claude_session_id",
+        lambda: "canonical-uuid",
+    )
+
+    # Simulate the post-reconcile state: filename = canonical, JSON
+    # content's session_id = pre-reconcile (rename without rewrite).
+    record = sessions / "canonical-uuid.session"
+    record.write_text(json.dumps({
+        "session_id": "lifespan-uuid",  # STALE
+        "server_host": "127.0.0.1",
+        "server_port": 12345,
+        "server_pid": own,
+        "claude_root_pid": own,
+        "created_at": time.time(),
+    }))
+
+    sweep_stale_sessions(sessions_dir=sessions)
+    assert record.exists(), (
+        "canonical record (filename matches current_session) must "
+        "survive sweep even when JSON content's session_id is stale; "
+        "filename-stem is canonical, JSON is incidental metadata"
+    )
+
+
 def test_sweep_keeps_record_matching_current_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -58,6 +58,52 @@ def _is_alive(pid: int) -> bool:
     return True
 
 
+def _find_record_by_chroma_pid(
+    sessions_dir: Path, chroma_pid: int,
+) -> Path | None:
+    """Find the session record file whose JSON ``server_pid`` matches.
+
+    GH #575 Phase E: pre-fix the watchdog tracked a CLI-arg
+    ``--session-file`` path captured at spawn time. When
+    ``reconcile_owned_chroma`` renamed the file (the canonical
+    lifespan-then-SessionStart flow), the watchdog's snapshot path
+    became stale and the sticky ``session_file_has_existed`` flag
+    never flipped True — the ``session_file_removed`` exit branch
+    (PR #574) was unreachable for the rest of the watchdog's life.
+
+    The chroma server_pid is invariant across reconcile renames and
+    /resume rolls. Looking up the record by ``server_pid`` is the
+    canonical "is our session still alive" check, robust to any
+    filename change.
+
+    Returns the matching :class:`pathlib.Path` or None. Corrupt /
+    unreadable session files are skipped silently — the watchdog's
+    job is to detect deletion of OUR record, not to validate
+    other processes' records.
+    """
+    import json
+
+    if not sessions_dir.exists():
+        return None
+    try:
+        candidates = list(sessions_dir.glob("*.session"))
+    except OSError:
+        return None
+    for f in candidates:
+        try:
+            rec = json.loads(f.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(rec, dict):
+            continue
+        try:
+            if int(rec.get("server_pid", 0)) == chroma_pid:
+                return f
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def _cleanup(
     *, chroma_pid: int, session_file: Path | None, tmpdir: Path | None,
 ) -> None:
@@ -148,17 +194,20 @@ def main(argv: list[str] | None = None) -> int:
     log = structlog.get_logger("nexus.t1_watchdog")
 
     session_file = Path(args.session_file) if args.session_file else None
-    # GH #567 + #572 follow-up: track whether the session file has EVER
-    # existed during this watchdog's lifetime, not just at startup.
-    # ``_t1_chroma_init_if_owner`` spawns the watchdog BEFORE writing
-    # the record (so the watchdog can be PID-watched even if the
-    # record write fails); using a startup-only snapshot meant
-    # ``session_file_existed_at_start`` was always False and the
-    # session-file-removed exit never fired. Sticky flag: once True,
-    # stays True; the file-removed exit only fires after we've
-    # observed the file exist at least once.
+    # GH #575 Phase E: track via ``server_pid`` JSON match instead of
+    # the CLI-arg path. Pre-fix the sticky flag was bound to
+    # ``args.session_file`` (captured at spawn time); any rename of
+    # the canonical record by ``reconcile_owned_chroma`` left the
+    # watchdog watching a path that was already gone before its first
+    # poll, so the sticky flag never flipped True and PR #574's
+    # ``session_file_removed`` exit was unreachable in the canonical
+    # lifespan-then-SessionStart flow. ``server_pid`` is invariant
+    # across reconcile renames and /resume rolls.
+    # Lazy import: keeps the watchdog cold-start cost negligible
+    # (the rest of this file is stdlib-only).
+    from nexus.db.t1 import SESSIONS_DIR as sessions_dir
     session_file_has_existed = (
-        session_file is not None and session_file.exists()
+        _find_record_by_chroma_pid(sessions_dir, args.chroma_pid) is not None
     )
     tmpdir = Path(args.tmpdir) if args.tmpdir else None
     dual_watch = args.mcp_pid > 0
@@ -191,32 +240,22 @@ def main(argv: list[str] | None = None) -> int:
                 chroma_pid=args.chroma_pid,
             )
             return 0
-        # GH #567: session-file disappearance trigger. The session
-        # record may be removed by sweep_stale_sessions (uuid-mismatch
-        # arm at session.py:286) when the same Claude process rolls to
-        # a new conversation UUID via /clear or /resume. Pre-fix, the
-        # watchdog kept polling on its old session's chroma_pid and
-        # leaked until that PID died -- the reporter saw a stale
-        # watchdog for a session whose .session file was gone. Exit
-        # cleanly when our session file disappears so the kept-alive
-        # chroma server we were watching can be reaped by whatever
-        # path replaced our session record.
-        #
-        # Only fire when the file has EVER existed in this watchdog's
-        # lifetime (sticky flag). Tests and legacy callers that pass
-        # a path that never gets created continue to rely on
-        # PID liveness alone.
-        if session_file is not None and session_file.exists():
+        # GH #567/#575: session-record disappearance trigger. Resolved
+        # via ``server_pid`` JSON match each poll (Phase E) — robust
+        # to filename rename by ``reconcile_owned_chroma`` (GH #572)
+        # and to /clear or /resume rolling the conversation UUID
+        # (nexus-886w). Sticky flag: once True, stays True; the
+        # exit only fires after we've observed our record exist at
+        # least once. Tests and legacy callers that don't write a
+        # record continue to rely on PID liveness alone.
+        record_path = _find_record_by_chroma_pid(sessions_dir, args.chroma_pid)
+        if record_path is not None:
             session_file_has_existed = True
-        if (
-            session_file_has_existed
-            and session_file is not None
-            and not session_file.exists()
-        ):
+        if session_file_has_existed and record_path is None:
             log.info(
                 "watchdog_exiting",
                 reason="session_file_removed",
-                session_file=str(session_file),
+                chroma_pid=args.chroma_pid,
             )
             return 0
         # Dual-watch mode (RDR-094 FM-NEW-1): MCP server died without
@@ -237,10 +276,16 @@ def main(argv: list[str] | None = None) -> int:
                 _signal_then_kill(args.mcp_pid)
             break
 
+    # GH #575 Phase E: at cleanup time, prefer the canonical record
+    # path (resolved via server_pid JSON match) over the CLI-arg
+    # ``--session-file`` snapshot. ``reconcile_owned_chroma`` may have
+    # renamed the file post-spawn; unlinking the CLI-arg path would
+    # miss the canonical record and leak it until the next sweep.
     log.info("chroma_cleanup_started", chroma_pid=args.chroma_pid)
+    canonical_record = _find_record_by_chroma_pid(sessions_dir, args.chroma_pid)
     _cleanup(
         chroma_pid=args.chroma_pid,
-        session_file=session_file,
+        session_file=canonical_record or session_file,
         tmpdir=tmpdir,
     )
     log.info("chroma_cleanup_complete", chroma_pid=args.chroma_pid)
