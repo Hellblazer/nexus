@@ -47,8 +47,9 @@ def _build_dispatch_env(
 ) -> dict[str, str]:
     """Build the env dict for a dispatched ``claude -p`` subprocess.
 
-    RDR-105 P2 (nexus-4gby). Three modes, gated on the
-    ``NX_T1_NEW_DISCOVERY=1`` feature flag in the parent's env:
+    RDR-105 P2 (nexus-4gby). Three modes, gated on the new-discovery
+    code path (default-on as of P3 / nexus-xf5r; opt-out via
+    ``NX_T1_NEW_DISCOVERY=0`` for the deprecation cycle):
 
     Shared T1 (``share_t1=True``)
         Subprocess inherits ``NX_T1_HOST`` / ``NX_T1_PORT`` from the

@@ -683,11 +683,12 @@ def find_claude_root_pid(start_pid: int | None = None) -> int:
     return best or immediate_ppid
 
 
-# ── RDR-105 P1 (nexus-4fek): hybrid-discovery primitives ─────────────────────
+# ── RDR-105 hybrid-discovery primitives ──────────────────────────────────────
 #
-# Behind feature flag ``NX_T1_NEW_DISCOVERY=1``. Coexists with the legacy
-# session-record discovery; the legacy ``find_claude_root_pid`` is retained
-# in this phase. P4 deletes the legacy code paths.
+# Default code path as of P3 (nexus-xf5r). The legacy session-record
+# discovery (and the legacy ``find_claude_root_pid``) runs only when the
+# operator opts out via ``NX_T1_NEW_DISCOVERY=0``. P4 (nexus-jnx7)
+# deletes the legacy paths.
 
 
 def find_immediate_claude_pid(start_pid: int | None = None) -> int:
