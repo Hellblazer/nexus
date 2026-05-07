@@ -148,6 +148,14 @@ def _t1_publish_addr_for_new_discovery() -> None:
         )
         return
 
+    # Invariant: ``_t1_state.T1_ADDR`` and
+    # ``_OWNED_CHROMA["t1_addr_claude_pid"]`` are written together
+    # in this block, and cleared together in
+    # ``_t1_unpublish_addr_for_new_discovery``. The unpublish path
+    # gates on ``t1_addr_claude_pid`` so it only runs when this
+    # block did. The two stay in lockstep across the lifecycle, so
+    # ``T1_ADDR`` cannot leak past a clean shutdown into a
+    # subsequent MCP boot in the same Python process.
     write_t1_addr(claude_pid, host, int(port))
     _t1_state.T1_ADDR = (host, int(port))
     _OWNED_CHROMA["t1_addr_claude_pid"] = claude_pid
@@ -160,6 +168,11 @@ def _t1_unpublish_addr_for_new_discovery() -> None:
     publish path ran for this lifecycle. No-op when nothing was
     published (flag was off, chroma was reused/nested, or publish
     bailed due to no claude_pid).
+
+    Gating on ``t1_addr_claude_pid`` keeps the lockstep invariant
+    documented in the publish helper: the unpublish path only
+    runs when publish populated the dict, so ``T1_ADDR`` never
+    gets reset out from under a still-owned chroma.
     """
     claude_pid = _OWNED_CHROMA.get("t1_addr_claude_pid")
     if not claude_pid:
