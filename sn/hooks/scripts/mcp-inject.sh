@@ -4,6 +4,45 @@
 # Selectively injects based on agent task text to save tokens.
 # Default: inject both (safe fallback on parse failure).
 # Timeout: 5s (hooks.json) — stdin read + python3 ~50ms, well within budget.
+#
+# DELIVERY CONTRACT (Claude Code SubagentStart): emit content via the JSON
+# envelope of the form
+#   {"hookSpecificOutput": {"hookEventName": "SubagentStart",
+#                            "additionalContext": "<text>"}}
+# Plain stdout was the prior shape and once worked, but the JSON envelope is
+# the documented schema — it makes the emit intent unambiguous, so a Claude
+# Code change that tightens parsing won't silently drop the content. This
+# mirrors nx/hooks/scripts/subagent-start.sh, which migrated 2026-05-05
+# (commit 68854ca). The sn plugin missed that migration; restoring it here
+# is what gets Serena + Context7 setup back into spawned subagents.
+#
+# Implementation: capture all body stdout into a tempfile via FD redirection
+# at the top of the script, then emit the JSON envelope at the end via an
+# EXIT trap. Body code below stays unchanged and continues to use cat for
+# content generation.
+
+_SN_HOOK_OUTBUF=$(mktemp -t sn-subagent-start.XXXXXX) || _SN_HOOK_OUTBUF=""
+if [[ -n "$_SN_HOOK_OUTBUF" ]]; then
+    exec 3>&1 1>"$_SN_HOOK_OUTBUF"
+fi
+_sn_emit_json_envelope() {
+    local rc=$?
+    if [[ -n "$_SN_HOOK_OUTBUF" ]]; then
+        exec 1>&3 3>&-
+        python3 -c '
+import json, sys
+print(json.dumps({
+    "hookSpecificOutput": {
+        "hookEventName": "SubagentStart",
+        "additionalContext": sys.stdin.read(),
+    },
+}))
+' < "$_SN_HOOK_OUTBUF"
+        rm -f "$_SN_HOOK_OUTBUF"
+    fi
+    return $rc
+}
+trap _sn_emit_json_envelope EXIT
 
 # --- Agent-type detection via stdin JSON ---
 STDIN=$(cat)
