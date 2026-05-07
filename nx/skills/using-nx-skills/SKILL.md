@@ -64,7 +64,7 @@ After a successful pipeline:
 
 ## Essential MCP Tools (always available)
 
-**Sequential Thinking** (`mcp__plugin_nx_sequential-thinking__sequentialthinking`): debugging hypotheses, design choices, plan evaluation. `needsMoreThoughts: true` to continue, `isRevision: true` to correct.
+**Sequential Thinking** (`mcp__plugin_nx_sequential-thinking__sequentialthinking`) — use for any non-trivial decision: debugging hypotheses, design choices, plan evaluation, risk assessment. Workflow: hypothesis → evidence → evaluate → branch or proceed. `needsMoreThoughts: true` to continue, `isRevision: true` to correct, `branchFromThought: N` + `branchId` to explore alternatives.
 
 **nx Storage Tiers — check before any work, write your findings back.** Read widest → narrowest:
 - **T3** `nx search` / `nx_answer`: permanent knowledge across all sessions and projects — **check before researching from scratch**.
