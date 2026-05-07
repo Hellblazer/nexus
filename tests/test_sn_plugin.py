@@ -127,10 +127,16 @@ class TestSnMarketplace:
 
 
 class TestSnHookOutput:
-    """mcp-inject.sh must produce expected guidance sections."""
+    """mcp-inject.sh must produce expected guidance sections.
+
+    The hook emits a JSON envelope; ``hook_output`` returns the unwrapped
+    additionalContext so the legacy substring assertions keep working
+    against the markdown body. ``hook_envelope`` exposes the raw stdout
+    for tests that need to verify the envelope shape itself.
+    """
 
     @pytest.fixture(scope="class")
-    def hook_output(self) -> str:
+    def hook_envelope(self) -> str:
         script = SN_DIR / "hooks" / "scripts" / "mcp-inject.sh"
         result = subprocess.run(
             ["bash", str(script)],
@@ -138,6 +144,25 @@ class TestSnHookOutput:
             cwd=str(REPO_ROOT),  # so git rev-parse works
         )
         return result.stdout
+
+    @pytest.fixture(scope="class")
+    def hook_output(self, hook_envelope: str) -> str:
+        envelope = json.loads(hook_envelope)
+        return envelope["hookSpecificOutput"]["additionalContext"]
+
+    def test_envelope_is_valid_json(self, hook_envelope: str) -> None:
+        """Hook must emit the documented Claude Code SubagentStart envelope.
+
+        Plain stdout was the prior shape; the JSON envelope is the
+        documented schema and prevents silent drop on parser tightening.
+        Mirrors nx/hooks/scripts/subagent-start.sh (commit 68854ca).
+        """
+        envelope = json.loads(hook_envelope)
+        assert "hookSpecificOutput" in envelope
+        hso = envelope["hookSpecificOutput"]
+        assert hso.get("hookEventName") == "SubagentStart"
+        assert "additionalContext" in hso
+        assert isinstance(hso["additionalContext"], str)
 
     def test_serena_section_present(self, hook_output: str) -> None:
         assert "## Serena MCP" in hook_output
