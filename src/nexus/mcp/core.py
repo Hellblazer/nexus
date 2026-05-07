@@ -612,7 +612,7 @@ async def _t1_chroma_lifespan_new_discovery():
         yield
         return
 
-    # Imported lazily — when flag-on, `_t1_isolated_env` reads the
+    # Imported lazily; when flag-on, `_t1_isolated_env` reads the
     # current env and emits a deprecation warning if the legacy alias
     # is the only signal.
     from nexus.session import _t1_isolated_env

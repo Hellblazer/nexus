@@ -682,7 +682,7 @@ class TestLifespanNewDiscoveryGenerator:
         the parent's file with its own chroma's address.
 
         This test simulates the scenario and locks the contract at the
-        lifespan layer — companion to the unit test on
+        lifespan layer; companion to the unit test on
         ``find_immediate_claude_pid`` itself.
         """
         import asyncio
