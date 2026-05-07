@@ -184,6 +184,15 @@ def sweep_orphan_tmpdirs(
 
     Returns the count of directories reaped. Best-effort cleanup
     that runs at top-level MCP startup; failures are non-fatal.
+
+    Pre-RDR-105-P4 the sweep also took a ``sessions_dir`` parameter
+    and skipped any tmpdir referenced by a live ``<uuid>.session``
+    record. The session-record machinery is gone; mtime is the sole
+    protection gate. Any ``nx_t1_*`` tmpdir older than 24h with no
+    live owner is treated as an orphan; tests or operators that
+    need to keep an old tmpdir around must touch it (refresh
+    mtime) on a sub-24h cadence or move it outside the
+    ``nx_t1_*`` namespace.
     """
     import shutil
 
@@ -550,6 +559,16 @@ def sweep_orphan_t1_addr_files() -> int:
 
     Returns the count of files reaped. Failures are logged but
     never propagate; this is not load-bearing.
+
+    PID reuse: if a live unrelated process happens to have the same
+    PID as the dead Claude (PIDs wrap on Linux), the sweep skips the
+    file (false-negative). Worst outcome: the file lingers until the
+    next sweep, at which point either the PID is still reused (still
+    skipped, still no harm) or it has exited (now reaped). No
+    incorrect destructive action is possible. A ``comm`` cross-check
+    would close the false-negative but adds two subprocess calls per
+    file with portability concerns; not justified for a best-effort
+    path.
     """
     config_dir = _nexus_config_dir_at_import()
     if not config_dir.exists():
