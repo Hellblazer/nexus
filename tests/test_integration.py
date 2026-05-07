@@ -54,10 +54,55 @@ def isolated_home(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def scratch_session(isolated_home):
-    """Set up T1 scratch with shared session ID."""
-    from nexus.session import write_claude_session_id
+def scratch_session(isolated_home, monkeypatch):
+    """Boot a real chroma + write the addr file so CLI invocations
+    share state (RDR-105 P4: the legacy session-record discovery is
+    gone; CLI scratch commands resolve via Path B addr file).
+    """
+    import os as _os
+    import shutil as _shutil
+
+    from nexus.session import (
+        find_immediate_claude_pid,
+        start_t1_server,
+        stop_t1_server,
+        unlink_t1_addr,
+        write_claude_session_id,
+        write_t1_addr,
+    )
+
+    # ``HOME`` is already isolated by ``isolated_home``;
+    # ``NEXUS_CONFIG_DIR`` makes that explicit for the addr file path.
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(isolated_home / ".config" / "nexus"))
+    monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+    monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
+    # Pin the session_id across CLI invocations so all writes/reads
+    # see the same metadata filter scope. Each ``runner.invoke``
+    # constructs a fresh ``T1Database``; without a stable session_id
+    # the T1 metadata filter excludes prior-invocation writes.
+    monkeypatch.setenv("NX_SESSION_ID", "integration-test-session")
+
     write_claude_session_id("integration-test-session")
+    host, port, server_pid, tmpdir = start_t1_server()
+
+    # Pin the addr file at THIS test's PID so CLI invocations
+    # (whose PPID walk lands on this pytest process) discover it.
+    own_pid = _os.getpid()
+    monkeypatch.setattr(
+        "nexus.session.find_immediate_claude_pid",
+        lambda start_pid=None: own_pid,
+    )
+    monkeypatch.setattr(
+        "nexus.db.t1.find_immediate_claude_pid",
+        lambda start_pid=None: own_pid,
+    )
+    write_t1_addr(own_pid, host, port)
+
+    yield
+
+    unlink_t1_addr(own_pid)
+    stop_t1_server(server_pid)
+    _shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def _uid(prefix: str = "int") -> str:
