@@ -409,35 +409,16 @@ def _run_check_tmpdirs(*, reap: bool, json_out: bool) -> None:
     import time
     from pathlib import Path
 
-    from nexus.db.t1 import SESSIONS_DIR
     from nexus.session import sweep_orphan_tmpdirs
 
     tmpdir_root = Path(tempfile.gettempdir())
     cutoff_hours = 24.0
     cutoff = time.time() - cutoff_hours * 3600.0
 
-    referenced: set[str] = set()
-    if SESSIONS_DIR.exists():
-        for f in SESSIONS_DIR.glob("*.session"):
-            try:
-                rec = json.loads(f.read_text())
-                if isinstance(rec, dict):
-                    td = rec.get("tmpdir", "")
-                    if td:
-                        referenced.add(str(Path(td).resolve()))
-            except (json.JSONDecodeError, OSError):
-                continue
-
     candidates: list[dict] = []
     if tmpdir_root.exists():
         for d in sorted(tmpdir_root.glob("nx_t1_*")):
             if not d.is_dir():
-                continue
-            try:
-                resolved = str(d.resolve())
-            except OSError:
-                continue
-            if resolved in referenced:
                 continue
             try:
                 mtime = d.stat().st_mtime
@@ -467,7 +448,7 @@ def _run_check_tmpdirs(*, reap: bool, json_out: bool) -> None:
 
     if reap:
         payload["reaped"] = sweep_orphan_tmpdirs(
-            sessions_dir=SESSIONS_DIR, tmpdir_root=tmpdir_root,
+            tmpdir_root=tmpdir_root,
             max_age_hours=cutoff_hours,
         )
 

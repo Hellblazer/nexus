@@ -45,36 +45,22 @@ def test_scan_sessions_no_dir():
 
 
 def test_scan_sessions_live_session(tmp_path):
-    """Create a session file with our own PID — should be detected as alive."""
+    """Addr file keyed by our own PID, should be detected as alive."""
     import os
-    session = {
-        "session_id": "test-session",
-        "server_host": "127.0.0.1",
-        "server_port": 0,  # won't connect but PID is alive
-        "server_pid": os.getpid(),
-        "created_at": 1700000000.0,
-    }
-    (tmp_path / "test.session").write_text(json.dumps(session))
+    own_pid = os.getpid()
+    (tmp_path / f"t1_addr.{own_pid}").write_text("127.0.0.1:0\n")
     results = scan_sessions_sync(tmp_path)
     assert len(results) == 1
-    assert results[0].session_id == "test-session"
+    assert results[0].session_id == str(own_pid)
     assert results[0].pid_alive is True
 
 
 def test_scan_sessions_dead_pid(tmp_path):
-    """Session with a dead PID."""
+    """Addr file keyed by a dead PID."""
     import subprocess
     proc = subprocess.Popen(["true"])
     proc.wait()
-
-    session = {
-        "session_id": "dead-session",
-        "server_host": "127.0.0.1",
-        "server_port": 12345,
-        "server_pid": proc.pid,
-        "created_at": 1700000000.0,
-    }
-    (tmp_path / "dead.session").write_text(json.dumps(session))
+    (tmp_path / f"t1_addr.{proc.pid}").write_text("127.0.0.1:12345\n")
     results = scan_sessions_sync(tmp_path)
     assert len(results) == 1
     assert results[0].pid_alive is False

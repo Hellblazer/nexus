@@ -19,72 +19,17 @@ from nexus.db.t2 import T2Database
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 from nexus.session import (
-    SESSIONS_DIR,
     _t1_isolated_env,
-    find_ancestor_session,
     find_immediate_claude_pid,
-    find_session_by_id,
     read_t1_addr_for,
-    t1_new_discovery_enabled,
 )
 
 _T = TypeVar("_T")
 
 _COLLECTION = "scratch"
 
-#: Backoff schedule for the subagent-race retry (RDR-094 CA-2 /
-#: nexus-zsqf). Total max wait ~3 s covers chroma's empirically
-#: measured 1.1-1.7 s cold-start window with slack for system jitter
-#: (Spike B observed downgrade through 1500 ms+; 350 ms retry from
-#: the bead's original prescription was insufficient). The retry only
-#: fires when ``NX_SESSION_ID`` is set in env -- the canonical signal
-#: that the caller is a subagent inheriting from a parent that should
-#: have a session record. Top-level callers without a parent session
-#: have no record by design; retrying would just delay startup.
-#:
-#: Typical hit happens on the 2nd-3rd retry (~700 ms wait) when
-#: chroma takes 1.2-1.5 s to come up. The exponential schedule keeps
-#: the first miss cheap (100 ms) for the rare benign-miss case.
-_T1_RACE_BACKOFF_MS: tuple[int, ...] = (100, 200, 400, 800, 1500)
 
-
-def _resolve_session_record_with_retry(sessions_dir) -> dict | None:
-    """Look up the T1 session record, with backoff retry for CA-2 race.
-
-    The race (verified empirically by Spike B / nexus-zsqf): a subagent
-    dispatched within ~1-2 s of top-level MCP startup observes
-    ``NX_SESSION_ID`` set in env but finds the parent's session record
-    not yet written, because the parent's
-    :func:`nexus.mcp.core._t1_chroma_init_if_owner` is still inside
-    ``start_t1_server`` (chroma cold-start dominates).
-    :func:`find_session_by_id` returns None and the caller falls through
-    to ``EphemeralClient`` -- silently, because the warning is invisible
-    under stdio transport.
-
-    Mitigation: when the first lookup misses AND the env var is set,
-    retry on a 50/100/200 ms schedule (~350 ms total wait) before
-    giving up. The env-var gate prevents wasted retries in top-level
-    callers that genuinely have no parent session.
-    """
-    import time as _time
-
-    record = find_session_by_id(sessions_dir)
-    if record is not None:
-        return record
-
-    # Retry only when the caller looks like a subagent: NX_SESSION_ID
-    # is set in env, meaning a parent process expects a record.
-    if not os.environ.get("NX_SESSION_ID", "").strip():
-        return None
-
-    for delay_ms in _T1_RACE_BACKOFF_MS:
-        _time.sleep(delay_ms / 1000.0)
-        record = find_session_by_id(sessions_dir)
-        if record is not None:
-            return record
-    return None
-
-# Common English stopwords — shared with MemoryStore._STOPWORDS for
+# Common English stopwords, shared with MemoryStore._STOPWORDS for
 # consistency across the two overlap-detection helpers.
 _PROMOTE_STOPWORDS = frozenset(
     {
@@ -167,49 +112,35 @@ def _find_promote_overlap_candidates(
 
 
 class T1ServerNotFoundError(RuntimeError):
-    """Raised when ``T1Database()`` cannot resolve a live T1 server and the
-    caller did not explicitly opt into ephemeral semantics.
+    """Raised when ``T1Database()`` cannot resolve a live T1 server.
 
     GH #567: pre-fix the constructor silently fell back to a per-process
-    ``EphemeralClient`` whenever no session record was found. CLI
-    ``nx scratch put`` writes landed in that store and vanished at
-    process exit; the next ``nx scratch list`` invocation spawned a
-    fresh ``EphemeralClient`` and saw nothing.
+    ``EphemeralClient`` whenever discovery failed. CLI ``nx scratch put``
+    writes landed in that store and vanished at process exit; the next
+    ``nx scratch list`` invocation spawned a fresh ``EphemeralClient``
+    and saw nothing.
 
     Opt-in paths (no exception raised):
-      - ``T1Database(client=...)`` — caller injects the chroma client
-        (tests, MCP server lifespan)
-      - ``NEXUS_SKIP_T1=1`` env var — operator subprocess path that
-        explicitly acknowledges ephemeral semantics
+      - ``T1Database(client=...)`` for explicit client injection in
+        tests and the MCP server lifespan.
+      - ``NX_T1_ISOLATED=1`` (or its deprecated ``NEXUS_SKIP_T1=1``
+        alias) for stateless one-shot subprocesses; constructs an
+        ``EphemeralClient``.
     """
 
 
 class T1Database:
     """T1 ChromaDB session scratch, shared across all agents in a session tree.
 
-    Two discovery regimes coexist behind the ``NX_T1_NEW_DISCOVERY=1``
-    feature flag (RDR-105). Flag-on and flag-off paths are mutually
-    exclusive within a process per the RDR §'Phase 2 flag-isolation
-    contract'.
+    RDR-105 P4: a single hybrid-discovery path. The constructor's
+    ``_init_new_discovery`` is a four-branch fail-loud gate, Path A
+    (env), Path B (addr file), Path C (explicit isolation), or Path
+    D (raise). No legacy session-record resolver. Reconnect after a
+    connectivity loss is unsupported; callers must construct a fresh
+    ``T1Database`` to re-resolve.
 
-    Flag-off (legacy)
-        On construction, walks the PPID chain looking for an
-        ancestor ``sessions/<uuid>.session`` record. Falls back to
-        ``EphemeralClient`` only when ``NEXUS_SKIP_T1=1`` is set;
-        otherwise raises ``T1ServerNotFoundError`` (GH #567).
-        Reconnect after a connectivity failure re-resolves the
-        record once before raising.
-
-    Flag-on (RDR-105 P2)
-        Constructor goes through ``_init_new_discovery`` (a four-
-        branch fail-loud gate): Path A (env), Path B (addr file),
-        Path C (explicit ``NX_T1_ISOLATED=1``), or Path D (raise).
-        No fall-through to legacy resolvers. Reconnect is NOT
-        supported in flag-on mode; callers must construct a fresh
-        ``T1Database`` to re-resolve.
-
-    Pass ``client=`` explicitly to inject a custom client in tests
-    (works in both regimes; bypasses both gates).
+    Pass ``client=`` to inject a custom client in tests; this bypasses
+    the gate entirely.
     """
 
     def _init_new_discovery(self, chromadb, session_id: str | None) -> None:
@@ -300,181 +231,43 @@ class T1Database:
             # EphemeralClient as the MCP-tool-side T1 store.
             self._client = client
             self._session_id = session_id or str(uuid4())
-        elif t1_new_discovery_enabled():
-            # RDR-105 P2 (nexus-mj2o): four-branch fail-loud constructor.
-            # Default-on as of P3 (nexus-xf5r); opt-out via
-            # NX_T1_NEW_DISCOVERY=0. P4 deletes the legacy branch.
-            self._init_new_discovery(chromadb, session_id)
         else:
-            # NEXUS_SKIP_T1=1 (set by claude_dispatch for stateless operator
-            # subprocesses) → go straight to EphemeralClient without searching
-            # for a server. Without this short-circuit, the subprocess inherits
-            # NX_SESSION_ID=<parent-uuid> from claude_dispatch and would
-            # inadvertently connect to the parent's T1 server, breaking the
-            # stateless-operator intent (operators reading/writing parent's
-            # scratch is precisely what we want to avoid).
-            skip_t1 = os.environ.get("NEXUS_SKIP_T1", "").strip().lower() in ("1", "true", "yes")
-            record = None
-            if not skip_t1:
-                # UUID-keyed lookup (T1 scoped to Claude conversation, not
-                # terminal session). _resolve_session_record_with_retry
-                # wraps find_session_by_id with a 50/100/200 ms backoff
-                # when NX_SESSION_ID is set in env (the subagent
-                # inheritance signal) -- covers the CA-2 race where a
-                # subagent dispatches inside the parent's chroma
-                # cold-start window. Falls back to find_ancestor_session
-                # for any legacy session files written by older nexus
-                # versions still living in
-                # ~/.config/nexus/sessions/{ppid}.session.
-                record = (
-                    _resolve_session_record_with_retry(SESSIONS_DIR)
-                    or find_ancestor_session(SESSIONS_DIR)
-                )
-            if record is not None:
-                self._client = chromadb.HttpClient(
-                    host=record["server_host"],
-                    port=record["server_port"],
-                )
-                self._session_id = record["session_id"]
-            elif skip_t1:
-                # Operator subprocess path: NEXUS_SKIP_T1=1 acknowledges
-                # the ephemeral semantics. Use EphemeralClient.
-                from nexus.session import read_claude_session_id
-                self._client = chromadb.EphemeralClient()
-                self._session_id = session_id or read_claude_session_id() or str(uuid4())
-            else:
-                # GH #567: NO live T1 server, NO opt-in via NEXUS_SKIP_T1,
-                # NO injected client. Pre-fix the constructor silently
-                # fell back to a per-process EphemeralClient. CLI
-                # ``nx scratch put`` writes would land in that ephemeral
-                # store and vanish when the process exited; subsequent
-                # ``nx scratch list`` invocations spawned a fresh
-                # EphemeralClient and saw nothing. The user reported
-                # this as silent data loss.
-                #
-                # Fail loud instead. Callers that want ephemeral
-                # semantics opt in explicitly:
-                #
-                #   - ``T1Database(client=chromadb.EphemeralClient())``
-                #     (tests, MCP-server lifespan)
-                #   - ``NEXUS_SKIP_T1=1`` env var (operator subprocess)
-                #
-                # NOTE: do NOT clear current_session here. An earlier
-                # iteration of this fix unlinked the pointer when no
-                # ``.session`` matched it, but that's racy: the MCP
-                # server's ``_t1_chroma_init_if_owner`` reads the same
-                # pointer to decide what session_id to spawn chroma
-                # under. Nuking it from a CLI invocation defeats an
-                # MCP server that's about to spawn its chroma.
-                # ``_t1_chroma_init_if_owner`` self-mints a UUID when
-                # the pointer is missing (mcp/core.py post-#567 fix).
-                raise T1ServerNotFoundError(
-                    f"No T1 server found in {SESSIONS_DIR} and no in-process "
-                    f"client supplied. T1 scratch requires either:\n"
-                    f"  - an active Claude Code session (which spawns the MCP "
-                    f"server + chroma via FastMCP lifespan), OR\n"
-                    f"  - NEXUS_SKIP_T1=1 to acknowledge ephemeral per-process "
-                    f"semantics (writes will not persist across invocations).\n"
-                    f"Pre-fix this fell through to a silent EphemeralClient "
-                    f"that lost every write at process exit (GH #567)."
-                )
+            # RDR-105 P4 (nexus-jnx7): the four-branch fail-loud gate is
+            # the only resolution path. The legacy session-record
+            # resolver chain was deleted along with the multi-writer
+            # coordination machinery that produced the GH #567 / #572 /
+            # #574 / #575 / #576 / #579 bug class.
+            self._init_new_discovery(chromadb, session_id)
 
         self._col = self._client.get_or_create_collection(_COLLECTION)
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _reconnect(self) -> None:
-        """Re-resolve the T1 server connection after a connectivity failure.
+        """Surface a connection loss as :class:`T1ServerNotFoundError`.
 
-        Uses the same UUID-keyed resolution chain as the constructor
-        (``_resolve_session_record_with_retry`` then legacy
-        ``find_ancestor_session`` for pre-v4.13 records). On miss,
-        raises :class:`T1ServerNotFoundError` — symmetric with the
-        constructor's PR #569 fail-loud contract (GH #576).
+        RDR-105 P4 (nexus-jnx7): there is no in-place reconnect under
+        the hybrid-discovery architecture. The legacy resolver chain
+        consulted ``SESSIONS_DIR`` and the multi-writer record files,
+        both of which are gone. Re-resolving via the addr file or env
+        path requires constructing a fresh ``T1Database`` so the
+        four-branch fail-loud gate fires; doing it inside an existing
+        instance would mask the connectivity loss as a silent retry.
 
-        Pre-fix this path silently fell back to a per-process
-        EphemeralClient, which dropped every prior scratch entry under
-        a single misleading WARNING. Live trace 2026-05-06 (issue
-        #576): ``nx_answer`` plan-runner subprocess SessionStart fired
-        ``sweep_stale_sessions`` against the parent's record before
-        Phase B/C landed; main MCP's next reconnect found no record
-        and silently switched to ephemeral. After Phase A, the same
-        sequence raises and the user sees the failure immediately
-        instead of after they've lost data.
-
-        Sets ``_dead=True`` immediately to prevent cascading reconnect
-        loops on re-entry.
+        Sets ``_dead=True`` so subsequent ``_exec`` calls re-raise
+        immediately rather than looping.
         """
-        import chromadb
-
         if self._dead:
             return
-        self._dead = True  # set before any I/O to prevent loops on re-entry
-
-        if t1_new_discovery_enabled():
-            # RDR-105 P2 follow-up (review #582): the legacy resolver
-            # consults SESSIONS_DIR + find_session_by_id, which
-            # new-discovery processes never write. Trying it would
-            # always miss; reading the addr file here would require
-            # a fresh T1Database to apply the new four-branch gate.
-            # Fail loud and let the caller decide whether to
-            # reconstruct.
-            _log.warning(
-                "t1_reconnect_unsupported_in_new_discovery",
-                session_id=self._session_id,
-            )
-            raise T1ServerNotFoundError(
-                "T1 reconnect is not supported under "
-                "NX_T1_NEW_DISCOVERY=1. The chroma server became "
-                "unreachable; construct a new T1Database to "
-                "re-resolve via the four-branch hybrid-discovery "
-                "gate (env -> addr file -> isolation -> raise)."
-            )
-
-        prior_session_id = self._session_id
-        # Use the same UUID-keyed chain as the constructor (GH #576):
-        # legacy ``find_ancestor_session`` (PID-keyed) cannot find
-        # records written by post-v4.13 ``write_session_record_by_id``,
-        # so reconnect was effectively guaranteed to miss in any
-        # current install. The retry helper additionally covers the
-        # CA-2 race where reconnect lands inside a respawn window.
-        record = (
-            _resolve_session_record_with_retry(SESSIONS_DIR)
-            or find_ancestor_session(SESSIONS_DIR)
-        )
-        if record is not None:
-            self._client = chromadb.HttpClient(
-                host=record["server_host"],
-                port=record["server_port"],
-            )
-            self._session_id = record["session_id"]
-            self._dead = False  # successful reconnect — re-arm
-            _log.warning(
-                "t1_reconnect_to_different_server",
-                prior_session_id=prior_session_id,
-                new_session_id=record["session_id"],
-                new_host=record["server_host"],
-                new_port=record["server_port"],
-            )
-            self._col = self._client.get_or_create_collection(_COLLECTION)
-            return
-
-        # No record. Fail loud — match constructor's PR #569 contract.
-        # The ``_dead=True`` flag set above prevents cascading reconnect
-        # loops; subsequent ``_exec`` calls will re-raise the original
-        # connection error rather than retrying.
+        self._dead = True
         _log.warning(
-            "t1_reconnect_no_record_raising",
+            "t1_reconnect_unsupported",
             session_id=self._session_id,
         )
         raise T1ServerNotFoundError(
-            f"T1 reconnect failed: no session record in {SESSIONS_DIR} "
-            f"for session_id={self._session_id}. The chroma server may "
-            f"have been reaped (sweep_stale_sessions, /clear, /resume) "
-            f"or the session record was unlinked by another process. "
-            f"Pre-fix this path silently fell back to EphemeralClient "
-            f"and lost every scratch entry written before the reconnect "
-            f"(GH #576)."
+            "T1 connection lost. Construct a new T1Database to "
+            "re-resolve via the four-branch hybrid-discovery gate "
+            "(env -> addr file -> isolation -> raise)."
         )
 
     @property

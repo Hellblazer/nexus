@@ -301,16 +301,7 @@ def test_session_end_orphan_recovery(two_sessions) -> None:
 
 # ── _t1() session stability ─────────────────────────────────────────────────
 
-def test_t1_auto_create_session_when_no_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import warnings
-    from nexus.commands.scratch import _t1
-    from nexus.session import write_claude_session_id
-    monkeypatch.setenv("HOME", str(tmp_path))
-    write_claude_session_id("known-stable-session-id")
-    with warnings.catch_warnings(record=True):
-        warnings.simplefilter("always")
-        first, second = _t1(), _t1()
-    assert first._session_id == "known-stable-session-id" == second._session_id
+
 
 
 # ── Edge cases ───────────────────────────────────────────────────────────────

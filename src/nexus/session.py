@@ -111,9 +111,7 @@ def read_session_id(ppid: int | None = None) -> str | None:
 
 # ── T1 server session management (RDR-010) ────────────────────────────────────
 
-SESSIONS_DIR: Path = _nexus_config_dir_at_import() / "sessions"
 _T1_SERVER_HOST: str = "127.0.0.1"
-_SESSION_MAX_AGE_SECONDS: float = 24 * 3600.0
 _SERVER_READY_TIMEOUT: float = 10.0
 
 
@@ -147,45 +145,7 @@ def _ppid_of(pid: int) -> int | None:
         return None  # intentional: process gone or ps unavailable — expected during PPID walk
 
 
-def find_ancestor_session(
-    sessions_dir: Path | None = None,
-    start_pid: int | None = None,
-) -> dict | None:
-    """Walk the PPID chain from *start_pid* looking for a valid JSON session record.
 
-    Returns the parsed record dict on success (keys: session_id, server_host,
-    server_port, server_pid, created_at), or None if no valid ancestor session
-    is found (ps unavailable, no files, stale, or corrupt).
-
-    Stale records (older than 24 h) are cleaned up automatically during the walk.
-    """
-    if sessions_dir is None:
-        sessions_dir = SESSIONS_DIR
-
-    pid = start_pid if start_pid is not None else os.getpid()
-    seen: set[int] = set()
-    cutoff = time.time() - _SESSION_MAX_AGE_SECONDS
-
-    while pid and pid not in seen:
-        seen.add(pid)
-        candidate = sessions_dir / f"{pid}.session"
-        if candidate.exists():
-            try:
-                record = json.loads(candidate.read_text())
-                if isinstance(record, dict):
-                    if record.get("created_at", 0) < cutoff:
-                        # Stale orphan: stop server (SIGTERM → SIGKILL) and remove file.
-                        server_pid = record.get("server_pid")
-                        if server_pid:
-                            stop_t1_server(server_pid)
-                        _try_remove_path(candidate)
-                    elif "server_host" in record and "server_port" in record and "session_id" in record:
-                        return record
-            except (json.JSONDecodeError, OSError):
-                _log.debug("find_ancestor_session: skipping corrupt/unreadable session file", path=str(candidate))
-        pid = _ppid_of(pid)
-
-    return None
 
 
 def _is_pid_alive(pid: int) -> bool:
@@ -207,184 +167,36 @@ def _is_pid_alive(pid: int) -> bool:
     return True
 
 
-def sweep_stale_sessions(
-    sessions_dir: Path | None = None,
-    max_age_hours: float = _SESSION_MAX_AGE_SECONDS / 3600.0,
-) -> None:
-    """Scan *sessions_dir* for JSON records older than *max_age_hours*.
 
-    For each stale record: sends SIGTERM → SIGKILL to server_pid, removes the
-    backing tmpdir, and deletes the session file. Non-JSON files are ignored.
-
-    nexus-99jb Layer 3 extension: a record is also reaped eagerly (regardless
-    of age) when its ``server_pid`` is no longer alive OR its
-    ``claude_root_pid`` has disappeared. The age-based threshold is retained
-    as a final safety net for records that lack PID metadata (legacy schema)
-    or point at a PID namespace the current user can't probe.
-
-    nexus-886w extension: a record whose ``session_id`` does not match the
-    ``current_session`` pointer is reaped even when both PIDs are alive.
-    Covers the same-claude-different-UUID case (``/clear`` or ``/resume``
-    rollover within a single live claude process) where the watchdog
-    keeps seeing the parent PID alive and never fires. The previous
-    fourth gap in the GC coverage: bounded to 24h via the age threshold,
-    but not closed.
-    """
-    if sessions_dir is None:
-        sessions_dir = SESSIONS_DIR
-    if not sessions_dir.exists():
-        return
-    cutoff = time.time() - max_age_hours * 3600.0
-    current_uuid = read_claude_session_id()
-    for f in sessions_dir.glob("*.session"):
-        # Migration: numeric-stem files come from the legacy PID-keyed scheme
-        # that bound T1 to the terminal session instead of the Claude
-        # conversation. They were never doing the right thing — sweep
-        # unconditionally on first new-code SessionStart, regardless of age.
-        # The chroma servers they pointed at were leaked aliases; reap them
-        # too. New code only writes UUID-keyed files.
-        if f.stem.isdigit():
-            try:
-                legacy = json.loads(f.read_text())
-                if isinstance(legacy, dict):
-                    server_pid = legacy.get("server_pid")
-                    if server_pid:
-                        stop_t1_server(server_pid)
-                    tmpdir = legacy.get("tmpdir", "")
-                    if tmpdir:
-                        import shutil
-                        shutil.rmtree(tmpdir, ignore_errors=True)
-            except (json.JSONDecodeError, OSError):
-                pass  # intentional: best-effort migration; the file gets removed regardless
-            _try_remove_path(f)
-            continue
-        try:
-            record = json.loads(f.read_text())
-            if not isinstance(record, dict):
-                continue
-            server_pid = record.get("server_pid")
-            claude_root_pid = record.get("claude_root_pid", 0)
-            # Reap triggers (any one is sufficient):
-            #   1. Age-based: created_at older than cutoff (legacy path).
-            #   2. Liveness: server_pid is no longer alive — process
-            #      already gone but the file + tmpdir were left behind.
-            #   3. Anchor loss: claude_root_pid known and dead — Claude
-            #      Code exited but SessionEnd didn't fire (/exit path,
-            #      hook cancelled, etc). Watchdog normally covers this
-            #      within 5s; this is belt-and-braces on SessionStart.
-            age_expired = record.get("created_at", time.time()) < cutoff
-            server_dead = server_pid and not _is_pid_alive(int(server_pid))
-            anchor_dead = claude_root_pid and not _is_pid_alive(int(claude_root_pid))
-            # nexus-886w: same claude process rolled to a different
-            # conversation UUID (``/clear`` or ``/resume``). The record is
-            # for a UUID that no longer matches ``current_session`` even
-            # though claude itself is still alive, so the watchdog never
-            # fires. Requires claude_root_pid to be alive — otherwise the
-            # anchor_dead arm owns the reap and reports the more specific
-            # reason.
-            #
-            # GH #576 Phase C: compare ``f.stem`` (the canonical
-            # filename, kept in sync with the conversation UUID by
-            # ``reconcile_owned_chroma``'s rename) against
-            # ``current_session``. Pre-fix this read ``record["session_id"]``
-            # from JSON content, which ``Path.replace`` did NOT rewrite
-            # — leading to a uuid_stale=True false positive on every
-            # subprocess SessionStart fire post-reconcile, which then
-            # unlinked the parent's canonical record (the silent T1
-            # data-loss trigger). Filename-stem is canonical; JSON
-            # content is incidental metadata.
-            record_uuid = f.stem
-            uuid_stale = bool(
-                current_uuid
-                and record_uuid
-                and record_uuid != current_uuid
-                and claude_root_pid
-                and not anchor_dead
-            )
-            if age_expired or server_dead or anchor_dead or uuid_stale:
-                if server_pid and not server_dead:
-                    stop_t1_server(server_pid)
-                tmpdir = record.get("tmpdir", "")
-                if tmpdir:
-                    import shutil
-                    shutil.rmtree(tmpdir, ignore_errors=True)
-                _try_remove_path(f)
-                _log.info(
-                    "sweep_reaped_session",
-                    session_id=record.get("session_id", "?"),
-                    reason=(
-                        "age" if age_expired
-                        else "server_dead" if server_dead
-                        else "anchor_dead" if anchor_dead
-                        else "uuid_mismatch"
-                    ),
-                )
-        except (json.JSONDecodeError, OSError) as exc:
-            _log.debug("sweep_corrupt_session_file", path=str(f), error=str(exc))
 
 
 def sweep_orphan_tmpdirs(
-    sessions_dir: Path | None = None,
     tmpdir_root: Path | None = None,
     max_age_hours: float = 24.0,
 ) -> int:
-    """RDR-094 Phase 3: reap orphan ``nx_t1_*`` tmpdirs.
+    """Reap orphan ``nx_t1_*`` tmpdirs older than *max_age_hours*.
 
     Scans *tmpdir_root* (defaults to the system tempdir) for
     directories matching ``nx_t1_*`` (the prefix used by
-    :func:`start_t1_server`). For each:
+    :func:`start_t1_server`). Reaps any whose mtime is older than
+    the cutoff (default 24h) so legitimate in-flight tmpdirs (active
+    chroma spawn between :func:`tempfile.mkdtemp` and the chroma
+    process becoming live) are not accidentally removed.
 
-    * If a session record in *sessions_dir* points at the tmpdir,
-      skip (live; some other code path owns this tmpdir's lifecycle).
-    * If the tmpdir's mtime is younger than *max_age_hours*, skip
-      (might be in active spawn between :func:`tempfile.mkdtemp` and
-      the session-record write, or actively used by an MCP server
-      that hasn't written its record yet).
-    * Otherwise, ``rmtree`` with ``ignore_errors``.
-
-    Returns the count of directories reaped. Closes RDR-094 Gap 3:
-    tmpdirs whose session record was deleted but whose chroma
-    server crashed before the cleanup path completed had no other
-    reap trigger; the existing ``sweep_stale_sessions`` operates on
-    records, not on the filesystem itself.
-
-    Cheap on every-startup invocation: glob + stat per directory,
-    no I/O beyond rmtree on confirmed orphans. The 24h cutoff
-    prevents accidental reap of legitimate in-flight tmpdirs.
+    Returns the count of directories reaped. Best-effort cleanup
+    that runs at top-level MCP startup; failures are non-fatal.
     """
     import shutil
 
-    if sessions_dir is None:
-        sessions_dir = SESSIONS_DIR
     if tmpdir_root is None:
         tmpdir_root = Path(tempfile.gettempdir())
     if not tmpdir_root.exists():
         return 0
 
-    # Collect every tmpdir path referenced by a current session record
-    # so we never reap a directory another component still owns.
-    referenced: set[str] = set()
-    if sessions_dir.exists():
-        for f in sessions_dir.glob("*.session"):
-            try:
-                rec = json.loads(f.read_text())
-                if isinstance(rec, dict):
-                    td = rec.get("tmpdir", "")
-                    if td:
-                        referenced.add(str(Path(td).resolve()))
-            except (json.JSONDecodeError, OSError):
-                continue
-
     cutoff = time.time() - max_age_hours * 3600.0
     reaped = 0
     for d in tmpdir_root.glob("nx_t1_*"):
         if not d.is_dir():
-            continue
-        try:
-            resolved = str(d.resolve())
-        except OSError:
-            continue
-        if resolved in referenced:
             continue
         try:
             mtime = d.stat().st_mtime
@@ -542,37 +354,7 @@ def stop_t1_server(server_pid: int) -> None:
         pass  # intentional: process already gone after SIGKILL
 
 
-def write_session_record(
-    sessions_dir: Path,
-    ppid: int,
-    session_id: str,
-    host: str,
-    port: int,
-    server_pid: int,
-    tmpdir: str = "",
-) -> Path:
-    """Write a JSON session record to *sessions_dir*/{ppid}.session (mode 0o600).
 
-    .. deprecated::
-        Legacy PID-keyed write. Use :func:`write_session_record_by_id` instead.
-        Kept as an alias for one release; no production code path calls this.
-    """
-    sessions_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    path = sessions_dir / f"{ppid}.session"
-    record = {
-        "session_id": session_id,
-        "server_host": host,
-        "server_port": port,
-        "server_pid": server_pid,
-        "created_at": time.time(),
-        "tmpdir": tmpdir,
-    }
-    fd = os.open(str(path), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
-    try:
-        os.write(fd, json.dumps(record).encode())
-    finally:
-        os.close(fd)
-    return path
 
 
 # ── UUID-keyed session records (the current scheme) ──────────────────────────
@@ -591,48 +373,7 @@ def write_session_record(
 _NX_SESSION_ID_ENV = "NX_SESSION_ID"
 
 
-def write_session_record_by_id(
-    sessions_dir: Path,
-    session_id: str,
-    host: str,
-    port: int,
-    server_pid: int,
-    tmpdir: str = "",
-    claude_root_pid: int = 0,
-    watchdog_pid: int = 0,
-) -> Path:
-    """Write a JSON session record at *sessions_dir*/{session_id}.session.
 
-    The UUID-keyed counterpart of :func:`write_session_record`. Always use
-    this in new code so T1 is scoped to a Claude conversation rather than
-    a terminal session.
-
-    ``claude_root_pid`` and ``watchdog_pid`` (nexus-99jb) are optional
-    metadata used by the orphan reaper and the self-watchdog sidecar.
-    Legacy records without these fields are still accepted by callers —
-    reap logic treats them as "no liveness anchor available, fall back
-    to age-based sweep".
-    """
-    sessions_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    path = sessions_dir / f"{session_id}.session"
-    record: dict[str, Any] = {
-        "session_id": session_id,
-        "server_host": host,
-        "server_port": port,
-        "server_pid": server_pid,
-        "created_at": time.time(),
-        "tmpdir": tmpdir,
-    }
-    if claude_root_pid:
-        record["claude_root_pid"] = claude_root_pid
-    if watchdog_pid:
-        record["watchdog_pid"] = watchdog_pid
-    fd = os.open(str(path), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
-    try:
-        os.write(fd, json.dumps(record).encode())
-    finally:
-        os.close(fd)
-    return path
 
 
 def _command_name_of(pid: int) -> str:
@@ -653,34 +394,7 @@ def _command_name_of(pid: int) -> str:
         return ""
 
 
-def find_claude_root_pid(start_pid: int | None = None) -> int:
-    """Walk the PPID chain looking for the Claude Code process.
 
-    Returns the topmost ancestor PID whose command name starts with
-    ``claude`` (matches ``claude``, ``claude-code``, and future CLI
-    renames). When no Claude ancestor is found — e.g. the caller isn't
-    actually under Claude Code — returns the immediate PPID as a
-    fallback so the watchdog at least watches *something* rather than
-    nothing.
-
-    Returns 0 only when the PPID chain can't be walked at all.
-    """
-    pid = start_pid if start_pid is not None else os.getpid()
-    seen: set[int] = set()
-    best: int = 0
-    # Walk upward. Remember the topmost "claude*" ancestor; fall back to
-    # the immediate PPID if none matches.
-    cur = _ppid_of(pid)
-    immediate_ppid = cur or 0
-    while cur and cur not in seen and cur > 1:
-        seen.add(cur)
-        name = _command_name_of(cur)
-        if name.lower().startswith("claude"):
-            best = cur
-            # Keep walking — in theory a "claude" shell could itself be
-            # under another "claude" (agent spawning). Prefer topmost.
-        cur = _ppid_of(cur)
-    return best or immediate_ppid
 
 
 # ── RDR-105 hybrid-discovery primitives ──────────────────────────────────────
@@ -727,16 +441,7 @@ def find_immediate_claude_pid(start_pid: int | None = None) -> int:
 _NEXUS_SKIP_T1_DEPRECATION_WARNED: bool = False
 
 
-def t1_new_discovery_enabled() -> bool:
-    """Return True iff the new RDR-105 hybrid-discovery code path
-    should run for this process.
 
-    Default-on as of P3 (nexus-xf5r). Opt-out via
-    ``NX_T1_NEW_DISCOVERY=0`` for the deprecation cycle; the legacy
-    session-record discovery is removed in P4 (``nexus-jnx7``)
-    along with this helper's no-op branch.
-    """
-    return os.environ.get("NX_T1_NEW_DISCOVERY", "1") != "0"
 
 
 def _t1_isolated_env() -> bool:
@@ -833,113 +538,45 @@ def unlink_t1_addr(claude_pid: int) -> None:
         _log.debug("t1_addr_unlink_failed", path=str(path), error=str(exc))
 
 
-def spawn_t1_watchdog(
-    *,
-    claude_pid: int,
-    chroma_pid: int,
-    session_file: Path,
-    tmpdir: str,
-    mcp_pid: int = 0,
-) -> int:
-    """Launch the T1 watchdog sidecar as a detached process.
+def sweep_orphan_t1_addr_files() -> int:
+    """Reap ``t1_addr.<claude_pid>`` files whose ``<claude_pid>`` is dead.
 
-    Returns the watchdog's PID. The watchdog runs under ``python -m
-    nexus.t1_watchdog`` in its own session (``start_new_session=True``)
-    so it survives the SessionStart hook's exit and can reap the
-    chroma server when Claude Code dies. See ``t1_watchdog.py`` for
-    the polling loop.
+    Best-effort orphan cleanup runs at top-level MCP startup. A
+    Claude Code session that exits ungracefully (SIGKILL, OOM, hard
+    crash) leaves its addr file behind; the lifespan finally never
+    runs. The next MCP boot's sweep reaps any stale files so a
+    sibling subprocess does not connect to a dead chroma.
 
-    When ``mcp_pid`` is non-zero, the watchdog is launched in
-    dual-watch mode (RDR-094 FM-NEW-1): it fires on EITHER mcp_pid
-    death (clean chroma directly because the MCP server's lifespan
-    did not run) OR claude_pid death (orphaned MCP, signal SIGTERM
-    to mcp_pid then clean chroma). Default 0 preserves the single-
-    watch claude-only mode for hook-spawned watchdogs.
-
-    Failure is non-fatal: returns 0 and logs a warning. Layer 3
-    (SessionStart orphan reaper) + the legacy age-based sweep cover
-    the case where the watchdog couldn't start.
+    Returns the count of files reaped. Failures are logged but
+    never propagate; this is not load-bearing.
     """
-    import sys as _sys
-    cmd: list[str] = [
-        _sys.executable, "-m", "nexus.t1_watchdog",
-        "--claude-pid", str(claude_pid),
-        "--chroma-pid", str(chroma_pid),
-        "--session-file", str(session_file),
-        "--tmpdir", tmpdir,
-    ]
-    if mcp_pid > 0:
-        cmd.extend(["--mcp-pid", str(mcp_pid)])
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        return proc.pid
-    except OSError as exc:
-        _log.warning("spawn_t1_watchdog_failed", error=str(exc))
+    config_dir = _nexus_config_dir_at_import()
+    if not config_dir.exists():
         return 0
+    reaped = 0
+    for path in config_dir.glob("t1_addr.*"):
+        suffix = path.suffix.lstrip(".")
+        try:
+            claude_pid = int(suffix)
+        except ValueError:
+            continue
+        if claude_pid > 0 and _is_pid_alive(claude_pid):
+            continue
+        try:
+            path.unlink()
+            reaped += 1
+            _log.info("sweep_reaped_orphan_t1_addr", path=str(path), pid=claude_pid)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            _log.debug("sweep_t1_addr_unlink_failed", path=str(path), error=str(exc))
+    return reaped
 
 
-def find_session_by_id(
-    sessions_dir: Path | None = None,
-    session_id: str | None = None,
-) -> dict | None:
-    """Look up the T1 session record for *session_id* in *sessions_dir*.
 
-    When *session_id* is None, resolves it in this order:
 
-    1. ``NX_SESSION_ID`` environment variable (set by the SessionStart hook
-       so direct child processes inherit it without a race).
-    2. ``current_session`` flat file (fallback for tools launched outside
-       the Claude process tree, e.g. an MCP server reconnecting after the
-       hook has already exited).
 
-    Returns the parsed record dict (keys: session_id, server_host,
-    server_port, server_pid, tmpdir, created_at) or None if no record
-    exists for that ID, or if no ID could be resolved at all.
 
-    Stale records (older than 24 h) are reaped on the way out — same
-    policy as the older PPID-walking variant.
-    """
-    if sessions_dir is None:
-        sessions_dir = SESSIONS_DIR
-    if session_id is None:
-        session_id = os.environ.get(_NX_SESSION_ID_ENV) or read_claude_session_id()
-    if not session_id:
-        return None
-    candidate = sessions_dir / f"{session_id}.session"
-    if not candidate.exists():
-        return None
-    try:
-        record = json.loads(candidate.read_text())
-    except (json.JSONDecodeError, OSError) as exc:
-        _log.debug(
-            "find_session_by_id: corrupt or unreadable session file",
-            path=str(candidate),
-            error=str(exc),
-        )
-        return None
-    if not isinstance(record, dict):
-        return None
-    cutoff = time.time() - _SESSION_MAX_AGE_SECONDS
-    if record.get("created_at", 0) < cutoff:
-        # Stale: reap server + remove file, return None so caller falls
-        # back to a fresh start.
-        server_pid = record.get("server_pid")
-        if server_pid:
-            stop_t1_server(server_pid)
-        _try_remove_path(candidate)
-        return None
-    if (
-        "server_host" not in record
-        or "server_port" not in record
-        or "session_id" not in record
-    ):
-        return None
-    return record
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────

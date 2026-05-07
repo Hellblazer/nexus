@@ -39,464 +39,38 @@ from nexus.mcp_infra import (
 )
 from nexus.ttl import parse_ttl
 
-# ── T1 chroma lifecycle (RDR-094, feature-flagged) ──────────────────────────
+# ── T1 chroma lifecycle (RDR-105 P4) ────────────────────────────────────────
 #
-# RDR-094 Phase 4 (unconditional as of 4.13.0). This module:
-#   1. Spawns chroma in the FastMCP lifespan __aenter__. Three cleanup
-#      paths run on shutdown, all calling the same idempotent
-#      _t1_chroma_shutdown:
-#        * signal handler (SIGTERM/SIGINT) -- PRIMARY on stdio transport
-#          (Spike A 2026-04-25: 10/10 SIGTERM cycles on stdio attributed
-#          to mcp_owned_signal). anyio does not install a SIGTERM
-#          handler under FastMCP stdio, so the explicit handler IS the
-#          path that runs.
-#        * lifespan async finally -- PRIMARY on HTTP/SSE transports.
-#          anyio installs SIGTERM there and propagates cancellation
-#          through async finally. Skipped on stdio (no anyio handler).
-#        * atexit -- belt-and-braces for clean stdin EOF / SystemExit
-#          paths that arrive without a signal.
-#   2. Spawns the watchdog with both --mcp-pid and --claude-pid so the
-#      Claude-crash-orphan failure mode (issue #1935, FM-NEW-1) is covered.
-#   3. TCP-probes any existing session record at startup; if reachable,
-#      reuses the existing chroma (FM-NEW-2 mitigation; Spike C 2026-04-25
-#      cleared issue #40207 not applicable to nx-mcp, so this path is
-#      cheap insurance against future Claude Code behaviour changes).
+# Single hybrid-discovery code path as of P4 (nexus-jnx7). The lifespan
+# is a three-branch asynccontextmanager mirroring the constructor's
+# four-branch fail-loud gate:
 #
-# The 4.12.0-era ``NEXUS_MCP_OWNS_T1`` opt-out gate was removed in
-# Phase F (4.13.0): Spike A (40/40), Spike B (CA-2 verified
-# post-mitigation), and Spike C (issue #40207 verified-negative for
-# stdio) all cleared, plus a clean v4.12.0 -> v4.12.1 shakeout cycle
-# in production confirmed no regression. The hook-era chroma-spawn
-# path was already disconnected by Phase B (session_end split) and
-# Phase C (hooks.json launcher swap), so deletion was a pure
-# simplification with no behavioural delta.
+#   Branch 1 (env): NX_T1_HOST + NX_T1_PORT inherited; the parent MCP
+#       owns chroma. Yield without spawning.
+#   Branch 2 (isolation): NX_T1_ISOLATED=1 (or its deprecated
+#       NEXUS_SKIP_T1=1 alias). Stateless one-shot. Yield without spawning.
+#   Branch 3 (top-level / owned): spawn chroma, write
+#       ~/.config/nexus/t1_addr.<claude_pid>, populate
+#       _t1_state.T1_ADDR, yield, then unlink + stop chroma + rmtree
+#       tmpdir + reset _t1_state.T1_ADDR on cleanup.
+#
+# Cleanup is idempotent across three sites: the lifespan async finally
+# (HTTP/SSE clean exit + clean stdin EOF on stdio), _sigterm_handler
+# (stdio SIGTERM where anyio does not install a SIGTERM handler), and
+# atexit (belt-and-braces). _SHUTDOWN_IN_FLIGHT prevents re-entry from
+# a signal handler that interrupted an in-flight stop_t1_server.
+#
+# No session record file. No watchdog. No reconcile. No reuse probe.
+# All deleted in P4 along with the multi-writer coordination layer
+# that produced GH #567 / #572 / #574 / #575 / #576 / #579.
 
 import os as _os
 
-#: Module-scope state for the owned chroma. Populated by
-#: ``_t1_chroma_init_if_owner`` and consumed by ``_t1_chroma_shutdown``.
-#: ``reused=True`` when the TCP-probe path detected a still-alive chroma
-#: from an earlier MCP server in the same session: that chroma is shared,
-#: and we must not stop it on our own shutdown.
+#: Module-scope state for the owned chroma. Populated by the lifespan
+#: Branch 3 before yield, cleared on cleanup. Used by the SIGTERM /
+#: atexit path so cleanup still runs when the lifespan async finally
+#: cannot fire.
 _OWNED_CHROMA: dict[str, Any] = {}
-
-
-def _tcp_probe_alive(host: str, port: int, timeout: float = 0.5) -> bool:
-    """Return True if a TCP connection to ``(host, port)`` succeeds.
-
-    Used by the FM-NEW-2 reuse path: at MCP startup, probe any existing
-    session record's chroma before spawning a new one. If the previous
-    MCP server's chroma is still listening (e.g. the prior server was
-    killed by issue #40207's mid-session SIGTERM but its chroma sidecar
-    survives because the lifespan finally was interrupted), connect to
-    it instead of starting a duplicate.
-    """
-    import socket
-
-    try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
-    except (OSError, socket.timeout):
-        return False
-
-
-#: Default chroma host (hardcoded throughout: chroma always binds to
-#: localhost). Used by the RDR-105 P1 publish helper when the spawn
-#: path didn't record an explicit host on ``_OWNED_CHROMA``.
-_T1_DEFAULT_HOST = "127.0.0.1"
-
-
-def _t1_publish_addr_for_new_discovery() -> None:
-    """RDR-105 P1 (nexus-4fek): publish the address file + populate
-    ``_t1_state.T1_ADDR`` so siblings (Path B) and dispatched
-    subprocesses (Path A via dispatcher reading the module variable)
-    can discover this MCP's chroma.
-
-    No-op when:
-      - ``NX_T1_NEW_DISCOVERY=0`` (operator opted out of the new
-        discovery path; legacy session-record machinery owns the
-        addr surface in that case, which is to say nothing owns it);
-      - ``_OWNED_CHROMA`` is empty (we didn't spawn);
-      - ``_OWNED_CHROMA`` is ``nested`` or ``reused`` (someone else
-        owns the chroma; they own the addr file too);
-      - ``server_port`` is missing.
-
-    Records ``t1_addr_claude_pid`` on ``_OWNED_CHROMA`` so the
-    symmetric ``_t1_unpublish_addr_for_new_discovery`` can find the
-    file at shutdown.
-    """
-    # P3 NOTE: in normal operation the new lifespan
-    # (``_t1_chroma_lifespan_new_discovery``) handles publishing
-    # directly when the flag is on (default), and this helper is
-    # not reached because the legacy ``_t1_chroma_init_if_owner``
-    # path runs only on explicit opt-out (NX_T1_NEW_DISCOVERY=0).
-    # The flag check below stays as belt-and-braces in case the
-    # legacy path is ever called from a flag-on context.
-    from nexus.session import t1_new_discovery_enabled
-
-    if not t1_new_discovery_enabled():
-        return
-    if not _OWNED_CHROMA:
-        return
-    if _OWNED_CHROMA.get("nested") or _OWNED_CHROMA.get("reused"):
-        return
-    port = _OWNED_CHROMA.get("server_port")
-    if not port:
-        return
-    host = _OWNED_CHROMA.get("server_host") or _T1_DEFAULT_HOST
-
-    from nexus.mcp import _t1_state
-    from nexus.session import find_immediate_claude_pid, write_t1_addr
-
-    claude_pid = find_immediate_claude_pid()
-    if claude_pid <= 0:
-        # Can't walk PPID chain. Fail-loud is the constructor's job;
-        # publish is best-effort. Log and bail.
-        import structlog
-        structlog.get_logger().warning(
-            "t1_addr_publish_skipped_no_claude_pid",
-            server_port=port,
-        )
-        return
-
-    # Invariant: ``_t1_state.T1_ADDR`` and
-    # ``_OWNED_CHROMA["t1_addr_claude_pid"]`` are written together
-    # in this block, and cleared together in
-    # ``_t1_unpublish_addr_for_new_discovery``. The unpublish path
-    # gates on ``t1_addr_claude_pid`` so it only runs when this
-    # block did. The two stay in lockstep across the lifecycle, so
-    # ``T1_ADDR`` cannot leak past a clean shutdown into a
-    # subsequent MCP boot in the same Python process.
-    write_t1_addr(claude_pid, host, int(port))
-    _t1_state.T1_ADDR = (host, int(port))
-    _OWNED_CHROMA["t1_addr_claude_pid"] = claude_pid
-
-
-def _t1_unpublish_addr_for_new_discovery() -> None:
-    """Symmetric counterpart to ``_t1_publish_addr_for_new_discovery``.
-
-    Unlinks the addr file and resets ``_t1_state.T1_ADDR`` when the
-    publish path ran for this lifecycle. No-op when nothing was
-    published (flag was off, chroma was reused/nested, or publish
-    bailed due to no claude_pid).
-
-    Gating on ``t1_addr_claude_pid`` keeps the lockstep invariant
-    documented in the publish helper: the unpublish path only
-    runs when publish populated the dict, so ``T1_ADDR`` never
-    gets reset out from under a still-owned chroma.
-    """
-    claude_pid = _OWNED_CHROMA.get("t1_addr_claude_pid")
-    if not claude_pid:
-        return
-    from nexus.mcp import _t1_state
-    from nexus.session import unlink_t1_addr
-
-    unlink_t1_addr(int(claude_pid))
-    _t1_state.T1_ADDR = None
-
-
-def _t1_chroma_init_if_owner() -> None:
-    """Spawn (or reuse) chroma for this MCP server's session.
-
-    Subagent detection: if ``NX_SESSION_ID`` is set AND an ancestor's
-    session record is reachable, this is a nested MCP server and we
-    skip spawn entirely (chroma is the parent's). Top-level MCP servers
-    fall through to the spawn-or-reuse path.
-
-    Reuse path (FM-NEW-2): probe any existing session record for the
-    same session_id; if the address is reachable, mark
-    ``_OWNED_CHROMA["reused"] = True`` and return. The shutdown path
-    skips cleanup of reused chroma.
-
-    Spawn path: starts a new chroma server, writes the session record
-    with both ``server_pid`` and ``claude_root_pid``, and spawns the
-    watchdog in dual-watch mode (--mcp-pid + --claude-pid).
-    """
-    if _OWNED_CHROMA:
-        return  # idempotent: lifespan + atexit may both call this
-    from pathlib import Path
-
-    from nexus.db.t1 import SESSIONS_DIR
-    from nexus.session import (
-        find_claude_root_pid,
-        find_session_by_id,
-        spawn_t1_watchdog,
-        start_t1_server,
-        write_session_record_by_id,
-    )
-
-    # GH #576 Phase D: subprocess HARD READ-ONLY init. When
-    # ``NX_SESSION_ID`` (subagent inheritance from claude_dispatch) OR
-    # ``NEXUS_SKIP_T1=1`` (operator-subprocess opt-in) is set, this
-    # process is NEVER the chroma owner and must never spawn a sibling
-    # chroma, write a session record, or unlink anything on shutdown.
-    #
-    # Pre-fix the function had a probe-driven branch (lines 137-143):
-    # if the parent's TCP probe failed (0.5s timeout under load) the
-    # nested guard would miss and control fell through to the spawn
-    # path at line 178, which started a fresh chroma at the inherited
-    # UUID and overwrote ``sessions/<inherited>.session`` with the
-    # subprocess's own server_pid. The subprocess's
-    # ``_t1_chroma_shutdown`` then unlinked the file because
-    # ``_OWNED_CHROMA["nested"]`` was never set. This is the silent
-    # spawn-and-overwrite path the deep-analyst flagged as the
-    # fifth invariant violation.
-    inherited = _os.environ.get("NX_SESSION_ID", "").strip()
-    skip_t1 = _os.environ.get(
-        "NEXUS_SKIP_T1", ""
-    ).strip().lower() in ("1", "true", "yes")
-    if inherited or skip_t1:
-        if inherited:
-            ancestor = find_session_by_id(SESSIONS_DIR, inherited)
-            if ancestor and _tcp_probe_alive(
-                ancestor.get("server_host", ""),
-                int(ancestor.get("server_port", 0)),
-            ):
-                _OWNED_CHROMA["nested"] = True
-                return
-        # Probe failed (or no inherited UUID): leave _OWNED_CHROMA
-        # empty. T1Database with NEXUS_SKIP_T1=1 will use
-        # EphemeralClient (operator-subprocess semantics); without
-        # NEXUS_SKIP_T1 the constructor will raise T1ServerNotFoundError
-        # — explicit failure, not a silent record overwrite.
-        return
-
-    own_id = inherited or _resolve_top_level_session_id()
-    if not own_id:
-        # GH #567 follow-up: no current_session pointer at the time
-        # the lifespan / first-tool-call fires. Pre-fix the function
-        # returned silently and chroma never spawned -- the silent-
-        # data-loss fingerprint #567 reported. The SessionStart hook
-        # may simply not have fired yet (race vs lifespan boot), or
-        # an earlier stale-cleanup pass nuked the pointer. Self-heal:
-        # mint a fresh UUID, write it to current_session as the canonical
-        # pointer, and use it as our session id. SessionStart on the
-        # NEXT boot reads this same pointer and won't overwrite.
-        from uuid import uuid4
-        from nexus.session import write_claude_session_id
-        own_id = str(uuid4())
-        write_claude_session_id(own_id)
-        import structlog
-        structlog.get_logger().info(
-            "t1_chroma_init_minted_session_id",
-            session_id=own_id,
-            reason="no_current_session_at_lifespan_boot",
-        )
-
-    # FM-NEW-2: TCP-probe an existing record before spawning. If the
-    # prior chroma is still listening, reuse it.
-    existing = find_session_by_id(SESSIONS_DIR, own_id)
-    if existing and _tcp_probe_alive(
-        existing.get("server_host", ""), int(existing.get("server_port", 0)),
-    ):
-        _OWNED_CHROMA["reused"] = True
-        _OWNED_CHROMA["session_id"] = own_id
-        return
-
-    # Spawn fresh chroma + dual-watch watchdog.
-    try:
-        host, port, server_pid, tmpdir = start_t1_server()
-    except Exception as exc:
-        import structlog
-
-        structlog.get_logger().warning(
-            "t1_chroma_spawn_failed",
-            error=str(exc),
-            session_id=own_id,
-        )
-        return
-
-    claude_root_pid = find_claude_root_pid()
-    session_file = SESSIONS_DIR / f"{own_id}.session"
-    watchdog_pid = spawn_t1_watchdog(
-        claude_pid=claude_root_pid or 0,
-        chroma_pid=server_pid,
-        session_file=session_file,
-        tmpdir=tmpdir,
-        mcp_pid=_os.getpid(),  # FM-NEW-1: dual-watch
-    ) if claude_root_pid else 0
-
-    # GH #572: post-spawn reconciliation. The SessionStart hook may
-    # race with this lifespan and write a DIFFERENT canonical session
-    # id to ``current_session`` AFTER we read it. Live trace from the
-    # reporter:
-    #
-    #   1. Prior session ended; sessions/ empty; current_session left
-    #      pointing at the prior id (7c5f5331)
-    #   2. New conversation starts. MCP lifespan reads pointer ->
-    #      7c5f5331 (stale but indistinguishable from a fresh
-    #      pre-SessionStart pointer at this point)
-    #   3. We spawn chroma + write sessions/7c5f5331.session
-    #   4. SessionStart fires (after our read), writes
-    #      current_session=b314324c (the canonical conversation id)
-    #   5. Every later T1Database() reads b314324c, looks for
-    #      sessions/b314324c.session, fails -> entire conversation's
-    #      T1 broken
-    #
-    # Reconcile by re-reading the pointer AFTER our record write. If
-    # it differs from own_id, rename the record file + pointer the
-    # _OWNED_CHROMA snapshot at the canonical id. The chroma server
-    # itself doesn't care about the file name; the file is the
-    # discovery surface that ``find_session_by_id`` reads.
-    write_session_record_by_id(
-        SESSIONS_DIR, own_id, host, port, server_pid, tmpdir,
-        claude_root_pid=claude_root_pid,
-        watchdog_pid=watchdog_pid,
-    )
-
-    _OWNED_CHROMA.update({
-        "session_id": own_id,
-        "server_pid": server_pid,
-        "tmpdir": str(tmpdir),
-        "session_file": str(session_file),
-        "server_host": host,
-        "server_port": port,
-    })
-
-    # Run a first reconcile pass immediately after spawn. Catches the
-    # case where SessionStart fired between our pointer read and our
-    # spawn (the closest race window). The full reconcile -- which
-    # also catches SessionStart firing AFTER spawn but before the
-    # first tool call -- runs from get_t1 via reconcile_owned_chroma.
-    if not inherited:
-        reconcile_owned_chroma()
-
-    # RDR-105 P1 (nexus-4fek): publish addr file + populate _t1_state
-    # for the new-discovery paths when the feature flag is on. No-op
-    # when flag-off, so legacy installs see no behaviour change.
-    _t1_publish_addr_for_new_discovery()
-
-
-def reconcile_owned_chroma() -> bool:
-    """GH #572: rename ``_OWNED_CHROMA``'s session record file to
-    match the current ``current_session`` pointer when they've
-    drifted. Idempotent.
-
-    The lifespan spawn path can race with the SessionStart hook:
-
-      1. Prior session ended; ``sessions/`` empty; ``current_session``
-         left pointing at the prior id (call it ``X``).
-      2. New conversation starts. MCP lifespan reads pointer -> ``X``,
-         spawns chroma + writes ``sessions/X.session``.
-      3. SessionStart fires, writes ``current_session=Y`` (the
-         canonical conversation id).
-      4. Every later ``T1Database()`` reads ``Y``, looks for
-         ``sessions/Y.session``, fails -- the conversation's T1 is
-         broken until manual recovery.
-
-    This reconcile pass re-reads ``current_session``. If it differs
-    from ``_OWNED_CHROMA["session_id"]``, rename the record file so
-    discovery via the canonical pointer succeeds. The chroma server
-    itself doesn't care about the file name; it's a discovery
-    surface only.
-
-    Called from two sites:
-      - ``_t1_chroma_init_if_owner`` post-spawn (catches the closest
-        race window: SessionStart fired between pointer read + spawn)
-      - ``get_t1`` first tool call (catches the wider race window:
-        SessionStart fired AFTER spawn but BEFORE first tool call;
-        tool dispatch is sequenced after SessionStart by Claude Code,
-        so by tool-call time the pointer is canonical)
-
-    Returns True when a rename was performed; False when no action
-    was needed.
-    """
-    if not _OWNED_CHROMA:
-        return False
-    if _OWNED_CHROMA.get("nested") or _OWNED_CHROMA.get("reused"):
-        # Subagent path or shared-server path: not our record to rename.
-        return False
-    if _os.environ.get("NX_SESSION_ID", "").strip():
-        # Subagent inheritance: parent owns the record key.
-        return False
-
-    current_id = _OWNED_CHROMA.get("session_id", "")
-    canonical = _resolve_top_level_session_id()
-    if not canonical or canonical == current_id:
-        return False
-
-    from nexus.db.t1 import SESSIONS_DIR
-
-    old_path_str = _OWNED_CHROMA.get("session_file", "")
-    if not old_path_str:
-        return False
-    from pathlib import Path
-    old_path = Path(old_path_str)
-    new_path = SESSIONS_DIR / f"{canonical}.session"
-
-    if not old_path.exists():
-        # Already renamed by a sibling reconcile, or reaped externally.
-        return False
-
-    try:
-        old_path.replace(new_path)
-    except OSError as exc:
-        import structlog
-        structlog.get_logger().warning(
-            "t1_chroma_reconcile_rename_failed",
-            from_id=current_id, to_id=canonical, error=str(exc),
-        )
-        return False
-
-    # GH #576 Phase B: rewrite the JSON content's session_id field to
-    # match the new (canonical) filename. Pre-fix ``Path.replace`` only
-    # renamed the file; the JSON content kept the pre-reconcile UUID,
-    # which then triggered ``sweep_stale_sessions.uuid_stale`` (the
-    # JSON-content-vs-current_session comparison at session.py:286)
-    # in any subsequent SessionStart fire — including the plan-runner
-    # subprocess SessionStart. The sweep would unlink the canonical
-    # record, leading to the silent T1 data loss reported in #576.
-    # The atomic write below uses the same shape as
-    # ``write_session_record_by_id`` (O_TRUNC + os.write).
-    import json
-    try:
-        record = json.loads(new_path.read_text())
-        record["session_id"] = canonical
-        fd = _os.open(
-            str(new_path), _os.O_CREAT | _os.O_WRONLY | _os.O_TRUNC, 0o600,
-        )
-        try:
-            _os.write(fd, json.dumps(record).encode())
-        finally:
-            _os.close(fd)
-    except (json.JSONDecodeError, OSError) as exc:
-        import structlog
-        structlog.get_logger().warning(
-            "t1_chroma_reconcile_json_rewrite_failed",
-            from_id=current_id, to_id=canonical, error=str(exc),
-        )
-        # Filename rename succeeded — record is still discoverable via
-        # ``find_session_by_id`` (UUID-keyed lookup). Phase C
-        # (sweep filename-stem comparison) prevents the uuid_stale
-        # arm from firing even with stale JSON content. Continue.
-
-    _OWNED_CHROMA["session_id"] = canonical
-    _OWNED_CHROMA["session_file"] = str(new_path)
-    import structlog
-    structlog.get_logger().info(
-        "t1_chroma_reconciled_session_id",
-        from_id=current_id,
-        to_id=canonical,
-        reason="current_session_pointer_diverged",
-    )
-    return True
-
-
-def _resolve_top_level_session_id() -> str | None:
-    """Return the conversation UUID from current_session, or None.
-
-    The SessionStart hook writes the UUID via ``write_claude_session_id``
-    before any MCP tool call. Reading it here lets the lifespan match the
-    record key the hook (or a previous MCP run) wrote.
-    """
-    try:
-        from nexus.session import read_claude_session_id
-
-        sid = read_claude_session_id()
-        return sid if sid else None
-    except Exception:
-        return None
-
 
 #: Sticky flag set by :func:`_t1_chroma_shutdown` on first entry so a
 #: signal arriving mid-cleanup (the production stdin-EOF + SIGTERM
@@ -507,134 +81,66 @@ def _resolve_top_level_session_id() -> str | None:
 _SHUTDOWN_IN_FLIGHT: bool = False
 
 
-def _t1_chroma_shutdown() -> None:
-    """Stop chroma + remove the session record. Idempotent.
+def _tcp_probe_alive(host: str, port: int, timeout: float = 0.5) -> bool:
+    """Return True if a TCP connection to ``(host, port)`` succeeds.
 
-    Called from the lifespan finally (primary on clean stdin EOF),
-    atexit (belt-and-braces for SystemExit / clean Python exit), and
-    SIGTERM/SIGINT handlers (primary on stdio under SIGTERM).
-    The first to fire performs the cleanup; the rest short-circuit
-    via ``_SHUTDOWN_IN_FLIGHT`` (set on entry, never cleared) so a
-    re-entrant call from a signal handler that interrupted an
-    in-flight ``stop_t1_server`` doesn't double-execute.
+    Retained from the pre-RDR-105 module for use by ``nx doctor`` and
+    other diagnostic surfaces that probe a chroma address without
+    constructing a full ``T1Database``.
     """
-    global _SHUTDOWN_IN_FLIGHT
-    if _SHUTDOWN_IN_FLIGHT:
-        return
-    if not _OWNED_CHROMA:
-        return
-    if _OWNED_CHROMA.get("new_discovery"):
-        # RDR-105 P2 follow-up (review #582): flag-on lifespan
-        # cleanup. The signal-handler / atexit path runs this when
-        # the lifespan's ``async finally`` did not fire (stdio
-        # SIGTERM). The impl is idempotent so calling it from both
-        # sites is safe.
-        _SHUTDOWN_IN_FLIGHT = True
-        _t1_chroma_shutdown_new_discovery_impl()
-        return
-    if _OWNED_CHROMA.get("nested") or _OWNED_CHROMA.get("reused"):
-        # Nested: parent owns chroma. Reused: another MCP server in the
-        # same session owns it. We must not stop it on our exit.
-        _SHUTDOWN_IN_FLIGHT = True
-        _OWNED_CHROMA.clear()
-        return
-
-    _SHUTDOWN_IN_FLIGHT = True
-
-    from pathlib import Path
-    import shutil
-
-    from nexus.session import stop_t1_server
-
-    server_pid = _OWNED_CHROMA.get("server_pid")
-    tmpdir = _OWNED_CHROMA.get("tmpdir")
-    session_file = _OWNED_CHROMA.get("session_file")
+    import socket
 
     try:
-        if server_pid:
-            stop_t1_server(int(server_pid))
-    except Exception:
-        pass
-    if tmpdir:
-        try:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-        except OSError:
-            pass
-    if session_file:
-        try:
-            Path(session_file).unlink(missing_ok=True)
-        except OSError:
-            pass
-    # RDR-105 P1 (nexus-4fek): unlink addr file + reset _t1_state when
-    # the publish path ran. No-op otherwise.
-    _t1_unpublish_addr_for_new_discovery()
-    _OWNED_CHROMA.clear()
-
-
-def _sigterm_handler(_signo: int, _frame: Any) -> None:
-    """Run the shutdown path then exit.
-
-    When invoked while the lifespan finally is already running cleanup
-    (stdin-EOF + SIGTERM race observed in production after 4.12.0
-    default-on shipped), ``_SHUTDOWN_IN_FLIGHT`` is already True and
-    we return immediately so the in-flight teardown completes cleanly.
-    Otherwise (SIGTERM-only path with no prior stdin EOF) we drive the
-    shutdown ourselves and ``os._exit(0)`` to terminate.
-
-    Why ``os._exit`` instead of ``sys.exit``: ``sys.exit`` raises
-    ``SystemExit``, which propagates through anyio's TaskGroup and
-    gets logged as ``mcp_server_crashed`` even though the actual
-    shutdown succeeded. ``os._exit`` terminates the process
-    immediately without raising; chroma is already cleaned up at
-    this point so there is nothing left to coordinate.
-    """
-    if _SHUTDOWN_IN_FLIGHT:
-        # Lifespan / atexit is already running shutdown. Don't
-        # interfere -- they hold the cleanup contract for this exit.
-        return
-
-    import os as _os
-
-    _t1_chroma_shutdown()
-    _os._exit(0)
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except (OSError, socket.timeout):
+        return False
 
 
 from contextlib import asynccontextmanager
 
 
 @asynccontextmanager
-async def _t1_chroma_lifespan_new_discovery():
-    """RDR-105 P2 (nexus-zlus): the flag-on lifespan generator.
+async def _t1_chroma_lifespan(_app: Any):
+    """RDR-105 P4 hybrid-discovery lifespan.
 
     Three branches symmetric with the four-branch fail-loud
-    constructor:
+    constructor in ``nexus.db.t1.T1Database._init_new_discovery``:
 
     Branch 1 (env)
-        ``NX_T1_HOST`` + ``NX_T1_PORT`` set: this MCP is a
-        subprocess of a parent MCP that already owns chroma.
-        Yield without spawning.
+        ``NX_T1_HOST`` + ``NX_T1_PORT`` set: the parent MCP already
+        owns chroma. Yield without spawning.
+
     Branch 2 (isolation)
-        ``NX_T1_ISOLATED=1`` (or its legacy ``NEXUS_SKIP_T1=1``
+        ``NX_T1_ISOLATED=1`` (or its deprecated ``NEXUS_SKIP_T1=1``
         alias): this MCP is a stateless one-shot. Yield without
         spawning.
-    Branch 3 (top-level / owned)
-        Spawn a fresh chroma, write ``~/.config/nexus/t1_addr.<pid>``
-        keyed by ``find_immediate_claude_pid`` (the FIRST claude
-        ancestor; RF-6), publish ``_t1_state.T1_ADDR``, then yield.
-        Cleanup unlinks the file, stops chroma, rmtrees the chroma
-        tmpdir, and resets ``_t1_state.T1_ADDR``.
 
-    No session record file. No watchdog. No reconcile. No reuse
-    probe. All of those are flag-off-only.
+    Branch 3 (top-level / owned)
+        Spawn a fresh chroma; write
+        ``~/.config/nexus/t1_addr.<claude_pid>`` keyed by
+        :func:`find_immediate_claude_pid` (the FIRST claude ancestor
+        per RF-6, NOT the topmost); populate ``_t1_state.T1_ADDR``;
+        yield. Cleanup unlinks the file, stops chroma, rmtrees the
+        chroma tmpdir, and resets ``_t1_state.T1_ADDR``.
+
+    Also runs a best-effort orphan-reaper sweep on entry to clean
+    up any addr files left by a prior session that exited without
+    its lifespan finally running (SIGKILL, OOM).
+
+    Cleanup is idempotent across three sites:
+
+    * The lifespan ``async finally`` (HTTP/SSE transports and the
+      clean-stdin-EOF path on stdio).
+    * :func:`_sigterm_handler` (stdio SIGTERM where anyio does not
+      install a SIGTERM handler).
+    * :mod:`atexit` (belt-and-braces for clean SystemExit paths).
     """
     if _os.environ.get("NX_T1_HOST", "").strip() and _os.environ.get("NX_T1_PORT", "").strip():
         # Branch 1: parent MCP owns chroma; subprocess inherits via env.
         yield
         return
 
-    # Imported lazily; when flag-on, `_t1_isolated_env` reads the
-    # current env and emits a deprecation warning if the legacy alias
-    # is the only signal.
     from nexus.session import _t1_isolated_env
 
     if _t1_isolated_env():
@@ -643,17 +149,37 @@ async def _t1_chroma_lifespan_new_discovery():
         return
 
     # Branch 3: spawn + publish.
-    from nexus.session import start_t1_server
+    from nexus.session import (
+        start_t1_server,
+        sweep_orphan_t1_addr_files,
+        sweep_orphan_tmpdirs,
+    )
+
+    # Best-effort orphan cleanup before we spawn. Two surfaces:
+    # (a) addr files from sessions that exited ungracefully (SIGKILL),
+    # (b) tmpdirs from chromas reaped before their cleanup completed.
+    # Both are bounded; failures are logged but never block startup.
+    try:
+        sweep_orphan_t1_addr_files()
+    except Exception:
+        pass
+    try:
+        sweep_orphan_tmpdirs()
+    except Exception:
+        pass
 
     host, port, server_pid, tmpdir = start_t1_server()
     # Record into ``_OWNED_CHROMA`` BEFORE any further work that
-    # might raise so the stdio SIGTERM path (``_sigterm_handler`` ->
-    # ``_t1_chroma_shutdown``) can still reap chroma if the lifespan
-    # body or the publish step explodes. The ``new_discovery``
-    # marker dispatches the legacy-vs-new shutdown impl.
+    # might raise so the stdio SIGTERM path
+    # (``_sigterm_handler`` -> ``_t1_chroma_shutdown``) can still
+    # reap chroma if the publish step explodes. Reset the
+    # ``_SHUTDOWN_IN_FLIGHT`` sentinel so a fresh lifespan gets a
+    # clean cleanup window; the flag is sticky within one process
+    # exit but each lifespan owns its own shutdown lifecycle.
+    global _SHUTDOWN_IN_FLIGHT
+    _SHUTDOWN_IN_FLIGHT = False
     _OWNED_CHROMA.clear()
     _OWNED_CHROMA.update({
-        "new_discovery": True,
         "server_pid": server_pid,
         "tmpdir": str(tmpdir),
     })
@@ -663,6 +189,10 @@ async def _t1_chroma_lifespan_new_discovery():
 
         claude_pid = find_immediate_claude_pid()
         if claude_pid > 0:
+            # Invariant: ``_t1_state.T1_ADDR`` and
+            # ``_OWNED_CHROMA["t1_addr_claude_pid"]`` are written
+            # together. The shutdown impl gates on the dict key so
+            # ``T1_ADDR`` cannot leak past a clean shutdown.
             write_t1_addr(claude_pid, host, port)
             _t1_state.T1_ADDR = (host, port)
             _OWNED_CHROMA["t1_addr_claude_pid"] = claude_pid
@@ -675,31 +205,31 @@ async def _t1_chroma_lifespan_new_discovery():
             )
         yield
     finally:
-        # Idempotent cleanup. If the SIGTERM / atexit path already
-        # ran via ``_t1_chroma_shutdown``, ``_OWNED_CHROMA`` is empty
-        # and the impl short-circuits.
-        _t1_chroma_shutdown_new_discovery_impl()
+        # Idempotent. If the SIGTERM / atexit path already ran via
+        # ``_t1_chroma_shutdown``, ``_OWNED_CHROMA`` is empty and
+        # the cleanup short-circuits.
+        _t1_chroma_shutdown()
 
 
-def _t1_chroma_shutdown_new_discovery_impl() -> None:
-    """RDR-105 P2 follow-up: idempotent cleanup for the flag-on
-    lifespan. Stops chroma, rmtree's the chroma tmpdir, unlinks the
-    addr file, resets ``_t1_state.T1_ADDR``, and clears
-    ``_OWNED_CHROMA``.
+def _t1_chroma_shutdown() -> None:
+    """Stop chroma, rmtree the chroma tmpdir, unlink the addr file,
+    reset ``_t1_state.T1_ADDR``, and clear ``_OWNED_CHROMA``.
 
-    Called from two sites:
+    Idempotent. Called from three sites (lifespan async finally,
+    :func:`_sigterm_handler`, :mod:`atexit`); whichever fires first
+    does the work, the others find ``_OWNED_CHROMA`` empty and
+    short-circuit.
 
-    * The new lifespan's ``async finally`` (HTTP/SSE transports and
-      the clean-stdin-EOF path on stdio).
-    * ``_t1_chroma_shutdown`` (signal handler + atexit) when the
-      lifespan's finally did not run (stdio SIGTERM).
-
-    Each step is independently idempotent so the two callers never
-    interfere; whichever fires first does the work, the other finds
-    ``_OWNED_CHROMA`` empty and short-circuits.
+    ``_SHUTDOWN_IN_FLIGHT`` prevents re-entry from a signal handler
+    that interrupted an in-flight ``stop_t1_server``: once set,
+    never cleared.
     """
-    if not _OWNED_CHROMA.get("new_discovery"):
+    global _SHUTDOWN_IN_FLIGHT
+    if _SHUTDOWN_IN_FLIGHT:
         return
+    if not _OWNED_CHROMA:
+        return
+    _SHUTDOWN_IN_FLIGHT = True
 
     import shutil
 
@@ -727,49 +257,30 @@ def _t1_chroma_shutdown_new_discovery_impl() -> None:
     _OWNED_CHROMA.clear()
 
 
-@asynccontextmanager
-async def _t1_chroma_lifespan(_app: Any):
-    """FastMCP lifespan that owns chroma's lifecycle.
+def _sigterm_handler(_signo: int, _frame: Any) -> None:
+    """Run the shutdown path then exit.
 
-    When ``NX_T1_NEW_DISCOVERY=1`` (RDR-105 P2 / nexus-zlus), delegate
-    to the three-branch ``_t1_chroma_lifespan_new_discovery``
-    generator. Otherwise, fall back to the legacy
-    ``_t1_chroma_init_if_owner`` + ``_t1_chroma_shutdown`` path
-    (sessions/, watchdog, reconcile). The two paths are mutually
-    exclusive per process per the RDR §'Phase 2 flag-isolation
-    contract'.
+    When invoked while the lifespan finally is already running cleanup
+    (stdin-EOF + SIGTERM race observed in production after 4.12.0
+    default-on shipped), ``_SHUTDOWN_IN_FLIGHT`` is already True and
+    we return immediately so the in-flight teardown completes cleanly.
+    Otherwise (SIGTERM-only path with no prior stdin EOF) we drive the
+    shutdown ourselves and ``os._exit(0)`` to terminate.
 
-    Primary cleanup path on **HTTP / SSE transports**: anyio installs
-    a SIGTERM handler that cancels the running task group;
-    cancellation propagates through this ``async finally`` block so
-    ``_t1_chroma_shutdown`` runs without a manual SIGTERM handler.
-
-    On **stdio transport** the lifespan ``async finally`` does NOT
-    fire under SIGTERM. anyio does not install a SIGTERM handler in
-    that mode (Spike A 2026-04-25 evidence: 10/10 SIGTERM cycles
-    attributed to ``mcp_owned_signal``, zero to lifespan). The
-    explicit signal handler registered in ``main()`` is the primary
-    cleanup path on stdio. The lifespan still runs on clean stdin
-    EOF (the ``async finally`` block fires when ``mcp.run()``
-    returns normally), which keeps the lifespan path live for
-    that exit shape.
-
-    ``_t1_chroma_shutdown`` is idempotent so any combination of
-    paths firing is safe: lifespan finally on HTTP/SSE, signal
-    handler on stdio SIGTERM, atexit on clean exit.
+    Why ``os._exit`` instead of ``sys.exit``: ``sys.exit`` raises
+    ``SystemExit``, which propagates through anyio's TaskGroup and
+    gets logged as ``mcp_server_crashed`` even though the actual
+    shutdown succeeded. ``os._exit`` terminates the process
+    immediately without raising; chroma is already cleaned up at
+    this point so there is nothing left to coordinate.
     """
-    from nexus.session import t1_new_discovery_enabled
-
-    if t1_new_discovery_enabled():
-        async with _t1_chroma_lifespan_new_discovery():
-            yield
+    if _SHUTDOWN_IN_FLIGHT:
+        # Lifespan / atexit is already running shutdown. Don't
+        # interfere -- they hold the cleanup contract for this exit.
         return
 
-    _t1_chroma_init_if_owner()
-    try:
-        yield
-    finally:
-        _t1_chroma_shutdown()
+    _t1_chroma_shutdown()
+    _os._exit(0)
 
 
 mcp = FastMCP("nexus", lifespan=_t1_chroma_lifespan)

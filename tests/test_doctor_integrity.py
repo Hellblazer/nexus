@@ -46,56 +46,7 @@ def _run_orphan_t1(sessions_dir: Path) -> tuple[bool, list[HealthResult]]:
 
 # ── Step 5: Orphan T1 ───────────────────────────────────────────────────────
 
-class TestCheckOrphanT1:
-    @pytest.mark.parametrize("setup,expect_ok,expect_text", [
-        ("no_dir", True, "no sessions directory"),
-        ("empty_dir", True, "no session files"),
-    ])
-    def test_missing_or_empty(self, tmp_path, setup, expect_ok, expect_text):
-        d = tmp_path / "sessions"
-        if setup == "empty_dir":
-            d.mkdir()
-        ok, results = _run_orphan_t1(d)
-        assert ok is expect_ok
-        assert expect_text in results[0].detail
 
-    def test_live_process_reports_ok(self, tmp_path):
-        d = tmp_path / "sessions"
-        d.mkdir()
-        _make_session_file(d, "99999.session", os.getpid())
-        ok, results = _run_orphan_t1(d)
-        assert ok is True
-        assert "all chroma servers alive" in results[0].detail
-        assert f"pid {os.getpid()} alive" in results[0].detail
-
-    def test_dead_pid_detected_as_orphan(self, tmp_path):
-        d = tmp_path / "sessions"
-        d.mkdir()
-        pid = _dead_pid()
-        _make_session_file(d, f"{pid}.session", pid)
-        ok, results = _run_orphan_t1(d)
-        assert ok is False and "1 orphaned" in results[0].detail
-        assert any("rm" in s for s in results[0].fix_suggestions)
-
-    @pytest.mark.parametrize("content", [
-        "not-json{{{",
-        json.dumps({"session_id": "abc", "server_host": "127.0.0.1", "server_port": 1234}),
-    ])
-    def test_corrupt_or_missing_pid_skipped(self, tmp_path, content):
-        d = tmp_path / "sessions"
-        d.mkdir()
-        (d / "bad.session").write_text(content)
-        ok, _ = _run_orphan_t1(d)
-        assert ok is True
-
-    def test_multiple_orphans_count(self, tmp_path):
-        d = tmp_path / "sessions"
-        d.mkdir()
-        for _ in range(2):
-            pid = _dead_pid()
-            _make_session_file(d, f"{pid}.session", pid)
-        ok, results = _run_orphan_t1(d)
-        assert ok is False and "2 orphaned" in results[0].detail
 
 
 # ── Step 6: T2 integrity ────────────────────────────────────────────────────

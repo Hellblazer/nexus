@@ -45,7 +45,6 @@ from nexus.mcp_server import (
     store_list,
     store_put,
 )
-from nexus.session import find_ancestor_session
 from nexus.types import SearchResult
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -815,29 +814,7 @@ def test_t1_session_isolation():
     assert all(e["content"] != "alpha only" for e in t1b.list_entries())
 
 
-@pytest.mark.parametrize("record, expected_found", [
-    pytest.param({"session_id": "test-session-id", "server_host": "127.0.0.1",
-                  "server_port": 9999, "server_pid": 12345}, True, id="resolves-record"),
-    pytest.param(None, False, id="no-record"),
-    pytest.param({"session_id": "stale-session", "server_host": "127.0.0.1",
-                  "server_port": 8888, "server_pid": 99999,
-                  "_created_at_offset": -25 * 3600}, False, id="skips-stale"),
-])
-def test_find_ancestor_session(record, expected_found):
-    with tempfile.TemporaryDirectory() as tmpdir:
-        sessions_dir = Path(tmpdir)
-        pid = os.getpid()
-        if record is not None:
-            offset = record.pop("_created_at_offset", 0)
-            record["created_at"] = time.time() + offset
-            (sessions_dir / f"{pid}.session").write_text(json.dumps(record))
-        result = find_ancestor_session(sessions_dir=sessions_dir, start_pid=pid)
-        if expected_found:
-            assert result is not None
-            assert result["session_id"] == record["session_id"]
-            assert result["server_port"] == record["server_port"]
-        else:
-            assert result is None
+
 
 
 # ── MCP client SDK round-trip (integration) ──────────────────────────────────
