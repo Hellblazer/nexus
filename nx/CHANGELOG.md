@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.26.7] - 2026-05-06
+
+Plugin version aligned with conexus 4.26.7. No plugin-side changes; the release ships a six-phase unified fix in the conexus package that closes the T1 data-loss class escaping three rounds of patches in 4.26.4–4.26.6 (PR #577 closes GH #576 silent data loss + GH #575 watchdog leak), plus an invariant regression scaffold (`tests/test_t1_invariants.py`) so the class cannot re-instantiate silently. See root ``CHANGELOG.md`` for the phase-by-phase breakdown.
+
 ## [4.26.6] - 2026-05-06
 
 Plugin version aligned with conexus 4.26.6. No plugin-side changes; the release ships two T1-discovery follow-ups in the conexus package: post-spawn pointer reconciliation when the lifespan races SessionStart (PR #573 closes #572), and watchdog sticky-has-existed flag for the session-file-removed exit (PR #574). See root ``CHANGELOG.md`` for details.

@@ -6,6 +6,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.26.7] - 2026-05-06
+
+Patch release. Closes the T1 data-loss class that escaped three rounds of patches in 4.26.4–4.26.6. Six-phase unified fix plus invariant test scaffolding.
+
+### Fixed
+
+- **T1 silent data loss when subprocess SessionStart sweeps parent's session record** (PR #577, GH #576): two-part root cause shipped together since they compose in the failure mode. (1) `reconcile_owned_chroma` renamed `sessions/<lifespan>.session` to the canonical name but did NOT rewrite the JSON content's `session_id` field; the stale field then triggered `sweep_stale_sessions.uuid_stale` on every subsequent SessionStart fire (including subprocess SessionStart from `claude_dispatch`'s plan-runner `claude -p` for `nx_answer` with `verb=research`). The sweep unlinked the canonical record. (2) `T1Database._reconnect` then fell through to a silent `EphemeralClient` fallback (the same defect class PR #569 fixed in the constructor — reconnect was missed) AND used the legacy PID-keyed `find_ancestor_session` resolver instead of the constructor's UUID-keyed chain, so reconnect could not find any post-v4.13 record even when one existed. Fix: reconcile rewrites JSON content atomically; sweep compares filename-stem instead of JSON content (filename is canonical post-rename, JSON is incidental metadata); subprocess `_t1_chroma_init_if_owner` becomes hard read-only when `NX_SESSION_ID` or `NEXUS_SKIP_T1=1` is set (closes the deep-analyst's "fifth bug" — silent spawn-and-overwrite under inherited UUID when the parent's TCP probe races); subprocess SessionStart skips both `sweep_stale_sessions` and `sweep_orphan_tmpdirs` when inherited; reconnect uses the same UUID-keyed resolver as the constructor and raises `T1ServerNotFoundError` on miss instead of EphemeralClient. Live sandbox shakeout exercised reconcile + JSON rewrite + subprocess SessionStart preservation end-to-end.
+
+- **T1 watchdog leak after `reconcile_owned_chroma` rename** (PR #577, GH #575): companion regression to PR #574's sticky-flag fix. The watchdog was spawned with `--session-file=sessions/<lifespan>.session` (CLI-arg snapshot at lifespan time); reconcile renamed the file 88 ms before the watchdog's first poll, so `session_file_has_existed` evaluated False at startup AND on every later poll (the path at `--session-file` was never observed to exist). The `session_file_removed` exit branch PR #574 set out to enable was unreachable for the rest of the watchdog's life — orphan watchdog leak per session boundary. Fix: per-poll lookup via `_find_record_by_chroma_pid` matches the JSON's `server_pid` field (invariant across reconcile renames, `/clear`, `/resume`); cleanup-time also resolves canonical record by `chroma_pid` so the watchdog unlinks the right path on cleanup-fires exits.
+
+### Added
+
+- **Invariant regression scaffolding** (`tests/test_t1_invariants.py`, PR #577): five tests that encode the invariants violated by the data-loss class, so any future patch that re-introduces the same shape fails CI before merge. Includes an `_EPHEMERAL_ALLOWLIST` grep test (any new `chromadb.EphemeralClient(` outside the two opt-in paths fails CI), AST-style audits for resolver symmetry / JSON rewrite / subprocess sweep gate, and an end-to-end #576 chain reproduction that walks lifespan-then-SessionStart drift through subprocess SessionStart and asserts the canonical record survives. The fix-loop pattern (`#567 → #569 → #572 → #573 → #574 → #575 + #576`) terminated with this commit because the codebase finally has the underlying invariants encoded as test assertions rather than patching witnessed instances.
+
 ## [4.26.6] - 2026-05-06
 
 Patch release. Two T1-discovery follow-ups to the 4.26.5 silent-write-loss fixes (#567 + race fix #571), both surfaced during the 4.26.5 sandbox shakeout.
