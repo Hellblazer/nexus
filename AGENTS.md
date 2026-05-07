@@ -24,6 +24,17 @@ Three storage tiers, by lifetime:
 - **T2** — SQLite + FTS5, seven domain stores behind a `T2Database` facade. Persistent notes, plans, taxonomy, telemetry, chash, aspects, aspect queue.
 - **T3** — `chromadb.PersistentClient` + local ONNX (local mode) **or** `chromadb.CloudClient` + Voyage (cloud mode). Permanent knowledge (`nx store`, `nx search`).
 
+### T1 sub-agent contract (RDR-105)
+
+T1 is the per-MCP-process "working memory" tier. T2 is the cross-process shared bus. Discovery is hybrid: env passdown for MCP-dispatched subprocesses, single-writer `~/.config/nexus/t1_addr.<claude_pid>` for Claude-Code-spawned siblings.
+
+- **Agent-tool sub-agents** (in-process Task dispatches) share T1 with their parent via the parent's MCP scratch tool. No separate T1 instance.
+- **`claude -p` sub-processes default to `owned`** mode: their MCP spawns its own session-scoped chroma + writes its own `~/.config/nexus/t1_addr.<own_claude_pid>` file. Sealed from the parent; internally consistent for the subprocess's own Bash tools and sub-agents.
+- **`claude -p` sub-processes that genuinely need parent-T1 visibility** opt in via `share_t1=True` at dispatch time. Subprocess inherits `NX_T1_HOST` / `NX_T1_PORT` and connects to the parent's chroma via HTTP.
+- **Stateless one-shot operators** (`ephemeral=True`) get an in-process `EphemeralClient` only (no chroma spawn). The operator-dispatch default (`nx_answer`, `nx_tidy`, plan-runner inline planning).
+- **Cross-process findings between sibling sub-processes go to T2** (`memory_put`). T1 is process-local by design; T2 is the shared bus (SQLite + WAL is multi-process-safe).
+- **Deprecated env name:** `NEXUS_SKIP_T1=1` is honoured as an alias for `NX_T1_ISOLATED=1` for the 4.27 -> 4.28 deprecation cycle. Removed in 5.0.
+
 Collection prefixes coexist in one T3 database. Always `__` (double underscore) as separator (colons are invalid in ChromaDB collection names). Conformant collection-name shape (RDR-103) is `<content_type>__<owner_id>__<embedding_model>__v<n>`, e.g. `code__nexus-1-1__voyage-code-3__v1`:
 
 | Prefix | Embedder | Document identity (catalog) | Chunk join key |
