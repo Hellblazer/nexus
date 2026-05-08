@@ -72,6 +72,47 @@ def _isolate_t1_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 @pytest.fixture(autouse=True)
+def _isolate_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Redirect NEXUS_CONFIG_DIR so child processes write under tmp_path.
+
+    nexus-mrmq: integration tests that dispatch ``claude -p`` subprocesses
+    (the operator dispatch path, plan-runner, nx_answer equivalence
+    suite) inherit the parent's ``os.environ``. Without this fixture
+    the child resolves ``nexus_config_dir()`` to the user's real
+    ``~/.config/nexus/`` and writes ``current_session`` /
+    ``t1_addr.<claude_pid>`` files there. Reproduced 2026-05-08 during
+    4.27.1 shakeout: a transient ``claude_dispatch -p`` subprocess
+    rewrote the live MCP's session file and unlinked its addr file
+    mid-session.
+
+    Setting ``NEXUS_CONFIG_DIR`` here is read at call time inside
+    ``nexus.config.nexus_config_dir()`` and propagates to children
+    via ``os.environ`` inheritance, so every spawned subprocess
+    (regardless of operator-dispatch mode) writes its config files
+    under the per-test tmp dir.
+
+    Tests that need to assert the default path (``Path.home() /
+    .config / nexus``) explicitly ``monkeypatch.delenv`` first; that
+    still works because this fixture's ``monkeypatch.setenv`` is
+    overridden by any later test-local ``setenv`` / ``delenv`` call.
+
+    Path layout mirrors the natural ``~/.config/nexus`` relative
+    layout (``tmp_path/.config/nexus``) so per-test fixtures that
+    set ``HOME=tmp_path`` and write into ``tmp_path/.config/nexus/``
+    (e.g. ``test_scratch_cmd.fake_home``) land at the same path
+    ``read_claude_session_id`` resolves to via ``NEXUS_CONFIG_DIR``.
+
+    The directory itself is *not* pre-created — write helpers
+    (``write_claude_session_id``, ``write_t1_addr``, etc.) all do
+    ``parents=True, exist_ok=True`` themselves, and tests that
+    explicitly call ``mkdir(parents=True)`` without ``exist_ok``
+    on the same path would otherwise hit ``FileExistsError``.
+    """
+    config_dir = tmp_path / ".config" / "nexus"
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config_dir))
+
+
+@pytest.fixture(autouse=True)
 def _isolate_catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Redirect NEXUS_CATALOG_PATH so tests never pollute the real user catalog.
 
