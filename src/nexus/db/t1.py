@@ -21,6 +21,7 @@ def _now_iso() -> str:
 from nexus.session import (
     _t1_isolated_env,
     find_immediate_claude_pid,
+    read_claude_session_id,
     read_t1_addr_for,
 )
 
@@ -143,6 +144,33 @@ class T1Database:
     the gate entirely.
     """
 
+    @staticmethod
+    def _resolve_session_id(arg: str | None) -> str:
+        """Resolve the session_id used as the per-entry metadata filter.
+
+        Chain: explicit ctor arg > ``NX_SESSION_ID`` env >
+        ``read_claude_session_id()`` (~/.config/nexus/current_session)
+        > new ``uuid4()``.
+
+        The ``read_claude_session_id()`` step is the load-bearing
+        fallback for cross-process T1 visibility (nexus-h8ge): the MCP
+        server, a Bash-tool sibling, and a hook subprocess all find
+        the same Claude session via the on-disk pointer and converge
+        on its UUID, so each side's session_id metadata filter sees
+        the others' entries. Pre-fix this step was missing in every
+        construction branch and every shell ``nx scratch`` invocation
+        orphaned its writes under a fresh per-process UUID,
+        breaking every nx-plugin hook that read T1 from the shell
+        (subagent-start, post_compact, pre_close_verification,
+        divergence-language-guard).
+        """
+        return (
+            arg
+            or os.environ.get("NX_SESSION_ID", "").strip()
+            or read_claude_session_id()
+            or str(uuid4())
+        )
+
     def _init_new_discovery(self, chromadb, session_id: str | None) -> None:
         """RDR-105 P2 (nexus-mj2o): four-branch fail-loud constructor.
 
@@ -177,11 +205,7 @@ class T1Database:
                     "not a valid integer."
                 ) from exc
             self._client = chromadb.HttpClient(host=host_env, port=port_int)
-            self._session_id = (
-                session_id
-                or os.environ.get("NX_SESSION_ID", "").strip()
-                or str(uuid4())
-            )
+            self._session_id = self._resolve_session_id(session_id)
             return
 
         claude_pid = find_immediate_claude_pid()
@@ -190,20 +214,12 @@ class T1Database:
             if addr is not None:
                 host, port = addr
                 self._client = chromadb.HttpClient(host=host, port=port)
-                self._session_id = (
-                    session_id
-                    or os.environ.get("NX_SESSION_ID", "").strip()
-                    or str(uuid4())
-                )
+                self._session_id = self._resolve_session_id(session_id)
                 return
 
         if _t1_isolated_env():
             self._client = chromadb.EphemeralClient()
-            self._session_id = (
-                session_id
-                or os.environ.get("NX_SESSION_ID", "").strip()
-                or str(uuid4())
-            )
+            self._session_id = self._resolve_session_id(session_id)
             return
 
         raise T1ServerNotFoundError(
@@ -230,7 +246,7 @@ class T1Database:
             # Used by the FastMCP lifespan to install a server-lifetime
             # EphemeralClient as the MCP-tool-side T1 store.
             self._client = client
-            self._session_id = session_id or str(uuid4())
+            self._session_id = self._resolve_session_id(session_id)
         else:
             # RDR-105 P4 (nexus-jnx7): the four-branch fail-loud gate is
             # the only resolution path. The legacy session-record
