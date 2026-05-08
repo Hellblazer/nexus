@@ -2,13 +2,25 @@
 title: "Incremental Catalog Projection Rebuild"
 id: RDR-104
 type: Architecture
-status: accepted
+status: closed
 priority: high
 author: Hal Hildebrand
 reviewed-by: self (solo)
 created: 2026-05-05
 accepted_date: 2026-05-05
-related_issues: [nexus-rr0u]
+closed_date: 2026-05-08
+close_reason: implemented
+related_issues: [nexus-rr0u, nexus-wehp]
+gap_closure:
+  - gap: 1
+    title: "Replay-from-zero on every modified mtime"
+    pointer: src/nexus/catalog/event_log.py:172
+  - gap: 2
+    title: "Binary fast-path forces full rebuild for any delta"
+    pointer: src/nexus/catalog/catalog.py:1122
+  - gap: 3
+    title: "Detection of events.jsonl rewrites"
+    pointer: src/nexus/catalog/catalog.py:190
 ---
 
 # RDR-104: Incremental Catalog Projection Rebuild
@@ -515,3 +527,32 @@ Substantive critic ran a third time against the Round 2 revisions. **0 Critical*
 | COALESCE on `created_at` not addressed in walkthrough | Observation | **Addressed.** Walkthrough now covers `created_at` alongside `superseded_by`/`superseded_at`. The full-rebuild path is unchanged (event freezes original timestamp); the degraded-retry path is where the COALESCE earns its keep. |
 
 **Gate outcome**: **PASSED**. Significant items were corrected in this revision pass; no further blockers. RDR is ready for `/nx:rdr-accept 104`.
+
+## Close — 2026-05-08
+
+### Implementation shipped
+
+- **PR #517** (`f961aec9`) — primary implementation. Three `_meta` rows (`last_applied_event_offset`, `last_applied_event_header_hash`, `last_applied_event_header_window`) drive the five-way dispatch in `_ensure_consistent`: empty-delta fast path, bootstrap full rebuild, invalidated full rebuild (header-hash drift or window mismatch), incremental delta replay, corruption escalation. Marker writes commit atomically with the projection writes inside `_db.transaction()`.
+- **PR #518** (`e26d8b4e`) — performance follow-up. Skips the O(N) `_event_log_covers_legacy` scan once the offset marker is established (~838 ms savings on a 460K-event log; was capping the incremental fast-path target).
+- **PR #516** (`cbb39e18`, conexus 4.24.4) — atomicity prerequisite. Marker write moved inside the rebuild's transaction block; closed the silent-corruption hazard that Round 1 gate flagged before any incremental work landed.
+
+### Gap closure pointers
+
+| Gap | Title | Pointer |
+|---|---|---|
+| 1 | Replay-from-zero on every modified mtime | `src/nexus/catalog/event_log.py:172` (`EventLog.replay_from`) |
+| 2 | Binary fast-path forces full rebuild for any delta | `src/nexus/catalog/catalog.py:1122` (incremental dispatch branch) |
+| 3 | Detection of events.jsonl rewrites | `src/nexus/catalog/catalog.py:190` (`_compute_header_hash`) |
+
+### Downstream verification
+
+- `nexus-wehp` (the SQLite writer-lock contention bug RDR-104 was the architectural fix for) closed 2026-05-08 with a regression test (PR #599, `tests/test_catalog_concurrent_writer_lock.py`). Two multiprocessing tests: a `slow`-marked mechanism check that holds the writer slot >10 s and observes the original `OperationalError: database is locked` failure shape, plus a default-tier regression guard showing two concurrent `register_collection` calls succeed under post-fix conditions.
+
+### Test coverage
+
+- `tests/test_catalog_incremental_rebuild.py` — full equivalence suite across the five dispatch paths.
+- `tests/test_catalog_consistency_marker.py` — atomicity + cross-process marker semantics (incl. `test_marker_does_not_advance_when_rebuild_raises`).
+- `tests/test_catalog_event_log.py` — `EventLog.replay_from` boundary cases and concurrent-appender safety.
+- `tests/test_catalog_concurrent_writer_lock.py` (new, nexus-wehp) — concurrent Catalog writer-lock regression guard.
+
+No post-mortem: the RDR shipped its declared scope across three gate rounds, including a Critical issue (atomicity hazard) split out as standalone fix 4.24.4 before incremental work began. Round 3 PASSED with three Significant items corrected in-place — those corrections shipped in PR #517 alongside the design they amended.
