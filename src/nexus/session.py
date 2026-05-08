@@ -79,6 +79,49 @@ def read_claude_session_id() -> str | None:
         return None  # intentional: file not created yet, normal on first run
 
 
+def resolve_active_session_id(arg: str | None = None) -> str | None:
+    """Single source of truth for the active Claude session_id.
+
+    Resolution chain (highest priority first):
+
+    1. Explicit ``arg`` (caller-supplied; non-empty after strip).
+    2. ``NX_SESSION_ID`` env var (non-empty after strip).
+    3. ``~/.config/nexus/current_session`` via ``read_claude_session_id``.
+    4. ``None``.
+
+    Returns ``None`` when nothing in the chain resolves. Callers choose
+    their own fallback at the call site:
+
+    * ``T1Database._resolve_session_id`` and ``mcp/core._record_tier_write``
+      substitute ``"unknown"`` so the per-entry / per-row session_id is
+      never empty and the audit log and the T1 chunk store agree on
+      attribution. Pre-PR T1 fell back to ``uuid4()`` while tier-write
+      fell back to ``"unknown"`` -- the divergence that produced the
+      nexus-h8ge bug class even after PR #590 lifted the chain into
+      ``T1Database._resolve_session_id``: each open-coded copy could
+      drift independently.
+    * ``_session_end_launcher._print_tier_status_summary`` short-circuits
+      on ``None`` (no useful per-session summary without a bound session
+      -- querying ``WHERE session_id = "unknown"`` would leak rows from
+      unrelated invocations into the user-facing summary).
+
+    Issue #594 / nexus-9e9a: this helper is the structural fix for the
+    three-site drift class. Any future change to the chain happens here
+    once.
+    """
+    if arg:
+        stripped = arg.strip()
+        if stripped:
+            return stripped
+    env = os.environ.get("NX_SESSION_ID", "").strip()
+    if env:
+        return env
+    file_id = read_claude_session_id()
+    if file_id:
+        return file_id
+    return None
+
+
 def _stable_pid() -> int:
     """Return a stable process-group anchor for legacy session file naming.
 

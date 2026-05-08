@@ -782,13 +782,22 @@ class TestT1DatabaseSessionIdResolution:
         assert db.session_id == "canonical-claude-uuid"
 
     @pytest.mark.parametrize("path_id", _PATH_IDS)
-    def test_uuid_fallback_when_nothing_set(
+    def test_unknown_fallback_when_nothing_set(
         self, path_id, tmp_path, monkeypatch, fake_chromadb
     ):
-        """Truly anonymous CLI (no env, no file) still gets a fresh
-        UUID -- preserves the pre-fix behaviour for callers running
-        outside any Claude session, e.g. ad-hoc scripting against an
-        explicit ephemeral.
+        """Truly anonymous CLI (no env, no file) attributes its T1
+        writes to the canonical ``"unknown"`` sentinel.
+
+        Pre-issue-#594 the fallback was ``uuid4()`` -- a per-process
+        random string that made T1 writes impossible to correlate with
+        the audit log when the on-disk pointer was missing, the exact
+        failure mode PR #590 was supposed to close. Issue #594 /
+        nexus-9e9a unifies the chain through
+        ``nexus.session.resolve_active_session_id`` and uses
+        ``"unknown"`` as the per-row last-resort sentinel, so the
+        T1 chunk store and the tier-write audit log agree on
+        attribution: rows under ``"unknown"`` are exactly the rows
+        from processes that did not bind to a Claude session.
         """
         kwargs, _ = _setup_path(path_id, tmp_path, monkeypatch, fake_chromadb)
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
@@ -796,9 +805,7 @@ class TestT1DatabaseSessionIdResolution:
 
         from nexus.db.t1 import T1Database
         db = T1Database(**kwargs)
-        # uuid4() strings are 36 chars with four hyphens.
-        assert len(db.session_id) == 36
-        assert db.session_id.count("-") == 4
+        assert db.session_id == "unknown"
 
 
 @pytest.mark.integration

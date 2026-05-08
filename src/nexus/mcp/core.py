@@ -339,30 +339,29 @@ def _record_tier_write(
     """Append one row to ``tier_writes`` recording a tier-write call.
 
     Best-effort: any exception is swallowed. Telemetry must NEVER break
-    the hot path of the calling tool. ``session_id`` resolves from
-    ``NX_SESSION_ID`` env, then ``read_claude_session_id()``, then
-    ``"unknown"`` as a last-resort sentinel so rows are never lost.
+    the hot path of the calling tool. ``session_id`` is resolved by
+    :func:`nexus.session.resolve_active_session_id`; rows from a process
+    with no bound Claude session are attributed to ``"unknown"`` so
+    operators can grep for the sentinel and rows are never lost.
 
     Phase 1A of the tier-discipline restoration initiative
-    (memory: tier-discipline-audit-2026-05-06).
+    (memory: tier-discipline-audit-2026-05-06). Issue #594 / nexus-9e9a
+    routed the resolution chain through ``resolve_active_session_id``
+    so this site agrees with the T1 chunk store and the SessionEnd
+    launcher on attribution.
 
     Lazy imports inside this function so monkey-patches of
     ``nexus.mcp_infra.t2_ctx`` in tests are picked up at call time
     rather than frozen at module-import time.
     """
     try:
-        import os
         from datetime import datetime, timezone
 
         from nexus.db.migrations import migrate_tier_writes
         from nexus.mcp_infra import t2_ctx
-        from nexus.session import read_claude_session_id
+        from nexus.session import resolve_active_session_id
 
-        session_id = (
-            os.environ.get("NX_SESSION_ID", "").strip()
-            or read_claude_session_id()
-            or "unknown"
-        )
+        session_id = resolve_active_session_id() or "unknown"
         ts = datetime.now(timezone.utc).isoformat()
         with t2_ctx() as t2:
             # Any domain conn points at the same SQLite file; reuse the
