@@ -580,6 +580,13 @@ class Catalog:
         self._last_consistency_mtime: float = self._read_consistency_marker()
         if self._documents_path.exists():
             self._ensure_consistent()
+        # nexus-mbm: link-graph operations live in catalog_links._LinkOps
+        # composed onto self._links. Public Catalog.link / .unlink /
+        # .links_from / etc. delegate to this object; the LinkOps
+        # holds a back-reference so it can read self._db / .resolve /
+        # ._acquire_lock through the same Catalog instance.
+        from nexus.catalog.catalog_links import _LinkOps
+        self._links = _LinkOps(self)
 
     def _read_consistency_marker(self) -> float:
         """Return the persisted ``_last_consistency_mtime`` or 0.0.
@@ -3160,143 +3167,18 @@ class Catalog:
         )
 
     # ── Links ──────────────────────────────────────────────────────────────
-
-    def _link_unlocked(
-        self,
-        from_t: Tumbler,
-        to_t: Tumbler,
-        link_type: str,
-        created_by: str,
-        from_span: str,
-        to_span: str,
-        meta: dict,
-        *,
-        allow_dangling: bool = False,
-    ) -> bool:
-        """Core link logic — caller must hold the lock. Returns True if new, False if merged."""
-        # Validate span format (Xanadu transclusion addressing)
-        for span, label in [(from_span, "from_span"), (to_span, "to_span")]:
-            if not _SPAN_PATTERN.match(span):
-                raise ValueError(
-                    f"invalid {label}: {span!r} — use 'line_start-line_end', "
-                    f"'chunk_idx:char_start-char_end', 'chash:<sha256hex>', 'chash:<start>-<end>:<sha256hex>', or '' for whole document"
-                )
-        if not allow_dangling:
-            errors = []
-            from_entry = self.resolve(from_t)
-            to_entry = self.resolve(to_t)
-            if from_entry is None:
-                errors.append(f"from_tumbler {from_t} not found")
-            if to_entry is None:
-                errors.append(f"to_tumbler {to_t} not found")
-            if errors:
-                raise ValueError(f"dangling link: {'; '.join(errors)}")
-            # Validate chash: spans resolve in their document's collection
-            for span, entry, label in [
-                (from_span, from_entry, "from_span"),
-                (to_span, to_entry, "to_span"),
-            ]:
-                if span.startswith("chash:") and entry and entry.physical_collection:
-                    try:
-                        from nexus.db import make_t3
-                        t3 = make_t3()
-                        result = self.resolve_span(span, entry.physical_collection, t3._client)
-                        if result is None:
-                            errors.append(
-                                f"{label} {span!r} does not resolve in "
-                                f"collection {entry.physical_collection}"
-                            )
-                    except Exception:
-                        pass  # T3 unavailable — skip validation
-            if errors:
-                raise ValueError(f"unresolvable span: {'; '.join(errors)}")
-        now = datetime.now(UTC).isoformat()
-        row = self._db.execute(
-            "SELECT id, created_by, metadata, created_at FROM links "
-            "WHERE from_tumbler=? AND to_tumbler=? AND link_type=?",
-            (str(from_t), str(to_t), link_type),
-        ).fetchone()
-
-        if row is not None:
-            existing_meta = json.loads(row[2]) if row[2] else {}
-            existing_meta.update(meta)
-            co = existing_meta.get("co_discovered_by", [])
-            if created_by != row[1] and created_by not in co:
-                co.append(created_by)
-            existing_meta["co_discovered_by"] = co
-            rec = LinkRecord(
-                from_t=str(from_t), to_t=str(to_t), link_type=link_type,
-                from_span=from_span, to_span=to_span,
-                created_by=row[1], created_at=row[3] or now, meta=existing_meta,
-            )
-            event = _make_event(
-                _LinkCreatedPayload(
-                    from_doc=str(from_t),
-                    to_doc=str(to_t),
-                    link_type=link_type,
-                    creator=row[1],
-                    from_span=from_span,
-                    to_span=to_span,
-                    created_at=row[3] or now,
-                    meta=dict(existing_meta),
-                ),
-                v=0,
-            )
-            if self._event_sourced_enabled:
-                # Event-sourced merge: emit the LinkCreated carrying
-                # the FINAL merged metadata first, then let the
-                # projector's INSERT OR REPLACE overwrite the prior
-                # SQLite row with the merged state.
-                self._write_to_event_log(event)
-                self._projector.apply(event)
-                self._db.commit()
-                self._append_jsonl(self._links_path, rec.__dict__)
-            else:
-                self._db.execute(
-                    "UPDATE links SET from_span=?, to_span=?, metadata=? WHERE id=?",
-                    (from_span, to_span, json.dumps(existing_meta), row[0]),
-                )
-                self._append_jsonl(self._links_path, rec.__dict__)
-                self._db.commit()
-                self._emit_shadow_event(event)
-            return False
-        else:
-            combined_meta = dict(meta)
-            rec = LinkRecord(
-                from_t=str(from_t), to_t=str(to_t), link_type=link_type,
-                from_span=from_span, to_span=to_span,
-                created_by=created_by, created_at=now, meta=combined_meta,
-            )
-            event = _make_event(
-                _LinkCreatedPayload(
-                    from_doc=str(from_t),
-                    to_doc=str(to_t),
-                    link_type=link_type,
-                    creator=created_by,
-                    from_span=from_span,
-                    to_span=to_span,
-                    created_at=now,
-                    meta=dict(combined_meta),
-                ),
-                v=0,
-            )
-            if self._event_sourced_enabled:
-                self._write_to_event_log(event)
-                self._projector.apply(event)
-                self._db.commit()
-                self._append_jsonl(self._links_path, rec.__dict__)
-            else:
-                self._db.execute(
-                    "INSERT OR IGNORE INTO links "
-                    "(from_tumbler, to_tumbler, link_type, from_span, to_span, "
-                    "created_by, created_at, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (str(from_t), str(to_t), link_type, from_span, to_span,
-                     created_by, now, json.dumps(combined_meta)),
-                )
-                self._append_jsonl(self._links_path, rec.__dict__)
-                self._db.commit()
-                self._emit_shadow_event(event)
-            return True
+    # nexus-mbm: implementations live in
+    # :class:`nexus.catalog.catalog_links._LinkOps`, composed onto
+    # ``self._links`` in ``__init__``. The methods below are one-line
+    # delegates that preserve the public Catalog API.
+    #
+    # Class-attribute aliases keep ``cat._MAX_GRAPH_DEPTH`` /
+    # ``cat._MAX_GRAPH_NODES`` addressable at the historical names
+    # (a handful of tests read them directly on the instance).
+    from nexus.catalog import catalog_links as _links_mod
+    _MAX_GRAPH_DEPTH = _links_mod._MAX_GRAPH_DEPTH
+    _MAX_GRAPH_NODES = _links_mod._MAX_GRAPH_NODES
+    del _links_mod
 
     def link(
         self,
@@ -3310,24 +3192,12 @@ class Catalog:
         allow_dangling: bool = False,
         **meta: object,
     ) -> bool:
-        """Create or merge a link. Returns True if new, False if merged.
-
-        Spans accept ``chash:<sha256hex>`` for content-addressed chunk identity
-        (preferred) or legacy positional formats. See class docstring for full
-        span policy.
-
-        Raises ValueError if either endpoint is missing (unless allow_dangling=True)
-        or if a span string does not match ``_SPAN_PATTERN``.
-        """
-        dir_fd = self._acquire_lock()
-        try:
-            return self._link_unlocked(
-                from_t, to_t, link_type, created_by,
-                from_span, to_span, dict(meta),
-                allow_dangling=allow_dangling,
-            )
-        finally:
-            self._release_lock(dir_fd)
+        """Create or merge a link. Returns True if new, False if merged."""
+        return self._links.link(
+            from_t, to_t, link_type, created_by,
+            from_span=from_span, to_span=to_span,
+            allow_dangling=allow_dangling, **meta,
+        )
 
     def link_if_absent(
         self,
@@ -3341,180 +3211,18 @@ class Catalog:
         allow_dangling: bool = False,
         **meta: object,
     ) -> bool:
-        """Create link only if it does not already exist. Returns True=created, False=existed.
-
-        No merge, no co_discovered_by — pure insert-or-skip via UNIQUE constraint.
-        No JSONL append on the 'already exists' path.
-        Raises ValueError if either endpoint is missing (unless allow_dangling=True).
-        """
-        # Validate span format before acquiring lock
-        for span, label in [(from_span, "from_span"), (to_span, "to_span")]:
-            if not _SPAN_PATTERN.match(span):
-                raise ValueError(
-                    f"invalid {label}: {span!r} — use 'line_start-line_end', "
-                    f"'chunk_idx:char_start-char_end', 'chash:<sha256hex>', 'chash:<start>-<end>:<sha256hex>', or '' for whole document"
-                )
-        dir_fd = self._acquire_lock()
-        try:
-            row = self._db.execute(
-                "SELECT id FROM links WHERE from_tumbler=? AND to_tumbler=? AND link_type=?",
-                (str(from_t), str(to_t), link_type),
-            ).fetchone()
-            if row is not None:
-                return False
-            if not allow_dangling:
-                errors = []
-                from_entry = self.resolve(from_t)
-                to_entry = self.resolve(to_t)
-                if from_entry is None:
-                    errors.append(f"from_tumbler {from_t} not found")
-                if to_entry is None:
-                    errors.append(f"to_tumbler {to_t} not found")
-                if errors:
-                    raise ValueError(f"dangling link: {'; '.join(errors)}")
-                for span, entry, label in [
-                    (from_span, from_entry, "from_span"),
-                    (to_span, to_entry, "to_span"),
-                ]:
-                    if span.startswith("chash:") and entry and entry.physical_collection:
-                        try:
-                            from nexus.db import make_t3
-                            t3 = make_t3()
-                            result = self.resolve_span(span, entry.physical_collection, t3._client)
-                            if result is None:
-                                errors.append(
-                                    f"{label} {span!r} does not resolve in "
-                                    f"collection {entry.physical_collection}"
-                                )
-                        except Exception:
-                            pass
-                if errors:
-                    raise ValueError(f"unresolvable span: {'; '.join(errors)}")
-            now = datetime.now(UTC).isoformat()
-            combined_meta = dict(meta)
-            rec = LinkRecord(
-                from_t=str(from_t), to_t=str(to_t), link_type=link_type,
-                from_span=from_span, to_span=to_span,
-                created_by=created_by, created_at=now, meta=combined_meta,
-            )
-            event = _make_event(
-                _LinkCreatedPayload(
-                    from_doc=str(from_t),
-                    to_doc=str(to_t),
-                    link_type=link_type,
-                    creator=created_by,
-                    from_span=from_span,
-                    to_span=to_span,
-                    created_at=now,
-                    meta=dict(combined_meta),
-                ),
-                v=0,
-            )
-            if self._event_sourced_enabled:
-                self._write_to_event_log(event)
-                self._projector.apply(event)
-                self._db.commit()
-                self._append_jsonl(self._links_path, rec.__dict__)
-            else:
-                self._db.execute(
-                    "INSERT OR IGNORE INTO links "
-                    "(from_tumbler, to_tumbler, link_type, from_span, to_span, "
-                    "created_by, created_at, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (str(from_t), str(to_t), link_type, from_span, to_span,
-                     created_by, now, json.dumps(combined_meta)),
-                )
-                self._append_jsonl(self._links_path, rec.__dict__)
-                self._db.commit()
-                self._emit_shadow_event(event)
-            return True
-        finally:
-            self._release_lock(dir_fd)
-
-    def unlink(self, from_t: Tumbler, to_t: Tumbler, link_type: str = "") -> int:
-        dir_fd = self._acquire_lock()
-        try:
-            if link_type:
-                rows = self._db.execute(
-                    "SELECT id, link_type, created_by FROM links "
-                    "WHERE from_tumbler = ? AND to_tumbler = ? AND link_type = ?",
-                    (str(from_t), str(to_t), link_type),
-                ).fetchall()
-            else:
-                rows = self._db.execute(
-                    "SELECT id, link_type, created_by FROM links "
-                    "WHERE from_tumbler = ? AND to_tumbler = ?",
-                    (str(from_t), str(to_t)),
-                ).fetchall()
-
-            for row_id, lt, original_created_by in rows:
-                # Fetch full row for forensic tombstone
-                full = self._db.execute(
-                    "SELECT from_span, to_span, metadata FROM links WHERE id = ?",
-                    (row_id,),
-                ).fetchone()
-                tombstone = {
-                    "from_t": str(from_t),
-                    "to_t": str(to_t),
-                    "link_type": lt,
-                    "_deleted": True,
-                    "from_span": full[0] or "" if full else "",
-                    "to_span": full[1] or "" if full else "",
-                    "created_by": original_created_by,
-                    "created_at": datetime.now(UTC).isoformat(),
-                    "meta": json.loads(full[2]) if full and full[2] else {},
-                }
-                event = _make_event(
-                    _LinkDeletedPayload(
-                        from_doc=str(from_t),
-                        to_doc=str(to_t),
-                        link_type=lt,
-                        reason="catalog.unlink",
-                    ),
-                    v=0,
-                )
-                if self._event_sourced_enabled:
-                    # Event-sourced: write event, project (DELETE),
-                    # then JSONL tombstone. Commit batched at end of
-                    # the loop for efficiency on multi-row unlinks.
-                    self._write_to_event_log(event)
-                    self._projector.apply(event)
-                    self._append_jsonl(self._links_path, tombstone)
-                else:
-                    self._append_jsonl(self._links_path, tombstone)
-                    self._db.execute("DELETE FROM links WHERE id = ?", (row_id,))
-
-            self._db.commit()
-            # Shadow-emit one LinkDeleted per removed row AFTER
-            # db.commit() so a process crash between the DELETE and the
-            # commit cannot leave events.jsonl claiming a deletion that
-            # SQLite has not yet committed. Skipped when event-sourced
-            # is on — the per-row loop above already emitted + applied.
-            if not self._event_sourced_enabled:
-                for row_id, lt, original_created_by in rows:
-                    self._emit_shadow_event(_make_event(
-                        _LinkDeletedPayload(
-                            from_doc=str(from_t),
-                            to_doc=str(to_t),
-                            link_type=lt,
-                            reason="catalog.unlink",
-                        ),
-                        v=0,
-                    ))
-            return len(rows)
-        finally:
-            self._release_lock(dir_fd)
-
-    def _row_to_link(self, row: tuple) -> CatalogLink:
-        return CatalogLink(
-            from_tumbler=Tumbler.parse(row[0]),
-            to_tumbler=Tumbler.parse(row[1]),
-            link_type=row[2],
-            from_span=row[3] or "",
-            to_span=row[4] or "",
-            created_by=row[5],
-            created_at=row[6] or "",
-            meta=json.loads(row[7]) if row[7] else {},
+        """Insert-or-skip via the UNIQUE constraint."""
+        return self._links.link_if_absent(
+            from_t, to_t, link_type, created_by,
+            from_span=from_span, to_span=to_span,
+            allow_dangling=allow_dangling, **meta,
         )
+
+    def unlink(
+        self, from_t: Tumbler, to_t: Tumbler, link_type: str = "",
+    ) -> int:
+        """Delete one or all link types between *from_t* and *to_t*."""
+        return self._links.unlink(from_t, to_t, link_type)
 
     def links_from(
         self,
@@ -3522,20 +3230,8 @@ class Catalog:
         link_type: str = "",
         link_types: list[str] | None = None,
     ) -> list[CatalogLink]:
-        sql = (
-            "SELECT from_tumbler, to_tumbler, link_type, from_span, to_span, "
-            "created_by, created_at, metadata FROM links WHERE from_tumbler = ?"
-        )
-        params: list[str] = [str(tumbler)]
-        effective = link_types or ([link_type] if link_type else [])
-        if len(effective) == 1:
-            sql += " AND link_type = ?"
-            params.append(effective[0])
-        elif len(effective) > 1:
-            placeholders = ",".join("?" * len(effective))
-            sql += f" AND link_type IN ({placeholders})"
-            params.extend(effective)
-        return [self._row_to_link(r) for r in self._db.execute(sql, params).fetchall()]
+        """All outbound links from *tumbler*."""
+        return self._links.links_from(tumbler, link_type, link_types)
 
     def links_to(
         self,
@@ -3543,20 +3239,8 @@ class Catalog:
         link_type: str = "",
         link_types: list[str] | None = None,
     ) -> list[CatalogLink]:
-        sql = (
-            "SELECT from_tumbler, to_tumbler, link_type, from_span, to_span, "
-            "created_by, created_at, metadata FROM links WHERE to_tumbler = ?"
-        )
-        params: list[str] = [str(tumbler)]
-        effective = link_types or ([link_type] if link_type else [])
-        if len(effective) == 1:
-            sql += " AND link_type = ?"
-            params.append(effective[0])
-        elif len(effective) > 1:
-            placeholders = ",".join("?" * len(effective))
-            sql += f" AND link_type IN ({placeholders})"
-            params.extend(effective)
-        return [self._row_to_link(r) for r in self._db.execute(sql, params).fetchall()]
+        """All inbound links to *tumbler*."""
+        return self._links.links_to(tumbler, link_type, link_types)
 
     def link_query(
         self,
@@ -3570,49 +3254,12 @@ class Catalog:
         limit: int = 100,
         offset: int = 0,
     ) -> list[CatalogLink]:
-        """Composable link filter. Returns CatalogLink list with LIMIT/OFFSET.
-
-        limit=0 means unlimited (maps to SQLite LIMIT -1).
-        """
-        conditions: list[str] = []
-        params: list[str | int] = []
-
-        if tumbler:
-            if direction == "out":
-                conditions.append("from_tumbler = ?")
-                params.append(tumbler)
-            elif direction == "in":
-                conditions.append("to_tumbler = ?")
-                params.append(tumbler)
-            else:
-                conditions.append("(from_tumbler = ? OR to_tumbler = ?)")
-                params.extend([tumbler, tumbler])
-        if from_t:
-            conditions.append("from_tumbler = ?")
-            params.append(from_t)
-        if to_t:
-            conditions.append("to_tumbler = ?")
-            params.append(to_t)
-        if link_type:
-            conditions.append("link_type = ?")
-            params.append(link_type)
-        if created_by:
-            conditions.append("created_by = ?")
-            params.append(created_by)
-        if created_at_before:
-            conditions.append("created_at != '' AND created_at < ?")
-            params.append(created_at_before)
-
-        sql = (
-            "SELECT from_tumbler, to_tumbler, link_type, from_span, to_span, "
-            "created_by, created_at, metadata FROM links"
+        """Composable link filter. ``limit=0`` means unlimited."""
+        return self._links.link_query(
+            from_t=from_t, to_t=to_t, link_type=link_type,
+            created_by=created_by, direction=direction, tumbler=tumbler,
+            created_at_before=created_at_before, limit=limit, offset=offset,
         )
-        if conditions:
-            sql += " WHERE " + " AND ".join(conditions)
-        sql += " LIMIT ? OFFSET ?"
-        params.extend([limit if limit > 0 else -1, offset])
-
-        return [self._row_to_link(r) for r in self._db.execute(sql, params).fetchall()]
 
     def bulk_unlink(
         self,
@@ -3623,89 +3270,18 @@ class Catalog:
         created_at_before: str = "",
         dry_run: bool = False,
     ) -> int:
-        """Delete links matching filters. Returns count removed.
-
-        Tombstones preserve original created_by for JSONL audit trail.
-        dry_run=True returns count without deleting.
-        """
-        has_filter = any([from_t, to_t, link_type, created_by, created_at_before])
-        if not has_filter and not dry_run:
-            raise ValueError("bulk_unlink requires at least one filter (or dry_run=True)")
-
-        dir_fd = self._acquire_lock()
-        try:
-            matching = self.link_query(
-                from_t=from_t, to_t=to_t, link_type=link_type,
-                created_by=created_by, created_at_before=created_at_before,
-                limit=0,
-            )
-
-            if dry_run:
-                return len(matching)
-
-            for lnk in matching:
-                tombstone = {
-                    "from_t": str(lnk.from_tumbler), "to_t": str(lnk.to_tumbler),
-                    "link_type": lnk.link_type, "_deleted": True,
-                    "from_span": lnk.from_span, "to_span": lnk.to_span,
-                    "created_by": lnk.created_by,
-                    "created_at": datetime.now(UTC).isoformat(),
-                    "meta": lnk.meta,
-                }
-                event = _make_event(
-                    _LinkDeletedPayload(
-                        from_doc=str(lnk.from_tumbler),
-                        to_doc=str(lnk.to_tumbler),
-                        link_type=lnk.link_type,
-                        reason="catalog.bulk_unlink",
-                    ),
-                    v=0,
-                )
-                if self._event_sourced_enabled:
-                    self._write_to_event_log(event)
-                    self._projector.apply(event)
-                    self._append_jsonl(self._links_path, tombstone)
-                else:
-                    self._append_jsonl(self._links_path, tombstone)
-                    self._db.execute(
-                        "DELETE FROM links WHERE from_tumbler=? AND to_tumbler=? AND link_type=?",
-                        (str(lnk.from_tumbler), str(lnk.to_tumbler), lnk.link_type),
-                    )
-            self._db.commit()
-            # Shadow-emit AFTER db.commit() (see ``unlink`` for the
-            # crash-window rationale). Skipped when event-sourced — the
-            # per-row loop already wrote and projected.
-            if not self._event_sourced_enabled:
-                for lnk in matching:
-                    self._emit_shadow_event(_make_event(
-                        _LinkDeletedPayload(
-                            from_doc=str(lnk.from_tumbler),
-                            to_doc=str(lnk.to_tumbler),
-                            link_type=lnk.link_type,
-                            reason="catalog.bulk_unlink",
-                        ),
-                        v=0,
-                    ))
-            return len(matching)
-        finally:
-            self._release_lock(dir_fd)
+        """Filtered bulk delete with JSONL tombstones."""
+        return self._links.bulk_unlink(
+            from_t=from_t, to_t=to_t, link_type=link_type,
+            created_by=created_by, created_at_before=created_at_before,
+            dry_run=dry_run,
+        )
 
     def validate_link(
-        self, from_t: Tumbler, to_t: Tumbler, link_type: str
+        self, from_t: Tumbler, to_t: Tumbler, link_type: str,
     ) -> list[str]:
-        """Validate a proposed link. Returns list of error strings (empty = valid)."""
-        errors: list[str] = []
-        if self.resolve(from_t) is None:
-            errors.append(f"from_tumbler {from_t} not found in documents")
-        if self.resolve(to_t) is None:
-            errors.append(f"to_tumbler {to_t} not found in documents")
-        row = self._db.execute(
-            "SELECT id FROM links WHERE from_tumbler=? AND to_tumbler=? AND link_type=?",
-            (str(from_t), str(to_t), link_type),
-        ).fetchone()
-        if row is not None:
-            errors.append(f"duplicate: link ({from_t}, {to_t}, {link_type!r}) already exists")
-        return errors
+        """Return a list of validation errors (empty = link is valid)."""
+        return self._links.validate_link(from_t, to_t, link_type)
 
     def resolve_span_text(self, tumbler: Tumbler, span: str) -> str | None:
         """Resolve a span to actual text content. Returns None if unavailable.
@@ -3724,129 +3300,8 @@ class Catalog:
         return catalog_spans.resolve_span_text_for_entry(entry, span)
 
     def link_audit(self, *, t3: "ClientAPI | None" = None) -> dict:
-        """Audit the links table. Returns stats + orphan + duplicate + chash lists.
-
-        When ``t3`` is provided, verifies each ``chash:`` span resolves to a
-        chunk in the corresponding ChromaDB collection. Unresolvable spans
-        appear in ``stale_chash``.
-
-        Args:
-            t3: Raw ChromaDB client (``chromadb.ClientAPI``), not a ``T3Database``.
-                Production callers pass ``t3_db._client``; tests pass an
-                ``EphemeralClient`` directly. Injection keeps the method testable
-                without ``make_t3()``.
-        """
-        total = self._db.execute("SELECT count(*) FROM links").fetchone()[0]
-        by_type = dict(
-            self._db.execute(
-                "SELECT link_type, count(*) FROM links GROUP BY link_type"
-            ).fetchall()
-        )
-        by_creator = dict(
-            self._db.execute(
-                "SELECT created_by, count(*) FROM links GROUP BY created_by"
-            ).fetchall()
-        )
-        orphan_rows = self._db.execute(
-            "SELECT from_tumbler, to_tumbler, link_type FROM links l "
-            "WHERE NOT EXISTS (SELECT 1 FROM documents d WHERE d.tumbler = l.from_tumbler) "
-            "   OR NOT EXISTS (SELECT 1 FROM documents d WHERE d.tumbler = l.to_tumbler)"
-        ).fetchall()
-        orphaned = [{"from": r[0], "to": r[1], "type": r[2]} for r in orphan_rows]
-        dup_rows = self._db.execute(
-            "SELECT from_tumbler, to_tumbler, link_type, count(*) AS cnt "
-            "FROM links GROUP BY from_tumbler, to_tumbler, link_type HAVING cnt > 1"
-        ).fetchall()
-        duplicates = [
-            {"from": r[0], "to": r[1], "type": r[2], "count": r[3]} for r in dup_rows
-        ]
-        # Stale spans: positional spans pointing to documents re-indexed after link creation.
-        # Content-hash spans (chash:) are excluded — they survive re-indexing by design
-        # (RDR-053). Stale chash spans are detected separately via T3 verification below.
-        # Checks both from_span (joined on from_tumbler) and to_span (joined on to_tumbler).
-        # datetime() wraps ensure correct comparison regardless of ISO-8601 padding.
-        stale_span_rows = self._db.execute(
-            "SELECT l.from_tumbler, l.to_tumbler, l.link_type, l.created_at, "
-            "       d.indexed_at, 'from' AS side "
-            "FROM links l "
-            "JOIN documents d ON d.tumbler = l.from_tumbler "
-            "WHERE (l.from_span IS NOT NULL AND l.from_span != '') "
-            "  AND l.from_span NOT LIKE 'chash:%' "
-            "  AND datetime(l.created_at) < datetime(d.indexed_at) "
-            "UNION ALL "
-            "SELECT l.from_tumbler, l.to_tumbler, l.link_type, l.created_at, "
-            "       d.indexed_at, 'to' AS side "
-            "FROM links l "
-            "JOIN documents d ON d.tumbler = l.to_tumbler "
-            "WHERE (l.to_span IS NOT NULL AND l.to_span != '') "
-            "  AND l.to_span NOT LIKE 'chash:%' "
-            "  AND datetime(l.created_at) < datetime(d.indexed_at)"
-        ).fetchall()
-        stale_spans = [
-            {"from": r[0], "to": r[1], "type": r[2],
-             "link_created": r[3], "doc_reindexed": r[4], "side": r[5]}
-            for r in stale_span_rows
-        ]
-        # chash verification: check each chash: span resolves in T3
-        stale_chash: list[dict] = []
-        if t3 is not None:
-            chash_rows = self._db.execute(
-                "SELECT from_tumbler, to_tumbler, link_type, from_span, to_span "
-                "FROM links WHERE from_span LIKE 'chash:%' OR to_span LIKE 'chash:%'"
-            ).fetchall()
-            for row in chash_rows:
-                from_t, to_t, lt, from_span, to_span = row
-                for span, tumbler_str in [(from_span, from_t), (to_span, to_t)]:
-                    if not span.startswith("chash:"):
-                        continue
-                    # Extract hash from chash:<hash> or chash:<hash>:<start>-<end>
-                    body = span[len("chash:"):]
-                    m_range = re.match(r"^([0-9a-f]{64}):\d+-\d+$", body)
-                    chunk_hash = m_range.group(1) if m_range else body
-                    entry = self.resolve(Tumbler.parse(tumbler_str))
-                    if entry is None:
-                        stale_chash.append(
-                            {"from": from_t, "to": to_t, "type": lt, "span": span,
-                             "reason": "document_deleted"}
-                        )
-                        continue
-                    try:
-                        col = t3.get_collection(entry.physical_collection)
-                        result = col.get(
-                            where={"chunk_text_hash": chunk_hash}, include=[]
-                        )
-                        if not result["ids"]:
-                            stale_chash.append(
-                                {"from": from_t, "to": to_t, "type": lt, "span": span,
-                                 "reason": "missing"}
-                            )
-                    except Exception as exc:
-                        _log.warning(
-                            "link_audit_chash_error",
-                            tumbler=tumbler_str, span=span,
-                            exc_info=True,
-                        )
-                        stale_chash.append(
-                            {"from": from_t, "to": to_t, "type": lt, "span": span,
-                             "reason": "error", "error": type(exc).__name__}
-                        )
-
-        return {
-            "total": total,
-            "by_type": by_type,
-            "by_creator": by_creator,
-            "orphaned": orphaned,
-            "orphaned_count": len(orphaned),
-            "duplicates": duplicates,
-            "duplicate_count": len(duplicates),
-            "stale_spans": stale_spans,
-            "stale_span_count": len(stale_spans),
-            "stale_chash": stale_chash,
-            "stale_chash_count": len(stale_chash),
-        }
-
-    _MAX_GRAPH_DEPTH = 10
-    _MAX_GRAPH_NODES = 500
+        """Audit the links table."""
+        return self._links.link_audit(t3=t3)
 
     def graph(
         self,
@@ -3856,45 +3311,11 @@ class Catalog:
         link_type: str = "",
         link_types: list[str] | None = None,
     ) -> dict:
-        """BFS traversal to given depth. Returns {"nodes": [...], "edges": [...]}.
-
-        Depth capped at _MAX_GRAPH_DEPTH. Traversal stops at _MAX_GRAPH_NODES visited.
-        ``link_types`` (plural list) takes precedence over ``link_type`` (single str).
-        """
-        depth = min(depth, self._MAX_GRAPH_DEPTH)
-        effective_types: list[str] = link_types or ([link_type] if link_type else [])
-        visited: set[str] = {str(tumbler)}
-        seen_edges: set[tuple[str, str, str]] = set()
-        all_edges: list[CatalogLink] = []
-        queue: deque[tuple[Tumbler, int]] = deque([(tumbler, 0)])
-
-        while queue:
-            if len(visited) >= self._MAX_GRAPH_NODES:
-                _log.warning("graph_node_limit", tumbler=str(tumbler), visited=len(visited))
-                break
-            current, d = queue.popleft()
-            if d >= depth:
-                continue
-
-            neighbors: list[CatalogLink] = []
-            if direction in ("out", "both"):
-                neighbors.extend(self.links_from(current, link_types=effective_types or None))
-            if direction in ("in", "both"):
-                neighbors.extend(self.links_to(current, link_types=effective_types or None))
-
-            for edge in neighbors:
-                edge_key = (str(edge.from_tumbler), str(edge.to_tumbler), edge.link_type)
-                if edge_key not in seen_edges:
-                    seen_edges.add(edge_key)
-                    all_edges.append(edge)
-                other = edge.to_tumbler if edge.from_tumbler == current else edge.from_tumbler
-                if str(other) not in visited:
-                    visited.add(str(other))
-                    queue.append((other, d + 1))
-
-        nodes = [self.resolve(Tumbler.parse(t)) for t in visited]
-        nodes = [n for n in nodes if n is not None]
-        return {"nodes": nodes, "edges": all_edges}
+        """BFS traversal — see ``_LinkOps.graph`` for the full contract."""
+        return self._links.graph(
+            tumbler, depth=depth, direction=direction,
+            link_type=link_type, link_types=link_types,
+        )
 
     def graph_many(
         self,
@@ -3904,48 +3325,11 @@ class Catalog:
         link_type: str = "",
         link_types: list[str] | None = None,
     ) -> dict:
-        """BFS traversal from multiple seed tumblers — thin wrapper over :meth:`graph`.
-
-        Merges per-seed results with node-key = ``str(tumbler)`` and
-        edge-key = ``(from, to, link_type)`` deduplication so a shared
-        node or edge discovered from two seeds only appears once.
-        """
-        merged_nodes: dict[str, object] = {}
-        merged_edges: dict[tuple[str, str, str], object] = {}
-
-        for seed in seeds:
-            if len(merged_nodes) >= self._MAX_GRAPH_NODES:
-                _log.warning("graph_many_node_limit", visited=len(merged_nodes))
-                break
-            result = self.graph(
-                seed, depth=depth, direction=direction,
-                link_type=link_type, link_types=link_types,
-            )
-            for node in result.get("nodes") or []:
-                if len(merged_nodes) >= self._MAX_GRAPH_NODES:
-                    _log.debug(
-                        "graph_many_node_limit_mid_seed",
-                        visited=len(merged_nodes),
-                    )
-                    break
-                key = str(node.tumbler) if hasattr(node, "tumbler") else str(node)
-                if key not in merged_nodes:
-                    merged_nodes[key] = node
-            # Drop edges whose endpoints were excluded by the node cap — otherwise
-            # callers iterating nodes-then-edges see dangling references.
-            for edge in result.get("edges") or []:
-                from_key = str(edge.from_tumbler)
-                to_key = str(edge.to_tumbler)
-                if from_key not in merged_nodes or to_key not in merged_nodes:
-                    continue
-                edge_key = (from_key, to_key, edge.link_type)
-                if edge_key not in merged_edges:
-                    merged_edges[edge_key] = edge
-
-        return {
-            "nodes": list(merged_nodes.values()),
-            "edges": list(merged_edges.values()),
-        }
+        """BFS from multiple seeds."""
+        return self._links.graph_many(
+            seeds, depth=depth, direction=direction,
+            link_type=link_type, link_types=link_types,
+        )
 
     # ── Rebuild ───────────���──────────────────────────��─────────────────────
 
