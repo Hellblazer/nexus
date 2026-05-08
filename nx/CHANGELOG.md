@@ -6,6 +6,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.28.0] - 2026-05-08
+
+Plugin version aligned with conexus 4.28.0. No plugin-side changes;
+the release ships in the conexus package: the new
+``nx catalog synthesize-log`` CLI verb (lossless in-place recovery
+for catalogs in bootstrap-fallback mode), the ``NX_T1_ISOLATED=1``
+precedence fix that lets operators opt into a sealed ephemeral T1
+from inside a Claude session, the unified session_id resolution
+chain (single source of truth across T1, tier-write telemetry,
+and the SessionEnd launcher), and the orphan-multiprocessing-
+tracker sweep that closes a chronic POSIX-semaphore-namespace
+leak. See root ``CHANGELOG.md`` for the full breakdown.
+
 ## [4.27.1] - 2026-05-08
 
 Plugin version aligned with conexus 4.27.1. No plugin-side changes;

@@ -6,6 +6,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.28.0] - 2026-05-08
+
+Minor release. Adds ``nx catalog synthesize-log`` (lossless
+in-place recovery for catalogs in bootstrap-fallback mode) and
+closes four bugs surfaced during the 4.27.1 follow-up review:
+``NX_T1_ISOLATED=1`` precedence (#593), session_id-chain drift
+across T1 / tier-write / launcher (#594), the synthesize-log
+data-loss regression (#591), and chronic POSIX-semaphore
+exhaustion from orphan multiprocessing trackers (nexus-9h1s).
+
 ### Fixed
 
 - **POSIX semaphore exhaustion from orphan multiprocessing trackers**
