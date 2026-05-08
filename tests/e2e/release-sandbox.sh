@@ -266,7 +266,13 @@ case "$MODE" in
         # under ``uv run`` from REPO_ROOT picks up the editable install
         # so the assertion runs against the same in-tree code the
         # sandbox's nx wheel was built from.
-        if (cd "$REPO_ROOT" && uv run pytest -x -q --no-header \
+        # ``-m integration`` is required: the test module is marked
+        # ``pytestmark = pytest.mark.integration`` and the project
+        # default in pyproject.toml deselects that marker. Without
+        # the flag pytest exits 5 ("no tests collected") and the
+        # shakedown reads it as FAIL even though the regression
+        # guard never ran.
+        if (cd "$REPO_ROOT" && uv run pytest -x -q --no-header -m integration \
                 tests/test_indexer_e2e.py::test_greenfield_index_writes_no_deprecated_keys \
                 2>&1) | tail -5 | sed 's/^/  /'; then
             echo "  [pass] greenfield index produced 0 chunks with deprecated keys"
@@ -291,13 +297,20 @@ case "$MODE" in
 
         echo
         echo "── 8/11 T1 scratch use (write + readback) ──"
-        # Note: outside a Claude Code session, no SessionStart hook fires to
-        # spawn the per-session ChromaDB HTTP server, so each `nx scratch *`
-        # invocation falls back to its own EphemeralClient. Cross-invocation
-        # readback is only possible inside a real Claude Code session. This
-        # shakedown verifies put returns a doc id; cross-process visibility
-        # is tested separately by the cc-validation harness.
-        SCRATCH_OUT=$(nx scratch put "shakedown probe $SHAKE_TS" --tags=shakedown 2>&1 | tail -1)
+        # Outside a Claude Code session, no SessionStart hook fires to
+        # publish a T1 chroma address (RDR-105 hybrid discovery: env
+        # passdown from MCP parent OR addr-file PPID walk to a claude
+        # ancestor). With neither path available, ``nx scratch *`` fails
+        # loud with ``T1ServerNotFoundError`` (the silent EphemeralClient
+        # fallback was removed in 4.27.0 because it produced data-loss
+        # bugs where put + list landed in different per-process clients).
+        #
+        # The shakedown opts into the documented escape hatch:
+        # ``NX_T1_ISOLATED=1`` makes T1Database open an in-process
+        # ``EphemeralClient`` for THIS invocation only. Cross-invocation
+        # readback is still impossible without a real session — that's
+        # tested by the cc-validation harness.
+        SCRATCH_OUT=$(NX_T1_ISOLATED=1 nx scratch put "shakedown probe $SHAKE_TS" --tags=shakedown 2>&1 | tail -1)
         if echo "$SCRATCH_OUT" | grep -qE "Stored:"; then
             echo "  put: ok ($SCRATCH_OUT)"
         else

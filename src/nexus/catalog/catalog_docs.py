@@ -47,6 +47,36 @@ if TYPE_CHECKING:
 _log = structlog.get_logger(__name__)
 
 
+# Column ordering for the ``collections`` projection. Co-located with
+# the read methods that consume it so a row-shape change touches one
+# module, not two. ``Catalog.register_collection`` (the writer) reads
+# from here via the module path; no class attribute on Catalog is
+# needed (architectural review nexus-mbm follow-up).
+_COLLECTION_COLUMNS: tuple[str, ...] = (
+    "name",
+    "content_type",
+    "owner_id",
+    "embedding_model",
+    "model_version",
+    "display_name",
+    "legacy_grandfathered",
+    "superseded_by",
+    "superseded_at",
+    "created_at",
+)
+
+
+def _row_to_collection_dict(row: tuple) -> dict:
+    """Coerce a ``collections``-table row tuple into a dict.
+
+    The ``legacy_grandfathered`` column is stored as 0/1 in SQLite;
+    we cast to ``bool`` for callers.
+    """
+    d = dict(zip(_COLLECTION_COLUMNS, row))
+    d["legacy_grandfathered"] = bool(d.get("legacy_grandfathered") or 0)
+    return d
+
+
 class _DocumentOps:
     """Read-only catalog queries composed onto ``Catalog``.
 
@@ -187,20 +217,20 @@ class _DocumentOps:
         """Return every row in the ``collections`` projection, ordered by name."""
         cat = self._cat
         sql = (
-            "SELECT " + ", ".join(cat._COLLECTION_COLUMNS) + " "
+            "SELECT " + ", ".join(_COLLECTION_COLUMNS) + " "
             "FROM collections ORDER BY name"
         )
         rows = cat._db.execute(sql).fetchall()
-        return [cat._row_to_collection_dict(r) for r in rows]
+        return [_row_to_collection_dict(r) for r in rows]
 
     def get_collection(self, name: str) -> dict | None:
         cat = self._cat
         sql = (
-            "SELECT " + ", ".join(cat._COLLECTION_COLUMNS) + " "
+            "SELECT " + ", ".join(_COLLECTION_COLUMNS) + " "
             "FROM collections WHERE name = ?"
         )
         row = cat._db.execute(sql, (name,)).fetchone()
-        return cat._row_to_collection_dict(row) if row else None
+        return _row_to_collection_dict(row) if row else None
 
     def is_legacy_collection(self, name: str) -> bool:
         """Return True if ``name`` is registered AND flagged legacy.
@@ -505,7 +535,7 @@ class _DocumentOps:
                 head_hash=r["head_hash"] or "",
                 indexed_at=r["indexed_at"] or "",
                 meta=json.loads(r["metadata"]) if r.get("metadata") else {},
-                source_mtime=r["source_mtime"] if "source_mtime" in r.keys() else 0.0,
+                source_mtime=r["source_mtime"] if "source_mtime" in r else 0.0,
             )
             for r in rows
         ]
