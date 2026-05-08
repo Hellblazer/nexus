@@ -6,6 +6,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.29.0] - 2026-05-08
+
+Plugin version aligned with conexus 4.29.0. No plugin-side changes; the
+release ships an internal-architecture refactor in the conexus package:
+the 4434-LOC ``catalog.py`` god object is decomposed into a 1683-LOC
+facade plus six focused modules (-62% LOC) following the T2Database
+domain-store pattern. Public API unchanged. See root ``CHANGELOG.md``
+for the full breakdown of the new modules and the supporting test
+isolation, regression guard, and shakedown-script fixes.
+
 ## [4.28.0] - 2026-05-08
 
 Plugin version aligned with conexus 4.28.0. No plugin-side changes;

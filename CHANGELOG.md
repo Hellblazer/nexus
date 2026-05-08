@@ -6,6 +6,107 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.29.0] - 2026-05-08
+
+Minor release. Decomposes the 4434-LOC ``catalog.py`` god object into a
+1683-LOC facade plus six focused modules — a -62% LOC reduction with
+the public API preserved verbatim.  Plus the supporting test isolation
+fix (#601), nexus-wehp regression guard (#599), RDR-104 / RDR-105
+close artefacts (#599 / #600), and two stale shakedown-script bugs
+surfaced and fixed by the live verification of this refactor.
+
+This release ships behaviour-equivalent code with a substantially
+clearer module structure.  No public API changes; downstream callers
+keep working with no source edits beyond the ``catalog/`` package
+itself.  Every existing catalog test passes; 12 new contract tests
+pin the previously-undocumented decomposition invariants
+(composition order, ``_cat_mod`` patching propagation, graph cap
+scenarios, ``bulk_unlink`` event-sourced vs legacy paths,
+shadow-emit ordering).
+
+### Changed
+
+- **Catalog decomposition** (#602 nexus-mbm, #603 nexus-p01o):
+  ``src/nexus/catalog/catalog.py`` 4434 LOC → 1683 LOC (-62%).  Six
+  new focused modules, each composed onto ``Catalog`` as a
+  ``self._<ops>`` facade following the T2Database domain-store pattern
+  (RDR-063):
+
+  - ``catalog_git.py`` (171 LOC): git subprocess plumbing for
+    ``Catalog.init`` / ``sync`` / ``pull`` (clone, init, ensure
+    identity, commit-and-push, pull-if-remote).
+  - ``catalog_spans.py`` (417 LOC): chash span resolution and
+    RDR-086 fallback machinery (``resolve_span_in_t3`` /
+    ``resolve_chash_globally`` / ``fallback_chash_scan`` /
+    ``negate_iso``).
+  - ``catalog_links.py`` (959 LOC, ``_LinkOps``): the link-table SQL
+    surface plus BFS traversal — ``link`` / ``unlink`` / ``links_from``
+    / ``links_to`` / ``link_query`` / ``bulk_unlink`` /
+    ``validate_link`` / ``link_audit`` / ``graph`` / ``graph_many``.
+  - ``catalog_docs.py`` (688 LOC, ``_DocumentOps``): read-only
+    document / owner / collection lookups (``resolve`` / ``find`` /
+    ``by_*`` / ``descendants`` / ``list_collections`` /
+    ``collection_for*`` / ``resolve_alias`` / ``resolve_path`` /
+    ``resolve_chunk``).
+  - ``catalog_sync.py`` (787 LOC, ``_SyncOps``): RDR-104 incremental
+    rebuild machinery, the consistency / offset / header-hash markers,
+    and the JSONL defrag/compact maintenance verbs.
+  - ``catalog_writes.py`` (714 LOC, ``_WriteOps``): non-registration
+    mutations (``update`` / ``delete_document`` / ``rename_collection``
+    / ``supersede_collection`` / ``set_alias`` /
+    ``update_document_collection`` /
+    ``update_documents_collection_batch``).  Registration writes
+    (``register_owner`` / ``register`` / ``register_collection``) stay
+    on the ``Catalog`` facade because they directly drive the
+    event-sourcing dual-write machinery.
+
+  The ``_cat_mod`` reference pattern in three of the new modules
+  preserves the test-monkeypatch contract:
+  ``monkeypatch.setattr("nexus.catalog.catalog._FOO", ...)`` propagates
+  into the extracted modules without needing a re-import dance.
+  ``Catalog._MAX_GRAPH_DEPTH`` / ``_MAX_GRAPH_NODES`` keep their
+  class-attribute aliases so tests reading them at the class level
+  continue to work.
+
+### Fixed
+
+- **Test config-dir isolation** (#601 nexus-mrmq): autouse fixture in
+  ``tests/conftest.py`` redirects ``NEXUS_CONFIG_DIR`` to
+  ``tmp_path/.config/nexus`` for every test, propagating to spawned
+  subprocesses (``claude_dispatch -p``, plan-runner, nx_answer
+  equivalence) via ``os.environ`` inheritance.  Closes a leak where
+  ``uv run pytest -m integration`` rewrote the live MCP's
+  ``~/.config/nexus/current_session`` from a transient subprocess.
+- **nexus-wehp catalog writer-lock regression guard** (#599): adds a
+  multiprocessing test that pins the post-fix invariant — two
+  concurrent ``Catalog.register_collection`` calls succeed without
+  ``database is locked``.  The original 4-second exclusive rebuild
+  window that occasionally exceeded ``busy_timeout=5s`` was eliminated
+  by the 4.23.1 marker persistence + RDR-104 incremental rebuild;
+  this is the regression test the ``nexus-wehp`` acceptance criteria
+  required.
+- **release-sandbox.sh step-5** integration-marker selection: was
+  invoking pytest without ``-m integration`` and reading the
+  exit-5 (no-tests-collected) as FAIL.  Caught during the
+  catalog-decomposition shakeout.
+- **release-sandbox.sh step-8** post-RDR-105 T1 contract drift: the
+  comment + invocation assumed pre-4.27 silent EphemeralClient
+  fallback for ``nx scratch put`` outside a Claude Code session.
+  Post-RDR-105 T1 fails loud with ``T1ServerNotFoundError``; the
+  fix sets ``NX_T1_ISOLATED=1`` for the shakedown invocation.
+
+### Closed
+
+- nexus-wehp (catalog Catalog() construction triggers DELETE FROM
+  links rebuild that races MCP-held SQLite connection)
+- nexus-mrmq (integration tests leak into live ~/.config/nexus/)
+- nexus-mbm (720 review: extract catalog.py god object into focused
+  modules)
+- nexus-p01o (catalog.py write surface: extract update / delete /
+  rename / supersede to catalog_writes.py)
+- RDR-104 (incremental catalog projection rebuild)
+- RDR-105 (T1 chroma architecture: env-passdown)
+
 ## [4.28.0] - 2026-05-08
 
 Minor release. Adds ``nx catalog synthesize-log`` (lossless
