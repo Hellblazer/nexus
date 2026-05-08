@@ -6,6 +6,50 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **POSIX semaphore exhaustion from orphan multiprocessing trackers**
+  (nexus-9h1s): each ungraceful MCP shutdown (SIGKILL/OOM) leaves
+  chroma's multiprocessing-worker ``resource_tracker`` /
+  ``spawn ... --multiprocessing-fork`` subprocesses re-parented to
+  init (PPID=1). The trackers continue holding their POSIX named
+  semaphores until killed; ``stop_t1_server``'s ``safe_killpg`` only
+  signals the CURRENT chroma's process group, so workers from PRIOR
+  sessions live in different (now-empty) PGIDs and cannot be
+  reached. ``sweep_orphan_tmpdirs`` reaped the directories but left
+  the kernel-level resources, so the namespace
+  (``kern.posix.sem.max=10000`` on macOS) accumulated to exhaustion
+  ("Errno 28") system-wide.
+
+  Live shakeout 2026-05-08 03:30 PT on the dev machine: 25 orphan
+  ``nx_t1_*`` tmpdirs, 3,314 orphan multiprocessing trackers, 8,359
+  POSIX semaphores held (83% of cap). Oldest tracker 11 days old.
+  After fix: 0 orphan trackers, 74 semaphores held.
+
+  Fix: introduce ``nexus.session.sweep_orphan_resource_trackers``
+  and wire it into the MCP top-level startup sweep alongside
+  ``sweep_orphan_t1_addr_files`` and ``sweep_orphan_tmpdirs``. Pure
+  parser ``_parse_orphan_tracker_candidates`` (PPID=1 + command
+  contains ``"multiprocessing"`` + age >= 60 s + not in
+  ``protected_pids``) feeds ``_kill_orphan_tracker_pids`` which
+  SIGTERMs each candidate, escalates to SIGKILL on survivors after
+  3 s. Both helpers are individually testable.
+
+  ``nx doctor --check-resources`` extended to surface the orphan
+  count: ``[✓]`` below 100, ``[!]`` advisory between 100 and
+  999, ``[!]`` URGENT at 1000+ with reap-inline instructions and
+  the bead reference. The known-sources warning text adds the
+  nexus-9h1s case alongside nexus-dc57 / nexus-ze2a.
+
+  Regression coverage in ``tests/test_session_sweep_orphan_trackers.py``
+  (9 tests): six parser unit tests pin the discrimination logic
+  (orphan vs live parent, multiprocessing match, etime parsing of
+  ``MM:SS`` / ``H:MM:SS`` / ``DD-HH:MM:SS`` / very-old, protected
+  PID exclusion) and three kill-helper tests verify SIGTERM
+  delivery to live subprocesses, ProcessLookupError handling for
+  already-dead PIDs, and SIGKILL escalation when SIGTERM is
+  trapped.
+
 ### Changed
 
 - **Single source of truth for the Claude session_id chain** (issue

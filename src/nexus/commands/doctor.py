@@ -927,10 +927,12 @@ def _run_check_mineru() -> None:
     "check_resources",
     is_flag=True,
     default=False,
-    help="Probe POSIX semaphore headroom. Exits 2 with 'Errno 28' when "
-         "the namespace is exhausted (known sources: MinerU workers / "
-         "orphan chroma children leaking via multiprocessing). Beads "
-         "nexus-dc57 + nexus-ze2a.",
+    help="Probe POSIX semaphore headroom and report orphan "
+         "multiprocessing-tracker pressure. Exits 2 with 'Errno 28' "
+         "when the namespace is exhausted (known sources: MinerU "
+         "workers / orphan chroma children leaking via multiprocessing "
+         "/ trackers re-parented to init after ungraceful MCP "
+         "shutdowns). Beads nexus-dc57 + nexus-ze2a + nexus-9h1s.",
 )
 @click.option(
     "--check-quotas",
@@ -1305,19 +1307,91 @@ def _probe_semaphore_namespace() -> tuple[bool, str]:
         return False, f"{exc!r}"
 
 
+def _count_orphan_trackers() -> int | None:
+    """Return the number of PPID=1 multiprocessing tracker orphans
+    visible to this user, or ``None`` if the count cannot be
+    obtained. Pure read; no side effects.
+
+    Bead nexus-9h1s. Each orphan tracker holds POSIX semaphores
+    until killed; the namespace is bounded
+    (``kern.posix.sem.max=10000`` on macOS). A high count predicts
+    imminent SemLock failure even when the live probe still passes.
+    """
+    try:
+        import subprocess
+
+        from nexus.session import _parse_orphan_tracker_candidates
+
+        ps_output = subprocess.check_output(
+            ["ps", "-eo", "pid,ppid,etime,command"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+        return len(_parse_orphan_tracker_candidates(ps_output))
+    except Exception:
+        return None
+
+
 def _run_check_resources() -> None:
-    """Emit a resource-pressure report to stdout; exit 2 on failure."""
+    """Emit a resource-pressure report to stdout; exit 2 on failure.
+
+    Two signals:
+
+    * ``_probe_semaphore_namespace`` -- direct SemLock allocation;
+      fails with Errno 28 when the namespace is exhausted.
+    * Orphan multiprocessing tracker count via
+      :func:`_count_orphan_trackers`. Warns above 100 (advisory)
+      and 1000 (urgent). Bead nexus-9h1s.
+    """
     ok, msg = _probe_semaphore_namespace()
+    orphan_count = _count_orphan_trackers()
     if ok:
         click.echo(f"[\u2713] resources: {msg}")
+        if orphan_count is None:
+            return
+        if orphan_count >= 1000:
+            click.echo(
+                f"[!] orphan multiprocessing trackers: {orphan_count} "
+                f"(URGENT - reap soon to avoid Errno 28; each leaks "
+                f"POSIX semaphores until killed)",
+                err=True,
+            )
+            click.echo(
+                "    Reap inline: python -c 'from nexus.session import "
+                "sweep_orphan_resource_trackers; "
+                "print(sweep_orphan_resource_trackers())'\n"
+                "    Or: ps -eo pid,ppid,command | "
+                "awk '$2==1 && /multiprocessing/ {print $1}' | "
+                "xargs kill -TERM",
+                err=True,
+            )
+        elif orphan_count >= 100:
+            click.echo(
+                f"[!] orphan multiprocessing trackers: {orphan_count} "
+                f"(advisory - accumulating)"
+            )
+        else:
+            click.echo(
+                f"[\u2713] orphan multiprocessing trackers: {orphan_count}"
+            )
         return
     click.echo(f"[\u2717] resources: SemLock probe FAILED — {msg}", err=True)
+    if orphan_count is not None:
+        click.echo(
+            f"    orphan multiprocessing trackers: {orphan_count}",
+            err=True,
+        )
     click.echo(
         "Known sources of POSIX semaphore exhaustion on this project:\n"
         "  - nexus-ze2a: MinerU workers leak semaphores.\n"
         "    Workaround: `nx mineru stop` (kills the whole process group).\n"
         "  - nexus-dc57: orphan chroma children from earlier nexus sessions.\n"
         "    Workaround: kill orphan chromas (`ps aux | grep 'chroma run'`).\n"
+        "  - nexus-9h1s: multiprocessing.resource_tracker subprocesses\n"
+        "    re-parented to init (PPID=1) after ungraceful MCP shutdowns.\n"
+        "    Reap with: python -c 'from nexus.session import "
+        "sweep_orphan_resource_trackers; "
+        "print(sweep_orphan_resource_trackers())'\n"
         "If the count does not recover, reboot — macOS does not unlink\n"
         "leaked named semaphores until the next boot.",
         err=True,
