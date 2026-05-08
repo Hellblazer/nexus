@@ -133,21 +133,25 @@ def _print_tier_status_summary() -> None:
     printing for a transactional session that didn't intend to
     persist anything).
 
-    Resolution: NX_SESSION_ID env, then read_claude_session_id from
-    the session file. Mirrors the same chain ``nx tier-status``
-    uses so the two surfaces agree.
+    Resolution: delegates to
+    :func:`nexus.session.resolve_active_session_id`. Short-circuits
+    when no session is bound -- a per-session summary makes no sense
+    without a session, and querying ``WHERE session_id = "unknown"``
+    would leak rows from unrelated invocations into the user-facing
+    summary.
+
+    Issue #594 / nexus-9e9a: this site shares the resolution chain
+    with the T1 chunk store and the tier-write audit log, so the
+    three surfaces never disagree on attribution.
     """
     try:
         import sqlite3
         from pathlib import Path
 
         from nexus.commands._helpers import default_db_path
-        from nexus.session import read_claude_session_id
+        from nexus.session import resolve_active_session_id
 
-        session_id = (
-            os.environ.get("NX_SESSION_ID", "").strip()
-            or read_claude_session_id()
-        )
+        session_id = resolve_active_session_id()
         if not session_id:
             return
         db_path = default_db_path()

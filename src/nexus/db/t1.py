@@ -21,8 +21,8 @@ def _now_iso() -> str:
 from nexus.session import (
     _t1_isolated_env,
     find_immediate_claude_pid,
-    read_claude_session_id,
     read_t1_addr_for,
+    resolve_active_session_id,
 )
 
 _T = TypeVar("_T")
@@ -148,28 +148,25 @@ class T1Database:
     def _resolve_session_id(arg: str | None) -> str:
         """Resolve the session_id used as the per-entry metadata filter.
 
-        Chain: explicit ctor arg > ``NX_SESSION_ID`` env >
-        ``read_claude_session_id()`` (~/.config/nexus/current_session)
-        > new ``uuid4()``.
+        Delegates to :func:`nexus.session.resolve_active_session_id` and
+        substitutes ``"unknown"`` when the chain returns ``None``.
 
-        The ``read_claude_session_id()`` step is the load-bearing
-        fallback for cross-process T1 visibility (nexus-h8ge): the MCP
-        server, a Bash-tool sibling, and a hook subprocess all find
-        the same Claude session via the on-disk pointer and converge
-        on its UUID, so each side's session_id metadata filter sees
-        the others' entries. Pre-fix this step was missing in every
-        construction branch and every shell ``nx scratch`` invocation
-        orphaned its writes under a fresh per-process UUID,
-        breaking every nx-plugin hook that read T1 from the shell
-        (subagent-start, post_compact, pre_close_verification,
-        divergence-language-guard).
+        The per-entry session_id is the metadata filter key on every
+        chunk; it must never be empty. ``"unknown"`` is the canonical
+        sentinel: when no session is bound, the audit log
+        (``mcp/core._record_tier_write``) and the T1 chunk store agree
+        on attribution and operators can grep for "unknown" to find
+        rows that did not bind to a Claude session.
+
+        Pre-issue-#594 this method open-coded the chain and used
+        ``uuid4()`` as the fallback, which made T1 writes impossible to
+        correlate with the audit log when the on-disk pointer was
+        missing -- the exact failure mode that PR #590 was supposed to
+        close. Issue #594 / nexus-9e9a unifies the chain and the
+        fallback so the three drift-prone sites
+        (T1 / tier-write / launcher) have one source of truth.
         """
-        return (
-            arg
-            or os.environ.get("NX_SESSION_ID", "").strip()
-            or read_claude_session_id()
-            or str(uuid4())
-        )
+        return resolve_active_session_id(arg) or "unknown"
 
     def _init_new_discovery(self, chromadb, session_id: str | None) -> None:
         """RDR-105 P2 (nexus-mj2o): four-branch fail-loud constructor.

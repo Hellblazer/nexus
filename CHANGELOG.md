@@ -6,6 +6,40 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Single source of truth for the Claude session_id chain** (issue
+  #594, nexus-9e9a): introduce ``nexus.session.resolve_active_session_id``
+  and route the three open-coded callsites
+  (``T1Database._resolve_session_id``, ``mcp/core._record_tier_write``,
+  ``_session_end_launcher._print_tier_status_summary``) through it.
+  Pre-PR each site implemented ``NX_SESSION_ID env >
+  read_claude_session_id() > <fallback>`` independently with three
+  divergent fallbacks: ``uuid4()`` (T1), ``"unknown"``
+  (``_record_tier_write``), and no fallback (launcher). The drift
+  between the first two was the exact bug class that produced PR #590
+  / nexus-h8ge -- the audit log and the T1 chunk store disagreed on
+  attribution because each site mutated its chain independently.
+
+  ``T1Database`` and ``_record_tier_write`` now both fall back to
+  ``"unknown"`` so the audit log and the T1 chunk store agree on
+  attribution: rows under ``"unknown"`` are exactly the rows from
+  processes that did not bind to a Claude session, grep-able for
+  forensics. Behaviour change: T1 no longer mints a per-process
+  ``uuid4()`` for an anonymous CLI run -- the existing
+  ``test_uuid_fallback_when_nothing_set`` regression test (now
+  ``test_unknown_fallback_when_nothing_set``) was locking in the
+  drift-prone behaviour. The launcher still short-circuits when the
+  resolver returns ``None`` (no useful per-session summary without a
+  bound session; querying ``WHERE session_id = "unknown"`` would leak
+  rows from unrelated invocations into the user-facing summary).
+
+  Regression coverage in ``tests/test_session_resolver.py`` (12 tests):
+  six chain-semantics tests pin the resolver's behaviour, six callsite
+  tests assert each of the three sites routes through the helper and
+  applies its documented fallback. Future changes to the chain happen
+  in one place or surface here.
+
 ### Fixed
 
 - **`NX_T1_ISOLATED=1` precedence inside Claude sessions** (issue #593,
