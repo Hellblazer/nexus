@@ -13,7 +13,6 @@ import threading
 import time
 from urllib.parse import urlparse
 import re
-import subprocess
 from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -622,29 +621,11 @@ class CatalogLink:
         }
 
 
-def _run_git(
-    args: list[str], cwd: Path, check: bool = True
-) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=30)
-    if check and result.returncode != 0:
-        raise RuntimeError(f"git command failed: {result.stderr.strip()}")
-    return result
-
-
-def _ensure_git_identity(cwd: Path) -> None:
-    """Set local git identity if none is configured (CI runners, fresh machines).
-
-    Why: Catalog.init runs ``git commit``, which fails with "Author identity
-    unknown" when neither global nor local user.name/user.email is set. Real
-    users with global git config see their own identity; environments without
-    one get a benign fallback so the initial commit succeeds.
-    """
-    name = _run_git(["git", "config", "user.name"], cwd=cwd, check=False)
-    if name.returncode != 0 or not name.stdout.strip():
-        _run_git(["git", "config", "user.name", "Nexus Catalog"], cwd=cwd)
-    email = _run_git(["git", "config", "user.email"], cwd=cwd, check=False)
-    if email.returncode != 0 or not email.stdout.strip():
-        _run_git(["git", "config", "user.email", "nexus@local"], cwd=cwd)
+# nexus-mbm: git subprocess helpers and the bodies of init / sync /
+# pull live in :mod:`nexus.catalog.catalog_git`. The Catalog methods
+# below delegate to those helpers; they keep self-state interactions
+# (locking, defrag-on-bloat, projection rebuild) here.
+from nexus.catalog import catalog_git as _git
 
 
 class Catalog:
@@ -1414,48 +1395,22 @@ class Catalog:
 
     @classmethod
     def init(cls, catalog_path: Path, remote: str | None = None) -> Catalog:
-        """Create catalog git repo with empty JSONL files."""
+        """Create catalog git repo with empty JSONL files.
+
+        Delegates the git plumbing to :mod:`nexus.catalog.catalog_git`
+        (nexus-mbm). When *remote* is provided and no local repo
+        exists, prefer cloning so the new machine starts from the
+        existing canonical history; otherwise initialise a local
+        repo from scratch.
+        """
         git_dir = catalog_path / ".git"
         if remote and not git_dir.exists():
-            # Clone from remote if catalog doesn't exist locally (new machine)
-            import subprocess as _sp
-            result = _sp.run(
-                ["git", "clone", remote, str(catalog_path)],
-                capture_output=True, text=True, timeout=30,
-            )
-            if result.returncode == 0:
-                _log.info("catalog_cloned_from_remote", remote=remote)
-                db_path = catalog_path / ".catalog.db"
-                return cls(catalog_path, db_path)
-            else:
-                raise RuntimeError(
-                    f"Failed to clone catalog from {remote}: {result.stderr.strip()}"
-                )
-        catalog_path.mkdir(parents=True, exist_ok=True)
-        if not git_dir.exists():
-            _run_git(["git", "init"], cwd=catalog_path)
-        _ensure_git_identity(catalog_path)
-        # Create empty JSONL files if missing
-        for name in ("documents.jsonl", "owners.jsonl", "links.jsonl"):
-            p = catalog_path / name
-            if not p.exists():
-                p.touch()
-        # Create .gitignore
-        gitignore = catalog_path / ".gitignore"
-        if not gitignore.exists():
-            gitignore.write_text(".catalog.db\n")
-        # Initial commit if no commits yet
-        result = _run_git(["git", "rev-parse", "HEAD"], cwd=catalog_path, check=False)
-        if result.returncode != 0:
-            _run_git(["git", "add", "-A"], cwd=catalog_path)
-            _run_git(["git", "commit", "-m", "Init catalog"], cwd=catalog_path)
+            _git.clone_catalog(remote, catalog_path)
+            return cls(catalog_path, catalog_path / ".catalog.db")
+        _git.init_repo(catalog_path)
         if remote:
-            # Only add remote if not already set
-            r = _run_git(["git", "remote"], cwd=catalog_path, check=False)
-            if "origin" not in r.stdout:
-                _run_git(["git", "remote", "add", "origin", remote], cwd=catalog_path)
-        db_path = catalog_path / ".catalog.db"
-        return cls(catalog_path, db_path)
+            _git.add_remote_origin_if_missing(catalog_path, remote)
+        return cls(catalog_path, catalog_path / ".catalog.db")
 
     @staticmethod
     def is_initialized(catalog_path: Path) -> bool:
@@ -1486,29 +1441,23 @@ class Catalog:
     def sync(self, message: str = "catalog update") -> None:
         """git add -A && git commit && git push (if remote configured).
 
-        Auto-compacts JSONL files when bloat ratio exceeds 3x live records.
+        Auto-compacts JSONL files when bloat ratio exceeds 3x live
+        records. Holds the catalog directory flock for the duration
+        so concurrent appenders don't race the commit. Subprocess
+        plumbing lives in :mod:`nexus.catalog.catalog_git`.
         """
         dir_fd = self._acquire_lock()
         try:
             if self._should_compact():
                 _log.info("catalog_auto_defrag")
                 self._defrag_unlocked()
-            _run_git(["git", "add", "-A"], cwd=self._dir)
-            status = _run_git(["git", "status", "--porcelain"], cwd=self._dir)
-            if not status.stdout.strip():
-                return
-            _run_git(["git", "commit", "-m", message], cwd=self._dir)
-            remote = _run_git(["git", "remote"], cwd=self._dir, check=False)
-            if remote.stdout.strip():
-                _run_git(["git", "push", "-u", "origin", "HEAD"], cwd=self._dir, check=False)
+            _git.commit_and_push(self._dir, message)
         finally:
             self._release_lock(dir_fd)
 
     def pull(self) -> None:
         """git pull && rebuild SQLite from JSONL."""
-        remote = _run_git(["git", "remote"], cwd=self._dir, check=False)
-        if remote.stdout.strip():
-            _run_git(["git", "pull"], cwd=self._dir, check=False)
+        _git.pull_origin_if_remote(self._dir)
         self.rebuild()
 
     # ── Locking ────────────────────────────────────────────────────────────
