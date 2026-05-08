@@ -2,13 +2,31 @@
 title: "T1 Chroma Architecture: Eliminate On-Disk Session Records via Env-Var Passdown"
 id: RDR-105
 type: Architecture
-status: accepted
+status: closed
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-07
 accepted_date: 2026-05-07
-related_issues: [nexus-lqp7, "GH-579", "GH-567", "GH-572", "GH-575", "GH-576"]
+closed_date: 2026-05-08
+close_reason: implemented
+related_issues: [nexus-lqp7, nexus-d73b, nexus-h8ge, "GH-579", "GH-567", "GH-572", "GH-575", "GH-576"]
+gap_closure:
+  - gap: 1
+    title: "Discovery-via-on-disk-record is inherently racy"
+    pointer: src/nexus/mcp/_t1_state.py:22
+  - gap: 2
+    title: "Cross-process idempotency is unenforceable in-process"
+    pointer: src/nexus/mcp/core.py:139
+  - gap: 3
+    title: "Silent ephemeral fallback is the data-loss generator"
+    pointer: src/nexus/db/t1.py:226
+  - gap: 4
+    title: "The watchdog's role is muddled"
+    pointer: src/nexus/session.py:813
+  - gap: 5
+    title: "Sub-agent dispatch sharing is implicit, not contractual"
+    pointer: src/nexus/operators/dispatch.py:44
 ---
 
 # RDR-105: T1 Chroma Architecture: Eliminate On-Disk Session Records via Env-Var Passdown
@@ -473,3 +491,47 @@ Stdlib-only (just typing). Imported by both the lifespan (writer) and the dispat
 - `src/nexus/t1_watchdog.py`, `src/nexus/mcp/core.py`, `src/nexus/db/t1.py`, `src/nexus/session.py`, `src/nexus/hooks.py`, source files this RDR rewrites.
 - `tests/test_t1_invariants.py`, `tests/test_t1_watchdog.py`, `tests/test_mcp_chroma_lifecycle.py`, `tests/test_session.py`, current scaffolding (will be replaced).
 - `docs/architecture.md`, three-tier T1/T2/T3 design context.
+
+## Close — 2026-05-08
+
+### Implementation shipped
+
+Five-phase epic `nexus-d73b` (closed 2026-05-07) shipped in **conexus 4.27.0**:
+
+- **Phase 1** (`nexus-4fek`, PR #581): design lock + hybrid-discovery spike, feature-flagged behind `NX_T1_NEW_DISCOVERY=1`.
+- **Phase 2** (`nexus-9fu7`, PR #582): constructor gate + dispatcher (4-branch `__init__`, `find_immediate_claude_pid`, lifespan publish, 3-mode dispatcher, new `_t1_state` module).
+- **Phase 3** (`nexus-xf5r`, PR #583): default flip + sandbox shakeout (six T1 cases + 10-parallel stress).
+- **Phase 4** (`nexus-jnx7`, PR #585): deletion of watchdog + record machinery + reconcile + sweep + `_OWNED_CHROMA` legacy migration; added periodic orphan reaper.
+- **Phase 5** (`nexus-s368`, PR #586 + release commit `7dc59e84`): release 4.27.0 (CHANGELOG, `NEXUS_SKIP_T1` deprecation alias for `NX_T1_ISOLATED=1`, `nx doctor --check-t1`).
+
+Net deletion: ~5000 LOC removed from production code, plus the corresponding test scaffolding for the deleted machinery.
+
+### Gap closure pointers
+
+| Gap | Title | Pointer |
+|---|---|---|
+| 1 | Discovery-via-on-disk-record is inherently racy | `src/nexus/mcp/_t1_state.py:22` (single-writer `T1_ADDR` module replacing the multi-writer record system) |
+| 2 | Cross-process idempotency is unenforceable in-process | `src/nexus/mcp/core.py:139` (env-discovery branch — eliminates the need for cross-process idempotency) |
+| 3 | Silent ephemeral fallback is the data-loss generator | `src/nexus/db/t1.py:226` (fail-loud `T1ServerNotFoundError` raise; no fallback path) |
+| 4 | The watchdog's role is muddled | `src/nexus/session.py:813` (`sweep_orphan_t1_addr_files`, periodic best-effort orphan reaper replacing the conflated watchdog) |
+| 5 | Sub-agent dispatch sharing is implicit, not contractual | `src/nexus/operators/dispatch.py:44` (`share_t1` / `ephemeral` explicit dispatcher contract) |
+
+### Production validation
+
+- **`nexus-h8ge`** (closed 2026-05-08): live shakeout against shipped 4.27.0 binary. PR #590 landed; 56 T1 unit tests pass; new e2e test `TestE2ESessionIdSharedAcrossProcesses` passes (real chroma 6 s); full unit suite 6595 passed / 33 skipped / 0 failures. Live shell `put` + `list` round-trips after reinstall.
+- **Post-release fixes already shipped**: `nexus-svpq` (PR #596 — `NX_T1_ISOLATED=1` outranks env+addr-file discovery), `nexus-9h1s` (PR #598 — orphan multiprocessing tracker reaping at MCP startup). Six-bug class structurally eliminated; the seven T1 manifestations between #567 and #579 have not recurred.
+
+### Deferred follow-ups (cleared at close)
+
+Both surfaced during P4 review and originally deferred; resolved alongside the close:
+
+- **`nexus-7m8i`** (closed 2026-05-08): emit `t1_chroma_init_owned` info log on happy-path spawn. The pre-RDR-105 `_t1_chroma_init_if_owner` was silent on success; the same gap survived through P4's rewrite at `src/nexus/mcp/core.py:200-230` (only the no-claude-pid warning fired). Now emits one structured `info` per owner spawn with `host` / `port` / `server_pid` / `claude_pid` / `tmpdir`. Two regression tests in `TestLifespanNewDiscoveryGenerator` lock the behaviour.
+- **`nexus-9nbk`** (closed 2026-05-08): delete legacy `getsid`-keyed session helpers (`_stable_pid`, `session_file_path`, `write_session_file`, `read_session_id`). The pre-RDR-094 PID-keyed scheme survived P4 because `memory_store.py` still fell back through it for direct-CLI session resolution. Migrated to `read_claude_session_id`; the four legacy functions and their tests are removed.
+
+### Test coverage post-RDR-105
+
+- `tests/test_t1_discovery.py` — 56 unit tests covering the four `__init__` branches, env-passdown, addr-file discovery, isolation, and ephemeral mode.
+- `tests/integration/test_e2e_session_id_shared_across_processes.py` — real-chroma e2e for the dispatcher's `share_t1=True` contract.
+- `tests/test_session_propagation_hypotheses.py`, `tests/test_ppid_chain_hypothesis.py`, `tests/test_session_sweep_orphan_trackers.py` — supporting hypothesis + sweep coverage.
+
+No post-mortem: shipped declared scope across five phases, with the structural-bug-class elimination thesis confirmed by the absence of seventh-instance manifestations through 4.27.x → 4.28.0.
