@@ -74,6 +74,102 @@ class TestCanonicalHelper:
         assert nexus_config_dir() == tmp_path
 
 
+class TestAutouseConfigDirIsolation:
+    """nexus-mrmq regression: the autouse ``_isolate_config_dir`` fixture
+    must redirect ``NEXUS_CONFIG_DIR`` to a tmp dir so child processes
+    spawned by integration tests (``claude_dispatch -p``, plan-runner,
+    nx_answer equivalence suite) inherit the redirect via
+    ``os.environ`` and write ``current_session`` /
+    ``t1_addr.<claude_pid>`` files under tmp instead of the user's
+    real ``~/.config/nexus/``.
+
+    These tests intentionally do NOT delenv ``NEXUS_CONFIG_DIR`` —
+    they assert the autouse fixture's effect.
+    """
+
+    def test_env_var_set_to_non_home_path(self):
+        env_path = os.environ.get("NEXUS_CONFIG_DIR", "")
+        assert env_path, (
+            "NEXUS_CONFIG_DIR is unset — the autouse _isolate_config_dir "
+            "fixture in tests/conftest.py is missing or has been disabled. "
+            "This is the guardrail that prevents integration-test "
+            "subprocesses from rewriting the user's real "
+            "~/.config/nexus/current_session and t1_addr.<pid> files."
+        )
+        real_config = Path.home() / ".config" / "nexus"
+        assert Path(env_path) != real_config, (
+            "NEXUS_CONFIG_DIR resolves to the user's real config "
+            "directory; integration-test isolation is broken."
+        )
+
+    def test_config_dir_resolves_under_tmp(self):
+        """``nexus_config_dir()`` follows the autouse redirect."""
+        from nexus.config import nexus_config_dir
+
+        resolved = nexus_config_dir()
+        real_config = Path.home() / ".config" / "nexus"
+        assert resolved != real_config
+
+    def test_subprocess_inherits_redirected_path(self):
+        """A subprocess that imports nexus and reads
+        ``nexus_config_dir()`` must resolve to the autouse tmp dir,
+        not the user's home. This is the actual leak path: a child
+        process inheriting ``os.environ`` from pytest must see the
+        override.
+        """
+        import subprocess
+        import sys
+
+        result = subprocess.run(
+            [
+                sys.executable, "-c",
+                "from nexus.config import nexus_config_dir; "
+                "print(nexus_config_dir())",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        child_path = result.stdout.strip()
+        real_config = str(Path.home() / ".config" / "nexus")
+        assert child_path != real_config, (
+            f"Child subprocess resolved nexus_config_dir() to "
+            f"{child_path!r}, the user's real home. The autouse "
+            "fixture's NEXUS_CONFIG_DIR did not propagate via "
+            "os.environ inheritance."
+        )
+
+    def test_user_real_config_untouched_by_leak_pattern(self, tmp_path):
+        """End-to-end: simulate the leak pattern (a child process
+        writing ``current_session``) and verify it lands under tmp,
+        not under the user's home."""
+        import subprocess
+        import sys
+
+        result = subprocess.run(
+            [
+                sys.executable, "-c",
+                "from nexus.session import write_claude_session_id; "
+                "write_claude_session_id('test-leak-uuid'); "
+                "from nexus.session import claude_session_file; "
+                "print(claude_session_file())",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        written_path = Path(result.stdout.strip())
+        real_session_file = Path.home() / ".config" / "nexus" / "current_session"
+        assert written_path != real_session_file, (
+            f"Child wrote current_session to {written_path!r}, the "
+            "user's real session file. Integration-test isolation is "
+            "broken."
+        )
+        # Confirm the autouse tmp dir actually received the write.
+        assert written_path.exists()
+        assert written_path.read_text().strip() == "test-leak-uuid"
+
+
 class TestT2IsolatedUnderOverride:
     def test_default_db_path_redirects(self, sandbox_dir: Path):
         from nexus.commands._helpers import default_db_path
