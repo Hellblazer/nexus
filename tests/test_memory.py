@@ -165,7 +165,7 @@ def test_t2_uses_session_module_for_session_id(db: T2Database) -> None:
     # moved with them. Patch the new location to verify the wiring.
     import nexus.db.t2.memory_store as mem_mod
     import nexus.session as sess_mod
-    assert mem_mod._read_session_id is sess_mod.read_session_id
+    assert mem_mod._read_session_id is sess_mod.read_claude_session_id
     with patch("nexus.db.t2.memory_store._read_session_id", return_value="test-sid-xyz"):
         row_id = db.put(project="p", title="t.md", content="x")
     assert db.get(id=row_id)["session"] == "test-sid-xyz"

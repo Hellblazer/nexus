@@ -122,52 +122,6 @@ def resolve_active_session_id(arg: str | None = None) -> str | None:
     return None
 
 
-def _stable_pid() -> int:
-    """Return a stable process-group anchor for legacy session file naming.
-
-    Lookup order:
-    1. ``NX_SESSION_PID`` env var — allows callers to pin a specific PID.
-    2. Process session leader (``os.getsid(0)``).
-
-    Note: os.getsid(0) is unreliable across Claude Code Bash subprocesses.
-    New code should use read_claude_session_id() / write_claude_session_id()
-    instead of session_file_path() / write_session_file() / read_session_id().
-    """
-    if raw := os.environ.get("NX_SESSION_PID"):
-        try:
-            return int(raw)
-        except ValueError:
-            pass  # intentional: invalid NX_SESSION_PID env var, fall through to os.getsid(0)
-    return os.getsid(0)
-
-
-def session_file_path(ppid: int | None = None) -> Path:
-    """Return the legacy getsid-keyed session file path."""
-    pid = ppid if ppid is not None else _stable_pid()
-    return _nexus_config_dir_at_import() / "sessions" / f"{pid}.session"
-
-
-def write_session_file(session_id: str, ppid: int | None = None) -> Path:
-    """Write *session_id* to the legacy getsid-keyed session file."""
-    path = session_file_path(ppid)
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd = os.open(str(path), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
-    try:
-        os.write(fd, session_id.encode())
-    finally:
-        os.close(fd)
-    return path
-
-
-def read_session_id(ppid: int | None = None) -> str | None:
-    """Read and return the session ID from the legacy getsid-keyed file, or None."""
-    try:
-        text = session_file_path(ppid).read_text().strip()
-        return text or None
-    except OSError:
-        return None  # intentional: session file not created yet, normal on first run
-
-
 # ── T1 server session management (RDR-010) ────────────────────────────────────
 
 _T1_SERVER_HOST: str = "127.0.0.1"

@@ -28,10 +28,11 @@ def sandbox_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     # Reload modules that resolve their path constants at import time so
     # the new env var takes effect within the test scope. Also reload
-    # nexus.db.t2.memory_store because it imports ``read_session_id``
-    # from nexus.session by name — a bare reload of nexus.session would
-    # leave memory_store pointing at the old function object and break
-    # the identity-check assertion in tests/test_memory.py.
+    # nexus.db.t2.memory_store because it imports
+    # ``read_claude_session_id`` from nexus.session by name — a bare
+    # reload of nexus.session would leave memory_store pointing at the
+    # old function object and break the identity-check assertion in
+    # tests/test_memory.py.
     import nexus.session
     import nexus.context
     import nexus.checkpoint
@@ -118,12 +119,6 @@ class TestSessionIsolatedUnderOverride:
 
         assert CLAUDE_SESSION_FILE == sandbox_dir / "current_session"
 
-
-
-    def test_session_file_path_redirects(self, sandbox_dir: Path):
-        from nexus.session import session_file_path
-
-        assert session_file_path(1234) == sandbox_dir / "sessions" / "1234.session"
 
 
 class TestCheckpointAndBufferRedirects:

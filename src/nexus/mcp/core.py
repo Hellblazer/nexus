@@ -1424,7 +1424,7 @@ def memory_put(
         if not content:
             return "Error: content is required"
         # Translate empty strings to None so MemoryStore.put's
-        # fall-back chain (NX_AGENT env, _read_session_id) takes
+        # fall-back chain (NX_AGENT env, read_claude_session_id) takes
         # over rather than persisting literal empty strings.
         agent_arg = agent if agent else None
         # Resolve session at the MCP layer so NX_SESSION_ID env wins
