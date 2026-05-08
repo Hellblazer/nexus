@@ -13,7 +13,6 @@ import threading
 import time
 from urllib.parse import urlparse
 import re
-from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -1201,24 +1200,13 @@ class Catalog:
         return self._docs.list_by_collection(physical_collection, limit=limit)
 
     # ── RDR-101 Phase 6: Collections projection (nexus-o6aa.14) ─────────
-
-    _COLLECTION_COLUMNS = (
-        "name",
-        "content_type",
-        "owner_id",
-        "embedding_model",
-        "model_version",
-        "display_name",
-        "legacy_grandfathered",
-        "superseded_by",
-        "superseded_at",
-        "created_at",
-    )
-
-    def _row_to_collection_dict(self, row: tuple) -> dict:
-        d = dict(zip(self._COLLECTION_COLUMNS, row))
-        d["legacy_grandfathered"] = bool(d.get("legacy_grandfathered") or 0)
-        return d
+    # nexus-mbm follow-up: ``_COLLECTION_COLUMNS`` and
+    # ``_row_to_collection_dict`` moved to module-level in
+    # :mod:`nexus.catalog.catalog_docs` so the read methods that
+    # consume them (``list_collections``, ``get_collection``,
+    # ``list_by_collection``) and the writer below can share one
+    # source of truth without crossing the ``cat._row_to_...``
+    # private-method boundary.
 
     def register_collection(
         self,
@@ -2089,9 +2077,27 @@ class Catalog:
     # ``self._links`` in ``__init__``. The methods below are one-line
     # delegates that preserve the public Catalog API.
     #
-    # Class-attribute aliases keep ``cat._MAX_GRAPH_DEPTH`` /
-    # ``cat._MAX_GRAPH_NODES`` addressable at the historical names
-    # (a handful of tests read them directly on the instance).
+    # ``cat._MAX_GRAPH_DEPTH`` / ``cat._MAX_GRAPH_NODES`` addressable
+    # at the historical names — copied here from ``catalog_links``
+    # at class-body time so both ``Catalog._MAX_GRAPH_NODES`` (class
+    # access, used by ``test_catalog_graph_many``) and
+    # ``cat._MAX_GRAPH_NODES`` (instance access) return an integer.
+    #
+    # Patching contract for tests:
+    #   (a) ``patch.object(type(cat), "_MAX_GRAPH_NODES", N)`` — works
+    #       (Catalog class attribute replaced; ``getattr(cat, ...)``
+    #       returns N).
+    #   (b) ``cat._MAX_GRAPH_NODES = N`` — works (instance attribute
+    #       shadows the class attribute).
+    #   (c) ``monkeypatch.setattr("nexus.catalog.catalog_links._MAX_GRAPH_NODES",
+    #       N)`` — does NOT propagate (Catalog's class attribute was
+    #       copied by value at class-body time and is not re-read).
+    #       Patch via (a) or (b) instead.
+    #
+    # A ``@property`` re-reading ``catalog_links`` on every access
+    # would propagate (c) but breaks ``Catalog._MAX_GRAPH_NODES``
+    # class-level reads (returns the property descriptor instead of
+    # an int). The class-attribute alias is the simpler contract.
     from nexus.catalog import catalog_links as _links_mod
     _MAX_GRAPH_DEPTH = _links_mod._MAX_GRAPH_DEPTH
     _MAX_GRAPH_NODES = _links_mod._MAX_GRAPH_NODES

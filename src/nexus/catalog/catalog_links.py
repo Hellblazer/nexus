@@ -38,6 +38,17 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+# nexus-mbm: ``catalog`` is fully loaded by the time this module is
+# imported (the import lives inside ``Catalog.__init__``). Reference
+# the patchable module-level helpers (``_cat_mod._SPAN_PATTERN``,
+# ``_cat_mod._make_event``) and the graph caps through the module object so
+# tests that ``monkeypatch.setattr("nexus.catalog.catalog._FOO",
+# ...)`` propagate here. Direct ``from … import _FOO`` would bind to
+# the original value at load time and silently defeat the patch.
+# Type / dataclass imports (``LinkRecord``, ``_LinkCreatedPayload``,
+# ``_LinkDeletedPayload``) stay direct because they are not patched.
+from nexus.catalog import catalog as _cat_mod
+
 if TYPE_CHECKING:
     from chromadb.api import ClientAPI
 
@@ -99,14 +110,12 @@ class _LinkOps:
         Returns ``True`` if a new row was inserted, ``False`` if an
         existing row was merged (metadata + co_discovered_by fold).
         """
-        from nexus.catalog.catalog import (
-            LinkRecord, _LinkCreatedPayload, _make_event, _SPAN_PATTERN,
-        )
+        from nexus.catalog.catalog import LinkRecord, _LinkCreatedPayload
         cat = self._cat
 
         # Validate span format (Xanadu transclusion addressing)
         for span, label in [(from_span, "from_span"), (to_span, "to_span")]:
-            if not _SPAN_PATTERN.match(span):
+            if not _cat_mod._SPAN_PATTERN.match(span):
                 raise ValueError(
                     f"invalid {label}: {span!r} — use 'line_start-line_end', "
                     f"'chunk_idx:char_start-char_end', 'chash:<sha256hex>', "
@@ -162,7 +171,7 @@ class _LinkOps:
                 created_by=row[1], created_at=row[3] or now,
                 meta=existing_meta,
             )
-            event = _make_event(
+            event = _cat_mod._make_event(
                 _LinkCreatedPayload(
                     from_doc=str(from_t),
                     to_doc=str(to_t),
@@ -201,7 +210,7 @@ class _LinkOps:
                 from_span=from_span, to_span=to_span,
                 created_by=created_by, created_at=now, meta=combined_meta,
             )
-            event = _make_event(
+            event = _cat_mod._make_event(
                 _LinkCreatedPayload(
                     from_doc=str(from_t),
                     to_doc=str(to_t),
@@ -279,13 +288,11 @@ class _LinkOps:
         Raises ``ValueError`` on dangling endpoints (unless
         ``allow_dangling=True``) or malformed spans.
         """
-        from nexus.catalog.catalog import (
-            LinkRecord, _LinkCreatedPayload, _make_event, _SPAN_PATTERN,
-        )
+        from nexus.catalog.catalog import LinkRecord, _LinkCreatedPayload
         cat = self._cat
 
         for span, label in [(from_span, "from_span"), (to_span, "to_span")]:
-            if not _SPAN_PATTERN.match(span):
+            if not _cat_mod._SPAN_PATTERN.match(span):
                 raise ValueError(
                     f"invalid {label}: {span!r} — use 'line_start-line_end', "
                     f"'chunk_idx:char_start-char_end', 'chash:<sha256hex>', "
@@ -337,7 +344,7 @@ class _LinkOps:
                 from_span=from_span, to_span=to_span,
                 created_by=created_by, created_at=now, meta=combined_meta,
             )
-            event = _make_event(
+            event = _cat_mod._make_event(
                 _LinkCreatedPayload(
                     from_doc=str(from_t),
                     to_doc=str(to_t),
@@ -383,7 +390,7 @@ class _LinkOps:
         Returns the count removed. Tombstones are appended to the
         JSONL audit trail before SQLite commits.
         """
-        from nexus.catalog.catalog import _LinkDeletedPayload, _make_event
+        from nexus.catalog.catalog import _LinkDeletedPayload
         cat = self._cat
 
         dir_fd = cat._acquire_lock()
@@ -417,7 +424,7 @@ class _LinkOps:
                     "created_at": datetime.now(UTC).isoformat(),
                     "meta": json.loads(full[2]) if full and full[2] else {},
                 }
-                event = _make_event(
+                event = _cat_mod._make_event(
                     _LinkDeletedPayload(
                         from_doc=str(from_t),
                         to_doc=str(to_t),
@@ -445,7 +452,7 @@ class _LinkOps:
             # emitted + applied.
             if not cat._event_sourced_enabled:
                 for row_id, lt, original_created_by in rows:
-                    cat._emit_shadow_event(_make_event(
+                    cat._emit_shadow_event(_cat_mod._make_event(
                         _LinkDeletedPayload(
                             from_doc=str(from_t),
                             to_doc=str(to_t),
@@ -573,12 +580,12 @@ class _LinkOps:
         the count removed (or, with ``dry_run=True``, the count
         that *would* be removed).
         """
-        from nexus.catalog.catalog import _LinkDeletedPayload, _make_event
+        from nexus.catalog.catalog import _LinkDeletedPayload
         cat = self._cat
 
-        has_filter = any([
+        has_filter = any((
             from_t, to_t, link_type, created_by, created_at_before,
-        ])
+        ))
         if not has_filter and not dry_run:
             raise ValueError(
                 "bulk_unlink requires at least one filter (or dry_run=True)"
@@ -605,7 +612,7 @@ class _LinkOps:
                     "created_at": datetime.now(UTC).isoformat(),
                     "meta": lnk.meta,
                 }
-                event = _make_event(
+                event = _cat_mod._make_event(
                     _LinkDeletedPayload(
                         from_doc=str(lnk.from_tumbler),
                         to_doc=str(lnk.to_tumbler),
@@ -631,7 +638,7 @@ class _LinkOps:
             cat._db.commit()
             if not cat._event_sourced_enabled:
                 for lnk in matching:
-                    cat._emit_shadow_event(_make_event(
+                    cat._emit_shadow_event(_cat_mod._make_event(
                         _LinkDeletedPayload(
                             from_doc=str(lnk.from_tumbler),
                             to_doc=str(lnk.to_tumbler),

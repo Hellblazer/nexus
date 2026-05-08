@@ -145,6 +145,16 @@ def commit_and_push(catalog_dir: Path, message: str) -> bool:
     Caller is responsible for holding the catalog directory flock
     around this call. Push failures are non-fatal — they are logged
     by git's own stderr but the function does not raise.
+
+    Note: ``git add -A`` is safe here because the catalog directory
+    is fully Nexus-owned (only ``owners.jsonl`` /
+    ``documents.jsonl`` / ``links.jsonl`` / ``events.jsonl`` /
+    ``.gitignore`` are tracked; ``.catalog.db`` is .gitignored).
+    The project-wide rule against ``git add -A`` in
+    :file:`CLAUDE.md` applies to developer workflows on user
+    repositories where a wildcard add risks staging unrelated
+    untracked drafts; it does not apply to managed-directory
+    commits like this one.
     """
     run_git(["git", "add", "-A"], cwd=catalog_dir)
     status = run_git(["git", "status", "--porcelain"], cwd=catalog_dir)
