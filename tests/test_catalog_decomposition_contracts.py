@@ -343,3 +343,112 @@ def test_bulk_unlink_requires_filter_when_not_dry_run(
     cat, _a, _b = cat_with_two_links
     with pytest.raises(ValueError, match="at least one filter"):
         cat.bulk_unlink()
+
+
+def test_bulk_unlink_legacy_path_writes_jsonl_tombstone_and_deletes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy path (``NEXUS_EVENT_SOURCED=0``): ``bulk_unlink``
+    appends a JSONL tombstone AND issues a direct ``DELETE FROM
+    links`` SQL statement (the projector path is gated off, so
+    SQLite removal is the writer's responsibility).
+
+    Test-validator review noted this path was uncovered post-
+    decomposition (Gap 7 part 2).
+    """
+    monkeypatch.setenv("NEXUS_EVENT_SOURCED", "0")
+    Catalog.init(tmp_path)
+    cat = Catalog(tmp_path, tmp_path / ".catalog.db")
+    assert not cat._event_sourced_enabled, (
+        "fixture must observe legacy mode"
+    )
+    owner = cat.register_owner(
+        name="o", owner_type="repo", repo_hash="hash",
+    )
+    a = cat.register(
+        owner=owner, title="a", content_type="prose", file_path="a.md",
+    )
+    b = cat.register(
+        owner=owner, title="b", content_type="prose", file_path="b.md",
+    )
+    cat.link(a, b, "cites", created_by="alice")
+    assert cat._db.execute(
+        "SELECT count(*) FROM links",
+    ).fetchone()[0] == 1
+
+    pre_jsonl_lines = cat._links_path.read_text().count("\n")
+    n = cat.bulk_unlink(created_by="alice")
+    assert n == 1
+
+    # JSONL tombstone appended.
+    post_jsonl = cat._links_path.read_text()
+    post_jsonl_lines = post_jsonl.count("\n")
+    assert post_jsonl_lines > pre_jsonl_lines, (
+        "tombstone must be appended to links.jsonl"
+    )
+    assert '"_deleted": true' in post_jsonl, (
+        "tombstone must carry _deleted=True"
+    )
+
+    # DELETE actually removed the row from SQLite.
+    assert cat._db.execute(
+        "SELECT count(*) FROM links",
+    ).fetchone()[0] == 0, (
+        "legacy path must DELETE the row from SQLite (no projector)"
+    )
+
+
+def test_bulk_unlink_legacy_shadow_emit_fires_after_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy path: shadow-emit MUST fire AFTER ``cat._db.commit()``
+    so a process crash between DELETE and commit cannot leave
+    events.jsonl claiming a deletion SQLite has not yet committed
+    (the crash-window invariant from the original code).
+
+    Strategy: capture the call order of ``_db.commit`` and
+    ``_emit_shadow_event`` via spies. The shadow emit timestamps
+    must be strictly later than the commit timestamp.
+    """
+    monkeypatch.setenv("NEXUS_EVENT_SOURCED", "0")
+    Catalog.init(tmp_path)
+    cat = Catalog(tmp_path, tmp_path / ".catalog.db")
+    owner = cat.register_owner(
+        name="o", owner_type="repo", repo_hash="hash",
+    )
+    a = cat.register(
+        owner=owner, title="a", content_type="prose", file_path="a.md",
+    )
+    b = cat.register(
+        owner=owner, title="b", content_type="prose", file_path="b.md",
+    )
+    cat.link(a, b, "cites", created_by="alice")
+
+    call_log: list[str] = []
+    real_commit = cat._db.commit
+
+    def spy_commit():
+        call_log.append("commit")
+        return real_commit()
+
+    real_emit = cat._emit_shadow_event
+
+    def spy_emit(event):
+        call_log.append("shadow_emit")
+        return real_emit(event)
+
+    with patch.object(cat._db, "commit", side_effect=spy_commit), \
+         patch.object(cat, "_emit_shadow_event", side_effect=spy_emit):
+        cat.bulk_unlink(created_by="alice")
+
+    # Among the recorded calls in the bulk_unlink path, every
+    # shadow_emit must come AFTER at least one commit (the shadow
+    # loop runs after the per-row write loop's terminating commit).
+    if "shadow_emit" in call_log and "commit" in call_log:
+        first_commit = call_log.index("commit")
+        first_shadow = call_log.index("shadow_emit")
+        assert first_shadow > first_commit, (
+            "shadow_emit fired before commit — crash-window invariant "
+            "broken (events.jsonl could claim deletions SQLite has "
+            f"not yet committed). call order: {call_log}"
+        )
