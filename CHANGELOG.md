@@ -6,6 +6,33 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`NX_T1_ISOLATED=1` precedence inside Claude sessions** (issue #593,
+  nexus-svpq): pre-fix, ``T1Database._init_new_discovery``'s four-branch
+  gate ran in order Path A (env-pair) -> Path B (addr file) -> Path C
+  (isolation flag) -> raise. Inside an active Claude session, Path B
+  always resolved a sibling MCP T1 via ``find_immediate_claude_pid()`` +
+  ``read_t1_addr_for(pid)`` and short-circuited before the
+  ``_t1_isolated_env()`` check fired. Operators who ran
+  ``NX_T1_ISOLATED=1 nx scratch ...`` from a sibling shell expected an
+  in-process ``EphemeralClient`` sealed from the live MCP T1; they got
+  an ``HttpClient`` against the live T1 instead. The 4.27.0 CHANGELOG
+  line "Operators who want ephemeral semantics opt in via
+  ``NX_T1_ISOLATED=1``" was true only outside a Claude session.
+
+  Fix: hoist Path C above Paths A and B so an explicit operator opt-in
+  outranks env-pair and addr-file auto-discovery. ``NX_T1_HOST`` /
+  ``NX_T1_PORT`` and the ``~/.config/nexus/t1_addr.<pid>`` file are
+  inheritance / discovery signals; ``NX_T1_ISOLATED=1`` is a deliberate
+  operator action, and opt-ins outrank discovery (consistent with the
+  pre-4.27 ``NEXUS_SKIP_T1=1`` semantics that the env-rename preserved).
+  Regression coverage in
+  ``tests/test_t1_discovery.py::TestT1DatabaseIsolatedOverridesDiscovery``
+  asserts isolated wins over env-pair, over addr-file, and over both
+  simultaneously, plus that the deprecated ``NEXUS_SKIP_T1=1`` alias
+  retains the same override semantics through the deprecation cycle.
+
 ### Added
 
 - **`nx catalog synthesize-log` CLI verb** (issue #591, nexus-hh1b):

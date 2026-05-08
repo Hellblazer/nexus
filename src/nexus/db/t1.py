@@ -174,26 +174,35 @@ class T1Database:
     def _init_new_discovery(self, chromadb, session_id: str | None) -> None:
         """RDR-105 P2 (nexus-mj2o): four-branch fail-loud constructor.
 
-        Branch order (signal hierarchy mirrors the lifespan):
+        Branch order (opt-in outranks discovery):
 
-        Path A
-            ``NX_T1_HOST`` + ``NX_T1_PORT`` in env -> ``HttpClient``.
-            Used by MCP-dispatched subprocesses (``claude -p`` shared).
-        Path B
-            ``find_immediate_claude_pid`` resolves to a live addr file
-            at ``~/.config/nexus/t1_addr.<pid>`` -> ``HttpClient``.
-            Used by Claude-Code-spawned siblings (Bash tool, hooks).
-        Path C
+        Path C (operator opt-in, highest priority)
             ``NX_T1_ISOLATED=1`` (or its legacy ``NEXUS_SKIP_T1=1``
             alias) -> ``EphemeralClient``. The only place
             ``EphemeralClient`` may be constructed in this code path.
-        Path D
+            nexus-svpq / GH #593: this branch is consulted FIRST so an
+            explicit operator opt-in to ephemeral semantics is not
+            silently overridden by env-pair or addr-file auto-discovery
+            inside an active Claude session.
+        Path A (env-pair discovery)
+            ``NX_T1_HOST`` + ``NX_T1_PORT`` in env -> ``HttpClient``.
+            Used by MCP-dispatched subprocesses (``claude -p`` shared).
+        Path B (addr-file discovery)
+            ``find_immediate_claude_pid`` resolves to a live addr file
+            at ``~/.config/nexus/t1_addr.<pid>`` -> ``HttpClient``.
+            Used by Claude-Code-spawned siblings (Bash tool, hooks).
+        Path D (failure)
             None of the above -> raise :class:`T1ServerNotFoundError`.
 
         The flag-on path does NOT fall through to the legacy resolver.
         Per the RDR §'Phase 2 flag-isolation contract', flag-on and
         flag-off paths are mutually exclusive per process.
         """
+        if _t1_isolated_env():
+            self._client = chromadb.EphemeralClient()
+            self._session_id = self._resolve_session_id(session_id)
+            return
+
         host_env = os.environ.get("NX_T1_HOST", "").strip()
         port_env = os.environ.get("NX_T1_PORT", "").strip()
         if host_env and port_env:
@@ -216,11 +225,6 @@ class T1Database:
                 self._client = chromadb.HttpClient(host=host, port=port)
                 self._session_id = self._resolve_session_id(session_id)
                 return
-
-        if _t1_isolated_env():
-            self._client = chromadb.EphemeralClient()
-            self._session_id = self._resolve_session_id(session_id)
-            return
 
         raise T1ServerNotFoundError(
             "T1 not configured for this process. Either inherit "
