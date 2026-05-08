@@ -6,6 +6,45 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **T1 cross-process session_id propagation regression in 4.27.0**
+  (PR pending, nexus-h8ge): RDR-105 P4 deletion of the legacy
+  session-record resolver removed the
+  ``read_claude_session_id()`` (~/.config/nexus/current_session)
+  fallback from ``T1Database._init_new_discovery``'s session_id
+  resolution chain. Every ``T1Database()`` call without an explicit
+  session_id arg or ``NX_SESSION_ID`` env minted a fresh ``uuid4()``
+  per process, so two processes in the same Claude session (the MCP
+  server and a Bash-tool sibling, or two shell ``nx scratch``
+  invocations) could not see each other's entries via the per-entry
+  session_id metadata filter. ``nx tier-status`` continued to use
+  the correct chain (``mcp/core.py:_record_tier_write``) so
+  telemetry attributed writes to the canonical session while the
+  data sat under fresh per-process UUIDs --- the audit log and the
+  T1 chunk store disagreed on attribution. Production hooks
+  reading T1 from the shell (``subagent-start.sh`` injecting T1 into
+  every sub-agent's seed prompt, ``post_compact_hook.sh``,
+  ``pre_close_verification_hook.sh``, ``divergence-language-guard.sh``)
+  silently saw "No scratch entries." regardless of T1 contents.
+  Fix: factor the resolution chain into ``_resolve_session_id`` and
+  call it from all four construction branches (Path A env, Path B
+  addr file, Path C isolation, client-injection) so the chain is a
+  single source of truth. ``read_claude_session_id`` /
+  ``write_claude_session_id`` now resolve ``NEXUS_CONFIG_DIR`` per
+  call instead of freezing the path at module import (consistency
+  with every other path helper in ``session.py``); the import-time
+  ``CLAUDE_SESSION_FILE`` constant remains for backward compat but
+  is no longer load-bearing. Regression coverage: 16 new unit tests
+  (``TestT1DatabaseSessionIdResolution``) parametrize the four
+  resolution scenarios across all four entry points; 1 new
+  integration test (``TestE2ESessionIdSharedAcrossProcesses``)
+  spawns two real subprocesses with no ``NX_SESSION_ID`` and
+  asserts both converge on the on-disk session_id and round-trip
+  T1 entries. The integration test is the missing invariant test
+  the 4.27.0 ship lacked: pre-fix it fails because each subprocess
+  mints its own UUID; post-fix it passes.
+
 ## [4.27.0] - 2026-05-07
 
 Minor release. RDR-105 retires the multi-writer T1 coordination layer

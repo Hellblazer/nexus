@@ -19,6 +19,7 @@ resolution surface. Verifies:
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -541,6 +542,274 @@ class TestT1DatabaseFlagOnPrecedence:
             T1Database()
         # Should have used env-supplied 10.0.0.1:1111, not file-supplied 10.0.0.2:2222.
         fake_chromadb.HttpClient.assert_called_once_with(host="10.0.0.1", port=1111)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# session_id resolution chain (nexus-h8ge regression)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The four-branch fail-loud constructor in
+# ``T1Database._init_new_discovery`` resolves the session_id used as the
+# ChromaDB metadata filter. All four branches MUST follow the same chain:
+#
+#     ctor session_id arg
+#         > NX_SESSION_ID env
+#         > read_claude_session_id() (~/.config/nexus/current_session)
+#         > new uuid4()
+#
+# The 4.27.0 ship omitted the ``read_claude_session_id()`` step in every
+# branch, so two ``T1Database()`` calls in the same Claude session (the
+# MCP server and a Bash-tool sibling) minted distinct UUIDs and could
+# not see each other's entries via the per-entry session_id metadata
+# filter. Production hooks that rely on shell ``nx scratch list``
+# (subagent-start, post_compact, pre_close_verification,
+# divergence-language-guard) silently saw "No scratch entries." even
+# when entries existed. See bead nexus-h8ge for the live shakeout
+# evidence.
+
+
+_PATH_IDS = ["env", "addr_file", "isolation", "client_injection"]
+
+
+def _setup_path(path_id: str, tmp_path, monkeypatch, fake_chromadb):
+    """Configure env + monkeypatches so the named branch fires.
+
+    Returns ``(extra_kwargs, expected_client_attr)`` for the
+    ``T1Database`` constructor call.
+
+    * ``env`` -- Path A (NX_T1_HOST + NX_T1_PORT).
+    * ``addr_file`` -- Path B (PPID walk + addr file).
+    * ``isolation`` -- Path C (NX_T1_ISOLATED=1 + no addr file).
+    * ``client_injection`` -- early branch with explicit client=.
+    """
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    for var in ("NX_T1_HOST", "NX_T1_PORT", "NX_T1_ISOLATED", "NEXUS_SKIP_T1"):
+        monkeypatch.delenv(var, raising=False)
+
+    if path_id == "env":
+        monkeypatch.setenv("NX_T1_HOST", "127.0.0.1")
+        monkeypatch.setenv("NX_T1_PORT", "5555")
+        return {}, "HttpClient"
+    if path_id == "addr_file":
+        from nexus.session import write_t1_addr
+        write_t1_addr(33333, "127.0.0.1", 6666)
+        monkeypatch.setattr(
+            "nexus.db.t1.find_immediate_claude_pid",
+            lambda start_pid=None: 33333,
+        )
+        return {}, "HttpClient"
+    if path_id == "isolation":
+        monkeypatch.setenv("NX_T1_ISOLATED", "1")
+        monkeypatch.setattr(
+            "nexus.db.t1.find_immediate_claude_pid",
+            lambda start_pid=None: 0,
+        )
+        return {}, "EphemeralClient"
+    if path_id == "client_injection":
+        return {"client": fake_chromadb.EphemeralClient.return_value}, None
+    raise ValueError(path_id)
+
+
+def _write_current_session(tmp_path, sid: str) -> None:
+    (tmp_path / "current_session").write_text(sid)
+
+
+@pytest.fixture
+def fake_chromadb(monkeypatch):
+    from unittest.mock import MagicMock
+    fake = MagicMock()
+    fake.HttpClient.return_value = MagicMock()
+    fake.EphemeralClient.return_value = MagicMock()
+    monkeypatch.setitem(sys.modules, "chromadb", fake)
+    return fake
+
+
+class TestT1DatabaseSessionIdResolution:
+    """nexus-h8ge: session_id MUST follow the same four-step chain in
+    every branch (Path A/B/C + client-injection).
+
+    The chain is:
+        ctor arg > NX_SESSION_ID env > read_claude_session_id() > uuid4()
+
+    Pre-fix the ``read_claude_session_id()`` step was missing from every
+    branch, so two ``T1Database()`` calls in the same Claude session
+    minted distinct UUIDs and could not see each other's entries via
+    the per-entry session_id metadata filter.
+    """
+
+    @pytest.mark.parametrize("path_id", _PATH_IDS)
+    def test_explicit_arg_wins(self, path_id, tmp_path, monkeypatch, fake_chromadb):
+        kwargs, _ = _setup_path(path_id, tmp_path, monkeypatch, fake_chromadb)
+        monkeypatch.setenv("NX_SESSION_ID", "from-env")
+        _write_current_session(tmp_path, "from-file")
+
+        from nexus.db.t1 import T1Database
+        db = T1Database(session_id="from-arg", **kwargs)
+        assert db.session_id == "from-arg"
+
+    @pytest.mark.parametrize("path_id", _PATH_IDS)
+    def test_env_wins_over_current_session_file(
+        self, path_id, tmp_path, monkeypatch, fake_chromadb
+    ):
+        kwargs, _ = _setup_path(path_id, tmp_path, monkeypatch, fake_chromadb)
+        monkeypatch.setenv("NX_SESSION_ID", "from-env")
+        _write_current_session(tmp_path, "from-file")
+
+        from nexus.db.t1 import T1Database
+        db = T1Database(**kwargs)
+        assert db.session_id == "from-env"
+
+    @pytest.mark.parametrize("path_id", _PATH_IDS)
+    def test_current_session_file_wins_over_uuid_fallback(
+        self, path_id, tmp_path, monkeypatch, fake_chromadb
+    ):
+        """Regression: the missing fallback step.
+
+        With env unset and current_session populated, every branch must
+        resolve to the file's contents -- not mint a fresh UUID. This
+        is the load-bearing invariant for cross-process T1 visibility:
+        the MCP server and a Bash-tool sibling both find the same
+        Claude session via the on-disk pointer and converge on its
+        UUID, so each side's session_id metadata filter sees the
+        other's entries.
+        """
+        kwargs, _ = _setup_path(path_id, tmp_path, monkeypatch, fake_chromadb)
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        _write_current_session(tmp_path, "canonical-claude-uuid")
+
+        from nexus.db.t1 import T1Database
+        db = T1Database(**kwargs)
+        assert db.session_id == "canonical-claude-uuid"
+
+    @pytest.mark.parametrize("path_id", _PATH_IDS)
+    def test_uuid_fallback_when_nothing_set(
+        self, path_id, tmp_path, monkeypatch, fake_chromadb
+    ):
+        """Truly anonymous CLI (no env, no file) still gets a fresh
+        UUID -- preserves the pre-fix behaviour for callers running
+        outside any Claude session, e.g. ad-hoc scripting against an
+        explicit ephemeral.
+        """
+        kwargs, _ = _setup_path(path_id, tmp_path, monkeypatch, fake_chromadb)
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        # No current_session file written.
+
+        from nexus.db.t1 import T1Database
+        db = T1Database(**kwargs)
+        # uuid4() strings are 36 chars with four hyphens.
+        assert len(db.session_id) == 36
+        assert db.session_id.count("-") == 4
+
+
+@pytest.mark.integration
+class TestE2ESessionIdSharedAcrossProcesses:
+    """nexus-h8ge: two processes in the same Claude session must
+    converge on the canonical session_id via the on-disk pointer.
+
+    Boots a real chroma HTTP server. Spawns two subprocesses, each
+    with NEITHER ``NX_SESSION_ID`` nor explicit ctor arg set, both
+    pointed at the same ``NEXUS_CONFIG_DIR`` containing a populated
+    ``current_session`` file and an addr file naming the chroma. The
+    test asserts (a) both ``T1Database().session_id`` resolve to the
+    same canonical UUID, and (b) a put from process A is visible from
+    a list in process B.
+
+    This is the missing invariant test that 4.27.0 shipped without.
+    Pre-fix this test fails because each subprocess mints its own
+    UUID and the per-entry session_id metadata filter isolates them.
+    """
+
+    def test_two_subprocesses_share_session_id_via_current_session_file(
+        self, tmp_path
+    ):
+        import shutil
+
+        from nexus.session import (
+            stop_t1_server,
+            unlink_t1_addr,
+            write_claude_session_id,
+            write_t1_addr,
+        )
+
+        host, port, server_pid, chroma_tmpdir = _start_real_chroma()
+        own_pid = os.getpid()
+        canonical = "11111111-2222-3333-4444-555555555555"
+        try:
+            # Populate NEXUS_CONFIG_DIR with: current_session pointer +
+            # an addr file naming the chroma. NX_SESSION_ID stays UNSET
+            # in both subprocesses' env -- they must read the file.
+            env_overlay = {"NEXUS_CONFIG_DIR": str(tmp_path)}
+            for var in ("NX_T1_HOST", "NX_T1_PORT", "NX_SESSION_ID",
+                        "NX_T1_ISOLATED", "NEXUS_SKIP_T1"):
+                env_overlay[var] = ""  # blank-out below
+
+            base_env = {
+                k: v for k, v in os.environ.items()
+                if k not in {"NX_T1_HOST", "NX_T1_PORT", "NX_SESSION_ID",
+                             "NX_T1_ISOLATED", "NEXUS_SKIP_T1"}
+            }
+            base_env["NEXUS_CONFIG_DIR"] = str(tmp_path)
+
+            import nexus.session as _sess
+            real_dir_at_import = _sess._nexus_config_dir_at_import
+            try:
+                # Force the helpers in this test process to use tmp_path.
+                _sess._nexus_config_dir_at_import = (  # type: ignore[attr-defined]
+                    lambda: tmp_path
+                )
+                write_claude_session_id(canonical)
+                write_t1_addr(own_pid, host, port)
+            finally:
+                _sess._nexus_config_dir_at_import = real_dir_at_import
+
+            try:
+                child_code = (
+                    "import os, sys, json\n"
+                    "from nexus.db.t1 import T1Database\n"
+                    "import nexus.session as _sess\n"
+                    "import nexus.db.t1 as _t1\n"
+                    f"_sess.find_immediate_claude_pid = lambda start_pid=None: {own_pid}\n"
+                    f"_t1.find_immediate_claude_pid = lambda start_pid=None: {own_pid}\n"
+                    "action = sys.argv[1]\n"
+                    "db = T1Database()\n"
+                    "if action == 'put':\n"
+                    "    eid = db.put('hello-from-A', tags='shakeout')\n"
+                    "    print(json.dumps({'session_id': db.session_id, 'entry_id': eid}))\n"
+                    "elif action == 'list':\n"
+                    "    items = [e['content'] for e in db.list_entries()]\n"
+                    "    print(json.dumps({'session_id': db.session_id, 'items': items}))\n"
+                )
+
+                proc_a = subprocess.run(
+                    [sys.executable, "-c", child_code, "put"],
+                    capture_output=True, text=True, timeout=30, env=base_env,
+                )
+                assert proc_a.returncode == 0, (
+                    f"put-subprocess failed (rc={proc_a.returncode}): "
+                    f"stdout={proc_a.stdout!r} stderr={proc_a.stderr!r}"
+                )
+                a_result = json.loads(proc_a.stdout.strip())
+
+                proc_b = subprocess.run(
+                    [sys.executable, "-c", child_code, "list"],
+                    capture_output=True, text=True, timeout=30, env=base_env,
+                )
+                assert proc_b.returncode == 0, (
+                    f"list-subprocess failed (rc={proc_b.returncode}): "
+                    f"stdout={proc_b.stdout!r} stderr={proc_b.stderr!r}"
+                )
+                b_result = json.loads(proc_b.stdout.strip())
+
+                # (a) both processes converge on the canonical UUID.
+                assert a_result["session_id"] == canonical, a_result
+                assert b_result["session_id"] == canonical, b_result
+                # (b) put-from-A is visible from list-in-B.
+                assert "hello-from-A" in b_result["items"], b_result
+            finally:
+                unlink_t1_addr(own_pid)
+        finally:
+            stop_t1_server(server_pid)
+            shutil.rmtree(chroma_tmpdir, ignore_errors=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

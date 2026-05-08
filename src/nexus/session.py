@@ -35,7 +35,23 @@ def _nexus_config_dir_at_import() -> Path:
     return Path.home() / ".config" / "nexus"
 
 
+#: Import-time snapshot kept for backward-compatibility with callers
+#: that import the constant directly. New code uses
+#: :func:`claude_session_file` (re-resolved per call so tests and
+#: subprocesses honour mid-process ``NEXUS_CONFIG_DIR`` flips). The
+#: read/write helpers below resolve the path per call so the constant
+#: is no longer load-bearing.
 CLAUDE_SESSION_FILE = _nexus_config_dir_at_import() / "current_session"
+
+
+def claude_session_file() -> Path:
+    """Return the path to ``current_session`` honouring the live
+    ``NEXUS_CONFIG_DIR`` env. Re-resolved per call so a subprocess
+    that inherits a different ``NEXUS_CONFIG_DIR`` (test isolation,
+    sandbox, sub-agent dispatch) sees its own config dir without
+    re-importing the module.
+    """
+    return _nexus_config_dir_at_import() / "current_session"
 
 
 def generate_session_id() -> str:
@@ -45,8 +61,9 @@ def generate_session_id() -> str:
 
 def write_claude_session_id(session_id: str) -> None:
     """Write the Claude session ID to the stable flat file (mode 0o600)."""
-    CLAUDE_SESSION_FILE.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd = os.open(str(CLAUDE_SESSION_FILE), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    path = claude_session_file()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(str(path), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
     try:
         os.write(fd, session_id.encode())
     finally:
@@ -56,7 +73,7 @@ def write_claude_session_id(session_id: str) -> None:
 def read_claude_session_id() -> str | None:
     """Read the Claude session ID from the flat file, or None if not set."""
     try:
-        text = CLAUDE_SESSION_FILE.read_text().strip()
+        text = claude_session_file().read_text().strip()
         return text or None
     except OSError:
         return None  # intentional: file not created yet, normal on first run
