@@ -3844,6 +3844,200 @@ def prune_stale_cmd(
                f"{'y' if n_deleted == 1 else 'ies'}.")
 
 
+# ── RDR-101 Phase 2: synthesize-log (in-place fallback recovery) ─────────
+
+
+@catalog.command("synthesize-log")
+@click.option(
+    "--check", is_flag=True,
+    help=(
+        "Detect bootstrap-fallback mode without writing. Exit 0 when not "
+        "in fallback, exit 1 when fallback is active."
+    ),
+)
+@click.option(
+    "--dry-run", is_flag=True,
+    help="Print event counts that would be synthesized; write nothing.",
+)
+@click.option(
+    "--no-verify", is_flag=True,
+    help=(
+        "Skip the post-write replay-equality verification. Use only when "
+        "you have already verified the catalog independently."
+    ),
+)
+@click.option(
+    "--force", is_flag=True,
+    help=(
+        "Synthesize even when the catalog is not in bootstrap-fallback. "
+        "Existing event-log doc_ids are harvested and preserved so that "
+        "T3 chunk metadata referencing them does not become stale."
+    ),
+)
+def synthesize_log_cmd(
+    check: bool, dry_run: bool, no_verify: bool, force: bool
+) -> None:
+    """Rebuild ``events.jsonl`` from the catalog's JSONL state in place.
+
+    Companion to ``nx catalog doctor`` for catalogs in bootstrap-fallback
+    mode. Calls ``nexus.catalog.synthesizer.synthesize_from_jsonl`` with
+    ``mint_doc_id=True`` and writes the resulting envelope stream to
+    ``events.jsonl`` atomically. Snapshots the entire catalog directory
+    before touching it; on a verify FAIL, rolls the snapshot back into
+    place and retains both copies for forensics.
+
+    Lossless alternative to ``rm -rf catalog && nx catalog setup``, which
+    discards user-authored typed links and owner registrations because
+    those are not reconstructible from T3 alone.
+    """
+    import dataclasses
+    import shutil
+    import time
+    from datetime import datetime, timezone
+
+    from nexus.config import catalog_path
+    from nexus.catalog import events as ev
+    from nexus.catalog.synthesizer import synthesize_from_jsonl
+
+    cat_path = catalog_path()
+    if not Catalog.is_initialized(cat_path):
+        raise click.ClickException(
+            f"Catalog at {cat_path} is not initialized. "
+            "Run 'nx catalog setup' first."
+        )
+
+    bootstrap_status = _check_bootstrap_status()
+    fallback_active = bool(bootstrap_status.get("fallback_active"))
+
+    if check:
+        if fallback_active:
+            click.echo(
+                "fallback-active: events.jsonl is sparse vs documents.jsonl. "
+                "Run 'nx catalog synthesize-log' to repair in place.",
+                err=True,
+            )
+            raise click.exceptions.Exit(1)
+        click.echo("not-in-fallback: events.jsonl matches documents.jsonl.")
+        return
+
+    if not fallback_active and not force:
+        click.echo(
+            "no-op: catalog is not in bootstrap-fallback mode. "
+            "Pass --force to synthesize anyway."
+        )
+        return
+
+    # --force on a healthy catalog: harvest existing tumbler->doc_id from
+    # events.jsonl so re-synthesis preserves T3-side doc_id references.
+    preserve_doc_ids: dict[str, str] = {}
+    events_path = cat_path / "events.jsonl"
+    if force and events_path.exists():
+        with events_path.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if obj.get("type") != ev.TYPE_DOCUMENT_REGISTERED:
+                    continue
+                payload = obj.get("payload") or {}
+                tumbler = payload.get("tumbler")
+                doc_id = payload.get("doc_id")
+                if tumbler and doc_id:
+                    preserve_doc_ids[tumbler] = doc_id
+
+    # Synthesize the full event stream into memory and tally per-type.
+    events_list = list(
+        synthesize_from_jsonl(
+            cat_path,
+            mint_doc_id=True,
+            preserve_doc_ids=preserve_doc_ids or None,
+        )
+    )
+    counts: dict[str, int] = {}
+    for e in events_list:
+        counts[e.type] = counts.get(e.type, 0) + 1
+    total = sum(counts.values())
+
+    click.echo("== synthesizing events ==")
+    for type_name in sorted(counts):
+        click.echo(f"  {type_name:<28} {counts[type_name]:>6}")
+    click.echo(f"  {'TOTAL':<28} {total:>6}")
+
+    if dry_run:
+        click.echo("(dry-run: no files written)")
+        return
+
+    # Snapshot the entire catalog directory to a sibling. Forensic
+    # retention: this command never deletes the snapshot, even on PASS.
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    snapshot_dir = cat_path.parent / f"{cat_path.name}.synth-snapshot-{ts}"
+    if snapshot_dir.exists():
+        # Disambiguate when a prior run within the same second exists.
+        snapshot_dir = cat_path.parent / (
+            f"{cat_path.name}.synth-snapshot-{ts}-{int(time.time() * 1000) % 1000}"
+        )
+    shutil.copytree(cat_path, snapshot_dir)
+    click.echo(f"snapshot: {snapshot_dir}")
+
+    # Atomic write: serialize to events.jsonl.tmp, fsync, rename.
+    tmp_path = events_path.with_suffix(".jsonl.tmp")
+    with tmp_path.open("w") as f:
+        for e in events_list:
+            line = json.dumps(
+                {
+                    "type": e.type,
+                    "v": e.v,
+                    "payload": dataclasses.asdict(e.payload),
+                    "ts": e.ts,
+                },
+                separators=(",", ":"),
+            )
+            f.write(line)
+            f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, events_path)
+    click.echo(f"wrote: {events_path} ({total} events)")
+
+    if no_verify:
+        click.echo("PASS (verify skipped via --no-verify)")
+        return
+
+    # Verify by re-running the doctor's replay-equality check against
+    # the freshly-written log. _run_replay_equality reads catalog_path()
+    # so it picks up the new state automatically.
+    report = _run_replay_equality()
+    if report.get("pass"):
+        click.echo("PASS: replay-equality verified against fresh log.")
+        click.echo(f"snapshot retained for forensics: {snapshot_dir}")
+        return
+
+    # Verify FAIL: rotate the failed live state aside, restore from the
+    # snapshot via copytree. Snapshot is left pristine so the operator
+    # has three artifacts for forensics: the pristine pre-synthesis
+    # snapshot, the failed live state, and the restored live catalog.
+    failed_dir = cat_path.parent / f"{cat_path.name}.synth-failed-{ts}"
+    if failed_dir.exists():
+        failed_dir = cat_path.parent / (
+            f"{cat_path.name}.synth-failed-{ts}-{int(time.time() * 1000) % 1000}"
+        )
+    os.rename(cat_path, failed_dir)
+    shutil.copytree(snapshot_dir, cat_path)
+
+    click.echo(
+        f"FAIL: replay-equality verification did not pass: {report}",
+        err=True,
+    )
+    click.echo(f"failed-state retained: {failed_dir}", err=True)
+    click.echo(f"snapshot retained: {snapshot_dir}", err=True)
+    click.echo(f"catalog restored from snapshot at: {cat_path}", err=True)
+    raise click.exceptions.Exit(1)
+
+
 # ── RDR-101 Phase 1: doctor --replay-equality ────────────────────────────
 
 
@@ -3954,10 +4148,14 @@ def doctor_cmd(
                 "  events.jsonl is non-empty but sparse vs documents.jsonl;\n"
                 "  ES writes are landing in the log but reads come from\n"
                 "  legacy JSONL; replay equality is silently broken.\n"
-                "  The synthesize-log + t3-backfill-doc-id remediation\n"
-                "  verbs were retired post Phase 5b (nexus-iftc). Restore\n"
-                "  by deleting the catalog directory and re-running\n"
-                "  'nx catalog setup' to bootstrap from current T3 state.\n",
+                "\n"
+                "  Restore in place with:\n"
+                "    nx catalog synthesize-log\n"
+                "\n"
+                "  This rebuilds events.jsonl from the JSONL state with\n"
+                "  zero data loss. 'nx catalog setup' from a clean state\n"
+                "  is a lossy fallback - it cannot reconstruct user-\n"
+                "  authored typed links or owner registrations from T3.\n",
                 err=True,
             )
         overall_pass = False

@@ -6,6 +6,37 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`nx catalog synthesize-log` CLI verb** (issue #591, nexus-hh1b):
+  in-place lossless recovery for catalogs in bootstrap-fallback mode.
+  The `synthesize_from_jsonl` synthesizer code has always been present
+  in `src/nexus/catalog/synthesizer.py`; only the CLI handler was
+  retired post Phase 5b (nexus-iftc). The previous `nx catalog doctor`
+  warning told operators to delete the catalog directory and re-run
+  `nx catalog setup`, which is destructive: setup bootstraps owners
+  and documents from current T3 state but cannot reconstruct user-
+  authored typed links (`relates`, `cites`, `implements`,
+  `supersedes`) because T3 stores chunks, not the catalog graph. On a
+  real-world catalog (15,853 docs / 533 links / 41 owners) this
+  produced 99% link loss in field reports.
+
+  Re-exposing the synthesizer behind a CLI handler restores the
+  zero-loss recovery path. Flags: `--check` (detect fallback, exit 1
+  if active), `--dry-run` (print event counts, write nothing),
+  `--no-verify` (skip post-write replay-equality check), `--force`
+  (synthesize on a healthy catalog, harvesting and preserving the
+  existing event-log `tumbler->doc_id` map so T3 chunk metadata
+  stays valid). Default invocation snapshots the entire catalog
+  directory to a sibling `<catalog>.synth-snapshot-<ts>/` before
+  writing, performs an atomic write of `events.jsonl`, runs the
+  doctor's `--replay-equality` check, and on FAIL rotates the
+  failed live state aside and restores the catalog from the snapshot
+  via `copytree` so all three artifacts (pristine snapshot, failed
+  state, restored catalog) are retained for forensics. `nx catalog
+  doctor` warning text updated to direct operators at the new verb
+  and label the destructive `setup` path as a lossy fallback.
+
 ## [4.27.1] - 2026-05-08
 
 Patch release. Closes a critical T1 regression introduced by RDR-105
