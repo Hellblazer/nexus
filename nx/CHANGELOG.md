@@ -6,6 +6,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.29.1] - 2026-05-08
+
+Plugin version aligned with conexus 4.29.1. No plugin-side changes;
+the release ships in the conexus package: catalog destructive-verb
+hardening (cwd bug fix on ``prune-stale``, default-flips on ``gc``
+and ``link-bulk-delete``) plus a backup-before-delete safety net
+for recovery via the new ``nx catalog undelete`` /
+``list-backups`` / ``vacuum-backups`` verbs. RDR-106 filed as the
+proper soft-delete architectural answer (follow-up).
+See root ``CHANGELOG.md`` for the full breakdown.
+
 ## [4.29.0] - 2026-05-08
 
 Plugin version aligned with conexus 4.29.0. No plugin-side changes; the

@@ -6,6 +6,88 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.29.1] - 2026-05-08
+
+Patch release. Hardens the catalog's destructive-verb surface
+caught during the 4.29.0 prod shakeout: ``nx catalog prune-stale``
+narrowly misclassified 11,766 valid relative-path entries as
+stale because of a cwd-dependent ``Path.exists()`` check
+(nexus-6ims). Plus two adjacent safety regressions
+(``catalog gc`` deletes-by-default, ``link-bulk-delete`` no
+``--confirm``) and a backup-before-delete safety net
+(RDR-106 Option A).
+
+### Fixed
+
+- **``nx catalog prune-stale`` cwd-dependent classification**
+  (nexus-6ims P0): pre-fix logic used ``Path(fp).exists()`` to
+  classify entries as stale, which only worked for absolute
+  paths. Relative paths (most catalog entries store paths
+  relative to their owner's repo_root) resolved against the
+  running process's cwd; running the verb from any cwd other
+  than the entry's owning repo over-classified valid entries.
+  Caught 2026-05-08 during prod shakeout: a live catalog with
+  23,370 documents reported 11,837 "stale" entries when only
+  71 were actually stale. Post-fix: relative paths resolve
+  against ``owner.repo_root`` (RDR-060); owners without a
+  ``repo_root`` skip with a structured warning rather than
+  auto-classifying as stale.
+- **``nx t3 prune-stale`` cwd bug** (same root cause): chunk
+  ``source_path`` resolution now joins through the catalog to
+  pick up the owning document's ``owner.repo_root``. Owners
+  with no ``repo_root`` skip with the same fail-safe.
+  Critical because T3 chunk deletion is unrecoverable without
+  re-embedding (Voyage cost) and there's no event-log audit
+  trail like the catalog has.
+- **``nx catalog gc`` deletes-by-default** (nexus-tnz3 P1):
+  ``--dry-run`` was opt-in (default deletes). A typo or
+  forgotten flag silently dropped orphan entries. Inverted to
+  match ``prune-stale``: dry-run by default, ``--no-dry-run
+  --confirm`` required to actually delete.
+- **``nx catalog link-bulk-delete`` lacks ``--confirm``**
+  (nexus-9nim P2): hidden verb with the same delete-by-default
+  pattern. Hidden so casual usage was unlikely, but still on
+  the destructive-verb surface. Now matches the
+  ``prune-stale`` / ``gc`` shape.
+
+### Added
+
+- **Backup-before-delete safety net** (RDR-106 Option A):
+  every destructive catalog verb (``delete``, ``gc``,
+  ``prune-stale``, ``link-bulk-delete``) writes a JSONL
+  snapshot of the rows about to be deleted to
+  ``$NEXUS_CONFIG_DIR/catalog/.deleted-backups/`` BEFORE the
+  actual delete. The snapshot captures the full document row
+  + inbound and outbound links so an undelete can fully
+  reconstruct the document AND its position in the link
+  graph.
+- **``nx catalog undelete <backup-file>``**: restores the
+  documents and links from a backup snapshot via event-sourced
+  ``DocumentRegistered`` / ``LinkCreated`` events. Documents
+  are restored with their ORIGINAL tumblers; the tumbler
+  minting path is bypassed.
+- **``nx catalog list-backups``**: enumerates available
+  backup snapshots newest-first with verb, timestamp, row
+  count, and reason.
+- **``nx catalog vacuum-backups``**: drops backup files past
+  the retention window (default 30 days). Defaults to
+  dry-run; ``--no-dry-run`` to actually remove.
+
+### Filed for follow-up
+
+- **RDR-106** (draft): proper soft-delete via tombstone
+  columns on the catalog projection. The 4.29.1 backup
+  pattern is a recovery affordance; RDR-106 is the full
+  architectural answer with grace-window semantics, in-tree
+  state, and read-path filtering.
+
+### Closed
+
+- nexus-6ims (P0): catalog + t3 prune-stale cwd-dependent
+  classification
+- nexus-tnz3 (P1): catalog gc deletes-by-default
+- nexus-9nim (P2): link-bulk-delete missing --confirm
+
 ## [4.29.0] - 2026-05-08
 
 Minor release. Decomposes the 4434-LOC ``catalog.py`` god object into a

@@ -1122,7 +1122,23 @@ def delete_cmd(tumbler_or_title: str, yes: bool) -> None:
     if entry is None:
         raise click.ClickException(f"Not found: {tumbler_or_title}")
     if not yes:
-        click.confirm(f"Delete '{entry.title}' ({t})? Links will be preserved.", abort=True)
+        click.confirm(
+            f"Delete '{entry.title}' ({t})? Links will be preserved.",
+            abort=True,
+        )
+
+    # Backup snapshot before delete (RDR-106 Option A).
+    from nexus.catalog.catalog_backup import snapshot_documents
+    backup_path = snapshot_documents(
+        cat, [str(t)], verb="delete",
+        reason=f"single-document delete: {entry.title}",
+    )
+    if backup_path:
+        click.echo(
+            f"Backup snapshot: {backup_path.name}"
+            f"  (restore: nx catalog undelete {backup_path.name})"
+        )
+
     deleted = cat.delete_document(t)
     if deleted:
         click.echo(f"Deleted: {t} ({entry.title}). Links preserved.")
@@ -1336,22 +1352,87 @@ def links_cmd(
 @click.option("--type", "link_type", default="")
 @click.option("--created-by", default="")
 @click.option("--created-at-before", default="", help="ISO timestamp cutoff")
-@click.option("--dry-run", is_flag=True)
+@click.option(
+    "--dry-run/--no-dry-run", default=True,
+    help="Report-only (default). Use --no-dry-run to perform deletions.",
+)
+@click.option(
+    "--confirm", is_flag=True, default=False,
+    help="Required alongside --no-dry-run to actually delete links.",
+)
 def link_bulk_delete_cmd(
     from_t: str, to_t: str, link_type: str, created_by: str,
-    created_at_before: str, dry_run: bool,
+    created_at_before: str, dry_run: bool, confirm: bool,
 ) -> None:
-    """Bulk delete links matching filters."""
+    """Bulk delete links matching filters.
+
+    nexus-9nim: 4.29.1 inverted the default from "delete unless --dry-run"
+    to "report unless --no-dry-run --confirm" + writes a backup snapshot
+    before the actual delete. Recoverable via ``nx catalog undelete``.
+    """
+    will_delete = (not dry_run) and confirm
+    if (not dry_run) and not confirm:
+        click.echo(
+            "--no-dry-run alone is treated as report-only. "
+            "Add --confirm to actually delete links."
+        )
+
     cat = _get_catalog()
     resolved_from = str(_resolve_tumbler(cat, from_t)) if from_t else ""
     resolved_to = str(_resolve_tumbler(cat, to_t)) if to_t else ""
-    count = cat.bulk_unlink(
+
+    # First pass: dry-run to enumerate the matching links for the
+    # backup snapshot. The cat.bulk_unlink dry_run path returns the
+    # count; we need the actual rows for the snapshot, so query directly.
+    matching_links = cat.link_query(
         from_t=resolved_from, to_t=resolved_to,
         link_type=link_type, created_by=created_by,
-        created_at_before=created_at_before, dry_run=dry_run,
+        created_at_before=created_at_before,
+        limit=0,
     )
-    mode = "Would remove" if dry_run else "Removed"
-    click.echo(f"{mode} {count} link(s)")
+    count = len(matching_links)
+
+    if not will_delete:
+        click.echo(f"Would remove {count} link(s)")
+        return
+
+    # Backup snapshot before delete (RDR-106 Option A).
+    from nexus.catalog.catalog_backup import snapshot_links
+    backup_path = snapshot_links(
+        cat,
+        [
+            {
+                "from": str(lnk.from_tumbler),
+                "to": str(lnk.to_tumbler),
+                "link_type": lnk.link_type,
+                "from_span": lnk.from_span,
+                "to_span": lnk.to_span,
+                "created_by": lnk.created_by,
+                "created_at": lnk.created_at,
+                "meta": lnk.meta,
+            }
+            for lnk in matching_links
+        ],
+        verb="link-bulk-delete",
+        reason="bulk-unlink filters",
+        args={
+            "from_t": resolved_from, "to_t": resolved_to,
+            "link_type": link_type, "created_by": created_by,
+            "created_at_before": created_at_before,
+        },
+    )
+    if backup_path:
+        click.echo(
+            f"Backup snapshot written: {backup_path}\n"
+            f"  Restore with: nx catalog undelete {backup_path.name}"
+        )
+
+    actual = cat.bulk_unlink(
+        from_t=resolved_from, to_t=resolved_to,
+        link_type=link_type, created_by=created_by,
+        created_at_before=created_at_before, dry_run=False,
+    )
+    click.echo(f"Removed {actual} link(s)")
 
 
 @catalog.command("link-audit", hidden=True)
@@ -2311,19 +2392,38 @@ def session_summary_cmd(since: int) -> None:
 
 
 @catalog.command("gc")
-@click.option("--dry-run", is_flag=True, default=False, help="Show what would be deleted without deleting.")
-def gc_cmd(dry_run: bool) -> None:
+@click.option(
+    "--dry-run/--no-dry-run", default=True,
+    help="Report-only (default). Use --no-dry-run to perform deletions.",
+)
+@click.option(
+    "--confirm", is_flag=True, default=False,
+    help="Required alongside --no-dry-run to actually delete catalog rows.",
+)
+def gc_cmd(dry_run: bool, confirm: bool) -> None:
     """Remove orphan catalog entries that have miss_count >= 2.
 
     \b
     Orphans are entries that were absent in two or more consecutive index runs.
-    Use --dry-run to preview deletions without applying them.
+    Default is read-only (--dry-run is on). To actually delete:
+      nx catalog gc --no-dry-run --confirm
 
     \b
     Examples:
-      nx catalog gc              # delete orphan entries
-      nx catalog gc --dry-run   # preview without deleting
+      nx catalog gc                          # report (read-only)
+      nx catalog gc --no-dry-run --confirm  # actually delete
+
+    nexus-tnz3: 4.29.1 inverted the default from "delete unless --dry-run"
+    to "report unless --no-dry-run --confirm" so a forgotten flag no longer
+    silently destroys orphan entries.
     """
+    will_delete = (not dry_run) and confirm
+    if (not dry_run) and not confirm:
+        click.echo(
+            "--no-dry-run alone is treated as report-only. "
+            "Add --confirm to actually delete catalog rows."
+        )
+
     cat = _get_catalog()
 
     rows = cat._db.execute(
@@ -2340,19 +2440,46 @@ def gc_cmd(dry_run: bool) -> None:
         click.echo("No orphan entries found.")
         return
 
-    click.echo(f"Found {len(orphans)} orphan {'entry' if len(orphans) == 1 else 'entries'} (miss_count >= 2):")
-    for tumbler_str, title, file_path in orphans:
+    click.echo(
+        f"Found {len(orphans)} orphan "
+        f"{'entry' if len(orphans) == 1 else 'entries'} (miss_count >= 2):"
+    )
+    for tumbler_str, title, file_path in orphans[:20]:
         loc = f" ({file_path})" if file_path else ""
-        if dry_run:
-            click.echo(f"  [dry-run] would delete {tumbler_str}: {title}{loc}")
-        else:
-            cat.delete_document(Tumbler.parse(tumbler_str))
-            click.echo(f"  deleted {tumbler_str}: {title}{loc}")
+        click.echo(f"  {tumbler_str}: {title}{loc}")
+    if len(orphans) > 20:
+        click.echo(f"  ... ({len(orphans) - 20} more)")
 
-    if dry_run:
-        click.echo(f"\n{len(orphans)} {'entry' if len(orphans) == 1 else 'entries'} would be deleted. Run without --dry-run to apply.")
-    else:
-        click.echo(f"\nDeleted {len(orphans)} orphan {'entry' if len(orphans) == 1 else 'entries'}.")
+    if not will_delete:
+        click.echo(
+            f"\n{len(orphans)} {'entry' if len(orphans) == 1 else 'entries'} "
+            f"would be deleted. Run with --no-dry-run --confirm to apply."
+        )
+        return
+
+    # Backup before delete (RDR-106 Option A).
+    from nexus.catalog.catalog_backup import snapshot_documents
+    backup_path = snapshot_documents(
+        cat,
+        [t for t, _, _ in orphans],
+        verb="gc",
+        reason="miss_count >= 2",
+    )
+    if backup_path:
+        click.echo(
+            f"\nBackup snapshot written: {backup_path}"
+            f"\n  Restore with: nx catalog undelete {backup_path.name}"
+        )
+
+    n_deleted = 0
+    for tumbler_str, title, file_path in orphans:
+        if cat.delete_document(Tumbler.parse(tumbler_str)):
+            n_deleted += 1
+
+    click.echo(
+        f"\nDeleted {n_deleted} orphan "
+        f"{'entry' if n_deleted == 1 else 'entries'}."
+    )
 
 
 @catalog.command("coverage")
@@ -3792,16 +3919,47 @@ def prune_stale_cmd(
     else:
         entries = cat.all_documents()
 
+    # nexus-6ims: relative file_paths must resolve against the owner's
+    # repo_root (RDR-060), not against the running process's cwd. Pre-fix
+    # logic used ``Path(fp).exists()`` directly, which caught absolute
+    # paths fine but mass-misclassified relative paths whenever the
+    # operator ran the verb from a different repo (verified 2026-05-08:
+    # 11,766 valid entries reported as stale because cwd was nexus, not
+    # the entry's owning repo).
+    owner_roots = dict(cat._db.execute(
+        "SELECT tumbler_prefix, repo_root FROM owners WHERE repo_root != ''"
+    ))
+
     stale: list = []  # entries to delete
     skipped_replacement: list = []  # entries with RDR-prefix replacement
+    skipped_no_root: list = []  # owner has no repo_root — can't verify
     for entry in entries:
         fp = entry.file_path or ""
         if not fp:  # MCP-stored, no source file
             continue
         if "/" not in fp:  # basename-only — remediable
             continue
-        if Path(fp).exists():  # live, not stale
+
+        if fp.startswith("/"):
+            resolved = Path(fp)
+        else:
+            # Relative path — anchor at owner.repo_root.
+            t_str = str(entry.tumbler)
+            parts = t_str.split(".")
+            owner_id = ".".join(parts[:2]) if len(parts) >= 2 else ""
+            root = owner_roots.get(owner_id, "")
+            if not root:
+                # Owner has no repo_root (registered before RDR-060
+                # added the column). Cannot verify presence; refuse to
+                # delete — operator must repair owner.repo_root first
+                # via ``nx catalog dedupe-owners`` or manual update.
+                skipped_no_root.append(entry)
+                continue
+            resolved = Path(root) / fp
+
+        if resolved.exists():  # live, not stale
             continue
+
         # Stale candidate. If a same-prefix replacement exists, prefer
         # remediation: skip prune.
         if prefix_index:
@@ -3813,13 +3971,18 @@ def prune_stale_cmd(
 
     n_stale = len(stale)
     n_skipped = len(skipped_replacement)
-    click.echo(
-        f"{n_stale} stale entr{'y' if n_stale == 1 else 'ies'}"
-        + (
-            f" (skipped {n_skipped} with same-prefix replacement)"
-            if n_skipped else ""
+    n_no_root = len(skipped_no_root)
+    parts_msg = []
+    if n_skipped:
+        parts_msg.append(f"skipped {n_skipped} with same-prefix replacement")
+    if n_no_root:
+        parts_msg.append(
+            f"skipped {n_no_root} relative-path entries whose owner has "
+            f"no repo_root (cannot verify)"
         )
-        + "."
+    suffix = f" ({'; '.join(parts_msg)})" if parts_msg else ""
+    click.echo(
+        f"{n_stale} stale entr{'y' if n_stale == 1 else 'ies'}{suffix}."
     )
 
     if n_stale:
@@ -3834,6 +3997,25 @@ def prune_stale_cmd(
         if dry_run:
             click.echo("\n(dry-run — no catalog writes performed.)")
         return
+
+    # Backup snapshot before delete (RDR-106 Option A).
+    from nexus.catalog.catalog_backup import snapshot_documents
+    backup_path = snapshot_documents(
+        cat,
+        [str(e.tumbler) for e in stale],
+        verb="prune-stale",
+        reason="absolute path missing OR relative path missing under owner.repo_root",
+        args={
+            "collection": collection, "owner": owner,
+            "source_dir": str(source_dir_opt) if source_dir_opt else "",
+            "rdr_prefix_skip": rdr_prefix_skip,
+        },
+    )
+    if backup_path:
+        click.echo(
+            f"\nBackup snapshot written: {backup_path}"
+            f"\n  Restore with: nx catalog undelete {backup_path.name}"
+        )
 
     n_deleted = 0
     for entry in stale:
@@ -5003,6 +5185,100 @@ def _print_t3_doc_id_coverage_text(report: dict) -> None:
         click.echo(
             "See docs/rdr/post-mortem/101-event-sourced-catalog-migration.md "
             "for the arc record (verbs retired post Phase 5b)."
+        )
+
+
+# ── Backup-before-delete recovery surface (RDR-106 Option A) ─────────────
+
+
+@catalog.command("list-backups")
+def list_backups_cmd() -> None:
+    """List backup snapshots written by destructive catalog verbs.
+
+    Each destructive catalog verb (``delete``, ``gc``, ``prune-stale``,
+    ``link-bulk-delete``) writes a JSONL snapshot of the rows about
+    to be deleted under ``$NEXUS_CONFIG_DIR/catalog/.deleted-backups/``
+    BEFORE the actual delete. This verb shows what's recoverable
+    without inspecting the files manually.
+    """
+    from nexus.catalog.catalog_backup import list_backups
+    cat = _get_catalog()
+    records = list_backups(cat)
+    if not records:
+        click.echo("No backups found.")
+        return
+    click.echo(f"{len(records)} backup(s) (newest first):\n")
+    for rec in records:
+        click.echo(
+            f"  {rec.path.name}\n"
+            f"    verb={rec.verb}  ts={rec.timestamp}  "
+            f"rows={rec.rows_count}\n"
+            f"    reason={rec.reason or '<none>'}"
+        )
+
+
+@catalog.command("undelete")
+@click.argument("backup")
+def undelete_cmd(backup: str) -> None:
+    """Restore documents (and their links) from a backup snapshot.
+
+    BACKUP is either a filename inside ``.deleted-backups/`` or an
+    absolute path. Documents are re-emitted as DocumentRegistered
+    events in events.jsonl (event-sourced; full audit trail);
+    inbound and outbound links are re-emitted as LinkCreated events
+    via ``link_if_absent`` (idempotent).
+
+    Documents are restored with their ORIGINAL tumblers — the tumbler
+    minting path is bypassed. Re-running this on an already-restored
+    backup is a no-op (DocumentRegistered on existing tumbler is
+    idempotent via INSERT OR REPLACE).
+    """
+    from nexus.catalog.catalog_backup import restore_documents
+    cat = _get_catalog()
+    if backup.startswith("/"):
+        backup_path = Path(backup)
+    else:
+        backup_path = cat._dir / ".deleted-backups" / backup
+    if not backup_path.exists():
+        raise click.ClickException(f"Backup not found: {backup_path}")
+
+    docs, links = restore_documents(cat, backup_path)
+    click.echo(
+        f"Restored {docs} document(s) and {links} link(s) "
+        f"from {backup_path.name}."
+    )
+
+
+@catalog.command("vacuum-backups")
+@click.option(
+    "--older-than-days", default=30, show_default=True,
+    help="Drop backup files older than this many days.",
+)
+@click.option(
+    "--dry-run/--no-dry-run", default=True,
+    help="Report-only (default). Use --no-dry-run to delete.",
+)
+def vacuum_backups_cmd(older_than_days: int, dry_run: bool) -> None:
+    """Drop old backup snapshots past the retention window.
+
+    Default retention is 30 days. Removed files are gone for good —
+    after vacuum, the rows in those backups are no longer recoverable
+    via ``nx catalog undelete``.
+    """
+    from nexus.catalog.catalog_backup import vacuum_old_backups
+    cat = _get_catalog()
+    removed, kept = vacuum_old_backups(
+        cat, older_than_days=older_than_days, dry_run=dry_run,
+    )
+    if dry_run:
+        click.echo(
+            f"Would remove {removed} backup file(s) "
+            f"(keeping {kept}). "
+            f"Run with --no-dry-run to actually delete."
+        )
+    else:
+        click.echo(
+            f"Removed {removed} backup file(s); kept {kept}."
         )
 
 
