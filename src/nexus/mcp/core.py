@@ -211,6 +211,9 @@ async def _t1_chroma_lifespan(_app: Any):
         from nexus.mcp import _t1_state
         from nexus.session import find_immediate_claude_pid, write_t1_addr
 
+        import structlog
+        _spawn_log = structlog.get_logger()
+
         claude_pid = find_immediate_claude_pid()
         if claude_pid > 0:
             # Invariant: ``_t1_state.T1_ADDR`` and
@@ -220,9 +223,22 @@ async def _t1_chroma_lifespan(_app: Any):
             write_t1_addr(claude_pid, host, port)
             _t1_state.T1_ADDR = (host, port)
             _OWNED_CHROMA["t1_addr_claude_pid"] = claude_pid
+            # nexus-7m8i: happy-path observability. Pre-RDR-105 the
+            # equivalent code emitted only on the exception branches
+            # (minted, reconciled), leaving operators unable to
+            # distinguish "MCP started cleanly" from "MCP never reached
+            # the spawn step" by reading the log alone. One ``info``
+            # per owner spawn closes the gap.
+            _spawn_log.info(
+                "t1_chroma_init_owned",
+                host=host,
+                port=port,
+                server_pid=server_pid,
+                claude_pid=claude_pid,
+                tmpdir=str(tmpdir),
+            )
         else:
-            import structlog
-            structlog.get_logger().warning(
+            _spawn_log.warning(
                 "t1_addr_publish_skipped_no_claude_pid",
                 host=host,
                 port=port,

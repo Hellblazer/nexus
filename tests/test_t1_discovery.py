@@ -1112,6 +1112,115 @@ class TestLifespanNewDiscoveryGenerator:
         finally:
             _t1_state.T1_ADDR = prev_addr
 
+    def test_branch3_emits_t1_chroma_init_owned_log(self, tmp_path, monkeypatch):
+        """nexus-7m8i: happy-path spawn emits exactly one
+        ``t1_chroma_init_owned`` info log with host/port/server_pid/
+        claude_pid/tmpdir. The no-claude-pid path emits the warning
+        instead (covered indirectly by the absence of the info)."""
+        import asyncio
+        import logging
+
+        import structlog
+        from structlog.testing import capture_logs
+
+        from nexus.mcp import _t1_state, core as mcp_core
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.delenv("NX_T1_HOST", raising=False)
+        monkeypatch.delenv("NX_T1_PORT", raising=False)
+        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
+        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+
+        # The default structlog wrapper filters at WARNING in test
+        # context; lower to INFO so capture_logs sees the happy-path
+        # event. Restored in the finally below.
+        prev_wrapper = structlog.get_config().get("wrapper_class")
+        structlog.configure(
+            wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+        )
+        prev_addr = _t1_state.T1_ADDR
+        _t1_state.T1_ADDR = None
+        try:
+            with patch("nexus.session.start_t1_server",
+                       return_value=("127.0.0.1", 51515, 88888,
+                                     str(tmp_path / "chroma_tmpdir"))), \
+                 patch("nexus.session.stop_t1_server"), \
+                 patch("nexus.session.find_immediate_claude_pid",
+                       return_value=12321):
+                with capture_logs() as cap:
+                    async def _run():
+                        async with mcp_core._t1_chroma_lifespan(None):
+                            pass
+                    asyncio.run(_run())
+
+            owned_events = [
+                e for e in cap if e.get("event") == "t1_chroma_init_owned"
+            ]
+            assert len(owned_events) == 1, (
+                f"expected exactly one t1_chroma_init_owned event, "
+                f"got {len(owned_events)}: {owned_events}"
+            )
+            ev = owned_events[0]
+            assert ev["log_level"] == "info"
+            assert ev["host"] == "127.0.0.1"
+            assert ev["port"] == 51515
+            assert ev["server_pid"] == 88888
+            assert ev["claude_pid"] == 12321
+            assert ev["tmpdir"] == str(tmp_path / "chroma_tmpdir")
+
+            # The warning path must NOT fire on the happy branch.
+            warnings = [
+                e for e in cap
+                if e.get("event") == "t1_addr_publish_skipped_no_claude_pid"
+            ]
+            assert warnings == []
+        finally:
+            _t1_state.T1_ADDR = prev_addr
+            if prev_wrapper is not None:
+                structlog.configure(wrapper_class=prev_wrapper)
+
+    def test_branch3_no_claude_pid_emits_warning_not_info(
+        self, tmp_path, monkeypatch,
+    ):
+        """When ``find_immediate_claude_pid`` returns 0, the warning
+        fires and the happy-path info does NOT (nexus-7m8i symmetry)."""
+        import asyncio
+        from structlog.testing import capture_logs
+
+        from nexus.mcp import _t1_state, core as mcp_core
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.delenv("NX_T1_HOST", raising=False)
+        monkeypatch.delenv("NX_T1_PORT", raising=False)
+        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
+        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+
+        prev_addr = _t1_state.T1_ADDR
+        _t1_state.T1_ADDR = None
+        try:
+            with patch("nexus.session.start_t1_server",
+                       return_value=("127.0.0.1", 51515, 88888,
+                                     str(tmp_path / "chroma_tmpdir"))), \
+                 patch("nexus.session.stop_t1_server"), \
+                 patch("nexus.session.find_immediate_claude_pid",
+                       return_value=0):
+                with capture_logs() as cap:
+                    async def _run():
+                        async with mcp_core._t1_chroma_lifespan(None):
+                            pass
+                    asyncio.run(_run())
+
+            owned = [e for e in cap if e.get("event") == "t1_chroma_init_owned"]
+            warned = [
+                e for e in cap
+                if e.get("event") == "t1_addr_publish_skipped_no_claude_pid"
+            ]
+            assert owned == []
+            assert len(warned) == 1
+            assert warned[0]["log_level"] == "warning"
+        finally:
+            _t1_state.T1_ADDR = prev_addr
+
     def test_branch3_no_claude_pid_skips_publish_but_keeps_chroma(
         self, tmp_path, monkeypatch
     ):
