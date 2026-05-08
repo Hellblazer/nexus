@@ -13,7 +13,6 @@ import threading
 import time
 from urllib.parse import urlparse
 import re
-import subprocess
 from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -325,159 +324,14 @@ def make_relative(abs_path: str | Path, repo_root: Path) -> str:
         return str(abs_path)
 
 
-# ── resolve_chash fallback helpers (RDR-086 Phase 2) ──────────────────────────
-
-# Fallback parallelism matches ChromaDB Cloud MAX_CONCURRENT_READS=10.
-_CHASH_FALLBACK_CONCURRENCY = 10
-# 30-second wall-clock deadline for the full T3 scan fallback.
-_CHASH_FALLBACK_DEADLINE_S = 30.0
-# Process-scoped flag: emit the "fallback entered" warning exactly once so
-# a repeatedly-missing chash does not flood the log.
-_chash_fallback_warned = False
-
-
-def _negate_iso(ts: str) -> str:
-    """Build a sort key that sorts newer ISO timestamps first.
-
-    ISO-8601 strings sort lexicographically from oldest to newest, so we
-    need a key that inverts the comparison. Mapping each digit through
-    9 - d flips the natural order — ``'2026'`` becomes ``'7973'`` and
-    newer dates sort first. Non-digits fall through unchanged so the
-    ``-``, ``:``, ``T``, and ``+`` separators keep their relative
-    positions in the string.
-
-    Correctness scope (review #5): the algorithm assumes every input
-    shares the same separator/timezone skeleton. ``created_at`` is
-    always written by ``ChashIndex.upsert`` via
-    ``datetime.now(UTC).isoformat()``, which emits
-    ``YYYY-MM-DDTHH:MM:SS.ffffff+00:00`` with a fixed
-    4-digit year and a ``+00:00`` suffix — so the key is well-defined
-    across any two values this catalog compares. Inputs with a
-    different suffix (``Z``, negative offsets, unicode minus) would
-    still sort deterministically but the "newest first" guarantee
-    only holds for values sharing the canonical shape. Fails
-    gracefully for year >= 10000 (column shift) — out of scope for
-    this decade.
-    """
-    return "".join(
-        str(9 - int(c)) if c.isdigit() else c for c in ts
-    )
-
-
-def _fallback_chash_scan(
-    *,
-    hex_chash: str,
-    span: str,
-    t3,
-    build_ref,
-) -> dict | None:
-    """Parallel scan across all T3 collections for a missing chash.
-
-    Invoked when the T2 ``chash_index`` returns no live row. Runs
-    ``resolve_span`` against every collection in batches of
-    ``_CHASH_FALLBACK_CONCURRENCY``; the first hit wins. The full scan
-    is bounded by a 30-second deadline. Logs a single warning per
-    process to surface the missing-index signal to operators.
-    """
-    global _chash_fallback_warned
-    import time
-    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-
-    try:
-        all_cols = [c.name for c in t3.list_collections()]
-    except Exception:
-        _log.debug("chash_fallback_list_collections_failed", exc_info=True)
-        return None
-
-    if not _chash_fallback_warned:
-        _log.warning(
-            "resolve_chash_fallback_scanning",
-            chash_prefix=hex_chash[:16],
-            collection_count=len(all_cols),
-            guidance="run 'nx collection backfill-hash --all' to populate T2",
-        )
-        _chash_fallback_warned = True
-
-    # resolve_span is a pure lookup on (t3, collection, hex_chash) —
-    # instance state is irrelevant, so we call it unbound via the class.
-    def _probe(coll: str) -> dict | None:
-        try:
-            return Catalog.resolve_span(None, span, coll, t3)  # type: ignore[arg-type]
-        except Exception:
-            return None
-
-    deadline = time.monotonic() + _CHASH_FALLBACK_DEADLINE_S
-    idx = 0
-    # Manual lifecycle so early return can call shutdown(cancel_futures=True)
-    # instead of blocking on in-flight futures during __exit__ (review #2).
-    ex = ThreadPoolExecutor(max_workers=_CHASH_FALLBACK_CONCURRENCY)
-    try:
-        in_flight: dict = {}
-        while idx < len(all_cols) or in_flight:
-            # Fill up to concurrency window.
-            while (
-                len(in_flight) < _CHASH_FALLBACK_CONCURRENCY
-                and idx < len(all_cols)
-            ):
-                col = all_cols[idx]
-                in_flight[ex.submit(_probe, col)] = col
-                idx += 1
-
-            if not in_flight:
-                break
-
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                _log.warning(
-                    "resolve_chash_fallback_timeout",
-                    chash_prefix=hex_chash[:16],
-                    deadline_s=_CHASH_FALLBACK_DEADLINE_S,
-                )
-                return None
-
-            done, _ = wait(
-                list(in_flight.keys()),
-                timeout=remaining,
-                return_when=FIRST_COMPLETED,
-            )
-            if not done:
-                _log.warning(
-                    "resolve_chash_fallback_timeout",
-                    chash_prefix=hex_chash[:16],
-                    deadline_s=_CHASH_FALLBACK_DEADLINE_S,
-                )
-                return None
-
-            for fut in done:
-                coll = in_flight.pop(fut)
-                span_res = fut.result()
-                if span_res is None:
-                    continue
-                # Recover doc_id from the hit collection — for fallback we
-                # have no T2 row, so query the collection directly.
-                try:
-                    col = t3.get_collection(coll)
-                    hit = col.get(
-                        where={"chunk_text_hash": hex_chash},
-                        include=[],
-                    )
-                    doc_id = hit["ids"][0] if hit["ids"] else ""
-                except Exception:
-                    doc_id = ""
-                return build_ref(coll=coll, doc_id=doc_id, span_result=span_res)
-
-        return None
-    finally:
-        # cancel_futures=True (3.9+) drops queued futures; wait=False stops
-        # shutdown from joining in-flight probes. The pool itself dies with
-        # the last reference so we don't leak threads after a hit or timeout.
-        ex.shutdown(wait=False, cancel_futures=True)
-
-
-def reset_chash_fallback_warning_for_tests() -> None:
-    """Test hook — clear the once-per-process fallback warning flag."""
-    global _chash_fallback_warned
-    _chash_fallback_warned = False
+# nexus-mbm: span resolution + RDR-086 Phase 2 chash-fallback
+# machinery moved to :mod:`nexus.catalog.catalog_spans`. The
+# Catalog methods further down delegate to that module; this
+# re-export keeps the test hook addressable at its historical
+# import path.
+from nexus.catalog.catalog_spans import (  # noqa: E402
+    reset_chash_fallback_warning_for_tests,
+)
 
 
 # Set of URI schemes the catalog will accept verbatim. Each scheme
@@ -622,29 +476,11 @@ class CatalogLink:
         }
 
 
-def _run_git(
-    args: list[str], cwd: Path, check: bool = True
-) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=30)
-    if check and result.returncode != 0:
-        raise RuntimeError(f"git command failed: {result.stderr.strip()}")
-    return result
-
-
-def _ensure_git_identity(cwd: Path) -> None:
-    """Set local git identity if none is configured (CI runners, fresh machines).
-
-    Why: Catalog.init runs ``git commit``, which fails with "Author identity
-    unknown" when neither global nor local user.name/user.email is set. Real
-    users with global git config see their own identity; environments without
-    one get a benign fallback so the initial commit succeeds.
-    """
-    name = _run_git(["git", "config", "user.name"], cwd=cwd, check=False)
-    if name.returncode != 0 or not name.stdout.strip():
-        _run_git(["git", "config", "user.name", "Nexus Catalog"], cwd=cwd)
-    email = _run_git(["git", "config", "user.email"], cwd=cwd, check=False)
-    if email.returncode != 0 or not email.stdout.strip():
-        _run_git(["git", "config", "user.email", "nexus@local"], cwd=cwd)
+# nexus-mbm: git subprocess helpers and the bodies of init / sync /
+# pull live in :mod:`nexus.catalog.catalog_git`. The Catalog methods
+# below delegate to those helpers; they keep self-state interactions
+# (locking, defrag-on-bloat, projection rebuild) here.
+from nexus.catalog import catalog_git as _git
 
 
 class Catalog:
@@ -741,174 +577,42 @@ class Catalog:
         # in-DB (not in a sidecar file) means a fresh SQLite cache
         # against an existing catalog dir naturally has no marker,
         # which correctly forces a rebuild to populate the empty cache.
+        # nexus-mbm: compose the _Ops facades BEFORE the consistency
+        # bootstrap. _read_consistency_marker / _ensure_consistent both
+        # delegate through self._sync, so the composition has to be in
+        # place when those calls fire.
+        from nexus.catalog.catalog_links import _LinkOps
+        from nexus.catalog.catalog_docs import _DocumentOps
+        from nexus.catalog.catalog_sync import _SyncOps
+        self._links = _LinkOps(self)
+        self._docs = _DocumentOps(self)
+        self._sync = _SyncOps(self)
+
         self._last_consistency_mtime: float = self._read_consistency_marker()
         if self._documents_path.exists():
             self._ensure_consistent()
 
     def _read_consistency_marker(self) -> float:
-        """Return the persisted ``_last_consistency_mtime`` or 0.0.
-
-        nexus-wehp: stored inside the catalog SQLite as a row in the
-        ``_meta`` table (created by ``CatalogDB._SCHEMA_SQL``, so reads
-        never issue DDL that would race a concurrent transaction). A
-        fresh SQLite cache (no row) returns 0.0, which forces a rebuild
-        and preserves the pre-fix invariant that a fresh cache always
-        projects from the canonical state. Read failures fall back to
-        0.0 (worst case = pre-fix rebuild).
-        """
-        try:
-            row = self._db.execute(
-                "SELECT value FROM _meta WHERE key = ?",
-                ("last_consistency_mtime",),
-            ).fetchone()
-            if row is None:
-                return 0.0
-            return float(row[0])
-        except (sqlite3.OperationalError, ValueError, TypeError):
-            return 0.0
+        """Delegates to ``_SyncOps._read_consistency_marker`` (nexus-mbm)."""
+        return self._sync._read_consistency_marker()
 
     def _projection_counts(self) -> tuple[int, int]:
-        """Return (document_count, link_count) for the heartbeat summary.
-
-        Read-only; used by the post-rebuild summary line so operators
-        can see the size of what they just rebuilt. Tolerates errors
-        and returns ``(0, 0)`` on failure — the summary is informational
-        and must never mask a real rebuild result.
-        """
-        try:
-            doc_row = self._db.execute(
-                "SELECT COUNT(*) FROM documents"
-            ).fetchone()
-            link_row = self._db.execute(
-                "SELECT COUNT(*) FROM links"
-            ).fetchone()
-            return (int(doc_row[0]) if doc_row else 0,
-                    int(link_row[0]) if link_row else 0)
-        except Exception:
-            return (0, 0)
+        """Delegates to ``_SyncOps._projection_counts`` (nexus-mbm)."""
+        return self._sync._projection_counts()
 
     def _write_consistency_marker(self, mtime: float) -> None:
-        """Persist the highest successfully-projected canonical mtime.
-
-        nexus-wehp: stored inside the catalog SQLite. Tolerates write
-        failures silently — failing to update the marker means the next
-        process will re-do the rebuild, which is correctness-preserving
-        (the rebuild is idempotent at the projection level).
-
-        RDR-104 critic Critical #2 fix: this write MUST live inside the
-        same transaction as the projector writes. Pre-fix it called
-        ``self._db.commit()`` independently, which created an asymmetric
-        failure window: a crash AFTER the marker commit but BEFORE the
-        outer transaction's projection writes committed (or while the
-        outer ``with self._conn:`` rolled back) advanced the marker
-        without advancing the projection. The next ``_ensure_consistent``
-        run would observe the new marker, conclude "nothing to do", and
-        permanently skip the events that should have been applied —
-        silent corruption with no recovery path.
-
-        Caller contract: this method is invoked from inside an active
-        ``CatalogDB.transaction()`` block. The connection-as-context-manager
-        commits the marker write atomically with the projection writes
-        on successful exit; rolls both back together on any exception.
-        Do NOT call ``self._db.commit()`` here.
-        """
-        try:
-            self._db.execute(
-                "INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)",
-                ("last_consistency_mtime", f"{mtime}"),
-            )
-        except sqlite3.OperationalError:
-            # RDR-104 Round 2 Significant #1: the OperationalError
-            # swallow is intentional. Marker-write failure is rare
-            # (transient SQLite lock contention is the most likely
-            # cause), idempotent re-replay corrects the next run, and
-            # propagating would degrade the catalog (``degraded=True``)
-            # for a recoverable cause. The in-memory mirror
-            # ``self._last_consistency_mtime`` is assigned post-
-            # ``with`` so this instance still short-circuits its own
-            # subsequent rebuilds; the next process reads the un-
-            # advanced DB row and re-rebuilds, which is correct.
-            pass
+        """Delegates to ``_SyncOps._write_consistency_marker`` (nexus-mbm)."""
+        return self._sync._write_consistency_marker(mtime)
 
     def _write_offset_marker(
         self, *, offset: int, header_hash: str, window: int,
     ) -> None:
-        """Persist the three RDR-104 incremental marker rows atomically.
-
-        RDR-104 Step 2: writes ``last_applied_event_offset``,
-        ``last_applied_event_header_hash``, and
-        ``last_applied_event_header_window`` to ``_meta``. All three
-        rows must commit together with the projector writes (and the
-        ``last_consistency_mtime`` row from
-        ``_write_consistency_marker``) so the marker is consistent
-        with the projection state.
-
-        Caller contract: this method is invoked from inside an active
-        ``CatalogDB.transaction()`` block. The connection-as-context-
-        manager commits all four marker rows atomically with the
-        projection writes on successful exit; rolls them all back
-        together on any exception. Do NOT call ``self._db.commit()``
-        here — see ``_write_consistency_marker`` for the same atomicity
-        contract.
-
-        Tolerates ``sqlite3.OperationalError`` for the same reasoning
-        as ``_write_consistency_marker``: rare transient lock
-        contention is corrected by the next idempotent re-replay.
-        """
-        try:
-            self._db.execute(
-                "INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)",
-                (_META_KEY_LAST_OFFSET, str(offset)),
-            )
-            self._db.execute(
-                "INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)",
-                (_META_KEY_HEADER_HASH, header_hash),
-            )
-            self._db.execute(
-                "INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)",
-                (_META_KEY_HEADER_WINDOW, str(window)),
-            )
-        except sqlite3.OperationalError:
-            # See _write_consistency_marker for the rationale on the
-            # silent OperationalError swallow (RDR-104 Round 2 #1).
-            pass
+        """Delegates to ``_SyncOps._write_offset_marker`` (nexus-mbm)."""
+        return self._sync._write_offset_marker(offset=offset, header_hash=header_hash, window=window)
 
     def _read_offset_marker(self) -> tuple[int, str, int] | None:
-        """Return ``(offset, header_hash, window)`` or ``None``.
-
-        RDR-104 Step 2: returns ``None`` when any of the three rows is
-        missing OR when the offset / window string is unparseable as
-        ``int``. The orchestrator (Step 3) treats ``None`` as the
-        bootstrap signal and falls through to full rebuild.
-
-        Returning a partial tuple would let the orchestrator act on
-        inconsistent metadata; full rebuild is the correctness-
-        preserving fallback.
-        """
-        try:
-            rows = self._db.execute(
-                "SELECT key, value FROM _meta WHERE key IN (?, ?, ?)",
-                (
-                    _META_KEY_LAST_OFFSET,
-                    _META_KEY_HEADER_HASH,
-                    _META_KEY_HEADER_WINDOW,
-                ),
-            ).fetchall()
-        except sqlite3.OperationalError:
-            return None
-        by_key = {key: value for key, value in rows}
-        if (
-            _META_KEY_LAST_OFFSET not in by_key
-            or _META_KEY_HEADER_HASH not in by_key
-            or _META_KEY_HEADER_WINDOW not in by_key
-        ):
-            return None
-        try:
-            offset = int(by_key[_META_KEY_LAST_OFFSET])
-            window = int(by_key[_META_KEY_HEADER_WINDOW])
-        except (TypeError, ValueError):
-            return None
-        return (offset, by_key[_META_KEY_HEADER_HASH], window)
+        """Delegates to ``_SyncOps._read_offset_marker`` (nexus-mbm)."""
+        return self._sync._read_offset_marker()
 
     @staticmethod
     def _prefix_sql(prefix: str) -> tuple[str, list]:
@@ -928,461 +632,12 @@ class Catalog:
         )
 
     def _ensure_consistent(self) -> None:
-        """Rebuild SQLite from the canonical truth when its mtime has advanced.
-
-        With ``NEXUS_EVENT_SOURCED=1`` the canonical truth is
-        ``events.jsonl`` (the event log IS the state per RDR-101 §"Core
-        invariants"); the rebuild path replays the log through
-        ``Projector.apply_all`` so a cross-process write that landed on
-        events.jsonl gets re-projected into this process's SQLite cache.
-        With the gate OFF the legacy JSONL files (owners/documents/links)
-        remain canonical and the rebuild reads them directly.
-
-        **Bootstrap guardrail.** When the gate is on but the legacy
-        JSONL holds substantially more documents than events.jsonl
-        carries DocumentRegistered events, we are looking at a freshly-
-        flipped catalog whose log is sparse against the legacy state:
-        the event-sourced rebuild would DELETE every legacy row and
-        replay only the few new events, silently wiping the catalog.
-        Refuse the event-sourced path in that scenario (fall through to
-        legacy + emit a structured warning). The synthesize-log
-        migration verb that historically populated the log was retired
-        post Phase 5b (nexus-iftc).
-
-        **Atomicity.** The DELETE+replay sequence runs inside
-        ``CatalogDB.transaction()`` so a malformed event, a
-        ``NotImplementedError`` from the v: 1 projector path, or an
-        ``OperationalError`` mid-replay rolls back to the pre-DELETE
-        state instead of leaving SQLite empty.
-
-        Sets ``degraded`` flag on failure so callers can surface the stale
-        state rather than silently serving outdated data (nexus-f2vp).
-
-        Storage review S-4: skips the rebuild when no canonical file has
-        been written since the last successful rebuild. For a large
-        catalog this eliminates the O(entries) parse cost on every
-        ``Catalog()`` construction — the MCP server instantiates one
-        per tool call.
-        """
-        try:
-            # Track all canonical-truth sources for mtime detection so a
-            # rebuild kicks in regardless of which path produced the
-            # write. With the gate OFF, legacy JSONL is canonical; with
-            # the gate ON, events.jsonl is canonical but legacy JSONL is
-            # still written (back-compat) and a bootstrap catalog may
-            # have JSONL data with an empty events.jsonl.
-            paths_with_mtime: list[tuple[Path, float]] = []
-            current_mtime = 0.0
-            for p in (
-                self._owners_path,
-                self._documents_path,
-                self._links_path,
-                self._events_path,
-            ):
-                if p.exists():
-                    m = p.stat().st_mtime
-                    paths_with_mtime.append((p, m))
-                    current_mtime = max(current_mtime, m)
-            if current_mtime <= self._last_consistency_mtime and not self.degraded:
-                return
-            trigger = _trigger_file_label(
-                paths_with_mtime, self._last_consistency_mtime,
-            )
-
-            use_event_log = (
-                self._event_sourced_enabled
-                and self._events_path.exists()
-                and self._events_path.stat().st_size > 0
-            )
-            # nexus-1sy5: once the offset marker is established, the
-            # bootstrap guardrail has already passed at least once —
-            # ``_write_offset_marker`` is only reached from rebuild
-            # branches that ran after the guardrail accepted the event
-            # log. Skip the O(N) ``covers_legacy`` scan in that
-            # steady state; it would otherwise dominate every post-
-            # write rebuild dispatch (~838 ms on a 460K-event log) and
-            # cap the RDR-104 incremental fast path well above its
-            # <100 ms target. The marker check is a single
-            # `SELECT key, value FROM _meta` and short-circuits before
-            # the scan so the perf path is microseconds.
-            marker_established = (
-                use_event_log and self._read_offset_marker() is not None
-            )
-            if (
-                use_event_log
-                and not marker_established
-                and not self._event_log_covers_legacy()
-            ):
-                # Bootstrap guardrail: events.jsonl is non-empty but
-                # the legacy JSONL has materially more documents than
-                # the event log carries DocumentRegistered events for.
-                # Refuse to wipe the legacy rows; fall through to the
-                # legacy rebuild and flag the state so operators see
-                # it via ``nx catalog doctor`` (not just structlog).
-                # nexus-iftc retired the synthesize-log migration
-                # verb; the warning now points operators at the
-                # ``nx catalog setup`` rebuild path.
-                self.bootstrap_fallback_active = True
-                _log.warning(
-                    "catalog_event_log_incomplete_falling_back_to_legacy",
-                    catalog_dir=str(self._dir),
-                    note=(
-                        "events.jsonl is non-empty but has fewer "
-                        "DocumentRegistered events than documents.jsonl "
-                        "has rows. ES writes are landing in the log "
-                        "but reads come from legacy JSONL; replay "
-                        "equality is silently broken. The synthesize-log "
-                        "and t3-backfill-doc-id remediation verbs were "
-                        "retired post Phase 5b (nexus-iftc). Restore by "
-                        "deleting the catalog directory and re-running "
-                        "'nx catalog setup' to bootstrap from current "
-                        "T3 state."
-                    ),
-                )
-                use_event_log = False
-            else:
-                self.bootstrap_fallback_active = False
-            if use_event_log:
-                # RDR-104 Step 3: five-way dispatch over the event-
-                # sourced rebuild paths.
-                #
-                #   (a) empty-delta fast path — events.jsonl unchanged,
-                #       only the mtime row advances. Mandatory inside
-                #       transaction() for the 4.24.4 atomicity contract.
-                #   (b) bootstrap full rebuild — no offset marker yet;
-                #       DELETE + replay from offset 0 and write all
-                #       four marker rows.
-                #   (c) invalidated full rebuild — header-hash drift
-                #       OR window-size mismatch; same as bootstrap.
-                #   (d) incremental — marker valid, delta non-empty;
-                #       replay_from(stored_offset, limit_offset=eof)
-                #       inside transaction() with apply_all(commit=
-                #       False), then write all four marker rows.
-                #   (e) corruption escalation — bounded iterator yields
-                #       zero events from a non-empty range; escalate
-                #       to (c) WITHOUT advancing the marker.
-                #
-                # The bulk_load_documents FTS5 fence is preserved on
-                # the full-rebuild path only — the per-event projector
-                # writes there number in the hundreds of thousands and
-                # need the trigger-drop-and-rebuild idiom. Incremental
-                # writes are bounded by the delta size (typically <100
-                # events) so the per-row trigger overhead is
-                # unmeasurable.
-                from nexus.catalog.event_log import EventLog
-                _log.debug(
-                    "catalog_consistency_rebuild_event_sourced",
-                    mtime=current_mtime,
-                )
-
-                eof_offset_now = self._events_path.stat().st_size
-                stored = self._read_offset_marker()
-                header_hash_now: str | None = None
-
-                # Empty-delta fast path (Round 1 Significant #4 / Round 2 #4).
-                # eof_offset_now == stored_offset means events.jsonl has not
-                # been appended to since the last successful rebuild. mtime
-                # ticked elsewhere (a legacy JSONL write, owners.jsonl, etc.)
-                # so we landed in the rebuild branch but there is nothing to
-                # replay. Advance only last_consistency_mtime — inside a
-                # transaction() for the 4.24.4 atomicity contract.
-                if stored is not None and stored[0] == eof_offset_now:
-                    def _summary_empty(elapsed: float) -> str:
-                        return (
-                            f"  Catalog: rebuild triggered by {trigger} — "
-                            f"empty delta → mtime-only marker advance "
-                            f"in {elapsed:.1f}s"
-                        )
-                    with _rebuild_heartbeat(
-                        "advancing consistency marker",
-                        summary_builder=_summary_empty,
-                    ):
-                        with self._db.transaction():
-                            self._write_consistency_marker(current_mtime)
-                else:
-                    # Decide bootstrap / invalidated / incremental.
-                    do_full = False
-                    invalidation: str | None = None
-                    if stored is None:
-                        do_full = True
-                        invalidation = "bootstrap"
-                    else:
-                        stored_offset, stored_hash, stored_window = stored
-                        if stored_window != _HEADER_HASH_BYTES:
-                            do_full = True
-                            invalidation = "window-size mismatch"
-                        else:
-                            header_hash_now = _compute_header_hash(
-                                self._events_path,
-                            )
-                            if stored_hash != header_hash_now:
-                                do_full = True
-                                invalidation = "header-hash drift"
-
-                    if not do_full:
-                        # Incremental path: replay only the bytes in
-                        # [stored_offset, eof_offset_now). The bounded
-                        # form is mandatory for concurrent-appender
-                        # safety (Round 2 Critical #1) — without it, a
-                        # writer landing between the stat() above and
-                        # the iterator's read window would extend the
-                        # iterator past eof_offset_now, the marker we
-                        # then persist (eof_offset_now, the pre-append
-                        # snapshot) would be stale below the actual
-                        # applied-event tail, and the empty-delta fast
-                        # path would never settle for that range.
-                        stored_offset, stored_hash, stored_window = stored
-                        delta_events = list(
-                            EventLog(self._dir).replay_from(
-                                stored_offset,
-                                limit_offset=eof_offset_now,
-                            )
-                        )
-                        if not delta_events and stored_offset < eof_offset_now:
-                            # Round 3 Significant #2: zero events from a
-                            # non-empty delta range is the corruption
-                            # signal. Escalate to full rebuild WITHOUT
-                            # advancing the marker so the recovery is
-                            # idempotent under retry.
-                            do_full = True
-                            invalidation = (
-                                "incremental corruption "
-                                "(zero events from non-empty delta)"
-                            )
-                        else:
-                            replayed_count = len(delta_events)
-
-                            def _summary_incremental(elapsed: float) -> str:
-                                docs, links = self._projection_counts()
-                                return (
-                                    f"  Catalog: rebuild triggered by "
-                                    f"{trigger} — replayed "
-                                    f"{replayed_count:,} events "
-                                    f"incrementally → {docs:,} docs, "
-                                    f"{links:,} links in {elapsed:.1f}s"
-                                )
-
-                            with _rebuild_heartbeat(
-                                "applying incremental delta",
-                                summary_builder=_summary_incremental,
-                            ):
-                                with self._db.transaction():
-                                    # commit=False mirrors the full-
-                                    # rebuild path. A nested commit()
-                                    # would defeat the rollback fence
-                                    # and re-introduce the 4.24.4
-                                    # ordering hazard (Round 3
-                                    # Significant #3).
-                                    self._projector.apply_all(
-                                        iter(delta_events), commit=False,
-                                    )
-                                    self._write_consistency_marker(
-                                        current_mtime,
-                                    )
-                                    self._write_offset_marker(
-                                        offset=eof_offset_now,
-                                        header_hash=stored_hash,
-                                        window=stored_window,
-                                    )
-
-                    if do_full:
-                        # Bootstrap, invalidated, or escalated-corruption
-                        # full rebuild. The bulk_load_documents FTS5
-                        # fence is preserved here because the per-event
-                        # projector writes can number in the hundreds of
-                        # thousands; without the fence each replayed
-                        # INSERT queues per-row hash entries that SQLite
-                        # cannot merge mid-transaction (15-20 min COMMIT
-                        # on a hot catalog).
-                        if header_hash_now is None:
-                            header_hash_now = _compute_header_hash(
-                                self._events_path,
-                            )
-                        event_count = _count_lines(self._events_path)
-                        invalidation_label = invalidation
-
-                        def _summary_full(elapsed: float) -> str:
-                            docs, links = self._projection_counts()
-                            qualifier = (
-                                f" ({invalidation_label} → full rebuild)"
-                                if invalidation_label
-                                and invalidation_label != "bootstrap"
-                                else ""
-                            )
-                            return (
-                                f"  Catalog: rebuild triggered by "
-                                f"{trigger} — replayed "
-                                f"{event_count:,} events → {docs:,} "
-                                f"docs, {links:,} links in "
-                                f"{elapsed:.1f}s{qualifier}"
-                            )
-
-                        with _rebuild_heartbeat(
-                            "rebuilding projection",
-                            summary_builder=_summary_full,
-                        ):
-                            with self._db.transaction() as conn:
-                                with self._db.bulk_load_documents():
-                                    conn.execute("DELETE FROM links")
-                                    conn.execute("DELETE FROM documents")
-                                    conn.execute("DELETE FROM owners")
-                                    # Step 0 (Critical #1): see the
-                                    # earlier comment for the rationale
-                                    # and why the COALESCE in
-                                    # _v0_collection_created is
-                                    # retained for the degraded-path
-                                    # retry case (Round 3 Significant
-                                    # #1).
-                                    conn.execute("DELETE FROM collections")
-                                    # commit=False — the transaction
-                                    # context owns the commit boundary;
-                                    # a nested commit() would defeat
-                                    # the rollback fence.
-                                    self._projector.apply_all(
-                                        EventLog(self._dir).replay(),
-                                        commit=False,
-                                    )
-                                # 4.24.4 atomicity contract: marker
-                                # writes happen INSIDE the same
-                                # transaction as the projection writes.
-                                # The transaction context commits all
-                                # rows atomically on success, rolls
-                                # them all back together on any
-                                # exception. Pre-4.24.4 the marker
-                                # write lived OUTSIDE this block in
-                                # _write_consistency_marker()'s own
-                                # commit(), a refactoring hazard.
-                                self._write_consistency_marker(current_mtime)
-                                self._write_offset_marker(
-                                    offset=eof_offset_now,
-                                    header_hash=header_hash_now,
-                                    window=_HEADER_HASH_BYTES,
-                                )
-            else:
-                owners = read_owners(self._owners_path) if self._owners_path.exists() else {}
-                documents = read_documents(self._documents_path) if self._documents_path.exists() else {}
-                links_dict = read_links(self._links_path) if self._links_path.exists() else {}
-                _log.debug("catalog_consistency_rebuild", mtime=current_mtime)
-                # Pre-rebuild sizes (the bulk dicts are about to be
-                # truncated and reloaded). _summary captures these by
-                # closure so the post-rebuild line reports what just
-                # got loaded.
-                n_owners = len(owners)
-                n_docs = len(documents)
-                n_links = len(links_dict)
-
-                def _summary(elapsed: float) -> str:
-                    return (
-                        f"  Catalog: rebuild triggered by {trigger} — "
-                        f"loaded {n_owners:,} owners, {n_docs:,} docs, "
-                        f"{n_links:,} links in {elapsed:.1f}s"
-                    )
-
-                with _rebuild_heartbeat(
-                    "rebuilding projection", summary_builder=_summary,
-                ):
-                    # RDR-104 critic Critical #2 fix: pass current_mtime so
-                    # the marker write happens INSIDE rebuild's transaction
-                    # block, atomic with the projection writes.
-                    self._db.rebuild(
-                        owners, documents, list(links_dict.values()),
-                        consistency_mtime=current_mtime,
-                    )
-            # In-memory mirror of the persisted marker. The DB write is
-            # already inside the rebuild transaction (event-sourced and
-            # legacy paths both); this assignment exists so subsequent
-            # in-process construction short-circuits without a SELECT.
-            self._last_consistency_mtime = current_mtime
-            self.degraded = False
-        except Exception as exc:
-            _log.warning("catalog_consistency_rebuild_failed", error=str(exc), exc_info=True)
-            self.degraded = True
+        """Delegates to ``_SyncOps._ensure_consistent`` (nexus-mbm)."""
+        return self._sync._ensure_consistent()
 
     def _event_log_covers_legacy(self) -> bool:
-        """Return True when events.jsonl plausibly covers documents.jsonl.
-
-        Bootstrap guardrail for ``_ensure_consistent``: refuses to
-        DELETE-and-rebuild from a sparse event log when the legacy
-        JSONL still holds the majority of the catalog's content (e.g.
-        an operator just flipped ``NEXUS_EVENT_SOURCED=1`` on a
-        populated catalog and the first event-sourced write produced
-        a one-event log).
-
-        Cheap O(N) line counts on both files. ``documents.jsonl`` may
-        contain duplicates (last-line-wins on rebuild) and tombstones
-        (``_deleted=True`` markers) — count distinct non-tombstoned
-        tumblers as the canonical row count. ``events.jsonl`` may
-        contain tombstones too (DocumentDeleted events) — count
-        DocumentRegistered events minus DocumentDeleted as the
-        replayed-document count. A 5% slop tolerance avoids tripping
-        on a single in-flight write or one-event drift.
-        """
-        if not self._documents_path.exists():
-            return True
-        try:
-            registered: set[str] = set()
-            tombstoned: set[str] = set()
-            with self._documents_path.open() as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        rec = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    tumbler = rec.get("tumbler")
-                    if not tumbler:
-                        continue
-                    if rec.get("_deleted"):
-                        tombstoned.add(tumbler)
-                    else:
-                        registered.add(tumbler)
-            legacy_doc_count = len(registered - tombstoned)
-            if legacy_doc_count == 0:
-                return True
-
-            from nexus.catalog import events as _ev
-            # Net document registrations: DocumentRegistered − DocumentDeleted.
-            # Can go negative (a dedupe-only event stream against a
-            # legacy catalog produces only DocumentDeleted), which the
-            # ``>= threshold`` check below relies on to fall through to
-            # legacy. RDR-101 Phase 3 follow-up C (nexus-o6aa.9.8):
-            # renamed from ``event_doc_count`` to make the negative
-            # values intentional rather than surprising.
-            net_registered = 0
-            with self._events_path.open() as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        obj = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    t = obj.get("type")
-                    if t == _ev.TYPE_DOCUMENT_REGISTERED:
-                        net_registered += 1
-                    elif t == _ev.TYPE_DOCUMENT_DELETED:
-                        net_registered -= 1
-
-            # RDR-101 Phase 3 follow-up B (nexus-o6aa.9.7): floor the
-            # threshold at 1. ``int(1 * 0.95) == 0`` and ``0 >= 0`` is
-            # True, so a 1-document legacy catalog with a non-empty-but-
-            # ``DocumentRegistered``-free ``events.jsonl`` (e.g. a
-            # ChunkIndexed-only log from a partial Phase 2 synthesis,
-            # or a dedupe-only event stream that pushes
-            # ``event_doc_count`` to 0) used to bypass the guardrail
-            # and silently wipe the single legacy row. The floor
-            # guarantees a real DocumentRegistered must exist in the
-            # log before ES rebuild is allowed at the smallest catalog
-            # sizes.
-            threshold = max(1, int(legacy_doc_count * 0.95))
-            return net_registered >= threshold
-        except Exception:
-            # On any unexpected failure, refuse the event-sourced
-            # rebuild (safer to fall through to legacy than to wipe).
-            return False
+        """Delegates to ``_SyncOps._event_log_covers_legacy`` (nexus-mbm)."""
+        return self._sync._event_log_covers_legacy()
 
     def jsonl_paths(self) -> tuple[Path, ...]:
         """Public accessor for legacy JSONL file paths.
@@ -1414,48 +669,22 @@ class Catalog:
 
     @classmethod
     def init(cls, catalog_path: Path, remote: str | None = None) -> Catalog:
-        """Create catalog git repo with empty JSONL files."""
+        """Create catalog git repo with empty JSONL files.
+
+        Delegates the git plumbing to :mod:`nexus.catalog.catalog_git`
+        (nexus-mbm). When *remote* is provided and no local repo
+        exists, prefer cloning so the new machine starts from the
+        existing canonical history; otherwise initialise a local
+        repo from scratch.
+        """
         git_dir = catalog_path / ".git"
         if remote and not git_dir.exists():
-            # Clone from remote if catalog doesn't exist locally (new machine)
-            import subprocess as _sp
-            result = _sp.run(
-                ["git", "clone", remote, str(catalog_path)],
-                capture_output=True, text=True, timeout=30,
-            )
-            if result.returncode == 0:
-                _log.info("catalog_cloned_from_remote", remote=remote)
-                db_path = catalog_path / ".catalog.db"
-                return cls(catalog_path, db_path)
-            else:
-                raise RuntimeError(
-                    f"Failed to clone catalog from {remote}: {result.stderr.strip()}"
-                )
-        catalog_path.mkdir(parents=True, exist_ok=True)
-        if not git_dir.exists():
-            _run_git(["git", "init"], cwd=catalog_path)
-        _ensure_git_identity(catalog_path)
-        # Create empty JSONL files if missing
-        for name in ("documents.jsonl", "owners.jsonl", "links.jsonl"):
-            p = catalog_path / name
-            if not p.exists():
-                p.touch()
-        # Create .gitignore
-        gitignore = catalog_path / ".gitignore"
-        if not gitignore.exists():
-            gitignore.write_text(".catalog.db\n")
-        # Initial commit if no commits yet
-        result = _run_git(["git", "rev-parse", "HEAD"], cwd=catalog_path, check=False)
-        if result.returncode != 0:
-            _run_git(["git", "add", "-A"], cwd=catalog_path)
-            _run_git(["git", "commit", "-m", "Init catalog"], cwd=catalog_path)
+            _git.clone_catalog(remote, catalog_path)
+            return cls(catalog_path, catalog_path / ".catalog.db")
+        _git.init_repo(catalog_path)
         if remote:
-            # Only add remote if not already set
-            r = _run_git(["git", "remote"], cwd=catalog_path, check=False)
-            if "origin" not in r.stdout:
-                _run_git(["git", "remote", "add", "origin", remote], cwd=catalog_path)
-        db_path = catalog_path / ".catalog.db"
-        return cls(catalog_path, db_path)
+            _git.add_remote_origin_if_missing(catalog_path, remote)
+        return cls(catalog_path, catalog_path / ".catalog.db")
 
     @staticmethod
     def is_initialized(catalog_path: Path) -> bool:
@@ -1486,29 +715,23 @@ class Catalog:
     def sync(self, message: str = "catalog update") -> None:
         """git add -A && git commit && git push (if remote configured).
 
-        Auto-compacts JSONL files when bloat ratio exceeds 3x live records.
+        Auto-compacts JSONL files when bloat ratio exceeds 3x live
+        records. Holds the catalog directory flock for the duration
+        so concurrent appenders don't race the commit. Subprocess
+        plumbing lives in :mod:`nexus.catalog.catalog_git`.
         """
         dir_fd = self._acquire_lock()
         try:
             if self._should_compact():
                 _log.info("catalog_auto_defrag")
                 self._defrag_unlocked()
-            _run_git(["git", "add", "-A"], cwd=self._dir)
-            status = _run_git(["git", "status", "--porcelain"], cwd=self._dir)
-            if not status.stdout.strip():
-                return
-            _run_git(["git", "commit", "-m", message], cwd=self._dir)
-            remote = _run_git(["git", "remote"], cwd=self._dir, check=False)
-            if remote.stdout.strip():
-                _run_git(["git", "push", "-u", "origin", "HEAD"], cwd=self._dir, check=False)
+            _git.commit_and_push(self._dir, message)
         finally:
             self._release_lock(dir_fd)
 
     def pull(self) -> None:
         """git pull && rebuild SQLite from JSONL."""
-        remote = _run_git(["git", "remote"], cwd=self._dir, check=False)
-        if remote.stdout.strip():
-            _run_git(["git", "pull"], cwd=self._dir, check=False)
+        _git.pull_origin_if_remote(self._dir)
         self.rebuild()
 
     # ── Locking ────────────────────────────────────────────────────────────
@@ -1682,33 +905,12 @@ class Catalog:
             self._release_lock(dir_fd)
 
     def owner_for_repo(self, repo_hash: str) -> Tumbler | None:
-        row = self._db.execute(
-            "SELECT tumbler_prefix FROM owners WHERE repo_hash = ?", (repo_hash,)
-        ).fetchone()
-        return Tumbler.parse(row[0]) if row else None
+        """Delegates to ``_DocumentOps.owner_for_repo`` (nexus-mbm)."""
+        return self._docs.owner_for_repo(repo_hash)
 
     def owner_tumblers_by_name(self, name: str) -> list[Tumbler]:
-        """Return tumblers of all owners with this name.
-
-        UNIQUE constraint is ``(name, owner_type)`` per nexus-7vuw, so
-        a single name can map to multiple owners across types (e.g.
-        a repo and a curator both named ``nexus``). Callers that need
-        a unique answer should disambiguate on the returned list
-        (typical CLI flow: error when ``len(...) > 1`` and surface
-        the candidates).
-
-        Returns ``[]`` if no owner has this name. Used by the
-        ``--owner`` CLI flags on ``nx catalog list`` (and friends)
-        to resolve operator-typed names to tumblers without leaking
-        the ``Tumbler.parse → int()`` ``ValueError`` (#537,
-        nexus-1lx7).
-        """
-        rows = self._db.execute(
-            "SELECT tumbler_prefix FROM owners WHERE name = ? "
-            "ORDER BY tumbler_prefix",
-            (name,),
-        ).fetchall()
-        return [Tumbler.parse(r[0]) for r in rows]
+        """Delegates to ``_DocumentOps.owner_tumblers_by_name`` (nexus-mbm)."""
+        return self._docs.owner_tumblers_by_name(name)
 
     def ensure_owner_for_repo(
         self, repo: Path, *, repo_name: str = "", description: str = "",
@@ -1989,93 +1191,14 @@ class Catalog:
             self._release_lock(dir_fd)
 
     def resolve(self, tumbler: Tumbler, *, follow_alias: bool = True) -> CatalogEntry | None:
-        """Return the document entry for ``tumbler``.
-
-        With ``follow_alias=True`` (default), transparently dereferences
-        ``alias_of`` — external callers get the canonical entry even
-        when they asked by an old tumbler. Pass ``follow_alias=False`` to
-        see the raw entry (needed by dedupe tooling to inspect the alias
-        graph itself).
-        """
-        target = self.resolve_alias(tumbler) if follow_alias else tumbler
-        row = self._db.execute(
-            "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
-            "metadata, source_mtime, alias_of, source_uri "
-            "FROM documents WHERE tumbler = ?",
-            (str(target),),
-        ).fetchone()
-        if not row:
-            return None
-        return CatalogEntry(
-            tumbler=Tumbler.parse(row[0]),
-            title=row[1],
-            author=row[2],
-            year=row[3],
-            content_type=row[4],
-            file_path=row[5],
-            corpus=row[6],
-            physical_collection=row[7],
-            chunk_count=row[8],
-            head_hash=row[9],
-            indexed_at=row[10],
-            meta=json.loads(row[11]) if row[11] else {},
-            source_mtime=row[12] or 0.0,
-            alias_of=row[13] or "",
-            source_uri=row[14] or "",
-        )
+        """Delegates to ``_DocumentOps.resolve`` (nexus-mbm)."""
+        return self._docs.resolve(tumbler, follow_alias=follow_alias)
 
     def list_by_collection(
         self, physical_collection: str, *, limit: int | None = None,
     ) -> list[CatalogEntry]:
-        """Return every document entry whose ``physical_collection``
-        matches.
-
-        One entry per source document (NOT per chunk) — what callers
-        like ``nx enrich aspects`` need to drive a per-document
-        operation. Ordered by ``tumbler ASC`` for deterministic
-        iteration. ``limit=None`` returns every match.
-
-        Reads the SQLite cache without acquiring the JSONL-truth
-        flock — consistent with ``resolve``, ``find``, and
-        ``by_file_path``. Callers driving downstream writes (e.g.
-        ``nx enrich aspects``) should treat the result as a
-        best-effort sweep; a document registered concurrently may
-        be missed and can be picked up by a subsequent run or by
-        ``--re-extract`` re-sweeps.
-        """
-        sql = (
-            "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
-            "metadata, source_mtime, alias_of, source_uri "
-            "FROM documents WHERE physical_collection = ? "
-            "ORDER BY tumbler ASC"
-        )
-        params: tuple = (physical_collection,)
-        if limit is not None:
-            sql += " LIMIT ?"
-            params = (physical_collection, limit)
-        rows = self._db.execute(sql, params).fetchall()
-        return [
-            CatalogEntry(
-                tumbler=Tumbler.parse(row[0]),
-                title=row[1],
-                author=row[2],
-                year=row[3],
-                content_type=row[4],
-                file_path=row[5],
-                corpus=row[6],
-                physical_collection=row[7],
-                chunk_count=row[8],
-                head_hash=row[9],
-                indexed_at=row[10],
-                meta=json.loads(row[11]) if row[11] else {},
-                source_mtime=row[12] or 0.0,
-                alias_of=row[13] or "",
-                source_uri=row[14] or "",
-            )
-            for row in rows
-        ]
+        """Delegates to ``_DocumentOps.list_by_collection`` (nexus-mbm)."""
+        return self._docs.list_by_collection(physical_collection, limit=limit)
 
     # ── RDR-101 Phase 6: Collections projection (nexus-o6aa.14) ─────────
 
@@ -2208,34 +1331,16 @@ class Catalog:
             self._release_lock(dir_fd)
 
     def list_collections(self) -> list[dict]:
-        """Return every row in the ``collections`` projection, ordered by name."""
-        sql = (
-            "SELECT " + ", ".join(self._COLLECTION_COLUMNS) + " "
-            "FROM collections ORDER BY name"
-        )
-        rows = self._db.execute(sql).fetchall()
-        return [self._row_to_collection_dict(r) for r in rows]
+        """Delegates to ``_DocumentOps.list_collections`` (nexus-mbm)."""
+        return self._docs.list_collections()
 
     def get_collection(self, name: str) -> dict | None:
-        sql = (
-            "SELECT " + ", ".join(self._COLLECTION_COLUMNS) + " "
-            "FROM collections WHERE name = ?"
-        )
-        row = self._db.execute(sql, (name,)).fetchone()
-        return self._row_to_collection_dict(row) if row else None
+        """Delegates to ``_DocumentOps.get_collection`` (nexus-mbm)."""
+        return self._docs.get_collection(name)
 
     def is_legacy_collection(self, name: str) -> bool:
-        """Return True if ``name`` is registered AND flagged legacy.
-
-        Unknown names return False (read paths are operationally hostile
-        to fail-loud per RDR-101 §"Phase 6"). Callers wanting strict
-        membership should query :meth:`get_collection` and check for None.
-        """
-        row = self._db.execute(
-            "SELECT legacy_grandfathered FROM collections WHERE name = ?",
-            (name,),
-        ).fetchone()
-        return bool(row and row[0])
+        """Delegates to ``_DocumentOps.is_legacy_collection`` (nexus-mbm)."""
+        return self._docs.is_legacy_collection(name)
 
     def collection_for(
         self,
@@ -2245,90 +1350,8 @@ class Catalog:
         *,
         bump: bool = False,
     ) -> CollectionName:
-        """Resolve the canonical ``CollectionName`` for a tuple.
-
-        RDR-103 Phase 2. The catalog is the authority for collection
-        naming: callers describe the tuple they want, the catalog renders
-        the physical name. Validation is strict at the public boundary
-        (per pinned decision #4): ``content_type`` must be in
-        :data:`nexus.corpus.CONTENT_TYPES`, ``embedding_model`` must be in
-        :data:`nexus.corpus.CANONICAL_EMBEDDING_MODELS`, and the derived
-        owner segment must be non-empty.
-
-        Version handling:
-
-        - New tuple ``(c, o, m)`` returns ``v1``.
-        - Existing tuple at ``vN`` returns ``vN`` (idempotent).
-        - With ``bump=True``, an existing ``vN`` returns ``vN+1``; a
-          new tuple still returns ``v1`` (bump only fires when prior
-          versions exist).
-
-        Pinned decision #2: a new ``embedding_model`` is NOT a version
-        bump. ``(c, o, m_new)`` is a different tuple from ``(c, o, m_old)``
-        and naturally lands in ``v1``. The operator runs
-        ``nx catalog supersede-collection`` to retire the old tuple.
-
-        Grandfathered legacy rows do NOT contribute to the version
-        lookup: their canonical fields are typically empty strings, and
-        the WHERE clause filters them out via ``legacy_grandfathered = 0``
-        belt-and-suspenders. Pinned decision #1.
-
-        This method does NOT register the returned name in the catalog
-        projection. Callers must follow up with
-        :meth:`register_collection` once they have actually created (or
-        otherwise materialised) the T3 collection. The indexer's
-        ``_catalog_hook_repo`` already pairs creation with registration;
-        Phase 3 wires that pattern through every indexer call site.
-
-        The returned ``CollectionName`` is constructed directly rather
-        than round-tripped through ``CollectionName.parse(render(...))``;
-        the fields are validated above against the same closed sets,
-        making the round-trip redundant.
-        """
-        if content_type not in CONTENT_TYPES:
-            raise ValueError(
-                f"collection_for: unknown content_type {content_type!r}; "
-                f"expected one of {CONTENT_TYPES}"
-            )
-        if embedding_model not in CANONICAL_EMBEDDING_MODELS:
-            raise ValueError(
-                f"collection_for: non-canonical embedding_model "
-                f"{embedding_model!r}; expected one of "
-                f"{sorted(CANONICAL_EMBEDDING_MODELS)}"
-            )
-        owner_id = owner_segment_for_tumbler(owner)
-        if not owner_id:
-            raise ValueError(
-                f"collection_for: cannot derive owner_id segment from "
-                f"owner {owner!r}"
-            )
-        # The compound index ``idx_collections_tuple`` covers this lookup.
-        # ``model_version`` is stored as TEXT (``v1``..``vN``). SUBSTR
-        # strips the ``v`` prefix so SQLite can CAST the digit string to
-        # INTEGER; ``CAST('v3' AS INTEGER)`` returns 0 because SQLite
-        # cannot parse a leading non-digit. The INTEGER cast is what
-        # gives MAX integer ordering rather than lexical (otherwise
-        # ``v10`` would sort before ``v9``).
-        row = self._db.execute(
-            "SELECT MAX(CAST(SUBSTR(model_version, 2) AS INTEGER)) "
-            "FROM collections "
-            "WHERE content_type = ? AND owner_id = ? "
-            "AND embedding_model = ? AND legacy_grandfathered = 0",
-            (content_type, owner_id, embedding_model),
-        ).fetchone()
-        existing_version = int(row[0]) if row and row[0] is not None else 0
-        if existing_version == 0:
-            new_version = 1
-        elif bump:
-            new_version = existing_version + 1
-        else:
-            new_version = existing_version
-        return CollectionName(
-            content_type=content_type,
-            owner_id=owner_id,
-            embedding_model=embedding_model,
-            model_version=new_version,
-        )
+        """Delegates to ``_DocumentOps.collection_for`` (nexus-mbm)."""
+        return self._docs.collection_for(content_type, owner, embedding_model, bump=bump)
 
     def collection_for_repo(
         self,
@@ -2337,43 +1360,8 @@ class Catalog:
         *,
         bump: bool = False,
     ) -> CollectionName:
-        """Resolve the canonical ``CollectionName`` for ``content_type`` in ``repo``.
-
-        Convenience wrapper around :meth:`collection_for` that handles
-        the repo-to-owner-to-collection-name pipeline:
-
-        1. Compute ``repo_hash`` via
-           :func:`nexus.registry._repo_identity`.
-        2. Look up the owner via :meth:`owner_for_repo`. Raises
-           ``LookupError`` when no owner exists; the indexer's
-           ``_catalog_hook`` flow registers the owner up front, so a
-           missing owner indicates a bypass of the standard write path.
-        3. Resolve the canonical embedding model via
-           :func:`nexus.corpus.canonical_embedding_model`.
-        4. Delegate to :meth:`collection_for`.
-
-        This is the helper that Phase 3 indexer call sites use. The
-        pre-RDR-103 ``_docs_collection_name(repo)`` family that this
-        replaced was removed in Phase 5.
-        """
-        from nexus.registry import _repo_identity  # noqa: PLC0415
-
-        _, repo_hash = _repo_identity(repo)
-        owner = self.owner_for_repo(repo_hash)
-        if owner is None:
-            raise LookupError(
-                f"collection_for_repo: no owner registered for "
-                f"repo_hash {repo_hash!r} (repo {repo!s}). "
-                f"Call register_owner(...) before requesting a "
-                f"collection name; the indexer's _catalog_hook normally "
-                f"registers owners up front."
-            )
-        return self.collection_for(
-            content_type=content_type,
-            owner=owner,
-            embedding_model=canonical_embedding_model(content_type),
-            bump=bump,
-        )
+        """Delegates to ``_DocumentOps.collection_for_repo`` (nexus-mbm)."""
+        return self._docs.collection_for_repo(repo, content_type, bump=bump)
 
     def _update_document_collection_locked(
         self, tumbler: str, new_collection: str,
@@ -2613,35 +1601,8 @@ class Catalog:
             self._release_lock(dir_fd)
 
     def resolve_alias(self, tumbler: Tumbler, *, max_hops: int = 16) -> Tumbler:
-        """Walk the alias chain to its canonical terminus.
-
-        Returns ``tumbler`` itself when no alias is set (the common case
-        and the pre-nexus-s8yz behaviour). Walks at most ``max_hops``
-        links and bails on cycles — a broken chain is treated as
-        terminating at the last-seen tumbler rather than raising, so
-        reads stay available even in a pathological catalog.
-        """
-        seen: set[str] = set()
-        current = str(tumbler)
-        for _ in range(max_hops):
-            if current in seen:
-                _log.warning("catalog.alias_cycle", tumbler=str(tumbler), seen=sorted(seen))
-                break
-            seen.add(current)
-            row = self._db.execute(
-                "SELECT alias_of FROM documents WHERE tumbler = ?",
-                (current,),
-            ).fetchone()
-            if not row:
-                # Dangling alias — return the last valid hop. Callers that
-                # need to detect this can compare to the input tumbler.
-                break
-            target = (row[0] or "").strip()
-            if not target:
-                # Canonical — this is the terminus.
-                return Tumbler.parse(current)
-            current = target
-        return Tumbler.parse(current)
+        """Delegates to ``_DocumentOps.resolve_alias`` (nexus-mbm)."""
+        return self._docs.resolve_alias(tumbler, max_hops=max_hops)
 
     def set_alias(self, tumbler: Tumbler, canonical: Tumbler) -> None:
         """Mark ``tumbler`` as an alias for ``canonical``.
@@ -2712,136 +1673,27 @@ class Catalog:
             self._release_lock(dir_fd)
 
     def resolve_path(self, tumbler: Tumbler) -> Path | None:
-        """Return absolute path for the document's file_path.
-
-        Resolution order:
-        1. Look up entry via self.resolve(tumbler)
-        2. If entry not found: return None
-        3. Find owner: tumbler.owner_address() -> str, look up in JSONL
-        4. If owner not found or owner.owner_type == "curator": return None
-        5. If entry.file_path is already absolute: return Path(entry.file_path)
-        6. If owner.repo_root is non-empty: return Path(owner.repo_root) / entry.file_path
-        7. Fallback: iterate registry to find path matching owner.repo_hash
-        8. If fallback found: return Path(repo_path) / entry.file_path
-        9. Otherwise: return None
-        """
-        import hashlib
-
-        from nexus.registry import RepoRegistry
-
-        entry = self.resolve(tumbler)
-        if not entry:
-            return None
-
-        # Find owner via SQLite (avoids re-reading JSONL on every call)
-        owner_prefix = str(tumbler.owner_address())
-        row = self._db.execute(
-            "SELECT owner_type, repo_root, repo_hash FROM owners WHERE tumbler_prefix = ?",
-            (owner_prefix,),
-        ).fetchone()
-        if not row:
-            return None
-        owner_type, repo_root, repo_hash = row[0], row[1], row[2]
-
-        # Curators (PDFs, standalone docs) are not resolvable
-        if owner_type == "curator":
-            return None
-
-        # If file_path is already absolute, return it directly
-        fp = Path(entry.file_path)
-        if fp.is_absolute():
-            return fp
-
-        # Primary: use repo_root from owner
-        if repo_root:
-            return Path(repo_root) / entry.file_path
-
-        # Fallback: find repo_root from registry by matching repo_hash
-        if repo_hash:
-            registry_path = _default_registry_path()
-            if registry_path.exists():
-                reg = RepoRegistry(registry_path)
-                for path_str in reg.all_info():
-                    path_hash = hashlib.sha256(path_str.encode()).hexdigest()[:8]
-                    if path_hash == repo_hash:
-                        return Path(path_str) / entry.file_path
-
-        return None
+        """Delegates to ``_DocumentOps.resolve_path`` (nexus-mbm)."""
+        return self._docs.resolve_path(tumbler)
 
     def descendants(self, prefix: str) -> list[dict]:
-        """All documents whose tumbler starts with *prefix* (any depth).
-
-        Unlike ``by_owner`` which returns only direct children, this returns
-        the full subtree.  The prefix itself is excluded.
-        """
-        return self._db.descendants(prefix)
+        """Delegates to ``_DocumentOps.descendants`` (nexus-mbm)."""
+        return self._docs.descendants(prefix)
 
     def resolve_chunk(self, tumbler: Tumbler) -> dict | None:
-        """Resolve a 4-segment chunk tumbler to its document + chunk metadata.
+        """Delegates to ``_DocumentOps.resolve_chunk`` (nexus-mbm)."""
+        return self._docs.resolve_chunk(tumbler)
 
-        Chunks are implicit addresses — the catalog tracks document-level entries
-        only; chunk sub-addresses are resolved on demand from the document's
-        ``chunk_count``.  Resolution parses the document prefix, verifies the
-        document exists, and checks the chunk index is in range.
+    def resolve_span(
+        self, span: str, physical_collection: str, t3: "ClientAPI",
+    ) -> dict | None:
+        """Resolve a ``chash:`` span to chunk content + metadata in T3.
 
-        Returns ``{"document_tumbler", "chunk_index", "physical_collection", ...}``
-        or None if the tumbler is not a chunk address or the document/chunk is
-        missing.
+        Thin delegate to :func:`nexus.catalog.catalog_spans.resolve_span_in_t3`
+        (nexus-mbm). See that function for the full contract.
         """
-        if tumbler.chunk is None:
-            return None
-        doc_tumbler = tumbler.document_address()
-        entry = self.resolve(doc_tumbler)
-        if entry is None:
-            return None
-        chunk_idx = tumbler.chunk
-        # chunk_count of 0 or None means count is not yet known — skip bounds check
-        if entry.chunk_count and chunk_idx >= entry.chunk_count:
-            return None
-        return {
-            "document_tumbler": str(doc_tumbler),
-            "chunk_index": chunk_idx,
-            "physical_collection": entry.physical_collection,
-            "title": entry.title,
-            "content_type": entry.content_type,
-        }
-
-    def resolve_span(self, span: str, physical_collection: str, t3: "ClientAPI") -> dict | None:
-        """Resolve a span string to its chunk content.
-
-        Handles three span formats:
-        - chash:<sha256hex>: whole chunk by content hash.
-        - chash:<sha256hex>:<start>-<end>: character range within a content-addressed chunk.
-        - Legacy positional (digit ranges): returns None.
-        """
-        if not span.startswith("chash:"):
-            return None
-        # Parse: chash:<hash> or chash:<hash>:<start>-<end>
-        body = span[len("chash:"):]
-        char_range = None
-        m = re.match(r"^([0-9a-f]{64}):(\d+)-(\d+)$", body)
-        if m:
-            chunk_hash = m.group(1)
-            char_range = (int(m.group(2)), int(m.group(3)))
-        elif re.fullmatch(r"[0-9a-f]{64}", body):
-            chunk_hash = body
-        else:
-            raise ValueError(f"malformed chash span: {span!r}")
-        col = t3.get_collection(physical_collection)
-        result = col.get(where={"chunk_text_hash": chunk_hash}, include=["documents", "metadatas"])
-        if not result["ids"]:
-            return None
-        text = result["documents"][0]
-        if char_range:
-            text = text[char_range[0]:char_range[1]]
-        out: dict = {
-            "chunk_text": text,
-            "metadata": result["metadatas"][0],
-            "chunk_hash": chunk_hash,
-        }
-        if char_range:
-            out["char_range"] = char_range
-        return out
+        from nexus.catalog import catalog_spans
+        return catalog_spans.resolve_span_in_t3(span, physical_collection, t3)
 
     def resolve_chash(
         self,
@@ -2853,124 +1705,13 @@ class Catalog:
     ) -> "dict | None":
         """Globally resolve a chash to the chunk it names (RDR-086 Phase 2).
 
-        Unlike ``resolve_span``, the caller does not need to know which
-        collection holds the chunk: the T2 ``chash_index`` populated by
-        Phase 1 dual-write answers that question in one SQL lookup.
-
-        Resolution order:
-          1. T2 lookup via ``chash_index.lookup(chash)``.
-          2. Drop rows whose ``physical_collection`` no longer exists in T3
-             (self-healing: the stale row is deleted on access).
-          3. Tie-break the survivors — ``prefer_collection`` first, then
-             newest ``created_at``, then deterministic name sort.
-          4. Delegate to ``resolve_span`` for chunk text + metadata on
-             the winner. On any per-candidate failure fall through.
-          5. If T2 was empty or exhausted, fall back to a parallel T3 scan
-             across all collections (10× concurrency, 30 s deadline).
-             Missing from index is a performance hit, not a correctness
-             one — ``nx collection backfill-hash --all`` reconciles.
-
-        Accepts three input forms (same as ``resolve_span``):
-          * bare ``<sha256hex>``
-          * ``chash:<sha256hex>``
-          * ``chash:<sha256hex>:<start>-<end>``
+        Thin delegate to
+        :func:`nexus.catalog.catalog_spans.resolve_chash_globally`
+        (nexus-mbm). See that function for the full contract.
         """
-        # ── Parse input ─────────────────────────────────────────────────
-        body = chash[len("chash:"):] if chash.startswith("chash:") else chash
-        char_range: tuple[int, int] | None = None
-        m = re.match(r"^([0-9a-f]{64}):(\d+)-(\d+)$", body)
-        if m:
-            hex_chash = m.group(1)
-            char_range = (int(m.group(2)), int(m.group(3)))
-        elif re.fullmatch(r"[0-9a-f]{64}", body):
-            hex_chash = body
-        else:
-            raise ValueError(f"malformed chash: {chash!r}")
-
-        # Reconstruct the span form that ``resolve_span`` expects.
-        span = f"chash:{hex_chash}"
-        if char_range:
-            span = f"{span}:{char_range[0]}-{char_range[1]}"
-
-        def _build_ref(
-            *,
-            coll: str,
-            doc_id: str,
-            span_result: dict,
-        ) -> dict:
-            ref = {
-                "chash": hex_chash,
-                "chunk_hash": hex_chash,
-                "physical_collection": coll,
-                "doc_id": doc_id,
-                "chunk_text": span_result["chunk_text"],
-                "metadata": span_result["metadata"],
-            }
-            if "char_range" in span_result:
-                ref["char_range"] = span_result["char_range"]
-            return ref
-
-        # ── T2 path ─────────────────────────────────────────────────────
-        rows = chash_index.lookup(hex_chash)
-        if rows:
-            # Self-healing: filter rows whose collection no longer exists in T3.
-            try:
-                live = {c.name for c in t3.list_collections()}
-            except Exception:
-                live = set()
-            survivors: list[dict] = []
-            for row in rows:
-                if row["collection"] in live:
-                    survivors.append(row)
-                else:
-                    # Go through the locked public API — this must not
-                    # race a concurrent upsert / delete_collection on the
-                    # same store. Direct conn.execute() would bypass
-                    # ChashIndex._lock (review #1).
-                    try:
-                        chash_index.delete_stale(
-                            chash=hex_chash, collection=row["collection"],
-                        )
-                    except Exception:
-                        _log.debug(
-                            "chash_index_selfheal_delete_failed",
-                            chash_prefix=hex_chash[:16],
-                            collection=row["collection"],
-                            exc_info=True,
-                        )
-
-            # Tie-break: prefer_collection → newest created_at → name sort.
-            def _sort_key(r: dict) -> tuple:
-                preferred = 0 if r["collection"] == prefer_collection else 1
-                # Reverse created_at so newest sorts first.
-                return (preferred, _negate_iso(r["created_at"]), r["collection"])
-
-            for row in sorted(survivors, key=_sort_key):
-                try:
-                    span_res = self.resolve_span(span, row["collection"], t3)
-                except Exception:
-                    span_res = None
-                if span_res is None:
-                    continue
-                # ``row["chunk_chroma_id"]`` carries the Chroma-natural-ID
-                # value the column has always held (renamed from ``doc_id``
-                # per RDR-101 Phase 0 nexus-o6aa.3 to disambiguate from
-                # ``Document.doc_id``). The public ``ChunkRef`` keeps the
-                # ``doc_id`` key in its returned dict for back-compat;
-                # Phase 3 will introduce a parallel ``chunk_chroma_id``
-                # key on the public surface.
-                return _build_ref(
-                    coll=row["collection"],
-                    doc_id=row["chunk_chroma_id"],
-                    span_result=span_res,
-                )
-
-        # ── T3 fallback ─────────────────────────────────────────────────
-        return _fallback_chash_scan(
-            hex_chash=hex_chash,
-            span=span,
-            t3=t3,
-            build_ref=_build_ref,
+        from nexus.catalog import catalog_spans
+        return catalog_spans.resolve_chash_globally(
+            chash, t3, chash_index, prefer_collection=prefer_collection,
         )
 
     def update(self, tumbler: Tumbler, **fields: object) -> None:
@@ -3309,327 +2050,52 @@ class Catalog:
             self._release_lock(dir_fd)
 
     def find(self, query: str, *, content_type: str | None = None) -> list[CatalogEntry]:
-        rows = self._db.search(query, content_type=content_type)
-        return [
-            CatalogEntry(
-                tumbler=Tumbler.parse(r["tumbler"]),
-                title=r["title"],
-                author=r["author"],
-                year=r["year"],
-                content_type=r["content_type"],
-                file_path=r["file_path"],
-                corpus=r["corpus"],
-                physical_collection=r["physical_collection"],
-                chunk_count=r["chunk_count"],
-                head_hash=r["head_hash"] or "",
-                indexed_at=r["indexed_at"] or "",
-                meta=json.loads(r["metadata"]) if r.get("metadata") else {},
-                source_mtime=r["source_mtime"] if "source_mtime" in r.keys() else 0.0,
-            )
-            for r in rows
-        ]
+        """Delegates to ``_DocumentOps.find`` (nexus-mbm)."""
+        return self._docs.find(query, content_type=content_type)
 
     def by_file_path(self, owner: Tumbler, file_path: str) -> CatalogEntry | None:
-        row = self._db.execute(
-            "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
-            f"FROM documents WHERE {self._prefix_sql(str(owner))[0]} AND file_path = ?",
-            (*self._prefix_sql(str(owner))[1], file_path),
-        ).fetchone()
-        if not row:
-            return None
-        return CatalogEntry(
-            tumbler=Tumbler.parse(row[0]),
-            title=row[1],
-            author=row[2],
-            year=row[3],
-            content_type=row[4],
-            file_path=row[5],
-            corpus=row[6],
-            physical_collection=row[7],
-            chunk_count=row[8],
-            head_hash=row[9],
-            indexed_at=row[10],
-            meta=json.loads(row[11]) if row[11] else {},
-            source_mtime=row[12] or 0.0,
-            source_uri=row[13] or "",
-        )
+        """Delegates to ``_DocumentOps.by_file_path`` (nexus-mbm)."""
+        return self._docs.by_file_path(owner, file_path)
 
     def by_owner(self, owner: Tumbler) -> list[CatalogEntry]:
-        rows = self._db.execute(
-            "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
-            f"FROM documents WHERE {self._prefix_sql(str(owner))[0]}",
-            self._prefix_sql(str(owner))[1],
-        ).fetchall()
-        return [
-            CatalogEntry(
-                tumbler=Tumbler.parse(r[0]),
-                title=r[1],
-                author=r[2],
-                year=r[3],
-                content_type=r[4],
-                file_path=r[5],
-                corpus=r[6],
-                physical_collection=r[7],
-                chunk_count=r[8],
-                head_hash=r[9],
-                indexed_at=r[10],
-                meta=json.loads(r[11]) if r[11] else {},
-                source_mtime=r[12] or 0.0,
-                source_uri=r[13] or "",
-            )
-            for r in rows
-        ]
+        """Delegates to ``_DocumentOps.by_owner`` (nexus-mbm)."""
+        return self._docs.by_owner(owner)
 
     def by_content_type(self, content_type: str) -> list[CatalogEntry]:
-        """List all entries with the given content type (code, paper, rdr, knowledge)."""
-        rows = self._db.execute(
-            "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
-            "FROM documents WHERE content_type = ?",
-            (content_type,),
-        ).fetchall()
-        return [
-            CatalogEntry(
-                tumbler=Tumbler.parse(r[0]), title=r[1], author=r[2], year=r[3],
-                content_type=r[4], file_path=r[5], corpus=r[6],
-                physical_collection=r[7], chunk_count=r[8], head_hash=r[9],
-                indexed_at=r[10], meta=json.loads(r[11]) if r[11] else {},
-                source_mtime=r[12] or 0.0,
-                source_uri=r[13] or "",
-            )
-            for r in rows
-        ]
+        """Delegates to ``_DocumentOps.by_content_type`` (nexus-mbm)."""
+        return self._docs.by_content_type(content_type)
 
     def by_corpus(self, corpus: str) -> list[CatalogEntry]:
-        """List all entries with the given corpus tag."""
-        rows = self._db.execute(
-            "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
-            "FROM documents WHERE corpus = ?",
-            (corpus,),
-        ).fetchall()
-        return [
-            CatalogEntry(
-                tumbler=Tumbler.parse(r[0]), title=r[1], author=r[2], year=r[3],
-                content_type=r[4], file_path=r[5], corpus=r[6],
-                physical_collection=r[7], chunk_count=r[8], head_hash=r[9],
-                indexed_at=r[10], meta=json.loads(r[11]) if r[11] else {},
-                source_mtime=r[12] or 0.0,
-                source_uri=r[13] or "",
-            )
-            for r in rows
-        ]
+        """Delegates to ``_DocumentOps.by_corpus`` (nexus-mbm)."""
+        return self._docs.by_corpus(corpus)
 
     def doc_count(self) -> int:
-        """Return the total number of documents in the catalog."""
-        row = self._db.execute("SELECT COUNT(*) FROM documents").fetchone()
-        return row[0] if row else 0
+        """Delegates to ``_DocumentOps.doc_count`` (nexus-mbm)."""
+        return self._docs.doc_count()
 
     def all_documents(
         self, limit: int = 0, *, content_type: str = "",
     ) -> list[CatalogEntry]:
-        """Return all catalog entries. limit=0 means unlimited.
-
-        GH #568: ``content_type`` pushes the filter into the SQL
-        ``WHERE`` clause so pagination works correctly when the
-        requested content_type is small-cardinality. Pre-fix the
-        CLI ``nx catalog list --type rdr`` filtered Python-side
-        AFTER ``LIMIT/OFFSET`` and returned empty whenever the
-        pre-LIMIT slice held no matching rows -- e.g. 15K-entry
-        catalog with only 2 rdr rows: ``--type rdr -n 3`` got 0.
-        Mirrors PR #533's fix for the MCP ``catalog_list`` surface.
-        """
-        sql = (
-            "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
-            "FROM documents"
-        )
-        params: tuple = ()
-        if content_type:
-            sql += " WHERE content_type = ?"
-            params = (content_type,)
-        if limit > 0:
-            sql += f" LIMIT {limit}"
-        rows = self._db.execute(sql, params).fetchall()
-        return [
-            CatalogEntry(
-                tumbler=Tumbler.parse(r[0]), title=r[1], author=r[2], year=r[3],
-                content_type=r[4], file_path=r[5], corpus=r[6],
-                physical_collection=r[7], chunk_count=r[8], head_hash=r[9],
-                indexed_at=r[10], meta=json.loads(r[11]) if r[11] else {},
-                source_mtime=r[12] or 0.0,
-                source_uri=r[13] or "",
-            )
-            for r in rows
-        ]
+        """Delegates to ``_DocumentOps.all_documents`` (nexus-mbm)."""
+        return self._docs.all_documents(limit, content_type=content_type)
 
     def by_doc_id(self, doc_id: str) -> CatalogEntry | None:
-        """Look up catalog entry by T3 doc_id stored in meta.doc_id."""
-        row = self._db.execute(
-            "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
-            "FROM documents WHERE json_extract(metadata, '$.doc_id') = ?",
-            (doc_id,),
-        ).fetchone()
-        if not row:
-            return None
-        return CatalogEntry(
-            tumbler=Tumbler.parse(row[0]),
-            title=row[1],
-            author=row[2],
-            year=row[3],
-            content_type=row[4],
-            file_path=row[5],
-            corpus=row[6],
-            physical_collection=row[7],
-            chunk_count=row[8],
-            head_hash=row[9],
-            indexed_at=row[10],
-            meta=json.loads(row[11]) if row[11] else {},
-            source_mtime=row[12] or 0.0,
-            source_uri=row[13] or "",
-        )
+        """Delegates to ``_DocumentOps.by_doc_id`` (nexus-mbm)."""
+        return self._docs.by_doc_id(doc_id)
 
     # ── Links ──────────────────────────────────────────────────────────────
-
-    def _link_unlocked(
-        self,
-        from_t: Tumbler,
-        to_t: Tumbler,
-        link_type: str,
-        created_by: str,
-        from_span: str,
-        to_span: str,
-        meta: dict,
-        *,
-        allow_dangling: bool = False,
-    ) -> bool:
-        """Core link logic — caller must hold the lock. Returns True if new, False if merged."""
-        # Validate span format (Xanadu transclusion addressing)
-        for span, label in [(from_span, "from_span"), (to_span, "to_span")]:
-            if not _SPAN_PATTERN.match(span):
-                raise ValueError(
-                    f"invalid {label}: {span!r} — use 'line_start-line_end', "
-                    f"'chunk_idx:char_start-char_end', 'chash:<sha256hex>', 'chash:<start>-<end>:<sha256hex>', or '' for whole document"
-                )
-        if not allow_dangling:
-            errors = []
-            from_entry = self.resolve(from_t)
-            to_entry = self.resolve(to_t)
-            if from_entry is None:
-                errors.append(f"from_tumbler {from_t} not found")
-            if to_entry is None:
-                errors.append(f"to_tumbler {to_t} not found")
-            if errors:
-                raise ValueError(f"dangling link: {'; '.join(errors)}")
-            # Validate chash: spans resolve in their document's collection
-            for span, entry, label in [
-                (from_span, from_entry, "from_span"),
-                (to_span, to_entry, "to_span"),
-            ]:
-                if span.startswith("chash:") and entry and entry.physical_collection:
-                    try:
-                        from nexus.db import make_t3
-                        t3 = make_t3()
-                        result = self.resolve_span(span, entry.physical_collection, t3._client)
-                        if result is None:
-                            errors.append(
-                                f"{label} {span!r} does not resolve in "
-                                f"collection {entry.physical_collection}"
-                            )
-                    except Exception:
-                        pass  # T3 unavailable — skip validation
-            if errors:
-                raise ValueError(f"unresolvable span: {'; '.join(errors)}")
-        now = datetime.now(UTC).isoformat()
-        row = self._db.execute(
-            "SELECT id, created_by, metadata, created_at FROM links "
-            "WHERE from_tumbler=? AND to_tumbler=? AND link_type=?",
-            (str(from_t), str(to_t), link_type),
-        ).fetchone()
-
-        if row is not None:
-            existing_meta = json.loads(row[2]) if row[2] else {}
-            existing_meta.update(meta)
-            co = existing_meta.get("co_discovered_by", [])
-            if created_by != row[1] and created_by not in co:
-                co.append(created_by)
-            existing_meta["co_discovered_by"] = co
-            rec = LinkRecord(
-                from_t=str(from_t), to_t=str(to_t), link_type=link_type,
-                from_span=from_span, to_span=to_span,
-                created_by=row[1], created_at=row[3] or now, meta=existing_meta,
-            )
-            event = _make_event(
-                _LinkCreatedPayload(
-                    from_doc=str(from_t),
-                    to_doc=str(to_t),
-                    link_type=link_type,
-                    creator=row[1],
-                    from_span=from_span,
-                    to_span=to_span,
-                    created_at=row[3] or now,
-                    meta=dict(existing_meta),
-                ),
-                v=0,
-            )
-            if self._event_sourced_enabled:
-                # Event-sourced merge: emit the LinkCreated carrying
-                # the FINAL merged metadata first, then let the
-                # projector's INSERT OR REPLACE overwrite the prior
-                # SQLite row with the merged state.
-                self._write_to_event_log(event)
-                self._projector.apply(event)
-                self._db.commit()
-                self._append_jsonl(self._links_path, rec.__dict__)
-            else:
-                self._db.execute(
-                    "UPDATE links SET from_span=?, to_span=?, metadata=? WHERE id=?",
-                    (from_span, to_span, json.dumps(existing_meta), row[0]),
-                )
-                self._append_jsonl(self._links_path, rec.__dict__)
-                self._db.commit()
-                self._emit_shadow_event(event)
-            return False
-        else:
-            combined_meta = dict(meta)
-            rec = LinkRecord(
-                from_t=str(from_t), to_t=str(to_t), link_type=link_type,
-                from_span=from_span, to_span=to_span,
-                created_by=created_by, created_at=now, meta=combined_meta,
-            )
-            event = _make_event(
-                _LinkCreatedPayload(
-                    from_doc=str(from_t),
-                    to_doc=str(to_t),
-                    link_type=link_type,
-                    creator=created_by,
-                    from_span=from_span,
-                    to_span=to_span,
-                    created_at=now,
-                    meta=dict(combined_meta),
-                ),
-                v=0,
-            )
-            if self._event_sourced_enabled:
-                self._write_to_event_log(event)
-                self._projector.apply(event)
-                self._db.commit()
-                self._append_jsonl(self._links_path, rec.__dict__)
-            else:
-                self._db.execute(
-                    "INSERT OR IGNORE INTO links "
-                    "(from_tumbler, to_tumbler, link_type, from_span, to_span, "
-                    "created_by, created_at, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (str(from_t), str(to_t), link_type, from_span, to_span,
-                     created_by, now, json.dumps(combined_meta)),
-                )
-                self._append_jsonl(self._links_path, rec.__dict__)
-                self._db.commit()
-                self._emit_shadow_event(event)
-            return True
+    # nexus-mbm: implementations live in
+    # :class:`nexus.catalog.catalog_links._LinkOps`, composed onto
+    # ``self._links`` in ``__init__``. The methods below are one-line
+    # delegates that preserve the public Catalog API.
+    #
+    # Class-attribute aliases keep ``cat._MAX_GRAPH_DEPTH`` /
+    # ``cat._MAX_GRAPH_NODES`` addressable at the historical names
+    # (a handful of tests read them directly on the instance).
+    from nexus.catalog import catalog_links as _links_mod
+    _MAX_GRAPH_DEPTH = _links_mod._MAX_GRAPH_DEPTH
+    _MAX_GRAPH_NODES = _links_mod._MAX_GRAPH_NODES
+    del _links_mod
 
     def link(
         self,
@@ -3643,24 +2109,12 @@ class Catalog:
         allow_dangling: bool = False,
         **meta: object,
     ) -> bool:
-        """Create or merge a link. Returns True if new, False if merged.
-
-        Spans accept ``chash:<sha256hex>`` for content-addressed chunk identity
-        (preferred) or legacy positional formats. See class docstring for full
-        span policy.
-
-        Raises ValueError if either endpoint is missing (unless allow_dangling=True)
-        or if a span string does not match ``_SPAN_PATTERN``.
-        """
-        dir_fd = self._acquire_lock()
-        try:
-            return self._link_unlocked(
-                from_t, to_t, link_type, created_by,
-                from_span, to_span, dict(meta),
-                allow_dangling=allow_dangling,
-            )
-        finally:
-            self._release_lock(dir_fd)
+        """Create or merge a link. Returns True if new, False if merged."""
+        return self._links.link(
+            from_t, to_t, link_type, created_by,
+            from_span=from_span, to_span=to_span,
+            allow_dangling=allow_dangling, **meta,
+        )
 
     def link_if_absent(
         self,
@@ -3674,180 +2128,18 @@ class Catalog:
         allow_dangling: bool = False,
         **meta: object,
     ) -> bool:
-        """Create link only if it does not already exist. Returns True=created, False=existed.
-
-        No merge, no co_discovered_by — pure insert-or-skip via UNIQUE constraint.
-        No JSONL append on the 'already exists' path.
-        Raises ValueError if either endpoint is missing (unless allow_dangling=True).
-        """
-        # Validate span format before acquiring lock
-        for span, label in [(from_span, "from_span"), (to_span, "to_span")]:
-            if not _SPAN_PATTERN.match(span):
-                raise ValueError(
-                    f"invalid {label}: {span!r} — use 'line_start-line_end', "
-                    f"'chunk_idx:char_start-char_end', 'chash:<sha256hex>', 'chash:<start>-<end>:<sha256hex>', or '' for whole document"
-                )
-        dir_fd = self._acquire_lock()
-        try:
-            row = self._db.execute(
-                "SELECT id FROM links WHERE from_tumbler=? AND to_tumbler=? AND link_type=?",
-                (str(from_t), str(to_t), link_type),
-            ).fetchone()
-            if row is not None:
-                return False
-            if not allow_dangling:
-                errors = []
-                from_entry = self.resolve(from_t)
-                to_entry = self.resolve(to_t)
-                if from_entry is None:
-                    errors.append(f"from_tumbler {from_t} not found")
-                if to_entry is None:
-                    errors.append(f"to_tumbler {to_t} not found")
-                if errors:
-                    raise ValueError(f"dangling link: {'; '.join(errors)}")
-                for span, entry, label in [
-                    (from_span, from_entry, "from_span"),
-                    (to_span, to_entry, "to_span"),
-                ]:
-                    if span.startswith("chash:") and entry and entry.physical_collection:
-                        try:
-                            from nexus.db import make_t3
-                            t3 = make_t3()
-                            result = self.resolve_span(span, entry.physical_collection, t3._client)
-                            if result is None:
-                                errors.append(
-                                    f"{label} {span!r} does not resolve in "
-                                    f"collection {entry.physical_collection}"
-                                )
-                        except Exception:
-                            pass
-                if errors:
-                    raise ValueError(f"unresolvable span: {'; '.join(errors)}")
-            now = datetime.now(UTC).isoformat()
-            combined_meta = dict(meta)
-            rec = LinkRecord(
-                from_t=str(from_t), to_t=str(to_t), link_type=link_type,
-                from_span=from_span, to_span=to_span,
-                created_by=created_by, created_at=now, meta=combined_meta,
-            )
-            event = _make_event(
-                _LinkCreatedPayload(
-                    from_doc=str(from_t),
-                    to_doc=str(to_t),
-                    link_type=link_type,
-                    creator=created_by,
-                    from_span=from_span,
-                    to_span=to_span,
-                    created_at=now,
-                    meta=dict(combined_meta),
-                ),
-                v=0,
-            )
-            if self._event_sourced_enabled:
-                self._write_to_event_log(event)
-                self._projector.apply(event)
-                self._db.commit()
-                self._append_jsonl(self._links_path, rec.__dict__)
-            else:
-                self._db.execute(
-                    "INSERT OR IGNORE INTO links "
-                    "(from_tumbler, to_tumbler, link_type, from_span, to_span, "
-                    "created_by, created_at, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (str(from_t), str(to_t), link_type, from_span, to_span,
-                     created_by, now, json.dumps(combined_meta)),
-                )
-                self._append_jsonl(self._links_path, rec.__dict__)
-                self._db.commit()
-                self._emit_shadow_event(event)
-            return True
-        finally:
-            self._release_lock(dir_fd)
-
-    def unlink(self, from_t: Tumbler, to_t: Tumbler, link_type: str = "") -> int:
-        dir_fd = self._acquire_lock()
-        try:
-            if link_type:
-                rows = self._db.execute(
-                    "SELECT id, link_type, created_by FROM links "
-                    "WHERE from_tumbler = ? AND to_tumbler = ? AND link_type = ?",
-                    (str(from_t), str(to_t), link_type),
-                ).fetchall()
-            else:
-                rows = self._db.execute(
-                    "SELECT id, link_type, created_by FROM links "
-                    "WHERE from_tumbler = ? AND to_tumbler = ?",
-                    (str(from_t), str(to_t)),
-                ).fetchall()
-
-            for row_id, lt, original_created_by in rows:
-                # Fetch full row for forensic tombstone
-                full = self._db.execute(
-                    "SELECT from_span, to_span, metadata FROM links WHERE id = ?",
-                    (row_id,),
-                ).fetchone()
-                tombstone = {
-                    "from_t": str(from_t),
-                    "to_t": str(to_t),
-                    "link_type": lt,
-                    "_deleted": True,
-                    "from_span": full[0] or "" if full else "",
-                    "to_span": full[1] or "" if full else "",
-                    "created_by": original_created_by,
-                    "created_at": datetime.now(UTC).isoformat(),
-                    "meta": json.loads(full[2]) if full and full[2] else {},
-                }
-                event = _make_event(
-                    _LinkDeletedPayload(
-                        from_doc=str(from_t),
-                        to_doc=str(to_t),
-                        link_type=lt,
-                        reason="catalog.unlink",
-                    ),
-                    v=0,
-                )
-                if self._event_sourced_enabled:
-                    # Event-sourced: write event, project (DELETE),
-                    # then JSONL tombstone. Commit batched at end of
-                    # the loop for efficiency on multi-row unlinks.
-                    self._write_to_event_log(event)
-                    self._projector.apply(event)
-                    self._append_jsonl(self._links_path, tombstone)
-                else:
-                    self._append_jsonl(self._links_path, tombstone)
-                    self._db.execute("DELETE FROM links WHERE id = ?", (row_id,))
-
-            self._db.commit()
-            # Shadow-emit one LinkDeleted per removed row AFTER
-            # db.commit() so a process crash between the DELETE and the
-            # commit cannot leave events.jsonl claiming a deletion that
-            # SQLite has not yet committed. Skipped when event-sourced
-            # is on — the per-row loop above already emitted + applied.
-            if not self._event_sourced_enabled:
-                for row_id, lt, original_created_by in rows:
-                    self._emit_shadow_event(_make_event(
-                        _LinkDeletedPayload(
-                            from_doc=str(from_t),
-                            to_doc=str(to_t),
-                            link_type=lt,
-                            reason="catalog.unlink",
-                        ),
-                        v=0,
-                    ))
-            return len(rows)
-        finally:
-            self._release_lock(dir_fd)
-
-    def _row_to_link(self, row: tuple) -> CatalogLink:
-        return CatalogLink(
-            from_tumbler=Tumbler.parse(row[0]),
-            to_tumbler=Tumbler.parse(row[1]),
-            link_type=row[2],
-            from_span=row[3] or "",
-            to_span=row[4] or "",
-            created_by=row[5],
-            created_at=row[6] or "",
-            meta=json.loads(row[7]) if row[7] else {},
+        """Insert-or-skip via the UNIQUE constraint."""
+        return self._links.link_if_absent(
+            from_t, to_t, link_type, created_by,
+            from_span=from_span, to_span=to_span,
+            allow_dangling=allow_dangling, **meta,
         )
+
+    def unlink(
+        self, from_t: Tumbler, to_t: Tumbler, link_type: str = "",
+    ) -> int:
+        """Delete one or all link types between *from_t* and *to_t*."""
+        return self._links.unlink(from_t, to_t, link_type)
 
     def links_from(
         self,
@@ -3855,20 +2147,8 @@ class Catalog:
         link_type: str = "",
         link_types: list[str] | None = None,
     ) -> list[CatalogLink]:
-        sql = (
-            "SELECT from_tumbler, to_tumbler, link_type, from_span, to_span, "
-            "created_by, created_at, metadata FROM links WHERE from_tumbler = ?"
-        )
-        params: list[str] = [str(tumbler)]
-        effective = link_types or ([link_type] if link_type else [])
-        if len(effective) == 1:
-            sql += " AND link_type = ?"
-            params.append(effective[0])
-        elif len(effective) > 1:
-            placeholders = ",".join("?" * len(effective))
-            sql += f" AND link_type IN ({placeholders})"
-            params.extend(effective)
-        return [self._row_to_link(r) for r in self._db.execute(sql, params).fetchall()]
+        """All outbound links from *tumbler*."""
+        return self._links.links_from(tumbler, link_type, link_types)
 
     def links_to(
         self,
@@ -3876,20 +2156,8 @@ class Catalog:
         link_type: str = "",
         link_types: list[str] | None = None,
     ) -> list[CatalogLink]:
-        sql = (
-            "SELECT from_tumbler, to_tumbler, link_type, from_span, to_span, "
-            "created_by, created_at, metadata FROM links WHERE to_tumbler = ?"
-        )
-        params: list[str] = [str(tumbler)]
-        effective = link_types or ([link_type] if link_type else [])
-        if len(effective) == 1:
-            sql += " AND link_type = ?"
-            params.append(effective[0])
-        elif len(effective) > 1:
-            placeholders = ",".join("?" * len(effective))
-            sql += f" AND link_type IN ({placeholders})"
-            params.extend(effective)
-        return [self._row_to_link(r) for r in self._db.execute(sql, params).fetchall()]
+        """All inbound links to *tumbler*."""
+        return self._links.links_to(tumbler, link_type, link_types)
 
     def link_query(
         self,
@@ -3903,49 +2171,12 @@ class Catalog:
         limit: int = 100,
         offset: int = 0,
     ) -> list[CatalogLink]:
-        """Composable link filter. Returns CatalogLink list with LIMIT/OFFSET.
-
-        limit=0 means unlimited (maps to SQLite LIMIT -1).
-        """
-        conditions: list[str] = []
-        params: list[str | int] = []
-
-        if tumbler:
-            if direction == "out":
-                conditions.append("from_tumbler = ?")
-                params.append(tumbler)
-            elif direction == "in":
-                conditions.append("to_tumbler = ?")
-                params.append(tumbler)
-            else:
-                conditions.append("(from_tumbler = ? OR to_tumbler = ?)")
-                params.extend([tumbler, tumbler])
-        if from_t:
-            conditions.append("from_tumbler = ?")
-            params.append(from_t)
-        if to_t:
-            conditions.append("to_tumbler = ?")
-            params.append(to_t)
-        if link_type:
-            conditions.append("link_type = ?")
-            params.append(link_type)
-        if created_by:
-            conditions.append("created_by = ?")
-            params.append(created_by)
-        if created_at_before:
-            conditions.append("created_at != '' AND created_at < ?")
-            params.append(created_at_before)
-
-        sql = (
-            "SELECT from_tumbler, to_tumbler, link_type, from_span, to_span, "
-            "created_by, created_at, metadata FROM links"
+        """Composable link filter. ``limit=0`` means unlimited."""
+        return self._links.link_query(
+            from_t=from_t, to_t=to_t, link_type=link_type,
+            created_by=created_by, direction=direction, tumbler=tumbler,
+            created_at_before=created_at_before, limit=limit, offset=offset,
         )
-        if conditions:
-            sql += " WHERE " + " AND ".join(conditions)
-        sql += " LIMIT ? OFFSET ?"
-        params.extend([limit if limit > 0 else -1, offset])
-
-        return [self._row_to_link(r) for r in self._db.execute(sql, params).fetchall()]
 
     def bulk_unlink(
         self,
@@ -3956,286 +2187,38 @@ class Catalog:
         created_at_before: str = "",
         dry_run: bool = False,
     ) -> int:
-        """Delete links matching filters. Returns count removed.
-
-        Tombstones preserve original created_by for JSONL audit trail.
-        dry_run=True returns count without deleting.
-        """
-        has_filter = any([from_t, to_t, link_type, created_by, created_at_before])
-        if not has_filter and not dry_run:
-            raise ValueError("bulk_unlink requires at least one filter (or dry_run=True)")
-
-        dir_fd = self._acquire_lock()
-        try:
-            matching = self.link_query(
-                from_t=from_t, to_t=to_t, link_type=link_type,
-                created_by=created_by, created_at_before=created_at_before,
-                limit=0,
-            )
-
-            if dry_run:
-                return len(matching)
-
-            for lnk in matching:
-                tombstone = {
-                    "from_t": str(lnk.from_tumbler), "to_t": str(lnk.to_tumbler),
-                    "link_type": lnk.link_type, "_deleted": True,
-                    "from_span": lnk.from_span, "to_span": lnk.to_span,
-                    "created_by": lnk.created_by,
-                    "created_at": datetime.now(UTC).isoformat(),
-                    "meta": lnk.meta,
-                }
-                event = _make_event(
-                    _LinkDeletedPayload(
-                        from_doc=str(lnk.from_tumbler),
-                        to_doc=str(lnk.to_tumbler),
-                        link_type=lnk.link_type,
-                        reason="catalog.bulk_unlink",
-                    ),
-                    v=0,
-                )
-                if self._event_sourced_enabled:
-                    self._write_to_event_log(event)
-                    self._projector.apply(event)
-                    self._append_jsonl(self._links_path, tombstone)
-                else:
-                    self._append_jsonl(self._links_path, tombstone)
-                    self._db.execute(
-                        "DELETE FROM links WHERE from_tumbler=? AND to_tumbler=? AND link_type=?",
-                        (str(lnk.from_tumbler), str(lnk.to_tumbler), lnk.link_type),
-                    )
-            self._db.commit()
-            # Shadow-emit AFTER db.commit() (see ``unlink`` for the
-            # crash-window rationale). Skipped when event-sourced — the
-            # per-row loop already wrote and projected.
-            if not self._event_sourced_enabled:
-                for lnk in matching:
-                    self._emit_shadow_event(_make_event(
-                        _LinkDeletedPayload(
-                            from_doc=str(lnk.from_tumbler),
-                            to_doc=str(lnk.to_tumbler),
-                            link_type=lnk.link_type,
-                            reason="catalog.bulk_unlink",
-                        ),
-                        v=0,
-                    ))
-            return len(matching)
-        finally:
-            self._release_lock(dir_fd)
+        """Filtered bulk delete with JSONL tombstones."""
+        return self._links.bulk_unlink(
+            from_t=from_t, to_t=to_t, link_type=link_type,
+            created_by=created_by, created_at_before=created_at_before,
+            dry_run=dry_run,
+        )
 
     def validate_link(
-        self, from_t: Tumbler, to_t: Tumbler, link_type: str
+        self, from_t: Tumbler, to_t: Tumbler, link_type: str,
     ) -> list[str]:
-        """Validate a proposed link. Returns list of error strings (empty = valid)."""
-        errors: list[str] = []
-        if self.resolve(from_t) is None:
-            errors.append(f"from_tumbler {from_t} not found in documents")
-        if self.resolve(to_t) is None:
-            errors.append(f"to_tumbler {to_t} not found in documents")
-        row = self._db.execute(
-            "SELECT id FROM links WHERE from_tumbler=? AND to_tumbler=? AND link_type=?",
-            (str(from_t), str(to_t), link_type),
-        ).fetchone()
-        if row is not None:
-            errors.append(f"duplicate: link ({from_t}, {to_t}, {link_type!r}) already exists")
-        return errors
+        """Return a list of validation errors (empty = link is valid)."""
+        return self._links.validate_link(from_t, to_t, link_type)
 
     def resolve_span_text(self, tumbler: Tumbler, span: str) -> str | None:
         """Resolve a span to actual text content. Returns None if unavailable.
 
-        Span formats:
-        - "" → returns None (whole document, no sub-addressing)
-        - "42-57" → lines 42-57 from the document's source file
-        - "3:100-250" → characters 100-250 from chunk index 3 in T3
-        - "chash:<sha256hex>" → content-addressed chunk from T3
-
-        This is the minimal transclusion read path — given a link with a span,
-        retrieve the exact passage being referenced.
+        Resolves the tumbler to a :class:`CatalogEntry` then delegates
+        the span dispatch to
+        :func:`nexus.catalog.catalog_spans.resolve_span_text_for_entry`
+        (nexus-mbm). See that function for the supported span formats.
         """
         if not span:
             return None
         entry = self.resolve(tumbler)
         if entry is None:
             return None
-
-        # Content-hash span: look up by chunk_text_hash in T3
-        if span.startswith("chash:") and entry.physical_collection:
-            try:
-                from nexus.db import make_t3
-                t3 = make_t3()
-                result = self.resolve_span(span, entry.physical_collection, t3._client)
-                return result["chunk_text"] if result else None
-            except Exception:
-                _log.warning("resolve_span_text_failed", span=span,
-                             collection=entry.physical_collection, exc_info=True)
-                return None
-
-        # Line-range span: read from source file
-        m = re.match(r"^(\d+)-(\d+)$", span)
-        if m and entry.file_path:
-            start, end = int(m.group(1)), int(m.group(2))
-            try:
-                lines = Path(entry.file_path).read_text(encoding="utf-8").splitlines()
-                return "\n".join(lines[start - 1:end])
-            except Exception:
-                return None
-
-        # Chunk:char span: read from T3
-        m = re.match(r"^(\d+):(\d+)-(\d+)$", span)
-        if m and entry.physical_collection:
-            chunk_idx, char_start, char_end = int(m.group(1)), int(m.group(2)), int(m.group(3))
-            try:
-                from nexus.db import make_t3
-                t3 = make_t3()
-                col = t3.get_or_create_collection(entry.physical_collection)
-                # nexus-dcym: chunk identity is the catalog ``doc_id``,
-                # not the legacy ``source_path``. ``doc_id`` is stored
-                # by the projector under ``meta.doc_id``; older entries
-                # predate that and fall back to ``str(entry.tumbler)``
-                # (Phase 1's stand-in for ``doc_id``).
-                doc_id = entry.meta.get("doc_id") or str(entry.tumbler)
-                where_filter: dict = {
-                    "chunk_index": chunk_idx,
-                    "doc_id": doc_id,
-                }
-                result = col.get(
-                    where={"$and": [{k: v} for k, v in where_filter.items()]},
-                    include=["documents"],
-                    limit=1,
-                )
-                docs = result.get("documents", [])
-                if docs:
-                    text = docs[0]
-                    return text[char_start:char_end]
-            except Exception:
-                return None
-
-        return None
+        from nexus.catalog import catalog_spans
+        return catalog_spans.resolve_span_text_for_entry(entry, span)
 
     def link_audit(self, *, t3: "ClientAPI | None" = None) -> dict:
-        """Audit the links table. Returns stats + orphan + duplicate + chash lists.
-
-        When ``t3`` is provided, verifies each ``chash:`` span resolves to a
-        chunk in the corresponding ChromaDB collection. Unresolvable spans
-        appear in ``stale_chash``.
-
-        Args:
-            t3: Raw ChromaDB client (``chromadb.ClientAPI``), not a ``T3Database``.
-                Production callers pass ``t3_db._client``; tests pass an
-                ``EphemeralClient`` directly. Injection keeps the method testable
-                without ``make_t3()``.
-        """
-        total = self._db.execute("SELECT count(*) FROM links").fetchone()[0]
-        by_type = dict(
-            self._db.execute(
-                "SELECT link_type, count(*) FROM links GROUP BY link_type"
-            ).fetchall()
-        )
-        by_creator = dict(
-            self._db.execute(
-                "SELECT created_by, count(*) FROM links GROUP BY created_by"
-            ).fetchall()
-        )
-        orphan_rows = self._db.execute(
-            "SELECT from_tumbler, to_tumbler, link_type FROM links l "
-            "WHERE NOT EXISTS (SELECT 1 FROM documents d WHERE d.tumbler = l.from_tumbler) "
-            "   OR NOT EXISTS (SELECT 1 FROM documents d WHERE d.tumbler = l.to_tumbler)"
-        ).fetchall()
-        orphaned = [{"from": r[0], "to": r[1], "type": r[2]} for r in orphan_rows]
-        dup_rows = self._db.execute(
-            "SELECT from_tumbler, to_tumbler, link_type, count(*) AS cnt "
-            "FROM links GROUP BY from_tumbler, to_tumbler, link_type HAVING cnt > 1"
-        ).fetchall()
-        duplicates = [
-            {"from": r[0], "to": r[1], "type": r[2], "count": r[3]} for r in dup_rows
-        ]
-        # Stale spans: positional spans pointing to documents re-indexed after link creation.
-        # Content-hash spans (chash:) are excluded — they survive re-indexing by design
-        # (RDR-053). Stale chash spans are detected separately via T3 verification below.
-        # Checks both from_span (joined on from_tumbler) and to_span (joined on to_tumbler).
-        # datetime() wraps ensure correct comparison regardless of ISO-8601 padding.
-        stale_span_rows = self._db.execute(
-            "SELECT l.from_tumbler, l.to_tumbler, l.link_type, l.created_at, "
-            "       d.indexed_at, 'from' AS side "
-            "FROM links l "
-            "JOIN documents d ON d.tumbler = l.from_tumbler "
-            "WHERE (l.from_span IS NOT NULL AND l.from_span != '') "
-            "  AND l.from_span NOT LIKE 'chash:%' "
-            "  AND datetime(l.created_at) < datetime(d.indexed_at) "
-            "UNION ALL "
-            "SELECT l.from_tumbler, l.to_tumbler, l.link_type, l.created_at, "
-            "       d.indexed_at, 'to' AS side "
-            "FROM links l "
-            "JOIN documents d ON d.tumbler = l.to_tumbler "
-            "WHERE (l.to_span IS NOT NULL AND l.to_span != '') "
-            "  AND l.to_span NOT LIKE 'chash:%' "
-            "  AND datetime(l.created_at) < datetime(d.indexed_at)"
-        ).fetchall()
-        stale_spans = [
-            {"from": r[0], "to": r[1], "type": r[2],
-             "link_created": r[3], "doc_reindexed": r[4], "side": r[5]}
-            for r in stale_span_rows
-        ]
-        # chash verification: check each chash: span resolves in T3
-        stale_chash: list[dict] = []
-        if t3 is not None:
-            chash_rows = self._db.execute(
-                "SELECT from_tumbler, to_tumbler, link_type, from_span, to_span "
-                "FROM links WHERE from_span LIKE 'chash:%' OR to_span LIKE 'chash:%'"
-            ).fetchall()
-            for row in chash_rows:
-                from_t, to_t, lt, from_span, to_span = row
-                for span, tumbler_str in [(from_span, from_t), (to_span, to_t)]:
-                    if not span.startswith("chash:"):
-                        continue
-                    # Extract hash from chash:<hash> or chash:<hash>:<start>-<end>
-                    body = span[len("chash:"):]
-                    m_range = re.match(r"^([0-9a-f]{64}):\d+-\d+$", body)
-                    chunk_hash = m_range.group(1) if m_range else body
-                    entry = self.resolve(Tumbler.parse(tumbler_str))
-                    if entry is None:
-                        stale_chash.append(
-                            {"from": from_t, "to": to_t, "type": lt, "span": span,
-                             "reason": "document_deleted"}
-                        )
-                        continue
-                    try:
-                        col = t3.get_collection(entry.physical_collection)
-                        result = col.get(
-                            where={"chunk_text_hash": chunk_hash}, include=[]
-                        )
-                        if not result["ids"]:
-                            stale_chash.append(
-                                {"from": from_t, "to": to_t, "type": lt, "span": span,
-                                 "reason": "missing"}
-                            )
-                    except Exception as exc:
-                        _log.warning(
-                            "link_audit_chash_error",
-                            tumbler=tumbler_str, span=span,
-                            exc_info=True,
-                        )
-                        stale_chash.append(
-                            {"from": from_t, "to": to_t, "type": lt, "span": span,
-                             "reason": "error", "error": type(exc).__name__}
-                        )
-
-        return {
-            "total": total,
-            "by_type": by_type,
-            "by_creator": by_creator,
-            "orphaned": orphaned,
-            "orphaned_count": len(orphaned),
-            "duplicates": duplicates,
-            "duplicate_count": len(duplicates),
-            "stale_spans": stale_spans,
-            "stale_span_count": len(stale_spans),
-            "stale_chash": stale_chash,
-            "stale_chash_count": len(stale_chash),
-        }
-
-    _MAX_GRAPH_DEPTH = 10
-    _MAX_GRAPH_NODES = 500
+        """Audit the links table."""
+        return self._links.link_audit(t3=t3)
 
     def graph(
         self,
@@ -4245,45 +2228,11 @@ class Catalog:
         link_type: str = "",
         link_types: list[str] | None = None,
     ) -> dict:
-        """BFS traversal to given depth. Returns {"nodes": [...], "edges": [...]}.
-
-        Depth capped at _MAX_GRAPH_DEPTH. Traversal stops at _MAX_GRAPH_NODES visited.
-        ``link_types`` (plural list) takes precedence over ``link_type`` (single str).
-        """
-        depth = min(depth, self._MAX_GRAPH_DEPTH)
-        effective_types: list[str] = link_types or ([link_type] if link_type else [])
-        visited: set[str] = {str(tumbler)}
-        seen_edges: set[tuple[str, str, str]] = set()
-        all_edges: list[CatalogLink] = []
-        queue: deque[tuple[Tumbler, int]] = deque([(tumbler, 0)])
-
-        while queue:
-            if len(visited) >= self._MAX_GRAPH_NODES:
-                _log.warning("graph_node_limit", tumbler=str(tumbler), visited=len(visited))
-                break
-            current, d = queue.popleft()
-            if d >= depth:
-                continue
-
-            neighbors: list[CatalogLink] = []
-            if direction in ("out", "both"):
-                neighbors.extend(self.links_from(current, link_types=effective_types or None))
-            if direction in ("in", "both"):
-                neighbors.extend(self.links_to(current, link_types=effective_types or None))
-
-            for edge in neighbors:
-                edge_key = (str(edge.from_tumbler), str(edge.to_tumbler), edge.link_type)
-                if edge_key not in seen_edges:
-                    seen_edges.add(edge_key)
-                    all_edges.append(edge)
-                other = edge.to_tumbler if edge.from_tumbler == current else edge.from_tumbler
-                if str(other) not in visited:
-                    visited.add(str(other))
-                    queue.append((other, d + 1))
-
-        nodes = [self.resolve(Tumbler.parse(t)) for t in visited]
-        nodes = [n for n in nodes if n is not None]
-        return {"nodes": nodes, "edges": all_edges}
+        """BFS traversal — see ``_LinkOps.graph`` for the full contract."""
+        return self._links.graph(
+            tumbler, depth=depth, direction=direction,
+            link_type=link_type, link_types=link_types,
+        )
 
     def graph_many(
         self,
@@ -4293,142 +2242,27 @@ class Catalog:
         link_type: str = "",
         link_types: list[str] | None = None,
     ) -> dict:
-        """BFS traversal from multiple seed tumblers — thin wrapper over :meth:`graph`.
-
-        Merges per-seed results with node-key = ``str(tumbler)`` and
-        edge-key = ``(from, to, link_type)`` deduplication so a shared
-        node or edge discovered from two seeds only appears once.
-        """
-        merged_nodes: dict[str, object] = {}
-        merged_edges: dict[tuple[str, str, str], object] = {}
-
-        for seed in seeds:
-            if len(merged_nodes) >= self._MAX_GRAPH_NODES:
-                _log.warning("graph_many_node_limit", visited=len(merged_nodes))
-                break
-            result = self.graph(
-                seed, depth=depth, direction=direction,
-                link_type=link_type, link_types=link_types,
-            )
-            for node in result.get("nodes") or []:
-                if len(merged_nodes) >= self._MAX_GRAPH_NODES:
-                    _log.debug(
-                        "graph_many_node_limit_mid_seed",
-                        visited=len(merged_nodes),
-                    )
-                    break
-                key = str(node.tumbler) if hasattr(node, "tumbler") else str(node)
-                if key not in merged_nodes:
-                    merged_nodes[key] = node
-            # Drop edges whose endpoints were excluded by the node cap — otherwise
-            # callers iterating nodes-then-edges see dangling references.
-            for edge in result.get("edges") or []:
-                from_key = str(edge.from_tumbler)
-                to_key = str(edge.to_tumbler)
-                if from_key not in merged_nodes or to_key not in merged_nodes:
-                    continue
-                edge_key = (from_key, to_key, edge.link_type)
-                if edge_key not in merged_edges:
-                    merged_edges[edge_key] = edge
-
-        return {
-            "nodes": list(merged_nodes.values()),
-            "edges": list(merged_edges.values()),
-        }
+        """BFS from multiple seeds."""
+        return self._links.graph_many(
+            seeds, depth=depth, direction=direction,
+            link_type=link_type, link_types=link_types,
+        )
 
     # ── Rebuild ───────────���──────────────────────────��─────────────────────
 
     def rebuild(self) -> None:
-        """Rebuild SQLite from JSONL. Called at startup and after git pull."""
-        dir_fd = self._acquire_lock()
-        try:
-            owners = read_owners(self._owners_path) if self._owners_path.exists() else {}
-            documents = read_documents(self._documents_path) if self._documents_path.exists() else {}
-            links_dict = read_links(self._links_path) if self._links_path.exists() else {}
-            self._db.rebuild(owners, documents, list(links_dict.values()))
-        finally:
-            self._release_lock(dir_fd)
+        """Delegates to ``_SyncOps.rebuild`` (nexus-mbm)."""
+        return self._sync.rebuild()
 
     def _defrag_unlocked(self) -> dict[str, int]:
-        """Core defrag logic — caller must hold the lock."""
-        removed = {}
-        for path in [self._owners_path, self._documents_path, self._links_path]:
-            if not path.exists():
-                continue
-            original_lines = sum(1 for line in path.open() if line.strip())
-            seen: dict[str, str] = {}
-            with path.open() as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        obj = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if "owner" in obj:
-                        key = obj["owner"]
-                    elif "tumbler" in obj:
-                        key = obj["tumbler"]
-                    elif "from_t" in obj:
-                        key = f"{obj['from_t']}|{obj['to_t']}|{obj['link_type']}"
-                    else:
-                        continue
-                    seen[key] = line
-            with path.open("w") as f:
-                for line in seen.values():
-                    f.write(line + "\n")
-            removed[path.name] = original_lines - len(seen)
-            # Rebuild SQLite from defragged JSONL to stay consistent
-        owners = read_owners(self._owners_path) if self._owners_path.exists() else {}
-        documents = read_documents(self._documents_path) if self._documents_path.exists() else {}
-        links_dict = read_links(self._links_path) if self._links_path.exists() else {}
-        self._db.rebuild(owners, documents, list(links_dict.values()))
-        return removed
+        """Delegates to ``_SyncOps._defrag_unlocked`` (nexus-mbm)."""
+        return self._sync._defrag_unlocked()
 
     def defrag(self) -> dict[str, int]:
-        """Deduplicate JSONL files — keep latest version of each live record.
-
-        Removes duplicate overwrites but preserves tombstones (deletion markers).
-        This is the safe compaction: no history is lost, deleted tumblers remain
-        reserved, and the version record is intact for forensic purposes.
-        Returns count of lines removed per file.
-        """
-        dir_fd = self._acquire_lock()
-        try:
-            return self._defrag_unlocked()
-        finally:
-            self._release_lock(dir_fd)
+        """Delegates to ``_SyncOps.defrag`` (nexus-mbm)."""
+        return self._sync.defrag()
 
     def compact(self) -> dict[str, int]:
-        """Full compaction: deduplicate AND remove tombstones.
+        """Delegates to ``_SyncOps.compact`` (nexus-mbm)."""
+        return self._sync.compact()
 
-        This erases deletion history — tombstoned tumblers are no longer
-        visible in the JSONL (though they remain reserved via owner next_seq).
-        Use defrag() for safe compaction that preserves tombstones.
-        """
-        dir_fd = self._acquire_lock()
-        try:
-            removed = {}
-            for path, reader in [
-                (self._owners_path, read_owners),
-                (self._documents_path, read_documents),
-                (self._links_path, read_links),
-            ]:
-                if not path.exists():
-                    continue
-                original_lines = sum(1 for line in path.open() if line.strip())
-                records = reader(path)
-                with path.open("w") as f:
-                    for record in records.values():
-                        f.write(json.dumps(record.__dict__, default=str) + "\n")
-                new_lines = len(records)
-                removed[path.name] = original_lines - new_lines
-            # Rebuild SQLite from compacted JSONL
-            owners = read_owners(self._owners_path) if self._owners_path.exists() else {}
-            documents = read_documents(self._documents_path) if self._documents_path.exists() else {}
-            links_dict = read_links(self._links_path) if self._links_path.exists() else {}
-            self._db.rebuild(owners, documents, list(links_dict.values()))
-            return removed
-        finally:
-            self._release_lock(dir_fd)
