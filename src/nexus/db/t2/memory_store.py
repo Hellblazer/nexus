@@ -38,7 +38,7 @@ from typing import Any, Literal
 
 import structlog
 
-from nexus.session import read_session_id as _read_session_id
+from nexus.session import read_claude_session_id as _read_session_id
 
 _log = structlog.get_logger()
 

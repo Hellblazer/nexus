@@ -1,19 +1,20 @@
-"""AC1: Session ID is a valid UUID4, written to and readable from a PID-scoped file."""
-import json
+"""Session-id generator and Claude-session flat-file behaviours.
+
+The legacy getsid-keyed session-file scheme (``_stable_pid``,
+``session_file_path``, ``write_session_file``, ``read_session_id``)
+was deleted as the RDR-105 P4 follow-up tracked by ``nexus-9nbk``.
+Current callers use ``read_claude_session_id`` /
+``write_claude_session_id`` against the flat
+``~/.config/nexus/current_session`` file.
+"""
 import os
 import re
 import time
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
-from nexus.session import (
-    _stable_pid,
-    generate_session_id,
-    read_session_id,
-    write_session_file,
-)
+from nexus.session import generate_session_id
 
 
 def test_generate_session_id_is_uuid4() -> None:
@@ -23,63 +24,6 @@ def test_generate_session_id_is_uuid4() -> None:
 
 def test_generate_session_id_unique() -> None:
     assert generate_session_id() != generate_session_id()
-
-
-def test_write_and_read_session_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
-    sid = generate_session_id()
-
-    path = write_session_file(sid, ppid=99999)
-    assert path.exists()
-    assert path.read_text() == sid
-
-    recovered = read_session_id(ppid=99999)
-    assert recovered == sid
-
-
-def test_read_session_id_missing_returns_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
-    assert read_session_id(ppid=99998) is None
-
-
-def test_session_file_is_pid_scoped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
-    write_session_file("session-a", ppid=1001)
-    write_session_file("session-b", ppid=1002)
-
-    assert read_session_id(ppid=1001) == "session-a"
-    assert read_session_id(ppid=1002) == "session-b"
-
-
-# ── Behavior 1: _stable_pid() env var path ────────────────────────────────────
-
-def test_stable_pid_env_var_takes_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When NX_SESSION_PID is set, _stable_pid() returns that value and ignores getsid(0)."""
-    monkeypatch.setenv("NX_SESSION_PID", "77777")
-    with patch("nexus.session.os.getsid", return_value=99999):
-        result = _stable_pid()
-    assert result == 77777
-
-
-# ── Behavior 2: _stable_pid() getsid fallback ────────────────────────────────
-
-def test_stable_pid_falls_back_to_getsid(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When NX_SESSION_PID is unset, _stable_pid() returns os.getsid(0)."""
-    monkeypatch.delenv("NX_SESSION_PID", raising=False)
-    with patch("nexus.session.os.getsid", return_value=55555) as mock_getsid:
-        result = _stable_pid()
-    assert result == 55555
-    mock_getsid.assert_called_once_with(0)
-
-
-# ── Behavior 3: _stable_pid() invalid env var falls back ─────────────────────
-
-def test_stable_pid_invalid_env_var_falls_back_to_getsid(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When NX_SESSION_PID is non-integer, _stable_pid() silently falls back to getsid(0)."""
-    monkeypatch.setenv("NX_SESSION_PID", "not-a-number")
-    with patch("nexus.session.os.getsid", return_value=44444):
-        result = _stable_pid()
-    assert result == 44444
 
 
 # ── write_session_record ──────────────────────────────────────────────────────

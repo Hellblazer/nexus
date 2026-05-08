@@ -43,12 +43,15 @@ def isolated_t2(
     monkeypatch.setattr(infra, "default_db_path", lambda: db)
     monkeypatch.delenv("NX_AGENT", raising=False)
     monkeypatch.delenv("NX_SESSION_ID", raising=False)
-    # Default: no claude session file present (prevents legacy session
-    # file from leaking into MemoryStore.put's session resolution).
-    import nexus.session
-    monkeypatch.setattr(
-        nexus.session, "read_session_id", lambda ppid=None: None,
-    )
+    # Default: no claude session file present (prevents the real
+    # ``~/.config/nexus/current_session`` from leaking into
+    # MemoryStore.put's session resolution). Patches the alias binding
+    # inside memory_store directly because ``from X import Y as Z`` in
+    # memory_store captures the function object at import time;
+    # patching ``nexus.session.read_claude_session_id`` after that
+    # would not propagate.
+    import nexus.db.t2.memory_store as _ms
+    monkeypatch.setattr(_ms, "_read_session_id", lambda: None)
     return db
 
 
