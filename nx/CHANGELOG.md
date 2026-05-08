@@ -6,6 +6,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.27.1] - 2026-05-08
+
+Plugin version aligned with conexus 4.27.1. No plugin-side changes;
+the release ships a critical T1 cross-process session_id fix in the
+conexus package that restores T1 visibility for every nx-plugin hook
+that reads scratch from the shell (`subagent-start.sh`,
+`post_compact_hook.sh`, `pre_close_verification_hook.sh`,
+`divergence-language-guard.sh`). See root `CHANGELOG.md` for the
+full breakdown.
+
 ## [4.27.0] - 2026-05-07
 
 Plugin version aligned with conexus 4.27.0. No plugin-side changes;

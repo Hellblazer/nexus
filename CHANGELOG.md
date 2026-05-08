@@ -6,44 +6,110 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.27.1] - 2026-05-08
+
+Patch release. Closes a critical T1 regression introduced by RDR-105
+P4 in 4.27.0 (PR #585) that broke cross-process T1 visibility for
+every nx-plugin hook reading scratch from the shell. Surfaced during
+the live 4.27.0 shakeout (bead nexus-h8ge) within ~30 minutes of the
+PyPI publish.
+
 ### Fixed
 
-- **T1 cross-process session_id propagation regression in 4.27.0**
-  (PR pending, nexus-h8ge): RDR-105 P4 deletion of the legacy
-  session-record resolver removed the
-  ``read_claude_session_id()`` (~/.config/nexus/current_session)
+- **T1 cross-process session_id propagation** (PR #590, nexus-h8ge):
+  RDR-105 P4 deletion of the legacy session-record resolver removed
+  the ``read_claude_session_id()`` (~/.config/nexus/current_session)
   fallback from ``T1Database._init_new_discovery``'s session_id
   resolution chain. Every ``T1Database()`` call without an explicit
   session_id arg or ``NX_SESSION_ID`` env minted a fresh ``uuid4()``
   per process, so two processes in the same Claude session (the MCP
   server and a Bash-tool sibling, or two shell ``nx scratch``
   invocations) could not see each other's entries via the per-entry
-  session_id metadata filter. ``nx tier-status`` continued to use
-  the correct chain (``mcp/core.py:_record_tier_write``) so
-  telemetry attributed writes to the canonical session while the
-  data sat under fresh per-process UUIDs --- the audit log and the
-  T1 chunk store disagreed on attribution. Production hooks
-  reading T1 from the shell (``subagent-start.sh`` injecting T1 into
-  every sub-agent's seed prompt, ``post_compact_hook.sh``,
-  ``pre_close_verification_hook.sh``, ``divergence-language-guard.sh``)
-  silently saw "No scratch entries." regardless of T1 contents.
-  Fix: factor the resolution chain into ``_resolve_session_id`` and
-  call it from all four construction branches (Path A env, Path B
-  addr file, Path C isolation, client-injection) so the chain is a
-  single source of truth. ``read_claude_session_id`` /
-  ``write_claude_session_id`` now resolve ``NEXUS_CONFIG_DIR`` per
-  call instead of freezing the path at module import (consistency
-  with every other path helper in ``session.py``); the import-time
-  ``CLAUDE_SESSION_FILE`` constant remains for backward compat but
-  is no longer load-bearing. Regression coverage: 16 new unit tests
-  (``TestT1DatabaseSessionIdResolution``) parametrize the four
-  resolution scenarios across all four entry points; 1 new
-  integration test (``TestE2ESessionIdSharedAcrossProcesses``)
-  spawns two real subprocesses with no ``NX_SESSION_ID`` and
-  asserts both converge on the on-disk session_id and round-trip
-  T1 entries. The integration test is the missing invariant test
-  the 4.27.0 ship lacked: pre-fix it fails because each subprocess
-  mints its own UUID; post-fix it passes.
+  session_id metadata filter. Live repro from any Bash tool, no env
+  overrides:
+  ```
+  $ nx scratch put hello && nx scratch list
+  Stored: <uuid>
+  No scratch entries.            <-- BUG
+  ```
+  ``nx tier-status`` continued to use the correct chain
+  (``mcp/core.py:_record_tier_write`` resolves ``NX_SESSION_ID`` env
+  > ``read_claude_session_id()`` > ``"unknown"``) so telemetry
+  attributed writes to the canonical Claude session while the
+  actual T1 chunks sat under fresh per-process UUIDs: the audit log
+  and the T1 chunk store disagreed on attribution. Production hooks
+  reading T1 from the shell silently saw "No scratch entries."
+  regardless of T1 contents:
+  - ``nx/hooks/scripts/subagent-start.sh:252`` ("Inject current T1
+    scratch entries") never injected anything; sub-agents got no T1
+    context.
+  - ``nx/hooks/scripts/post_compact_hook.sh:23`` saw no scratch
+    post-compact.
+  - ``nx/hooks/scripts/pre_close_verification_hook.sh:82,215``
+    verification gates were blind.
+  - ``nx/hooks/scripts/divergence-language-guard.sh:75`` writes
+    were lost into per-process ephemeral namespaces.
+
+  Fix: factor the resolution chain into
+  ``T1Database._resolve_session_id`` and call it from all four
+  construction branches (Path A env, Path B addr file, Path C
+  isolation, client-injection) so the chain is a single source of
+  truth. ``read_claude_session_id`` / ``write_claude_session_id``
+  now resolve ``NEXUS_CONFIG_DIR`` per call instead of freezing the
+  path at module import (consistency with every other path helper
+  in ``session.py``); the import-time ``CLAUDE_SESSION_FILE``
+  constant remains for backward compat but is no longer
+  load-bearing.
+
+- **``test_plan_miss_returns_clear_message`` over-narrow markers**
+  (PR #592): release-gate integration test failed 2/3 in isolation
+  on a freshly-seeded plan library. The LLM produced a perfect
+  graceful-degrade response that the substring matcher did not
+  recognise: ``"I can't retrieve real-time weather for Tokyo from
+  this knowledge base..."``. The accepted-marker list assumed the
+  LLM would use the formal "cannot" rather than the contraction
+  "can't" and did not include the natural-language shapes the model
+  consistently produces ("static indexed", "knowledge base", "no
+  tool"). Broadened the markers; assertion still requires SOMETHING
+  from a curated list of degrade-shape phrases (not weakened to
+  "any non-empty string"). Unrelated to the T1 fix above; surfaced
+  by the same shakeout pass.
+
+### Added
+
+- **Regression coverage for the T1 invariant 4.27.0 lacked** (PR
+  #590): ``TestT1DatabaseSessionIdResolution`` (16 unit tests)
+  parametrizes the four resolution scenarios (explicit-arg-wins,
+  env-wins, file-wins, uuid-fallback) across all four entry points;
+  ``TestE2ESessionIdSharedAcrossProcesses`` (1 integration test)
+  spawns two real subprocesses with no ``NX_SESSION_ID``, asserts
+  both converge on the on-disk session_id and round-trip a T1
+  entry. Pre-fix the integration test fails because each subprocess
+  mints its own UUID; post-fix it passes. **This is the invariant
+  test the 4.27.0 ship lacked.** ``TestE2EParallelStress`` (the
+  pre-existing "10-parallel" RF-3 verification) explicitly sets
+  ``NX_SESSION_ID`` per worker so each subprocess gets its own
+  scoped view by design; the missing case was "two processes with
+  no ``NX_SESSION_ID``, expect to share Claude session via the
+  on-disk pointer".
+
+### Known issues (deferred to follow-up)
+
+The 4.27.0 shakeout also surfaced two adjacent T1 issues left for
+a follow-up PR (notes on bead nexus-h8ge):
+
+- ``NX_T1_ISOLATED=1`` is silently ignored when Path B can fire.
+  Four-branch order is A -> B -> C -> raise; any shell sibling of a
+  live Claude has a discoverable addr file -> Path B wins -> HTTP
+  chroma. Operators cannot opt into ephemeral inside a Claude
+  session. The CHANGELOG line in 4.27.0 ("Operators who want
+  ephemeral semantics opt in via ``NX_T1_ISOLATED=1``") is true
+  only outside an active Claude session.
+- ``nx tier-status`` and the T1 writer used different session_id
+  resolution surfaces pre-fix (audit log got it right, T1 chunks
+  did not). Post this release the chains are aligned via
+  ``_resolve_session_id``; the underlying surface asymmetry is
+  worth its own audit.
 
 ## [4.27.0] - 2026-05-07
 
