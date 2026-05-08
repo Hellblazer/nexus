@@ -587,6 +587,10 @@ class Catalog:
         # ._acquire_lock through the same Catalog instance.
         from nexus.catalog.catalog_links import _LinkOps
         self._links = _LinkOps(self)
+        # nexus-mbm: read-only document/owner/collection lookup
+        # methods live in catalog_docs._DocumentOps.
+        from nexus.catalog.catalog_docs import _DocumentOps
+        self._docs = _DocumentOps(self)
 
     def _read_consistency_marker(self) -> float:
         """Return the persisted ``_last_consistency_mtime`` or 0.0.
@@ -1493,33 +1497,12 @@ class Catalog:
             self._release_lock(dir_fd)
 
     def owner_for_repo(self, repo_hash: str) -> Tumbler | None:
-        row = self._db.execute(
-            "SELECT tumbler_prefix FROM owners WHERE repo_hash = ?", (repo_hash,)
-        ).fetchone()
-        return Tumbler.parse(row[0]) if row else None
+        """Delegates to ``_DocumentOps.owner_for_repo`` (nexus-mbm)."""
+        return self._docs.owner_for_repo(repo_hash)
 
     def owner_tumblers_by_name(self, name: str) -> list[Tumbler]:
-        """Return tumblers of all owners with this name.
-
-        UNIQUE constraint is ``(name, owner_type)`` per nexus-7vuw, so
-        a single name can map to multiple owners across types (e.g.
-        a repo and a curator both named ``nexus``). Callers that need
-        a unique answer should disambiguate on the returned list
-        (typical CLI flow: error when ``len(...) > 1`` and surface
-        the candidates).
-
-        Returns ``[]`` if no owner has this name. Used by the
-        ``--owner`` CLI flags on ``nx catalog list`` (and friends)
-        to resolve operator-typed names to tumblers without leaking
-        the ``Tumbler.parse → int()`` ``ValueError`` (#537,
-        nexus-1lx7).
-        """
-        rows = self._db.execute(
-            "SELECT tumbler_prefix FROM owners WHERE name = ? "
-            "ORDER BY tumbler_prefix",
-            (name,),
-        ).fetchall()
-        return [Tumbler.parse(r[0]) for r in rows]
+        """Delegates to ``_DocumentOps.owner_tumblers_by_name`` (nexus-mbm)."""
+        return self._docs.owner_tumblers_by_name(name)
 
     def ensure_owner_for_repo(
         self, repo: Path, *, repo_name: str = "", description: str = "",
@@ -1800,93 +1783,14 @@ class Catalog:
             self._release_lock(dir_fd)
 
     def resolve(self, tumbler: Tumbler, *, follow_alias: bool = True) -> CatalogEntry | None:
-        """Return the document entry for ``tumbler``.
-
-        With ``follow_alias=True`` (default), transparently dereferences
-        ``alias_of`` — external callers get the canonical entry even
-        when they asked by an old tumbler. Pass ``follow_alias=False`` to
-        see the raw entry (needed by dedupe tooling to inspect the alias
-        graph itself).
-        """
-        target = self.resolve_alias(tumbler) if follow_alias else tumbler
-        row = self._db.execute(
-            "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
-            "metadata, source_mtime, alias_of, source_uri "
-            "FROM documents WHERE tumbler = ?",
-            (str(target),),
-        ).fetchone()
-        if not row:
-            return None
-        return CatalogEntry(
-            tumbler=Tumbler.parse(row[0]),
-            title=row[1],
-            author=row[2],
-            year=row[3],
-            content_type=row[4],
-            file_path=row[5],
-            corpus=row[6],
-            physical_collection=row[7],
-            chunk_count=row[8],
-            head_hash=row[9],
-            indexed_at=row[10],
-            meta=json.loads(row[11]) if row[11] else {},
-            source_mtime=row[12] or 0.0,
-            alias_of=row[13] or "",
-            source_uri=row[14] or "",
-        )
+        """Delegates to ``_DocumentOps.resolve`` (nexus-mbm)."""
+        return self._docs.resolve(tumbler, follow_alias=follow_alias)
 
     def list_by_collection(
         self, physical_collection: str, *, limit: int | None = None,
     ) -> list[CatalogEntry]:
-        """Return every document entry whose ``physical_collection``
-        matches.
-
-        One entry per source document (NOT per chunk) — what callers
-        like ``nx enrich aspects`` need to drive a per-document
-        operation. Ordered by ``tumbler ASC`` for deterministic
-        iteration. ``limit=None`` returns every match.
-
-        Reads the SQLite cache without acquiring the JSONL-truth
-        flock — consistent with ``resolve``, ``find``, and
-        ``by_file_path``. Callers driving downstream writes (e.g.
-        ``nx enrich aspects``) should treat the result as a
-        best-effort sweep; a document registered concurrently may
-        be missed and can be picked up by a subsequent run or by
-        ``--re-extract`` re-sweeps.
-        """
-        sql = (
-            "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
-            "metadata, source_mtime, alias_of, source_uri "
-            "FROM documents WHERE physical_collection = ? "
-            "ORDER BY tumbler ASC"
-        )
-        params: tuple = (physical_collection,)
-        if limit is not None:
-            sql += " LIMIT ?"
-            params = (physical_collection, limit)
-        rows = self._db.execute(sql, params).fetchall()
-        return [
-            CatalogEntry(
-                tumbler=Tumbler.parse(row[0]),
-                title=row[1],
-                author=row[2],
-                year=row[3],
-                content_type=row[4],
-                file_path=row[5],
-                corpus=row[6],
-                physical_collection=row[7],
-                chunk_count=row[8],
-                head_hash=row[9],
-                indexed_at=row[10],
-                meta=json.loads(row[11]) if row[11] else {},
-                source_mtime=row[12] or 0.0,
-                alias_of=row[13] or "",
-                source_uri=row[14] or "",
-            )
-            for row in rows
-        ]
+        """Delegates to ``_DocumentOps.list_by_collection`` (nexus-mbm)."""
+        return self._docs.list_by_collection(physical_collection, limit=limit)
 
     # ── RDR-101 Phase 6: Collections projection (nexus-o6aa.14) ─────────
 
@@ -2019,34 +1923,16 @@ class Catalog:
             self._release_lock(dir_fd)
 
     def list_collections(self) -> list[dict]:
-        """Return every row in the ``collections`` projection, ordered by name."""
-        sql = (
-            "SELECT " + ", ".join(self._COLLECTION_COLUMNS) + " "
-            "FROM collections ORDER BY name"
-        )
-        rows = self._db.execute(sql).fetchall()
-        return [self._row_to_collection_dict(r) for r in rows]
+        """Delegates to ``_DocumentOps.list_collections`` (nexus-mbm)."""
+        return self._docs.list_collections()
 
     def get_collection(self, name: str) -> dict | None:
-        sql = (
-            "SELECT " + ", ".join(self._COLLECTION_COLUMNS) + " "
-            "FROM collections WHERE name = ?"
-        )
-        row = self._db.execute(sql, (name,)).fetchone()
-        return self._row_to_collection_dict(row) if row else None
+        """Delegates to ``_DocumentOps.get_collection`` (nexus-mbm)."""
+        return self._docs.get_collection(name)
 
     def is_legacy_collection(self, name: str) -> bool:
-        """Return True if ``name`` is registered AND flagged legacy.
-
-        Unknown names return False (read paths are operationally hostile
-        to fail-loud per RDR-101 §"Phase 6"). Callers wanting strict
-        membership should query :meth:`get_collection` and check for None.
-        """
-        row = self._db.execute(
-            "SELECT legacy_grandfathered FROM collections WHERE name = ?",
-            (name,),
-        ).fetchone()
-        return bool(row and row[0])
+        """Delegates to ``_DocumentOps.is_legacy_collection`` (nexus-mbm)."""
+        return self._docs.is_legacy_collection(name)
 
     def collection_for(
         self,
@@ -2056,90 +1942,8 @@ class Catalog:
         *,
         bump: bool = False,
     ) -> CollectionName:
-        """Resolve the canonical ``CollectionName`` for a tuple.
-
-        RDR-103 Phase 2. The catalog is the authority for collection
-        naming: callers describe the tuple they want, the catalog renders
-        the physical name. Validation is strict at the public boundary
-        (per pinned decision #4): ``content_type`` must be in
-        :data:`nexus.corpus.CONTENT_TYPES`, ``embedding_model`` must be in
-        :data:`nexus.corpus.CANONICAL_EMBEDDING_MODELS`, and the derived
-        owner segment must be non-empty.
-
-        Version handling:
-
-        - New tuple ``(c, o, m)`` returns ``v1``.
-        - Existing tuple at ``vN`` returns ``vN`` (idempotent).
-        - With ``bump=True``, an existing ``vN`` returns ``vN+1``; a
-          new tuple still returns ``v1`` (bump only fires when prior
-          versions exist).
-
-        Pinned decision #2: a new ``embedding_model`` is NOT a version
-        bump. ``(c, o, m_new)`` is a different tuple from ``(c, o, m_old)``
-        and naturally lands in ``v1``. The operator runs
-        ``nx catalog supersede-collection`` to retire the old tuple.
-
-        Grandfathered legacy rows do NOT contribute to the version
-        lookup: their canonical fields are typically empty strings, and
-        the WHERE clause filters them out via ``legacy_grandfathered = 0``
-        belt-and-suspenders. Pinned decision #1.
-
-        This method does NOT register the returned name in the catalog
-        projection. Callers must follow up with
-        :meth:`register_collection` once they have actually created (or
-        otherwise materialised) the T3 collection. The indexer's
-        ``_catalog_hook_repo`` already pairs creation with registration;
-        Phase 3 wires that pattern through every indexer call site.
-
-        The returned ``CollectionName`` is constructed directly rather
-        than round-tripped through ``CollectionName.parse(render(...))``;
-        the fields are validated above against the same closed sets,
-        making the round-trip redundant.
-        """
-        if content_type not in CONTENT_TYPES:
-            raise ValueError(
-                f"collection_for: unknown content_type {content_type!r}; "
-                f"expected one of {CONTENT_TYPES}"
-            )
-        if embedding_model not in CANONICAL_EMBEDDING_MODELS:
-            raise ValueError(
-                f"collection_for: non-canonical embedding_model "
-                f"{embedding_model!r}; expected one of "
-                f"{sorted(CANONICAL_EMBEDDING_MODELS)}"
-            )
-        owner_id = owner_segment_for_tumbler(owner)
-        if not owner_id:
-            raise ValueError(
-                f"collection_for: cannot derive owner_id segment from "
-                f"owner {owner!r}"
-            )
-        # The compound index ``idx_collections_tuple`` covers this lookup.
-        # ``model_version`` is stored as TEXT (``v1``..``vN``). SUBSTR
-        # strips the ``v`` prefix so SQLite can CAST the digit string to
-        # INTEGER; ``CAST('v3' AS INTEGER)`` returns 0 because SQLite
-        # cannot parse a leading non-digit. The INTEGER cast is what
-        # gives MAX integer ordering rather than lexical (otherwise
-        # ``v10`` would sort before ``v9``).
-        row = self._db.execute(
-            "SELECT MAX(CAST(SUBSTR(model_version, 2) AS INTEGER)) "
-            "FROM collections "
-            "WHERE content_type = ? AND owner_id = ? "
-            "AND embedding_model = ? AND legacy_grandfathered = 0",
-            (content_type, owner_id, embedding_model),
-        ).fetchone()
-        existing_version = int(row[0]) if row and row[0] is not None else 0
-        if existing_version == 0:
-            new_version = 1
-        elif bump:
-            new_version = existing_version + 1
-        else:
-            new_version = existing_version
-        return CollectionName(
-            content_type=content_type,
-            owner_id=owner_id,
-            embedding_model=embedding_model,
-            model_version=new_version,
-        )
+        """Delegates to ``_DocumentOps.collection_for`` (nexus-mbm)."""
+        return self._docs.collection_for(content_type, owner, embedding_model, bump=bump)
 
     def collection_for_repo(
         self,
@@ -2148,43 +1952,8 @@ class Catalog:
         *,
         bump: bool = False,
     ) -> CollectionName:
-        """Resolve the canonical ``CollectionName`` for ``content_type`` in ``repo``.
-
-        Convenience wrapper around :meth:`collection_for` that handles
-        the repo-to-owner-to-collection-name pipeline:
-
-        1. Compute ``repo_hash`` via
-           :func:`nexus.registry._repo_identity`.
-        2. Look up the owner via :meth:`owner_for_repo`. Raises
-           ``LookupError`` when no owner exists; the indexer's
-           ``_catalog_hook`` flow registers the owner up front, so a
-           missing owner indicates a bypass of the standard write path.
-        3. Resolve the canonical embedding model via
-           :func:`nexus.corpus.canonical_embedding_model`.
-        4. Delegate to :meth:`collection_for`.
-
-        This is the helper that Phase 3 indexer call sites use. The
-        pre-RDR-103 ``_docs_collection_name(repo)`` family that this
-        replaced was removed in Phase 5.
-        """
-        from nexus.registry import _repo_identity  # noqa: PLC0415
-
-        _, repo_hash = _repo_identity(repo)
-        owner = self.owner_for_repo(repo_hash)
-        if owner is None:
-            raise LookupError(
-                f"collection_for_repo: no owner registered for "
-                f"repo_hash {repo_hash!r} (repo {repo!s}). "
-                f"Call register_owner(...) before requesting a "
-                f"collection name; the indexer's _catalog_hook normally "
-                f"registers owners up front."
-            )
-        return self.collection_for(
-            content_type=content_type,
-            owner=owner,
-            embedding_model=canonical_embedding_model(content_type),
-            bump=bump,
-        )
+        """Delegates to ``_DocumentOps.collection_for_repo`` (nexus-mbm)."""
+        return self._docs.collection_for_repo(repo, content_type, bump=bump)
 
     def _update_document_collection_locked(
         self, tumbler: str, new_collection: str,
@@ -2424,35 +2193,8 @@ class Catalog:
             self._release_lock(dir_fd)
 
     def resolve_alias(self, tumbler: Tumbler, *, max_hops: int = 16) -> Tumbler:
-        """Walk the alias chain to its canonical terminus.
-
-        Returns ``tumbler`` itself when no alias is set (the common case
-        and the pre-nexus-s8yz behaviour). Walks at most ``max_hops``
-        links and bails on cycles — a broken chain is treated as
-        terminating at the last-seen tumbler rather than raising, so
-        reads stay available even in a pathological catalog.
-        """
-        seen: set[str] = set()
-        current = str(tumbler)
-        for _ in range(max_hops):
-            if current in seen:
-                _log.warning("catalog.alias_cycle", tumbler=str(tumbler), seen=sorted(seen))
-                break
-            seen.add(current)
-            row = self._db.execute(
-                "SELECT alias_of FROM documents WHERE tumbler = ?",
-                (current,),
-            ).fetchone()
-            if not row:
-                # Dangling alias — return the last valid hop. Callers that
-                # need to detect this can compare to the input tumbler.
-                break
-            target = (row[0] or "").strip()
-            if not target:
-                # Canonical — this is the terminus.
-                return Tumbler.parse(current)
-            current = target
-        return Tumbler.parse(current)
+        """Delegates to ``_DocumentOps.resolve_alias`` (nexus-mbm)."""
+        return self._docs.resolve_alias(tumbler, max_hops=max_hops)
 
     def set_alias(self, tumbler: Tumbler, canonical: Tumbler) -> None:
         """Mark ``tumbler`` as an alias for ``canonical``.
@@ -2523,99 +2265,16 @@ class Catalog:
             self._release_lock(dir_fd)
 
     def resolve_path(self, tumbler: Tumbler) -> Path | None:
-        """Return absolute path for the document's file_path.
-
-        Resolution order:
-        1. Look up entry via self.resolve(tumbler)
-        2. If entry not found: return None
-        3. Find owner: tumbler.owner_address() -> str, look up in JSONL
-        4. If owner not found or owner.owner_type == "curator": return None
-        5. If entry.file_path is already absolute: return Path(entry.file_path)
-        6. If owner.repo_root is non-empty: return Path(owner.repo_root) / entry.file_path
-        7. Fallback: iterate registry to find path matching owner.repo_hash
-        8. If fallback found: return Path(repo_path) / entry.file_path
-        9. Otherwise: return None
-        """
-        import hashlib
-
-        from nexus.registry import RepoRegistry
-
-        entry = self.resolve(tumbler)
-        if not entry:
-            return None
-
-        # Find owner via SQLite (avoids re-reading JSONL on every call)
-        owner_prefix = str(tumbler.owner_address())
-        row = self._db.execute(
-            "SELECT owner_type, repo_root, repo_hash FROM owners WHERE tumbler_prefix = ?",
-            (owner_prefix,),
-        ).fetchone()
-        if not row:
-            return None
-        owner_type, repo_root, repo_hash = row[0], row[1], row[2]
-
-        # Curators (PDFs, standalone docs) are not resolvable
-        if owner_type == "curator":
-            return None
-
-        # If file_path is already absolute, return it directly
-        fp = Path(entry.file_path)
-        if fp.is_absolute():
-            return fp
-
-        # Primary: use repo_root from owner
-        if repo_root:
-            return Path(repo_root) / entry.file_path
-
-        # Fallback: find repo_root from registry by matching repo_hash
-        if repo_hash:
-            registry_path = _default_registry_path()
-            if registry_path.exists():
-                reg = RepoRegistry(registry_path)
-                for path_str in reg.all_info():
-                    path_hash = hashlib.sha256(path_str.encode()).hexdigest()[:8]
-                    if path_hash == repo_hash:
-                        return Path(path_str) / entry.file_path
-
-        return None
+        """Delegates to ``_DocumentOps.resolve_path`` (nexus-mbm)."""
+        return self._docs.resolve_path(tumbler)
 
     def descendants(self, prefix: str) -> list[dict]:
-        """All documents whose tumbler starts with *prefix* (any depth).
-
-        Unlike ``by_owner`` which returns only direct children, this returns
-        the full subtree.  The prefix itself is excluded.
-        """
-        return self._db.descendants(prefix)
+        """Delegates to ``_DocumentOps.descendants`` (nexus-mbm)."""
+        return self._docs.descendants(prefix)
 
     def resolve_chunk(self, tumbler: Tumbler) -> dict | None:
-        """Resolve a 4-segment chunk tumbler to its document + chunk metadata.
-
-        Chunks are implicit addresses — the catalog tracks document-level entries
-        only; chunk sub-addresses are resolved on demand from the document's
-        ``chunk_count``.  Resolution parses the document prefix, verifies the
-        document exists, and checks the chunk index is in range.
-
-        Returns ``{"document_tumbler", "chunk_index", "physical_collection", ...}``
-        or None if the tumbler is not a chunk address or the document/chunk is
-        missing.
-        """
-        if tumbler.chunk is None:
-            return None
-        doc_tumbler = tumbler.document_address()
-        entry = self.resolve(doc_tumbler)
-        if entry is None:
-            return None
-        chunk_idx = tumbler.chunk
-        # chunk_count of 0 or None means count is not yet known — skip bounds check
-        if entry.chunk_count and chunk_idx >= entry.chunk_count:
-            return None
-        return {
-            "document_tumbler": str(doc_tumbler),
-            "chunk_index": chunk_idx,
-            "physical_collection": entry.physical_collection,
-            "title": entry.title,
-            "content_type": entry.content_type,
-        }
+        """Delegates to ``_DocumentOps.resolve_chunk`` (nexus-mbm)."""
+        return self._docs.resolve_chunk(tumbler)
 
     def resolve_span(
         self, span: str, physical_collection: str, t3: "ClientAPI",
@@ -2983,188 +2642,38 @@ class Catalog:
             self._release_lock(dir_fd)
 
     def find(self, query: str, *, content_type: str | None = None) -> list[CatalogEntry]:
-        rows = self._db.search(query, content_type=content_type)
-        return [
-            CatalogEntry(
-                tumbler=Tumbler.parse(r["tumbler"]),
-                title=r["title"],
-                author=r["author"],
-                year=r["year"],
-                content_type=r["content_type"],
-                file_path=r["file_path"],
-                corpus=r["corpus"],
-                physical_collection=r["physical_collection"],
-                chunk_count=r["chunk_count"],
-                head_hash=r["head_hash"] or "",
-                indexed_at=r["indexed_at"] or "",
-                meta=json.loads(r["metadata"]) if r.get("metadata") else {},
-                source_mtime=r["source_mtime"] if "source_mtime" in r.keys() else 0.0,
-            )
-            for r in rows
-        ]
+        """Delegates to ``_DocumentOps.find`` (nexus-mbm)."""
+        return self._docs.find(query, content_type=content_type)
 
     def by_file_path(self, owner: Tumbler, file_path: str) -> CatalogEntry | None:
-        row = self._db.execute(
-            "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
-            f"FROM documents WHERE {self._prefix_sql(str(owner))[0]} AND file_path = ?",
-            (*self._prefix_sql(str(owner))[1], file_path),
-        ).fetchone()
-        if not row:
-            return None
-        return CatalogEntry(
-            tumbler=Tumbler.parse(row[0]),
-            title=row[1],
-            author=row[2],
-            year=row[3],
-            content_type=row[4],
-            file_path=row[5],
-            corpus=row[6],
-            physical_collection=row[7],
-            chunk_count=row[8],
-            head_hash=row[9],
-            indexed_at=row[10],
-            meta=json.loads(row[11]) if row[11] else {},
-            source_mtime=row[12] or 0.0,
-            source_uri=row[13] or "",
-        )
+        """Delegates to ``_DocumentOps.by_file_path`` (nexus-mbm)."""
+        return self._docs.by_file_path(owner, file_path)
 
     def by_owner(self, owner: Tumbler) -> list[CatalogEntry]:
-        rows = self._db.execute(
-            "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
-            f"FROM documents WHERE {self._prefix_sql(str(owner))[0]}",
-            self._prefix_sql(str(owner))[1],
-        ).fetchall()
-        return [
-            CatalogEntry(
-                tumbler=Tumbler.parse(r[0]),
-                title=r[1],
-                author=r[2],
-                year=r[3],
-                content_type=r[4],
-                file_path=r[5],
-                corpus=r[6],
-                physical_collection=r[7],
-                chunk_count=r[8],
-                head_hash=r[9],
-                indexed_at=r[10],
-                meta=json.loads(r[11]) if r[11] else {},
-                source_mtime=r[12] or 0.0,
-                source_uri=r[13] or "",
-            )
-            for r in rows
-        ]
+        """Delegates to ``_DocumentOps.by_owner`` (nexus-mbm)."""
+        return self._docs.by_owner(owner)
 
     def by_content_type(self, content_type: str) -> list[CatalogEntry]:
-        """List all entries with the given content type (code, paper, rdr, knowledge)."""
-        rows = self._db.execute(
-            "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
-            "FROM documents WHERE content_type = ?",
-            (content_type,),
-        ).fetchall()
-        return [
-            CatalogEntry(
-                tumbler=Tumbler.parse(r[0]), title=r[1], author=r[2], year=r[3],
-                content_type=r[4], file_path=r[5], corpus=r[6],
-                physical_collection=r[7], chunk_count=r[8], head_hash=r[9],
-                indexed_at=r[10], meta=json.loads(r[11]) if r[11] else {},
-                source_mtime=r[12] or 0.0,
-                source_uri=r[13] or "",
-            )
-            for r in rows
-        ]
+        """Delegates to ``_DocumentOps.by_content_type`` (nexus-mbm)."""
+        return self._docs.by_content_type(content_type)
 
     def by_corpus(self, corpus: str) -> list[CatalogEntry]:
-        """List all entries with the given corpus tag."""
-        rows = self._db.execute(
-            "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
-            "FROM documents WHERE corpus = ?",
-            (corpus,),
-        ).fetchall()
-        return [
-            CatalogEntry(
-                tumbler=Tumbler.parse(r[0]), title=r[1], author=r[2], year=r[3],
-                content_type=r[4], file_path=r[5], corpus=r[6],
-                physical_collection=r[7], chunk_count=r[8], head_hash=r[9],
-                indexed_at=r[10], meta=json.loads(r[11]) if r[11] else {},
-                source_mtime=r[12] or 0.0,
-                source_uri=r[13] or "",
-            )
-            for r in rows
-        ]
+        """Delegates to ``_DocumentOps.by_corpus`` (nexus-mbm)."""
+        return self._docs.by_corpus(corpus)
 
     def doc_count(self) -> int:
-        """Return the total number of documents in the catalog."""
-        row = self._db.execute("SELECT COUNT(*) FROM documents").fetchone()
-        return row[0] if row else 0
+        """Delegates to ``_DocumentOps.doc_count`` (nexus-mbm)."""
+        return self._docs.doc_count()
 
     def all_documents(
         self, limit: int = 0, *, content_type: str = "",
     ) -> list[CatalogEntry]:
-        """Return all catalog entries. limit=0 means unlimited.
-
-        GH #568: ``content_type`` pushes the filter into the SQL
-        ``WHERE`` clause so pagination works correctly when the
-        requested content_type is small-cardinality. Pre-fix the
-        CLI ``nx catalog list --type rdr`` filtered Python-side
-        AFTER ``LIMIT/OFFSET`` and returned empty whenever the
-        pre-LIMIT slice held no matching rows -- e.g. 15K-entry
-        catalog with only 2 rdr rows: ``--type rdr -n 3`` got 0.
-        Mirrors PR #533's fix for the MCP ``catalog_list`` surface.
-        """
-        sql = (
-            "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
-            "FROM documents"
-        )
-        params: tuple = ()
-        if content_type:
-            sql += " WHERE content_type = ?"
-            params = (content_type,)
-        if limit > 0:
-            sql += f" LIMIT {limit}"
-        rows = self._db.execute(sql, params).fetchall()
-        return [
-            CatalogEntry(
-                tumbler=Tumbler.parse(r[0]), title=r[1], author=r[2], year=r[3],
-                content_type=r[4], file_path=r[5], corpus=r[6],
-                physical_collection=r[7], chunk_count=r[8], head_hash=r[9],
-                indexed_at=r[10], meta=json.loads(r[11]) if r[11] else {},
-                source_mtime=r[12] or 0.0,
-                source_uri=r[13] or "",
-            )
-            for r in rows
-        ]
+        """Delegates to ``_DocumentOps.all_documents`` (nexus-mbm)."""
+        return self._docs.all_documents(limit, content_type=content_type)
 
     def by_doc_id(self, doc_id: str) -> CatalogEntry | None:
-        """Look up catalog entry by T3 doc_id stored in meta.doc_id."""
-        row = self._db.execute(
-            "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
-            "FROM documents WHERE json_extract(metadata, '$.doc_id') = ?",
-            (doc_id,),
-        ).fetchone()
-        if not row:
-            return None
-        return CatalogEntry(
-            tumbler=Tumbler.parse(row[0]),
-            title=row[1],
-            author=row[2],
-            year=row[3],
-            content_type=row[4],
-            file_path=row[5],
-            corpus=row[6],
-            physical_collection=row[7],
-            chunk_count=row[8],
-            head_hash=row[9],
-            indexed_at=row[10],
-            meta=json.loads(row[11]) if row[11] else {},
-            source_mtime=row[12] or 0.0,
-            source_uri=row[13] or "",
-        )
+        """Delegates to ``_DocumentOps.by_doc_id`` (nexus-mbm)."""
+        return self._docs.by_doc_id(doc_id)
 
     # ── Links ──────────────────────────────────────────────────────────────
     # nexus-mbm: implementations live in
