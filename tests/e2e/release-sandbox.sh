@@ -266,7 +266,13 @@ case "$MODE" in
         # under ``uv run`` from REPO_ROOT picks up the editable install
         # so the assertion runs against the same in-tree code the
         # sandbox's nx wheel was built from.
-        if (cd "$REPO_ROOT" && uv run pytest -x -q --no-header \
+        # ``-m integration`` is required: the test module is marked
+        # ``pytestmark = pytest.mark.integration`` and the project
+        # default in pyproject.toml deselects that marker. Without
+        # the flag pytest exits 5 ("no tests collected") and the
+        # shakedown reads it as FAIL even though the regression
+        # guard never ran.
+        if (cd "$REPO_ROOT" && uv run pytest -x -q --no-header -m integration \
                 tests/test_indexer_e2e.py::test_greenfield_index_writes_no_deprecated_keys \
                 2>&1) | tail -5 | sed 's/^/  /'; then
             echo "  [pass] greenfield index produced 0 chunks with deprecated keys"
