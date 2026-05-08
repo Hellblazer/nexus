@@ -544,6 +544,106 @@ class TestT1DatabaseFlagOnPrecedence:
         fake_chromadb.HttpClient.assert_called_once_with(host="10.0.0.1", port=1111)
 
 
+class TestT1DatabaseIsolatedOverridesDiscovery:
+    """nexus-svpq / GH #593: ``NX_T1_ISOLATED=1`` is an explicit operator
+    opt-in and must outrank both env-pair (Path A) and addr-file (Path B)
+    auto-discovery. Pre-fix, Path C only fired when Paths A and B both
+    missed, so an operator setting the flag from inside a Claude session
+    silently wrote into the live MCP-owned T1 instead of a sealed
+    EphemeralClient.
+    """
+
+    def test_isolated_wins_over_env_pair(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+
+        fake_chromadb = MagicMock()
+        fake_chromadb.HttpClient.return_value = MagicMock()
+        fake_chromadb.EphemeralClient.return_value = MagicMock()
+        monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setenv("NX_T1_HOST", "10.0.0.1")
+        monkeypatch.setenv("NX_T1_PORT", "1111")
+        monkeypatch.setenv("NX_T1_ISOLATED", "1")
+        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+
+        from nexus.db.t1 import T1Database
+        T1Database()
+
+        fake_chromadb.EphemeralClient.assert_called_once()
+        fake_chromadb.HttpClient.assert_not_called()
+
+    def test_isolated_wins_over_addr_file(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+
+        fake_chromadb = MagicMock()
+        fake_chromadb.HttpClient.return_value = MagicMock()
+        fake_chromadb.EphemeralClient.return_value = MagicMock()
+        monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        for var in ("NX_T1_HOST", "NX_T1_PORT", "NEXUS_SKIP_T1"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("NX_T1_ISOLATED", "1")
+
+        from nexus.session import write_t1_addr
+        write_t1_addr(44444, "10.0.0.2", 2222)
+
+        with patch("nexus.db.t1.find_immediate_claude_pid", return_value=44444):
+            from nexus.db.t1 import T1Database
+            T1Database()
+
+        fake_chromadb.EphemeralClient.assert_called_once()
+        fake_chromadb.HttpClient.assert_not_called()
+
+    def test_isolated_wins_over_env_pair_and_addr_file(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+
+        fake_chromadb = MagicMock()
+        fake_chromadb.HttpClient.return_value = MagicMock()
+        fake_chromadb.EphemeralClient.return_value = MagicMock()
+        monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setenv("NX_T1_HOST", "10.0.0.1")
+        monkeypatch.setenv("NX_T1_PORT", "1111")
+        monkeypatch.setenv("NX_T1_ISOLATED", "1")
+        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+
+        from nexus.session import write_t1_addr
+        write_t1_addr(55555, "10.0.0.3", 3333)
+
+        with patch("nexus.db.t1.find_immediate_claude_pid", return_value=55555):
+            from nexus.db.t1 import T1Database
+            T1Database()
+
+        fake_chromadb.EphemeralClient.assert_called_once()
+        fake_chromadb.HttpClient.assert_not_called()
+
+    def test_legacy_skip_t1_alias_still_overrides_discovery(self, tmp_path, monkeypatch):
+        """``NEXUS_SKIP_T1=1`` is honoured as a deprecated alias for the
+        4.27 -> 4.28 cycle (per CLAUDE.md / RDR-105). The override must
+        apply through the alias path too."""
+        from unittest.mock import MagicMock
+
+        fake_chromadb = MagicMock()
+        fake_chromadb.HttpClient.return_value = MagicMock()
+        fake_chromadb.EphemeralClient.return_value = MagicMock()
+        monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setenv("NX_T1_HOST", "10.0.0.1")
+        monkeypatch.setenv("NX_T1_PORT", "1111")
+        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
+        monkeypatch.setenv("NEXUS_SKIP_T1", "1")
+
+        from nexus.db.t1 import T1Database
+        T1Database()
+
+        fake_chromadb.EphemeralClient.assert_called_once()
+        fake_chromadb.HttpClient.assert_not_called()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # session_id resolution chain (nexus-h8ge regression)
 # ─────────────────────────────────────────────────────────────────────────────
