@@ -267,7 +267,7 @@ class TestNegateIso:
     """
 
     def test_newer_sorts_first(self):
-        from nexus.catalog.catalog import _negate_iso
+        from nexus.catalog.catalog_spans import negate_iso as _negate_iso
 
         old = "2025-01-15T10:00:00+00:00"
         new = "2026-04-18T10:00:00+00:00"
@@ -276,7 +276,7 @@ class TestNegateIso:
         assert pair[1] == old
 
     def test_preserves_separator_positions(self):
-        from nexus.catalog.catalog import _negate_iso
+        from nexus.catalog.catalog_spans import negate_iso as _negate_iso
 
         out = _negate_iso("2026-04-18T10:00:00+00:00")
         # Non-digits pass through unchanged.

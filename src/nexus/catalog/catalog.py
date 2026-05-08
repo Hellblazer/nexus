@@ -324,159 +324,14 @@ def make_relative(abs_path: str | Path, repo_root: Path) -> str:
         return str(abs_path)
 
 
-# ── resolve_chash fallback helpers (RDR-086 Phase 2) ──────────────────────────
-
-# Fallback parallelism matches ChromaDB Cloud MAX_CONCURRENT_READS=10.
-_CHASH_FALLBACK_CONCURRENCY = 10
-# 30-second wall-clock deadline for the full T3 scan fallback.
-_CHASH_FALLBACK_DEADLINE_S = 30.0
-# Process-scoped flag: emit the "fallback entered" warning exactly once so
-# a repeatedly-missing chash does not flood the log.
-_chash_fallback_warned = False
-
-
-def _negate_iso(ts: str) -> str:
-    """Build a sort key that sorts newer ISO timestamps first.
-
-    ISO-8601 strings sort lexicographically from oldest to newest, so we
-    need a key that inverts the comparison. Mapping each digit through
-    9 - d flips the natural order — ``'2026'`` becomes ``'7973'`` and
-    newer dates sort first. Non-digits fall through unchanged so the
-    ``-``, ``:``, ``T``, and ``+`` separators keep their relative
-    positions in the string.
-
-    Correctness scope (review #5): the algorithm assumes every input
-    shares the same separator/timezone skeleton. ``created_at`` is
-    always written by ``ChashIndex.upsert`` via
-    ``datetime.now(UTC).isoformat()``, which emits
-    ``YYYY-MM-DDTHH:MM:SS.ffffff+00:00`` with a fixed
-    4-digit year and a ``+00:00`` suffix — so the key is well-defined
-    across any two values this catalog compares. Inputs with a
-    different suffix (``Z``, negative offsets, unicode minus) would
-    still sort deterministically but the "newest first" guarantee
-    only holds for values sharing the canonical shape. Fails
-    gracefully for year >= 10000 (column shift) — out of scope for
-    this decade.
-    """
-    return "".join(
-        str(9 - int(c)) if c.isdigit() else c for c in ts
-    )
-
-
-def _fallback_chash_scan(
-    *,
-    hex_chash: str,
-    span: str,
-    t3,
-    build_ref,
-) -> dict | None:
-    """Parallel scan across all T3 collections for a missing chash.
-
-    Invoked when the T2 ``chash_index`` returns no live row. Runs
-    ``resolve_span`` against every collection in batches of
-    ``_CHASH_FALLBACK_CONCURRENCY``; the first hit wins. The full scan
-    is bounded by a 30-second deadline. Logs a single warning per
-    process to surface the missing-index signal to operators.
-    """
-    global _chash_fallback_warned
-    import time
-    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-
-    try:
-        all_cols = [c.name for c in t3.list_collections()]
-    except Exception:
-        _log.debug("chash_fallback_list_collections_failed", exc_info=True)
-        return None
-
-    if not _chash_fallback_warned:
-        _log.warning(
-            "resolve_chash_fallback_scanning",
-            chash_prefix=hex_chash[:16],
-            collection_count=len(all_cols),
-            guidance="run 'nx collection backfill-hash --all' to populate T2",
-        )
-        _chash_fallback_warned = True
-
-    # resolve_span is a pure lookup on (t3, collection, hex_chash) —
-    # instance state is irrelevant, so we call it unbound via the class.
-    def _probe(coll: str) -> dict | None:
-        try:
-            return Catalog.resolve_span(None, span, coll, t3)  # type: ignore[arg-type]
-        except Exception:
-            return None
-
-    deadline = time.monotonic() + _CHASH_FALLBACK_DEADLINE_S
-    idx = 0
-    # Manual lifecycle so early return can call shutdown(cancel_futures=True)
-    # instead of blocking on in-flight futures during __exit__ (review #2).
-    ex = ThreadPoolExecutor(max_workers=_CHASH_FALLBACK_CONCURRENCY)
-    try:
-        in_flight: dict = {}
-        while idx < len(all_cols) or in_flight:
-            # Fill up to concurrency window.
-            while (
-                len(in_flight) < _CHASH_FALLBACK_CONCURRENCY
-                and idx < len(all_cols)
-            ):
-                col = all_cols[idx]
-                in_flight[ex.submit(_probe, col)] = col
-                idx += 1
-
-            if not in_flight:
-                break
-
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                _log.warning(
-                    "resolve_chash_fallback_timeout",
-                    chash_prefix=hex_chash[:16],
-                    deadline_s=_CHASH_FALLBACK_DEADLINE_S,
-                )
-                return None
-
-            done, _ = wait(
-                list(in_flight.keys()),
-                timeout=remaining,
-                return_when=FIRST_COMPLETED,
-            )
-            if not done:
-                _log.warning(
-                    "resolve_chash_fallback_timeout",
-                    chash_prefix=hex_chash[:16],
-                    deadline_s=_CHASH_FALLBACK_DEADLINE_S,
-                )
-                return None
-
-            for fut in done:
-                coll = in_flight.pop(fut)
-                span_res = fut.result()
-                if span_res is None:
-                    continue
-                # Recover doc_id from the hit collection — for fallback we
-                # have no T2 row, so query the collection directly.
-                try:
-                    col = t3.get_collection(coll)
-                    hit = col.get(
-                        where={"chunk_text_hash": hex_chash},
-                        include=[],
-                    )
-                    doc_id = hit["ids"][0] if hit["ids"] else ""
-                except Exception:
-                    doc_id = ""
-                return build_ref(coll=coll, doc_id=doc_id, span_result=span_res)
-
-        return None
-    finally:
-        # cancel_futures=True (3.9+) drops queued futures; wait=False stops
-        # shutdown from joining in-flight probes. The pool itself dies with
-        # the last reference so we don't leak threads after a hit or timeout.
-        ex.shutdown(wait=False, cancel_futures=True)
-
-
-def reset_chash_fallback_warning_for_tests() -> None:
-    """Test hook — clear the once-per-process fallback warning flag."""
-    global _chash_fallback_warned
-    _chash_fallback_warned = False
+# nexus-mbm: span resolution + RDR-086 Phase 2 chash-fallback
+# machinery moved to :mod:`nexus.catalog.catalog_spans`. The
+# Catalog methods further down delegate to that module; this
+# re-export keeps the test hook addressable at its historical
+# import path.
+from nexus.catalog.catalog_spans import (  # noqa: E402
+    reset_chash_fallback_warning_for_tests,
+)
 
 
 # Set of URI schemes the catalog will accept verbatim. Each scheme
@@ -2755,42 +2610,16 @@ class Catalog:
             "content_type": entry.content_type,
         }
 
-    def resolve_span(self, span: str, physical_collection: str, t3: "ClientAPI") -> dict | None:
-        """Resolve a span string to its chunk content.
+    def resolve_span(
+        self, span: str, physical_collection: str, t3: "ClientAPI",
+    ) -> dict | None:
+        """Resolve a ``chash:`` span to chunk content + metadata in T3.
 
-        Handles three span formats:
-        - chash:<sha256hex>: whole chunk by content hash.
-        - chash:<sha256hex>:<start>-<end>: character range within a content-addressed chunk.
-        - Legacy positional (digit ranges): returns None.
+        Thin delegate to :func:`nexus.catalog.catalog_spans.resolve_span_in_t3`
+        (nexus-mbm). See that function for the full contract.
         """
-        if not span.startswith("chash:"):
-            return None
-        # Parse: chash:<hash> or chash:<hash>:<start>-<end>
-        body = span[len("chash:"):]
-        char_range = None
-        m = re.match(r"^([0-9a-f]{64}):(\d+)-(\d+)$", body)
-        if m:
-            chunk_hash = m.group(1)
-            char_range = (int(m.group(2)), int(m.group(3)))
-        elif re.fullmatch(r"[0-9a-f]{64}", body):
-            chunk_hash = body
-        else:
-            raise ValueError(f"malformed chash span: {span!r}")
-        col = t3.get_collection(physical_collection)
-        result = col.get(where={"chunk_text_hash": chunk_hash}, include=["documents", "metadatas"])
-        if not result["ids"]:
-            return None
-        text = result["documents"][0]
-        if char_range:
-            text = text[char_range[0]:char_range[1]]
-        out: dict = {
-            "chunk_text": text,
-            "metadata": result["metadatas"][0],
-            "chunk_hash": chunk_hash,
-        }
-        if char_range:
-            out["char_range"] = char_range
-        return out
+        from nexus.catalog import catalog_spans
+        return catalog_spans.resolve_span_in_t3(span, physical_collection, t3)
 
     def resolve_chash(
         self,
@@ -2802,124 +2631,13 @@ class Catalog:
     ) -> "dict | None":
         """Globally resolve a chash to the chunk it names (RDR-086 Phase 2).
 
-        Unlike ``resolve_span``, the caller does not need to know which
-        collection holds the chunk: the T2 ``chash_index`` populated by
-        Phase 1 dual-write answers that question in one SQL lookup.
-
-        Resolution order:
-          1. T2 lookup via ``chash_index.lookup(chash)``.
-          2. Drop rows whose ``physical_collection`` no longer exists in T3
-             (self-healing: the stale row is deleted on access).
-          3. Tie-break the survivors — ``prefer_collection`` first, then
-             newest ``created_at``, then deterministic name sort.
-          4. Delegate to ``resolve_span`` for chunk text + metadata on
-             the winner. On any per-candidate failure fall through.
-          5. If T2 was empty or exhausted, fall back to a parallel T3 scan
-             across all collections (10× concurrency, 30 s deadline).
-             Missing from index is a performance hit, not a correctness
-             one — ``nx collection backfill-hash --all`` reconciles.
-
-        Accepts three input forms (same as ``resolve_span``):
-          * bare ``<sha256hex>``
-          * ``chash:<sha256hex>``
-          * ``chash:<sha256hex>:<start>-<end>``
+        Thin delegate to
+        :func:`nexus.catalog.catalog_spans.resolve_chash_globally`
+        (nexus-mbm). See that function for the full contract.
         """
-        # ── Parse input ─────────────────────────────────────────────────
-        body = chash[len("chash:"):] if chash.startswith("chash:") else chash
-        char_range: tuple[int, int] | None = None
-        m = re.match(r"^([0-9a-f]{64}):(\d+)-(\d+)$", body)
-        if m:
-            hex_chash = m.group(1)
-            char_range = (int(m.group(2)), int(m.group(3)))
-        elif re.fullmatch(r"[0-9a-f]{64}", body):
-            hex_chash = body
-        else:
-            raise ValueError(f"malformed chash: {chash!r}")
-
-        # Reconstruct the span form that ``resolve_span`` expects.
-        span = f"chash:{hex_chash}"
-        if char_range:
-            span = f"{span}:{char_range[0]}-{char_range[1]}"
-
-        def _build_ref(
-            *,
-            coll: str,
-            doc_id: str,
-            span_result: dict,
-        ) -> dict:
-            ref = {
-                "chash": hex_chash,
-                "chunk_hash": hex_chash,
-                "physical_collection": coll,
-                "doc_id": doc_id,
-                "chunk_text": span_result["chunk_text"],
-                "metadata": span_result["metadata"],
-            }
-            if "char_range" in span_result:
-                ref["char_range"] = span_result["char_range"]
-            return ref
-
-        # ── T2 path ─────────────────────────────────────────────────────
-        rows = chash_index.lookup(hex_chash)
-        if rows:
-            # Self-healing: filter rows whose collection no longer exists in T3.
-            try:
-                live = {c.name for c in t3.list_collections()}
-            except Exception:
-                live = set()
-            survivors: list[dict] = []
-            for row in rows:
-                if row["collection"] in live:
-                    survivors.append(row)
-                else:
-                    # Go through the locked public API — this must not
-                    # race a concurrent upsert / delete_collection on the
-                    # same store. Direct conn.execute() would bypass
-                    # ChashIndex._lock (review #1).
-                    try:
-                        chash_index.delete_stale(
-                            chash=hex_chash, collection=row["collection"],
-                        )
-                    except Exception:
-                        _log.debug(
-                            "chash_index_selfheal_delete_failed",
-                            chash_prefix=hex_chash[:16],
-                            collection=row["collection"],
-                            exc_info=True,
-                        )
-
-            # Tie-break: prefer_collection → newest created_at → name sort.
-            def _sort_key(r: dict) -> tuple:
-                preferred = 0 if r["collection"] == prefer_collection else 1
-                # Reverse created_at so newest sorts first.
-                return (preferred, _negate_iso(r["created_at"]), r["collection"])
-
-            for row in sorted(survivors, key=_sort_key):
-                try:
-                    span_res = self.resolve_span(span, row["collection"], t3)
-                except Exception:
-                    span_res = None
-                if span_res is None:
-                    continue
-                # ``row["chunk_chroma_id"]`` carries the Chroma-natural-ID
-                # value the column has always held (renamed from ``doc_id``
-                # per RDR-101 Phase 0 nexus-o6aa.3 to disambiguate from
-                # ``Document.doc_id``). The public ``ChunkRef`` keeps the
-                # ``doc_id`` key in its returned dict for back-compat;
-                # Phase 3 will introduce a parallel ``chunk_chroma_id``
-                # key on the public surface.
-                return _build_ref(
-                    coll=row["collection"],
-                    doc_id=row["chunk_chroma_id"],
-                    span_result=span_res,
-                )
-
-        # ── T3 fallback ─────────────────────────────────────────────────
-        return _fallback_chash_scan(
-            hex_chash=hex_chash,
-            span=span,
-            t3=t3,
-            build_ref=_build_ref,
+        from nexus.catalog import catalog_spans
+        return catalog_spans.resolve_chash_globally(
+            chash, t3, chash_index, prefer_collection=prefer_collection,
         )
 
     def update(self, tumbler: Tumbler, **fields: object) -> None:
@@ -3992,74 +3710,18 @@ class Catalog:
     def resolve_span_text(self, tumbler: Tumbler, span: str) -> str | None:
         """Resolve a span to actual text content. Returns None if unavailable.
 
-        Span formats:
-        - "" → returns None (whole document, no sub-addressing)
-        - "42-57" → lines 42-57 from the document's source file
-        - "3:100-250" → characters 100-250 from chunk index 3 in T3
-        - "chash:<sha256hex>" → content-addressed chunk from T3
-
-        This is the minimal transclusion read path — given a link with a span,
-        retrieve the exact passage being referenced.
+        Resolves the tumbler to a :class:`CatalogEntry` then delegates
+        the span dispatch to
+        :func:`nexus.catalog.catalog_spans.resolve_span_text_for_entry`
+        (nexus-mbm). See that function for the supported span formats.
         """
         if not span:
             return None
         entry = self.resolve(tumbler)
         if entry is None:
             return None
-
-        # Content-hash span: look up by chunk_text_hash in T3
-        if span.startswith("chash:") and entry.physical_collection:
-            try:
-                from nexus.db import make_t3
-                t3 = make_t3()
-                result = self.resolve_span(span, entry.physical_collection, t3._client)
-                return result["chunk_text"] if result else None
-            except Exception:
-                _log.warning("resolve_span_text_failed", span=span,
-                             collection=entry.physical_collection, exc_info=True)
-                return None
-
-        # Line-range span: read from source file
-        m = re.match(r"^(\d+)-(\d+)$", span)
-        if m and entry.file_path:
-            start, end = int(m.group(1)), int(m.group(2))
-            try:
-                lines = Path(entry.file_path).read_text(encoding="utf-8").splitlines()
-                return "\n".join(lines[start - 1:end])
-            except Exception:
-                return None
-
-        # Chunk:char span: read from T3
-        m = re.match(r"^(\d+):(\d+)-(\d+)$", span)
-        if m and entry.physical_collection:
-            chunk_idx, char_start, char_end = int(m.group(1)), int(m.group(2)), int(m.group(3))
-            try:
-                from nexus.db import make_t3
-                t3 = make_t3()
-                col = t3.get_or_create_collection(entry.physical_collection)
-                # nexus-dcym: chunk identity is the catalog ``doc_id``,
-                # not the legacy ``source_path``. ``doc_id`` is stored
-                # by the projector under ``meta.doc_id``; older entries
-                # predate that and fall back to ``str(entry.tumbler)``
-                # (Phase 1's stand-in for ``doc_id``).
-                doc_id = entry.meta.get("doc_id") or str(entry.tumbler)
-                where_filter: dict = {
-                    "chunk_index": chunk_idx,
-                    "doc_id": doc_id,
-                }
-                result = col.get(
-                    where={"$and": [{k: v} for k, v in where_filter.items()]},
-                    include=["documents"],
-                    limit=1,
-                )
-                docs = result.get("documents", [])
-                if docs:
-                    text = docs[0]
-                    return text[char_start:char_end]
-            except Exception:
-                return None
-
-        return None
+        from nexus.catalog import catalog_spans
+        return catalog_spans.resolve_span_text_for_entry(entry, span)
 
     def link_audit(self, *, t3: "ClientAPI | None" = None) -> dict:
         """Audit the links table. Returns stats + orphan + duplicate + chash lists.
