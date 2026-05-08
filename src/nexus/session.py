@@ -283,6 +283,208 @@ def sweep_orphan_tmpdirs(
     return reaped
 
 
+def _parse_etime_seconds(etime: str) -> float | None:
+    """Parse a ``ps -o etime`` value into seconds.
+
+    Accepts the four shapes ``ps`` emits:
+
+    * ``MM:SS``
+    * ``HH:MM:SS``
+    * ``DD-HH:MM:SS``
+    * Trailing whitespace tolerated.
+
+    Returns ``None`` on parse failure so the caller can decide a
+    safe default (typically: skip the row).
+    """
+    s = etime.strip()
+    if not s:
+        return None
+    days = 0
+    if "-" in s:
+        d, _, rest = s.partition("-")
+        try:
+            days = int(d)
+        except ValueError:
+            return None
+        s = rest
+    parts = s.split(":")
+    try:
+        nums = [int(p) for p in parts]
+    except ValueError:
+        return None
+    if len(nums) == 2:
+        h, m, sec = 0, nums[0], nums[1]
+    elif len(nums) == 3:
+        h, m, sec = nums
+    else:
+        return None
+    return float(days * 86400 + h * 3600 + m * 60 + sec)
+
+
+def _parse_orphan_tracker_candidates(
+    ps_output: str,
+    *,
+    min_age_seconds: float = 60.0,
+    protected_pids: set[int] | None = None,
+) -> list[int]:
+    """Parse the output of ``ps -eo pid,ppid,etime,command`` and
+    return the PIDs of orphan multiprocessing trackers safe to reap.
+
+    Conservative match — a row is included iff every condition holds:
+
+    * ``ppid == 1`` (re-parented to init; the original parent is dead).
+    * ``command`` contains ``"multiprocessing"`` (matches both
+      ``multiprocessing.resource_tracker`` and
+      ``multiprocessing.spawn ... --multiprocessing-fork``).
+    * Process age >= *min_age_seconds* (avoids racing in-flight
+      MCP-startup workers whose parent has not yet attached).
+    * ``pid not in protected_pids`` (escape hatch for tests / live
+      MCP-managed PIDs the caller wants to spare).
+
+    Returns the list in the order ``ps`` emitted (effectively PID
+    order). Pure function for unit testing; callers handle SIGTERM.
+    """
+    protected = protected_pids or set()
+    out: list[int] = []
+    for line in ps_output.splitlines():
+        s = line.strip()
+        if not s or not s[0].isdigit():
+            continue  # header row or blank
+        # Tokenize: pid, ppid, etime, command-tail
+        parts = s.split(None, 3)
+        if len(parts) < 4:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+        except ValueError:
+            continue
+        if ppid != 1:
+            continue
+        if pid in protected:
+            continue
+        if "multiprocessing" not in parts[3]:
+            continue
+        age = _parse_etime_seconds(parts[2])
+        if age is None or age < min_age_seconds:
+            continue
+        out.append(pid)
+    return out
+
+
+def sweep_orphan_resource_trackers(
+    *,
+    min_age_seconds: float = 60.0,
+    command_substring: str = "multiprocessing",
+    protected_pids: set[int] | None = None,
+) -> int:
+    """Reap multiprocessing.resource_tracker / spawn workers re-parented to init.
+
+    Each ungraceful MCP shutdown (SIGKILL/OOM, lost SessionEnd hook)
+    leaves chroma's multiprocessing workers' resource_tracker
+    subprocesses re-parented to init (PPID=1). The trackers continue
+    holding their POSIX named semaphores until killed; the namespace
+    is bounded (``kern.posix.sem.max=10000`` on macOS) so chronic
+    accumulation produces ``Errno 28`` system-wide.
+
+    :func:`stop_t1_server`'s ``safe_killpg`` only signals the CURRENT
+    chroma's process group; orphan workers from prior sessions live
+    in different (now-empty) process groups and cannot be reached.
+    :func:`sweep_orphan_tmpdirs` reaps the directories but leaves the
+    processes that hold the kernel resources.
+
+    This sweep complements them and runs at MCP top-level startup.
+    Sends SIGTERM (graceful), then SIGKILL after 3 s for any tracker
+    that did not exit. Returns the count signalled.
+
+    *command_substring* is a defence-in-depth filter the caller can
+    narrow (e.g. tests pass a unique marker so the sweep cannot
+    touch unrelated trackers on the dev machine).
+
+    Live shakeout 2026-05-08: 3,314 trackers / 8,359 semaphores
+    cleared in single SIGTERM batch on a system that had been
+    accumulating for 11+ days. Bead nexus-9h1s.
+    """
+    try:
+        ps_output = subprocess.check_output(
+            ["ps", "-eo", "pid,ppid,etime,command"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError) as exc:
+        _log.debug("sweep_orphan_trackers_ps_failed", error=str(exc))
+        return 0
+
+    candidates = _parse_orphan_tracker_candidates(
+        ps_output,
+        min_age_seconds=min_age_seconds,
+        protected_pids=protected_pids,
+    )
+    # Apply the caller-supplied substring filter on top of the
+    # parser's hard-coded "multiprocessing" gate so tests can scope
+    # the sweep to a marker they injected.
+    if command_substring != "multiprocessing":
+        narrowed: list[int] = []
+        for pid in candidates:
+            try:
+                cmd = subprocess.check_output(
+                    ["ps", "-o", "command=", "-p", str(pid)],
+                    text=True,
+                    stderr=subprocess.DEVNULL,
+                ).strip()
+            except (subprocess.CalledProcessError, OSError):
+                continue
+            if command_substring in cmd:
+                narrowed.append(pid)
+        candidates = narrowed
+
+    if not candidates:
+        return 0
+
+    signalled = _kill_orphan_tracker_pids(candidates)
+    _log.info(
+        "sweep_orphan_trackers_reaped",
+        count=signalled,
+        candidates=len(candidates),
+    )
+    return signalled
+
+
+def _kill_orphan_tracker_pids(
+    pids: list[int],
+    *,
+    grace_seconds: float = 3.0,
+) -> int:
+    """SIGTERM each PID in *pids*; escalate to SIGKILL after
+    *grace_seconds* for any survivor. Returns the count of PIDs we
+    successfully signalled (SIGTERM-step). Best-effort: missing
+    PIDs and EPERM are skipped silently. Pure side effects + return
+    count; testable independently of the parser."""
+    signalled = 0
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            signalled += 1
+        except ProcessLookupError:
+            continue
+        except PermissionError as exc:
+            _log.debug("sweep_orphan_tracker_eperm", pid=pid, error=str(exc))
+            continue
+
+    deadline = time.time() + grace_seconds
+    while time.time() < deadline:
+        if not any(_is_pid_alive(pid) for pid in pids):
+            break
+        time.sleep(0.1)
+    for pid in pids:
+        if _is_pid_alive(pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                continue
+    return signalled
+
+
 def _find_chroma() -> str | None:
     """Return the path to the chroma CLI co-installed with this interpreter.
 
