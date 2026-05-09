@@ -1,5 +1,5 @@
 ---
-title: "Graph Identity Normalization: Content-Hash Chunk IDs and Cascade-Free Schema"
+title: "Graph Identity Normalization: Catalog Holds the Tree, T3 is a Content-Addressed Blob Store"
 id: RDR-108
 type: Architecture
 status: draft
@@ -7,6 +7,7 @@ priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-08
+revised: 2026-05-08
 related_issues: [nexus-jc63, nexus-b5mh, nexus-je0b, nexus-mmf5, nexus-17wf]
 related_rdrs: [RDR-053, RDR-101, RDR-103, RDR-106, RDR-107]
 supersedes: [RDR-107]
@@ -448,6 +449,78 @@ takes a `chunk_chroma_id` parameter and inserts into the
 list updated. Trivial change: grep `chash_index.upsert` to
 find them.
 
+### RF-8: ChromaDB "documents" ≠ catalog Documents — naming clash was masking the right architectural split (gate-revision 2026-05-08)
+
+The Layer 3 substantive critique (gate run 2026-05-08) uncovered
+that the original D1 (raw `chunk_text_hash[:32]` as natural ID)
+caused silent data loss for identical-text chunks within the
+same collection — RDR-101 had explicitly rejected this. The fix
+candidates proposed during gate review (`sha256(doc_id:chash)`,
+`sha256(chash:chunk_index)`, etc.) all carried tradeoffs; none
+were structurally clean.
+
+User-Hal (2026-05-08, post-gate) reframed the problem:
+
+> Docs are a graph concept and live in the catalog. T3 has
+> collections, not documents. What ChromaDB means by "document"
+> is our chunks. A doc collection is a collection of chunks in
+> a DB.
+
+This unmasked the actual architectural split that the original
+RDR-108 draft was fighting:
+
+| Layer | What "document" means there |
+|---|---|
+| **Catalog** (graph layer) | Nexus's domain document — a tumbler-keyed entity. Graph node. |
+| **ChromaDB** (T3) | Per `col.add(documents=...)`: just the text of one chunk. ChromaDB has zero awareness of multi-chunk structure. A T3 collection is a flat bag of these. |
+
+Once the responsibility split is clear:
+
+- **T3 = content-addressed blob store**. Flat. Records keyed by
+  `chunk_text_hash[:32]`. ChromaDB doesn't model relationships,
+  ordering, or composition, and shouldn't.
+- **Catalog = graph + tree layer**. Documents are graph nodes.
+  Their structure (which chunks they contain, in what order)
+  lives in an explicit manifest field on `Document`, not as
+  per-chunk metadata in T3.
+
+This matches the git/IPFS model directly:
+
+| git/IPFS | Nexus under RDR-108 (this revision) |
+|---|---|
+| Blob (content-addressed object) | T3 chunk record, natural ID = `chunk_text_hash[:32]` |
+| Tree (manifest of blobs) | `Document.chunks` = ordered list of chash references |
+| Commit (history pointer) | `Document.head_hash` (already present) |
+
+**Implication**: D1 stays as `chunk_text_hash[:32]` (Xanadu-pure),
+because the within-doc collision concern from the original gate
+review evaporates: identical chunks in the same doc share ONE
+T3 record by design (content addressing), and the manifest
+records each occurrence's position. The "second occurrence
+silently lost" critique no longer applies — both occurrences
+appear as separate manifest entries pointing at the same
+content.
+
+**Net effect on the RDR**:
+
+- Original D1 (raw chash[:32]) is restored, justified by the
+  manifest layer.
+- New D2 added: catalog gains `Document.chunks` manifest.
+- Original D2 (document_aspects PK migration) renumbers to D3,
+  expanded to also cover `aspect_extraction_queue` per the
+  Layer 3 critique's C3 finding.
+- Original D4 (chash_index simplification) renumbers to D5 and
+  becomes more thorough: with chash[:32] as the universal
+  natural ID, the `chunk_chroma_id` column has no remaining
+  readers (collection_audit, mcp/core, commands/store, prose_indexer
+  all simplify or drop their references). The Layer 3 C1
+  finding (27 chunk_chroma_id sites) now has dispositions:
+  most disappear, the rest reduce to `hex_chash[:32]`.
+- Chunk metadata schema simplifies: `doc_id`, `chunk_index`,
+  `chunk_count` move OUT of T3 chunk metadata into the catalog
+  manifest. T3 chunks carry only filter-relevant fields
+  (content_type, section_type, embedding_model, etc.).
+
 ### Open follow-ups (not blocking)
 
 - **`taxonomy__centroids` natural-ID strategy**: separate RDR
@@ -469,24 +542,27 @@ find them.
 
 ## Proposed Solution
 
-Four locked decisions per Hal direction (2026-05-08):
+Five locked decisions per Hal direction (2026-05-08, post-gate
+revision after RF-8 reframing):
 
-### D1: Chunk Chroma natural ID = `chunk_text_hash`-derived
+### D1: T3 chunk Chroma natural ID = `chunk_text_hash[:32]` (pure content addressing)
 
-`chunk_chroma_id` becomes content-derived, not position-derived.
+`chunk_chroma_id` becomes a pure function of chunk content:
 
 ```python
-# Current (code_indexer.py:380)
+# Current (code_indexer.py:380, prose_indexer.py:101, mcp/core.py:973, ...)
 chunk_chroma_id = sha256(f"{corpus}:{title}:chunk{i}").hexdigest()[:32]
 
-# Proposed (per RF-3: per-collection scope eliminates collision risk)
+# Proposed
 chunk_chroma_id = chunk_text_hash[:32]
 ```
 
-RF-3 confirmed ChromaDB natural IDs are per-collection
-scoped, so raw `chunk_text_hash[:32]` is safe; the same hash
-in two different collections is two independent records, not a
-conflict.
+RF-3 confirmed ChromaDB natural IDs are per-collection scoped,
+so raw `chunk_text_hash[:32]` is safe across collections. The
+within-doc collision concern that surfaced during the Layer 3
+gate review is structurally resolved by D2 (manifest layer):
+identical text in the same doc shares ONE T3 record by design;
+the manifest records each occurrence's position.
 
 Consequences:
 - `upsert` is truly idempotent. Same chunk text → same Chroma
@@ -497,45 +573,147 @@ Consequences:
   path.
 - RDR-053 design intent is fully realized: span identity =
   routing identity.
+- Identical chunks across the corpus are deduplicated at the
+  storage layer. Two files containing the same boilerplate
+  contribute ONE T3 record; the manifest layer (D2) records
+  the references.
 
-### D2: `document_aspects` PK migration to `(doc_id)`
+### D2: Catalog `Document.chunks` manifest (the tree layer) — NEW
 
-Schema change:
+The catalog gains an explicit per-document chunk manifest. T3
+remains a flat content-addressed blob store; the catalog is
+the authoritative source for "which chunks compose this doc and
+in what order."
+
+Schema addition (catalog SQLite, `documents` table):
 
 ```sql
--- Current
-PRIMARY KEY (collection, source_path)
+-- Either as a column on documents:
+ALTER TABLE documents ADD COLUMN chunks JSON NOT NULL DEFAULT '[]';
 
--- Proposed
-PRIMARY KEY (doc_id)
-collection TEXT REFERENCES collections(name)  -- denorm cache for read filters
-source_path TEXT  -- denorm cache for display
+-- Or as a separate table for normalized many-to-one:
+CREATE TABLE document_chunks (
+    doc_id     TEXT NOT NULL REFERENCES documents(tumbler),
+    position   INTEGER NOT NULL,
+    chash      TEXT NOT NULL,
+    chunk_index INTEGER,        -- chunker-assigned ordinal at index time (informational)
+    line_start  INTEGER,        -- optional, for code chunks
+    line_end    INTEGER,        -- optional, for code chunks
+    char_start  INTEGER,        -- optional, byte offset
+    char_end    INTEGER,        -- optional, byte offset
+    PRIMARY KEY (doc_id, position)
+);
+CREATE INDEX idx_document_chunks_chash ON document_chunks(chash);
 ```
 
-`doc_id` is the catalog tumbler (UUID7 per RDR-101). Cascade on
-collection rename / document delete becomes a one-row update,
-not a JOIN-and-update.
+The separate-table form is preferred (better for queries,
+avoids JSON parsing on every read, supports cross-doc chash
+lookup via the index). Decision deferred to implementation.
+
+Manifest semantics:
+- `position` = 0-indexed ordinal within the doc (replaces
+  `chunk_index` on T3 chunk metadata).
+- `chash` = full 64-char SHA-256 of chunk text (the chunk's
+  identity in T3 is `chash[:32]`).
+- Same `chash` may appear at multiple `(doc_id, position)`
+  rows when a chunk's text recurs in the doc — manifest
+  preserves position; T3 stores content once.
+- Same `chash` may appear in multiple docs — same chash,
+  different doc_id rows. Cross-doc dedup at the storage layer.
+
+Doc reconstruction (replaces `where={"doc_id": tumbler}` +
+metadata sort):
+
+```python
+manifest = catalog.get_chunks(doc_id)  # ordered list[(position, chash)]
+chashes = [m.chash[:32] for m in manifest]
+chunks = col.get(ids=chashes, include=["documents", "metadatas"])
+# preserve manifest order (col.get may reorder by ID)
+ordered = {c.id: c for c in chunks}
+return [ordered[chash[:32]] for chash in chashes]
+```
+
+T3 chunk metadata simplifies (removes per-chunk doc identity):
+
+| Field | Pre-RDR-108 | Post-RDR-108 |
+|---|---|---|
+| `chunk_text_hash` | present | present (authoritative; the natural ID is `[:32]` of this) |
+| `content_hash` | present | present (file-level, useful for stale-source detection) |
+| `content_type` | present | present (filter-relevant) |
+| `section_type` | present | present (filter-relevant) |
+| `programming_language` | present | present (filter-relevant) |
+| `embedding_model` | present | present (filter-relevant) |
+| `indexed_at` | present | present (operational) |
+| `doc_id` | present | **REMOVED** (now in catalog manifest) |
+| `chunk_index` | present | **REMOVED** (now `position` in manifest) |
+| `chunk_count` | present | **REMOVED** (catalog manifest length) |
+| `source_path` | sometimes | already removed in RDR-101 Phase 5c |
+
+### D3: `document_aspects` + `aspect_extraction_queue` PK migration to `(doc_id)`
+
+(Combines original D2 with the Layer 3 critique's C3 finding.)
+
+Both tables migrate from `(collection, source_path)` PK to
+`(doc_id)` PK. The two are coupled: `aspect_extraction_queue`'s
+`mark_done(collection, source_path)` signals completion to the
+extractor; if `document_aspects` migrates without the queue,
+in-flight entries lose their completion signal.
+
+Schema change (both tables):
+
+```sql
+-- aspect_extraction_queue
+ALTER TABLE aspect_extraction_queue ADD COLUMN doc_id TEXT NOT NULL DEFAULT '';
+-- backfill via JOIN, then:
+ALTER TABLE aspect_extraction_queue DROP CONSTRAINT pk_aspect_extraction_queue;
+ALTER TABLE aspect_extraction_queue ADD PRIMARY KEY (doc_id);
+-- collection, source_path retained as denorm cache columns
+
+-- document_aspects (same pattern)
+ALTER TABLE document_aspects ADD COLUMN doc_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE document_aspects DROP CONSTRAINT pk_document_aspects;
+ALTER TABLE document_aspects ADD PRIMARY KEY (doc_id);
+```
+
+Pre-migration precondition: drain queue to zero pending
+entries.
+
+```sql
+SELECT count(*) FROM aspect_extraction_queue WHERE status = 'pending';
+-- Must return 0 before the PK swap runs.
+```
+
+`mark_done` updates: `mark_done(doc_id)` instead of
+`mark_done(collection, source_path)`.
 
 Backfill: for every existing row, look up the matching catalog
-document via `(collection, file_path)`. The 318
-legacy-collection orphans are mapped via RDR-103 collection-
-name authority where possible; the 118 test-fixture orphans
-are hard-deleted (they came from CLI tests that should never
-have persisted); the 136 other orphans are surfaced for manual
-review.
+document via `(collection, file_path)`. Per RF-4:
 
-### D3: RDR-107 superseded
+- 11 distinct legacy-collection orphan collections (~453 rows).
+- 1 has automated `collections.superseded_by` mapping.
+- Top-4 high-row-count orphans (445 rows / 98%) need
+  hand-curated supersede mapping pre-step (~30 minutes
+  operator time).
+- 7 collections with 1-2 rows each: hard-delete (orphan beyond
+  reasonable mapping).
+- 118 test-fixture orphans (`knowledge__cli-*`,
+  `nexus-integration-test`, `reproducer`, `pagtest`, `pagend`):
+  hard-delete (came from CLI tests that should never have
+  persisted).
+
+### D4: RDR-107 superseded
 
 This RDR fully replaces RDR-107. The soft-delete approach in
-RDR-107 was a half-step that mitigated symptoms without
-addressing the structural cause. Status flip to `superseded`
+RDR-107 was a half-step that mitigated symptoms (stale-chunk
+accumulation) without addressing the structural root cause
+(position-derived natural IDs). Status flip to `superseded`
 landed in the same PR as this RDR.
 
 The soft-delete pattern remains valid for catalog tombstones
 (RDR-106) where the use case is operator-driven undelete, not
 content-edit handling. RDR-106 stays unchanged.
 
-### D4: `chash_index` simplified to membership table
+### D5: `chash_index` simplified to membership table
 
 Current schema:
 
@@ -560,11 +738,30 @@ CREATE TABLE chash_index (
 )
 ```
 
-`chunk_chroma_id` column dropped. The compound PK `(chash,
-physical_collection)` retains its existing routing role per
-RDR-101 nexus-tcwm. Lookup answer "which collection holds this
-chash?" is now a single column read; the row's existence IS the
-answer to "is this chash in this collection?".
+`chunk_chroma_id` column dropped. With D1 universally applied,
+`chunk_chroma_id == chash[:32]` for every row — pure function
+of `chash`, no need to store separately. The compound PK
+`(chash, physical_collection)` retains its existing routing
+role per RDR-101 nexus-tcwm.
+
+Layer 3 critique C1 dispositions for the 27 `chunk_chroma_id`
+sites enumerated by grep:
+
+| Site | Disposition under D1 + D5 |
+|---|---|
+| `code_indexer.py:380, 424` | replace formula → `chunk_text_hash[:32]` |
+| `prose_indexer.py:101, 121, 167, 200` | same |
+| `mcp/core.py:973, 978, 984` | same; store_put writes content-derived ID |
+| `commands/store.py:113, 115` | same |
+| `catalog/catalog_spans.py:327` | replace `row["chunk_chroma_id"]` → `hex_chash[:32]` |
+| `collection_audit.py:425-431` | rewrite to cross-check directly: `col.get(ids=chashes_from_index)` returns the live records, no separate ID column needed |
+| `db/t2/chash_index.py:62, 64, 105-135, 145-158, 261-283, 304-338` | drop the column from schema + accessor methods + `record_chunks` helper |
+| `db/migrations.py:912-961, 1939` | historical migrations — leave untouched (they describe the column's lifecycle); add a new migration that drops the column after Phase 4 verification |
+
+The `chunk_chroma_id` column AND the `chunk_index` /
+`chunk_count` / `doc_id` chunk metadata fields all disappear
+together, dropping ~270 lines of supporting code by rough
+count.
 
 The cascade-on-rename via `ChashIndex.rename_collection`
 (`chash_index.py:178`) survives unchanged — it's still a
@@ -599,8 +796,27 @@ sequence.
 renumbers all indices when oversized chunks split. So
 "chunk 5" before the edit may not be "chunk 5" after — same
 identity, different content semantically. Routing breaks.
-Content-derived IDs (Alternative D1=A) avoid this by anchoring
-on text, not position.
+Content-derived IDs (D1) avoid this by anchoring on text, not
+position.
+
+### Alternative B': `sha256(doc_id:chash:occurrence_within_doc)[:32]` (gate-revision draft)
+
+A post-gate proposal during the C2 critique discussion. Adds an
+occurrence ordinal to disambiguate identical chunks within a
+doc: same text in same doc gets distinct IDs by 0-based
+occurrence count. Position-precise reconstruction works via
+chunk metadata; current chunk_count + chunk_index semantics
+intact; small delta from raw `chunk_text_hash[:32]`.
+
+**Why rejected**: this is the half-step before the manifest
+model. It carries the same per-chunk doc-identity metadata
+denorm that D1+D2 eliminate. Cross-doc identical chunks remain
+duplicated (different doc_ids → different IDs) instead of
+being deduplicated at the storage layer. The naming-clash
+problem (ChromaDB doc vs catalog Document) stays unresolved.
+Choosing this would require migrating again later when the
+manifest model is adopted. Skip it; go directly to the
+manifest model.
 
 ### Alternative C: D2 only (cascade-on-rename for `document_aspects`)
 
@@ -634,123 +850,256 @@ without amending the closed document.
 
 ## Trade-offs
 
-| Dimension | RDR-108 (D1=A, D2=A, D4=A) | Soft-delete (RDR-107) | Cascade-only (D2 alone) | Do nothing |
+| Dimension | RDR-108 (D1-D5, manifest model) | RDR-108 (B variant: chash + occurrence ordinal) | Soft-delete (RDR-107) | Do nothing |
 |---|---|---|---|---|
-| Chunk drift | structurally impossible | mitigated, retention-window-bounded | persists | persists |
-| Aspect drift (existing 318) | fixed | persists | persists | persists |
-| Aspect drift (future) | fixed | persists | fixed | persists |
-| chash_index drift | reduced (FK-enforced) | persists | persists | persists |
-| RDR-053 design intent | fully realized | partial | unaffected | unaddressed |
-| T3 migration cost | re-upsert 290k chunks | none (incremental) | none | none |
-| Catalog migration cost | document_aspects PK swap | none | document_aspects cascade only | none |
-| Doctor-check noise | minimal | persists at low rate | aspect-drift only | grows |
-| Reversibility | reversible (re-upsert old IDs from backup) | trivially reversible (flag flip) | trivially reversible | N/A |
+| Chunk drift | structurally impossible | structurally impossible | mitigated, retention-window-bounded | persists |
+| Aspect drift (existing) | fixed | fixed | persists | persists |
+| Aspect drift (future) | fixed | fixed | persists | persists |
+| chash_index drift | reduced (FK-enforced) | reduced | persists | persists |
+| Within-doc identical chunks | content-addressed (manifest preserves position) | disambiguated by occurrence ordinal; one record per chunk regardless | n/a | persists |
+| Cross-doc identical chunks | deduplicated at storage | duplicated (per-doc IDs differ) | duplicated | duplicated |
+| RDR-053 design intent | fully realized + extended | fully realized | partial | unaddressed |
+| Naming clash with ChromaDB | resolved (catalog Document, T3 chunk; clean split) | unresolved (chunks still carry doc_id metadata) | unresolved | unresolved |
+| T3 migration cost | re-upsert 290k chunks | re-upsert 290k chunks | none (incremental) | none |
+| Catalog migration cost | docs.chunks manifest + aspects PK swap + queue PK swap | aspects PK swap + queue PK swap | none | none |
+| Retrieval rewrites | doc-grouping reads catalog manifest first (~5-10 call sites) | unchanged (chunk metadata still has doc_id) | unchanged | unchanged |
+| Reversibility | reversible (re-upsert under old IDs from a backup snapshot) | reversible | trivially reversible | N/A |
+| Doctor-check noise | minimal | minimal | persists at low rate | grows |
+| Architectural alignment with git/IPFS | full | partial | none | none |
 
-The RDR-108 path trades a one-time migration cost for permanent
-elimination of three bug classes. The soft-delete path trades
-zero migration for ongoing operator burden (vacuum schedule,
-retention tuning, drift monitoring).
+The manifest model trades a one-time migration cost (~1.3× the
+catalog work of the B variant; similar T3 work; one new
+retrieval pattern) for permanent elimination of four bug
+classes (the three from B + the within-doc collision RDR-101
+warned about) and a clean responsibility split between the
+graph layer (catalog) and the blob store (T3).
 
 ## Implementation Plan
 
-### Phase 0: Approve decisions D1-D4 (gate)
+### Phase 0: Approve decisions D1-D5 (gate)
 
-This RDR's finalization gate. D1, D2, D3, D4 are locked per
-user direction (2026-05-08); the gate verifies (a) the
+This RDR's finalization gate. D1-D5 are locked per Hal direction
+(2026-05-08, post-gate revision); the gate verifies (a) the
 research questions in §"Research Findings" are answered and
 (b) the migration cost estimate is plausible.
 
 ### Phase 1: Catalog schema migrations (cheap, no T3 touch)
 
-- `documents.physical_collection`: declare a foreign key
-  reference to `collections(name)`. Backfill `collections`
-  rows for any physical_collection value that doesn't have
-  one yet.
-- **Pre-step (per RF-4)**: hand-curate
-  `collections.superseded_by` mappings for the 4 high-row-count
-  legacy orphan collections (`rdr__nexus-571b8edd` 224,
-  `rdr__ART-8c2e74c0` 94, `knowledge__art-papers` 78,
-  `rdr__1-1__voyage-context-3__v1` 49 = 445 rows / 98% of
-  legacy-orphan corpus). Operator inspects each and decides
-  the current target. The remaining 7 collections (1-2 rows
-  each) are hard-deleted at the end of Phase 1.
-- `document_aspects` PK migration:
+**Step 1a: Manifest table (D2)**
+
+- Create `document_chunks` table per the D2 schema (PK
+  `(doc_id, position)`, idx on `chash`).
+- Add FK from `documents.physical_collection` to
+  `collections(name)`. Backfill `collections` rows for any
+  physical_collection value that doesn't have one yet.
+
+**Step 1b: Manifest backfill (D2)**
+
+For each catalog Document, paginate T3 chunks matching its
+current `doc_id` metadata, sort by `chunk_index`, write
+`document_chunks` rows preserving order and capturing
+positional metadata (line_start, line_end, char_start, char_end).
+
+```python
+# Pseudocode
+for doc in catalog.iter_documents():
+    chunks = []
+    offset = 0
+    while True:
+        page = col.get(
+            where={"doc_id": doc.tumbler}, limit=300, offset=offset,
+            include=["metadatas"],
+        )
+        if not page["ids"]: break
+        for cid, meta in zip(page["ids"], page["metadatas"]):
+            chunks.append({
+                "chash": meta["chunk_text_hash"],
+                "position": meta["chunk_index"],
+                "line_start": meta.get("line_start"),
+                "line_end": meta.get("line_end"),
+                "char_start": meta.get("chunk_start_char"),
+                "char_end": meta.get("chunk_end_char"),
+            })
+        if len(page["ids"]) < 300: break
+        offset += 300
+    chunks.sort(key=lambda c: c["position"])
+    catalog.write_manifest(doc.tumbler, chunks)
+```
+
+Idempotent — re-running overwrites the manifest with the same
+content.
+
+**Step 1c: Aspect tables PK migration (D3)**
+
+- Pre-step (per RF-4): hand-curate `collections.superseded_by`
+  mappings for the 4 high-row-count legacy orphan collections
+  (`rdr__nexus-571b8edd` 224, `rdr__ART-8c2e74c0` 94,
+  `knowledge__art-papers` 78, `rdr__1-1__voyage-context-3__v1`
+  49 = 445 rows / 98% of legacy-orphan corpus). Operator
+  inspects each and decides the current target.
+- **Pre-step (per Layer 3 critique C3)**: drain
+  `aspect_extraction_queue` to zero pending entries. SQL
+  precondition `SELECT count(*) FROM aspect_extraction_queue
+  WHERE status = 'pending'` must return 0 before the PK swap.
+- For each of `aspect_extraction_queue` and `document_aspects`:
   1. Add `doc_id TEXT NOT NULL DEFAULT ''` column.
-  2. Backfill: for each row, look up the catalog doc_id via
-     `(collection, file_path)` JOIN. For rows whose collection
-     was just supersede-mapped, follow the supersede chain
-     before the JOIN. Hard-delete the 118 test-fixture
-     orphans. Surface any remaining unmapped rows for manual
-     review.
+  2. Backfill via `(collection, file_path)` JOIN to
+     `documents`. Follow `collections.superseded_by` chain for
+     legacy collection names. Hard-delete the 118 test-fixture
+     orphans + the 7 low-row-count unmapped legacy collections.
   3. Swap PK from `(collection, source_path)` to `(doc_id)`.
   4. Keep `collection` and `source_path` as denorm cache
-     columns for read filters and display.
-- Wire `Catalog.rename_collection` to UPDATE
-  `document_aspects.collection` (and any other dependent
-  table discovered during research).
+     columns.
+- Update `mark_done(collection, source_path)` →
+  `mark_done(doc_id)`. Cascade callers.
 
-### Phase 2: Chunk Chroma natural ID switch (T3 re-upsert)
+**Step 1d: Cascade wiring**
+
+- `Catalog.rename_collection`: UPDATE the denorm `collection`
+  cache column on `aspect_extraction_queue` and
+  `document_aspects` (PK is `doc_id`, unaffected; cache stays
+  in sync).
+- Note: with PKs no longer keyed on collection name, a rename
+  is now safe — no row identity changes.
+
+### Phase 2: T3 chunk re-upsert with content-derived natural IDs (D1)
 
 **Per RF-2: migration is cheap, no Voyage re-embed.**
 
-Per collection, paginated:
+Per collection, paginated, idempotent (per RF-6):
 
-1. Fetch all chunks via
-   `col.get(limit=300, offset=..., include=["documents", "embeddings", "metadatas"])`.
-2. For each chunk, compute new natural ID = `chunk_text_hash[:32]`
-   (per RF-3, raw form, no collection scoping needed).
-3. If the new ID differs from the old, re-upsert under the new
-   ID with `embeddings=page["embeddings"]` (existing vector,
-   no Voyage call per RF-2).
-4. After all chunks for a collection are re-upserted, delete
-   the old IDs in batches of 300.
-5. Update `chash_index.chunk_chroma_id` to match (or drop the
-   column per Phase 3).
+```python
+seen_old_ids = set()
+offset = 0
+while True:
+    page = col.get(
+        limit=300, offset=offset,
+        include=["documents", "embeddings", "metadatas"],
+    )
+    if not page["ids"]: break
 
-This phase is collection-by-collection to bound risk. A
-failure mid-collection is recoverable by replaying the same
-phase against that collection.
+    to_migrate = []
+    for cid, doc, emb, meta in zip(page["ids"], page["documents"],
+                                    page["embeddings"], page["metadatas"]):
+        new_id = meta["chunk_text_hash"][:32]
+        if cid == new_id:
+            continue  # already migrated, skip silently
+        # Strip doc-level identity fields from metadata (D2 manifest is authoritative now)
+        new_meta = {k: v for k, v in meta.items()
+                    if k not in {"doc_id", "chunk_index", "chunk_count"}}
+        to_migrate.append((cid, new_id, doc, emb, new_meta))
+        seen_old_ids.add(cid)
+
+    if to_migrate:
+        col.upsert(
+            ids=[t[1] for t in to_migrate],
+            documents=[t[2] for t in to_migrate],
+            embeddings=[t[3] for t in to_migrate],
+            metadatas=[t[4] for t in to_migrate],
+        )
+    if len(page["ids"]) < 300: break
+    offset += 300
+
+# Delete old IDs in batches of 300
+for batch in batched(seen_old_ids, 300):
+    col.delete(ids=list(batch))
+```
+
+Critical detail: the `to_migrate` step ALSO strips `doc_id`,
+`chunk_index`, `chunk_count` from chunk metadata (those fields
+now live in the catalog manifest). Re-upserting under the new
+content-derived ID effectively replaces the chunk's identity
+AND its metadata in one op.
 
 **Carve-outs per RF-1**:
 - `taxonomy__centroids`: skip; uses centroid-hash identity
-  from the `topics` table, not chunk_text_hash.
+  from the `topics` table, not chunk_text_hash. The migration
+  command MUST guard for missing `chunk_text_hash` per the
+  Layer 3 critique S3 finding (raise a structured error if
+  missing, do not KeyError).
 - `docs__scheme-evolution-research-b7de0b63`: re-index 690
   pre-RDR-053 chunks from source as a pre-step (only ~few
   minutes of Voyage embedding for that subset; the rest of
   the collection migrates normally).
 
-### Phase 3: chash_index simplification
+**Identical-text collapse**: when two chunks in the same
+collection have the same `chunk_text_hash`, the second
+`upsert` on the new ID is a no-op (chromadb upsert is
+idempotent). The catalog manifest from Phase 1 records both
+positions; both refer to the same T3 record.
 
-- Drop `chunk_chroma_id` column from `chash_index`.
-- The (chash, physical_collection) compound PK and routing
-  semantics survive unchanged.
-- Update `ChashIndex` accessor methods to match the new
-  schema; ensure `delete_stale` and `rename_collection` keep
-  working.
-- Reconcile (Phase 1's migration may already have done this):
-  drop chash_index rows whose physical_collection has no
-  matching `collections` row.
+### Phase 3: T3 chunk metadata schema cleanup (D2)
 
-### Phase 4: Documentation + cleanup
+After Phase 2 completes for a collection, its chunks no longer
+carry `doc_id`, `chunk_index`, `chunk_count` in metadata
+(stripped at re-upsert). The system-wide cleanup:
 
-- Update `CLAUDE.md`: the "Critical conventions" §"Hot rules"
-  needs a new entry on chunk identity = `chunk_text_hash`.
-- Update `docs/architecture.md` with the normalized schema.
-- Remove RDR-107's soft-delete plumbing if any landed
-  (verify nothing did before this RDR's gate).
-- Update `nx doctor` to surface drift between
-  `documents.physical_collection` and `collections.name`
-  (FK violations).
+- Update `metadata_schema.ALLOWED_TOP_LEVEL` to drop these
+  three fields. New chunk writes via `make_chunk_metadata`
+  stop including them.
+- Update chunk-write paths: `code_indexer.py`, `prose_indexer.py`,
+  `pipeline_stages.py`, `mcp/core.py:store_put`,
+  `commands/store.py`, `db/t3.py:upsert_chunks_with_embeddings`
+  no longer pass these fields.
+- Catalog post-store hooks (`fire_post_store_hooks`,
+  `fire_post_document_hooks`) write the manifest entry instead
+  of relying on chunk metadata.
 
-### Phase 5: Verification
+### Phase 4: chash_index simplification (D5) + retrieval call site rewrites
 
+**chash_index column drop** (per RF-7 + Layer 3 C1):
+
+- Drop `chunk_chroma_id` column from `chash_index` schema.
+- Update accessor methods enumerated in D5's site-disposition
+  table.
+- Drop the migration that created the column (`db/migrations.py:912-961`)
+  — historical, leave; add a new migration that drops the
+  column.
+
+**Retrieval call site rewrites** (the new pattern):
+
+| Site | Pre | Post |
+|---|---|---|
+| `db/t3.py:1228` | `where={"doc_id": doc_id}` | `chashes = catalog.get_chunk_chashes(doc_id); col.get(ids=[c[:32] for c in chashes])` |
+| `indexer.py:1477, :1531` | batched `where={"doc_id": {"$in": ...}}` for stale-chunk prune | with manifest model, stale detection becomes "chunks no longer in any manifest" — likely a separate sweep. RDR-108 doesn't change `_prune_deleted_files`'s logic but the manifest changes the lookup pattern. |
+| `mcp/core.py:847-855` | group results by `chunk.metadata["doc_id"]` | gather `chunk_text_hash` values from results; query manifest by chash → group by doc |
+| `catalog/synthesizer.py:616-672` | sort by `chunk_index` from metadata | walk manifest in order |
+| `catalog/catalog_spans.py:327` | `doc_id=row["chunk_chroma_id"]` | `doc_id=hex_chash[:32]` |
+
+For the doc-grouping case (`mcp/core.py:847`), the catalog
+gains a helper:
+
+```python
+catalog.docs_for_chashes(chashes: list[str]) -> dict[str, list[doc_id]]
+# SELECT doc_id FROM document_chunks WHERE chash IN (?, ?, ...)
+```
+
+This is a fast index lookup (idx_document_chunks_chash). Adds
+one catalog query per retrieval batch, far smaller than the
+embedding similarity computation cost.
+
+### Phase 5: Documentation + verification
+
+- Update `CLAUDE.md`: §"Critical conventions" gains an entry on
+  the catalog/T3 split: "Catalog Documents are graph nodes;
+  T3 chunks are content-addressed blobs. Doc structure lives
+  in catalog manifest, not chunk metadata."
+- Update `docs/architecture.md` with the manifest model.
+- Update `docs/rdr/rdr-053-xanadu-fidelity.md` Deviations
+  Register: D5 "Position-Based Chunk Spans" → mark resolved
+  by RDR-108.
 - Re-run the 2026-05-08 prod-shakeout probes:
-  - chash_index distinct collections should == T3 collection
-    count
-  - document_aspects orphan rate should be 0%
-  - code__1-2188 dupe rate should be 0%
-- Run a re-index of any code repo and verify zero stale chunks
-  accumulate.
+  - chash_index distinct collections == T3 collection count
+  - document_aspects orphan rate == 0%
+  - code__1-2188 `(source_path, chunk_index)` dupe-key count == 0
+  - Per-collection check: any chunks with `doc_id` /
+    `chunk_index` / `chunk_count` in metadata = 0 (cleanup
+    successful)
+- Run a code-repo re-index and verify:
+  - Zero stale chunks accumulate
+  - Manifest correctly captures all chunks in order
+  - Identical chunks (e.g. test fixture re-import) collapse to
+    one T3 record
 
 ## Test Plan
 
@@ -773,34 +1122,69 @@ phase against that collection.
   collections with distinct content. Assert (a) both `add`
   calls succeed, (b) `col_A.get(ids=[chash])` and
   `col_B.get(ids=[chash])` return the distinct content.
-- **Aspect PK migration backfill**: fixture with five rows:
-  (a) matching catalog, (b) legacy-collection-name with
+- **Carve-out — `taxonomy__centroids`**: assert
+  `nx t3 reidentify` skips this collection by default and
+  emits a structured log entry naming it as exempt. Per Layer 3
+  S3: also assert that if a chunk in any collection lacks
+  `chunk_text_hash` metadata, the migration raises a
+  structured error rather than KeyError.
+- **Manifest preserves order under content addressing**
+  (D2): index a doc with chunks `[A, B, A, C]` (chunk B is
+  unique; chunk A and C are unique; A appears at positions 0
+  and 2). Assert (a) T3 has exactly 3 records (A, B, C) keyed
+  by their content hashes, (b) `document_chunks` manifest has
+  4 rows in `(doc_id, position)` order: `(d, 0, A), (d, 1, B),
+  (d, 2, A), (d, 3, C)`, (c) doc reconstruction returns the
+  4-element ordered chunk list with A's content appearing at
+  positions 0 and 2.
+- **Cross-doc chash dedup** (D1 + D2): index the same chunk
+  text in two distinct docs. Assert (a) T3 has ONE record
+  (the chash[:32] is shared), (b) `document_chunks` manifest
+  has TWO rows (one per doc), (c) `catalog.docs_for_chashes`
+  returns both doc_ids for the chash.
+- **Manifest backfill from existing chunk metadata** (Phase 1
+  Step 1b): fixture T3 with chunks carrying current
+  `doc_id`/`chunk_index` metadata; run Phase 1 Step 1b; assert
+  the resulting `document_chunks` rows preserve order and
+  match the original metadata.
+- **Aspect queue drain precondition** (Phase 1 Step 1c): with
+  a non-empty `aspect_extraction_queue` (status=pending), run
+  the PK migration; assert it BLOCKS with a clear error and
+  does not modify schema.
+- **Aspect PK migration end-to-end** (D3): fixture with five
+  rows: (a) matching catalog, (b) legacy-collection-name with
   hand-curated supersede mapping, (c) legacy-collection-name
-  with NO supersede (test-fixture pattern), (d) test-fixture
-  collection (`knowledge__cli-...`), (e) collection unknown
-  to catalog. Assert (a) and (b) migrate to the correct
-  doc_id, (c) and (d) are hard-deleted, (e) is surfaced for
-  manual review (no silent loss).
-- **Catalog rename cascades to document_aspects**: rename a
+  with NO supersede (drop class), (d) test-fixture collection
+  (`knowledge__cli-...`), (e) collection unknown to catalog.
+  Assert (a) and (b) migrate to the correct doc_id, (c) and
+  (d) are hard-deleted, (e) is surfaced for manual review.
+- **Catalog rename cascades to denorm caches**: rename a
   collection via `Catalog.rename_collection`; assert the
-  denorm `collection` column on `document_aspects` rows
-  updates atomically with the FK target.
-- **chash_index FK enforcement**: attempt to INSERT a
-  chash_index row pointing at a non-existent
-  `physical_collection`; assert FK violation. Then attempt
-  delete-cascade behavior: delete a collection row; assert
-  chash_index rows referencing it are removed (or rejected if
-  ON DELETE RESTRICT).
-- **Cross-collection chash routing**: insert the same
-  `chunk_text_hash` into two collections; assert
-  `chash_index.lookup(chash)` returns both rows.
+  denorm `collection` column on `document_aspects` and
+  `aspect_extraction_queue` updates atomically. PKs (`doc_id`)
+  unaffected.
+- **chash_index FK enforcement** (D5): attempt INSERT into
+  chash_index pointing at a non-existent
+  `physical_collection`; assert FK violation. Verify cascade
+  behavior on collection deletion.
+- **chunk_chroma_id column drop is safe** (D5 + Layer 3 C1):
+  before dropping the column, run a structured migration that
+  asserts every row has `chunk_chroma_id == chash[:32]`. If
+  any row violates, log + fail loud (allows operator to
+  diagnose stale rows).
+- **Retrieval rewrite — doc-grouping by manifest** (Phase 4):
+  search returns chunks with no `doc_id` metadata. Assert
+  `mcp/core.py:847` doc-grouping pulls from
+  `catalog.docs_for_chashes(chashes)` and produces the same
+  grouping as the pre-migration metadata path.
+- **Cross-collection chash routing** (existing semantics):
+  insert the same `chunk_text_hash` into two collections;
+  assert `chash_index.lookup(chash)` returns both rows (the
+  per-collection scope from RF-3 is preserved).
 - **Quota compliance**: migration batches respect
   `chroma_quotas.MAX_RECORDS_PER_WRITE = 300` for both
   `col.get` (page size) and `col.upsert` / `col.delete`
   (batch size).
-- **Carve-out — `taxonomy__centroids`**: assert
-  `nx t3 reidentify` skips this collection by default and
-  emits a structured log entry naming it as exempt.
 - **Carve-out — pre-RDR-053 partial-coverage collection**:
   assert that running Phase 2 against
   `docs__scheme-evolution-research-b7de0b63` requires the
@@ -832,53 +1216,76 @@ phase against that collection.
 
 ### Cross-Cutting Concerns
 
-- **Versioning**: catalog SQLite schema bump (document_aspects
-  PK swap, chash_index column drop, FK declaration on
-  documents.physical_collection). T3 chunk metadata schema
-  unchanged (chunk_text_hash already present per RDR-053). T3
-  natural-ID migration is data-level, not schema-level.
+- **Versioning**: catalog SQLite schema additions (new
+  `document_chunks` manifest table, `doc_id` columns +
+  reshuffled PKs on `document_aspects` and
+  `aspect_extraction_queue`, FK on
+  `documents.physical_collection`, `chash_index` drops
+  `chunk_chroma_id` column). T3 chunk metadata schema
+  simplifies (drops `doc_id`, `chunk_index`, `chunk_count`).
+  T3 natural-ID migration is data-level, not schema-level
+  (ChromaDB doesn't enforce a metadata schema).
 - **Build tool compatibility**: N/A.
 - **Licensing**: N/A.
-- **Deployment model**: ships in conexus wheel; first run
-  after upgrade triggers Phase 1 catalog migrations
-  automatically. Phase 2 (T3 re-upsert) is operator-driven via
-  `nx t3 reidentify --collection ...` to bound the time and
-  cost.
+- **Deployment model**: ships in conexus wheel. Phase 1
+  catalog migrations run automatically at first DB open after
+  upgrade (current nexus pattern: `db/migrations.py`
+  numbered migrations). Phase 2 (T3 re-upsert) is operator-
+  driven via `nx t3 reidentify --collection ...` to bound the
+  time and cost.
 - **Incremental adoption**: Phase 1 is mandatory at upgrade
-  (catalog migrations). Phase 2 is per-collection on operator
-  demand; until run, the collection retains old position-
-  derived IDs and continues to leak stale chunks. Phase 3
-  follows Phase 2 globally.
+  (catalog migrations land first; manifest backfill for
+  existing chunks runs as part of it; aspect tables PK migration
+  blocks until queue is drained). Phase 2 is per-collection
+  on operator demand; until run, that specific collection
+  retains old position-derived IDs and per-chunk doc_id
+  metadata (system continues to function in mixed-state).
+  Phase 3 (chunk metadata cleanup) and Phase 4 (chash_index
+  column drop) run after Phase 2 completes globally — both
+  require a corpus-wide assertion before the cleanup migrations.
 - **Memory management**: re-upserting 290k chunks fits within
-  ChromaDB Cloud quotas if batched at 300/op. No new
-  memory pressure.
+  ChromaDB Cloud quotas at 300/op batches. Catalog manifest
+  table adds ~290k rows × ~80 bytes = ~23 MiB to the
+  catalog SQLite — negligible relative to the existing 64 MiB.
 - **Secret/credential lifecycle**: N/A.
 
 ### Proportionality
 
-Right-sized. The migration is a one-time cost (catalog: under
-a minute; T3: hours per large collection, parallelizable
-across collections) that structurally eliminates three bug
-classes documented in five filed beads. Multi-week
-implementation matches the value: the alternative is operator
-drift-monitoring forever. Half-fixes (RDR-107 soft-delete,
-D2-only cascade) trade migration cost for permanent operator
-burden — the wrong direction for nexus's robot-mode
-disposition.
+Right-sized given the architectural payoff. The migration is a
+one-time cost (catalog: 1-2 minutes for schema + manifest
+backfill; T3: hours per large collection, parallelizable;
+chash_index + retrieval rewrites: a focused PR each) that
+structurally eliminates four bug classes (the three from the
+prod-shakeout + the within-doc collision RDR-101 warned
+about) AND establishes a clean responsibility split between
+the catalog (graph + tree layer) and T3 (content-addressed
+blob store). The git/IPFS architectural alignment is a
+substantive long-term win: future work (e.g., distributing
+the corpus across nodes, adding a delta-encoding layer for
+similar chunks, exposing chunks as linkable resources to
+external systems) becomes naturally tractable under this
+model.
+
+Half-fixes (RDR-107 soft-delete, B' occurrence-ordinal,
+cascade-only) trade migration cost for permanent operator
+burden AND lock in the naming-clash architecture — the wrong
+direction for nexus's robot-mode disposition.
 
 ## References
 
 ### Beads addressed
 
 - nexus-jc63 (P0): chunk soft-delete steady-state — superseded
-  by D1=A in this RDR.
+  by D1 + D2 in this RDR (content-addressed natural ID +
+  manifest layer eliminate the stale-chunk problem
+  structurally).
 - nexus-b5mh (P1): one-shot stale-chunk reconciliation —
-  superseded by Phase 2 in this RDR.
+  superseded by Phase 2 in this RDR (re-upsert under
+  content-derived IDs is the migration AND the cleanup).
 - nexus-je0b (P1): document_aspects 76% orphan rate — fixed by
-  D2=A in this RDR.
-- nexus-mmf5 (P1): chash_index namespace drift — fixed by D4=A
-  + FK enforcement on documents.physical_collection in this
-  RDR.
+  D3 PK migration to (doc_id) in this RDR.
+- nexus-mmf5 (P1): chash_index namespace drift — fixed by D5 +
+  FK enforcement on documents.physical_collection in this RDR.
 - nexus-17wf (P2): low-confidence aspect rows — orthogonal,
   not addressed here.
 
@@ -886,18 +1293,66 @@ disposition.
 
 - RDR-053 (Xanadu Fidelity, accepted/closed): chose
   `chunk_text_hash` as immutable span identity. RDR-108
-  completes the design by making it the routing identity too.
+  completes the design by making it the routing identity AND
+  introducing the manifest layer (catalog Document.chunks)
+  that resolves the within-doc collision concern RDR-053
+  itself anticipated.
 - RDR-101 (Catalog T3 Metadata Design, closed): established
-  UUID7 doc_id and the event-sourced catalog. RDR-108 builds
-  on these.
+  UUID7 doc_id and the event-sourced catalog. RDR-108 imports
+  these and resolves RDR-101's stated rationale for NOT using
+  chash as natural ID — the rationale held under per-chunk
+  metadata; under the manifest model, identical content is
+  one record by design and the manifest preserves position.
 - RDR-103 (Catalog as Collection-Name Authority, closed):
   established the `collections` table. RDR-108 makes
-  `documents.physical_collection` a foreign key to it.
+  `documents.physical_collection` a foreign key to it and
+  uses RDR-103's supersede chain for the Phase 1 pre-step.
 - RDR-106 (Soft-Delete via Tombstone Columns on Catalog
   Projection, draft): catalog-projection-layer soft-delete.
   Independent of RDR-108; both can ship.
 - RDR-107 (T3 Chunk Soft-Delete via Tombstone Metadata,
   superseded by this RDR): the partial-fix predecessor.
+
+### Architectural references
+
+- Git's object model (blobs + trees): same content-addressed
+  blob store + tree-of-references pattern that RDR-108 adopts.
+  T3 chunks are the blobs; catalog Document.chunks is the
+  tree.
+- IPFS DAG: same content-addressed model with a distributed
+  twist. RDR-108 uses the conceptual pattern (blob + tree)
+  but stays on local SQLite + ChromaDB Cloud rather than
+  introducing distributed addressing.
+
+### Architectural-revision provenance
+
+The original D1 (raw `chunk_text_hash[:32]` as natural ID,
+no manifest layer) was BLOCKED at the Layer 3 finalization
+gate (substantive-critic, 2026-05-08) on three issues:
+
+- **C1**: D4 blast radius understated (27 `chunk_chroma_id`
+  sites, not 1; collection_audit.py read site has no defined
+  replacement)
+- **C2**: silent data loss for identical-text chunks within
+  the same collection (RDR-101 explicitly rejected raw chash
+  as natural ID for this reason)
+- **C3**: D2 ignored the coupled `aspect_extraction_queue`
+  table
+
+User-Hal reframed the problem post-gate (the ChromaDB-doc vs
+catalog-Document naming clash had been masking the right
+architectural split). The current RDR-108 (manifest model)
+resolves all three:
+
+- C1 dispositions enumerated in D5.
+- C2 structurally resolved by D2 (manifest layer; identical
+  content collapses to one T3 record).
+- C3 folded into D3.
+
+The pre-revision draft (B variant: `sha256(doc_id:chash:occurrence)[:32]`)
+is documented in §"Alternatives Considered". RDR-107 (the
+soft-delete predecessor) is also retained as a closed
+exploration that led here.
 
 ### Probes / analysis
 
