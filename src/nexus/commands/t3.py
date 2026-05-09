@@ -748,3 +748,146 @@ def backfill_manifest_cmd(
 
     if errors:
         raise SystemExit(1)
+
+
+@t3.command("reidentify")
+@click.option(
+    "--collection",
+    "-c",
+    default="",
+    help="Limit to one collection. Mutually exclusive with --all-collections.",
+)
+@click.option(
+    "--all-collections",
+    "all_collections",
+    is_flag=True,
+    default=False,
+    help="Re-identify every T3 collection. Mutually exclusive with --collection.",
+)
+@click.option(
+    "--dry-run/--no-dry-run",
+    default=True,
+    help="Report-only (default). Use --no-dry-run to perform the migration.",
+)
+def reidentify_cmd(
+    collection: str,
+    all_collections: bool,
+    dry_run: bool,
+) -> None:
+    """Re-upsert T3 chunks under content-derived natural IDs (RDR-108 D1).
+
+    \b
+    Per collection, paginates T3 chunks (300/op), computes a new natural
+    ID from chunk_text_hash[:32], and re-upserts each chunk under the new
+    ID using the existing embedding (no Voyage call). Document-level
+    metadata fields (doc_id, chunk_index, chunk_count) are stripped at
+    re-upsert; the catalog manifest table is now authoritative for those.
+    Old chunk IDs are batch-deleted after the get-loop completes.
+
+    \b
+    The command is idempotent: re-running on a fully-migrated collection
+    is a zero-write no-op. It is also crash-resumable: re-invoking after
+    an interrupted run safely sweeps the un-deleted old IDs.
+
+    \b
+    Carve-outs:
+      - taxonomy__* collections are skipped (centroids use centroid_hash).
+      - Pre-RDR-053 chunks missing chunk_text_hash raise an error;
+        re-index that collection from source before running.
+
+    \b
+    Examples:
+      nx t3 reidentify --collection code__nexus            # dry-run report
+      nx t3 reidentify -c code__nexus --no-dry-run         # one collection
+      nx t3 reidentify --all-collections --no-dry-run      # full corpus
+    """
+    from nexus.db.t3_reidentify import (  # noqa: PLC0415
+        MissingChunkHashError,
+        reidentify_collection,
+    )
+
+    if not collection and not all_collections:
+        raise click.UsageError(
+            "Specify either --collection NAME or --all-collections."
+        )
+    if collection and all_collections:
+        raise click.UsageError(
+            "--collection and --all-collections are mutually exclusive."
+        )
+
+    t3_db = _make_t3_for_backfill()
+
+    if dry_run:
+        click.echo("(dry-run: no T3 writes or deletes will be performed)")
+
+    if collection:
+        collections_to_process = [collection]
+    else:
+        collections_to_process = [
+            c["name"] for c in t3_db.list_collections()
+        ]
+        if not collections_to_process:
+            click.echo("No T3 collections found; nothing to do.")
+            return
+
+    total = len(collections_to_process)
+    total_examined = 0
+    total_migrated = 0
+    total_already = 0
+    total_deleted = 0
+    skipped_taxonomy = 0
+    errors: list[str] = []
+
+    for idx, coll_name in enumerate(collections_to_process, start=1):
+        print(
+            f"[{idx}/{total}] {coll_name}: processing ...",
+            file=sys.stderr,
+        )
+        try:
+            result = reidentify_collection(
+                t3_db, coll_name, dry_run=dry_run
+            )
+        except MissingChunkHashError as exc:
+            click.echo(f"ERROR: {exc}", err=True)
+            errors.append(str(exc))
+            continue
+        except Exception as exc:
+            click.echo(f"ERROR in {coll_name}: {exc}", err=True)
+            errors.append(f"{coll_name}: {exc}")
+            continue
+
+        if result.skipped_taxonomy:
+            click.echo(f"  {coll_name}: skipped (taxonomy carve-out)")
+            skipped_taxonomy += 1
+            continue
+
+        verb = "would migrate" if dry_run else "migrated"
+        delete_part = (
+            f", {result.chunks_deleted} old id(s) deleted"
+            if not dry_run and result.chunks_deleted
+            else ""
+        )
+        click.echo(
+            f"  {coll_name}: examined {result.chunks_examined} chunk(s), "
+            f"{verb} {result.chunks_migrated}, "
+            f"{result.chunks_already_migrated} already migrated"
+            + delete_part
+        )
+
+        total_examined += result.chunks_examined
+        total_migrated += result.chunks_migrated
+        total_already += result.chunks_already_migrated
+        total_deleted += result.chunks_deleted
+
+    verb = "would migrate" if dry_run else "migrated"
+    click.echo(
+        f"\nSummary: examined {total_examined} chunk(s) across "
+        f"{total} collection(s); {verb} {total_migrated}, "
+        f"{total_already} already migrated, "
+        f"{total_deleted} old id(s) deleted"
+        + (f", skipped {skipped_taxonomy} taxonomy" if skipped_taxonomy else "")
+        + (f", {len(errors)} error(s)" if errors else "")
+    )
+
+    if errors:
+        raise SystemExit(1)
