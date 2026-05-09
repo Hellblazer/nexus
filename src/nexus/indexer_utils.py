@@ -381,7 +381,16 @@ def check_staleness(
             return False
         return stored == (content_hash, embedding_model)
 
-    where: dict = {"doc_id": doc_id} if doc_id else {"source_path": str(source_file)}
+    # RDR-108 Phase 3 (nexus-bdag): chunks no longer carry ``doc_id`` —
+    # the catalog ``document_chunks`` manifest is authoritative. Query
+    # by ``content_hash`` (a file-level fingerprint that all chunks of
+    # the same file share); falling back to ``source_path`` for legacy
+    # chunks predating RDR-102 D2.
+    where: dict
+    if content_hash:
+        where = {"content_hash": content_hash}
+    else:
+        where = {"source_path": str(source_file)}
     existing = _chroma_with_retry(
         col.get,  # type: ignore[attr-defined]
         where=where,
@@ -395,17 +404,6 @@ def check_staleness(
         stored.get("content_hash") != content_hash
         or stored.get("embedding_model") != embedding_model
     ):
-        return False
-    # nexus-o6aa.10.4 follow-up: ghost-chunk class. Stored chunk
-    # matches content_hash + model but lacks doc_id metadata. The
-    # staleness check would normally return True (skip re-index) and
-    # the ghost would persist forever. When the caller has a non-empty
-    # doc_id resolver result for this file, treat the stored chunk as
-    # metadata-stale so the indexer re-upserts and the ghost gets a
-    # doc_id. Found on Hal's catalog 2026-05-02: 499 chunks indexed
-    # under an old branch when the catalog hook silently failed,
-    # surviving content-hash dedup on every subsequent re-index.
-    if doc_id and not stored.get("doc_id"):
         return False
     return True
 

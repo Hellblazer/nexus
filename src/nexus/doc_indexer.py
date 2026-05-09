@@ -104,17 +104,15 @@ def _lookup_existing_doc_id(file_path: str, corpus: str) -> str:
 def _identity_where(file_path: str, corpus: str, *, content_hash: str = "") -> dict:
     """nexus-dcym: chunk-identity where-filter for incremental sync sites.
 
-    Prefers a ``doc_id``-keyed lookup when the catalog already has an
-    entry for *file_path* under *corpus*. RDR-101 Phase 5c removed
-    ``source_path`` from chunk metadata, so the staleness fallback
-    keys on *content_hash* when the catalog is absent (e.g. local-mode
-    ingest without a catalog initialised). Pass ``content_hash`` only
-    for staleness checks — pruning by content_hash is incorrect because
-    matching chunks are by definition not stale.
+    RDR-108 Phase 3 retired ``doc_id`` from chunk metadata (catalog
+    manifest is authoritative); ``content_hash`` is now the canonical
+    staleness key. Pre-Phase-3 chunks still carry ``doc_id`` in stored
+    metadata, but those reads are handled by Phase 4 retargeted readers.
+    Pass ``content_hash`` only for staleness checks — pruning by
+    content_hash is incorrect because matching chunks are by definition
+    not stale; the legacy ``source_path`` fallback is retained for
+    pruning sites pending Phase 4 manifest-driven prune rewrites.
     """
-    doc_id = _lookup_existing_doc_id(file_path, corpus)
-    if doc_id:
-        return {"doc_id": doc_id}
     if content_hash:
         return {"content_hash": content_hash}
     return {"source_path": file_path}
@@ -672,8 +670,10 @@ def _index_document(
         fire_post_store_batch_hooks,
         fire_post_store_hooks,
     )
+    _catalog_doc_id_for_batch = _lookup_existing_doc_id(sp, corpus)
     fire_post_store_batch_hooks(
         ids, collection_name, documents, embeddings, metadatas,
+        catalog_doc_id=_catalog_doc_id_for_batch,
     )
     for _did, _doc in zip(ids, documents):
         fire_post_store_hooks(_did, collection_name, _doc)
@@ -684,7 +684,7 @@ def _index_document(
     # can capture the doc_id alongside source_path.
     fire_post_document_hooks(
         sp, collection_name, "",
-        doc_id=_lookup_existing_doc_id(sp, corpus),
+        doc_id=_catalog_doc_id_for_batch,
     )
 
     # Prune stale chunks from a previous (larger) version of this file.
@@ -779,6 +779,11 @@ def _index_pdf_incremental(
     documents_all = [p[1] for p in prepared]
     metadatas_all = [p[2] for p in prepared]
 
+    # Resolve catalog doc_id once outside the per-batch loop (RDR-108
+    # Phase 3: chunk metadata no longer carries it; manifest hook reads
+    # via the fire_post_store_batch_hooks kwarg).
+    _catalog_doc_id_for_batch = _lookup_existing_doc_id(str(file_path), corpus)
+
     for batch_start in range(start_offset, total, _INCREMENTAL_BATCH_SIZE):
         batch_end = min(batch_start + _INCREMENTAL_BATCH_SIZE, total)
         batch_docs = documents_all[batch_start:batch_end]
@@ -805,6 +810,18 @@ def _index_pdf_incremental(
         # Upsert
         t3.upsert_chunks_with_embeddings(collection_name, batch_ids, batch_docs, embeddings, batch_metas)
 
+        # RDR-108 Phase 3: inject the global chunk_index per row before
+        # firing the batch chain. ``batch_metas`` came from
+        # ``make_chunk_metadata`` (post-Phase-3, no chunk_index); the
+        # incremental loop slices ``metadatas_all[batch_start:batch_end]``
+        # so the per-row global index is ``batch_start + i``. Without
+        # this injection the manifest hook defaults to a batch-local
+        # enumeration that resets to 0 each batch, truncating the
+        # manifest. T3 already received the post-Phase-3 metadata; the
+        # local copy mutation here only affects the hook payload.
+        for _i, _meta in enumerate(batch_metas):
+            _meta["chunk_index"] = batch_start + _i
+
         # Post-store hook chains (RDR-095). Both single-doc and batch
         # chains fire from every storage event; the per-doc loop covers
         # single-shape consumers on CLI ingest.
@@ -814,6 +831,7 @@ def _index_pdf_incremental(
         )
         fire_post_store_batch_hooks(
             batch_ids, collection_name, batch_docs, embeddings, batch_metas,
+            catalog_doc_id=_catalog_doc_id_for_batch,
         )
         for _did, _doc in zip(batch_ids, batch_docs):
             fire_post_store_hooks(_did, collection_name, _doc)
@@ -943,10 +961,10 @@ def _pdf_chunks(
     for chunk in chunks:
         chunk_id = f"{content_hash[:16]}_{chunk.chunk_index}"
         # RDR-101 Phase 5c dropped corpus, store_type, git_meta. Title kept.
+        # RDR-108 Phase 3 dropped chunk_index, chunk_count, doc_id —
+        # catalog manifest is authoritative.
         meta = make_chunk_metadata(
             content_type="pdf",
-            chunk_index=chunk.chunk_index,
-            chunk_count=len(chunks),
             chunk_text_hash=hashlib.sha256(chunk.text.encode()).hexdigest(),
             content_hash=content_hash,
             chunk_start_char=chunk.metadata.get("chunk_start_char", 0),
@@ -964,7 +982,6 @@ def _pdf_chunks(
             bib_authors=bib.get("authors", ""),
             bib_venue=bib.get("venue", ""),
             bib_citation_count=bib.get("citation_count", 0),
-            doc_id=doc_id,
         )
         prepared.append((chunk_id, chunk.text, meta))
     return prepared
@@ -1028,10 +1045,10 @@ def _markdown_chunks(
     for chunk in chunks:
         chunk_id = f"{content_hash[:16]}_{chunk.chunk_index}"
         # RDR-101 Phase 5c dropped corpus, store_type, git_meta. Title kept.
+        # RDR-108 Phase 3 dropped chunk_index, chunk_count, doc_id —
+        # catalog manifest is authoritative.
         meta = make_chunk_metadata(
             content_type="markdown",
-            chunk_index=chunk.chunk_index,
-            chunk_count=len(chunks),
             chunk_text_hash=hashlib.sha256(chunk.text.encode()).hexdigest(),
             content_hash=content_hash,
             chunk_start_char=chunk.metadata.get("chunk_start_char", 0) + frontmatter_len,
@@ -1045,7 +1062,6 @@ def _markdown_chunks(
             section_type=chunk.metadata.get("section_type", ""),
             tags="markdown",
             category="prose",
-            doc_id=doc_id,
         )
         prepared.append((chunk_id, chunk.text, meta))
     return prepared
@@ -1300,8 +1316,10 @@ def index_pdf(
         fire_post_store_batch_hooks,
         fire_post_store_hooks,
     )
+    _catalog_doc_id_for_batch = _lookup_existing_doc_id(str(pdf_path), corpus)
     fire_post_store_batch_hooks(
         ids, col_name, documents, embeddings, metadatas_list,
+        catalog_doc_id=_catalog_doc_id_for_batch,
     )
     for _did, _doc in zip(ids, documents):
         fire_post_store_hooks(_did, col_name, _doc)
@@ -1311,7 +1329,7 @@ def index_pdf(
     # nexus-tdgc: forward the catalog doc_id post-register.
     fire_post_document_hooks(
         str(pdf_path), col_name, "",
-        doc_id=_lookup_existing_doc_id(str(pdf_path), corpus),
+        doc_id=_catalog_doc_id_for_batch,
     )
 
     # Prune stale chunks (nexus-dcym: doc_id-keyed when catalog has the

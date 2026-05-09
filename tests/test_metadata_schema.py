@@ -33,19 +33,15 @@ def test_allowed_top_level_is_bounded() -> None:
 def test_load_bearing_keys_are_allowed() -> None:
     """Every key read by ``where=`` filters or scoring must be top-level.
 
-    RDR-102 D2 dropped ``source_path`` from the schema — the catalog
-    tumbler in ``doc_id`` is now the canonical reference and the
-    stale-detection where-filters fall back to ``source_path`` only
-    for legacy chunks indexed before the doc_id-keyed identity wiring
-    landed (RDR-101 Phase 5b will drop the fallback branch entirely).
+    RDR-108 Phase 3 retired three chunk-identity keys (``doc_id``,
+    ``chunk_index``, ``chunk_count``): the ``document_chunks`` manifest
+    table is authoritative and the chunk-level fields became cargo.
     """
     from nexus.metadata_schema import ALLOWED_TOP_LEVEL
 
     for key in (
         "content_hash",
         "chunk_text_hash",
-        "chunk_index",
-        "chunk_count",
         "chunk_start_char",
         "chunk_end_char",
         "page_number",
@@ -55,7 +51,6 @@ def test_load_bearing_keys_are_allowed() -> None:
         "section_type",
         "frecency_score",
         "source_agent",
-        "doc_id",  # RDR-101 Phase 3 PR δ — catalog cross-reference
     ):
         assert key in ALLOWED_TOP_LEVEL, f"load-bearing key {key!r} missing"
 
@@ -103,19 +98,16 @@ def test_cargo_keys_not_allowed() -> None:
 
 
 def test_normalize_drops_unknown_keys() -> None:
-    """RDR-102 D2: ``source_path`` is now also a key normalize() drops
-    (the schema-level removal flips it from a load-bearing key to a
-    cargo key). The ``content_hash`` / ``chunk_index`` / ``chunk_count``
-    / ``content_type`` checks below stand in for "load-bearing keys
-    survive" since they remain in ALLOWED_TOP_LEVEL."""
+    """RDR-102 D2: ``source_path`` is no longer in ALLOWED_TOP_LEVEL.
+    RDR-108 Phase 3: ``chunk_index`` / ``chunk_count`` / ``doc_id`` are
+    also dropped. The ``content_hash`` check stands in for "load-bearing
+    keys survive"."""
     from nexus.metadata_schema import normalize
 
     raw = {
         "source_path": "/a.pdf",
         "content_hash": "abc",
         "chunk_text_hash": "def",
-        "chunk_index": 0,
-        "chunk_count": 1,
         "pdf_subject": "should drop",
         "extraction_method": "should drop",
         "ast_chunked": True,
@@ -129,7 +121,6 @@ def test_normalize_drops_unknown_keys() -> None:
         "normalize() must drop it"
     )
     assert out["content_hash"] == "abc"
-    assert out["chunk_index"] == 0
 
 
 def test_normalize_drops_flat_git_keys() -> None:
@@ -142,8 +133,6 @@ def test_normalize_drops_flat_git_keys() -> None:
     raw = {
         "content_hash": "x",
         "chunk_text_hash": "y",
-        "chunk_index": 0,
-        "chunk_count": 1,
         "git_project_name": "nexus",
         "git_branch": "main",
         "git_commit_hash": "deadbeef",
@@ -162,8 +151,6 @@ def test_normalize_injects_content_type() -> None:
         "source_path": "f.py",
         "content_hash": "x",
         "chunk_text_hash": "y",
-        "chunk_index": 0,
-        "chunk_count": 1,
     }
     out = normalize(raw, content_type="code")
     assert out["content_type"] == "code"
@@ -174,7 +161,7 @@ def test_normalize_rejects_invalid_content_type() -> None:
 
     with pytest.raises(ValueError, match="content_type"):
         normalize({"source_path": "a", "content_hash": "x",
-                   "chunk_text_hash": "y", "chunk_index": 0, "chunk_count": 1},
+                   "chunk_text_hash": "y"},
                   content_type="binary")
 
 
@@ -185,8 +172,6 @@ def test_normalize_preserves_bib_fields() -> None:
         "source_path": "p.pdf",
         "content_hash": "x",
         "chunk_text_hash": "y",
-        "chunk_index": 0,
-        "chunk_count": 1,
         "bib_year": 2024,
         "bib_authors": "Smith, Jones",
         "bib_venue": "ICML",
@@ -213,8 +198,6 @@ def test_normalize_is_idempotent() -> None:
         "source_path": "src/foo.py",
         "content_hash": "x",
         "chunk_text_hash": "y",
-        "chunk_index": 0,
-        "chunk_count": 1,
         "git_project_name": "nexus",
         "git_branch": "main",
         "git_commit_hash": "deadbeef",
@@ -236,8 +219,6 @@ def test_normalize_idempotent_on_reprocess() -> None:
     raw = {
         "content_hash": "x",
         "chunk_text_hash": "y",
-        "chunk_index": 0,
-        "chunk_count": 1,
     }
     first = normalize(raw, content_type="code")
     merged = {**first, "bib_year": 2024, "bib_authors": "Doe"}
@@ -257,8 +238,6 @@ def test_normalize_keeps_ttl_and_indexed_at() -> None:
         "source_path": "a",
         "content_hash": "x",
         "chunk_text_hash": "y",
-        "chunk_index": 0,
-        "chunk_count": 1,
         "ttl_days": 0,
         "indexed_at": "2026-04-26T00:00:00+00:00",
     }
@@ -299,8 +278,6 @@ def test_normalize_drops_empty_bib_placeholders() -> None:
         "source_path": "p.pdf",
         "content_hash": "x",
         "chunk_text_hash": "y",
-        "chunk_index": 0,
-        "chunk_count": 1,
         "bib_year": 0,
         "bib_authors": "",
         "bib_venue": "",
@@ -320,8 +297,6 @@ def test_normalize_keeps_partial_bib_when_year_populated() -> None:
         "source_path": "p.pdf",
         "content_hash": "x",
         "chunk_text_hash": "y",
-        "chunk_index": 0,
-        "chunk_count": 1,
         "bib_year": 2024,
         "bib_authors": "",
         "bib_venue": "",
@@ -341,8 +316,6 @@ def test_normalize_keeps_fully_populated_bib() -> None:
         "source_path": "p.pdf",
         "content_hash": "x",
         "chunk_text_hash": "y",
-        "chunk_index": 0,
-        "chunk_count": 1,
         "bib_year": 2024,
         "bib_authors": "Smith",
         "bib_venue": "ICML",
@@ -365,8 +338,6 @@ def test_validate_passes_well_formed() -> None:
         "source_path": "a",
         "content_hash": "x",
         "chunk_text_hash": "y",
-        "chunk_index": 0,
-        "chunk_count": 1,
     }
     validate(normalize(raw, content_type="code"))  # no raise
 
@@ -462,131 +433,69 @@ def test_normalize_output_fits_under_chroma_cap() -> None:
     )
 
 
-# ── RDR-101 Phase 3 PR δ — doc_id schema support ─────────────────────────
+# ── RDR-101 Phase 3 PR δ — doc_id schema (RETIRED by RDR-108 Phase 3) ────
 
 
-class TestDocIdInSchema:
-    """``doc_id`` joins ALLOWED_TOP_LEVEL with drop-when-empty semantics
-    parallel to the bib_* and git_meta filters. Live indexing call sites
-    populate it from ``Catalog.by_file_path(owner, rel_path).tumbler``;
-    call sites that have no Catalog handle pass ``""`` and the field is
-    dropped by ``normalize`` so it does not consume a metadata slot.
+class TestDocIdRetiredFromChunkSchema:
+    """RDR-108 Phase 3 (nexus-bdag) retires ``doc_id`` from chunk-level
+    T3 metadata. The catalog ``document_chunks`` manifest table is now
+    the authoritative document-to-chunk map; carrying ``doc_id`` on the
+    chunk duplicates that state.
+
+    Pre-Phase-3 chunks already in T3 keep the ``doc_id`` field in their
+    stored metadata — the schema change only affects new writes.
+    Phase 4 retargets the read paths (search/scoring/aspects) to consult
+    the manifest directly.
     """
 
-    def test_doc_id_in_allowed_top_level(self) -> None:
+    def test_doc_id_not_in_allowed_top_level(self) -> None:
         from nexus.metadata_schema import ALLOWED_TOP_LEVEL
 
-        assert "doc_id" in ALLOWED_TOP_LEVEL
+        assert "doc_id" not in ALLOWED_TOP_LEVEL
 
-    def test_validate_accepts_doc_id(self) -> None:
-        # WITH TEETH: removing ``doc_id`` from ALLOWED_TOP_LEVEL makes
-        # ``validate`` raise on any chunk metadata that carries it,
-        # which is exactly what blocks the live indexing path under
-        # the funnel's ``_write_batch`` validate call.
-        from nexus.metadata_schema import validate
+    def test_validate_rejects_doc_id_on_new_writes(self) -> None:
+        from nexus.metadata_schema import MetadataSchemaError, validate
 
         meta = {
             "content_hash": "x",
             "chunk_text_hash": "y",
-            "chunk_index": 0,
-            "chunk_count": 1,
             "content_type": "code",
             "doc_id": "1.1.42",
         }
-        validate(meta)  # must not raise
+        with pytest.raises(MetadataSchemaError):
+            validate(meta)
 
-    def test_make_chunk_metadata_propagates_doc_id(self) -> None:
-        # WITH TEETH: confirms make_chunk_metadata wires doc_id into the
-        # raw dict and normalize() preserves it. A regression that
-        # forgot to add doc_id to the raw assignment would drop the
-        # value silently here.
-        from nexus.metadata_schema import make_chunk_metadata
-
-        meta = make_chunk_metadata(
-            content_type="code",
-            chunk_index=0,
-            chunk_count=1,
-            chunk_text_hash="abc",
-            content_hash="def",
-            indexed_at="2026-05-01T00:00:00+00:00",
-            embedding_model="voyage-context-3",
-            doc_id="1.1.42",
-        )
-        assert meta["doc_id"] == "1.1.42"
-
-    def test_make_chunk_metadata_drops_empty_doc_id(self) -> None:
-        # WITH TEETH: drop-when-empty saves the metadata slot for
-        # call sites that don't pass doc_id (back-compat). A regression
-        # that left doc_id="" in the dict would consume one of the
-        # 32 metadata slots for no payload.
-        from nexus.metadata_schema import make_chunk_metadata
-
-        meta = make_chunk_metadata(
-            content_type="code",
-            chunk_index=0,
-            chunk_count=1,
-            chunk_text_hash="abc",
-            content_hash="def",
-            indexed_at="2026-05-01T00:00:00+00:00",
-            embedding_model="voyage-context-3",
-            # doc_id omitted (defaults to "")
-        )
-        assert "doc_id" not in meta
-
-    def test_normalize_drops_explicit_empty_doc_id(self) -> None:
-        # WITH TEETH: normalize() Step 4c drops doc_id when value is
-        # falsy. Same invariant as bib_* and git_meta drop-when-empty.
+    def test_normalize_drops_doc_id(self) -> None:
+        """``normalize`` cargo-drops ``doc_id`` (anything outside
+        ``ALLOWED_TOP_LEVEL`` is removed silently in the cargo filter)."""
         from nexus.metadata_schema import normalize
 
         out = normalize(
             {
-                "source_path": "src/foo.py",
                 "content_hash": "x",
                 "chunk_text_hash": "y",
-                "chunk_index": 0,
-                "chunk_count": 1,
-                "doc_id": "",
+                "doc_id": "1.1.42",
             },
             content_type="code",
         )
         assert "doc_id" not in out
 
-    def test_normalize_preserves_truthy_doc_id(self) -> None:
-        # WITH TEETH: drop-when-empty must not also drop populated
-        # values. A regression that filtered ``doc_id`` unconditionally
-        # would silently lose the catalog cross-reference.
-        from nexus.metadata_schema import normalize
+    def test_make_chunk_metadata_rejects_doc_id_kwarg(self) -> None:
+        """The ``doc_id=`` kwarg is HARD-REMOVED — passing it must raise
+        ``TypeError`` so a regression at any call site is a build break,
+        not a silent drop.
+        """
+        from nexus.metadata_schema import make_chunk_metadata
 
-        out = normalize(
-            {
-                "source_path": "src/foo.py",
-                "content_hash": "x",
-                "chunk_text_hash": "y",
-                "chunk_index": 0,
-                "chunk_count": 1,
-                "doc_id": "1.1.42",
-            },
-            content_type="code",
-        )
-        assert out["doc_id"] == "1.1.42"
-
-    def test_normalize_is_idempotent_with_doc_id(self) -> None:
-        # Round-trip: re-normalising preserves doc_id without accreting
-        # or dropping. Mirrors the bib_* / git_meta idempotency tests.
-        from nexus.metadata_schema import normalize
-
-        raw = {
-            "source_path": "src/foo.py",
-            "content_hash": "x",
-            "chunk_text_hash": "y",
-            "chunk_index": 0,
-            "chunk_count": 1,
-            "doc_id": "1.1.42",
-        }
-        first = normalize(raw, content_type="code")
-        second = normalize(first, content_type="code")
-        assert first == second
-        assert second["doc_id"] == "1.1.42"
+        with pytest.raises(TypeError):
+            make_chunk_metadata(
+                content_type="code",
+                chunk_text_hash="abc",
+                content_hash="def",
+                indexed_at="2026-05-09T00:00:00Z",
+                embedding_model="voyage-code-3",
+                doc_id="1.1.42",
+            )
 
 
 # ── RDR-102 Phase B: source_path retirement ─────────────────────────────
@@ -644,8 +553,6 @@ def test_make_chunk_metadata_rejects_source_path_kwarg() -> None:
         make_chunk_metadata(
             content_type="code",
             source_path="/should/raise/typeerror.py",  # RDR-102 D2: rejected kwarg
-            chunk_index=0,
-            chunk_count=1,
             chunk_text_hash="abc",
             content_hash="def",
             indexed_at="2026-05-02T00:00:00Z",
@@ -665,8 +572,6 @@ def test_make_chunk_metadata_does_not_emit_source_path() -> None:
 
     meta = make_chunk_metadata(
         content_type="code",
-        chunk_index=0,
-        chunk_count=1,
         chunk_text_hash="abc",
         content_hash="def",
         indexed_at="2026-05-02T00:00:00Z",
@@ -724,7 +629,6 @@ class TestPhase5cSchemaRemoval:
         out = normalize(
             {
                 "content_type": "code",
-                "chunk_index": 0, "chunk_count": 1,
                 "chunk_text_hash": "abc", "content_hash": "def",
                 "indexed_at": "2026-05-03T00:00:00Z",
                 "embedding_model": "voyage-code-3",
@@ -753,7 +657,6 @@ class TestPhase5cSchemaRemoval:
         from nexus.metadata_schema import make_chunk_metadata
         common_kwargs = dict(
             content_type="code",
-            chunk_index=0, chunk_count=1,
             chunk_text_hash="abc", content_hash="def",
             indexed_at="2026-05-03T00:00:00Z",
             embedding_model="voyage-code-3",
@@ -775,7 +678,6 @@ class TestPhase5cSchemaRemoval:
         from nexus.metadata_schema import validate, MetadataSchemaError
         good_base = {
             "content_type": "code",
-            "chunk_index": 0, "chunk_count": 1,
             "chunk_text_hash": "abc", "content_hash": "def",
             "indexed_at": "2026-05-03T00:00:00Z",
             "embedding_model": "voyage-code-3",
@@ -795,3 +697,134 @@ class TestPhase5cSchemaRemoval:
         import nexus.config
         assert not hasattr(nexus.metadata_schema, "_GATED_BY_EVENT_SOURCED")
         assert not hasattr(nexus.config, "is_catalog_event_sourced")
+
+
+# ── RDR-108 Phase 3: chunk-identity removal (nexus-bdag) ─────────────────────
+
+
+class TestPhase3SchemaRemoval:
+    """Phase 3 of RDR-108 retires three chunk-identity fields from
+    ``ALLOWED_TOP_LEVEL``: ``doc_id``, ``chunk_index``, ``chunk_count``.
+    After Phase 1's ``document_chunks`` manifest table is the catalog's
+    authoritative document-to-chunk map, these chunk-level metadata
+    keys duplicate manifest state and consume metadata budget for no
+    payload.
+
+    After Phase 3:
+      * The schema rejects all three (cargo-dropped at normalize, raised
+        at validate).
+      * The ``make_chunk_metadata`` factory refuses the kwargs (TypeError
+        — re-introduction is a build break).
+      * Indexer call sites stop emitting them on new writes.
+      * Pre-Phase-3 chunks already in T3 keep the fields in stored
+        metadata (T3 doesn't strip stored metadata when the schema
+        changes); legacy reads still work. Phase 4 rewrites read paths
+        to use the manifest.
+    """
+    PHASE_3_DROPPED = ("doc_id", "chunk_index", "chunk_count")
+
+    def test_dropped_keys_not_in_allowed_top_level(self) -> None:
+        from nexus.metadata_schema import ALLOWED_TOP_LEVEL
+
+        for k in self.PHASE_3_DROPPED:
+            assert k not in ALLOWED_TOP_LEVEL, (
+                f"{k!r} must be removed from ALLOWED_TOP_LEVEL "
+                f"(Phase 3). Current: {sorted(ALLOWED_TOP_LEVEL)}"
+            )
+
+    def test_normalize_drops_phase_3_keys(self) -> None:
+        """``normalize()`` drops the 3 keys via the cargo filter (Step 2:
+        anything outside ALLOWED_TOP_LEVEL is dropped silently)."""
+        from nexus.metadata_schema import normalize
+
+        out = normalize(
+            {
+                "content_hash": "x",
+                "chunk_text_hash": "y",
+                "indexed_at": "2026-05-09T00:00:00Z",
+                "embedding_model": "voyage-code-3",
+                "doc_id": "1.1.42",
+                "chunk_index": 7,
+                "chunk_count": 99,
+            },
+            content_type="code",
+        )
+        for k in self.PHASE_3_DROPPED:
+            assert k not in out, (
+                f"{k!r} survived normalize() — Phase 3 should drop it. "
+                f"Got keys: {sorted(out.keys())}"
+            )
+
+    def test_make_chunk_metadata_rejects_phase_3_kwargs(self) -> None:
+        """``doc_id``, ``chunk_index``, ``chunk_count`` kwargs are removed
+        from the factory signature. Passing any raises ``TypeError`` —
+        re-introduction is a build break.
+        """
+        from nexus.metadata_schema import make_chunk_metadata
+
+        common_kwargs = dict(
+            content_type="code",
+            chunk_text_hash="abc",
+            content_hash="def",
+            indexed_at="2026-05-09T00:00:00Z",
+            embedding_model="voyage-code-3",
+        )
+        for kwarg, value in [
+            ("doc_id", "1.1.42"),
+            ("chunk_index", 0),
+            ("chunk_count", 1),
+        ]:
+            with pytest.raises(TypeError):
+                make_chunk_metadata(**common_kwargs, **{kwarg: value})
+
+    def test_validate_rejects_phase_3_keys(self) -> None:
+        """``validate()`` enforces ALLOWED_TOP_LEVEL membership; the 3
+        Phase 3 keys trigger MetadataSchemaError."""
+        from nexus.metadata_schema import MetadataSchemaError, validate
+
+        good_base = {
+            "content_type": "code",
+            "chunk_text_hash": "abc",
+            "content_hash": "def",
+            "indexed_at": "2026-05-09T00:00:00Z",
+            "embedding_model": "voyage-code-3",
+        }
+        for dropped in self.PHASE_3_DROPPED:
+            with pytest.raises(MetadataSchemaError):
+                validate({**good_base, dropped: "value" if isinstance(dropped, str) and dropped == "doc_id" else 1})
+
+    def test_make_chunk_metadata_does_not_emit_phase_3_keys(self) -> None:
+        """A bare ``make_chunk_metadata`` call with the post-Phase-3
+        signature must NOT emit any of the 3 dropped keys.
+        """
+        from nexus.metadata_schema import make_chunk_metadata
+
+        meta = make_chunk_metadata(
+            content_type="code",
+            chunk_text_hash="abc",
+            content_hash="def",
+            indexed_at="2026-05-09T00:00:00Z",
+            embedding_model="voyage-code-3",
+        )
+        for k in self.PHASE_3_DROPPED:
+            assert k not in meta, (
+                f"{k!r} appeared in factory output post-Phase-3; "
+                f"got keys: {sorted(meta.keys())}"
+            )
+
+    def test_legacy_chunk_dict_reads_unaffected(self) -> None:
+        """Pre-Phase-3 chunks stored in T3 still carry doc_id /
+        chunk_index / chunk_count in their metadata. Direct ``dict.get``
+        reads on a legacy dict continue to return the stored value —
+        the schema change only affects new writes via normalize/validate.
+        """
+        legacy_meta = {
+            "content_hash": "x",
+            "chunk_text_hash": "y",
+            "doc_id": "1.1.42",
+            "chunk_index": 3,
+            "chunk_count": 10,
+        }
+        assert legacy_meta.get("doc_id") == "1.1.42"
+        assert legacy_meta.get("chunk_index") == 3
+        assert legacy_meta.get("chunk_count") == 10

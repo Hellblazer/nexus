@@ -626,3 +626,70 @@ class TestManifestWriteBatchHook:
         from nexus.mcp_infra import _post_store_batch_hooks, manifest_write_batch_hook
 
         assert manifest_write_batch_hook in _post_store_batch_hooks
+
+    def test_manifest_write_batch_hook_accumulates_across_batches(self, tmp_path):
+        """RDR-108 Phase 3 (nexus-bdag) regression test: when the hook is
+        called multiple times for the same ``catalog_doc_id`` (the
+        streaming PDF / incremental indexer pattern), the manifest must
+        accumulate across calls. Pre-fix the hook used
+        ``write_manifest`` which DELETE+INSERTs, so the second call
+        truncated the first call's rows. Post-fix uses
+        ``append_manifest_chunks`` (UPSERT keyed on (doc_id, position))
+        so callers passing a global ``chunk_index`` get a complete
+        manifest.
+
+        This test simulates a 2-batch indexing run for one document
+        with 5 total chunks (3 in batch 1, 2 in batch 2). The final
+        manifest must contain all 5 rows at positions 0..4.
+        """
+        from unittest.mock import patch
+
+        from nexus.mcp_infra import manifest_write_batch_hook
+
+        cat = _make_catalog(tmp_path)
+        _insert_doc(cat, "1.1.1", "code__test")
+
+        # Helper to build a metadata dict with a global chunk_index.
+        def _meta(global_idx: int, chash: str) -> dict:
+            return {
+                "chunk_index": global_idx,
+                "chunk_text_hash": chash,
+            }
+
+        # Batch 1: positions 0, 1, 2.
+        batch_1 = [_meta(0, "a" * 64), _meta(1, "b" * 64), _meta(2, "c" * 64)]
+        # Batch 2: positions 3, 4.
+        batch_2 = [_meta(3, "d" * 64), _meta(4, "e" * 64)]
+
+        with patch("nexus.mcp_infra.get_catalog", return_value=cat):
+            manifest_write_batch_hook(
+                doc_ids=["chunk-0", "chunk-1", "chunk-2"],
+                collection="code__test",
+                contents=["c0", "c1", "c2"],
+                embeddings=None,
+                metadatas=batch_1,
+                catalog_doc_id="1.1.1",
+            )
+            manifest_write_batch_hook(
+                doc_ids=["chunk-3", "chunk-4"],
+                collection="code__test",
+                contents=["c3", "c4"],
+                embeddings=None,
+                metadatas=batch_2,
+                catalog_doc_id="1.1.1",
+            )
+
+        rows = cat._db.execute(
+            "SELECT position, chash FROM document_chunks "
+            "WHERE doc_id = ? ORDER BY position",
+            ("1.1.1",),
+        ).fetchall()
+        assert len(rows) == 5, (
+            f"expected 5 manifest rows after 2 batches; got {len(rows)}. "
+            f"Pre-fix the second batch's write_manifest deleted the "
+            f"first batch's rows."
+        )
+        for i, (pos, chash) in enumerate(rows):
+            assert pos == i
+        assert rows[0][1] == "a" * 64
+        assert rows[4][1] == "e" * 64

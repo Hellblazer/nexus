@@ -48,15 +48,16 @@ __all__ = [
 #: ``where=`` filter, every ``meta.get(...)`` / ``metadata[...]`` read,
 #: and every display formatter in the codebase.
 ALLOWED_TOP_LEVEL: frozenset[str] = frozenset({
-    # Identity (4) — RDR-102 D2 dropped ``source_path``. The catalog
-    # tumbler in ``doc_id`` is the canonical reference; ``source_path``
-    # was a regression vector against the prune verb (RF-8: it was the
-    # only key in both ALLOWED_TOP_LEVEL and _PRUNE_DEPRECATED_KEYS,
-    # which created a write-strip-rewrite cycle that never terminated).
+    # Identity (2) — RDR-102 D2 dropped ``source_path`` (catalog tumbler
+    # is the canonical reference). RDR-108 Phase 3 (nexus-bdag) dropped
+    # ``doc_id``, ``chunk_index``, ``chunk_count``: the catalog
+    # ``document_chunks`` manifest table is the authoritative
+    # document-to-chunk map and chunk-level mirrors of those fields
+    # consume metadata budget for no payload. Pre-Phase-3 chunks keep
+    # the fields in their stored metadata for legacy reads; Phase 4
+    # rewrites read paths to consult the manifest directly.
     "content_hash",
     "chunk_text_hash",
-    "chunk_index",
-    "chunk_count",
     # Spans (5)
     "chunk_start_char",
     "chunk_end_char",
@@ -104,15 +105,6 @@ ALLOWED_TOP_LEVEL: frozenset[str] = frozenset({
     # provenance JSON blob): zero non-self-referential readers in
     # src/. Catalog Document carries source git provenance at the
     # document level.
-    # RDR-101 Phase 3 PR δ — catalog cross-reference (1).
-    # ``doc_id`` carries the catalog Tumbler string for the document
-    # this chunk belongs to. RDR-101 Phase 4: every indexer writes
-    # ``doc_id`` at chunk-creation time via ``make_chunk_metadata``;
-    # ``_write_batch`` calls ``validate()`` which would otherwise
-    # strip a non-whitelisted key. The Phase 2 t3-backfill-doc-id
-    # migration verb was retired post Phase 5b (nexus-iftc); legacy
-    # chunks predating Phase 4 are repopulated by re-indexing.
-    "doc_id",
 })
 
 #: Allowed content_type values. Replaces the old overlapping pair
@@ -170,16 +162,14 @@ def normalize(raw: dict[str, Any], *, content_type: str) -> dict[str, Any]:
     2. Drop cargo keys — anything outside :data:`ALLOWED_TOP_LEVEL`.
        Then drop the four ``bib_*`` slots together when every value is
        the placeholder (``0`` / ``""``).
-    3. Drop ``doc_id`` when the call site did not populate it (RDR-101
-       PR δ — empty values consume metadata slots for no payload).
-    4. Inject ``content_type`` so routing code has a single canonical
+    3. Inject ``content_type`` so routing code has a single canonical
        field to read.
 
     RDR-101 Phase 5c (``nexus-o6aa.13``) removed ``corpus``,
-    ``store_type``, ``git_meta`` from :data:`ALLOWED_TOP_LEVEL`. The
-    Step 2 cargo filter drops them. The Phase 5a/5b
-    ``[catalog].event_sourced`` flag machinery is gone — there's no
-    flag, the schema just doesn't have those fields.
+    ``store_type``, ``git_meta`` from :data:`ALLOWED_TOP_LEVEL`.
+    RDR-108 Phase 3 (``nexus-bdag``) further removed ``doc_id``,
+    ``chunk_index``, ``chunk_count``. The Step 2 cargo filter drops
+    each of them silently.
 
     The function never raises on unknown keys (cargo is silently dropped).
     The companion :func:`validate` performs the strict post-write check.
@@ -211,14 +201,7 @@ def normalize(raw: dict[str, Any], *, content_type: str) -> dict[str, Any]:
         for field in _BIB_FIELDS:
             normalised.pop(field, None)
 
-    # Step 3 (RDR-101 PR δ): drop ``doc_id`` when the call site did not
-    # populate it. Pre-PR-δ chunks have no doc_id; the field is opt-in
-    # for indexers that have a Catalog handle. Empty value would
-    # otherwise consume a metadata slot for no payload.
-    if not normalised.get("doc_id"):
-        normalised.pop("doc_id", None)
-
-    # Step 4: stamp content_type.
+    # Step 3: stamp content_type.
     normalised["content_type"] = content_type
 
     return normalised
@@ -271,11 +254,12 @@ def make_chunk_metadata(
     content_type: str,
     # Identity (always required) — RDR-102 D2 hard-removed
     # ``source_path``; RDR-101 Phase 5c (nexus-o6aa.13) hard-removed
-    # ``corpus``, ``store_type``, and ``git_meta``. Callers that still
-    # pass any of those raise ``TypeError`` so the regression is caught
+    # ``corpus``, ``store_type``, and ``git_meta``. RDR-108 Phase 3
+    # (nexus-bdag) hard-removed ``chunk_index``, ``chunk_count``, and
+    # ``doc_id`` — the catalog ``document_chunks`` manifest carries
+    # those fields at document scope. Callers that still pass any of
+    # the removed kwargs raise ``TypeError`` so the regression is caught
     # at the call site rather than silently dropped downstream.
-    chunk_index: int,
-    chunk_count: int,
     chunk_text_hash: str,
     content_hash: str,
     indexed_at: str,
@@ -305,13 +289,6 @@ def make_chunk_metadata(
     frecency_score: float = 0.0,
     source_agent: str = "nexus-indexer",
     session_id: str = "",
-    # RDR-101 Phase 3 PR δ — catalog cross-reference. Empty string is
-    # the "not registered" sentinel; live-indexing call sites populate
-    # it from ``Catalog.by_file_path(owner, rel_path).tumbler``. Empty
-    # values flow through normalize() unchanged but are dropped from
-    # the written metadata by the same cargo-key filter that handles
-    # other empty optionals (see normalize() Step 3).
-    doc_id: str = "",
 ) -> dict[str, Any]:
     """Build a complete chunk metadata dict and route through
     :func:`normalize` so it's safe to write directly to T3.
@@ -327,8 +304,6 @@ def make_chunk_metadata(
     raw: dict[str, Any] = {
         "content_hash": content_hash,
         "chunk_text_hash": chunk_text_hash,
-        "chunk_index": chunk_index,
-        "chunk_count": chunk_count,
         "chunk_start_char": chunk_start_char,
         "chunk_end_char": chunk_end_char,
         "line_start": line_start,
@@ -351,7 +326,6 @@ def make_chunk_metadata(
         "frecency_score": frecency_score,
         "source_agent": source_agent,
         "session_id": session_id,
-        "doc_id": doc_id,
     }
     return normalize(raw, content_type=content_type)
 

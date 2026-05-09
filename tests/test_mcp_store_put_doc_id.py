@@ -113,11 +113,15 @@ def test_mcp_store_put_writes_catalog_doc_id_into_t3_chunk_metadata(
     ]
     assert matching_metas, "expected a chunk with title='mcp-finding-doc-id'"
 
+    # RDR-108 Phase 3: MCP-stored chunks no longer carry ``doc_id`` —
+    # the catalog manifest is authoritative. The Document's existence
+    # in the catalog (asserted above) is the contract Phase 3 locks in.
     for m in matching_metas:
-        assert m.get("doc_id") == expected_doc_id, (
-            f"MCP-stored chunk carries doc_id={m.get('doc_id')!r}, "
-            f"expected {expected_doc_id!r} (catalog tumbler)"
+        assert "doc_id" not in m, (
+            f"Phase 3: MCP-stored chunk metadata must not carry doc_id; "
+            f"got {m!r}"
         )
+    assert expected_doc_id, "expected catalog tumbler for the mcp-stored doc"
 
 
 def test_mcp_store_put_doc_id_absent_when_catalog_uninitialized(

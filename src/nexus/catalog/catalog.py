@@ -1517,6 +1517,12 @@ class Catalog:
         """
         return self._writes.write_manifest(doc_id, chunks)
 
+    def append_manifest_chunks(self, doc_id: str, chunks: list[dict]) -> None:
+        """UPSERT manifest rows for one document (RDR-108 Phase 3,
+        nexus-bdag). Use from per-batch hook contexts; see
+        :meth:`_WriteOps.append_manifest_chunks` for the contract."""
+        return self._writes.append_manifest_chunks(doc_id, chunks)
+
     def get_manifest(self, doc_id: str) -> list[_ManifestRow]:
         """Return ordered manifest rows for ``doc_id`` (nexus-572g K6)."""
         return self._writes.get_manifest(doc_id)

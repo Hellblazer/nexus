@@ -124,18 +124,19 @@ def _do_index(repo: Path, registry: RepoRegistry, t3: T3Database, monkeypatch) -
         index_repository(repo, registry, force=False)
 
 
-def test_pdf_indexer_writes_doc_id_into_t3_chunk_metadata(
+def test_pdf_indexer_registers_catalog_and_writes_manifest(
     pdf_repo: Path,
     registry: RepoRegistry,
     local_t3: T3Database,
     catalog_env: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """First-pass indexing of a fresh PDF corpus must:
-      1) Register the PDF in the catalog (was: skipped — PDFs missing from
-         ``indexed_for_catalog`` pre-Stage-B.3).
-      2) Populate ``doc_id`` in every PDF chunk's T3 metadata, matching
-         the catalog tumbler.
+    """RDR-108 Phase 3: PDF indexing must:
+      1) Register the PDF in the catalog (Stage-B.3 ensured PDFs reach
+         ``indexed_for_catalog``).
+      2) Populate the catalog ``document_chunks`` manifest for the PDF's
+         tumbler. Phase 3 retired ``doc_id`` from chunk metadata in
+         favour of the manifest.
     """
     _do_index(pdf_repo, registry, local_t3, monkeypatch)
 
@@ -152,6 +153,12 @@ def test_pdf_indexer_writes_doc_id_into_t3_chunk_metadata(
     # Filter to PDF chunks (the docs__ collection holds prose + PDF mixed).
     pdf_metas = [m for m in result["metadatas"] if m.get("content_type") == "pdf"]
     assert pdf_metas, "expected at least one chunk with content_type='pdf'"
+
+    # Phase 3: chunks must NOT carry doc_id any more.
+    for m in pdf_metas:
+        assert "doc_id" not in m, (
+            f"Phase 3: PDF chunk metadata must not carry doc_id; got {m!r}"
+        )
 
     # Resolve the catalog owner and the PDF's catalog entry.
     owner_row = cat._db.execute(
@@ -170,12 +177,11 @@ def test_pdf_indexer_writes_doc_id_into_t3_chunk_metadata(
         f"expected catalog content_type='pdf', got {pdf_entry.content_type!r}"
     )
 
-    expected_doc_id = str(pdf_entry.tumbler)
-    for m in pdf_metas:
-        assert m.get("doc_id") == expected_doc_id, (
-            f"PDF chunk carries doc_id={m.get('doc_id')!r}, "
-            f"expected {expected_doc_id!r} (catalog tumbler)"
-        )
+    manifest_rows = cat.get_manifest(str(pdf_entry.tumbler))
+    assert manifest_rows, (
+        f"manifest_write_batch_hook must populate document_chunks for "
+        f"PDF doc_id={pdf_entry.tumbler!r}"
+    )
 
 
 def test_pdf_indexer_doc_id_absent_when_catalog_uninitialized(

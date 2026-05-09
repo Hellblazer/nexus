@@ -131,16 +131,17 @@ def _do_index(repo: Path, registry: RepoRegistry, t3: T3Database, monkeypatch) -
         index_repository(repo, registry, force=False)
 
 
-def test_code_indexer_writes_doc_id_into_t3_chunk_metadata(
+def test_code_indexer_writes_manifest_rows_for_each_document(
     code_repo: Path,
     registry: RepoRegistry,
     local_t3: T3Database,
     catalog_env: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """First-pass indexing of a fresh code corpus must populate ``doc_id``
-    in every chunk's T3 metadata, matching the catalog tumbler the
-    orchestrator registered before per-file indexing.
+    """RDR-108 Phase 3 (nexus-bdag) retired ``doc_id`` from chunk metadata
+    in favour of the catalog ``document_chunks`` manifest. First-pass
+    indexing of a fresh code corpus must populate manifest rows for
+    every registered Document, not stamp doc_id on every chunk.
     """
     _do_index(code_repo, registry, local_t3, monkeypatch)
 
@@ -154,34 +155,27 @@ def test_code_indexer_writes_doc_id_into_t3_chunk_metadata(
     result = code_col.get(include=["metadatas"])
     assert result["ids"], "expected at least one code chunk in T3 code collection"
 
-    # RDR-102 D2 dropped source_path from the chunk schema; group
-    # chunks by doc_id (the post-Phase-A canonical identity) and
-    # verify each doc_id resolves to a real catalog Document via the
-    # tumbler-keyed reverse lookup.
-    by_doc_id: dict[str, list[dict]] = {}
+    # Phase 3: chunks must NOT carry doc_id any more.
     for meta in result["metadatas"]:
-        doc_id = meta.get("doc_id", "")
-        assert doc_id, (
-            f"chunk metadata lacks doc_id (Phase A pre-flight "
-            f"registration regression): {meta}"
+        assert "doc_id" not in meta, (
+            f"Phase 3: chunk metadata must not carry doc_id; got {meta!r}"
         )
-        by_doc_id.setdefault(doc_id, []).append(meta)
+        assert "chunk_index" not in meta
+        assert "chunk_count" not in meta
 
-    assert by_doc_id, "expected metadatas to carry doc_id"
-
-    owner_row = cat._db.execute(
-        "SELECT tumbler_prefix FROM owners LIMIT 1"
-    ).fetchone()
-    assert owner_row is not None, "expected catalog owner registered by indexer"
-
-    for doc_id in by_doc_id:
-        # doc_id is the catalog tumbler; resolve confirms the catalog
-        # row exists. Phase A's pre-flight registration guarantees one
-        # Document per file-path with a stable tumbler.
-        entry = cat.resolve(Tumbler.parse(doc_id))
-        assert entry is not None, (
-            f"catalog has no Document for doc_id={doc_id!r} - "
-            "pre-index registration should have created one"
+    documents = cat._db.execute(
+        "SELECT tumbler, file_path FROM documents "
+        "WHERE physical_collection = ?",
+        (code_collection,),
+    ).fetchall()
+    assert documents, "expected catalog Documents for the code collection"
+    for row in documents:
+        tumbler = row[0]
+        file_path = row[1] or ""
+        manifest_rows = cat.get_manifest(tumbler)
+        assert manifest_rows, (
+            f"manifest_write_batch_hook must populate document_chunks "
+            f"for doc_id={tumbler!r} (file_path={file_path!r})"
         )
 
 

@@ -132,11 +132,15 @@ def test_store_put_cli_writes_catalog_doc_id_into_t3_chunk_metadata(
     ]
     assert matching_metas, "expected a chunk with title='finding-doc-id-pin'"
 
+    # RDR-108 Phase 3: chunks no longer carry ``doc_id``. The catalog
+    # entry's existence (asserted above) is the contract Phase 3 locks
+    # in; the manifest is populated by the post-store batch hook.
     for m in matching_metas:
-        assert m.get("doc_id") == expected_doc_id, (
-            f"chunk for finding-doc-id-pin carries doc_id={m.get('doc_id')!r}, "
-            f"expected {expected_doc_id!r} (catalog tumbler)"
+        assert "doc_id" not in m, (
+            f"Phase 3: chunk for finding-doc-id-pin must not carry doc_id; "
+            f"got {m!r}"
         )
+    assert expected_doc_id, "expected catalog tumbler for the stored doc"
 
 
 def test_store_put_doc_id_absent_when_catalog_uninitialized(
