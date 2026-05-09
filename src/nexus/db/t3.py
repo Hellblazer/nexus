@@ -1213,6 +1213,17 @@ class T3Database:
         reader migration). Paginates ``col.get()`` to respect the ChromaDB
         Cloud 300-record limit. Returns empty list if the collection does
         not exist.
+
+        **RDR-108 Phase 3 caveat (nexus-bdag)**: chunks written after
+        Phase 3 do not carry ``doc_id`` in their metadata, so the
+        ``where={"doc_id": ...}`` filter returns empty for them.
+        Callers that need the doc_id → chunk_id mapping for Phase-3
+        chunks should consult the catalog ``document_chunks`` manifest
+        (``Catalog.get_manifest(doc_id)``) and resolve chash → chunk
+        via ``chash_index`` instead. RDR-108 Phase 4 retargets every
+        in-tree caller (prune paths, search filters, aspect readers)
+        to the manifest-based lookup; this method is retained for
+        legacy reads against pre-Phase-3 chunks.
         """
         try:
             col = self._client_for(collection_name).get_collection(collection_name)
@@ -1242,6 +1253,14 @@ class T3Database:
         Companion to :meth:`delete_by_source` (RDR-101 Phase 4 reader
         migration). Uses paginated ``col.get()`` keyed on ``doc_id`` to
         avoid the ChromaDB Cloud 300-record truncation limit.
+
+        **RDR-108 Phase 3 caveat (nexus-bdag)**: chunks written after
+        Phase 3 do not carry ``doc_id`` in their metadata; this method
+        silently returns 0 for those chunks. The Phase 4 prune rewrite
+        (nexus-mmf5 family) consults the catalog manifest to resolve
+        chunk IDs by chash and deletes via ``_delete_batch`` directly.
+        Pre-Phase-3 chunks (still present in T3 until the operator runs
+        ``nx t3 reidentify --all-collections``) keep working unchanged.
         """
         try:
             col = self._client_for(collection_name).get_collection(collection_name)

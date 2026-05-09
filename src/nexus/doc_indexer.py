@@ -810,6 +810,18 @@ def _index_pdf_incremental(
         # Upsert
         t3.upsert_chunks_with_embeddings(collection_name, batch_ids, batch_docs, embeddings, batch_metas)
 
+        # RDR-108 Phase 3: inject the global chunk_index per row before
+        # firing the batch chain. ``batch_metas`` came from
+        # ``make_chunk_metadata`` (post-Phase-3, no chunk_index); the
+        # incremental loop slices ``metadatas_all[batch_start:batch_end]``
+        # so the per-row global index is ``batch_start + i``. Without
+        # this injection the manifest hook defaults to a batch-local
+        # enumeration that resets to 0 each batch, truncating the
+        # manifest. T3 already received the post-Phase-3 metadata; the
+        # local copy mutation here only affects the hook payload.
+        for _i, _meta in enumerate(batch_metas):
+            _meta["chunk_index"] = batch_start + _i
+
         # Post-store hook chains (RDR-095). Both single-doc and batch
         # chains fire from every storage event; the per-doc loop covers
         # single-shape consumers on CLI ingest.

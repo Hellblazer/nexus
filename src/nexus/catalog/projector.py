@@ -198,7 +198,13 @@ class Projector:
         # ``document_chunks → documents`` does not wipe the manifest on
         # every projector replay (INSERT OR REPLACE deletes-then-inserts
         # the row, triggering the cascade; ON CONFLICT DO UPDATE updates
-        # in place).
+        # in place). The SET clause lists exactly the columns that
+        # ``DocumentRegistered`` payloads carry; ``bib_*`` columns are
+        # intentionally absent so projector replay does not clobber
+        # bibliographic enrichment written by the
+        # ``BibliographicEnriched`` event handler — a behavioural
+        # divergence from the prior INSERT OR REPLACE which reset bib_*
+        # to defaults on every replay.
         self._db.execute(
             "INSERT INTO documents "
             "(tumbler, title, author, year, content_type, file_path, "

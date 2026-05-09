@@ -518,6 +518,18 @@ class _WriteOps:
                 # cat.update() after the per-batch manifest_write_hook.
                 # The ON CONFLICT DO UPDATE pattern updates in place so
                 # no cascade fires.
+                #
+                # NOTE: the SET clause lists every column that
+                # ``cat.update()`` is expected to refresh. ``bib_*``
+                # columns are intentionally NOT in the list — under the
+                # prior ``INSERT OR REPLACE`` form, every catalog
+                # update implicitly reset bibliographic enrichment to
+                # the column defaults (because REPLACE deletes-and-
+                # re-inserts), which silently lost any ``nx enrich``
+                # data on every re-index. ON CONFLICT DO UPDATE
+                # preserves the pre-existing bib_* values: the only
+                # writer to those columns becomes the explicit
+                # ``BibliographicEnriched`` event handler.
                 cat._db.execute(
                     "INSERT INTO documents "
                     "(tumbler, title, author, year, content_type, file_path, "
@@ -719,6 +731,11 @@ class _WriteOps:
         operations driven by the backfill verb, not by the dual-write
         event-sourcing machinery. The FK constraint (doc_id REFERENCES
         documents.tumbler) is enforced by the SQLite connection.
+
+        Use :meth:`append_manifest_chunks` instead from per-batch hook
+        contexts; this method's DELETE-then-INSERT semantic truncates the
+        manifest when called multiple times for the same doc_id (the
+        intentional behaviour for backfill / full rebuild).
         """
         cat = self._cat
         with cat._db.transaction():
@@ -739,6 +756,63 @@ class _WriteOps:
                     "(doc_id, position, chash, chunk_index, "
                     " line_start, line_end, char_start, char_end) "
                     "VALUES " + ", ".join(["(?, ?, ?, ?, ?, ?, ?, ?)"] * len(batch)),
+                    [
+                        val
+                        for c in batch
+                        for val in (
+                            doc_id,
+                            c["position"],
+                            c["chash"],
+                            c.get("chunk_index"),
+                            c.get("line_start"),
+                            c.get("line_end"),
+                            c.get("char_start"),
+                            c.get("char_end"),
+                        )
+                    ],
+                )
+
+    def append_manifest_chunks(self, doc_id: str, chunks: list[dict]) -> None:
+        """UPSERT manifest rows for one document without deleting prior rows
+        (RDR-108 Phase 3, nexus-bdag).
+
+        ``write_manifest`` clears the doc_id's rows before inserting, which
+        truncates the manifest when called multiple times for the same
+        document — the failure mode for the streaming PDF uploader and
+        the doc_indexer incremental path, both of which fire the
+        per-batch hook once per upload batch (~128 chunks). For documents
+        with more than one batch, the second batch's ``write_manifest``
+        call deletes the first batch's rows.
+
+        ``append_manifest_chunks`` keeps the prior rows in place and
+        upserts on the ``(doc_id, position)`` primary key, so callers
+        that fire it once per batch accumulate the manifest correctly.
+        Re-indexing with fewer chunks than before may leave orphan rows
+        at higher positions; the post-document hook (fired once per
+        document at the tail of every indexing call) is responsible for
+        the final shape and may call ``write_manifest`` to replace.
+
+        Each chunk dict has the same keys as :meth:`write_manifest`.
+        """
+        if not chunks:
+            return
+        cat = self._cat
+        with cat._db.transaction():
+            _batch = 300
+            for i in range(0, len(chunks), _batch):
+                batch = chunks[i : i + _batch]
+                cat._db.execute(
+                    "INSERT INTO document_chunks "
+                    "(doc_id, position, chash, chunk_index, "
+                    " line_start, line_end, char_start, char_end) "
+                    "VALUES " + ", ".join(["(?, ?, ?, ?, ?, ?, ?, ?)"] * len(batch))
+                    + " ON CONFLICT(doc_id, position) DO UPDATE SET "
+                    "chash=excluded.chash, "
+                    "chunk_index=excluded.chunk_index, "
+                    "line_start=excluded.line_start, "
+                    "line_end=excluded.line_end, "
+                    "char_start=excluded.char_start, "
+                    "char_end=excluded.char_end",
                     [
                         val
                         for c in batch

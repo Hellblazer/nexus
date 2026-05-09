@@ -424,6 +424,20 @@ def uploader_loop(
 
                 t3.upsert_chunks_with_embeddings(collection, ids, documents, embeddings, metadatas)
 
+                # RDR-108 Phase 3: inject the per-row global chunk_index
+                # from T2 into the metadata blob BEFORE firing the batch
+                # chain. The blob in T2 was stamped via
+                # ``make_chunk_metadata`` (post-Phase-3, no chunk_index),
+                # so the manifest hook would otherwise default to a
+                # batch-local enumeration index — wrong for multi-batch
+                # streaming where each batch resets to 0. T3 has already
+                # been upserted with the post-Phase-3 metadata; mutating
+                # the local copy now is safe and only affects the hook
+                # payload. ``row["chunk_index"]`` is the chunker's
+                # canonical global ordering.
+                for _i, row in enumerate(batch):
+                    metadatas[_i]["chunk_index"] = row["chunk_index"]
+
                 # Post-store hook chains (RDR-095). Both single-doc and
                 # batch chains fire from every storage event; the per-doc
                 # loop covers single-shape consumers on CLI ingest.
