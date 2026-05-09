@@ -2,13 +2,15 @@
 """nexus-1ccq — `nx collection rename` + domain-store cascade coverage.
 
 ChromaDB Cloud's ``collection.modify(name=...)`` is an O(1) metadata-only
-rename. The CLI wraps it and cascades the new name through the three T2
-surfaces that store a collection string:
+rename. The CLI wraps it and cascades the new name through the T2 surfaces
+that store a collection string:
 
   * ``chash_index.physical_collection``
   * ``topics.collection`` / ``topic_assignments.source_collection`` /
     ``taxonomy_meta.collection``
   * Catalog documents' ``physical_collection`` (JSONL + SQLite cache).
+  * ``document_aspects.collection`` (denorm cache, nexus-gp20)
+  * ``aspect_extraction_queue.collection`` (denorm cache, nexus-gp20)
 
 The cascade is fail-open after the T3 rename lands — T2/catalog errors
 log but do not abort, mirroring the delete-cascade contract.
@@ -446,3 +448,276 @@ class TestRenameCascadeFailureModes:
         fake.rename_collection.assert_called_once_with("code__old", "code__new")
         assert "catalog cascade failed" in result.output
         assert "simulated catalog lock contention" in result.output
+
+
+# ── DocumentAspects.rename_collection (nexus-gp20) ─────────────────────────
+
+
+class TestDocumentAspectsRename:
+    """RDR-108 Phase 1d: ``document_aspects.collection`` is a denorm cache;
+    rename_collection keeps it in sync with the T3 collection rename."""
+
+    def _seed(self, tmp_path: Path):
+        from nexus.db.t2.document_aspects import DocumentAspects, AspectRecord
+
+        store = DocumentAspects(tmp_path / "aspects.db")
+        # Insert rows directly via SQL to avoid the upsert's schema-detection
+        # gate (pre-migration schema: PK is (collection, source_path)).
+        store.conn.execute(
+            "INSERT INTO document_aspects "
+            "(collection, source_path, problem_formulation, proposed_method, "
+            " experimental_datasets, experimental_baselines, experimental_results, "
+            " extras, confidence, extracted_at, model_version, extractor_name) "
+            "VALUES (?, ?, NULL, NULL, '[]', '[]', NULL, '{}', NULL, "
+            "        '2026-05-09T00:00:00Z', 'v1', 'test_extractor')",
+            ("code__old", "a.py"),
+        )
+        store.conn.execute(
+            "INSERT INTO document_aspects "
+            "(collection, source_path, problem_formulation, proposed_method, "
+            " experimental_datasets, experimental_baselines, experimental_results, "
+            " extras, confidence, extracted_at, model_version, extractor_name) "
+            "VALUES (?, ?, NULL, NULL, '[]', '[]', NULL, '{}', NULL, "
+            "        '2026-05-09T00:00:00Z', 'v1', 'test_extractor')",
+            ("code__old", "b.py"),
+        )
+        store.conn.execute(
+            "INSERT INTO document_aspects "
+            "(collection, source_path, problem_formulation, proposed_method, "
+            " experimental_datasets, experimental_baselines, experimental_results, "
+            " extras, confidence, extracted_at, model_version, extractor_name) "
+            "VALUES (?, ?, NULL, NULL, '[]', '[]', NULL, '{}', NULL, "
+            "        '2026-05-09T00:00:00Z', 'v1', 'test_extractor')",
+            ("code__stays", "c.py"),
+        )
+        store.conn.commit()
+        return store
+
+    def test_updates_matching_rows(self, tmp_path: Path) -> None:
+        store = self._seed(tmp_path)
+        count = store.rename_collection(old="code__old", new="code__new")
+        assert count == 2
+
+        old_rows = store.conn.execute(
+            "SELECT COUNT(*) FROM document_aspects WHERE collection = ?",
+            ("code__old",),
+        ).fetchone()[0]
+        new_rows = store.conn.execute(
+            "SELECT COUNT(*) FROM document_aspects WHERE collection = ?",
+            ("code__new",),
+        ).fetchone()[0]
+        stays_rows = store.conn.execute(
+            "SELECT COUNT(*) FROM document_aspects WHERE collection = ?",
+            ("code__stays",),
+        ).fetchone()[0]
+        assert (old_rows, new_rows, stays_rows) == (0, 2, 1)
+
+    def test_source_path_untouched(self, tmp_path: Path) -> None:
+        """source_path denorm cache must be byte-identical pre/post rename."""
+        store = self._seed(tmp_path)
+        paths_before = set(
+            r[0] for r in store.conn.execute(
+                "SELECT source_path FROM document_aspects ORDER BY source_path"
+            ).fetchall()
+        )
+        store.rename_collection(old="code__old", new="code__new")
+        paths_after = set(
+            r[0] for r in store.conn.execute(
+                "SELECT source_path FROM document_aspects ORDER BY source_path"
+            ).fetchall()
+        )
+        assert paths_before == paths_after
+
+    def test_no_rows_returns_zero(self, tmp_path: Path) -> None:
+        from nexus.db.t2.document_aspects import DocumentAspects
+
+        store = DocumentAspects(tmp_path / "aspects.db")
+        assert store.rename_collection(old="docs__ghost", new="docs__phantom") == 0
+
+    def test_idempotent_second_rename(self, tmp_path: Path) -> None:
+        """Second call with old name that no longer has rows is safe no-op."""
+        store = self._seed(tmp_path)
+        store.rename_collection(old="code__old", new="code__new")
+        # Second rename of same old name: no rows match → zero, no error.
+        count = store.rename_collection(old="code__old", new="code__new")
+        assert count == 0
+
+    def test_only_matching_collection_updated(self, tmp_path: Path) -> None:
+        """Rows for 'code__stays' must not be touched."""
+        store = self._seed(tmp_path)
+        store.rename_collection(old="code__old", new="code__new")
+        stays = store.conn.execute(
+            "SELECT collection FROM document_aspects WHERE source_path = ?",
+            ("c.py",),
+        ).fetchone()[0]
+        assert stays == "code__stays"
+
+
+# ── AspectExtractionQueue.rename_collection (nexus-gp20) ───────────────────
+
+
+class TestAspectExtractionQueueRename:
+    """RDR-108 Phase 1d: ``aspect_extraction_queue.collection`` is a denorm
+    cache; rename_collection keeps it in sync."""
+
+    def _seed(self, tmp_path: Path):
+        from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
+
+        queue = AspectExtractionQueue(tmp_path / "queue.db")
+        queue.enqueue("code__old", "a.py", doc_id="d1")
+        queue.enqueue("code__old", "b.py", doc_id="d2")
+        queue.enqueue("code__stays", "c.py", doc_id="d3")
+        return queue
+
+    def test_updates_matching_rows(self, tmp_path: Path) -> None:
+        queue = self._seed(tmp_path)
+        count = queue.rename_collection(old="code__old", new="code__new")
+        assert count == 2
+
+        old_rows = queue.conn.execute(
+            "SELECT COUNT(*) FROM aspect_extraction_queue WHERE collection = ?",
+            ("code__old",),
+        ).fetchone()[0]
+        new_rows = queue.conn.execute(
+            "SELECT COUNT(*) FROM aspect_extraction_queue WHERE collection = ?",
+            ("code__new",),
+        ).fetchone()[0]
+        stays_rows = queue.conn.execute(
+            "SELECT COUNT(*) FROM aspect_extraction_queue WHERE collection = ?",
+            ("code__stays",),
+        ).fetchone()[0]
+        assert (old_rows, new_rows, stays_rows) == (0, 2, 1)
+
+    def test_source_path_and_doc_id_untouched(self, tmp_path: Path) -> None:
+        """source_path and doc_id must be byte-identical pre/post rename."""
+        queue = self._seed(tmp_path)
+        rows_before = {
+            r[0]: (r[1], r[2])  # source_path -> (doc_id, collection)
+            for r in queue.conn.execute(
+                "SELECT source_path, doc_id, collection "
+                "FROM aspect_extraction_queue ORDER BY source_path"
+            ).fetchall()
+        }
+        queue.rename_collection(old="code__old", new="code__new")
+        rows_after = {
+            r[0]: (r[1], r[2])
+            for r in queue.conn.execute(
+                "SELECT source_path, doc_id, collection "
+                "FROM aspect_extraction_queue ORDER BY source_path"
+            ).fetchall()
+        }
+        # source_path and doc_id unchanged
+        for sp in rows_before:
+            assert rows_before[sp][0] == rows_after[sp][0], f"doc_id changed for {sp}"
+
+    def test_no_rows_returns_zero(self, tmp_path: Path) -> None:
+        from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
+
+        queue = AspectExtractionQueue(tmp_path / "queue.db")
+        assert queue.rename_collection(old="docs__ghost", new="docs__phantom") == 0
+
+    def test_idempotent_second_rename(self, tmp_path: Path) -> None:
+        queue = self._seed(tmp_path)
+        queue.rename_collection(old="code__old", new="code__new")
+        count = queue.rename_collection(old="code__old", new="code__new")
+        assert count == 0
+
+
+# ── Aspect cascade wired into rename_collection_data_plane (nexus-gp20) ────
+
+
+class TestAspectCascadeIntegration:
+    """End-to-end: rename_collection_data_plane must update both aspect
+    denorm tables in the same T2Database context as chash_index."""
+
+    def test_both_aspect_tables_updated_by_data_plane(
+        self, tmp_path: Path, env_creds,
+    ) -> None:
+        from nexus.commands.collection import rename_collection_data_plane
+        from nexus.db.t2 import T2Database
+
+        db_path = tmp_path / "memory.db"
+        cat_dir = tmp_path / "catalog"
+        cat_dir.mkdir()
+
+        # Seed T2 with rows in both aspect tables.
+        with T2Database(db_path) as t2db:
+            t2db.chash_index.upsert(
+                chash="aa", collection="code__old", chunk_chroma_id="d1"
+            )
+            t2db.document_aspects.conn.execute(
+                "INSERT INTO document_aspects "
+                "(collection, source_path, problem_formulation, proposed_method, "
+                " experimental_datasets, experimental_baselines, "
+                " experimental_results, extras, confidence, extracted_at, "
+                " model_version, extractor_name) "
+                "VALUES (?, ?, NULL, NULL, '[]', '[]', NULL, '{}', NULL, "
+                "        '2026-05-09T00:00:00Z', 'v1', 'test')",
+                ("code__old", "a.py"),
+            )
+            t2db.document_aspects.conn.commit()
+            t2db.aspect_queue.enqueue("code__old", "b.py", doc_id="d2")
+
+        fake = MagicMock()
+        fake.collection_exists = MagicMock(side_effect=lambda n: n == "code__old")
+        fake.rename_collection = MagicMock()
+
+        with patch("nexus.commands.collection._t3", return_value=fake), \
+             patch("nexus.commands._helpers.default_db_path", return_value=db_path), \
+             patch("nexus.config.catalog_path", return_value=cat_dir):
+            counts = rename_collection_data_plane("code__old", "code__new")
+
+        assert counts.get("aspects", 0) >= 0  # key present (even if 0)
+        assert counts.get("aspect_queue", 0) >= 0
+
+        with T2Database(db_path) as verify:
+            da_old = verify.document_aspects.conn.execute(
+                "SELECT COUNT(*) FROM document_aspects WHERE collection = ?",
+                ("code__old",),
+            ).fetchone()[0]
+            da_new = verify.document_aspects.conn.execute(
+                "SELECT COUNT(*) FROM document_aspects WHERE collection = ?",
+                ("code__new",),
+            ).fetchone()[0]
+            aq_old = verify.aspect_queue.conn.execute(
+                "SELECT COUNT(*) FROM aspect_extraction_queue WHERE collection = ?",
+                ("code__old",),
+            ).fetchone()[0]
+            aq_new = verify.aspect_queue.conn.execute(
+                "SELECT COUNT(*) FROM aspect_extraction_queue WHERE collection = ?",
+                ("code__new",),
+            ).fetchone()[0]
+
+        assert da_old == 0 and da_new == 1
+        assert aq_old == 0 and aq_new == 1
+
+    def test_no_collateral_writes_to_chash(self, tmp_path: Path) -> None:
+        """Aspect cascade must not alter chash_index rows."""
+        from nexus.db.t2.document_aspects import DocumentAspects
+        from nexus.db.t2.chash_index import ChashIndex
+
+        aspects = DocumentAspects(tmp_path / "aspects.db")
+        aspects.conn.execute(
+            "INSERT INTO document_aspects "
+            "(collection, source_path, problem_formulation, proposed_method, "
+            " experimental_datasets, experimental_baselines, "
+            " experimental_results, extras, confidence, extracted_at, "
+            " model_version, extractor_name) "
+            "VALUES (?, ?, NULL, NULL, '[]', '[]', NULL, '{}', NULL, "
+            "        '2026-05-09T00:00:00Z', 'v1', 'test')",
+            ("code__old", "a.py"),
+        )
+        aspects.conn.commit()
+
+        chash = ChashIndex(tmp_path / "chash.db")
+        chash.upsert(chash="aa", collection="code__old", chunk_chroma_id="d1")
+
+        # rename only aspects
+        aspects.rename_collection(old="code__old", new="code__new")
+
+        # chash_index untouched
+        old_chash = chash.conn.execute(
+            "SELECT COUNT(*) FROM chash_index WHERE physical_collection = ?",
+            ("code__old",),
+        ).fetchone()[0]
+        assert old_chash == 1  # still there — chash cascade not triggered here

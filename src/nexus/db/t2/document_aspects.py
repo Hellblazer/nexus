@@ -353,6 +353,27 @@ class DocumentAspects:
             self.conn.commit()
             return cur.rowcount
 
+    def rename_collection(self, *, old: str, new: str) -> int:
+        """Re-point every row's denorm ``collection`` cache from ``old`` to ``new``.
+
+        nexus-gp20 / RDR-108 Phase 1d: ``collection`` is a denorm cache
+        column (the primary key is ``doc_id`` post-migration, or
+        ``(collection, source_path)`` on legacy tables). Updating the
+        cache column does NOT affect the primary key either way — no row
+        identity changes, no row recreation.
+
+        Returns the count of rows updated (0 when no rows match — safe
+        no-op). Idempotent: a second call with the same ``old`` name
+        (now no rows match) returns 0 without error.
+        """
+        with self._lock:
+            cur = self.conn.execute(
+                "UPDATE document_aspects SET collection = ? WHERE collection = ?",
+                (new, old),
+            )
+            self.conn.commit()
+            return cur.rowcount
+
     def list_by_extractor_version(
         self,
         extractor_name: str,
