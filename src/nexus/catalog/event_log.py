@@ -6,8 +6,10 @@
 The event log is the canonical state per RDR-101 §"Core invariants". This
 module owns the on-disk format (JSONL, one envelope per line) and the
 locking pattern that the existing ``Catalog`` JSONL files use today: a
-directory-level ``fcntl.flock`` taken before every append, mirroring
-``Catalog._acquire_lock`` / ``Catalog._append_jsonl``.
+directory-level exclusive lock taken before every append, mirroring
+``Catalog._acquire_lock`` / ``Catalog._append_jsonl``. Locking is
+delegated to :mod:`nexus._locking`, which uses POSIX ``fcntl.flock`` on
+Unix and a sentinel-file ``msvcrt.locking`` on Windows.
 
 The Phase 1 writer is shadow-only: nothing reads from this log yet and
 the existing ``Catalog.register()`` / ``update()`` continue to write to
@@ -25,7 +27,6 @@ malformed line would brick the projector.
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 from collections.abc import Iterator
@@ -33,6 +34,7 @@ from pathlib import Path
 
 import structlog
 
+from nexus._locking import acquire_directory_lock, release_lock
 from nexus.catalog.events import Event
 
 _log = structlog.get_logger()
@@ -82,15 +84,13 @@ class EventLog:
         primitives before calling.
         """
         line = json.dumps(event.to_dict(), separators=(",", ":"))
-        dir_fd = os.open(str(self._dir), os.O_RDONLY)
+        dir_fd = acquire_directory_lock(self._dir)
         try:
-            fcntl.flock(dir_fd, fcntl.LOCK_EX)
             with self._path.open("a") as f:
                 f.write(line)
                 f.write("\n")
         finally:
-            fcntl.flock(dir_fd, fcntl.LOCK_UN)
-            os.close(dir_fd)
+            release_lock(dir_fd)
 
     def append_many(self, events: list[Event]) -> None:
         """Append a batch of events under a single flock acquisition.
@@ -109,16 +109,14 @@ class EventLog:
             json.dumps(e.to_dict(), separators=(",", ":"))
             for e in events
         ]
-        dir_fd = os.open(str(self._dir), os.O_RDONLY)
+        dir_fd = acquire_directory_lock(self._dir)
         try:
-            fcntl.flock(dir_fd, fcntl.LOCK_EX)
             with self._path.open("a") as f:
                 for line in lines:
                     f.write(line)
                     f.write("\n")
         finally:
-            fcntl.flock(dir_fd, fcntl.LOCK_UN)
-            os.close(dir_fd)
+            release_lock(dir_fd)
 
     def replay(self) -> Iterator[Event]:
         """Yield events in append order. Skips malformed lines with a warning.
