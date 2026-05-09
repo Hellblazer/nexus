@@ -163,8 +163,8 @@ class DocumentAspects:
         Cached per-instance after first call (schema cannot change while
         this connection is open without explicit migration).
         """
-        if not hasattr(self, "_doc_id_pk_cache"):
-            with self._lock:
+        with self._lock:
+            if not hasattr(self, "_doc_id_pk_cache"):
                 pk_cols = {
                     r[1] for r in self.conn.execute(
                         "PRAGMA table_info(document_aspects)"
