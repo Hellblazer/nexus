@@ -53,6 +53,7 @@ worker spawn).
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 
 import structlog
@@ -67,6 +68,29 @@ from nexus.aspect_extractor import (
 )
 
 _log = structlog.get_logger(__name__)
+
+# ── Drain protocol exceptions ───────────────────────────────────────────────
+
+
+class DrainTimeoutError(RuntimeError):
+    """Raised by ``drain_worker`` when the queue still has actionable rows
+    (``status != 'failed'``) after the configured timeout.
+
+    Actionable rows are those in ``pending`` or ``in_progress`` state.
+    The operator must triage: inspect ``aspect_extraction_queue`` for
+    stuck ``in_progress`` rows, kill any hung workers, and re-run the
+    drain after the queue is clear.
+    """
+
+    def __init__(self, stuck_count: int, timeout: float) -> None:
+        self.stuck_count = stuck_count
+        self.timeout = timeout
+        super().__init__(
+            f"Drain timeout after {timeout:.1f}s: "
+            f"{stuck_count} actionable row(s) remain in aspect_extraction_queue "
+            f"(status pending or in_progress). "
+            "Triage stuck workers before retrying the PK migration."
+        )
 
 
 # ── Worker class ────────────────────────────────────────────────────────────
@@ -152,6 +176,33 @@ class AspectExtractionWorker:
         """True iff the worker thread exists and is alive."""
         with self._lock:
             return self._thread is not None and self._thread.is_alive()
+
+    def stop_claiming(self) -> None:
+        """Set the stop signal so the run loop exits after its current
+        iteration without claiming any more rows.
+
+        Unlike ``stop()``, this method does NOT join the thread — in-flight
+        row processing continues to completion.  The thread will exit on its
+        own once the current iteration finishes and it re-checks
+        ``_stop_event`` at the top of the loop.
+
+        Idempotent — safe to call multiple times or on an already-stopped
+        worker.
+
+        Used by the RDR-108 drain-before-PK-migration protocol
+        (nexus-he24).  Call ``drain_worker()`` rather than this method
+        directly — it coordinates stop_claiming + queue-empty wait.
+        """
+        self._stop_event.set()
+
+    def is_claiming_stopped(self) -> bool:
+        """True iff the stop signal is set (worker will not claim new rows).
+
+        Note: a True result does not mean the thread has actually exited —
+        an in-flight iteration may still be running.  Use ``is_running()``
+        to check thread liveness.
+        """
+        return self._stop_event.is_set()
 
     def _run_loop(self) -> None:
         """Drain loop. Runs until ``_stop_event`` is set.
@@ -464,6 +515,93 @@ def reset_worker_for_tests() -> None:
     stop_worker(timeout=5.0)
     with _worker_lock:
         _worker = None
+
+
+def drain_worker(
+    queue_path: Path | str,
+    *,
+    timeout: float = 30.0,
+    poll_interval: float = 0.1,
+) -> None:
+    """Stop the singleton worker and wait until the queue is fully drained.
+
+    A queue is considered drained when
+    ``SELECT count(*) FROM aspect_extraction_queue WHERE status != 'failed'``
+    returns 0 — i.e., no rows are pending or in_progress.  Failed rows
+    are terminal and do not block a PK migration.
+
+    Protocol (RDR-108 Phase 1 S1, nexus-he24):
+
+      1. Set the stop signal on the singleton worker (if one exists) so
+         it claims no new rows.  In-flight row processing continues.
+      2. Poll the queue at ``poll_interval`` (default 100 ms) until
+         ``is_drained()`` returns True or ``timeout`` elapses.
+      3. On success: join the worker thread (it has already exited or will
+         exit imminently after the last iteration).
+      4. On timeout: raise ``DrainTimeoutError`` so the operator is alerted
+         to inspect stuck ``in_progress`` rows.
+
+    Args:
+        queue_path: Path to the T2 SQLite database file.  Used to open a
+            short-lived read-only connection for the ``is_drained()`` poll
+            separate from the worker's own T2 context so this function does
+            not compete for locks.
+        timeout: Seconds to wait for the queue to drain (default 30).
+        poll_interval: Seconds between is_drained() checks (default 0.1).
+
+    Raises:
+        DrainTimeoutError: Queue still has pending/in_progress rows after
+            ``timeout`` seconds.
+
+    Note:
+        If no worker has been started in this process (``get_worker()``
+        returns None), the function simply checks ``is_drained()`` once and
+        returns — there is no thread to stop and no in-flight work to wait
+        for.  This handles the quiescent case (e.g., the caller's process
+        never ran the worker, or the worker finished and was reset).
+    """
+    from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
+
+    worker = get_worker()
+    if worker is not None:
+        worker.stop_claiming()
+
+    queue_path = Path(queue_path)
+    deadline = time.monotonic() + timeout
+
+    queue = AspectExtractionQueue(queue_path)
+    try:
+        # Short-circuit: if already drained, return immediately.
+        if queue.is_drained():
+            if worker is not None and worker.is_running():
+                with _worker_lock:
+                    thread = worker._thread
+                    worker._thread = None
+                if thread is not None:
+                    thread.join(timeout=2.0)
+            return
+
+        while time.monotonic() < deadline:
+            time.sleep(poll_interval)
+            if queue.is_drained():
+                # Join the worker thread: it has stopped claiming and will
+                # exit after its current iteration completes.
+                if worker is not None:
+                    with _worker_lock:
+                        thread = worker._thread
+                        worker._thread = None
+                    if thread is not None:
+                        thread.join(timeout=2.0)
+                return
+
+        # Timeout: count stuck rows for the error message.
+        stuck = queue.conn.execute(
+            "SELECT COUNT(*) FROM aspect_extraction_queue WHERE status != 'failed'"
+        ).fetchone()
+        stuck_count = stuck[0] if stuck else 0
+        raise DrainTimeoutError(stuck_count=stuck_count, timeout=timeout)
+    finally:
+        queue.close()
 
 
 # ── Hook function (registered via register_post_document_hook) ──────────────
