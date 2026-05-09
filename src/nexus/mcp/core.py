@@ -968,10 +968,11 @@ def store_put(
         # RDR-101 Phase 3 PR δ Stage B.5: pre-register the catalog entry
         # so the T3 chunk can carry the resulting tumbler as ``doc_id``
         # at write-time. Same pattern as the CLI ``nx store put`` (B.4).
-        # The chunk_chroma_id is deterministic (sha256 of "{coll}:{title}"),
-        # matching ``T3Database.put``'s internal derivation.
+        # chunk_chroma_id mirrors ``T3Database.put``'s natural-id
+        # derivation (chunk_text_hash[:32] per RDR-108 D1 / nexus-kmb6;
+        # for single-chunk MCP docs chunk_text == content).
         import hashlib as _hl
-        chunk_chroma_id = _hl.sha256(f"{col_name}:{title}".encode()).hexdigest()[:16]
+        chunk_chroma_id = _hl.sha256(content.encode()).hexdigest()[:32]
         catalog_doc_id = ""
         try:
             from nexus.commands.store import _catalog_store_hook

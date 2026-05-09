@@ -687,7 +687,12 @@ class T3Database:
         """
         from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415
 
-        doc_id = hashlib.sha256(f"{collection}:{title}".encode()).hexdigest()[:16]
+        # MCP-stored docs are single-chunk: chunk_text == content, so the
+        # natural ID (chunk_text_hash[:32], per RDR-108 D1 / nexus-kmb6)
+        # equals content_hash[:32]. Identical content under any title in
+        # this collection collapses to one T3 record by design.
+        content_hash = hashlib.sha256(content.encode()).hexdigest()
+        doc_id = content_hash[:32]
         now_iso = datetime.now(UTC).isoformat()
 
         # Determine whether this collection uses CCE.  When a voyage_api_key
@@ -714,13 +719,10 @@ class T3Database:
                 content_type = ct
                 break
 
-        # MCP-stored docs are single-chunk: chunk_text_hash matches
-        # content_hash because content == chunk text.
-        content_hash = hashlib.sha256(content.encode()).hexdigest()
-        # RDR-101 Phase 5c dropped store_type, corpus, git_meta. Title kept
-        # — find_ids_by_title is the load-bearing reader for nx store
-        # delete --title and MCP store_get title-fallback. RDR-108 Phase 3
-        # dropped chunk_index, chunk_count, doc_id — catalog manifest is
+        # RDR-101 Phase 5c dropped store_type, corpus, git_meta. Title
+        # kept (find_ids_by_title is load-bearing for nx store delete
+        # --title and MCP store_get title-fallback). RDR-108 Phase 3
+        # dropped chunk_index, chunk_count, doc_id; catalog manifest is
         # authoritative.
         metadata = make_chunk_metadata(
             content_type=content_type,

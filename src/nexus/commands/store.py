@@ -106,11 +106,12 @@ def put_cmd(
 
     # RDR-101 Phase 3 PR δ Stage B.4: pre-register the catalog entry
     # so the T3 chunk can carry the resulting tumbler as ``doc_id``
-    # at write-time. The chunk_chroma_id (sha256 of "{collection}:{title}")
-    # is deterministic, so we can compute it here and pass to the hook
-    # for legacy meta.doc_id dedup. The hook returns the catalog
-    # tumbler string (or "" when the catalog is absent).
-    chunk_chroma_id = hashlib.sha256(f"{col_name}:{title}".encode()).hexdigest()[:16]
+    # at write-time. chunk_chroma_id mirrors ``T3Database.put``'s
+    # natural-id derivation (chunk_text_hash[:32] per RDR-108 D1 /
+    # nexus-kmb6; for single-chunk MCP docs chunk_text == content).
+    # The hook returns the catalog tumbler string (or "" when the
+    # catalog is absent).
+    chunk_chroma_id = hashlib.sha256(content.encode()).hexdigest()[:32]
     catalog_doc_id = _catalog_store_hook(
         title=title, doc_id=chunk_chroma_id, collection_name=col_name,
     )

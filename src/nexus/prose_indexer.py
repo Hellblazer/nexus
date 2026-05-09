@@ -95,16 +95,16 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
 
         for chunk in chunks:
             title = f"{file_path.relative_to(ctx.repo_path)}:chunk-{chunk.chunk_index}"
-            # ``chunk_chroma_id`` is the per-chunk Chroma natural-id
-            # (sha256-derived) — disambiguated from the catalog
-            # ``Document.doc_id`` per RDR-101 Phase 0 nexus-o6aa.3.
-            chunk_chroma_id = _hl.sha256(f"{ctx.corpus}:{title}".encode()).hexdigest()[:32]
+            # ``chunk_chroma_id`` is the per-chunk Chroma natural-id:
+            # ``chunk_text_hash[:32]`` per RDR-108 D1 (nexus-kmb6).
+            chunk_text_hash_full = _hl.sha256(chunk.text.encode()).hexdigest()
+            chunk_chroma_id = chunk_text_hash_full[:32]
             # RDR-101 Phase 5c dropped corpus, store_type, git_meta. Title kept.
-            # RDR-108 Phase 3 dropped chunk_index, chunk_count, doc_id —
+            # RDR-108 Phase 3 dropped chunk_index, chunk_count, doc_id;
             # catalog manifest is authoritative.
             metadata = make_chunk_metadata(
                 content_type="markdown",
-                chunk_text_hash=_hl.sha256(chunk.text.encode()).hexdigest(),
+                chunk_text_hash=chunk_text_hash_full,
                 content_hash=content_hash,
                 chunk_start_char=chunk.metadata.get("chunk_start_char", 0) + frontmatter_len,
                 chunk_end_char=chunk.metadata.get("chunk_end_char", 0) + frontmatter_len,
@@ -159,10 +159,10 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
 
         for ls, le, text in raw_chunks:
             title = f"{file_path.relative_to(ctx.repo_path)}:{ls}-{le}"
-            # ``chunk_chroma_id`` is the per-chunk Chroma natural-id —
-            # disambiguated from catalog ``Document.doc_id`` per RDR-101
-            # Phase 0 nexus-o6aa.3.
-            chunk_chroma_id = _hl.sha256(f"{ctx.corpus}:{title}".encode()).hexdigest()[:32]
+            # ``chunk_chroma_id`` is the per-chunk Chroma natural-id:
+            # ``chunk_text_hash[:32]`` per RDR-108 D1 (nexus-kmb6).
+            chunk_text_hash_full = _hl.sha256(text.encode()).hexdigest()
+            chunk_chroma_id = chunk_text_hash_full[:32]
             chunk_start_char = _line_offsets[ls - 1] if 0 < ls <= len(_line_offsets) else 0
             chunk_end_char = (
                 _line_offsets[le] if le < len(_line_offsets) else len(content)
@@ -179,7 +179,7 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
             # catalog manifest is authoritative.
             metadata = make_chunk_metadata(
                 content_type="prose",
-                chunk_text_hash=_hl.sha256(text.encode()).hexdigest(),
+                chunk_text_hash=chunk_text_hash_full,
                 content_hash=content_hash,
                 chunk_start_char=chunk_start_char,
                 chunk_end_char=chunk_end_char,

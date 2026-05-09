@@ -532,33 +532,41 @@ def test_list_collections_skips_failed_count(mock_chromadb):
     assert "knowledge__broken" not in names
 
 
-# ── Deterministic ID ────────────────────────────────────────────────────────
+# ── Deterministic ID (RDR-108 D1: content-derived natural ID) ────────────────
 
 
-@pytest.mark.parametrize("col,title1,title2,expect_same", [
-    ("knowledge__sec", "finding.md", "finding.md", True),
-    ("knowledge__sec", "chunk-a.md", "chunk-b.md", False),
-    ("code__repo", "file.py:1-50", "file.py:1-50", True),
+@pytest.mark.parametrize("col,c1,c2,expect_same", [
+    ("knowledge__sec", "same body", "same body", True),
+    ("knowledge__sec", "first body", "second body", False),
+    ("code__repo", "snippet a", "snippet b", False),
 ])
-def test_put_deterministic_id(mock_db, col, title1, title2, expect_same):
+def test_put_deterministic_id_keys_on_content(mock_db, col, c1, c2, expect_same):
+    """Per RDR-108 D1 (nexus-kmb6) the natural ID is
+    ``chunk_text_hash[:32]``. Identical content collapses to one ID;
+    distinct content gets distinct IDs."""
     db, mock_col, _ = mock_db
-    id1 = db.put(collection=col, content="first", title=title1)
-    id2 = db.put(collection=col, content="second", title=title2)
+    id1 = db.put(collection=col, content=c1, title="t1")
+    id2 = db.put(collection=col, content=c2, title="t2")
     assert (id1 == id2) == expect_same
 
 
-def test_put_empty_title_collision(mock_db):
+def test_put_id_is_independent_of_title(mock_db):
+    """Title is a metadata field, not part of the natural ID. Same
+    content under different titles produces the same ID."""
     db, mock_col, _ = mock_db
-    id1 = db.put(collection="knowledge__sec", content="first", title="")
-    id2 = db.put(collection="knowledge__sec", content="second", title="")
+    id1 = db.put(collection="knowledge__sec", content="body", title="alpha.md")
+    id2 = db.put(collection="knowledge__sec", content="body", title="beta.md")
     assert id1 == id2
 
 
-def test_put_same_title_different_collection_different_ids(mock_db):
+def test_put_id_is_independent_of_collection(mock_db):
+    """Natural ID is global (content-addressed). Same content stored
+    in two collections produces the same ID; chromadb keeps the rows
+    separate via collection scoping, not via the ID."""
     db, mock_col, _ = mock_db
     id1 = db.put(collection="knowledge__sec", content="text", title="shared.md")
     id2 = db.put(collection="knowledge__ops", content="text", title="shared.md")
-    assert id1 != id2
+    assert id1 == id2
 
 
 # ── Oversized put raises (GH #244 + nexus-akof) ─────────────────────────────
@@ -595,7 +603,8 @@ def test_put_under_cap_still_succeeds(mock_db):
     doc_id = db.put(
         collection="knowledge__sec", content="small body", title="ok.md",
     )
-    assert isinstance(doc_id, str) and len(doc_id) == 16
+    # RDR-108 D1: natural ID is chunk_text_hash[:32] (32 hex chars).
+    assert isinstance(doc_id, str) and len(doc_id) == 32
     mock_col.upsert.assert_called_once()
 
 

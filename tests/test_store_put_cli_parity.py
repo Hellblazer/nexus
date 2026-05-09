@@ -65,7 +65,8 @@ def _make_stub_t3():
             pass
 
         def put(self, *, collection, content, title="", **kwargs):
-            return hashlib.sha256(f"{collection}:{title}".encode()).hexdigest()[:16]
+            # Mirrors T3Database.put: chunk_text_hash[:32] (RDR-108 D1).
+            return hashlib.sha256(content.encode()).hexdigest()[:32]
 
     return lambda: _StubT3()
 

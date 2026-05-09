@@ -959,13 +959,16 @@ def _pdf_chunks(
 
     prepared: list[tuple[str, str, dict]] = []
     for chunk in chunks:
-        chunk_id = f"{content_hash[:16]}_{chunk.chunk_index}"
+        # ``chunk_id`` is the per-chunk Chroma natural-id:
+        # ``chunk_text_hash[:32]`` per RDR-108 D1 (nexus-kmb6).
+        chunk_text_hash_full = hashlib.sha256(chunk.text.encode()).hexdigest()
+        chunk_id = chunk_text_hash_full[:32]
         # RDR-101 Phase 5c dropped corpus, store_type, git_meta. Title kept.
-        # RDR-108 Phase 3 dropped chunk_index, chunk_count, doc_id —
+        # RDR-108 Phase 3 dropped chunk_index, chunk_count, doc_id;
         # catalog manifest is authoritative.
         meta = make_chunk_metadata(
             content_type="pdf",
-            chunk_text_hash=hashlib.sha256(chunk.text.encode()).hexdigest(),
+            chunk_text_hash=chunk_text_hash_full,
             content_hash=content_hash,
             chunk_start_char=chunk.metadata.get("chunk_start_char", 0),
             chunk_end_char=chunk.metadata.get("chunk_end_char", 0),
@@ -1043,13 +1046,16 @@ def _markdown_chunks(
 
     prepared: list[tuple[str, str, dict]] = []
     for chunk in chunks:
-        chunk_id = f"{content_hash[:16]}_{chunk.chunk_index}"
+        # ``chunk_id`` is the per-chunk Chroma natural-id:
+        # ``chunk_text_hash[:32]`` per RDR-108 D1 (nexus-kmb6).
+        chunk_text_hash_full = hashlib.sha256(chunk.text.encode()).hexdigest()
+        chunk_id = chunk_text_hash_full[:32]
         # RDR-101 Phase 5c dropped corpus, store_type, git_meta. Title kept.
-        # RDR-108 Phase 3 dropped chunk_index, chunk_count, doc_id —
+        # RDR-108 Phase 3 dropped chunk_index, chunk_count, doc_id;
         # catalog manifest is authoritative.
         meta = make_chunk_metadata(
             content_type="markdown",
-            chunk_text_hash=hashlib.sha256(chunk.text.encode()).hexdigest(),
+            chunk_text_hash=chunk_text_hash_full,
             content_hash=content_hash,
             chunk_start_char=chunk.metadata.get("chunk_start_char", 0) + frontmatter_len,
             chunk_end_char=chunk.metadata.get("chunk_end_char", 0) + frontmatter_len,

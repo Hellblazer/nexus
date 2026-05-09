@@ -375,10 +375,13 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
 
     for i, chunk in enumerate(chunks):
         title = f"{rel_path}:{chunk['line_start']}-{chunk['line_end']}"
-        # ``chunk_chroma_id`` is the per-chunk Chroma natural-id
-        # (sha256-derived) — disambiguated from catalog
-        # ``Document.doc_id`` per RDR-101 Phase 0 nexus-o6aa.3.
-        chunk_chroma_id = _hl.sha256(f"{ctx.corpus}:{title}:chunk{i}".encode()).hexdigest()[:32]
+        # ``chunk_chroma_id`` is the per-chunk Chroma natural-id:
+        # ``chunk_text_hash[:32]`` per RDR-108 D1 (nexus-kmb6).
+        # Identical chunk text in the same collection collapses to one
+        # T3 record; the catalog manifest preserves position via
+        # ``(doc_id, position)`` pointing at the shared chash.
+        chunk_text_hash_full = _hl.sha256(chunk["text"].encode()).hexdigest()
+        chunk_chroma_id = chunk_text_hash_full[:32]
         class_ctx, method_ctx = _extract_context(
             source_bytes, language, chunk["line_start"] - 1, chunk["line_end"] - 1
         )
@@ -406,7 +409,7 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
         # catalog manifest is authoritative.
         metadata = make_chunk_metadata(
             content_type="code",
-            chunk_text_hash=_hl.sha256(chunk["text"].encode()).hexdigest(),
+            chunk_text_hash=chunk_text_hash_full,
             content_hash=content_hash,
             chunk_start_char=chunk_start_char,
             chunk_end_char=chunk_end_char,
