@@ -95,6 +95,15 @@ def _make_catalog():
     return Catalog(path, path / ".catalog.db")
 
 
+def _make_t3_for_backfill():
+    """Construct the default T3Database for the backfill command.
+
+    Patched in tests for isolation.
+    """
+    from nexus.db import make_t3  # noqa: PLC0415
+    return make_t3()
+
+
 @click.group()
 def t3() -> None:
     """T3 (ChromaDB) maintenance commands."""
@@ -472,3 +481,128 @@ def gc_cmd(
         click.echo(
             f"\nSummary: deleted {deleted_total} chunk(s) from {collection}."
         )
+
+
+@t3.command("backfill-manifest")
+@click.option(
+    "--collection",
+    "-c",
+    default="",
+    help=(
+        "Limit to one collection. Omit to backfill all collections "
+        "registered in the catalog."
+    ),
+)
+@click.option(
+    "--dry-run/--no-dry-run",
+    default=True,
+    help="Report-only (default). Use --no-dry-run to write manifest rows.",
+)
+@click.option(
+    "--limit",
+    "-n",
+    default=0,
+    type=int,
+    help="If > 0, process at most N documents per collection.",
+)
+def backfill_manifest_cmd(
+    collection: str,
+    dry_run: bool,
+    limit: int,
+) -> None:
+    """Backfill document_chunks manifest from T3 chunk metadata (RDR-108 D2).
+
+    \\b
+    Reads T3 chunk metadata (doc_id, chunk_index, chunk_text_hash, span
+    coordinates) per catalog document and writes one row per chunk into
+    the ``document_chunks`` manifest table. After this runs the catalog
+    can answer "what chunks compose a Document and in what order?" without
+    consulting T3 metadata.
+
+    \\b
+    The backfill is idempotent: re-running overwrites the manifest with
+    the same content (DELETE + INSERT in one transaction per document).
+
+    \\b
+    Carve-outs:
+      - taxonomy__* collections are skipped (centroids have no chunk_text_hash).
+      - Pre-RDR-053 chunks missing chunk_text_hash raise an error; re-index
+        that collection before running backfill.
+
+    \\b
+    Examples:
+      nx t3 backfill-manifest --dry-run                         # report only
+      nx t3 backfill-manifest -c code__nexus --no-dry-run       # one collection
+      nx t3 backfill-manifest --no-dry-run                      # all collections
+      nx t3 backfill-manifest --no-dry-run -n 100               # first 100 docs
+    """
+    from nexus.catalog.manifest_backfill import (  # noqa: PLC0415
+        MissingChunkHashError,
+        backfill_manifest_for_collection,
+    )
+
+    cat = _make_catalog()
+    t3_db = _make_t3_for_backfill()
+
+    if dry_run:
+        click.echo("(dry-run: no manifest rows will be written)")
+
+    if collection:
+        collections_to_process = [collection]
+    else:
+        # All collections registered in the catalog.
+        collections_to_process = [
+            c["name"] for c in cat.list_collections()
+        ]
+        if not collections_to_process:
+            click.echo("No collections registered in catalog; nothing to do.")
+            return
+
+    total_docs = 0
+    total_chunks = 0
+    skipped_taxonomy = 0
+    errors: list[str] = []
+
+    for coll_name in collections_to_process:
+        try:
+            result = backfill_manifest_for_collection(
+                cat, t3_db, coll_name, dry_run=dry_run, limit=limit
+            )
+        except MissingChunkHashError as exc:
+            click.echo(
+                f"ERROR: {exc}",
+                err=True,
+            )
+            errors.append(str(exc))
+            continue
+        except Exception as exc:
+            click.echo(
+                f"ERROR in {coll_name}: {exc}",
+                err=True,
+            )
+            errors.append(f"{coll_name}: {exc}")
+            continue
+
+        if result.skipped_taxonomy:
+            click.echo(f"  {coll_name}: skipped (taxonomy carve-out)")
+            skipped_taxonomy += 1
+            continue
+
+        verb = "would write" if dry_run else "wrote"
+        click.echo(
+            f"  {coll_name}: processed {result.docs_processed} doc(s), "
+            f"{verb} {result.chunks_written} chunk manifest row(s)"
+        )
+        total_docs += result.docs_processed
+        total_chunks += result.chunks_written
+
+    verb = "would write" if dry_run else "wrote"
+    click.echo(
+        f"\nSummary: processed {total_docs} doc(s), "
+        f"{verb} {total_chunks} manifest row(s)"
+        + (f", skipped {skipped_taxonomy} taxonomy collection(s)" if skipped_taxonomy else "")
+        + (f", {len(errors)} error(s)" if errors else "")
+    )
+
+    if errors:
+        raise SystemExit(1)

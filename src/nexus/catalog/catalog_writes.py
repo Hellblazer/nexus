@@ -659,6 +659,65 @@ class _WriteOps:
         finally:
             cat._release_lock(dir_fd)
 
+    def write_manifest(self, doc_id: str, chunks: list[dict]) -> None:
+        """Write the document_chunks manifest for one document (RDR-108 D2).
+
+        Deletes any existing manifest rows for ``doc_id`` and inserts the
+        new rows in a single transaction. This makes the operation idempotent:
+        re-running with the same ``chunks`` list produces identical rows.
+
+        Each chunk dict must have:
+          - ``chash`` (str): chunk content-address hash (chunk_text_hash[:32]
+            or the full hash, stored verbatim).
+          - ``position`` (int): canonical ordering key (chunk_index at index time).
+          - ``line_start``, ``line_end``, ``char_start``, ``char_end``
+            (int | None): optional span coordinates.
+
+        Zero-chunk docs are valid: calling write_manifest(doc_id, []) clears
+        any existing rows without inserting new ones. This is the correct
+        representation for a doc the catalog knows about but T3 has no chunks
+        for yet.
+
+        No flock is acquired: document_chunks writes are catalog-maintenance
+        operations driven by the backfill verb, not by the dual-write
+        event-sourcing machinery. The FK constraint (doc_id REFERENCES
+        documents.tumbler) is enforced by the SQLite connection.
+        """
+        cat = self._cat
+        with cat._db.transaction():
+            cat._db.execute(
+                "DELETE FROM document_chunks WHERE doc_id = ?",
+                (doc_id,),
+            )
+            if not chunks:
+                return
+            # INSERT in batches of <=300 (ChromaDB quota for reference;
+            # SQLite can handle larger batches, but we keep consistent with
+            # the project's per-operation limit for future portability).
+            _batch = 300
+            for i in range(0, len(chunks), _batch):
+                batch = chunks[i : i + _batch]
+                cat._db.execute(
+                    "INSERT INTO document_chunks "
+                    "(doc_id, position, chash, chunk_index, "
+                    " line_start, line_end, char_start, char_end) "
+                    "VALUES " + ", ".join(["(?, ?, ?, ?, ?, ?, ?, ?)"] * len(batch)),
+                    [
+                        val
+                        for c in batch
+                        for val in (
+                            doc_id,
+                            c["position"],
+                            c["chash"],
+                            c.get("chunk_index"),
+                            c.get("line_start"),
+                            c.get("line_end"),
+                            c.get("char_start"),
+                            c.get("char_end"),
+                        )
+                    ],
+                )
+
     def delete_document(self, tumbler: Tumbler) -> bool:
         """Soft-delete a document: tombstone in JSONL, DELETE from SQLite.
 

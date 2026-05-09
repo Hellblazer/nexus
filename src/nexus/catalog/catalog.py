@@ -1446,6 +1446,14 @@ class Catalog:
         """Delegates to ``_WriteOps.delete_document`` (nexus-mbm)."""
         return self._writes.delete_document(tumbler)
 
+    def write_manifest(self, doc_id: str, chunks: list[dict]) -> None:
+        """Write the document_chunks manifest for one document (RDR-108 D2).
+
+        Delegates to ``_WriteOps.write_manifest`` (nexus-j43k).
+        See catalog_writes._WriteOps.write_manifest for the contract.
+        """
+        return self._writes.write_manifest(doc_id, chunks)
+
     def find(self, query: str, *, content_type: str | None = None) -> list[CatalogEntry]:
         """Delegates to ``_DocumentOps.find`` (nexus-mbm)."""
         return self._docs.find(query, content_type=content_type)
