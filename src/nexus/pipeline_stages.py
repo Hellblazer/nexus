@@ -209,7 +209,11 @@ def _embed_and_write_batch(
         emb_bytes = None
         if i < len(embeddings):
             emb_bytes = struct.pack(f"{len(embeddings[i])}f", *embeddings[i])
-        chunk_id = f"{content_hash[:16]}_{chunk.chunk_index}"
+        # RDR-108 D1 / nexus-kmb6: streaming PDF chunk natural ID is
+        # chunk_text_hash[:32] (matches code/prose/doc indexer write
+        # paths). Identical chunk text in the same collection collapses
+        # to one T3 record; the catalog manifest preserves position.
+        chunk_id = hashlib.sha256(chunk.text.encode()).hexdigest()[:32]
         meta = _build_chunk_metadata(
             chunk,
             content_hash=content_hash,

@@ -541,6 +541,89 @@ def test_prune_deleted_files_no_catalog_is_noop(tmp_path):
     db.get_or_create_collection.assert_not_called()
 
 
+def test_prune_deleted_files_round_trip_with_real_catalog(tmp_path):
+    """RDR-108 Phase 4 / nexus-dyxe integration test: exercise the full
+    catalog -> T3 round trip with a real SQLite-backed Catalog and a
+    real ``chromadb.EphemeralClient`` collection. Document deletion via
+    FK CASCADE drops manifest rows; the next GC sweep removes the now-
+    orphaned T3 chunks while leaving live chunks intact.
+
+    This locks the contract that ``chashes_for_collection`` returns
+    correctly-truncated chashes that match T3 chunk metadata's
+    ``chunk_text_hash[:32]``, end-to-end."""
+    import hashlib
+
+    import chromadb
+
+    from nexus.catalog.catalog import Catalog
+    from nexus.indexer import _prune_deleted_files
+
+    # Real Catalog with real SQLite.
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    cat = Catalog(catalog_dir=catalog_dir, db_path=tmp_path / "catalog.sqlite")
+
+    # Two documents in the same physical_collection; each carries one
+    # chunk. We will delete the first document and verify GC sweeps
+    # exactly its chunk.
+    coll_name = "code__rt-test__voyage-code-3__v1"
+    live_text = "def live(): return 1\n"
+    orphan_text = "def gone(): return 2\n"
+    live_chash = hashlib.sha256(live_text.encode()).hexdigest()
+    orphan_chash = hashlib.sha256(orphan_text.encode()).hexdigest()
+
+    for tumbler, fname in (("1.1.1", "live.py"), ("1.1.2", "gone.py")):
+        cat._db.execute(  # epsilon-allow: integration fixture seeds documents
+            "INSERT INTO documents "
+            "(tumbler, title, author, year, content_type, file_path, "
+            "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
+            "metadata, source_mtime, alias_of, source_uri) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (tumbler, fname, "", 0, "code", f"/tmp/{fname}",
+             "", coll_name, 1, "", "", "{}", 0.0, "", ""),
+        )
+    cat._db.commit()
+
+    cat.write_manifest("1.1.1", [
+        {"chash": live_chash, "position": 0, "chunk_index": 0,
+         "line_start": 1, "line_end": 1, "char_start": 0,
+         "char_end": len(live_text)},
+    ])
+    cat.write_manifest("1.1.2", [
+        {"chash": orphan_chash, "position": 0, "chunk_index": 0,
+         "line_start": 1, "line_end": 1, "char_start": 0,
+         "char_end": len(orphan_text)},
+    ])
+
+    # Real ChromaDB EphemeralClient with both chunks present.
+    chroma = chromadb.EphemeralClient()
+    col = chroma.get_or_create_collection(coll_name)
+    col.upsert(
+        ids=[live_chash[:32], orphan_chash[:32]],
+        documents=[live_text, orphan_text],
+        metadatas=[
+            {"chunk_text_hash": live_chash, "title": "live.py:1-1"},
+            {"chunk_text_hash": orphan_chash, "title": "gone.py:1-1"},
+        ],
+    )
+    assert len(col.get()["ids"]) == 2
+
+    class _DBShim:
+        def get_or_create_collection(self, name):
+            return chroma.get_or_create_collection(name)
+
+    # Delete the second document. FK CASCADE removes its manifest rows.
+    cat._db.execute(  # epsilon-allow: integration fixture forces FK CASCADE
+        "DELETE FROM documents WHERE tumbler = ?", ("1.1.2",),
+    )
+    cat._db.commit()
+
+    _prune_deleted_files(coll_name, "docs__unused", _DBShim(), catalog=cat)
+
+    remaining = set(col.get()["ids"])
+    assert remaining == {live_chash[:32]}
+
+
 def test_run_index_prune_misclassified(tmp_path):
     from nexus.indexer import _prune_misclassified
     repo = tmp_path / "repo"; repo.mkdir()

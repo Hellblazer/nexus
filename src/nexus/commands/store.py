@@ -223,7 +223,7 @@ def list_cmd(collection: str, limit: int, offset: int, docs: bool) -> None:
     click.echo(f"{col_name}  (showing {shown_start}-{shown_end} of {total})\n")
     from datetime import datetime, timedelta  # noqa: PLC0415
     for e in entries:
-        doc_id = e.get("id", "")[:16]
+        doc_id = e.get("id", "")[:32]
         title = (e.get("title") or "")[:40]
         tags = e.get("tags") or ""
         ttl_days = e.get("ttl_days", 0)
@@ -294,12 +294,13 @@ def _list_documents(db: T3Database, col_name: str) -> None:
 def get_cmd(doc_id: str, collection: str, json_out: bool) -> None:
     """Retrieve a T3 knowledge entry by its document ID.
 
-    DOC_ID is the 16-char hex ID shown by 'nx store list'.
+    DOC_ID is the 32-char content-hash ID shown by 'nx store list'
+    (chunk_text_hash[:32] per RDR-108 D1).
 
     \b
     Examples:
-      nx store get a1b2c3d4e5f6g7h8
-      nx store get a1b2c3d4e5f6g7h8 --collection code__myrepo --json
+      nx store get a1b2c3d4e5f6789012345678901234ab
+      nx store get a1b2c3d4e5f6789012345678901234ab --collection code__myrepo --json
     """
     db = _t3()
     col_name = t3_collection_name(collection, t3=db)
@@ -353,7 +354,7 @@ def _reap_catalog_for_doc_ids(doc_ids: list[str]) -> None:
 @click.option("--collection", "-c", required=True,
               help="Collection name (required)")
 @click.option("--id", "doc_id", default=None,
-              help="Exact 16-char document ID from 'nx store list'")
+              help="Exact 32-char content-hash document ID from 'nx store list'")
 @click.option("--title", default=None,
               help="Exact title metadata match (deletes all matching chunks)")
 @click.option("--yes", "-y", is_flag=True, default=False,

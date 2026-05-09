@@ -1080,7 +1080,7 @@ def store_get(doc_id: str, collection: str = "knowledge") -> str:
     Use after store_list or search to read the complete document.
 
     Args:
-        doc_id: Exact 16-char content-hash document ID (from store_list / store_put / search),
+        doc_id: Exact 32-char content-hash document ID (from store_list / store_put / search),
                 OR an exact title (looked up via metadata).
         collection: Collection name or prefix (default: knowledge)
     """
@@ -1091,10 +1091,10 @@ def store_get(doc_id: str, collection: str = "knowledge") -> str:
         col_name = t3_collection_name(collection, t3=t3)
         entry = t3.get_by_id(col_name, doc_id)
         if entry is None:
-            # Title fallback: 16 lowercase hex chars looks like a hash;
-            # anything else, try treating it as an exact title (matches what
-            # store_list / search display, since hashes aren't surfaced there).
-            looks_like_hash = len(doc_id) == 16 and all(c in "0123456789abcdef" for c in doc_id)
+            # Title fallback: 32 lowercase hex chars looks like a hash
+            # (chunk_text_hash[:32] per RDR-108 D1); anything else, try
+            # treating it as an exact title.
+            looks_like_hash = len(doc_id) == 32 and all(c in "0123456789abcdef" for c in doc_id)
             if not looks_like_hash:
                 ids = t3.find_ids_by_title(col_name, doc_id)
                 if len(ids) == 1:
@@ -1103,10 +1103,10 @@ def store_get(doc_id: str, collection: str = "knowledge") -> str:
                     return (
                         f"Multiple documents with title {doc_id!r} in {col_name}: "
                         + ", ".join(ids[:5]) + (" …" if len(ids) > 5 else "")
-                        + " — pass a 16-char content-hash to disambiguate."
+                        + ". Pass a 32-char content-hash to disambiguate."
                     )
         if entry is None:
-            return f"Not found: {doc_id!r} in {col_name} (pass a 16-char content-hash from store_list/store_put/search, or an exact title)"
+            return f"Not found: {doc_id!r} in {col_name} (pass a 32-char content-hash from store_list/store_put/search, or an exact title)"
         title = entry.get("title", "")
         tags = entry.get("tags", "")
         indexed_at = (entry.get("indexed_at") or "")[:10]
@@ -1344,7 +1344,7 @@ def store_list(
         lines: list[str] = [f"{col_name}  (showing {offset + 1}-{offset + len(page)} of {total})"]
         from datetime import datetime, timedelta  # noqa: PLC0415
         for e in page:
-            doc_id = e.get("id", "")[:16]
+            doc_id = e.get("id", "")[:32]
             title = (e.get("title") or "")[:40]
             tags = e.get("tags") or ""
             ttl_days = e.get("ttl_days", 0)
@@ -1402,9 +1402,10 @@ def _store_list_docs(t3, col_name: str, total: int) -> str:
     # normalize() so the read always returned empty. Removed in nexus-59j0.
     lines = [f"{col_name}  ({len(docs)} documents, {total} chunks)"]
     for i, (h, d) in enumerate(docs, 1):
-        # 16-char content-hash prefix surfaces the doc_id store_get expects;
-        # without it the natural list → get flow had no path from title to hash.
-        doc_id = (d.get("id") or h)[:16]
+        # 32-char content-hash (chunk_text_hash[:32], RDR-108 D1) is the
+        # doc_id that store_get accepts. Surfaced here so the list -> get
+        # flow has a usable handle.
+        doc_id = (d.get("id") or h)[:32]
         title = (d.get("title") or "untitled")[:50]
         chunks = chunks_by_hash.get(h, "?")
         indexed = (d.get("indexed_at") or "")[:10]

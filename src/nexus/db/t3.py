@@ -661,15 +661,20 @@ class T3Database:
     ) -> str:
         """Upsert *content* into *collection*. Returns the document ID.
 
-        *ttl_days* = 0 means permanent. Expiry is no longer stored as a
-        separate ``expires_at`` field — it's computed Python-side via
-        :func:`nexus.metadata_schema.is_expired` from
-        ``indexed_at + ttl_days``.
+        *ttl_days* = 0 means permanent. Expiry is computed Python-side
+        via :func:`nexus.metadata_schema.is_expired` from
+        ``indexed_at + ttl_days``; no separate ``expires_at`` field.
 
-        Note: The document ID is derived from ``collection:title``. Calling put()
-        with an empty title will overwrite any previous empty-title document in the
-        same collection. Always provide a meaningful title to avoid unintentional
-        overwrites.
+        Note (RDR-108 D1 / nexus-kmb6): The document ID is the
+        content-derived natural ID ``sha256(content).hexdigest()[:32]``.
+        Identical content under any title in this collection collapses
+        to one T3 record. Title is metadata only and does not influence
+        identity. The second ``put`` of the same content with a
+        different title overwrites the first put's ``title`` metadata
+        on the shared row, so ``find_ids_by_title`` will return only
+        the most recent title; if you need both titles to remain
+        searchable, store them under distinct content (or rely on the
+        catalog manifest for cross-title bookkeeping).
 
         MCP-stored docs are single-chunk by definition; this routes through
         :func:`nexus.metadata_schema.make_chunk_metadata` so every

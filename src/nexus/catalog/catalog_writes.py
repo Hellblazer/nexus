@@ -868,14 +868,18 @@ class _WriteOps:
         the manifest for documents in ``physical_collection`` (RDR-108
         Phase 4 / nexus-dyxe).
 
-        T3 chunk IDs are ``chunk_text_hash[:32]`` after Phase 2's
-        content-derived ID change; the manifest stores the full
-        ``chunk_text_hash`` (64 hex chars). Truncating to 32 here means
-        callers can test ``chunk_id in result`` directly.
+        ``document_chunks.chash`` accepts either the full 64-char
+        ``chunk_text_hash`` (the canonical write path via
+        ``manifest_write_batch_hook``) or the truncated 32-char form
+        (used by some backfill flows); ``substr(chash, 1, 32)``
+        normalizes both shapes so the returned set is always
+        32-char-keyed and can be compared directly against
+        ``chunk_text_hash[:32]`` (the natural ID under RDR-108 D1).
 
         Used by the GC rewrite (``indexer._prune_deleted_files``) to
-        identify orphan T3 chunks: anything in the collection whose ID
-        is NOT in this set has no manifest entry and should be deleted.
+        identify orphan T3 chunks: anything in the collection whose
+        ``chunk_text_hash[:32]`` is NOT in this set has no manifest
+        entry and should be deleted.
         """
         cat = self._cat
         rows = cat._db.execute(

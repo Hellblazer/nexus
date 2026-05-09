@@ -1595,6 +1595,14 @@ def _prune_deleted_files(
         replaces the chash at that slot, so the old chash is no longer
         referenced).
 
+    Timing for deleted files: ``_run_housekeeping`` defers
+    ``cat.delete_document`` until ``miss_count >= 2`` (rename-detection
+    grace window). The document and its manifest rows therefore survive
+    the first index run after a file is removed; this GC only sweeps
+    the orphaned T3 chunks on the second run, when housekeeping
+    actually deletes the document and FK CASCADE drops the manifest
+    rows. One-run latency on cleanup, never on correctness.
+
     Pre-D1 [:16] cleanup (RDR-108 re-gate O1 mixed-state) is delegated
     to ``nx t3 reidentify``, whose Pass 2 batch-deletes the old IDs
     after re-upsert. GC's job is doc-level orphan removal; same-content
