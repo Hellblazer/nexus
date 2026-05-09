@@ -6,6 +6,39 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.29.2] - 2026-05-09
+
+Patch release. Restores Windows compatibility — every CLI invocation
+on Windows was failing with ``ModuleNotFoundError: No module named
+'fcntl'`` because ``catalog.py``, ``event_log.py``, and ``indexer.py``
+each did an unconditional top-level ``import fcntl`` (Unix-only stdlib
+module). The import error fired at module load before click ever got
+a chance to dispatch, so ``nx --version`` was as broken as anything
+else. Caught by a fresh Windows install of 4.29.1 from PyPI; the
+package was effectively unusable on the platform.
+
+### Fixed
+
+- **Windows ``ModuleNotFoundError: fcntl`` on every CLI invocation**
+  (#620): adds a small ``nexus._locking`` shim wrapping
+  ``fcntl.flock`` (POSIX) and ``msvcrt.locking`` (Windows) behind a
+  uniform API. Two patterns: ``acquire_directory_lock`` /
+  ``release_lock`` for serializing catalog writers, and
+  ``lock_file`` / ``unlock_file`` for the per-repo PID lock in the
+  indexer. Windows can't ``flock`` directory handles, so the
+  directory lock locks a sentinel file ``<dir>/.lock`` instead;
+  caller contract (opaque token in/out) is preserved. Non-blocking
+  failures raise ``BlockingIOError`` on both platforms so callers
+  handle them with one except clause. ``msvcrt.locking(LK_LOCK)``
+  only retries 10 times before raising; the helper loops it for
+  true blocking semantics matching ``fcntl.LOCK_EX``.
+
+### Docs
+
+- **RDR-108 graph identity normalization** (#606): drafts the design
+  for graph identity normalization across catalog stores, supersedes
+  RDR-107.
+
 ## [4.29.1] - 2026-05-08
 
 Patch release. Hardens the catalog's destructive-verb surface

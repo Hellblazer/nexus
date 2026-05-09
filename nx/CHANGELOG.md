@@ -6,6 +6,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.29.2] - 2026-05-09
+
+Plugin version aligned with conexus 4.29.2. No plugin-side changes;
+the release ships a Windows-compatibility fix in the conexus
+package: every CLI invocation on Windows was failing with
+``ModuleNotFoundError: No module named 'fcntl'`` because
+``catalog.py``, ``event_log.py``, and ``indexer.py`` each did an
+unconditional top-level ``import fcntl`` (Unix-only stdlib module).
+Replaced with a cross-platform ``nexus._locking`` shim
+(``fcntl.flock`` on POSIX, ``msvcrt.locking`` on Windows). See root
+``CHANGELOG.md`` for the full breakdown.
+
 ## [4.29.1] - 2026-05-08
 
 Plugin version aligned with conexus 4.29.1. No plugin-side changes;
