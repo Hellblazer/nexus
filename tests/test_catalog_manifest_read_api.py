@@ -266,6 +266,102 @@ class TestDocsForChashes:
         assert result["b" * 64] == ["1.1.1"]
 
 
+# ── RDR-108 Phase 4 / nexus-dyxe: chashes_for_collection ─────────────────────
+
+
+class TestChashesForCollection:
+    """Tests for ``Catalog.chashes_for_collection(physical_collection) -> set[str]``.
+
+    Returns the set of T3 chunk natural IDs (chash[:32]) referenced by any
+    manifest entry for documents in the given physical_collection. Used by the
+    Phase 4 GC rewrite (indexer._prune_deleted_files) to identify orphan
+    chunks: anything in T3 whose ID is NOT in this set is stale.
+    """
+
+    def test_chashes_for_collection_unknown_returns_empty(self, tmp_path):
+        """Unknown collection name returns empty set, not an error."""
+        cat = _make_catalog(tmp_path)
+        result = cat.chashes_for_collection("code__nonexistent")
+        assert result == set()
+
+    def test_chashes_for_collection_returns_set_of_strings(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        _insert_doc(cat, "1.1.1", "code__test")
+        cat.write_manifest("1.1.1", [_make_chunk("a" * 64, 0)])
+
+        result = cat.chashes_for_collection("code__test")
+        assert isinstance(result, set)
+        assert all(isinstance(x, str) for x in result)
+
+    def test_chashes_for_collection_returns_truncated_to_32(self, tmp_path):
+        """T3 chunk IDs are chash[:32]; the returned set must be truncated
+        so direct membership testing against chunk IDs works."""
+        cat = _make_catalog(tmp_path)
+        _insert_doc(cat, "1.1.1", "code__test")
+        full = "a" * 64
+        cat.write_manifest("1.1.1", [_make_chunk(full, 0)])
+
+        result = cat.chashes_for_collection("code__test")
+        assert result == {full[:32]}
+
+    def test_chashes_for_collection_distinct_across_chunks(self, tmp_path):
+        """Each chash appears once even if it occurs at multiple positions
+        or across multiple docs in the same collection."""
+        cat = _make_catalog(tmp_path)
+        _insert_doc(cat, "1.1.1", "code__test")
+        _insert_doc(cat, "1.1.2", "code__test")
+        shared = "a" * 64
+        cat.write_manifest("1.1.1", [
+            _make_chunk(shared, 0),
+            _make_chunk(shared, 1),
+            _make_chunk("b" * 64, 2),
+        ])
+        cat.write_manifest("1.1.2", [_make_chunk(shared, 0)])
+
+        result = cat.chashes_for_collection("code__test")
+        assert result == {shared[:32], ("b" * 64)[:32]}
+
+    def test_chashes_for_collection_isolates_by_physical_collection(self, tmp_path):
+        """Only docs whose ``physical_collection`` matches contribute chashes."""
+        cat = _make_catalog(tmp_path)
+        _insert_doc(cat, "1.1.1", "code__a")
+        _insert_doc(cat, "1.1.2", "code__b")
+        cat.write_manifest("1.1.1", [_make_chunk("a" * 64, 0)])
+        cat.write_manifest("1.1.2", [_make_chunk("b" * 64, 0)])
+
+        a_set = cat.chashes_for_collection("code__a")
+        b_set = cat.chashes_for_collection("code__b")
+        assert a_set == {("a" * 64)[:32]}
+        assert b_set == {("b" * 64)[:32]}
+
+    def test_chashes_for_collection_empty_manifest_returns_empty(self, tmp_path):
+        """A doc registered to the collection but with no manifest rows
+        contributes no chashes (zero-chunk doc → all-deleted)."""
+        cat = _make_catalog(tmp_path)
+        _insert_doc(cat, "1.1.1", "code__test")
+        cat.write_manifest("1.1.1", [])
+
+        result = cat.chashes_for_collection("code__test")
+        assert result == set()
+
+    def test_chashes_for_collection_skips_deleted_documents(self, tmp_path):
+        """ON DELETE CASCADE removes manifest rows when the document is
+        deleted, so ``chashes_for_collection`` returns an empty set after
+        the only contributing doc is removed (deleted-file → all chunks
+        become orphans, the GC contract)."""
+        cat = _make_catalog(tmp_path)
+        _insert_doc(cat, "1.1.1", "code__test")
+        cat.write_manifest("1.1.1", [_make_chunk("a" * 64, 0)])
+
+        cat._db.execute(  # epsilon-allow: test fixture forces FK CASCADE
+            "DELETE FROM documents WHERE tumbler = ?", ("1.1.1",)
+        )
+        cat._db.commit()
+
+        result = cat.chashes_for_collection("code__test")
+        assert result == set()
+
+
 # ── K7: event-sourced backfill ────────────────────────────────────────────────
 
 

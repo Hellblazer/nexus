@@ -411,69 +411,134 @@ def test_run_index_mixed_repo(tmp_path):
 
 # ── Prune helpers ────────────────────────────────────────────────────────────
 
-def test_run_index_prune_deleted_files(tmp_path):
-    """Legacy fallback path: chunks pre-date Phase A doc_id wiring AND
-    were written before Phase B dropped source_path. ``_prune_deleted_files``
-    must still detect deleted-file chunks via the source_path lookup
-    (Phase 5b cleanup will drop this branch once the prune verb has
-    swept every collection)."""
-    from nexus.indexer import _prune_deleted_files
+def _gc_col(rows: list[tuple[str, str]]):
+    """Build a MagicMock T3 collection. ``rows`` is a list of
+    ``(chunk_id, chunk_text_hash)`` pairs; the chunk_text_hash may be
+    short (synthetic-write era), [:32] (post-D1), or [:64] (full sha256
+    in metadata, the actual production shape)."""
+    ids = [r[0] for r in rows]
+    metas = [{"chunk_text_hash": r[1]} for r in rows]
     col = MagicMock()
-    col.get.return_value = {"ids": ["a1","b1","b2"], "metadatas": [
-        {"source_path": "/repo/a.py"}, {"source_path": "/repo/b.py"}, {"source_path": "/repo/b.py"}]}
-    db = MagicMock(); db.get_or_create_collection.return_value = col
-    _prune_deleted_files("code__repo", "docs__repo", {"/repo/a.py"}, db)
+    col.get.side_effect = [
+        {"ids": ids, "metadatas": metas},
+        {"ids": [], "metadatas": []},
+    ]
+    return col
+
+
+def _gc_catalog(per_collection: dict[str, set[str]]):
+    """MagicMock catalog whose ``chashes_for_collection`` reads from a dict."""
+    cat = MagicMock()
+    cat.chashes_for_collection.side_effect = lambda name: per_collection.get(name, set())
+    return cat
+
+
+def _deleted_ids(col) -> list[str]:
+    out: list[str] = []
     for dc in col.delete.call_args_list:
-        ids = dc.kwargs.get("ids") or dc[1].get("ids") if dc[1] else dc[0][0]
+        ids = dc.kwargs.get("ids") or (dc.args[0] if dc.args else None)
         if isinstance(ids, list):
-            assert "a1" not in ids and ("b1" in ids or "b2" in ids)
+            out.extend(ids)
+    return out
 
 
-def test_run_index_prune_deleted_files_doc_id_keyed(tmp_path):
-    """RDR-102 D2 / Phase B regression guard: post-Phase-B chunks carry
-    no source_path; ``_prune_deleted_files`` must use the doc_id-keyed
-    identity (via the file_to_doc_id map the catalog hook always
-    populates) to identify deleted-file chunks. A regression where the
-    function still keys only on source_path would silently no-op for
-    every post-Phase-B repo and let deleted-file chunks accumulate
-    indefinitely.
-    """
+def test_prune_deleted_files_orphan_chunk_deleted(tmp_path):
+    """RDR-108 Phase 4 / nexus-dyxe: a T3 chunk whose
+    ``chunk_text_hash[:32]`` is NOT in the manifest's referenced-chash
+    set is an orphan and must be deleted. Orphans are produced by
+    deleted documents (FK CASCADE drops their manifest rows) and by
+    re-indexing that supersedes older chunks."""
     from nexus.indexer import _prune_deleted_files
-    # Three chunks: a1's doc_id matches a current file, b1's and b2's
-    # doc_ids point to a Document for a file that was deleted from
-    # the repo (the file_to_doc_id map only carries a.py).
-    col = MagicMock()
-    col.get.return_value = {
-        "ids": ["a1", "b1", "b2"],
-        "metadatas": [
-            {"doc_id": "1.7.10"},  # current file
-            {"doc_id": "1.7.99"},  # deleted file
-            {"doc_id": "1.7.99"},
-        ],
-    }
+    live_chash = "a" * 64
+    orphan_chash = "b" * 64
+    col = _gc_col([("live-id-synthetic", live_chash),
+                   ("orphan-id-synthetic", orphan_chash)])
     db = MagicMock(); db.get_or_create_collection.return_value = col
-    file_to_doc_id = {Path("/repo/a.py"): "1.7.10"}  # b.py is gone
+    catalog = _gc_catalog({"code__repo": {live_chash[:32]}, "docs__repo": set()})
 
-    _prune_deleted_files(
-        "code__repo", "docs__repo",
-        all_current_paths={"/repo/a.py"},  # source_path fallback would also work
-        db=db,
-        file_to_doc_id=file_to_doc_id,
-    )
+    _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
 
-    deleted_ids: list[str] = []
-    for dc in col.delete.call_args_list:
-        ids = dc.kwargs.get("ids") or (dc[1].get("ids") if dc[1] else dc[0][0])
-        if isinstance(ids, list):
-            deleted_ids.extend(ids)
-    assert "a1" not in deleted_ids, (
-        "current-file chunk was incorrectly pruned"
-    )
-    assert "b1" in deleted_ids and "b2" in deleted_ids, (
-        f"deleted-file chunks were not pruned via doc_id-keyed lookup; "
-        f"deleted={deleted_ids}. Phase B regression: chunks lacking "
-        f"source_path must be reachable via the file_to_doc_id map."
-    )
+    deleted = _deleted_ids(col)
+    assert "orphan-id-synthetic" in deleted
+    assert "live-id-synthetic" not in deleted
+
+
+def test_prune_deleted_files_preserves_live_synthetic_id(tmp_path):
+    """Newly-indexed chunks still carry synthetic IDs (the indexer write
+    path predates Phase 2's content-derived ID change). GC must preserve
+    them by matching ``meta.chunk_text_hash[:32]`` against the manifest,
+    NOT the chunk's natural ID."""
+    from nexus.indexer import _prune_deleted_files
+    chash = "a" * 64
+    synthetic_id = "0123456789abcdef" * 2  # 32 hex chars unrelated to chash
+    col = _gc_col([(synthetic_id, chash)])
+    db = MagicMock(); db.get_or_create_collection.return_value = col
+    catalog = _gc_catalog({"code__repo": {chash[:32]}, "docs__repo": set()})
+
+    _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
+
+    assert col.delete.call_count == 0
+
+
+def test_prune_deleted_files_empty_manifest_deletes_all(tmp_path):
+    """When the catalog has zero referenced chashes for a collection
+    (fully-rotted corpus where every document was removed), every
+    chunk in T3 is an orphan."""
+    from nexus.indexer import _prune_deleted_files
+    col = _gc_col([("id-x", "x" * 64),
+                   ("id-y", "y" * 64),
+                   ("id-z", "z" * 64)])
+    db = MagicMock(); db.get_or_create_collection.return_value = col
+    catalog = _gc_catalog({"code__repo": set(), "docs__repo": set()})
+
+    _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
+
+    deleted = _deleted_ids(col)
+    assert set(deleted) == {"id-x", "id-y", "id-z"}
+
+
+def test_prune_deleted_files_chunk_without_chunk_text_hash_deleted(tmp_path):
+    """A T3 chunk that lacks ``chunk_text_hash`` metadata cannot be
+    proved live by the manifest. These are pre-Phase-A relics; GC
+    sweeps them."""
+    from nexus.indexer import _prune_deleted_files
+    col = _gc_col([("ancient", "")])
+    db = MagicMock(); db.get_or_create_collection.return_value = col
+    catalog = _gc_catalog({"code__repo": {"a" * 32}, "docs__repo": set()})
+
+    _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
+
+    assert "ancient" in _deleted_ids(col)
+
+
+def test_prune_deleted_files_idempotent(tmp_path):
+    """Re-running with no new orphans is a no-op (zero deletes)."""
+    from nexus.indexer import _prune_deleted_files
+    chash = "a" * 64
+    catalog = _gc_catalog({"code__repo": {chash[:32]}, "docs__repo": set()})
+
+    col = _gc_col([("live-id", chash)])
+    db = MagicMock(); db.get_or_create_collection.return_value = col
+    _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
+    assert col.delete.call_count == 0
+
+    col2 = _gc_col([("live-id", chash)])
+    db2 = MagicMock(); db2.get_or_create_collection.return_value = col2
+    _prune_deleted_files("code__repo", "docs__repo", db2, catalog=catalog)
+    assert col2.delete.call_count == 0
+
+
+def test_prune_deleted_files_no_catalog_is_noop(tmp_path):
+    """Catalog-absent (e.g. catalog not initialized) is a safe no-op:
+    GC cannot run without the manifest as the source of truth."""
+    from nexus.indexer import _prune_deleted_files
+    col = _gc_col([("x", "x" * 64)])
+    db = MagicMock(); db.get_or_create_collection.return_value = col
+
+    _prune_deleted_files("code__repo", "docs__repo", db, catalog=None)
+
+    assert col.delete.call_count == 0
+    db.get_or_create_collection.assert_not_called()
 
 
 def test_run_index_prune_misclassified(tmp_path):
@@ -896,20 +961,38 @@ def test_on_stage_timers_none_is_safe(tmp_path):
 # ── Pagination tests ────────────────────────────────────────────────────────
 
 def test_prune_deleted_files_paginates(tmp_path):
+    """RDR-108 Phase 4 / nexus-dyxe: pagination still walks the whole
+    collection and deletes orphans across page boundaries."""
     from nexus.indexer import _prune_deleted_files
-    sa, sb = "/repo/a.py", "/repo/b.py"
-    p1 = {"ids": [f"a-{i}" for i in range(200)] + [f"b-{i}" for i in range(100)],
-          "metadatas": [{"source_path": sa}]*200 + [{"source_path": sb}]*100}
-    p2 = {"ids": [f"b-{i}" for i in range(100,110)], "metadatas": [{"source_path": sb}]*10}
+    live = [(f"live-{i:03d}", f"a{i:03d}" + "0" * 60) for i in range(200)]
+    orphan = [(f"orphan-{i:03d}", f"b{i:03d}" + "0" * 60) for i in range(110)]
+    live_ids = {r[0] for r in live}
+    orphan_ids = {r[0] for r in orphan}
+    live_chashes_32 = {r[1][:32] for r in live}
+    # Force pagination by filling page 1 to exactly _CHROMA_PAGE_SIZE=300 rows
+    # so the helper continues to page 2 instead of short-circuiting.
+    p1_rows = live + orphan[:100]
+    p2_rows = orphan[100:]
+    p1 = {"ids": [r[0] for r in p1_rows],
+          "metadatas": [{"chunk_text_hash": r[1]} for r in p1_rows]}
+    p2 = {"ids": [r[0] for r in p2_rows],
+          "metadatas": [{"chunk_text_hash": r[1]} for r in p2_rows]}
+    p3 = {"ids": [], "metadatas": []}
     mock_cols: list[MagicMock] = []
     def mc():
-        c = MagicMock(); c.get.side_effect = [p1, p2]; return c
-    db = MagicMock(); db.get_or_create_collection.side_effect = lambda _: (mock_cols.append(mc()), mock_cols[-1])[1]
-    _prune_deleted_files("code__repo", "docs__repo", {sa}, db)
+        c = MagicMock(); c.get.side_effect = [p1, p2, p3]; return c
+    db = MagicMock()
+    db.get_or_create_collection.side_effect = lambda _: (mock_cols.append(mc()), mock_cols[-1])[1]
+    catalog = _gc_catalog({"code__repo": live_chashes_32, "docs__repo": live_chashes_32})
+
+    _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
+
     for col in mock_cols:
         d = set()
-        for c in col.delete.call_args_list: d.update(c.kwargs.get("ids") or (c.args[0] if c.args else []))
-        assert {f"b-{i}" for i in range(110)}.issubset(d) and not {f"a-{i}" for i in range(200)}.intersection(d)
+        for c in col.delete.call_args_list:
+            d.update(c.kwargs.get("ids") or (c.args[0] if c.args else []))
+        assert orphan_ids.issubset(d)
+        assert not live_ids.intersection(d)
 
 
 def test_frecency_update_paginates(tmp_path):

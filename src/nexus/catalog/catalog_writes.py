@@ -863,6 +863,30 @@ class _WriteOps:
             for row in rows
         ]
 
+    def chashes_for_collection(self, physical_collection: str) -> set[str]:
+        """Return the set of chunk natural IDs (chash[:32]) referenced by
+        the manifest for documents in ``physical_collection`` (RDR-108
+        Phase 4 / nexus-dyxe).
+
+        T3 chunk IDs are ``chunk_text_hash[:32]`` after Phase 2's
+        content-derived ID change; the manifest stores the full
+        ``chunk_text_hash`` (64 hex chars). Truncating to 32 here means
+        callers can test ``chunk_id in result`` directly.
+
+        Used by the GC rewrite (``indexer._prune_deleted_files``) to
+        identify orphan T3 chunks: anything in the collection whose ID
+        is NOT in this set has no manifest entry and should be deleted.
+        """
+        cat = self._cat
+        rows = cat._db.execute(
+            "SELECT DISTINCT substr(dc.chash, 1, 32) "
+            "FROM document_chunks dc "
+            "JOIN documents d ON d.tumbler = dc.doc_id "
+            "WHERE d.physical_collection = ?",
+            (physical_collection,),
+        ).fetchall()
+        return {row[0] for row in rows}
+
     def docs_for_chashes(self, chashes: list[str]) -> dict[str, list[str]]:
         """Reverse-lookup: chash -> [doc_id, ...] (nexus-572g K6).
 

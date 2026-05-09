@@ -1531,6 +1531,12 @@ class Catalog:
         """Reverse-lookup: chash -> [doc_id, ...] (nexus-572g K6)."""
         return self._writes.docs_for_chashes(chashes)
 
+    def chashes_for_collection(self, physical_collection: str) -> set[str]:
+        """Return chunk natural IDs (chash[:32]) referenced by the manifest
+        for documents in ``physical_collection`` (RDR-108 Phase 4 / nexus-dyxe).
+        Used by GC to identify orphan T3 chunks."""
+        return self._writes.chashes_for_collection(physical_collection)
+
     def find(self, query: str, *, content_type: str | None = None) -> list[CatalogEntry]:
         """Delegates to ``_DocumentOps.find`` (nexus-mbm)."""
         return self._docs.find(query, content_type=content_type)
