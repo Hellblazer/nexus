@@ -516,17 +516,33 @@ class AspectExtractionQueue:
         """Re-point every row's denorm ``collection`` cache from ``old`` to ``new``.
 
         nexus-gp20 / RDR-108 Phase 1d: ``collection`` is a denorm cache.
-        When the queue table uses the legacy ``PRIMARY KEY (collection,
-        source_path)`` schema, this UPDATE is the authoritative re-keying
-        for the PK itself (safe because ``source_path`` values within a
-        renamed collection remain unique).  When the PK has been migrated
-        to ``doc_id``, only the denorm cache shifts.
+        On migrated tables (PK=doc_id, post-RDR-108 Phase 1c), this
+        updates only the denorm cache; PK is unaffected. On legacy tables
+        (PK=(collection, source_path)), this also re-keys the PK, which
+        is safe because source_path values are unique within a collection.
 
-        Returns row count updated (0 when no rows match — safe no-op).
+        Collision defense (nexus-nhyh / K4): on legacy-PK tables, a
+        pre-existing ``(new, source_path)`` row would cause a UNIQUE
+        constraint violation on UPDATE. Mirror chash_index's strategy:
+        DELETE conflicting new-side rows first, then UPDATE. The rename
+        is an atomic re-home, so dropping a stale new-side row is safe.
+
+        Returns row count updated (0 when no rows match -- safe no-op).
         Idempotent: a second call with the same ``old`` name returns 0
         without error.
         """
         with self._lock:
+            # Drop any pre-existing new-collection rows that would collide
+            # with the rename (same source_path). Mirrors ChashIndex pattern.
+            self.conn.execute(
+                "DELETE FROM aspect_extraction_queue "
+                "WHERE collection = ? "
+                "  AND source_path IN ("
+                "    SELECT source_path FROM aspect_extraction_queue"
+                "    WHERE collection = ?"
+                "  )",
+                (new, old),
+            )
             cur = self.conn.execute(
                 "UPDATE aspect_extraction_queue "
                 "SET collection = ? WHERE collection = ?",

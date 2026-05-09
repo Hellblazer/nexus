@@ -80,9 +80,13 @@ def test_mcp_hooks_registered():
     from nexus.mcp_infra import _post_store_batch_hooks, _post_store_hooks
 
     batch_names = [h.__name__ for h in _post_store_batch_hooks]
+    # RDR-108 D2 (nexus-572g): manifest_write_batch_hook joins the chain
+    # so chunk batches landing in T3 update the catalog manifest at the
+    # same boundary that chash_dual_write and taxonomy_assign run on.
     assert batch_names == [
         "chash_dual_write_batch_hook",
         "taxonomy_assign_batch_hook",
+        "manifest_write_batch_hook",
     ], f"unexpected batch chain order: {batch_names}"
 
     single_names = [h.__name__ for h in _post_store_hooks]

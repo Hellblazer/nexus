@@ -423,55 +423,11 @@ class CatalogDB:
                 "WHERE bib_openalex_id != ''"
             )
 
-        # RDR-108 D2 (nexus-mydi): backfill collections rows for any
-        # documents.physical_collection value that has no matching
-        # collections.name row. Pre-RDR-108 catalogs accumulated docs
-        # whose physical_collection was a free-form string, never
-        # registered in the collections projection — surfaced as the
-        # 11.3x chash_index drift and 76% document_aspects orphan rate
-        # in the 2026-05-08 prod-shakeout. This backfill is structural
-        # prep for FK enforcement on documents.physical_collection
-        # (deferred to a follow-up migration that recreates the
-        # documents table per SQLite's 12-step ALTER pattern).
-        # Idempotent: the SELECT-then-INSERT pattern with a
-        # collections.name PK on the target side is a no-op when the
-        # row already exists.
-        # Probe-guarded: stripped-down legacy schemas (e.g. the
-        # alias_of migration test fixture) may lack the
-        # physical_collection column entirely; skip the backfill in
-        # that case rather than raise.
-        try:
-            self._conn.execute(
-                "SELECT physical_collection FROM documents LIMIT 0"
-            )
-        except sqlite3.OperationalError:
-            pass
-        else:
-            # SIG-7 (RDR-108, nexus-lh8c): use ISO timestamp for created_at.
-            from datetime import UTC, datetime as _datetime  # noqa: PLC0415
-            _now = _datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-            # O-5 (nexus-lh8c): INSERT OR IGNORE for O(1) idempotency vs
-            # the anti-join WHERE NOT IN pattern which is O(n*m).
-            with self._conn:
-                self._conn.execute(
-                    "INSERT OR IGNORE INTO collections "
-                    "(name, content_type, owner_id, embedding_model, "
-                    " model_version, display_name, legacy_grandfathered, "
-                    " superseded_by, superseded_at, created_at) "
-                    "SELECT DISTINCT physical_collection, '', '', '', '', '', "
-                    f"  1, '', '', '{_now}' "
-                    "FROM documents "
-                    "WHERE physical_collection IS NOT NULL "
-                    "  AND physical_collection != ''"
-                )
-
         # RDR-108 K1 (nexus-lh8c): add ON DELETE CASCADE to document_chunks
         # for existing databases that were created before this constraint was
         # declared in the schema. SQLite cannot ALTER a FK constraint in place;
         # the 12-step pattern recreates the table with the correct declaration.
-        # Idempotent: skipped if the schema already includes ON DELETE CASCADE,
-        # or if document_chunks doesn't exist yet (fresh install gets it right
-        # from _SCHEMA_SQL above).
+        # Idempotent: skipped if the schema already includes ON DELETE CASCADE.
         _chunks_ddl_row = self._conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='document_chunks'"
         ).fetchone()
@@ -515,6 +471,81 @@ class CatalogDB:
                     "CREATE INDEX IF NOT EXISTS idx_document_chunks_chash"
                     " ON document_chunks(chash)"
                 )
+
+                # RDR-108 D2 (nexus-mydi): backfill collections rows for any
+        # documents.physical_collection value that has no matching
+        # collections.name row. Pre-RDR-108 catalogs accumulated docs
+        # whose physical_collection was a free-form string, never
+        # registered in the collections projection — surfaced as the
+        # 11.3x chash_index drift and 76% document_aspects orphan rate
+        # in the 2026-05-08 prod-shakeout. This backfill is structural
+        # prep for FK enforcement on documents.physical_collection
+        # (deferred to a follow-up migration that recreates the
+        # documents table per SQLite's 12-step ALTER pattern).
+        # Idempotent: the SELECT-then-INSERT pattern with a
+        # collections.name PK on the target side is a no-op when the
+        # row already exists.
+        # Probe-guarded: stripped-down legacy schemas (e.g. the
+        # alias_of migration test fixture) may lack the
+        # physical_collection column entirely; skip the backfill in
+        # that case rather than raise.
+        # nexus-572g K7: track inserted names so Catalog.__init__ can
+        # emit synthetic CollectionCreated events with
+        # legacy_grandfathered=True. Without backing events the rows
+        # vanish on Catalog.rebuild() (DELETE FROM collections + JSONL
+        # replay). Catalog reads _backfilled_collections immediately
+        # after constructing this CatalogDB.
+        self._backfilled_collections: set[str] = set()
+        try:
+            self._conn.execute(
+                "SELECT physical_collection FROM documents LIMIT 0"
+            )
+        except sqlite3.OperationalError:
+            pass
+        else:
+            # RDR-108 D2 (nexus-mydi → nexus-572g): identify candidate
+            # collection names before INSERT so we track exactly which
+            # names actually land (the INSERT below skips existing rows).
+            # The candidate set seeds _emit_backfilled_collection_events
+            # (catalog.py) so the event-sourced model stays canonical:
+            # synthetic CollectionCreated events are emitted post-rebuild
+            # so a JSONL replay materializes the same collections rows.
+            #
+            # SIG-7 (nexus-872w): created_at is a real ISO timestamp
+            # (parameter-bound, not f-string interpolated) so audit
+            # tools can distinguish rows that were backfilled from
+            # rows that were never written.
+            #
+            # O-5: INSERT OR IGNORE replaces the NOT IN subquery
+            # form (perf — collections.name is a PK so OR IGNORE is
+            # the natural shape).
+            candidates = {
+                row[0]
+                for row in self._conn.execute(
+                    "SELECT DISTINCT physical_collection FROM documents "
+                    "WHERE physical_collection IS NOT NULL "
+                    "  AND physical_collection != '' "
+                    "  AND physical_collection NOT IN "
+                    "      (SELECT name FROM collections)"
+                ).fetchall()
+            }
+            if candidates:
+                from datetime import UTC, datetime as _datetime  # noqa: PLC0415
+                _now = _datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+                with self._conn:
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO collections "
+                        "(name, content_type, owner_id, embedding_model, "
+                        " model_version, display_name, legacy_grandfathered, "
+                        " superseded_by, superseded_at, created_at) "
+                        "SELECT DISTINCT physical_collection, '', '', '', '', '', "
+                        "  1, '', '', ? "
+                        "FROM documents "
+                        "WHERE physical_collection IS NOT NULL "
+                        "  AND physical_collection != ''",
+                        (_now,),
+                    )
+                self._backfilled_collections = candidates
 
     def rebuild(
         self,

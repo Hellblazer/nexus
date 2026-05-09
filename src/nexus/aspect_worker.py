@@ -93,6 +93,36 @@ class DrainTimeoutError(RuntimeError):
         )
 
 
+class DrainBlockedByActiveWorker(RuntimeError):
+    """Raised by ``drain_worker`` when an active MCP-process worker is
+    detected via a lock file.
+
+    ``drain_worker`` is process-local: it only stops the worker running
+    inside the *current* process.  If an MCP server has its own worker
+    in a separate process, draining here leaves that process's queue
+    rows untouched — the PK migration would then race against live
+    ``in_progress`` rows it cannot see.
+
+    The operator must either:
+      1. Stop the MCP server before running the migration, **or**
+      2. Invoke the migration from within the MCP process (e.g., via
+         ``nx upgrade``).
+
+    SIG-5 (nexus-1091): lock-file path is
+    ``~/.config/nexus/locks/aspect_worker.<pid>``.
+    """
+
+    def __init__(self, blocking_pid: int, lock_file: Path) -> None:
+        self.blocking_pid = blocking_pid
+        self.lock_file = lock_file
+        super().__init__(
+            f"drain_worker blocked by active MCP worker in PID {blocking_pid} "
+            f"(lock file: {lock_file}). "
+            "Stop the MCP server before running the migration, or invoke the "
+            "migration from within the MCP process (e.g., via `nx upgrade`)."
+        )
+
+
 # ── Worker class ────────────────────────────────────────────────────────────
 
 
@@ -470,16 +500,66 @@ def get_worker() -> AspectExtractionWorker | None:
     return _worker
 
 
+def _worker_lock_path(locks_dir: Path | None = None) -> Path:
+    """Return the canonical lock file path for this process.
+
+    Lock file name: ``aspect_worker.<os.getpid()>``.
+
+    SIG-5 (nexus-1091): the MCP server writes this file when its worker
+    starts so that CLI-side ``drain_worker`` can detect the conflict.
+    """
+    import os
+
+    base = locks_dir if locks_dir is not None else (
+        Path.home() / ".config" / "nexus" / "locks"
+    )
+    return base / f"aspect_worker.{os.getpid()}"
+
+
+def _write_worker_lock(locks_dir: Path | None = None) -> None:
+    """Write a process-scoped lock file advertising this worker.
+
+    Non-fatal if the locks directory cannot be created or the file cannot
+    be written — the lock is advisory; a missing file merely means
+    ``drain_worker`` from another process will not detect this worker.
+    """
+    import os
+
+    try:
+        lock = _worker_lock_path(locks_dir)
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        lock.write_text(str(os.getpid()))
+    except Exception:
+        _log.warning("aspect_worker_lock_write_failed", exc_info=True)
+
+
+def _remove_worker_lock(locks_dir: Path | None = None) -> None:
+    """Remove the process-scoped lock file when the worker stops.
+
+    Non-fatal if the file does not exist or cannot be removed.
+    """
+    try:
+        _worker_lock_path(locks_dir).unlink(missing_ok=True)
+    except Exception:
+        _log.warning("aspect_worker_lock_remove_failed", exc_info=True)
+
+
 def ensure_worker_started(
     *,
     poll_interval: float = 2.0,
     stale_timeout_seconds: int = 300,
+    _locks_dir: Path | None = None,
 ) -> AspectExtractionWorker:
     """Lazy-start the singleton worker. Returns the worker.
 
-    Idempotent — calling once, twice, or N times all return the same
+    Idempotent -- calling once, twice, or N times all return the same
     instance and only spawn one thread. Tuning parameters apply only
     to the first call (subsequent calls cannot retune).
+
+    Writes a process-scoped lock file (SIG-5) so that CLI-side
+    ``drain_worker`` calls in other processes can detect an active
+    MCP worker and raise ``DrainBlockedByActiveWorker`` with operator
+    guidance rather than silently missing queue rows.
     """
     global _worker
     with _worker_lock:
@@ -489,22 +569,26 @@ def ensure_worker_started(
                 stale_timeout_seconds=stale_timeout_seconds,
             )
         _worker.start()
-        return _worker
+    _write_worker_lock(_locks_dir)
+    return _worker
 
 
-def stop_worker(timeout: float = 10.0) -> None:
+def stop_worker(timeout: float = 10.0, _locks_dir: Path | None = None) -> None:
     """Stop the singleton worker if running. Idempotent.
 
     Note: leaves the singleton instance in place (stopped) so a
     subsequent ``ensure_worker_started`` call rebuilds the daemon
     thread on the existing instance. Tests that need a fresh
     instance should call ``reset_worker_for_tests`` instead.
+
+    Removes the process-scoped lock file (SIG-5) when the worker stops.
     """
     global _worker
     with _worker_lock:
         worker = _worker
     if worker is not None:
         worker.stop(timeout=timeout)
+    _remove_worker_lock(_locks_dir)
 
 
 def reset_worker_for_tests() -> None:
@@ -517,11 +601,73 @@ def reset_worker_for_tests() -> None:
         _worker = None
 
 
+def _check_mcp_worker_lock(locks_dir: Path) -> None:
+    """Check for active MCP-process aspect workers via lock files.
+
+    Scans ``locks_dir`` for ``aspect_worker.<pid>`` files.  For each:
+      - If the PID matches the current process: skip (drain can stop its
+        own worker directly; not a cross-process conflict).
+      - If the PID is alive in a different process: raises
+        ``DrainBlockedByActiveWorker``.
+      - If the PID is dead (stale lock): removes the lock file silently.
+
+    SIG-5 (nexus-1091): drain_worker is process-local.  An active MCP
+    server holds its own worker in a separate OS process.  Draining here
+    only stops the current process's worker; the MCP worker keeps running
+    and may continue to write queue rows that the PK migration would race
+    against.  The lock file check surfaces this cross-process conflict
+    before the migration begins rather than after.
+
+    Args:
+        locks_dir: Directory to scan for lock files.  If it does not
+            exist, the check is skipped (no MCP server ever registered).
+    """
+    import os
+
+    if not locks_dir.exists():
+        return
+
+    own_pid = os.getpid()
+
+    for lock_file in locks_dir.glob("aspect_worker.*"):
+        try:
+            pid = int(lock_file.name.rsplit(".", 1)[-1])
+        except ValueError:
+            continue  # Not a PID-suffixed lock file — skip.
+
+        if pid == own_pid:
+            # The current process wrote this lock; drain can stop its own
+            # worker directly.  Not a cross-process conflict.
+            continue
+
+        # Probe whether the PID is alive.  os.kill(pid, 0) returns without
+        # error if the process exists and we have permission to signal it.
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            # PID does not exist — stale lock; clean up and continue.
+            _log.info(
+                "drain_worker_stale_lock_removed",
+                lock_file=str(lock_file),
+                pid=pid,
+            )
+            lock_file.unlink(missing_ok=True)
+            continue
+        except PermissionError:
+            # PID exists but we cannot signal it (different user) — treat
+            # as alive and block the drain.
+            pass
+
+        # PID is alive in a different process — block the drain.
+        raise DrainBlockedByActiveWorker(blocking_pid=pid, lock_file=lock_file)
+
+
 def drain_worker(
     queue_path: Path | str,
     *,
-    timeout: float = 30.0,
+    timeout: float = 120.0,
     poll_interval: float = 0.1,
+    _locks_dir: Path | None = None,
 ) -> None:
     """Stop the singleton worker and wait until the queue is fully drained.
 
@@ -532,13 +678,18 @@ def drain_worker(
 
     Protocol (RDR-108 Phase 1 S1, nexus-he24):
 
-      1. Set the stop signal on the singleton worker (if one exists) so
+      1. Check for active MCP-process workers via lock files (SIG-5).
+         If a live MCP worker is detected, raise ``DrainBlockedByActiveWorker``
+         immediately with operator guidance.
+      2. Set the stop signal on the singleton worker (if one exists) so
          it claims no new rows.  In-flight row processing continues.
-      2. Poll the queue at ``poll_interval`` (default 100 ms) until
+      3. Poll the queue at ``poll_interval`` (default 100 ms) until
          ``is_drained()`` returns True or ``timeout`` elapses.
-      3. On success: join the worker thread (it has already exited or will
-         exit imminently after the last iteration).
-      4. On timeout: raise ``DrainTimeoutError`` so the operator is alerted
+      4. On success: join the worker thread (it has already exited or will
+         exit imminently after the last iteration).  If the thread does not
+         exit within 2 seconds, log a warning (S-5) and continue — the
+         thread is a daemon and will die with the process.
+      5. On timeout: raise ``DrainTimeoutError`` so the operator is alerted
          to inspect stuck ``in_progress`` rows.
 
     Args:
@@ -546,10 +697,22 @@ def drain_worker(
             short-lived read-only connection for the ``is_drained()`` poll
             separate from the worker's own T2 context so this function does
             not compete for locks.
-        timeout: Seconds to wait for the queue to drain (default 30).
+        timeout: Seconds to wait for the queue to drain.  Default 120s.
+            RDR-089 P1.3 measured ~26.5s median extraction time with a
+            tail to 90s for the scholarly-paper-v1 extractor.  120s
+            (approximately 4x median) provides adequate margin while
+            still surfacing genuinely stuck workers within two minutes.
+            Callers that know their workload is lighter may pass a smaller
+            value.
         poll_interval: Seconds between is_drained() checks (default 0.1).
+        _locks_dir: Override the locks directory for testing.  Production
+            code should leave this as None (resolved to
+            ``~/.config/nexus/locks``).
 
     Raises:
+        DrainBlockedByActiveWorker: An active MCP-process worker was
+            detected via a lock file.  Stop the MCP server before running
+            the migration.
         DrainTimeoutError: Queue still has pending/in_progress rows after
             ``timeout`` seconds.
 
@@ -562,6 +725,15 @@ def drain_worker(
     """
     from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
 
+    # SIG-5: detect active MCP-process workers before stopping the local
+    # singleton.  A live MCP worker in another process drains its own
+    # queue independently; the migration must not run while that worker is
+    # alive or it will race against in_progress rows it cannot see.
+    locks_dir = _locks_dir if _locks_dir is not None else (
+        Path.home() / ".config" / "nexus" / "locks"
+    )
+    _check_mcp_worker_lock(locks_dir)
+
     worker = get_worker()
     if worker is not None:
         worker.stop_claiming()
@@ -570,15 +742,32 @@ def drain_worker(
     deadline = time.monotonic() + timeout
 
     queue = AspectExtractionQueue(queue_path)
+
+    def _join_worker_thread(w: AspectExtractionWorker) -> None:
+        """Join the worker thread; log a warning if it does not exit in 2s.
+
+        S-5 (nexus-1091): the original join was silent on timeout.  A stuck
+        thread after stop_claiming() is unexpected and warrants an operator-
+        visible warning so the hang is not silently ignored.
+        """
+        with _worker_lock:
+            thread = w._thread
+            w._thread = None
+        if thread is None:
+            return
+        thread.join(timeout=2.0)
+        if thread.is_alive():
+            _log.warning(
+                "drain_worker_thread_join_timeout",
+                thread_id=thread.ident,
+                timeout=2.0,
+            )
+
     try:
         # Short-circuit: if already drained, return immediately.
         if queue.is_drained():
             if worker is not None and worker.is_running():
-                with _worker_lock:
-                    thread = worker._thread
-                    worker._thread = None
-                if thread is not None:
-                    thread.join(timeout=2.0)
+                _join_worker_thread(worker)
             return
 
         while time.monotonic() < deadline:
@@ -587,11 +776,7 @@ def drain_worker(
                 # Join the worker thread: it has stopped claiming and will
                 # exit after its current iteration completes.
                 if worker is not None:
-                    with _worker_lock:
-                        thread = worker._thread
-                        worker._thread = None
-                    if thread is not None:
-                        thread.join(timeout=2.0)
+                    _join_worker_thread(worker)
                 return
 
         # Timeout: count stuck rows for the error message.
