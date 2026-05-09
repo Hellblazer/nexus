@@ -346,3 +346,42 @@ class Telemetry:
             )
             self.conn.commit()
         return cur.rowcount
+
+    def rename_collection(self, *, old: str, new: str) -> dict[str, int]:
+        """Re-point ``collection`` columns from ``old`` to ``new`` in all
+        telemetry tables that carry a collection name.
+
+        nexus-nhyh / K9: ``search_telemetry.collection`` and
+        ``hook_failures.collection`` (if the table exists) are both
+        indexed collection-scoped lookup columns. A collection rename
+        that skips these tables leaves telemetry orphaned under the old
+        name, making ``nx collection health`` and ``nx doctor hooks``
+        query the wrong bucket.
+
+        Returns a dict with keys ``search_telemetry`` and
+        ``hook_failures`` (each value is the row count updated). The
+        ``hook_failures`` key is 0 and not an error when the table does
+        not yet exist (pre-migration databases).
+        """
+        counts: dict[str, int] = {"search_telemetry": 0, "hook_failures": 0}
+        with self._lock:
+            cur = self.conn.execute(
+                "UPDATE search_telemetry SET collection = ? WHERE collection = ?",
+                (new, old),
+            )
+            counts["search_telemetry"] = cur.rowcount
+
+            # hook_failures may not exist on pre-migration databases.
+            table_exists = self.conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master "
+                "WHERE type='table' AND name='hook_failures'"
+            ).fetchone()[0]
+            if table_exists:
+                cur = self.conn.execute(
+                    "UPDATE hook_failures SET collection = ? WHERE collection = ?",
+                    (new, old),
+                )
+                counts["hook_failures"] = cur.rowcount
+
+            self.conn.commit()
+        return counts
