@@ -355,6 +355,86 @@ class TestReidentifyCollection:
         assert result.chunks_migrated == 0
         assert result.chunks_deleted == 0
 
+    def test_cross_batch_collapse_dedupes_correctly(self, t3_db):
+        """Identical chunk_text_hash across pass-2 batches still collapses.
+
+        The seen_new_ids set is initialized outside the batch loop so the
+        collapse path works across batch boundaries. With page_size=2 and
+        three duplicates, the first batch upserts the new id; the second
+        and third batches see new_id in seen_new_ids and skip the upsert
+        but still add their cids to seen_old_ids for deletion.
+        """
+        from nexus.db import t3_reidentify
+        from nexus.db.t3_reidentify import reidentify_collection
+
+        coll = _unique_coll()
+        for i in range(3):
+            _seed_chunk(
+                t3_db, collection=coll, chunk_id=f"legacy-{i}",
+                content="duplicate", chunk_text_hash="d" * 64,
+            )
+
+        with patch.object(t3_reidentify, "_PAGE_SIZE", 2):
+            result = reidentify_collection(t3_db, coll, dry_run=False)
+
+        ids = _ids_in(t3_db, coll)
+        assert ids == {"d" * 32}
+        # All three old cids deleted, even though only one upsert fired.
+        assert result.chunks_deleted == 3
+        assert result.chunks_migrated == 1
+
+    def test_missing_hash_in_non_first_batch_propagates(self, t3_db):
+        """MissingChunkHashError raises from any batch, not only batch 1.
+
+        Patches _PAGE_SIZE=1 and seeds two chunks with the bad chunk
+        second so the error fires from pass-2 iteration after a
+        successful first batch.
+        """
+        from nexus.db import t3_reidentify
+        from nexus.db.t3_reidentify import (
+            MissingChunkHashError,
+            reidentify_collection,
+        )
+
+        coll = _unique_coll()
+        _seed_chunk(
+            t3_db, collection=coll, chunk_id="legacy-good",
+            content="ok", chunk_text_hash="a" * 64,
+        )
+        col = t3_db._client.get_or_create_collection(coll)
+        col.add(
+            ids=["legacy-bad"],
+            documents=["pre-RDR-053"],
+            metadatas=[{"doc_id": "1.1.1"}],  # no chunk_text_hash
+        )
+
+        with patch.object(t3_reidentify, "_PAGE_SIZE", 1):
+            with pytest.raises(MissingChunkHashError) as exc_info:
+                reidentify_collection(t3_db, coll, dry_run=False)
+        assert "legacy-bad" in str(exc_info.value)
+
+    def test_missing_hash_raises_in_dry_run(self, t3_db):
+        """Dry-run does not suppress the missing-hash error.
+
+        The fail-loud contract (re-gate S3) must hold even when no
+        writes are scheduled. The error fires before the dry-run guard.
+        """
+        from nexus.db.t3_reidentify import (
+            MissingChunkHashError,
+            reidentify_collection,
+        )
+
+        coll = _unique_coll()
+        col = t3_db._client.get_or_create_collection(coll)
+        col.add(
+            ids=["legacy-noh"],
+            documents=["pre-RDR-053"],
+            metadatas=[{"doc_id": "1.1.1"}],
+        )
+
+        with pytest.raises(MissingChunkHashError):
+            reidentify_collection(t3_db, coll, dry_run=True)
+
 
 class TestReidentifyPagination:
     """Verify quota compliance: page size <= 300, batch deletes <= 300."""
@@ -593,5 +673,74 @@ class TestReidentifyCLI:
             "nexus.commands.t3._make_t3_for_backfill", return_value=t3_db
         ):
             result = runner.invoke(main, ["t3", "reidentify"])
-        # Either a non-zero exit or an explanatory message
-        assert result.exit_code != 0 or "collection" in result.output.lower()
+        assert result.exit_code != 0
+        assert "collection" in result.output.lower()
+
+    def test_cli_rejects_both_collection_and_all(self, t3_db, runner):
+        """--collection and --all-collections together raise UsageError."""
+        with patch(
+            "nexus.commands.t3._make_t3_for_backfill", return_value=t3_db
+        ):
+            result = runner.invoke(
+                main,
+                ["t3", "reidentify", "--collection", "x", "--all-collections"],
+            )
+        assert result.exit_code != 0
+        assert "exactly one" in result.output.lower()
+
+    def test_cli_all_collections_continues_past_errors(self, t3_db, runner):
+        """--all-collections accumulates errors and exits nonzero,
+        but processes every collection in the iteration first.
+
+        Mixes a taxonomy carve-out, a valid collection, and a hashless
+        collection. The valid one must migrate, the taxonomy one must
+        be reported skipped, and the hashless one must surface the
+        structured error and force exit_code != 0.
+        """
+        coll_valid = _unique_coll()
+        coll_tax = _unique_coll(prefix="taxonomy")
+        coll_bad = _unique_coll()
+
+        _seed_chunk(
+            t3_db, collection=coll_valid, chunk_id="legacy-valid",
+            content="hello", chunk_text_hash="9" * 64,
+        )
+        col_tax = t3_db._client.get_or_create_collection(coll_tax)
+        col_tax.add(
+            ids=["centroid-1"],
+            documents=["centroid"],
+            metadatas=[{"centroid_hash": "abc"}],
+        )
+        col_bad = t3_db._client.get_or_create_collection(coll_bad)
+        col_bad.add(
+            ids=["legacy-noh"],
+            documents=["pre-RDR-053"],
+            metadatas=[{"doc_id": "1.1.1"}],
+        )
+
+        with (
+            patch(
+                "nexus.commands.t3._make_t3_for_backfill", return_value=t3_db
+            ),
+            patch.object(
+                t3_db,
+                "list_collections",
+                return_value=[
+                    {"name": coll_valid, "count": 1},
+                    {"name": coll_tax, "count": 1},
+                    {"name": coll_bad, "count": 1},
+                ],
+            ),
+        ):
+            result = runner.invoke(
+                main,
+                ["t3", "reidentify", "--all-collections", "--no-dry-run"],
+            )
+
+        assert result.exit_code != 0  # error present
+        # Valid collection migrated despite the bad one's error
+        assert "9" * 32 in _ids_in(t3_db, coll_valid)
+        # Taxonomy reported skipped
+        assert "skip" in result.output.lower()
+        # Bad collection surfaced the structured error
+        assert "chunk_text_hash" in result.output.lower()
