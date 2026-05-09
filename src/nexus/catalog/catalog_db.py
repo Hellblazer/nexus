@@ -447,6 +447,12 @@ class CatalogDB:
         except sqlite3.OperationalError:
             pass
         else:
+            # SIG-7 (RDR-108 Phase 1, nexus-872w): use a real ISO timestamp
+            # for created_at so backfilled rows are auditable. The previous
+            # empty string made it impossible to distinguish rows that were
+            # backfilled from rows that were never written.
+            from datetime import UTC, datetime as _datetime  # noqa: PLC0415
+            _now = _datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
             with self._conn:
                 self._conn.execute(
                     "INSERT INTO collections "
@@ -454,7 +460,7 @@ class CatalogDB:
                     " model_version, display_name, legacy_grandfathered, "
                     " superseded_by, superseded_at, created_at) "
                     "SELECT DISTINCT physical_collection, '', '', '', '', '', "
-                    "  1, '', '', '' "
+                    f"  1, '', '', '{_now}' "
                     "FROM documents "
                     "WHERE physical_collection IS NOT NULL "
                     "  AND physical_collection != '' "

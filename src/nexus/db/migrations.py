@@ -38,6 +38,19 @@ class MigrationError(RuntimeError):
     identify and triage the specific rows.
     """
 
+
+class MigrationRetry(Exception):
+    """Raised by a migration function to signal a transient skip.
+
+    ``apply_pending`` catches this and does NOT add the path to
+    ``_upgrade_done``, so the migration is retried on the next DB open.
+    Use this when a precondition (e.g. catalog absent, queue non-empty)
+    is expected to clear in normal operation without operator action.
+
+    Contrast with ``MigrationError``, which is a permanent fatal condition
+    requiring explicit operator remediation.
+    """
+
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
 
@@ -1852,9 +1865,11 @@ _FIXTURE_COLLECTION_PATTERNS: tuple[str, ...] = (
     "knowledge__pagend",
 )
 
-#: Row count above which an unmapped orphan collection triggers a fail-loud
-#: error rather than a silent hard-delete. Operators must curate
+#: Default row count above which an unmapped orphan collection triggers a
+#: fail-loud error rather than a silent hard-delete. Operators must curate
 #: ``collections.superseded_by`` for these before running the migration.
+#: OBS-4: Override at runtime with NEXUS_MIGRATION_HIGH_VOLUME_THRESHOLD
+#: env var (read fresh on each call to _check_high_volume_orphans).
 _HIGH_VOLUME_ORPHAN_THRESHOLD: int = 10
 
 
@@ -1874,9 +1889,7 @@ def _attach_catalog(conn: sqlite3.Connection, catalog_db_path: Path) -> None:
     ``conn.execute("DETACH DATABASE cat_db")`` when finished to avoid
     leaving dangling attached schemas on the connection.
     """
-    conn.execute(
-        f"ATTACH DATABASE '{catalog_db_path}' AS cat_db"
-    )
+    conn.execute("ATTACH DATABASE ? AS cat_db", (str(catalog_db_path),))
 
 
 def _detach_catalog(conn: sqlite3.Connection) -> None:
@@ -1937,16 +1950,28 @@ def _check_high_volume_orphans(conn: sqlite3.Connection, *, table: str) -> None:
     """Raise ``MigrationError`` if any non-fixture collection has >threshold
     unmapped rows (doc_id still '').
 
-    The error message lists the unmapped collections and their row counts so
-    the operator knows exactly which ``collections.superseded_by`` entries
-    to curate before re-running.
+    OBS-4: Threshold read from ``NEXUS_MIGRATION_HIGH_VOLUME_THRESHOLD`` env
+    var (default ``_HIGH_VOLUME_ORPHAN_THRESHOLD`` = 10) on every call so
+    operators can lower it for small installs without rebuilding.
+
+    SIG-4: The error message includes a ``nx catalog mark-superseded`` command
+    template per orphan collection so operators have an actionable next step.
     """
+    import os as _os
+
+    threshold = int(
+        _os.environ.get(
+            "NEXUS_MIGRATION_HIGH_VOLUME_THRESHOLD",
+            str(_HIGH_VOLUME_ORPHAN_THRESHOLD),
+        )
+    )
+
     rows = conn.execute(f"""
         SELECT collection, COUNT(*) AS n
         FROM {table}
         WHERE doc_id = ''
         GROUP BY collection
-        HAVING n > {_HIGH_VOLUME_ORPHAN_THRESHOLD}
+        HAVING n > {threshold}
         ORDER BY n DESC
     """).fetchall()
 
@@ -1954,11 +1979,17 @@ def _check_high_volume_orphans(conn: sqlite3.Connection, *, table: str) -> None:
         return
 
     detail = "; ".join(f"{coll} ({n} rows)" for coll, n in rows)
+    # SIG-4: Build actionable command templates for each orphan collection.
+    remediation_lines = "\n".join(
+        f"  nx catalog mark-superseded {coll} <new-collection-name>"
+        for coll, _ in rows
+    )
     raise MigrationError(
         f"RDR-108 Phase 1c: {table} has high-volume unmapped orphan collection(s): "
-        f"{detail}. "
-        "Curate 'collections.superseded_by' for each listed collection in the catalog DB, "
-        "then re-run the migration."
+        f"{detail}.\n"
+        f"For each listed collection, register its superseded_by mapping:\n"
+        f"{remediation_lines}\n"
+        f"Then re-run the migration."
     )
 
 
@@ -2069,57 +2100,80 @@ def migrate_document_aspects_pk_to_doc_id(
     # Steps 6-7: CREATE new table with (doc_id) PK, INSERT deduped rows,
     # DROP old, RENAME, recreate indexes.
     #
-    # Dedup strategy: when multiple old rows map to the same doc_id, keep
-    # the row with the latest ``extracted_at`` (most recent extraction wins).
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS document_aspects_new (
-            doc_id                 TEXT NOT NULL,
-            collection             TEXT NOT NULL DEFAULT '',
-            source_path            TEXT NOT NULL DEFAULT '',
-            problem_formulation    TEXT,
-            proposed_method        TEXT,
-            experimental_datasets  TEXT,
-            experimental_baselines TEXT,
-            experimental_results   TEXT,
-            extras                 TEXT,
-            confidence             REAL,
-            extracted_at           TEXT NOT NULL,
-            model_version          TEXT NOT NULL,
-            extractor_name         TEXT NOT NULL,
-            source_uri             TEXT,
-            PRIMARY KEY (doc_id)
-        );
-
-        INSERT OR IGNORE INTO document_aspects_new
-            (doc_id, collection, source_path,
-             problem_formulation, proposed_method,
-             experimental_datasets, experimental_baselines,
-             experimental_results, extras, confidence,
-             extracted_at, model_version, extractor_name, source_uri)
-        SELECT
-            doc_id, collection, source_path,
-            problem_formulation, proposed_method,
-            experimental_datasets, experimental_baselines,
-            experimental_results, extras, confidence,
-            extracted_at, model_version, extractor_name, source_uri
-        FROM document_aspects
-        WHERE doc_id IN (
-            SELECT doc_id
-            FROM document_aspects
-            GROUP BY doc_id
-            HAVING extracted_at = MAX(extracted_at)
+    # K3 fix (RDR-108 Phase 1, nexus-lh8c): atomic table swap via explicit
+    # conn.execute() calls inside "with conn:" (BEGIN/COMMIT scope), replacing
+    # the previous approach which used auto-committing DDL that was NOT atomic.
+    # Each step in the DROP TABLE -> RENAME sequence is inside the same
+    # transaction; a crash mid-way rolls back, preserving the old table.
+    #
+    # K8 fix (RDR-108 Phase 1, nexus-lh8c): deterministic dedup via
+    # ROW_NUMBER() OVER (PARTITION BY doc_id ORDER BY extracted_at DESC) CTE,
+    # replacing a fragile HAVING clause that relied on undocumented SQLite behavior.
+    with conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS document_aspects_new (
+                doc_id                 TEXT NOT NULL,
+                collection             TEXT NOT NULL DEFAULT \'\',
+                source_path            TEXT NOT NULL DEFAULT \'\',
+                problem_formulation    TEXT,
+                proposed_method        TEXT,
+                experimental_datasets  TEXT,
+                experimental_baselines TEXT,
+                experimental_results   TEXT,
+                extras                 TEXT,
+                confidence             REAL,
+                extracted_at           TEXT NOT NULL,
+                model_version          TEXT NOT NULL,
+                extractor_name         TEXT NOT NULL,
+                source_uri             TEXT,
+                PRIMARY KEY (doc_id)
+            )
+            """
         )
-        ORDER BY extracted_at DESC;
-
-        DROP TABLE document_aspects;
-        ALTER TABLE document_aspects_new RENAME TO document_aspects;
-
-        CREATE INDEX IF NOT EXISTS idx_document_aspects_extractor
-            ON document_aspects(extractor_name, model_version);
-        CREATE INDEX IF NOT EXISTS idx_document_aspects_collection
-            ON document_aspects(collection);
-    """)
-    conn.commit()
+        conn.execute(
+            """
+            INSERT INTO document_aspects_new
+                (doc_id, collection, source_path,
+                 problem_formulation, proposed_method,
+                 experimental_datasets, experimental_baselines,
+                 experimental_results, extras, confidence,
+                 extracted_at, model_version, extractor_name, source_uri)
+            WITH latest AS (
+                SELECT
+                    doc_id, collection, source_path,
+                    problem_formulation, proposed_method,
+                    experimental_datasets, experimental_baselines,
+                    experimental_results, extras, confidence,
+                    extracted_at, model_version, extractor_name, source_uri,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY doc_id
+                        ORDER BY extracted_at DESC
+                    ) AS rn
+                FROM document_aspects
+            )
+            SELECT
+                doc_id, collection, source_path,
+                problem_formulation, proposed_method,
+                experimental_datasets, experimental_baselines,
+                experimental_results, extras, confidence,
+                extracted_at, model_version, extractor_name, source_uri
+            FROM latest
+            WHERE rn = 1
+            """
+        )
+        conn.execute("DROP TABLE document_aspects")
+        conn.execute(
+            "ALTER TABLE document_aspects_new RENAME TO document_aspects"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_document_aspects_extractor "
+            "ON document_aspects(extractor_name, model_version)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_document_aspects_collection "
+            "ON document_aspects(collection)"
+        )
 
     _log.info("migrate_document_aspects_pk_to_doc_id_done")
 
@@ -2168,7 +2222,8 @@ def migrate_aspect_extraction_queue_pk_to_doc_id(
         raise MigrationError(
             f"RDR-108 Phase 1c: aspect_extraction_queue is not drained. "
             f"{actionable_count} row(s) with status pending or in_progress remain. "
-            "Call drain_worker(timeout=30) and verify is_drained() before re-running."
+            "To drain the queue and retry: run 'nx aspects drain' or call "
+            "drain_worker(timeout=30)."
         )
 
     # Step 1: add doc_id column if not present
@@ -2208,48 +2263,69 @@ def migrate_aspect_extraction_queue_pk_to_doc_id(
             count=dropped,
         )
 
-    # Steps 5-7: CREATE new table with (doc_id) PK; dedup by latest enqueued_at
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS aspect_extraction_queue_new (
-            doc_id          TEXT NOT NULL,
-            collection      TEXT NOT NULL DEFAULT '',
-            source_path     TEXT NOT NULL DEFAULT '',
-            content_hash    TEXT NOT NULL DEFAULT '',
-            content         TEXT NOT NULL DEFAULT '',
-            status          TEXT NOT NULL DEFAULT 'pending',
-            retry_count     INTEGER NOT NULL DEFAULT 0,
-            enqueued_at     TEXT NOT NULL,
-            last_attempt_at TEXT,
-            last_error      TEXT,
-            PRIMARY KEY (doc_id)
-        );
-
-        INSERT OR IGNORE INTO aspect_extraction_queue_new
-            (doc_id, collection, source_path,
-             content_hash, content, status,
-             retry_count, enqueued_at, last_attempt_at, last_error)
-        SELECT
-            doc_id, collection, source_path,
-            content_hash, content, status,
-            retry_count, enqueued_at, last_attempt_at, last_error
-        FROM aspect_extraction_queue
-        WHERE doc_id IN (
-            SELECT doc_id
-            FROM aspect_extraction_queue
-            GROUP BY doc_id
-            HAVING enqueued_at = MAX(enqueued_at)
+    # Steps 5-7: CREATE new table with (doc_id) PK; dedup by latest enqueued_at.
+    #
+    # K3 fix (RDR-108 Phase 1, nexus-lh8c): atomic table swap via explicit
+    # conn.execute() inside "with conn:". See migrate_document_aspects_pk_to_doc_id
+    # for the full rationale.
+    #
+    # K8 fix (RDR-108 Phase 1, nexus-lh8c): ROW_NUMBER() CTE replaces the fragile
+    # HAVING enqueued_at = MAX(enqueued_at) no-op. Latest enqueued_at wins.
+    with conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS aspect_extraction_queue_new (
+                doc_id          TEXT NOT NULL,
+                collection      TEXT NOT NULL DEFAULT \'\',
+                source_path     TEXT NOT NULL DEFAULT \'\',
+                content_hash    TEXT NOT NULL DEFAULT \'\',
+                content         TEXT NOT NULL DEFAULT \'\',
+                status          TEXT NOT NULL DEFAULT \'pending\',
+                retry_count     INTEGER NOT NULL DEFAULT 0,
+                enqueued_at     TEXT NOT NULL,
+                last_attempt_at TEXT,
+                last_error      TEXT,
+                PRIMARY KEY (doc_id)
+            )
+            """
         )
-        ORDER BY enqueued_at DESC;
-
-        DROP TABLE aspect_extraction_queue;
-        ALTER TABLE aspect_extraction_queue_new RENAME TO aspect_extraction_queue;
-
-        CREATE INDEX IF NOT EXISTS idx_aspect_queue_status
-            ON aspect_extraction_queue(status);
-        CREATE INDEX IF NOT EXISTS idx_aspect_queue_collection
-            ON aspect_extraction_queue(collection);
-    """)
-    conn.commit()
+        conn.execute(
+            """
+            INSERT INTO aspect_extraction_queue_new
+                (doc_id, collection, source_path,
+                 content_hash, content, status,
+                 retry_count, enqueued_at, last_attempt_at, last_error)
+            WITH latest AS (
+                SELECT
+                    doc_id, collection, source_path,
+                    content_hash, content, status,
+                    retry_count, enqueued_at, last_attempt_at, last_error,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY doc_id
+                        ORDER BY enqueued_at DESC
+                    ) AS rn
+                FROM aspect_extraction_queue
+            )
+            SELECT
+                doc_id, collection, source_path,
+                content_hash, content, status,
+                retry_count, enqueued_at, last_attempt_at, last_error
+            FROM latest
+            WHERE rn = 1
+            """
+        )
+        conn.execute("DROP TABLE aspect_extraction_queue")
+        conn.execute(
+            "ALTER TABLE aspect_extraction_queue_new RENAME TO aspect_extraction_queue"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_aspect_queue_status "
+            "ON aspect_extraction_queue(status)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_aspect_queue_collection "
+            "ON aspect_extraction_queue(collection)"
+        )
 
     _log.info("migrate_aspect_queue_pk_to_doc_id_done")
 
@@ -2289,6 +2365,10 @@ def _migrate_document_aspects_pk_via_apply_pending(conn: sqlite3.Connection) -> 
     ``apply_pending`` calls migrations as ``fn(conn)`` with no extra args.
     This wrapper resolves the catalog DB path from the connection and
     delegates to ``migrate_document_aspects_pk_to_doc_id``.
+
+    Raises ``MigrationRetry`` when the catalog is absent so the path is
+    NOT marked done in ``_upgrade_done`` and will be retried on the next
+    DB open once the catalog has been populated.
     """
     catalog_path = _catalog_db_path_from_conn(conn)
     if not catalog_path.exists():
@@ -2296,7 +2376,10 @@ def _migrate_document_aspects_pk_via_apply_pending(conn: sqlite3.Connection) -> 
             "migrate_document_aspects_pk_skip_no_catalog",
             catalog_path=str(catalog_path),
         )
-        return
+        raise MigrationRetry(
+            "catalog absent — retry deferred until catalog exists: "
+            f"{catalog_path}"
+        )
     migrate_document_aspects_pk_to_doc_id(conn, catalog_db_path=catalog_path)
 
 
@@ -2306,6 +2389,14 @@ def _migrate_aspect_queue_pk_via_apply_pending(conn: sqlite3.Connection) -> None
     ``apply_pending`` calls migrations as ``fn(conn)`` with no extra args.
     This wrapper resolves the catalog DB path from the connection and
     delegates to ``migrate_aspect_extraction_queue_pk_to_doc_id``.
+
+    K2 (RDR-108 Phase 1, nexus-lh8c): attempt to drain the aspect worker
+    before checking the queue. If the queue is still non-empty after the
+    drain attempt, the underlying migration raises ``MigrationError``.
+
+    Raises ``MigrationRetry`` when the catalog is absent so the path is
+    NOT marked done in ``_upgrade_done`` and will be retried on the next
+    DB open once the catalog has been populated.
     """
     catalog_path = _catalog_db_path_from_conn(conn)
     if not catalog_path.exists():
@@ -2313,7 +2404,21 @@ def _migrate_aspect_queue_pk_via_apply_pending(conn: sqlite3.Connection) -> None
             "migrate_aspect_queue_pk_skip_no_catalog",
             catalog_path=str(catalog_path),
         )
-        return
+        raise MigrationRetry(
+            "catalog absent — retry deferred until catalog exists: "
+            f"{catalog_path}"
+        )
+    # Attempt to drain in-flight rows before the drain precondition check.
+    # Imports lazily to avoid a circular import at module load time.
+    try:
+        import nexus.aspect_worker as _aw  # noqa: PLC0415
+        memory_path = catalog_path.parent.parent / "memory.db"
+        _aw.drain_worker(memory_path, timeout=30)
+    except Exception as _drain_err:  # noqa: BLE001
+        _log.warning(
+            "migrate_aspect_queue_drain_attempt_failed",
+            error=str(_drain_err),
+        )
     migrate_aspect_extraction_queue_pk_to_doc_id(conn, catalog_db_path=catalog_path)
 
 
@@ -2672,10 +2777,20 @@ def apply_pending(conn: sqlite3.Connection, current_version: str) -> None:
     entered under the released lock would see the path as "done" and
     proceed against a half-initialised schema (storage review C-1).
     """
+    import time as _time
+
     path_key = _connection_path_key(conn)
     with _upgrade_lock:
         if path_key in _upgrade_done:
             return
+
+        # OBS-1: record migration session start for telemetry.
+        _t_start = _time.monotonic()
+        _log.info(
+            "migration_start",
+            path_key=path_key,
+            current_version=current_version,
+        )
 
         # Run the entire sequence under the lock — bootstrap_version +
         # migrations + version update. Only mark the path done on
@@ -2686,11 +2801,46 @@ def apply_pending(conn: sqlite3.Connection, current_version: str) -> None:
         current_t = _parse_version(current_version)
 
         # Filter and execute eligible migrations
+        steps_run = 0
+        any_skipped = False
         for m in MIGRATIONS:
             m_ver = _parse_version(m.introduced)
             if m_ver > last_seen_t and m_ver <= current_t:
-                _log.info("Running migration", name=m.name, introduced=m.introduced)
-                m.fn(conn)
+                _t_step = _time.monotonic()
+                _log.info(
+                    "migration_step_start",
+                    name=m.name,
+                    introduced=m.introduced,
+                )
+                try:
+                    m.fn(conn)
+                except MigrationRetry as _retry:
+                    _log.warning(
+                        "migration_step_skipped",
+                        name=m.name,
+                        introduced=m.introduced,
+                        reason=str(_retry),
+                    )
+                    any_skipped = True
+                    continue
+                steps_run += 1
+                _log.info(
+                    "migration_step_done",
+                    name=m.name,
+                    introduced=m.introduced,
+                    duration_ms=round((_time.monotonic() - _t_step) * 1000),
+                )
+
+        # When any step was skipped (transient precondition), do NOT update
+        # the stored version or mark the path done — so the skipped migrations
+        # are retried on the next DB open (CG-2 / K11 nexus-lh8c).
+        if any_skipped:
+            _log.warning(
+                "migration_skipped_not_marking_done",
+                path_key=path_key,
+                steps_run=steps_run,
+            )
+            return
 
         # Update stored version.  Guards:
         # - Skip pre-release/unparseable versions ((0,0,0)) to prevent
@@ -2707,6 +2857,14 @@ def apply_pending(conn: sqlite3.Connection, current_version: str) -> None:
         # Only now — after bootstrap + migrations + version update all
         # succeeded — record the path as done.
         _upgrade_done.add(path_key)
+
+        # OBS-1: emit migration session completion telemetry.
+        _log.info(
+            "migration_done",
+            path_key=path_key,
+            steps_run=steps_run,
+            duration_ms=round((_time.monotonic() - _t_start) * 1000),
+        )
 
 
 def _connection_path_key(conn: sqlite3.Connection) -> str:

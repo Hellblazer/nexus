@@ -182,6 +182,17 @@ class T2Database:
                 except Exception:
                     current_version = "0.0.0"
 
+                # OBS-2: emit a brief migration notice so operators see
+                # progress rather than a silent hang on first post-upgrade
+                # invocation. Writes to stderr so it doesn't pollute
+                # structured stdout output of CLI commands.
+                import sys as _sys
+                print(
+                    f"Migrating database {path.name!r} to schema version "
+                    f"{current_version} ...",
+                    file=_sys.stderr,
+                )
+
                 conn = sqlite3.connect(str(path), check_same_thread=False)
                 try:
                     conn.execute("PRAGMA busy_timeout=5000")
