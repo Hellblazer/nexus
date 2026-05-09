@@ -128,6 +128,8 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-103](rdr-103-catalog-collection-name-authority.md) | Catalog as Collection-Name Authority | Architecture | Closed | 2026-05-03 |
 | [RDR-104](rdr-104-incremental-catalog-projection-rebuild.md) | Incremental Catalog Projection Rebuild | Architecture | Closed | 2026-05-05 |
 | [RDR-105](rdr-105-t1-chroma-architecture-env-passdown.md) | T1 Chroma Architecture: Eliminate On-Disk Session Records via Env-Var Passdown | Architecture | Closed | 2026-05-07 |
+| [RDR-107](rdr-107-t3-chunk-soft-delete.md) | T3 Chunk Soft-Delete via Tombstone Metadata | Architecture | Superseded by RDR-108 | 2026-05-08 |
+| [RDR-108](rdr-108-graph-identity-normalization.md) | Graph Identity Normalization: Content-Hash Chunk IDs and Cascade-Free Schema | Architecture | Draft | 2026-05-08 |
 
 ---
 
