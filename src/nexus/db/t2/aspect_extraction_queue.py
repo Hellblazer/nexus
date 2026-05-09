@@ -356,18 +356,38 @@ class AspectExtractionQueue:
             out.append(row)
         return out
 
-    def mark_done(self, collection: str, source_path: str) -> int:
-        """DELETE the row at ``(collection, source_path)`` — success path.
+    def mark_done(
+        self,
+        collection: str = "",
+        source_path: str = "",
+        *,
+        doc_id: str = "",
+    ) -> int:
+        """DELETE the row at ``(doc_id)`` or ``(collection, source_path)`` — success path.
+
+        After the RDR-108 Phase 1c PK migration the table uses ``doc_id``
+        as primary key; pass ``doc_id=<tumbler>`` to delete by the new key.
+        The legacy ``(collection, source_path)`` pair is retained as a
+        backward-compatible shim for callers that have not yet been updated;
+        it deletes matching rows via the denorm cache columns.
 
         Returns deleted row count (0 when the row was already gone —
         idempotent under concurrent worker invocations).
         """
         with self._lock:
-            cur = self.conn.execute(
-                "DELETE FROM aspect_extraction_queue "
-                "WHERE collection = ? AND source_path = ?",
-                (collection, source_path),
-            )
+            if doc_id:
+                cur = self.conn.execute(
+                    "DELETE FROM aspect_extraction_queue WHERE doc_id = ?",
+                    (doc_id,),
+                )
+            elif collection or source_path:
+                cur = self.conn.execute(
+                    "DELETE FROM aspect_extraction_queue "
+                    "WHERE collection = ? AND source_path = ?",
+                    (collection, source_path),
+                )
+            else:
+                return 0
             self.conn.commit()
             return cur.rowcount
 

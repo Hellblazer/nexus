@@ -97,6 +97,11 @@ class AspectRecord:
     ``experimental_baselines``, ``extras``) are typed as Python
     list / dict here; the store handles serialization on write and
     deserialization on read.
+
+    ``doc_id`` (RDR-108 Phase 1c): catalog tumbler identity for the
+    source document.  After the PK migration, this is the primary key;
+    ``collection`` and ``source_path`` are retained as denorm cache
+    columns.  Empty string on legacy rows written before the migration.
     """
 
     collection: str
@@ -114,6 +119,9 @@ class AspectRecord:
     # RDR-096 P2.1: persistent URI identity. ``None`` on legacy rows
     # written before P2.1 ships; populated for all writes after.
     source_uri: str | None = None
+    # RDR-108 Phase 1c: catalog tumbler identity. Empty string on legacy
+    # rows written before the PK migration.
+    doc_id: str = ""
 
 
 # ── DocumentAspects ─────────────────────────────────────────────────────────
@@ -145,20 +153,42 @@ class DocumentAspects:
             self.conn.executescript(_DOCUMENT_ASPECTS_SCHEMA_SQL)
             self.conn.commit()
 
+    # ── Schema detection ──────────────────────────────────────────────────
+
+    def _has_doc_id_pk(self) -> bool:
+        """Return True iff ``document_aspects`` is using ``doc_id`` as its PK.
+
+        Used by ``upsert`` and ``get`` to route to the right SQL form
+        without callers needing to know which schema version is live.
+        Cached per-instance after first call (schema cannot change while
+        this connection is open without explicit migration).
+        """
+        if not hasattr(self, "_doc_id_pk_cache"):
+            with self._lock:
+                pk_cols = {
+                    r[1] for r in self.conn.execute(
+                        "PRAGMA table_info(document_aspects)"
+                    ).fetchall()
+                    if r[5] == 1
+                }
+                self._doc_id_pk_cache: bool = pk_cols == {"doc_id"}
+        return self._doc_id_pk_cache
+
     # ── Public API ────────────────────────────────────────────────────────
 
     def upsert(self, record: AspectRecord) -> None:
-        """Persist *record* — complete overwrite if (collection, source_path)
-        already present.
+        """Persist *record* — complete overwrite if the PK key already exists.
+
+        Pre-migration: keyed on ``(collection, source_path)``.
+        Post-migration (RDR-108 Phase 1c): keyed on ``doc_id``.
+
+        Both forms require ``extracted_at``, ``model_version``, and
+        ``extractor_name``. Post-migration writes should supply ``doc_id``.
 
         Uses ``INSERT OR REPLACE``. JSON fields serialize with
         ``json.dumps`` (no separator overrides — matches the rest of
         the project).
         """
-        if not record.collection:
-            raise ValueError("collection must not be empty")
-        if not record.source_path:
-            raise ValueError("source_path must not be empty")
         if not record.extracted_at:
             raise ValueError("extracted_at must not be empty")
         if not record.model_version:
@@ -170,35 +200,77 @@ class DocumentAspects:
         baselines_json = json.dumps(list(record.experimental_baselines))
         extras_json = json.dumps(dict(record.extras))
 
-        with self._lock:
-            self.conn.execute(
-                "INSERT OR REPLACE INTO document_aspects "
-                "(collection, source_path, problem_formulation, "
-                " proposed_method, experimental_datasets, "
-                " experimental_baselines, experimental_results, "
-                " extras, confidence, extracted_at, "
-                " model_version, extractor_name, source_uri) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    record.collection,
-                    record.source_path,
-                    record.problem_formulation,
-                    record.proposed_method,
-                    datasets_json,
-                    baselines_json,
-                    record.experimental_results,
-                    extras_json,
-                    record.confidence,
-                    record.extracted_at,
-                    record.model_version,
-                    record.extractor_name,
-                    record.source_uri,
-                ),
-            )
-            self.conn.commit()
+        if self._has_doc_id_pk():
+            # Post-migration schema: doc_id is PK; collection + source_path are denorm.
+            if not record.doc_id:
+                raise ValueError("doc_id must not be empty on a migrated document_aspects table")
+            with self._lock:
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO document_aspects "
+                    "(doc_id, collection, source_path, problem_formulation, "
+                    " proposed_method, experimental_datasets, "
+                    " experimental_baselines, experimental_results, "
+                    " extras, confidence, extracted_at, "
+                    " model_version, extractor_name, source_uri) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        record.doc_id,
+                        record.collection,
+                        record.source_path,
+                        record.problem_formulation,
+                        record.proposed_method,
+                        datasets_json,
+                        baselines_json,
+                        record.experimental_results,
+                        extras_json,
+                        record.confidence,
+                        record.extracted_at,
+                        record.model_version,
+                        record.extractor_name,
+                        record.source_uri,
+                    ),
+                )
+                self.conn.commit()
+        else:
+            # Pre-migration schema: (collection, source_path) is PK.
+            if not record.collection:
+                raise ValueError("collection must not be empty")
+            if not record.source_path:
+                raise ValueError("source_path must not be empty")
+            with self._lock:
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO document_aspects "
+                    "(collection, source_path, problem_formulation, "
+                    " proposed_method, experimental_datasets, "
+                    " experimental_baselines, experimental_results, "
+                    " extras, confidence, extracted_at, "
+                    " model_version, extractor_name, source_uri) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        record.collection,
+                        record.source_path,
+                        record.problem_formulation,
+                        record.proposed_method,
+                        datasets_json,
+                        baselines_json,
+                        record.experimental_results,
+                        extras_json,
+                        record.confidence,
+                        record.extracted_at,
+                        record.model_version,
+                        record.extractor_name,
+                        record.source_uri,
+                    ),
+                )
+                self.conn.commit()
 
     def get(self, collection: str, source_path: str) -> AspectRecord | None:
-        """Return the row matching ``(collection, source_path)``, or None."""
+        """Return the row matching ``(collection, source_path)``, or None.
+
+        Works on both pre- and post-migration schemas; the post-migration
+        table retains ``collection`` + ``source_path`` as denorm cache columns
+        so this query is still valid after the PK migration.
+        """
         with self._lock:
             row = self.conn.execute(
                 "SELECT collection, source_path, problem_formulation, "
@@ -213,6 +285,30 @@ class DocumentAspects:
         if row is None:
             return None
         return _row_to_record(row)
+
+    def get_by_doc_id(self, doc_id: str) -> AspectRecord | None:
+        """Return the row matching ``doc_id``, or None.
+
+        Only valid on post-migration schema (RDR-108 Phase 1c) where
+        ``doc_id`` is the primary key.  Returns None if the table has
+        not been migrated or if the doc_id is not present.
+        """
+        if not self._has_doc_id_pk():
+            return None
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT collection, source_path, problem_formulation, "
+                "       proposed_method, experimental_datasets, "
+                "       experimental_baselines, experimental_results, "
+                "       extras, confidence, extracted_at, "
+                "       model_version, extractor_name, source_uri, doc_id "
+                "FROM document_aspects "
+                "WHERE doc_id = ?",
+                (doc_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return _row_to_record_with_doc_id(row)
 
     def list_by_collection(
         self,
@@ -301,10 +397,17 @@ class DocumentAspects:
 
 
 def _row_to_record(row: tuple) -> AspectRecord:
-    """Inflate a SELECT-result tuple into an ``AspectRecord``.
+    """Inflate a 13-column SELECT-result tuple into an ``AspectRecord``.
 
     JSON columns deserialize on read; missing or NULL JSON columns
     yield empty list/dict so callers never need a None-check.
+
+    Column order must match the SELECT in ``get()`` and
+    ``list_by_collection()``:
+      collection, source_path, problem_formulation, proposed_method,
+      experimental_datasets, experimental_baselines, experimental_results,
+      extras, confidence, extracted_at, model_version, extractor_name,
+      source_uri
     """
     (
         collection,
@@ -335,6 +438,47 @@ def _row_to_record(row: tuple) -> AspectRecord:
         model_version=model_version,
         extractor_name=extractor_name,
         source_uri=source_uri,
+    )
+
+
+def _row_to_record_with_doc_id(row: tuple) -> AspectRecord:
+    """Inflate a 14-column SELECT-result tuple (includes doc_id) into an
+    ``AspectRecord``.
+
+    Used by ``get_by_doc_id()`` which SELECTs the ``doc_id`` column as the
+    14th positional column.
+    """
+    (
+        collection,
+        source_path,
+        problem_formulation,
+        proposed_method,
+        datasets_json,
+        baselines_json,
+        experimental_results,
+        extras_json,
+        confidence,
+        extracted_at,
+        model_version,
+        extractor_name,
+        source_uri,
+        doc_id,
+    ) = row
+    return AspectRecord(
+        collection=collection,
+        source_path=source_path,
+        problem_formulation=problem_formulation,
+        proposed_method=proposed_method,
+        experimental_datasets=_safe_json_list(datasets_json),
+        experimental_baselines=_safe_json_list(baselines_json),
+        experimental_results=experimental_results,
+        extras=_safe_json_dict(extras_json),
+        confidence=confidence,
+        extracted_at=extracted_at,
+        model_version=model_version,
+        extractor_name=extractor_name,
+        source_uri=source_uri,
+        doc_id=doc_id or "",
     )
 
 

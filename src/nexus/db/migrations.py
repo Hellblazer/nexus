@@ -14,11 +14,29 @@ from __future__ import annotations
 import sqlite3
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
 import structlog
 
 _log = structlog.get_logger()
+
+
+# ── Migration exceptions ─────────────────────────────────────────────────────
+
+
+class MigrationError(RuntimeError):
+    """Raised when a migration cannot proceed due to a data precondition.
+
+    Examples:
+      - High-volume unmapped orphan collections in aspect PK migration
+        (operator must curate ``collections.superseded_by`` first).
+      - Queue not drained before the PK swap
+        (pending / in_progress rows would be lost).
+
+    The error message includes structured detail so the operator can
+    identify and triage the specific rows.
+    """
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -1821,6 +1839,484 @@ def migrate_drop_null_aspect_rows(conn: sqlite3.Connection) -> None:
     )
 
 
+# ── RDR-108 Phase 1c: Aspect PK migration helpers ───────────────────────────
+
+#: Fixture collection prefixes to hard-delete during aspect PK migration.
+#: These collections were created by the test suite and should never have
+#: persisted into production; dropping them is safe.
+_FIXTURE_COLLECTION_PATTERNS: tuple[str, ...] = (
+    "knowledge__cli-",
+    "knowledge__nexus-integration-test",
+    "knowledge__reproducer",
+    "knowledge__pagtest",
+    "knowledge__pagend",
+)
+
+#: Row count above which an unmapped orphan collection triggers a fail-loud
+#: error rather than a silent hard-delete. Operators must curate
+#: ``collections.superseded_by`` for these before running the migration.
+_HIGH_VOLUME_ORPHAN_THRESHOLD: int = 10
+
+
+def _is_fixture_collection(collection: str) -> bool:
+    """Return True iff *collection* is a test-fixture collection to hard-delete."""
+    for prefix_or_name in _FIXTURE_COLLECTION_PATTERNS:
+        if collection.startswith(prefix_or_name) or collection == prefix_or_name:
+            return True
+    return False
+
+
+def _attach_catalog(conn: sqlite3.Connection, catalog_db_path: Path) -> None:
+    """Attach the catalog DB as ``cat_db`` on *conn*.
+
+    SQLite ATTACH DATABASE allows cross-DB JOINs without reading the
+    entire catalog into Python. The caller must call
+    ``conn.execute("DETACH DATABASE cat_db")`` when finished to avoid
+    leaving dangling attached schemas on the connection.
+    """
+    conn.execute(
+        f"ATTACH DATABASE '{catalog_db_path}' AS cat_db"
+    )
+
+
+def _detach_catalog(conn: sqlite3.Connection) -> None:
+    """Detach ``cat_db`` from *conn* (idempotent — ignored if not attached)."""
+    try:
+        conn.execute("DETACH DATABASE cat_db")
+    except sqlite3.OperationalError:
+        pass  # Not attached — no-op.
+
+
+def _backfill_doc_ids_via_catalog(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+) -> None:
+    """Two-pass backfill of the ``doc_id`` column in *table* using the
+    catalog ``documents`` table (attached as ``cat_db``).
+
+    Pass 1: direct JOIN on (collection = physical_collection) AND
+            (source_path = file_path).
+    Pass 2: follow ``collections.superseded_by`` one level to handle
+            legacy collection names that were superseded after indexing.
+
+    Fixture rows and remaining unmapped rows are NOT touched here;
+    callers handle those separately.
+    """
+    # Pass 1: direct match — only update rows where the subquery finds a match.
+    # The INNER JOIN form avoids the "subquery returns NULL" NOT NULL violation
+    # that a correlated subquery with no match would produce.
+    conn.execute(f"""
+        UPDATE {table}
+        SET doc_id = cat_db.documents.tumbler
+        FROM cat_db.documents
+        WHERE {table}.collection = cat_db.documents.physical_collection
+          AND {table}.source_path = cat_db.documents.file_path
+          AND {table}.doc_id = ''
+    """)
+    conn.commit()
+
+    # Pass 2: one-hop supersede chain — only for rows still unmapped.
+    # Logic: find the collection row where collections.name matches the
+    # aspect's legacy collection, then look up the document in the
+    # successor collection (collections.superseded_by) with the same file_path.
+    conn.execute(f"""
+        UPDATE {table}
+        SET doc_id = cat_db.documents.tumbler
+        FROM cat_db.documents
+        JOIN cat_db.collections ON cat_db.documents.physical_collection = cat_db.collections.superseded_by
+        WHERE cat_db.collections.superseded_by != ''
+          AND cat_db.collections.name = {table}.collection
+          AND cat_db.documents.file_path = {table}.source_path
+          AND {table}.doc_id = ''
+    """)
+    conn.commit()
+
+
+def _check_high_volume_orphans(conn: sqlite3.Connection, *, table: str) -> None:
+    """Raise ``MigrationError`` if any non-fixture collection has >threshold
+    unmapped rows (doc_id still '').
+
+    The error message lists the unmapped collections and their row counts so
+    the operator knows exactly which ``collections.superseded_by`` entries
+    to curate before re-running.
+    """
+    rows = conn.execute(f"""
+        SELECT collection, COUNT(*) AS n
+        FROM {table}
+        WHERE doc_id = ''
+        GROUP BY collection
+        HAVING n > {_HIGH_VOLUME_ORPHAN_THRESHOLD}
+        ORDER BY n DESC
+    """).fetchall()
+
+    if not rows:
+        return
+
+    detail = "; ".join(f"{coll} ({n} rows)" for coll, n in rows)
+    raise MigrationError(
+        f"RDR-108 Phase 1c: {table} has high-volume unmapped orphan collection(s): "
+        f"{detail}. "
+        "Curate 'collections.superseded_by' for each listed collection in the catalog DB, "
+        "then re-run the migration."
+    )
+
+
+def _hard_delete_unmapped(conn: sqlite3.Connection, *, table: str) -> int:
+    """DELETE rows still at doc_id='' (low-volume orphans acceptable to drop).
+
+    Returns the number of deleted rows.
+    """
+    cur = conn.execute(f"DELETE FROM {table} WHERE doc_id = ''")
+    conn.commit()
+    return cur.rowcount
+
+
+def _is_already_migrated(conn: sqlite3.Connection, *, table: str) -> bool:
+    """Return True iff *table* already has ``doc_id`` as its sole PRIMARY KEY.
+
+    Used for idempotency: re-running the migration on an already-migrated DB
+    is a no-op.
+    """
+    # Check the PK column(s) from PRAGMA table_info (pk flag > 0 means PK member)
+    pk_cols = {
+        r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        if r[5] == 1
+    }
+    return pk_cols == {"doc_id"}
+
+
+def migrate_document_aspects_pk_to_doc_id(
+    conn: sqlite3.Connection,
+    *,
+    catalog_db_path: Path,
+) -> None:
+    """RDR-108 Phase 1c: migrate ``document_aspects`` PRIMARY KEY from
+    ``(collection, source_path)`` to ``(doc_id)``.
+
+    SQLite does not support ``DROP CONSTRAINT`` or ``ADD PRIMARY KEY``, so
+    this uses the 12-step ALTER pattern:
+
+    1. Add ``doc_id TEXT NOT NULL DEFAULT ''`` to the existing table.
+    2. Delete test-fixture collection rows (hard-delete, safe).
+    3. Backfill ``doc_id`` via JOIN against catalog ``documents``.
+       Pass 1: direct (collection, file_path) match.
+       Pass 2: one-hop ``collections.superseded_by`` chain.
+    4. Raise ``MigrationError`` if any non-fixture collection has
+       >10 unmapped rows (operator must curate supersede mappings first).
+    5. Hard-delete remaining low-volume unmapped rows.
+    6. CREATE TABLE ``document_aspects_new`` with ``PRIMARY KEY (doc_id)``
+       and current columns; INSERT from old (deduplicating by latest
+       ``extracted_at`` when two old rows collapse to same doc_id).
+    7. DROP TABLE old; RENAME new; recreate indexes.
+
+    Idempotent: if ``doc_id`` is already the sole PK, returns immediately.
+
+    Args:
+        conn: Open connection to ``memory.db``.
+        catalog_db_path: Path to ``catalog/.catalog.db``. Used for
+            cross-DB JOIN via ``ATTACH DATABASE``.
+    """
+    if _is_already_migrated(conn, table="document_aspects"):
+        _log.info("migrate_document_aspects_pk_to_doc_id_skip", reason="already migrated")
+        return
+
+    # Check table exists
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(document_aspects)").fetchall()}
+    if not cols:
+        _log.info("migrate_document_aspects_pk_to_doc_id_skip", reason="table does not exist")
+        return
+
+    # Step 1: add doc_id column if not present
+    if "doc_id" not in cols:
+        conn.execute(
+            "ALTER TABLE document_aspects ADD COLUMN doc_id TEXT NOT NULL DEFAULT ''"
+        )
+        conn.commit()
+
+    # Step 2: hard-delete test-fixture rows first (before catalog JOIN)
+    for pattern in _FIXTURE_COLLECTION_PATTERNS:
+        if pattern.endswith("-"):
+            conn.execute(
+                "DELETE FROM document_aspects WHERE collection LIKE ?",
+                (pattern + "%",),
+            )
+        else:
+            conn.execute(
+                "DELETE FROM document_aspects WHERE collection = ?",
+                (pattern,),
+            )
+    conn.commit()
+
+    # Steps 3: backfill doc_id via catalog JOIN
+    _attach_catalog(conn, catalog_db_path)
+    try:
+        _backfill_doc_ids_via_catalog(conn, table="document_aspects")
+
+        # Step 4: fail-loud for high-volume unmapped collections
+        _check_high_volume_orphans(conn, table="document_aspects")
+    finally:
+        _detach_catalog(conn)
+
+    # Step 5: hard-delete remaining low-volume unmapped rows
+    dropped = _hard_delete_unmapped(conn, table="document_aspects")
+    if dropped:
+        _log.info(
+            "migrate_document_aspects_pk_to_doc_id_dropped_orphans",
+            count=dropped,
+        )
+
+    # Steps 6-7: CREATE new table with (doc_id) PK, INSERT deduped rows,
+    # DROP old, RENAME, recreate indexes.
+    #
+    # Dedup strategy: when multiple old rows map to the same doc_id, keep
+    # the row with the latest ``extracted_at`` (most recent extraction wins).
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS document_aspects_new (
+            doc_id                 TEXT NOT NULL,
+            collection             TEXT NOT NULL DEFAULT '',
+            source_path            TEXT NOT NULL DEFAULT '',
+            problem_formulation    TEXT,
+            proposed_method        TEXT,
+            experimental_datasets  TEXT,
+            experimental_baselines TEXT,
+            experimental_results   TEXT,
+            extras                 TEXT,
+            confidence             REAL,
+            extracted_at           TEXT NOT NULL,
+            model_version          TEXT NOT NULL,
+            extractor_name         TEXT NOT NULL,
+            source_uri             TEXT,
+            PRIMARY KEY (doc_id)
+        );
+
+        INSERT OR IGNORE INTO document_aspects_new
+            (doc_id, collection, source_path,
+             problem_formulation, proposed_method,
+             experimental_datasets, experimental_baselines,
+             experimental_results, extras, confidence,
+             extracted_at, model_version, extractor_name, source_uri)
+        SELECT
+            doc_id, collection, source_path,
+            problem_formulation, proposed_method,
+            experimental_datasets, experimental_baselines,
+            experimental_results, extras, confidence,
+            extracted_at, model_version, extractor_name, source_uri
+        FROM document_aspects
+        WHERE doc_id IN (
+            SELECT doc_id
+            FROM document_aspects
+            GROUP BY doc_id
+            HAVING extracted_at = MAX(extracted_at)
+        )
+        ORDER BY extracted_at DESC;
+
+        DROP TABLE document_aspects;
+        ALTER TABLE document_aspects_new RENAME TO document_aspects;
+
+        CREATE INDEX IF NOT EXISTS idx_document_aspects_extractor
+            ON document_aspects(extractor_name, model_version);
+        CREATE INDEX IF NOT EXISTS idx_document_aspects_collection
+            ON document_aspects(collection);
+    """)
+    conn.commit()
+
+    _log.info("migrate_document_aspects_pk_to_doc_id_done")
+
+
+def migrate_aspect_extraction_queue_pk_to_doc_id(
+    conn: sqlite3.Connection,
+    *,
+    catalog_db_path: Path,
+) -> None:
+    """RDR-108 Phase 1c: migrate ``aspect_extraction_queue`` PRIMARY KEY from
+    ``(collection, source_path)`` to ``(doc_id)``.
+
+    Pre-migration drain precondition: the queue must have zero rows with
+    ``status != 'failed'`` (i.e., no pending or in_progress rows). Pending /
+    in_progress rows would be dropped by the CREATE-new + INSERT + DROP-old
+    PK swap and the worker would silently lose those extractions. Raises
+    ``MigrationError`` if the precondition fails.
+
+    Uses the same 12-step ALTER pattern as ``migrate_document_aspects_pk_to_doc_id``.
+    The queue is typically empty in production at migration time, but the
+    migration handles non-empty queues (of failed rows only) correctly.
+
+    Idempotent: if ``doc_id`` is already the sole PK, returns immediately.
+
+    Args:
+        conn: Open connection to ``memory.db``.
+        catalog_db_path: Path to ``catalog/.catalog.db``. Used for
+            cross-DB JOIN via ``ATTACH DATABASE``.
+    """
+    if _is_already_migrated(conn, table="aspect_extraction_queue"):
+        _log.info("migrate_aspect_queue_pk_to_doc_id_skip", reason="already migrated")
+        return
+
+    # Check table exists
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(aspect_extraction_queue)").fetchall()}
+    if not cols:
+        _log.info("migrate_aspect_queue_pk_to_doc_id_skip", reason="table does not exist")
+        return
+
+    # Drain precondition: fail if any pending or in_progress rows remain
+    actionable = conn.execute(
+        "SELECT COUNT(*) FROM aspect_extraction_queue WHERE status != 'failed'"
+    ).fetchone()
+    actionable_count = actionable[0] if actionable else 0
+    if actionable_count > 0:
+        raise MigrationError(
+            f"RDR-108 Phase 1c: aspect_extraction_queue is not drained. "
+            f"{actionable_count} row(s) with status pending or in_progress remain. "
+            "Call drain_worker(timeout=30) and verify is_drained() before re-running."
+        )
+
+    # Step 1: add doc_id column if not present
+    if "doc_id" not in cols:
+        conn.execute(
+            "ALTER TABLE aspect_extraction_queue ADD COLUMN doc_id TEXT NOT NULL DEFAULT ''"
+        )
+        conn.commit()
+
+    # Step 2: hard-delete test-fixture rows
+    for pattern in _FIXTURE_COLLECTION_PATTERNS:
+        if pattern.endswith("-"):
+            conn.execute(
+                "DELETE FROM aspect_extraction_queue WHERE collection LIKE ?",
+                (pattern + "%",),
+            )
+        else:
+            conn.execute(
+                "DELETE FROM aspect_extraction_queue WHERE collection = ?",
+                (pattern,),
+            )
+    conn.commit()
+
+    # Step 3: backfill doc_id via catalog JOIN (only for failed rows at this point)
+    _attach_catalog(conn, catalog_db_path)
+    try:
+        _backfill_doc_ids_via_catalog(conn, table="aspect_extraction_queue")
+        _check_high_volume_orphans(conn, table="aspect_extraction_queue")
+    finally:
+        _detach_catalog(conn)
+
+    # Step 4: hard-delete remaining unmapped low-volume rows
+    dropped = _hard_delete_unmapped(conn, table="aspect_extraction_queue")
+    if dropped:
+        _log.info(
+            "migrate_aspect_queue_pk_to_doc_id_dropped_orphans",
+            count=dropped,
+        )
+
+    # Steps 5-7: CREATE new table with (doc_id) PK; dedup by latest enqueued_at
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS aspect_extraction_queue_new (
+            doc_id          TEXT NOT NULL,
+            collection      TEXT NOT NULL DEFAULT '',
+            source_path     TEXT NOT NULL DEFAULT '',
+            content_hash    TEXT NOT NULL DEFAULT '',
+            content         TEXT NOT NULL DEFAULT '',
+            status          TEXT NOT NULL DEFAULT 'pending',
+            retry_count     INTEGER NOT NULL DEFAULT 0,
+            enqueued_at     TEXT NOT NULL,
+            last_attempt_at TEXT,
+            last_error      TEXT,
+            PRIMARY KEY (doc_id)
+        );
+
+        INSERT OR IGNORE INTO aspect_extraction_queue_new
+            (doc_id, collection, source_path,
+             content_hash, content, status,
+             retry_count, enqueued_at, last_attempt_at, last_error)
+        SELECT
+            doc_id, collection, source_path,
+            content_hash, content, status,
+            retry_count, enqueued_at, last_attempt_at, last_error
+        FROM aspect_extraction_queue
+        WHERE doc_id IN (
+            SELECT doc_id
+            FROM aspect_extraction_queue
+            GROUP BY doc_id
+            HAVING enqueued_at = MAX(enqueued_at)
+        )
+        ORDER BY enqueued_at DESC;
+
+        DROP TABLE aspect_extraction_queue;
+        ALTER TABLE aspect_extraction_queue_new RENAME TO aspect_extraction_queue;
+
+        CREATE INDEX IF NOT EXISTS idx_aspect_queue_status
+            ON aspect_extraction_queue(status);
+        CREATE INDEX IF NOT EXISTS idx_aspect_queue_collection
+            ON aspect_extraction_queue(collection);
+    """)
+    conn.commit()
+
+    _log.info("migrate_aspect_queue_pk_to_doc_id_done")
+
+
+def _catalog_db_path_from_conn(conn: sqlite3.Connection) -> Path:
+    """Derive the catalog DB path from the memory.db connection.
+
+    The catalog DB lives at ``<nexus_config_dir>/catalog/.catalog.db``.
+    We infer ``<nexus_config_dir>`` as the parent of the directory that
+    contains ``memory.db`` (i.e., ``memory.db`` is at
+    ``<nexus_config_dir>/memory.db``).
+
+    If the path cannot be inferred (e.g., in-memory DB or non-standard
+    layout), falls back to a path derived from ``NEXUS_CONFIG_DIR`` env
+    or the default ``~/.config/nexus``.
+    """
+    # ``PRAGMA database_list`` returns (seq, name, file) triples.
+    # Row with name='main' gives the file path.
+    for row in conn.execute("PRAGMA database_list").fetchall():
+        if row[1] == "main" and row[2]:
+            mem_path = Path(row[2]).resolve()
+            # memory.db is at <config_dir>/memory.db
+            config_dir = mem_path.parent
+            return config_dir / "catalog" / ".catalog.db"
+
+    # Fallback: use NEXUS_CONFIG_DIR env or default
+    import os
+    override = os.environ.get("NEXUS_CONFIG_DIR", "").strip()
+    if override:
+        return Path(override) / "catalog" / ".catalog.db"
+    return Path.home() / ".config" / "nexus" / "catalog" / ".catalog.db"
+
+
+def _migrate_document_aspects_pk_via_apply_pending(conn: sqlite3.Connection) -> None:
+    """Wrapper for ``apply_pending`` compatibility.
+
+    ``apply_pending`` calls migrations as ``fn(conn)`` with no extra args.
+    This wrapper resolves the catalog DB path from the connection and
+    delegates to ``migrate_document_aspects_pk_to_doc_id``.
+    """
+    catalog_path = _catalog_db_path_from_conn(conn)
+    if not catalog_path.exists():
+        _log.warning(
+            "migrate_document_aspects_pk_skip_no_catalog",
+            catalog_path=str(catalog_path),
+        )
+        return
+    migrate_document_aspects_pk_to_doc_id(conn, catalog_db_path=catalog_path)
+
+
+def _migrate_aspect_queue_pk_via_apply_pending(conn: sqlite3.Connection) -> None:
+    """Wrapper for ``apply_pending`` compatibility.
+
+    ``apply_pending`` calls migrations as ``fn(conn)`` with no extra args.
+    This wrapper resolves the catalog DB path from the connection and
+    delegates to ``migrate_aspect_extraction_queue_pk_to_doc_id``.
+    """
+    catalog_path = _catalog_db_path_from_conn(conn)
+    if not catalog_path.exists():
+        _log.warning(
+            "migrate_aspect_queue_pk_skip_no_catalog",
+            catalog_path=str(catalog_path),
+        )
+        return
+    migrate_aspect_extraction_queue_pk_to_doc_id(conn, catalog_db_path=catalog_path)
+
+
 MIGRATIONS: list[Migration] = [
     Migration("1.10.0", "Memory FTS rebuild with title", migrate_memory_fts),
     Migration("2.8.0", "Add plan project column", migrate_plan_project),
@@ -1953,6 +2449,16 @@ MIGRATIONS: list[Migration] = [
         "4.26.2",
         "Backfill document_aspects.source_uri rows where empty string (nexus-pnje)",
         migrate_document_aspects_source_uri_backfill_empty,
+    ),
+    Migration(
+        "4.30.0",
+        "Migrate document_aspects PK to doc_id (RDR-108 Phase 1c, nexus-je0b)",
+        _migrate_document_aspects_pk_via_apply_pending,
+    ),
+    Migration(
+        "4.30.0",
+        "Migrate aspect_extraction_queue PK to doc_id (RDR-108 Phase 1c, nexus-je0b)",
+        _migrate_aspect_queue_pk_via_apply_pending,
     ),
 ]
 
