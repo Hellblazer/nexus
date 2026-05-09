@@ -240,6 +240,52 @@ class TestChashIndexErrors:
             store.close()
 
 
+# ── chashes_for_collection (RDR-108 Phase 4 / nexus-z1mu) ────────────────────
+
+
+class TestChashesForCollection:
+    """``ChashIndex.chashes_for_collection`` returns chash[:32] values
+    for a collection. Replaces ``chunk_chroma_ids_present_in_collection``
+    (removed in the same change). Used by ``compute_chash_coverage`` to
+    sample missing chunks via a single set-difference."""
+
+    def test_unknown_collection_returns_empty(self, tmp_path: Path) -> None:
+        from nexus.db.t2.chash_index import ChashIndex
+        store = ChashIndex(tmp_path / "t2.db")
+        try:
+            assert store.chashes_for_collection("code__nonexistent") == set()
+        finally:
+            store.close()
+
+    def test_returns_truncated_chashes_for_collection(self, tmp_path: Path) -> None:
+        from nexus.db.t2.chash_index import ChashIndex
+        store = ChashIndex(tmp_path / "t2.db")
+        try:
+            full = "a" * 64
+            store.upsert(chash=full, collection="code__foo", chunk_chroma_id=full[:32])
+            store.upsert(chash="b" * 64, collection="code__foo", chunk_chroma_id=("b" * 64)[:32])
+            store.upsert(chash="c" * 64, collection="code__bar", chunk_chroma_id=("c" * 64)[:32])
+
+            foo = store.chashes_for_collection("code__foo")
+            bar = store.chashes_for_collection("code__bar")
+
+            assert foo == {full[:32], ("b" * 64)[:32]}
+            assert bar == {("c" * 64)[:32]}
+        finally:
+            store.close()
+
+    def test_handles_truncated_storage(self, tmp_path: Path) -> None:
+        """``substr`` is a no-op on inputs already <= 32 chars, so older
+        rows that stored 32-char chashes round-trip unchanged."""
+        from nexus.db.t2.chash_index import ChashIndex
+        store = ChashIndex(tmp_path / "t2.db")
+        try:
+            store.upsert(chash="a" * 32, collection="code__foo", chunk_chroma_id="a" * 32)
+            assert store.chashes_for_collection("code__foo") == {"a" * 32}
+        finally:
+            store.close()
+
+
 # ── delete_stale + is_empty encapsulation (review #1, #6) ────────────────────
 
 

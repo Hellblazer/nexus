@@ -441,17 +441,24 @@ class TestChashCoverageSection:
         from nexus.collection_audit import compute_chash_coverage
 
         db_path = tmp_path / "memory.db"
-        # Only 2 of 4 chunks indexed.
+        # RDR-108 D1: T3 chunk natural ID == chash[:32]. Only 2 of 4
+        # chunks indexed: h0, h1 (live), h2, h3 (T3 has them but
+        # chash_index does not, so they are the audit's "missing" sample).
         self._seed_chash_index(db_path, [
-            ("h0", "code__x", "id0"),
-            ("h1", "code__x", "id1"),
+            ("h0" * 32, "code__x", ("h0" * 32)[:32]),
+            ("h1" * 32, "code__x", ("h1" * 32)[:32]),
         ])
 
         class _FakeCol:
             def count(self): return 4
             def get(self, **kwargs):
                 return {
-                    "ids": ["id0", "id1", "id2", "id3"],
+                    "ids": [
+                        ("h0" * 32)[:32],
+                        ("h1" * 32)[:32],
+                        ("h2" * 32)[:32],
+                        ("h3" * 32)[:32],
+                    ],
                     "metadatas": [{}, {}, {}, {}],
                 }
         class _FakeT3:
@@ -467,9 +474,10 @@ class TestChashCoverageSection:
         assert cov.total_chunks == 4
         assert cov.indexed_rows == 2
         assert cov.ratio == 0.5
-        # Missing-sample contains id2 + id3 (any of the non-indexed ids
-        # in the sample page; bounded at 5).
-        assert set(cov.missing_sample).issubset({"id2", "id3"})
+        # Missing-sample contains the non-indexed chash[:32] values.
+        assert set(cov.missing_sample).issubset({
+            ("h2" * 32)[:32], ("h3" * 32)[:32],
+        })
         assert len(cov.missing_sample) == 2
 
     def test_empty_t3_collection_returns_none_ratio(

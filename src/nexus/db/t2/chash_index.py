@@ -258,29 +258,28 @@ class ChashIndex:
             ).fetchone()
         return int(row[0]) if row else 0
 
-    def chunk_chroma_ids_present_in_collection(
-        self, collection: str, chunk_chroma_ids: list[str],
-    ) -> set[str]:
-        """Return the subset of ``chunk_chroma_ids`` indexed in *collection*.
+    def chashes_for_collection(self, collection: str) -> set[str]:
+        """Return the set of chash[:32] values registered for *collection*
+        (RDR-108 Phase 4 / nexus-z1mu).
 
-        Targeted membership probe for ``compute_chash_coverage`` — takes a
-        caller-provided list of T3 Chroma natural IDs and returns the ones
-        that appear in ``chash_index`` for the given collection. Callers
-        use the set difference to surface missing ids.
+        The chash_index stores the full ``chunk_text_hash`` plus its
+        Chroma natural ID; under RDR-108 D1 the natural ID is
+        ``chash[:32]`` so the truncated set composes directly with T3
+        chunk IDs. Truncating in SQL via ``substr(chash, 1, 32)`` keeps
+        the helper consistent with ``Catalog.chashes_for_collection``
+        and tolerates any 64-char chashes that older indexer versions
+        may have stored.
 
-        Empty ``chunk_chroma_ids`` → empty set (no query issued).
-
-        Renamed from ``doc_ids_present_in_collection`` per the RDR-101
-        Phase 0 nexus-o6aa.3 deliverable.
+        Replaces ``chunk_chroma_ids_present_in_collection`` (removed in
+        the same change). The audit's missing-sample probe now does a
+        direct set-difference with this single set rather than a per-
+        page IN-list query.
         """
-        if not chunk_chroma_ids:
-            return set()
-        placeholders = ",".join("?" * len(chunk_chroma_ids))
         with self._lock:
             rows = self.conn.execute(
-                f"SELECT chunk_chroma_id FROM chash_index "
-                f"WHERE physical_collection = ? AND chunk_chroma_id IN ({placeholders})",
-                (collection, *chunk_chroma_ids),
+                "SELECT DISTINCT substr(chash, 1, 32) FROM chash_index "
+                "WHERE physical_collection = ?",
+                (collection,),
             ).fetchall()
         return {r[0] for r in rows}
 
