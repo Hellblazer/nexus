@@ -700,6 +700,22 @@ Default is report-only; both `--no-dry-run` AND `--yes` are required to actually
 
 `--orphan-window` accepts `s`, `m`, `h`, `d`, `w` suffixes (e.g. `30d`, `12h`, `2w`); a bare integer is rejected so a typo cannot silently mean 30 seconds.
 
+### nx t3 reidentify
+
+```
+nx t3 reidentify (-c COLLECTION | --all-collections) [--no-dry-run]
+```
+
+Re-upsert T3 chunks under content-derived natural IDs `chunk_text_hash[:32]` (RDR-108 D1 / nexus-jc63). Per collection the verb paginates T3 chunks (300/op), computes the new natural ID for each chunk, re-upserts under the new ID using the existing embedding (no Voyage call), and batch-deletes the old chunk IDs after the get-loop completes. Document-level metadata fields (`doc_id`, `chunk_index`, `chunk_count`) are stripped at re-upsert; the `document_chunks` manifest table is now authoritative for those.
+
+The verb is idempotent: re-running on a fully-migrated collection performs zero writes. It is also crash-resumable: re-invoking after an interrupted run safely sweeps the un-deleted old IDs.
+
+Default is `--dry-run` (report-only). Use `--no-dry-run` to perform the migration.
+
+Carve-outs:
+- `taxonomy__*` collections are skipped (centroids use `centroid_hash` from the `topics` table, not `chunk_text_hash`).
+- Pre-RDR-053 chunks lacking `chunk_text_hash` raise a structured error; re-index that collection from source before running.
+
 ---
 
 ## nx taxonomy
