@@ -223,10 +223,18 @@ class TestOBS2MigrationUX:
     """OBS-2: T2Database.__init__ must emit a migration-start message on
     stderr when apply_pending runs, so users don't see a silent hang."""
 
-    def test_migration_emits_progress_message(self, tmp_path, capsys):
+    def test_migration_emits_progress_message(self, tmp_path, capsys, monkeypatch):
         """First construction of T2Database on a fresh DB emits a 'migrating'
-        message to stderr before running apply_pending."""
+        message to stderr when stderr is a tty.
+
+        The OBS-2 message is gated on ``sys.stderr.isatty()`` so it stays
+        out of CliRunner-mixed output during JSON-parsing tests; force it
+        on here.
+        """
         from nexus.db.t2 import T2Database
+        import sys
+
+        monkeypatch.setattr(sys.stderr, "isatty", lambda: True, raising=False)
 
         # Use a unique path: tmp_path is per-test so _upgrade_done won't cache it.
         db_path = tmp_path / "obs2_fresh.db"
@@ -241,10 +249,30 @@ class TestOBS2MigrationUX:
             f"Expected 'migrat' in stderr output but got: {all_stderr!r}"
         )
 
-    def test_no_output_on_already_migrated_db(self, tmp_path, capsys):
-        """Second T2Database construction (fast-path via _upgrade_done) must
-        not re-emit the migration message."""
+    def test_migration_quiet_under_non_tty_stderr(self, tmp_path, capsys, monkeypatch):
+        """OBS-2 message is suppressed when stderr is not a tty (CI, pipes,
+        click.testing.CliRunner mixing stderr into result.output)."""
         from nexus.db.t2 import T2Database
+        import sys
+
+        monkeypatch.setattr(sys.stderr, "isatty", lambda: False, raising=False)
+
+        db_path = tmp_path / "obs2_quiet.db"
+        db = T2Database(db_path)
+        db.close()
+
+        captured = capsys.readouterr()
+        assert "migrat" not in captured.err.lower(), (
+            f"Expected NO 'migrat' under non-tty stderr but got: {captured.err!r}"
+        )
+
+    def test_no_output_on_already_migrated_db(self, tmp_path, capsys, monkeypatch):
+        """Second T2Database construction (fast-path via _upgrade_done) must
+        not re-emit the migration message even when stderr is a tty."""
+        from nexus.db.t2 import T2Database
+        import sys
+
+        monkeypatch.setattr(sys.stderr, "isatty", lambda: True, raising=False)
 
         db_path = tmp_path / "obs2_second.db"
 
