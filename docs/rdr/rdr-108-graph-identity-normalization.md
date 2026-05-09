@@ -676,12 +676,23 @@ ALTER TABLE document_aspects ADD PRIMARY KEY (doc_id);
 ```
 
 Pre-migration precondition: drain queue to zero pending
-entries.
+**and zero in-progress** entries (per re-gate S1). The queue
+is a three-state machine (`pending` / `in_progress` / `failed`);
+workers transition rows to `in_progress` via `claim_next`
+(`aspect_extraction_queue.py:317`) and complete with
+`mark_done`. Checking only `status = 'pending'` misses
+in-flight rows, which can be lost during the
+CREATE-TABLE-new + INSERT + DROP-old + RENAME PK swap.
 
 ```sql
-SELECT count(*) FROM aspect_extraction_queue WHERE status = 'pending';
+SELECT count(*) FROM aspect_extraction_queue WHERE status != 'failed';
 -- Must return 0 before the PK swap runs.
+-- (status='failed' rows are inert and can survive the swap.)
 ```
+
+Operational sequence: stop the AspectWorker thread (or signal
+it to stop claiming), wait for in-progress rows to drain,
+verify the precondition, run the PK swap, restart the worker.
 
 `mark_done` updates: `mark_done(doc_id)` instead of
 `mark_done(collection, source_path)`.
@@ -751,11 +762,12 @@ sites enumerated by grep:
 |---|---|
 | `code_indexer.py:380, 424` | replace formula → `chunk_text_hash[:32]` |
 | `prose_indexer.py:101, 121, 167, 200` | same |
-| `mcp/core.py:973, 978, 984` | same; store_put writes content-derived ID |
-| `commands/store.py:113, 115` | same |
+| `mcp/core.py:973, 978, 984` | replace `sha256(...).hexdigest()[:16]` with `chunk_text_hash[:32]`. **Note (re-gate O1)**: current code uses 16-char ID for store_put; D1 standardizes on 32-char. Phase 2's idempotent loop handles the mixed-length case via `cid == new_id` skip, but old 16-char IDs accumulate until GC. Phase 4 GC rewrite catches them via the manifest cross-check. |
+| `commands/store.py:113, 115` | same — replace 16-char or position-derived ID with `chunk_text_hash[:32]` |
 | `catalog/catalog_spans.py:327` | replace `row["chunk_chroma_id"]` → `hex_chash[:32]` |
-| `collection_audit.py:425-431` | rewrite to cross-check directly: `col.get(ids=chashes_from_index)` returns the live records, no separate ID column needed |
-| `db/t2/chash_index.py:62, 64, 105-135, 145-158, 261-283, 304-338` | drop the column from schema + accessor methods + `record_chunks` helper |
+| `collection_audit.py:425-431` | replace the `chunk_chroma_ids_present_in_collection(col, ids)` call with a direct chromadb cross-check: `live_ids = set(col.get(ids=...))`, then `intersect = chashes_from_index & live_ids`. The chash_index returns chash values via `lookup`; T3 natural IDs equal chash[:32] post-D1, so the comparison is direct |
+| `db/t2/chash_index.py:62, 64, 105-135, 145-158, 304-338` | drop the column from schema + `upsert` signature + `lookup` SELECT + `record_chunks` helper |
+| `db/t2/chash_index.py:261-283` (`chunk_chroma_ids_present_in_collection` method, per re-gate S3) | **remove the method entirely** along with its sole caller at `collection_audit.py:426`. The method's purpose (cross-check chash_index entries against live T3 IDs) was specifically tied to the old chunk_chroma_id column; under D1 the audit equivalent is `set(chash_index.lookup(chash) for chash in expected) ∩ set(col.get(ids=...))`, a one-liner that doesn't need a dedicated accessor |
 | `db/migrations.py:912-961, 1939` | historical migrations — leave untouched (they describe the column's lifecycle); add a new migration that drops the column after Phase 4 verification |
 
 The `chunk_chroma_id` column AND the `chunk_index` /
@@ -927,7 +939,12 @@ for doc in catalog.iter_documents():
 ```
 
 Idempotent — re-running overwrites the manifest with the same
-content.
+content. Per re-gate O2: a catalog Document with zero matching
+T3 chunks (catalog knows the doc, T3 has no chunks) produces
+an empty manifest row-set — valid, not an error. The reverse
+direction (T3 chunks with no matching catalog doc) is the
+existing orphan case handled by the GC path described in
+Phase 4.
 
 **Step 1c: Aspect tables PK migration (D3)**
 
@@ -937,10 +954,13 @@ content.
   `knowledge__art-papers` 78, `rdr__1-1__voyage-context-3__v1`
   49 = 445 rows / 98% of legacy-orphan corpus). Operator
   inspects each and decides the current target.
-- **Pre-step (per Layer 3 critique C3)**: drain
-  `aspect_extraction_queue` to zero pending entries. SQL
-  precondition `SELECT count(*) FROM aspect_extraction_queue
-  WHERE status = 'pending'` must return 0 before the PK swap.
+- **Pre-step (per Layer 3 critique C3 + re-gate S1)**: drain
+  `aspect_extraction_queue` to zero pending AND zero
+  in-progress entries (full spec in §D3 above). Stop the
+  AspectWorker, wait for in-flight rows, verify SQL
+  `SELECT count(*) FROM aspect_extraction_queue WHERE status
+  != 'failed'` returns 0, then run the PK swap, restart the
+  worker.
 - For each of `aspect_extraction_queue` and `document_aspects`:
   1. Add `doc_id TEXT NOT NULL DEFAULT ''` column.
   2. Backfill via `(collection, file_path)` JOIN to
@@ -1061,7 +1081,6 @@ carry `doc_id`, `chunk_index`, `chunk_count` in metadata
 | Site | Pre | Post |
 |---|---|---|
 | `db/t3.py:1228` | `where={"doc_id": doc_id}` | `chashes = catalog.get_chunk_chashes(doc_id); col.get(ids=[c[:32] for c in chashes])` |
-| `indexer.py:1477, :1531` | batched `where={"doc_id": {"$in": ...}}` for stale-chunk prune | with manifest model, stale detection becomes "chunks no longer in any manifest" — likely a separate sweep. RDR-108 doesn't change `_prune_deleted_files`'s logic but the manifest changes the lookup pattern. |
 | `mcp/core.py:847-855` | group results by `chunk.metadata["doc_id"]` | gather `chunk_text_hash` values from results; query manifest by chash → group by doc |
 | `catalog/synthesizer.py:616-672` | sort by `chunk_index` from metadata | walk manifest in order |
 | `catalog/catalog_spans.py:327` | `doc_id=row["chunk_chroma_id"]` | `doc_id=hex_chash[:32]` |
@@ -1077,6 +1096,71 @@ catalog.docs_for_chashes(chashes: list[str]) -> dict[str, list[doc_id]]
 This is a fast index lookup (idx_document_chunks_chash). Adds
 one catalog query per retrieval batch, far smaller than the
 embedding similarity computation cost.
+
+**GC rewrite** (per re-gate S2 — critical implementation
+gap surfaced at re-gate):
+
+`indexer.py:1606-1620` (`_prune_deleted_files`) currently
+identifies orphan chunks via `meta.get("doc_id", "")` on each
+T3 chunk's metadata. After Phase 2 strips that field, the
+existing pruner becomes a no-op for migrated collections —
+silently re-creating the stale-chunk root bug RDR-108 set out
+to fix. RDR-101 RF-3 stated "GC keys on `chunk_id`, not
+`chash`, because chash is non-unique across documents"; under
+the manifest model, the answer is "GC keys on absence-from-
+manifest in the catalog," resolving RDR-101's concern at the
+graph layer rather than the chunk-metadata layer.
+
+New GC contract:
+
+```python
+# nx t3 gc, per collection
+def prune_orphan_chunks(col, catalog):
+    """Delete T3 chunks whose chash[:32] does not appear in any
+    document_chunks manifest entry for this collection's docs.
+    """
+    # 1. Gather all chash[:32] values referenced by manifest for
+    #    docs whose physical_collection == col.name.
+    referenced_chashes = catalog.chashes_for_collection(col.name)
+    # 2. Paginate T3 chunks; identify orphans (chunk natural ID
+    #    not in referenced_chashes after Phase 2's content-derived
+    #    ID change). Note chunk natural ID == chunk_text_hash[:32]
+    #    so identity comparison is direct.
+    orphan_ids = []
+    offset = 0
+    while True:
+        page = col.get(limit=300, offset=offset, include=[])
+        if not page["ids"]: break
+        for cid in page["ids"]:
+            if cid not in referenced_chashes:
+                orphan_ids.append(cid)
+        if len(page["ids"]) < 300: break
+        offset += 300
+    # 3. Batch-delete orphans (300 per delete, per quota).
+    for batch in batched(orphan_ids, 300):
+        col.delete(ids=list(batch))
+```
+
+Catalog gains a helper:
+
+```python
+catalog.chashes_for_collection(physical_collection: str) -> set[str]
+# SELECT DISTINCT substr(chash, 1, 32) FROM document_chunks dc
+#   JOIN documents d ON d.tumbler = dc.doc_id
+#   WHERE d.physical_collection = ?
+```
+
+This replaces (does not augment) the metadata-based path in
+`_prune_deleted_files`. Cost: one catalog query per
+collection at GC time, plus the existing T3 pagination. Net
+~equivalent to the pre-migration cost; the work moves from
+T3 metadata-filtering to catalog index-lookup, which is
+faster.
+
+The rewrite is required as part of Phase 4. `_prune_deleted_files`
+loses the `meta.get("doc_id", ...)` branch entirely; the
+fallback `source_path` branch was already deprecated by
+RDR-101 Phase 5b.
 
 ### Phase 5: Documentation + verification
 
@@ -1147,10 +1231,12 @@ embedding similarity computation cost.
   `doc_id`/`chunk_index` metadata; run Phase 1 Step 1b; assert
   the resulting `document_chunks` rows preserve order and
   match the original metadata.
-- **Aspect queue drain precondition** (Phase 1 Step 1c): with
-  a non-empty `aspect_extraction_queue` (status=pending), run
-  the PK migration; assert it BLOCKS with a clear error and
-  does not modify schema.
+- **Aspect queue drain precondition** (Phase 1 Step 1c, per
+  re-gate S1): with `aspect_extraction_queue` rows in EACH of
+  pending and in_progress state (separate fixtures), run the
+  PK migration; assert it BLOCKS for both with a clear error
+  naming the offending state, and does not modify schema. Then
+  drain to zero pending+in_progress; assert migration runs.
 - **Aspect PK migration end-to-end** (D3): fixture with five
   rows: (a) matching catalog, (b) legacy-collection-name with
   hand-curated supersede mapping, (c) legacy-collection-name
@@ -1189,6 +1275,16 @@ embedding similarity computation cost.
   assert that running Phase 2 against
   `docs__scheme-evolution-research-b7de0b63` requires the
   690-chunk re-index pre-step or fails loud.
+- **GC rewrite — orphan detection by manifest absence** (per
+  re-gate S2): fixture with N migrated chunks where some have
+  manifest entries and some don't (simulating a deleted-file
+  scenario). Run `nx t3 gc`. Assert (a) chunks without
+  manifest entries are deleted, (b) chunks with manifest
+  entries survive, (c) the new code path does NOT consult
+  chunk metadata for `doc_id`. Includes the negative case:
+  metadata still has `doc_id` (mid-migration mixed state) AND
+  manifest is absent → still treated as orphan (manifest is
+  authoritative).
 
 ## Validation
 
@@ -1243,6 +1339,20 @@ embedding similarity computation cost.
   Phase 3 (chunk metadata cleanup) and Phase 4 (chash_index
   column drop) run after Phase 2 completes globally — both
   require a corpus-wide assertion before the cleanup migrations.
+- **Mixed-state retrieval (per re-gate O3)**: between Phase 1
+  manifest backfill and Phase 2 completion for a given
+  collection, retrieval may return chunks that DO have
+  `doc_id`/`chunk_index` in metadata (Phase 2 hasn't stripped
+  them) but ALSO have manifest entries (Phase 1 wrote them).
+  Doc-grouping reads via `catalog.docs_for_chashes` work
+  uniformly. The transitional gap is for chunks indexed AFTER
+  Phase 1 manifest backfill but BEFORE Phase 3's write-path
+  changes — those chunks have OLD natural IDs and no manifest
+  entry. The retrieval-path fix: when grouping chunks by doc,
+  fall back to `chunk.metadata["doc_id"]` if the manifest
+  lookup misses. Document this fallback for the migration
+  window and remove it after Phase 3 + a corpus-wide
+  reconciliation pass.
 - **Memory management**: re-upserting 290k chunks fits within
   ChromaDB Cloud quotas at 300/op batches. Catalog manifest
   table adds ~290k rows × ~80 bytes = ~23 MiB to the
