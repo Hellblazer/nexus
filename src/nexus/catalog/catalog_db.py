@@ -231,7 +231,7 @@ CREATE INDEX IF NOT EXISTS idx_collections_tuple
 -- time, retained for reference; position is the canonical ordering
 -- key from this RDR onward.
 CREATE TABLE IF NOT EXISTS document_chunks (
-    doc_id      TEXT NOT NULL REFERENCES documents(tumbler),
+    doc_id      TEXT NOT NULL REFERENCES documents(tumbler) ON DELETE CASCADE,
     position    INTEGER NOT NULL,
     chash       TEXT NOT NULL,
     chunk_index INTEGER,
@@ -423,7 +423,56 @@ class CatalogDB:
                 "WHERE bib_openalex_id != ''"
             )
 
-        # RDR-108 D2 (nexus-mydi): backfill collections rows for any
+        # RDR-108 K1 (nexus-lh8c): add ON DELETE CASCADE to document_chunks
+        # for existing databases that were created before this constraint was
+        # declared in the schema. SQLite cannot ALTER a FK constraint in place;
+        # the 12-step pattern recreates the table with the correct declaration.
+        # Idempotent: skipped if the schema already includes ON DELETE CASCADE.
+        _chunks_ddl_row = self._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='document_chunks'"
+        ).fetchone()
+        if _chunks_ddl_row is not None and "ON DELETE CASCADE" not in _chunks_ddl_row[0]:
+            # Detect which columns exist — older schemas may be a strict subset.
+            _old_col_names = {
+                r[1] for r in self._conn.execute(
+                    "PRAGMA table_info(document_chunks)"
+                ).fetchall()
+            }
+            _all_cols = [
+                "doc_id", "position", "chash", "chunk_index",
+                "line_start", "line_end", "char_start", "char_end",
+            ]
+            _copy_cols = [c for c in _all_cols if c in _old_col_names]
+            _copy_sql = ", ".join(_copy_cols)
+            with self._conn:
+                self._conn.execute(
+                    "CREATE TABLE document_chunks_rdr108k1_new ("
+                    "    doc_id      TEXT NOT NULL"
+                    "                REFERENCES documents(tumbler) ON DELETE CASCADE,"
+                    "    position    INTEGER NOT NULL,"
+                    "    chash       TEXT NOT NULL,"
+                    "    chunk_index INTEGER,"
+                    "    line_start  INTEGER,"
+                    "    line_end    INTEGER,"
+                    "    char_start  INTEGER,"
+                    "    char_end    INTEGER,"
+                    "    PRIMARY KEY (doc_id, position)"
+                    ")"
+                )
+                self._conn.execute(
+                    f"INSERT INTO document_chunks_rdr108k1_new ({_copy_sql})"
+                    f" SELECT {_copy_sql} FROM document_chunks"
+                )
+                self._conn.execute("DROP TABLE document_chunks")
+                self._conn.execute(
+                    "ALTER TABLE document_chunks_rdr108k1_new RENAME TO document_chunks"
+                )
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_document_chunks_chash"
+                    " ON document_chunks(chash)"
+                )
+
+                # RDR-108 D2 (nexus-mydi): backfill collections rows for any
         # documents.physical_collection value that has no matching
         # collections.name row. Pre-RDR-108 catalogs accumulated docs
         # whose physical_collection was a free-form string, never
@@ -440,6 +489,13 @@ class CatalogDB:
         # alias_of migration test fixture) may lack the
         # physical_collection column entirely; skip the backfill in
         # that case rather than raise.
+        # nexus-572g K7: track inserted names so Catalog.__init__ can
+        # emit synthetic CollectionCreated events with
+        # legacy_grandfathered=True. Without backing events the rows
+        # vanish on Catalog.rebuild() (DELETE FROM collections + JSONL
+        # replay). Catalog reads _backfilled_collections immediately
+        # after constructing this CatalogDB.
+        self._backfilled_collections: set[str] = set()
         try:
             self._conn.execute(
                 "SELECT physical_collection FROM documents LIMIT 0"
@@ -447,20 +503,35 @@ class CatalogDB:
         except sqlite3.OperationalError:
             pass
         else:
-            with self._conn:
-                self._conn.execute(
-                    "INSERT INTO collections "
-                    "(name, content_type, owner_id, embedding_model, "
-                    " model_version, display_name, legacy_grandfathered, "
-                    " superseded_by, superseded_at, created_at) "
-                    "SELECT DISTINCT physical_collection, '', '', '', '', '', "
-                    "  1, '', '', '' "
-                    "FROM documents "
+            # Identify candidate names before INSERT so we track exactly which
+            # names actually land (the INSERT below skips existing rows).
+            candidates = {
+                row[0]
+                for row in self._conn.execute(
+                    "SELECT DISTINCT physical_collection FROM documents "
                     "WHERE physical_collection IS NOT NULL "
                     "  AND physical_collection != '' "
                     "  AND physical_collection NOT IN "
                     "      (SELECT name FROM collections)"
-                )
+                ).fetchall()
+            }
+            if candidates:
+                from datetime import UTC, datetime as _datetime  # noqa: PLC0415
+                _now = _datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+                with self._conn:
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO collections "
+                        "(name, content_type, owner_id, embedding_model, "
+                        " model_version, display_name, legacy_grandfathered, "
+                        " superseded_by, superseded_at, created_at) "
+                        "SELECT DISTINCT physical_collection, '', '', '', '', '', "
+                        "  1, '', '', ? "
+                        "FROM documents "
+                        "WHERE physical_collection IS NOT NULL "
+                        "  AND physical_collection != ''",
+                        (_now,),
+                    )
+                self._backfilled_collections = candidates
 
     def rebuild(
         self,

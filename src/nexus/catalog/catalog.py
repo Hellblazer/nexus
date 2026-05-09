@@ -331,6 +331,7 @@ def make_relative(abs_path: str | Path, repo_root: Path) -> str:
 from nexus.catalog.catalog_spans import (  # noqa: E402
     reset_chash_fallback_warning_for_tests,
 )
+from nexus.catalog.catalog_writes import ManifestRow as _ManifestRow  # noqa: E402
 
 
 # Set of URI schemes the catalog will accept verbatim. Each scheme
@@ -593,8 +594,70 @@ class Catalog:
         self._writes = _WriteOps(self)
 
         self._last_consistency_mtime: float = self._read_consistency_marker()
+
+        # nexus-572g K7: emit CollectionCreated events for collections that
+        # were direct-INSERT backfilled by CatalogDB.__init__. Without backing
+        # events in events.jsonl, rebuild() (DELETE FROM collections + event
+        # replay) silently removes the rows. This must run AFTER _events_path
+        # is set and the lock helpers are available.
+        self._emit_backfilled_collection_events()
+
         if self._documents_path.exists():
             self._ensure_consistent()
+
+    def _emit_backfilled_collection_events(self) -> None:
+        """Emit CollectionCreated events for CatalogDB-backfilled collections.
+
+        CatalogDB.__init__ direct-INSERTs ``collections`` rows for any
+        ``documents.physical_collection`` value that has no matching row
+        (nexus-mydi). Those rows have no backing event in ``events.jsonl``,
+        so ``Catalog.rebuild()`` (DELETE FROM collections + JSONL replay)
+        silently removes them.
+
+        This method writes one ``CollectionCreated`` event per backfilled
+        name with ``legacy_grandfathered=True`` so the projection is
+        durable across rebuilds. Idempotent: only fires for names in
+        ``self._db._backfilled_collections`` (the set is populated only
+        when an INSERT actually landed; a no-op backfill leaves it empty).
+
+        Events are written unconditionally (not gated on shadow-emit or
+        event-sourced mode) because the projection correctness depends on
+        them being present -- they are structural, not optional telemetry.
+        """
+        names = self._db._backfilled_collections
+        if not names:
+            return
+        dir_fd = self._acquire_lock()
+        try:
+            for name in sorted(names):  # sorted for deterministic JSONL ordering
+                event = _make_event(
+                    _CollectionCreatedPayload(
+                        coll_id=name,
+                        owner_id="",
+                        content_type="",
+                        embedding_model="",
+                        model_version="",
+                        name=name,
+                        created_at="",
+                        legacy_grandfathered=True,
+                    ),
+                    v=0,
+                )
+                try:
+                    self._write_to_event_log(event)
+                except Exception:
+                    _log.warning(
+                        "catalog_backfill_event_write_failed",
+                        collection_name=name,
+                        exc_info=True,
+                    )
+        finally:
+            self._release_lock(dir_fd)
+        _log.debug(
+            "catalog_backfill_events_emitted",
+            count=len(names),
+            names=sorted(names),
+        )
 
     def _read_consistency_marker(self) -> float:
         """Delegates to ``_SyncOps._read_consistency_marker`` (nexus-mbm)."""
@@ -1453,6 +1516,14 @@ class Catalog:
         See catalog_writes._WriteOps.write_manifest for the contract.
         """
         return self._writes.write_manifest(doc_id, chunks)
+
+    def get_manifest(self, doc_id: str) -> list[_ManifestRow]:
+        """Return ordered manifest rows for ``doc_id`` (nexus-572g K6)."""
+        return self._writes.get_manifest(doc_id)
+
+    def docs_for_chashes(self, chashes: list[str]) -> dict[str, list[str]]:
+        """Reverse-lookup: chash -> [doc_id, ...] (nexus-572g K6)."""
+        return self._writes.docs_for_chashes(chashes)
 
     def find(self, query: str, *, content_type: str | None = None) -> list[CatalogEntry]:
         """Delegates to ``_DocumentOps.find`` (nexus-mbm)."""

@@ -28,6 +28,8 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections import defaultdict
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -47,6 +49,28 @@ if TYPE_CHECKING:
     from nexus.catalog.catalog import Catalog
 
 _log = structlog.get_logger(__name__)
+
+
+# ── ManifestRow (nexus-572g K6) ───────────────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class ManifestRow:
+    """One row from ``document_chunks``, ordered by position.
+
+    Fields mirror the ``document_chunks`` schema (RDR-108 D2):
+    ``(position, chash, chunk_index, line_start, line_end,
+    char_start, char_end)``. Span columns are ``None`` for chunks
+    that were inserted without span metadata.
+    """
+
+    position: int
+    chash: str
+    chunk_index: int | None = None
+    line_start: int | None = None
+    line_end: int | None = None
+    char_start: int | None = None
+    char_end: int | None = None
 
 
 class _WriteOps:
@@ -717,6 +741,67 @@ class _WriteOps:
                         )
                     ],
                 )
+
+    def get_manifest(self, doc_id: str) -> list[ManifestRow]:
+        """Return manifest rows for ``doc_id`` ordered by position (nexus-572g K6).
+
+        Each row carries the (position, chash, chunk_index, line_start,
+        line_end, char_start, char_end) tuple that the ``document_chunks``
+        table stores. Returns an empty list when no rows exist, which is
+        correct for both unknown doc_ids and zero-chunk documents.
+
+        Phase 4 retrieval rewrites use this to reconstitute the ordered
+        chunk sequence from the catalog after ``doc_id``/``chunk_index``/
+        ``chunk_count`` are stripped from T3 chunk metadata in Phase 3.
+        """
+        cat = self._cat
+        rows = cat._db.execute(
+            "SELECT position, chash, chunk_index, "
+            "line_start, line_end, char_start, char_end "
+            "FROM document_chunks "
+            "WHERE doc_id = ? "
+            "ORDER BY position",
+            (doc_id,),
+        ).fetchall()
+        return [
+            ManifestRow(
+                position=row[0],
+                chash=row[1],
+                chunk_index=row[2],
+                line_start=row[3],
+                line_end=row[4],
+                char_start=row[5],
+                char_end=row[6],
+            )
+            for row in rows
+        ]
+
+    def docs_for_chashes(self, chashes: list[str]) -> dict[str, list[str]]:
+        """Reverse-lookup: chash -> [doc_id, ...] (nexus-572g K6).
+
+        Given a list of ``chash`` values (content-address hashes),
+        returns a mapping from each chash to the list of doc_ids
+        whose manifest contains that chash. Chashes with no manifest
+        entries are omitted from the result.
+
+        Used by Phase 4 retrieval doc-grouping (mcp/core.py:847 path)
+        to reconstruct the document context for a set of chunk hashes
+        returned by a T3 query.
+        """
+        if not chashes:
+            return {}
+        cat = self._cat
+        placeholders = ", ".join(["?"] * len(chashes))
+        rows = cat._db.execute(
+            f"SELECT chash, doc_id FROM document_chunks "
+            f"WHERE chash IN ({placeholders})",
+            chashes,
+        ).fetchall()
+        result: dict[str, list[str]] = defaultdict(list)
+        for chash, doc_id in rows:
+            if doc_id not in result[chash]:
+                result[chash].append(doc_id)
+        return dict(result)
 
     def delete_document(self, tumbler: Tumbler) -> bool:
         """Soft-delete a document: tombstone in JSONL, DELETE from SQLite.
