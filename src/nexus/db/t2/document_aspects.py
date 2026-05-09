@@ -359,14 +359,33 @@ class DocumentAspects:
         nexus-gp20 / RDR-108 Phase 1d: ``collection`` is a denorm cache
         column (the primary key is ``doc_id`` post-migration, or
         ``(collection, source_path)`` on legacy tables). Updating the
-        cache column does NOT affect the primary key either way — no row
+        cache column does NOT affect the primary key either way -- no row
         identity changes, no row recreation.
 
-        Returns the count of rows updated (0 when no rows match — safe
+        Collision defense (nexus-nhyh / K4): on legacy-PK tables where
+        the PK is ``(collection, source_path)``, a pre-existing
+        ``(new, source_path)`` row would collide with the UPDATE.
+        Mirror chash_index's strategy: DELETE any conflicting new-side
+        rows whose ``source_path`` values overlap with old-side rows,
+        then UPDATE. This is conservative but correct: the rename is an
+        atomic re-home, so preserving a stale ``new``-side row would
+        silently drop the ``old``-side data.
+
+        Returns the count of rows updated (0 when no rows match -- safe
         no-op). Idempotent: a second call with the same ``old`` name
         (now no rows match) returns 0 without error.
         """
         with self._lock:
+            # Drop any pre-existing new-collection rows that would collide
+            # with the rename (same source_path). Mirrors ChashIndex pattern.
+            self.conn.execute(
+                "DELETE FROM document_aspects "
+                "WHERE collection = ? "
+                "  AND source_path IN ("
+                "    SELECT source_path FROM document_aspects WHERE collection = ?"
+                "  )",
+                (new, old),
+            )
             cur = self.conn.execute(
                 "UPDATE document_aspects SET collection = ? WHERE collection = ?",
                 (new, old),
