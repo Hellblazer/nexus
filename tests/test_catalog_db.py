@@ -485,3 +485,210 @@ class TestNexus7vuwOwnerNameUniqueRelaxation:
         assert db._conn.execute(
             "SELECT COUNT(*) FROM owners WHERE name = 'nexus'"
         ).fetchone()[0] == 2
+
+
+class TestRDR108Phase1aManifest:
+    """RDR-108 Phase 1a (nexus-mydi): document_chunks manifest table +
+    collections backfill + FK enforcement.
+
+    The catalog becomes the authoritative source of truth for
+    doc -> chunk ordering (the "tree" layer of the git/IPFS-style
+    blob+tree split). T3 chunks are content-addressed blobs;
+    document_chunks records each (doc_id, position) -> chash reference.
+    """
+
+    def test_document_chunks_table_exists(self, tmp_path):
+        db = CatalogDB(tmp_path / ".catalog.db")
+        tables = {
+            row[0]
+            for row in db._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "document_chunks" in tables
+
+    def test_document_chunks_columns(self, tmp_path):
+        db = CatalogDB(tmp_path / ".catalog.db")
+        cols = {
+            row[1]
+            for row in db._conn.execute(
+                "PRAGMA table_info(document_chunks)"
+            ).fetchall()
+        }
+        assert {"doc_id", "position", "chash", "chunk_index",
+                "line_start", "line_end", "char_start", "char_end"} <= cols
+
+    def test_document_chunks_pk_is_doc_id_position(self, tmp_path):
+        db = CatalogDB(tmp_path / ".catalog.db")
+        pk_cols = [
+            row[1]
+            for row in db._conn.execute(
+                "PRAGMA table_info(document_chunks)"
+            ).fetchall()
+            if row[5] > 0
+        ]
+        # SQLite PRAGMA pk column ordering: 1 = first PK col, 2 = second, etc.
+        assert pk_cols == ["doc_id", "position"]
+
+    def test_idx_document_chunks_chash_exists(self, tmp_path):
+        db = CatalogDB(tmp_path / ".catalog.db")
+        indexes = {
+            row[0]
+            for row in db._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            ).fetchall()
+        }
+        assert "idx_document_chunks_chash" in indexes
+
+    def test_foreign_keys_pragma_enabled(self, tmp_path):
+        """RDR-108 D2 + D5 require FK enforcement so cascades work and
+        manifest entries cannot point at deleted documents. SQLite FK
+        enforcement is per-connection: PRAGMA foreign_keys=ON must be
+        set on the CatalogDB connection.
+        """
+        db = CatalogDB(tmp_path / ".catalog.db")
+        on = db._conn.execute("PRAGMA foreign_keys").fetchone()[0]
+        assert on == 1
+
+    def test_document_chunks_fk_rejects_unknown_doc_id(self, tmp_path):
+        """Manifest entries must reference an existing Document. Insert
+        with a doc_id that has no matching documents.tumbler row should
+        raise IntegrityError when foreign_keys=ON.
+        """
+        db = CatalogDB(tmp_path / ".catalog.db")
+        with pytest.raises(sqlite3.IntegrityError):
+            db._conn.execute(
+                "INSERT INTO document_chunks "
+                "(doc_id, position, chash) VALUES (?, ?, ?)",
+                ("1.999.999", 0, "a" * 64),
+            )
+
+    def test_document_chunks_fk_accepts_known_doc_id(self, tmp_path):
+        """Sanity: a manifest entry for a real document succeeds."""
+        db = CatalogDB(tmp_path / ".catalog.db")
+        # Insert a Document row first (use raw SQL to keep the test
+        # independent of the rebuild path).
+        db._conn.execute(
+            "INSERT INTO documents (tumbler, title) VALUES (?, ?)",
+            ("1.1.1", "test.py"),
+        )
+        # Then a manifest entry referencing it.
+        db._conn.execute(
+            "INSERT INTO document_chunks "
+            "(doc_id, position, chash) VALUES (?, ?, ?)",
+            ("1.1.1", 0, "f" * 64),
+        )
+        db._conn.commit()
+        rows = db._conn.execute(
+            "SELECT doc_id, position, chash FROM document_chunks"
+        ).fetchall()
+        assert rows == [("1.1.1", 0, "f" * 64)]
+
+    def test_collections_backfill_creates_missing_rows(self, tmp_path):
+        """Pre-existing documents.physical_collection values that have
+        no matching collections.name row must be backfilled at CatalogDB
+        construction time. This is the structural prep step for FK
+        enforcement on documents.physical_collection (RDR-108 D2 ->
+        future migration).
+        """
+        # Seed a fresh DB and inject documents pointing at an unregistered
+        # collection name (mimics pre-RDR-108 state).
+        db = CatalogDB(tmp_path / ".catalog.db")
+        db._conn.execute(
+            "INSERT INTO documents (tumbler, title, physical_collection) "
+            "VALUES (?, ?, ?)",
+            ("1.1.1", "doc1", "code__legacy-no-row"),
+        )
+        db._conn.execute(
+            "INSERT INTO documents (tumbler, title, physical_collection) "
+            "VALUES (?, ?, ?)",
+            ("1.1.2", "doc2", "code__legacy-no-row"),
+        )
+        db._conn.commit()
+        db.close()
+
+        # Re-open: backfill must create the missing collections row
+        # (idempotent on re-open of an already-backfilled DB).
+        db2 = CatalogDB(tmp_path / ".catalog.db")
+        names = {
+            row[0]
+            for row in db2._conn.execute(
+                "SELECT name FROM collections"
+            ).fetchall()
+        }
+        assert "code__legacy-no-row" in names
+
+    def test_collections_backfill_idempotent(self, tmp_path):
+        """Re-opening a DB whose backfill already ran must not raise
+        nor duplicate collections rows.
+        """
+        db = CatalogDB(tmp_path / ".catalog.db")
+        db._conn.execute(
+            "INSERT INTO documents (tumbler, title, physical_collection) "
+            "VALUES (?, ?, ?)",
+            ("1.1.1", "doc1", "code__legacy"),
+        )
+        db._conn.commit()
+        db.close()
+
+        # Two re-opens: backfill runs twice, must converge.
+        CatalogDB(tmp_path / ".catalog.db").close()
+        db3 = CatalogDB(tmp_path / ".catalog.db")
+        count = db3._conn.execute(
+            "SELECT COUNT(*) FROM collections WHERE name = ?",
+            ("code__legacy",),
+        ).fetchone()[0]
+        assert count == 1
+
+    def test_collections_backfill_skips_empty_physical_collection(self, tmp_path):
+        """Documents with empty physical_collection must NOT generate a
+        backfill row (an empty string is not a valid collection name).
+        """
+        db = CatalogDB(tmp_path / ".catalog.db")
+        db._conn.execute(
+            "INSERT INTO documents (tumbler, title, physical_collection) "
+            "VALUES (?, ?, ?)",
+            ("1.1.1", "doc1", ""),
+        )
+        db._conn.commit()
+        db.close()
+
+        db2 = CatalogDB(tmp_path / ".catalog.db")
+        names = {
+            row[0]
+            for row in db2._conn.execute(
+                "SELECT name FROM collections"
+            ).fetchall()
+        }
+        assert "" not in names
+
+    def test_collections_backfill_skips_existing_rows(self, tmp_path):
+        """If a collections row already exists for a physical_collection
+        value, the backfill must not OVERWRITE its existing fields
+        (legacy_grandfathered, content_type, owner_id, etc.).
+        """
+        db = CatalogDB(tmp_path / ".catalog.db")
+        db._conn.execute(
+            "INSERT INTO collections "
+            "(name, content_type, owner_id, embedding_model, "
+            " legacy_grandfathered, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("code__pre-existing", "code", "1.1", "voyage-code-3",
+             0, "2026-04-01T00:00:00Z"),
+        )
+        db._conn.execute(
+            "INSERT INTO documents (tumbler, title, physical_collection) "
+            "VALUES (?, ?, ?)",
+            ("1.1.1", "doc", "code__pre-existing"),
+        )
+        db._conn.commit()
+        db.close()
+
+        db2 = CatalogDB(tmp_path / ".catalog.db")
+        row = db2._conn.execute(
+            "SELECT content_type, owner_id, legacy_grandfathered "
+            "FROM collections WHERE name = ?",
+            ("code__pre-existing",),
+        ).fetchone()
+        # Pre-existing row preserved.
+        assert row == ("code", "1.1", 0)
