@@ -18,13 +18,22 @@ def chroma_client() -> chromadb.ClientAPI:
 
 @pytest.fixture(autouse=True)
 def _reset_hooks():
-    """Clear post_store_hooks between tests to prevent cross-test leakage."""
+    """Clear post_store_hooks between tests to prevent cross-test leakage.
+
+    Snapshots the load-bearing batch-hook list (chash dual-write,
+    taxonomy assign, manifest write — registered at module load in
+    ``mcp_infra``) and restores it on teardown so subsequent tests
+    that depend on the catalog manifest hook firing do not see an
+    empty hook list.
+    """
     from nexus.mcp_infra import _post_store_batch_hooks, _post_store_hooks
+    snapshot = list(_post_store_batch_hooks)
     _post_store_hooks.clear()
     _post_store_batch_hooks.clear()
     yield
     _post_store_hooks.clear()
     _post_store_batch_hooks.clear()
+    _post_store_batch_hooks.extend(snapshot)
 
 
 # ── Hook mechanism ───────────────────────────────────────────────────────────

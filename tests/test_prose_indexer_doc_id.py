@@ -130,16 +130,18 @@ def _do_index(repo: Path, registry: RepoRegistry, t3: T3Database, monkeypatch) -
         index_repository(repo, registry, force=False)
 
 
-def test_prose_indexer_writes_doc_id_into_t3_chunk_metadata(
+def test_prose_indexer_writes_manifest_rows_for_each_document(
     prose_repo: Path,
     registry: RepoRegistry,
     local_t3: T3Database,
     catalog_env: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """First-pass indexing of a fresh prose corpus must populate ``doc_id``
-    in every chunk's T3 metadata, matching the catalog tumbler the
-    orchestrator registered before per-file indexing.
+    """RDR-108 Phase 3 (nexus-bdag) retired ``doc_id`` from chunk metadata
+    in favour of the catalog ``document_chunks`` manifest. First-pass
+    indexing of a fresh prose corpus must therefore populate manifest
+    rows for every registered Document instead of stamping doc_id on
+    every chunk.
 
     Covers both the markdown and non-markdown branches of
     ``prose_indexer.index_prose_file``.
@@ -156,41 +158,36 @@ def test_prose_indexer_writes_doc_id_into_t3_chunk_metadata(
     result = docs_col.get(include=["metadatas"])
     assert result["ids"], "expected at least one prose chunk in T3 docs collection"
 
-    # RDR-102 D2 dropped source_path from the chunk schema. Group
-    # chunks by doc_id (Phase A canonical identity); the chunk title
-    # carries "{relpath}:chunk-{i}" so we can still verify both
-    # branches (markdown vs line-chunk for .rst) ran.
-    by_doc_id: dict[str, list[dict]] = {}
+    # Phase 3: chunks must NOT carry doc_id any more (catalog manifest
+    # is authoritative).
     for meta in result["metadatas"]:
-        doc_id = meta.get("doc_id", "")
-        assert doc_id, (
-            f"chunk metadata lacks doc_id (Phase A pre-flight "
-            f"registration regression): {meta}"
+        assert "doc_id" not in meta, (
+            f"Phase 3: chunk metadata must not carry doc_id; got {meta!r}"
         )
-        by_doc_id.setdefault(doc_id, []).append(meta)
+        assert "chunk_index" not in meta
+        assert "chunk_count" not in meta
 
-    assert by_doc_id, "expected metadatas to carry doc_id"
-
-    owner_row = cat._db.execute(
-        "SELECT tumbler_prefix FROM owners LIMIT 1"
-    ).fetchone()
-    assert owner_row is not None, "expected catalog owner registered by indexer"
+    # Each registered Document in the docs collection must have a manifest.
+    documents = cat._db.execute(
+        "SELECT tumbler, file_path FROM documents "
+        "WHERE physical_collection = ?",
+        (docs_collection,),
+    ).fetchall()
+    assert documents, "expected catalog Documents for the docs collection"
 
     md_seen = False
     rst_seen = False
-    for doc_id, metas in by_doc_id.items():
-        # doc_id is the catalog tumbler — resolve confirms the row
-        # exists. Use the first chunk's title to detect which branch
-        # produced the chunk (markdown vs .rst line-chunk).
-        entry = cat.resolve(Tumbler.parse(doc_id))
-        assert entry is not None, (
-            f"catalog has no Document for doc_id={doc_id!r} — "
-            "pre-index registration should have created one"
+    for row in documents:
+        tumbler = row[0]
+        file_path = row[1] or ""
+        manifest_rows = cat.get_manifest(tumbler)
+        assert manifest_rows, (
+            f"manifest_write_batch_hook must populate document_chunks "
+            f"for doc_id={tumbler!r} (file_path={file_path!r})"
         )
-        title = metas[0].get("title", "")
-        if ".md" in title:
+        if file_path.endswith(".md"):
             md_seen = True
-        if ".rst" in title:
+        if file_path.endswith(".rst"):
             rst_seen = True
 
     assert md_seen, "markdown branch (SemanticMarkdownChunker) was not exercised"

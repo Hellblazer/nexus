@@ -308,7 +308,6 @@ class TestLocalCollectionLifecycle:
             documents=["temporary data"],
             metadatas=[make_chunk_metadata(
                 content_type="prose",
-                chunk_index=0, chunk_count=1,
                 chunk_text_hash=h_temp, content_hash=h_temp,
                 chunk_end_char=14,
                 indexed_at=old, ttl_days=1,

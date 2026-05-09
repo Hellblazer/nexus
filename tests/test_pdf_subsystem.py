@@ -105,7 +105,12 @@ class TestPdfChunksMetadata:
             # not in ALLOWED_TOP_LEVEL.
             assert "page_count" not in meta
             assert "extraction_method" not in meta
-            assert meta["chunk_count"] == len(result)
+            # RDR-108 Phase 3 (nexus-bdag): chunk_count / chunk_index /
+            # doc_id retired from chunk metadata. Catalog manifest carries
+            # the document-to-chunk binding instead.
+            assert "chunk_count" not in meta
+            assert "chunk_index" not in meta
+            assert "doc_id" not in meta
             # title (was source_title): Docling content-extracted or filename fallback
             assert isinstance(meta["title"], str)
             # source_author: Docling does not expose XMP author; may be empty

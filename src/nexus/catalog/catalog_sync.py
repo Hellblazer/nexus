@@ -523,43 +523,63 @@ class _SyncOps:
                             "rebuilding projection",
                             summary_builder=_summary_full,
                         ):
-                            with cat._db.transaction() as conn:
-                                with cat._db.bulk_load_documents():
-                                    conn.execute("DELETE FROM links")
-                                    conn.execute("DELETE FROM documents")
-                                    conn.execute("DELETE FROM owners")
-                                    # Step 0 (Critical #1): see the
-                                    # earlier comment for the rationale
-                                    # and why the COALESCE in
-                                    # _v0_collection_created is
-                                    # retained for the degraded-path
-                                    # retry case (Round 3 Significant
-                                    # #1).
-                                    conn.execute("DELETE FROM collections")
-                                    # commit=False — the transaction
-                                    # context owns the commit boundary;
-                                    # a nested commit() would defeat
-                                    # the rollback fence.
-                                    cat._projector.apply_all(
-                                        EventLog(cat._dir).replay(),
-                                        commit=False,
+                            # RDR-108 Phase 3 (nexus-bdag):
+                            # ``document_chunks`` is FK-bound to
+                            # ``documents`` with ON DELETE CASCADE.
+                            # The DELETE+replay rebuild below would
+                            # cascade-wipe the manifest, but the
+                            # projector does not re-emit ``ChunkIndexed``
+                            # rows during replay (the manifest is
+                            # populated by the post-store batch hook,
+                            # not by the event log yet). Disable FK
+                            # enforcement around the rebuild so the
+                            # cascade doesn't fire; INSERTs restore
+                            # valid references and we re-enable FK
+                            # afterwards. PRAGMA foreign_keys is a no-op
+                            # within a transaction so it must run BEFORE
+                            # ``transaction()`` opens its block.
+                            cat._db._conn.execute("PRAGMA foreign_keys=OFF")
+                            try:
+                                with cat._db.transaction() as conn:
+                                    with cat._db.bulk_load_documents():
+                                        conn.execute("DELETE FROM links")
+                                        conn.execute("DELETE FROM documents")
+                                        conn.execute("DELETE FROM owners")
+                                        # Step 0 (Critical #1): see the
+                                        # earlier comment for the
+                                        # rationale and why the COALESCE
+                                        # in ``_v0_collection_created``
+                                        # is retained for the
+                                        # degraded-path retry case
+                                        # (Round 3 Significant #1).
+                                        conn.execute("DELETE FROM collections")
+                                        # commit=False — the transaction
+                                        # context owns the commit
+                                        # boundary; a nested commit()
+                                        # would defeat the rollback
+                                        # fence.
+                                        cat._projector.apply_all(
+                                            EventLog(cat._dir).replay(),
+                                            commit=False,
+                                        )
+                                    # 4.24.4 atomicity contract: marker
+                                    # writes happen INSIDE the same
+                                    # transaction as the projection writes.
+                                    # The transaction context commits all
+                                    # rows atomically on success, rolls
+                                    # them all back together on any
+                                    # exception. Pre-4.24.4 the marker
+                                    # write lived OUTSIDE this block in
+                                    # _write_consistency_marker()'s own
+                                    # commit(), a refactoring hazard.
+                                    cat._write_consistency_marker(current_mtime)
+                                    cat._write_offset_marker(
+                                        offset=eof_offset_now,
+                                        header_hash=header_hash_now,
+                                        window=_cat_mod._HEADER_HASH_BYTES,
                                     )
-                                # 4.24.4 atomicity contract: marker
-                                # writes happen INSIDE the same
-                                # transaction as the projection writes.
-                                # The transaction context commits all
-                                # rows atomically on success, rolls
-                                # them all back together on any
-                                # exception. Pre-4.24.4 the marker
-                                # write lived OUTSIDE this block in
-                                # _write_consistency_marker()'s own
-                                # commit(), a refactoring hazard.
-                                cat._write_consistency_marker(current_mtime)
-                                cat._write_offset_marker(
-                                    offset=eof_offset_now,
-                                    header_hash=header_hash_now,
-                                    window=_cat_mod._HEADER_HASH_BYTES,
-                                )
+                            finally:
+                                cat._db._conn.execute("PRAGMA foreign_keys=ON")
             else:
                 owners = read_owners(cat._owners_path) if cat._owners_path.exists() else {}
                 documents = read_documents(cat._documents_path) if cat._documents_path.exists() else {}

@@ -345,7 +345,6 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
     if not chunks:
         _log.debug("skipped file with no chunks", path=str(file_path))
         return 0
-    total_chunks = len(chunks)
 
     ids: list[str] = []
     documents: list[str] = []
@@ -366,8 +365,10 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
     from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415
 
     # Catalog Document.doc_id (RDR-101 Phase 3 PR δ): resolved once per
-    # file. Empty string when no catalog handle exists; ``normalize``
-    # Step 4c drops the field on the way to T3.
+    # file. Empty string when no catalog handle exists. RDR-108 Phase 3
+    # removed doc_id from chunk metadata; the catalog tumbler now flows
+    # through the post-store batch hook instead so the manifest can
+    # bind chunks to the document at write time.
     catalog_doc_id = (
         ctx.doc_id_resolver(file_path) if ctx.doc_id_resolver is not None else ""
     )
@@ -400,11 +401,11 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
         section_type = "method" if method_ctx else ("class" if class_ctx else "")
         # RDR-101 Phase 5c (nexus-o6aa.13) dropped corpus, store_type,
         # git_meta from the chunk schema. Title kept (find_ids_by_title
-        # is load-bearing for nx store / MCP store_get).
+        # is load-bearing for nx store / MCP store_get). RDR-108 Phase 3
+        # (nexus-bdag) dropped chunk_index, chunk_count, doc_id —
+        # catalog manifest is authoritative.
         metadata = make_chunk_metadata(
             content_type="code",
-            chunk_index=chunk.get("chunk_index", i),
-            chunk_count=chunk.get("chunk_count", total_chunks),
             chunk_text_hash=_hl.sha256(chunk["text"].encode()).hexdigest(),
             content_hash=content_hash,
             chunk_start_char=chunk_start_char,
@@ -419,7 +420,6 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
             tags=ext.lstrip("."),
             category="code",
             frecency_score=float(ctx.score),
-            doc_id=catalog_doc_id,
         )
         ids.append(chunk_chroma_id)
         documents.append(chunk["text"])
@@ -482,6 +482,7 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
         )
         fire_post_store_batch_hooks(
             ids, ctx.corpus, documents, embeddings, metadatas,
+            catalog_doc_id=catalog_doc_id,
         )
         for _did, _doc in zip(ids, documents):
             fire_post_store_hooks(_did, ctx.corpus, _doc)

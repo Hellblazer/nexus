@@ -36,22 +36,21 @@ def _expected_keys_for_content_type(content_type: str) -> set[str]:
     is dropped when all four flat git_* keys are empty. Both are
     by-design omissions — every other ALLOWED_TOP_LEVEL key must be
     present.
+
+    RDR-108 Phase 3 (nexus-bdag) retired ``doc_id``, ``chunk_index``,
+    ``chunk_count`` from the chunk schema (catalog manifest is now
+    authoritative). They no longer appear in the factory output.
     """
     bib_keys = {
         "bib_year", "bib_authors", "bib_venue", "bib_citation_count",
         "bib_semantic_scholar_id",
     }
-    # RDR-101 Phase 3 PR δ: ``doc_id`` is opt-in. Drop-when-empty
-    # parallels bib_* / git_meta — call sites that do not pass a
-    # Catalog-resolved doc_id get ``""`` and normalize() strips it.
-    return ALLOWED_TOP_LEVEL - bib_keys - {"git_meta", "doc_id"}
+    return ALLOWED_TOP_LEVEL - bib_keys - {"git_meta"}
 
 
 def test_factory_emits_full_keyset_for_code() -> None:
     meta = make_chunk_metadata(
         content_type="code",
-        chunk_index=0,
-        chunk_count=1,
         chunk_text_hash="a" * 64,
         content_hash="b" * 64,
         indexed_at="2026-04-26T00:00:00+00:00",
@@ -66,8 +65,6 @@ def test_factory_emits_full_keyset_for_code() -> None:
 def test_factory_emits_full_keyset_for_pdf() -> None:
     meta = make_chunk_metadata(
         content_type="pdf",
-        chunk_index=0,
-        chunk_count=1,
         chunk_text_hash="a" * 64,
         content_hash="b" * 64,
         indexed_at="2026-04-26T00:00:00+00:00",
@@ -82,8 +79,6 @@ def test_factory_emits_full_keyset_for_pdf() -> None:
 def test_factory_emits_full_keyset_for_markdown() -> None:
     meta = make_chunk_metadata(
         content_type="markdown",
-        chunk_index=0,
-        chunk_count=1,
         chunk_text_hash="a" * 64,
         content_hash="b" * 64,
         indexed_at="2026-04-26T00:00:00+00:00",
@@ -98,8 +93,6 @@ def test_factory_emits_full_keyset_for_markdown() -> None:
 def test_factory_emits_full_keyset_for_prose() -> None:
     meta = make_chunk_metadata(
         content_type="prose",
-        chunk_index=0,
-        chunk_count=1,
         chunk_text_hash="a" * 64,
         content_hash="b" * 64,
         indexed_at="2026-04-26T00:00:00+00:00",
@@ -116,7 +109,6 @@ def test_factory_drops_bib_when_empty() -> None:
     as zero/empty placeholders eating metadata budget."""
     meta = make_chunk_metadata(
         content_type="pdf",
-        chunk_index=0, chunk_count=1,
         chunk_text_hash="a"*64, content_hash="b"*64,
         indexed_at="2026-04-26T00:00:00+00:00",
         embedding_model="voyage-context-3",
@@ -129,7 +121,6 @@ def test_factory_keeps_bib_when_populated() -> None:
     """When at least one bib field is populated the whole quad rides."""
     meta = make_chunk_metadata(
         content_type="pdf",
-        chunk_index=0, chunk_count=1,
         chunk_text_hash="a"*64, content_hash="b"*64,
         indexed_at="2026-04-26T00:00:00+00:00",
         embedding_model="voyage-context-3",
@@ -173,17 +164,15 @@ def _full_keyset_minus_optional() -> set[str]:
     """Keys that every chunked-write indexer MUST emit.
 
     bib_* and git_meta are intentionally optional (see normalize() rules).
-    RDR-101 Phase 3 PR δ: ``doc_id`` is also opt-in — call sites with a
-    Catalog handle pass it; call sites without one (e.g. MCP store_put,
-    bare-metadata factory tests) pass ``""`` and the field is dropped
-    by ``normalize`` Step 4c.
     Every other ALLOWED_TOP_LEVEL key must appear on every chunk.
+
+    RDR-108 Phase 3 retired ``doc_id`` / ``chunk_index`` / ``chunk_count``
+    from the chunk schema; they are no longer in ALLOWED_TOP_LEVEL.
     """
     return ALLOWED_TOP_LEVEL - {
         "bib_year", "bib_authors", "bib_venue", "bib_citation_count",
         "bib_semantic_scholar_id",
         "git_meta",
-        "doc_id",
     }
 
 
@@ -233,7 +222,6 @@ def test_pipeline_pdf_emits_full_keyset() -> None:
         pdf_path="/x.pdf",
         corpus="test",
         embedding_model="voyage-context-3",
-        chunk_count=1,
         now_iso="2026-04-26T00:00:00+00:00",
     )
     expected = _full_keyset_minus_optional()
@@ -246,7 +234,11 @@ def test_pipeline_pdf_emits_full_keyset() -> None:
 def test_t3_put_emits_full_keyset_for_mcp_stored_doc() -> None:
     """``T3Database.put`` (MCP store_put backend) routes through the
     factory so single-chunk MCP-stored docs carry the full keyset
-    (closes RDR-086 chash coverage hole for MCP-stored docs)."""
+    (closes RDR-086 chash coverage hole for MCP-stored docs).
+
+    RDR-108 Phase 3: chunk_index / chunk_count / doc_id no longer
+    appear in chunk metadata — the catalog manifest carries them.
+    """
     from nexus.metadata_schema import make_chunk_metadata
     # We can't easily exercise the full T3Database in a unit test
     # (cloud auth), so verify the metadata-shape contract via the
@@ -255,8 +247,6 @@ def test_t3_put_emits_full_keyset_for_mcp_stored_doc() -> None:
     content_hash = hashlib.sha256(content.encode()).hexdigest()
     meta = make_chunk_metadata(
         content_type="prose",
-        chunk_index=0,
-        chunk_count=1,
         chunk_text_hash=content_hash,
         content_hash=content_hash,
         chunk_start_char=0,
@@ -273,5 +263,6 @@ def test_t3_put_emits_full_keyset_for_mcp_stored_doc() -> None:
     # Specifically the chash fields that close the RDR-086 coverage hole:
     assert meta["chunk_text_hash"] == content_hash
     assert meta["content_hash"] == content_hash
-    assert meta["chunk_index"] == 0
-    assert meta["chunk_count"] == 1
+    # Phase 3 retired chunk_index / chunk_count from chunk schema.
+    assert "chunk_index" not in meta
+    assert "chunk_count" not in meta

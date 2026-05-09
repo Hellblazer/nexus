@@ -546,17 +546,11 @@ class TestPipelineIndexPdf:
     def test_writes_doc_id_when_catalog_initialized(
         self, db, tmp_path, monkeypatch,
     ) -> None:
-        """RDR-102 D4 #2 (streaming pipeline mirror): pipeline_index_pdf
-        must populate ``doc_id`` on every chunk it uploads when the
-        catalog is initialized.
-
-        Pre-Phase-A this fails because the streaming pipeline registers
-        the catalog Document via ``_catalog_pdf_hook`` AFTER the upload
-        completes (line 729 of pipeline_stages.py); ``chunker_loop``
-        builds chunk metadata via ``_build_chunk_metadata`` →
-        ``make_chunk_metadata()`` with no ``doc_id`` argument. Phase A
-        registers the Document at the streaming-entry boundary and
-        threads doc_id through chunker_loop's metadata builder.
+        """RDR-108 Phase 3: pipeline_index_pdf no longer stamps ``doc_id``
+        on chunks. The streaming pipeline still registers the catalog
+        Document at the entry boundary; the catalog manifest hook
+        populates ``document_chunks`` from the post-store batch fire.
+        Verify chunks lack doc_id and the manifest carries it instead.
         """
         import chromadb
         from nexus.catalog import reset_cache
@@ -600,14 +594,23 @@ class TestPipelineIndexPdf:
         assert rows["metadatas"], (
             "expected at least one chunk in docs__rdr102_stream"
         )
-        missing_doc_id = [m for m in rows["metadatas"] if not m.get("doc_id")]
-        assert not missing_doc_id, (
-            f"{len(missing_doc_id)}/{len(rows['metadatas'])} streaming "
-            f"pipeline chunks missing doc_id. Phase A must register the "
-            f"catalog Document at the pipeline_index_pdf entry boundary "
-            f"and thread doc_id through chunker_loop's metadata builder, "
-            f"not via the post-upload _catalog_pdf_hook."
-        )
+        # Phase 3: no doc_id on chunk metadata.
+        for m in rows["metadatas"]:
+            assert "doc_id" not in m
+
+        # Manifest carries the doc-to-chunk binding instead.
+        from nexus.catalog import open_cached
+        cat = open_cached(cat_dir)
+        documents = cat._db.execute(
+            "SELECT tumbler FROM documents WHERE physical_collection = ?",
+            ("docs__rdr102-stream__voyage-context-3__v1",),
+        ).fetchall()
+        assert documents, "catalog must register a Document for the streaming PDF"
+        for row in documents:
+            assert cat.get_manifest(row[0]), (
+                f"manifest_write_batch_hook must populate document_chunks "
+                f"for doc_id={row[0]!r}"
+            )
 
 
 
@@ -630,9 +633,9 @@ class TestBufferEdgeCases:
 
 _REQUIRED_META = {
     # Identity / spans / position — RDR-102 D2 dropped source_path.
-    # doc_id is drop-when-empty so it's not in this required set
-    # (the chunker_loop test below has no catalog).
-    "content_hash", "chunk_text_hash", "chunk_index", "chunk_count",
+    # RDR-108 Phase 3 (nexus-bdag) dropped chunk_index, chunk_count, doc_id
+    # in favour of the catalog ``document_chunks`` manifest.
+    "content_hash", "chunk_text_hash",
     "chunk_start_char", "chunk_end_char", "line_start", "line_end", "page_number",
     # Display / routing — RDR-101 Phase 5c (nexus-o6aa.13) dropped
     # ``store_type``, ``corpus``, ``git_meta``. ``title`` kept (audit

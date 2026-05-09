@@ -428,17 +428,15 @@ def _record_tier_write(
 # runs (mirroring the legacy chash-before-taxonomy CLI invariant).
 
 from nexus.mcp_infra import (
-    chash_dual_write_batch_hook,
-    manifest_write_batch_hook,
     register_post_document_hook,
-    register_post_store_batch_hook,
-    taxonomy_assign_batch_hook,
 )
 
-register_post_store_batch_hook(chash_dual_write_batch_hook)
-register_post_store_batch_hook(taxonomy_assign_batch_hook)
-# nexus-572g OBS-3: wire manifest writes into the post-store batch chain
-register_post_store_batch_hook(manifest_write_batch_hook)
+# RDR-108 Phase 3 (nexus-bdag): the three batch hooks
+# (chash_dual_write_batch_hook, taxonomy_assign_batch_hook,
+# manifest_write_batch_hook) now self-register at module load in
+# ``nexus.mcp_infra`` so CLI-only flows (``nx index repo``) also fire
+# them. Pre-Phase-3 the registrations lived here, which silently
+# skipped them for non-MCP code paths.
 
 # RDR-089 follow-up (nexus-qeo8): document-grain hook chain consumer.
 # The synchronous-inline shape was invalidated by the P1.3 spike
@@ -1034,6 +1032,7 @@ def store_put(
         _fire_post_store_hooks(doc_id, col_name, content)
         _fire_post_store_batch_hooks(
             [doc_id], col_name, [content], None, None,
+            catalog_doc_id=catalog_doc_id,
         )
         # RDR-089 document-grain chain — plain sync call (FastMCP wraps
         # this @mcp.tool() body in a thread pool at the framework level;

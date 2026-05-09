@@ -575,6 +575,35 @@ class CatalogDB:
         same transaction makes the atomicity invariant trivially
         true regardless of caller ordering.
         """
+        # RDR-108 Phase 3 (nexus-bdag): ``document_chunks`` is FK-bound
+        # to ``documents`` with ON DELETE CASCADE. The DELETE FROM
+        # documents below would cascade-wipe the manifest, but the
+        # projector does not re-emit ``ChunkIndexed`` rows during
+        # legacy replay (the manifest is populated by the post-store
+        # batch hook, not by the JSONL log yet). Disable FK enforcement
+        # around the DELETE+reload so the cascade doesn't fire; INSERTs
+        # restore valid references and we re-enable FK afterwards.
+        # PRAGMA foreign_keys is a no-op within a transaction, so it
+        # must run BEFORE the ``with self._conn:`` block opens its
+        # transaction.
+        self._conn.execute("PRAGMA foreign_keys=OFF")
+        try:
+            self._rebuild_inner(owners, documents, links, consistency_mtime=consistency_mtime)
+        finally:
+            self._conn.execute("PRAGMA foreign_keys=ON")
+
+        _log.debug("catalog_db.rebuild", owners=len(owners), documents=len(documents), links=len(links))
+
+    def _rebuild_inner(
+        self,
+        owners: dict[str, OwnerRecord],
+        documents: dict[str, DocumentRecord],
+        links: list[LinkRecord],
+        *,
+        consistency_mtime: float | None,
+    ) -> None:
+        """Inner rebuild routine called by :meth:`rebuild` with FK
+        enforcement disabled around it (RDR-108 Phase 3)."""
         with self._lock, self._conn, self.bulk_load_documents():
             # Delete from base tables. Triggers are dropped for the
             # duration of the bulk_load_documents fence; FTS5 is
@@ -657,8 +686,6 @@ class CatalogDB:
                     "INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)",
                     ("last_consistency_mtime", f"{consistency_mtime}"),
                 )
-
-        _log.debug("catalog_db.rebuild", owners=len(owners), documents=len(documents), links=len(links))
 
     def next_document_number(self, owner_prefix: str) -> int:
         """Max document number for owner + 1.

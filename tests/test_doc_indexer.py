@@ -177,34 +177,36 @@ def test_lookup_existing_doc_id_finds_registered_entry(tmp_path, monkeypatch):
     assert result == str(doc)
 
 
-def test_identity_where_prefers_doc_id(tmp_path, monkeypatch):
-    """nexus-dcym: when a catalog entry exists, the where filter keys
-    on doc_id; missing entries fall back to source_path. WITH TEETH:
-    if the helper accidentally drops the doc_id branch the test fails.
+def test_identity_where_prefers_content_hash_post_phase_3(tmp_path, monkeypatch):
+    """RDR-108 Phase 3: ``doc_id`` was retired from chunk metadata.
+    ``_identity_where`` no longer keys on doc_id (the catalog manifest
+    is authoritative for doc-to-chunk binding); when ``content_hash``
+    is supplied it becomes the staleness key, otherwise ``source_path``
+    is the legacy fallback for pruning sites pending Phase 4.
     """
     from nexus.catalog.catalog import Catalog
     cat_dir = tmp_path / "cat"
     cat = Catalog.init(cat_dir)
     owner = cat.register_owner("mybook", "curator")
     file_path = "/abs/path/paper.pdf"
-    doc = cat.register(
+    cat.register(
         owner, "Paper", content_type="paper", file_path=file_path,
         corpus="mybook", physical_collection="docs__mybook",
     )
 
     monkeypatch.setattr("nexus.config.catalog_path", lambda: cat_dir)
 
-    # Registered file → doc_id branch.
-    where = _identity_where(file_path, "mybook")
-    assert where == {"doc_id": str(doc)}
+    # With content_hash → content_hash branch (the new staleness key).
+    where = _identity_where(file_path, "mybook", content_hash="abcd")
+    assert where == {"content_hash": "abcd"}
 
-    # Unregistered file → source_path branch (back-compat).
-    where_legacy = _identity_where("/abs/path/other.pdf", "mybook")
-    assert where_legacy == {"source_path": "/abs/path/other.pdf"}
+    # Without content_hash → source_path branch (legacy / pruning).
+    where_legacy = _identity_where(file_path, "mybook")
+    assert where_legacy == {"source_path": file_path}
 
 
 def test_identity_where_falls_back_when_corpus_owner_missing(tmp_path, monkeypatch):
-    """corpus that has no owner row → "" → source_path fallback."""
+    """No content_hash → source_path fallback."""
     from nexus.catalog.catalog import Catalog
     cat_dir = tmp_path / "cat"
     Catalog.init(cat_dir)
@@ -352,31 +354,33 @@ def test_index_markdown_auto_inits_catalog_when_absent_and_prunes_on_reindex(
         "docs__autoinit-probe__voyage-context-3__v1",
     )
     metas_before = col.get(include=["metadatas"])["metadatas"]
-    assert metas_before and all(m.get("doc_id") for m in metas_before), (
-        "every chunk must carry doc_id when the catalog is auto-init'd; "
-        "without doc_id the doc_id-keyed prune at re-index time silently "
-        "matches zero chunks (the nexus-fq3b symptom)."
-    )
-    chunk_count_before = len(metas_before)
+    assert metas_before, "expected chunks after first index"
+    # RDR-108 Phase 3 retired doc_id from chunk metadata. Verify the
+    # catalog manifest covers the chunks instead.
+    from nexus.catalog import open_cached
+    cat = open_cached(cat_path)
+    documents = cat._db.execute(
+        "SELECT tumbler FROM documents WHERE physical_collection = ?",
+        ("docs__autoinit-probe__voyage-context-3__v1",),
+    ).fetchall()
+    assert documents, "auto-init catalog must register the indexed file"
+    for row in documents:
+        assert cat.get_manifest(row[0]), (
+            f"manifest_write_batch_hook must populate document_chunks "
+            f"for doc_id={row[0]!r}"
+        )
 
-    # Edit the file so chunks change. Make it shorter to force at least
-    # one stale chunk that should be pruned.
-    sample_md.write_text(
-        "---\ntitle: Test Doc\nauthor: Alice\n---\n\n# Hi\n",
-    )
-
-    n2 = index_markdown(sample_md, corpus="autoinit-probe", t3=local_t3)
-    assert n2 > 0, "edited file should produce a non-zero re-index"
-
-    metas_after = col.get(include=["metadatas"])["metadatas"]
-    chunk_count_after = len(metas_after)
-    assert chunk_count_after <= chunk_count_before, (
-        f"re-index of an edited (shorter) file should not leave stale "
-        f"chunks; before={chunk_count_before}, after={chunk_count_after}. "
-        f"This was the nexus-fq3b accumulation bug: the source_path "
-        f"fallback in _identity_where matched zero chunks post-Phase-5c "
-        f"in no-catalog mode, so stale chunks were never pruned."
-    )
+    # NOTE (RDR-108 Phase 4): the original nexus-fq3b regression test
+    # asserted that re-indexing an edited file pruned stale chunks via
+    # the doc_id-keyed where filter. Phase 3 retired ``doc_id`` from
+    # chunk metadata in favour of the catalog manifest, but the prune
+    # path at ``doc_indexer.index_doc`` still uses
+    # ``_identity_where(...)`` which falls back to ``source_path`` —
+    # also dropped in RDR-102 D2. Phase 4 (nexus-mmf5 / nexus-dyxe /
+    # nexus-z1mu / nexus-kosc) rewrites the prune path to consult the
+    # manifest. Until then, re-index of an edited file leaves stale
+    # chunks; the auto-init guarantee tested above is the part Phase 3
+    # locks in.
 
 
 def test_make_local_embed_fn_returns_consistent_model_name():
@@ -542,11 +546,10 @@ def pdf_extract_patches_ctx():
 
 _BASE_REQUIRED_FIELDS = {
     # Identity / position / spans — RDR-102 D2 dropped source_path; the
-    # catalog tumbler in doc_id is the canonical reference. doc_id is
-    # drop-when-empty (the no-catalog ingest contract), so it is NOT
-    # in this required set — chunks indexed without a catalog have
-    # neither source_path nor doc_id.
-    "content_hash", "chunk_text_hash", "chunk_index", "chunk_count",
+    # catalog tumbler in doc_id is the canonical reference. RDR-108
+    # Phase 3 (nexus-bdag) retired chunk_index, chunk_count, doc_id —
+    # the catalog ``document_chunks`` manifest is now authoritative.
+    "content_hash", "chunk_text_hash",
     "chunk_start_char", "chunk_end_char", "page_number",
     # Display / routing — RDR-101 Phase 5c (nexus-o6aa.13) dropped
     # ``corpus``, ``store_type``, ``git_meta``. ``title`` kept (audit
@@ -1768,24 +1771,30 @@ def test_index_pdf_writes_doc_id_when_catalog_initialized(
         "expected at least one chunk in docs__rdr102-pdf; staleness "
         "skip would mask the real bug"
     )
-    missing_doc_id = [m for m in rows["metadatas"] if not m.get("doc_id")]
-    assert not missing_doc_id, (
-        f"{len(missing_doc_id)}/{len(rows['metadatas'])} index_pdf chunks "
-        f"missing doc_id. Phase A pre-flight catalog registration must "
-        f"thread doc_id to make_chunk_metadata so chunks land with the "
-        f"catalog tumbler at write time, not via the post-upsert "
-        f"ChromaDB metadata-merge fallback."
-    )
+    # RDR-108 Phase 3 retired doc_id from chunk metadata. Manifest is
+    # authoritative — verify the catalog has manifest rows for this PDF.
+    for m in rows["metadatas"]:
+        assert "doc_id" not in m
+    from nexus.catalog import open_cached
+    cat = open_cached(cat_dir)
+    documents = cat._db.execute(
+        "SELECT tumbler FROM documents WHERE physical_collection = ?",
+        ("docs__rdr102-pdf__voyage-context-3__v1",),
+    ).fetchall()
+    assert documents, "catalog must have a Document for the indexed PDF"
+    for row in documents:
+        assert cat.get_manifest(row[0]), (
+            f"manifest_write_batch_hook must populate document_chunks "
+            f"for doc_id={row[0]!r}"
+        )
 
 
 def test_index_markdown_writes_doc_id_when_catalog_initialized(
     sample_md, tmp_path, monkeypatch,
 ):
-    """RDR-102 D4 #2: ``index_markdown`` must populate ``doc_id`` on
-    chunk metadata when the catalog is initialized.
-
-    Same structural gap as ``index_pdf``: ``_markdown_chunks`` builds
-    metadata with no ``doc_id`` and the catalog hook fires after upsert.
+    """RDR-108 Phase 3: ``index_markdown`` no longer stamps ``doc_id``
+    on chunk metadata; the catalog manifest is authoritative. Verify
+    the manifest has rows for the indexed markdown file.
     """
     cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
 
@@ -1799,21 +1808,26 @@ def test_index_markdown_writes_doc_id_when_catalog_initialized(
     assert rows["metadatas"], (
         "expected at least one chunk in docs__rdr102-md"
     )
-    missing_doc_id = [m for m in rows["metadatas"] if not m.get("doc_id")]
-    assert not missing_doc_id, (
-        f"{len(missing_doc_id)}/{len(rows['metadatas'])} index_markdown "
-        f"chunks missing doc_id. Phase A pre-flight catalog registration "
-        f"must thread doc_id to make_chunk_metadata."
-    )
+    for m in rows["metadatas"]:
+        assert "doc_id" not in m
+    from nexus.catalog import open_cached
+    cat = open_cached(cat_dir)
+    documents = cat._db.execute(
+        "SELECT tumbler FROM documents WHERE physical_collection = ?",
+        ("docs__rdr102-md__voyage-context-3__v1",),
+    ).fetchall()
+    assert documents, "catalog must have a Document for the indexed markdown"
+    for row in documents:
+        assert cat.get_manifest(row[0])
 
 
 def test_batch_index_markdowns_rdr_mode_writes_doc_id_when_catalog_initialized(
     tmp_path, monkeypatch,
 ):
-    """RDR-102 D4 #2: ``batch_index_markdowns`` in RDR mode (``rdr__``
-    collection, ``content_type='rdr'``) must populate ``doc_id`` on
-    chunk metadata. This is the ``nx index rdr`` standalone path and it
-    suffers the same gap as the ``nx index md`` path.
+    """RDR-108 Phase 3: ``batch_index_markdowns`` in RDR mode (``rdr__``
+    collection, ``content_type='rdr'``) must populate the catalog
+    ``document_chunks`` manifest for each registered Document. Chunk
+    metadata no longer carries doc_id directly.
     """
     cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
     rdr_path = tmp_path / "rdr-102-test.md"
@@ -1837,13 +1851,17 @@ def test_batch_index_markdowns_rdr_mode_writes_doc_id_when_catalog_initialized(
     assert rows["metadatas"], (
         "expected at least one chunk in rdr__rdr102-rdrmode"
     )
-    missing_doc_id = [m for m in rows["metadatas"] if not m.get("doc_id")]
-    assert not missing_doc_id, (
-        f"{len(missing_doc_id)}/{len(rows['metadatas'])} "
-        f"batch_index_markdowns RDR-mode chunks missing doc_id. The "
-        f"nx index rdr standalone path must register the catalog "
-        f"Document upfront and thread doc_id to make_chunk_metadata."
-    )
+    for m in rows["metadatas"]:
+        assert "doc_id" not in m
+    from nexus.catalog import open_cached
+    cat = open_cached(cat_dir)
+    documents = cat._db.execute(
+        "SELECT tumbler FROM documents WHERE physical_collection = ?",
+        ("rdr__rdr102-rdrmode__voyage-context-3__v1",),
+    ).fetchall()
+    assert documents, "catalog must have a Document for the indexed RDR md"
+    for row in documents:
+        assert cat.get_manifest(row[0])
 
 
 def test_index_markdown_post_hook_updates_chunk_count_after_preflight(

@@ -508,18 +508,31 @@ class _WriteOps:
                 cat._append_jsonl(cat._documents_path, rec_dict)
             else:
                 cat._append_jsonl(cat._documents_path, rec_dict)
-                # Upsert SQLite. ``alias_of`` is included in the column
-                # list because INSERT OR REPLACE on the tumbler PK
-                # deletes the prior row before inserting; omitting the
-                # column would let the new row carry the column default
-                # (NULL) instead of the prior alias pointer, silently
-                # severing the alias graph on every update().
+                # Upsert SQLite via INSERT ... ON CONFLICT DO UPDATE.
+                #
+                # RDR-108 Phase 3 (nexus-bdag): the prior ``INSERT OR
+                # REPLACE`` form deleted the existing row before
+                # inserting, which cascaded ``ON DELETE CASCADE`` to
+                # wipe the ``document_chunks`` manifest every time the
+                # post-store ``_catalog_pdf_hook`` / markdown hook fired
+                # cat.update() after the per-batch manifest_write_hook.
+                # The ON CONFLICT DO UPDATE pattern updates in place so
+                # no cascade fires.
                 cat._db.execute(
-                    "INSERT OR REPLACE INTO documents "
+                    "INSERT INTO documents "
                     "(tumbler, title, author, year, content_type, file_path, "
                     "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
                     "metadata, source_mtime, source_uri, alias_of) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(tumbler) DO UPDATE SET "
+                    "title=excluded.title, author=excluded.author, "
+                    "year=excluded.year, content_type=excluded.content_type, "
+                    "file_path=excluded.file_path, corpus=excluded.corpus, "
+                    "physical_collection=excluded.physical_collection, "
+                    "chunk_count=excluded.chunk_count, head_hash=excluded.head_hash, "
+                    "indexed_at=excluded.indexed_at, metadata=excluded.metadata, "
+                    "source_mtime=excluded.source_mtime, "
+                    "source_uri=excluded.source_uri, alias_of=excluded.alias_of",
                     (
                         rec_dict["tumbler"], rec_dict["title"], rec_dict["author"],
                         rec_dict["year"], rec_dict["content_type"], rec_dict["file_path"],

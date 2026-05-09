@@ -714,16 +714,16 @@ class T3Database:
                 content_type = ct
                 break
 
-        # MCP-stored docs are single-chunk: chunk_index=0, chunk_count=1,
-        # chunk_text_hash matches content_hash because content == chunk text.
+        # MCP-stored docs are single-chunk: chunk_text_hash matches
+        # content_hash because content == chunk text.
         content_hash = hashlib.sha256(content.encode()).hexdigest()
         # RDR-101 Phase 5c dropped store_type, corpus, git_meta. Title kept
         # — find_ids_by_title is the load-bearing reader for nx store
-        # delete --title and MCP store_get title-fallback.
+        # delete --title and MCP store_get title-fallback. RDR-108 Phase 3
+        # dropped chunk_index, chunk_count, doc_id — catalog manifest is
+        # authoritative.
         metadata = make_chunk_metadata(
             content_type=content_type,
-            chunk_index=0,
-            chunk_count=1,
             chunk_text_hash=content_hash,
             content_hash=content_hash,
             chunk_start_char=0,
@@ -736,7 +736,6 @@ class T3Database:
             ttl_days=ttl_days,
             source_agent=source_agent,
             session_id=session_id,
-            doc_id=catalog_doc_id,
         )
 
         # ``put`` is the operator / MCP single-document write path. The

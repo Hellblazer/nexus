@@ -131,10 +131,8 @@ def _build_chunk_metadata(
     pdf_path: str,
     corpus: str,
     embedding_model: str,
-    chunk_count: int,
     now_iso: str,
     git_meta: dict | None = None,
-    doc_id: str = "",
 ) -> dict:
     """Build chunk metadata with fields known at chunk time.
 
@@ -142,23 +140,21 @@ def _build_chunk_metadata(
     format, page_count, is_image_pdf, has_formulas) are set to defaults here
     and corrected by the metadata post-pass after extraction completes.
 
-    *git_meta* — flat ``git_*`` provenance dict (nexus-2my fix #3). Caller
-    resolves once via :func:`nexus.indexer_utils.detect_git_metadata` and
-    passes through to keep per-chunk overhead at zero. Empty dict when
-    *pdf_path* is not in a git repo.
+    RDR-108 Phase 3 retired ``chunk_index``, ``chunk_count``, ``doc_id``
+    from chunk metadata; the catalog ``document_chunks`` manifest is now
+    authoritative for document-to-chunk binding.
 
-    *doc_id* (RDR-102 Phase A) — catalog tumbler resolved at the streaming
-    entry boundary. Empty string when the catalog is absent or pre-flight
-    registration failed; ``normalize()`` drops the field on empty so chunks
-    from no-catalog runs are unchanged.
+    *git_meta* — accepted for backwards compatibility; the schema dropped
+    git provenance from chunk metadata (RDR-101 Phase 5c). Catalog Document
+    carries it at the document level. Parameter retained so existing call
+    sites do not need to drop the kwarg simultaneously.
     """
     from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415
 
     # RDR-101 Phase 5c dropped corpus, store_type, git_meta. Title kept.
+    # RDR-108 Phase 3 dropped chunk_index, chunk_count, doc_id.
     return make_chunk_metadata(
         content_type="pdf",
-        chunk_index=chunk.chunk_index,
-        chunk_count=chunk_count,  # provisional; corrected in post-pass
         chunk_text_hash=hashlib.sha256(chunk.text.encode()).hexdigest(),
         content_hash=content_hash,
         chunk_start_char=chunk.metadata.get("chunk_start_char", 0),
@@ -172,7 +168,6 @@ def _build_chunk_metadata(
         section_type=chunk.metadata.get("section_type", ""),
         tags="pdf",
         category="paper",
-        doc_id=doc_id,
     )
 
 
@@ -187,10 +182,8 @@ def _embed_and_write_batch(
     pdf_path: str,
     corpus: str,
     target_model: str,
-    chunk_count: int,
     now_iso: str,
     git_meta: dict | None = None,
-    doc_id: str = "",
 ) -> tuple[int, str]:
     """Embed and write a batch of chunks. Returns (count_written, actual_model)."""
     if not chunks_to_embed:
@@ -223,10 +216,8 @@ def _embed_and_write_batch(
             pdf_path=pdf_path,
             corpus=corpus,
             embedding_model=actual_model,
-            chunk_count=chunk_count,
             now_iso=now_iso,
             git_meta=git_meta,
-            doc_id=doc_id,
         )
         db.write_chunk(content_hash, chunk.chunk_index, chunk.text, chunk_id,
                         metadata=meta, embedding=emb_bytes)
@@ -357,14 +348,14 @@ def chunker_loop(
 
             batch_kwargs = dict(
                 pdf_path=pdf_path, corpus=corpus, target_model=current_model,
-                now_iso=now_iso, git_meta=git_meta, doc_id=doc_id,
+                now_iso=now_iso, git_meta=git_meta,
             )
 
             if is_final:
                 new_chunks = chunks[written_up_to:]
                 count, actual_model = _embed_and_write_batch(
                     new_chunks, content_hash, db, embed_fn, cancel,
-                    total_embedded, chunk_count=len(chunks), **batch_kwargs,
+                    total_embedded, **batch_kwargs,
                 )
                 total_embedded += count
                 written_up_to += count
@@ -378,7 +369,7 @@ def chunker_loop(
             if new_chunks:
                 count, actual_model = _embed_and_write_batch(
                     new_chunks, content_hash, db, embed_fn, cancel,
-                    total_embedded, chunk_count=0, **batch_kwargs,  # provisional
+                    total_embedded, **batch_kwargs,
                 )
                 current_model = actual_model
                 total_embedded += count
@@ -398,8 +389,17 @@ def uploader_loop(
     collection: str,
     cancel: threading.Event,
     chunking_done: threading.Event | None = None,
+    *,
+    catalog_doc_id: str = "",
 ) -> None:
-    """Poll chunk buffer for embedded chunks and upsert to T3 ChromaDB."""
+    """Poll chunk buffer for embedded chunks and upsert to T3 ChromaDB.
+
+    *catalog_doc_id* (RDR-108 Phase 3) — catalog ``Document.tumbler``
+    string for the document this pipeline run is processing. Threaded
+    through to ``fire_post_store_batch_hooks`` so ``manifest_write_batch_hook``
+    can write the manifest without having to read it from chunk metadata
+    (which Phase 3 retired).
+    """
     total_uploaded = 0
 
     while not cancel.is_set():
@@ -433,6 +433,7 @@ def uploader_loop(
                 )
                 fire_post_store_batch_hooks(
                     ids, collection, documents, embeddings, metadatas,
+                    catalog_doc_id=catalog_doc_id,
                 )
                 for _did, _doc in zip(ids, documents):
                     fire_post_store_hooks(_did, collection, _doc)
@@ -670,6 +671,7 @@ def pipeline_index_pdf(
         upload_future = pool.submit(
             uploader_loop, content_hash, db, t3, collection, cancel,
             chunking_done,
+            catalog_doc_id=doc_id,
         )
 
         all_futures: set[Future] = {extract_future, chunk_future, upload_future}
@@ -804,13 +806,12 @@ def _enrich_metadata_from_extraction(
 ) -> bool:
     """Post-pass: update chunk metadata with fields from ExtractionResult.
 
-    Resolves source_title (docling_title → pdf_title → filename), source_author,
-    extraction_method, format, page_count, is_image_pdf, has_formulas — matching
-    the batch path in doc_indexer._pdf_chunks.
+    Resolves source_title (docling_title → pdf_title → filename) and
+    source_author — matching the batch path in doc_indexer._pdf_chunks.
 
-    Cannot use ``_update_chunk_metadata`` because ``chunk_count`` requires
-    knowing the total number of chunks (``len(all_ids)``), which is only
-    available after the full paginated query.
+    RDR-108 Phase 3: ``chunk_count`` was retired from the chunk schema
+    (catalog ``document_chunks`` manifest carries it at document scope),
+    so the post-pass no longer has to correct chunk_count after the fact.
 
     Returns True on success, False on failure (nexus-pfmr).
     """
@@ -834,7 +835,6 @@ def _enrich_metadata_from_extraction(
         "source_author": meta.get("pdf_author", ""),
     }
 
-    # Also correct chunk_count to the final total.
     try:
         all_ids: list[str] = []
         all_metas: list[dict] = []
@@ -856,8 +856,7 @@ def _enrich_metadata_from_extraction(
         if not all_ids:
             return True
 
-        chunk_count = len(all_ids)
-        updated_metas = [{**m, **enrichment, "chunk_count": chunk_count} for m in all_metas]
+        updated_metas = [{**m, **enrichment} for m in all_metas]
 
         t3.update_chunks(collection, all_ids, updated_metas)
         return True

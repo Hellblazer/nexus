@@ -488,6 +488,8 @@ def fire_post_store_batch_hooks(
     contents: list[str],
     embeddings: list[list[float]] | None = None,
     metadatas: list[dict] | None = None,
+    *,
+    catalog_doc_id: str = "",
 ) -> None:
     """Invoke all registered batch hooks. Per-hook failures captured and
     persisted to T2 hook_failures, never raised.
@@ -497,6 +499,14 @@ def fire_post_store_batch_hooks(
     Different consumers read different payload fields:
     chash_dual_write_batch_hook reads metadatas, taxonomy_assign_batch_hook
     reads embeddings. Hooks ignore parameters they don't need.
+
+    *catalog_doc_id* (RDR-108 Phase 3) — catalog ``Document.tumbler``
+    string for the document this batch belongs to. Required by
+    ``manifest_write_batch_hook`` after Phase 3 retired ``doc_id`` from
+    chunk metadata; the manifest hook can no longer derive it from the
+    chunks themselves. Empty string is the "unknown document" sentinel
+    — the manifest hook then falls back to legacy ``meta.doc_id`` reads
+    (still populated on pre-Phase-3 chunks).
     """
     if not doc_ids:
         return
@@ -504,7 +514,20 @@ def fire_post_store_batch_hooks(
     _hook_log = structlog.get_logger()
     for hook in _post_store_batch_hooks:
         try:
-            hook(doc_ids, collection, contents, embeddings, metadatas)
+            try:
+                hook(
+                    doc_ids, collection, contents, embeddings, metadatas,
+                    catalog_doc_id=catalog_doc_id,
+                )
+            except TypeError as type_exc:
+                # Backwards-compat: hooks registered before RDR-108 Phase 3
+                # do not accept the ``catalog_doc_id`` kwarg. Fall back to
+                # the legacy 5-argument call so registered lambdas /
+                # third-party hooks continue to fire. Reraise unrelated
+                # TypeErrors (e.g. wrong arg count for the legacy form).
+                if "catalog_doc_id" not in str(type_exc):
+                    raise
+                hook(doc_ids, collection, contents, embeddings, metadatas)
         except Exception as exc:
             hook_name = getattr(hook, "__name__", "?")
             _hook_log.warning(
@@ -604,6 +627,8 @@ def taxonomy_assign_batch_hook(
     contents: list[str],
     embeddings: list[list[float]] | None,
     metadatas: list[dict] | None,
+    *,
+    catalog_doc_id: str = "",
 ) -> None:
     """Registered batch hook: assign indexed docs to their nearest topics.
 
@@ -731,6 +756,8 @@ def chash_dual_write_batch_hook(
     contents: list[str],
     embeddings: list[list[float]] | None,
     metadatas: list[dict] | None,
+    *,
+    catalog_doc_id: str = "",
 ) -> None:
     """Registered batch hook (RDR-095): best-effort dual-write of
     ``chash_index`` rows after a T3 upsert.
@@ -765,28 +792,38 @@ def manifest_write_batch_hook(
     contents: list[str],
     embeddings: list[list[float]] | None,
     metadatas: list[dict] | None,
+    *,
+    catalog_doc_id: str = "",
 ) -> None:
     """Registered batch hook (nexus-572g OBS-3): write document_chunks manifest
     rows after every T3 upsert so the catalog manifest stays current without
     manual backfill.
 
-    Groups chunk metadatas by ``doc_id``, then calls
-    ``Catalog.write_manifest`` once per document. Best-effort: any failure
-    is logged at debug level and never propagates to the caller.
+    Calls ``Catalog.write_manifest`` once per document. Best-effort: any
+    failure is logged at debug level and never propagates to the caller.
 
-    Reads ``metadatas`` (uses ``chunk_text_hash``, ``chunk_index``,
-    ``chunk_start_char``, ``chunk_end_char`` fields); ignores ``contents``
-    and ``embeddings``.
+    Reads ``metadatas`` (``chunk_text_hash``, ``line_start``, ``line_end``,
+    ``chunk_start_char``, ``chunk_end_char``); ignores ``contents`` and
+    ``embeddings``.
+
+    *catalog_doc_id* (RDR-108 Phase 3) — the catalog ``Document.tumbler``
+    string for the batch's document. Phase 3 retired ``doc_id`` from
+    chunk metadata; the hook now reads it from the outer call context.
+    For pre-Phase-3 chunks (still re-fired during legacy reindexes) the
+    field may also appear in ``meta.doc_id`` — that legacy fallback path
+    preserves correctness during the transition. ``int(m.get("chunk_index", i))``
+    similarly bridges legacy chunks (which carry chunk_index in metadata)
+    and Phase 3 chunks (which use enumeration index within the batch).
     """
     if not metadatas:
         return
     from collections import defaultdict
 
-    by_doc: dict[str, list[dict]] = defaultdict(list)
-    for meta in metadatas:
-        doc_id = meta.get("doc_id", "")
+    by_doc: dict[str, list[tuple[int, dict]]] = defaultdict(list)
+    for i, meta in enumerate(metadatas):
+        doc_id = catalog_doc_id or meta.get("doc_id", "")
         if doc_id:
-            by_doc[doc_id].append(meta)
+            by_doc[doc_id].append((i, meta))
     if not by_doc:
         return
     try:
@@ -795,7 +832,9 @@ def manifest_write_batch_hook(
         import structlog
         structlog.get_logger().debug("manifest_write_hook_no_catalog", exc_info=True)
         return
-    for doc_id, metas in by_doc.items():
+    if cat is None:
+        return
+    for doc_id, indexed_metas in by_doc.items():
         chunks = [
             {
                 "chash": m.get("chunk_text_hash", ""),
@@ -806,7 +845,7 @@ def manifest_write_batch_hook(
                 "char_start": m.get("chunk_start_char") or None,
                 "char_end": m.get("chunk_end_char") or None,
             }
-            for i, m in enumerate(metas)
+            for i, m in indexed_metas
         ]
         if all(not c["chash"] for c in chunks):
             continue
@@ -817,6 +856,22 @@ def manifest_write_batch_hook(
             structlog.get_logger().debug(
                 "manifest_write_hook_failed", doc_id=doc_id, exc_info=True
             )
+
+
+# RDR-108 Phase 3 (nexus-bdag): the three batch hooks above are
+# load-bearing for catalog correctness across BOTH CLI ingest and MCP
+# tool calls (e.g. ``nx index repo`` populates ``chash_index``,
+# ``taxonomy_assignments``, and ``document_chunks`` on the catalog
+# manifest). Pre-Phase-3 the registrations lived in ``nexus.mcp.core``
+# so the hooks fired only when an MCP server started up; CLI-only
+# flows silently skipped them, leaving the catalog manifest empty for
+# ``nx index repo``-only corpora. Registering here at module load
+# keeps both paths honest — every code path that fires the batch
+# chain (every indexer goes through ``mcp_infra.fire_post_store_batch_hooks``)
+# is guaranteed to also have the hooks attached.
+register_post_store_batch_hook(chash_dual_write_batch_hook)
+register_post_store_batch_hook(taxonomy_assign_batch_hook)
+register_post_store_batch_hook(manifest_write_batch_hook)
 
 
 # ── Post-store document hooks (RDR-089, nexus-yyev) ──────────────────────────

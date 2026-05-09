@@ -193,12 +193,27 @@ class Projector:
             _log.warning("projector_document_registered_no_tumbler",
                          payload=payload)
             return
+        # RDR-108 Phase 3 (nexus-bdag): use ON CONFLICT DO UPDATE rather
+        # than INSERT OR REPLACE so the FK ``ON DELETE CASCADE`` from
+        # ``document_chunks → documents`` does not wipe the manifest on
+        # every projector replay (INSERT OR REPLACE deletes-then-inserts
+        # the row, triggering the cascade; ON CONFLICT DO UPDATE updates
+        # in place).
         self._db.execute(
-            "INSERT OR REPLACE INTO documents "
+            "INSERT INTO documents "
             "(tumbler, title, author, year, content_type, file_path, "
             "corpus, physical_collection, chunk_count, head_hash, "
             "indexed_at, metadata, source_mtime, alias_of, source_uri) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(tumbler) DO UPDATE SET "
+            "title=excluded.title, author=excluded.author, "
+            "year=excluded.year, content_type=excluded.content_type, "
+            "file_path=excluded.file_path, corpus=excluded.corpus, "
+            "physical_collection=excluded.physical_collection, "
+            "chunk_count=excluded.chunk_count, head_hash=excluded.head_hash, "
+            "indexed_at=excluded.indexed_at, metadata=excluded.metadata, "
+            "source_mtime=excluded.source_mtime, alias_of=excluded.alias_of, "
+            "source_uri=excluded.source_uri",
             (
                 tumbler,
                 payload.title,

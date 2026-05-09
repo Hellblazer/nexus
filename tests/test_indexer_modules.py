@@ -67,18 +67,17 @@ def test_check_staleness_no_existing_chunks(tmp_path):
     assert check_staleness(mock_col, tmp_path / "foo.py", "abc123", "voyage-code-3") is False
 
 
-def test_check_staleness_uses_doc_id_when_provided(tmp_path):
-    """nexus-dcym: when caller passes ``doc_id``, the where-filter must
-    key on doc_id, not the legacy source_path. WITH TEETH: a stash-revert
-    of indexer_utils.py to the source_path-keyed form makes the assertion
-    on ``where`` fail.
+def test_check_staleness_uses_content_hash_when_provided(tmp_path):
+    """RDR-108 Phase 3: chunks no longer carry ``doc_id``; ``check_staleness``
+    keys on ``content_hash`` (which is in ALLOWED_TOP_LEVEL and shared by
+    every chunk of the same file). The ``doc_id=`` kwarg is accepted for
+    backwards compatibility but is no longer the where-filter key.
     """
     mock_col = MagicMock()
     mock_col.get.return_value = {
         "metadatas": [{
             "content_hash": "abc",
             "embedding_model": "voyage-code-3",
-            "doc_id": "ART-deadbeef",
         }],
         "ids": ["id1"],
     }
@@ -88,53 +87,29 @@ def test_check_staleness_uses_doc_id_when_provided(tmp_path):
     )
     assert result is True
     where = mock_col.get.call_args.kwargs["where"]
-    assert where == {"doc_id": "ART-deadbeef"}
+    assert where == {"content_hash": "abc"}
 
 
-def test_check_staleness_falls_back_to_source_path_when_no_doc_id(tmp_path):
-    """No doc_id passed → legacy source_path lookup (back-compat)."""
+def test_check_staleness_falls_back_to_source_path_when_no_content_hash(tmp_path):
+    """No content_hash passed → legacy source_path lookup (back-compat
+    for direct test callers; production CLI ingest always supplies a
+    content_hash).
+    """
     mock_col = MagicMock()
     mock_col.get.return_value = {"metadatas": [], "ids": []}
     file_path = tmp_path / "foo.py"
-    check_staleness(mock_col, file_path, "abc", "voyage-code-3")
+    check_staleness(mock_col, file_path, "", "voyage-code-3")
     where = mock_col.get.call_args.kwargs["where"]
     assert where == {"source_path": str(file_path)}
 
 
-def test_check_staleness_treats_chunk_without_doc_id_as_stale(tmp_path):
-    """nexus-o6aa.10.4 follow-up: ghost-chunk class. Stored chunk
-    matches content_hash + model but lacks doc_id metadata. When the
-    caller has a non-empty doc_id (catalog hook resolved it this run),
-    return False so the indexer re-upserts and writes the missing
-    doc_id. WITH TEETH: a regression that drops this branch resurrects
-    Hal's 499-chunk ghost class.
-    """
-    mock_col = MagicMock()
-    mock_col.get.return_value = {
-        "metadatas": [
-            # Stored chunk: matches content + model but no doc_id.
-            {"content_hash": "abc", "embedding_model": "voyage-code-3"},
-        ],
-        "ids": ["chunk-0"],
-    }
-    result = check_staleness(
-        mock_col, tmp_path / "foo.py", "abc", "voyage-code-3",
-        doc_id="ART-deadbeef",
-    )
-    assert result is False, (
-        "stored chunk lacks doc_id but the caller has one to write; "
-        "staleness must return False so the chunk gets re-upserted"
-    )
-
-
-def test_check_staleness_passes_when_chunk_has_matching_doc_id(tmp_path):
-    """Inverse: stored chunk has the same doc_id as caller → still stale."""
+def test_check_staleness_passes_when_chunk_has_matching_content_hash(tmp_path):
+    """Inverse: stored chunk has the same content_hash + model → stale."""
     mock_col = MagicMock()
     mock_col.get.return_value = {
         "metadatas": [{
             "content_hash": "abc",
             "embedding_model": "voyage-code-3",
-            "doc_id": "ART-deadbeef",
         }],
         "ids": ["chunk-0"],
     }
