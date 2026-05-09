@@ -216,6 +216,8 @@ def rename_collection_data_plane(
         "tax_assignments": 0,
         "tax_meta": 0,
         "chash": 0,
+        "aspects": 0,
+        "aspect_queue": 0,
         "catalog_docs": 0,
     }
 
@@ -229,6 +231,13 @@ def rename_collection_data_plane(
             counts["tax_assignments"] = tax.get("assignments", 0)
             counts["tax_meta"] = tax.get("meta", 0)
             counts["chash"] = t2db.chash_index.rename_collection(old=old, new=new)
+            # nexus-gp20 / RDR-108 Phase 1d: cascade to aspect denorm caches.
+            counts["aspects"] = t2db.document_aspects.rename_collection(
+                old=old, new=new
+            )
+            counts["aspect_queue"] = t2db.aspect_queue.rename_collection(
+                old=old, new=new
+            )
     except Exception as exc:
         on_warn(f"warn: T3 rename succeeded but T2 cascade failed: {exc}")
 
