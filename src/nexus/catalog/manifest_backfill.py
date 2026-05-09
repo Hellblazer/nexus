@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import structlog
+from chromadb.errors import NotFoundError as _ChromaNotFoundError
 
 from nexus.db.chroma_quotas import QUOTAS
 
@@ -155,11 +156,14 @@ def backfill_manifest_for_collection(
         result.skipped_taxonomy = True
         return result
 
-    # Fetch the T3 collection handle (returns without error if not found).
+    # Fetch the T3 collection handle (K10: only catch NotFoundError;
+    # let quota errors, auth failures, and other exceptions propagate
+    # so the operator sees the real cause instead of a silent empty manifest).
+    col = None
     try:
         col = t3._client_for(collection_name).get_collection(collection_name)
-    except Exception:
-        # Collection doesn't exist in T3; treat as zero-chunk for all docs.
+    except _ChromaNotFoundError:
+        # Collection doesn't exist in T3 — all docs will be counted as skipped.
         col = None
 
     # Get docs from catalog for this collection.
@@ -170,10 +174,16 @@ def backfill_manifest_for_collection(
     for doc in docs:
         doc_id = str(doc.tumbler)
         if col is None:
-            chunks: list[dict] = []
-        else:
-            chunks = _iter_chunks_for_doc(col, doc_id, collection_name)
+            # S-2: collection absent in T3 — count as skipped, not processed.
+            result.docs_skipped_no_t3 += 1
+            _log.debug(
+                "manifest_backfill_doc_skipped_no_t3",
+                collection=collection_name,
+                doc_id=doc_id,
+            )
+            continue
 
+        chunks = _iter_chunks_for_doc(col, doc_id, collection_name)
         chunks.sort(key=lambda c: c["position"])
 
         if not dry_run:

@@ -325,17 +325,44 @@ class TestBackfillManifestForCollection:
         assert rows == [(0, "a" * 64), (1, "b" * 64)]
 
     def test_backfill_zero_chunk_doc_produces_no_rows(self, catalog, t3_db):
-        """A doc registered in the catalog with no T3 chunks gets an empty manifest."""
+        """A doc registered in the catalog whose T3 collection doesn't exist
+        is counted as docs_skipped_no_t3 (S-2 fix)."""
         from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
 
         coll = _unique_coll()
         _insert_doc(catalog, "1.1.1", coll)
-        # No chunks seeded for this doc in this unique collection
+        # No T3 collection seeded for this unique name at all
 
         result = backfill_manifest_for_collection(
             catalog, t3_db, coll, dry_run=False
         )
+        # S-2: absent T3 collection → skipped, not processed
+        assert result.docs_processed == 0
+        assert result.docs_skipped_no_t3 == 1
+        assert result.chunks_written == 0
+
+        count = catalog._db.execute(
+            "SELECT COUNT(*) FROM document_chunks WHERE doc_id = ?",
+            ("1.1.1",),
+        ).fetchone()[0]
+        assert count == 0
+
+    def test_backfill_zero_chunk_doc_with_existing_collection(self, catalog, t3_db):
+        """A doc in a T3 collection that exists but has no chunks for that
+        doc_id is counted as docs_processed with zero chunks written."""
+        from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
+
+        coll = _unique_coll()
+        _insert_doc(catalog, "1.1.1", coll)
+        # Create the collection in T3 but seed NO chunks for doc_id 1.1.1
+        t3_db._client.get_or_create_collection(coll)
+
+        result = backfill_manifest_for_collection(
+            catalog, t3_db, coll, dry_run=False
+        )
+        # Collection exists → doc IS processed; it just has zero chunks
         assert result.docs_processed == 1
+        assert result.docs_skipped_no_t3 == 0
         assert result.chunks_written == 0
 
         count = catalog._db.execute(

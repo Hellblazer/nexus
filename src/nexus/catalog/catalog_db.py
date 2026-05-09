@@ -503,8 +503,22 @@ class CatalogDB:
         except sqlite3.OperationalError:
             pass
         else:
-            # Identify candidate names before INSERT so we track exactly which
+            # RDR-108 D2 (nexus-mydi → nexus-572g): identify candidate
+            # collection names before INSERT so we track exactly which
             # names actually land (the INSERT below skips existing rows).
+            # The candidate set seeds _emit_backfilled_collection_events
+            # (catalog.py) so the event-sourced model stays canonical:
+            # synthetic CollectionCreated events are emitted post-rebuild
+            # so a JSONL replay materializes the same collections rows.
+            #
+            # SIG-7 (nexus-872w): created_at is a real ISO timestamp
+            # (parameter-bound, not f-string interpolated) so audit
+            # tools can distinguish rows that were backfilled from
+            # rows that were never written.
+            #
+            # O-5: INSERT OR IGNORE replaces the NOT IN subquery
+            # form (perf — collections.name is a PK so OR IGNORE is
+            # the natural shape).
             candidates = {
                 row[0]
                 for row in self._conn.execute(

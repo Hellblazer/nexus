@@ -26,7 +26,11 @@ Out of scope:
 """
 from __future__ import annotations
 
+import json
+import os
 import re
+import signal
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -34,6 +38,16 @@ import click
 import structlog
 
 _log = structlog.get_logger(__name__)
+
+# SIG-6 (nexus-872w): resumable backfill state file.
+# The state file is a JSON dict mapping collection name → list of doc_ids
+# that have been processed, or ["__done__"] when a collection is complete.
+# Atomic writes via .tmp + rename avoid partial-write corruption on crash.
+_BACKFILL_STATE_FILE_ENV = "NEXUS_BACKFILL_STATE_FILE"
+_BACKFILL_STATE_DEFAULT = os.path.expanduser(
+    "~/.config/nexus/backfill_state.json"
+)
+_PROGRESS_INTERVAL = 10  # emit progress every N docs across all collections
 
 
 _DEFAULT_ORPHAN_WINDOW = "30d"
@@ -71,6 +85,31 @@ def _parse_orphan_window(spec: str) -> timedelta:
         )
     unit = match.group(2).lower()
     return timedelta(seconds=n * _WINDOW_UNIT_SECONDS[unit])
+
+
+def _backfill_state_path() -> Path:
+    """Return the path to the backfill state file.
+
+    Respects ``NEXUS_BACKFILL_STATE_FILE`` env override so tests can
+    redirect the file to a tmp directory without touching the real config.
+    """
+    return Path(os.environ.get(_BACKFILL_STATE_FILE_ENV, _BACKFILL_STATE_DEFAULT))
+
+
+def _load_backfill_state(path: Path) -> dict[str, list[str]]:
+    """Load the backfill state file, returning an empty dict on miss/error."""
+    try:
+        return json.loads(path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_backfill_state(path: Path, state: dict[str, list[str]]) -> None:
+    """Atomically write the backfill state file (tmp + rename)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, indent=2))
+    tmp.replace(path)
 
 
 def _make_catalog():
@@ -505,10 +544,21 @@ def gc_cmd(
     type=int,
     help="If > 0, process at most N documents per collection.",
 )
+@click.option(
+    "--resume/--no-resume",
+    default=False,
+    help=(
+        "Resume a previous interrupted backfill. Reads state from "
+        f"$NEXUS_BACKFILL_STATE_FILE (default: {_BACKFILL_STATE_DEFAULT}). "
+        "Collections marked done are skipped; others are re-processed "
+        "from scratch (per-doc idempotency comes from write_manifest)."
+    ),
+)
 def backfill_manifest_cmd(
     collection: str,
     dry_run: bool,
     limit: int,
+    resume: bool,
 ) -> None:
     """Backfill document_chunks manifest from T3 chunk metadata (RDR-108 D2).
 
@@ -530,11 +580,17 @@ def backfill_manifest_cmd(
         that collection before running backfill.
 
     \\b
+    Progress is written to stderr. Use --resume to continue after Ctrl-C.
+    On SIGINT the state file is flushed before exit so --resume can pick
+    up where it left off.
+
+    \\b
     Examples:
       nx t3 backfill-manifest --dry-run                         # report only
       nx t3 backfill-manifest -c code__nexus --no-dry-run       # one collection
       nx t3 backfill-manifest --no-dry-run                      # all collections
       nx t3 backfill-manifest --no-dry-run -n 100               # first 100 docs
+      nx t3 backfill-manifest --no-dry-run --resume             # continue after Ctrl-C
     """
     from nexus.catalog.manifest_backfill import (  # noqa: PLC0415
         MissingChunkHashError,
@@ -558,12 +614,58 @@ def backfill_manifest_cmd(
             click.echo("No collections registered in catalog; nothing to do.")
             return
 
+    total = len(collections_to_process)
+
+    # SIG-6: load resume state and skip already-done collections.
+    state_path = _backfill_state_path()
+    state: dict[str, list[str]] = {}
+    if resume:
+        state = _load_backfill_state(state_path)
+        done_before = sum(1 for v in state.values() if v == ["__done__"])
+        if done_before:
+            print(
+                f"Resuming: {done_before} collection(s) already done, skipping.",
+                file=sys.stderr,
+            )
+
+    # SIG-6: SIGINT handler — flush state then exit 130.
+    def _on_sigint(signum: int, frame: object) -> None:  # noqa: ARG001
+        if state:
+            _save_backfill_state(state_path, state)
+            print(
+                f"\nInterrupted. Progress saved to {state_path}. "
+                f"Re-run with --resume to continue.",
+                file=sys.stderr,
+            )
+        sys.exit(130)
+
+    try:
+        signal.signal(signal.SIGINT, _on_sigint)
+    except (ValueError, OSError):
+        # Non-main thread (e.g. test runner) — skip signal registration.
+        pass
+
     total_docs = 0
     total_chunks = 0
+    total_skipped_no_t3 = 0
     skipped_taxonomy = 0
     errors: list[str] = []
+    docs_processed_overall = 0
 
-    for coll_name in collections_to_process:
+    for idx, coll_name in enumerate(collections_to_process, start=1):
+        # SIG-6: skip collections already complete in resume state.
+        if resume and state.get(coll_name) == ["__done__"]:
+            print(
+                f"[{idx}/{total}] {coll_name}: skipped (already done)",
+                file=sys.stderr,
+            )
+            continue
+
+        print(
+            f"[{idx}/{total}] {coll_name}: processing ...",
+            file=sys.stderr,
+        )
+
         try:
             result = backfill_manifest_for_collection(
                 cat, t3_db, coll_name, dry_run=dry_run, limit=limit
@@ -588,18 +690,58 @@ def backfill_manifest_cmd(
             skipped_taxonomy += 1
             continue
 
+        # SIG-6: per-collection stderr progress including skipped-no-t3.
         verb = "would write" if dry_run else "wrote"
+        skipped_part = (
+            f" ({result.docs_skipped_no_t3} skipped: no_t3)"
+            if result.docs_skipped_no_t3
+            else ""
+        )
+        print(
+            f"[{idx}/{total}] {coll_name}: processed {result.docs_processed} "
+            f"doc(s), {verb} {result.chunks_written} chunk manifest row(s)"
+            f"{skipped_part}",
+            file=sys.stderr,
+        )
+
+        # Emit to stdout as well for the summary output.
         click.echo(
             f"  {coll_name}: processed {result.docs_processed} doc(s), "
             f"{verb} {result.chunks_written} chunk manifest row(s)"
+            + (
+                f" ({result.docs_skipped_no_t3} skipped: no T3 collection)"
+                if result.docs_skipped_no_t3
+                else ""
+            )
         )
+
         total_docs += result.docs_processed
         total_chunks += result.chunks_written
+        total_skipped_no_t3 += result.docs_skipped_no_t3
+        docs_processed_overall += result.docs_processed
+
+        # SIG-6: periodic progress every _PROGRESS_INTERVAL docs.
+        if docs_processed_overall % _PROGRESS_INTERVAL == 0 and docs_processed_overall > 0:
+            print(
+                f"  ... {docs_processed_overall} docs processed so far",
+                file=sys.stderr,
+            )
+
+        # SIG-6: mark collection done in state file (atomic write).
+        if not dry_run:
+            state[coll_name] = ["__done__"]
+            _save_backfill_state(state_path, state)
 
     verb = "would write" if dry_run else "wrote"
+    skipped_no_t3_part = (
+        f", {total_skipped_no_t3} doc(s) skipped (no T3 collection)"
+        if total_skipped_no_t3
+        else ""
+    )
     click.echo(
         f"\nSummary: processed {total_docs} doc(s), "
         f"{verb} {total_chunks} manifest row(s)"
+        + skipped_no_t3_part
         + (f", skipped {skipped_taxonomy} taxonomy collection(s)" if skipped_taxonomy else "")
         + (f", {len(errors)} error(s)" if errors else "")
     )
