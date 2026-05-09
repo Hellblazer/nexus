@@ -601,3 +601,8 @@
 {"id":"int-76e4402b","kind":"field_change","created_at":"2026-05-09T09:03:47.130762Z","actor":"Hellblazer","issue_id":"nexus-he24","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
 {"id":"int-f803cb4f","kind":"field_change","created_at":"2026-05-09T09:03:47.479701Z","actor":"Hellblazer","issue_id":"nexus-j43k","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
 {"id":"int-97397f5c","kind":"field_change","created_at":"2026-05-09T09:36:24.822195Z","actor":"Hellblazer","issue_id":"nexus-je0b","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
+<<<<<<< Updated upstream
+=======
+{"id":"int-83fe6125","kind":"field_change","created_at":"2026-05-09T11:04:11.44617Z","actor":"Hellblazer","issue_id":"nexus-1091","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
+{"id":"int-f60c81ab","kind":"field_change","created_at":"2026-05-09T11:13:11.204901Z","actor":"Hellblazer","issue_id":"nexus-572g","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Implemented: manifest read API (K6), event-sourced backfill (K7), post-store hook (OBS-3), >300-chunk batching regression test (SG-3). PR #614."}}
+>>>>>>> Stashed changes
