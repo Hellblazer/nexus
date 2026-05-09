@@ -216,6 +216,34 @@ CREATE INDEX IF NOT EXISTS idx_collections_tuple
 -- live in the post-migration block in __init__: the legacy-DB upgrade
 -- path has to ALTER TABLE the bib columns into existence before the
 -- partial-index CREATE can reference them.
+
+-- RDR-108 D2 (nexus-mydi): document_chunks manifest. The catalog is
+-- the authoritative source of truth for doc->chunk ordering (the
+-- "tree" layer of the git/IPFS-style blob+tree split). T3 chunks are
+-- content-addressed blobs keyed on chunk_text_hash[:32]; this table
+-- records the ordered (doc_id, position) -> chash references that
+-- compose each Document. The same chash can appear at multiple
+-- (doc_id, position) rows: the manifest preserves position; T3
+-- stores content once. Optional positional columns (line_start /
+-- line_end / char_start / char_end) carry display-friendly span
+-- coordinates so retrieval doesn't have to re-derive them from the
+-- source file. chunk_index is the chunker-assigned ordinal at index
+-- time, retained for reference; position is the canonical ordering
+-- key from this RDR onward.
+CREATE TABLE IF NOT EXISTS document_chunks (
+    doc_id      TEXT NOT NULL REFERENCES documents(tumbler),
+    position    INTEGER NOT NULL,
+    chash       TEXT NOT NULL,
+    chunk_index INTEGER,
+    line_start  INTEGER,
+    line_end    INTEGER,
+    char_start  INTEGER,
+    char_end    INTEGER,
+    PRIMARY KEY (doc_id, position)
+);
+
+CREATE INDEX IF NOT EXISTS idx_document_chunks_chash
+    ON document_chunks(chash);
 """
 
 
@@ -237,6 +265,13 @@ class CatalogDB:
         # an indexing writer.
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.execute("PRAGMA journal_mode=WAL")
+        # RDR-108 D2 + D5 (nexus-mydi): enable foreign-key enforcement
+        # so the document_chunks manifest cannot reference a deleted
+        # Document, and future cascade-on-rename machinery (D5
+        # chash_index FK) works as advertised. SQLite enforces FK
+        # constraints only when this PRAGMA is ON; declared REFERENCES
+        # clauses in the schema are otherwise advisory.
+        self._conn.execute("PRAGMA foreign_keys=ON")
         # Issue #437: cap WAL growth under long-lived MCP-server reader
         # connections. SQLite's auto-checkpoint can run only as PASSIVE
         # while readers hold pre-checkpoint snapshots; PASSIVE folds
@@ -387,6 +422,45 @@ class CatalogDB:
                 "ON documents(bib_openalex_id) "
                 "WHERE bib_openalex_id != ''"
             )
+
+        # RDR-108 D2 (nexus-mydi): backfill collections rows for any
+        # documents.physical_collection value that has no matching
+        # collections.name row. Pre-RDR-108 catalogs accumulated docs
+        # whose physical_collection was a free-form string, never
+        # registered in the collections projection — surfaced as the
+        # 11.3x chash_index drift and 76% document_aspects orphan rate
+        # in the 2026-05-08 prod-shakeout. This backfill is structural
+        # prep for FK enforcement on documents.physical_collection
+        # (deferred to a follow-up migration that recreates the
+        # documents table per SQLite's 12-step ALTER pattern).
+        # Idempotent: the SELECT-then-INSERT pattern with a
+        # collections.name PK on the target side is a no-op when the
+        # row already exists.
+        # Probe-guarded: stripped-down legacy schemas (e.g. the
+        # alias_of migration test fixture) may lack the
+        # physical_collection column entirely; skip the backfill in
+        # that case rather than raise.
+        try:
+            self._conn.execute(
+                "SELECT physical_collection FROM documents LIMIT 0"
+            )
+        except sqlite3.OperationalError:
+            pass
+        else:
+            with self._conn:
+                self._conn.execute(
+                    "INSERT INTO collections "
+                    "(name, content_type, owner_id, embedding_model, "
+                    " model_version, display_name, legacy_grandfathered, "
+                    " superseded_by, superseded_at, created_at) "
+                    "SELECT DISTINCT physical_collection, '', '', '', '', '', "
+                    "  1, '', '', '' "
+                    "FROM documents "
+                    "WHERE physical_collection IS NOT NULL "
+                    "  AND physical_collection != '' "
+                    "  AND physical_collection NOT IN "
+                    "      (SELECT name FROM collections)"
+                )
 
     def rebuild(
         self,
