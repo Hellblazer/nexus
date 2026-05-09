@@ -186,14 +186,23 @@ class T2Database:
 
                 # OBS-2: emit a brief migration notice so operators see
                 # progress rather than a silent hang on first post-upgrade
-                # invocation. Writes to stderr so it doesn't pollute
-                # structured stdout output of CLI commands.
+                # invocation. Suppressed when stderr is not a TTY
+                # (CI, pipes, click.testing.CliRunner) because CliRunner
+                # mixes stderr into result.output and tests parsing
+                # JSON output break otherwise. The interactive operator
+                # case (running `nx <verb>` from a real terminal) keeps
+                # the visibility benefit; the headless case stays
+                # quiet.
                 import sys as _sys
-                print(
-                    f"Migrating database {path.name!r} to schema version "
-                    f"{current_version} ...",
-                    file=_sys.stderr,
+                _stderr_is_tty = (
+                    hasattr(_sys.stderr, "isatty") and _sys.stderr.isatty()
                 )
+                if _stderr_is_tty:
+                    print(
+                        f"Migrating database {path.name!r} to schema "
+                        f"version {current_version} ...",
+                        file=_sys.stderr,
+                    )
 
                 conn = sqlite3.connect(str(path), check_same_thread=False)
                 try:
