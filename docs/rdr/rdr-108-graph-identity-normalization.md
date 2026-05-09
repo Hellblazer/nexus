@@ -330,6 +330,124 @@ orphan corpus). Option 2 (hard-delete) for the remaining 7
 collections with 1-2 rows each. Decision deferred to gate
 time; document operator workflow.
 
+### RF-5: Chunk-order reconstruction post-migration = unaffected (code-trace 2026-05-08)
+
+Concern: with content-derived natural IDs, does the order of
+chunks within a document survive migration? Found via grep + read:
+
+- Order reconstruction reads `chunk_index` from each chunk's
+  metadata. Confirmed at `src/nexus/catalog/synthesizer.py:616-672`
+  (`chunk_index = int(meta.get("chunk_index", 0) or 0)` →
+  `position=chunk_index`).
+- Migration touches only the Chroma natural ID, not metadata.
+  `chunk_index` survives byte-for-byte.
+- For multi-chunk doc reconstruction, the existing pattern is
+  `col.get(where={"doc_id": tumbler})` then sort by
+  `chunk_index` ascending. Post-migration this still works.
+
+**Implication**: order reconstruction is unaffected by D1.
+Pre-existing characteristic that `chunk_index` is unstable
+across re-index runs (boundaries shift) is unchanged: RDR-108
+neither fixes nor worsens it. A separate RDR could address
+position-stable identity within a doc, but it is out of scope
+here.
+
+### RF-6: Migration idempotency / interruption recovery = achievable with filter-based loop (code-trace 2026-05-08)
+
+Concern: if Phase 2 crashes mid-collection, can it be safely
+resumed? Existing nexus migrations don't surface an explicit
+checkpoint pattern (grep for `resume`/`checkpoint`/`partial`
+in `t3.py` + `commands/t3.py` returned only generic comments).
+The loop design needs to be inherently idempotent.
+
+**Recommended loop structure for `nx t3 reidentify`**:
+
+```python
+# Per-collection, paginated, idempotent.
+seen_old_ids: set[str] = set()
+offset = 0
+while True:
+    page = col.get(
+        limit=300, offset=offset,
+        include=["documents", "embeddings", "metadatas"],
+    )
+    if not page["ids"]:
+        break
+
+    to_migrate = []
+    for cid, doc, emb, meta in zip(page["ids"], page["documents"],
+                                    page["embeddings"], page["metadatas"]):
+        new_id = meta["chunk_text_hash"][:32]
+        if cid == new_id:
+            continue  # already migrated, skip silently
+        to_migrate.append((cid, new_id, doc, emb, meta))
+        seen_old_ids.add(cid)
+
+    if to_migrate:
+        col.upsert(
+            ids=[t[1] for t in to_migrate],
+            documents=[t[2] for t in to_migrate],
+            embeddings=[t[3] for t in to_migrate],
+            metadatas=[t[4] for t in to_migrate],
+        )
+
+    if len(page["ids"]) < 300:
+        break
+    offset += 300
+
+# Phase 2b: delete old IDs in batches of 300.
+for batch in batched(seen_old_ids, 300):
+    col.delete(ids=list(batch))
+```
+
+Key properties:
+- Re-running on a fully-migrated collection: every page has
+  `cid == new_id`, skip-silent, zero writes. Naturally idempotent.
+- Re-running after partial migration: pages mix
+  already-migrated and not-yet-migrated chunks. The filter
+  correctly skips the former, processes the latter.
+- Pagination doesn't break: deletes happen in Phase 2b after
+  the get-loop completes, so offsets stay valid during reads.
+- If the process crashes mid-collection: Phase 2b never ran
+  for the un-deleted old IDs. Resume re-runs the get-loop,
+  finds the un-deleted old IDs again, re-upserts (idempotent
+  overwrite of new ID), re-collects them in `seen_old_ids`,
+  Phase 2b deletes them. No data loss; some redundant work.
+
+**Implication**: Phase 2 can be safely resumed without state
+file or checkpoint table. Document the contract in `nx t3
+reidentify`'s help text.
+
+### RF-7: Existing `chash:<hex>` link backward compatibility = unaffected by D1; one code change for D4 (code-trace 2026-05-08)
+
+Concern: existing catalog links use `chash:<full_hex>` spans.
+After D1 (chunk natural ID = `chunk_text_hash[:32]`) and D4
+(chash_index drops `chunk_chroma_id` column), do existing
+links still resolve?
+
+- `src/nexus/catalog/catalog_spans.py:89-122` (`resolve_span_in_t3`)
+  resolves a chash span via
+  `col.get(where={"chunk_text_hash": hex_chash}, include=["documents", "metadatas"])`.
+  This is **already content-keyed**, not natural-ID-keyed.
+  Post-D1 migration, this path works unchanged.
+- `src/nexus/catalog/catalog_spans.py:300-329` (`resolve_chash_globally`)
+  reads `row["chunk_chroma_id"]` from `chash_index` and passes
+  it as `doc_id=` to `_build_ref`. After D4 drops that column,
+  this code must be updated. Replacement: `doc_id=hex_chash[:32]`
+  (a pure function of the chash that the call already has).
+
+**Implication for D4**: one explicit code change in
+`catalog_spans.py:327`. Phase 3 (chash_index column drop)
+must be paired with this code update in the same commit;
+otherwise `resolve_chash_globally` KeyErrors on missing column.
+
+Caveat: `chash_index.upsert` (`src/nexus/db/t2/chash_index.py:105`)
+takes a `chunk_chroma_id` parameter and inserts into the
+`chunk_chroma_id` column. Phase 3 removes both. The call sites
+(post-store hooks for chunk-grain inserts) need their parameter
+list updated. Trivial change: grep `chash_index.upsert` to
+find them.
+
 ### Open follow-ups (not blocking)
 
 - **`taxonomy__centroids` natural-ID strategy**: separate RDR
@@ -343,6 +461,11 @@ time; document operator workflow.
   collection; either re-index the source materials (preferred)
   or hard-delete the 690 pre-RDR-053 chunks (cheaper).
   Operator choice.
+- **Migration bandwidth cost**: 290k chunks × ~4 KiB
+  embedding + ~2 KiB doc + metadata ≈ 2-3 GiB total bandwidth
+  from ChromaDB Cloud. ~5,000 paginated GETs across 150
+  collections. Estimated runtime: 1-3 hours for the full
+  corpus. Operator-driven phasing is appropriate.
 
 ## Proposed Solution
 
