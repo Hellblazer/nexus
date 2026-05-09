@@ -845,15 +845,41 @@ def query(
                 ],
             }
 
-        # Group by document: use doc_id (post-prune stable identity)
-        # then content_hash, title, _display_path, source_path as fallbacks.
-        # nexus-1qed: doc_id sits at the top so chunks of the same
-        # document group together even after source_path is pruned.
+        # Group by document. RDR-108 Phase 4b (nexus-kosc): post-Phase-3
+        # chunks no longer carry ``doc_id`` in their metadata, so the
+        # canonical mapping is now ``chunk_text_hash -> [doc_id, ...]``
+        # via ``Catalog.docs_for_chashes``. Fall back to the legacy
+        # metadata keys (``content_hash``, ``title``, ``_display_path``,
+        # ``source_path``, chunk id) for chunks the catalog cannot
+        # resolve (catalog absent, orphan chunks, pre-Phase-A chunks).
+        chash_to_doc: dict[str, str] = {}
+        try:
+            cat = _get_catalog()
+        except Exception:
+            cat = None
+        if cat is not None:
+            chashes_seen = sorted({
+                r.metadata.get("chunk_text_hash", "")
+                for r in results
+                if r.metadata.get("chunk_text_hash")
+            })
+            if chashes_seen:
+                try:
+                    by_chash = cat.docs_for_chashes(chashes_seen)
+                except Exception:
+                    by_chash = {}
+                # Same chash can appear in multiple docs (identical
+                # content); pick the first deterministically so chunks
+                # group consistently within a single response.
+                for chash, doc_ids in by_chash.items():
+                    if doc_ids:
+                        chash_to_doc[chash] = sorted(doc_ids)[0]
         docs: dict[str, dict] = {}  # doc_key → {meta, snippets, best_distance}
         for r in results:
             meta = r.metadata
             doc_key = (
-                meta.get("doc_id")
+                chash_to_doc.get(meta.get("chunk_text_hash", ""))
+                or meta.get("doc_id")
                 or meta.get("content_hash")
                 or meta.get("title")
                 or meta.get("_display_path")

@@ -1212,68 +1212,67 @@ class T3Database:
             self._delete_batch(col, collection_name, ids)
         return len(ids)
 
-    def ids_for_doc_id(self, collection_name: str, doc_id: str) -> list[str]:
-        """Return all chunk IDs for a given catalog ``doc_id``. No content fetch.
+    def ids_for_doc_id(
+        self,
+        collection_name: str,
+        doc_id: str,
+        *,
+        catalog: object,
+    ) -> list[str]:
+        """Return the T3 chunk IDs for a catalog ``doc_id`` (RDR-108
+        Phase 4b / nexus-kosc).
 
-        Companion to :meth:`ids_for_source`; switches the chunk-lookup
-        identity field from ``source_path`` to ``doc_id`` (RDR-101 Phase 4
-        reader migration). Paginates ``col.get()`` to respect the ChromaDB
-        Cloud 300-record limit. Returns empty list if the collection does
-        not exist.
+        Resolves via the catalog's ``document_chunks`` manifest:
+        ``Catalog.get_chunk_chashes(doc_id)`` returns the ordered chashes
+        that compose the document; each chunk's natural ID is
+        ``chash[:32]`` per RDR-108 D1. ``col.get(ids=...)`` filters the
+        list to chunks actually present in T3 (so a stale manifest entry
+        for a since-deleted chunk does not surface). Returns empty list
+        if the collection does not exist or the manifest has no rows.
 
-        **RDR-108 Phase 3 caveat (nexus-bdag)**: chunks written after
-        Phase 3 do not carry ``doc_id`` in their metadata, so the
-        ``where={"doc_id": ...}`` filter returns empty for them.
-        Callers that need the doc_id → chunk_id mapping for Phase-3
-        chunks should consult the catalog ``document_chunks`` manifest
-        (``Catalog.get_manifest(doc_id)``) and resolve chash → chunk
-        via ``chash_index`` instead. RDR-108 Phase 4 retargets every
-        in-tree caller (prune paths, search filters, aspect readers)
-        to the manifest-based lookup; this method is retained for
-        legacy reads against pre-Phase-3 chunks.
+        ``catalog`` is required (no metadata fallback): post-Phase-3
+        chunks no longer carry ``doc_id`` in their metadata, so the
+        prior ``where={"doc_id": ...}`` query returned empty for them.
         """
         try:
             col = self._client_for(collection_name).get_collection(collection_name)
         except _ChromaNotFoundError:
             return []
-        ids: list[str] = []
-        offset = 0
+        chashes = catalog.get_chunk_chashes(doc_id)
+        if not chashes:
+            return []
+        candidate_ids = [c[:32] for c in chashes]
+        # ChromaDB ``get(ids=...)`` returns only ids actually present in
+        # the collection. Page in MAX_RECORDS_PER_WRITE batches so large
+        # documents stay within the per-request quota.
         page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
-        while True:
-            result = _chroma_with_retry(
-                col.get,
-                where={"doc_id": doc_id},
-                include=[],
-                limit=page_limit,
-                offset=offset,
-            )
-            page_ids = result["ids"]
-            ids.extend(page_ids)
-            offset += len(page_ids)
-            if len(page_ids) < page_limit:
-                break
-        return ids
+        present: list[str] = []
+        for i in range(0, len(candidate_ids), page_limit):
+            batch = candidate_ids[i : i + page_limit]
+            result = _chroma_with_retry(col.get, ids=batch, include=[])
+            present.extend(result["ids"])
+        return present
 
-    def delete_by_doc_id(self, collection_name: str, doc_id: str) -> int:
-        """Delete all chunks for a given catalog ``doc_id``. Returns count.
+    def delete_by_doc_id(
+        self,
+        collection_name: str,
+        doc_id: str,
+        *,
+        catalog: object,
+    ) -> int:
+        """Delete all chunks for a catalog ``doc_id``. Returns count.
 
-        Companion to :meth:`delete_by_source` (RDR-101 Phase 4 reader
-        migration). Uses paginated ``col.get()`` keyed on ``doc_id`` to
-        avoid the ChromaDB Cloud 300-record truncation limit.
-
-        **RDR-108 Phase 3 caveat (nexus-bdag)**: chunks written after
-        Phase 3 do not carry ``doc_id`` in their metadata; this method
-        silently returns 0 for those chunks. The Phase 4 prune rewrite
-        (nexus-mmf5 family) consults the catalog manifest to resolve
-        chunk IDs by chash and deletes via ``_delete_batch`` directly.
-        Pre-Phase-3 chunks (still present in T3 until the operator runs
-        ``nx t3 reidentify --all-collections``) keep working unchanged.
+        Resolves chunk IDs via :meth:`ids_for_doc_id` (which consults
+        the catalog manifest, RDR-108 Phase 4b / nexus-kosc) then
+        deletes them in MAX_RECORDS_PER_WRITE batches. ``catalog`` is
+        required for the same reason it is on ``ids_for_doc_id``: post-
+        Phase-3 chunks no longer carry ``doc_id`` in their metadata.
         """
         try:
             col = self._client_for(collection_name).get_collection(collection_name)
         except _ChromaNotFoundError:
             return 0
-        ids = self.ids_for_doc_id(collection_name, doc_id)
+        ids = self.ids_for_doc_id(collection_name, doc_id, catalog=catalog)
         if ids:
             self._delete_batch(col, collection_name, ids)
         return len(ids)

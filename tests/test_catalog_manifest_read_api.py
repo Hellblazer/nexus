@@ -266,6 +266,46 @@ class TestDocsForChashes:
         assert result["b" * 64] == ["1.1.1"]
 
 
+# ── RDR-108 Phase 4b / nexus-kosc: get_chunk_chashes ─────────────────────────
+
+
+class TestGetChunkChashes:
+    """``Catalog.get_chunk_chashes(doc_id)`` returns the ordered list of
+    chashes for a document's manifest, used by retrieval call sites that
+    need to resolve a doc_id to its chunk content addresses without
+    materializing the full ManifestRow tuples."""
+
+    def test_unknown_doc_returns_empty_list(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        assert cat.get_chunk_chashes("9.9.9") == []
+
+    def test_returns_ordered_chashes(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        _insert_doc(cat, "1.1.1", "code__test")
+        chunks = [
+            _make_chunk("b" * 64, position=1),
+            _make_chunk("a" * 64, position=0),
+            _make_chunk("c" * 64, position=2),
+        ]
+        cat.write_manifest("1.1.1", chunks)
+        assert cat.get_chunk_chashes("1.1.1") == ["a" * 64, "b" * 64, "c" * 64]
+
+    def test_isolates_by_doc_id(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        _insert_doc(cat, "1.1.1", "code__test")
+        _insert_doc(cat, "1.1.2", "code__test")
+        cat.write_manifest("1.1.1", [_make_chunk("a" * 64, 0)])
+        cat.write_manifest("1.1.2", [_make_chunk("b" * 64, 0), _make_chunk("c" * 64, 1)])
+        assert cat.get_chunk_chashes("1.1.1") == ["a" * 64]
+        assert cat.get_chunk_chashes("1.1.2") == ["b" * 64, "c" * 64]
+
+    def test_zero_chunk_doc_returns_empty(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        _insert_doc(cat, "1.1.1", "code__test")
+        cat.write_manifest("1.1.1", [])
+        assert cat.get_chunk_chashes("1.1.1") == []
+
+
 # ── RDR-108 Phase 4 / nexus-dyxe: chashes_for_collection ─────────────────────
 
 

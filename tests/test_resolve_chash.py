@@ -70,7 +70,10 @@ class TestResolveChashT2Hit:
         assert ref["chash"] == h
         assert ref["chunk_hash"] == h   # back-compat alias
         assert ref["physical_collection"] == "code__only"
-        assert ref["doc_id"] == "chunk-0"
+        # RDR-108 Phase 4b (nexus-kosc): doc_id is the chunk natural ID
+        # derived from the chash (chash[:32] per D1), not the chash_index
+        # row's chunk_chroma_id column (which is dropped by nexus-mmf5).
+        assert ref["doc_id"] == h[:32]
         assert ref["chunk_text"] == "hello"
         assert ref["metadata"]["source_path"] == "s.py"
 
