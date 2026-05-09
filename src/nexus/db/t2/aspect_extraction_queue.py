@@ -452,6 +452,24 @@ class AspectExtractionQueue:
             ).fetchone()
         return row[0] if row else 0
 
+    def is_drained(self) -> bool:
+        """Return True iff no actionable rows remain in the queue.
+
+        A queue is considered drained when the count of rows with
+        ``status != 'failed'`` is zero.  Failed rows are terminal and
+        do not block a PK migration — they stay in the table as audit
+        records and must be explicitly re-enqueued to be retried.
+
+        Used by ``drain_worker`` (RDR-108 Phase 1 S1) and by
+        ``nexus-je0b`` as a precondition guard before the PK swap.
+        """
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT COUNT(*) FROM aspect_extraction_queue "
+                "WHERE status != 'failed'"
+            ).fetchone()
+        return (row[0] if row else 0) == 0
+
     def list_pending(self, limit: int | None = None) -> list[QueueRow]:
         """Return pending rows in claim order (FIFO by ``enqueued_at``)."""
         sql = (
