@@ -80,6 +80,14 @@ def _restore_post_store_batch_hooks_after_test():
     from nexus.catalog import reset_cache as _reset_catalog_cache
     snapshot_batch = list(_mod._post_store_batch_hooks)
     snapshot_single = list(_mod._post_store_hooks)
+    # Snapshot the catalog_doc_id-aware classification set too: a test
+    # that registers a fresh batch hook adds its ``id(fn)`` here, and
+    # without restoration the entry leaks for the rest of the session.
+    # Python may recycle the id() for a later object, which would then
+    # be (wrongly) classified as catalog_doc_id-aware on first dispatch.
+    snapshot_catalog_doc_id_set = set(
+        _mod._post_store_batch_hooks_with_catalog_doc_id
+    )
     _mod._catalog_instance = None
     _mod._catalog_mtime = 0.0
     _reset_catalog_cache()
@@ -88,6 +96,10 @@ def _restore_post_store_batch_hooks_after_test():
     _mod._post_store_batch_hooks.extend(snapshot_batch)
     _mod._post_store_hooks.clear()
     _mod._post_store_hooks.extend(snapshot_single)
+    _mod._post_store_batch_hooks_with_catalog_doc_id.clear()
+    _mod._post_store_batch_hooks_with_catalog_doc_id.update(
+        snapshot_catalog_doc_id_set
+    )
     _mod._catalog_instance = None
     _mod._catalog_mtime = 0.0
     _reset_catalog_cache()

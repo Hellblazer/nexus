@@ -508,8 +508,16 @@ def register_post_store_batch_hook(fn) -> None:
     except (TypeError, ValueError):
         # Built-in or C-extension callable with no introspectable
         # signature — assume legacy shape so the dispatcher does not
-        # blow up on first call.
-        pass
+        # blow up on first call. Log at debug so the registration is
+        # visible when chasing a "hook never seems to fire correctly"
+        # symptom; if the underlying callable actually accepts
+        # catalog_doc_id, the legacy 5-arg dispatch will silently drop
+        # the value.
+        import structlog
+        structlog.get_logger().debug(
+            "post_store_batch_hook_signature_unintrospectable",
+            hook=getattr(fn, "__name__", repr(fn)),
+        )
 
 
 def fire_post_store_batch_hooks(

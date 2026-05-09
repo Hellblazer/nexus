@@ -362,6 +362,61 @@ class TestUploaderLoop:
         assert s["chunks_uploaded"] == 3 and s["status"] == "completed"
         t3.upsert_chunks_with_embeddings.assert_called_once()
 
+    def test_uploader_injects_global_chunk_index_into_hook_payload(self, db) -> None:
+        """RDR-108 Phase 3 (nexus-bdag): the streaming uploader populates
+        the per-batch hook chain with a metadata blob that carries the
+        global ``chunk_index`` from T2's ``chunk_index`` column. Without
+        the injection the manifest hook falls through to a batch-local
+        enumeration that resets each batch — which would silently
+        truncate the manifest for documents that span multiple upload
+        batches.
+
+        Verifies the injection happens AFTER ``upsert_chunks_with_embeddings``
+        returns: T3 receives the post-Phase-3 metadata (no
+        ``chunk_index``); the hook receives the injected value.
+        """
+        from unittest.mock import patch
+
+        _pop_chunks(db, "h1", 200)
+        t3 = MagicMock()
+
+        # Capture the metadata seen by the batch hook chain and the T3 upsert.
+        seen_in_hook: list[list[dict]] = []
+        seen_in_t3: list[list[dict]] = []
+        t3.upsert_chunks_with_embeddings.side_effect = (
+            lambda collection, ids, documents, embeddings, metadatas:
+            seen_in_t3.append([dict(m) for m in metadatas])
+        )
+
+        def _capture_batch(doc_ids, collection, contents, embeddings, metadatas, **_kwargs):
+            seen_in_hook.append([dict(m) for m in metadatas])
+
+        with patch(
+            "nexus.mcp_infra._post_store_batch_hooks",
+            [_capture_batch],
+        ), patch(
+            "nexus.mcp_infra._post_store_batch_hooks_with_catalog_doc_id",
+            {id(_capture_batch)},
+        ):
+            uploader_loop("h1", db, t3, "docs__test", threading.Event())
+
+        # Two batches expected: 128 + 72.
+        assert [len(b) for b in seen_in_hook] == [128, 72]
+        # Hook payload carries global chunk_index 0..127 then 128..199.
+        assert [m["chunk_index"] for m in seen_in_hook[0]] == list(range(128))
+        assert [m["chunk_index"] for m in seen_in_hook[1]] == list(range(128, 200))
+        # T3 received the unmutated copy: no ``chunk_index`` should have
+        # been injected before the T3 upsert. (The injection happens
+        # after ``upsert_chunks_with_embeddings`` returns; ``side_effect``
+        # captures the dict at call time.)
+        for batch in seen_in_t3:
+            for m in batch:
+                assert "chunk_index" not in m, (
+                    f"chunk_index leaked into T3 upsert payload: {m!r}. "
+                    f"The injection must happen AFTER "
+                    f"upsert_chunks_with_embeddings returns."
+                )
+
 
 
 class TestPipelineIndexPdf:
