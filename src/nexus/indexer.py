@@ -17,7 +17,6 @@ Per-file indexing logic lives in focused sub-modules (RDR-032):
   nexus.index_context  — IndexContext dataclass
 """
 import errno
-import fcntl
 import os
 import subprocess
 import time
@@ -27,6 +26,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from nexus._locking import lock_file, unlock_file
 from nexus.corpus import index_model_for_collection
 from nexus.retry import _chroma_with_retry, _voyage_with_retry  # noqa: F401 — re-exported for any existing imports
 from nexus.errors import CredentialsMissingError  # re-exported for backward compatibility
@@ -200,8 +200,8 @@ def _clear_stale_lock(lock_path: Path) -> None:
     The second case handles background processes (disown/&) that were killed
     before writing their PID, leaving empty 0-byte lock files forever.
 
-    This is advisory cleanup — ``fcntl.flock`` provides the real mutual
-    exclusion.
+    This is advisory cleanup — the platform lock from
+    :mod:`nexus._locking` provides the real mutual exclusion.
     """
     if not lock_path.exists():
         return
@@ -885,9 +885,8 @@ def index_repository(
             lock_fd.flush()
         except OSError:
             pass  # PID write is best-effort; lock still works without it
-        lock_flag = fcntl.LOCK_EX if on_locked == "wait" else fcntl.LOCK_EX | fcntl.LOCK_NB
         try:
-            fcntl.flock(lock_fd, lock_flag)
+            lock_file(lock_fd, blocking=(on_locked == "wait"))
         except BlockingIOError:
             # on_locked == "skip" and another process holds the lock
             lock_fd.close()
@@ -912,7 +911,7 @@ def index_repository(
             raise
     finally:
         if lock_fd is not None:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            unlock_file(lock_fd)
             lock_fd.close()
         if lock_path is not None:
             try:
