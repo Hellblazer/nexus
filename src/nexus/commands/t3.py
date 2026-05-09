@@ -806,13 +806,10 @@ def reidentify_cmd(
         reidentify_collection,
     )
 
-    if not collection and not all_collections:
+    # XOR: exactly one of --collection / --all-collections must be set.
+    if bool(collection) == bool(all_collections):
         raise click.UsageError(
-            "Specify either --collection NAME or --all-collections."
-        )
-    if collection and all_collections:
-        raise click.UsageError(
-            "--collection and --all-collections are mutually exclusive."
+            "Specify exactly one of --collection NAME or --all-collections."
         )
 
     t3_db = _make_t3_for_backfill()
