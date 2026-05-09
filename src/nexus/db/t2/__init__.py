@@ -162,6 +162,8 @@ class T2Database:
         from nexus.db.t2.telemetry import Telemetry
 
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Store path for cross-domain operations (e.g. rename_collection_cascade).
+        self._path: Path = path
 
         # ── Transient connection: run pending migrations (RDR-076) ────
         from nexus.db.migrations import _upgrade_done, _upgrade_lock, apply_pending
@@ -253,6 +255,166 @@ class T2Database:
         self.taxonomy.close()
         self.plans.close()
         self.memory.close()
+
+    # ── Atomic cascade rename (nexus-nhyh / K4) ───────────────────────────────
+
+    def rename_collection_cascade(
+        self,
+        *,
+        old: str,
+        new: str,
+        _conn: "sqlite3.Connection | None" = None,
+    ) -> dict[str, int]:
+        """Rename a collection atomically across all T2 collection tables.
+
+        nexus-nhyh / K4: runs all UPDATEs inside a single SQLite
+        transaction on a dedicated shared connection, so no partial-update
+        window exists. If any UPDATE raises, the entire transaction is
+        rolled back before the exception propagates.
+
+        Tables updated atomically:
+          - ``chash_index.physical_collection``
+          - ``document_aspects.collection`` (with collision-defense DELETE)
+          - ``aspect_extraction_queue.collection`` (with collision-defense DELETE)
+          - ``topics.collection`` / ``topic_assignments.source_collection`` /
+            ``taxonomy_meta.collection``
+          - ``search_telemetry.collection``
+          - ``hook_failures.collection`` (if table exists)
+
+        Returns a dict with counts per table. Raises on any failure --
+        the SQLite transaction is rolled back automatically.
+
+        Callers (``rename_collection_data_plane``) catch and re-raise as
+        ClickException with a non-zero exit code.
+
+        ``_conn`` is a private test-seam parameter. Production callers
+        omit it; the method opens a fresh dedicated connection. Tests
+        pass a wrapper object to inject mid-cascade failures.
+        """
+        counts: dict[str, int] = {
+            "chash": 0,
+            "aspects": 0,
+            "aspect_queue": 0,
+            "tax_topics": 0,
+            "tax_assignments": 0,
+            "tax_meta": 0,
+            "search_telemetry": 0,
+            "hook_failures": 0,
+        }
+
+        # Open a dedicated connection to the shared database file. All
+        # UPDATEs run in one BEGIN...COMMIT -- SQLite rolls back the
+        # entire transaction automatically if we close without committing.
+        owned = _conn is None
+        conn: sqlite3.Connection
+        if owned:
+            conn = sqlite3.connect(str(self._path), check_same_thread=False)
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("PRAGMA journal_mode=WAL")
+        else:
+            conn = _conn  # type: ignore[assignment]
+
+        try:
+            conn.execute("BEGIN")
+
+            # chash_index (with collision defense)
+            conn.execute(
+                "DELETE FROM chash_index "
+                "WHERE physical_collection = ? "
+                "  AND chash IN ("
+                "    SELECT chash FROM chash_index WHERE physical_collection = ?"
+                "  )",
+                (new, old),
+            )
+            cur = conn.execute(
+                "UPDATE chash_index SET physical_collection = ? "
+                "WHERE physical_collection = ?",
+                (new, old),
+            )
+            counts["chash"] = cur.rowcount
+
+            # document_aspects (with collision defense)
+            conn.execute(
+                "DELETE FROM document_aspects "
+                "WHERE collection = ? "
+                "  AND source_path IN ("
+                "    SELECT source_path FROM document_aspects WHERE collection = ?"
+                "  )",
+                (new, old),
+            )
+            cur = conn.execute(
+                "UPDATE document_aspects SET collection = ? WHERE collection = ?",
+                (new, old),
+            )
+            counts["aspects"] = cur.rowcount
+
+            # aspect_extraction_queue (with collision defense)
+            conn.execute(
+                "DELETE FROM aspect_extraction_queue "
+                "WHERE collection = ? "
+                "  AND source_path IN ("
+                "    SELECT source_path FROM aspect_extraction_queue"
+                "    WHERE collection = ?"
+                "  )",
+                (new, old),
+            )
+            cur = conn.execute(
+                "UPDATE aspect_extraction_queue "
+                "SET collection = ? WHERE collection = ?",
+                (new, old),
+            )
+            counts["aspect_queue"] = cur.rowcount
+
+            # taxonomy (three sub-tables)
+            cur = conn.execute(
+                "UPDATE topics SET collection = ? WHERE collection = ?",
+                (new, old),
+            )
+            counts["tax_topics"] = cur.rowcount
+            cur = conn.execute(
+                "UPDATE topic_assignments SET source_collection = ? "
+                "WHERE source_collection = ?",
+                (new, old),
+            )
+            counts["tax_assignments"] = cur.rowcount
+            cur = conn.execute(
+                "UPDATE taxonomy_meta SET collection = ? WHERE collection = ?",
+                (new, old),
+            )
+            counts["tax_meta"] = cur.rowcount
+
+            # search_telemetry
+            cur = conn.execute(
+                "UPDATE search_telemetry SET collection = ? WHERE collection = ?",
+                (new, old),
+            )
+            counts["search_telemetry"] = cur.rowcount
+
+            # hook_failures (optional table -- created by migration)
+            table_exists = conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master "
+                "WHERE type='table' AND name='hook_failures'"
+            ).fetchone()[0]
+            if table_exists:
+                cur = conn.execute(
+                    "UPDATE hook_failures SET collection = ? WHERE collection = ?",
+                    (new, old),
+                )
+                counts["hook_failures"] = cur.rowcount
+
+            conn.commit()
+
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            if owned:
+                conn.close()
+
+        return counts
 
     # ── Memory delegation (RDR-063 Phase 1 step 2) ────────────────────────────
     # Every memory-domain method delegates to self.memory. Signatures and

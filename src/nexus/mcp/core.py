@@ -429,6 +429,7 @@ def _record_tier_write(
 
 from nexus.mcp_infra import (
     chash_dual_write_batch_hook,
+    manifest_write_batch_hook,
     register_post_document_hook,
     register_post_store_batch_hook,
     taxonomy_assign_batch_hook,
@@ -436,6 +437,8 @@ from nexus.mcp_infra import (
 
 register_post_store_batch_hook(chash_dual_write_batch_hook)
 register_post_store_batch_hook(taxonomy_assign_batch_hook)
+# nexus-572g OBS-3: wire manifest writes into the post-store batch chain
+register_post_store_batch_hook(manifest_write_batch_hook)
 
 # RDR-089 follow-up (nexus-qeo8): document-grain hook chain consumer.
 # The synchronous-inline shape was invalidated by the P1.3 spike

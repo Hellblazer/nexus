@@ -759,6 +759,66 @@ def chash_dual_write_batch_hook(
         structlog.get_logger().debug("chash_dual_write_batch_failed", exc_info=True)
 
 
+def manifest_write_batch_hook(
+    doc_ids: list[str],
+    collection: str,
+    contents: list[str],
+    embeddings: list[list[float]] | None,
+    metadatas: list[dict] | None,
+) -> None:
+    """Registered batch hook (nexus-572g OBS-3): write document_chunks manifest
+    rows after every T3 upsert so the catalog manifest stays current without
+    manual backfill.
+
+    Groups chunk metadatas by ``doc_id``, then calls
+    ``Catalog.write_manifest`` once per document. Best-effort: any failure
+    is logged at debug level and never propagates to the caller.
+
+    Reads ``metadatas`` (uses ``chunk_text_hash``, ``chunk_index``,
+    ``chunk_start_char``, ``chunk_end_char`` fields); ignores ``contents``
+    and ``embeddings``.
+    """
+    if not metadatas:
+        return
+    from collections import defaultdict
+
+    by_doc: dict[str, list[dict]] = defaultdict(list)
+    for meta in metadatas:
+        doc_id = meta.get("doc_id", "")
+        if doc_id:
+            by_doc[doc_id].append(meta)
+    if not by_doc:
+        return
+    try:
+        cat = get_catalog()
+    except Exception:
+        import structlog
+        structlog.get_logger().debug("manifest_write_hook_no_catalog", exc_info=True)
+        return
+    for doc_id, metas in by_doc.items():
+        chunks = [
+            {
+                "chash": m.get("chunk_text_hash", ""),
+                "position": int(m.get("chunk_index", i)),
+                "chunk_index": m.get("chunk_index"),
+                "line_start": m.get("line_start") or None,
+                "line_end": m.get("line_end") or None,
+                "char_start": m.get("chunk_start_char") or None,
+                "char_end": m.get("chunk_end_char") or None,
+            }
+            for i, m in enumerate(metas)
+        ]
+        if all(not c["chash"] for c in chunks):
+            continue
+        try:
+            cat.write_manifest(doc_id, chunks)
+        except Exception:
+            import structlog
+            structlog.get_logger().debug(
+                "manifest_write_hook_failed", doc_id=doc_id, exc_info=True
+            )
+
+
 # ── Post-store document hooks (RDR-089, nexus-yyev) ──────────────────────────
 # Third hook chain — fires once per *document* after every storage event
 # (MCP store_put and every CLI ingest path). Signature is
