@@ -159,8 +159,6 @@ User direction (Hal, 2026-05-08): adopt the full normalization
 
 ## Research Findings
 
-(to be filled during /nx:rdr-research)
-
 The codebase deep-analyzer subagent produced a comprehensive
 denormalization map and decision matrix on 2026-05-08. Stored
 at:
@@ -168,33 +166,183 @@ at:
 - T3 knowledge store: `analysis-normalization-nexus-inode-identity-2026-05-08`
 - T1 scratch: `0823e897-3308-4aa7-b85b-8f0cecb6f10f`
 
-Open questions to research:
+A second pass (T1 scratch
+`209bfc7f-9ca3-4c7c-8a89-e8038950ab05`, tagged
+`rdr108-q2q3-research-2026-05-08`) and a direct prod probe
+(2026-05-08) answered the four questions raised at draft time.
+Findings are recorded in T2 as `nexus_rdr/108-research-1`
+through `108-research-4`.
 
-1. **Coverage of `chunk_text_hash`**: every chunk written since
-   when? Pre-coverage chunks need a backfill before they can
-   participate in the new identity scheme. Estimate the
-   pre-coverage chunk count and design the backfill or accept
-   re-embed cost.
-2. **Embedding reuse during migration**: can ChromaDB reuse a
-   stored embedding when re-upserting under a new natural ID?
-   If yes, the migration is metadata-only at the embedding
-   layer (cheap). If no, every chunk re-embeds (expensive
-   Voyage call).
-3. **Cross-collection `chunk_text_hash` collision**: same
-   chunk text legitimately lives in multiple collections (4,504
-   cross-collection dupes observed in the 2026-05-08 probe,
-   row 21 of the umbrella). The natural ID must include the
-   collection scope: `(collection, chunk_text_hash)` becomes
-   the compound identity. Verify ChromaDB's natural-ID model
-   supports this — the natural ID is a string, so it must
-   encode both: e.g. `f"{collection_id}:{chunk_text_hash[:32]}"`
-   or rely on per-collection scoping that ChromaDB already
-   provides. Confirm via ChromaDB docs / test.
-4. **Aspect orphan backfill correctness**: the 318
-   legacy-collection-name orphans need to be mapped to current
-   collection names via RDR-103 collection-name authority. Is
-   that mapping deterministic for every legacy name, or are
-   some unrecoverable?
+### RF-1: `chunk_text_hash` coverage = 99.02% (probe 2026-05-08)
+
+Across all 290,663 T3 chunks:
+
+- **287,803 (99.02%)** have `chunk_text_hash` populated.
+- **2,860 (0.98%)** missing the field, concentrated in two
+  collections:
+  - `taxonomy__centroids`: 2,170 chunks (100% missing). These
+    are HDBSCAN cluster centroids written by the topic-mining
+    pipeline, not source-content chunks. They have no "chunk
+    text" in the conventional sense and cannot participate in
+    the new natural-ID scheme as drafted.
+  - `docs__scheme-evolution-research-b7de0b63`: 690 chunks
+    (10.8% of 6,392 chunks in that collection). Pre-RDR-053
+    indexing artifact; the other 89% have it. Re-index of the
+    underlying source materials would backfill them.
+
+**Implication for D1**: the chunk-content corpus is effectively
+ready for the migration. Two carve-outs needed:
+
+- `taxonomy__centroids` is excluded from RDR-108 Phase 2 (it
+  uses a different identity primitive: the centroid hash
+  computed at clustering time, stored in the `topics` table).
+  Document this exception in Phase 2's command surface
+  (`nx t3 reidentify` skips taxonomy collections by default).
+- The 690 missing chunks in `docs__scheme-evolution-research-b7de0b63`
+  re-index from source as a Phase-2 prerequisite for that
+  specific collection (cost: a few minutes of Voyage embedding
+  for the 690 affected chunks).
+
+### RF-2: ChromaDB embedding reuse on re-upsert = YES (subagent verified)
+
+`col.add(ids=, documents=, embeddings=, metadatas=)` and
+`col.upsert(...)` accept externally-supplied embeddings and
+**bypass the collection's embedding function entirely** when
+`embeddings=` is non-None. This holds in Cloud mode:
+`CloudClient` is a thin REST wrapper, the EF / supplied
+decision happens client-side before the HTTP POST.
+
+**Authoritative evidence:**
+- ChromaDB SDK source
+  `chromadb/api/models/CollectionCommon.py:239-243` (add) and
+  `:444-450` (upsert): explicit `if embeddings is None: ...
+  else: use as-is` branch. The EF (`_embed_record_set`) is
+  only consulted in the `is None` branch.
+- Nexus already exercises this in production:
+  `src/nexus/db/t3.py:upsert_chunks_with_embeddings` docstring
+  states verbatim: "ChromaDB accepts pre-computed embeddings
+  when `embeddings=` is supplied to `col.upsert()`, even when
+  the collection was created with an EF attached."
+- Existing migration pattern at
+  `src/nexus/db/t2/catalog_taxonomy.py:2183` already paginates
+  `col.get(include=["embeddings"], limit=300, offset=...)` and
+  reuses vectors against real Cloud (production-tested).
+- ChromaDB cookbook FAQ ("Measure Embedding and Addition
+  Performance"): "this will add your documents and the
+  generated embeddings without Chroma doing the embedding for
+  you internally."
+
+Caveats: (a) supplied embedding dim must match the collection's
+locked dim (non-issue: voyage-code-3 and voyage-context-3 are
+both 1024-dim); (b) doc-size ≤16384 bytes still enforced;
+(c) batch ≤300 records per `upsert` (already chunked).
+
+**Implication for Phase 2**: migration is **CHEAP**. Loop is
+`col.get(include=["documents","embeddings","metadatas"])` →
+relabel IDs → `col.upsert(..., embeddings=page["embeddings"])`
+→ `col.delete(old_ids)`. Zero Voyage API calls, zero $$$.
+Dominant cost is paginated GETs (~967 per typical collection).
+
+### RF-3: ChromaDB natural-ID scope = PER-COLLECTION (subagent verified)
+
+Natural IDs are scoped to the collection's segment, not the
+database. Two collections can carry the same `id` for
+different content with no conflict.
+
+**Authoritative evidence:**
+- ChromaDB local schema
+  `chromadb/migrations/metadb/00001-embedding-metadata.sqlite.sql`:
+  `UNIQUE (segment_id, embedding_id)` — compound, scoped by
+  segment (≈ collection). No database-level uniqueness.
+- ChromaDB cookbook "Tenancy and DB Hierarchies"
+  (https://cookbook.chromadb.dev/core/concepts): records live
+  inside collections.
+- Nexus already assumes this in
+  `src/nexus/db/t2/chash_index.py:60-67` with
+  `PRIMARY KEY (chash, physical_collection)`. Module docstring
+  (lines 24-29) explicitly cites the same-paper-in-two-
+  collections case. Test
+  `tests/test_chash_index_store.py:76-92`
+  (`test_upsert_allows_same_chash_in_different_collections`)
+  locks the contract.
+
+**Implication for D1 + D4**:
+
+- **D1 valid as drafted**: use raw `chunk_text_hash[:32]` as
+  the Chroma natural ID. The 4,504 cross-collection
+  `chunk_text_hash` dupes observed in the 2026-05-08 probe
+  (umbrella row 21) are independent records under the
+  per-collection scope, not conflicts.
+- **D4 simplification valid**: the `chunk_chroma_id` column in
+  `chash_index` becomes `chash[:32]` after migration (a pure
+  function of `chash`). The compound PK
+  `(chash, physical_collection)` already encodes the
+  per-collection scope. Drop the redundant column without
+  losing addressability.
+
+### RF-4: Aspect orphan mappability = poor (probe 2026-05-08)
+
+Of the legacy-collection-name aspects flagged in nexus-je0b,
+the actual breakdown by mapping path:
+
+- **11 distinct orphan collections** (excluding test fixtures),
+  ~453 aspect rows total. (The "318 legacy" figure in the
+  earlier probe was approximate; precise counts:
+  `rdr__nexus-571b8edd` 224, `rdr__ART-8c2e74c0` 94,
+  `knowledge__art-papers` 78, `rdr__1-1__voyage-context-3__v1`
+  49, plus 7 collections with 1-2 rows each.)
+- **1 collection** has an automated `collections.superseded_by`
+  mapping in the catalog
+  (`docs__art-architecture → docs__1-2153__voyage-context-3__v1`).
+- **0 of 11** mapped via the owner-prefix heuristic
+  (`<type>__<owner_token>__<embedding>__v<n>`). The legacy
+  hashes don't decode to current owner tumblers.
+- **Manual disposition needed for 10 of 11.**
+
+**Implication for D2**: the original Phase 1 plan
+("backfill via RDR-103 collection-name authority where
+possible") cannot run automated. Three sub-strategies, each a
+real choice:
+
+1. **Backfill the supersede chain first** — before Phase 1's
+   PK migration runs, populate `collections.superseded_by`
+   for the 10 unmapped legacy names by hand-curated review.
+   Then Phase 1's automated mapping covers all of them. Cost:
+   ~30 minutes of operator time to inspect each legacy-orphan
+   collection and decide its successor.
+2. **Hard-delete unmapped orphans** — if a legacy collection
+   has no clear successor, treat its aspect rows as stale and
+   delete. Cost: lose ≤453 rows of LLM-extracted aspect data
+   permanently. Lowest operator effort; clean schema; some
+   data loss.
+3. **Migrate aspects with `collection=NULL`** — preserve the
+   data with `collection` set to NULL or the legacy string;
+   the new PK is `(doc_id)` so collection becomes a denorm
+   cache only. The legacy-string rows still resolve via
+   `doc_id` if the underlying document is in the catalog;
+   otherwise they are true orphans.
+
+**Recommendation**: option 1 (backfill supersede chain first)
+for the 4 high-row-count orphans (`rdr__nexus-571b8edd` 224,
+`rdr__ART-8c2e74c0` 94, `knowledge__art-papers` 78,
+`rdr__1-1__voyage-context-3__v1` 49 = 445 rows / 98% of the
+orphan corpus). Option 2 (hard-delete) for the remaining 7
+collections with 1-2 rows each. Decision deferred to gate
+time; document operator workflow.
+
+### Open follow-ups (not blocking)
+
+- **`taxonomy__centroids` natural-ID strategy**: separate RDR
+  or note in RDR-108 Phase 4. Centroids are computed
+  artifacts, not source chunks, and may use the existing
+  `centroid_hash` from the `topics` table as their identity.
+  Worth tracking as a follow-up bead post-acceptance, not
+  blocking RDR-108.
+- **`docs__scheme-evolution-research-b7de0b63` partial
+  coverage**: Phase-2 prerequisite for that specific
+  collection; either re-index the source materials (preferred)
+  or hard-delete the 690 pre-RDR-053 chunks (cheaper).
+  Operator choice.
 
 ## Proposed Solution
 
@@ -208,13 +356,14 @@ Four locked decisions per Hal direction (2026-05-08):
 # Current (code_indexer.py:380)
 chunk_chroma_id = sha256(f"{corpus}:{title}:chunk{i}").hexdigest()[:32]
 
-# Proposed
-chunk_chroma_id = chunk_text_hash[:32]  # already a sha256 hex
-# OR if cross-collection scoping isn't free:
-chunk_chroma_id = sha256(f"{collection}:{chunk_text_hash}").hexdigest()[:32]
+# Proposed (per RF-3: per-collection scope eliminates collision risk)
+chunk_chroma_id = chunk_text_hash[:32]
 ```
 
-Decided during /nx:rdr-research after question 3 above.
+RF-3 confirmed ChromaDB natural IDs are per-collection
+scoped, so raw `chunk_text_hash[:32]` is safe; the same hash
+in two different collections is two independent records, not a
+conflict.
 
 Consequences:
 - `upsert` is truly idempotent. Same chunk text → same Chroma
@@ -394,12 +543,22 @@ research questions in §"Research Findings" are answered and
   reference to `collections(name)`. Backfill `collections`
   rows for any physical_collection value that doesn't have
   one yet.
+- **Pre-step (per RF-4)**: hand-curate
+  `collections.superseded_by` mappings for the 4 high-row-count
+  legacy orphan collections (`rdr__nexus-571b8edd` 224,
+  `rdr__ART-8c2e74c0` 94, `knowledge__art-papers` 78,
+  `rdr__1-1__voyage-context-3__v1` 49 = 445 rows / 98% of
+  legacy-orphan corpus). Operator inspects each and decides
+  the current target. The remaining 7 collections (1-2 rows
+  each) are hard-deleted at the end of Phase 1.
 - `document_aspects` PK migration:
   1. Add `doc_id TEXT NOT NULL DEFAULT ''` column.
   2. Backfill: for each row, look up the catalog doc_id via
-     `(collection, file_path)` JOIN. Hard-delete the 118
-     test-fixture orphans. Surface the 136 other orphans for
-     manual review.
+     `(collection, file_path)` JOIN. For rows whose collection
+     was just supersede-mapped, follow the supersede chain
+     before the JOIN. Hard-delete the 118 test-fixture
+     orphans. Surface any remaining unmapped rows for manual
+     review.
   3. Swap PK from `(collection, source_path)` to `(doc_id)`.
   4. Keep `collection` and `source_path` as denorm cache
      columns for read filters and display.
@@ -409,23 +568,33 @@ research questions in §"Research Findings" are answered and
 
 ### Phase 2: Chunk Chroma natural ID switch (T3 re-upsert)
 
+**Per RF-2: migration is cheap, no Voyage re-embed.**
+
 Per collection, paginated:
 
-1. Fetch all chunks via `col.get(limit=300, offset=...)` with
-   metadatas.
-2. For each chunk, compute new natural ID from
-   `chunk_text_hash` (per question-3 resolution).
+1. Fetch all chunks via
+   `col.get(limit=300, offset=..., include=["documents", "embeddings", "metadatas"])`.
+2. For each chunk, compute new natural ID = `chunk_text_hash[:32]`
+   (per RF-3, raw form, no collection scoping needed).
 3. If the new ID differs from the old, re-upsert under the new
-   ID. Reuse the existing embedding if ChromaDB allows
-   (per question-2 resolution); otherwise re-embed.
+   ID with `embeddings=page["embeddings"]` (existing vector,
+   no Voyage call per RF-2).
 4. After all chunks for a collection are re-upserted, delete
    the old IDs in batches of 300.
 5. Update `chash_index.chunk_chroma_id` to match (or drop the
-   column per Phase 4).
+   column per Phase 3).
 
 This phase is collection-by-collection to bound risk. A
 failure mid-collection is recoverable by replaying the same
 phase against that collection.
+
+**Carve-outs per RF-1**:
+- `taxonomy__centroids`: skip; uses centroid-hash identity
+  from the `topics` table, not chunk_text_hash.
+- `docs__scheme-evolution-research-b7de0b63`: re-index 690
+  pre-RDR-053 chunks from source as a pre-step (only ~few
+  minutes of Voyage embedding for that subset; the rest of
+  the collection migrates normally).
 
 ### Phase 3: chash_index simplification
 
@@ -462,31 +631,57 @@ phase against that collection.
 
 ## Test Plan
 
-(to be filled during /nx:rdr-research)
-
-Sketch:
-
-- **Regression**: re-index a code file twice with a line-shift
-  edit; assert (a) chunk_chroma_id is unchanged for chunks
-  whose text didn't shift, (b) chunks whose text changed
-  result in new IDs, (c) old IDs are physically replaced (not
-  duplicated).
-- **Aspect PK migration**: backfill fixture with three rows
-  (matching catalog, legacy-collection-name with mappable
-  RDR-103 successor, legacy-collection-name with no successor);
-  assert all three resolve to the right state.
-- **Cascade test**: rename a collection via
-  `Catalog.rename_collection`; assert document_aspects rows
-  pointing at the old name are updated to the new name (or
-  unchanged if PK is doc_id-keyed and collection is denorm).
-- **chash_index FK enforcement**: insert a chash_index row
-  pointing at a non-existent collection; assert it raises (or
-  is silently dropped if the FK is `ON DELETE CASCADE`).
-- **Cross-collection chash collision**: insert the same
-  `chunk_text_hash` into two collections; assert both rows
-  exist (compound PK satisfied) and routing returns both.
+- **Regression — content-derived ID stability**: re-index a
+  code file twice with a line-shift edit (insert a function at
+  the top so all subsequent chunks shift line numbers). Assert
+  (a) `chunk_chroma_id` is unchanged for chunks whose text
+  didn't shift (only their position did), (b) chunks whose
+  text changed get new IDs, (c) old IDs for replaced chunks
+  are physically removed by the standard `nx t3 gc` path.
+- **Embedding reuse on re-upsert** (per RF-2): build a
+  fixture with N chunks whose embeddings are known. Run
+  `col.get(include=["embeddings"])`, re-upsert under new IDs
+  with `embeddings=` populated, fetch back, assert the
+  embeddings are byte-identical (no re-embedding occurred).
+  Catches any Cloud-mode regression that bypasses the
+  externally-supplied path.
+- **Per-collection ID scope** (per RF-3): insert the same
+  `chunk_text_hash[:32]` as a natural ID into two different
+  collections with distinct content. Assert (a) both `add`
+  calls succeed, (b) `col_A.get(ids=[chash])` and
+  `col_B.get(ids=[chash])` return the distinct content.
+- **Aspect PK migration backfill**: fixture with five rows:
+  (a) matching catalog, (b) legacy-collection-name with
+  hand-curated supersede mapping, (c) legacy-collection-name
+  with NO supersede (test-fixture pattern), (d) test-fixture
+  collection (`knowledge__cli-...`), (e) collection unknown
+  to catalog. Assert (a) and (b) migrate to the correct
+  doc_id, (c) and (d) are hard-deleted, (e) is surfaced for
+  manual review (no silent loss).
+- **Catalog rename cascades to document_aspects**: rename a
+  collection via `Catalog.rename_collection`; assert the
+  denorm `collection` column on `document_aspects` rows
+  updates atomically with the FK target.
+- **chash_index FK enforcement**: attempt to INSERT a
+  chash_index row pointing at a non-existent
+  `physical_collection`; assert FK violation. Then attempt
+  delete-cascade behavior: delete a collection row; assert
+  chash_index rows referencing it are removed (or rejected if
+  ON DELETE RESTRICT).
+- **Cross-collection chash routing**: insert the same
+  `chunk_text_hash` into two collections; assert
+  `chash_index.lookup(chash)` returns both rows.
 - **Quota compliance**: migration batches respect
-  MAX_RECORDS_PER_WRITE = 300.
+  `chroma_quotas.MAX_RECORDS_PER_WRITE = 300` for both
+  `col.get` (page size) and `col.upsert` / `col.delete`
+  (batch size).
+- **Carve-out — `taxonomy__centroids`**: assert
+  `nx t3 reidentify` skips this collection by default and
+  emits a structured log entry naming it as exempt.
+- **Carve-out — pre-RDR-053 partial-coverage collection**:
+  assert that running Phase 2 against
+  `docs__scheme-evolution-research-b7de0b63` requires the
+  690-chunk re-index pre-step or fails loud.
 
 ## Validation
 
