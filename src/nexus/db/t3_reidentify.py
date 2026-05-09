@@ -7,6 +7,16 @@ the migration is free of Voyage calls. After all chunks for a
 collection have been re-upserted, the old chunk IDs are batch-deleted
 in groups of 300 (the ChromaDB write quota).
 
+The implementation uses a two-pass design (divergence from the RDR-108
+RF-6 pseudocode, which prescribed a single loop interleaving
+``col.get(offset)`` and ``col.upsert``). Pass 1 paginates by offset to
+collect every original chunk id with NO writes; pass 2 processes the
+collected ids in batches via exact-id ``col.get(ids=batch)`` lookups,
+which are immune to in-loop collection mutation. The naive single-pass
+form is unsafe because mid-loop upserts add records that shift
+offset-pagination semantics, causing later pages to either re-visit or
+skip chunks (see ``test_multi_page_iteration_migrates_all_chunks``).
+
 The loop is idempotent (re-running on a fully-migrated collection is
 a zero-write no-op) and crash-resumable (a partial run can be
 re-invoked safely; the filter naturally skips already-migrated chunks
@@ -86,18 +96,28 @@ def reidentify_collection(
 ) -> ReidentifyResult:
     """Re-upsert every chunk in ``collection_name`` under chunk_text_hash[:32].
 
-    Per-collection paginated loop following RDR-108 RF-6:
+    Two-pass per-collection loop:
 
-      1. ``col.get(limit=300, offset=N, include=[documents, embeddings, metadatas])``
-      2. For each chunk, compute ``new_id = meta["chunk_text_hash"][:32]``.
-         Skip silently if ``cid == new_id`` (already migrated).
-      3. Strip ``doc_id`` / ``chunk_index`` / ``chunk_count`` from metadata
-         (the catalog manifest is now authoritative for those fields).
-      4. ``col.upsert(ids=new, documents=..., embeddings=..., metadatas=...)``
-         — pre-computed embeddings bypass the embedding function (no Voyage
-         call).
-      5. After the get-loop completes, batch-delete the collected old IDs
-         in groups of 300.
+      Pass 1 (id discovery): paginate ``col.get(limit=300, offset=N, include=[])``
+      until exhaustion, collecting every original chunk id. No writes.
+
+      Pass 2 (process): for each batch of <=300 collected ids,
+        a. ``col.get(ids=batch, include=[documents, embeddings, metadatas])``
+        b. Compute ``new_id = meta["chunk_text_hash"][:32]`` per chunk.
+           Skip silently if ``cid == new_id`` (already migrated).
+        c. Strip ``doc_id`` / ``chunk_index`` / ``chunk_count`` from
+           metadata (catalog manifest is authoritative for those).
+        d. ``col.upsert(ids=new, documents=..., embeddings=..., metadatas=...)``
+           — pre-computed embeddings bypass the embedding function
+           (no Voyage call).
+
+      Phase 2b (cleanup): batch-delete the collected old ids in groups
+      of 300.
+
+    The two-pass form sidesteps the offset-instability that plagues the
+    naive single-pass loop (in-loop upserts add records, shifting offset
+    semantics for later pages). Exact-id lookups in pass 2 are immune to
+    collection mutation.
 
     Args:
         t3: T3Database for ChromaDB access.
@@ -129,19 +149,46 @@ def reidentify_collection(
         )
         return result
 
-    seen_old_ids: set[str] = set()
+    # Two-pass design:
+    #
+    #   Pass 1: paginate by offset, collecting only the cid list. No writes
+    #           happen during pass 1, so offset semantics stay valid.
+    #
+    #   Pass 2: process in batches of <=_PAGE_SIZE, fetching each batch via
+    #           col.get(ids=batch) (exact-id lookup, not offset-based). New
+    #           upserts during pass 2 don't disturb iteration because we
+    #           already know the full original cid set.
+    #
+    # The naive "paginate-and-upsert in one loop" pattern from RDR-108 RF-6
+    # is unsafe: in-loop upserts add records to the collection, shifting
+    # offset semantics so later pages either re-visit migrated chunks or
+    # skip un-migrated ones. The two-pass form is correctness-preserving
+    # and equally idempotent / resumable.
+    all_cids: list[str] = []
     offset = 0
     while True:
         page = _chroma_with_retry(
-            col.get,
-            limit=_PAGE_SIZE,
-            offset=offset,
-            include=["documents", "embeddings", "metadatas"],
+            col.get, limit=_PAGE_SIZE, offset=offset, include=[]
         )
         page_ids: list[str] = page.get("ids") or []
         if not page_ids:
             break
+        all_cids.extend(page_ids)
+        if len(page_ids) < _PAGE_SIZE:
+            break
+        offset += _PAGE_SIZE
 
+    seen_old_ids: set[str] = set()
+    seen_new_ids: set[str] = set()
+
+    for start in range(0, len(all_cids), _PAGE_SIZE):
+        cid_batch = all_cids[start : start + _PAGE_SIZE]
+        page = _chroma_with_retry(
+            col.get,
+            ids=cid_batch,
+            include=["documents", "embeddings", "metadatas"],
+        )
+        page_ids = page.get("ids") or []
         page_docs = page.get("documents") or [None] * len(page_ids)
         page_embs = page.get("embeddings")
         if page_embs is None:
@@ -152,11 +199,6 @@ def reidentify_collection(
         docs_to_upsert: list[str] = []
         embs_to_upsert: list = []
         metas_to_upsert: list[dict] = []
-        # Dedupe within-page identical-text collisions: chromadb.upsert
-        # rejects duplicate IDs within a single call. Two chunks in the
-        # same page sharing chunk_text_hash[:32] mean identical text, so
-        # the second upsert would carry the same content anyway.
-        seen_new_ids_in_page: set[str] = set()
 
         for cid, doc, emb, meta in zip(
             page_ids, page_docs, page_embs, page_metas
@@ -174,11 +216,12 @@ def reidentify_collection(
                 continue
 
             seen_old_ids.add(cid)
-            if new_id in seen_new_ids_in_page:
-                # Identical-text collapse: still need to delete the old
-                # cid, but skip the redundant upsert.
+            if new_id in seen_new_ids:
+                # Identical-text collapse (within-batch or cross-batch):
+                # still need to delete the old cid, but skip the
+                # redundant upsert so chromadb doesn't reject a duplicate.
                 continue
-            seen_new_ids_in_page.add(new_id)
+            seen_new_ids.add(new_id)
 
             new_meta = {
                 k: v for k, v in meta.items()
@@ -199,10 +242,6 @@ def reidentify_collection(
             )
 
         result.chunks_migrated += len(ids_to_upsert)
-
-        if len(page_ids) < _PAGE_SIZE:
-            break
-        offset += _PAGE_SIZE
 
     if not dry_run and seen_old_ids:
         old_ids_list = list(seen_old_ids)

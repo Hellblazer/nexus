@@ -271,7 +271,12 @@ class TestReidentifyCollection:
         assert coll in str(exc_info.value)
 
     def test_within_collection_identical_chunks_collapse(self, t3_db):
-        """Identical chunk text in the same collection collapses to one T3 record."""
+        """Identical chunk text in the same collection collapses to one T3 record.
+
+        Both old cids must still be deleted: the second duplicate is dropped
+        from the upsert batch (chromadb rejects duplicate ids in one call)
+        but its cid is added to seen_old_ids and Phase 2b deletes it.
+        """
         from nexus.db.t3_reidentify import reidentify_collection
 
         coll = _unique_coll()
@@ -284,10 +289,12 @@ class TestReidentifyCollection:
             content="identical text", chunk_text_hash="1" * 64,
         )
 
-        reidentify_collection(t3_db, coll, dry_run=False)
+        result = reidentify_collection(t3_db, coll, dry_run=False)
 
         ids = _ids_in(t3_db, coll)
         assert ids == {"1" * 32}
+        # Both old cids deleted (collapse-path doesn't skip cleanup).
+        assert result.chunks_deleted == 2
 
     def test_cross_collection_chash_dedup_independent(self, t3_db):
         """Same chunk text in two collections produces independent records.
@@ -351,6 +358,41 @@ class TestReidentifyCollection:
 
 class TestReidentifyPagination:
     """Verify quota compliance: page size <= 300, batch deletes <= 300."""
+
+    def test_multi_page_iteration_migrates_all_chunks(self, t3_db):
+        """Multi-page pagination correctly walks past page 1.
+
+        Patches _PAGE_SIZE to 3 so seven seeded chunks span three pages
+        (3 + 3 + 1). The chunk_text_hash values are constructed so each
+        chunk's first 32 chars are unique (variation in the high nibbles,
+        not the low ones).
+        """
+        from nexus.db import t3_reidentify
+        from nexus.db.t3_reidentify import reidentify_collection
+
+        coll = _unique_coll()
+        # Hashes vary in the FIRST 32 chars so chunk_text_hash[:32] is
+        # distinct per chunk. Pattern: digit i repeated 32 times, then
+        # zeros to pad to 64 chars.
+        new_ids_expected = []
+        for i in range(7):
+            chash = (str(i) * 32) + ("0" * 32)
+            new_ids_expected.append(chash[:32])
+            _seed_chunk(
+                t3_db, collection=coll, chunk_id=f"legacy-{i}",
+                content=f"content-{i}", chunk_text_hash=chash,
+            )
+
+        with patch.object(t3_reidentify, "_PAGE_SIZE", 3):
+            result = reidentify_collection(t3_db, coll, dry_run=False)
+
+        assert result.chunks_examined == 7
+        assert result.chunks_migrated == 7
+        assert result.chunks_deleted == 7
+        ids = _ids_in(t3_db, coll)
+        for i, new_id in enumerate(new_ids_expected):
+            assert f"legacy-{i}" not in ids
+            assert new_id in ids
 
     def test_get_page_size_never_exceeds_300(self, t3_db):
         """col.get is called with limit <= 300."""
