@@ -168,6 +168,50 @@ def prune_stale_cmd(collection: str, dry_run: bool, confirm: bool) -> None:
     total_stale_chunks = 0
     affected_collections = 0
 
+    # nexus-6ims: relative source_paths must resolve against the
+    # owning catalog document's owner.repo_root, not against the
+    # running process's cwd. Open the catalog so we can join.
+    from nexus.catalog.catalog import Catalog
+    from nexus.config import catalog_path as _catalog_path
+    cat_dir = _catalog_path()
+    cat: Catalog | None = None
+    owner_roots: dict[str, str] = {}
+    if (cat_dir / "documents.jsonl").exists():
+        try:
+            cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+            owner_roots = dict(cat._db.execute(
+                "SELECT tumbler_prefix, repo_root FROM owners "
+                "WHERE repo_root != ''"
+            ))
+        except Exception as exc:
+            click.echo(f"WARN: catalog not available for owner lookup: {exc}")
+
+    def _resolve(path_str: str) -> Path | None:
+        """Resolve a chunk source_path. Absolute → as-is. Relative → look
+        up the owning document's owner.repo_root and prepend. Returns
+        None if no owner.repo_root anchor available."""
+        if path_str.startswith("/"):
+            return Path(path_str)
+        if not cat:
+            return None
+        # Find any catalog document with this file_path; take its owner.
+        row = cat._db.execute(
+            "SELECT tumbler FROM documents WHERE file_path = ? LIMIT 1",
+            (path_str,),
+        ).fetchone()
+        if not row:
+            return None
+        parts = row[0].split(".")
+        if len(parts) < 2:
+            return None
+        owner_id = ".".join(parts[:2])
+        root = owner_roots.get(owner_id)
+        if not root:
+            return None
+        return Path(root) / path_str
+
+    skipped_unverifiable = 0
+
     for coll_name in target_collections:
         try:
             unique_paths = t3_db.list_unique_source_paths(coll_name)
@@ -175,7 +219,17 @@ def prune_stale_cmd(collection: str, dry_run: bool, confirm: bool) -> None:
             click.echo(f"  {coll_name}: SKIP (list failed: {exc})")
             continue
 
-        stale_paths: list[str] = [p for p in unique_paths if not Path(p).exists()]
+        stale_paths: list[str] = []
+        for p in unique_paths:
+            resolved = _resolve(p)
+            if resolved is None:
+                # Relative path with no owner anchor — refuse to
+                # classify (would have falsely deleted under the
+                # nexus-6ims pre-fix logic).
+                skipped_unverifiable += 1
+                continue
+            if not resolved.exists():
+                stale_paths.append(p)
         if not stale_paths:
             continue
 
@@ -208,6 +262,12 @@ def prune_stale_cmd(collection: str, dry_run: bool, confirm: bool) -> None:
         f"across {total_stale_paths} stale path(s) "
         f"in {affected_collections} collection(s)."
     )
+    if skipped_unverifiable:
+        click.echo(
+            f"  Skipped {skipped_unverifiable} relative-path entries "
+            f"whose owning document has no owner.repo_root — cannot "
+            f"verify presence (nexus-6ims fail-safe)."
+        )
 
 
 @t3.command("gc")
