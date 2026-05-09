@@ -42,30 +42,30 @@ class TestChashIndexStoreBasics:
 
         store = ChashIndex(tmp_path / "t2.db")
         try:
-            store.upsert(chash="abc123", collection="code__foo", chunk_chroma_id="d1")
+            store.upsert(chash="abc123", collection="code__foo")
             rows = store.conn.execute(
-                "SELECT chash, physical_collection, chunk_chroma_id FROM chash_index"
+                "SELECT chash, physical_collection FROM chash_index"
             ).fetchall()
-            assert rows == [("abc123", "code__foo", "d1")]
+            assert rows == [("abc123", "code__foo")]
         finally:
             store.close()
 
     def test_upsert_replaces_duplicate_within_same_collection(self, tmp_path: Path) -> None:
-        """Re-indexing the same file: INSERT OR REPLACE updates doc_id + created_at."""
+        """Re-indexing the same chunk: INSERT OR REPLACE refreshes created_at."""
         from nexus.db.t2.chash_index import ChashIndex
 
         store = ChashIndex(tmp_path / "t2.db")
         try:
-            store.upsert(chash="abc", collection="code__foo", chunk_chroma_id="d1")
+            store.upsert(chash="abc", collection="code__foo")
             first_created = store.conn.execute(
                 "SELECT created_at FROM chash_index WHERE chash=?", ("abc",)
             ).fetchone()[0]
-            # Second write with different doc_id, same (chash, collection).
-            store.upsert(chash="abc", collection="code__foo", chunk_chroma_id="d2")
+            # Re-upsert under the same (chash, collection) PK.
+            store.upsert(chash="abc", collection="code__foo")
             rows = store.conn.execute(
-                "SELECT chash, physical_collection, chunk_chroma_id FROM chash_index"
+                "SELECT chash, physical_collection FROM chash_index"
             ).fetchall()
-            assert rows == [("abc", "code__foo", "d2")]  # REPLACEd, not duplicated.
+            assert rows == [("abc", "code__foo")]  # REPLACEd, not duplicated.
             new_created = store.conn.execute(
                 "SELECT created_at FROM chash_index WHERE chash=?", ("abc",)
             ).fetchone()[0]
@@ -74,41 +74,40 @@ class TestChashIndexStoreBasics:
             store.close()
 
     def test_upsert_allows_same_chash_in_different_collections(self, tmp_path: Path) -> None:
-        """Compound PK contract — same chunk text in two collections: both rows coexist."""
+        """Compound PK contract: same chunk text in two collections, both rows coexist."""
         from nexus.db.t2.chash_index import ChashIndex
 
         store = ChashIndex(tmp_path / "t2.db")
         try:
-            store.upsert(chash="abc", collection="knowledge__delos",         chunk_chroma_id="d1")
-            store.upsert(chash="abc", collection="knowledge__delos_docling", chunk_chroma_id="d2")
+            store.upsert(chash="abc", collection="knowledge__delos")
+            store.upsert(chash="abc", collection="knowledge__delos_docling")
             rows = sorted(store.conn.execute(
-                "SELECT chash, physical_collection, chunk_chroma_id FROM chash_index"
+                "SELECT chash, physical_collection FROM chash_index"
             ).fetchall())
             assert rows == [
-                ("abc", "knowledge__delos",         "d1"),
-                ("abc", "knowledge__delos_docling", "d2"),
+                ("abc", "knowledge__delos"),
+                ("abc", "knowledge__delos_docling"),
             ]
         finally:
             store.close()
 
     def test_lookup_returns_all_matches(self, tmp_path: Path) -> None:
-        """``lookup(chash)`` returns every (collection, doc_id) pair for the chash."""
+        """``lookup(chash)`` returns every collection that holds the chash."""
         from nexus.db.t2.chash_index import ChashIndex
 
         store = ChashIndex(tmp_path / "t2.db")
         try:
-            store.upsert(chash="abc", collection="A", chunk_chroma_id="d1")
-            store.upsert(chash="abc", collection="B", chunk_chroma_id="d2")
-            store.upsert(chash="xyz", collection="A", chunk_chroma_id="d3")
+            store.upsert(chash="abc", collection="A")
+            store.upsert(chash="abc", collection="B")
+            store.upsert(chash="xyz", collection="A")
 
             results = store.lookup("abc")
-            assert sorted((r["collection"], r["chunk_chroma_id"]) for r in results) == [
-                ("A", "d1"),
-                ("B", "d2"),
-            ]
+            assert sorted(r["collection"] for r in results) == ["A", "B"]
+            # RDR-108 mmf5: chunk_chroma_id no longer in the row dict.
+            assert "chunk_chroma_id" not in results[0]
 
             results = store.lookup("xyz")
-            assert [(r["collection"], r["chunk_chroma_id"]) for r in results] == [("A", "d3")]
+            assert [r["collection"] for r in results] == ["A"]
 
             results = store.lookup("notfound")
             assert results == []
@@ -121,17 +120,17 @@ class TestChashIndexStoreBasics:
 
         store = ChashIndex(tmp_path / "t2.db")
         try:
-            store.upsert(chash="abc", collection="A", chunk_chroma_id="d1")
-            store.upsert(chash="abc", collection="B", chunk_chroma_id="d2")
-            store.upsert(chash="xyz", collection="A", chunk_chroma_id="d3")
+            store.upsert(chash="abc", collection="A")
+            store.upsert(chash="abc", collection="B")
+            store.upsert(chash="xyz", collection="A")
 
             deleted = store.delete_collection("A")
             assert deleted == 2
 
             remaining = sorted(store.conn.execute(
-                "SELECT chash, physical_collection, chunk_chroma_id FROM chash_index"
+                "SELECT chash, physical_collection FROM chash_index"
             ).fetchall())
-            assert remaining == [("abc", "B", "d2")]
+            assert remaining == [("abc", "B")]
 
             # Idempotent: second delete is a 0-row no-op.
             assert store.delete_collection("A") == 0
@@ -158,7 +157,6 @@ class TestChashIndexConcurrency:
                 store.upsert(
                     chash=f"chash_{i:04d}",
                     collection=f"coll_{i % 8}",
-                    chunk_chroma_id=f"doc_{i}",
                 )
 
             with ThreadPoolExecutor(max_workers=3) as ex:
@@ -186,7 +184,7 @@ class TestT2DatabaseFacadeWiring:
         try:
             assert hasattr(db, "chash_index"), "T2Database must expose db.chash_index"
             # Reachable through the facade + functional.
-            db.chash_index.upsert(chash="abc", collection="A", chunk_chroma_id="d1")
+            db.chash_index.upsert(chash="abc", collection="A")
             results = db.chash_index.lookup("abc")
             assert results and results[0]["collection"] == "A"
         finally:
@@ -215,7 +213,7 @@ class TestChashIndexErrors:
         store = ChashIndex(tmp_path / "t2.db")
         try:
             with pytest.raises(ValueError, match="chash"):
-                store.upsert(chash="", collection="A", chunk_chroma_id="d1")
+                store.upsert(chash="", collection="A")
         finally:
             store.close()
 
@@ -225,17 +223,7 @@ class TestChashIndexErrors:
         store = ChashIndex(tmp_path / "t2.db")
         try:
             with pytest.raises(ValueError, match="collection"):
-                store.upsert(chash="abc", collection="", chunk_chroma_id="d1")
-        finally:
-            store.close()
-
-    def test_upsert_raises_on_empty_chunk_chroma_id(self, tmp_path: Path) -> None:
-        from nexus.db.t2.chash_index import ChashIndex
-
-        store = ChashIndex(tmp_path / "t2.db")
-        try:
-            with pytest.raises(ValueError, match="chunk_chroma_id"):
-                store.upsert(chash="abc", collection="A", chunk_chroma_id="")
+                store.upsert(chash="abc", collection="")
         finally:
             store.close()
 
@@ -262,9 +250,9 @@ class TestChashesForCollection:
         store = ChashIndex(tmp_path / "t2.db")
         try:
             full = "a" * 64
-            store.upsert(chash=full, collection="code__foo", chunk_chroma_id=full[:32])
-            store.upsert(chash="b" * 64, collection="code__foo", chunk_chroma_id=("b" * 64)[:32])
-            store.upsert(chash="c" * 64, collection="code__bar", chunk_chroma_id=("c" * 64)[:32])
+            store.upsert(chash=full, collection="code__foo")
+            store.upsert(chash="b" * 64, collection="code__foo")
+            store.upsert(chash="c" * 64, collection="code__bar")
 
             foo = store.chashes_for_collection("code__foo")
             bar = store.chashes_for_collection("code__bar")
@@ -280,7 +268,7 @@ class TestChashesForCollection:
         from nexus.db.t2.chash_index import ChashIndex
         store = ChashIndex(tmp_path / "t2.db")
         try:
-            store.upsert(chash="a" * 32, collection="code__foo", chunk_chroma_id="a" * 32)
+            store.upsert(chash="a" * 32, collection="code__foo")
             assert store.chashes_for_collection("code__foo") == {"a" * 32}
         finally:
             store.close()
@@ -301,8 +289,8 @@ class TestChashIndexEncapsulation:
 
         store = ChashIndex(tmp_path / "t2.db")
         try:
-            store.upsert(chash="aa", collection="c1", chunk_chroma_id="d1")
-            store.upsert(chash="aa", collection="c2", chunk_chroma_id="d2")
+            store.upsert(chash="aa", collection="c1")
+            store.upsert(chash="aa", collection="c2")
             removed = store.delete_stale(chash="aa", collection="c1")
             assert removed == 1
             rows = sorted(store.conn.execute(
@@ -333,7 +321,7 @@ class TestChashIndexEncapsulation:
             # Seed 100 rows, then have two threads racing delete_stale + upsert
             # on disjoint keys. Both must complete without DB lock errors.
             for i in range(100):
-                store.upsert(chash=f"h{i:03d}", collection="race", chunk_chroma_id=f"d{i}")
+                store.upsert(chash=f"h{i:03d}", collection="race")
 
             errors: list[BaseException] = []
 
@@ -351,7 +339,6 @@ class TestChashIndexEncapsulation:
                     for i in range(100, 150):
                         store.upsert(
                             chash=f"h{i:03d}", collection="race",
-                            chunk_chroma_id=f"d{i}",
                         )
                 except BaseException as e:
                     errors.append(e)
@@ -377,7 +364,7 @@ class TestChashIndexEncapsulation:
 
         store = ChashIndex(tmp_path / "t2.db")
         try:
-            store.upsert(chash="h", collection="c", chunk_chroma_id="d")
+            store.upsert(chash="h", collection="c")
             assert store.is_empty() is False
         finally:
             store.close()
@@ -406,12 +393,12 @@ class TestDualWriteHelper:
             dual_write_chash_index(store, "code__foo", ids, metadatas)
 
             rows = sorted(store.conn.execute(
-                "SELECT chash, physical_collection, chunk_chroma_id FROM chash_index"
+                "SELECT chash, physical_collection FROM chash_index"
             ).fetchall())
             assert rows == [
-                ("hash1", "code__foo", "doc1"),
-                ("hash2", "code__foo", "doc2"),
-                ("hash3", "code__foo", "doc3"),
+                ("hash1", "code__foo"),
+                ("hash2", "code__foo"),
+                ("hash3", "code__foo"),
             ]
         finally:
             store.close()
@@ -424,7 +411,7 @@ class TestDualWriteHelper:
         dual_write_chash_index(None, "any", ["d1"], [{"chunk_text_hash": "h1"}])
 
     def test_dual_write_skips_empty_chash_metadata(self, tmp_path: Path) -> None:
-        """Some legacy / test-only metadata paths omit chunk_text_hash — don't write empty rows."""
+        """Some legacy / test-only metadata paths omit chunk_text_hash; don't write empty rows."""
         from nexus.db.t2.chash_index import ChashIndex, dual_write_chash_index
 
         store = ChashIndex(tmp_path / "t2.db")
@@ -438,9 +425,9 @@ class TestDualWriteHelper:
             dual_write_chash_index(store, "coll", ids, metadatas)
 
             rows = store.conn.execute(
-                "SELECT chash, chunk_chroma_id FROM chash_index"
+                "SELECT chash, physical_collection FROM chash_index"
             ).fetchall()
-            assert rows == [("hash1", "doc1")]
+            assert rows == [("hash1", "coll")]
         finally:
             store.close()
 
@@ -451,11 +438,11 @@ class TestDualWriteHelper:
 
         store = ChashIndex(tmp_path / "t2.db")
         try:
-            # First row has invalid args that ChashIndex.upsert rejects;
-            # second and third must still land.
-            ids = ["", "doc2", "doc3"]
+            # First row has empty chunk_text_hash that ChashIndex.upsert
+            # rejects; the other two must still land.
+            ids = ["doc1", "doc2", "doc3"]
             metadatas = [
-                {"chunk_text_hash": "hash1"},
+                {"chunk_text_hash": ""},
                 {"chunk_text_hash": "hash2"},
                 {"chunk_text_hash": "hash3"},
             ]
@@ -465,9 +452,9 @@ class TestDualWriteHelper:
 
             # Rows with valid args still inserted.
             rows = sorted(store.conn.execute(
-                "SELECT chash, chunk_chroma_id FROM chash_index"
+                "SELECT chash, physical_collection FROM chash_index"
             ).fetchall())
-            assert rows == [("hash2", "doc2"), ("hash3", "doc3")]
+            assert rows == [("hash2", "coll"), ("hash3", "coll")]
         finally:
             store.close()
 
@@ -524,11 +511,11 @@ class TestChashDualWriteBatchEntryPoint:
         )
 
         with T2Database(db_path) as db:
-            assert db.chash_index.lookup("aa11") == [
-                {"collection": "code__example", "chunk_chroma_id": "doc1",
-                 "created_at": db.chash_index.lookup("aa11")[0]["created_at"]},
-            ]
-            assert db.chash_index.lookup("bb22")[0]["chunk_chroma_id"] == "doc2"
+            aa = db.chash_index.lookup("aa11")
+            assert len(aa) == 1
+            assert aa[0]["collection"] == "code__example"
+            assert "chunk_chroma_id" not in aa[0]  # column dropped (mmf5)
+            assert db.chash_index.lookup("bb22")[0]["collection"] == "code__example"
 
     def test_chash_dual_write_batch_empty_is_noop(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
