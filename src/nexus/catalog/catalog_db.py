@@ -231,7 +231,7 @@ CREATE INDEX IF NOT EXISTS idx_collections_tuple
 -- time, retained for reference; position is the canonical ordering
 -- key from this RDR onward.
 CREATE TABLE IF NOT EXISTS document_chunks (
-    doc_id      TEXT NOT NULL REFERENCES documents(tumbler),
+    doc_id      TEXT NOT NULL REFERENCES documents(tumbler) ON DELETE CASCADE,
     position    INTEGER NOT NULL,
     chash       TEXT NOT NULL,
     chunk_index INTEGER,
@@ -447,19 +447,73 @@ class CatalogDB:
         except sqlite3.OperationalError:
             pass
         else:
+            # SIG-7 (RDR-108, nexus-lh8c): use ISO timestamp for created_at.
+            from datetime import UTC, datetime as _datetime  # noqa: PLC0415
+            _now = _datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+            # O-5 (nexus-lh8c): INSERT OR IGNORE for O(1) idempotency vs
+            # the anti-join WHERE NOT IN pattern which is O(n*m).
             with self._conn:
                 self._conn.execute(
-                    "INSERT INTO collections "
+                    "INSERT OR IGNORE INTO collections "
                     "(name, content_type, owner_id, embedding_model, "
                     " model_version, display_name, legacy_grandfathered, "
                     " superseded_by, superseded_at, created_at) "
                     "SELECT DISTINCT physical_collection, '', '', '', '', '', "
-                    "  1, '', '', '' "
+                    f"  1, '', '', '{_now}' "
                     "FROM documents "
                     "WHERE physical_collection IS NOT NULL "
-                    "  AND physical_collection != '' "
-                    "  AND physical_collection NOT IN "
-                    "      (SELECT name FROM collections)"
+                    "  AND physical_collection != ''"
+                )
+
+        # RDR-108 K1 (nexus-lh8c): add ON DELETE CASCADE to document_chunks
+        # for existing databases that were created before this constraint was
+        # declared in the schema. SQLite cannot ALTER a FK constraint in place;
+        # the 12-step pattern recreates the table with the correct declaration.
+        # Idempotent: skipped if the schema already includes ON DELETE CASCADE,
+        # or if document_chunks doesn't exist yet (fresh install gets it right
+        # from _SCHEMA_SQL above).
+        _chunks_ddl_row = self._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='document_chunks'"
+        ).fetchone()
+        if _chunks_ddl_row is not None and "ON DELETE CASCADE" not in _chunks_ddl_row[0]:
+            # Detect which columns exist — older schemas may be a strict subset.
+            _old_col_names = {
+                r[1] for r in self._conn.execute(
+                    "PRAGMA table_info(document_chunks)"
+                ).fetchall()
+            }
+            _all_cols = [
+                "doc_id", "position", "chash", "chunk_index",
+                "line_start", "line_end", "char_start", "char_end",
+            ]
+            _copy_cols = [c for c in _all_cols if c in _old_col_names]
+            _copy_sql = ", ".join(_copy_cols)
+            with self._conn:
+                self._conn.execute(
+                    "CREATE TABLE document_chunks_rdr108k1_new ("
+                    "    doc_id      TEXT NOT NULL"
+                    "                REFERENCES documents(tumbler) ON DELETE CASCADE,"
+                    "    position    INTEGER NOT NULL,"
+                    "    chash       TEXT NOT NULL,"
+                    "    chunk_index INTEGER,"
+                    "    line_start  INTEGER,"
+                    "    line_end    INTEGER,"
+                    "    char_start  INTEGER,"
+                    "    char_end    INTEGER,"
+                    "    PRIMARY KEY (doc_id, position)"
+                    ")"
+                )
+                self._conn.execute(
+                    f"INSERT INTO document_chunks_rdr108k1_new ({_copy_sql})"
+                    f" SELECT {_copy_sql} FROM document_chunks"
+                )
+                self._conn.execute("DROP TABLE document_chunks")
+                self._conn.execute(
+                    "ALTER TABLE document_chunks_rdr108k1_new RENAME TO document_chunks"
+                )
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_document_chunks_chash"
+                    " ON document_chunks(chash)"
                 )
 
     def rebuild(
