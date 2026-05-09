@@ -1371,24 +1371,29 @@ class TestGcCommand:
         assert "No orphan" in result.output
 
     def test_gc_dry_run_does_not_delete(self, catalog_env):
-        runner = CliRunner()
-        cat = self._make_cat(catalog_env)
-        owner = cat.register_owner("repo", "repo", repo_hash="abc")
-        t = cat.register(owner, "old.py", content_type="code", file_path="src/old.py")
-        cat.update(t, meta={"miss_count": 2})
-        result = runner.invoke(main, ["catalog", "gc", "--dry-run"])
-        assert result.exit_code == 0
-        assert "[dry-run]" in result.output
-        # Entry still exists after dry run
-        assert cat.resolve(t) is not None
-
-    def test_gc_deletes_orphans(self, catalog_env):
+        """nexus-tnz3: 4.29.1 dry-run is the DEFAULT — no flags = report-only.
+        Entry must remain after a default invocation."""
         runner = CliRunner()
         cat = self._make_cat(catalog_env)
         owner = cat.register_owner("repo", "repo", repo_hash="abc")
         t = cat.register(owner, "old.py", content_type="code", file_path="src/old.py")
         cat.update(t, meta={"miss_count": 2})
         result = runner.invoke(main, ["catalog", "gc"])
+        assert result.exit_code == 0
+        # Default is dry-run; entry survives.
+        assert "would be deleted" in result.output
+        assert cat.resolve(t) is not None
+
+    def test_gc_deletes_orphans(self, catalog_env):
+        """4.29.1 requires --no-dry-run --confirm to actually delete."""
+        runner = CliRunner()
+        cat = self._make_cat(catalog_env)
+        owner = cat.register_owner("repo", "repo", repo_hash="abc")
+        t = cat.register(owner, "old.py", content_type="code", file_path="src/old.py")
+        cat.update(t, meta={"miss_count": 2})
+        result = runner.invoke(
+            main, ["catalog", "gc", "--no-dry-run", "--confirm"],
+        )
         assert result.exit_code == 0
         assert "Deleted 1" in result.output
         # Entry gone from catalog
@@ -1407,14 +1412,19 @@ class TestGcCommand:
         assert cat.resolve(t) is not None
 
     def test_gc_mixed_entries(self, catalog_env):
-        """Only entries with miss_count >= 2 are deleted; others survive."""
+        """Only entries with miss_count >= 2 are deleted; others survive.
+
+        4.29.1 default is dry-run; pass --no-dry-run --confirm to delete.
+        """
         runner = CliRunner()
         cat = self._make_cat(catalog_env)
         owner = cat.register_owner("repo", "repo", repo_hash="abc")
         t_keep = cat.register(owner, "keep.py", content_type="code", file_path="src/keep.py")
         t_del = cat.register(owner, "del.py", content_type="code", file_path="src/del.py")
         cat.update(t_del, meta={"miss_count": 3})
-        result = runner.invoke(main, ["catalog", "gc"])
+        result = runner.invoke(
+            main, ["catalog", "gc", "--no-dry-run", "--confirm"],
+        )
         assert result.exit_code == 0
         assert "Deleted 1" in result.output
         assert cat.resolve(t_keep) is not None
