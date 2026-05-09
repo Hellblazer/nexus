@@ -2,7 +2,8 @@
 title: "Graph Identity Normalization: Catalog Holds the Tree, T3 is a Content-Addressed Blob Store"
 id: RDR-108
 type: Architecture
-status: draft
+status: accepted
+accepted_date: 2026-05-08
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
