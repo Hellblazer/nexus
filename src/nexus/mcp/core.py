@@ -853,6 +853,13 @@ def query(
         # ``source_path``, chunk id) for chunks the catalog cannot
         # resolve (catalog absent, orphan chunks, pre-Phase-A chunks).
         chash_to_doc: dict[str, str] = {}
+        # nexus-voy5 (RDR-108 Phase 4 review S3): chunk_count was
+        # previously read from chunk metadata, but RDR-108 Phase 3
+        # (nexus-bdag) removed it. Resolve via the catalog manifest
+        # once per unique doc_id so the display value matches D2's
+        # "manifest is authoritative" invariant. Empty dict when
+        # the catalog is absent (legacy display falls through to "").
+        doc_to_chunk_count: dict[str, int] = {}
         try:
             cat = _get_catalog()
         except Exception:
@@ -874,6 +881,13 @@ def query(
                 for chash, doc_ids in by_chash.items():
                     if doc_ids:
                         chash_to_doc[chash] = sorted(doc_ids)[0]
+            # Fetch manifest length for each unique doc_id seen.
+            # One get_manifest call per doc; bounded by the result set.
+            for doc_id in set(chash_to_doc.values()):
+                try:
+                    doc_to_chunk_count[doc_id] = len(cat.get_manifest(doc_id))
+                except Exception:
+                    continue
         docs: dict[str, dict] = {}  # doc_key → {meta, snippets, best_distance}
         for r in results:
             meta = r.metadata
@@ -896,9 +910,20 @@ def query(
                     "bib_authors": meta.get("bib_authors", ""),
                     "bib_citation_count": meta.get("bib_citation_count", ""),
                     "bib_venue": meta.get("bib_venue", ""),
-                    "chunk_count": meta.get("chunk_count", ""),
+                    # nexus-voy5: derive chunk_count from the catalog
+                    # manifest (RDR-108 D2 authoritative source).
+                    # Fall back to legacy metadata for chunks the
+                    # catalog can't resolve (catalog-absent or
+                    # pre-Phase-A chunks).
+                    "chunk_count": (
+                        doc_to_chunk_count.get(
+                            chash_to_doc.get(meta.get("chunk_text_hash", "")),
+                            None,
+                        )
+                        or meta.get("chunk_count", "")
+                    ),
                     # page_count / extraction_method / has_formulas are not in
-                    # ALLOWED_TOP_LEVEL — normalize() drops them, so the read
+                    # ALLOWED_TOP_LEVEL: normalize() drops them, so the read
                     # always returned "". Removed in nexus-59j0 cleanup.
                     # nexus-1qed: prefer catalog-resolved _display_path so
                     # the response survives after source_path is pruned.
