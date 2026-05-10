@@ -499,53 +499,61 @@ def try_aggregate(
 def _query_filter(
     idents: list[tuple[str, str]], field: str, query: str,
 ) -> tuple[list[tuple[str, str]], list[dict]]:
-    """Execute the filter SQL. Return (kept_idents, rationale_entries)."""
+    """Execute the filter SQL. Return (kept_idents, rationale_entries).
+
+    nexus-ocu9.11 (RDR-096 P5.2): the ``source_path`` column is
+    dropped from ``document_aspects`` at 4.31.0; the SQL keys on
+    ``source_uri`` instead. The operator's input ``idents`` still
+    carry ``(collection, source_path)`` for back-compat; we derive
+    each ident's URI via ``aspect_readers.uri_for(collection,
+    source_path)`` before the SELECT, and key the round-trip by
+    URI on the way back. The rationale's ``id`` field stays as the
+    source_path string for caller back-compat.
+    """
+    from nexus.aspect_readers import uri_for
     from nexus.commands._helpers import default_db_path
     from nexus.db.t2 import T2Database
 
     pred_sql, pred_params = _build_filter_predicate(field, query)
 
-    # SELECT in batches of 300 (ChromaDB-quota-equivalent SQLite param
-    # cap) to handle large item lists. SQLite's default param limit
-    # is 999 with two params per item (collection, source_path), so
-    # batching at 300 leaves plenty of headroom.
-    # RDR-096 P2.3 dual-read: ``COALESCE(source_uri, 'file://' ||
-    # source_path) AS source_identity`` projects the URI form so the
-    # rationale entries can surface URIs alongside the source_path
-    # ``id`` (kept for back-compat). Rows whose source_uri escaped
-    # backfill (empty source_path) get the file://-shaped fallback
-    # via the COALESCE second arm.
-    #
-    # Rationale-shape contract (P2.3):
-    # * ``id`` — source_path string (back-compat with pre-P2.3 callers)
-    # * ``source_uri`` — populated for rows the SQL fast path
-    #   matched; ``""`` when no row exists (non-match, queue pending,
-    #   or aspects-only meta entry). Never ``None``: the empty-string
-    #   sentinel keeps the field type consistent for downstream
-    #   consumers that don't distinguish missing-vs-pending.
-    # * ``reason`` — human-readable explanation.
+    # Derive URIs for every ident up front; idents whose
+    # ``uri_for`` returns None are unreachable post-source_path-drop
+    # (the migration's audit guarantees no NULL/empty source_uri
+    # rows so a None here is a caller-side issue, not a row issue).
+    ident_to_uri: dict[tuple[str, str], str] = {}
+    uri_to_ident: dict[str, tuple[str, str]] = {}
+    for c, sp in idents:
+        u = uri_for(c, sp) or ""
+        if not u:
+            continue
+        ident_to_uri[(c, sp)] = u
+        uri_to_ident[u] = (c, sp)
+
     keep: list[tuple[str, str]] = []
     matches: dict[tuple[str, str], bool] = {}
     uris: dict[tuple[str, str], str] = {}
-    with T2Database(default_db_path()) as db:
-        conn = db.document_aspects.conn
-        for chunk_start in range(0, len(idents), 300):
-            batch = idents[chunk_start:chunk_start + 300]
-            placeholders = ",".join(["(?, ?)"] * len(batch))
-            params: list[Any] = []
-            for c, sp in batch:
-                params.extend([c, sp])
-            sql = (
-                f"SELECT collection, source_path, "
-                f"       COALESCE(source_uri, 'file://' || source_path) AS source_identity "
-                f"FROM document_aspects "
-                f"WHERE (collection, source_path) IN ({placeholders}) "
-                f"  AND {pred_sql}"
-            )
-            params.extend(pred_params)
-            for c, sp, uri in conn.execute(sql, params).fetchall():
-                matches[(c, sp)] = True
-                uris[(c, sp)] = uri
+    if ident_to_uri:
+        # Batch in 300s to leave plenty of headroom under SQLite's
+        # 999-param default cap.
+        with T2Database(default_db_path()) as db:
+            conn = db.document_aspects.conn
+            uri_list = list(ident_to_uri.values())
+            for chunk_start in range(0, len(uri_list), 300):
+                batch = uri_list[chunk_start:chunk_start + 300]
+                placeholders = ",".join(["?"] * len(batch))
+                sql = (
+                    f"SELECT source_uri "
+                    f"FROM document_aspects "
+                    f"WHERE source_uri IN ({placeholders}) "
+                    f"  AND {pred_sql}"
+                )
+                params: list[Any] = list(batch) + list(pred_params)
+                for (uri,) in conn.execute(sql, params).fetchall():
+                    ident = uri_to_ident.get(uri)
+                    if ident is None:
+                        continue
+                    matches[ident] = True
+                    uris[ident] = uri
 
     rationale = []
     for c, sp in idents:
@@ -587,31 +595,41 @@ def _query_groupby(
         select_expr = field
         select_params = []
 
-    # P2.3 note: ``_query_filter`` widens its SELECT with a COALESCE
-    # source_identity column so rationale entries can surface URIs.
-    # ``_query_groupby`` does not — its return shape (``{key:
-    # [(collection, source_path)]}``) doesn't currently expose
-    # identity to callers, and projecting an unused column would be
-    # dead overhead. When a future bead adds URI to groupby output,
-    # widen the SELECT here and update the unpacking.
+    # nexus-ocu9.11: source_path column dropped at 4.31.0; key on
+    # source_uri instead. The operator's input idents still carry
+    # (collection, source_path) for back-compat; derive each ident's
+    # URI via ``aspect_readers.uri_for`` and use the URI for both
+    # the WHERE and the round-trip mapping.
+    from nexus.aspect_readers import uri_for
+
     groups: dict[str, list[tuple[str, str]]] = {}
     fetched: dict[tuple[str, str], Any] = {}
+    ident_to_uri: dict[tuple[str, str], str] = {}
+    uri_to_ident: dict[str, tuple[str, str]] = {}
+    for c, sp in idents:
+        u = uri_for(c, sp) or ""
+        if not u:
+            continue
+        ident_to_uri[(c, sp)] = u
+        uri_to_ident[u] = (c, sp)
 
     with T2Database(default_db_path()) as db:
         conn = db.document_aspects.conn
-        for chunk_start in range(0, len(idents), 300):
-            batch = idents[chunk_start:chunk_start + 300]
-            placeholders = ",".join(["(?, ?)"] * len(batch))
-            params: list[Any] = list(select_params)
-            for c, sp in batch:
-                params.extend([c, sp])
+        uri_list = list(ident_to_uri.values())
+        for chunk_start in range(0, len(uri_list), 300):
+            batch = uri_list[chunk_start:chunk_start + 300]
+            placeholders = ",".join(["?"] * len(batch))
+            params: list[Any] = list(select_params) + list(batch)
             sql = (
-                f"SELECT collection, source_path, {select_expr} "
+                f"SELECT source_uri, {select_expr} "
                 f"FROM document_aspects "
-                f"WHERE (collection, source_path) IN ({placeholders})"
+                f"WHERE source_uri IN ({placeholders})"
             )
-            for c, sp, value in conn.execute(sql, params).fetchall():
-                fetched[(c, sp)] = value
+            for uri, value in conn.execute(sql, params).fetchall():
+                ident = uri_to_ident.get(uri)
+                if ident is None:
+                    continue
+                fetched[ident] = value
 
     for ident in idents:
         value = fetched.get(ident)
@@ -655,24 +673,33 @@ def _query_confidence_aggregate(
     if reducer_kind not in op_map:
         return None
 
+    # nexus-ocu9.11: source_path column dropped; key the WHERE on
+    # source_uri. Confidence aggregate doesn't need the round-trip
+    # mapping (it folds into a scalar), so we just collect URIs.
+    from nexus.aspect_readers import uri_for
+
     sum_acc = 0.0
     count_acc = 0
     min_acc: float | None = None
     max_acc: float | None = None
 
+    uris_for_query: list[str] = []
+    for c, sp in idents:
+        u = uri_for(c, sp) or ""
+        if u:
+            uris_for_query.append(u)
+
     with T2Database(default_db_path()) as db:
         conn = db.document_aspects.conn
-        for chunk_start in range(0, len(idents), 300):
-            batch = idents[chunk_start:chunk_start + 300]
-            placeholders = ",".join(["(?, ?)"] * len(batch))
-            params: list[Any] = []
-            for c, sp in batch:
-                params.extend([c, sp])
+        for chunk_start in range(0, len(uris_for_query), 300):
+            batch = uris_for_query[chunk_start:chunk_start + 300]
+            placeholders = ",".join(["?"] * len(batch))
             sql = (
                 f"SELECT confidence FROM document_aspects "
-                f"WHERE (collection, source_path) IN ({placeholders}) "
+                f"WHERE source_uri IN ({placeholders}) "
                 f"  AND confidence IS NOT NULL"
             )
+            params: list[Any] = list(batch)
             for (value,) in conn.execute(sql, params).fetchall():
                 if value is None:
                     continue
