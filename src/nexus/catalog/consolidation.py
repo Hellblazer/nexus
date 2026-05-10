@@ -34,11 +34,11 @@ def merge_corpus(
     # strict-naming guard. The owner segment is the corpus tag with
     # underscores rewritten to hyphens (the conformant grammar's owner
     # segment disallows ``_``).
-    from nexus.corpus import canonical_embedding_model  # noqa: PLC0415
+    from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415
 
     owner_segment = corpus.replace("_", "-")
     target_col_name = (
-        f"docs__{owner_segment}__{canonical_embedding_model('docs')}__v1"
+        f"docs__{owner_segment}__{effective_embedding_model_for_writes('docs')}__v1"
     )
 
     if dry_run:

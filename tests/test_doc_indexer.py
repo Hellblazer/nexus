@@ -250,6 +250,10 @@ def test_index_md_falls_back_to_local_embedder_when_no_credentials(
     reset_cache()
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
+    # nexus-59vl: opt OUT of the autouse ``_force_cloud_mode_default``
+    # fixture for this specific test; the whole point is to exercise
+    # the local-mode fallback when no credentials are present.
+    monkeypatch.delenv("NX_LOCAL", raising=False)
     monkeypatch.setattr(
         "nexus.config._global_config_path", lambda: Path("/nonexistent"),
     )
@@ -269,10 +273,15 @@ def test_index_md_falls_back_to_local_embedder_when_no_credentials(
         f"in local mode."
     )
 
-    # Verify chunks landed AND were tagged with the local model name
-    # (not voyage-context-3 — staleness check on re-run depends on it).
+    # nexus-59vl: post-fix the local-mode write path uses
+    # ``effective_embedding_model_for_writes`` which returns the
+    # local-EF token. The collection name reflects the actual EF.
+    # Pre-fix (RDR-103-pre-59vl) this was a voyage-* name even in
+    # local mode; the GH #667 fix made it honest.
+    from nexus.corpus import current_local_embedding_model_token
+    local_token = current_local_embedding_model_token()
     col = local_t3.get_or_create_collection(
-        "docs__local-fallback-test__voyage-context-3__v1",
+        f"docs__local-fallback-test__{local_token}__v1",
     )
     rows = col.get(limit=1, include=["metadatas"])
     assert rows["metadatas"], "expected at least one chunk in collection"
@@ -333,6 +342,9 @@ def test_index_markdown_auto_inits_catalog_when_absent_and_prunes_on_reindex(
     reset_cache()
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
+    # nexus-59vl: opt out of the autouse cloud-mode default so the
+    # local-mode credential-fallback path runs.
+    monkeypatch.delenv("NX_LOCAL", raising=False)
     monkeypatch.setattr(
         "nexus.config._global_config_path", lambda: Path("/nonexistent"),
     )
@@ -351,7 +363,7 @@ def test_index_markdown_auto_inits_catalog_when_absent_and_prunes_on_reindex(
     )
 
     col = local_t3.get_or_create_collection(
-        "docs__autoinit-probe__voyage-context-3__v1",
+        "docs__autoinit-probe__minilm-l6-v2-384__v1",
     )
     metas_before = col.get(include=["metadatas"])["metadatas"]
     assert metas_before, "expected chunks after first index"
@@ -361,7 +373,7 @@ def test_index_markdown_auto_inits_catalog_when_absent_and_prunes_on_reindex(
     cat = open_cached(cat_path)
     documents = cat._db.execute(
         "SELECT tumbler FROM documents WHERE physical_collection = ?",
-        ("docs__autoinit-probe__voyage-context-3__v1",),
+        ("docs__autoinit-probe__minilm-l6-v2-384__v1",),
     ).fetchall()
     assert documents, "auto-init catalog must register the indexed file"
     for row in documents:
@@ -1669,6 +1681,10 @@ def _setup_phase_a_catalog(tmp_path, monkeypatch):
     reset_cache()
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
+    # nexus-59vl: opt OUT of the autouse ``_force_cloud_mode_default``
+    # fixture; this helper sets up a local-mode catalog and the
+    # exercised code paths intentionally hit ``is_local_mode() == True``.
+    monkeypatch.delenv("NX_LOCAL", raising=False)
     monkeypatch.setattr(
         "nexus.config._global_config_path", lambda: Path("/nonexistent"),
     )
@@ -1722,8 +1738,12 @@ def test_index_pdf_does_not_emit_source_path(
     with pdf_extract_patches_ctx():
         index_pdf(sample_pdf, corpus="rdr102-pdf-b", t3=t3, embed_fn=_fake_embed)
 
+    # nexus-59vl: local-mode write paths use the local-EF token in
+    # the collection name; ``_setup_phase_a_catalog`` opts out of the
+    # autouse cloud-mode default so this collection lands under the
+    # MiniLM-384 token, not voyage-context-3.
     col = t3.get_or_create_collection(
-        "docs__rdr102-pdf-b__voyage-context-3__v1",
+        "docs__rdr102-pdf-b__minilm-l6-v2-384__v1",
     )
     rows = col.get(include=["metadatas"])
     assert rows["metadatas"], "expected at least one chunk"
@@ -1749,7 +1769,7 @@ def test_index_markdown_does_not_emit_source_path(
     assert n > 0
 
     col = t3.get_or_create_collection(
-        "docs__rdr102-md-b__voyage-context-3__v1",
+        "docs__rdr102-md-b__minilm-l6-v2-384__v1",
     )
     rows = col.get(include=["metadatas"])
     assert rows["metadatas"], "expected at least one chunk"
@@ -1779,7 +1799,7 @@ def test_index_pdf_writes_doc_id_when_catalog_initialized(
         index_pdf(sample_pdf, corpus="rdr102-pdf", t3=t3, embed_fn=_fake_embed)
 
     col = t3.get_or_create_collection(
-        "docs__rdr102-pdf__voyage-context-3__v1",
+        "docs__rdr102-pdf__minilm-l6-v2-384__v1",
     )
     rows = col.get(include=["metadatas"])
     assert rows["metadatas"], (
@@ -1794,7 +1814,7 @@ def test_index_pdf_writes_doc_id_when_catalog_initialized(
     cat = open_cached(cat_dir)
     documents = cat._db.execute(
         "SELECT tumbler FROM documents WHERE physical_collection = ?",
-        ("docs__rdr102-pdf__voyage-context-3__v1",),
+        ("docs__rdr102-pdf__minilm-l6-v2-384__v1",),
     ).fetchall()
     assert documents, "catalog must have a Document for the indexed PDF"
     for row in documents:
@@ -1817,7 +1837,7 @@ def test_index_markdown_writes_doc_id_when_catalog_initialized(
     assert n > 0, "expected index_markdown to upsert chunks"
 
     col = t3.get_or_create_collection(
-        "docs__rdr102-md__voyage-context-3__v1",
+        "docs__rdr102-md__minilm-l6-v2-384__v1",
     )
     rows = col.get(include=["metadatas"])
     assert rows["metadatas"], (
@@ -1829,7 +1849,7 @@ def test_index_markdown_writes_doc_id_when_catalog_initialized(
     cat = open_cached(cat_dir)
     documents = cat._db.execute(
         "SELECT tumbler FROM documents WHERE physical_collection = ?",
-        ("docs__rdr102-md__voyage-context-3__v1",),
+        ("docs__rdr102-md__minilm-l6-v2-384__v1",),
     ).fetchall()
     assert documents, "catalog must have a Document for the indexed markdown"
     for row in documents:
@@ -1854,13 +1874,13 @@ def test_batch_index_markdowns_rdr_mode_writes_doc_id_when_catalog_initialized(
 
     batch_index_markdowns(
         [rdr_path], corpus="rdr102-rdrmode",
-        collection_name="rdr__rdr102-rdrmode__voyage-context-3__v1",
+        collection_name="rdr__rdr102-rdrmode__minilm-l6-v2-384__v1",
         content_type="rdr",
         t3=t3,
     )
 
     col = t3.get_or_create_collection(
-        "rdr__rdr102-rdrmode__voyage-context-3__v1",
+        "rdr__rdr102-rdrmode__minilm-l6-v2-384__v1",
     )
     rows = col.get(include=["metadatas"])
     assert rows["metadatas"], (
@@ -1872,7 +1892,7 @@ def test_batch_index_markdowns_rdr_mode_writes_doc_id_when_catalog_initialized(
     cat = open_cached(cat_dir)
     documents = cat._db.execute(
         "SELECT tumbler FROM documents WHERE physical_collection = ?",
-        ("rdr__rdr102-rdrmode__voyage-context-3__v1",),
+        ("rdr__rdr102-rdrmode__minilm-l6-v2-384__v1",),
     ).fetchall()
     assert documents, "catalog must have a Document for the indexed RDR md"
     for row in documents:

@@ -97,7 +97,7 @@ def _resolve_repo_collection(
                 content_type=content_type,
                 error=str(exc),
             )
-    from nexus.corpus import canonical_embedding_model  # noqa: PLC0415
+    from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415
 
     if content_type not in ("code", "docs", "rdr"):
         raise ValueError(
@@ -118,7 +118,7 @@ def _resolve_repo_collection(
     # since the registry entry was already written, the failure looped
     # forever in the index log on every git hook fire.
     sanitised = _sanitise_owner_segment(name)
-    model = canonical_embedding_model(content_type)
+    model = effective_embedding_model_for_writes(content_type)
     return _safe_collection(
         f"{content_type}__", sanitised, path_hash, suffix=f"__{model}__v1",
     )

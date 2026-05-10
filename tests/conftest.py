@@ -218,6 +218,28 @@ def _isolate_t1_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 @pytest.fixture(autouse=True)
+def _force_cloud_mode_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """nexus-59vl: default tests to cloud mode so legacy assertions
+    that pin ``voyage-context-3`` / ``voyage-code-3`` keep passing in
+    CI (where neither ``CHROMA_API_KEY`` nor ``VOYAGE_API_KEY`` is
+    set, and ``is_local_mode()`` would otherwise return True).
+
+    Tests that need to exercise local-mode behavior (the
+    ``test_local_onnx_naming.py`` suite, any future mode-flip
+    integration tests) override this with
+    ``monkeypatch.setenv("NX_LOCAL", "1")`` or
+    ``patch("nexus.config.is_local_mode", return_value=True)``.
+
+    Without this fixture, the
+    ``effective_embedding_model_for_writes`` mode-aware function
+    returns the local-EF token (``minilm-l6-v2-384``) for every
+    write-path call site, and ~30 legacy tests that assert voyage
+    tokens fail in CI.
+    """
+    monkeypatch.setenv("NX_LOCAL", "0")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Redirect NEXUS_CONFIG_DIR so child processes write under tmp_path.
 

@@ -30,6 +30,7 @@ from nexus.corpus import (
     CANONICAL_EMBEDDING_MODELS,
     CONTENT_TYPES,
     canonical_embedding_model,
+    effective_embedding_model_for_writes,
 )
 from nexus.registry import RepoRegistry, _repo_identity
 
@@ -382,7 +383,7 @@ class _DocumentOps:
         return cat.collection_for(
             content_type=content_type,
             owner=owner,
-            embedding_model=canonical_embedding_model(content_type),
+            embedding_model=effective_embedding_model_for_writes(content_type),
             bump=bump,
         )
 

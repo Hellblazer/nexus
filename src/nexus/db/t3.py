@@ -360,11 +360,50 @@ class T3Database:
             return self._ef_override
         with self._ef_lock:
             if collection_name not in self._ef_cache:
-                if self._local_mode:
+                # nexus-59vl (GH #667): name-aware EF dispatch.
+                # ``embedding_model_for_collection`` reads the
+                # collection-name segment when the name is conformant
+                # and the segment is a recognised canonical token.
+                # When the segment is a local-EF token (e.g.
+                # ``minilm-l6-v2-384``) we MUST build a
+                # LocalEmbeddingFunction even when the process is in
+                # cloud mode, otherwise a local-mode-built collection
+                # becomes unqueryable on a cloud-credentials add (the
+                # original mode-flip hazard described in the bead).
+                from nexus.corpus import (  # noqa: PLC0415
+                    LOCAL_EMBEDDING_MODELS,
+                )
+                model = embedding_model_for_collection(collection_name)
+                if model in LOCAL_EMBEDDING_MODELS or self._local_mode:
                     from nexus.db.local_ef import LocalEmbeddingFunction
-                    self._ef_cache[collection_name] = LocalEmbeddingFunction()
+                    # Pin the EF to the recorded model name so a
+                    # local-mode collection built with MiniLM stays
+                    # MiniLM even after a fastembed install would
+                    # auto-promote a fresh LocalEmbeddingFunction()
+                    # to bge-base. The token-to-model_name reverse
+                    # map lives in ``corpus._LOCAL_MODEL_NAME_TO_TOKEN``.
+                    from nexus.corpus import (  # noqa: PLC0415
+                        _LOCAL_MODEL_NAME_TO_TOKEN,
+                    )
+                    pinned_name = next(
+                        (mn for mn, tok in _LOCAL_MODEL_NAME_TO_TOKEN.items()
+                         if tok == model),
+                        None,
+                    )
+                    if pinned_name is not None:
+                        self._ef_cache[collection_name] = (
+                            LocalEmbeddingFunction(model_name=pinned_name)
+                        )
+                    else:
+                        # Pre-RDR-103 names that resolved through the
+                        # legacy prefix fallback in cloud mode kept
+                        # giving Voyage tokens; in local mode the
+                        # default-tier LocalEmbeddingFunction() is the
+                        # right answer.
+                        self._ef_cache[collection_name] = (
+                            LocalEmbeddingFunction()
+                        )
                 else:
-                    model = embedding_model_for_collection(collection_name)
                     self._ef_cache[collection_name] = (
                         chromadb.utils.embedding_functions.VoyageAIEmbeddingFunction(
                             model_name=model, api_key=self._voyage_api_key

@@ -835,10 +835,10 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         if collection:
             col_name = collection
         else:
-            from nexus.corpus import canonical_embedding_model  # noqa: PLC0415
+            from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415
             owner_segment = corpus.replace("_", "-")
             col_name = (
-                f"docs__{owner_segment}__{canonical_embedding_model('docs')}__v1"
+                f"docs__{owner_segment}__{effective_embedding_model_for_writes('docs')}__v1"
             )
         col = local_t3.get_or_create_collection(col_name)
         result = col.get(include=["documents", "metadatas"])

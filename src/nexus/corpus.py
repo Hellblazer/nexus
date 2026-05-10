@@ -50,10 +50,30 @@ CONTENT_TYPES: tuple[str, ...] = _CONTENT_TYPES
 RDR-103 ``<content_type>__<owner_id>__<embedding_model>__v<n>`` schema.
 ``CollectionName`` validates against this tuple."""
 
+# nexus-59vl (GH #667): local-EF tokens. The dim is part of the
+# token so a future local-EF swap that produces vectors of a
+# different dim cannot collide with an existing collection's name.
+LOCAL_EMBEDDING_MODELS: frozenset[str] = frozenset({
+    "minilm-l6-v2-384",
+    "bge-base-en-v15-768",
+})
+"""nexus-59vl: local-mode (ONNX / fastembed) tokens that may appear in
+the embedding-model segment of a conformant collection name. Distinct
+from the cloud Voyage tokens so local and cloud collections are
+structurally different physical entities; a local-mode collection
+remains queryable in cloud mode (the EF dispatch reads the segment to
+decide which embedder to build)."""
+
+# Mapping from local-EF model_name to canonical token.
+_LOCAL_MODEL_NAME_TO_TOKEN: dict[str, str] = {
+    "all-MiniLM-L6-v2": "minilm-l6-v2-384",
+    "BAAI/bge-base-en-v1.5": "bge-base-en-v15-768",
+}
+
 CANONICAL_EMBEDDING_MODELS: frozenset[str] = frozenset({
     "voyage-context-3",
     "voyage-code-3",
-})
+}) | LOCAL_EMBEDDING_MODELS
 """RDR-103 canonical-set guard. Any embedding-model segment NOT in this
 set is treated as legacy/unknown by ``CollectionName.parse``. Pinned
 decision #1: migrations use the indexer's CURRENT canonical model rather
@@ -61,7 +81,11 @@ than parsing the model out of the legacy collection name; allowing
 non-canonical models here would defeat that invariant. The
 ``_CONFORMANT_COLLECTION_RE`` regex stays permissive so legacy names
 remain readable as strings; canonical-set validation lives in
-``CollectionName.parse``."""
+``CollectionName.parse``.
+
+nexus-59vl (GH #667): includes the local-EF tokens in
+``LOCAL_EMBEDDING_MODELS`` so local-mode collection names are also
+canonical."""
 
 _CT_ALTERNATION = "|".join(_CONTENT_TYPES)
 _CONFORMANT_COLLECTION_RE = re.compile(
@@ -114,19 +138,55 @@ def parse_conformant_collection_name(name: str) -> dict[str, str]:
     }
 
 
-def canonical_embedding_model(content_type: str) -> str:
-    """Return the RDR-103 canonical embedding model for ``content_type``.
+def current_local_embedding_model_token() -> str:
+    """nexus-59vl: return the local-EF token that matches the
+    currently-active ``LocalEmbeddingFunction`` selection.
 
-    Single source of truth for the per-content-type model policy:
+    The local EF auto-selects between MiniLM (384d) and bge-base
+    (768d) based on whether ``fastembed`` is importable. This helper
+    consults the same selection so the canonical model token in
+    fresh collection names matches the actual EF that will write
+    into them.
+    """
+    from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415
+    ef = LocalEmbeddingFunction()
+    token = _LOCAL_MODEL_NAME_TO_TOKEN.get(ef.model_name)
+    if token is None:
+        # Defensive: an unknown local EF name shouldn't ship without
+        # also being added to LOCAL_EMBEDDING_MODELS. Surface loudly
+        # so the operator knows to extend the canonical set.
+        raise ValueError(
+            f"current_local_embedding_model_token: local EF "
+            f"model_name {ef.model_name!r} has no canonical token. "
+            f"Add it to ``_LOCAL_MODEL_NAME_TO_TOKEN`` and to "
+            f"``LOCAL_EMBEDDING_MODELS`` in nexus.corpus."
+        )
+    return token
+
+
+def canonical_embedding_model(content_type: str) -> str:
+    """Return the RDR-103 canonical (cloud) embedding model for
+    ``content_type``.
 
     - ``code`` to ``voyage-code-3``
     - ``docs`` / ``rdr`` / ``knowledge`` to ``voyage-context-3`` (CCE)
 
-    Raises ``ValueError`` for unknown content types so the caller does
-    not silently fall through to a wrong model.
-    ``Catalog.collection_for_repo`` uses this; legacy
-    :func:`voyage_model_for_collection` continues to dispatch off the
-    physical name for read paths.
+    This function is INTENTIONALLY mode-agnostic and returns the
+    cloud-canonical token unconditionally. It is the schema-level
+    function (used by tests, doc generation, and any caller that
+    asks "what is the cloud canonical for content_type X").
+
+    For write paths that need the EF token a fresh collection
+    name should embed (so local-mode names reflect the actual
+    on-disk EF), use :func:`effective_embedding_model_for_writes`
+    instead. That function is the mode-aware variant added by
+    nexus-59vl (GH #667) to fix the local-ONNX false-voyage-label
+    bug; it consults ``is_local_mode()`` and returns the local
+    token when appropriate, falling through to this function in
+    cloud mode.
+
+    Raises ``ValueError`` for unknown content types so the caller
+    does not silently fall through to a wrong model.
     """
     if content_type == "code":
         return "voyage-code-3"
@@ -138,17 +198,67 @@ def canonical_embedding_model(content_type: str) -> str:
     )
 
 
-def voyage_model_for_collection(collection_name: str) -> str:
-    """Return the Voyage AI model for a T3 collection (index and query).
+def effective_embedding_model_for_writes(content_type: str) -> str:
+    """nexus-59vl (GH #667): mode-aware EF token for WRITE paths.
 
-    The same model MUST be used at both index and query time —
+    In local mode returns the active local-EF token (e.g.
+    ``minilm-l6-v2-384`` or ``bge-base-en-v15-768``) so the
+    collection name a fresh write produces honestly reflects the
+    on-disk vector space. In cloud mode delegates to
+    :func:`canonical_embedding_model` for the existing voyage
+    token.
+
+    Pre-fix every write path called ``canonical_embedding_model``
+    directly and produced ``...__voyage-*__v1`` names even in local
+    mode, where the bytes are 384d MiniLM. Today cosmetic +
+    observability bug; on local -> cloud mode flip a query-time
+    correctness bug (1024d Voyage EF rejected against 384d MiniLM
+    vectors).
+
+    Used by the indexer + catalog write paths
+    (``Catalog.collection_for_repo`` / ``collection_for``,
+    ``indexer.py`` collection-name builders, ``doc_indexer.py``
+    PDF ingest). Read paths and tests of canonical schema continue
+    to call ``canonical_embedding_model`` directly.
+    """
+    from nexus.config import is_local_mode  # noqa: PLC0415
+
+    if content_type not in CONTENT_TYPES:
+        raise ValueError(
+            f"effective_embedding_model_for_writes: unknown "
+            f"content_type {content_type!r}; expected one of "
+            f"{CONTENT_TYPES}"
+        )
+    if is_local_mode():
+        return current_local_embedding_model_token()
+    return canonical_embedding_model(content_type)
+
+
+def voyage_model_for_collection(collection_name: str) -> str:
+    """Return the embedding model for a T3 collection (index and query).
+
+    The same model MUST be used at both index and query time;
     mismatched models yield random noise (RDR-059).
 
-    docs__/knowledge__/rdr__ → voyage-context-3 (CCE)
-    code__ and all others    → voyage-code-3
+    nexus-59vl (GH #667): the function reads the model directly from
+    the collection's name segment when the name is conformant and
+    the segment is a recognised canonical token. This is the
+    mode-flip safeguard: a local-mode-named collection
+    (``...__minilm-l6-v2-384__v1``) keeps reporting the local
+    token even when consulted from cloud mode, so the EF dispatch
+    builds the right embedder. The legacy prefix-based fallback
+    handles pre-RDR-103 names that don't carry an explicit
+    embedding-model segment.
 
-    In local mode, callers bypass this and use ``LocalEmbeddingFunction``.
+    Pre-fix this function unconditionally returned a Voyage token,
+    silently misnaming local-mode collections.
     """
+    if is_conformant_collection_name(collection_name):
+        parsed = parse_conformant_collection_name(collection_name)
+        candidate = parsed.get("embedding_model", "")
+        if candidate in CANONICAL_EMBEDDING_MODELS:
+            return candidate
+    # Legacy fallback: dispatch off the prefix.
     if collection_name.startswith(("docs__", "knowledge__", "rdr__")):
         return "voyage-context-3"
     return "voyage-code-3"
@@ -271,7 +381,7 @@ def t3_collection_name(user_arg: str, *, t3: object | None = None) -> str:
         if len(matches) > 1 and user_arg != "knowledge":
             preferred_4seg = (
                 f"{user_arg}__{user_arg}__"
-                f"{canonical_embedding_model(user_arg)}__v1"
+                f"{effective_embedding_model_for_writes(user_arg)}__v1"
             )
             preferred_2seg = f"{user_arg}__{user_arg}"
             picked: str | None = None
@@ -304,7 +414,7 @@ def t3_collection_name(user_arg: str, *, t3: object | None = None) -> str:
         return user_arg
 
     owner_segment = rest.replace("_", "-")
-    promoted = f"{ct}__{owner_segment}__{canonical_embedding_model(ct)}__v1"
+    promoted = f"{ct}__{owner_segment}__{effective_embedding_model_for_writes(ct)}__v1"
 
     if t3 is None or user_arg == promoted:
         return promoted

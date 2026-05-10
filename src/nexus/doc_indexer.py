@@ -606,11 +606,11 @@ def _index_document(
         # rewritten to hyphens (``_`` is the conformant grammar's
         # segment separator); an explicit owner row is not required
         # for ad-hoc paths.
-        from nexus.corpus import canonical_embedding_model  # noqa: PLC0415
+        from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415
 
         owner_segment = corpus.replace("_", "-")
         collection_name = (
-            f"docs__{owner_segment}__{canonical_embedding_model('docs')}__v1"
+            f"docs__{owner_segment}__{effective_embedding_model_for_writes('docs')}__v1"
         )
     db = t3 if t3 is not None else make_t3()
     col = db.get_or_create_collection(collection_name)
@@ -1145,10 +1145,10 @@ def index_pdf(
     if collection_name is not None:
         col_name = collection_name
     else:
-        from nexus.corpus import canonical_embedding_model  # noqa: PLC0415
+        from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415
         owner_segment = corpus.replace("_", "-")
         col_name = (
-            f"docs__{owner_segment}__{canonical_embedding_model('docs')}__v1"
+            f"docs__{owner_segment}__{effective_embedding_model_for_writes('docs')}__v1"
         )
     db = t3 if t3 is not None else make_t3()  # T3Database instance (not PipelineDB)
     col = db.get_or_create_collection(col_name)
@@ -1519,10 +1519,10 @@ def index_markdown(
     if collection_name is not None:
         col_name = collection_name
     else:
-        from nexus.corpus import canonical_embedding_model  # noqa: PLC0415
+        from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415
         owner_segment = corpus.replace("_", "-")
         col_name = (
-            f"docs__{owner_segment}__{canonical_embedding_model('docs')}__v1"
+            f"docs__{owner_segment}__{effective_embedding_model_for_writes('docs')}__v1"
         )
     # RDR-102 Phase A: pre-flight catalog registration. Resolve doc_id BEFORE
     # _index_document's staleness check so a fresh index lands chunks with
