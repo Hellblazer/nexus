@@ -4909,6 +4909,15 @@ def _run_t3_doc_id_coverage(
             f"Failed to open T3 client: {exc}. Check ChromaDB credentials."
         )
 
+    # nexus-esrl (RDR-108 Phase 4 review D-M3): the audit reads
+    # ``meta.get("doc_id", "")`` from chunk metadata to compare
+    # against the event-log expected value. RDR-108 Phase 3
+    # (nexus-bdag) removed doc_id from chunk metadata; the read
+    # returns "" for every Phase-3 chunk. Without manifest
+    # resolution the audit unconditionally reports near-100%
+    # ``missing_doc_id``, masking real coverage problems.
+    cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+
     per_coll: dict[str, dict] = {}
     overall_pass = True
     coll_count = len(expected)
@@ -4956,11 +4965,34 @@ def _run_t3_doc_id_coverage(
             metas = page.get("metadatas") or []
             if not ids:
                 break
+            # nexus-esrl: resolve actual doc_id via the catalog
+            # manifest for this page's chashes when chunk metadata
+            # lacks doc_id (Phase-3 chunks). One batched lookup per
+            # page; the per-chunk resolution below tries metadata
+            # first, falls through to the manifest map.
+            page_chashes = [
+                (m or {}).get("chunk_text_hash", "") for m in metas
+            ]
+            page_chashes_nonempty = [c for c in page_chashes if c]
+            chash_to_doc_for_page: dict[str, str] = {}
+            if page_chashes_nonempty:
+                try:
+                    by_chash = cat.docs_for_chashes(page_chashes_nonempty)
+                except Exception:
+                    by_chash = {}
+                for c, doc_ids in by_chash.items():
+                    if doc_ids:
+                        chash_to_doc_for_page[c] = sorted(doc_ids)[0]
             for cid, meta in zip(ids, metas):
                 meta = meta or {}
                 total += 1
                 seen.add(cid)
                 actual = meta.get("doc_id", "") or ""
+                # Manifest fallback when metadata lacks doc_id.
+                if not actual:
+                    chash = meta.get("chunk_text_hash", "")
+                    if chash:
+                        actual = chash_to_doc_for_page.get(chash, "")
                 expected_doc_id = expected_chunks.get(cid, "")
                 is_orphan = cid in expected_orphans.get(coll_name, set())
                 if actual:
