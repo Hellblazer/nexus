@@ -44,7 +44,7 @@ def _seed_chunk(
         documents=[text],
         metadatas=[{"chunk_text_hash": chash, "source_path": "s.py"}],
     )
-    chash_index.upsert(chash=chash, collection=collection, chunk_chroma_id=chunk_id)
+    chash_index.upsert(chash=chash, collection=collection)
 
 
 # ── ChunkRef type ────────────────────────────────────────────────────────────
@@ -70,7 +70,10 @@ class TestResolveChashT2Hit:
         assert ref["chash"] == h
         assert ref["chunk_hash"] == h   # back-compat alias
         assert ref["physical_collection"] == "code__only"
-        assert ref["doc_id"] == "chunk-0"
+        # RDR-108 Phase 4b (nexus-kosc): doc_id is the chunk natural ID
+        # derived from the chash (chash[:32] per D1), not the chash_index
+        # row's chunk_chroma_id column (which is dropped by nexus-mmf5).
+        assert ref["doc_id"] == h[:32]
         assert ref["chunk_text"] == "hello"
         assert ref["metadata"]["source_path"] == "s.py"
 
@@ -112,20 +115,20 @@ class TestResolveChashT2Hit:
             metadatas=[{"chunk_text_hash": h, "source_path": "s.py"}],
         )
 
-        # Direct SQL with explicit timestamps — the default upsert uses
+        # Direct SQL with explicit timestamps -- the default upsert uses
         # datetime.now() which can collide at microsecond resolution.
         with chash_index._lock:
             chash_index.conn.execute(
                 "INSERT OR REPLACE INTO chash_index "
-                "(chash, physical_collection, chunk_chroma_id, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                (h, "code__old", "c-old", "2025-01-01T00:00:00+00:00"),
+                "(chash, physical_collection, created_at) "
+                "VALUES (?, ?, ?)",
+                (h, "code__old", "2025-01-01T00:00:00+00:00"),
             )
             chash_index.conn.execute(
                 "INSERT OR REPLACE INTO chash_index "
-                "(chash, physical_collection, chunk_chroma_id, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                (h, "code__new", "c-new", "2026-04-18T00:00:00+00:00"),
+                "(chash, physical_collection, created_at) "
+                "VALUES (?, ?, ?)",
+                (h, "code__new", "2026-04-18T00:00:00+00:00"),
             )
             chash_index.conn.commit()
 
@@ -160,7 +163,7 @@ class TestResolveChashSelfHeal:
         cat, t3, chash_index = resolve_env
         h = "e" * 64
         # Register a chash pointing at a collection that does not exist in T3.
-        chash_index.upsert(chash=h, collection="code__deleted", chunk_chroma_id="ghost")
+        chash_index.upsert(chash=h, collection="code__deleted")
         # And a live one.
         _seed_chunk(t3, chash_index, "code__live", "real-id", "real text", h)
 

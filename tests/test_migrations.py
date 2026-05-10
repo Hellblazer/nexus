@@ -1438,6 +1438,79 @@ class TestMigrateChashIndex:
         ).fetchone()
         assert row is None
 
+    def test_chash_index_drop_chunk_chroma_id_drops_column(self) -> None:
+        """RDR-108 Phase 4a (nexus-mmf5): the drop migration removes the
+        ``chunk_chroma_id`` column from the post-rename schema. Other
+        columns and the secondary index are preserved; data on remaining
+        columns survives."""
+        from nexus.db.migrations import (
+            _drop_chash_index_chunk_chroma_id,
+            migrate_chash_index,
+            migrate_chash_index_rename_doc_id,
+        )
+
+        conn = sqlite3.connect(":memory:")
+        migrate_chash_index(conn)
+        migrate_chash_index_rename_doc_id(conn)
+        conn.execute(
+            "INSERT INTO chash_index VALUES (?, ?, ?, ?)",
+            ("aa", "code__keep", "chunk-7", "2026-05-09T00:00:00Z"),
+        )
+        conn.commit()
+
+        _drop_chash_index_chunk_chroma_id(conn)
+
+        cols = {
+            r[1] for r in conn.execute(
+                "PRAGMA table_info(chash_index)"
+            ).fetchall()
+        }
+        assert "chunk_chroma_id" not in cols
+        assert cols == {"chash", "physical_collection", "created_at"}
+
+        # Secondary index survives.
+        indices = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            ).fetchall()
+        }
+        assert "idx_chash_index_collection" in indices
+
+        # Data on remaining columns survives.
+        row = conn.execute(
+            "SELECT chash, physical_collection, created_at FROM chash_index"
+        ).fetchone()
+        assert row == ("aa", "code__keep", "2026-05-09T00:00:00Z")
+
+    def test_chash_index_drop_chunk_chroma_id_idempotent_and_absent_safe(self) -> None:
+        """The drop migration is a no-op when the column is already gone
+        and when the table itself does not exist."""
+        from nexus.db.migrations import (
+            _drop_chash_index_chunk_chroma_id,
+            migrate_chash_index,
+            migrate_chash_index_rename_doc_id,
+        )
+
+        # No table → no-op.
+        conn1 = sqlite3.connect(":memory:")
+        _drop_chash_index_chunk_chroma_id(conn1)  # must not raise
+        assert conn1.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='chash_index'"
+        ).fetchone() is None
+
+        # Table present but column already dropped → no-op.
+        conn2 = sqlite3.connect(":memory:")
+        migrate_chash_index(conn2)
+        migrate_chash_index_rename_doc_id(conn2)
+        _drop_chash_index_chunk_chroma_id(conn2)
+        _drop_chash_index_chunk_chroma_id(conn2)  # second call is a no-op
+        cols = {
+            r[1] for r in conn2.execute(
+                "PRAGMA table_info(chash_index)"
+            ).fetchall()
+        }
+        assert "chunk_chroma_id" not in cols
+
     def test_chash_index_in_migrations_list(self) -> None:
         from nexus.db.migrations import MIGRATIONS
 

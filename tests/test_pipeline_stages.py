@@ -204,7 +204,12 @@ class TestChunkerLoop:
         for dropped in ("source_path", "store_type", "corpus", "git_meta"):
             assert dropped not in meta
         assert "indexed_at" in meta
-        assert out[0]["chunk_id"] == "h1_0" and out[1]["chunk_id"] == "h1_1"
+        # RDR-108 D1 (nexus-kmb6): chunk_id is chunk_text_hash[:32].
+        import hashlib as _hl
+        expected_0 = _hl.sha256(b"chunk 0 text").hexdigest()[:32]
+        expected_1 = _hl.sha256(b"chunk 1 text").hexdigest()[:32]
+        assert out[0]["chunk_id"] == expected_0
+        assert out[1]["chunk_id"] == expected_1
 
     def test_cancel_exits(self, db) -> None:
         db.create_pipeline("h1", "/a.pdf", "docs__test")

@@ -571,6 +571,26 @@ def synthesize_t3_chunks(
         _log.warning("synthesizer_t3_list_collections_failed", error=str(exc))
         return
 
+    # RDR-108 Phase 4b (nexus-kosc): per-doc manifest cache. Phase 3
+    # stripped ``chunk_index`` from chunk metadata, so the position
+    # field on emitted ChunkIndexed events comes from the catalog
+    # manifest. Cache is built lazily so collections that resolve to
+    # zero docs do not pay the lookup cost.
+    manifest_position_cache: dict[str, dict[str, int]] = {}
+
+    # Open the catalog handle ONCE for the whole walk rather than per
+    # collection. Catalog-absent is a safe fallback to enumerate-by-
+    # page-order (handled inside ``_synthesize_collection_chunks``).
+    _cat: Any = None
+    try:
+        from nexus.catalog import Catalog as _Catalog
+        from nexus.config import catalog_path as _catalog_path
+        _cat_path = _catalog_path()
+        if _Catalog.is_initialized(_cat_path):
+            _cat = _Catalog(_cat_path, _cat_path / ".catalog.db")
+    except Exception:
+        _cat = None
+
     for col in collections:
         coll_name = getattr(col, "name", None) or str(col)
         try:
@@ -580,6 +600,8 @@ def synthesize_t3_chunks(
                 title_to_doc_id=title_to_doc_id,
                 file_path_to_doc_id=file_path_to_doc_id,
                 live_doc_lookup=live_doc_lookup,
+                manifest_position_cache=manifest_position_cache,
+                catalog=_cat,
             )
         except Exception as exc:
             _log.warning(
@@ -597,9 +619,48 @@ def _synthesize_collection_chunks(
     title_to_doc_id: dict[str, str],
     file_path_to_doc_id: dict[str, str] | None = None,
     live_doc_lookup: dict[str, str] | None = None,
+    manifest_position_cache: dict[str, dict[str, int]] | None = None,
+    catalog: Any = None,
 ) -> Iterator[Event]:
-    """Paginate one collection and yield ``ChunkIndexed`` per chunk."""
+    """Paginate one collection and yield ``ChunkIndexed`` per chunk.
+
+    ``catalog`` (RDR-108 Phase 4b) is the shared Catalog handle the
+    outer ``synthesize_t3_chunks`` opens once per call, threaded down
+    so manifest position lookups don't incur a per-collection SQLite
+    open (50 collections * one connection each was the original cost).
+    ``None`` falls back to enumerate-by-page-order, matching the
+    catalog-absent path the outer caller leaves explicit.
+    """
+    if manifest_position_cache is None:
+        manifest_position_cache = {}
+
+    _cat = catalog
+
+    def _position_for(doc_id: str, chash: str, fallback: int) -> int:
+        """Look up the chunk's position in the catalog manifest. Falls
+        back to ``fallback`` when the catalog is absent, the doc has no
+        manifest, or the chash is not in the manifest."""
+        if not doc_id or not chash or _cat is None:
+            return fallback
+        if doc_id not in manifest_position_cache:
+            try:
+                rows = _cat.get_manifest(doc_id)
+            except Exception:
+                rows = []
+            # Both 32-char and 64-char chash keys so we can match
+            # legacy chunks (full hash) and post-D1 chunks (truncated)
+            # without re-truncating at lookup time.
+            cache: dict[str, int] = {}
+            for row in rows:
+                cache[row.chash] = row.position
+                if len(row.chash) > 32:
+                    cache[row.chash[:32]] = row.position
+            manifest_position_cache[doc_id] = cache
+        cache = manifest_position_cache[doc_id]
+        return cache.get(chash, cache.get(chash[:32], fallback))
+
     offset = 0
+    page_offset = 0
     while True:
         page = col.get(limit=_CHUNK_PAGE_SIZE, offset=offset, include=["metadatas"])
         ids = page.get("ids") or []
@@ -613,7 +674,12 @@ def _synthesize_collection_chunks(
             chunk_title = meta.get("title") or ""
             chash = meta.get("chunk_text_hash") or ""
             content_hash = meta.get("content_hash") or ""
-            chunk_index = int(meta.get("chunk_index", 0) or 0)
+            # RDR-108 Phase 4b (nexus-kosc): position comes from the
+            # catalog manifest rather than ``meta.chunk_index`` (which
+            # Phase 3 retired). Page-order index is the last-resort
+            # fallback when both the manifest and the legacy field
+            # are unavailable.
+            legacy_chunk_index = int(meta.get("chunk_index", 0) or 0)
             embedded_at = meta.get("indexed_at") or meta.get("embedded_at") or ""
 
             # 0. RDR-102 Phase A propagation: chunks indexed by the
@@ -661,6 +727,10 @@ def _synthesize_collection_chunks(
                 doc_id = live_doc_lookup.get(content_hash, "")
             orphan = not doc_id
 
+            position = _position_for(
+                doc_id, chash,
+                fallback=legacy_chunk_index or page_offset,
+            )
             yield Event(
                 type=ev.TYPE_CHUNK_INDEXED,
                 v=0,
@@ -669,13 +739,14 @@ def _synthesize_collection_chunks(
                     chash=chash,
                     doc_id=doc_id,
                     coll_id=coll_name,
-                    position=chunk_index,
+                    position=position,
                     content_hash=content_hash,
                     embedded_at=embedded_at,
                     synthesized_orphan=orphan,
                 ),
                 ts=embedded_at,
             )
+            page_offset += 1
 
         if len(ids) < _CHUNK_PAGE_SIZE:
             break

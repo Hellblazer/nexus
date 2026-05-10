@@ -1570,59 +1570,91 @@ def _prune_misclassified(
 def _prune_deleted_files(
     code_collection: str,
     docs_collection: str,
-    all_current_paths: set[str],
     db: object,
     *,
-    file_to_doc_id: dict[Path, str] | None = None,
+    catalog: object | None,
 ) -> None:
-    """Remove chunks for files that no longer exist in the repo (C3 fix).
+    """Remove orphan T3 chunks via the catalog manifest (RDR-108 Phase 4 /
+    nexus-dyxe).
 
-    Queries each collection for all distinct chunk identities and deletes
-    chunks for any file no longer present in the repo.
+    The catalog's ``document_chunks`` table is the authoritative source
+    of truth for which chunk content (chash) belongs to which document.
+    Membership is tested by the chunk's ``chunk_text_hash`` metadata
+    field (content hash, always present in the post-Phase-A schema)
+    rather than the chunk's natural ID. The two coincide once a chunk
+    has been migrated by ``nx t3 reidentify``, but until then live
+    indexer writes still produce synthetic IDs (``sha256(corpus:title:
+    chunk{i})[:32]``). Comparing by content hash preserves live data
+    regardless of which scheme the chunk was written under.
 
-    RDR-102 D2: source_path is no longer written to chunks at the
-    canonical write path; identity is keyed on the catalog tumbler
-    (``doc_id``) for chunks the post-Phase-A writer produced. The
-    *file_to_doc_id* map (always populated by the catalog hook when a
-    catalog is initialized) provides the current ``{abs_path: doc_id}``
-    set; chunks whose ``doc_id`` is NOT in that map's value set are
-    "deleted-file" chunks and get pruned. Legacy chunks (no ``doc_id``
-    in metadata, pre-Phase-A) fall back to the source_path lookup so
-    pre-RDR-102 collections keep getting cleaned up — RDR-101 Phase 5b
-    will drop the fallback once the prune verb has run on every
-    collection.
+    Orphans (chunk_text_hash not referenced by any manifest row in this
+    collection) are produced by:
+
+      - deleted documents (FK CASCADE drops their manifest rows),
+      - re-indexing that supersedes content (UPSERT-on-(doc_id, position)
+        replaces the chash at that slot, so the old chash is no longer
+        referenced).
+
+    Timing for deleted files: ``_run_housekeeping`` defers
+    ``cat.delete_document`` until ``miss_count >= 2`` (rename-detection
+    grace window). The document and its manifest rows therefore survive
+    the first index run after a file is removed; this GC only sweeps
+    the orphaned T3 chunks on the second run, when housekeeping
+    actually deletes the document and FK CASCADE drops the manifest
+    rows. One-run latency on cleanup, never on correctness.
+
+    Pre-D1 [:16] cleanup (RDR-108 re-gate O1 mixed-state) is delegated
+    to ``nx t3 reidentify``, whose Pass 2 batch-deletes the old IDs
+    after re-upsert. GC's job is doc-level orphan removal; same-content
+    duplicates are reidentify's job.
+
+    Catalog-absent is a safe no-op: GC requires the manifest as the
+    source of truth and cannot infer orphans without it.
+
+    Note (operator runbook): the ``nx t3 gc`` CLI verb still uses the
+    legacy ``meta.doc_id``-keyed path (``commands/t3.py:gc_cmd``) and
+    therefore reports zero candidates for post-Phase-3 chunks. The two
+    paths will be reconciled in nexus-e5aw; until then this function is
+    the authoritative GC for content-addressed chunks and ``nx t3 gc``
+    handles only legacy pre-Phase-3 orphans.
     """
-    file_to_doc_id = file_to_doc_id or {}
-    current_doc_ids: set[str] = {d for d in file_to_doc_id.values() if d}
-
+    if catalog is None:
+        return
     for collection_name in (code_collection, docs_collection):
+        referenced = catalog.chashes_for_collection(collection_name)
         col = db.get_or_create_collection(collection_name)
-        # Get all chunks to find their identities (paginated — Cloud cap is 300)
         all_chunks = _paginated_get(col, include=["metadatas"])
         if not all_chunks["ids"]:
             continue
-
-        stale_ids: list[str] = []
+        orphan_ids: list[str] = []
+        unsafe_skipped = 0
         for chunk_id, meta in zip(all_chunks["ids"], all_chunks["metadatas"]):
-            doc_id = meta.get("doc_id", "")
-            if doc_id:
-                # Phase A path: chunk carries catalog tumbler. Stale iff
-                # the tumbler is not in the current file_to_doc_id values.
-                if current_doc_ids and doc_id not in current_doc_ids:
-                    stale_ids.append(chunk_id)
+            chash = (meta.get("chunk_text_hash") or "")[:32]
+            if not chash:
+                # Pre-RDR-053 relics carry no ``chunk_text_hash`` in
+                # metadata, so the manifest cannot prove them live or
+                # dead. Silently sweeping them would be data loss for
+                # the documented carve-out collection
+                # ``docs__scheme-evolution-research-b7de0b63`` (~690
+                # chunks per RDR-108 RF-1) and any other unmigrated
+                # corpus. Skip and log; the operator cleans them up by
+                # re-indexing the source or running ``nx t3
+                # reidentify``, which adds the field.
+                unsafe_skipped += 1
                 continue
-            # Legacy fallback: chunk pre-dates Phase A doc_id wiring AND
-            # was written before Phase B dropped source_path. Phase 5b
-            # cleanup will drop this branch once the prune verb has
-            # swept every collection.
-            source_path = meta.get("source_path", "")
-            if source_path and source_path not in all_current_paths:
-                stale_ids.append(chunk_id)
-
-        if stale_ids:
-            _batched_delete(col, stale_ids)
-            _log.info("pruned deleted-file chunks",
-                       collection=collection_name, count=len(stale_ids))
+            if chash not in referenced:
+                orphan_ids.append(chunk_id)
+        if unsafe_skipped:
+            _log.warning("skipped chunks without chunk_text_hash",
+                         collection=collection_name,
+                         count=unsafe_skipped,
+                         note=("re-index source or run `nx t3 reidentify` "
+                               "to populate chunk_text_hash; until then GC "
+                               "cannot decide these chunks safely"))
+        if orphan_ids:
+            _batched_delete(col, orphan_ids)
+            _log.info("pruned orphan chunks",
+                      collection=collection_name, count=len(orphan_ids))
 
 
 # ── Main indexing pipeline ───────────────────────────────────────────────────
@@ -1874,12 +1906,12 @@ def _run_index(
     # creation below so the rest of the pipeline only ever sees the
     # conformant name. Idempotent: subsequent runs are a no-op (legacy
     # absent from T3). Catalog-absent is a safe no-op (returns legacy).
+    _cat: object | None = None
     try:
         from nexus.catalog.catalog import Catalog as _Catalog
         from nexus.config import catalog_path as _catalog_path
 
         _cat_path = _catalog_path()
-        _cat: object | None = None
         if _Catalog.is_initialized(_cat_path):
             _cat = _Catalog(_cat_path, _cat_path / ".catalog.db")
 
@@ -2148,19 +2180,12 @@ def _run_index(
         )
         _phase(f"Pruning misclassified done ({time.monotonic() - _t:.1f}s)")
 
-        # C3: Prune deleted files — remove chunks for files no longer in the repo
+        # C3: Prune deleted files. Remove orphan chunks via the catalog
+        # manifest (RDR-108 Phase 4 / nexus-dyxe).
         _phase("Pruning deleted files…")
         _t = time.monotonic()
-        all_current_paths: set[str] = set()
-        for _, f in code_files:
-            all_current_paths.add(str(f))
-        for _, f in prose_files:
-            all_current_paths.add(str(f))
-        for _, f in pdf_files:
-            all_current_paths.add(str(f))
         _prune_deleted_files(
-            code_collection, docs_collection, all_current_paths, db,
-            file_to_doc_id=file_to_doc_id,
+            code_collection, docs_collection, db, catalog=_cat,
         )
         _phase(f"Pruning deleted files done ({time.monotonic() - _t:.1f}s)")
 

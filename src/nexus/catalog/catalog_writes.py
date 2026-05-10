@@ -863,6 +863,34 @@ class _WriteOps:
             for row in rows
         ]
 
+    def chashes_for_collection(self, physical_collection: str) -> set[str]:
+        """Return the set of chunk natural IDs (chash[:32]) referenced by
+        the manifest for documents in ``physical_collection`` (RDR-108
+        Phase 4 / nexus-dyxe).
+
+        ``document_chunks.chash`` accepts either the full 64-char
+        ``chunk_text_hash`` (the canonical write path via
+        ``manifest_write_batch_hook``) or the truncated 32-char form
+        (used by some backfill flows); ``substr(chash, 1, 32)``
+        normalizes both shapes so the returned set is always
+        32-char-keyed and can be compared directly against
+        ``chunk_text_hash[:32]`` (the natural ID under RDR-108 D1).
+
+        Used by the GC rewrite (``indexer._prune_deleted_files``) to
+        identify orphan T3 chunks: anything in the collection whose
+        ``chunk_text_hash[:32]`` is NOT in this set has no manifest
+        entry and should be deleted.
+        """
+        cat = self._cat
+        rows = cat._db.execute(
+            "SELECT DISTINCT substr(dc.chash, 1, 32) "
+            "FROM document_chunks dc "
+            "JOIN documents d ON d.tumbler = dc.doc_id "
+            "WHERE d.physical_collection = ?",
+            (physical_collection,),
+        ).fetchall()
+        return {row[0] for row in rows}
+
     def docs_for_chashes(self, chashes: list[str]) -> dict[str, list[str]]:
         """Reverse-lookup: chash -> [doc_id, ...] (nexus-572g K6).
 
@@ -874,20 +902,28 @@ class _WriteOps:
         Used by Phase 4 retrieval doc-grouping (mcp/core.py:847 path)
         to reconstruct the document context for a set of chunk hashes
         returned by a T3 query.
+
+        Batched at 500 chashes per query to stay safely under SQLite's
+        ``SQLITE_LIMIT_VARIABLE_NUMBER`` (default 999, can be 32766 in
+        newer builds). Search-result populations rarely exceed a few
+        hundred chashes, but the batch keeps the worst case bounded.
         """
         if not chashes:
             return {}
         cat = self._cat
-        placeholders = ", ".join(["?"] * len(chashes))
-        rows = cat._db.execute(
-            f"SELECT chash, doc_id FROM document_chunks "
-            f"WHERE chash IN ({placeholders})",
-            chashes,
-        ).fetchall()
         result: dict[str, list[str]] = defaultdict(list)
-        for chash, doc_id in rows:
-            if doc_id not in result[chash]:
-                result[chash].append(doc_id)
+        _BATCH = 500
+        for i in range(0, len(chashes), _BATCH):
+            batch = chashes[i : i + _BATCH]
+            placeholders = ", ".join(["?"] * len(batch))
+            rows = cat._db.execute(
+                f"SELECT chash, doc_id FROM document_chunks "
+                f"WHERE chash IN ({placeholders})",
+                batch,
+            ).fetchall()
+            for chash, doc_id in rows:
+                if doc_id not in result[chash]:
+                    result[chash].append(doc_id)
         return dict(result)
 
     def delete_document(self, tumbler: Tumbler) -> bool:

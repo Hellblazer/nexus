@@ -1527,9 +1527,21 @@ class Catalog:
         """Return ordered manifest rows for ``doc_id`` (nexus-572g K6)."""
         return self._writes.get_manifest(doc_id)
 
+    def get_chunk_chashes(self, doc_id: str) -> list[str]:
+        """Return the ordered list of chashes for ``doc_id`` (RDR-108
+        Phase 4b / nexus-kosc). Convenience wrapper over ``get_manifest``
+        for retrieval call sites that need only the chash sequence."""
+        return [row.chash for row in self._writes.get_manifest(doc_id)]
+
     def docs_for_chashes(self, chashes: list[str]) -> dict[str, list[str]]:
         """Reverse-lookup: chash -> [doc_id, ...] (nexus-572g K6)."""
         return self._writes.docs_for_chashes(chashes)
+
+    def chashes_for_collection(self, physical_collection: str) -> set[str]:
+        """Return chunk natural IDs (chash[:32]) referenced by the manifest
+        for documents in ``physical_collection`` (RDR-108 Phase 4 / nexus-dyxe).
+        Used by GC to identify orphan T3 chunks."""
+        return self._writes.chashes_for_collection(physical_collection)
 
     def find(self, query: str, *, content_type: str | None = None) -> list[CatalogEntry]:
         """Delegates to ``_DocumentOps.find`` (nexus-mbm)."""

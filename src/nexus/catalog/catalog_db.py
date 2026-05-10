@@ -423,6 +423,25 @@ class CatalogDB:
                 "WHERE bib_openalex_id != ''"
             )
 
+        # RDR-108 Phase 4 (nexus-dyxe): index documents.physical_collection
+        # so manifest-based GC's per-collection lookup
+        # (``chashes_for_collection`` joins document_chunks to documents
+        # filtered by physical_collection) does not full-scan documents.
+        # Same column is the filter key for ``list_by_collection`` and
+        # ``relocate_collection``. Probe-guarded so stripped-down legacy
+        # schemas without ``physical_collection`` (e.g. the alias_of
+        # migration test fixture) still open cleanly.
+        try:
+            self._conn.execute("SELECT physical_collection FROM documents LIMIT 0")
+        except sqlite3.OperationalError:
+            pass
+        else:
+            with self._conn:
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_documents_physical_collection "
+                    "ON documents(physical_collection)"
+                )
+
         # RDR-108 K1 (nexus-lh8c): add ON DELETE CASCADE to document_chunks
         # for existing databases that were created before this constraint was
         # declared in the schema. SQLite cannot ALTER a FK constraint in place;

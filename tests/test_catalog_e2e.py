@@ -260,11 +260,11 @@ def test_store_put_registers_in_catalog(tmp_path, monkeypatch):
     """RDR-101 Phase 3 PR δ Stage B.5 changed the timing so the catalog
     hook now runs BEFORE the T3 write (so the chunk can carry the
     catalog tumbler as ``doc_id``). The catalog's legacy
-    ``meta.doc_id`` lookup field is therefore populated with the real
-    deterministic ``chunk_chroma_id`` (sha256 of "{collection}:{title}"
-    truncated), not whatever a mocked ``db.put`` echoes back. The real
-    ``db.put`` returns the same hash, so the production behaviour is
-    unchanged — only the test setup needs to match.
+    ``meta.doc_id`` lookup field is populated with the deterministic
+    ``chunk_chroma_id`` that ``T3Database.put`` derives. RDR-108 D1
+    (nexus-kmb6) standardises the derivation as
+    ``sha256(content)[:32]`` so single-chunk MCP docs land directly
+    under their content-addressed natural ID.
     """
     import hashlib as _hl
     from nexus.mcp_server import _reset_singletons, store_put
@@ -274,24 +274,20 @@ def test_store_put_registers_in_catalog(tmp_path, monkeypatch):
     cat = Catalog.init(catalog_dir)
     cat.register_owner("knowledge", "curator")
     _reset_singletons()
+    content = "# Research: Vector Indexing\n\nFindings about HNSW..."
     with patch("nexus.mcp.core._get_t3") as mock_t3:
         mock_db = MagicMock()
         mock_db.put.return_value = "doc-abc123"
         mock_t3.return_value = mock_db
         result = store_put(
-            content="# Research: Vector Indexing\n\nFindings about HNSW...",
+            content=content,
             collection="knowledge", title="research-vector-indexing",
             tags="research,embeddings",
         )
     assert "Stored" in result
-    # The catalog now stores the deterministic chunk_chroma_id, matching
-    # what the real T3Database.put returns (independent of the mock).
-    # RDR-103 Phase 5: ``t3_collection_name`` auto-promotes the
-    # 1-segment ``knowledge`` arg to a conformant 4-segment name; the
-    # chunk_chroma_id is derived from that promoted name + title.
-    expected_chunk_chroma_id = _hl.sha256(
-        b"knowledge__knowledge__voyage-context-3__v1:research-vector-indexing"
-    ).hexdigest()[:16]
+    # The catalog stores the deterministic chunk_chroma_id derived from
+    # content (the natural ID per RDR-108 D1).
+    expected_chunk_chroma_id = _hl.sha256(content.encode()).hexdigest()[:32]
     entry = Catalog(catalog_dir, catalog_dir / ".catalog.db").by_doc_id(
         expected_chunk_chroma_id,
     )
@@ -375,11 +371,15 @@ class TestChashSpan:
             limit=5, include=["documents", "metadatas"],
         )
         assert result["ids"]
-        for doc_text, meta in zip(result["documents"], result["metadatas"]):
+        for chunk_id, doc_text, meta in zip(
+            result["ids"], result["documents"], result["metadatas"],
+        ):
             assert "chunk_text_hash" in meta and "content_hash" in meta
             expected = hashlib.sha256(doc_text.encode()).hexdigest()
             assert meta["chunk_text_hash"] == expected
             assert meta["chunk_text_hash"] != meta["content_hash"]
+            # RDR-108 D1 (nexus-kmb6): chunk natural ID is content-derived.
+            assert chunk_id == expected[:32]
 
     def test_audit_and_resolve_roundtrip(self, indexed_catalog):
         cat, local_t3 = indexed_catalog

@@ -532,33 +532,41 @@ def test_list_collections_skips_failed_count(mock_chromadb):
     assert "knowledge__broken" not in names
 
 
-# ── Deterministic ID ────────────────────────────────────────────────────────
+# ── Deterministic ID (RDR-108 D1: content-derived natural ID) ────────────────
 
 
-@pytest.mark.parametrize("col,title1,title2,expect_same", [
-    ("knowledge__sec", "finding.md", "finding.md", True),
-    ("knowledge__sec", "chunk-a.md", "chunk-b.md", False),
-    ("code__repo", "file.py:1-50", "file.py:1-50", True),
+@pytest.mark.parametrize("col,c1,c2,expect_same", [
+    ("knowledge__sec", "same body", "same body", True),
+    ("knowledge__sec", "first body", "second body", False),
+    ("code__repo", "snippet a", "snippet b", False),
 ])
-def test_put_deterministic_id(mock_db, col, title1, title2, expect_same):
+def test_put_deterministic_id_keys_on_content(mock_db, col, c1, c2, expect_same):
+    """Per RDR-108 D1 (nexus-kmb6) the natural ID is
+    ``chunk_text_hash[:32]``. Identical content collapses to one ID;
+    distinct content gets distinct IDs."""
     db, mock_col, _ = mock_db
-    id1 = db.put(collection=col, content="first", title=title1)
-    id2 = db.put(collection=col, content="second", title=title2)
+    id1 = db.put(collection=col, content=c1, title="t1")
+    id2 = db.put(collection=col, content=c2, title="t2")
     assert (id1 == id2) == expect_same
 
 
-def test_put_empty_title_collision(mock_db):
+def test_put_id_is_independent_of_title(mock_db):
+    """Title is a metadata field, not part of the natural ID. Same
+    content under different titles produces the same ID."""
     db, mock_col, _ = mock_db
-    id1 = db.put(collection="knowledge__sec", content="first", title="")
-    id2 = db.put(collection="knowledge__sec", content="second", title="")
+    id1 = db.put(collection="knowledge__sec", content="body", title="alpha.md")
+    id2 = db.put(collection="knowledge__sec", content="body", title="beta.md")
     assert id1 == id2
 
 
-def test_put_same_title_different_collection_different_ids(mock_db):
+def test_put_id_is_independent_of_collection(mock_db):
+    """Natural ID is global (content-addressed). Same content stored
+    in two collections produces the same ID; chromadb keeps the rows
+    separate via collection scoping, not via the ID."""
     db, mock_col, _ = mock_db
     id1 = db.put(collection="knowledge__sec", content="text", title="shared.md")
     id2 = db.put(collection="knowledge__ops", content="text", title="shared.md")
-    assert id1 != id2
+    assert id1 == id2
 
 
 # ── Oversized put raises (GH #244 + nexus-akof) ─────────────────────────────
@@ -595,7 +603,8 @@ def test_put_under_cap_still_succeeds(mock_db):
     doc_id = db.put(
         collection="knowledge__sec", content="small body", title="ok.md",
     )
-    assert isinstance(doc_id, str) and len(doc_id) == 16
+    # RDR-108 D1: natural ID is chunk_text_hash[:32] (32 hex chars).
+    assert isinstance(doc_id, str) and len(doc_id) == 32
     mock_col.upsert.assert_called_once()
 
 
@@ -776,72 +785,96 @@ def test_delete_by_source_nonexistent_collection_returns_zero(mock_chromadb):
     assert db.delete_by_source("code__nonexistent", "src/file.py") == 0
 
 
-# ── ids_for_doc_id / delete_by_doc_id (nexus-dcym) ────────────────────────
+# ── ids_for_doc_id / delete_by_doc_id (nexus-dcym + RDR-108 Phase 4b kosc) ──
 
 
-@pytest.mark.parametrize("col,doc_id,returned_ids,expected_count", [
-    ("code__myrepo", "ART-deadbeef", ["a1", "a2", "a3"], 3),
-    ("knowledge__wiki", "ART-cafe1234", ["x1"], 1),
-    ("code__myrepo", "ART-nonexistent", [], 0),
+def _stub_catalog(chashes: list[str]):
+    """MagicMock catalog whose ``get_chunk_chashes`` returns ``chashes``."""
+    cat = MagicMock()
+    cat.get_chunk_chashes.return_value = chashes
+    return cat
+
+
+@pytest.mark.parametrize("col,doc_id,chashes,present_ids", [
+    ("code__myrepo", "ART-deadbeef", ["a" * 64, "b" * 64, "c" * 64],
+     [("a" * 64)[:32], ("b" * 64)[:32], ("c" * 64)[:32]]),
+    ("knowledge__wiki", "ART-cafe1234", ["d" * 64], [("d" * 64)[:32]]),
+    ("code__myrepo", "ART-nonexistent", [], []),
 ])
-def test_ids_for_doc_id(mock_db, col, doc_id, returned_ids, expected_count):
-    """ids_for_doc_id queries on the doc_id metadata field, not source_path."""
+def test_ids_for_doc_id(mock_db, col, doc_id, chashes, present_ids):
+    """``ids_for_doc_id`` consults the catalog manifest (RDR-108 Phase 4b)
+    and verifies T3 presence via ``col.get(ids=...)``."""
     db, mock_col, _ = mock_db
-    mock_col.get.return_value = {"ids": returned_ids}
-    result = db.ids_for_doc_id(col, doc_id)
-    assert result == returned_ids
-    assert len(result) == expected_count
-    # The chunk-lookup must use doc_id, NOT source_path. WITH TEETH:
-    # if the implementation accidentally falls back to source_path, this fails.
-    where = mock_col.get.call_args.kwargs["where"]
-    assert where == {"doc_id": doc_id}
+    mock_col.get.return_value = {"ids": present_ids}
+    cat = _stub_catalog(chashes)
+
+    result = db.ids_for_doc_id(col, doc_id, catalog=cat)
+
+    assert result == present_ids
+    cat.get_chunk_chashes.assert_called_once_with(doc_id)
+    if chashes:
+        # The T3 verification leg must look up by ``ids=``, not ``where=``.
+        kwargs = mock_col.get.call_args.kwargs
+        assert kwargs["ids"] == [c[:32] for c in chashes]
+        assert "where" not in kwargs
+    else:
+        mock_col.get.assert_not_called()
 
 
 def test_ids_for_doc_id_nonexistent_collection_returns_empty(mock_chromadb):
     _, mock_client = mock_chromadb
     mock_client.get_collection.side_effect = chromadb.errors.NotFoundError("Collection not found")
     db = T3Database(tenant="t", database="d", api_key="k")
-    assert db.ids_for_doc_id("code__nonexistent", "ART-deadbeef") == []
+    cat = _stub_catalog(["a" * 64])
+    assert db.ids_for_doc_id("code__nonexistent", "ART-deadbeef", catalog=cat) == []
 
 
 def test_ids_for_doc_id_paginates_over_300_record_quota(mock_db):
-    """Cloud has a 300-record limit per get(); helper must page."""
+    """Cloud has a 300-record limit per get(); helper must page across
+    the candidate-id list."""
     db, mock_col, _ = mock_db
-    page1 = {"ids": [f"id-{i}" for i in range(300)]}
-    page2 = {"ids": [f"id-{i}" for i in range(300, 450)]}
+    chashes = [f"{i:064x}" for i in range(450)]
+    page1 = {"ids": [c[:32] for c in chashes[:300]]}
+    page2 = {"ids": [c[:32] for c in chashes[300:]]}
     mock_col.get.side_effect = [page1, page2]
-    result = db.ids_for_doc_id("code__myrepo", "ART-large")
+    cat = _stub_catalog(chashes)
+
+    result = db.ids_for_doc_id("code__myrepo", "ART-large", catalog=cat)
+
     assert len(result) == 450
     assert mock_col.get.call_count == 2
-    # offset advances by page size
-    assert mock_col.get.call_args_list[0].kwargs["offset"] == 0
-    assert mock_col.get.call_args_list[1].kwargs["offset"] == 300
+    # First batch is the first 300 candidates; second is the remainder.
+    assert mock_col.get.call_args_list[0].kwargs["ids"] == [c[:32] for c in chashes[:300]]
+    assert mock_col.get.call_args_list[1].kwargs["ids"] == [c[:32] for c in chashes[300:]]
 
 
-@pytest.mark.parametrize("col,doc_id,returned_ids,expected_count,expect_delete", [
-    ("code__myrepo", "ART-deadbeef", ["a1", "a2", "a3"], 3, True),
-    ("knowledge__wiki", "ART-cafe1234", ["x1", "x2"], 2, True),
-    ("code__myrepo", "ART-nonexistent", [], 0, False),
+@pytest.mark.parametrize("col,doc_id,chashes,present_ids,expect_delete", [
+    ("code__myrepo", "ART-deadbeef", ["a" * 64, "b" * 64, "c" * 64],
+     [("a" * 64)[:32], ("b" * 64)[:32], ("c" * 64)[:32]], True),
+    ("knowledge__wiki", "ART-cafe1234", ["d" * 64, "e" * 64],
+     [("d" * 64)[:32], ("e" * 64)[:32]], True),
+    ("code__myrepo", "ART-nonexistent", [], [], False),
 ])
-def test_delete_by_doc_id(mock_db, col, doc_id, returned_ids, expected_count, expect_delete):
+def test_delete_by_doc_id(mock_db, col, doc_id, chashes, present_ids, expect_delete):
     db, mock_col, _ = mock_db
-    mock_col.get.return_value = {"ids": returned_ids}
-    result = db.delete_by_doc_id(col, doc_id)
-    assert result == expected_count
+    mock_col.get.return_value = {"ids": present_ids}
+    cat = _stub_catalog(chashes)
+
+    result = db.delete_by_doc_id(col, doc_id, catalog=cat)
+
+    assert result == len(present_ids)
     if expect_delete:
-        mock_col.delete.assert_called_once_with(ids=returned_ids)
+        mock_col.delete.assert_called_once_with(ids=present_ids)
     else:
         mock_col.delete.assert_not_called()
-    # The lookup leg must filter on doc_id.
-    where = mock_col.get.call_args.kwargs["where"]
-    assert where == {"doc_id": doc_id}
 
 
 def test_delete_by_doc_id_nonexistent_collection_returns_zero(mock_chromadb):
     _, mock_client = mock_chromadb
     mock_client.get_collection.side_effect = chromadb.errors.NotFoundError("Collection not found")
     db = T3Database(tenant="t", database="d", api_key="k")
-    assert db.delete_by_doc_id("code__nonexistent", "ART-deadbeef") == 0
+    cat = _stub_catalog(["a" * 64])
+    assert db.delete_by_doc_id("code__nonexistent", "ART-deadbeef", catalog=cat) == 0
 
 
 # ── update_source_path ─────────────────────────────────────────────────────
