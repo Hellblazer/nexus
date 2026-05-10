@@ -425,22 +425,45 @@ def test_parse_where_empty_value_with_operator_raises() -> None:
 # ── --max-file-chunks ───────────────────────────────────────────────────────
 
 
-def test_max_file_chunks_builds_chunk_count_filter(runner: CliRunner, code_search_ctx) -> None:
+def test_max_file_chunks_does_not_route_through_chroma_where(
+    runner: CliRunner, code_search_ctx,
+) -> None:
+    """nexus-oo4f (RDR-108 Phase 4 review D-M2): --max-file-chunks
+    used to build a chroma where={"chunk_count": {"$lte": N}} filter.
+    RDR-108 Phase 3 removed chunk_count from chunk metadata; the
+    chroma where matched zero Phase-3 chunks and --max-file-chunks
+    silently returned no results.
+
+    Post-fix: --max-file-chunks is a post-query filter (against the
+    catalog manifest length), so the chroma where must NOT carry
+    chunk_count. Reverting the fix routes chunk_count through chroma
+    again and makes Phase-3 chunks invisible.
+    """
     _, captured = code_search_ctx
     runner.invoke(main, ["search", "query", "--corpus", "code", "--max-file-chunks", "17"])
-    assert captured[0] == {"chunk_count": {"$lte": 17}}
+    # No where filter at all when --max-file-chunks is the only filter.
+    assert captured[0] is None, (
+        f"chunk_count must NOT be routed through chroma where; got {captured[0]!r}"
+    )
 
 
-def test_max_file_chunks_and_where_merged_with_and(runner: CliRunner, code_search_ctx) -> None:
+def test_max_file_chunks_does_not_pollute_where_when_combined(
+    runner: CliRunner, code_search_ctx,
+) -> None:
+    """When combined with --where, only the --where pairs reach
+    chroma; the size filter is a post-query pass.
+    """
     _, captured = code_search_ctx
     runner.invoke(main, [
         "search", "query", "--corpus", "code",
         "--max-file-chunks", "17", "--where", "lang=python",
     ])
     w = captured[0]
-    assert "$and" in w
-    assert {"chunk_count": {"$lte": 17}} in w["$and"]
-    assert {"lang": "python"} in w["$and"]
+    # Only --where pairs route through chroma now.
+    assert w == {"lang": "python"}, (
+        f"where filter must contain only --where pairs, not chunk_count; "
+        f"got {w!r}"
+    )
 
 
 # ── corpus warning ──────────────────────────────────────────────────────────
