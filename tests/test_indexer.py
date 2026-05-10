@@ -1568,3 +1568,104 @@ def test_prose_indexer_non_markdown_metadata(tmp_path):
         h = x["chunk_text_hash"]; assert len(h) == 64
         assert h == hashlib.sha256(doc.encode()).hexdigest()
         assert x.get("section_type") == ""
+
+
+# ── nexus-27u7: lazy collection creation ─────────────────────────────────
+
+
+def test_run_index_skips_docs_collection_for_code_only_repo(tmp_path):
+    """nexus-27u7: a code-only repo MUST NOT create the docs__
+    collection at the start of ``_run_index``. Pre-fix the indexer
+    pre-created BOTH ``code__`` and ``docs__`` regardless of file
+    composition; a code-only repo accumulated an empty zombie
+    ``docs__`` that ``nx catalog collection-gc`` had to sweep later.
+
+    Reverting the lazy-creation gate (re-introducing
+    ``code_col = db.get_or_create_collection(code_collection);
+    docs_col = db.get_or_create_collection(docs_collection)``)
+    makes this test fail because the docs name appears in the
+    get_or_create_collection call list.
+    """
+    from nexus.indexer import _run_index
+    repo = tmp_path / "repo"; repo.mkdir()
+    (repo / "main.py").write_text("x = 1\n")  # code only
+    db, col = _mock_db()
+    v = _voyage(1)
+    with _patches(db, extra={
+        "nexus.chunker.chunk_file": {"return_value": [_chunk()]},
+        "voyageai.Client": {"return_value": v},
+    }):
+        _run_index(repo, _reg())
+
+    # Inspect every collection name passed to get_or_create_collection.
+    created = [
+        call.args[0] if call.args else call.kwargs.get("name", "")
+        for call in db.get_or_create_collection.call_args_list
+    ]
+    docs_created = [n for n in created if n.startswith("docs__")]
+    assert not docs_created, (
+        f"docs collection should NOT have been created for code-only "
+        f"repo (nexus-27u7); got created: {docs_created!r}"
+    )
+
+
+def test_run_index_skips_code_collection_for_docs_only_repo(tmp_path):
+    """nexus-27u7 symmetric case: a docs-only repo (.md files only)
+    MUST NOT create the code__ collection.
+    """
+    from nexus.indexer import _run_index
+    repo = tmp_path / "repo"; repo.mkdir()
+    (repo / "README.md").write_text("# Title\n\nSome prose.\n")  # docs only
+    db, col = _mock_db()
+    with _patches(db, extra={
+        "nexus.doc_indexer._embed_with_fallback": {
+            "return_value": ([[0.1]*10], "voyage-context-3"),
+        },
+    }):
+        _run_index(repo, _reg())
+
+    created = [
+        call.args[0] if call.args else call.kwargs.get("name", "")
+        for call in db.get_or_create_collection.call_args_list
+    ]
+    code_created = [n for n in created if n.startswith("code__")]
+    assert not code_created, (
+        f"code collection should NOT have been created for docs-only "
+        f"repo (nexus-27u7); got created: {code_created!r}"
+    )
+
+
+def test_run_index_creates_both_for_mixed_repo(tmp_path):
+    """nexus-27u7 regression guard: a mixed repo (code + docs)
+    creates BOTH collections. Lazy-creation must not regress the
+    happy path.
+    """
+    from nexus.indexer import _run_index
+    repo = tmp_path / "repo"; repo.mkdir()
+    (repo / "main.py").write_text("x = 1\n")
+    (repo / "README.md").write_text("# Title\n\nProse.\n")
+    db, col = _mock_db()
+    v = _voyage(1)
+    with _patches(db, extra={
+        "nexus.chunker.chunk_file": {"return_value": [_chunk()]},
+        "voyageai.Client": {"return_value": v},
+        "nexus.doc_indexer._embed_with_fallback": {
+            "return_value": ([[0.1]*10], "voyage-context-3"),
+        },
+    }):
+        _run_index(repo, _reg())
+
+    created = [
+        call.args[0] if call.args else call.kwargs.get("name", "")
+        for call in db.get_or_create_collection.call_args_list
+    ]
+    code_created = [n for n in created if n.startswith("code__")]
+    docs_created = [n for n in created if n.startswith("docs__")]
+    assert code_created, (
+        "mixed repo must create code__ collection; "
+        "lazy-creation gate is over-eager"
+    )
+    assert docs_created, (
+        "mixed repo must create docs__ collection; "
+        "lazy-creation gate is over-eager"
+    )
