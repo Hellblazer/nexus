@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.31.5] - 2026-05-10
+
+Plugin version aligned with conexus 4.31.5. No plugin-side changes;
+the release re-defers the RDR-108 Phase 1c PK migrations that 4.31.4
+attempted to reland, but ships the ``_resolve_doc_id`` substrate so
+the next reland is a one-line registry change. See root
+``CHANGELOG.md``.
+
 ## [4.31.4] - 2026-05-10
 
 Plugin version aligned with conexus 4.31.4. No plugin-side changes;

@@ -542,6 +542,29 @@ class TestK8DedupRowNumber:
 # ── K11: Migration retry when catalog absent ──────────────────────────────────
 
 
+def _je0b_registered() -> bool:
+    """True iff the je0b PK migration is registered in MIGRATIONS.
+
+    K11 / CG-2 / K2 tests verify behavior of je0b's MigrationRetry path
+    (skip + don't cache + retry on next open). When je0b is deferred
+    from the registry (4.31.5: pending companion fixes for the wider
+    DocumentAspects refactor), apply_pending has nothing to skip and
+    these contracts don't apply. Re-enable by re-registering je0b.
+    """
+    from nexus.db.migrations import (
+        MIGRATIONS,
+        _migrate_document_aspects_pk_via_apply_pending,
+    )
+    return any(
+        m.fn is _migrate_document_aspects_pk_via_apply_pending
+        for m in MIGRATIONS
+    )
+
+
+@pytest.mark.skipif(
+    not _je0b_registered(),
+    reason="je0b deferred from MIGRATIONS in 4.31.5 (see CHANGELOG)",
+)
 class TestK11SkipNotCached:
     """K11: apply_pending must NOT add path to _upgrade_done when catalog is absent."""
 
@@ -609,6 +632,10 @@ class TestK11SkipNotCached:
 # ── CG-2: apply_pending no-catalog-path ──────────────────────────────────────
 
 
+@pytest.mark.skipif(
+    not _je0b_registered(),
+    reason="je0b deferred from MIGRATIONS in 4.31.5 (see CHANGELOG)",
+)
 class TestCG2NoCatalog:
     """CG-2: apply_pending with absent catalog must be no-op AND retry-able."""
 

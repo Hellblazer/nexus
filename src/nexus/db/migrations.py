@@ -2067,7 +2067,6 @@ def _check_high_volume_orphans(conn: sqlite3.Connection, *, table: str) -> None:
         return
 
     detail = "; ".join(f"{coll} ({n} rows)" for coll, n in rows)
-    # SIG-4: Build actionable command templates for each orphan collection.
     remediation_lines = "\n".join(
         f"  nx catalog mark-superseded {coll} <new-collection-name>"
         for coll, _ in rows
@@ -2491,102 +2490,21 @@ def _migrate_document_aspects_pk_via_apply_pending(conn: sqlite3.Connection) -> 
     This wrapper resolves the catalog DB path from the connection and
     delegates to ``migrate_document_aspects_pk_to_doc_id``.
 
-    Raises ``MigrationRetry`` when the catalog is absent AND the
-    document_aspects table has rows that need backfill. A fresh empty
-    table migrates against an in-memory placeholder catalog (the
-    cross-DB JOIN returns zero rows; the rebuild proceeds with nothing
-    to backfill).
+    Raises ``MigrationRetry`` when the catalog is absent so the path is
+    NOT marked done in ``_upgrade_done`` and will be retried on the next
+    DB open once the catalog has been populated.
     """
     catalog_path = _catalog_db_path_from_conn(conn)
     if not catalog_path.exists():
-        try:
-            n = int(conn.execute(
-                "SELECT COUNT(*) FROM document_aspects"
-            ).fetchone()[0])
-        except sqlite3.OperationalError:
-            return
-        if n == 0:
-            _migrate_document_aspects_pk_with_empty_catalog(conn)
-            return
         _log.warning(
             "migrate_document_aspects_pk_skip_no_catalog",
             catalog_path=str(catalog_path),
-            row_count=n,
         )
         raise MigrationRetry(
-            "catalog absent and document_aspects has rows: "
-            f"retry deferred until catalog exists: {catalog_path}"
+            "catalog absent — retry deferred until catalog exists: "
+            f"{catalog_path}"
         )
     migrate_document_aspects_pk_to_doc_id(conn, catalog_db_path=catalog_path)
-
-
-def _migrate_document_aspects_pk_with_empty_catalog(
-    conn: sqlite3.Connection,
-) -> None:
-    """Run je0b against a temporary placeholder catalog.
-
-    Used when the table is empty (fresh install) but the catalog
-    file does not yet exist. Writes a minimal stub catalog DB with
-    the ``documents`` + ``collections`` projection schema to a
-    sibling temp file, then delegates to je0b. The cross-DB JOIN
-    finds zero matches (table is empty); the rebuild proceeds with
-    nothing to backfill.
-    """
-    import tempfile
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
-        stub_path = Path(tmp.name)
-    try:
-        stub = sqlite3.connect(str(stub_path))
-        stub.execute(
-            "CREATE TABLE documents ("
-            "  tumbler TEXT, physical_collection TEXT, "
-            "  file_path TEXT, title TEXT, metadata TEXT)"
-        )
-        stub.execute(
-            "CREATE TABLE collections (name TEXT, superseded_by TEXT)"
-        )
-        stub.commit()
-        stub.close()
-        migrate_document_aspects_pk_to_doc_id(conn, catalog_db_path=stub_path)
-    finally:
-        try:
-            stub_path.unlink()
-        except FileNotFoundError:
-            pass
-
-
-def _migrate_aspect_queue_pk_with_empty_catalog(
-    conn: sqlite3.Connection,
-) -> None:
-    """Run aspect_queue je0b against a temporary placeholder catalog.
-
-    Same shape as ``_migrate_document_aspects_pk_with_empty_catalog``;
-    used when the queue is empty (fresh install, no in-flight extractions)
-    but the catalog file does not yet exist.
-    """
-    import tempfile
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
-        stub_path = Path(tmp.name)
-    try:
-        stub = sqlite3.connect(str(stub_path))
-        stub.execute(
-            "CREATE TABLE documents ("
-            "  tumbler TEXT, physical_collection TEXT, "
-            "  file_path TEXT, title TEXT, metadata TEXT)"
-        )
-        stub.execute(
-            "CREATE TABLE collections (name TEXT, superseded_by TEXT)"
-        )
-        stub.commit()
-        stub.close()
-        migrate_aspect_extraction_queue_pk_to_doc_id(
-            conn, catalog_db_path=stub_path,
-        )
-    finally:
-        try:
-            stub_path.unlink()
-        except FileNotFoundError:
-            pass
 
 
 def _migrate_aspect_queue_pk_via_apply_pending(conn: sqlite3.Connection) -> None:
@@ -2600,31 +2518,19 @@ def _migrate_aspect_queue_pk_via_apply_pending(conn: sqlite3.Connection) -> None
     before checking the queue. If the queue is still non-empty after the
     drain attempt, the underlying migration raises ``MigrationError``.
 
-    Raises ``MigrationRetry`` when the catalog is absent AND the
-    queue has rows that need backfill. A fresh empty queue migrates
-    against a temporary placeholder catalog (the cross-DB JOIN
-    returns zero matches; the rebuild proceeds with nothing to
-    backfill).
+    Raises ``MigrationRetry`` when the catalog is absent so the path is
+    NOT marked done in ``_upgrade_done`` and will be retried on the next
+    DB open once the catalog has been populated.
     """
     catalog_path = _catalog_db_path_from_conn(conn)
     if not catalog_path.exists():
-        try:
-            n = int(conn.execute(
-                "SELECT COUNT(*) FROM aspect_extraction_queue"
-            ).fetchone()[0])
-        except sqlite3.OperationalError:
-            return
-        if n == 0:
-            _migrate_aspect_queue_pk_with_empty_catalog(conn)
-            return
         _log.warning(
             "migrate_aspect_queue_pk_skip_no_catalog",
             catalog_path=str(catalog_path),
-            row_count=n,
         )
         raise MigrationRetry(
-            "catalog absent and aspect_extraction_queue has rows: "
-            f"retry deferred until catalog exists: {catalog_path}"
+            "catalog absent — retry deferred until catalog exists: "
+            f"{catalog_path}"
         )
     # Attempt to drain in-flight rows before the drain precondition check.
     # Imports lazily to avoid a circular import at module load time.
@@ -2775,26 +2681,20 @@ MIGRATIONS: list[Migration] = [
     ),
     Migration(
         "4.30.0",
-        "Migrate document_aspects PK to doc_id (RDR-108 Phase 1c, nexus-je0b)",
-        _migrate_document_aspects_pk_via_apply_pending,
-    ),
-    Migration(
-        "4.30.0",
-        "Migrate aspect_extraction_queue PK to doc_id (RDR-108 Phase 1c, nexus-je0b)",
-        _migrate_aspect_queue_pk_via_apply_pending,
-    ),
-    Migration(
-        "4.30.0",
         "Drop chash_index.chunk_chroma_id column (RDR-108 Phase 4a, nexus-mmf5)",
         _drop_chash_index_chunk_chroma_id,
     ),
-    # ``nexus-ocu9.11`` (drop document_aspects.source_path) stays
-    # deferred. Multiple read/write methods in DocumentAspects (upsert,
-    # get) reference source_path via SQL; dropping the column requires
-    # a wider refactor to add a ``_has_source_path_column`` schema flag
-    # and branch every reference. ``je0b`` (PK switch + doc_id resolver
-    # in upsert) is enough to ship the runtime contract without the
-    # column drop. Tracked as a follow-up.
+    # The RDR-108 Phase 1c PK migrations (``nexus-je0b``: document_aspects
+    # and aspect_extraction_queue PK switch to doc_id) and ``nexus-ocu9.11``
+    # (drop document_aspects.source_path) stay deferred from the
+    # registry. The 4.31.4 reland attempt surfaced cascading test
+    # surgery: collection-rename / aspect-worker direct INSERTs need
+    # doc_id threading; the empty-catalog fast path violates the
+    # K11/CG2 "no-catalog → no-cache" contract; the high-volume
+    # orphan check needs to stay MigrationError (test contract). The
+    # ``_resolve_doc_id`` substrate in DocumentAspects.upsert ships
+    # in 4.31.5 so the eventual reland is a one-line registry change
+    # plus targeted test updates. Function definitions stay in place.
 ]
 
 # ── T3 upgrade steps ────────────────────────────────────────────────────────

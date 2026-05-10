@@ -6,6 +6,46 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.31.5] - 2026-05-10
+
+Re-defers the RDR-108 Phase 1c PK migrations (``nexus-je0b``: PK
+switch on ``document_aspects`` and ``aspect_extraction_queue``)
+that 4.31.4 attempted to reland. The 4.31.4 attempt surfaced
+cascading test surgery (collection-rename / aspect-worker direct
+INSERTs need doc_id threading) plus a contract violation: the
+empty-catalog fast-path broke the K11/CG2 "no-catalog must not
+cache in _upgrade_done" invariant. Reverts to the 4.31.3 baseline
+behavior on those paths.
+
+The ``_resolve_doc_id`` substrate added to
+``DocumentAspects.upsert`` ships, so the eventual je0b reland is a
+one-line registry change plus targeted test updates rather than a
+runtime-contract change.
+
+### Added
+
+- **``DocumentAspects._resolve_doc_id`` substrate** (preparation
+  for je0b reland): module-scope helper that derives a doc_id when
+  caller passes empty against a post-migration table. Resolution
+  order: catalog lookup on ``(physical_collection,
+  file_path|title)`` → tumbler; ``record.source_uri``; deterministic
+  ``legacy:{collection}:{source_path}`` synthetic. The upsert post-
+  migration path uses it. Inactive in 4.31.5 because je0b is not
+  registered, but the substrate is in place for the next reland
+  attempt.
+
+### Changed
+
+- **Reverted the empty-catalog je0b fast path** (4.31.4 attempt
+  only): both ``_migrate_document_aspects_pk_via_apply_pending`` and
+  ``_migrate_aspect_queue_pk_via_apply_pending`` go back to
+  ``MigrationRetry`` on missing catalog. The K11 / CG2 contract
+  ("no catalog → not cached → retry on next open") is preserved.
+- **Reverted the high-volume-orphan ``MigrationRetry``** (4.31.4
+  attempt only): back to ``MigrationError`` per the test contract.
+  The reland will need to coordinate this change with the test
+  fixtures rather than landing it standalone.
+
 ## [4.31.4] - 2026-05-10
 
 Re-lands the RDR-108 Phase 1c PK migrations (``nexus-je0b``:
