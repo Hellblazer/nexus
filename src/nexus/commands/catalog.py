@@ -2065,19 +2065,43 @@ def _home_matches_root(home: str, repo_root: str) -> bool:
     return real_home.startswith(real_root) or real_root.startswith(real_home)
 
 
+_EMPTY_HOME_KEY = ""
+_DEVONTHINK_HOME_KEY = "x-devonthink-item://"
+
+
 def _source_uri_home_key(uri: str) -> str:
     """Stable grouping key for source_uri "home" detection.
 
     For ``file://`` URIs, returns the first four path segments
     (e.g. ``/Users/hal.hildebrand/git/ART``) so two entries from the
-    same repo cluster regardless of the file inside that repo. For
-    other schemes returns ``<scheme>://<netloc>``. Empty URIs map to
-    ``""`` so missing-source-uri entries form their own bucket.
+    same repo cluster regardless of the file inside that repo.
+
+    For ``x-devonthink-item://`` URIs (RDR-099 DEVONthink integration),
+    returns a fixed sentinel ``x-devonthink-item://`` so every UUID-
+    netlocked DEVONthink reference collapses to ONE bucket. Pre-fix
+    this returned ``<scheme>://<uuid>`` per chunk, making every
+    DEVONthink import look like its own home. ``knowledge__art-
+    grossberg-papers`` reported 110+ homes when it has at most 4
+    logical roots; the audit's contamination signal was unreadable.
+
+    Other schemes return ``<scheme>://<netloc>``.
+
+    Empty URIs return :data:`_EMPTY_HOME_KEY` so the audit can
+    distinguish "no source_uri" rows from real "single home" rows;
+    callers that want a non-empty home count must filter the empty
+    bucket explicitly (the contamination signal is "≥2 distinct
+    NON-EMPTY homes", not just "≥2 distinct buckets"; a single self-
+    marker row was previously enough to flip a small clean
+    collection to "contaminated").
+
+    Constants ``_EMPTY_HOME_KEY`` and ``_DEVONTHINK_HOME_KEY`` are
+    exposed so consumers (audit-membership, doctor checks, tests)
+    can pattern-match on them without re-implementing the literals.
     """
     from urllib.parse import urlparse
 
     if not uri:
-        return ""
+        return _EMPTY_HOME_KEY
     p = urlparse(uri)
     if p.scheme == "file":
         # path = "/Users/hal.hildebrand/git/ART/docs/rdr/X.md"
@@ -2085,6 +2109,12 @@ def _source_uri_home_key(uri: str) -> str:
         # Take through the 5th component (the project root).
         parts = p.path.split("/")
         return "/".join(parts[:5]) if len(parts) >= 5 else p.path
+    if p.scheme == "x-devonthink-item":
+        # nexus-n3md: collapse all DEVONthink items to one bucket.
+        # Per RDR-099 the UUID netloc is an opaque doc handle, not a
+        # repo / namespace identifier; treating each as a distinct
+        # home produced 110+ false-positive homes per collection.
+        return _DEVONTHINK_HOME_KEY
     return f"{p.scheme}://{p.netloc}"
 
 
