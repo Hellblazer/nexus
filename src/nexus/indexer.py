@@ -2097,20 +2097,46 @@ def _run_index(
         # collection names so the indexing run still completes.
         _log.warning("phase4_migration_failed", exc_info=True)
 
-    _log.debug("creating collections", code=code_collection, docs=docs_collection)
-    code_col = db.get_or_create_collection(code_collection)
-    docs_col = db.get_or_create_collection(docs_collection)
+    # nexus-27u7: defer T3 collection creation to the per-content-type
+    # branches that actually have files. Pre-fix the indexer
+    # unconditionally created both ``code__`` and ``docs__`` collections
+    # at the start of every ``nx index repo`` run; a code-only repo
+    # (no .md / .rst) accumulated an empty ``docs__`` zombie that
+    # ``nx catalog collection-gc`` had to sweep later. Symmetric for
+    # docs-only corpora.
+    #
+    # Downstream call sites already handle ``code_col is None`` /
+    # ``docs_col is None`` (frecency reads at indexer.py:1676,
+    # build_staleness_cache below, stamp_collection_version below);
+    # the missing piece was the gate here.
+    have_code_files = bool(code_files)
+    have_docs_files = bool(prose_files or pdf_files)
+    _log.debug(
+        "creating collections",
+        code=code_collection if have_code_files else "(deferred; no files)",
+        docs=docs_collection if have_docs_files else "(deferred; no files)",
+    )
+    code_col = (
+        db.get_or_create_collection(code_collection)
+        if have_code_files else None
+    )
+    docs_col = (
+        db.get_or_create_collection(docs_collection)
+        if have_docs_files else None
+    )
     _log.debug("collections ready")
 
     # Check pipeline version staleness (informational warning only)
-    check_pipeline_staleness(code_col, code_collection)
-    check_pipeline_staleness(docs_col, docs_collection)
+    if code_col is not None:
+        check_pipeline_staleness(code_col, code_collection)
+    if docs_col is not None:
+        check_pipeline_staleness(docs_col, docs_collection)
 
     # --force-stale: escalate to force if any collection is stale
     if force_stale:
         any_stale = (
-            get_collection_pipeline_version(code_col) not in (None, PIPELINE_VERSION)
-            or get_collection_pipeline_version(docs_col) not in (None, PIPELINE_VERSION)
+            (code_col is not None and get_collection_pipeline_version(code_col) not in (None, PIPELINE_VERSION))
+            or (docs_col is not None and get_collection_pipeline_version(docs_col) not in (None, PIPELINE_VERSION))
         )
         if any_stale:
             _log.info("force_stale_escalating", reason="stale collection detected")
@@ -2185,8 +2211,19 @@ def _run_index(
     if on_phase is not None:
         on_phase("Building staleness caches…")
     _staleness_t0 = time.monotonic()
-    code_staleness = build_staleness_cache(code_col)
-    docs_staleness = build_staleness_cache(docs_col)
+    # nexus-27u7: empty StalenessCache when the collection wasn't
+    # created (no files of that content_type). Caller-side
+    # ``check_staleness(cache=…)`` falls through to the per-file path,
+    # which itself short-circuits on a missing collection.
+    from nexus.indexer_utils import StalenessCache  # noqa: PLC0415
+    code_staleness = (
+        build_staleness_cache(code_col) if code_col is not None
+        else StalenessCache()
+    )
+    docs_staleness = (
+        build_staleness_cache(docs_col) if docs_col is not None
+        else StalenessCache()
+    )
     _log.info(
         "staleness_caches_built",
         code_doc_ids=len(code_staleness.by_doc_id),
@@ -2354,8 +2391,11 @@ def _run_index(
         # a state that should never have existed.
         _phase("Stamping pipeline version…")
         _t = time.monotonic()
-        stamp_collection_version(code_col)
-        stamp_collection_version(docs_col)
+        # nexus-27u7: stamp only when the collection was created.
+        if code_col is not None:
+            stamp_collection_version(code_col)
+        if docs_col is not None:
+            stamp_collection_version(docs_col)
         if rdr_indexed > 0:
             # RDR-103 Phase 3a: catalog-first resolution; legacy
             # fallback retained for catalog-absent test paths.
