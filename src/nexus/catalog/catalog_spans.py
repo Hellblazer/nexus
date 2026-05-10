@@ -340,7 +340,7 @@ def resolve_chash_globally(
 
 
 def resolve_span_text_for_entry(
-    entry: "CatalogEntry", span: str,
+    entry: "CatalogEntry", span: str, *, catalog: "Catalog | None" = None,
 ) -> str | None:
     """Resolve a span to text given an already-resolved CatalogEntry.
 
@@ -354,6 +354,17 @@ def resolve_span_text_for_entry(
     span, retrieve the exact passage. ``Catalog.resolve_span_text``
     is the public entry point that performs the tumbler→entry
     resolution before calling here.
+
+    *catalog* (nexus-hjd6 / RDR-108 Phase 4 review D-H3): the
+    chunk:char branch uses the catalog ``document_chunks`` manifest
+    to map a position-indexed chunk (``3:100-250``) to its content
+    hash. RDR-108 Phase 3 removed ``chunk_index`` and ``doc_id``
+    from chunk metadata so the legacy ``where`` filter has nothing
+    to match against; without the catalog the chunk:char branch
+    silently returns ``None`` for every Phase-3 chunk. The
+    ``Catalog.resolve_span_text`` entry point passes ``self``;
+    ad-hoc callers without a catalog fall back to the legacy
+    metadata path (correct for pre-Phase-3 chunks only).
     """
     if not span:
         return None
@@ -398,11 +409,41 @@ def resolve_span_text_for_entry(
             from nexus.db import make_t3
             t3 = make_t3()
             col = t3.get_or_create_collection(entry.physical_collection)
-            # nexus-dcym: chunk identity is the catalog ``doc_id``,
-            # not the legacy ``source_path``. ``doc_id`` is stored by
-            # the projector under ``meta.doc_id``; older entries fall
-            # back to ``str(entry.tumbler)`` (Phase 1's stand-in).
             doc_id = entry.meta.get("doc_id") or str(entry.tumbler)
+
+            # nexus-hjd6 (RDR-108 Phase 4 review D-H3): prefer the
+            # catalog manifest because RDR-108 Phase 3 removed
+            # chunk_index / doc_id from T3 chunk metadata. The
+            # manifest stores (doc_id, position, chash) so we can
+            # resolve position chunk_idx -> chash, then look up the
+            # chunk in T3 by its content-addressed natural id
+            # (chash[:32]). The legacy where-filter path stays as a
+            # fallback for environments that have a chunk:char span
+            # but no catalog manifest yet (transition window).
+            if catalog is not None:
+                manifest = catalog.get_manifest(doc_id)
+                # Manifest is ordered by position; index by `chunk_idx`
+                # but defensively look it up by .position to tolerate
+                # any future gap or reorder.
+                row = next(
+                    (r for r in manifest if r.position == chunk_idx),
+                    None,
+                )
+                if row is not None and row.chash:
+                    natural_id = row.chash[:32]
+                    fetched = col.get(
+                        ids=[natural_id],
+                        include=["documents"],
+                    )
+                    docs = fetched.get("documents", [])
+                    if docs:
+                        text = docs[0]
+                        return text[char_start:char_end]
+
+            # Legacy fallback: ``where`` on chunk_index + doc_id.
+            # Returns nothing for post-Phase-3 chunks (the metadata
+            # fields are gone). Kept so pre-Phase-3 corpora and
+            # ad-hoc callers without a catalog still resolve.
             where_filter: dict = {
                 "chunk_index": chunk_idx,
                 "doc_id": doc_id,
