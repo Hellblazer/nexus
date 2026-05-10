@@ -734,12 +734,28 @@ async def dispatch_bundle(
     *,
     timeout: float = 300.0,
 ) -> dict[str, Any]:
-    """Issue a single ``claude_dispatch`` for the whole bundle.
+    """Issue a single dispatch (claude or qwen) for the whole bundle.
 
     Returns the terminal step's output dict — the caller stamps it at the
     bundle's ``end_index`` slot in ``step_outputs``.
+
+    Routing: per-operator via :mod:`nexus.operators.dispatch_router`,
+    consulting the bundle's step tools. Default is ``claude_dispatch``
+    (preserves prior behavior); operator opts into Qwen routing via
+    ``NEXUS_DISPATCH_BACKEND={qwen,auto}`` or per-operator
+    ``NEXUS_DISPATCH_QWEN_OPERATORS`` env. See the router module
+    docstring for the resolution order and bench-grounded defaults.
     """
-    from nexus.operators.dispatch import claude_dispatch
+    from nexus.operators.dispatch_router import pick_dispatcher_for_bundle
 
     prompt, schema = compose_bundle_prompt(bundle)
+    backend = pick_dispatcher_for_bundle(step.tool for step in bundle.steps)
+
+    if backend == "qwen":
+        from nexus.operators.qwen_dispatch import qwen_dispatch
+
+        return await qwen_dispatch(prompt, schema, timeout=timeout)
+
+    from nexus.operators.dispatch import claude_dispatch
+
     return await claude_dispatch(prompt, schema, timeout=timeout)
