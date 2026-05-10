@@ -282,7 +282,7 @@ def build_staleness_cache(col: object) -> StalenessCache:
     Pulls every chunk's ``include=["metadatas"]`` via the standard
     paginated helper. Calls per pull are ChromaDB Cloud's 300-record
     cap, so the total round-trip count is ``ceil(N / 300)`` where N is
-    the collection's chunk count — independent of the number of files
+    the collection's chunk count, independent of the number of files
     being indexed.
 
     Errors are tolerated: a build failure returns an empty cache and
@@ -300,7 +300,33 @@ def build_staleness_cache(col: object) -> StalenessCache:
     except Exception:
         return cache
 
+    # nexus-0ocy (RDR-108 Phase 4 review D-M4): when chunk metadata
+    # lacks ``doc_id`` (Phase-3 chunks) but carries ``chunk_text_hash``,
+    # resolve via the catalog ``document_chunks`` manifest in one
+    # batched call so by_doc_id stays useful for Phase-3 corpora.
+    # Empty fallback is a clean cache miss (the existing perf path
+    # for legacy chunks).
     metadatas = all_chunks.get("metadatas") or []
+    chash_to_doc: dict[str, str] = {}
+    needed_chashes = [
+        (m or {}).get("chunk_text_hash", "")
+        for m in metadatas
+        if m and not (m or {}).get("doc_id") and (m or {}).get("chunk_text_hash")
+    ]
+    if needed_chashes:
+        try:
+            from nexus.catalog import Catalog
+            from nexus.config import catalog_path
+            _cp = catalog_path()
+            if Catalog.is_initialized(_cp):
+                _cat = Catalog(_cp, _cp / ".catalog.db")
+                by_chash = _cat.docs_for_chashes(list(set(needed_chashes)))
+                for c, doc_ids in by_chash.items():
+                    if doc_ids:
+                        chash_to_doc[c] = sorted(doc_ids)[0]
+        except Exception:
+            pass
+
     for meta in metadatas:
         if not meta:
             continue
@@ -310,6 +336,10 @@ def build_staleness_cache(col: object) -> StalenessCache:
             continue
         value = (content_hash, model)
         doc_id = meta.get("doc_id", "")
+        if not doc_id:
+            chash = meta.get("chunk_text_hash", "")
+            if chash:
+                doc_id = chash_to_doc.get(chash, "")
         if doc_id:
             cache.by_doc_id[doc_id] = value
         source_path = meta.get("source_path", "")
