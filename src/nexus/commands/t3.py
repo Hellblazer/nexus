@@ -388,6 +388,12 @@ def gc_cmd(
     as the indexer's manifest GC.
 
     \b
+    NOTE (RDR-108 Phase 4): post-Phase-3 chunks have no ``doc_id`` in
+    metadata and so are skipped here. The manifest-based GC inside
+    ``nx index`` (``indexer._prune_deleted_files``) handles them.
+    Reconciliation of the two paths is tracked in nexus-e5aw.
+
+    \b
     Examples:
       nx t3 gc -c knowledge__delos --dry-run                # report only
       nx t3 gc -c rdr__nexus-571b8edd --no-dry-run --yes    # actually GC
