@@ -42,5 +42,6 @@ tests/fixtures/*.pdf
 blog/
 output/
 
-# Local exploration / scratch — never committed
+# Local exploration / scratch, never committed
 notes/
+docs/workflow-engine-with-ext-apps.md
