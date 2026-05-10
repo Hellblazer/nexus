@@ -1745,11 +1745,13 @@ class Catalog:
         direction: str = "both",
         link_type: str = "",
         link_types: list[str] | None = None,
+        include_heuristic: bool = False,
     ) -> dict:
         """BFS traversal — see ``_LinkOps.graph`` for the full contract."""
         return self._links.graph(
             tumbler, depth=depth, direction=direction,
             link_type=link_type, link_types=link_types,
+            include_heuristic=include_heuristic,
         )
 
     def graph_many(
@@ -1759,11 +1761,13 @@ class Catalog:
         direction: str = "both",
         link_type: str = "",
         link_types: list[str] | None = None,
+        include_heuristic: bool = False,
     ) -> dict:
         """BFS from multiple seeds."""
         return self._links.graph_many(
             seeds, depth=depth, direction=direction,
             link_type=link_type, link_types=link_types,
+            include_heuristic=include_heuristic,
         )
 
     # ── Rebuild ───────────���──────────────────────────��─────────────────────
