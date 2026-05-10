@@ -6,6 +6,31 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.31.1] - 2026-05-10
+
+Patch release. The 4.31.0 tag-push uncovered a real bug: the
+``nexus-ocu9.11`` migration assumed the ``nexus-je0b`` PK migration
+had already run, so it used ``ALTER TABLE ... DROP COLUMN`` which
+SQLite refuses when the column is part of a PRIMARY KEY. In hermetic
+test environments without a catalog, ``je0b`` raises
+``MigrationRetry`` and is skipped, leaving ``source_path`` as part
+of the ``(collection, source_path)`` PK when ``ocu9.11`` fires.
+Caught by CI's Python 3.13 job; PyPI publish was correctly gated and
+4.31.0 never reached PyPI.
+
+### Fixed
+
+- **``migrate_drop_source_path_column`` rebuild fallback**
+  (nexus-ocu9.11): the migration now introspects the live PK and
+  takes one of two paths. When ``source_path`` is no longer in the
+  PK (``je0b`` ran successfully), uses simple
+  ``ALTER TABLE ... DROP COLUMN``. When ``source_path`` is still in
+  the PK (``je0b`` was skipped), falls back to the 4-step
+  table-rebuild pattern: CREATE-new with the post-drop schema /
+  INSERT-SELECT / DROP-old / RENAME / recreate indexes. Both paths
+  preserve the source_uri NOT-NULL audit and remain idempotent on
+  the column-presence check.
+
 ## [4.31.0] - 2026-05-10
 
 Major release rolling up RDR-108 Phase 4 read-path remediation,

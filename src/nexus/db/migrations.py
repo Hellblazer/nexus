@@ -1663,6 +1663,13 @@ def migrate_document_aspects_source_uri(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE document_aspects ADD COLUMN source_uri TEXT")
         conn.commit()
 
+    if "source_path" not in cols:
+        # ocu9.11 (4.31.0) dropped source_path. When apply_pending re-runs
+        # because a later MigrationRetry blocked the version-bump, this
+        # backfill is reached again with source_path absent. Idempotent
+        # no-op in that case.
+        return
+
     # Two-pass backfill. Loop in Python (SQL has no abspath helper);
     # wrap in an explicit transaction so 100K rows don't produce 100K
     # round-trips against the WAL — autocommit would slow this from
@@ -1729,6 +1736,11 @@ def migrate_document_aspects_source_uri_backfill_empty(conn: sqlite3.Connection)
     if not cols or "source_uri" not in cols:
         return
 
+    if "source_path" not in cols:
+        # ocu9.11 (4.31.0) dropped source_path. Re-runs after that point
+        # have nothing to backfill from; idempotent no-op.
+        return
+
     rows = conn.execute(
         "SELECT rowid, collection, source_path FROM document_aspects "
         "WHERE (source_uri IS NULL OR source_uri = '') "
@@ -1782,9 +1794,11 @@ def migrate_drop_source_path_column(conn: sqlite3.Connection) -> None:
       migration aborts so the operator can triage rather than
       silently destroying the only addressing path.
 
-    Implementation: SQLite >= 3.35 supports ``ALTER TABLE ... DROP
-    COLUMN`` natively (project floor is 3.49.1). Idempotent on the
-    column-presence check.
+    Implementation: when ``source_path`` is still part of the PRIMARY
+    KEY (``je0b`` was skipped because the catalog was absent), SQLite
+    refuses ``ALTER TABLE ... DROP COLUMN``. Falls back to the 4-step
+    table-rebuild pattern in that case. Otherwise uses the simple
+    DROP COLUMN path. Idempotent on the column-presence check.
     """
     cols = {
         r[1] for r in conn.execute(
@@ -1792,14 +1806,10 @@ def migrate_drop_source_path_column(conn: sqlite3.Connection) -> None:
         ).fetchall()
     }
     if not cols:
-        # Table doesn't exist; nothing to drop.
         return
     if "source_path" not in cols:
         return
 
-    # Pre-audit: every row MUST have source_uri populated. After two
-    # release windows of writer + backfill enforcement this should be
-    # zero in production. Block here loudly if not.
     bad_rows = conn.execute(
         "SELECT COUNT(*) FROM document_aspects "
         "WHERE source_uri IS NULL OR source_uri = ''"
@@ -1814,14 +1824,81 @@ def migrate_drop_source_path_column(conn: sqlite3.Connection) -> None:
             f"first or repair the rows manually, then re-run."
         )
 
-    # SQLite indexed-column drop; the migration runs INSIDE the
-    # T2Database constructor's transaction context (apply_pending
-    # wraps each migration in its own transaction).
-    conn.execute("ALTER TABLE document_aspects DROP COLUMN source_path")
-    conn.commit()
+    pk_cols = {
+        r[1] for r in conn.execute("PRAGMA table_info(document_aspects)").fetchall()
+        if r[5] > 0
+    }
+    source_path_in_pk = "source_path" in pk_cols
+    has_doc_id = "doc_id" in cols
+
+    if not source_path_in_pk:
+        conn.execute("ALTER TABLE document_aspects DROP COLUMN source_path")
+        conn.commit()
+        _log.info(
+            "migrate_drop_source_path_column",
+            table="document_aspects",
+            path="alter_drop",
+        )
+        return
+
+    # Rebuild path. ``je0b`` (4.30.0) was skipped (catalog absent), so the
+    # table still has the legacy compound PK and no ``doc_id`` column. Build
+    # the post-je0b shape directly so a later je0b retry is a no-op via
+    # ``_is_already_migrated`` (PK == {doc_id}).
+    select_doc_id = "doc_id" if has_doc_id else "''"
+    with conn:
+        conn.execute(
+            """
+            CREATE TABLE document_aspects_new (
+                doc_id                 TEXT NOT NULL DEFAULT '',
+                collection             TEXT NOT NULL,
+                problem_formulation    TEXT,
+                proposed_method        TEXT,
+                experimental_datasets  TEXT,
+                experimental_baselines TEXT,
+                experimental_results   TEXT,
+                extras                 TEXT,
+                confidence             REAL,
+                extracted_at           TEXT NOT NULL,
+                model_version          TEXT NOT NULL,
+                extractor_name         TEXT NOT NULL,
+                source_uri             TEXT,
+                PRIMARY KEY (doc_id)
+            )
+            """
+        )
+        conn.execute(
+            f"""
+            INSERT INTO document_aspects_new
+                (doc_id, collection,
+                 problem_formulation, proposed_method,
+                 experimental_datasets, experimental_baselines,
+                 experimental_results, extras, confidence,
+                 extracted_at, model_version, extractor_name, source_uri)
+            SELECT
+                {select_doc_id}, collection,
+                problem_formulation, proposed_method,
+                experimental_datasets, experimental_baselines,
+                experimental_results, extras, confidence,
+                extracted_at, model_version, extractor_name, source_uri
+            FROM document_aspects
+            """
+        )
+        conn.execute("DROP TABLE document_aspects")
+        conn.execute("ALTER TABLE document_aspects_new RENAME TO document_aspects")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_document_aspects_extractor "
+            "ON document_aspects(extractor_name, model_version)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_document_aspects_collection "
+            "ON document_aspects(collection)"
+        )
     _log.info(
         "migrate_drop_source_path_column",
         table="document_aspects",
+        path="rebuild",
+        had_doc_id=has_doc_id,
     )
 
 
