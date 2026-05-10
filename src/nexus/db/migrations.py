@@ -1763,6 +1763,68 @@ def migrate_document_aspects_source_uri_backfill_empty(conn: sqlite3.Connection)
         )
 
 
+def migrate_drop_source_path_column(conn: sqlite3.Connection) -> None:
+    """nexus-ocu9.11 (RDR-096 P5.2 final deprecation): drop
+    ``source_path`` from ``document_aspects``.
+
+    Pre-conditions enforced as a hard audit:
+
+    * Column exists in the live schema. If not, the migration is a
+      no-op (already dropped).
+    * Every row has ``source_uri`` populated (NOT NULL and not the
+      empty string). The two-release deprecation window had two
+      backfill migrations land first
+      (``migrate_document_aspects_source_uri`` at 4.16.0 and
+      ``migrate_document_aspects_source_uri_backfill_empty`` /
+      ``nexus-pnje`` at 4.26.2); after both, every row should be
+      addressable by URI alone. If any row still has NULL or empty
+      source_uri, the audit raises ``MigrationError`` and the
+      migration aborts so the operator can triage rather than
+      silently destroying the only addressing path.
+
+    Implementation: SQLite >= 3.35 supports ``ALTER TABLE ... DROP
+    COLUMN`` natively (project floor is 3.49.1). Idempotent on the
+    column-presence check.
+    """
+    cols = {
+        r[1] for r in conn.execute(
+            "PRAGMA table_info(document_aspects)"
+        ).fetchall()
+    }
+    if not cols:
+        # Table doesn't exist; nothing to drop.
+        return
+    if "source_path" not in cols:
+        return
+
+    # Pre-audit: every row MUST have source_uri populated. After two
+    # release windows of writer + backfill enforcement this should be
+    # zero in production. Block here loudly if not.
+    bad_rows = conn.execute(
+        "SELECT COUNT(*) FROM document_aspects "
+        "WHERE source_uri IS NULL OR source_uri = ''"
+    ).fetchone()[0]
+    if bad_rows > 0:
+        raise MigrationError(
+            f"nexus-ocu9.11: refusing to drop document_aspects.source_path "
+            f"because {bad_rows} row(s) still have NULL or empty "
+            f"source_uri. After dropping the column those rows would be "
+            f"unaddressable. Run "
+            f"``migrate_document_aspects_source_uri_backfill_empty`` "
+            f"first or repair the rows manually, then re-run."
+        )
+
+    # SQLite indexed-column drop; the migration runs INSIDE the
+    # T2Database constructor's transaction context (apply_pending
+    # wraps each migration in its own transaction).
+    conn.execute("ALTER TABLE document_aspects DROP COLUMN source_path")
+    conn.commit()
+    _log.info(
+        "migrate_drop_source_path_column",
+        table="document_aspects",
+    )
+
+
 def migrate_drop_null_aspect_rows(conn: sqlite3.Connection) -> None:
     """RDR-096 P2.2: drop pre-RDR-096 read-failure rows from
     ``document_aspects`` using the seven-clause discriminator from
@@ -2606,6 +2668,11 @@ MIGRATIONS: list[Migration] = [
         "4.30.0",
         "Drop chash_index.chunk_chroma_id column (RDR-108 Phase 4a, nexus-mmf5)",
         _drop_chash_index_chunk_chroma_id,
+    ),
+    Migration(
+        "4.31.0",
+        "Drop document_aspects.source_path column (RDR-096 P5.2, nexus-ocu9.11)",
+        migrate_drop_source_path_column,
     ),
 ]
 

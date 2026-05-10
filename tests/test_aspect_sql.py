@@ -372,15 +372,25 @@ class TestDualRead:
             "chroma://knowledge__delos//papers/paxos.pdf"
         )
 
-    def test_filter_rationale_falls_back_to_file_for_legacy_null_uri(
+    def test_filter_legacy_null_uri_row_is_unreachable_post_drop(
         self, env: Path, monkeypatch,
     ) -> None:
-        """Rows whose source_uri escaped backfill (NULL in the DB)
-        get a synthesised ``file://<abspath>`` URI from the COALESCE
-        second arm. Simulate by NULLing one row directly in SQL.
+        """nexus-ocu9.11 (RDR-096 P5.2): the COALESCE second arm
+        retired with the source_path column drop. A row with
+        source_uri NULL is now structurally unreachable by the
+        operator: the WHERE clause keys on source_uri IN (...), so
+        a NULL source_uri row never matches the WHERE; the operator
+        treats it as "row absent" with an empty source_uri.
+
+        This is the post-drop contract. The migration's pre-audit
+        in ``migrate_drop_source_path_column`` blocks if any row
+        has NULL/empty source_uri, so in production this state is
+        unreachable. The test simulates the legacy state to lock
+        the operator's "no fallback synthesis" behavior.
         """
-        # NULL out source_uri on one row to mimic a legacy /
-        # backfill-skipped state.
+        # NULL out source_uri on one row to mimic the now-unreachable
+        # legacy state. The migration's audit would have blocked
+        # this in prod; the test forces it via SQL.
         with T2Database(env) as db:
             db.document_aspects.conn.execute(
                 "UPDATE document_aspects SET source_uri = NULL "
@@ -396,11 +406,11 @@ class TestDualRead:
         assert result is not None
         match = [r for r in result["rationale"] if r["id"] == "/papers/raft.pdf"]
         assert len(match) == 1
-        # COALESCE second arm: 'file://' || source_path. Note SQL's
-        # || does not call os.path.abspath — it concatenates verbatim,
-        # so the URI is ``file:///papers/raft.pdf`` (the source_path
-        # already had a leading slash).
-        assert match[0]["source_uri"] == "file:///papers/raft.pdf"
+        # Post-drop: NULL source_uri row never matches the WHERE,
+        # so the operator surfaces it as "aspect row absent" with
+        # empty source_uri. There is no synthesised file:// fallback.
+        assert match[0]["source_uri"] == ""
+        assert "absent" in match[0]["reason"] or "does not match" in match[0]["reason"]
 
     def test_filter_non_match_rationale_has_empty_source_uri(
         self, env: Path,
