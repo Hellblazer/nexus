@@ -247,3 +247,38 @@ class TestCollectionGCCli:
         names = {c["name"] for c in t3_db.list_collections()}
         assert "taxonomy__centroids" in names
         assert "rdr__zombie" not in names
+
+    def test_catalog_sqlite_error_exits_clean_not_traceback(
+        self, monkeypatch, runner, t3_db, catalog_env,
+    ) -> None:
+        """nexus-pz24 (RDR-108 Phase 4 review CR-M2): a SQLite error
+        on the catalog query (locked DB, schema mismatch, FS issue)
+        must surface a clean operator message, not a raw Python
+        traceback. The T3 query path already had this guard;
+        the catalog query path was the lone exception.
+        """
+        import sqlite3
+        from unittest.mock import MagicMock
+
+        # Stub _get_catalog to return a catalog whose _db.execute
+        # raises on the documents.physical_collection query.
+        fake_cat = MagicMock()
+        fake_cat.list_collections.return_value = []
+        fake_cat._db.execute.side_effect = sqlite3.OperationalError(
+            "database is locked"
+        )
+
+        monkeypatch.setattr(
+            "nexus.commands.catalog._get_catalog", lambda: fake_cat,
+        )
+        monkeypatch.setattr("nexus.db.make_t3", lambda: t3_db)
+
+        result = runner.invoke(main, ["catalog", "collection-gc"])
+
+        assert result.exit_code != 0, (
+            "should exit nonzero on catalog failure"
+        )
+        assert "Failed to query catalog" in result.output, (
+            f"expected clean operator message, got: {result.output!r}"
+        )
+        assert "Traceback" not in result.output
