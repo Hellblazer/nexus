@@ -6,6 +6,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.31.4] - 2026-05-10
+
+Plugin version aligned with conexus 4.31.4. No plugin-side changes;
+the release re-lands the RDR-108 Phase 1c PK migrations
+(``nexus-je0b``) with a companion ``DocumentAspects.upsert``
+doc_id resolver that auto-derives doc_id when callers pass empty.
+``nexus-ocu9.11`` stays deferred pending a wider refactor of
+DocumentAspects read/write methods. See root ``CHANGELOG.md``.
+
 ## [4.31.3] - 2026-05-10
 
 Plugin version aligned with conexus 4.31.3. No plugin-side changes;

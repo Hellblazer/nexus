@@ -224,10 +224,15 @@ class TestMigrateDropSourcePathColumn:
 
 
 class TestMigrationListRegistration:
-    def test_drop_source_path_appears_in_migrations_list(self) -> None:
-        """The migration is registered in the MIGRATIONS list at
-        version 4.31.0 — apply_pending picks it up automatically on
-        the next nx run.
+    def test_drop_source_path_deferred_pending_callers_refactor(self) -> None:
+        """nexus-ocu9.11 is intentionally deferred from MIGRATIONS.
+
+        The schema migration is correct, but ``DocumentAspects.upsert``
+        and ``DocumentAspects.get`` still reference ``source_path`` via
+        SQL. Re-enabling requires a wider refactor to add a
+        ``_has_source_path_column`` schema flag and branch every
+        reference. The function definition stays in place so re-enable
+        is a one-line registry change.
         """
         from nexus.db.migrations import MIGRATIONS
 
@@ -235,5 +240,4 @@ class TestMigrationListRegistration:
             m for m in MIGRATIONS
             if m.fn is migrate_drop_source_path_column
         ]
-        assert len(targets) == 1
-        assert targets[0].introduced == "4.31.0"
+        assert targets == []

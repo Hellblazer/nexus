@@ -139,14 +139,37 @@ class TestDocumentAspectsDeleteOrphans:
             # Direct SQL: AspectRecord requires source_uri. The legacy
             # state has it as empty/NULL (pre-P2.1).
             db.document_aspects.upsert(_make_aspect(source_uri="file:///live.pdf"))
-            db.document_aspects.conn.execute(
-                "INSERT INTO document_aspects "
-                "(collection, source_path, extracted_at, model_version, "
-                " extractor_name, source_uri) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                ("knowledge__test", "/legacy.pdf", "2024-01-01T00:00:00",
-                 "v0", "scholarly-paper-v1", ""),
-            )
+            # Direct SQL bypasses the upsert resolver. Branch on the live
+            # PK so this test works both pre- and post-je0b: post-je0b
+            # the doc_id column is NOT NULL with no default, so supply a
+            # synthetic legacy doc_id to satisfy the constraint without
+            # changing the test's empty-source_uri intent.
+            pk_cols = {
+                r[1] for r in db.document_aspects.conn.execute(
+                    "PRAGMA table_info(document_aspects)"
+                ).fetchall()
+                if r[5] > 0
+            }
+            if pk_cols == {"doc_id"}:
+                db.document_aspects.conn.execute(
+                    "INSERT INTO document_aspects "
+                    "(doc_id, collection, source_path, extracted_at, "
+                    " model_version, extractor_name, source_uri) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    ("legacy:knowledge__test:/legacy.pdf",
+                     "knowledge__test", "/legacy.pdf",
+                     "2024-01-01T00:00:00", "v0",
+                     "scholarly-paper-v1", ""),
+                )
+            else:
+                db.document_aspects.conn.execute(
+                    "INSERT INTO document_aspects "
+                    "(collection, source_path, extracted_at, model_version, "
+                    " extractor_name, source_uri) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    ("knowledge__test", "/legacy.pdf", "2024-01-01T00:00:00",
+                     "v0", "scholarly-paper-v1", ""),
+                )
             db.document_aspects.conn.commit()
 
             orphans, total = db.document_aspects.delete_orphans(

@@ -47,7 +47,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import structlog
@@ -133,6 +133,51 @@ class AspectRecord:
     # RDR-108 Phase 1c: catalog tumbler identity. Empty string on legacy
     # rows written before the PK migration.
     doc_id: str = ""
+
+
+def _resolve_doc_id(record: AspectRecord) -> str:
+    """Derive a stable ``doc_id`` for a record that arrived empty.
+
+    Resolution order:
+      1. Catalog lookup (``physical_collection`` + ``file_path`` / ``title``).
+         Returns the document's tumbler if found.
+      2. ``source_uri`` if non-empty. RDR-096 canonical identity is
+         unique per document and stable across runs.
+      3. ``legacy:{collection}:{source_path}`` synthetic. Last-resort
+         deterministic key so ``INSERT OR REPLACE`` preserves
+         uniqueness per real document.
+
+    Returns ``""`` only when collection AND source_path AND source_uri
+    are all empty.
+
+    Lazy catalog import to avoid circular dependency with
+    ``nexus.catalog`` (which imports ``nexus.db.t2`` for ``_sanitize_fts5``).
+    """
+    try:
+        from nexus.catalog import Catalog, open_cached
+        from nexus.config import catalog_path
+        cat_path = catalog_path()
+        if Catalog.is_initialized(cat_path):
+            cat = open_cached(cat_path)
+            row = cat._db.execute(
+                "SELECT json_extract(metadata, '$.doc_id'), tumbler "
+                "FROM documents "
+                "WHERE physical_collection = ? "
+                "  AND (file_path = ? OR title = ?) "
+                "LIMIT 1",
+                (record.collection, record.source_path, record.source_path),
+            ).fetchone()
+            if row:
+                resolved = row[0] or row[1] or ""
+                if resolved:
+                    return str(resolved)
+    except Exception:
+        pass
+    if record.source_uri:
+        return record.source_uri
+    if record.collection and record.source_path:
+        return f"legacy:{record.collection}:{record.source_path}"
+    return ""
 
 
 # ── DocumentAspects ─────────────────────────────────────────────────────────
@@ -243,8 +288,23 @@ class DocumentAspects:
 
         if self._has_doc_id_pk():
             # Post-migration schema: doc_id is PK; collection + source_path are denorm.
-            if not record.doc_id:
-                raise ValueError("doc_id must not be empty on a migrated document_aspects table")
+            doc_id = record.doc_id or _resolve_doc_id(record)
+            if not doc_id:
+                raise ValueError(
+                    "doc_id must not be empty on a migrated document_aspects "
+                    "table and could not be derived from source_uri or "
+                    "collection+source_path"
+                )
+            if doc_id != record.doc_id:
+                _log.warning(
+                    "document_aspects_upsert_synthesized_doc_id",
+                    derived_doc_id=doc_id,
+                    collection=record.collection,
+                    source_path=record.source_path,
+                    source_uri=record.source_uri,
+                    extractor_name=record.extractor_name,
+                )
+                record = replace(record, doc_id=doc_id)
             with self._lock:
                 self.conn.execute(
                     "INSERT OR REPLACE INTO document_aspects "

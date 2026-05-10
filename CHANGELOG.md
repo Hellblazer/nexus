@@ -6,6 +6,68 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.31.4] - 2026-05-10
+
+Re-lands the RDR-108 Phase 1c PK migrations (``nexus-je0b``:
+document_aspects + aspect_extraction_queue PK switch to ``doc_id``)
+that 4.31.3 deferred. The companion fix lives in
+``DocumentAspects.upsert``: a ``_resolve_doc_id`` helper auto-derives
+the doc_id when the caller passes it empty, removing the latent gap
+that surfaced when the migration completed in test environments.
+
+``nexus-ocu9.11`` (drop ``document_aspects.source_path``) stays
+deferred. Multiple read/write methods in DocumentAspects still
+reference ``source_path`` via SQL; dropping the column needs a
+``_has_source_path_column`` schema flag and branch on every reference.
+Tracked as a follow-up.
+
+### Added
+
+- **``DocumentAspects.upsert`` doc_id resolver** (companion to je0b):
+  a new ``_resolve_doc_id`` helper at module scope. When caller
+  passes empty ``doc_id`` against a post-migration table, derives
+  via (1) catalog lookup on ``(physical_collection, file_path|title)``
+  → tumbler, (2) ``record.source_uri`` (RDR-096 canonical identity),
+  (3) ``legacy:{collection}:{source_path}`` deterministic synthetic.
+  Logs ``document_aspects_upsert_synthesized_doc_id`` when synthesis
+  kicks in so operators see the wiring gap. The hard
+  ``ValueError("doc_id must not be empty")`` only fires when
+  collection AND source_path AND source_uri are all empty (true
+  programming error).
+
+### Changed
+
+- **``_migrate_document_aspects_pk_via_apply_pending`` empty-table
+  fast path**: when catalog is absent AND the table is empty (fresh
+  install), spins up a temp stub catalog with the minimal
+  ``documents`` + ``collections`` schema and runs je0b against it.
+  The cross-DB JOIN finds zero matches, the rebuild proceeds.
+  Replaces the previous unconditional ``MigrationRetry`` which left
+  35 migrations unbumped on every fresh install.
+- **``_migrate_aspect_queue_pk_via_apply_pending`` same shape**:
+  empty queue + absent catalog now uses a stub catalog instead of
+  deferring.
+
+### Re-enabled
+
+- **``nexus-je0b`` (RDR-108 Phase 1c)**: document_aspects PK switch
+  to doc_id. Re-registered in MIGRATIONS at 4.30.0.
+- **``nexus-je0b`` (RDR-108 Phase 1c)**: aspect_extraction_queue PK
+  switch to doc_id. Re-registered in MIGRATIONS at 4.30.0.
+
+### Tests
+
+- **``test_doctor_aspect_queue._enqueue``**: derives a synthetic
+  doc_id via ``f"legacy:{collection}:{source_path}"`` when the
+  table has been migrated to PK=doc_id, satisfying the NOT NULL
+  constraint without changing test semantics.
+- **``test_empty_source_uri_not_classified_as_orphan``**: same
+  pattern for the direct-SQL legacy-row INSERT.
+- **``test_drop_source_path_appears_in_migrations_list``**: renamed
+  to ``test_drop_source_path_deferred_pending_callers_refactor``;
+  asserts that ``ocu9.11`` is intentionally NOT in MIGRATIONS until
+  the upsert/get refactor lands.
+
 ## [4.31.3] - 2026-05-10
 
 Patch release. Defers the RDR-108 Phase 1c PK migrations

@@ -52,15 +52,36 @@ def _enqueue(
     status: str = "pending", error: str = "",
     enqueued_at: str = "2026-04-29T00:00:00+00:00",
 ) -> None:
-    """Insert a queue row directly via SQL."""
+    """Insert a queue row directly via SQL.
+
+    Derives a synthetic doc_id matching the legacy fallback so the
+    NOT NULL constraint after the je0b PK migration is satisfied
+    while keeping the test's collection+source_path semantics.
+    """
     conn = sqlite3.connect(str(db_path))
-    conn.execute(
-        "INSERT INTO aspect_extraction_queue "
-        "(collection, source_path, content_hash, content, status, "
-        " retry_count, enqueued_at, last_error) "
-        "VALUES (?, ?, '', '', ?, 0, ?, ?)",
-        (collection, source_path, status, enqueued_at, error),
-    )
+    pk_cols = {
+        r[1] for r in conn.execute(
+            "PRAGMA table_info(aspect_extraction_queue)"
+        ).fetchall()
+        if r[5] > 0
+    }
+    if pk_cols == {"doc_id"}:
+        doc_id = f"legacy:{collection}:{source_path}"
+        conn.execute(
+            "INSERT INTO aspect_extraction_queue "
+            "(doc_id, collection, source_path, content_hash, content, "
+            " status, retry_count, enqueued_at, last_error) "
+            "VALUES (?, ?, ?, '', '', ?, 0, ?, ?)",
+            (doc_id, collection, source_path, status, enqueued_at, error),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO aspect_extraction_queue "
+            "(collection, source_path, content_hash, content, status, "
+            " retry_count, enqueued_at, last_error) "
+            "VALUES (?, ?, '', '', ?, 0, ?, ?)",
+            (collection, source_path, status, enqueued_at, error),
+        )
     conn.commit()
     conn.close()
 
