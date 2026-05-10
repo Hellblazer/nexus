@@ -296,3 +296,69 @@ class TestDriftGuard:
                 )
                 return
         pytest.fail("put_cmd not found in commands/store.py")
+
+
+# ── stub vs real T3.put parity (nexus-v7mn item 3) ──────────────────────────
+
+
+class TestStubT3PutParity:
+    """``_make_stub_t3()`` mirrors ``T3Database.put`` in this file: it
+    derives the returned id as ``sha256(content)[:32]``. The stub's
+    body and the real implementation drift independently across
+    refactors because nothing in CI catches a mismatch (the rest of
+    the parity tests probe hook-fire counts, not return values).
+
+    These parametrized round-trips call both implementations on the
+    same input and assert the returned ids match. Reverting either
+    side's id derivation (e.g. salting the stub with the title or
+    re-introducing collection into the real put's id formula) makes
+    one of the parameter cases fail loud.
+    """
+
+    @pytest.mark.parametrize(
+        "content,collection,title",
+        [
+            ("a tiny note", "knowledge__memory", "note-1"),
+            ("a tiny note", "knowledge__memory", "different-title"),
+            ("different content", "knowledge__memory", "note-1"),
+            ("a tiny note", "knowledge__other", "note-1"),
+            ("", "knowledge__memory", "empty-content"),
+            ("multi\nline\ncontent", "knowledge__memory", "multi"),
+        ],
+        ids=[
+            "baseline",
+            "title-change-shares-id",
+            "content-change-changes-id",
+            "collection-change-shares-id",
+            "empty-content",
+            "multi-line",
+        ],
+    )
+    def test_stub_and_real_put_return_same_id(
+        self, content, collection, title, tmp_path,
+    ):
+        import chromadb
+        from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+
+        from nexus.db.t3 import T3Database
+
+        # Real T3 backed by an EphemeralClient so the put actually
+        # writes; the returned id is what we compare.
+        real_t3 = T3Database(
+            _client=chromadb.EphemeralClient(),
+            _ef_override=DefaultEmbeddingFunction(),
+        )
+        real_id = real_t3.put(
+            collection=collection, content=content, title=title,
+        )
+
+        stub_factory = _make_stub_t3()
+        stub_id = stub_factory().put(
+            collection=collection, content=content, title=title,
+        )
+
+        assert real_id == stub_id, (
+            "stub T3.put must return the same id as the real implementation; "
+            f"real={real_id!r} stub={stub_id!r} "
+            f"(content={content!r}, collection={collection!r}, title={title!r})"
+        )
