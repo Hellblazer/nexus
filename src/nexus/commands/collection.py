@@ -359,16 +359,56 @@ def reindex_cmd(name: str, force: bool) -> None:
     # source_path from chunk metadata, doc_id is the only signal; the
     # catalog row pointed to by doc_id holds the file_path used for
     # the actual reindex.
+    #
+    # nexus-vn48 (RDR-108 Phase 4 review D-M1): RDR-108 Phase 3
+    # (nexus-bdag) removed doc_id from chunk metadata too. For
+    # Phase-3 chunks both source_path and doc_id are gone; the
+    # only remaining signal is ``chunk_text_hash``. Resolve via
+    # the catalog's chash -> doc_id manifest reverse-lookup, then
+    # fall through to the existing _doc_id_to_file_path helper.
     col = db.get_or_create_collection(name)
     sourceless: list[str] = []
     source_paths: set[str] = set()
     offset = 0
+    # Build a one-shot catalog handle for the manifest fallback.
+    _cat = None
+    try:
+        from nexus.catalog import Catalog
+        from nexus.config import catalog_path
+        _cp = catalog_path()
+        if Catalog.is_initialized(_cp):
+            _cat = Catalog(_cp, _cp / ".catalog.db")
+    except Exception:
+        pass
     while True:
         batch = col.get(limit=300, offset=offset, include=["metadatas"])
+        # nexus-vn48: page-batch chash -> doc_id resolution to amortise
+        # SQLite calls across the page rather than per-chunk.
+        page_chashes = [
+            (m or {}).get("chunk_text_hash", "")
+            for m in (batch["metadatas"] or [])
+        ]
+        page_chashes_nonempty = [c for c in page_chashes if c]
+        chash_to_doc: dict[str, str] = {}
+        if _cat is not None and page_chashes_nonempty:
+            try:
+                by_chash = _cat.docs_for_chashes(page_chashes_nonempty)
+            except Exception:
+                by_chash = {}
+            for c, doc_ids in by_chash.items():
+                if doc_ids:
+                    chash_to_doc[c] = sorted(doc_ids)[0]
+
         for mid, meta in zip(batch["ids"], batch["metadatas"] or []):
             meta = meta or {}
             sp = meta.get("source_path", "")
             did = meta.get("doc_id", "")
+            # Phase-3 fallback: resolve via manifest when metadata
+            # lacks doc_id but carries chunk_text_hash.
+            if not did:
+                chash = meta.get("chunk_text_hash", "")
+                if chash:
+                    did = chash_to_doc.get(chash, "")
             if sp:
                 source_paths.add(sp)
             elif did:
