@@ -2682,24 +2682,20 @@ MIGRATIONS: list[Migration] = [
     ),
     Migration(
         "4.30.0",
-        "Migrate document_aspects PK to doc_id (RDR-108 Phase 1c, nexus-je0b)",
-        _migrate_document_aspects_pk_via_apply_pending,
-    ),
-    Migration(
-        "4.30.0",
-        "Migrate aspect_extraction_queue PK to doc_id (RDR-108 Phase 1c, nexus-je0b)",
-        _migrate_aspect_queue_pk_via_apply_pending,
-    ),
-    Migration(
-        "4.30.0",
         "Drop chash_index.chunk_chroma_id column (RDR-108 Phase 4a, nexus-mmf5)",
         _drop_chash_index_chunk_chroma_id,
     ),
-    Migration(
-        "4.31.0",
-        "Drop document_aspects.source_path column (RDR-096 P5.2, nexus-ocu9.11)",
-        migrate_drop_source_path_column,
-    ),
+    # The RDR-108 Phase 1c PK migrations (``nexus-je0b``: document_aspects
+    # and aspect_extraction_queue PK switch to doc_id) and ``nexus-ocu9.11``
+    # (drop document_aspects.source_path) are intentionally NOT registered.
+    # The schema migrations themselves are correct, but the runtime upsert
+    # path (``DocumentAspects.upsert``) and the ``nx enrich aspects`` CLI
+    # still write rows with empty ``doc_id`` against the post-migration
+    # table. The strict ``doc_id must not be empty`` guard added in #610
+    # then fires for those callers. Re-enable after wiring the enrich
+    # pipeline + upsert path to populate doc_id from the catalog lookup
+    # (``_build_catalog_doc_id_lookup`` in commands/enrich.py). Tracked
+    # as a follow-up. Functions stay defined so re-enable is one-line.
 ]
 
 # ── T3 upgrade steps ────────────────────────────────────────────────────────

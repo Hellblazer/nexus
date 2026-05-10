@@ -6,6 +6,42 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.31.3] - 2026-05-10
+
+Patch release. Defers the RDR-108 Phase 1c PK migrations
+(``nexus-je0b``: document_aspects and aspect_extraction_queue PK
+switch to ``doc_id``) and ``nexus-ocu9.11`` (drop
+``document_aspects.source_path``) from the migration registry. The
+schema migrations themselves are correct, but the runtime upsert
+path (``DocumentAspects.upsert``) and the ``nx enrich aspects`` CLI
+still write rows with empty ``doc_id`` against the post-migration
+table. The strict ``doc_id must not be empty`` guard added in #610
+then fires for those callers. Re-enables once the enrich pipeline
++ upsert path are wired to populate ``doc_id`` from the catalog
+lookup (``_build_catalog_doc_id_lookup`` in
+``commands/enrich.py``).
+
+Everything else from the 4.31.x release series ships as planned:
+RDR-108 Phase 4 read-path remediation, operator dispatch
+qwen-routing promotion, 3 new catalog doctor checks, prose + PDF
+auto-link generators, lazy T3 collection creation, aspects
+write-side confidence floor, default-exclude implements-heuristic
+from graph traversal, classifier skips minified bundles, and the
+Windows winget hint block in ``nx doctor``. The RDR-108 Phase 4a
+``chash_index.chunk_chroma_id`` column drop (``nexus-mmf5``) ships
+as planned (no caller dependency).
+
+### Changed
+
+- **Defer ``nexus-je0b`` and ``nexus-ocu9.11``**: removed from the
+  registered migration list. Function definitions stay in place.
+  The column-presence guards added to
+  ``migrate_document_aspects_source_uri`` (4.16.0) and
+  ``migrate_document_aspects_source_uri_backfill_empty`` (4.26.2)
+  are kept as defensive code (they document the column-drop
+  contract and prevent re-run failures when these migrations
+  re-enable later).
+
 ## [4.31.2] - 2026-05-10
 
 Patch release. The 4.31.0 tag-push uncovered a migration ordering

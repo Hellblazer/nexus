@@ -6,6 +6,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.31.3] - 2026-05-10
+
+Plugin version aligned with conexus 4.31.3. No plugin-side changes;
+the release defers ``nexus-ocu9.11`` from the migration registry
+pending companion fixes to the runtime upsert + enrich paths. See
+root ``CHANGELOG.md``.
+
 ## [4.31.2] - 2026-05-10
 
 Plugin version aligned with conexus 4.31.2. No plugin-side changes;
