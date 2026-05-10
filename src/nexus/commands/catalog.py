@@ -5333,7 +5333,15 @@ def chash_reconcile_cmd(apply: bool) -> None:
 
     try:
         t3 = make_t3()
-        live_collections = {c.name for c in t3._client.list_collections()}
+        # nexus-l1yt: chromadb's list_collections shape varies by
+        # backend version (Collection objects vs string names).
+        # Every other call site in nexus uses the same defensive
+        # ``isinstance(c, str)`` guard; without it this verb crashes
+        # with AttributeError on the string-returning versions.
+        live_collections = {
+            (c if isinstance(c, str) else c.name)
+            for c in t3._client.list_collections()
+        }
     except Exception as exc:
         click.echo(f"Failed to list T3 collections: {exc}", err=True)
         raise SystemExit(1)
