@@ -899,6 +899,20 @@ class _WriteOps:
         whose manifest contains that chash. Chashes with no manifest
         entries are omitted from the result.
 
+        Accepts EITHER full 64-char ``chunk_text_hash`` (legacy callers,
+        e.g. ``mcp/core.py:868``) OR 32-char ``chash[:32]``
+        (RDR-108 D1 natural-id form, used by post-Phase-4 helpers
+        such as ``search_engine._attach_doc_ids_from_catalog``). The
+        SQL match normalizes to 32-char via ``substr(chash,1,32)``,
+        matching ``chashes_for_collection``'s contract (nexus-f8c3
+        review S2: closes the latent normalization-contract
+        divergence between the two manifest read APIs).
+
+        Returned keys preserve the INPUT form so callers don't have
+        to re-normalize: a caller that passed full 64-char chashes
+        gets full-chash keys back; a caller that passed 32-char
+        gets 32-char keys back. Mixed input is supported.
+
         Used by Phase 4 retrieval doc-grouping (mcp/core.py:847 path)
         to reconstruct the document context for a set of chunk hashes
         returned by a T3 query.
@@ -911,20 +925,37 @@ class _WriteOps:
         if not chashes:
             return {}
         cat = self._cat
-        result: dict[str, list[str]] = defaultdict(list)
+        # Map chash[:32] -> the input form(s) that asked for it. A
+        # single 32-char prefix may correspond to multiple 64-char
+        # input variants (when the caller mixes representations);
+        # all such input forms get the same doc list back.
+        prefix_to_inputs: dict[str, list[str]] = defaultdict(list)
+        for c in chashes:
+            if c:
+                prefix_to_inputs[c[:32]].append(c)
+        if not prefix_to_inputs:
+            return {}
+        prefix_to_docs: dict[str, list[str]] = defaultdict(list)
+        unique_prefixes = list(prefix_to_inputs.keys())
         _BATCH = 500
-        for i in range(0, len(chashes), _BATCH):
-            batch = chashes[i : i + _BATCH]
+        for i in range(0, len(unique_prefixes), _BATCH):
+            batch = unique_prefixes[i : i + _BATCH]
             placeholders = ", ".join(["?"] * len(batch))
             rows = cat._db.execute(
-                f"SELECT chash, doc_id FROM document_chunks "
-                f"WHERE chash IN ({placeholders})",
+                f"SELECT substr(chash, 1, 32), doc_id FROM document_chunks "
+                f"WHERE substr(chash, 1, 32) IN ({placeholders})",
                 batch,
             ).fetchall()
-            for chash, doc_id in rows:
-                if doc_id not in result[chash]:
-                    result[chash].append(doc_id)
-        return dict(result)
+            for prefix, doc_id in rows:
+                if doc_id not in prefix_to_docs[prefix]:
+                    prefix_to_docs[prefix].append(doc_id)
+        # Build the response keyed on the caller's input form so
+        # callers don't have to re-normalize their lookup keys.
+        result: dict[str, list[str]] = {}
+        for prefix, doc_ids in prefix_to_docs.items():
+            for input_form in prefix_to_inputs[prefix]:
+                result[input_form] = list(doc_ids)
+        return result
 
     def delete_document(self, tumbler: Tumbler) -> bool:
         """Soft-delete a document: tombstone in JSONL, DELETE from SQLite.

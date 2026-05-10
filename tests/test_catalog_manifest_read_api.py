@@ -265,6 +265,67 @@ class TestDocsForChashes:
         assert result["a" * 64] == ["1.1.1"]
         assert result["b" * 64] == ["1.1.1"]
 
+    def test_docs_for_chashes_accepts_32_char_chash_form(self, tmp_path):
+        """nexus-f8c3 (RDR-108 Phase 4 review S2): a caller passing
+        32-char chash[:32] (the RDR-108 D1 natural-id form) must
+        get the same lookup result as a caller passing the full
+        64-char form. Pre-fix the WHERE clause was a literal string
+        match, so 32-char input silently returned an empty result.
+        """
+        cat = _make_catalog(tmp_path)
+        _insert_doc(cat, "1.1.1", "code__test")
+        full_chash = "a" * 64
+        cat.write_manifest("1.1.1", [_make_chunk(full_chash, 0)])
+
+        # 32-char form (RDR-108 D1 natural id).
+        result = cat.docs_for_chashes([full_chash[:32]])
+        assert result[full_chash[:32]] == ["1.1.1"], (
+            "32-char chash[:32] form must resolve to the same doc_id "
+            "as the 64-char form (S2 normalization-contract fix)."
+        )
+
+    def test_docs_for_chashes_preserves_input_form_in_keys(self, tmp_path):
+        """Backward-compat: callers that pass full 64-char chashes
+        must get full 64-char keys back (not chash[:32] keys).
+        Otherwise the lookup pattern ``result[r.metadata['chunk_text_hash']]``
+        in mcp/core.py:868 silently returns nothing. The fix
+        normalizes for SQL but rebuilds the response keyed on the
+        caller's input form.
+        """
+        cat = _make_catalog(tmp_path)
+        _insert_doc(cat, "1.1.1", "code__test")
+        full_chash = "b" * 64
+        cat.write_manifest("1.1.1", [_make_chunk(full_chash, 0)])
+
+        result = cat.docs_for_chashes([full_chash])
+        # Key is the input form (64-char), not the truncated form.
+        assert full_chash in result
+        assert full_chash[:32] not in result, (
+            "result keys must mirror input form, not internal "
+            "normalization (preserves backward compat with mcp/core.py)"
+        )
+        assert result[full_chash] == ["1.1.1"]
+
+    def test_docs_for_chashes_mixed_input_forms(self, tmp_path):
+        """A caller may mix 64-char and 32-char inputs in one call
+        (e.g. legacy + new chunks in one search response). Each
+        input form must resolve correctly in the response.
+        """
+        cat = _make_catalog(tmp_path)
+        _insert_doc(cat, "1.1.1", "code__test")
+        _insert_doc(cat, "1.1.2", "code__test")
+        legacy_chash = "c" * 64
+        new_chash = "d" * 64
+        cat.write_manifest("1.1.1", [_make_chunk(legacy_chash, 0)])
+        cat.write_manifest("1.1.2", [_make_chunk(new_chash, 0)])
+
+        result = cat.docs_for_chashes([
+            legacy_chash,             # 64-char
+            new_chash[:32],           # 32-char
+        ])
+        assert result[legacy_chash] == ["1.1.1"]
+        assert result[new_chash[:32]] == ["1.1.2"]
+
 
 # ── RDR-108 Phase 4b / nexus-kosc: get_chunk_chashes ─────────────────────────
 
