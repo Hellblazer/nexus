@@ -272,6 +272,40 @@ class TestStalenessCache:
             "legacy/old.py": ("hash-l", "voyage-code-3"),
         }
 
+    def test_build_resolves_phase3_chunks_via_catalog_manifest(self) -> None:
+        """nexus-0ocy (RDR-108 Phase 4 review D-M4): Phase-3 chunks
+        have no doc_id in metadata, only chunk_text_hash. The
+        staleness cache must batch-resolve chash -> doc_id via the
+        catalog manifest so by_doc_id stays useful for Phase-3
+        corpora; otherwise check_staleness falls through to the
+        per-file Chroma path and the build_staleness_cache perf
+        win evaporates.
+        """
+        chash = "a" * 64
+        col = MagicMock()
+        col.get.return_value = {
+            "ids": ["c1"],
+            "metadatas": [{
+                # Phase-3: chunk_text_hash but no doc_id.
+                "chunk_text_hash": chash,
+                "content_hash": "hash-a",
+                "embedding_model": "voyage-code-3",
+            }],
+        }
+
+        # Stub Catalog so the resolution finds the doc_id.
+        fake_cat = MagicMock()
+        fake_cat.docs_for_chashes.return_value = {chash: ["1.1.42"]}
+        import nexus.catalog as _cat_mod
+        with patch.object(
+            _cat_mod.Catalog, "is_initialized", return_value=True,
+        ), patch.object(_cat_mod, "Catalog", return_value=fake_cat):
+            cache = build_staleness_cache(col)
+
+        # by_doc_id resolved from the manifest, NOT from absent metadata.
+        assert cache.by_doc_id == {"1.1.42": ("hash-a", "voyage-code-3")}
+        fake_cat.docs_for_chashes.assert_called_once()
+
     def test_build_skips_chunks_missing_required_fields(self) -> None:
         """Chunks without content_hash or embedding_model (corrupted
         metadata, partial backfill) are skipped — the cache only holds
