@@ -37,11 +37,13 @@ T1 is the per-MCP-process "working memory" tier. T2 is the cross-process shared 
 
 Collection prefixes coexist in one T3 database. Always `__` (double underscore) as separator (colons are invalid in ChromaDB collection names). Conformant collection-name shape (RDR-103) is `<content_type>__<owner_id>__<embedding_model>__v<n>`, e.g. `code__nexus-1-1__voyage-code-3__v1`:
 
-| Prefix | Embedder | Document identity (catalog) | Chunk join key |
+| Prefix | Embedder | Document identity (catalog) | Chunk natural ID (T3) |
 |---|---|---|---|
-| `code__*` | `voyage-code-3` | `source_uri` (file path) | `doc_id` (RDR-101 tumbler) |
-| `docs__*`, `rdr__*` | `voyage-context-3` (CCE) | `source_uri` (file path) | `doc_id` |
-| `knowledge__*` | `voyage-context-3` | `source_uri` then `title` (fallback for MCP-stored notes) | `doc_id` |
+| `code__*` | `voyage-code-3` | `source_uri` (file path) | `chunk_text_hash[:32]` |
+| `docs__*`, `rdr__*` | `voyage-context-3` (CCE) | `source_uri` (file path) | `chunk_text_hash[:32]` |
+| `knowledge__*` | `voyage-context-3` | `source_uri` then `title` (fallback for MCP-stored notes) | `chunk_text_hash[:32]` |
+
+**Catalog/T3 split (RDR-108)**: Catalog Documents are graph nodes addressed by tumblers (`Document.tumbler`); T3 chunks are content-addressed blobs whose Chroma natural ID is `sha256(chunk_text)[:32]`. Document structure (which chashes compose a doc, in what order) lives in the catalog `document_chunks` manifest, not in chunk metadata. The doc-to-chunks join is `documents.tumbler -> document_chunks.doc_id -> document_chunks.chash` then `chash[:32] -> chroma chunk id`. Identical chunk text in the same collection collapses to one T3 row by design; the manifest preserves position via `(doc_id, position)` rows pointing at the shared chash.
 
 For the full module map, post-store hook contracts, T2 schema, and design heritage see [`docs/architecture.md`](docs/architecture.md). For module-local guidance see the `AGENTS.md` files inside `src/nexus/catalog/`, `src/nexus/db/`, and `src/nexus/mcp/`.
 

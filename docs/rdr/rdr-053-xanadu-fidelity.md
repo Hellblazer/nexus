@@ -299,16 +299,18 @@ Every deliberate departure from Nelson's Xanadu design, with rationale and trace
 | **Consequence** | A tumbler that once resolved may stop resolving. Links to expired entries become orphans (detectable via `link_audit()`). |
 | **RF** | Catalog docstring (RDR-052 Xanadu critique) |
 
-### D5: Position-Based Chunk Spans (Being Addressed by This RDR)
+### D5: Position-Based Chunk Spans (Resolved by RDR-053; Reinforced by RDR-108)
 
 | | |
 |---|---|
 | **Nelson** | "Links between bytes can survive deletions, insertions and rearrangements" (LM 4/43). Byte-level addressing in append-only storage ensures survivability. |
-| **Nexus (current)** | `from_span`/`to_span` encode chunk indices that shift on re-index. |
-| **Nexus (proposed)** | `chash:{chunk_text_hash}` — content-addressed chunk identity. Survives re-indexing when chunk text preserved. |
-| **Rationale** | Nexus doesn't store raw source bytes (vectors + chunk text only). Content hashing is the pragmatic middle path between position-based (fragile) and byte-range (requires raw storage). |
-| **Consequence** | Spans survive re-indexing when chunk boundaries unchanged. When chunking changes, spans degrade to unresolvable (detectable via `link_audit()` stale span warning). |
+| **Nexus (pre-RDR-053)** | `from_span`/`to_span` encoded chunk indices that shifted on re-index. |
+| **Nexus (post-RDR-053)** | `chash:{chunk_text_hash}`, content-addressed chunk identity. Survives re-indexing when chunk text is preserved. |
+| **Nexus (post-RDR-108)** | T3 chunk natural ID is `chunk_text_hash[:32]` (RDR-108 D1, nexus-kmb6). The Chroma row IS the content-addressed blob; identical chunk text in the same collection collapses to one row. Document structure (which chashes compose a doc, in what order) lives in the catalog `document_chunks` manifest, not in chunk metadata. Position survives re-index via the manifest's `(doc_id, position) -> chash` rows. |
+| **Rationale** | Nexus doesn't store raw source bytes (vectors + chunk text only). Content hashing is the pragmatic middle path between position-based (fragile) and byte-range (requires raw storage). RDR-108 closes the loop by making the storage layer itself content-addressed: there is no separate chunk_id namespace to drift from chash. |
+| **Consequence** | Spans survive re-indexing when chunk boundaries are unchanged. Re-indexing identical content is idempotent at the chunk layer (same natural ID, no churn). When chunking changes, spans degrade to unresolvable (detectable via `link_audit()` stale span warning). |
 | **RF** | RF-3, RF-6, RF-8 |
+| **Resolution** | RDR-053 (chash spans) + RDR-108 (content-addressed natural IDs + manifest as authoritative doc structure). |
 
 ### D6: No Tumbler Arithmetic (Being Addressed by This RDR)
 

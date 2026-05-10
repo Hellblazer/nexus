@@ -108,6 +108,46 @@ and scoping semantic search to relevant collections instead of searching everyth
 
 Content-hash spans reference chunks by `chunk_text_hash` metadata (SHA-256 of stored chunk text). All 5 indexers (code, prose, doc PDF, doc markdown, streaming PDF pipeline) emit `chunk_text_hash` alongside the existing file-level `content_hash`. For existing collections, `nx catalog setup` or `nx collection backfill-hash` adds the field without re-embedding. `link_audit()` verifies chash spans resolve in T3.
 
+### Catalog manifest as authoritative doc structure (RDR-108)
+
+The catalog `document_chunks` table is the authoritative graph layer of the git/IPFS-style blob+tree split that addresses document identity:
+
+- `documents` carries the Document graph node (tumbler-addressable).
+- `document_chunks` records the ordered `(doc_id, position) -> chash` references that compose each Document.
+- T3 stores chunks as content-addressed blobs; the chunk's Chroma natural ID is `sha256(chunk_text)[:32]`.
+
+Schema:
+
+```sql
+CREATE TABLE document_chunks (
+    doc_id      TEXT NOT NULL REFERENCES documents(tumbler) ON DELETE CASCADE,
+    position    INTEGER NOT NULL,
+    chash       TEXT NOT NULL,
+    chunk_index INTEGER,
+    line_start  INTEGER,
+    line_end    INTEGER,
+    char_start  INTEGER,
+    char_end    INTEGER,
+    PRIMARY KEY (doc_id, position)
+);
+CREATE INDEX idx_document_chunks_chash ON document_chunks(chash);
+```
+
+Properties:
+
+- **Identical content collapses to one T3 row.** Two documents that contain the same chunk text in the same collection share one chunk in T3; the manifest records position separately for each. This is a design goal of D1 (no duplicate embeddings, no duplicate vector storage).
+- **Re-indexing is idempotent at the chunk layer.** Re-indexing the same content produces the same Chroma natural ID; the upsert is a no-op. Manifest rows reflect the latest indexed structure.
+- **Document deletion cascades to manifest, then to T3 via GC.** `cat.delete_document(tumbler)` removes the document row; FK `ON DELETE CASCADE` drops the manifest rows; the next `nx index` run sees those chashes as no-longer-referenced and the manifest-based GC (`indexer._prune_deleted_files`) sweeps the orphaned T3 chunks.
+- **Position is in the manifest, not in chunk metadata.** Phase 3 (RDR-108) retired `doc_id`, `chunk_index`, and `chunk_count` from chunk metadata; the manifest is the single source of truth for chunk position within a document. Retrieval call sites that need order (e.g. `synthesizer.py`'s ChunkIndexed event emission) consult `Catalog.get_manifest(doc_id)`.
+
+**Catalog read API for the manifest**:
+- `Catalog.get_manifest(doc_id) -> list[ManifestRow]` -- ordered rows.
+- `Catalog.get_chunk_chashes(doc_id) -> list[str]` -- ordered chash sequence.
+- `Catalog.docs_for_chashes(chashes) -> dict[chash, list[doc_id]]` -- reverse map; one chash can map to multiple docs (identical content shared).
+- `Catalog.chashes_for_collection(physical_collection) -> set[str]` -- chash[:32] set referenced by the manifest for this collection. Used by GC to identify orphan T3 chunks.
+
+**ChashIndex (T2 routing table)**: `chash_index` maps `(chash, physical_collection)` to enable global `chash:<hex>` link resolution without scanning every collection. Post-RDR-108 it is a pure routing table (chash + collection + created_at, no denormalized chunk_chroma_id). Stale rows are self-healed by `Catalog.resolve_chash` on access; a separate `nx catalog chash-reconcile` follow-up is tracked in nexus-mmf5's original symptom thread.
+
 **Tumbler ordering**: Comparison operators (`<`, `<=`, `>`, `>=`) use -1 sentinel padding for cross-depth ordering -- parent tumblers sort before their children. `Tumbler.spans_overlap()` detects positional span overlap using these operators.
 
 **Two graph views**: `catalog_links` returns only links between live documents (deleted nodes excluded).
