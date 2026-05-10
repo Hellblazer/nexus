@@ -259,12 +259,14 @@ def search_cmd(
     except click.BadParameter as exc:
         raise click.ClickException(str(exc)) from exc
 
-    if max_file_chunks is not None:
-        size_filter: dict = {"chunk_count": {"$lte": max_file_chunks}}
-        if where_filter is None:
-            where_filter = size_filter
-        else:
-            where_filter = {"$and": [size_filter, where_filter]}
+    # nexus-oo4f (RDR-108 Phase 4 review D-M2): pre-Phase-3 chunks
+    # carried ``chunk_count`` in metadata so a chroma ``where``
+    # filter at query time worked. RDR-108 Phase 3 (nexus-bdag)
+    # removed that field; the chroma filter then matched zero
+    # Phase-3 chunks and ``--max-file-chunks`` silently returned no
+    # results. The filter is now applied as a post-query pass
+    # against the catalog manifest length (D2 authoritative source);
+    # the query no longer carries ``chunk_count`` to chroma.
 
     db = _t3()
     all_collections = [c["name"] for c in db.list_collections()]
@@ -342,6 +344,50 @@ def search_cmd(
             if (r.metadata.get("_display_path") or "").startswith(resolved)
             or r.metadata.get("file_path", "").startswith(resolved)
             or r.metadata.get("source_path", "").startswith(resolved)
+        ]
+        if not results:
+            click.echo("No results.")
+            return
+
+    # nexus-oo4f post-query filter: --max-file-chunks against the
+    # catalog manifest length. Phase-3 chunks no longer carry
+    # chunk_count metadata, so the chroma where-filter (above) has
+    # been removed. We resolve each result's doc_id (already
+    # populated by search_engine._attach_doc_ids_from_catalog from
+    # nexus-rehf), then look up the doc's manifest length once.
+    # Chunks whose doc has more than N manifest rows are dropped.
+    # Pre-Phase-3 chunks that still carry chunk_count fall back to
+    # the metadata read so the legacy contract still works.
+    if max_file_chunks is not None:
+        from nexus.catalog import Catalog
+        from nexus.config import catalog_path
+        _cp = catalog_path()
+        _cat = (
+            Catalog(_cp, _cp / ".catalog.db")
+            if Catalog.is_initialized(_cp)
+            else None
+        )
+        chunk_count_cache: dict[str, int] = {}
+
+        def _doc_chunk_count(r: SearchResult) -> int | None:
+            doc_id = r.metadata.get("doc_id", "")
+            if doc_id and _cat is not None:
+                if doc_id not in chunk_count_cache:
+                    try:
+                        chunk_count_cache[doc_id] = len(_cat.get_manifest(doc_id))
+                    except Exception:
+                        chunk_count_cache[doc_id] = 0
+                if chunk_count_cache[doc_id] > 0:
+                    return chunk_count_cache[doc_id]
+            # Legacy fallback: pre-Phase-3 chunks still have it.
+            legacy = r.metadata.get("chunk_count")
+            if isinstance(legacy, int) and legacy > 0:
+                return legacy
+            return None  # unknown; keep the chunk
+
+        results = [
+            r for r in results
+            if (cnt := _doc_chunk_count(r)) is None or cnt <= max_file_chunks
         ]
         if not results:
             click.echo("No results.")
