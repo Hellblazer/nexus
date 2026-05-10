@@ -62,6 +62,53 @@ _MAX_GRAPH_DEPTH: int = 10
 _MAX_GRAPH_NODES: int = 500
 
 
+# nexus-6ppk: link types whose precision is too low for default
+# graph traversal. ``implements-heuristic`` is auto-emitted by
+# ``index_hook`` whenever a code chunk's auto-extracted symbols match
+# an RDR's terminology heuristic; high-traffic generic-infrastructure
+# RDRs (rdr-063 t2-domain-split, AST chunking, T1 scratch) accumulate
+# 500-660 inbound heuristic edges each, drowning the ~6% of hand-
+# curated cites/relates/contains. The 2026-05-08 prod probe found
+# 15,490 ``implements-heuristic`` edges (66% of 23,582 total); the
+# ``_MAX_GRAPH_NODES`` cap fires correctly but the resulting first-
+# 500 set is mostly noise.
+#
+# Default-exclude from graph traversal; callers wanting the noise
+# (auditing / debugging) opt back in via ``include_heuristic=True``.
+_HEURISTIC_LINK_TYPES: frozenset[str] = frozenset({
+    "implements-heuristic",
+})
+
+
+def _filter_link_types(
+    link_types: list[str] | None,
+    link_type: str,
+    *,
+    include_heuristic: bool,
+) -> list[str] | None:
+    """nexus-6ppk: compute the effective link-type filter for graph
+    traversal. When the caller did not specify any types AND
+    ``include_heuristic`` is False, returns the full known set minus
+    heuristic types so the BFS skips them. Returns the caller's
+    explicit list (or single-type list) unmodified when types are
+    given. Returns None (no filter) when ``include_heuristic`` is
+    True and no types were specified.
+    """
+    if link_types or link_type:
+        # Explicit caller filter wins; trust the caller knows whether
+        # they want heuristic edges in the result.
+        return link_types or [link_type]
+    if include_heuristic:
+        # Caller asked for everything explicitly.
+        return None
+    # Default: known meaningful types except the heuristic class.
+    return [
+        "cites", "implements", "relates", "contains",
+        "supersedes", "describes", "quotes", "comments",
+        "formalizes", "same-as",
+    ]
+
+
 class _LinkOps:
     """Composed into ``Catalog`` as ``self._links``.
 
@@ -825,6 +872,7 @@ class _LinkOps:
         direction: str = "both",
         link_type: str = "",
         link_types: list[str] | None = None,
+        include_heuristic: bool = False,
     ) -> dict:
         """BFS traversal to *depth*. Capped at ``_MAX_GRAPH_DEPTH``
         (10) and ``_MAX_GRAPH_NODES`` (500). Returns
@@ -835,6 +883,14 @@ class _LinkOps:
         (``cat._MAX_GRAPH_DEPTH`` / ``_MAX_GRAPH_NODES``) so tests
         that ``patch.object(type(cat), "_MAX_GRAPH_NODES", N)``
         intercept the value used here.
+
+        nexus-6ppk: when ``link_types`` and ``link_type`` are both
+        unspecified, the BFS defaults to "everything except
+        ``implements-heuristic``" so the auto-emitted heuristic
+        edges (66% of the 2026-05-08 prod link graph) don't drown
+        out hand-curated edges. Pass ``include_heuristic=True`` to
+        opt back in (auditing, debugging, or the rare consumer that
+        actively wants the heuristic flood).
         """
         from nexus.catalog.catalog import CatalogLink  # noqa: F401
         from nexus.catalog.tumbler import Tumbler
@@ -843,9 +899,10 @@ class _LinkOps:
         max_nodes = getattr(cat, "_MAX_GRAPH_NODES", _MAX_GRAPH_NODES)
 
         depth = min(depth, max_depth)
-        effective_types: list[str] = (
-            link_types or ([link_type] if link_type else [])
-        )
+        effective_types: list[str] = _filter_link_types(
+            link_types, link_type,
+            include_heuristic=include_heuristic,
+        ) or []
         visited: set[str] = {str(tumbler)}
         seen_edges: set[tuple[str, str, str]] = set()
         all_edges: list = []
@@ -904,6 +961,7 @@ class _LinkOps:
         direction: str = "both",
         link_type: str = "",
         link_types: list[str] | None = None,
+        include_heuristic: bool = False,
     ) -> dict:
         """BFS from multiple seeds. Thin wrapper over :meth:`graph`
         that dedupes nodes by ``str(tumbler)`` and edges by
@@ -930,6 +988,7 @@ class _LinkOps:
             result = self._cat.graph(
                 seed, depth=depth, direction=direction,
                 link_type=link_type, link_types=link_types,
+                include_heuristic=include_heuristic,
             )
             for node in result.get("nodes") or []:
                 if len(merged_nodes) >= max_nodes:
