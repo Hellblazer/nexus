@@ -1011,6 +1011,53 @@ def test_upsert_chunks_with_embeddings_stores(mock_db):
     )
 
 
+def test_upsert_chunks_with_embeddings_dedupes_duplicate_ids(mock_db):
+    """RDR-108 D1 (nexus-1ljk): under content-derived natural IDs,
+    identical chunk text in the same batch produces duplicate IDs.
+    ChromaDB's ``col.upsert`` rejects batches with duplicate ids
+    (DuplicateIDError), so ``_write_batch`` must dedupe upstream
+    keeping the first occurrence (first-wins is content-equivalent
+    to last-wins under D1, since identical chunk_text yields
+    identical content + embedding + metadata)."""
+    db, mock_col, _ = mock_db
+    # Two distinct content + one duplicate of the first.
+    ids = ["a" * 32, "b" * 32, "a" * 32]
+    docs = ["alpha text", "beta text", "alpha text"]
+    embeddings = [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.1, 0.2, 0.3]]
+    metas = [{"page_number": 1}, {"page_number": 2}, {"page_number": 1}]
+
+    db.upsert_chunks_with_embeddings(
+        collection_name="docs__corpus", ids=ids, documents=docs,
+        embeddings=embeddings, metadatas=metas,
+    )
+
+    # The duplicate is dropped before col.upsert is called.
+    call_kwargs = mock_col.upsert.call_args.kwargs
+    assert call_kwargs["ids"] == ["a" * 32, "b" * 32]
+    assert call_kwargs["documents"] == ["alpha text", "beta text"]
+    assert call_kwargs["embeddings"] == [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
+
+
+def test_upsert_chunks_with_embeddings_no_dedup_when_unique(mock_db):
+    """No collapse when all ids are distinct: the dedup path is a
+    no-op and the batch passes through unchanged."""
+    db, mock_col, _ = mock_db
+    ids = ["a" * 32, "b" * 32, "c" * 32]
+    docs = ["alpha", "beta", "gamma"]
+    embeddings = [[0.1, 0.0, 0.0], [0.0, 0.1, 0.0], [0.0, 0.0, 0.1]]
+    metas = [{"page_number": 1}, {"page_number": 2}, {"page_number": 3}]
+
+    db.upsert_chunks_with_embeddings(
+        collection_name="docs__corpus", ids=ids, documents=docs,
+        embeddings=embeddings, metadatas=metas,
+    )
+
+    call_kwargs = mock_col.upsert.call_args.kwargs
+    assert call_kwargs["ids"] == ids
+    assert call_kwargs["documents"] == docs
+    assert call_kwargs["embeddings"] == embeddings
+
+
 def test_upsert_chunks_with_embeddings_uses_get_or_create(mock_db):
     db, mock_col, mock_client = mock_db
     db.upsert_chunks_with_embeddings(

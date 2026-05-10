@@ -515,6 +515,38 @@ class T3Database:
             for m in metadatas:
                 validate(m)
 
+        # RDR-108 D1 (nexus-fyfx): under content-derived natural IDs
+        # (``chunk_text_hash[:32]``), identical chunk text in the same
+        # batch produces duplicate IDs. ChromaDB's ``col.upsert``
+        # rejects batches with duplicate ids
+        # (``DuplicateIDError``). Drop duplicates here, keeping the
+        # first occurrence; the semantic is "identical content
+        # collapses to one row" per D1, and the dropped occurrences
+        # carry the same content + embedding + metadata so first-wins
+        # is content-equivalent to last-wins. Log when non-zero so
+        # operators can correlate with collection collapse rates.
+        seen_ids: set[str] = set()
+        unique_idx: list[int] = []
+        for i, cid in enumerate(ids):
+            if cid in seen_ids:
+                continue
+            seen_ids.add(cid)
+            unique_idx.append(i)
+        if len(unique_idx) < len(ids):
+            collapsed = len(ids) - len(unique_idx)
+            _log.info(
+                "write_batch_collapsed_duplicate_ids",
+                collection=collection_name,
+                received=len(ids),
+                kept=len(unique_idx),
+                collapsed=collapsed,
+            )
+            ids = [ids[i] for i in unique_idx]
+            documents = [documents[i] for i in unique_idx]
+            metadatas = [metadatas[i] for i in unique_idx]
+            if embeddings is not None:
+                embeddings = [embeddings[i] for i in unique_idx]
+
         size = QUOTAS.MAX_RECORDS_PER_WRITE
         with self._write_sem(collection_name):
             for start in range(0, len(ids), size):
