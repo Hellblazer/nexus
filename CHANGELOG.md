@@ -6,30 +6,35 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [4.31.1] - 2026-05-10
+## [4.31.2] - 2026-05-10
 
-Patch release. The 4.31.0 tag-push uncovered a real bug: the
-``nexus-ocu9.11`` migration assumed the ``nexus-je0b`` PK migration
-had already run, so it used ``ALTER TABLE ... DROP COLUMN`` which
-SQLite refuses when the column is part of a PRIMARY KEY. In hermetic
-test environments without a catalog, ``je0b`` raises
-``MigrationRetry`` and is skipped, leaving ``source_path`` as part
-of the ``(collection, source_path)`` PK when ``ocu9.11`` fires.
-Caught by CI's Python 3.13 job; PyPI publish was correctly gated and
-4.31.0 never reached PyPI.
+Patch release. The 4.31.0 tag-push uncovered a migration ordering
+bug, and the 4.31.1 attempt to fix it via a table-rebuild diverged
+from the runtime upsert path (which still writes ``source_path`` as
+a denorm cache when the table is in the post-je0b shape). 4.31.2
+takes the simpler approach: ``ocu9.11`` defers when ``je0b`` hasn't
+run yet, mirroring je0b's own ``MigrationRetry`` pattern. Neither
+4.31.0 nor 4.31.1 reached PyPI (test gate held both times).
 
 ### Fixed
 
-- **``migrate_drop_source_path_column`` rebuild fallback**
-  (nexus-ocu9.11): the migration now introspects the live PK and
-  takes one of two paths. When ``source_path`` is no longer in the
-  PK (``je0b`` ran successfully), uses simple
-  ``ALTER TABLE ... DROP COLUMN``. When ``source_path`` is still in
-  the PK (``je0b`` was skipped), falls back to the 4-step
-  table-rebuild pattern: CREATE-new with the post-drop schema /
-  INSERT-SELECT / DROP-old / RENAME / recreate indexes. Both paths
-  preserve the source_uri NOT-NULL audit and remain idempotent on
-  the column-presence check.
+- **``migrate_drop_source_path_column`` defers until je0b ran**
+  (nexus-ocu9.11): the migration now raises ``MigrationRetry`` when
+  ``source_path`` is still in the PRIMARY KEY (which means ``je0b``
+  was skipped because the catalog is absent). ``apply_pending``
+  re-runs all skipped migrations on the next DB open; once the
+  catalog exists and je0b succeeds, source_path is no longer in the
+  PK and the simple ``ALTER TABLE ... DROP COLUMN`` path applies.
+  Replaces the 4.31.1 table-rebuild approach which diverged from
+  the runtime upsert path that writes source_path as a denorm cache.
+- **``migrate_document_aspects_source_uri`` source_path guard**
+  (4.16.0): early-return when source_path column is absent. Defends
+  against ``apply_pending`` re-running this migration on a DB where
+  ``ocu9.11`` has already dropped source_path (e.g. after a later
+  migration raised ``MigrationRetry`` and apply_pending is replaying
+  from last_seen).
+- **``migrate_document_aspects_source_uri_backfill_empty`` same
+  guard** (4.26.2): same shape; same defensive early-return.
 
 ## [4.31.0] - 2026-05-10
 

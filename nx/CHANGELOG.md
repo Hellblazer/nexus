@@ -6,13 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [4.31.1] - 2026-05-10
+## [4.31.2] - 2026-05-10
 
-Plugin version aligned with conexus 4.31.1. No plugin-side changes;
-the release ships a one-line patch in the conexus package fixing the
-``nexus-ocu9.11`` migration's ``ALTER TABLE ... DROP COLUMN`` path
-on hermetic test environments where ``source_path`` is still in the
-PK. See root ``CHANGELOG.md``.
+Plugin version aligned with conexus 4.31.2. No plugin-side changes;
+the release ships a migration-ordering fix in the conexus package
+that makes ``nexus-ocu9.11`` defer (``MigrationRetry``) when its
+prerequisite ``je0b`` hasn't run yet. See root ``CHANGELOG.md``.
 
 ## [4.31.0] - 2026-05-10
 

@@ -1828,77 +1828,26 @@ def migrate_drop_source_path_column(conn: sqlite3.Connection) -> None:
         r[1] for r in conn.execute("PRAGMA table_info(document_aspects)").fetchall()
         if r[5] > 0
     }
-    source_path_in_pk = "source_path" in pk_cols
-    has_doc_id = "doc_id" in cols
+    if "source_path" in pk_cols:
+        # ``je0b`` (4.30.0) hasn't run yet (typically because the catalog is
+        # absent and je0b raised MigrationRetry). Dropping a PK column is
+        # refused by SQLite; rebuilding the table here would diverge from
+        # the je0b post-state and break the runtime upsert path that still
+        # writes ``source_path`` as a denorm cache. Defer: ``apply_pending``
+        # leaves the version unbumped and re-runs all skipped migrations on
+        # the next DB open. Once the catalog exists and je0b succeeds,
+        # ``source_path`` is no longer in the PK and the simple DROP path
+        # below applies.
+        raise MigrationRetry(
+            "source_path still in PRIMARY KEY — defer until "
+            "migrate_document_aspects_pk_to_doc_id (je0b) has run"
+        )
 
-    if not source_path_in_pk:
-        conn.execute("ALTER TABLE document_aspects DROP COLUMN source_path")
-        conn.commit()
-        _log.info(
-            "migrate_drop_source_path_column",
-            table="document_aspects",
-            path="alter_drop",
-        )
-        return
-
-    # Rebuild path. ``je0b`` (4.30.0) was skipped (catalog absent), so the
-    # table still has the legacy compound PK and no ``doc_id`` column. Build
-    # the post-je0b shape directly so a later je0b retry is a no-op via
-    # ``_is_already_migrated`` (PK == {doc_id}).
-    select_doc_id = "doc_id" if has_doc_id else "''"
-    with conn:
-        conn.execute(
-            """
-            CREATE TABLE document_aspects_new (
-                doc_id                 TEXT NOT NULL DEFAULT '',
-                collection             TEXT NOT NULL,
-                problem_formulation    TEXT,
-                proposed_method        TEXT,
-                experimental_datasets  TEXT,
-                experimental_baselines TEXT,
-                experimental_results   TEXT,
-                extras                 TEXT,
-                confidence             REAL,
-                extracted_at           TEXT NOT NULL,
-                model_version          TEXT NOT NULL,
-                extractor_name         TEXT NOT NULL,
-                source_uri             TEXT,
-                PRIMARY KEY (doc_id)
-            )
-            """
-        )
-        conn.execute(
-            f"""
-            INSERT INTO document_aspects_new
-                (doc_id, collection,
-                 problem_formulation, proposed_method,
-                 experimental_datasets, experimental_baselines,
-                 experimental_results, extras, confidence,
-                 extracted_at, model_version, extractor_name, source_uri)
-            SELECT
-                {select_doc_id}, collection,
-                problem_formulation, proposed_method,
-                experimental_datasets, experimental_baselines,
-                experimental_results, extras, confidence,
-                extracted_at, model_version, extractor_name, source_uri
-            FROM document_aspects
-            """
-        )
-        conn.execute("DROP TABLE document_aspects")
-        conn.execute("ALTER TABLE document_aspects_new RENAME TO document_aspects")
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_document_aspects_extractor "
-            "ON document_aspects(extractor_name, model_version)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_document_aspects_collection "
-            "ON document_aspects(collection)"
-        )
+    conn.execute("ALTER TABLE document_aspects DROP COLUMN source_path")
+    conn.commit()
     _log.info(
         "migrate_drop_source_path_column",
         table="document_aspects",
-        path="rebuild",
-        had_doc_id=has_doc_id,
     )
 
 
