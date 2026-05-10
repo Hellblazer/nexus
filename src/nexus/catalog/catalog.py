@@ -1726,7 +1726,13 @@ class Catalog:
         if entry is None:
             return None
         from nexus.catalog import catalog_spans
-        return catalog_spans.resolve_span_text_for_entry(entry, span)
+        # nexus-hjd6: pass self so the chunk:char branch can use the
+        # document_chunks manifest (RDR-108 Phase 3 removed the
+        # chunk_index/doc_id metadata that the legacy where-filter
+        # depended on).
+        return catalog_spans.resolve_span_text_for_entry(
+            entry, span, catalog=self,
+        )
 
     def link_audit(self, *, t3: "ClientAPI | None" = None) -> dict:
         """Audit the links table."""
