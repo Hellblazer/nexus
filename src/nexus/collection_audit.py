@@ -420,7 +420,7 @@ def compute_chash_coverage(collection: str) -> ChashCoverage | None:
                 page = col.get(limit=300, include=[])
                 ids = page.get("ids") or []
                 if ids:
-                    indexed_chashes = idx.chashes_for_collection(collection)
+                    indexed_chashes = idx.registered_chashes_for_collection(collection)
                     for cid in ids:
                         if cid not in indexed_chashes:
                             missing.append(cid)
