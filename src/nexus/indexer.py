@@ -1006,8 +1006,15 @@ def _run_index_frecency_only(repo: Path, registry: "RepoRegistry") -> None:
     if docs_collection:
         collection_names.append(docs_collection)
 
+    # nexus-ks40: frecency_only is a read-update flow; if the
+    # collection has not yet been written, skip rather than mint an
+    # empty zombie via get_or_create_collection.
+    from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: PLC0415
     for collection_name in collection_names:
-        col = db.get_or_create_collection(collection_name)
+        try:
+            col = db.get_collection(collection_name)
+        except _ChromaNotFoundError:
+            continue
         for file, score in frecency_map.items():
             doc_id = file_to_doc_id.get(file, "")
             where = {"doc_id": doc_id} if doc_id else {"source_path": str(file)}
@@ -1532,10 +1539,25 @@ def _prune_misclassified(
     ~ceil(N / _CHROMA_PAGE_SIZE) queries per direction (~34 total for
     ART) — about a 300x reduction in roundtrips.
     """
+    from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: PLC0415
     from tqdm import tqdm
 
-    code_col = db.get_or_create_collection(code_collection)
-    docs_col = db.get_or_create_collection(docs_collection)
+    # nexus-ks40: read-only sweeps must NOT speculatively create T3
+    # collections. ``get_or_create_collection`` would mint an empty
+    # zombie T3 collection whenever this prune ran on a repo whose
+    # ``code__`` or ``docs__`` collection had not been written yet
+    # (fresh corpus, type-skewed corpus, post-housekeeping cleanup).
+    # Use ``get_collection`` and skip the matching sweep when the
+    # collection genuinely does not exist (there is nothing to
+    # misclassify against an absent target).
+    def _read_collection_or_none(name: str):
+        try:
+            return db.get_collection(name)
+        except _ChromaNotFoundError:
+            return None
+
+    code_col = _read_collection_or_none(code_collection)
+    docs_col = _read_collection_or_none(docs_collection)
     file_to_doc_id = file_to_doc_id or {}
 
     # Prose + PDF files should NOT have chunks in the code__ collection.
@@ -1552,15 +1574,17 @@ def _prune_misclassified(
         unit="sweep",
     )
     try:
-        pruned_chunks += _prune_misclassified_in_collection(
-            code_col, code_targets, file_to_doc_id, kind="code",
-        )
+        if code_col is not None:
+            pruned_chunks += _prune_misclassified_in_collection(
+                code_col, code_targets, file_to_doc_id, kind="code",
+            )
         bar.set_postfix_str(f"chunks={pruned_chunks}", refresh=False)
         bar.update(1)
 
-        pruned_chunks += _prune_misclassified_in_collection(
-            docs_col, docs_targets, file_to_doc_id, kind="docs",
-        )
+        if docs_col is not None:
+            pruned_chunks += _prune_misclassified_in_collection(
+                docs_col, docs_targets, file_to_doc_id, kind="docs",
+            )
         bar.set_postfix_str(f"chunks={pruned_chunks}", refresh=False)
         bar.update(1)
     finally:
@@ -1620,9 +1644,17 @@ def _prune_deleted_files(
     """
     if catalog is None:
         return
+    # nexus-ks40: read-only GC must use get_collection so an absent
+    # T3 collection is a clean skip, not a speculative empty creation
+    # (the latter is the leak that fed the doctor's "T3 collections
+    # without projection rows" zombie list).
+    from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: PLC0415
     for collection_name in (code_collection, docs_collection):
         referenced = catalog.chashes_for_collection(collection_name)
-        col = db.get_or_create_collection(collection_name)
+        try:
+            col = db.get_collection(collection_name)
+        except _ChromaNotFoundError:
+            continue
         all_chunks = _paginated_get(col, include=["metadatas"])
         if not all_chunks["ids"]:
             continue

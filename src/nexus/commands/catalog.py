@@ -5401,4 +5401,158 @@ def chash_reconcile_cmd(apply: bool) -> None:
         idx.close()
 
 
+# ── nx catalog collection-gc (nexus-ks40) ────────────────────────────────
+
+
+@catalog.command("collection-gc")
+@click.option(
+    "--apply",
+    is_flag=True,
+    default=False,
+    help="Actually delete zombie T3 collections. Without this flag the "
+    "command is a dry-run report only.",
+)
+def collection_gc_cmd(apply: bool) -> None:
+    """Sweep zombie T3 collections (0 chunks, no catalog projection,
+    no document references).
+
+    \b
+    Targets the junkyard pattern flagged by
+    ``nx catalog doctor --collections-drift``: T3 collections that
+    accumulate from interrupted indexes, deleted worktrees, or any
+    indexer path that pre-creates a collection name (via
+    ``get_or_create_collection``) and then never writes a chunk.
+    Each one shows up in the doctor's "T3 collections without
+    projection rows" list and never gets cleaned up because no verb
+    targets them.
+
+    \b
+    Conservative deletion criteria. A T3 collection must satisfy ALL
+    of:
+
+      * 0 chunks (``col.count() == 0``);
+      * NOT registered in the catalog ``collections`` projection;
+      * NOT referenced by any ``documents.physical_collection`` row;
+      * NOT bypass-schema (``taxonomy__*`` is operator-managed and
+        out of scope).
+
+    \b
+    Default is dry-run: reports per-candidate deletion plan without
+    writing. Pass ``--apply`` to actually delete.
+
+    \b
+    Stale projection rows (catalog has the row, T3 collection is
+    gone) are NOT handled here: the catalog event log is
+    append-only, so removing a projection row requires
+    ``supersede_collection(<old>, <target>)`` against an explicit
+    operator-chosen target. Use the recipe printed by
+    ``nx catalog doctor --collections-drift`` for those cases.
+
+    \b
+    Examples:
+      nx catalog collection-gc          # dry-run report
+      nx catalog collection-gc --apply  # actually delete
+
+    \b
+    Filed under nexus-ks40 (catalog/T3 hygiene).
+    """
+    from nexus.db import make_t3
+    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES
+
+    cat = _get_catalog()
+    try:
+        t3_db = make_t3()
+        t3_collections = t3_db.list_collections()
+    except Exception as exc:
+        click.echo(f"Failed to list T3 collections: {exc}", err=True)
+        raise SystemExit(1)
+
+    projection_names = {r["name"] for r in cat.list_collections()}
+    doc_collection_rows = cat._db.execute(
+        "SELECT DISTINCT physical_collection FROM documents "
+        "WHERE physical_collection != ''"
+    ).fetchall()
+    doc_collection_names = {r[0] for r in doc_collection_rows if r[0]}
+
+    candidates: list[tuple[str, int]] = []
+    skipped_referenced = 0
+    skipped_nonempty = 0
+    skipped_bypass = 0
+
+    for c in t3_collections:
+        name = c["name"]
+        count = c.get("count", 0)
+        if name.startswith(_BYPASS_SCHEMA_PREFIXES):
+            skipped_bypass += 1
+            continue
+        if name in projection_names or name in doc_collection_names:
+            skipped_referenced += 1
+            continue
+        if count > 0:
+            skipped_nonempty += 1
+            continue
+        candidates.append((name, count))
+
+    candidates.sort()
+
+    click.echo(
+        f"T3 collections: {len(t3_collections)} total"
+    )
+    click.echo(
+        f"  catalog projection: {len(projection_names)} entries"
+    )
+    click.echo(
+        f"  documents.physical_collection: {len(doc_collection_names)} entries"
+    )
+    click.echo(
+        f"  bypass-schema (excluded): {skipped_bypass}"
+    )
+    click.echo(
+        f"  referenced by catalog (kept): {skipped_referenced}"
+    )
+    click.echo(
+        f"  unreferenced but non-empty (kept, needs operator review): "
+        f"{skipped_nonempty}"
+    )
+    click.echo(
+        f"  unreferenced AND empty (zombie candidates): {len(candidates)}"
+    )
+
+    if not candidates:
+        click.echo("\nNothing to gc.")
+        return
+
+    verb = "would delete" if not apply else "deleted"
+    click.echo(f"\nZombie collections ({verb}):")
+    # Cap at 30 to keep output sane; the operator gets the count above.
+    for name, count in candidates[:30]:
+        click.echo(f"  {verb} {name} ({count} chunks)")
+    if len(candidates) > 30:
+        click.echo(f"  ... and {len(candidates) - 30} more")
+
+    if apply:
+        actually_deleted = 0
+        failures: list[tuple[str, str]] = []
+        for name, _ in candidates:
+            try:
+                t3_db.delete_collection(name)
+                actually_deleted += 1
+            except Exception as exc:
+                failures.append((name, str(exc)))
+        click.echo(
+            f"\nSummary: deleted {actually_deleted} zombie collection(s) "
+            f"of {len(candidates)} candidate(s)."
+        )
+        if failures:
+            click.echo(f"  {len(failures)} delete(s) failed:")
+            for name, err in failures[:10]:
+                click.echo(f"    {name}: {err}")
+            raise SystemExit(1)
+    else:
+        click.echo(
+            f"\nSummary: would delete {len(candidates)} zombie collection(s). "
+            "Re-run with --apply to actually delete."
+        )
+
+
 # ── Catalog t3-doc-id-coverage support helpers ───────────────────────────

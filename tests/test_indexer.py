@@ -46,6 +46,8 @@ def _tracking_db():
         ups.setdefault(collection_name, []).extend(metadatas)
     db = MagicMock()
     db.get_or_create_collection.side_effect = goc
+    db.get_collection.side_effect = goc
+    db.get_collection.side_effect = goc
     db.upsert_chunks_with_embeddings.side_effect = cap
     return db, ups, cols
 
@@ -53,6 +55,7 @@ def _tracking_db():
 def _mock_db():
     col = MagicMock(); col.get.return_value = {"metadatas": [], "ids": []}
     db = MagicMock(); db.get_or_create_collection.return_value = col
+    db.get_collection.return_value = col
     return db, col
 
 
@@ -203,6 +206,7 @@ def test_run_index_reindexes_when_embedding_model_changed(tmp_path):
     col = MagicMock()
     col.get.return_value = {"metadatas": [{"content_hash": h, "embedding_model": "voyage-4"}], "ids": []}
     db = MagicMock(); db.get_or_create_collection.return_value = col
+    db.get_collection.return_value = col
     with _patches(db, extra={"nexus.chunker.chunk_file": {"return_value": [_chunk()]},
                               "voyageai.Client": {"return_value": _voyage(1)}}):
         _run_index(repo, _reg())
@@ -218,6 +222,7 @@ def test_frecency_only_updates_frecency_score(tmp_path):
     old = {"frecency_score": 0.1, "source_path": str(src), "title": "main.py:1-1"}
     col = MagicMock(); col.get.return_value = {"ids": ["c1"], "metadatas": [old]}
     db = MagicMock(); db.get_or_create_collection.return_value = col
+    db.get_collection.return_value = col
     with patch("nexus.frecency.batch_frecency", return_value={src: 0.75}), \
          patch("nexus.config.get_credential", return_value="fake-key"), \
          patch("nexus.db.make_t3", return_value=db):
@@ -244,6 +249,8 @@ def test_frecency_only_uses_doc_id_when_catalog_has_entry(tmp_path):
     col.get.return_value = {"ids": ["c1"], "metadatas": [old]}
     db = MagicMock()
     db.get_or_create_collection.return_value = col
+    db.get_collection.return_value = col
+    db.get_collection.return_value = col
 
     # Mock the catalog map so the file resolves to a known doc_id.
     with patch(
@@ -275,6 +282,8 @@ def test_frecency_only_falls_back_to_source_path_when_no_catalog_entry(tmp_path)
     col.get.return_value = {"ids": ["c1"], "metadatas": [old]}
     db = MagicMock()
     db.get_or_create_collection.return_value = col
+    db.get_collection.return_value = col
+    db.get_collection.return_value = col
     with patch(
         "nexus.indexer._build_frecency_doc_id_map",
         return_value={},
@@ -293,6 +302,7 @@ def test_frecency_only_skips_unindexed_files(tmp_path):
     src = repo / "new.py"; src.write_text("y = 2\n")
     col = MagicMock(); col.get.return_value = {"ids": [], "metadatas": []}
     db = MagicMock(); db.get_or_create_collection.return_value = col
+    db.get_collection.return_value = col
     with patch("nexus.frecency.batch_frecency", return_value={src: 0.5}), \
          patch("nexus.config.get_credential", return_value="fake-key"), \
          patch("nexus.db.make_t3", return_value=db):
@@ -444,6 +454,7 @@ def _gc_db(per_collection_rows: dict[str, list[tuple[str, str]]]):
     returns a per-collection ``_gc_col``. Use when a test needs DIFFERENT
     chunks for the code and docs collections; the single-shared-col
     pattern (``db.get_or_create_collection.return_value = _gc_col(...)``)
+    db.get_collection.return_value = _gc_col(...)``)
     silently returns the same chunks for both collections, which would
     mask correctness bugs in any test that exercises non-empty
     references on both sides simultaneously (nexus-v7mn).
@@ -456,6 +467,10 @@ def _gc_db(per_collection_rows: dict[str, list[tuple[str, str]]]):
     }
     db = MagicMock()
     db.get_or_create_collection.side_effect = lambda name: cols[name]
+    db.get_collection.side_effect = lambda name: cols[name]
+    # nexus-ks40: read paths now use ``get_collection`` (raises when
+    # absent) so the mock must satisfy both name-resolution surfaces.
+    db.get_collection.side_effect = lambda name: cols[name]
     return db, cols
 
 
@@ -487,6 +502,7 @@ def test_prune_deleted_files_orphan_chunk_deleted(tmp_path):
     col = _gc_col([("live-id-synthetic", live_chash),
                    ("orphan-id-synthetic", orphan_chash)])
     db = MagicMock(); db.get_or_create_collection.return_value = col
+    db.get_collection.return_value = col
     catalog = _gc_catalog({"code__repo": {live_chash[:32]}, "docs__repo": set()})
 
     _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
@@ -506,6 +522,7 @@ def test_prune_deleted_files_preserves_live_synthetic_id(tmp_path):
     synthetic_id = "0123456789abcdef" * 2  # 32 hex chars unrelated to chash
     col = _gc_col([(synthetic_id, chash)])
     db = MagicMock(); db.get_or_create_collection.return_value = col
+    db.get_collection.return_value = col
     catalog = _gc_catalog({"code__repo": {chash[:32]}, "docs__repo": set()})
 
     _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
@@ -522,6 +539,7 @@ def test_prune_deleted_files_empty_manifest_deletes_all(tmp_path):
                    ("id-y", "y" * 64),
                    ("id-z", "z" * 64)])
     db = MagicMock(); db.get_or_create_collection.return_value = col
+    db.get_collection.return_value = col
     catalog = _gc_catalog({"code__repo": set(), "docs__repo": set()})
 
     _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
@@ -541,6 +559,7 @@ def test_prune_deleted_files_chunk_without_chunk_text_hash_skipped(tmp_path):
     from nexus.indexer import _prune_deleted_files
     col = _gc_col([("ancient", ""), ("orphan", "b" * 64)])
     db = MagicMock(); db.get_or_create_collection.return_value = col
+    db.get_collection.return_value = col
     catalog = _gc_catalog({"code__repo": {"a" * 32}, "docs__repo": set()})
 
     with capture_logs() as cap:
@@ -572,11 +591,13 @@ def test_prune_deleted_files_idempotent(tmp_path):
 
     col = _gc_col([("live-id", chash)])
     db = MagicMock(); db.get_or_create_collection.return_value = col
+    db.get_collection.return_value = col
     _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
     assert col.delete.call_count == 0
 
     col2 = _gc_col([("live-id", chash)])
     db2 = MagicMock(); db2.get_or_create_collection.return_value = col2
+    db2.get_collection.return_value = col2
     _prune_deleted_files("code__repo", "docs__repo", db2, catalog=catalog)
     assert col2.delete.call_count == 0
 
@@ -587,11 +608,72 @@ def test_prune_deleted_files_no_catalog_is_noop(tmp_path):
     from nexus.indexer import _prune_deleted_files
     col = _gc_col([("x", "x" * 64)])
     db = MagicMock(); db.get_or_create_collection.return_value = col
+    db.get_collection.return_value = col
 
     _prune_deleted_files("code__repo", "docs__repo", db, catalog=None)
 
     assert col.delete.call_count == 0
     db.get_or_create_collection.assert_not_called()
+
+
+def test_prune_deleted_files_does_not_create_zombie_collections(tmp_path):
+    """nexus-ks40 regression: an absent T3 collection must NOT be
+    speculatively created by the prune sweep. Pre-fix, prune called
+    ``db.get_or_create_collection`` which minted an empty zombie T3
+    collection whenever the GC ran on a corpus whose ``code__`` or
+    ``docs__`` collection had never been written. That zombie then
+    showed up in ``nx catalog doctor --collections-drift``'s "T3
+    collections without projection rows" list and never got cleaned
+    up. Post-fix, prune uses ``get_collection`` and silently skips
+    when the collection is absent.
+    """
+    from chromadb.errors import NotFoundError as _ChromaNotFoundError
+    from nexus.indexer import _prune_deleted_files
+
+    catalog = _gc_catalog({"code__repo": set(), "docs__repo": set()})
+
+    db = MagicMock()
+    db.get_collection.side_effect = _ChromaNotFoundError(
+        "Collection not found"
+    )
+
+    _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
+
+    # CRITICAL: get_or_create_collection must NOT have been called
+    # (the leak path). get_collection is the read-only correct path.
+    db.get_or_create_collection.assert_not_called()
+    # get_collection called once per collection (code, docs).
+    assert db.get_collection.call_count == 2
+
+
+def test_prune_misclassified_does_not_create_zombie_collections(tmp_path):
+    """nexus-ks40 regression for the misclassification sweep: same
+    contract as above. Absent T3 collections must NOT trip
+    speculative creation; the corresponding sweep is a no-op.
+    """
+    from chromadb.errors import NotFoundError as _ChromaNotFoundError
+    from nexus.indexer import _prune_misclassified
+
+    db = MagicMock()
+    db.get_collection.side_effect = _ChromaNotFoundError(
+        "Collection not found"
+    )
+
+    repo = tmp_path / "fresh-repo"
+    repo.mkdir()
+    (repo / "main.py").write_text("x = 1\n")
+
+    _prune_misclassified(
+        repo, "code__fresh", "docs__fresh",
+        code_files=[repo / "main.py"],
+        prose_files=[],
+        pdf_files=[],
+        db=db,
+        file_to_doc_id={},
+    )
+
+    db.get_or_create_collection.assert_not_called()
+    assert db.get_collection.call_count == 2
 
 
 def test_prune_deleted_files_per_collection_orphan_isolation(tmp_path):
@@ -713,6 +795,11 @@ def test_prune_deleted_files_round_trip_with_real_catalog(tmp_path):
         def get_or_create_collection(self, name):
             return chroma.get_or_create_collection(name)
 
+        # nexus-ks40: read-only GC paths now use ``get_collection``;
+        # forward to chroma so the integration test still wires through.
+        def get_collection(self, name):
+            return chroma.get_collection(name)
+
     # Delete the second document. FK CASCADE removes its manifest rows.
     cat._db.execute(  # epsilon-allow: integration fixture forces FK CASCADE
         "DELETE FROM documents WHERE tumbler = ?", ("1.1.2",),
@@ -731,6 +818,7 @@ def test_run_index_prune_misclassified(tmp_path):
     cc = MagicMock(); cc.get.return_value = {"ids": []}
     dc = MagicMock(); dc.get.return_value = {"ids": ["stale-1"]}
     db = MagicMock(); db.get_or_create_collection.side_effect = {"code__repo": cc, "docs__repo": dc}.get
+    db.get_collection.side_effect = {"code__repo": cc, "docs__repo": dc}.get
     _prune_misclassified(repo, "code__repo", "docs__repo", [repo/"main.py"], [repo/"README.md"], [], db)
     dc.delete.assert_called_once_with(ids=["stale-1"])
 
@@ -747,6 +835,7 @@ def test_registry_c2_fallback(tmp_path):
     names: list[str] = []
     col = MagicMock(); col.get.return_value = {"metadatas": [], "ids": []}
     db = MagicMock(); db.get_or_create_collection.side_effect = lambda n: (names.append(n), col)[1]
+    db.get_collection.side_effect = lambda n: (names.append(n), col)[1]
     with _patches(db): _run_index(repo, reg)
     assert expected in names
 
@@ -1167,6 +1256,8 @@ def test_prune_deleted_files_paginates(tmp_path):
         c = MagicMock(); c.get.side_effect = [p1, p2, p3]; return c
     db = MagicMock()
     db.get_or_create_collection.side_effect = lambda _: (mock_cols.append(mc()), mock_cols[-1])[1]
+    db.get_collection.side_effect = lambda _: (mock_cols.append(mc()), mock_cols[-1])[1]
+    db.get_collection.side_effect = lambda _: (mock_cols.append(mc()), mock_cols[-1])[1]
     catalog = _gc_catalog({"code__repo": live_chashes_32, "docs__repo": live_chashes_32})
 
     _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
@@ -1187,6 +1278,7 @@ def test_frecency_update_paginates(tmp_path):
     cc = MagicMock(); cc.get.side_effect = [p1, p2]
     dc = MagicMock(); dc.get.return_value = {"ids":[],"metadatas":[]}
     db = MagicMock(); db.get_or_create_collection.side_effect = {"code__repo":cc,"docs__repo":dc}.get
+    db.get_collection.side_effect = {"code__repo":cc,"docs__repo":dc}.get
     with patch("nexus.frecency.batch_frecency", return_value={src: 0.9}), \
          patch("nexus.config.get_credential", return_value="fake-key"), \
          patch("nexus.db.make_t3", return_value=db):
@@ -1202,6 +1294,7 @@ def test_prune_misclassified_paginates(tmp_path):
     cc = MagicMock(); cc.get.side_effect = [{"ids":[f"s-{i}" for i in range(300)]}, {"ids":[f"s-{i}" for i in range(300,310)]}]
     dc = MagicMock(); dc.get.return_value = {"ids":[]}
     db = MagicMock(); db.get_or_create_collection.side_effect = {"code__repo":cc,"docs__repo":dc}.get
+    db.get_collection.side_effect = {"code__repo":cc,"docs__repo":dc}.get
     _prune_misclassified(repo, "code__repo", "docs__repo", [], [bp], [], db)
     d = set()
     for c in cc.delete.call_args_list: d.update(c.kwargs.get("ids") or (c.args[0] if c.args else []))
@@ -1230,6 +1323,8 @@ def test_prune_misclassified_uses_doc_id_when_supplied(tmp_path):
     dc.get.return_value = {"ids": []}
     db = MagicMock()
     db.get_or_create_collection.side_effect = {"code__repo": cc, "docs__repo": dc}.get
+    db.get_collection.side_effect = {"code__repo": cc, "docs__repo": dc}.get
+    db.get_collection.side_effect = {"code__repo": cc, "docs__repo": dc}.get
     _prune_misclassified(
         repo, "code__repo", "docs__repo",
         [], [bp], [], db,
@@ -1256,6 +1351,8 @@ def test_prune_misclassified_falls_back_to_source_path_for_unmapped_files(tmp_pa
     dc.get.return_value = {"ids": []}
     db = MagicMock()
     db.get_or_create_collection.side_effect = {"code__repo": cc, "docs__repo": dc}.get
+    db.get_collection.side_effect = {"code__repo": cc, "docs__repo": dc}.get
+    db.get_collection.side_effect = {"code__repo": cc, "docs__repo": dc}.get
     _prune_misclassified(
         repo, "code__repo", "docs__repo",
         [], [bp], [], db,
