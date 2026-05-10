@@ -11,6 +11,11 @@
           },
           {
             "type": "command",
+            "command": "$CLAUDE_PLUGIN_ROOT/hooks/scripts/_run_python_hook.sh $CLAUDE_PLUGIN_ROOT/hooks/scripts/preflight.py",
+            "timeout": 5
+          },
+          {
+            "type": "command",
             "command": "nx hook session-start",
             "timeout": 10
           },
