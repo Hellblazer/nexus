@@ -4304,6 +4304,38 @@ def synthesize_log_cmd(
     ),
 )
 @click.option(
+    "--chunk-size-distribution",
+    "chunk_size_distribution",
+    is_flag=True,
+    help=(
+        "nexus-6dan: per-collection chunk size stats (p50/p95/p99/max). "
+        "FAIL on any chunk > MAX_DOCUMENT_BYTES (Voyage will reject); "
+        "WARN when >5% of chunks are < 100 bytes (micro-chunks)."
+    ),
+)
+@click.option(
+    "--chunk-text-dedup",
+    "chunk_text_dedup",
+    is_flag=True,
+    help=(
+        "nexus-6dan: collect chunk_text_hash across all collections. "
+        "Within-collection dupe ratio > 5% signals a chunker bug; "
+        "cross-collection dupe count > 100 chunks signals a cross-"
+        "ingest investigation lead."
+    ),
+)
+@click.option(
+    "--t3-vs-catalog",
+    "t3_vs_catalog",
+    is_flag=True,
+    help=(
+        "nexus-6dan: bridge the projection-vs-T3 gap. Reports T3 "
+        "collections with no catalog documents (orphan), T3 collections "
+        "in catalog projection but with 0 chunks (zombie), and catalog "
+        "documents whose physical_collection is gone from T3."
+    ),
+)
+@click.option(
     "--json", "as_json", is_flag=True,
     help="Emit machine-readable JSON instead of text output.",
 )
@@ -4312,6 +4344,9 @@ def doctor_cmd(
     t3_doc_id_coverage: bool,
     strict_not_in_t3: bool,
     collections_drift: bool,
+    chunk_size_distribution: bool,
+    chunk_text_dedup: bool,
+    t3_vs_catalog: bool,
     as_json: bool,
 ) -> None:
     """RDR-101 catalog doctor surface.
@@ -4327,10 +4362,16 @@ def doctor_cmd(
 
     Future flags land in later phases.
     """
-    if not replay_equality and not t3_doc_id_coverage and not collections_drift:
+    any_check = (
+        replay_equality or t3_doc_id_coverage or collections_drift
+        or chunk_size_distribution or chunk_text_dedup or t3_vs_catalog
+    )
+    if not any_check:
         raise click.UsageError(
             "Pass a check flag: --replay-equality, "
-            "--t3-doc-id-coverage, or --collections-drift."
+            "--t3-doc-id-coverage, --collections-drift, "
+            "--chunk-size-distribution, --chunk-text-dedup, "
+            "or --t3-vs-catalog."
         )
     if strict_not_in_t3 and not t3_doc_id_coverage:
         raise click.UsageError(
@@ -4400,6 +4441,43 @@ def doctor_cmd(
             if replay_equality or t3_doc_id_coverage:
                 click.echo("")
             _print_collections_drift_text(report)
+        if not report["pass"]:
+            overall_pass = False
+
+    # nexus-6dan: 3 new checks. Each is read-only against T3 + catalog.
+    _printed_anything = (
+        replay_equality or t3_doc_id_coverage or collections_drift
+    )
+    if chunk_size_distribution:
+        report = _run_chunk_size_distribution()
+        if as_json:
+            json_payload["chunk_size_distribution"] = report
+        else:
+            if _printed_anything:
+                click.echo("")
+            _print_chunk_size_distribution_text(report)
+            _printed_anything = True
+        if not report["pass"]:
+            overall_pass = False
+    if chunk_text_dedup:
+        report = _run_chunk_text_dedup()
+        if as_json:
+            json_payload["chunk_text_dedup"] = report
+        else:
+            if _printed_anything:
+                click.echo("")
+            _print_chunk_text_dedup_text(report)
+            _printed_anything = True
+        if not report["pass"]:
+            overall_pass = False
+    if t3_vs_catalog:
+        report = _run_t3_vs_catalog()
+        if as_json:
+            json_payload["t3_vs_catalog"] = report
+        else:
+            if _printed_anything:
+                click.echo("")
+            _print_t3_vs_catalog_text(report)
         if not report["pass"]:
             overall_pass = False
 
@@ -4515,6 +4593,394 @@ def _print_collections_drift_text(report: dict) -> None:
             "c.register_collection('<TARGET>'); "
             "c.supersede_collection('<OLD>', '<TARGET>')\""
         )
+
+
+# nexus-6dan: tunable thresholds for the 3 new doctor checks. Module-
+# level constants so tests can stub them without re-implementing.
+_MICRO_CHUNK_BYTES = 100
+_MICRO_CHUNK_WARN_RATIO = 0.05
+_WITHIN_COLL_DUPE_WARN_RATIO = 0.05
+_CROSS_COLL_DUPE_WARN_COUNT = 100
+
+
+def _percentile(sorted_values: list[int], q: float) -> int:
+    """Return the q-th percentile (q in [0,1]) of a sorted-ascending
+    int list. Empty list returns 0; single value returns itself.
+    Linear interpolation between adjacent values; matches numpy
+    default semantics closely enough for ops display.
+    """
+    if not sorted_values:
+        return 0
+    if len(sorted_values) == 1:
+        return sorted_values[0]
+    pos = q * (len(sorted_values) - 1)
+    lo = int(pos)
+    hi = min(lo + 1, len(sorted_values) - 1)
+    frac = pos - lo
+    return int(sorted_values[lo] * (1 - frac) + sorted_values[hi] * frac)
+
+
+def _run_chunk_size_distribution() -> dict:
+    """Per-collection chunk-size statistics (nexus-6dan).
+
+    Walks every T3 collection (paginating <= 300 records per call),
+    measures ``len(document_text)`` for each chunk, and reports
+    p50/p95/p99/max + counts of micro-chunks (< 100 bytes) and
+    over-quota chunks (> ``MAX_DOCUMENT_BYTES``). FAIL on any
+    over-quota chunk (Voyage will reject these at embed time);
+    WARN flagged at the per-collection level when > 5% of chunks
+    are micro-chunks (likely a chunker bug).
+
+    Returns ``{"pass": bool, "tables": {coll_name: {...stats...}}}``.
+    Bypass-schema (``taxonomy__*``) collections are skipped: they
+    carry centroid embeddings, not chunked text, so size stats
+    aren't meaningful.
+    """
+    from nexus.db import make_t3  # noqa: PLC0415
+    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415
+    from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415
+
+    try:
+        t3 = make_t3()
+        collections = [
+            c["name"] for c in t3.list_collections()
+            if not c["name"].startswith(_BYPASS_SCHEMA_PREFIXES)
+        ]
+    except Exception as exc:
+        return {
+            "pass": False,
+            "error": f"Failed to list T3 collections: {exc}",
+            "tables": {},
+        }
+
+    page = QUOTAS.MAX_QUERY_RESULTS  # 300
+    max_doc_bytes = QUOTAS.MAX_DOCUMENT_BYTES
+    overall_pass = True
+    tables: dict[str, dict] = {}
+    for name in collections:
+        try:
+            col = t3._client.get_collection(name=name)
+        except Exception as exc:
+            tables[name] = {"error": f"open: {exc}"}
+            overall_pass = False
+            continue
+        sizes: list[int] = []
+        offset = 0
+        while True:
+            try:
+                got = col.get(
+                    limit=page, offset=offset, include=["documents"],
+                )
+            except Exception as exc:
+                tables[name] = {"error": f"get: {exc}"}
+                overall_pass = False
+                break
+            docs = got.get("documents") or []
+            if not docs:
+                break
+            sizes.extend(len(d or "") for d in docs)
+            if len(docs) < page:
+                break
+            offset += page
+        else:
+            continue
+        sizes.sort()
+        n = len(sizes)
+        micros = sum(1 for s in sizes if s < _MICRO_CHUNK_BYTES)
+        over_quota = sum(1 for s in sizes if s > max_doc_bytes)
+        ratio = (micros / n) if n else 0.0
+        coll_pass = over_quota == 0
+        if not coll_pass:
+            overall_pass = False
+        tables[name] = {
+            "total_chunks": n,
+            "p50": _percentile(sizes, 0.5),
+            "p95": _percentile(sizes, 0.95),
+            "p99": _percentile(sizes, 0.99),
+            "max": sizes[-1] if sizes else 0,
+            "micro_count": micros,
+            "micro_ratio": round(ratio, 4),
+            "over_quota_count": over_quota,
+            "warn": ratio > _MICRO_CHUNK_WARN_RATIO,
+            "pass": coll_pass,
+        }
+    return {
+        "pass": overall_pass,
+        "max_document_bytes": max_doc_bytes,
+        "micro_chunk_bytes": _MICRO_CHUNK_BYTES,
+        "tables": tables,
+    }
+
+
+def _print_chunk_size_distribution_text(report: dict) -> None:
+    if report.get("error"):
+        click.echo(f"chunk-size-distribution: ERROR - {report['error']}")
+        return
+    status = "PASS" if report["pass"] else "FAIL"
+    click.echo(f"chunk-size-distribution: {status}")
+    click.echo(
+        f"  thresholds: micro < {report['micro_chunk_bytes']}B, "
+        f"over-quota > {report['max_document_bytes']}B"
+    )
+    for name, t in report["tables"].items():
+        if "error" in t:
+            click.echo(f"  ERROR {name}: {t['error']}")
+            continue
+        marker = "FAIL" if not t["pass"] else ("WARN" if t["warn"] else "ok")
+        click.echo(
+            f"  {marker} {name}  total={t['total_chunks']}  "
+            f"p50={t['p50']}  p95={t['p95']}  p99={t['p99']}  "
+            f"max={t['max']}  micro={t['micro_count']} "
+            f"({t['micro_ratio']:.2%})  over_quota={t['over_quota_count']}"
+        )
+
+
+def _run_chunk_text_dedup() -> dict:
+    """Cross-collection chunk_text_hash dedup audit (nexus-6dan).
+
+    Walks every non-bypass-schema T3 collection, collects each
+    chunk's ``chunk_text_hash`` metadata, and reports:
+      - within-collection dupe ratio (one chash mapping to >1 cid):
+        WARN when > 5% (signals a chunker bug producing non-distinct
+        chunk text from distinct source positions).
+      - cross-collection dupes (one chash present in >= 2 collections):
+        WARN when count > 100 chunks (signals a cross-ingest pattern
+        worth investigating, e.g. fixture re-import or multi-corpus
+        leakage).
+
+    Returns
+    ``{"pass": bool, "within": {coll: {...}}, "cross": [{...}]}``.
+    """
+    from nexus.db import make_t3  # noqa: PLC0415
+    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415
+    from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415
+
+    try:
+        t3 = make_t3()
+        collections = [
+            c["name"] for c in t3.list_collections()
+            if not c["name"].startswith(_BYPASS_SCHEMA_PREFIXES)
+        ]
+    except Exception as exc:
+        return {
+            "pass": False,
+            "error": f"Failed to list T3 collections: {exc}",
+            "within": {},
+            "cross": [],
+        }
+
+    page = QUOTAS.MAX_QUERY_RESULTS
+    overall_pass = True
+    within_summary: dict[str, dict] = {}
+    chash_to_collections: dict[str, set[str]] = {}
+    for name in collections:
+        try:
+            col = t3._client.get_collection(name=name)
+        except Exception as exc:
+            within_summary[name] = {"error": f"open: {exc}"}
+            overall_pass = False
+            continue
+        chash_count: dict[str, int] = {}
+        offset = 0
+        while True:
+            try:
+                got = col.get(
+                    limit=page, offset=offset, include=["metadatas"],
+                )
+            except Exception as exc:
+                within_summary[name] = {"error": f"get: {exc}"}
+                overall_pass = False
+                break
+            metas = got.get("metadatas") or []
+            ids = got.get("ids") or []
+            if not metas:
+                break
+            for meta in metas:
+                meta = meta or {}
+                ch = meta.get("chunk_text_hash") or ""
+                if not ch:
+                    continue
+                chash_count[ch] = chash_count.get(ch, 0) + 1
+                chash_to_collections.setdefault(ch, set()).add(name)
+            if len(ids) < page:
+                break
+            offset += page
+        else:
+            continue
+        total = sum(chash_count.values())
+        # within-coll dupes: chashes seen >= 2 times in the same collection.
+        dupe_chunks = sum(c for c in chash_count.values() if c >= 2)
+        ratio = (dupe_chunks / total) if total else 0.0
+        warn = ratio > _WITHIN_COLL_DUPE_WARN_RATIO
+        within_summary[name] = {
+            "total_chunks_with_hash": total,
+            "dupe_chunks": dupe_chunks,
+            "dupe_ratio": round(ratio, 4),
+            "warn": warn,
+        }
+        # within-coll dupes are surfaced as WARN, not FAIL; the only
+        # FAIL surface here is the open/get exception path.
+
+    # Cross-collection: chashes present in >= 2 collections.
+    cross = [
+        {"chash": ch[:32], "collections": sorted(colls)}
+        for ch, colls in chash_to_collections.items()
+        if len(colls) >= 2
+    ]
+    cross_warn = len(cross) > _CROSS_COLL_DUPE_WARN_COUNT
+    return {
+        "pass": overall_pass,
+        "within": within_summary,
+        "cross_dupe_chunk_count": len(cross),
+        "cross_dupe_warn_threshold": _CROSS_COLL_DUPE_WARN_COUNT,
+        "cross_dupe_warn": cross_warn,
+        "cross_sample": cross[:20],
+    }
+
+
+def _print_chunk_text_dedup_text(report: dict) -> None:
+    if report.get("error"):
+        click.echo(f"chunk-text-dedup: ERROR - {report['error']}")
+        return
+    status = "PASS" if report["pass"] else "FAIL"
+    click.echo(f"chunk-text-dedup: {status}")
+    for name, t in report["within"].items():
+        if "error" in t:
+            click.echo(f"  ERROR {name}: {t['error']}")
+            continue
+        marker = "WARN" if t["warn"] else "ok"
+        click.echo(
+            f"  {marker} {name}  total={t['total_chunks_with_hash']}  "
+            f"dupes={t['dupe_chunks']} ({t['dupe_ratio']:.2%})"
+        )
+    cross_marker = "WARN" if report["cross_dupe_warn"] else "ok"
+    click.echo(
+        f"  {cross_marker} cross-collection dupes: "
+        f"{report['cross_dupe_chunk_count']} "
+        f"(threshold {report['cross_dupe_warn_threshold']})"
+    )
+
+
+def _run_t3_vs_catalog() -> dict:
+    """Bridge T3 vs catalog: surface 3 drift classes (nexus-6dan).
+
+    Reports:
+      - ``t3_orphans``: T3 collections with chunks but no catalog
+        documents at all (no row referencing the collection).
+      - ``zombies``: collections in the catalog projection that have
+        a T3 collection but with 0 chunks.
+      - ``docs_pointing_at_missing_t3``: catalog documents whose
+        ``physical_collection`` value is not in T3 (e.g. T3 collection
+        was deleted out from under the catalog).
+
+    All read-only. PASS when all three lists are empty. Bypass-schema
+    collections (``taxonomy__*``) are skipped from all three.
+    """
+    from nexus.db import make_t3  # noqa: PLC0415
+    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415
+
+    cat = _get_catalog()
+    try:
+        t3_db = make_t3()
+        t3_listing = {
+            c["name"]: c for c in t3_db.list_collections()
+            if not c["name"].startswith(_BYPASS_SCHEMA_PREFIXES)
+        }
+    except Exception as exc:
+        return {
+            "pass": False,
+            "error": f"Failed to list T3 collections: {exc}",
+            "t3_orphans": [], "zombies": [],
+            "docs_pointing_at_missing_t3": [],
+        }
+
+    t3_names = set(t3_listing.keys())
+    rows = cat._db.execute(
+        "SELECT physical_collection, COUNT(*) FROM documents "
+        "WHERE physical_collection != '' GROUP BY physical_collection"
+    ).fetchall()
+    docs_per_coll: dict[str, int] = dict(rows)
+
+    # T3 collections with chunks but zero catalog docs:
+    t3_orphans = []
+    for name in sorted(t3_names):
+        if docs_per_coll.get(name, 0) > 0:
+            continue
+        # Only flag if the T3 collection actually has chunks; an empty
+        # T3 collection with no docs is the zombie class below.
+        try:
+            col = t3_db._client.get_collection(name=name)
+            count = col.count()
+        except Exception:
+            count = 0
+        if count > 0:
+            t3_orphans.append({"name": name, "chunk_count": count})
+
+    # Zombies: in catalog projection AND in T3 BUT 0 chunks in T3.
+    projection = cat.list_collections()
+    projection_names = {
+        r["name"] for r in projection if not r.get("superseded_by")
+    }
+    zombies = []
+    for name in sorted(projection_names & t3_names):
+        try:
+            col = t3_db._client.get_collection(name=name)
+            count = col.count()
+        except Exception:
+            continue
+        if count == 0:
+            zombies.append(name)
+
+    # Catalog docs whose physical_collection is missing from T3.
+    docs_missing = [
+        {"physical_collection": pc, "doc_count": cnt}
+        for pc, cnt in sorted(docs_per_coll.items())
+        if pc and pc not in t3_names
+    ]
+
+    overall_pass = (
+        not t3_orphans and not zombies and not docs_missing
+    )
+    return {
+        "pass": overall_pass,
+        "t3_orphans": t3_orphans,
+        "zombies": zombies,
+        "docs_pointing_at_missing_t3": docs_missing,
+    }
+
+
+def _print_t3_vs_catalog_text(report: dict) -> None:
+    if report.get("error"):
+        click.echo(f"t3-vs-catalog: ERROR - {report['error']}")
+        return
+    status = "PASS" if report["pass"] else "FAIL"
+    click.echo(f"t3-vs-catalog: {status}")
+    if report["t3_orphans"]:
+        click.echo(
+            f"  T3 collections with chunks but no catalog docs "
+            f"({len(report['t3_orphans'])}):"
+        )
+        for o in report["t3_orphans"][:20]:
+            click.echo(f"    {o['name']}  chunks={o['chunk_count']}")
+    if report["zombies"]:
+        click.echo(
+            f"  Zombie collections (registered, 0 chunks in T3) "
+            f"({len(report['zombies'])}):"
+        )
+        for n in report["zombies"][:20]:
+            click.echo(f"    {n}")
+        click.echo(
+            "  Remediate: nx catalog collection-gc --apply"
+        )
+    if report["docs_pointing_at_missing_t3"]:
+        click.echo(
+            f"  Catalog documents whose physical_collection is gone "
+            f"from T3 ({len(report['docs_pointing_at_missing_t3'])}):"
+        )
+        for d in report["docs_pointing_at_missing_t3"][:20]:
+            click.echo(
+                f"    {d['physical_collection']}  docs={d['doc_count']}"
+            )
 
 
 def _check_bootstrap_status() -> dict:
