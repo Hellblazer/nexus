@@ -221,6 +221,96 @@ class TestUpsertGet:
         assert json.loads(row[2]) == {"venue": "VLDB", "year": 2023}
 
 
+class TestConfidenceFloor:
+    """nexus-17wf: rows with NULL or sub-floor confidence must be
+    DROPPED at upsert (no row written, structured warning logged,
+    upsert returns False). The 2026-05-08 prod probe found 125 of
+    753 rows (16.6%) committed with NULL or zero confidence,
+    polluting downstream consumers (``nx aspects show``, retrieval
+    ranking, telemetry) that treated them as authoritative. Per
+    the project's no-silent-fallback principle, the right shape is
+    reject + log.
+    """
+
+    def test_null_confidence_is_dropped(self, tmp_path: Path) -> None:
+        from nexus.db.t2.document_aspects import DocumentAspects
+
+        store = DocumentAspects(tmp_path / "t2.db")
+        try:
+            written = store.upsert(_make_record(confidence=None))
+            assert written is False
+            assert store.get(
+                "knowledge__delos", "/papers/p1.pdf"
+            ) is None
+        finally:
+            store.close()
+
+    def test_zero_confidence_is_dropped(self, tmp_path: Path) -> None:
+        from nexus.db.t2.document_aspects import DocumentAspects
+
+        store = DocumentAspects(tmp_path / "t2.db")
+        try:
+            written = store.upsert(_make_record(confidence=0.0))
+            assert written is False
+            assert store.get(
+                "knowledge__delos", "/papers/p1.pdf"
+            ) is None
+        finally:
+            store.close()
+
+    def test_confidence_at_floor_is_persisted(self, tmp_path: Path) -> None:
+        """A confidence equal to the floor (0.3) is accepted; only
+        STRICTLY-below values are dropped. Lock the boundary so a
+        future tightening of the floor surfaces as a deliberate
+        diff rather than a silent drop.
+        """
+        from nexus.db.t2.document_aspects import (
+            DocumentAspects, _MIN_CONFIDENCE,
+        )
+        assert _MIN_CONFIDENCE == 0.3
+        store = DocumentAspects(tmp_path / "t2.db")
+        try:
+            written = store.upsert(_make_record(confidence=0.3))
+            assert written is True
+            assert store.get(
+                "knowledge__delos", "/papers/p1.pdf"
+            ) is not None
+        finally:
+            store.close()
+
+    def test_confidence_just_below_floor_is_dropped(
+        self, tmp_path: Path,
+    ) -> None:
+        from nexus.db.t2.document_aspects import DocumentAspects
+
+        store = DocumentAspects(tmp_path / "t2.db")
+        try:
+            written = store.upsert(_make_record(confidence=0.29))
+            assert written is False
+            assert store.get(
+                "knowledge__delos", "/papers/p1.pdf"
+            ) is None
+        finally:
+            store.close()
+
+    def test_high_confidence_unaffected(self, tmp_path: Path) -> None:
+        """Real extractions (avg confidence 0.823 in the 2026-05-08
+        probe) clear the floor comfortably. Lock the contract so a
+        future change that accidentally tightens the floor too high
+        surfaces in the test diff.
+        """
+        from nexus.db.t2.document_aspects import DocumentAspects
+
+        store = DocumentAspects(tmp_path / "t2.db")
+        try:
+            assert store.upsert(_make_record(confidence=0.823)) is True
+            got = store.get("knowledge__delos", "/papers/p1.pdf")
+            assert got is not None
+            assert got.confidence == 0.823
+        finally:
+            store.close()
+
+
 # ── Idempotent overwrite (RDR Upsert Semantics — load-bearing) ───────────────
 
 

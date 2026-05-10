@@ -135,13 +135,23 @@ class TestWorkerDrain:
             rec = db.document_aspects.get("code__nexus", "/p1.py")
         assert rec is None
 
-    def test_worker_null_fields_record_persists_without_retry(
+    def test_worker_null_confidence_record_dropped_without_retry(
         self, _isolate_t2: Path,
     ) -> None:
-        """If extract_aspects returned a null-fields record, the
-        extractor's internal 3-retry budget is exhausted. The worker
-        writes the null record + drops the queue row (no retry —
-        retrying would re-attempt 3× more for no benefit)."""
+        """nexus-17wf: a null-fields record (the failure shape that
+        the extractor's internal 3-retry budget produces) carries
+        ``confidence=None``. The DocumentAspects upsert must DROP
+        it (no row written) so downstream consumers don't treat
+        a failed extraction as authoritative; the worker still
+        marks the queue row done (no worker-level retry, since
+        retrying would re-attempt 3 more times for no benefit).
+
+        Pre-fix: the null record was persisted, polluting 16.6%
+        of the table per 2026-05-08 prod probe. Reverting the
+        confidence-floor check in DocumentAspects.upsert lands
+        the row again and this test fails on the ``rec is None``
+        assertion below.
+        """
         from nexus.aspect_extractor import AspectRecord
         from nexus.aspect_worker import AspectExtractionWorker
 
@@ -179,11 +189,14 @@ class TestWorkerDrain:
 
         # extract_aspects called exactly once — no worker-level retry.
         assert call_count[0] == 1
+        # The null-confidence record must NOT be persisted (nexus-17wf).
         with T2Database(_isolate_t2) as db:
             rec = db.document_aspects.get("knowledge__delos", "/p1.pdf")
-        assert rec is not None
-        assert rec.problem_formulation is None
-        assert rec.extractor_name == "scholarly-paper-v1"
+        assert rec is None, (
+            "nexus-17wf: confidence=None record must be dropped at "
+            "upsert (was committed pre-fix, polluting downstream "
+            "consumers); reverting the floor check fails this assert"
+        )
 
     def test_mcp_path_content_survives_the_queue(
         self, _isolate_t2: Path,

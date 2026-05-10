@@ -748,11 +748,16 @@ class TestAspectRecordSourceUriRoundTrip:
 
         store = DocumentAspects(tmp_path / "rt.db")
         try:
+            # nexus-17wf: confidence is now floor-gated (>=0.3); pass
+            # an explicit value above the floor so the upsert lands.
+            # The test exercises source_uri round-trip, not confidence
+            # semantics.
             store.upsert(AspectRecord(
                 collection="knowledge__delos",
                 source_path="/Users/me/aleph-bft.pdf",
                 problem_formulation="problem",
                 proposed_method="method",
+                confidence=0.9,
                 extracted_at=datetime.now(UTC).isoformat(),
                 model_version="claude-haiku-4-5-20251001",
                 extractor_name="scholarly-paper-v1",

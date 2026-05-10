@@ -55,6 +55,17 @@ import structlog
 _log = structlog.get_logger()
 
 
+# nexus-17wf: minimum confidence for an aspect record to be persisted.
+# Records with confidence None or below this floor are dropped at
+# upsert time with a structured warning, since they signal extractor
+# failures (LLM returned malformed JSON, retry-loop exhausted, etc.).
+# 2026-05-08 prod probe: 125 of 753 rows (16.6%) had NULL or zero
+# confidence; downstream consumers treated them as authoritative.
+# 0.3 is conservative: the same probe showed avg=0.823 across
+# non-NULL rows, so a real extraction clears the floor comfortably.
+_MIN_CONFIDENCE: float = 0.3
+
+
 # ── Schema SQL ──────────────────────────────────────────────────────────────
 
 _DOCUMENT_ASPECTS_SCHEMA_SQL = """\
@@ -176,7 +187,7 @@ class DocumentAspects:
 
     # ── Public API ────────────────────────────────────────────────────────
 
-    def upsert(self, record: AspectRecord) -> None:
+    def upsert(self, record: AspectRecord) -> bool:
         """Persist *record* — complete overwrite if the PK key already exists.
 
         Pre-migration: keyed on ``(collection, source_path)``.
@@ -188,6 +199,19 @@ class DocumentAspects:
         Uses ``INSERT OR REPLACE``. JSON fields serialize with
         ``json.dumps`` (no separator overrides — matches the rest of
         the project).
+
+        nexus-17wf: silently DROPS records with ``confidence is None``
+        or ``confidence < _MIN_CONFIDENCE`` (no row written, structured
+        warning logged). The 2026-05-08 prod probe found 125 of 753
+        rows (16.6%) committed with NULL or zero confidence, signaling
+        extractor failures that downstream consumers (``nx aspects
+        show``, retrieval ranking, telemetry) treated as authoritative.
+        Per the project's no-silent-fallback principle for
+        data-correctness problems, the right shape is reject + log so
+        the data store stays clean. Returns True if the row was
+        written, False if dropped on the confidence floor; callers
+        that need to mark a queue row done either way ignore the
+        return value.
         """
         if not record.extracted_at:
             raise ValueError("extracted_at must not be empty")
@@ -195,6 +219,23 @@ class DocumentAspects:
             raise ValueError("model_version must not be empty")
         if not record.extractor_name:
             raise ValueError("extractor_name must not be empty")
+
+        # nexus-17wf: drop low-quality extractions before they pollute
+        # the aspects table. The threshold is conservative; a real
+        # extraction should clear it comfortably (2026-05-08 probe:
+        # min=0, max=1.0, avg=0.823 across non-NULL rows).
+        if record.confidence is None or record.confidence < _MIN_CONFIDENCE:
+            _log.warning(
+                "document_aspects_upsert_dropped_low_confidence",
+                doc_id=record.doc_id,
+                collection=record.collection,
+                source_path=record.source_path,
+                extractor_name=record.extractor_name,
+                model_version=record.model_version,
+                confidence=record.confidence,
+                threshold=_MIN_CONFIDENCE,
+            )
+            return False
 
         datasets_json = json.dumps(list(record.experimental_datasets))
         baselines_json = json.dumps(list(record.experimental_baselines))
@@ -263,6 +304,7 @@ class DocumentAspects:
                     ),
                 )
                 self.conn.commit()
+        return True
 
     def get(self, collection: str, source_path: str) -> AspectRecord | None:
         """Return the row matching ``(collection, source_path)``, or None.
