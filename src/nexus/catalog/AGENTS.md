@@ -11,7 +11,7 @@ The catalog is a Xanadu-inspired document registry that tracks *what* is indexed
 
 ## Three link-creation paths
 
-1. **Post-hoc** (batch, after indexing) — `link_generator.py`: `generate_citation_links()`, `generate_code_rdr_links()`, `generate_rdr_filepath_links()`. Run when a corpus is fully indexed.
+1. **Post-hoc** (batch, after indexing): `link_generator.py` exposes `generate_citation_links()`, `generate_rdr_filepath_links()`, `generate_prose_filepath_links()`, `generate_pdf_corpus_links()`. Run when a corpus is fully indexed.
 2. **Auto-linker** — `auto_linker.py` fires on every `store_put` MCP call. Reads `link-context` from T1 scratch (tag `link-context`), creates links to seeded targets. Skills seed before dispatch; agents self-seed from their task prompt.
 3. **Agent-direct** — agents call the `catalog_link` MCP tool during work for precise typed links.
 
@@ -30,7 +30,7 @@ The `query` MCP tool has catalog-aware routing: `author`, `content_type`, `subtr
 | `catalog_db.py` | SQLite schema, FTS5 tables, UNIQUE link constraint, `descendants()` SQL helper. |
 | `tumbler.py` | `Tumbler` dataclass + `parse`, hierarchy helpers, JSONL readers with resilience (truncated rows, bad JSON). |
 | `auto_linker.py` | Storage-boundary auto-linking from T1 scratch link-context. Hook firing site is `mcp/core.py`. |
-| `link_generator.py` | Post-hoc batch linkers (citation, code↔RDR heuristic, RDR↔file-path). |
+| `link_generator.py` | Post-hoc batch linkers (citation, RDR↔file-path, prose↔file-path, pdf same-as via shared head_hash). |
 | `consolidation.py` | Merges per-paper `knowledge__<paper>` collections into corpus-level `knowledge__<corpus>`. |
 
 ## Adding a new source-URI scheme
