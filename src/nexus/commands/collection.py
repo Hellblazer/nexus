@@ -622,35 +622,88 @@ def _backfill_chunk_text_hash(
         col: ChromaDB collection.
         on_progress: Optional callback(updated, skipped, total) called after each batch.
         chash_index: Optional T2 store (RDR-086 Phase 1.3). When provided, every
-            chunk that has — or gains — a chunk_text_hash is registered as a
-            ``(chash, physical_collection, doc_id)`` row. Reconciles gaps left
-            by Phase 1.2 dual-write failures and pre-Phase-1 collections. Pass
+            chunk that has, or gains, a chunk_text_hash is registered as a
+            ``(chash, physical_collection)`` row. Reconciles gaps left by
+            Phase 1.2 dual-write failures and pre-Phase-1 collections. Pass
             ``None`` (default) to preserve the T3-only behaviour that legacy
             callers in ``commands/catalog.py`` still rely on.
+
+    Implementation (nexus-o9an): two-pass walk, mirrors
+    ``reidentify_collection``. Pass 1 paginates ``col.get(include=[])``
+    to collect every chunk id; pass 2 fetches by exact id and re-upserts
+    chunks needing the hash with a canonical-schema-normalized payload.
+
+    Why two-pass: ChromaDB Cloud's offset-based ``col.get`` is order-
+    unstable, so a naive ``offset += len(ids)`` loop can revisit some
+    chunks and miss others. The two-pass design sidesteps this entirely
+    (pass 2's exact-id lookups are deterministic).
+
+    Why upsert + normalize instead of update: many legacy collections
+    carry chunks with 32+ metadata keys (pre-RDR-101-Phase-5c cargo +
+    pre-RDR-108 doc/chunk fields). ``col.update`` MERGES metadata, so
+    adding ``chunk_text_hash`` would push them to 33+ and trip the
+    ChromaDB Cloud per-row ``NumMetadataKeys`` quota. The previous
+    implementation caught the quota error and silently incremented
+    ``skipped``, leaving the chunks broken. The upsert + normalize
+    path REPLACES metadata via the canonical schema funnel, dropping
+    cargo so the row lands back under quota.
     """
     if getattr(col, "name", "") in _DOCUMENTLESS_COLLECTIONS:
         return (0, 0, 0)
 
     from nexus.db.t2.chash_index import dual_write_chash_index
+    from nexus.db.t3 import _normalize_for_write
+
+    # Pass 1: collect every chunk id. Lightweight payload (no metadata,
+    # no documents, no embeddings); offset is stable because pass 1 only
+    # reads. ChromaDB Cloud's offset semantics are order-unstable across
+    # the longer pass-2 walk, but pass 1 completes fast enough that the
+    # collection state stays consistent for this iteration.
+    all_ids: list[str] = []
+    offset = 0
+    while True:
+        page = col.get(limit=_BACKFILL_BATCH, offset=offset, include=[])
+        ids = page.get("ids") if isinstance(page, dict) else []
+        if not ids or not isinstance(ids, list):
+            break
+        all_ids.extend(ids)
+        if len(ids) < _BACKFILL_BATCH:
+            break
+        offset += _BACKFILL_BATCH
 
     updated = 0
     skipped = 0
-    total = 0
-    offset = 0
-    while True:
-        batch = col.get(limit=_BACKFILL_BATCH, offset=offset, include=["documents", "metadatas"])
-        ids = batch.get("ids") if isinstance(batch, dict) else []
-        if not ids or not isinstance(ids, list):
-            break
-        update_ids: list[str] = []
-        update_metas: list[dict] = []
-        # Parallel lists for the T2 reconciliation write — ids + metas for every
-        # row whose metadata ends this batch with a chunk_text_hash, whether
-        # newly computed or previously present.
+    total = len(all_ids)
+    coll_name = getattr(col, "name", "")
+
+    # Pass 2: fetch by exact id (deterministic), then upsert chunks
+    # needing the hash with canonical-schema-normalized metadata.
+    for start in range(0, len(all_ids), _BACKFILL_BATCH):
+        batch_ids = all_ids[start : start + _BACKFILL_BATCH]
+        page = col.get(
+            ids=batch_ids,
+            include=["documents", "embeddings", "metadatas"],
+        )
+        page_ids = page.get("ids") or []
+        page_docs = page.get("documents") or [None] * len(page_ids)
+        page_embs = page.get("embeddings")
+        if page_embs is None:
+            page_embs = [None] * len(page_ids)
+        page_metas = page.get("metadatas") or [{}] * len(page_ids)
+
+        upsert_ids: list[str] = []
+        upsert_docs: list[str] = []
+        upsert_embs: list = []
+        upsert_metas: list[dict] = []
+        # Parallel lists for the T2 reconciliation write: ids + metas for
+        # every row whose metadata ends this batch with a chunk_text_hash,
+        # whether newly computed or previously present.
         t2_ids: list[str] = []
         t2_metas: list[dict] = []
-        for chunk_id, doc, meta in zip(ids, batch["documents"], batch["metadatas"]):
-            total += 1
+
+        for chunk_id, doc, emb, meta in zip(
+            page_ids, page_docs, page_embs, page_metas
+        ):
             if meta and meta.get("chunk_text_hash"):
                 skipped += 1
                 # Reconciliation path: T3 already has the hash but T2 may not.
@@ -661,38 +714,58 @@ def _backfill_chunk_text_hash(
                 # nexus-p03z: Cloud T3 occasionally returns rows whose
                 # ``documents`` entry is None even when the chunk exists.
                 # Hashing a missing doc is impossible; skip and keep
-                # going. Without this guard, ``nx catalog backfill``
-                # crashes mid-pass and leaves the catalog half-recovered.
+                # going.
                 skipped += 1
                 _log.warning(
                     "backfill_chunk_text_hash_none_doc",
                     chunk_id=chunk_id,
-                    collection=getattr(col, "name", ""),
+                    collection=coll_name,
                 )
                 continue
             new_meta = dict(meta) if meta else {}
-            new_meta["chunk_text_hash"] = hashlib.sha256(doc.encode()).hexdigest()
-            update_ids.append(chunk_id)
-            update_metas.append(new_meta)
-            # Newly-hashed path: register in T2 alongside T3.
+            new_meta["chunk_text_hash"] = hashlib.sha256(
+                doc.encode()
+            ).hexdigest()
+            # Canonical schema funnel: drops cargo (corpus, store_type,
+            # expires_at, extraction_method, etc) so chunks with 32+
+            # keys land back under the per-row metadata quota.
+            normalized = _normalize_for_write(new_meta, coll_name)
+            upsert_ids.append(chunk_id)
+            upsert_docs.append(doc)
+            upsert_embs.append(emb)
+            upsert_metas.append(normalized)
             t2_ids.append(chunk_id)
-            t2_metas.append(new_meta)
-        if update_ids:
+            t2_metas.append(normalized)
+
+        if upsert_ids:
             try:
-                col.update(ids=update_ids, metadatas=update_metas)
-                updated += len(update_ids)
+                col.upsert(
+                    ids=upsert_ids,
+                    documents=upsert_docs,
+                    embeddings=upsert_embs,
+                    metadatas=upsert_metas,
+                )
+                updated += len(upsert_ids)
             except Exception as exc:
                 exc_msg = str(exc)
                 if "Quota exceeded" in exc_msg or "NumMetadataKeys" in exc_msg:
-                    skipped += len(update_ids)  # count as skipped — too many metadata keys
+                    # Even after normalization the row is over quota;
+                    # operator must re-index from source. Count as
+                    # skipped so the totals still balance.
+                    skipped += len(upsert_ids)
+                    _log.warning(
+                        "backfill_chunk_text_hash_quota_after_normalize",
+                        collection=coll_name,
+                        affected=len(upsert_ids),
+                    )
                 else:
                     raise
         if chash_index is not None and t2_ids:
             # Best-effort: dual_write_chash_index swallows per-row failures.
-            dual_write_chash_index(chash_index, col.name, t2_ids, t2_metas)
-        offset += len(ids)
+            dual_write_chash_index(chash_index, coll_name, t2_ids, t2_metas)
         if on_progress:
             on_progress(updated, skipped, total)
+
     return updated, skipped, total
 
 

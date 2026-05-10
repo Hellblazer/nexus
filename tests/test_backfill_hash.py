@@ -117,15 +117,18 @@ class TestBackfillChunkTextHash:
     def test_backfill_skips_none_documents_without_crash(self):
         """nexus-p03z Issue 1: when T3 returns ``documents[i] is None``
         (an inconsistency that occurs in practice on rare chunks), the
-        previous code crashed on ``doc.encode()``. Guard skips those
-        rows, counts them as skipped, processes the remainder, and
-        returns normally.
+        backfill code must skip those rows, count them as skipped,
+        process the remainder, and return normally.
 
         Reproduces the live crash that made ``nx catalog backfill``
         unusable on the host catalog. Uses a mocked collection because
         chromadb's public ``add()`` rejects None document strings; the
         None-document state is reachable in cloud T3 but not via local
         EphemeralClient writes.
+
+        nexus-o9an: backfill is now a two-pass walk (pass 1 collects
+        ids; pass 2 fetches by exact id). The mock must return shapes
+        for both passes.
         """
         from unittest.mock import MagicMock
 
@@ -133,20 +136,20 @@ class TestBackfillChunkTextHash:
 
         col = MagicMock()
         col.name = "code__none_doc_repro"
-        # First page: 3 chunks. Middle one has a None document. The
-        # other two have valid text and no chunk_text_hash so they
-        # should be hashed normally.
         col.get.side_effect = [
+            # Pass 1: 3 ids (< _BACKFILL_BATCH so loop breaks after one call).
+            {"ids": ["c1", "c2", "c3"]},
+            # Pass 2: batch fetch with docs + embeddings + metadatas.
             {
                 "ids": ["c1", "c2", "c3"],
                 "documents": ["alpha", None, "gamma"],
+                "embeddings": [[0.1], [0.2], [0.3]],
                 "metadatas": [
                     {"source_path": "a.py"},
                     {"source_path": "b.py"},
                     {"source_path": "c.py"},
                 ],
             },
-            {"ids": [], "documents": [], "metadatas": []},
         ]
 
         updated, skipped, total = _backfill_chunk_text_hash(col)
@@ -154,9 +157,141 @@ class TestBackfillChunkTextHash:
         assert total == 3
         assert updated == 2  # alpha + gamma got hashed
         assert skipped == 1  # the None doc skipped, not crashed
-        # The col.update call must NOT include the None-doc chunk.
-        update_call = col.update.call_args
-        assert "c2" not in update_call.kwargs["ids"]
+        # The col.upsert call must NOT include the None-doc chunk.
+        upsert_call = col.upsert.call_args
+        assert "c2" not in upsert_call.kwargs["ids"]
+
+
+class TestBackfillUpsertHandlesLegacyChunks:
+    """nexus-o9an: chunks with 32+ metadata keys (legacy cargo +
+    pre-RDR-108 fields) trip ChromaDB Cloud's per-row metadata quota
+    when ``col.update`` MERGES the existing metadata with a new
+    ``chunk_text_hash``. The previous implementation caught the
+    quota error and silently incremented ``skipped``, leaving
+    chunks broken. Backfill now uses ``col.upsert`` with metadata
+    pre-normalized via the canonical schema funnel; on Cloud this
+    REPLACES rather than merges (proven by the prod migration on
+    ``docs__1-7__voyage-context-3__v1`` which fixed 600 over-quota
+    chunks). EphemeralClient's upsert MERGES, so this test asserts
+    the contract that's reliable across both backends: the new
+    ``chunk_text_hash`` lands on the chunk and the row is no longer
+    a silently-skipped error."""
+
+    def test_legacy_chunk_with_cargo_gets_hash_via_upsert(self):
+        from nexus.commands.collection import _backfill_chunk_text_hash
+
+        client = chromadb.EphemeralClient()
+        col = client.get_or_create_collection("docs__legacy_cargo")
+        col.add(
+            ids=["legacy-1"],
+            documents=["paper text body"],
+            metadatas=[{
+                "title": "old-paper",
+                "content_type": "pdf",
+                "content_hash": "abc",
+                "indexed_at": "2024-01-01T00:00:00",
+                "corpus": "knowledge",
+                "store_type": "knowledge",
+                "extraction_method": "docling",
+                "doc_id": "1.1.1",
+                "chunk_index": 0,
+                "chunk_count": 50,
+            }],
+        )
+
+        updated, skipped, total = _backfill_chunk_text_hash(col)
+        # Counted as updated (was missing chunk_text_hash, now has it).
+        # The old code would have silently skipped these on Cloud
+        # quota failure; the new code routes through upsert which
+        # Cloud treats as REPLACE.
+        assert (updated, skipped, total) == (1, 0, 1)
+
+        meta = col.get(ids=["legacy-1"], include=["metadatas"])["metadatas"][0]
+        assert meta["chunk_text_hash"] == hashlib.sha256(
+            b"paper text body"
+        ).hexdigest()
+        # Title preserved (canonical field, present in both old + new).
+        assert meta["title"] == "old-paper"
+
+
+class TestBackfillTwoPassPaginationContract:
+    """nexus-o9an: pass 1 collects every chunk id with a lightweight
+    ``include=[]`` payload before pass 2 fetches by exact id. This
+    sidesteps ChromaDB Cloud's offset-pagination instability (where a
+    naive offset+update loop can revisit some chunks and miss others)."""
+
+    def test_pass1_uses_lightweight_payload_pass2_uses_exact_ids(self):
+        from unittest.mock import MagicMock
+
+        from nexus.commands.collection import _backfill_chunk_text_hash
+
+        col = MagicMock()
+        col.name = "code__two_pass_contract"
+        # Pass 1 short-circuits on a partial page (< _BACKFILL_BATCH);
+        # only one pass-1 call fires before the loop breaks.
+        col.get.side_effect = [
+            # Pass 1: 2 ids (less than batch size, so loop breaks).
+            {"ids": ["a", "b"]},
+            # Pass 2: batch fetch with embeddings + docs + metas.
+            {
+                "ids": ["a", "b"],
+                "documents": ["doc-a", "doc-b"],
+                "embeddings": [[0.1], [0.2]],
+                "metadatas": [{}, {}],
+            },
+        ]
+
+        _backfill_chunk_text_hash(col)
+
+        calls = col.get.call_args_list
+        assert len(calls) == 2, (
+            f"expected 1 pass-1 call + 1 pass-2 call, got {len(calls)}"
+        )
+        # Pass 1: lightweight (include=[]), offset-based.
+        assert calls[0].kwargs.get("include") == []
+        assert calls[0].kwargs.get("offset") == 0
+        # Pass 2: ids= (exact-id lookup), NOT offset-based.
+        assert calls[1].kwargs.get("ids") == ["a", "b"]
+        assert "offset" not in calls[1].kwargs
+        assert set(calls[1].kwargs.get("include", [])) == {
+            "documents", "embeddings", "metadatas",
+        }
+
+    def test_pass1_paginates_when_first_page_full(self):
+        """When pass-1 page is exactly _BACKFILL_BATCH, the loop
+        continues with offset += BATCH and probes for more.
+        Locks the multi-page pass-1 path that the order-stability
+        contract depends on."""
+        from unittest.mock import MagicMock
+
+        from nexus.commands.collection import (
+            _BACKFILL_BATCH,
+            _backfill_chunk_text_hash,
+        )
+
+        col = MagicMock()
+        col.name = "code__paginated"
+        # Pass 1 page 1 returns exactly _BACKFILL_BATCH ids → loop continues.
+        page1_ids = [f"id-{i}" for i in range(_BACKFILL_BATCH)]
+        col.get.side_effect = [
+            {"ids": page1_ids},                     # pass 1, page 1 (full)
+            {"ids": []},                            # pass 1, page 2 (empty)
+            {                                        # pass 2, batch fetch
+                "ids": page1_ids,
+                "documents": [f"doc-{i}" for i in range(_BACKFILL_BATCH)],
+                "embeddings": [[0.0]] * _BACKFILL_BATCH,
+                "metadatas": [{"chunk_text_hash": "x"}] * _BACKFILL_BATCH,
+            },
+        ]
+
+        _backfill_chunk_text_hash(col)
+
+        calls = col.get.call_args_list
+        assert len(calls) == 3
+        assert calls[0].kwargs.get("offset") == 0
+        assert calls[1].kwargs.get("offset") == _BACKFILL_BATCH
+        # Pass 2 still uses ids= regardless of pass-1 page count.
+        assert calls[2].kwargs.get("ids") == page1_ids
 
 
 # ── Phase 1.3 (nexus-ppl) — T2 chash_index reconciliation ────────────────────
