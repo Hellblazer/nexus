@@ -17,10 +17,16 @@ Per-operator overrides apply in **all** modes (most-granular wins):
 Bake-in defaults are grounded in measurement —
 ``qwen-coprocessor-stack/scripts/bench/`` (run 2026-05-09) covered all
 ten bundleable operator types with 10/10 schema-conforming output on
-both engines and content-tied or near-tied on 9/10 cases. Only
-``extract`` showed a clear Qwen content loss (heuristically filtered
-underscore-prefixed identifiers despite an "every top-level function"
-prompt) and stays pinned to Claude.
+both engines and content-tied or near-tied on 9/10 cases.
+
+Initial routing pinned ``extract`` to Claude based on a single bench
+sample where Qwen filtered an underscore-prefixed function. A follow-
+up bench (2026-05-09 evening, 4 extract case shapes × 5 repeats = 20
+dispatches) returned 20/20 oracle-match — including the original
+``_normalize``-miss case at 5/5. The miss was sampling variance, not
+a precision floor. ``extract`` is now in ``QWEN_OPERATORS_DEFAULT``;
+``CLAUDE_OPERATORS_PINNED`` remains as an empty placeholder so future
+bench-driven pins have a home without re-introducing the symbol.
 
 Operator-chooses pattern: defaults reflect bench evidence, the operator
 flips to ``auto`` (or pins per-operator) when ready, no flag day.
@@ -43,26 +49,25 @@ DispatchBackend = Literal["qwen", "claude"]
 
 
 #: Operators routed to Qwen when ``NEXUS_DISPATCH_BACKEND=auto``.
-#: Bench: 10/10 schema-conforming; content tied or near-tied. Filter
-#: showed minor formatting drift (kept input enum prefix) but content
-#: was correct — operator preference is to favor Qwen pipelines for
-#: filter (cleaner), so it lives here despite the cosmetic note.
+#: Bench: 10/10 schema-conforming; content tied or near-tied. ``extract``
+#: was previously Claude-pinned on a single-sample miss, then validated
+#: at 20/20 oracle-match (4 case shapes × 5 repeats including URL-
+#: from-prose, ISO-date-from-log, CLI-flag-from-help, function-name-
+#: from-code) and promoted to default. ``filter`` showed minor
+#: formatting drift (kept input enum prefix) but content was correct;
+#: operator preference is to favor Qwen pipelines for filter (cleaner)
+#: so it lives here despite the cosmetic note.
 QWEN_OPERATORS_DEFAULT: frozenset[str] = frozenset({
     "summarize", "compare", "rank", "filter",
     "aggregate", "groupby", "verify", "check", "generate",
-})
-
-#: Operators where Qwen lost precision in the bench. Pinned to Claude
-#: in ``auto`` mode until a tighter prompt or grammar enforcement
-#: closes the gap.
-#:   extract: Qwen heuristically filtered "private-looking" identifiers
-#:     (underscore-prefix) despite the prompt asking for *every*
-#:     top-level function. Precision loss matters more here than on
-#:     other operators because extract typically heads a pipeline:
-#:     downstream rank / compare / summarize all consume its output.
-CLAUDE_OPERATORS_PINNED: frozenset[str] = frozenset({
     "extract",
 })
+
+#: Operators where Qwen has measurably lost precision in the bench.
+#: Currently empty — the original ``extract`` pin was retired after a
+#: 20/20 oracle-match validation. Kept as a placeholder so future
+#: bench-driven pins can land without re-introducing the symbol.
+CLAUDE_OPERATORS_PINNED: frozenset[str] = frozenset()
 
 
 def _bare(tool: str) -> str:
