@@ -549,8 +549,26 @@ class CatalogDB:
                 ).fetchall()
             }
             if candidates:
-                from datetime import UTC, datetime as _datetime  # noqa: PLC0415
-                _now = _datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+                # nexus-33xm: created_at is INTENTIONALLY left empty
+                # here. The companion ``_emit_backfilled_collection_events``
+                # (catalog.py) emits CollectionCreated events with
+                # ``created_at=""`` for these same names; the projector
+                # handler does ``INSERT OR REPLACE ... COALESCE((SELECT
+                # created_at FROM collections WHERE name = ?), ?)``. If
+                # this auto-bootstrap stamps ``NOW()``, the COALESCE
+                # preserves the synthetic stamp on event apply but a
+                # fresh ``--replay-equality`` replay (which starts from
+                # an empty table) takes the ``""`` from the event
+                # payload, producing a permanent drift between live
+                # and projected. Empty here keeps the two paths
+                # bit-equal.
+                #
+                # SIG-7 (nexus-872w) audit-distinction goal: the prior
+                # NOW() stamp was meant to let audit tools distinguish
+                # auto-bootstrapped rows from event-derived rows. That
+                # distinction now lives in the synthetic event itself
+                # (``payload.created_at == ""`` marks a backfilled row);
+                # the SQLite row no longer needs to carry it.
                 with self._conn:
                     self._conn.execute(
                         "INSERT OR IGNORE INTO collections "
@@ -558,11 +576,10 @@ class CatalogDB:
                         " model_version, display_name, legacy_grandfathered, "
                         " superseded_by, superseded_at, created_at) "
                         "SELECT DISTINCT physical_collection, '', '', '', '', '', "
-                        "  1, '', '', ? "
+                        "  1, '', '', '' "
                         "FROM documents "
                         "WHERE physical_collection IS NOT NULL "
                         "  AND physical_collection != ''",
-                        (_now,),
                     )
                 self._backfilled_collections = candidates
 

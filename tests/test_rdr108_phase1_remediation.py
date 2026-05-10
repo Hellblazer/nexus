@@ -383,23 +383,44 @@ class TestSIG6ProgressOutput:
             assert result2.exit_code == 0, result2.output
 
 
-# ── SIG-7: created_at='' on backfilled collections rows ──────────────────────
+# ── nexus-33xm: created_at='' on auto-bootstrapped collections rows ─────────
 
 
-class TestSIG7CreatedAtTimestamp:
-    """SIG-7: collections backfill in catalog_db must set a real ISO timestamp
-    for created_at, not the empty string ''."""
+class TestAutoBootstrapCreatedAtEmpty:
+    """nexus-33xm (replaces SIG-7 / nexus-872w):
 
-    def test_backfilled_collections_have_real_created_at(self, tmp_path):
-        """The collections backfill (catalog_db.py __init__ INSERT INTO collections)
-        must emit a real ISO timestamp, not empty string."""
+    The auto-bootstrap that populates ``collections`` from
+    ``documents.physical_collection`` (catalog_db.py __init__) MUST
+    leave ``created_at`` empty.
+
+    Why: ``_emit_backfilled_collection_events`` (catalog.py) emits
+    a companion ``CollectionCreated`` event with
+    ``payload.created_at = ""`` for each auto-bootstrapped name. The
+    projector handler does ``INSERT OR REPLACE ... COALESCE((SELECT
+    created_at FROM collections WHERE name = ?), payload.created_at)``.
+
+    If the auto-bootstrap stamps ``NOW()``, the COALESCE preserves
+    that synthetic stamp on event apply, but a fresh
+    ``--replay-equality`` replay (which starts from an empty table)
+    takes ``""`` from the event payload, producing a permanent
+    drift between live and projected created_at columns.
+
+    Empty here keeps the two paths bit-equal. The audit-distinction
+    goal that drove SIG-7 (NOW() so audit tools could tell
+    backfilled from event-derived rows) now lives in the synthetic
+    event itself: ``payload.created_at == ""`` is the marker.
+    """
+
+    def test_backfilled_collections_have_empty_created_at(self, tmp_path):
+        """Auto-bootstrap must NOT stamp ``created_at = NOW()`` or
+        ``--replay-equality`` will permanently drift on the column.
+        Reverting the empty-string stamp to ``NOW()`` makes this
+        test fail with a non-empty timestamp.
+        """
         from nexus.catalog.catalog_db import CatalogDB
 
         db_path = tmp_path / "catalog.db"
         db = CatalogDB(db_path)
-
-        # Manually insert a documents row with a physical_collection not in
-        # the collections table, to trigger the backfill path
         db.execute(
             "INSERT OR IGNORE INTO documents "
             "(tumbler, title, author, year, content_type, file_path, "
@@ -408,28 +429,25 @@ class TestSIG7CreatedAtTimestamp:
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 "1.1.1", "Test doc", "", 0, "code", "/tmp/test.py",
-                "", "code__test_backfill_sig7", 0, "", "", "{}", 0.0, "", "",
+                "", "code__test_backfill_33xm", 0, "", "", "{}", 0.0, "", "",
             ),
         )
         db.commit()
         db.close()
 
-        # Re-open: the __init__ backfill path should fire and populate created_at
         db2 = CatalogDB(db_path)
         row = db2._conn.execute(
             "SELECT created_at FROM collections WHERE name = ?",
-            ("code__test_backfill_sig7",),
+            ("code__test_backfill_33xm",),
         ).fetchone()
         db2.close()
 
         assert row is not None, "collections row was not inserted"
-        created_at = row[0]
-        assert created_at not in ("", None), (
-            f"created_at must be a real timestamp, got {created_at!r}"
-        )
-        # Validate it's ISO format (basic check)
-        assert "T" in created_at or len(created_at) >= 10, (
-            f"created_at does not look like an ISO timestamp: {created_at!r}"
+        assert row[0] == "", (
+            f"auto-bootstrap must leave created_at empty so the "
+            f"synthetic CollectionCreated event with "
+            f"``payload.created_at == ''`` matches under "
+            f"--replay-equality; got {row[0]!r}"
         )
 
 
