@@ -31,6 +31,100 @@ def pytest_configure(config):
     )
 
 
+# nexus-nifd: prefixes that the indexer's repo cache uses for
+# pytest fixture-named test repos. Files at
+# ``~/.config/nexus/<prefix>-*-<repo_hash>.cache`` matching one of
+# these are evidence that a test bypassed the autouse
+# ``_isolate_config_dir`` fixture (e.g. a subprocess that didn't
+# inherit ``NEXUS_CONFIG_DIR``, or a test that explicitly
+# ``monkeypatch.delenv("NEXUS_CONFIG_DIR")``). Update this list when
+# adding a new fixture-named test repo.
+_FIXTURE_CACHE_PREFIXES: tuple[str, ...] = (
+    "nexus-rich0",
+    "nexus-mini0",
+    "code-repo",
+    "prose-repo",
+    "pdf-repo",
+    "stage-b-repo",
+    "sentinel-repo",
+    "test-repo",
+    "nx-shakeout-",
+)
+
+
+def _scan_fixture_cache_files() -> set[Path]:
+    """Return the set of *.cache files in the REAL ~/.config/nexus/
+    whose basename starts with a fixture-cache prefix. Empty when
+    the directory doesn't exist.
+
+    Uses Path.home() rather than ``nexus_config_dir()`` to bypass
+    any test-time NEXUS_CONFIG_DIR override; the leak we're guarding
+    against is precisely tests that hit the REAL config dir.
+    """
+    real_config = Path.home() / ".config" / "nexus"
+    if not real_config.exists():
+        return set()
+    return {
+        p for p in real_config.glob("*.cache")
+        if p.name.startswith(_FIXTURE_CACHE_PREFIXES)
+    }
+
+
+_fixture_cache_baseline: set[Path] = set()
+
+
+def pytest_sessionstart(session):
+    """Snapshot fixture cache files in ~/.config/nexus/ at session
+    start so ``pytest_sessionfinish`` can detect leaks introduced
+    during the session (nexus-nifd).
+    """
+    global _fixture_cache_baseline
+    _fixture_cache_baseline = _scan_fixture_cache_files()
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """nexus-nifd: fail the session when any new test-fixture cache
+    file appears in the REAL ~/.config/nexus/ during the session.
+
+    Background: 2026-05-08 prod shakeout found 1,707 leaked
+    test-fixture cache files (~121.5 MB) accumulated over weeks.
+    The autouse ``_isolate_config_dir`` fixture (PR #601 / nexus-
+    mrmq) prevents future leakage for tests that USE it, but a
+    test that bypasses the fixture or spawns a subprocess without
+    propagating ``NEXUS_CONFIG_DIR`` could re-introduce the leak
+    silently. This guard catches that class.
+
+    Best-effort cleanup: any newly-leaked file is unlinked before
+    the failure surfaces so the next run starts from a clean
+    baseline. The session is still failed so the offending test
+    is visible in CI.
+    """
+    after = _scan_fixture_cache_files()
+    leaked = after - _fixture_cache_baseline
+    if not leaked:
+        return
+    # Surface and clean up.
+    leaked_sorted = sorted(leaked)
+    for path in leaked_sorted:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+    names = ", ".join(p.name for p in leaked_sorted[:5])
+    suffix = "" if len(leaked_sorted) <= 5 else f" (+{len(leaked_sorted) - 5} more)"
+    session.exitstatus = 1
+    print(
+        f"\n\nFAIL: nexus-nifd cache-leak guard caught "
+        f"{len(leaked_sorted)} fixture-cache file(s) leaked into "
+        f"~/.config/nexus/: {names}{suffix}\n"
+        f"  Cause: a test bypassed the autouse `_isolate_config_dir` "
+        f"fixture or spawned a subprocess without inheriting "
+        f"NEXUS_CONFIG_DIR.\n"
+        f"  Cleanup: leaked files removed; failing the session.\n",
+        flush=True,
+    )
+
+
 @pytest.fixture(autouse=True)
 def _restore_structlog_after_test():
     """Save and restore structlog config around every test so any test
