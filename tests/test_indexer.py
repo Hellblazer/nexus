@@ -741,6 +741,69 @@ def test_prune_misclassified_does_not_create_zombie_collections(tmp_path):
     assert db.get_collection.call_count == 2
 
 
+def test_prune_misclassified_uses_catalog_manifest_for_phase3_chunks(tmp_path):
+    from types import SimpleNamespace
+    """nexus-7zcv (RDR-108 Phase 4 review D-H4): when chunks have no
+    doc_id metadata (Phase 3 removed it), the prune must resolve
+    each doc_id's chashes via the catalog manifest and delete by
+    chash[:32] (the RDR-108 D1 natural id), not via where={doc_id}.
+
+    Reverting the manifest path makes this test fail because the
+    chunks have no doc_id metadata and the legacy where-filter
+    matches nothing.
+    """
+    from nexus.indexer import _prune_misclassified
+
+    code_path = tmp_path / "main.py"
+    code_path.write_text("x = 1\n")
+
+    chash_a = "a" * 64
+    chash_b = "b" * 64
+
+    # docs collection contains the misclassified chunks (Phase-3 shape:
+    # natural id = chash[:32], no doc_id in metadata).
+    docs_col = MagicMock()
+    docs_col.get.return_value = {
+        "ids": [chash_a[:32], chash_b[:32]],
+    }
+
+    db = MagicMock()
+    db.get_collection.side_effect = lambda name: (
+        docs_col if name == "docs__repo" else MagicMock()
+    )
+
+    # Catalog manifest reports both chashes belong to the code file's doc.
+    catalog = MagicMock()
+    catalog.get_manifest.return_value = [
+        SimpleNamespace(chash=chash_a, position=0),
+        SimpleNamespace(chash=chash_b, position=1),
+    ]
+
+    _prune_misclassified(
+        repo=tmp_path,
+        code_collection="code__repo",
+        docs_collection="docs__repo",
+        code_files=[code_path],
+        prose_files=[],
+        pdf_files=[],
+        db=db,
+        file_to_doc_id={code_path: "1.1.5"},
+        catalog=catalog,
+    )
+
+    # Manifest was queried for the doc_id.
+    catalog.get_manifest.assert_any_call("1.1.5")
+    # docs col was queried with the chash[:32] IDs.
+    get_calls = docs_col.get.call_args_list
+    assert any(
+        set(call.kwargs.get("ids", [])) == {chash_a[:32], chash_b[:32]}
+        for call in get_calls
+    ), f"docs col.get must receive chash[:32] IDs; got {get_calls!r}"
+    # Both chunks deleted from the wrong collection.
+    deleted = _deleted_ids(docs_col)
+    assert set(deleted) == {chash_a[:32], chash_b[:32]}
+
+
 def test_prune_deleted_files_per_collection_orphan_isolation(tmp_path):
     """Both code and docs collections carry their own non-empty chunk
     sets; each collection's orphans must be deleted from its OWN col
