@@ -207,3 +207,46 @@ class TestReplayEqualityFails:
         assert docs_diff["equal"] is False
         assert docs_diff["live_count"] == 0
         assert docs_diff["projected_count"] >= 1
+
+
+class TestAutoBootstrapReplayEquality:
+    """nexus-33xm: when documents reference a physical_collection that
+    has no matching ``collections`` row, ``CatalogDB.__init__`` auto-
+    bootstraps the row and ``Catalog._emit_backfilled_collection_events``
+    appends a synthetic ``CollectionCreated`` event with
+    ``payload.created_at == ""``. The auto-bootstrap and the synthetic
+    event must agree on ``created_at``, otherwise ``--replay-equality``
+    permanently flags collections as drifted.
+
+    Pre-fix: auto-bootstrap stamped ``NOW()`` but the synthetic event
+    carried ``""``; live SQLite kept the NOW stamp via the projector's
+    COALESCE, but a fresh replay from the event log started empty and
+    took the synthetic ``""``. The drift was reproducible on every
+    catalog open with auto-bootstrapped rows.
+    """
+
+    def test_replay_equality_holds_for_auto_bootstrapped_collection(
+        self, isolated_nexus, runner,
+    ):
+        cat_dir = isolated_nexus
+        Catalog.init(cat_dir)
+        cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+        owner = cat.register_owner("nexus", "repo", repo_hash="abab")
+        # Register with a physical_collection that has no CollectionCreated
+        # event of its own; on next open the auto-bootstrap will fire.
+        cat.register(
+            owner, "doc.md", content_type="prose", file_path="doc.md",
+            physical_collection="docs__autobackfill_33xm",
+        )
+        cat._db.close()
+
+        # Re-open: triggers CatalogDB.__init__ auto-bootstrap +
+        # Catalog._emit_backfilled_collection_events.
+        cat2 = Catalog(cat_dir, cat_dir / ".catalog.db")
+        cat2._db.close()
+
+        result = runner.invoke(doctor_cmd, ["--replay-equality"])
+        assert result.exit_code == 0, (
+            f"replay-equality must hold for auto-bootstrapped "
+            f"collections; got exit {result.exit_code}\n{result.output}"
+        )
