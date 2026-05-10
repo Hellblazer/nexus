@@ -53,7 +53,6 @@ _log = structlog.get_logger(__name__)
 
 _TAXONOMY_PREFIX = "taxonomy__"
 _PAGE_SIZE = QUOTAS.MAX_RECORDS_PER_WRITE  # 300
-_STRIPPED_META_FIELDS = frozenset({"doc_id", "chunk_index", "chunk_count"})
 
 
 class MissingChunkHashError(ValueError):
@@ -223,10 +222,18 @@ def reidentify_collection(
                 continue
             seen_new_ids.add(new_id)
 
-            new_meta = {
-                k: v for k, v in meta.items()
-                if k not in _STRIPPED_META_FIELDS
-            }
+            # Use the canonical schema funnel (RDR-108 nexus-6l9p)
+            # rather than a narrow strip set. ``_normalize_for_write``
+            # drops the 3 RDR-108 Phase 3 fields (doc_id, chunk_index,
+            # chunk_count) plus all pre-RDR-101-Phase-5c cargo (corpus,
+            # store_type, expires_at, extraction_method, etc) and
+            # bib_* placeholders. Surfaced during the Phase 5 prod
+            # migration: 2 of 153 collections held legacy chunks with
+            # 33+ metadata keys; the prior narrow-strip path produced
+            # NumMetadataKeys quota errors on the upsert. The canonical
+            # funnel brings these chunks back under the per-row quota.
+            from nexus.db.t3 import _normalize_for_write
+            new_meta = _normalize_for_write(meta, collection_name)
             ids_to_upsert.append(new_id)
             docs_to_upsert.append(doc)
             embs_to_upsert.append(emb)
