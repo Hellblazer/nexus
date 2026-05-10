@@ -108,6 +108,27 @@ and scoping semantic search to relevant collections instead of searching everyth
 
 Content-hash spans reference chunks by `chunk_text_hash` metadata (SHA-256 of stored chunk text). All 5 indexers (code, prose, doc PDF, doc markdown, streaming PDF pipeline) emit `chunk_text_hash` alongside the existing file-level `content_hash`. For existing collections, `nx catalog setup` or `nx collection backfill-hash` adds the field without re-embedding. `link_audit()` verifies chash spans resolve in T3.
 
+### Metadata field semantics (chunk vs document level)
+
+Two hash fields look similar but mean very different things. Confusing them produces false-positive panic findings (e.g. "94% redundancy across the corpus" turns out to be 94% of chunks share a doc-level hash, which is correct: every chunk of one paper has the same `content_hash`). The table below locks the contract; consult before drawing conclusions from a metadata distribution.
+
+| Metadata field | Level | Keyed on | Set by | Used for |
+|---|---|---|---|---|
+| `content_hash` | document | `sha256(file_bytes)` | every indexer at register time (`indexer.py:1198`) | document-level dedup; staleness comparison; backup-snapshot identity |
+| `chunk_text_hash` | chunk | `sha256(chunk_text)` (full 64 chars) | every indexer per chunk; backfilled by `nx collection backfill-hash` | content-addressed link spans (`chash:<hex>`); `nx t3 reidentify` natural-ID source (first 32 chars); cross-collection chunk dedup |
+| `chunk_text_hash[:32]` | chunk | first 32 chars of the SHA | `nx t3 reidentify` upsert (RDR-108 Phase 2) | Chroma natural ID for the chunk; the join key from `document_chunks.chash` |
+| `source_uri` | document | `file://...` or `x-devonthink-item://<uuid>` etc. | indexer / MCP write paths | persistent URI identity; aspect-extraction routing; audit-membership home detection |
+| `source_path` | document | absolute or repo-relative file path | indexer | display + grep targets; legacy path predating `source_uri` |
+| `chunk_start_char` / `chunk_end_char` | chunk | char offsets in the source file | indexer per chunk | `chunk:char` span resolution; UI highlight |
+| `section_title` / `section_type` | chunk | tree-sitter / Markdown section header | code/prose chunkers | search-time filtering (`section_type!=references`) |
+| `embedding_model` | document | model id string | every write through `T3Database` | `voyage-code-3` vs `voyage-context-3` routing; quota validation |
+
+`doc_id`, `chunk_index`, and `chunk_count` were ALSO chunk-level metadata pre-RDR-108. RDR-108 Phase 3 retired them; the catalog `document_chunks` manifest is the single source of truth for chunk position within a document. Read paths that need chunk order consult `Catalog.get_manifest(doc_id)` (see `_attach_doc_ids_from_catalog` in `search_engine.py` for the standard fallback).
+
+Legacy fields (`corpus`, `store_type`, `extraction_method`, `expires_at`) were dropped in RDR-101 Phase 5c. They are not present in current writes; older collections still carry them as cargo until `nx t3 reidentify` runs the canonical-schema funnel and normalizes them away.
+
+For operator runbooks built on this vocabulary see [`docs/operations/t3-health.md`](operations/t3-health.md) (when `nx catalog doctor` reports X) and [`docs/operations/audit-membership-interpretation.md`](operations/audit-membership-interpretation.md) (the 3 contamination axes).
+
 ### Catalog manifest as authoritative doc structure (RDR-108)
 
 The catalog `document_chunks` table is the authoritative graph layer of the git/IPFS-style blob+tree split that addresses document identity:
