@@ -1658,6 +1658,29 @@ def _prune_deleted_files(
         all_chunks = _paginated_get(col, include=["metadatas"])
         if not all_chunks["ids"]:
             continue
+        # nexus-oqku: when the catalog manifest has zero referenced
+        # chashes for a collection that DOES have T3 chunks, every
+        # chunk would be classified as orphan and the loop below
+        # would delete the entire collection. This fires on the
+        # first ``nx index repo`` after the RDR-108 schema migration
+        # lands on a system that has not yet run manifest backfill.
+        # An empty manifest cannot prove ANY chunk is live or dead;
+        # treat it the same way as the per-chunk missing-chash case
+        # (skip and log) instead of silent full-collection wipe.
+        if not referenced:
+            _log.warning(
+                "manifest_empty_skipping_gc",
+                collection=collection_name,
+                t3_chunks=len(all_chunks["ids"]),
+                note=(
+                    "catalog manifest has zero referenced chashes for this "
+                    "collection but T3 has chunks. GC cannot safely decide "
+                    "orphans without a manifest. Run a fresh `nx index repo` "
+                    "(populates manifest via post-store hook) or backfill "
+                    "manually before retrying GC."
+                ),
+            )
+            continue
         orphan_ids: list[str] = []
         unsafe_skipped = 0
         for chunk_id, meta in zip(all_chunks["ids"], all_chunks["metadatas"]):
