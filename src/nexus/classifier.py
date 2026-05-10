@@ -43,6 +43,36 @@ _SKIP_EXTENSIONS: frozenset[str] = frozenset({
     ".txt", ".csv", ".tsv", ".dat", ".log",
 })
 
+# nexus-haet (GH issue surfaced 2026-05-08): minified bundle filenames
+# (``htmx.min.js``, ``react.min.css``, ``vendor.min.mjs``) are
+# extension-wise indexable code, but the bytes are unreadable for
+# semantic search: mangled identifiers, no whitespace, no comments.
+# Embedding them wastes Voyage budget AND historically produced
+# oversized chunks (the 2026-05-08 audit found 84 chunks > Voyage
+# MAX_DOCUMENT_BYTES, all from a single ``htmx.min.js`` at 50,917
+# bytes each, blocking re-embed). The T3.put MAX_DOCUMENT_BYTES guard
+# (``db/t3.py:460``) drops oversized chunks defensively, but skipping
+# the file at classification time avoids the chunker churn entirely.
+#
+# Operators with a legitimate need to index minified files (e.g.
+# auditing a vendored bundle for known patterns) opt back in via
+# ``indexing_config["index_minified"] = True``.
+_MINIFIED_BASENAME_PATTERNS: tuple[str, ...] = (
+    ".min.js", ".min.mjs", ".min.cjs",
+    ".min.css",
+    ".bundle.js", ".bundle.mjs",  # Webpack / Rollup output convention.
+)
+
+
+def _is_minified_basename(basename: str) -> bool:
+    """Return True when ``basename`` matches a known minified-bundle
+    naming convention. Case-insensitive; handles double extensions
+    (e.g. ``htmx.min.js``) which a bare ``Path.suffix`` check would
+    miss (it returns ``.js``).
+    """
+    lower = basename.lower()
+    return any(lower.endswith(suffix) for suffix in _MINIFIED_BASENAME_PATTERNS)
+
 
 def _has_shebang(path: Path) -> bool:
     """Return True if *path* starts with a shebang (#!)."""
@@ -63,11 +93,14 @@ def classify_file(
 
     Priority order:
     1. PDF (always PDF)
-    2. prose_extensions config override (wins over all)
-    3. Effective code set (defaults + code_extensions config)
-    4. _SKIP_EXTENSIONS (known-noise file types)
-    5. Extensionless files: shebang → CODE, else → SKIP
-    6. Everything else → PROSE
+    2. nexus-haet: minified bundles (basename matches
+       ``_MINIFIED_BASENAME_PATTERNS``) -> SKIP, unless
+       ``indexing_config["index_minified"] = True``
+    3. prose_extensions config override (wins over all)
+    4. Effective code set (defaults + code_extensions config)
+    5. _SKIP_EXTENSIONS (known-noise file types)
+    6. Extensionless files: shebang → CODE, else → SKIP
+    7. Everything else → PROSE
     """
     ext = path.suffix.lower()
 
@@ -75,6 +108,15 @@ def classify_file(
         return ContentClass.PDF
 
     cfg = indexing_config or {}
+
+    # nexus-haet: minified-bundle skip. Runs BEFORE the code-extension
+    # check so ``htmx.min.js`` (extension ``.js``) doesn't reach the
+    # CODE branch. Operators can opt back in via
+    # ``indexing_config["index_minified"] = True``.
+    if not cfg.get("index_minified", False):
+        if _is_minified_basename(path.name):
+            return ContentClass.SKIP
+
     prose_overrides = set(cfg.get("prose_extensions", []))
     code_additions = set(cfg.get("code_extensions", []))
 
