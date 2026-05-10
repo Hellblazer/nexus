@@ -785,6 +785,10 @@ class TestDocumentAspectsPostMigrationAPI:
             doc_id="nexus-new01",
             problem_formulation="Test",
             proposed_method="Test method",
+            # nexus-17wf: confidence floor-gated (>=0.3); pass an
+            # explicit value so the upsert lands. Test exercises
+            # doc_id PK round-trip, not confidence semantics.
+            confidence=0.9,
             extracted_at="2026-05-09T00:00:00+00:00",
             model_version="claude-haiku-4-5-20251001",
             extractor_name="scholarly-paper-v1",
