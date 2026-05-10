@@ -11,9 +11,24 @@ import click
 # otherwise, which leaves progress invisible for 10+ minutes on large
 # repos. ``reconfigure(line_buffering=True)`` lands the same flush-on-
 # newline behaviour regardless of terminal attachment.
+#
+# nexus-vwu1 (GH #621): also force UTF-8 with replacement on Windows
+# where the default cp1252 console can't encode the status glyphs nx
+# emits (checkmarks, crosses, ellipses, em-dashes). Without this,
+# every ``click.echo`` carrying a non-ASCII char crashes with
+# UnicodeEncodeError. ``errors="replace"`` is the conservative tail:
+# a console that genuinely can't render a glyph gets a "?" instead of
+# a stack trace. POSIX hosts are left untouched (modern Linux/macOS
+# default to UTF-8 already).
+_IS_WINDOWS = sys.platform == "win32"
 for _stream in (sys.stdout, sys.stderr):
     try:
-        _stream.reconfigure(line_buffering=True)
+        if _IS_WINDOWS:
+            _stream.reconfigure(
+                encoding="utf-8", errors="replace", line_buffering=True,
+            )
+        else:
+            _stream.reconfigure(line_buffering=True)
     except (AttributeError, OSError):
         # AttributeError: pre-3.7 ``reconfigure`` is missing (we're 3.12+
         # so this branch is dead, but defensive); OSError: stream is
