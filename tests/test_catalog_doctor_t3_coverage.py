@@ -443,3 +443,75 @@ class TestOrphanRatioSurface:
         assert "WARN" not in runner.invoke(
             doctor_cmd, ["--t3-doc-id-coverage"],
         ).output
+
+
+# ── nexus-esrl (RDR-108 Phase 4 review D-M3): manifest-fallback ─────────────
+
+
+class TestPhase3ManifestFallback:
+    """nexus-esrl: under RDR-108 Phase 3 (nexus-bdag) chunk metadata
+    no longer carries doc_id. The audit must fall back to the
+    catalog ``document_chunks`` manifest (resolve via
+    ``Catalog.docs_for_chashes(chash)``) so Phase-3 chunks register
+    as covered when the manifest knows their doc_id. Pre-fix, every
+    Phase-3 chunk reported as missing_doc_id and the audit failed
+    unconditionally on any post-Phase-3 corpus.
+    """
+
+    def test_phase3_chunks_resolve_via_manifest(
+        self, isolated_nexus, runner, chroma_client,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A Phase-3 chunk (no doc_id in metadata, only chunk_text_hash)
+        must register as covered when the catalog manifest has the
+        chash -> doc_id mapping. Reverting the manifest-fallback
+        path makes this test fail with missing_doc_id_count >= 1.
+        """
+        events = [_chunk("ch1", "uuid7-PHASE3", "code__phase3")]
+        _seed_log(isolated_nexus, events)
+
+        # Phase-3 chunk: only chunk_text_hash in metadata, no doc_id.
+        chash = "a" * 64
+        _seed(chroma_client, "code__phase3", [
+            {"id": "ch1", "content": "x",
+             "metadata": {"chunk_text_hash": chash}},
+        ])
+
+        # Seed the catalog manifest so chash -> doc_id resolves.
+        cat = Catalog(isolated_nexus, isolated_nexus / ".catalog.db")
+        cat._db.execute(  # epsilon-allow: test fixture seeds documents row
+            "INSERT OR IGNORE INTO documents "
+            "(tumbler, title, author, year, content_type, file_path, "
+            "corpus, physical_collection, chunk_count, head_hash, "
+            "indexed_at, metadata, source_mtime, alias_of, source_uri) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("uuid7-PHASE3", "doc", "", 0, "code", "/tmp/x.py",
+             "", "code__phase3", 1, "", "", "{}", 0.0, "", ""),
+        )
+        cat._db.commit()
+        cat.write_manifest("uuid7-PHASE3", [
+            {"chash": chash, "position": 0,
+             "chunk_index": None, "line_start": None, "line_end": None,
+             "char_start": None, "char_end": None},
+        ])
+
+        class _FakeT3:
+            _client = chroma_client
+
+        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
+
+        result = runner.invoke(
+            doctor_cmd, ["--t3-doc-id-coverage", "--json"],
+        )
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)["t3_doc_id_coverage"]
+        assert payload["pass"] is True, (
+            f"Phase-3 chunk should register as covered via manifest; "
+            f"got {payload!r}"
+        )
+        coll = payload["tables"]["code__phase3"]
+        assert coll["with_doc_id"] == 1
+        assert coll["missing_doc_id_count"] == 0, (
+            "Phase-3 chunk should NOT be reported as missing doc_id "
+            "when catalog manifest has the chash -> doc_id mapping"
+        )
