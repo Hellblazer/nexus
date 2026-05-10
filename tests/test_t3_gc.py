@@ -69,16 +69,24 @@ def _seed_chunk(
     collection: str,
     chunk_id: str,
     content: str,
-    doc_id: str,
     indexed_at: str,
+    chunk_text_hash: str | None = None,
+    doc_id: str | None = None,
 ) -> None:
-    """Insert one chunk with the metadata GC reads."""
+    """Insert one chunk with the metadata GC reads.
+
+    nexus-e5aw: GC now reads ``chunk_text_hash`` (not ``doc_id``) to
+    decide orphan status, matching the indexer's manifest-based GC.
+    ``doc_id`` is retained as an optional kwarg for back-compat with
+    legacy tests, but the new GC ignores it.
+    """
+    meta: dict = {"indexed_at": indexed_at}
+    if chunk_text_hash is not None:
+        meta["chunk_text_hash"] = chunk_text_hash
+    if doc_id is not None:
+        meta["doc_id"] = doc_id
     col = t3_db._client.get_or_create_collection(collection)
-    col.add(
-        ids=[chunk_id],
-        documents=[content],
-        metadatas=[{"doc_id": doc_id, "indexed_at": indexed_at}],
-    )
+    col.add(ids=[chunk_id], documents=[content], metadatas=[meta])
 
 
 def _iso(dt: datetime) -> str:
@@ -143,12 +151,19 @@ def test_delete_by_chunk_ids_empty_list(t3_db):
 # ── nx t3 gc CLI ─────────────────────────────────────────────────────────
 
 
-def _register_doc(catalog: Catalog, *, tumbler: str, collection: str) -> None:
-    """Seed a document row directly so ``list_by_collection`` returns it.
+def _register_doc(
+    catalog: Catalog,
+    *,
+    tumbler: str,
+    collection: str,
+    chashes: list[str] | None = None,
+) -> None:
+    """Seed a document row directly so the catalog manifest references it.
 
     Bypasses ``Catalog.register`` (which mints its own tumbler off an
-    owner prefix). GC only cares that ``list_by_collection`` reports
-    alive doc_ids, and the SQLite projection is the read path.
+    owner prefix). nexus-e5aw: also writes manifest rows for the given
+    ``chashes`` so ``Catalog.chashes_for_collection`` returns them as
+    referenced (live).
     """
     catalog._db.execute(  # epsilon-allow: GC alive_set fixture; Catalog.register would mint its own tumbler instead of pinning to the test value
         "INSERT INTO documents "
@@ -162,20 +177,28 @@ def _register_doc(catalog: Catalog, *, tumbler: str, collection: str) -> None:
         ),
     )
     catalog._db.commit()
+    if chashes:
+        catalog.write_manifest(tumbler, [
+            {"chash": c, "position": i} for i, c in enumerate(chashes)
+        ])
 
 
 def test_gc_dry_run_reports_orphans_no_mutation(t3_db, catalog, tmp_path, runner):
     """Default dry-run prints orphan candidates but does not delete or emit."""
     coll = "knowledge__test_gc_dryrun"
     long_ago = _iso(datetime.now(UTC) - timedelta(days=60))
-    _register_doc(catalog, tumbler="1.1.1", collection=coll)  # alive
+    live_chash = "a" * 64
+    orphan_chash = "b" * 64
+    _register_doc(
+        catalog, tumbler="1.1.1", collection=coll, chashes=[live_chash],
+    )
     _seed_chunk(
         t3_db, collection=coll, chunk_id="alive1", content="a",
-        doc_id="1.1.1", indexed_at=long_ago,
+        chunk_text_hash=live_chash, indexed_at=long_ago,
     )
-    _seed_chunk(  # orphan: doc 1.1.99 not registered
+    _seed_chunk(  # orphan: chash not in any manifest entry
         t3_db, collection=coll, chunk_id="orphan1", content="o",
-        doc_id="1.1.99", indexed_at=long_ago,
+        chunk_text_hash=orphan_chash, indexed_at=long_ago,
     )
 
     with patch("nexus.db.make_t3", return_value=t3_db), \
@@ -211,18 +234,21 @@ def test_gc_emits_chunk_orphaned_event_before_delete(
     """
     coll = "knowledge__test_gc_emit"
     long_ago = _iso(datetime.now(UTC) - timedelta(days=60))
-    _register_doc(catalog, tumbler="1.1.1", collection=coll)
+    live_chash = "a" * 64
+    _register_doc(
+        catalog, tumbler="1.1.1", collection=coll, chashes=[live_chash],
+    )
     _seed_chunk(
         t3_db, collection=coll, chunk_id="alive1", content="a",
-        doc_id="1.1.1", indexed_at=long_ago,
+        chunk_text_hash=live_chash, indexed_at=long_ago,
     )
     _seed_chunk(
         t3_db, collection=coll, chunk_id="orphan1", content="o",
-        doc_id="1.1.99", indexed_at=long_ago,
+        chunk_text_hash="b" * 64, indexed_at=long_ago,
     )
     _seed_chunk(
         t3_db, collection=coll, chunk_id="orphan2", content="o2",
-        doc_id="1.1.99", indexed_at=long_ago,
+        chunk_text_hash="c" * 64, indexed_at=long_ago,
     )
 
     with patch("nexus.db.make_t3", return_value=t3_db), \
@@ -248,10 +274,10 @@ def test_gc_emits_chunk_orphaned_event_before_delete(
 
 def test_gc_orphan_window_excludes_recent(t3_db, catalog, tmp_path, runner):
     """Chunks whose ``indexed_at`` is within the orphan window are not GC'd
-    even if their ``doc_id`` is dead.
+    even if their chash is not in the manifest.
 
     Rationale: a fresh re-index might briefly leave chunks orphaned
-    while the catalog projection catches up. The window is the grace
+    while the manifest projection catches up. The window is the grace
     period.
     """
     coll = "knowledge__test_gc_window"
@@ -259,11 +285,11 @@ def test_gc_orphan_window_excludes_recent(t3_db, catalog, tmp_path, runner):
     long_ago = _iso(datetime.now(UTC) - timedelta(days=60))
     _seed_chunk(  # orphan but recent: protected
         t3_db, collection=coll, chunk_id="recent_orphan", content="r",
-        doc_id="1.1.99", indexed_at=recent,
+        chunk_text_hash="b" * 64, indexed_at=recent,
     )
     _seed_chunk(  # orphan and old: eligible
         t3_db, collection=coll, chunk_id="old_orphan", content="o",
-        doc_id="1.1.99", indexed_at=long_ago,
+        chunk_text_hash="c" * 64, indexed_at=long_ago,
     )
 
     with patch("nexus.db.make_t3", return_value=t3_db), \
@@ -289,11 +315,11 @@ def test_gc_default_window_is_30_days(t3_db, catalog, tmp_path, runner):
     forty_days = _iso(datetime.now(UTC) - timedelta(days=40))
     _seed_chunk(
         t3_db, collection=coll, chunk_id="within_window", content="w",
-        doc_id="1.1.99", indexed_at=twenty_days,
+        chunk_text_hash="b" * 64, indexed_at=twenty_days,
     )
     _seed_chunk(
         t3_db, collection=coll, chunk_id="past_window", content="p",
-        doc_id="1.1.99", indexed_at=forty_days,
+        chunk_text_hash="c" * 64, indexed_at=forty_days,
     )
 
     with patch("nexus.db.make_t3", return_value=t3_db), \
@@ -309,13 +335,16 @@ def test_gc_default_window_is_30_days(t3_db, catalog, tmp_path, runner):
 
 
 def test_gc_no_orphans_clean_summary(t3_db, catalog, runner):
-    """Every chunk's doc_id alive → 0/0 summary, no events."""
+    """Every chunk's chash referenced in the manifest → 0 orphans, no events."""
     coll = "knowledge__test_gc_clean"
     long_ago = _iso(datetime.now(UTC) - timedelta(days=60))
-    _register_doc(catalog, tumbler="1.1.1", collection=coll)
+    live_chash = "a" * 64
+    _register_doc(
+        catalog, tumbler="1.1.1", collection=coll, chashes=[live_chash],
+    )
     _seed_chunk(
         t3_db, collection=coll, chunk_id="c1", content="x",
-        doc_id="1.1.1", indexed_at=long_ago,
+        chunk_text_hash=live_chash, indexed_at=long_ago,
     )
 
     with patch("nexus.db.make_t3", return_value=t3_db), \
@@ -331,22 +360,19 @@ def test_gc_no_orphans_clean_summary(t3_db, catalog, runner):
         assert events == []
 
 
-def test_gc_chunk_with_missing_doc_id_skipped(
+def test_gc_chunk_with_missing_chunk_text_hash_skipped(
     t3_db, catalog, tmp_path, runner,
 ):
-    """Chunk metadata without ``doc_id`` is undecidable, skipped not GC'd.
-
-    Legacy chunks pre-Phase-2-backfill may not carry ``doc_id``. They
-    must NOT be silently deleted; a maintenance backfill verb is the
-    right path, not GC.
-    """
-    coll = "knowledge__test_gc_no_doc_id"
+    """nexus-e5aw: pre-RDR-053 chunks without ``chunk_text_hash`` are
+    undecidable under the manifest path and skipped with a warning,
+    not GC'd. Same carve-out as ``indexer._prune_deleted_files``."""
+    coll = "knowledge__test_gc_no_chash"
     long_ago = _iso(datetime.now(UTC) - timedelta(days=60))
     col = t3_db._client.get_or_create_collection(coll)
     col.add(
         ids=["legacy_chunk"],
         documents=["x"],
-        metadatas=[{"indexed_at": long_ago}],  # no doc_id
+        metadatas=[{"indexed_at": long_ago}],  # no chunk_text_hash
     )
 
     with patch("nexus.db.make_t3", return_value=t3_db), \
@@ -356,8 +382,12 @@ def test_gc_chunk_with_missing_doc_id_skipped(
             ["t3", "gc", "-c", coll, "--no-dry-run", "--yes"],
         )
 
-    assert result.exit_code == 0
+    assert result.exit_code == 0, result.output
+    # Carve-out chunk preserved.
     assert t3_db._client.get_collection(coll).count() == 1
+    # Operator-visible warning surfaces.
+    assert "no chunk_text_hash" in result.output
+    assert "pre-RDR-053" in result.output
 
 
 def test_gc_aborts_on_uninitialized_catalog(t3_db, tmp_path, runner, monkeypatch):
@@ -402,7 +432,10 @@ def test_gc_malformed_indexed_at_is_skipped(t3_db, catalog, tmp_path, runner):
     col.add(
         ids=["bad_chunk"],
         documents=["x"],
-        metadatas=[{"doc_id": "1.1.99", "indexed_at": "not-an-iso-timestamp"}],
+        metadatas=[{
+            "chunk_text_hash": "b" * 64,
+            "indexed_at": "not-an-iso-timestamp",
+        }],
     )
 
     with patch("nexus.db.make_t3", return_value=t3_db), \
@@ -432,8 +465,11 @@ def test_gc_paginates_above_300_chunk_boundary(
         ids=[f"orphan_{i:04d}" for i in range(chunk_count)],
         documents=[f"chunk {i}" for i in range(chunk_count)],
         metadatas=[
-            {"doc_id": "1.1.99", "indexed_at": long_ago}
-            for _ in range(chunk_count)
+            {
+                "chunk_text_hash": f"{i:064x}",  # unique chash per chunk
+                "indexed_at": long_ago,
+            }
+            for i in range(chunk_count)
         ],
     )
 
@@ -449,52 +485,37 @@ def test_gc_paginates_above_300_chunk_boundary(
     assert t3_db._client.get_collection(coll).count() == 0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "nexus-krhr contract lock: today GC builds alive_set from "
-        "CatalogEntry.tumbler only (commands/t3.py:302). When Phase 3 "
-        "ships native UUID7 doc_id writes to T3 chunk metadata while "
-        "the catalog still keys documents by tumbler, the alive_set "
-        "intersection misses every UUID7-keyed chunk and GC silently "
-        "sweeps live data after the orphan window. The fix unions both "
-        "tumbler and uuid7 columns when constructing alive_set. This "
-        "test fails today (UUID7 chunks classified as orphans, deleted) "
-        "and starts passing once the union lands. The strict=True flag "
-        "ensures CI fails when the fix is in place but the marker has "
-        "not been removed, forcing the contract lock to ratchet forward."
-    ),
-)
-def test_gc_uuid7_keyed_chunks_with_alive_catalog_entry_must_survive(
+def test_gc_chunk_id_shape_irrelevant_under_manifest_path(
     t3_db, catalog, tmp_path, runner,
 ):
-    """nexus-krhr forward-proof: when chunk doc_id is a UUID7 string
-    that the catalog's projection treats as alive (under whatever
-    schema extension lands), GC must not classify the chunk as an
-    orphan.
-
-    Today's behaviour: alive_set = {tumbler}; chunk doc_id (UUID7) not
-    in alive_set; chunk swept after orphan window. This test fails.
-
-    Future behaviour: alive_set = {tumbler} | {uuid7}; chunk doc_id
-    matches; chunk survives. This test passes; remove the xfail marker.
-    """
-    coll = "knowledge__test_gc_uuid7"
+    """nexus-e5aw replaces the legacy nexus-krhr xfail. Under the
+    manifest path, the chunk's natural-ID shape (UUID7, content-derived
+    chash[:32], legacy synthetic hash) is irrelevant for orphan
+    classification: the only thing that matters is whether the chunk's
+    ``meta.chunk_text_hash[:32]`` is in the manifest's referenced set.
+    A UUID7-keyed chunk whose chash IS referenced survives; a content-
+    derived-keyed chunk whose chash is NOT referenced is GC'd."""
+    coll = "knowledge__test_gc_chunk_id_shape"
     long_ago = _iso(datetime.now(UTC) - timedelta(days=60))
+    live_chash = "a" * 64
 
-    # The catalog has the document keyed by tumbler "1.1.1" today.
-    # In a future native-UUID7-writes world, the SAME document would
-    # ALSO carry the UUID7. Simulate that future by stuffing the UUID7
-    # into a synthetic field; the GC fix must read it.
-    uuid7 = "01900000-0000-7000-8000-000000000000"
-    _register_doc(catalog, tumbler="1.1.1", collection=coll)
+    _register_doc(
+        catalog, tumbler="1.1.1", collection=coll, chashes=[live_chash],
+    )
 
-    # Seed a T3 chunk whose doc_id is the UUID7 (the Phase 3 native
-    # write shape). Today's GC, walking alive = {tumbler}, classifies
-    # this as an orphan because UUID7 != "1.1.1".
+    # UUID7-keyed chunk whose chash IS in the manifest. Survives.
     _seed_chunk(
-        t3_db, collection=coll, chunk_id="alive-uuid7", content="x",
-        doc_id=uuid7, indexed_at=long_ago,
+        t3_db, collection=coll,
+        chunk_id="01900000-0000-7000-8000-000000000000",
+        content="live",
+        chunk_text_hash=live_chash, indexed_at=long_ago,
+    )
+    # Content-derived-keyed chunk whose chash is NOT referenced. GC'd.
+    _seed_chunk(
+        t3_db, collection=coll,
+        chunk_id=("b" * 64)[:32],
+        content="orphan",
+        chunk_text_hash="b" * 64, indexed_at=long_ago,
     )
 
     with patch("nexus.db.make_t3", return_value=t3_db), \
@@ -505,17 +526,9 @@ def test_gc_uuid7_keyed_chunks_with_alive_catalog_entry_must_survive(
         )
 
     assert result.exit_code == 0, result.output
-
-    # Future contract: the UUID7-keyed chunk must survive because the
-    # catalog projection treats it as alive. Today this assertion fails
-    # (the chunk was deleted as an orphan).
-    surviving = t3_db._client.get_collection(coll).get()["ids"]
-    assert "alive-uuid7" in surviving, (
-        f"UUID7-keyed chunk was swept; alive_set construction in "
-        f"commands/t3.py:302 only reads e.tumbler. Fix: union with "
-        f"the future uuid7 column when it lands. Surviving ids: "
-        f"{surviving!r}."
-    )
+    surviving = set(t3_db._client.get_collection(coll).get()["ids"])
+    assert "01900000-0000-7000-8000-000000000000" in surviving
+    assert ("b" * 64)[:32] not in surviving
 
 
 def test_gc_no_yes_flag_reports_only(t3_db, catalog, tmp_path, runner):
@@ -524,7 +537,7 @@ def test_gc_no_yes_flag_reports_only(t3_db, catalog, tmp_path, runner):
     long_ago = _iso(datetime.now(UTC) - timedelta(days=60))
     _seed_chunk(
         t3_db, collection=coll, chunk_id="orphan1", content="o",
-        doc_id="1.1.99", indexed_at=long_ago,
+        chunk_text_hash="b" * 64, indexed_at=long_ago,
     )
 
     with patch("nexus.db.make_t3", return_value=t3_db), \

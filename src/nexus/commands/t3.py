@@ -351,18 +351,25 @@ def gc_cmd(
     dry_run: bool,
     yes: bool,
 ) -> None:
-    """Garbage-collect orphaned T3 chunks (RDR-101 Phase 6).
+    """Garbage-collect orphaned T3 chunks via the catalog manifest (RDR-108 Phase 4).
 
     \b
     A chunk is an orphan when:
-      - its ``doc_id`` metadata is not in the catalog projection's
-        alive set for ``--collection``, AND
+      - its ``meta.chunk_text_hash[:32]`` is NOT referenced by any
+        manifest entry in the catalog ``document_chunks`` table for
+        ``--collection``, AND
       - its ``indexed_at`` predates ``--orphan-window`` (default 30d).
 
     \b
-    Per RF-101-3, ``nx t3 gc`` is the SOLE post-Phase-3 emitter of
-    ``ChunkOrphaned`` events and the SOLE path that physically deletes
-    T3 chunks. The strict order on each candidate is:
+    The manifest path matches what ``indexer._prune_deleted_files``
+    (run at the end of ``nx index``) does. Both paths are now
+    semantically equivalent; this CLI is the operator-driven one with
+    explicit dry-run + --yes confirmation, plus ``ChunkOrphaned``
+    event emission for audit trail.
+
+    \b
+    Per RF-101-3, ``nx t3 gc`` is the SOLE emitter of ``ChunkOrphaned``
+    events. The strict order on each candidate is:
 
         1. Append ``ChunkOrphaned(chunk_id, reason)`` to the event log.
         2. Call ``T3Database.delete_by_chunk_ids`` for that chunk.
@@ -375,15 +382,10 @@ def gc_cmd(
     replay-equality.
 
     \b
-    Chunks missing ``doc_id`` (legacy pre-Phase-2 backfill) are
-    UNDECIDABLE here and skipped: operators must run a maintenance
-    backfill verb, not GC, to address them.
-
-    \b
-    NOTE (RDR-108 Phase 4): post-Phase-3 chunks have no ``doc_id`` in
-    metadata and so are skipped here. The manifest-based GC inside
-    ``nx index`` (``indexer._prune_deleted_files``) handles them.
-    Reconciliation of the two paths is tracked in nexus-e5aw.
+    Chunks missing ``chunk_text_hash`` (pre-RDR-053 relics) are
+    UNDECIDABLE here and skipped with a warning: re-index the source
+    or run ``nx t3 reidentify`` to populate the field. Same carve-out
+    as the indexer's manifest GC.
 
     \b
     Examples:
@@ -413,30 +415,40 @@ def gc_cmd(
     cat = _make_catalog()
 
     try:
-        alive = {e.tumbler for e in cat.list_by_collection(collection)}
+        # Manifest path (RDR-108 nexus-e5aw): the catalog
+        # document_chunks table is the authoritative source of truth
+        # for which chashes belong to which collection. A chunk is
+        # orphan when its content hash is not referenced by any
+        # manifest row for this collection's documents. Same SQL the
+        # indexer's _prune_deleted_files uses.
+        referenced = cat.chashes_for_collection(collection)
     except Exception as exc:
-        click.echo(f"Failed to read catalog: {exc}")
+        click.echo(f"Failed to read catalog manifest: {exc}")
         raise click.exceptions.Exit(1)
-    alive_str = {str(t) for t in alive}
 
-    candidates: list[tuple[str, str]] = []
-    skipped_no_doc_id = 0
+    candidates: list[tuple[str, str]] = []  # (chunk_id, chash)
+    skipped_no_chash = 0
     skipped_no_indexed_at = 0
     skipped_within_window = 0
 
     try:
-        chunks = list(t3_db.list_chunks_with_metadata(collection))
+        chunks = list(t3_db.list_chunks_with_metadata(
+            collection, fields=("chunk_text_hash", "indexed_at"),
+        ))
     except Exception as exc:
         click.echo(f"Failed to list chunks for {collection}: {exc}")
         raise click.exceptions.Exit(1)
 
     for chunk_id, meta in chunks:
-        doc_id = meta.get("doc_id", "")
-        if not doc_id:
-            skipped_no_doc_id += 1
+        chash = (meta.get("chunk_text_hash") or "")[:32]
+        if not chash:
+            # Pre-RDR-053 relic: no content hash to compare against
+            # the manifest. Skip with operator-visible count. Same
+            # carve-out semantics as indexer._prune_deleted_files.
+            skipped_no_chash += 1
             continue
-        if doc_id in alive_str:
-            continue
+        if chash in referenced:
+            continue  # live: manifest still references this chunk
         indexed_at = meta.get("indexed_at", "")
         if not indexed_at:
             skipped_no_indexed_at += 1
@@ -449,14 +461,17 @@ def gc_cmd(
         if indexed_dt > cutoff:
             skipped_within_window += 1
             continue
-        candidates.append((chunk_id, doc_id))
+        candidates.append((chunk_id, chash))
 
     click.echo(
         f"{collection}: {len(candidates)} orphan chunk(s) eligible "
         f"(window={orphan_window})"
     )
-    if skipped_no_doc_id:
-        click.echo(f"  skipped {skipped_no_doc_id} chunk(s) with no doc_id")
+    if skipped_no_chash:
+        click.echo(
+            f"  skipped {skipped_no_chash} chunk(s) with no chunk_text_hash "
+            f"(pre-RDR-053 relics; re-index source or run 'nx t3 reidentify')"
+        )
     if skipped_no_indexed_at:
         click.echo(
             f"  skipped {skipped_no_indexed_at} chunk(s) with no/bad indexed_at"
@@ -466,8 +481,8 @@ def gc_cmd(
             f"  skipped {skipped_within_window} chunk(s) inside the orphan window"
         )
 
-    for chunk_id, doc_id in candidates:
-        click.echo(f"  {chunk_id}  ->  doc_id={doc_id}")
+    for chunk_id, chash in candidates:
+        click.echo(f"  {chunk_id}  ->  chash={chash}")
 
     if not candidates:
         click.echo("\nSummary: 0 orphan(s); nothing to do.")
@@ -487,19 +502,23 @@ def gc_cmd(
     # consistent with T3 (events present, all chunks still in T3); the
     # next gc run idempotently re-emits and retries the batch.
     #
-    # NOTE on the alive snapshot: ``alive_str`` was sampled at the top
-    # of this command. A doc registered concurrently between snapshot
-    # and execution would not appear in the alive set, so its chunks
-    # could be GC'd despite the doc being live again. Operators
-    # SHOULD NOT run gc concurrently with active indexing. The window
-    # is single-operator-driven and acceptably small in practice.
+    # NOTE on the manifest snapshot: ``referenced`` was sampled at the
+    # top of this command. A doc registered concurrently between
+    # snapshot and execution would not appear in the referenced set,
+    # so its chunks could be GC'd despite the doc being live again.
+    # Operators SHOULD NOT run gc concurrently with active indexing.
+    # The window is single-operator-driven and acceptably small in
+    # practice.
     event_log = EventLog(cat._dir)
     pending_chunk_ids: list[str] = []
-    for chunk_id, doc_id in candidates:
+    for chunk_id, chash in candidates:
         event = make_event(
             ChunkOrphanedPayload(
                 chunk_id=chunk_id,
-                reason=f"doc_id {doc_id} no longer alive in {collection}",
+                reason=(
+                    f"chash {chash} not referenced by any manifest entry "
+                    f"in {collection}"
+                ),
             )
         )
         event_log.append(event)
