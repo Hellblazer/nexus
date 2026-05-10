@@ -148,6 +148,25 @@ Properties:
 
 **ChashIndex (T2 routing table)**: `chash_index` maps `(chash, physical_collection)` to enable global `chash:<hex>` link resolution without scanning every collection. Post-RDR-108 it is a pure routing table (chash + collection + created_at, no denormalized chunk_chroma_id). Stale rows (collection no longer exists in T3) are self-healed by `Catalog.resolve_chash` on access. A bulk reconcile sweep is on the post-Phase-4 follow-up backlog.
 
+### Migration runbook (RDR-108 Phase 4 -> Phase 5)
+
+For operators upgrading an existing nexus deployment to the post-RDR-108 storage shape:
+
+1. **Deploy the new code + restart the MCP server** so the indexer / GC / retrieval paths use the manifest-aware code paths.
+2. **`nx collection backfill-hash --all`** . Adds `chunk_text_hash` to any chunk that lacks it (pre-RDR-053 collections). Two-pass walk: pass 1 collects ids with a lightweight `include=[]` payload, pass 2 fetches by exact id and re-upserts with canonical-schema-normalized metadata. The two-pass design sidesteps ChromaDB Cloud's offset-pagination instability (a naive offset+update loop misses chunks); the canonical-normalize step drops legacy cargo so chunks with 32+ metadata keys land back under the per-row `NumMetadataKeys` quota. Idempotent; chunks that already have the hash short-circuit.
+3. **`nx t3 reidentify --all-collections --dry-run --max-workers 4`** . Preview what will migrate. Should return `0 error(s)`. Errors at this stage typically mean a collection still has chunks without `chunk_text_hash`; re-run step 2 on the named collection or re-index from source.
+4. **`nx t3 reidentify --all-collections --no-dry-run --max-workers 4`** . Actual migration. Each collection is re-upserted under content-derived natural IDs (`chunk_text_hash[:32]`); old IDs are batch-deleted. The `--max-workers` flag parallelizes across collections (default 4); each collection has an independent ID namespace so concurrent execution is safe. Bound by ChromaDB Cloud rate limits, not local CPU.
+5. **Verify**: rerun the dry-run from step 3; expect `would migrate 0` corpus-wide. Spot-check `(source_path, chunk_index)` dupe-key count on a previously-affected collection (was 1,630 in `code__1-2188` before migration; should be 0 after, since the positional fields no longer exist).
+
+Properties of the verbs:
+- **Idempotent**: re-running on a fully-migrated collection performs zero writes.
+- **Crash-resumable**: re-invoking after an interrupted run safely sweeps un-deleted old IDs.
+- **Carve-outs surface as structured errors**: `taxonomy__*` collections are auto-skipped (centroids use `centroid_hash`, not `chunk_text_hash`). Pre-RDR-053 chunks missing `chunk_text_hash` raise `MissingChunkHashError` rather than silently dropping; the message names the collection and tells the operator to re-index from source.
+
+Pre-existing drift surfaced during Phase 5 verification (filed as separate beads):
+- `chash_index` may carry rows for collections that no longer exist in T3 (`Catalog.resolve_chash` self-heals on access; bulk sweep tracked in `nexus-w9vq`).
+- `document_aspects` may carry rows whose `source_uri` no longer matches a catalog Document (FK CASCADE + optional one-shot GC tracked in `nexus-urj4`).
+
 **Tumbler ordering**: Comparison operators (`<`, `<=`, `>`, `>=`) use -1 sentinel padding for cross-depth ordering -- parent tumblers sort before their children. `Tumbler.spans_overlap()` detects positional span overlap using these operators.
 
 **Two graph views**: `catalog_links` returns only links between live documents (deleted nodes excluded).

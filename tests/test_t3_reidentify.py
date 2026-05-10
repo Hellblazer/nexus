@@ -218,6 +218,18 @@ class TestReidentifyCollection:
         # Canonical fields preserved.
         assert meta.get("title") == "old-paper"
         assert meta.get("content_type") == "pdf"
+        # nexus-2exh review caveat #3: lock the per-row metadata
+        # quota bound. ChromaDB Cloud rejects records whose metadata
+        # has more than 32 keys (NumMetadataKeys quota); the canonical
+        # normalize must produce a payload that respects it. The
+        # MAX_SAFE_TOP_LEVEL_KEYS constant in metadata_schema is the
+        # canonical bound (32).
+        from nexus.metadata_schema import MAX_SAFE_TOP_LEVEL_KEYS
+        assert len(meta) <= MAX_SAFE_TOP_LEVEL_KEYS, (
+            f"normalized metadata must fit under the per-row key "
+            f"quota ({MAX_SAFE_TOP_LEVEL_KEYS}); got {len(meta)} "
+            f"keys: {sorted(meta)}"
+        )
 
     def test_idempotent_on_fully_migrated_collection(self, t3_db):
         """Re-running on a fully-migrated collection performs zero writes."""

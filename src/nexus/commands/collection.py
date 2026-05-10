@@ -657,8 +657,12 @@ def _backfill_chunk_text_hash(
     # Pass 1: collect every chunk id. Lightweight payload (no metadata,
     # no documents, no embeddings); offset is stable because pass 1 only
     # reads. ChromaDB Cloud's offset semantics are order-unstable across
-    # the longer pass-2 walk, but pass 1 completes fast enough that the
-    # collection state stays consistent for this iteration.
+    # long walks, but pass 1 (read-only, ids only) completes fast enough
+    # for the single-operator scenario that the collection state stays
+    # consistent. Best-effort only: concurrent indexer writes during
+    # pass 1 may produce incomplete coverage on this iteration. The verb
+    # is idempotent, so re-running picks up any chunks the previous pass
+    # missed. nexus-2exh review caveat #4.
     all_ids: list[str] = []
     offset = 0
     while True:
