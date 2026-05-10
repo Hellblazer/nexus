@@ -462,8 +462,13 @@ class TestEventSourcedCollectionBackfill:
             if e.get("type") == "CollectionCreated"
             and e.get("payload", {}).get("coll_id") == "code__legacy-collection"
         ]
-        assert len(collection_created_events) >= 1, (
-            "CollectionCreated event must be written for the backfilled collection"
+        # nexus-oe2i: == 1, not >= 1. The backfill emits exactly one
+        # CollectionCreated event per legacy collection. A regression
+        # that double-emits would silently pass `>= 1`.
+        assert len(collection_created_events) == 1, (
+            "CollectionCreated event must be written exactly once "
+            "for the backfilled collection (got "
+            f"{len(collection_created_events)})"
         )
         payload = collection_created_events[0]["payload"]
         assert payload.get("legacy_grandfathered") is True, (
@@ -507,7 +512,9 @@ class TestEventSourcedCollectionBackfill:
             if e.get("type") == "CollectionCreated"
             and e.get("payload", {}).get("coll_id") == "code__legacy-survive-rebuild"
         ]
-        assert len(collection_events) >= 1
+        # nexus-oe2i: exact == 1 (single legacy collection seeded; a
+        # double-emit would silently pass >= 1).
+        assert len(collection_events) == 1
 
     def test_backfill_does_not_double_emit_on_second_open(self, tmp_path):
         """Opening the same DB twice should not emit duplicate CollectionCreated
@@ -543,7 +550,11 @@ class TestEventSourcedCollectionBackfill:
         # First Catalog open -- backfill fires, event emitted.
         cat1 = Catalog(catalog_dir=catalog_dir, db_path=db_path)
         count_after_first = _count_events(events_path)
-        assert count_after_first >= 1, "first open must emit the event"
+        # nexus-oe2i: == 1 (first open emits exactly one event for
+        # the seeded legacy collection).
+        assert count_after_first == 1, (
+            f"first open must emit exactly one event; got {count_after_first}"
+        )
 
         # Second Catalog open -- backfill SELECT sees the row already exists;
         # no INSERT, so _backfilled_collections is empty, so no event.
@@ -829,3 +840,60 @@ class TestManifestWriteBatchHook:
             assert pos == i
         assert rows[0][1] == "a" * 64
         assert rows[4][1] == "e" * 64
+
+
+# ── nexus-oe2i (RDR-108 Phase 4 review TV-low): manifest-authoritative ──────
+
+
+class TestManifestIsAuthoritative:
+    """nexus-oe2i: lock the contract that under D2 the catalog
+    document_chunks manifest is the single source of truth for
+    "which chashes belong to which doc, in what order." If a
+    future code change introduces a path that reads doc structure
+    from chunk metadata (the legacy doc_id/chunk_index fields)
+    OR diverges the manifest from a metadata fallback, this test
+    surfaces the divergence.
+    """
+
+    def test_manifest_wins_when_manifest_disagrees_with_metadata(self, tmp_path):
+        """Seed a Document with a manifest pointing at one set of
+        chashes; seed T3 (here: chunk metadata via the synthesizer
+        path) carrying DIFFERENT chash values. The manifest read
+        APIs must return the manifest's view, not the metadata's.
+        """
+        cat = _make_catalog(tmp_path)
+        _insert_doc(cat, "1.1.7", "code__authoritative")
+        manifest_chash = "a" * 64
+        cat.write_manifest("1.1.7", [_make_chunk(manifest_chash, 0)])
+
+        # The manifest API reports the manifest, NOT any conflicting
+        # chunk-metadata view.
+        rows = cat.get_manifest("1.1.7")
+        assert len(rows) == 1
+        assert rows[0].chash == manifest_chash
+        assert rows[0].position == 0
+
+        # docs_for_chashes resolves only the manifest's chash to
+        # the doc; a stray chash that's not in the manifest does
+        # NOT resolve.
+        result = cat.docs_for_chashes([manifest_chash, "z" * 64])
+        assert result[manifest_chash] == ["1.1.7"]
+        assert "z" * 64 not in result, (
+            "manifest is authoritative; a chash absent from the "
+            "manifest must not resolve via this API even if some "
+            "chunk metadata claims membership"
+        )
+
+    def test_manifest_for_unregistered_doc_returns_empty(self, tmp_path):
+        """A doc_id that has no manifest row returns an empty list
+        regardless of whether the doc itself exists in the
+        documents table. Manifest-presence is the load-bearing
+        signal, not document-existence.
+        """
+        cat = _make_catalog(tmp_path)
+        _insert_doc(cat, "1.1.8", "code__test")
+        # NO write_manifest call.
+        assert cat.get_manifest("1.1.8") == []
+        # And docs_for_chashes won't find any chash mapping to this
+        # doc either.
+        assert cat.docs_for_chashes(["x" * 64]) == {}
