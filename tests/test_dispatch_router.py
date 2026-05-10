@@ -95,6 +95,11 @@ class TestAutoMode:
     def test_qwen_default_operators_route_to_qwen(self, op: str) -> None:
         assert pick_dispatcher(op) == "qwen"
 
+    @pytest.mark.skipif(
+        not CLAUDE_OPERATORS_PINNED,
+        reason="CLAUDE_OPERATORS_PINNED is empty after extract was promoted to "
+        "qwen-default; placeholder remains for future bench-driven pins",
+    )
     @pytest.mark.parametrize("op", sorted(CLAUDE_OPERATORS_PINNED))
     def test_claude_pinned_operators_route_to_claude(self, op: str) -> None:
         assert pick_dispatcher(op) == "claude"
@@ -180,10 +185,12 @@ class TestBundleRouting:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("NEXUS_DISPATCH_BACKEND", "auto")
-        # extract is Claude-pinned; the bundle includes it → all Claude
-        # so the bundle stays a single subprocess.
+        # Pin one operator to Claude via env. The bundle then contains
+        # one Claude-routed step; conservative routing pulls the whole
+        # bundle to Claude so it stays a single subprocess.
+        monkeypatch.setenv("NEXUS_DISPATCH_CLAUDE_OPERATORS", "verify")
         assert (
-            pick_dispatcher_for_bundle(["extract", "rank", "summarize"])
+            pick_dispatcher_for_bundle(["verify", "rank", "summarize"])
             == "claude"
         )
 
@@ -197,10 +204,8 @@ class TestBundleRouting:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("NEXUS_DISPATCH_BACKEND", "qwen")
-        # Even bundles that include extract (normally Claude-pinned)
-        # go to qwen when the global override is qwen.
         assert (
-            pick_dispatcher_for_bundle(["extract", "summarize"]) == "qwen"
+            pick_dispatcher_for_bundle(["summarize", "compare"]) == "qwen"
         )
 
     def test_empty_bundle_defaults_to_claude(self) -> None:

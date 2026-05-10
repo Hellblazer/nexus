@@ -54,6 +54,29 @@ def _restore_structlog_after_test():
 
 
 @pytest.fixture(autouse=True)
+def _isolate_dispatch_routing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Strip NEXUS_DISPATCH_* env so tests don't inherit operator mode.
+
+    The dispatch router consults ``NEXUS_DISPATCH_BACKEND`` and the
+    ``NEXUS_DISPATCH_{QWEN,CLAUDE}_OPERATORS`` env sets at every call.
+    If the test runner inherits ``NEXUS_DISPATCH_BACKEND=auto`` from a
+    shell where the operator activated qwen routing, every bundle test
+    that mocks ``claude_dispatch`` silently switches to the qwen path
+    and the assertion ``patch.object(..., 'claude_dispatch', fake)``
+    never fires. The pre-existing shell env can leak the operator's
+    production routing into the suite. Strip them at session start;
+    individual tests that exercise routing opt in via
+    ``monkeypatch.setenv`` as they already do.
+    """
+    for var in (
+        "NEXUS_DISPATCH_BACKEND",
+        "NEXUS_DISPATCH_QWEN_OPERATORS",
+        "NEXUS_DISPATCH_CLAUDE_OPERATORS",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_t1_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Force tests onto the explicit-isolation T1 path.
 
