@@ -845,15 +845,41 @@ def query(
                 ],
             }
 
-        # Group by document: use doc_id (post-prune stable identity)
-        # then content_hash, title, _display_path, source_path as fallbacks.
-        # nexus-1qed: doc_id sits at the top so chunks of the same
-        # document group together even after source_path is pruned.
+        # Group by document. RDR-108 Phase 4b (nexus-kosc): post-Phase-3
+        # chunks no longer carry ``doc_id`` in their metadata, so the
+        # canonical mapping is now ``chunk_text_hash -> [doc_id, ...]``
+        # via ``Catalog.docs_for_chashes``. Fall back to the legacy
+        # metadata keys (``content_hash``, ``title``, ``_display_path``,
+        # ``source_path``, chunk id) for chunks the catalog cannot
+        # resolve (catalog absent, orphan chunks, pre-Phase-A chunks).
+        chash_to_doc: dict[str, str] = {}
+        try:
+            cat = _get_catalog()
+        except Exception:
+            cat = None
+        if cat is not None:
+            chashes_seen = sorted({
+                r.metadata.get("chunk_text_hash", "")
+                for r in results
+                if r.metadata.get("chunk_text_hash")
+            })
+            if chashes_seen:
+                try:
+                    by_chash = cat.docs_for_chashes(chashes_seen)
+                except Exception:
+                    by_chash = {}
+                # Same chash can appear in multiple docs (identical
+                # content); pick the first deterministically so chunks
+                # group consistently within a single response.
+                for chash, doc_ids in by_chash.items():
+                    if doc_ids:
+                        chash_to_doc[chash] = sorted(doc_ids)[0]
         docs: dict[str, dict] = {}  # doc_key → {meta, snippets, best_distance}
         for r in results:
             meta = r.metadata
             doc_key = (
-                meta.get("doc_id")
+                chash_to_doc.get(meta.get("chunk_text_hash", ""))
+                or meta.get("doc_id")
                 or meta.get("content_hash")
                 or meta.get("title")
                 or meta.get("_display_path")
@@ -968,10 +994,11 @@ def store_put(
         # RDR-101 Phase 3 PR δ Stage B.5: pre-register the catalog entry
         # so the T3 chunk can carry the resulting tumbler as ``doc_id``
         # at write-time. Same pattern as the CLI ``nx store put`` (B.4).
-        # The chunk_chroma_id is deterministic (sha256 of "{coll}:{title}"),
-        # matching ``T3Database.put``'s internal derivation.
+        # chunk_chroma_id mirrors ``T3Database.put``'s natural-id
+        # derivation (chunk_text_hash[:32] per RDR-108 D1 / nexus-kmb6;
+        # for single-chunk MCP docs chunk_text == content).
         import hashlib as _hl
-        chunk_chroma_id = _hl.sha256(f"{col_name}:{title}".encode()).hexdigest()[:16]
+        chunk_chroma_id = _hl.sha256(content.encode()).hexdigest()[:32]
         catalog_doc_id = ""
         try:
             from nexus.commands.store import _catalog_store_hook
@@ -1079,7 +1106,7 @@ def store_get(doc_id: str, collection: str = "knowledge") -> str:
     Use after store_list or search to read the complete document.
 
     Args:
-        doc_id: Exact 16-char content-hash document ID (from store_list / store_put / search),
+        doc_id: Exact 32-char content-hash document ID (from store_list / store_put / search),
                 OR an exact title (looked up via metadata).
         collection: Collection name or prefix (default: knowledge)
     """
@@ -1090,10 +1117,10 @@ def store_get(doc_id: str, collection: str = "knowledge") -> str:
         col_name = t3_collection_name(collection, t3=t3)
         entry = t3.get_by_id(col_name, doc_id)
         if entry is None:
-            # Title fallback: 16 lowercase hex chars looks like a hash;
-            # anything else, try treating it as an exact title (matches what
-            # store_list / search display, since hashes aren't surfaced there).
-            looks_like_hash = len(doc_id) == 16 and all(c in "0123456789abcdef" for c in doc_id)
+            # Title fallback: 32 lowercase hex chars looks like a hash
+            # (chunk_text_hash[:32] per RDR-108 D1); anything else, try
+            # treating it as an exact title.
+            looks_like_hash = len(doc_id) == 32 and all(c in "0123456789abcdef" for c in doc_id)
             if not looks_like_hash:
                 ids = t3.find_ids_by_title(col_name, doc_id)
                 if len(ids) == 1:
@@ -1102,10 +1129,10 @@ def store_get(doc_id: str, collection: str = "knowledge") -> str:
                     return (
                         f"Multiple documents with title {doc_id!r} in {col_name}: "
                         + ", ".join(ids[:5]) + (" …" if len(ids) > 5 else "")
-                        + " — pass a 16-char content-hash to disambiguate."
+                        + ". Pass a 32-char content-hash to disambiguate."
                     )
         if entry is None:
-            return f"Not found: {doc_id!r} in {col_name} (pass a 16-char content-hash from store_list/store_put/search, or an exact title)"
+            return f"Not found: {doc_id!r} in {col_name} (pass a 32-char content-hash from store_list/store_put/search, or an exact title)"
         title = entry.get("title", "")
         tags = entry.get("tags", "")
         indexed_at = (entry.get("indexed_at") or "")[:10]
@@ -1343,7 +1370,7 @@ def store_list(
         lines: list[str] = [f"{col_name}  (showing {offset + 1}-{offset + len(page)} of {total})"]
         from datetime import datetime, timedelta  # noqa: PLC0415
         for e in page:
-            doc_id = e.get("id", "")[:16]
+            doc_id = e.get("id", "")[:32]
             title = (e.get("title") or "")[:40]
             tags = e.get("tags") or ""
             ttl_days = e.get("ttl_days", 0)
@@ -1401,9 +1428,10 @@ def _store_list_docs(t3, col_name: str, total: int) -> str:
     # normalize() so the read always returned empty. Removed in nexus-59j0.
     lines = [f"{col_name}  ({len(docs)} documents, {total} chunks)"]
     for i, (h, d) in enumerate(docs, 1):
-        # 16-char content-hash prefix surfaces the doc_id store_get expects;
-        # without it the natural list → get flow had no path from title to hash.
-        doc_id = (d.get("id") or h)[:16]
+        # 32-char content-hash (chunk_text_hash[:32], RDR-108 D1) is the
+        # doc_id that store_get accepts. Surfaced here so the list -> get
+        # flow has a usable handle.
+        doc_id = (d.get("id") or h)[:32]
         title = (d.get("title") or "untitled")[:50]
         chunks = chunks_by_hash.get(h, "?")
         indexed = (d.get("indexed_at") or "")[:10]

@@ -661,15 +661,20 @@ class T3Database:
     ) -> str:
         """Upsert *content* into *collection*. Returns the document ID.
 
-        *ttl_days* = 0 means permanent. Expiry is no longer stored as a
-        separate ``expires_at`` field — it's computed Python-side via
-        :func:`nexus.metadata_schema.is_expired` from
-        ``indexed_at + ttl_days``.
+        *ttl_days* = 0 means permanent. Expiry is computed Python-side
+        via :func:`nexus.metadata_schema.is_expired` from
+        ``indexed_at + ttl_days``; no separate ``expires_at`` field.
 
-        Note: The document ID is derived from ``collection:title``. Calling put()
-        with an empty title will overwrite any previous empty-title document in the
-        same collection. Always provide a meaningful title to avoid unintentional
-        overwrites.
+        Note (RDR-108 D1 / nexus-kmb6): The document ID is the
+        content-derived natural ID ``sha256(content).hexdigest()[:32]``.
+        Identical content under any title in this collection collapses
+        to one T3 record. Title is metadata only and does not influence
+        identity. The second ``put`` of the same content with a
+        different title overwrites the first put's ``title`` metadata
+        on the shared row, so ``find_ids_by_title`` will return only
+        the most recent title; if you need both titles to remain
+        searchable, store them under distinct content (or rely on the
+        catalog manifest for cross-title bookkeeping).
 
         MCP-stored docs are single-chunk by definition; this routes through
         :func:`nexus.metadata_schema.make_chunk_metadata` so every
@@ -687,7 +692,12 @@ class T3Database:
         """
         from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415
 
-        doc_id = hashlib.sha256(f"{collection}:{title}".encode()).hexdigest()[:16]
+        # MCP-stored docs are single-chunk: chunk_text == content, so the
+        # natural ID (chunk_text_hash[:32], per RDR-108 D1 / nexus-kmb6)
+        # equals content_hash[:32]. Identical content under any title in
+        # this collection collapses to one T3 record by design.
+        content_hash = hashlib.sha256(content.encode()).hexdigest()
+        doc_id = content_hash[:32]
         now_iso = datetime.now(UTC).isoformat()
 
         # Determine whether this collection uses CCE.  When a voyage_api_key
@@ -714,13 +724,10 @@ class T3Database:
                 content_type = ct
                 break
 
-        # MCP-stored docs are single-chunk: chunk_text_hash matches
-        # content_hash because content == chunk text.
-        content_hash = hashlib.sha256(content.encode()).hexdigest()
-        # RDR-101 Phase 5c dropped store_type, corpus, git_meta. Title kept
-        # — find_ids_by_title is the load-bearing reader for nx store
-        # delete --title and MCP store_get title-fallback. RDR-108 Phase 3
-        # dropped chunk_index, chunk_count, doc_id — catalog manifest is
+        # RDR-101 Phase 5c dropped store_type, corpus, git_meta. Title
+        # kept (find_ids_by_title is load-bearing for nx store delete
+        # --title and MCP store_get title-fallback). RDR-108 Phase 3
+        # dropped chunk_index, chunk_count, doc_id; catalog manifest is
         # authoritative.
         metadata = make_chunk_metadata(
             content_type=content_type,
@@ -1205,68 +1212,67 @@ class T3Database:
             self._delete_batch(col, collection_name, ids)
         return len(ids)
 
-    def ids_for_doc_id(self, collection_name: str, doc_id: str) -> list[str]:
-        """Return all chunk IDs for a given catalog ``doc_id``. No content fetch.
+    def ids_for_doc_id(
+        self,
+        collection_name: str,
+        doc_id: str,
+        *,
+        catalog: object,
+    ) -> list[str]:
+        """Return the T3 chunk IDs for a catalog ``doc_id`` (RDR-108
+        Phase 4b / nexus-kosc).
 
-        Companion to :meth:`ids_for_source`; switches the chunk-lookup
-        identity field from ``source_path`` to ``doc_id`` (RDR-101 Phase 4
-        reader migration). Paginates ``col.get()`` to respect the ChromaDB
-        Cloud 300-record limit. Returns empty list if the collection does
-        not exist.
+        Resolves via the catalog's ``document_chunks`` manifest:
+        ``Catalog.get_chunk_chashes(doc_id)`` returns the ordered chashes
+        that compose the document; each chunk's natural ID is
+        ``chash[:32]`` per RDR-108 D1. ``col.get(ids=...)`` filters the
+        list to chunks actually present in T3 (so a stale manifest entry
+        for a since-deleted chunk does not surface). Returns empty list
+        if the collection does not exist or the manifest has no rows.
 
-        **RDR-108 Phase 3 caveat (nexus-bdag)**: chunks written after
-        Phase 3 do not carry ``doc_id`` in their metadata, so the
-        ``where={"doc_id": ...}`` filter returns empty for them.
-        Callers that need the doc_id → chunk_id mapping for Phase-3
-        chunks should consult the catalog ``document_chunks`` manifest
-        (``Catalog.get_manifest(doc_id)``) and resolve chash → chunk
-        via ``chash_index`` instead. RDR-108 Phase 4 retargets every
-        in-tree caller (prune paths, search filters, aspect readers)
-        to the manifest-based lookup; this method is retained for
-        legacy reads against pre-Phase-3 chunks.
+        ``catalog`` is required (no metadata fallback): post-Phase-3
+        chunks no longer carry ``doc_id`` in their metadata, so the
+        prior ``where={"doc_id": ...}`` query returned empty for them.
         """
         try:
             col = self._client_for(collection_name).get_collection(collection_name)
         except _ChromaNotFoundError:
             return []
-        ids: list[str] = []
-        offset = 0
+        chashes = catalog.get_chunk_chashes(doc_id)
+        if not chashes:
+            return []
+        candidate_ids = [c[:32] for c in chashes]
+        # ChromaDB ``get(ids=...)`` returns only ids actually present in
+        # the collection. Page in MAX_RECORDS_PER_WRITE batches so large
+        # documents stay within the per-request quota.
         page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
-        while True:
-            result = _chroma_with_retry(
-                col.get,
-                where={"doc_id": doc_id},
-                include=[],
-                limit=page_limit,
-                offset=offset,
-            )
-            page_ids = result["ids"]
-            ids.extend(page_ids)
-            offset += len(page_ids)
-            if len(page_ids) < page_limit:
-                break
-        return ids
+        present: list[str] = []
+        for i in range(0, len(candidate_ids), page_limit):
+            batch = candidate_ids[i : i + page_limit]
+            result = _chroma_with_retry(col.get, ids=batch, include=[])
+            present.extend(result["ids"])
+        return present
 
-    def delete_by_doc_id(self, collection_name: str, doc_id: str) -> int:
-        """Delete all chunks for a given catalog ``doc_id``. Returns count.
+    def delete_by_doc_id(
+        self,
+        collection_name: str,
+        doc_id: str,
+        *,
+        catalog: object,
+    ) -> int:
+        """Delete all chunks for a catalog ``doc_id``. Returns count.
 
-        Companion to :meth:`delete_by_source` (RDR-101 Phase 4 reader
-        migration). Uses paginated ``col.get()`` keyed on ``doc_id`` to
-        avoid the ChromaDB Cloud 300-record truncation limit.
-
-        **RDR-108 Phase 3 caveat (nexus-bdag)**: chunks written after
-        Phase 3 do not carry ``doc_id`` in their metadata; this method
-        silently returns 0 for those chunks. The Phase 4 prune rewrite
-        (nexus-mmf5 family) consults the catalog manifest to resolve
-        chunk IDs by chash and deletes via ``_delete_batch`` directly.
-        Pre-Phase-3 chunks (still present in T3 until the operator runs
-        ``nx t3 reidentify --all-collections``) keep working unchanged.
+        Resolves chunk IDs via :meth:`ids_for_doc_id` (which consults
+        the catalog manifest, RDR-108 Phase 4b / nexus-kosc) then
+        deletes them in MAX_RECORDS_PER_WRITE batches. ``catalog`` is
+        required for the same reason it is on ``ids_for_doc_id``: post-
+        Phase-3 chunks no longer carry ``doc_id`` in their metadata.
         """
         try:
             col = self._client_for(collection_name).get_collection(collection_name)
         except _ChromaNotFoundError:
             return 0
-        ids = self.ids_for_doc_id(collection_name, doc_id)
+        ids = self.ids_for_doc_id(collection_name, doc_id, catalog=catalog)
         if ids:
             self._delete_batch(col, collection_name, ids)
         return len(ids)

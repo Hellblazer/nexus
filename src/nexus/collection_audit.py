@@ -411,24 +411,18 @@ def compute_chash_coverage(collection: str) -> ChashCoverage | None:
 
         # Sample missing chunks only when there's actually a gap. Bounded
         # at 5 to keep the audit cheap; the operator uses nx collection
-        # backfill-hash for the real fix.
+        # backfill-hash for the real fix. RDR-108 Phase 4 (nexus-z1mu):
+        # one set-difference between T3 chunk IDs and indexed chash[:32]
+        # values replaces the per-page IN-list probe.
         missing: list[str] = []
         if ratio < 1.0:
             try:
-                # Pull up to MAX_QUERY_RESULTS=300 chunks from T3 and
-                # cross-check against the chash_index. One get() is
-                # bounded by the ChromaDB quota.
-                page = col.get(limit=300, include=["metadatas"])
+                page = col.get(limit=300, include=[])
                 ids = page.get("ids") or []
-                metadatas = page.get("metadatas") or []
-                if ids and metadatas:
-                    indexed_chunk_chroma_ids = (
-                        idx.chunk_chroma_ids_present_in_collection(
-                            collection, ids,
-                        )
-                    )
+                if ids:
+                    indexed_chashes = idx.chashes_for_collection(collection)
                     for cid in ids:
-                        if cid not in indexed_chunk_chroma_ids:
+                        if cid not in indexed_chashes:
                             missing.append(cid)
                         if len(missing) >= 5:
                             break

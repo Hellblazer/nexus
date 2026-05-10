@@ -106,11 +106,12 @@ def put_cmd(
 
     # RDR-101 Phase 3 PR δ Stage B.4: pre-register the catalog entry
     # so the T3 chunk can carry the resulting tumbler as ``doc_id``
-    # at write-time. The chunk_chroma_id (sha256 of "{collection}:{title}")
-    # is deterministic, so we can compute it here and pass to the hook
-    # for legacy meta.doc_id dedup. The hook returns the catalog
-    # tumbler string (or "" when the catalog is absent).
-    chunk_chroma_id = hashlib.sha256(f"{col_name}:{title}".encode()).hexdigest()[:16]
+    # at write-time. chunk_chroma_id mirrors ``T3Database.put``'s
+    # natural-id derivation (chunk_text_hash[:32] per RDR-108 D1 /
+    # nexus-kmb6; for single-chunk MCP docs chunk_text == content).
+    # The hook returns the catalog tumbler string (or "" when the
+    # catalog is absent).
+    chunk_chroma_id = hashlib.sha256(content.encode()).hexdigest()[:32]
     catalog_doc_id = _catalog_store_hook(
         title=title, doc_id=chunk_chroma_id, collection_name=col_name,
     )
@@ -142,12 +143,18 @@ def _catalog_store_hook(title: str, doc_id: str, collection_name: str) -> str:
     Returns the catalog ``Document.doc_id`` (Tumbler string) so the
     caller can pass it to ``T3Database.put()`` as ``catalog_doc_id``
     for chunk-write-time embedding (RDR-101 Phase 3 PR δ Stage B.4).
-    Returns ``""`` when the catalog is absent or an error occurs — the
-    schema funnel drops empty doc_id at the boundary.
+    Returns ``""`` when the catalog is absent or an error occurs --
+    the schema funnel drops empty doc_id at the boundary.
 
-    ``doc_id`` here is the legacy T3 chunk Chroma natural-id
-    (sha256-of-collection-and-title), used for dedup against the
-    legacy ``meta.doc_id`` mapping.
+    ``doc_id`` here is the T3 chunk natural-id (RDR-108 D1 / nexus-kmb6:
+    ``sha256(content)[:32]``). It is consulted for legacy
+    ``meta.doc_id`` dedup via ``cat.by_doc_id``: catalog entries
+    written before Phase 4 stored the legacy 16-char sha256-of-
+    collection-and-title under ``meta.doc_id``, so this lookup misses
+    on those legacy entries and the hook re-registers. That is the
+    intentional behavior for the upgrade window; a follow-up catalog
+    GC pass (out of scope for nexus-mmf5) consolidates duplicates
+    once all callers have been updated.
     """
     try:
         from nexus.catalog import Catalog
@@ -222,7 +229,7 @@ def list_cmd(collection: str, limit: int, offset: int, docs: bool) -> None:
     click.echo(f"{col_name}  (showing {shown_start}-{shown_end} of {total})\n")
     from datetime import datetime, timedelta  # noqa: PLC0415
     for e in entries:
-        doc_id = e.get("id", "")[:16]
+        doc_id = e.get("id", "")[:32]
         title = (e.get("title") or "")[:40]
         tags = e.get("tags") or ""
         ttl_days = e.get("ttl_days", 0)
@@ -293,12 +300,13 @@ def _list_documents(db: T3Database, col_name: str) -> None:
 def get_cmd(doc_id: str, collection: str, json_out: bool) -> None:
     """Retrieve a T3 knowledge entry by its document ID.
 
-    DOC_ID is the 16-char hex ID shown by 'nx store list'.
+    DOC_ID is the 32-char content-hash ID shown by 'nx store list'
+    (chunk_text_hash[:32] per RDR-108 D1).
 
     \b
     Examples:
-      nx store get a1b2c3d4e5f6g7h8
-      nx store get a1b2c3d4e5f6g7h8 --collection code__myrepo --json
+      nx store get a1b2c3d4e5f6789012345678901234ab
+      nx store get a1b2c3d4e5f6789012345678901234ab --collection code__myrepo --json
     """
     db = _t3()
     col_name = t3_collection_name(collection, t3=db)
@@ -352,7 +360,7 @@ def _reap_catalog_for_doc_ids(doc_ids: list[str]) -> None:
 @click.option("--collection", "-c", required=True,
               help="Collection name (required)")
 @click.option("--id", "doc_id", default=None,
-              help="Exact 16-char document ID from 'nx store list'")
+              help="Exact 32-char content-hash document ID from 'nx store list'")
 @click.option("--title", default=None,
               help="Exact title metadata match (deletes all matching chunks)")
 @click.option("--yes", "-y", is_flag=True, default=False,
@@ -362,6 +370,13 @@ def delete_cmd(collection: str, doc_id: str | None, title: str | None, yes: bool
 
     Use --id for a single known entry, --title to delete all chunks of a document.
     To remove an entire collection use: nx collection delete <name>
+
+    Note (RDR-108 D1): T3 chunk natural IDs are content-derived
+    (sha256(text)[:32]). Two documents with different titles but
+    identical content share one Chroma row; deleting one --title
+    removes the shared row, which also removes the other title's
+    content. If you need both titles to remain, store them under
+    distinct content.
     """
     if not doc_id and not title:
         raise click.UsageError("provide --id or --title")

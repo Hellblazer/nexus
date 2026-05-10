@@ -1328,31 +1328,46 @@ def test_index_threads_on_progress(indexer, sample_pdf, sample_md, monkeypatch, 
 
 
 def test_stale_chunk_pruning_deletes_old_ids(sample_md, monkeypatch, voyage_client):
+    """RDR-108 D1 (nexus-kmb6): chunk natural ID is
+    ``chunk_text_hash[:32]``. Stale-chunk pruning deletes T3 chunks
+    whose ID is no longer in the current upsert set (i.e. their text
+    no longer appears in this document)."""
     set_credentials(monkeypatch)
-    content_hash = hashlib.sha256(sample_md.read_bytes()).hexdigest()
-    prefix = content_hash[:16]
+    new_chunk_texts = [f"chunk text {i}" for i in range(3)]
+    new_ids = {
+        hashlib.sha256(t.encode()).hexdigest()[:32] for t in new_chunk_texts
+    }
+    stale_ids = {
+        hashlib.sha256(f"old text {i}".encode()).hexdigest()[:32]
+        for i in range(2)
+    }
     mock_col = MagicMock()
     mock_col.get.side_effect = [
-        {"ids": [f"{prefix}_0"], "metadatas": [{"content_hash": "old_hash", "embedding_model": "voyage-context-3"}]},
-        {"ids": [f"{prefix}_{i}" for i in range(5)]},
+        # First call: staleness check (one prior chunk with old content_hash).
+        {"ids": [next(iter(stale_ids))],
+         "metadatas": [{"content_hash": "old_hash",
+                        "embedding_model": "voyage-context-3"}]},
+        # Second call: prune scan returns the union of new + stale IDs.
+        {"ids": list(new_ids | stale_ids)},
     ]
     captured_deletes: list = []
     mock_col.delete.side_effect = lambda ids: captured_deletes.extend(ids)
     mock_t3 = MagicMock()
     mock_t3.get_or_create_collection.return_value = mock_col
     chunks = []
-    for i in range(3):
+    for i, text in enumerate(new_chunk_texts):
         mc = MagicMock()
-        mc.text = f"chunk text {i}"
+        mc.text = text
         mc.chunk_index = i
-        mc.metadata = {"chunk_start_char": 0, "chunk_end_char": 10, "page_number": 0, "header_path": "H"}
+        mc.metadata = {"chunk_start_char": 0, "chunk_end_char": 10,
+                       "page_number": 0, "header_path": "H"}
         chunks.append(mc)
     with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
         with patch("nexus.doc_indexer.SemanticMarkdownChunker") as chk_cls:
             with patch("voyageai.Client", return_value=voyage_client):
                 chk_cls.return_value.chunk.return_value = chunks
                 index_markdown(sample_md, corpus="docs")
-    assert set(captured_deletes) == {f"{prefix}_3", f"{prefix}_4"}
+    assert set(captured_deletes) == stale_ids
 
 
 @pytest.fixture

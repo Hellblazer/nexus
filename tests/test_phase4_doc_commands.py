@@ -57,9 +57,7 @@ def _seed_catalog_and_t3(tmp_path: Path):
     )
 
     chash_index = ChashIndex(tmp_path / "t2.db")
-    chash_index.upsert(
-        chash=chash, collection="knowledge__phase4", chunk_chroma_id="doc:0:chunk:0",
-    )
+    chash_index.upsert(chash=chash, collection="knowledge__phase4")
     return cat, t3, chash_index, chash
 
 
@@ -180,10 +178,13 @@ class TestCheckExtensionsResolvesChashToDocId:
         assert result.exit_code == 0, result.output
         assert captured, "chunk_grounded_in was never called"
         seen_doc_id, _, _ = captured[0]
-        # Critical: the DocId passed must be the resolved doc_id, NOT the chash.
-        assert seen_doc_id == "doc:0:chunk:0", (
-            f"expected resolved doc_id, got {seen_doc_id!r} "
-            f"(this is the RDR-083 v1 inertness bug)"
+        # Critical: the DocId passed must be the resolved doc_id, NOT the
+        # raw chash hex. RDR-108 Phase 4b (nexus-kosc): doc_id is now
+        # ``chash[:32]`` (the chunk natural ID under D1) rather than the
+        # legacy chash_index.chunk_chroma_id column.
+        assert seen_doc_id == chash[:32], (
+            f"expected resolved doc_id (chash[:32]={chash[:32]!r}), "
+            f"got {seen_doc_id!r}"
         )
 
     def test_experimental_marker_and_warning_removed(self):

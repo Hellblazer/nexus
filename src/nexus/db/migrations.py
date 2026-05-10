@@ -2359,6 +2359,43 @@ def _catalog_db_path_from_conn(conn: sqlite3.Connection) -> Path:
     return Path.home() / ".config" / "nexus" / "catalog" / ".catalog.db"
 
 
+def _drop_chash_index_chunk_chroma_id(conn: sqlite3.Connection) -> None:
+    """Drop the ``chash_index.chunk_chroma_id`` column (RDR-108 Phase 4a /
+    nexus-mmf5).
+
+    Under RDR-108 D1 (nexus-kmb6) the chunk natural ID is
+    ``chunk_text_hash[:32]`` -- a pure function of ``chash`` -- so the
+    denormalized column has no remaining readers (nexus-z1mu removed
+    the audit's only reader; nexus-kosc retargeted the catalog_spans
+    resolver to derive ``hex_chash[:32]`` directly).
+
+    Idempotent in three states:
+      1. Table absent (fresh install): no-op (the create-if-not-exists
+         path in ``ChashIndex._init_schema`` already uses the new
+         schema).
+      2. Table present without ``chunk_chroma_id`` (already migrated):
+         no-op.
+      3. Table present with ``chunk_chroma_id``: drop the column.
+
+    SQLite 3.35+ supports ``ALTER TABLE ... DROP COLUMN`` natively. The
+    primary key ``(chash, physical_collection)`` and the secondary
+    index ``idx_chash_index_collection`` are unaffected.
+    """
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='chash_index'"
+    ).fetchone()
+    if row is None:
+        return
+    cols = {
+        r[1]
+        for r in conn.execute("PRAGMA table_info(chash_index)").fetchall()
+    }
+    if "chunk_chroma_id" not in cols:
+        return
+    conn.execute("ALTER TABLE chash_index DROP COLUMN chunk_chroma_id")
+    conn.commit()
+
+
 def _migrate_document_aspects_pk_via_apply_pending(conn: sqlite3.Connection) -> None:
     """Wrapper for ``apply_pending`` compatibility.
 
@@ -2564,6 +2601,11 @@ MIGRATIONS: list[Migration] = [
         "4.30.0",
         "Migrate aspect_extraction_queue PK to doc_id (RDR-108 Phase 1c, nexus-je0b)",
         _migrate_aspect_queue_pk_via_apply_pending,
+    ),
+    Migration(
+        "4.30.0",
+        "Drop chash_index.chunk_chroma_id column (RDR-108 Phase 4a, nexus-mmf5)",
+        _drop_chash_index_chunk_chroma_id,
     ),
 ]
 
