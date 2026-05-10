@@ -668,3 +668,116 @@ class TestAttachDisplayPaths:
         # Must not raise.
         _attach_display_paths([r], catalog=catalog)
         assert "_display_path" not in r.metadata
+
+
+# ── nexus-rehf: _attach_doc_ids_from_catalog (RDR-108 Phase 4 review D-H1+H2) ─
+
+
+class TestAttachDocIdsFromCatalog:
+    """nexus-rehf (RDR-108 Phase 4 review D-H1+H2): the search
+    orchestrator must resolve ``doc_id`` via the catalog manifest and
+    inject it into ``r.metadata["doc_id"]`` BEFORE downstream
+    consumers (apply_link_boost, _attach_display_paths) read it.
+    Phase 3 (nexus-bdag) removed doc_id from chunk metadata; without
+    this attach step both downstream functions silently no-op on
+    Phase-3 chunks.
+    """
+
+    def _result(self, *, chunk_text_hash: str = "", doc_id: str = "") -> SearchResult:
+        from nexus.types import SearchResult
+        meta: dict = {}
+        if chunk_text_hash:
+            meta["chunk_text_hash"] = chunk_text_hash
+        if doc_id:
+            meta["doc_id"] = doc_id
+        return SearchResult(
+            id=f"r-{chunk_text_hash[:8] or doc_id or 'x'}",
+            content="x", distance=0.1, collection="docs__c", metadata=meta,
+        )
+
+    def test_no_catalog_is_noop(self):
+        from nexus.search_engine import _attach_doc_ids_from_catalog
+        r = self._result(chunk_text_hash="a" * 64)
+        _attach_doc_ids_from_catalog([r], catalog=None)
+        assert "doc_id" not in r.metadata
+
+    def test_no_chashes_is_noop(self):
+        from nexus.search_engine import _attach_doc_ids_from_catalog
+        catalog = MagicMock()
+        r = self._result()  # no chunk_text_hash
+        _attach_doc_ids_from_catalog([r], catalog=catalog)
+        catalog.docs_for_chashes.assert_not_called()
+        assert "doc_id" not in r.metadata
+
+    def test_injects_doc_id_from_manifest(self):
+        """WITH TEETH: a Phase-3 chunk (no doc_id in metadata, only
+        chunk_text_hash) gets its catalog doc_id injected. Reverting
+        the helper or skipping the orchestrator wiring breaks this.
+        """
+        from nexus.search_engine import _attach_doc_ids_from_catalog
+        chash = "a" * 64
+        catalog = MagicMock()
+        catalog.docs_for_chashes.return_value = {chash: ["1.1.5"]}
+        r = self._result(chunk_text_hash=chash)
+        _attach_doc_ids_from_catalog([r], catalog=catalog)
+        assert r.metadata["doc_id"] == "1.1.5"
+        catalog.docs_for_chashes.assert_called_once_with([chash])
+
+    def test_preserves_existing_doc_id_legacy_fallback(self):
+        """Pre-Phase-3 chunks may still carry doc_id in metadata; the
+        helper must NOT overwrite the legacy field, only fill the gap."""
+        from nexus.search_engine import _attach_doc_ids_from_catalog
+        chash = "b" * 64
+        catalog = MagicMock()
+        catalog.docs_for_chashes.return_value = {chash: ["MANIFEST-doc"]}
+        r = self._result(chunk_text_hash=chash, doc_id="LEGACY-doc")
+        _attach_doc_ids_from_catalog([r], catalog=catalog)
+        assert r.metadata["doc_id"] == "LEGACY-doc"
+
+    def test_chash_with_no_manifest_entry_leaves_field_unset(self):
+        from nexus.search_engine import _attach_doc_ids_from_catalog
+        catalog = MagicMock()
+        catalog.docs_for_chashes.return_value = {}  # nothing matched
+        r = self._result(chunk_text_hash="c" * 64)
+        _attach_doc_ids_from_catalog([r], catalog=catalog)
+        assert "doc_id" not in r.metadata
+
+    def test_catalog_exception_does_not_break_search(self):
+        """Best-effort: a manifest-lookup failure is logged-and-
+        swallowed; results pass through with no doc_id (downstream
+        consumers degrade gracefully)."""
+        from nexus.search_engine import _attach_doc_ids_from_catalog
+        catalog = MagicMock()
+        catalog.docs_for_chashes.side_effect = RuntimeError("catalog dead")
+        r = self._result(chunk_text_hash="d" * 64)
+        # Must not raise.
+        _attach_doc_ids_from_catalog([r], catalog=catalog)
+        assert "doc_id" not in r.metadata
+
+    def test_link_boost_now_works_on_phase3_chunks(self):
+        """End-to-end contract: a Phase-3 chunk (no doc_id in metadata)
+        whose catalog doc has outgoing links MUST receive a link boost
+        after the search orchestrator runs. Reverting the helper
+        wiring in search_cross_corpus drops this back to silently-no-op.
+        """
+        from nexus.scoring import apply_link_boost
+        from nexus.search_engine import _attach_doc_ids_from_catalog
+
+        chash = "e" * 64
+        catalog = MagicMock()
+        catalog.docs_for_chashes.return_value = {chash: ["DOC-with-links"]}
+        catalog._db.execute.return_value.fetchall.return_value = [
+            ("DOC-with-links", "implements"),
+            ("DOC-with-links", "cites"),
+        ]
+        r = self._result(chunk_text_hash=chash)
+        r.hybrid_score = 1.0
+
+        _attach_doc_ids_from_catalog([r], catalog=catalog)
+        apply_link_boost([r], catalog=catalog)
+
+        # Boost = 0.15 * min(1.0+0.5, 1.0) = 0.15 * 1.0 = 0.15
+        assert r.hybrid_score > 1.0, (
+            "Phase-3 chunk did NOT receive link boost. The attach helper "
+            "did not inject doc_id, OR apply_link_boost regressed."
+        )
