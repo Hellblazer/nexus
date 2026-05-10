@@ -391,7 +391,14 @@ def compute_chash_coverage(collection: str) -> ChashCoverage | None:
 
         try:
             t3 = make_t3()
-            col = t3.get_or_create_collection(collection)
+            # nexus-8lbe (RDR-108 Phase 4 review CR-M3): use
+            # get_collection (not get_or_create_collection) so a
+            # missing T3 collection is reported as "unknown total"
+            # rather than minted as an empty zombie. The ks40 fix
+            # closed three indexer paths but missed this audit
+            # entry point — without this guard the audit ITSELF
+            # creates the zombies it then reports.
+            col = t3.get_collection(collection)
             total_chunks = col.count()
         except Exception:
             return ChashCoverage(

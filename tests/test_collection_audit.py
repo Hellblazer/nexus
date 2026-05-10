@@ -422,6 +422,10 @@ class TestChashCoverageSection:
             def count(self): return 3
         class _FakeT3:
             def get_or_create_collection(self, _n): return _FakeCol()
+            # nexus-8lbe: compute_chash_coverage now uses get_collection
+            def get_collection(self, _n): return _FakeCol()
+            # nexus-8lbe: compute_chash_coverage now uses get_collection
+            def get_collection(self, _n): return _FakeCol()
 
         monkeypatch.setattr(
             "nexus.commands._helpers.default_db_path", lambda: db_path,
@@ -463,6 +467,10 @@ class TestChashCoverageSection:
                 }
         class _FakeT3:
             def get_or_create_collection(self, _n): return _FakeCol()
+            # nexus-8lbe: compute_chash_coverage now uses get_collection
+            def get_collection(self, _n): return _FakeCol()
+            # nexus-8lbe: compute_chash_coverage now uses get_collection
+            def get_collection(self, _n): return _FakeCol()
 
         monkeypatch.setattr(
             "nexus.commands._helpers.default_db_path", lambda: db_path,
@@ -492,6 +500,10 @@ class TestChashCoverageSection:
             def count(self): return 0
         class _FakeT3:
             def get_or_create_collection(self, _n): return _FakeCol()
+            # nexus-8lbe: compute_chash_coverage now uses get_collection
+            def get_collection(self, _n): return _FakeCol()
+            # nexus-8lbe: compute_chash_coverage now uses get_collection
+            def get_collection(self, _n): return _FakeCol()
 
         monkeypatch.setattr(
             "nexus.commands._helpers.default_db_path", lambda: db_path,
@@ -516,6 +528,56 @@ class TestChashCoverageSection:
         )
         cov = compute_chash_coverage("code__x")
         assert cov is None
+
+    def test_missing_t3_collection_does_not_create_zombie(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """nexus-8lbe (RDR-108 Phase 4 review CR-M3): the audit must
+        NOT speculatively create a T3 collection while computing
+        chash coverage. Pre-fix it called
+        ``get_or_create_collection`` and minted an empty zombie any
+        time the audit ran on a collection name that didn't yet
+        exist in T3 — the same leak ks40 fixed in three indexer
+        paths but missed in collection_audit.
+
+        Post-fix: ``get_collection`` raises NotFoundError; the
+        audit catches and returns total_chunks=None.
+        ``get_or_create_collection`` MUST NOT be called.
+        """
+        from chromadb.errors import NotFoundError as _ChromaNotFoundError
+
+        from nexus.collection_audit import compute_chash_coverage
+
+        db_path = tmp_path / "memory.db"
+        self._seed_chash_index(db_path, [])
+
+        get_or_create_calls: list[str] = []
+
+        class _FakeT3:
+            def get_or_create_collection(self, name):
+                get_or_create_calls.append(name)
+                class _C:
+                    def count(self_inner): return 0
+                return _C()
+
+            def get_collection(self, name):
+                raise _ChromaNotFoundError(f"Collection {name} not found")
+
+        monkeypatch.setattr(
+            "nexus.commands._helpers.default_db_path", lambda: db_path,
+        )
+        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
+
+        cov = compute_chash_coverage("code__never_created")
+
+        assert get_or_create_calls == [], (
+            "audit must NOT speculatively create T3 collection; "
+            f"get_or_create_collection was called with {get_or_create_calls!r}"
+        )
+        assert cov is not None
+        assert cov.total_chunks is None
+        assert cov.ratio is None
+        assert cov.missing_sample == []
 
 
 # ── CLI integration ─────────────────────────────────────────────────────────
