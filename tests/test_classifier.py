@@ -160,3 +160,89 @@ def test_case_insensitive_extension():
     from nexus.classifier import classify_file, ContentClass
     assert classify_file(Path("Main.PY")) == ContentClass.CODE
     assert classify_file(Path("Doc.PDF")) == ContentClass.PDF
+
+
+# ── nexus-haet: minified-bundle skip ─────────────────────────────────────
+
+
+class TestMinifiedBundleSkip:
+    """nexus-haet (2026-05-08 chunk-size audit): minified bundle
+    filenames (``htmx.min.js``, ``react.min.css``) are extension-wise
+    indexable code but produce ~zero search signal (mangled
+    identifiers, no whitespace) and historically generated chunks
+    larger than Voyage MAX_DOCUMENT_BYTES. Default classify as SKIP;
+    operators opt back in via ``index_minified``.
+    """
+
+    def test_min_js_classified_as_skip(self):
+        from nexus.classifier import classify_file, ContentClass
+        assert (
+            classify_file(Path("htmx.min.js"))
+            == ContentClass.SKIP
+        )
+
+    def test_min_mjs_classified_as_skip(self):
+        from nexus.classifier import classify_file, ContentClass
+        assert (
+            classify_file(Path("vendor.min.mjs"))
+            == ContentClass.SKIP
+        )
+
+    def test_min_cjs_classified_as_skip(self):
+        from nexus.classifier import classify_file, ContentClass
+        assert (
+            classify_file(Path("lib.min.cjs"))
+            == ContentClass.SKIP
+        )
+
+    def test_min_css_classified_as_skip(self):
+        from nexus.classifier import classify_file, ContentClass
+        # .css is already in _SKIP_EXTENSIONS but lock the
+        # min-pattern path explicitly so a future .css removal from
+        # the skip list (e.g. promoting CSS to prose) doesn't
+        # silently re-enable .min.css indexing.
+        assert (
+            classify_file(Path("react.min.css"))
+            == ContentClass.SKIP
+        )
+
+    def test_bundle_js_classified_as_skip(self):
+        """Webpack / Rollup produce ``vendor.bundle.js``-shape names;
+        same ~zero-signal class as min.js.
+        """
+        from nexus.classifier import classify_file, ContentClass
+        assert (
+            classify_file(Path("vendor.bundle.js"))
+            == ContentClass.SKIP
+        )
+
+    def test_non_minified_js_still_classified_as_code(self):
+        """Regression guard: a regular ``.js`` file is NOT swept up
+        by the minified-pattern check.
+        """
+        from nexus.classifier import classify_file, ContentClass
+        assert classify_file(Path("app.js")) == ContentClass.CODE
+        assert classify_file(Path("src/lib/util.js")) == ContentClass.CODE
+
+    def test_index_minified_opt_in(self):
+        """``indexing_config["index_minified"] = True`` opts back into
+        indexing minified files. The file then routes through normal
+        extension-based classification (``.min.js`` -> CODE because
+        ``.js`` is in ``_CODE_EXTENSIONS``).
+        """
+        from nexus.classifier import classify_file, ContentClass
+        cfg = {"index_minified": True}
+        assert (
+            classify_file(Path("htmx.min.js"), indexing_config=cfg)
+            == ContentClass.CODE
+        )
+
+    def test_case_insensitive_minified_match(self):
+        """Operators sometimes have ``HTMX.MIN.JS`` (case-insensitive
+        repos / Windows-derived names). Match on lowercase.
+        """
+        from nexus.classifier import classify_file, ContentClass
+        assert (
+            classify_file(Path("HTMX.MIN.JS"))
+            == ContentClass.SKIP
+        )
