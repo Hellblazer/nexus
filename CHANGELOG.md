@@ -6,6 +6,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.31.6] - 2026-05-10
+
+Patch on 4.31.5. Updates the
+``test_migrations_rdr108_phase1c::TestMigrationsListRegistration``
+assertions that 4.31.5 missed: with je0b deferred from MIGRATIONS,
+the previous "je0b is registered" assertions invert to "je0b is
+deferred". Mirrors the same flip already applied to
+``test_drop_source_path_appears_in_migrations_list`` in 4.31.3.
+
+### Tests
+
+- **``test_document_aspects_migration_registered`` →
+  ``test_document_aspects_migration_deferred``**: asserts the
+  PK migration is NOT in MIGRATIONS until nexus-4s2o lands.
+- **``test_aspect_queue_migration_registered`` →
+  ``test_aspect_queue_migration_deferred``**: same flip for the
+  queue PK migration.
+- **``test_both_at_version_4_30_0`` →
+  ``test_both_functions_still_defined``**: now asserts the function
+  definitions stay in place (so reland is one-line registry change)
+  rather than testing their version stamp.
+
 ## [4.31.5] - 2026-05-10
 
 Re-defers the RDR-108 Phase 1c PK migrations (``nexus-je0b``: PK

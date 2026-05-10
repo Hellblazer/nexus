@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.31.6] - 2026-05-10
+
+Plugin version aligned with conexus 4.31.6. No plugin-side changes;
+the release ships a test-assertion patch that 4.31.5 missed (mirror
+of the 4.31.3 deferral flip for je0b). See root ``CHANGELOG.md``.
+
 ## [4.31.5] - 2026-05-10
 
 Plugin version aligned with conexus 4.31.5. No plugin-side changes;

@@ -804,35 +804,43 @@ class TestDocumentAspectsPostMigrationAPI:
 
 
 class TestMigrationsListRegistration:
-    """Both migrations appear in the MIGRATIONS list at version 4.30.0."""
+    """je0b migrations are intentionally deferred from MIGRATIONS in 4.31.5+.
 
-    def test_document_aspects_migration_registered(self) -> None:
+    The companion ``_resolve_doc_id`` substrate ships in
+    ``DocumentAspects.upsert``; the registry change is the last
+    one-line step plus targeted test surgery (see bead nexus-4s2o).
+    Function definitions stay in place so re-enable is trivial.
+    """
+
+    def test_document_aspects_migration_deferred(self) -> None:
         from nexus.db.migrations import MIGRATIONS
 
         names = [m.name for m in MIGRATIONS]
-        assert any("document_aspects" in n and "doc_id" in n for n in names), (
-            f"document_aspects PK migration not found in MIGRATIONS: {names}"
+        assert not any(
+            "document_aspects" in n and "doc_id" in n for n in names
+        ), (
+            "document_aspects PK migration must stay deferred until "
+            "the test surgery in nexus-4s2o lands; got: "
+            f"{[n for n in names if 'document_aspects' in n]}"
         )
 
-    def test_aspect_queue_migration_registered(self) -> None:
+    def test_aspect_queue_migration_deferred(self) -> None:
         from nexus.db.migrations import MIGRATIONS
 
         names = [m.name for m in MIGRATIONS]
-        assert any("aspect_extraction_queue" in n and "doc_id" in n for n in names), (
-            f"aspect_extraction_queue PK migration not found in MIGRATIONS: {names}"
+        assert not any(
+            "aspect_extraction_queue" in n and "doc_id" in n for n in names
+        ), (
+            "aspect_extraction_queue PK migration must stay deferred "
+            "until nexus-4s2o lands; got: "
+            f"{[n for n in names if 'aspect_extraction_queue' in n]}"
         )
 
-    def test_both_at_version_4_30_0(self) -> None:
-        from nexus.db.migrations import MIGRATIONS
-
-        migrated = [
-            m for m in MIGRATIONS
-            if "doc_id" in m.name and (
-                "document_aspects" in m.name or "aspect_extraction_queue" in m.name
-            )
-        ]
-        assert len(migrated) == 2
-        for m in migrated:
-            assert m.introduced == "4.30.0", (
-                f"Migration {m.name!r} has version {m.introduced!r}, expected '4.30.0'"
-            )
+    def test_both_functions_still_defined(self) -> None:
+        """Function defs stay in place so reland is one-line registry change."""
+        from nexus.db.migrations import (
+            _migrate_aspect_queue_pk_via_apply_pending,
+            _migrate_document_aspects_pk_via_apply_pending,
+        )
+        assert callable(_migrate_document_aspects_pk_via_apply_pending)
+        assert callable(_migrate_aspect_queue_pk_via_apply_pending)
