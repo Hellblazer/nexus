@@ -188,7 +188,11 @@ def test_voyage_embedding_fn_selects_model(mock_chromadb, collection, expected_m
 def test_store_put_permanent_returns_id(mock_db):
     db, mock_col, _ = mock_db
     doc_id = db.put(collection="knowledge__security", content="text", title="sec.md", tags="security,audit")
-    assert isinstance(doc_id, str) and len(doc_id) > 0
+    # nexus-oe2i: exact == 32 per RDR-108 D1 (chunk_text_hash[:32]).
+    # The pre-D1 assertion `len > 0` predated content-derived natural
+    # IDs and would silently pass any non-empty string.
+    assert isinstance(doc_id, str)
+    assert len(doc_id) == 32
 
 
 def test_store_put_permanent_metadata(mock_db):
@@ -1160,7 +1164,9 @@ def test_t3_context_manager_works_end_to_end(mock_chromadb):
     mock_client.get_or_create_collection.return_value = mock_col
     with T3Database(tenant="t", database="d", api_key="k") as db:
         doc_id = db.put(collection="knowledge__cm_test", content="context manager test", title="cm.md")
-        assert isinstance(doc_id, str) and len(doc_id) > 0
+        # nexus-oe2i: RDR-108 D1 natural id is chunk_text_hash[:32].
+        assert isinstance(doc_id, str)
+        assert len(doc_id) == 32
 
 
 # ── local_t3: retrieval quality ─────────────────────────────────────────────
@@ -1172,7 +1178,9 @@ def test_search_returns_closest_document_first(local_t3: T3Database):
     local_t3.put(collection=col, content="Quantum physics experiments studying wave-particle duality and entanglement", title="quantum")
     local_t3.put(collection=col, content="Italian cooking recipes for homemade pasta carbonara and risotto", title="cooking")
     results = local_t3.search(query="Django REST API web development Python", collection_names=[col], n_results=3)
-    assert len(results) >= 3
+    # nexus-oe2i: exact == 3 (3 docs seeded; n_results=3). >= 3 would
+    # silently pass if the seed accidentally double-inserted.
+    assert len(results) == 3
     assert results[0]["title"] == "python-web"
 
 
