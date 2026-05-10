@@ -775,10 +775,24 @@ def backfill_manifest_cmd(
     default=True,
     help="Report-only (default). Use --no-dry-run to perform the migration.",
 )
+@click.option(
+    "--max-workers",
+    type=int,
+    default=4,
+    show_default=True,
+    help=(
+        "Number of collections to process in parallel under "
+        "--all-collections. Each collection has an independent ID "
+        "namespace so concurrent execution is safe; ChromaDB Cloud "
+        "rate limits are the practical ceiling. Set to 1 for "
+        "deterministic serial output."
+    ),
+)
 def reidentify_cmd(
     collection: str,
     all_collections: bool,
     dry_run: bool,
+    max_workers: int,
 ) -> None:
     """Re-upsert T3 chunks under content-derived natural IDs (RDR-108 D1).
 
@@ -802,11 +816,24 @@ def reidentify_cmd(
         re-index that collection from source before running.
 
     \b
+    Performance (RDR-108 nexus-qlm2):
+      - --all-collections processes collections in parallel via a
+        ThreadPoolExecutor (--max-workers, default 4). Each collection
+        has an independent ID namespace so concurrent execution is
+        correctness-preserving; the practical ceiling is the operator's
+        ChromaDB Cloud rate limits, not local CPU.
+      - Per-collection completion order is non-deterministic under
+        max_workers > 1. Pass --max-workers 1 for serial dispatch and
+        operator-readable output.
+
+    \b
     Examples:
       nx t3 reidentify --collection code__nexus            # dry-run report
       nx t3 reidentify -c code__nexus --no-dry-run         # one collection
-      nx t3 reidentify --all-collections --no-dry-run      # full corpus
+      nx t3 reidentify --all-collections --no-dry-run      # full corpus, 4 workers
+      nx t3 reidentify --all-collections --max-workers 8   # higher concurrency
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     from nexus.db.t3_reidentify import (  # noqa: PLC0415
         MissingChunkHashError,
         reidentify_collection,
@@ -817,6 +844,9 @@ def reidentify_cmd(
         raise click.UsageError(
             "Specify exactly one of --collection NAME or --all-collections."
         )
+
+    if max_workers < 1:
+        raise click.UsageError("--max-workers must be >= 1.")
 
     t3_db = _make_t3_for_backfill()
 
@@ -834,6 +864,29 @@ def reidentify_cmd(
             return
 
     total = len(collections_to_process)
+    # Single-collection invocations are inherently serial; skip the
+    # executor overhead and keep the per-collection progress line shape
+    # the operator already knows from --collection mode.
+    workers = min(max_workers, total) if total > 1 else 1
+
+    def _process_one(idx: int, coll_name: str) -> tuple[
+        int, str, "object | None", str | None
+    ]:
+        """Run reidentify_collection in a worker. Returns (idx, name,
+        result_or_None, error_or_None) so the main thread can render
+        output deterministically by index."""
+        print(
+            f"[{idx}/{total}] {coll_name}: processing ...",
+            file=sys.stderr,
+        )
+        try:
+            res = reidentify_collection(t3_db, coll_name, dry_run=dry_run)
+        except MissingChunkHashError as exc:
+            return idx, coll_name, None, str(exc)
+        except Exception as exc:
+            return idx, coll_name, None, f"{coll_name}: {exc}"
+        return idx, coll_name, res, None
+
     total_examined = 0
     total_migrated = 0
     total_already = 0
@@ -841,22 +894,28 @@ def reidentify_cmd(
     skipped_taxonomy = 0
     errors: list[str] = []
 
-    for idx, coll_name in enumerate(collections_to_process, start=1):
-        print(
-            f"[{idx}/{total}] {coll_name}: processing ...",
-            file=sys.stderr,
+    if workers == 1:
+        # Deterministic serial path: dispatch + render in input order.
+        results_iter = (
+            _process_one(i, n)
+            for i, n in enumerate(collections_to_process, start=1)
         )
+    else:
+        # Parallel dispatch; collect as completed (out-of-order render).
+        executor = ThreadPoolExecutor(max_workers=workers)
         try:
-            result = reidentify_collection(
-                t3_db, coll_name, dry_run=dry_run
-            )
-        except MissingChunkHashError as exc:
-            click.echo(f"ERROR: {exc}", err=True)
-            errors.append(str(exc))
-            continue
-        except Exception as exc:
-            click.echo(f"ERROR in {coll_name}: {exc}", err=True)
-            errors.append(f"{coll_name}: {exc}")
+            futures = [
+                executor.submit(_process_one, i, n)
+                for i, n in enumerate(collections_to_process, start=1)
+            ]
+            results_iter = (f.result() for f in as_completed(futures))
+        finally:
+            executor.shutdown(wait=False)
+
+    for _idx, coll_name, result, error in results_iter:
+        if error is not None:
+            click.echo(f"ERROR: {error}", err=True)
+            errors.append(error)
             continue
 
         if result.skipped_taxonomy:

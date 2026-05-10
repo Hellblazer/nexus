@@ -688,6 +688,144 @@ class TestReidentifyCLI:
         assert result.exit_code != 0
         assert "exactly one" in result.output.lower()
 
+    def test_cli_all_collections_parallel_processes_concurrently(self, t3_db, runner):
+        """RDR-108 Phase 5 follow-up (nexus-qlm2): --all-collections
+        with --max-workers > 1 runs collection processing concurrently.
+
+        Each collection is independent (separate ID namespace), so
+        parallel execution is safe and gives N-x speedup bounded by the
+        operator's ChromaDB Cloud rate limits.
+
+        We verify three properties:
+          1. Every collection is processed (no skips beyond the
+             documented carve-outs).
+          2. Total counts in the summary match the per-collection
+             results regardless of completion order.
+          3. The reidentify_collection callable is dispatched within a
+             worker pool (the function call timestamps interleave),
+             not strictly sequentially.
+        """
+        import threading
+        import time
+        from collections import defaultdict
+        from unittest.mock import patch as _patch
+
+        # Seed three collections; each will need migration.
+        colls = [_unique_coll() for _ in range(3)]
+        for i, coll in enumerate(colls):
+            _seed_chunk(
+                t3_db, collection=coll, chunk_id=f"legacy-{i}",
+                content=f"content-{i}", chunk_text_hash=str(i) * 64,
+            )
+
+        # Wrap reidentify_collection so we can observe call timing.
+        from nexus.db import t3_reidentify as _ri
+        call_times: dict[str, tuple[float, float]] = {}
+        lock = threading.Lock()
+        original = _ri.reidentify_collection
+
+        def _timed(t3, coll_name, *, dry_run):
+            t0 = time.monotonic()
+            time.sleep(0.05)  # force overlap window
+            res = original(t3, coll_name, dry_run=dry_run)
+            t1 = time.monotonic()
+            with lock:
+                call_times[coll_name] = (t0, t1)
+            return res
+
+        with (
+            patch("nexus.commands.t3._make_t3_for_backfill", return_value=t3_db),
+            patch.object(
+                t3_db,
+                "list_collections",
+                return_value=[{"name": c, "count": 1} for c in colls],
+            ),
+            _patch(
+                "nexus.db.t3_reidentify.reidentify_collection",
+                side_effect=_timed,
+            ),
+        ):
+            result = runner.invoke(
+                main,
+                [
+                    "t3", "reidentify",
+                    "--all-collections",
+                    "--no-dry-run",
+                    "--max-workers", "3",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        # All three collections were processed.
+        for c in colls:
+            assert c in call_times, (
+                f"collection {c} was never dispatched; got {list(call_times)}"
+            )
+        # Concurrency check: at least one pair of collections must have
+        # overlapping (start, end) windows under max_workers=3.
+        windows = sorted(call_times.values())
+        any_overlap = any(
+            windows[i][1] > windows[i + 1][0]  # later starts before earlier ends
+            for i in range(len(windows) - 1)
+        )
+        assert any_overlap, (
+            f"expected overlapping execution windows under max_workers=3; "
+            f"observed serial windows {windows}"
+        )
+        # Summary aggregates correctly.
+        assert "across 3 collection(s)" in result.output
+
+    def test_cli_max_workers_one_falls_back_to_serial(self, t3_db, runner):
+        """``--max-workers 1`` (or default in single-collection mode)
+        executes serially and produces deterministic per-collection
+        ordering, useful for debugging and operator-readable logs."""
+        import time
+        import threading
+
+        colls = [_unique_coll() for _ in range(2)]
+        for i, coll in enumerate(colls):
+            _seed_chunk(
+                t3_db, collection=coll, chunk_id=f"legacy-{i}",
+                content=f"content-{i}", chunk_text_hash=str(i + 5) * 64,
+            )
+
+        from nexus.db import t3_reidentify as _ri
+        call_order: list[str] = []
+        order_lock = threading.Lock()
+        original = _ri.reidentify_collection
+
+        def _ordered(t3, coll_name, *, dry_run):
+            with order_lock:
+                call_order.append(coll_name)
+            time.sleep(0.02)
+            return original(t3, coll_name, dry_run=dry_run)
+
+        with (
+            patch("nexus.commands.t3._make_t3_for_backfill", return_value=t3_db),
+            patch.object(
+                t3_db,
+                "list_collections",
+                return_value=[{"name": c, "count": 1} for c in colls],
+            ),
+            patch(
+                "nexus.db.t3_reidentify.reidentify_collection",
+                side_effect=_ordered,
+            ),
+        ):
+            result = runner.invoke(
+                main,
+                [
+                    "t3", "reidentify",
+                    "--all-collections",
+                    "--no-dry-run",
+                    "--max-workers", "1",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        # Strict serial dispatch order matches input order.
+        assert call_order == colls
+
     def test_cli_all_collections_continues_past_errors(self, t3_db, runner):
         """--all-collections accumulates errors and exits nonzero,
         but processes every collection in the iteration first.
