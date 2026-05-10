@@ -4884,6 +4884,13 @@ def _run_t3_doc_id_coverage(
             "bootstrap from current T3 state."
         )
 
+    # nexus-wszt: bypass-schema collections (taxonomy__*) carry their
+    # own metadata vocabulary and intentionally have no doc_id (they
+    # are BERTopic centroids / embedding anchors, not document chunks).
+    # The doc_id-coverage audit must skip them or it reports 100%
+    # orphan ratio on every centroid set (false positive class).
+    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415
+
     # Build expected (coll_id, chunk_id) → doc_id; track orphans.
     # RDR-102 D3: also track every coll_id that appears in events.jsonl
     # (whether non-orphan or orphan-only) so the orphan-ratio surface
@@ -4895,6 +4902,8 @@ def _run_t3_doc_id_coverage(
         if event.type != ev.TYPE_CHUNK_INDEXED:
             continue
         coll = event.payload.coll_id
+        if coll.startswith(_BYPASS_SCHEMA_PREFIXES):
+            continue
         cid = event.payload.chunk_id
         all_event_collections.add(coll)
         if event.payload.synthesized_orphan:
