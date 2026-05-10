@@ -205,7 +205,7 @@ class TestCollectionGCCli:
         empty_referenced = "rdr__doc-referenced__voyage-context-3__v1"
         t3_db._client.get_or_create_collection(empty_referenced)
         # Direct insert into documents to skip the register flow.
-        catalog_env._db.execute(
+        catalog_env._db.execute(  # epsilon-allow: gc test fixture seeds an orphaned documents row to verify the document-reference protection guard
             "INSERT INTO documents "
             "(tumbler, title, author, year, content_type, file_path, "
             " corpus, physical_collection, chunk_count, head_hash, "
