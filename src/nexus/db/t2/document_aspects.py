@@ -353,6 +353,71 @@ class DocumentAspects:
             self.conn.commit()
             return cur.rowcount
 
+    def delete_orphans(
+        self,
+        catalog_db_path: Path | None,
+        *,
+        dry_run: bool = True,
+    ) -> tuple[int, int]:
+        """Delete document_aspects rows whose ``source_uri`` no longer
+        appears in the catalog ``documents`` table (RDR-108 nexus-urj4).
+
+        Aspects are extracted asynchronously after a document is
+        registered. When the document is later deleted (via
+        ``cat.delete_document``, source-file removal, etc.) the
+        corresponding aspect rows are NOT cascaded today (the catalog
+        and T2 live in separate SQLite files; cross-DB FK CASCADE is
+        not supported by SQLite). This method is the periodic-sweep
+        cleanup for the orphans that accumulate between extraction
+        and deletion lifecycle events.
+
+        Behavior:
+          - Aspects whose ``source_uri`` is empty are NOT classified
+            as orphans (legacy / pre-RDR-096 P2.1 rows; the operator
+            must use the ``rename_collection`` or ``delete`` paths
+            to address those).
+          - Aspects whose ``source_uri`` matches at least one row in
+            ``catalog.documents.source_uri`` are LIVE; not touched.
+          - Everything else (non-empty source_uri, no match in catalog)
+            is orphan; deleted unless ``dry_run=True``.
+
+        Returns ``(orphan_count, total_examined)``. ``orphan_count`` is
+        the number of orphans found (and deleted, when ``dry_run=False``);
+        ``total_examined`` is the total non-empty-source_uri row count
+        considered.
+
+        Catalog-absent (``catalog_db_path is None`` or path does not
+        exist) returns ``(0, 0)`` -- no orphans can be detected without
+        the catalog as the live-set source of truth.
+        """
+        if catalog_db_path is None or not Path(catalog_db_path).exists():
+            return (0, 0)
+
+        with self._lock:
+            self.conn.execute(f"ATTACH DATABASE ? AS cat", (str(catalog_db_path),))
+            try:
+                total = self.conn.execute(
+                    "SELECT COUNT(*) FROM document_aspects "
+                    "WHERE source_uri != ''"
+                ).fetchone()[0]
+                orphans = self.conn.execute(
+                    "SELECT COUNT(*) FROM document_aspects da "
+                    "WHERE da.source_uri != '' "
+                    "  AND NOT EXISTS (SELECT 1 FROM cat.documents d "
+                    "                  WHERE d.source_uri = da.source_uri)"
+                ).fetchone()[0]
+                if not dry_run and orphans > 0:
+                    self.conn.execute(
+                        "DELETE FROM document_aspects "
+                        "WHERE source_uri != '' "
+                        "  AND NOT EXISTS (SELECT 1 FROM cat.documents d "
+                        "                  WHERE d.source_uri = document_aspects.source_uri)"
+                    )
+                    self.conn.commit()
+            finally:
+                self.conn.execute("DETACH DATABASE cat")
+        return (int(orphans), int(total))
+
     def rename_collection(self, *, old: str, new: str) -> int:
         """Re-point every row's denorm ``collection`` cache from ``old`` to ``new``.
 
