@@ -530,10 +530,20 @@ def test_prune_deleted_files_preserves_live_synthetic_id(tmp_path):
     assert col.delete.call_count == 0
 
 
-def test_prune_deleted_files_empty_manifest_deletes_all(tmp_path):
-    """When the catalog has zero referenced chashes for a collection
-    (fully-rotted corpus where every document was removed), every
-    chunk in T3 is an orphan."""
+def test_prune_deleted_files_empty_manifest_skips_no_wipe(tmp_path):
+    """nexus-oqku (RDR-108 Phase 4 review S1): an empty manifest is
+    AMBIGUOUS. It could mean "fully-rotted corpus" OR "manifest
+    backfill never ran on a fresh post-migration system." There is
+    no way to distinguish these from inside ``_prune_deleted_files``
+    without additional state. Safe default: skip + warn, do NOT
+    wipe. Operators with a genuine "delete everything" intent have
+    ``nx collection delete``; the prune sweep refuses to perform
+    that destructive action implicitly.
+
+    Pre-fix this test asserted the WIPE behavior (every chunk
+    classified as orphan when ``referenced`` was empty). That was
+    documenting a silent-data-loss bug, not a defensible invariant.
+    """
     from nexus.indexer import _prune_deleted_files
     col = _gc_col([("id-x", "x" * 64),
                    ("id-y", "y" * 64),
@@ -544,8 +554,11 @@ def test_prune_deleted_files_empty_manifest_deletes_all(tmp_path):
 
     _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
 
+    # No deletions when manifest is empty (vs T3 having chunks).
     deleted = _deleted_ids(col)
-    assert set(deleted) == {"id-x", "id-y", "id-z"}
+    assert deleted == [], (
+        f"empty-manifest case must skip, not wipe; got deleted={deleted!r}"
+    )
 
 
 def test_prune_deleted_files_chunk_without_chunk_text_hash_skipped(tmp_path):
@@ -614,6 +627,58 @@ def test_prune_deleted_files_no_catalog_is_noop(tmp_path):
 
     assert col.delete.call_count == 0
     db.get_or_create_collection.assert_not_called()
+
+
+def test_prune_deleted_files_skips_when_manifest_empty_no_wipe(tmp_path):
+    """nexus-oqku P0 regression: when the catalog manifest has zero
+    referenced chashes for a collection that DOES have T3 chunks,
+    the prune sweep MUST treat it as "cannot decide safely" (skip +
+    warn), not classify every chunk as orphan and wipe the
+    collection.
+
+    Pre-fix, the per-chunk loop ran with referenced=set() and
+    classified every chunk as orphan via ``if chash not in referenced``,
+    deleting the entire collection silently. This fired on the first
+    ``nx index repo`` run after the RDR-108 schema migration on a
+    system that had not yet run manifest backfill.
+    """
+    from structlog.testing import capture_logs
+
+    from nexus.indexer import _prune_deleted_files
+
+    # Catalog has the collection registered but the manifest is empty
+    # (chashes_for_collection returns set()).
+    catalog = _gc_catalog({"code__repo": set(), "docs__repo": set()})
+
+    # T3 collection exists and has chunks (would all be wiped pre-fix).
+    col = _gc_col([
+        ("chunk-1", "a" * 64),
+        ("chunk-2", "b" * 64),
+        ("chunk-3", "c" * 64),
+    ])
+    db = MagicMock()
+    db.get_collection.return_value = col
+
+    with capture_logs() as cap:
+        _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
+
+    # CRITICAL: NO chunk deletion happened. The empty-manifest case
+    # is treated as a safety abort, not a green light to wipe.
+    assert col.delete.call_count == 0, (
+        f"empty manifest must NOT trigger deletion; "
+        f"got {col.delete.call_count} delete calls"
+    )
+
+    # Warning must surface so operators know GC was skipped.
+    skip_logs = [
+        r for r in cap if r.get("event") == "manifest_empty_skipping_gc"
+    ]
+    assert skip_logs, (
+        f"missing manifest_empty_skipping_gc warning; got events: "
+        f"{[r.get('event') for r in cap]}"
+    )
+    assert skip_logs[0]["t3_chunks"] == 3
+    assert skip_logs[0]["collection"] == "code__repo"
 
 
 def test_prune_deleted_files_does_not_create_zombie_collections(tmp_path):
