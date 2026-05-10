@@ -84,7 +84,6 @@ Pagination over a large collection: `limit ≤ 300` per call, `offset += 300` in
 - **Never `git add -A` or `git add .`.** Stage by explicit path so untracked drafts don't sneak in.
 - **Never include AI attribution in commits.** No "Generated with Claude", no `Co-Authored-By: Claude`. Bead references and `Closes #N` only.
 - **Never delete RDR files.** Closing an RDR is a frontmatter `status: closed` flip — the file stays. See [`docs/rdr/AGENTS.md`](docs/rdr/AGENTS.md).
-- **T3 expire-guard SQL must be three-clause.** `ttl_days > 0 AND expires_at != "" AND expires_at < now`. The `!= ""` clause is mandatory: permanent rows have `expires_at=""` which sorts before ISO timestamps and would be wrongly deleted by a two-clause guard.
 - **Always use full MCP tool names.** `mcp__plugin_<plugin>_<server>__<tool>`. Short names fail at runtime.
 
 ## Workflows
