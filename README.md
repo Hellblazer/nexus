@@ -9,49 +9,44 @@
   <img src="https://i0.wp.com/tensegrity.blog/wp-content/uploads/2026/04/a-stately-pleasure-dome.png?w=480&ssl=1" alt="A brass-ribbed crystal dome on a hilltop at dusk, the establishing shot for the Tensegrity blog series on Nexus" align="right" width="320" />
 </a>
 
-Nexus is a lightweight knowledge management system for AI coding agents. It provides persistent memory and semantic search through tiered storage that preserves decisions, findings, and project knowledge across agent sessions. That knowledge compounds over time, becoming more valuable as the corpus grows.
+**Persistent memory and semantic search for AI coding agents.** Local-first (no API keys required), three storage tiers with different lifetimes, an event-sourced document catalog with typed links between artefacts, and a specification-before-code decision-tracking workflow (RDR). Knowledge compounds across sessions instead of evaporating with the conversation.
 
-Nexus includes RDR (Research-Design-Review), an integrated human-AI design and audit system. RDRs capture the reasoning behind technical decisions (problem, research, chosen approach, rejected alternatives) as structured, searchable documents that live in the repository alongside the code. Nexus indexes the RDR corpus so team members and their agents can quickly get up to speed on a project's design history and stay aligned as the codebase evolves.
+The four-paragraph version is on the Tensegrity blog: [**How I actually use Nexus**](https://tensegrity.blog/2026/04/26/how-i-actually-use-nexus/) (concepts), [**Installing Nexus**](https://tensegrity.blog/2026/04/26/installing-nexus/) (ten-minute walkthrough), [**Nexus by Example**](https://tensegrity.blog/2026/04/19/nexus-by-example/) (the pieces in practice).
 
-> **New to Nexus?** Start on the Tensegrity blog: [**How I actually use Nexus**](https://tensegrity.blog/2026/04/26/how-i-actually-use-nexus/) is the conceptual overview, and [**Installing Nexus**](https://tensegrity.blog/2026/04/26/installing-nexus/) is the ten-minute install walkthrough. After that, [**Nexus by Example**](https://tensegrity.blog/2026/04/19/nexus-by-example/) shows the pieces fitting together in practice.
+## At a glance
 
-## What it does
+| | What you get |
+|---|---|
+| **Storage** | T1 ephemeral session scratch (in-memory ChromaDB) · T2 SQLite + FTS5 for memory / plans / taxonomy / telemetry · T3 ChromaDB persistent + Voyage AI in cloud mode, ONNX MiniLM in local mode |
+| **Indexing** | Tree-sitter AST chunking (23 languages) · CCE prose chunking (`voyage-context-3`) · PDF auto-routing (Docling → MinerU → PyMuPDF) · git frecency scoring · automatic topic discovery via HDBSCAN |
+| **Search** | Semantic · keyword · hybrid · taxonomy-boosted · catalog-aware · plan-driven via `nx_answer`. Metadata filtering via `--where bib_year>=2024 --where chunk_type=table_page` and similar |
+| **Catalog** | Event-sourced (`events.jsonl` canonical, SQLite is a deterministic projection) · typed links (`cites`, `implements`, `supersedes`, …) · Tumbler addressing inspired by Ted Nelson's Xanadu |
+| **Decision tracking (RDR)** | Specification-before-code lifecycle: `create → research → gate → accept → close`, with post-mortems and a searchable history that surfaces during new design work |
+| **Claude Code plugin** | 13 specialized agents · 43 skills (RDR lifecycle, plan-centric retrieval, dev workflow) · 36 MCP tools across two servers · session hooks for cold-start context |
+| **CLI** | `nx` with 16 top-level verbs (`index`, `search`, `query`, `store`, `memory`, `scratch`, `catalog`, `taxonomy`, `enrich`, `doctor`, `upgrade`, …) |
+| **Local-first** | Default install runs entirely on your machine, zero API keys (ONNX MiniLM + local ChromaDB). Voyage AI + ChromaDB Cloud are opt-in for higher-quality embeddings |
+| **License** | AGPL-3.0-or-later |
 
-**Semantic search.** Standard text search matches exact strings. Nexus matches by meaning: querying "how does authentication work" returns the auth middleware, the login handler, and the JWT validation, even when none contain the word "authentication."
-
-```bash
-nx index repo .                  # index current repo
-nx search "error handling"       # finds try/catch, Result types, error middleware, logging
-nx search "auth" --hybrid        # combine semantic + keyword matching
-```
-
-**Persistent memory.** Agents share ephemeral session context for inter-agent coordination, project-level decisions persist locally with full-text search, and cross-project knowledge is stored permanently with semantic retrieval.
-
-```bash
-nx scratch put "the bug is in the retry logic"    # T1: inter-agent session context
-nx memory put --project myapp --title "DB choice"  "Chose Postgres over SQLite for concurrency"
-nx store put --collection knowledge__myapp "API rate limit is 10k/min per the vendor docs"
-```
-
-**Analytical queries.** The `query` MCP tool handles catalog-aware scoped search in a single call: `query(question="...", author="Fagin")` searches only that author's collections. For complex multi-step analysis (compare, extract, generate), the `/nx:query` skill routes through three paths: direct query, template match, or planner dispatch.
+## By example
 
 ```bash
-# Filter indexed PDFs by bibliographic metadata
-nx search "consensus protocols" --where bib_year>=2024 --where chunk_type=table_page
+# Semantic search across indexed code, docs, and knowledge
+nx search "how does authentication work"           # matches by meaning, not strings
+nx search "error handling" --hybrid                # semantic + ripgrep, frecency-weighted
 
-# Backfill bibliographic metadata on an existing collection
+# Three tiers, one tool
+nx scratch put "the bug is in the retry logic"           # T1, inter-agent session
+nx memory put --project myapp --title "DB choice" "Postgres for concurrency"
+nx store put --collection knowledge__myapp "Rate limit: 10k/min per vendor docs"
+
+# Indexed PDFs filtered by bibliographic metadata
 nx enrich bib knowledge__papers --delay 0.5
+nx search "consensus protocols" --where bib_year>=2024
+
+# Topic discovery is automatic; review keeps humans in the loop
+nx index repo .
+nx taxonomy review                                  # accept, rename, merge, split
 ```
-
-**Topic taxonomy.** After indexing, Nexus automatically discovers topics across your corpus using HDBSCAN clustering, then labels each cluster with a human-readable name via Claude Haiku. Search results are grouped by topic and boosted for relevance. Works with both local and cloud embeddings; no configuration needed.
-
-```bash
-nx index repo .                  # indexing triggers topic discovery automatically
-nx taxonomy status               # see discovered topics
-nx taxonomy review               # accept, rename, merge, or split topics interactively
-```
-
-**Decision tracking.** RDR documents record the reasoning behind technical choices and are searchable alongside code, so prior decisions surface automatically during new design work.
 
 ## Quick Start
 
