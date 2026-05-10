@@ -61,8 +61,22 @@ class TestChashReconcileCLI:
 
     @pytest.fixture()
     def t3_db(self) -> T3Database:
+        # ``chromadb.EphemeralClient`` instances share an in-memory
+        # backend across the test session — collections leak between
+        # tests when the same process opens multiple ephemerals. Tests
+        # that assert on ``list_collections``-derived counts (e.g.
+        # ``test_unindexed_t3_collections_reported_not_deleted``)
+        # silently fail under shared state. Drop every existing
+        # collection on fixture entry so each test sees a clean slate.
+        client = chromadb.EphemeralClient()
+        for c in list(client.list_collections()):
+            name = c if isinstance(c, str) else c.name
+            try:
+                client.delete_collection(name)
+            except Exception:
+                pass
         return T3Database(
-            _client=chromadb.EphemeralClient(),
+            _client=client,
             _ef_override=DefaultEmbeddingFunction(),
         )
 
