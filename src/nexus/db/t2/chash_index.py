@@ -199,6 +199,19 @@ class ChashIndex:
             self.conn.commit()
             return cur.rowcount
 
+    def distinct_collections(self) -> set[str]:
+        """Return every distinct ``physical_collection`` value in the
+        index (RDR-108 Phase 5 / nexus-w9vq).
+
+        Used by ``nx catalog chash-reconcile`` to identify ghost
+        collections (rows whose collection no longer exists in T3).
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT DISTINCT physical_collection FROM chash_index"
+            ).fetchall()
+        return {r[0] for r in rows}
+
     def rename_collection(self, *, old: str, new: str) -> int:
         """Re-point every row from ``old`` → ``new``. Returns row count updated.
 

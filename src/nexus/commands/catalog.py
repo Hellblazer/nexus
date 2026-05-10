@@ -5282,4 +5282,123 @@ def vacuum_backups_cmd(older_than_days: int, dry_run: bool) -> None:
         )
 
 
+@catalog.command("chash-reconcile")
+@click.option(
+    "--apply",
+    is_flag=True,
+    default=False,
+    help="Actually delete ghost rows. Without this flag the command "
+    "is a dry-run report only.",
+)
+def chash_reconcile_cmd(apply: bool) -> None:
+    """Sweep stale ``chash_index`` rows pointing at deleted T3 collections.
+
+    \b
+    The T2 ``chash_index`` is the routing table that resolves
+    ``chash:<hex>`` link spans to the (collection, chunk) they live
+    in. Rows accumulate over time: when a collection is deleted from
+    T3 (``nx collection delete`` or operator-driven cleanup), the
+    chash_index rows for that collection are NOT cascaded today, so
+    they remain as ghosts pointing at a non-existent collection.
+
+    \b
+    ``Catalog.resolve_chash`` self-heals on access (drops a stale row
+    when it tries to look up a chash and finds the collection
+    missing in T3), but that's a per-access correction, not a sweep.
+    This verb is the bulk equivalent.
+
+    \b
+    Default is dry-run: reports per-collection ghost counts without
+    writing. Pass ``--apply`` to actually delete.
+
+    \b
+    Examples:
+      nx catalog chash-reconcile         # dry-run report
+      nx catalog chash-reconcile --apply # actually delete
+
+    \b
+    Filed under nexus-w9vq (RDR-108 Phase 5 follow-up).
+    """
+    from nexus.commands._helpers import default_db_path
+    from nexus.db import make_t3
+    from nexus.db.t2.chash_index import ChashIndex
+
+    db_path = default_db_path()
+    if not db_path.exists():
+        click.echo(
+            f"No T2 db at {db_path}. Nothing to reconcile.",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    try:
+        t3 = make_t3()
+        live_collections = {c.name for c in t3._client.list_collections()}
+    except Exception as exc:
+        click.echo(f"Failed to list T3 collections: {exc}", err=True)
+        raise SystemExit(1)
+
+    idx = ChashIndex(db_path)
+    try:
+        indexed_collections = idx.distinct_collections()
+        ghost_collections = sorted(indexed_collections - live_collections)
+        live_in_index = indexed_collections & live_collections
+        unindexed_in_t3 = sorted(live_collections - indexed_collections)
+
+        if not ghost_collections:
+            click.echo(
+                f"chash_index: {len(indexed_collections)} distinct "
+                f"collection(s); 0 ghost(s). Nothing to reconcile."
+            )
+            if unindexed_in_t3:
+                click.echo(
+                    f"  Note: {len(unindexed_in_t3)} T3 collection(s) "
+                    f"have no chash_index rows (likely empty or never "
+                    f"backfilled)."
+                )
+            return
+
+        # Per-collection ghost row counts (read-only).
+        ghost_counts: list[tuple[str, int]] = []
+        for coll_name in ghost_collections:
+            n = idx.count_for_collection(coll_name)
+            ghost_counts.append((coll_name, n))
+        total_ghost_rows = sum(n for _, n in ghost_counts)
+
+        verb = "would delete" if not apply else "deleted"
+        click.echo(
+            f"chash_index: {len(indexed_collections)} distinct "
+            f"collection(s); {len(ghost_collections)} ghost(s) "
+            f"({total_ghost_rows} row(s) total)"
+        )
+        click.echo(f"  live (in both T3 and index): {len(live_in_index)}")
+        if unindexed_in_t3:
+            click.echo(
+                f"  unindexed (in T3 but not index): {len(unindexed_in_t3)}"
+            )
+
+        # Per-ghost-collection breakdown (capped at 20 to keep output sane).
+        for coll_name, n in ghost_counts[:20]:
+            click.echo(f"  {verb} {n:>6} row(s) from ghost: {coll_name}")
+        if len(ghost_counts) > 20:
+            click.echo(f"  ... and {len(ghost_counts) - 20} more ghost collection(s)")
+
+        if apply:
+            actually_deleted = 0
+            for coll_name in ghost_collections:
+                actually_deleted += idx.delete_collection(coll_name)
+            click.echo(
+                f"\nSummary: deleted {actually_deleted} row(s) across "
+                f"{len(ghost_collections)} ghost collection(s)."
+            )
+        else:
+            click.echo(
+                f"\nSummary: would delete {total_ghost_rows} row(s) "
+                f"across {len(ghost_collections)} ghost collection(s). "
+                f"Re-run with --apply to actually delete."
+            )
+    finally:
+        idx.close()
+
+
 # ── Catalog t3-doc-id-coverage support helpers ───────────────────────────
