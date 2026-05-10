@@ -228,12 +228,15 @@ class TestChashIndexErrors:
             store.close()
 
 
-# ── chashes_for_collection (RDR-108 Phase 4 / nexus-z1mu) ────────────────────
+# ── registered_chashes_for_collection (RDR-108 Phase 4 / nexus-z1mu) ─────────
 
 
-class TestChashesForCollection:
-    """``ChashIndex.chashes_for_collection`` returns chash[:32] values
-    for a collection. Replaces ``chunk_chroma_ids_present_in_collection``
+class TestRegisteredChashesForCollection:
+    """``ChashIndex.registered_chashes_for_collection`` returns
+    chash[:32] values currently registered in the chash_index routing
+    table for a collection. Disambiguated from
+    ``Catalog.chashes_for_collection`` (manifest-authoritative) by the
+    nexus-v7mn rename. Replaces ``chunk_chroma_ids_present_in_collection``
     (removed in the same change). Used by ``compute_chash_coverage`` to
     sample missing chunks via a single set-difference."""
 
@@ -241,11 +244,11 @@ class TestChashesForCollection:
         from nexus.db.t2.chash_index import ChashIndex
         store = ChashIndex(tmp_path / "t2.db")
         try:
-            assert store.chashes_for_collection("code__nonexistent") == set()
+            assert store.registered_chashes_for_collection("code__nonexistent") == set()
         finally:
             store.close()
 
-    def test_returns_truncated_chashes_for_collection(self, tmp_path: Path) -> None:
+    def test_returns_truncated_registered_chashes_for_collection(self, tmp_path: Path) -> None:
         from nexus.db.t2.chash_index import ChashIndex
         store = ChashIndex(tmp_path / "t2.db")
         try:
@@ -254,8 +257,8 @@ class TestChashesForCollection:
             store.upsert(chash="b" * 64, collection="code__foo")
             store.upsert(chash="c" * 64, collection="code__bar")
 
-            foo = store.chashes_for_collection("code__foo")
-            bar = store.chashes_for_collection("code__bar")
+            foo = store.registered_chashes_for_collection("code__foo")
+            bar = store.registered_chashes_for_collection("code__bar")
 
             assert foo == {full[:32], ("b" * 64)[:32]}
             assert bar == {("c" * 64)[:32]}
@@ -269,7 +272,7 @@ class TestChashesForCollection:
         store = ChashIndex(tmp_path / "t2.db")
         try:
             store.upsert(chash="a" * 32, collection="code__foo")
-            assert store.chashes_for_collection("code__foo") == {"a" * 32}
+            assert store.registered_chashes_for_collection("code__foo") == {"a" * 32}
         finally:
             store.close()
 

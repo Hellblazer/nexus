@@ -122,8 +122,13 @@ class TestReidentifyCollection:
         assert "a" * 32 in _ids_in(t3_db, coll)
         assert "legacy-id-1" not in _ids_in(t3_db, coll)
 
-    def test_strips_doc_level_metadata_fields(self, t3_db):
-        """doc_id, chunk_index, chunk_count are removed from metadata at re-upsert."""
+    def test_normalizes_metadata_to_canonical_schema(self, t3_db):
+        """RDR-108 nexus-6l9p: reidentify routes metadata through the
+        canonical schema funnel (``_normalize_for_write``), dropping
+        all cargo not in ``ALLOWED_TOP_LEVEL`` rather than just the
+        3-field RDR-108 Phase 3 set. This sidesteps the per-row
+        ``NumMetadataKeys`` quota error that fires when legacy chunks
+        carry 32+ keys."""
         from nexus.db.t3_reidentify import reidentify_collection
 
         coll = _unique_coll()
@@ -131,7 +136,14 @@ class TestReidentifyCollection:
             t3_db, collection=coll, chunk_id="legacy-id-1",
             content="hello", chunk_text_hash="b" * 64,
             doc_id="1.1.1", chunk_index=2, chunk_count=5,
-            extra_meta={"source_path": "/tmp/foo.py", "line_start": 0},
+            extra_meta={
+                # Pre-RDR-102 D2: source_path was canonical, now cargo.
+                "source_path": "/tmp/foo.py",
+                # Canonical fields that survive normalize.
+                "line_start": 0,
+                "title": "foo.py:0-5",
+                "content_type": "code",
+            },
         )
 
         reidentify_collection(t3_db, coll, dry_run=False)
@@ -139,13 +151,85 @@ class TestReidentifyCollection:
         col = t3_db._client.get_or_create_collection(coll)
         result = col.get(ids=["b" * 32], include=["metadatas"])
         meta = result["metadatas"][0]
+        # RDR-108 Phase 3 fields dropped (the original strip target).
         assert "doc_id" not in meta
         assert "chunk_index" not in meta
         assert "chunk_count" not in meta
-        # Non-stripped fields preserved
-        assert meta.get("source_path") == "/tmp/foo.py"
+        # RDR-102 D2 cargo dropped by canonical normalize.
+        assert "source_path" not in meta
+        # Canonical fields preserved.
         assert meta.get("line_start") == 0
+        assert meta.get("title") == "foo.py:0-5"
         assert meta.get("chunk_text_hash") == "b" * 64
+
+    def test_normalize_drops_legacy_cargo_for_over_quota_chunks(self, t3_db):
+        """RDR-108 nexus-6l9p regression: a chunk seeded with 33 metadata
+        keys (legacy cargo + pre-RDR-108 fields) must reidentify cleanly,
+        producing a normalized payload under the per-row quota.
+
+        Pre-fix path used a 3-field strip; the resulting upsert merged
+        with the chunk's existing cargo and tripped Cloud's
+        ``NumMetadataKeys`` quota at 33 > 32. The canonical funnel drops
+        cargo so the upsert lands under quota."""
+        from nexus.db.t3_reidentify import reidentify_collection
+
+        coll = _unique_coll(prefix="docs")
+        _seed_chunk(
+            t3_db, collection=coll, chunk_id="legacy-cargo-1",
+            content="paper text body", chunk_text_hash="c" * 64,
+            doc_id="1.1.1", chunk_index=0, chunk_count=50,
+            extra_meta={
+                "title": "old-paper",
+                "content_type": "pdf",
+                "content_hash": "abc",
+                "indexed_at": "2024-01-01T00:00:00",
+                "source_path": "/papers/old.pdf",
+                # Cargo that the canonical schema drops:
+                "corpus": "knowledge",
+                "store_type": "knowledge",
+                "expires_at": "",
+                "extraction_method": "docling",
+                "format": "markdown",
+                "is_image_pdf": False,
+                "has_formulas": False,
+                "page_count": 12,
+                "chunk_type": "text",
+            },
+        )
+
+        reidentify_collection(t3_db, coll, dry_run=False)
+
+        col = t3_db._client.get_or_create_collection(coll)
+        result = col.get(ids=["c" * 32], include=["metadatas"])
+        meta = result["metadatas"][0]
+        # The hash is preserved (the chunk migrated).
+        assert meta["chunk_text_hash"] == "c" * 64
+        # Cargo dropped by canonical normalize.
+        for cargo_key in (
+            "corpus", "store_type", "expires_at", "extraction_method",
+            "format", "is_image_pdf", "has_formulas", "page_count",
+            "chunk_type", "source_path",
+            "doc_id", "chunk_index", "chunk_count",
+        ):
+            assert cargo_key not in meta, (
+                f"{cargo_key!r} should be stripped by canonical "
+                f"normalize, got meta={sorted(meta)}"
+            )
+        # Canonical fields preserved.
+        assert meta.get("title") == "old-paper"
+        assert meta.get("content_type") == "pdf"
+        # nexus-2exh review caveat #3: lock the per-row metadata
+        # quota bound. ChromaDB Cloud rejects records whose metadata
+        # has more than 32 keys (NumMetadataKeys quota); the canonical
+        # normalize must produce a payload that respects it. The
+        # MAX_SAFE_TOP_LEVEL_KEYS constant in metadata_schema is the
+        # canonical bound (32).
+        from nexus.metadata_schema import MAX_SAFE_TOP_LEVEL_KEYS
+        assert len(meta) <= MAX_SAFE_TOP_LEVEL_KEYS, (
+            f"normalized metadata must fit under the per-row key "
+            f"quota ({MAX_SAFE_TOP_LEVEL_KEYS}); got {len(meta)} "
+            f"keys: {sorted(meta)}"
+        )
 
     def test_idempotent_on_fully_migrated_collection(self, t3_db):
         """Re-running on a fully-migrated collection performs zero writes."""
@@ -687,6 +771,144 @@ class TestReidentifyCLI:
             )
         assert result.exit_code != 0
         assert "exactly one" in result.output.lower()
+
+    def test_cli_all_collections_parallel_processes_concurrently(self, t3_db, runner):
+        """RDR-108 Phase 5 follow-up (nexus-qlm2): --all-collections
+        with --max-workers > 1 runs collection processing concurrently.
+
+        Each collection is independent (separate ID namespace), so
+        parallel execution is safe and gives N-x speedup bounded by the
+        operator's ChromaDB Cloud rate limits.
+
+        We verify three properties:
+          1. Every collection is processed (no skips beyond the
+             documented carve-outs).
+          2. Total counts in the summary match the per-collection
+             results regardless of completion order.
+          3. The reidentify_collection callable is dispatched within a
+             worker pool (the function call timestamps interleave),
+             not strictly sequentially.
+        """
+        import threading
+        import time
+        from collections import defaultdict
+        from unittest.mock import patch as _patch
+
+        # Seed three collections; each will need migration.
+        colls = [_unique_coll() for _ in range(3)]
+        for i, coll in enumerate(colls):
+            _seed_chunk(
+                t3_db, collection=coll, chunk_id=f"legacy-{i}",
+                content=f"content-{i}", chunk_text_hash=str(i) * 64,
+            )
+
+        # Wrap reidentify_collection so we can observe call timing.
+        from nexus.db import t3_reidentify as _ri
+        call_times: dict[str, tuple[float, float]] = {}
+        lock = threading.Lock()
+        original = _ri.reidentify_collection
+
+        def _timed(t3, coll_name, *, dry_run):
+            t0 = time.monotonic()
+            time.sleep(0.05)  # force overlap window
+            res = original(t3, coll_name, dry_run=dry_run)
+            t1 = time.monotonic()
+            with lock:
+                call_times[coll_name] = (t0, t1)
+            return res
+
+        with (
+            patch("nexus.commands.t3._make_t3_for_backfill", return_value=t3_db),
+            patch.object(
+                t3_db,
+                "list_collections",
+                return_value=[{"name": c, "count": 1} for c in colls],
+            ),
+            _patch(
+                "nexus.db.t3_reidentify.reidentify_collection",
+                side_effect=_timed,
+            ),
+        ):
+            result = runner.invoke(
+                main,
+                [
+                    "t3", "reidentify",
+                    "--all-collections",
+                    "--no-dry-run",
+                    "--max-workers", "3",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        # All three collections were processed.
+        for c in colls:
+            assert c in call_times, (
+                f"collection {c} was never dispatched; got {list(call_times)}"
+            )
+        # Concurrency check: at least one pair of collections must have
+        # overlapping (start, end) windows under max_workers=3.
+        windows = sorted(call_times.values())
+        any_overlap = any(
+            windows[i][1] > windows[i + 1][0]  # later starts before earlier ends
+            for i in range(len(windows) - 1)
+        )
+        assert any_overlap, (
+            f"expected overlapping execution windows under max_workers=3; "
+            f"observed serial windows {windows}"
+        )
+        # Summary aggregates correctly.
+        assert "across 3 collection(s)" in result.output
+
+    def test_cli_max_workers_one_falls_back_to_serial(self, t3_db, runner):
+        """``--max-workers 1`` (or default in single-collection mode)
+        executes serially and produces deterministic per-collection
+        ordering, useful for debugging and operator-readable logs."""
+        import time
+        import threading
+
+        colls = [_unique_coll() for _ in range(2)]
+        for i, coll in enumerate(colls):
+            _seed_chunk(
+                t3_db, collection=coll, chunk_id=f"legacy-{i}",
+                content=f"content-{i}", chunk_text_hash=str(i + 5) * 64,
+            )
+
+        from nexus.db import t3_reidentify as _ri
+        call_order: list[str] = []
+        order_lock = threading.Lock()
+        original = _ri.reidentify_collection
+
+        def _ordered(t3, coll_name, *, dry_run):
+            with order_lock:
+                call_order.append(coll_name)
+            time.sleep(0.02)
+            return original(t3, coll_name, dry_run=dry_run)
+
+        with (
+            patch("nexus.commands.t3._make_t3_for_backfill", return_value=t3_db),
+            patch.object(
+                t3_db,
+                "list_collections",
+                return_value=[{"name": c, "count": 1} for c in colls],
+            ),
+            patch(
+                "nexus.db.t3_reidentify.reidentify_collection",
+                side_effect=_ordered,
+            ),
+        ):
+            result = runner.invoke(
+                main,
+                [
+                    "t3", "reidentify",
+                    "--all-collections",
+                    "--no-dry-run",
+                    "--max-workers", "1",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        # Strict serial dispatch order matches input order.
+        assert call_order == colls
 
     def test_cli_all_collections_continues_past_errors(self, t3_db, runner):
         """--all-collections accumulates errors and exits nonzero,

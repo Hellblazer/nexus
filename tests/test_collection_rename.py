@@ -63,25 +63,51 @@ class TestChashIndexRename:
         assert (old_rows, new_rows, stays_rows) == (0, 2, 1)
 
     def test_pk_collision_new_side_wins(self, tmp_path: Path) -> None:
-        """When `(chash, new)` already exists, the rename's source row
-        wins (pre-existing new-side row is cleared first). Verified by
-        survival count: exactly one row remains for (chash, new) after
-        rename."""
+        """When ``(chash, new)`` already exists at rename time, the
+        source row's data wins: ``rename_collection`` deletes the
+        pre-existing destination row, then UPDATEs the source row's
+        ``physical_collection`` to ``new``. The survivor therefore
+        carries the SOURCE side's ``created_at``, not the destination's.
+
+        nexus-v7mn: the original assertion only counted survival; this
+        version seeds distinguishable ``created_at`` values via direct
+        SQL so the test fails (instead of silently passing) if a future
+        implementation reverses the precedence by preserving the
+        destination row instead.
+        """
         from nexus.db.t2.chash_index import ChashIndex
 
+        source_ts = "2026-04-01T00:00:00+00:00"
+        dest_ts = "2026-05-01T00:00:00+00:00"
+
         idx = ChashIndex(tmp_path / "chash.db")
-        idx.upsert(chash="aa", collection="code__old")
-        idx.upsert(chash="aa", collection="code__new")
+        # Direct SQL keeps the seed deterministic without monkeypatching
+        # datetime.now (the upsert helper always stamps the current time).
+        with idx._lock:
+            idx.conn.execute(
+                "INSERT INTO chash_index (chash, physical_collection, created_at) "
+                "VALUES (?, ?, ?)",
+                ("aa", "code__old", source_ts),
+            )
+            idx.conn.execute(
+                "INSERT INTO chash_index (chash, physical_collection, created_at) "
+                "VALUES (?, ?, ?)",
+                ("aa", "code__new", dest_ts),
+            )
+            idx.conn.commit()
 
         count = idx.rename_collection(old="code__old", new="code__new")
         assert count == 1
 
         rows = idx.conn.execute(
-            "SELECT physical_collection FROM chash_index "
-            "WHERE chash = ? AND physical_collection = ?",
-            ("aa", "code__new"),
+            "SELECT physical_collection, created_at FROM chash_index "
+            "WHERE chash = ?",
+            ("aa",),
         ).fetchall()
-        assert rows == [("code__new",)]
+        assert rows == [("code__new", source_ts)], (
+            "rename must preserve the source row's data; got "
+            f"{rows!r} (expected [('code__new', {source_ts!r})])"
+        )
 
     def test_no_rows_returns_zero(self, tmp_path: Path) -> None:
         from nexus.db.t2.chash_index import ChashIndex

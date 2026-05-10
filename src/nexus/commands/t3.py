@@ -351,18 +351,25 @@ def gc_cmd(
     dry_run: bool,
     yes: bool,
 ) -> None:
-    """Garbage-collect orphaned T3 chunks (RDR-101 Phase 6).
+    """Garbage-collect orphaned T3 chunks via the catalog manifest (RDR-108 Phase 4).
 
     \b
     A chunk is an orphan when:
-      - its ``doc_id`` metadata is not in the catalog projection's
-        alive set for ``--collection``, AND
+      - its ``meta.chunk_text_hash[:32]`` is NOT referenced by any
+        manifest entry in the catalog ``document_chunks`` table for
+        ``--collection``, AND
       - its ``indexed_at`` predates ``--orphan-window`` (default 30d).
 
     \b
-    Per RF-101-3, ``nx t3 gc`` is the SOLE post-Phase-3 emitter of
-    ``ChunkOrphaned`` events and the SOLE path that physically deletes
-    T3 chunks. The strict order on each candidate is:
+    The manifest path matches what ``indexer._prune_deleted_files``
+    (run at the end of ``nx index``) does. Both paths are now
+    semantically equivalent; this CLI is the operator-driven one with
+    explicit dry-run + --yes confirmation, plus ``ChunkOrphaned``
+    event emission for audit trail.
+
+    \b
+    Per RF-101-3, ``nx t3 gc`` is the SOLE emitter of ``ChunkOrphaned``
+    events. The strict order on each candidate is:
 
         1. Append ``ChunkOrphaned(chunk_id, reason)`` to the event log.
         2. Call ``T3Database.delete_by_chunk_ids`` for that chunk.
@@ -375,9 +382,10 @@ def gc_cmd(
     replay-equality.
 
     \b
-    Chunks missing ``doc_id`` (legacy pre-Phase-2 backfill) are
-    UNDECIDABLE here and skipped: operators must run a maintenance
-    backfill verb, not GC, to address them.
+    Chunks missing ``chunk_text_hash`` (pre-RDR-053 relics) are
+    UNDECIDABLE here and skipped with a warning: re-index the source
+    or run ``nx t3 reidentify`` to populate the field. Same carve-out
+    as the indexer's manifest GC.
 
     \b
     NOTE (RDR-108 Phase 4): post-Phase-3 chunks have no ``doc_id`` in
@@ -413,30 +421,40 @@ def gc_cmd(
     cat = _make_catalog()
 
     try:
-        alive = {e.tumbler for e in cat.list_by_collection(collection)}
+        # Manifest path (RDR-108 nexus-e5aw): the catalog
+        # document_chunks table is the authoritative source of truth
+        # for which chashes belong to which collection. A chunk is
+        # orphan when its content hash is not referenced by any
+        # manifest row for this collection's documents. Same SQL the
+        # indexer's _prune_deleted_files uses.
+        referenced = cat.chashes_for_collection(collection)
     except Exception as exc:
-        click.echo(f"Failed to read catalog: {exc}")
+        click.echo(f"Failed to read catalog manifest: {exc}")
         raise click.exceptions.Exit(1)
-    alive_str = {str(t) for t in alive}
 
-    candidates: list[tuple[str, str]] = []
-    skipped_no_doc_id = 0
+    candidates: list[tuple[str, str]] = []  # (chunk_id, chash)
+    skipped_no_chash = 0
     skipped_no_indexed_at = 0
     skipped_within_window = 0
 
     try:
-        chunks = list(t3_db.list_chunks_with_metadata(collection))
+        chunks = list(t3_db.list_chunks_with_metadata(
+            collection, fields=("chunk_text_hash", "indexed_at"),
+        ))
     except Exception as exc:
         click.echo(f"Failed to list chunks for {collection}: {exc}")
         raise click.exceptions.Exit(1)
 
     for chunk_id, meta in chunks:
-        doc_id = meta.get("doc_id", "")
-        if not doc_id:
-            skipped_no_doc_id += 1
+        chash = (meta.get("chunk_text_hash") or "")[:32]
+        if not chash:
+            # Pre-RDR-053 relic: no content hash to compare against
+            # the manifest. Skip with operator-visible count. Same
+            # carve-out semantics as indexer._prune_deleted_files.
+            skipped_no_chash += 1
             continue
-        if doc_id in alive_str:
-            continue
+        if chash in referenced:
+            continue  # live: manifest still references this chunk
         indexed_at = meta.get("indexed_at", "")
         if not indexed_at:
             skipped_no_indexed_at += 1
@@ -449,14 +467,17 @@ def gc_cmd(
         if indexed_dt > cutoff:
             skipped_within_window += 1
             continue
-        candidates.append((chunk_id, doc_id))
+        candidates.append((chunk_id, chash))
 
     click.echo(
         f"{collection}: {len(candidates)} orphan chunk(s) eligible "
         f"(window={orphan_window})"
     )
-    if skipped_no_doc_id:
-        click.echo(f"  skipped {skipped_no_doc_id} chunk(s) with no doc_id")
+    if skipped_no_chash:
+        click.echo(
+            f"  skipped {skipped_no_chash} chunk(s) with no chunk_text_hash "
+            f"(pre-RDR-053 relics; re-index source or run 'nx t3 reidentify')"
+        )
     if skipped_no_indexed_at:
         click.echo(
             f"  skipped {skipped_no_indexed_at} chunk(s) with no/bad indexed_at"
@@ -466,8 +487,8 @@ def gc_cmd(
             f"  skipped {skipped_within_window} chunk(s) inside the orphan window"
         )
 
-    for chunk_id, doc_id in candidates:
-        click.echo(f"  {chunk_id}  ->  doc_id={doc_id}")
+    for chunk_id, chash in candidates:
+        click.echo(f"  {chunk_id}  ->  chash={chash}")
 
     if not candidates:
         click.echo("\nSummary: 0 orphan(s); nothing to do.")
@@ -487,19 +508,23 @@ def gc_cmd(
     # consistent with T3 (events present, all chunks still in T3); the
     # next gc run idempotently re-emits and retries the batch.
     #
-    # NOTE on the alive snapshot: ``alive_str`` was sampled at the top
-    # of this command. A doc registered concurrently between snapshot
-    # and execution would not appear in the alive set, so its chunks
-    # could be GC'd despite the doc being live again. Operators
-    # SHOULD NOT run gc concurrently with active indexing. The window
-    # is single-operator-driven and acceptably small in practice.
+    # NOTE on the manifest snapshot: ``referenced`` was sampled at the
+    # top of this command. A doc registered concurrently between
+    # snapshot and execution would not appear in the referenced set,
+    # so its chunks could be GC'd despite the doc being live again.
+    # Operators SHOULD NOT run gc concurrently with active indexing.
+    # The window is single-operator-driven and acceptably small in
+    # practice.
     event_log = EventLog(cat._dir)
     pending_chunk_ids: list[str] = []
-    for chunk_id, doc_id in candidates:
+    for chunk_id, chash in candidates:
         event = make_event(
             ChunkOrphanedPayload(
                 chunk_id=chunk_id,
-                reason=f"doc_id {doc_id} no longer alive in {collection}",
+                reason=(
+                    f"chash {chash} not referenced by any manifest entry "
+                    f"in {collection}"
+                ),
             )
         )
         event_log.append(event)
@@ -775,10 +800,24 @@ def backfill_manifest_cmd(
     default=True,
     help="Report-only (default). Use --no-dry-run to perform the migration.",
 )
+@click.option(
+    "--max-workers",
+    type=int,
+    default=4,
+    show_default=True,
+    help=(
+        "Number of collections to process in parallel under "
+        "--all-collections. Each collection has an independent ID "
+        "namespace so concurrent execution is safe; ChromaDB Cloud "
+        "rate limits are the practical ceiling. Set to 1 for "
+        "deterministic serial output."
+    ),
+)
 def reidentify_cmd(
     collection: str,
     all_collections: bool,
     dry_run: bool,
+    max_workers: int,
 ) -> None:
     """Re-upsert T3 chunks under content-derived natural IDs (RDR-108 D1).
 
@@ -802,11 +841,24 @@ def reidentify_cmd(
         re-index that collection from source before running.
 
     \b
+    Performance (RDR-108 nexus-qlm2):
+      - --all-collections processes collections in parallel via a
+        ThreadPoolExecutor (--max-workers, default 4). Each collection
+        has an independent ID namespace so concurrent execution is
+        correctness-preserving; the practical ceiling is the operator's
+        ChromaDB Cloud rate limits, not local CPU.
+      - Per-collection completion order is non-deterministic under
+        max_workers > 1. Pass --max-workers 1 for serial dispatch and
+        operator-readable output.
+
+    \b
     Examples:
       nx t3 reidentify --collection code__nexus            # dry-run report
       nx t3 reidentify -c code__nexus --no-dry-run         # one collection
-      nx t3 reidentify --all-collections --no-dry-run      # full corpus
+      nx t3 reidentify --all-collections --no-dry-run      # full corpus, 4 workers
+      nx t3 reidentify --all-collections --max-workers 8   # higher concurrency
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     from nexus.db.t3_reidentify import (  # noqa: PLC0415
         MissingChunkHashError,
         reidentify_collection,
@@ -817,6 +869,9 @@ def reidentify_cmd(
         raise click.UsageError(
             "Specify exactly one of --collection NAME or --all-collections."
         )
+
+    if max_workers < 1:
+        raise click.UsageError("--max-workers must be >= 1.")
 
     t3_db = _make_t3_for_backfill()
 
@@ -834,6 +889,29 @@ def reidentify_cmd(
             return
 
     total = len(collections_to_process)
+    # Single-collection invocations are inherently serial; skip the
+    # executor overhead and keep the per-collection progress line shape
+    # the operator already knows from --collection mode.
+    workers = min(max_workers, total) if total > 1 else 1
+
+    def _process_one(idx: int, coll_name: str) -> tuple[
+        int, str, "object | None", str | None
+    ]:
+        """Run reidentify_collection in a worker. Returns (idx, name,
+        result_or_None, error_or_None) so the main thread can render
+        output deterministically by index."""
+        print(
+            f"[{idx}/{total}] {coll_name}: processing ...",
+            file=sys.stderr,
+        )
+        try:
+            res = reidentify_collection(t3_db, coll_name, dry_run=dry_run)
+        except MissingChunkHashError as exc:
+            return idx, coll_name, None, str(exc)
+        except Exception as exc:
+            return idx, coll_name, None, f"{coll_name}: {exc}"
+        return idx, coll_name, res, None
+
     total_examined = 0
     total_migrated = 0
     total_already = 0
@@ -841,22 +919,28 @@ def reidentify_cmd(
     skipped_taxonomy = 0
     errors: list[str] = []
 
-    for idx, coll_name in enumerate(collections_to_process, start=1):
-        print(
-            f"[{idx}/{total}] {coll_name}: processing ...",
-            file=sys.stderr,
+    if workers == 1:
+        # Deterministic serial path: dispatch + render in input order.
+        results_iter = (
+            _process_one(i, n)
+            for i, n in enumerate(collections_to_process, start=1)
         )
+    else:
+        # Parallel dispatch; collect as completed (out-of-order render).
+        executor = ThreadPoolExecutor(max_workers=workers)
         try:
-            result = reidentify_collection(
-                t3_db, coll_name, dry_run=dry_run
-            )
-        except MissingChunkHashError as exc:
-            click.echo(f"ERROR: {exc}", err=True)
-            errors.append(str(exc))
-            continue
-        except Exception as exc:
-            click.echo(f"ERROR in {coll_name}: {exc}", err=True)
-            errors.append(f"{coll_name}: {exc}")
+            futures = [
+                executor.submit(_process_one, i, n)
+                for i, n in enumerate(collections_to_process, start=1)
+            ]
+            results_iter = (f.result() for f in as_completed(futures))
+        finally:
+            executor.shutdown(wait=False)
+
+    for _idx, coll_name, result, error in results_iter:
+        if error is not None:
+            click.echo(f"ERROR: {error}", err=True)
+            errors.append(error)
             continue
 
         if result.skipped_taxonomy:

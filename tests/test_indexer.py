@@ -415,15 +415,48 @@ def _gc_col(rows: list[tuple[str, str]]):
     """Build a MagicMock T3 collection. ``rows`` is a list of
     ``(chunk_id, chunk_text_hash)`` pairs; the chunk_text_hash may be
     short (synthetic-write era), [:32] (post-D1), or [:64] (full sha256
-    in metadata, the actual production shape)."""
+    in metadata, the actual production shape).
+
+    ``col.get`` uses a callable ``side_effect`` so the mock survives an
+    unlimited number of calls: the seeded page comes back on the first
+    call and every subsequent call returns an empty page. That keeps
+    the helper safe for callers that paginate (multiple offsets) or
+    re-enter ``_prune_deleted_files`` (which loops over both code and
+    docs collections; each iteration calls ``col.get`` at least once).
+    """
     ids = [r[0] for r in rows]
     metas = [{"chunk_text_hash": r[1]} for r in rows]
+    state = {"calls": 0}
+
+    def _get(*args, **kwargs):
+        state["calls"] += 1
+        if state["calls"] == 1:
+            return {"ids": list(ids), "metadatas": list(metas)}
+        return {"ids": [], "metadatas": []}
+
     col = MagicMock()
-    col.get.side_effect = [
-        {"ids": ids, "metadatas": metas},
-        {"ids": [], "metadatas": []},
-    ]
+    col.get.side_effect = _get
     return col
+
+
+def _gc_db(per_collection_rows: dict[str, list[tuple[str, str]]]):
+    """Build a MagicMock T3 db whose ``get_or_create_collection(name)``
+    returns a per-collection ``_gc_col``. Use when a test needs DIFFERENT
+    chunks for the code and docs collections; the single-shared-col
+    pattern (``db.get_or_create_collection.return_value = _gc_col(...)``)
+    silently returns the same chunks for both collections, which would
+    mask correctness bugs in any test that exercises non-empty
+    references on both sides simultaneously (nexus-v7mn).
+
+    Returns a ``(db, cols)`` pair so per-collection assertions can read
+    ``cols["code__repo"].delete.call_args_list`` directly.
+    """
+    cols: dict[str, MagicMock] = {
+        name: _gc_col(rows) for name, rows in per_collection_rows.items()
+    }
+    db = MagicMock()
+    db.get_or_create_collection.side_effect = lambda name: cols[name]
+    return db, cols
 
 
 def _gc_catalog(per_collection: dict[str, set[str]]):
@@ -559,6 +592,54 @@ def test_prune_deleted_files_no_catalog_is_noop(tmp_path):
 
     assert col.delete.call_count == 0
     db.get_or_create_collection.assert_not_called()
+
+
+def test_prune_deleted_files_per_collection_orphan_isolation(tmp_path):
+    """Both code and docs collections carry their own non-empty chunk
+    sets; each collection's orphans must be deleted from its OWN col
+    mock, not from a shared one. Locks the per-collection isolation
+    that the ``_gc_db`` helper provides; pre-helper, the single shared
+    ``col`` mock made it impossible to tell which collection's delete
+    fired (and silently passed any test that asserted just the
+    aggregate delete count).
+    """
+    from nexus.indexer import _prune_deleted_files
+
+    code_live = "a" * 64
+    code_orphan = "b" * 64
+    docs_live = "c" * 64
+    docs_orphan = "d" * 64
+
+    db, cols = _gc_db({
+        "code__repo": [
+            ("code-live-id", code_live),
+            ("code-orphan-id", code_orphan),
+        ],
+        "docs__repo": [
+            ("docs-live-id", docs_live),
+            ("docs-orphan-id", docs_orphan),
+        ],
+    })
+    catalog = _gc_catalog({
+        "code__repo": {code_live[:32]},
+        "docs__repo": {docs_live[:32]},
+    })
+
+    _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
+
+    code_deleted = _deleted_ids(cols["code__repo"])
+    docs_deleted = _deleted_ids(cols["docs__repo"])
+
+    # Each collection's orphan goes through ITS col.delete.
+    assert code_deleted == ["code-orphan-id"], (
+        f"code__repo deletes must isolate to code's col; got {code_deleted!r}"
+    )
+    assert docs_deleted == ["docs-orphan-id"], (
+        f"docs__repo deletes must isolate to docs's col; got {docs_deleted!r}"
+    )
+    # Neither collection's live chunk gets touched.
+    assert "code-live-id" not in code_deleted
+    assert "docs-live-id" not in docs_deleted
 
 
 def test_prune_deleted_files_round_trip_with_real_catalog(tmp_path):

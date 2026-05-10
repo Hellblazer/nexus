@@ -199,6 +199,19 @@ class ChashIndex:
             self.conn.commit()
             return cur.rowcount
 
+    def distinct_collections(self) -> set[str]:
+        """Return every distinct ``physical_collection`` value in the
+        index (RDR-108 Phase 5 / nexus-w9vq).
+
+        Used by ``nx catalog chash-reconcile`` to identify ghost
+        collections (rows whose collection no longer exists in T3).
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT DISTINCT physical_collection FROM chash_index"
+            ).fetchall()
+        return {r[0] for r in rows}
+
     def rename_collection(self, *, old: str, new: str) -> int:
         """Re-point every row from ``old`` → ``new``. Returns row count updated.
 
@@ -282,17 +295,26 @@ class ChashIndex:
             ).fetchone()
         return int(row[0]) if row else 0
 
-    def chashes_for_collection(self, collection: str) -> set[str]:
-        """Return the set of chash[:32] values registered for *collection*
-        (RDR-108 Phase 4 / nexus-z1mu).
+    def registered_chashes_for_collection(self, collection: str) -> set[str]:
+        """Return the set of chash[:32] values currently registered in
+        the chash_index routing table for *collection* (RDR-108 Phase 4
+        / nexus-z1mu).
+
+        Disambiguated from ``Catalog.chashes_for_collection``
+        (nexus-v7mn): this reader returns the may-be-stale routing
+        snapshot the chash_index dual-write hook last recorded, while
+        the catalog reader returns the manifest-authoritative chash set
+        derived from ``document_chunks``. The two diverge whenever
+        backfill-hash, reidentify, chash-reconcile, or any other
+        out-of-band mutation runs on T3 between dual-write hook calls.
 
         The chash_index stores the full ``chunk_text_hash`` plus its
         Chroma natural ID; under RDR-108 D1 the natural ID is
         ``chash[:32]`` so the truncated set composes directly with T3
         chunk IDs. Truncating in SQL via ``substr(chash, 1, 32)`` keeps
         the helper consistent with ``Catalog.chashes_for_collection``
-        and tolerates any 64-char chashes that older indexer versions
-        may have stored.
+        (chroma-id-shape) and tolerates any 64-char chashes that older
+        indexer versions may have stored.
 
         Replaces ``chunk_chroma_ids_present_in_collection`` (removed in
         the same change). The audit's missing-sample probe now does a

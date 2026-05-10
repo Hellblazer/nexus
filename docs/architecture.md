@@ -108,6 +108,65 @@ and scoping semantic search to relevant collections instead of searching everyth
 
 Content-hash spans reference chunks by `chunk_text_hash` metadata (SHA-256 of stored chunk text). All 5 indexers (code, prose, doc PDF, doc markdown, streaming PDF pipeline) emit `chunk_text_hash` alongside the existing file-level `content_hash`. For existing collections, `nx catalog setup` or `nx collection backfill-hash` adds the field without re-embedding. `link_audit()` verifies chash spans resolve in T3.
 
+### Catalog manifest as authoritative doc structure (RDR-108)
+
+The catalog `document_chunks` table is the authoritative graph layer of the git/IPFS-style blob+tree split that addresses document identity:
+
+- `documents` carries the Document graph node (tumbler-addressable).
+- `document_chunks` records the ordered `(doc_id, position) -> chash` references that compose each Document.
+- T3 stores chunks as content-addressed blobs; the chunk's Chroma natural ID is `sha256(chunk_text)[:32]`.
+
+Schema:
+
+```sql
+CREATE TABLE document_chunks (
+    doc_id      TEXT NOT NULL REFERENCES documents(tumbler) ON DELETE CASCADE,
+    position    INTEGER NOT NULL,
+    chash       TEXT NOT NULL,
+    chunk_index INTEGER,
+    line_start  INTEGER,
+    line_end    INTEGER,
+    char_start  INTEGER,
+    char_end    INTEGER,
+    PRIMARY KEY (doc_id, position)
+);
+CREATE INDEX idx_document_chunks_chash ON document_chunks(chash);
+```
+
+Properties:
+
+- **Identical content collapses to one T3 row.** Two documents that contain the same chunk text in the same collection share one chunk in T3; the manifest records position separately for each. This is a design goal of D1 (no duplicate embeddings, no duplicate vector storage).
+- **Re-indexing is idempotent at the chunk layer.** Re-indexing the same content produces the same Chroma natural ID; the upsert is a no-op. Manifest rows reflect the latest indexed structure.
+- **Document deletion cascades to manifest, then to T3 via GC.** `cat.delete_document(tumbler)` removes the document row; FK `ON DELETE CASCADE` drops the manifest rows; the manifest-based GC (`indexer._prune_deleted_files`) sweeps the orphaned T3 chunks on the next `nx index` run after the document is evicted. Note: when the trigger is a deleted source file (rather than a direct `delete_document` call), `_run_housekeeping` waits for `miss_count >= 2` before evicting -- a one-run rename-detection grace window. T3 cleanup of the orphaned chunks therefore lands on the **second** `nx index` after the file disappears, not the first. One-run latency on cleanup, never on correctness.
+- **Position is in the manifest, not in chunk metadata.** Phase 3 (RDR-108) retired `doc_id`, `chunk_index`, and `chunk_count` from chunk metadata; the manifest is the single source of truth for chunk position within a document. Retrieval call sites that need order (e.g. `synthesizer.py`'s ChunkIndexed event emission) consult `Catalog.get_manifest(doc_id)`.
+
+**Catalog read API for the manifest**:
+- `Catalog.get_manifest(doc_id) -> list[ManifestRow]` -- ordered rows.
+- `Catalog.get_chunk_chashes(doc_id) -> list[str]` -- ordered chash sequence.
+- `Catalog.docs_for_chashes(chashes) -> dict[chash, list[doc_id]]` -- reverse map; one chash can map to multiple docs (identical content shared).
+- `Catalog.chashes_for_collection(physical_collection) -> set[str]` -- chash[:32] set referenced by the manifest for this collection. Used by GC to identify orphan T3 chunks.
+
+**ChashIndex (T2 routing table)**: `chash_index` maps `(chash, physical_collection)` to enable global `chash:<hex>` link resolution without scanning every collection. Post-RDR-108 it is a pure routing table (chash + collection + created_at, no denormalized chunk_chroma_id). Stale rows (collection no longer exists in T3) are self-healed by `Catalog.resolve_chash` on access. A bulk reconcile sweep is on the post-Phase-4 follow-up backlog.
+
+### Migration runbook (RDR-108 Phase 4 -> Phase 5)
+
+For operators upgrading an existing nexus deployment to the post-RDR-108 storage shape:
+
+1. **Deploy the new code + restart the MCP server** so the indexer / GC / retrieval paths use the manifest-aware code paths.
+2. **`nx collection backfill-hash --all`** . Adds `chunk_text_hash` to any chunk that lacks it (pre-RDR-053 collections). Two-pass walk: pass 1 collects ids with a lightweight `include=[]` payload, pass 2 fetches by exact id and re-upserts with canonical-schema-normalized metadata. The two-pass design sidesteps ChromaDB Cloud's offset-pagination instability (a naive offset+update loop misses chunks); the canonical-normalize step drops legacy cargo so chunks with 32+ metadata keys land back under the per-row `NumMetadataKeys` quota. Idempotent; chunks that already have the hash short-circuit.
+3. **`nx t3 reidentify --all-collections --dry-run --max-workers 4`** . Preview what will migrate. Should return `0 error(s)`. Errors at this stage typically mean a collection still has chunks without `chunk_text_hash`; re-run step 2 on the named collection or re-index from source.
+4. **`nx t3 reidentify --all-collections --no-dry-run --max-workers 4`** . Actual migration. Each collection is re-upserted under content-derived natural IDs (`chunk_text_hash[:32]`); old IDs are batch-deleted. The `--max-workers` flag parallelizes across collections (default 4); each collection has an independent ID namespace so concurrent execution is safe. Bound by ChromaDB Cloud rate limits, not local CPU.
+5. **Verify**: rerun the dry-run from step 3; expect `would migrate 0` corpus-wide. Spot-check `(source_path, chunk_index)` dupe-key count on a previously-affected collection (was 1,630 in `code__1-2188` before migration; should be 0 after, since the positional fields no longer exist).
+
+Properties of the verbs:
+- **Idempotent**: re-running on a fully-migrated collection performs zero writes.
+- **Crash-resumable**: re-invoking after an interrupted run safely sweeps un-deleted old IDs.
+- **Carve-outs surface as structured errors**: `taxonomy__*` collections are auto-skipped (centroids use `centroid_hash`, not `chunk_text_hash`). Pre-RDR-053 chunks missing `chunk_text_hash` raise `MissingChunkHashError` rather than silently dropping; the message names the collection and tells the operator to re-index from source.
+
+Pre-existing drift surfaced during Phase 5 verification (filed as separate beads):
+- `chash_index` may carry rows for collections that no longer exist in T3 (`Catalog.resolve_chash` self-heals on access; bulk sweep tracked in `nexus-w9vq`).
+- `document_aspects` may carry rows whose `source_uri` no longer matches a catalog Document (FK CASCADE + optional one-shot GC tracked in `nexus-urj4`).
+
 **Tumbler ordering**: Comparison operators (`<`, `<=`, `>`, `>=`) use -1 sentinel padding for cross-depth ordering -- parent tumblers sort before their children. `Tumbler.spans_overlap()` detects positional span overlap using these operators.
 
 **Two graph views**: `catalog_links` returns only links between live documents (deleted nodes excluded).

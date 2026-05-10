@@ -569,6 +569,62 @@ def test_put_id_is_independent_of_collection(mock_db):
     assert id1 == id2
 
 
+# ── store delete --title cross-collapse (nexus-v7mn item 4) ─────────────────
+
+
+def test_put_then_delete_by_title_cross_collapses_shared_content():
+    """Two puts with identical content under different titles share one
+    Chroma row (RDR-108 D1 content-derived natural ID); the second put
+    overwrites the first put's title metadata, so only the most recent
+    title resolves via ``find_ids_by_title``. Deleting that title
+    removes the shared row, and the prior title's content is gone too.
+
+    This locks the cross-title side-effect documented in
+    ``nx store delete --title``: an exact-content collision under two
+    distinct titles cannot be partially deleted.
+
+    Uses a real ``EphemeralClient`` so the upsert-overwrite + metadata
+    replace + delete-by-where path actually fire end-to-end (the
+    mocked ``mock_db`` fixture above only proves id parity, not the
+    delete-side consequence).
+    """
+    import chromadb
+    from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+
+    db = T3Database(
+        _client=chromadb.EphemeralClient(),
+        _ef_override=DefaultEmbeddingFunction(),
+    )
+    collection = "knowledge__crosscollapse"
+    shared_content = "the shared body of two notes"
+
+    id_alpha = db.put(collection=collection, content=shared_content, title="alpha.md")
+    id_beta = db.put(collection=collection, content=shared_content, title="beta.md")
+
+    # Same id by RDR-108 D1.
+    assert id_alpha == id_beta
+
+    # Title metadata is replaced by the second put; the first title is
+    # no longer queryable through the title index.
+    assert db.find_ids_by_title(collection, "alpha.md") == []
+    assert db.find_ids_by_title(collection, "beta.md") == [id_beta]
+
+    # The shared row resolves; its content carries the latest write.
+    row = db.get_by_id(collection, id_beta)
+    assert row is not None
+    assert row["content"] == shared_content
+
+    # Delete via the still-resolvable title removes the shared row.
+    ids_to_delete = db.find_ids_by_title(collection, "beta.md")
+    assert len(ids_to_delete) == 1
+    db.batch_delete(collection, ids_to_delete)
+
+    # After the delete neither title resolves and the shared row is gone.
+    assert db.find_ids_by_title(collection, "alpha.md") == []
+    assert db.find_ids_by_title(collection, "beta.md") == []
+    assert db.get_by_id(collection, id_beta) is None
+
+
 # ── Oversized put raises (GH #244 + nexus-akof) ─────────────────────────────
 
 
@@ -1009,6 +1065,53 @@ def test_upsert_chunks_with_embeddings_stores(mock_db):
     mock_col.upsert.assert_called_once_with(
         ids=ids, documents=docs, embeddings=embeddings, metadatas=expected_metas,
     )
+
+
+def test_upsert_chunks_with_embeddings_dedupes_duplicate_ids(mock_db):
+    """RDR-108 D1 (nexus-1ljk): under content-derived natural IDs,
+    identical chunk text in the same batch produces duplicate IDs.
+    ChromaDB's ``col.upsert`` rejects batches with duplicate ids
+    (DuplicateIDError), so ``_write_batch`` must dedupe upstream
+    keeping the first occurrence (first-wins is content-equivalent
+    to last-wins under D1, since identical chunk_text yields
+    identical content + embedding + metadata)."""
+    db, mock_col, _ = mock_db
+    # Two distinct content + one duplicate of the first.
+    ids = ["a" * 32, "b" * 32, "a" * 32]
+    docs = ["alpha text", "beta text", "alpha text"]
+    embeddings = [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.1, 0.2, 0.3]]
+    metas = [{"page_number": 1}, {"page_number": 2}, {"page_number": 1}]
+
+    db.upsert_chunks_with_embeddings(
+        collection_name="docs__corpus", ids=ids, documents=docs,
+        embeddings=embeddings, metadatas=metas,
+    )
+
+    # The duplicate is dropped before col.upsert is called.
+    call_kwargs = mock_col.upsert.call_args.kwargs
+    assert call_kwargs["ids"] == ["a" * 32, "b" * 32]
+    assert call_kwargs["documents"] == ["alpha text", "beta text"]
+    assert call_kwargs["embeddings"] == [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
+
+
+def test_upsert_chunks_with_embeddings_no_dedup_when_unique(mock_db):
+    """No collapse when all ids are distinct: the dedup path is a
+    no-op and the batch passes through unchanged."""
+    db, mock_col, _ = mock_db
+    ids = ["a" * 32, "b" * 32, "c" * 32]
+    docs = ["alpha", "beta", "gamma"]
+    embeddings = [[0.1, 0.0, 0.0], [0.0, 0.1, 0.0], [0.0, 0.0, 0.1]]
+    metas = [{"page_number": 1}, {"page_number": 2}, {"page_number": 3}]
+
+    db.upsert_chunks_with_embeddings(
+        collection_name="docs__corpus", ids=ids, documents=docs,
+        embeddings=embeddings, metadatas=metas,
+    )
+
+    call_kwargs = mock_col.upsert.call_args.kwargs
+    assert call_kwargs["ids"] == ids
+    assert call_kwargs["documents"] == docs
+    assert call_kwargs["embeddings"] == embeddings
 
 
 def test_upsert_chunks_with_embeddings_uses_get_or_create(mock_db):
