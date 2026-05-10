@@ -5475,11 +5475,19 @@ def collection_gc_cmd(apply: bool) -> None:
         click.echo(f"Failed to list T3 collections: {exc}", err=True)
         raise SystemExit(1)
 
-    projection_names = {r["name"] for r in cat.list_collections()}
-    doc_collection_rows = cat._db.execute(
-        "SELECT DISTINCT physical_collection FROM documents "
-        "WHERE physical_collection != ''"
-    ).fetchall()
+    # nexus-pz24 (RDR-108 Phase 4 review CR-M2): mirror the T3 path's
+    # error-handling shape so a SQLite failure (locked DB, schema
+    # mismatch, FS issue) surfaces a clean operator message rather
+    # than a raw Python traceback.
+    try:
+        projection_names = {r["name"] for r in cat.list_collections()}
+        doc_collection_rows = cat._db.execute(
+            "SELECT DISTINCT physical_collection FROM documents "
+            "WHERE physical_collection != ''"
+        ).fetchall()
+    except Exception as exc:
+        click.echo(f"Failed to query catalog: {exc}", err=True)
+        raise SystemExit(1)
     doc_collection_names = {r[0] for r in doc_collection_rows if r[0]}
 
     candidates: list[tuple[str, int]] = []

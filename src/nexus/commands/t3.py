@@ -919,52 +919,57 @@ def reidentify_cmd(
     skipped_taxonomy = 0
     errors: list[str] = []
 
+    def _render(results_iter):
+        nonlocal total_examined, total_migrated, total_already, total_deleted
+        nonlocal skipped_taxonomy
+        for _idx, coll_name, result, error in results_iter:
+            if error is not None:
+                click.echo(f"ERROR: {error}", err=True)
+                errors.append(error)
+                continue
+
+            if result.skipped_taxonomy:
+                click.echo(f"  {coll_name}: skipped (taxonomy carve-out)")
+                skipped_taxonomy += 1
+                continue
+
+            verb = "would migrate" if dry_run else "migrated"
+            delete_part = (
+                f", {result.chunks_deleted} old id(s) deleted"
+                if not dry_run and result.chunks_deleted
+                else ""
+            )
+            click.echo(
+                f"  {coll_name}: examined {result.chunks_examined} chunk(s), "
+                f"{verb} {result.chunks_migrated}, "
+                f"{result.chunks_already_migrated} already migrated"
+                + delete_part
+            )
+
+            total_examined += result.chunks_examined
+            total_migrated += result.chunks_migrated
+            total_already += result.chunks_already_migrated
+            total_deleted += result.chunks_deleted
+
     if workers == 1:
         # Deterministic serial path: dispatch + render in input order.
-        results_iter = (
+        _render(
             _process_one(i, n)
             for i, n in enumerate(collections_to_process, start=1)
         )
     else:
-        # Parallel dispatch; collect as completed (out-of-order render).
-        executor = ThreadPoolExecutor(max_workers=workers)
-        try:
+        # Parallel dispatch; collect + render INSIDE the executor's
+        # ``with`` block so __exit__ blocks until in-flight workers
+        # finish (nexus-uv06: prior code called executor.shutdown(
+        # wait=False) from a finally that fired BEFORE the lazy
+        # results_iter generator was consumed, leaking worker threads
+        # if the consumer raised or returned early).
+        with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = [
                 executor.submit(_process_one, i, n)
                 for i, n in enumerate(collections_to_process, start=1)
             ]
-            results_iter = (f.result() for f in as_completed(futures))
-        finally:
-            executor.shutdown(wait=False)
-
-    for _idx, coll_name, result, error in results_iter:
-        if error is not None:
-            click.echo(f"ERROR: {error}", err=True)
-            errors.append(error)
-            continue
-
-        if result.skipped_taxonomy:
-            click.echo(f"  {coll_name}: skipped (taxonomy carve-out)")
-            skipped_taxonomy += 1
-            continue
-
-        verb = "would migrate" if dry_run else "migrated"
-        delete_part = (
-            f", {result.chunks_deleted} old id(s) deleted"
-            if not dry_run and result.chunks_deleted
-            else ""
-        )
-        click.echo(
-            f"  {coll_name}: examined {result.chunks_examined} chunk(s), "
-            f"{verb} {result.chunks_migrated}, "
-            f"{result.chunks_already_migrated} already migrated"
-            + delete_part
-        )
-
-        total_examined += result.chunks_examined
-        total_migrated += result.chunks_migrated
-        total_already += result.chunks_already_migrated
-        total_deleted += result.chunks_deleted
+            _render(f.result() for f in as_completed(futures))
 
     verb = "would migrate" if dry_run else "migrated"
     click.echo(
