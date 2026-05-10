@@ -99,9 +99,10 @@ def _check_python() -> list[HealthResult]:
     )
     if not ok:
         r.fix_suggestions = [
+            "brew install python@3.12                                 (macOS)",
+            "apt install python3.12                                   (Ubuntu/Debian)",
+            "winget install --id Python.Python.3.12 --scope user      (Windows)",
             "https://www.python.org/downloads/",
-            "brew install python@3.12         (macOS)",
-            "apt install python3.12           (Ubuntu/Debian)",
         ]
     return [r]
 
@@ -379,9 +380,12 @@ def _check_tools() -> list[HealthResult]:
         fatal=True,
     )
     if not rg_path:
+        # nexus-njmg (GH #622): winget --scope user avoids UAC-prompt
+        # failures during unattended install on Windows.
         r.fix_suggestions = [
-            "brew install ripgrep                      (macOS)",
-            "apt install ripgrep                       (Ubuntu/Debian)",
+            "brew install ripgrep                                          (macOS)",
+            "apt install ripgrep                                           (Ubuntu/Debian)",
+            "winget install --id BurntSushi.ripgrep.MSVC --scope user      (Windows)",
             "https://github.com/BurntSushi/ripgrep#installation",
         ]
     results.append(r)
@@ -396,8 +400,9 @@ def _check_tools() -> list[HealthResult]:
     )
     if not git_path:
         r.fix_suggestions = [
-            "brew install git                          (macOS)",
-            "apt install git                           (Ubuntu/Debian)",
+            "brew install git                                              (macOS)",
+            "apt install git                                               (Ubuntu/Debian)",
+            "winget install --id Git.Git --scope user                      (Windows)",
             "https://git-scm.com/downloads",
         ]
     results.append(r)
@@ -407,11 +412,15 @@ def _check_tools() -> list[HealthResult]:
     if bd_path:
         results.append(HealthResult(label="bd (beads, optional)", ok=True, detail=bd_path))
     else:
+        # bd has no winget package (verified 2026-05-10); upstream releases
+        # ship as a GitHub release zip operators install manually.
         results.append(HealthResult(
             label="bd (beads, optional)",
             ok=True,
             detail="not found — task tracking unavailable",
-            fix_suggestions=["https://github.com/BeadsProject/beads"],
+            fix_suggestions=[
+                "https://github.com/BeadsProject/beads/releases   (download for your OS)",
+            ],
         ))
 
     # npx (Node.js, plugin-only)
@@ -430,9 +439,10 @@ def _check_tools() -> list[HealthResult]:
             ok=True,
             detail="not found — plugin MCP servers (sequential-thinking, context7) will fail",
             fix_suggestions=[
-                "brew install node                         (macOS)",
-                "apt install nodejs npm                    (Ubuntu/Debian)",
-                "https://nodejs.org/                       (other platforms)",
+                "brew install node                                              (macOS)",
+                "apt install nodejs npm                                         (Ubuntu/Debian)",
+                "winget install --id OpenJS.NodeJS.LTS --scope user             (Windows)",
+                "https://nodejs.org/                                            (other platforms)",
             ],
         ))
 
