@@ -65,6 +65,61 @@ class SearchDiagnostics:
             return None
         return max(candidates, key=lambda item: item[2])
 
+def _attach_doc_ids_from_catalog(
+    results: list[SearchResult], catalog: Any | None,
+) -> None:
+    """nexus-rehf: resolve each result's ``doc_id`` via the catalog
+    manifest and inject it into ``r.metadata["doc_id"]``.
+
+    RDR-108 Phase 3 (nexus-bdag) removed ``doc_id`` from chunk
+    metadata; the catalog ``document_chunks`` manifest is now the
+    authoritative source. Downstream consumers that previously read
+    ``r.metadata["doc_id"]`` (link-boost, display-path resolution,
+    span quote-back, frecency-only update, misclassified prune,
+    chunk_count display, doctor coverage) silently no-op without
+    this attach step.
+
+    Centralising the resolution at the top of the search post-
+    processing chain lets every downstream consumer remain unchanged
+    while still working against Phase-3 chunks.
+
+    Mutates *results* in place. No-op when *catalog* is ``None`` or
+    when no result carries a ``chunk_text_hash`` metadata field.
+    Best-effort: a manifest-lookup failure never breaks the search.
+    """
+    if catalog is None or not results:
+        return
+    chashes = [
+        r.metadata.get("chunk_text_hash", "") for r in results
+    ]
+    nonempty = [c for c in chashes if c]
+    if not nonempty:
+        return
+    try:
+        chash_to_docs = catalog.docs_for_chashes(nonempty)
+    except Exception:
+        _log.debug("attach_doc_ids_lookup_failed", exc_info=True)
+        return
+    if not chash_to_docs:
+        return
+    for r, chash in zip(results, chashes):
+        if not chash:
+            continue
+        # If a result already carries doc_id (e.g. from a legacy
+        # pre-Phase-3 chunk that still has the field), preserve it.
+        # The manifest lookup is the FALLBACK for chunks where the
+        # field is absent, not an override.
+        if r.metadata.get("doc_id"):
+            continue
+        docs = chash_to_docs.get(chash, [])
+        if docs:
+            # Multiple docs sharing the same chash is uncommon but
+            # possible (content-identical files across docs). Pick
+            # the first deterministically; downstream consumers that
+            # need finer disambiguation can re-query the manifest.
+            r.metadata["doc_id"] = docs[0]
+
+
 def _attach_display_paths(
     results: list[SearchResult], catalog: Any | None,
 ) -> None:
@@ -81,6 +136,10 @@ def _attach_display_paths(
     unset; the formatter helper then falls back to ``source_path`` /
     ``file_path``. Best-effort by design: a display-path lookup must
     never break a search.
+
+    Pairs with :func:`_attach_doc_ids_from_catalog`: under Phase 3
+    chunk metadata no longer carries ``doc_id``, so this function
+    must run AFTER ``_attach_doc_ids_from_catalog`` injects it.
     """
     if catalog is None or not results:
         return
@@ -453,6 +512,14 @@ def search_cross_corpus(
     # Topic post-filter: keep only results in the requested topic
     if topic_doc_ids is not None:
         all_results = [r for r in all_results if r.id in topic_doc_ids]
+
+    # nexus-rehf (RDR-108 Phase 4 review D-H1+H2): resolve doc_id via
+    # the catalog manifest and inject into result metadata BEFORE any
+    # downstream consumer reads ``r.metadata["doc_id"]``. Phase 3
+    # removed doc_id from chunk metadata; without this step,
+    # apply_link_boost and _attach_display_paths silently no-op.
+    if catalog is not None and all_results:
+        _attach_doc_ids_from_catalog(all_results, catalog)
 
     # Link-aware boost (RDR-060 E3)
     if link_boost and catalog and all_results:
