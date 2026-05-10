@@ -1010,6 +1010,24 @@ def _run_index_frecency_only(repo: Path, registry: "RepoRegistry") -> None:
     # collection has not yet been written, skip rather than mint an
     # empty zombie via get_or_create_collection.
     from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: PLC0415
+
+    # nexus-7zcv (RDR-108 Phase 4 review D-H4): the legacy
+    # ``where={"doc_id": <id>}`` lookup matches nothing for Phase-3
+    # chunks (the doc_id metadata field is gone). Use the catalog
+    # document_chunks manifest to map doc_id -> chashes, then fetch
+    # by ``chash[:32]`` IDs. Falls back to the legacy where-filter
+    # when the catalog is unavailable (correct only for pre-Phase-3
+    # chunks).
+    _cat = None
+    try:
+        from nexus.catalog import Catalog
+        from nexus.config import catalog_path
+        _cp = catalog_path()
+        if Catalog.is_initialized(_cp):
+            _cat = Catalog(_cp, _cp / ".catalog.db")
+    except Exception:
+        _log.debug("frecency_only_catalog_lookup_failed", exc_info=True)
+
     for collection_name in collection_names:
         try:
             col = db.get_collection(collection_name)
@@ -1017,12 +1035,36 @@ def _run_index_frecency_only(repo: Path, registry: "RepoRegistry") -> None:
             continue
         for file, score in frecency_map.items():
             doc_id = file_to_doc_id.get(file, "")
-            where = {"doc_id": doc_id} if doc_id else {"source_path": str(file)}
-            existing = _paginated_get(
-                col,
-                include=["metadatas"],
-                where=where,
-            )
+
+            existing: dict | None = None
+            if _cat is not None and doc_id:
+                # Manifest-based path: resolve chashes for this doc.
+                try:
+                    manifest = _cat.get_manifest(doc_id)
+                except Exception:
+                    manifest = []
+                natural_ids = [r.chash[:32] for r in manifest if r.chash]
+                if natural_ids:
+                    try:
+                        present = col.get(
+                            ids=natural_ids, include=["metadatas"],
+                        )
+                    except Exception:
+                        present = None
+                    if present and present.get("ids"):
+                        existing = present
+
+            if existing is None:
+                # Legacy where-filter fallback. Returns nothing for
+                # post-Phase-3 chunks; correct for pre-Phase-3 only.
+                where = (
+                    {"doc_id": doc_id} if doc_id
+                    else {"source_path": str(file)}
+                )
+                existing = _paginated_get(
+                    col, include=["metadatas"], where=where,
+                )
+
             if not existing["ids"]:
                 continue  # not yet indexed — needs full nx index repo
 
@@ -1446,16 +1488,19 @@ def _prune_misclassified_in_collection(
     file_to_doc_id: dict[Path, str],
     *,
     kind: str,
+    catalog: object | None = None,
 ) -> int:
-    """Find and delete chunks in *col* whose ``doc_id`` matches any
+    """Find and delete chunks in *col* whose document matches any
     file in *target_paths*. Returns the number of chunks pruned.
 
-    Batched over ``where={"doc_id": {"$in": [batch]}}``. ChromaDB
-    accepts list-valued ``$in`` against a metadata column with a
-    single round-trip; ``_paginated_get`` then walks the full match
-    set in 300-chunk pages. Net result: ~ceil(N / _CHROMA_PAGE_SIZE)
-    queries instead of N — for ART (~4,800 files) that's ~17 calls
-    per collection-direction instead of ~4,800.
+    nexus-7zcv (RDR-108 Phase 4 review D-H4): the legacy path used
+    ``where={"doc_id": {"$in": [batch]}}`` against chunk metadata.
+    RDR-108 Phase 3 removed ``doc_id`` from chunk metadata; the
+    where-filter matches nothing for Phase-3 chunks and the prune
+    silently no-ops. Post-fix: when a catalog is provided, resolve
+    each doc_id's chashes via the document_chunks manifest and
+    delete by ``chash[:32]`` (the RDR-108 D1 natural id). Legacy
+    where-filter retained as fallback for catalog-absent callers.
 
     Files not present in *file_to_doc_id* (legacy / pre-RDR-102 D2
     rows) fall back to per-path ``source_path`` lookup so collections
@@ -1473,26 +1518,62 @@ def _prune_misclassified_in_collection(
 
     pruned = 0
 
-    # Batched doc_id sweep — the load-bearing optimization. _CHROMA_PAGE_SIZE
-    # caps the ``$in`` list per query (matches the doc-id pagination cap
-    # and stays well within ChromaDB Cloud's where-predicate budget).
-    for i in range(0, len(doc_ids), _CHROMA_PAGE_SIZE):
-        batch = doc_ids[i : i + _CHROMA_PAGE_SIZE]
-        if not batch:
-            continue
-        existing = _paginated_get(
-            col, include=[], where={"doc_id": {"$in": batch}},
-        )
-        if existing["ids"]:
-            _batched_delete(col, existing["ids"])
-            pruned += len(existing["ids"])
-            _log.debug(
-                f"pruned misclassified chunks from {kind} collection",
-                count=len(existing["ids"]),
-                doc_id_batch_size=len(batch),
+    if catalog is not None and doc_ids:
+        # Manifest-based path: per-doc, fetch the chashes that document
+        # owns and delete the ones present in this (wrong) collection
+        # using ``col.get(ids=...)`` on chash[:32]. Chroma returns only
+        # the IDs that exist in this collection, so the cross-direction
+        # check (a code file's chunks living in docs__) works without
+        # any per-chunk metadata.
+        all_natural_ids: list[str] = []
+        for did in doc_ids:
+            try:
+                manifest = catalog.get_manifest(did)
+            except Exception:
+                continue
+            for row in manifest:
+                if row.chash:
+                    all_natural_ids.append(row.chash[:32])
+        # Batched ``col.get`` to fetch the present subset, then batched
+        # delete. _CHROMA_PAGE_SIZE caps the ids list per call.
+        for i in range(0, len(all_natural_ids), _CHROMA_PAGE_SIZE):
+            batch_ids = all_natural_ids[i : i + _CHROMA_PAGE_SIZE]
+            if not batch_ids:
+                continue
+            try:
+                present = col.get(ids=batch_ids, include=[])
+            except Exception:
+                continue
+            present_ids = present.get("ids") or []
+            if present_ids:
+                _batched_delete(col, present_ids)
+                pruned += len(present_ids)
+                _log.debug(
+                    f"pruned misclassified chunks from {kind} collection (manifest)",
+                    count=len(present_ids),
+                    doc_id_batch_size=len(batch_ids),
+                )
+    else:
+        # Legacy where-filter path: kept for catalog-absent callers
+        # (correct only for pre-Phase-3 chunks). For Phase-3 chunks
+        # this returns nothing because the where keys are gone.
+        for i in range(0, len(doc_ids), _CHROMA_PAGE_SIZE):
+            batch = doc_ids[i : i + _CHROMA_PAGE_SIZE]
+            if not batch:
+                continue
+            existing = _paginated_get(
+                col, include=[], where={"doc_id": {"$in": batch}},
             )
+            if existing["ids"]:
+                _batched_delete(col, existing["ids"])
+                pruned += len(existing["ids"])
+                _log.debug(
+                    f"pruned misclassified chunks from {kind} collection",
+                    count=len(existing["ids"]),
+                    doc_id_batch_size=len(batch),
+                )
 
-    # Legacy fallback — one query per unmapped path. Cardinality is
+    # Legacy source_path fallback for unmapped files. Cardinality is
     # bounded by the number of files indexed before catalog backfill,
     # which on a repo that has been on a recent nexus is typically zero.
     for src in legacy_paths:
@@ -1519,6 +1600,7 @@ def _prune_misclassified(
     db: object,
     *,
     file_to_doc_id: dict[Path, str] | None = None,
+    catalog: object | None = None,
 ) -> None:
     """Remove chunks from the wrong collection after reclassification.
 
@@ -1577,6 +1659,7 @@ def _prune_misclassified(
         if code_col is not None:
             pruned_chunks += _prune_misclassified_in_collection(
                 code_col, code_targets, file_to_doc_id, kind="code",
+                catalog=catalog,
             )
         bar.set_postfix_str(f"chunks={pruned_chunks}", refresh=False)
         bar.update(1)
@@ -1584,6 +1667,7 @@ def _prune_misclassified(
         if docs_col is not None:
             pruned_chunks += _prune_misclassified_in_collection(
                 docs_col, docs_targets, file_to_doc_id, kind="docs",
+                catalog=catalog,
             )
         bar.set_postfix_str(f"chunks={pruned_chunks}", refresh=False)
         bar.update(1)
@@ -2209,6 +2293,7 @@ def _run_index(
             [f for _, f in pdf_files],
             db,
             file_to_doc_id=file_to_doc_id,
+            catalog=_cat,
         )
         _phase(f"Pruning misclassified done ({time.monotonic() - _t:.1f}s)")
 
