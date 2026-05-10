@@ -133,6 +133,47 @@ def test_doctor_missing_rg_shows_platform_hints(runner, mock_reg):
     assert "BurntSushi/ripgrep" in result.output
 
 
+def test_doctor_missing_rg_includes_winget_hint(runner, mock_reg):
+    """nexus-njmg (GH #622): the Fix-line block for ripgrep must
+    include a Windows winget command. Operators on Windows had no
+    actionable install line and had to leave the terminal to figure
+    out the path manually. ``--scope user`` is mandatory to avoid
+    UAC-prompt failures during unattended install.
+    """
+    result = _invoke(runner, mock_reg, which=lambda _: None)
+    assert "winget install --id BurntSushi.ripgrep.MSVC" in result.output
+    assert "--scope user" in result.output
+
+
+def test_doctor_missing_git_includes_winget_hint(runner, mock_reg):
+    """nexus-njmg: git Fix-line must include winget."""
+    def which_side(name):
+        return None if name == "git" else f"/usr/bin/{name}"
+    result = _invoke(runner, mock_reg, which=which_side)
+    assert "winget install --id Git.Git --scope user" in result.output
+
+
+def test_doctor_missing_npx_includes_winget_hint(runner, mock_reg):
+    """nexus-njmg: Node.js (npx) Fix-line must include winget so
+    Windows plugin users can install the MCP-server runtime.
+    """
+    def which_side(name):
+        return None if name == "npx" else f"/usr/bin/{name}"
+    result = _invoke(runner, mock_reg, which=which_side)
+    assert "winget install --id OpenJS.NodeJS.LTS --scope user" in result.output
+
+
+def test_doctor_missing_bd_includes_release_zip_hint(runner, mock_reg):
+    """nexus-njmg: bd has no winget package; the Fix-line must point
+    at the GitHub releases page so Windows users can find the right
+    binary.
+    """
+    def which_side(name):
+        return None if name == "bd" else f"/usr/bin/{name}"
+    result = _invoke(runner, mock_reg, which=which_side)
+    assert "github.com/BeadsProject/beads/releases" in result.output
+
+
 @pytest.mark.parametrize("tool,exit_code", [("bd", 0), ("uv", 0)])
 def test_doctor_missing_optional_tool(runner, mock_reg, tool, exit_code):
     def which_side(name):
