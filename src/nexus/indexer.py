@@ -735,11 +735,28 @@ def _catalog_hook(
         if new_tumblers:
             _progress(f"  Catalog: linking {len(new_tumblers)} new entries…\r")
         try:
-            from nexus.catalog.link_generator import generate_rdr_filepath_links
+            from nexus.catalog.link_generator import (
+                generate_pdf_corpus_links,
+                generate_prose_filepath_links,
+                generate_rdr_filepath_links,
+            )
             fp_count = generate_rdr_filepath_links(cat, new_tumblers=new_tumblers)
-            links_created = fp_count
+            # nexus-sob9: prose + pdf coverage. Run with the same
+            # incremental scope so a single bulk-index pass closes
+            # the prose/pdf 0% gap from the 2026-05-08 prod shakeout.
+            prose_count = generate_prose_filepath_links(
+                cat, new_tumblers=new_tumblers,
+            )
+            pdf_count = generate_pdf_corpus_links(
+                cat, new_tumblers=new_tumblers,
+            )
+            links_created = fp_count + prose_count + pdf_count
             if links_created:
-                _log.info("catalog_links_generated", filepath=fp_count, repo=repo_name)
+                _log.info(
+                    "catalog_links_generated",
+                    filepath=fp_count, prose=prose_count, pdf=pdf_count,
+                    repo=repo_name,
+                )
         except Exception:
             _log.debug("catalog_link_generation_failed", exc_info=True)
 
