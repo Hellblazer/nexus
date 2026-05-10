@@ -305,6 +305,62 @@ def test_reindex_treats_doc_id_only_chunk_as_reindexable(
     mock_db.delete_collection.assert_called_once_with("docs__test")
 
 
+def test_reindex_treats_phase3_chunk_with_chash_only_as_reindexable(
+    runner, env_creds, mock_db, tmp_path,
+) -> None:
+    """nexus-vn48 (RDR-108 Phase 4 review D-M1): RDR-108 Phase 3
+    chunks have neither source_path NOR doc_id in metadata, only
+    chunk_text_hash. The safety check must resolve chash -> doc_id
+    via the catalog manifest then use the existing doc_id branch.
+    Pre-fix the chunk landed in ``sourceless`` and triggered the
+    all-sourceless refuse path on every Phase-3 corpus.
+    """
+    doc_file = tmp_path / "doc.md"
+    doc_file.write_text("# Doc\ncontent")
+
+    mock_db.collection_info.return_value = {"count": 1, "metadata": {}}
+    mock_col = MagicMock()
+    chash = "a" * 64
+    # Phase-3 chunk: only chunk_text_hash; no source_path or doc_id.
+    mock_col.get.return_value = {
+        "ids": ["chunk-phase3"],
+        "metadatas": [{"chunk_text_hash": chash}],
+    }
+    mock_db.get_or_create_collection.return_value = mock_col
+    from nexus.db.t3 import VerifyResult
+    mock_db.delete_collection.return_value = None
+    after_col = MagicMock()
+    after_col.count.return_value = 1
+    mock_db.get_or_create_collection.side_effect = [mock_col, after_col]
+    vr = VerifyResult(status="healthy", doc_count=1, probe_doc_id="x", distance=0.05, metric="l2")
+
+    # Stub Catalog.docs_for_chashes to return the manifest mapping.
+    # Catalog is lazy-imported inside reindex_cmd (`from nexus.catalog
+    # import Catalog`); patch the source module's attribute so the
+    # lazy import resolves to our stub.
+    fake_cat = MagicMock()
+    fake_cat.docs_for_chashes.return_value = {chash: ["ART-PHASE3"]}
+
+    import nexus.catalog as _cat_mod
+    with patch(
+        "nexus.commands.collection._doc_id_to_file_path",
+        return_value=str(doc_file),
+    ), \
+         patch("nexus.commands.collection._t3", return_value=mock_db), \
+         patch.object(_cat_mod.Catalog, "is_initialized", return_value=True), \
+         patch.object(_cat_mod, "Catalog", return_value=fake_cat), \
+         patch("nexus.doc_indexer.index_markdown", return_value=1), \
+         patch("nexus.db.t3.verify_collection_deep", return_value=vr):
+        result = runner.invoke(
+            main, ["collection", "reindex", "docs__test", "--force"],
+        )
+    # Must NOT hit the all-sourceless refuse branch.
+    assert "refusing to reindex" not in result.output.lower(), result.output
+    mock_db.delete_collection.assert_called_once_with("docs__test")
+    # Verify the manifest path actually fired.
+    fake_cat.docs_for_chashes.assert_called_once()
+
+
 def test_reindex_treats_doc_id_with_no_catalog_entry_as_sourceless(
     runner, env_creds, mock_db,
 ) -> None:
