@@ -6,6 +6,152 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.31.0] - 2026-05-10
+
+Major release rolling up RDR-108 Phase 4 read-path remediation,
+RDR-096 Phase 5.2 source_path retirement, the operator dispatch
+qwen-routing promotion (#623, #626), and a wave of catalog-doctor
++ indexer correctness work surfaced during the 4.29.x prod
+shakeouts.
+
+### Added
+
+- **Operator dispatch qwen routing** (RDR-110 substrate): per-operator
+  routing via ``NEXUS_DISPATCH_BACKEND`` and
+  ``NEXUS_DISPATCH_{QWEN,CLAUDE}_OPERATORS``. ``extract`` promoted to
+  qwen-default; remaining operators stay on claude-dispatch. Feature
+  is opt-in via env; default behavior unchanged. (#623, #626)
+- **3 new catalog doctor checks** (nexus-6dan): ``--chunk-size`` flags
+  T3 chunks above ``MAX_DOCUMENT_BYTES``; ``--chunk-text-dedup``
+  reports duplicate chunk_text_hash collisions per collection;
+  ``--t3-vs-catalog`` cross-checks T3 collections against catalog
+  projection rows. (#665)
+- **Prose + PDF auto-link generators** (nexus-sob9): bulk ingest now
+  emits prose-to-filepath and pdf-to-corpus links during
+  ``nx index repo`` / ``nx index pdf`` instead of leaving links to
+  manual ``nx catalog link`` calls. Default-on; disable via
+  ``--no-auto-links``. (#669)
+- **Lazy T3 collection creation** (nexus-27u7): bulk ingest defers
+  creating ``code__*`` / ``docs__*`` Chroma collections until the
+  first chunk write. Eliminates zombie empty collections from
+  content-type-mismatched runs. (#672)
+- **Aspects confidence floor on writes** (nexus-17wf): the
+  document_aspects upsert path drops rows with ``confidence < 0.3``
+  or NULL/empty source_uri before insert, matching the existing
+  read-side filter. (#663)
+- **Default-exclude implements-heuristic from graph traversal**
+  (nexus-6ppk): ``catalog graph`` BFS no longer follows
+  heuristic-only edges by default; pass ``--include-heuristic`` to
+  opt in. (#671)
+- **Skip minified bundles by default** (nexus-haet): classifier
+  rejects ``*.min.{js,mjs,cjs,css}`` and ``*.bundle.{js,mjs}`` before
+  code-extension routing. Saves Voyage tokens; prevents oversize
+  failures on bundled web assets. (#670)
+- **Honest local-mode test-suite mode default + RDR-109 draft**:
+  documents the architectural plan to fix local-mode collection
+  naming + add cross-encoder salience scoring as a paired RDR.
+  Implementation deferred.
+- **Windows winget hints in install Fix-line block** (nexus-njmg):
+  ``nx doctor`` install instructions include Windows-native winget
+  recipes alongside macOS/Linux. (#656)
+- **Plugin SessionStart preflight degraded-mode marker**
+  (nexus-hwbj): plugin emits a marker when ``nx`` is unreachable so
+  downstream skills can route to fallback behavior. (#657)
+
+### Changed
+
+- **Drop document_aspects.source_path column** (RDR-096 Phase 5.2,
+  nexus-ocu9.11): ``apply_pending`` migrates the projection table to
+  remove the column. ``source_uri`` is the sole identity. Caught +
+  cleared 50 leftover NULL/empty source_uri rows during the
+  2026-05-10 triage. (#666)
+- **Drop chash_index.chunk_chroma_id column** (RDR-108 Phase 4a,
+  nexus-mmf5): retired as part of the Phase-3 metadata reduction.
+  ``chunk_text_hash`` is now the sole T3 chash anchor.
+- **Migrate document_aspects PK to doc_id** (RDR-108 Phase 1c,
+  nexus-je0b): aspects now key by tumbler-style ``doc_id`` instead
+  of the legacy compound key.
+- **Migrate aspect_extraction_queue PK to doc_id** (RDR-108
+  Phase 1c, nexus-je0b): same rationale; queue keys align with the
+  projection table.
+
+### Fixed
+
+- **t3-doc-id-coverage falls back to manifest for Phase-3 chunks**
+  (nexus-esrl): doctor now resolves chunk doc_id via the catalog
+  ``document_chunks`` manifest when chunk metadata lacks doc_id.
+  (#650)
+- **Reindex resolves Phase-3 chunks via catalog manifest**
+  (nexus-vn48): the indexer's "is this chunk already known?" check
+  uses the manifest as a fallback so Phase-3 chunks aren't
+  re-embedded unnecessarily. (#651)
+- **Staleness cache resolves Phase-3 chunks via manifest**
+  (nexus-0ocy): the file-level staleness cache no longer considers
+  Phase-3 chunks "missing" when their doc_id is only available
+  through the manifest. (#652)
+- **doctor ``t3-doc-id-coverage`` skips bypass-schema collections**
+  (nexus-wszt). (#653)
+- **Auto-bootstrap leaves created_at empty for replay-equality**
+  (nexus-33xm): synthesized ``CollectionCreated`` events stamp
+  ``created_at=""`` (matching the post-Phase-4 contract) instead of
+  NOW(), so replay-equality holds across rebuilds. (#654)
+- **CLI force UTF-8 stdout/stderr on Windows** (nexus-vwu1):
+  prevents crashes when a cp1252 console can't encode non-ASCII
+  output. (#655)
+- **Pipeline pass-2 fetch with prior-batch upsert in reidentify**
+  (nexus-zpnq): ``nx t3 reidentify`` eagerly upserts each batch so
+  a mid-run failure preserves earlier work. (#658)
+- **DEVONthink URI collapse** (nexus-n3md): catalog deduplicates
+  variant DEVONthink URIs to a single canonical form; exposes
+  empty-sentinel for documents that lost their DEVONthink anchor.
+  (#662)
+- **docs_for_chashes accepts both 32-char and 64-char chashes**
+  (nexus-f8c3): mixed Phase-2/Phase-3 chash tables no longer
+  partial-miss. (#645)
+- **search ``--max-file-chunks`` via post-query manifest filter**
+  (nexus-oo4f D-M2): Phase-3 chunks lack file_path metadata; filter
+  now resolves file_path through the manifest. (#648)
+- **MCP derives chunk_count from catalog manifest** (nexus-voy5):
+  ``store_get`` and adjacent verbs no longer try to read
+  ``chunk_count`` from removed chunk metadata. (#646)
+- **ThreadPoolExecutor lifecycle + collection-gc clean error
+  handling** (nexus-uv06 + nexus-pz24). (#644)
+- **collection_audit uses get_collection to avoid zombie creation**
+  (nexus-8lbe). (#643)
+- **chash-reconcile guards isinstance(c, str) in list_collections**
+  (nexus-l1yt): defensive type-check against the rare non-str row
+  that crashed the reconciler. (#642)
+
+### Tests
+
+- **Papers-curator isolation invariant for knowledge__knowledge**
+  (nexus-frai): regression test pinning that catalog operations
+  never cross-contaminate between papers-curator-owned
+  ``knowledge__knowledge`` and other curator collections. (#660)
+- **Fail session when fixture cache files leak into
+  ``~/.config/nexus/``** (nexus-nifd): conftest guard catching a
+  whole class of test-isolation regressions. (#661)
+- **Tighten 5 inequality weaknesses + lock manifest-authoritative
+  contract** (nexus-oe2i): converts ``>=N`` assertions to ``==N`` in
+  fixture regressions and locks the post-RDR-108 contract that the
+  manifest is authoritative for chunk-doc mapping. (#649)
+- **Phase-3 position ordering regression tests** (nexus-ivra):
+  guards the ``(doc_id, position)`` ordering the catalog-aware
+  retrieval path relies on. (#647)
+
+### Documentation
+
+- **Chunk vs document metadata semantics + T3 health &
+  audit-membership runbooks** (nexus-gndj): fills a long-standing
+  doc gap on what lives where post-Phase-3. (#664)
+- **Removed stale T3 expire-guard SQL rule** (nexus-ejoq): AGENTS.md
+  no longer references the two-clause guard pattern; the
+  three-clause rule (``ttl_days > 0 AND expires_at != "" AND
+  expires_at < now``) is the only documented form. (#659)
+- **RDR-110 (Semantic Tuple Space)** drafted: unified coordination
+  primitive over ChromaDB + SQLite. Status: Accepted; implementation
+  deferred.
+
 ## [4.29.2] - 2026-05-09
 
 Patch release. Restores Windows compatibility — every CLI invocation

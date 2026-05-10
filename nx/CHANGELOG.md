@@ -6,6 +6,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.31.0] - 2026-05-10
+
+Plugin version aligned with conexus 4.31.0. No plugin-side changes;
+the release ships in the conexus package: RDR-108 Phase 4 read-path
+remediation, RDR-096 Phase 5.2 source_path retirement, operator
+dispatch qwen-routing promotion, 3 new catalog doctor checks, prose
++ PDF auto-link generators, lazy T3 collection creation, aspects
+write-side confidence floor, default-exclude implements-heuristic
+from graph traversal, classifier skips minified bundles, and the
+Windows winget hint block in ``nx doctor``. See root
+``CHANGELOG.md`` for the full breakdown.
+
 ## [4.29.2] - 2026-05-09
 
 Plugin version aligned with conexus 4.29.2. No plugin-side changes;
