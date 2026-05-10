@@ -37,6 +37,7 @@ Edge-case contracts:
 """
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -180,75 +181,109 @@ def reidentify_collection(
     seen_old_ids: set[str] = set()
     seen_new_ids: set[str] = set()
 
-    for start in range(0, len(all_cids), _PAGE_SIZE):
-        cid_batch = all_cids[start : start + _PAGE_SIZE]
-        page = _chroma_with_retry(
+    # nexus-zpnq: pipeline pass-2 fetches one batch ahead of the
+    # processing+upsert of the prior batch. ChromaDB allows up to 10
+    # concurrent reads + 10 concurrent writes per collection
+    # (chroma_quotas.MAX_CONCURRENT_READS/WRITES); a 1-batch
+    # look-ahead is well within budget. Order is preserved: the main
+    # thread still processes batches in cid-list order, and the
+    # ``seen_old_ids`` / ``seen_new_ids`` dedupe sets are only ever
+    # touched from the main thread, so the per-collection state
+    # machine stays correct under the overlap. Theoretical speedup:
+    # up to 2x for I/O-bound collections; in practice modest because
+    # processing time per batch is non-zero.
+    cid_batches = [
+        all_cids[i : i + _PAGE_SIZE]
+        for i in range(0, len(all_cids), _PAGE_SIZE)
+    ]
+
+    def _fetch(batch: list[str]) -> dict:
+        return _chroma_with_retry(
             col.get,
-            ids=cid_batch,
+            ids=batch,
             include=["documents", "embeddings", "metadatas"],
         )
-        page_ids = page.get("ids") or []
-        page_docs = page.get("documents") or [None] * len(page_ids)
-        page_embs = page.get("embeddings")
-        if page_embs is None:
-            page_embs = [None] * len(page_ids)
-        page_metas = page.get("metadatas") or [{}] * len(page_ids)
 
-        ids_to_upsert: list[str] = []
-        docs_to_upsert: list[str] = []
-        embs_to_upsert: list = []
-        metas_to_upsert: list[dict] = []
+    pending_future: Future[dict] | None = None
+    with ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="reidentify-fetch",
+    ) as executor:
+        if cid_batches:
+            pending_future = executor.submit(_fetch, cid_batches[0])
 
-        for cid, doc, emb, meta in zip(
-            page_ids, page_docs, page_embs, page_metas
-        ):
-            result.chunks_examined += 1
-            meta = meta if isinstance(meta, dict) else {}
-            chash = meta.get("chunk_text_hash") or ""
-            if not chash:
-                raise MissingChunkHashError(
-                    chunk_id=cid, collection=collection_name
+        for i, cid_batch in enumerate(cid_batches):
+            assert pending_future is not None
+            page = pending_future.result()
+            # Kick off the NEXT fetch before processing this batch so
+            # the network round-trip overlaps with the upsert below.
+            if i + 1 < len(cid_batches):
+                pending_future = executor.submit(
+                    _fetch, cid_batches[i + 1],
                 )
-            new_id = chash[:32]
-            if cid == new_id:
-                result.chunks_already_migrated += 1
-                continue
+            else:
+                pending_future = None
+            page_ids = page.get("ids") or []
+            page_docs = page.get("documents") or [None] * len(page_ids)
+            page_embs = page.get("embeddings")
+            if page_embs is None:
+                page_embs = [None] * len(page_ids)
+            page_metas = page.get("metadatas") or [{}] * len(page_ids)
 
-            seen_old_ids.add(cid)
-            if new_id in seen_new_ids:
-                # Identical-text collapse (within-batch or cross-batch):
-                # still need to delete the old cid, but skip the
-                # redundant upsert so chromadb doesn't reject a duplicate.
-                continue
-            seen_new_ids.add(new_id)
+            ids_to_upsert: list[str] = []
+            docs_to_upsert: list[str] = []
+            embs_to_upsert: list = []
+            metas_to_upsert: list[dict] = []
 
-            # Use the canonical schema funnel (RDR-108 nexus-6l9p)
-            # rather than a narrow strip set. ``_normalize_for_write``
-            # drops the 3 RDR-108 Phase 3 fields (doc_id, chunk_index,
-            # chunk_count) plus all pre-RDR-101-Phase-5c cargo (corpus,
-            # store_type, expires_at, extraction_method, etc) and
-            # bib_* placeholders. Surfaced during the Phase 5 prod
-            # migration: 2 of 153 collections held legacy chunks with
-            # 33+ metadata keys; the prior narrow-strip path produced
-            # NumMetadataKeys quota errors on the upsert. The canonical
-            # funnel brings these chunks back under the per-row quota.
-            from nexus.db.t3 import _normalize_for_write
-            new_meta = _normalize_for_write(meta, collection_name)
-            ids_to_upsert.append(new_id)
-            docs_to_upsert.append(doc)
-            embs_to_upsert.append(emb)
-            metas_to_upsert.append(new_meta)
+            for cid, doc, emb, meta in zip(
+                page_ids, page_docs, page_embs, page_metas
+            ):
+                result.chunks_examined += 1
+                meta = meta if isinstance(meta, dict) else {}
+                chash = meta.get("chunk_text_hash") or ""
+                if not chash:
+                    raise MissingChunkHashError(
+                        chunk_id=cid, collection=collection_name
+                    )
+                new_id = chash[:32]
+                if cid == new_id:
+                    result.chunks_already_migrated += 1
+                    continue
 
-        if ids_to_upsert and not dry_run:
-            _chroma_with_retry(
-                col.upsert,
-                ids=ids_to_upsert,
-                documents=docs_to_upsert,
-                embeddings=embs_to_upsert,
-                metadatas=metas_to_upsert,
-            )
+                seen_old_ids.add(cid)
+                if new_id in seen_new_ids:
+                    # Identical-text collapse (within-batch or cross-batch):
+                    # still need to delete the old cid, but skip the
+                    # redundant upsert so chromadb doesn't reject a duplicate.
+                    continue
+                seen_new_ids.add(new_id)
 
-        result.chunks_migrated += len(ids_to_upsert)
+                # Use the canonical schema funnel (RDR-108 nexus-6l9p)
+                # rather than a narrow strip set. ``_normalize_for_write``
+                # drops the 3 RDR-108 Phase 3 fields (doc_id, chunk_index,
+                # chunk_count) plus all pre-RDR-101-Phase-5c cargo (corpus,
+                # store_type, expires_at, extraction_method, etc) and
+                # bib_* placeholders. Surfaced during the Phase 5 prod
+                # migration: 2 of 153 collections held legacy chunks with
+                # 33+ metadata keys; the prior narrow-strip path produced
+                # NumMetadataKeys quota errors on the upsert. The canonical
+                # funnel brings these chunks back under the per-row quota.
+                from nexus.db.t3 import _normalize_for_write
+                new_meta = _normalize_for_write(meta, collection_name)
+                ids_to_upsert.append(new_id)
+                docs_to_upsert.append(doc)
+                embs_to_upsert.append(emb)
+                metas_to_upsert.append(new_meta)
+
+            if ids_to_upsert and not dry_run:
+                _chroma_with_retry(
+                    col.upsert,
+                    ids=ids_to_upsert,
+                    documents=docs_to_upsert,
+                    embeddings=embs_to_upsert,
+                    metadatas=metas_to_upsert,
+                )
+
+            result.chunks_migrated += len(ids_to_upsert)
 
     if not dry_run and seen_old_ids:
         old_ids_list = list(seen_old_ids)

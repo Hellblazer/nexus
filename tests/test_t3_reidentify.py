@@ -624,6 +624,148 @@ class TestReidentifyPagination:
             )
 
 
+# ── nexus-zpnq: pass-2 fetch / upsert pipelining ─────────────────────────────
+
+
+class TestReidentifyPipelining:
+    """nexus-zpnq: pass-2 must fetch batch N+1 in parallel with the
+    processing+upsert of batch N. Reverting the pipelining (back to
+    sequential ``col.get -> col.upsert -> col.get -> col.upsert``)
+    fails the timing-overlap test below.
+    """
+
+    def test_pass2_fetch_overlaps_with_upsert(self, t3_db, monkeypatch):
+        """The look-ahead fetch (executor thread) must run
+        concurrently with the prior batch's upsert (main thread).
+        Test asserts that a fetch is in flight at the same wall-
+        clock moment as an upsert; reverting to a fully-sequential
+        ``fetch -> upsert -> fetch -> upsert`` loop fails this.
+        """
+        import threading
+        import time
+
+        coll_name = _unique_coll()
+        col = t3_db._client.get_or_create_collection(coll_name)
+
+        # Seed 3 pages worth of chunks. _PAGE_SIZE is monkeypatched
+        # down so the test runs fast (production _PAGE_SIZE=300).
+        from nexus.db import t3_reidentify as rmod
+        monkeypatch.setattr(rmod, "_PAGE_SIZE", 3)
+
+        ids = [f"old-{i}" for i in range(7)]  # 3 pages of 3 + 1
+        col.add(
+            ids=ids,
+            documents=[f"text-{i}" for i in range(7)],
+            metadatas=[
+                {"chunk_text_hash": f"h{i:062d}aa"}
+                for i in range(7)
+            ],
+            embeddings=[[0.1] * 3 for _ in range(7)],
+        )
+
+        # Track whether a get and an upsert are EVER concurrently
+        # in flight (the pipelining contract).
+        get_in_flight = False
+        upsert_in_flight = False
+        observed_overlap = False
+        lock = threading.Lock()
+
+        target_col = t3_db._client.get_collection(coll_name)
+        real_get = target_col.get
+        real_upsert = target_col.upsert
+
+        def _slow_get(*args, **kwargs):
+            nonlocal get_in_flight, observed_overlap
+            with lock:
+                get_in_flight = True
+                if upsert_in_flight:
+                    observed_overlap = True
+            try:
+                # ids= calls are pass-2 batches; offset= calls are
+                # pass-1 id discovery (no upsert in flight then,
+                # so they don't trigger the overlap signal anyway).
+                time.sleep(0.05)
+                return real_get(*args, **kwargs)
+            finally:
+                with lock:
+                    get_in_flight = False
+
+        def _slow_upsert(*args, **kwargs):
+            nonlocal upsert_in_flight, observed_overlap
+            with lock:
+                upsert_in_flight = True
+                if get_in_flight:
+                    observed_overlap = True
+            try:
+                time.sleep(0.05)
+                return real_upsert(*args, **kwargs)
+            finally:
+                with lock:
+                    upsert_in_flight = False
+
+        monkeypatch.setattr(target_col, "get", _slow_get)
+        monkeypatch.setattr(target_col, "upsert", _slow_upsert)
+        monkeypatch.setattr(
+            t3_db, "_client_for",
+            lambda _name: type(
+                "X", (), {"get_collection": lambda self, n: target_col},
+            )(),
+        )
+
+        rmod.reidentify_collection(t3_db, coll_name, dry_run=False)
+
+        assert observed_overlap, (
+            "pass-2 must overlap a look-ahead fetch with the prior "
+            "batch's upsert (zpnq pipelining contract). Reverting to "
+            "sequential fetch->upsert keeps the two strictly "
+            "alternating and observed_overlap stays False."
+        )
+
+    def test_pipelining_preserves_dedupe_semantics(self, t3_db, monkeypatch):
+        """The seen_new_ids dedupe set is touched only from the main
+        thread; pipelining the fetch must not introduce concurrent
+        writes to it. Two batches whose chunks all share the same
+        chash must collapse to a single upsert in total (one new id,
+        rest skipped as identical-text-collapse).
+        """
+        from nexus.db import t3_reidentify as rmod
+        monkeypatch.setattr(rmod, "_PAGE_SIZE", 2)
+
+        coll_name = _unique_coll()
+        col = t3_db._client.get_or_create_collection(coll_name)
+
+        # 4 chunks, 2 unique chashes -> 2 batches of 2; under
+        # pipelining, batch 2 is being fetched while batch 1 upsert
+        # is processing. The dedupe set must still correctly skip
+        # cross-batch duplicates.
+        chash_a = "a" * 64
+        chash_b = "b" * 64
+        col.add(
+            ids=["c1", "c2", "c3", "c4"],
+            documents=["a-text", "a-dup", "b-text", "b-dup"],
+            metadatas=[
+                {"chunk_text_hash": chash_a},
+                {"chunk_text_hash": chash_a},
+                {"chunk_text_hash": chash_b},
+                {"chunk_text_hash": chash_b},
+            ],
+            embeddings=[[0.1] * 3 for _ in range(4)],
+        )
+
+        result = rmod.reidentify_collection(
+            t3_db, coll_name, dry_run=False,
+        )
+        assert result.chunks_examined == 4
+        # Two unique chashes -> two upserts under the new ids.
+        assert result.chunks_migrated == 2, (
+            f"identical-text collapse broken under pipelining: "
+            f"expected 2 unique migrations, got {result.chunks_migrated}"
+        )
+        # All 4 old ids deleted (the 2 collapsed dupes still get the
+        # old-cid delete; only the upsert is skipped).
+        assert result.chunks_deleted == 4
+
+
 # ── CLI tests: nx t3 reidentify ──────────────────────────────────────────────
 
 
