@@ -122,8 +122,14 @@ class ChashIndex:
                     self.conn.execute(
                         "ALTER TABLE chash_index DROP COLUMN chunk_chroma_id"
                     )
-                except sqlite3.OperationalError:
-                    pass
+                except sqlite3.OperationalError as exc:
+                    # Narrow guard: only swallow the lost-race
+                    # ("no such column") signature. Other
+                    # OperationalError causes (locked DB, syntax,
+                    # missing table, I/O) must propagate so a real
+                    # failure is not silently masked.
+                    if "no such column" not in str(exc):
+                        raise
             self.conn.commit()
 
     # ── Public API ────────────────────────────────────────────────────────
@@ -331,10 +337,16 @@ def dual_write_chash_index(
     the index. Missing rows are a performance hit, not a correctness
     hit.
 
-    No-op when ``chash_index`` is ``None`` or ``ids`` is empty.
-    Empty ``chunk_text_hash`` metadata entries are skipped silently.
+    No-op when ``chash_index`` is ``None``, ``ids`` is empty, or
+    ``metadatas`` is empty. The pre-Phase-4a signature consumed both
+    lists via ``zip(ids, metadatas)`` which implicitly bounded
+    iteration to the shorter; the new helper iterates only
+    ``metadatas`` so a length mismatch (caller bug) was previously
+    diagnosed by zip truncation. The combined guard preserves that
+    fail-cheap behavior. Empty ``chunk_text_hash`` metadata entries
+    are skipped silently inside the loop.
     """
-    if chash_index is None or not ids:
+    if chash_index is None or not ids or not metadatas:
         return
     for meta in metadatas:
         chash = meta.get("chunk_text_hash", "") if isinstance(meta, dict) else ""

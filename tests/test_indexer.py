@@ -497,18 +497,38 @@ def test_prune_deleted_files_empty_manifest_deletes_all(tmp_path):
     assert set(deleted) == {"id-x", "id-y", "id-z"}
 
 
-def test_prune_deleted_files_chunk_without_chunk_text_hash_deleted(tmp_path):
+def test_prune_deleted_files_chunk_without_chunk_text_hash_skipped(tmp_path):
     """A T3 chunk that lacks ``chunk_text_hash`` metadata cannot be
-    proved live by the manifest. These are pre-Phase-A relics; GC
-    sweeps them."""
+    proved live by the manifest, BUT silently sweeping such chunks
+    would be data loss for pre-RDR-053 relics (~690 chunks in
+    ``docs__scheme-evolution-research-b7de0b63`` per RDR-108 RF-1).
+    GC must skip them with a warning and let the operator re-index
+    or run ``nx t3 reidentify`` to populate the field."""
+    from structlog.testing import capture_logs
     from nexus.indexer import _prune_deleted_files
-    col = _gc_col([("ancient", "")])
+    col = _gc_col([("ancient", ""), ("orphan", "b" * 64)])
     db = MagicMock(); db.get_or_create_collection.return_value = col
     catalog = _gc_catalog({"code__repo": {"a" * 32}, "docs__repo": set()})
 
-    _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
+    with capture_logs() as cap:
+        _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
 
-    assert "ancient" in _deleted_ids(col)
+    deleted = _deleted_ids(col)
+    assert "ancient" not in deleted, (
+        "chunk lacking chunk_text_hash must NOT be deleted; manifest "
+        "cannot decide its liveness safely"
+    )
+    assert "orphan" in deleted
+    # Warning naming the count must surface in the log so operators see it.
+    skip_logs = [
+        r for r in cap
+        if r.get("event") == "skipped chunks without chunk_text_hash"
+    ]
+    assert skip_logs, (
+        f"missing-hash skip must emit a warning event; got {cap}"
+    )
+    assert skip_logs[0]["count"] == 1
+    assert skip_logs[0]["collection"] == "code__repo"
 
 
 def test_prune_deleted_files_idempotent(tmp_path):

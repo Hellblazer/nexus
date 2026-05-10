@@ -143,12 +143,18 @@ def _catalog_store_hook(title: str, doc_id: str, collection_name: str) -> str:
     Returns the catalog ``Document.doc_id`` (Tumbler string) so the
     caller can pass it to ``T3Database.put()`` as ``catalog_doc_id``
     for chunk-write-time embedding (RDR-101 Phase 3 PR δ Stage B.4).
-    Returns ``""`` when the catalog is absent or an error occurs — the
-    schema funnel drops empty doc_id at the boundary.
+    Returns ``""`` when the catalog is absent or an error occurs --
+    the schema funnel drops empty doc_id at the boundary.
 
-    ``doc_id`` here is the legacy T3 chunk Chroma natural-id
-    (sha256-of-collection-and-title), used for dedup against the
-    legacy ``meta.doc_id`` mapping.
+    ``doc_id`` here is the T3 chunk natural-id (RDR-108 D1 / nexus-kmb6:
+    ``sha256(content)[:32]``). It is consulted for legacy
+    ``meta.doc_id`` dedup via ``cat.by_doc_id``: catalog entries
+    written before Phase 4 stored the legacy 16-char sha256-of-
+    collection-and-title under ``meta.doc_id``, so this lookup misses
+    on those legacy entries and the hook re-registers. That is the
+    intentional behavior for the upgrade window; a follow-up catalog
+    GC pass (out of scope for nexus-mmf5) consolidates duplicates
+    once all callers have been updated.
     """
     try:
         from nexus.catalog import Catalog
@@ -364,6 +370,13 @@ def delete_cmd(collection: str, doc_id: str | None, title: str | None, yes: bool
 
     Use --id for a single known entry, --title to delete all chunks of a document.
     To remove an entire collection use: nx collection delete <name>
+
+    Note (RDR-108 D1): T3 chunk natural IDs are content-derived
+    (sha256(text)[:32]). Two documents with different titles but
+    identical content share one Chroma row; deleting one --title
+    removes the shared row, which also removes the other title's
+    content. If you need both titles to remain, store them under
+    distinct content.
     """
     if not doc_id and not title:
         raise click.UsageError("provide --id or --title")

@@ -1610,6 +1610,13 @@ def _prune_deleted_files(
 
     Catalog-absent is a safe no-op: GC requires the manifest as the
     source of truth and cannot infer orphans without it.
+
+    Note (operator runbook): the ``nx t3 gc`` CLI verb still uses the
+    legacy ``meta.doc_id``-keyed path (``commands/t3.py:gc_cmd``) and
+    therefore reports zero candidates for post-Phase-3 chunks. The two
+    paths will be reconciled in nexus-e5aw; until then this function is
+    the authoritative GC for content-addressed chunks and ``nx t3 gc``
+    handles only legacy pre-Phase-3 orphans.
     """
     if catalog is None:
         return
@@ -1620,10 +1627,30 @@ def _prune_deleted_files(
         if not all_chunks["ids"]:
             continue
         orphan_ids: list[str] = []
+        unsafe_skipped = 0
         for chunk_id, meta in zip(all_chunks["ids"], all_chunks["metadatas"]):
             chash = (meta.get("chunk_text_hash") or "")[:32]
-            if not chash or chash not in referenced:
+            if not chash:
+                # Pre-RDR-053 relics carry no ``chunk_text_hash`` in
+                # metadata, so the manifest cannot prove them live or
+                # dead. Silently sweeping them would be data loss for
+                # the documented carve-out collection
+                # ``docs__scheme-evolution-research-b7de0b63`` (~690
+                # chunks per RDR-108 RF-1) and any other unmigrated
+                # corpus. Skip and log; the operator cleans them up by
+                # re-indexing the source or running ``nx t3
+                # reidentify``, which adds the field.
+                unsafe_skipped += 1
+                continue
+            if chash not in referenced:
                 orphan_ids.append(chunk_id)
+        if unsafe_skipped:
+            _log.warning("skipped chunks without chunk_text_hash",
+                         collection=collection_name,
+                         count=unsafe_skipped,
+                         note=("re-index source or run `nx t3 reidentify` "
+                               "to populate chunk_text_hash; until then GC "
+                               "cannot decide these chunks safely"))
         if orphan_ids:
             _batched_delete(col, orphan_ids)
             _log.info("pruned orphan chunks",

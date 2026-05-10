@@ -274,6 +274,55 @@ class TestChashesForCollection:
             store.close()
 
 
+class TestChashIndexInitSchemaDropsLegacyColumn:
+    """RDR-108 Phase 4a (nexus-mmf5): ``_init_schema`` probe-and-drop
+    fast-path mirrors the version-tracked ``_drop_chash_index_chunk_chroma_id``
+    migration so dev DBs that opened against the legacy 4-column shape
+    converge to the post-Phase-4a 3-column shape on the next
+    ``ChashIndex(...)`` construction."""
+
+    def test_legacy_4col_table_is_dropped_to_3col_on_open(self, tmp_path) -> None:
+        from nexus.db.migrations import (
+            migrate_chash_index,
+            migrate_chash_index_rename_doc_id,
+        )
+        from nexus.db.t2.chash_index import ChashIndex
+
+        # Build the legacy 4-column shape (install + rename) directly.
+        db_path = tmp_path / "t2.db"
+        seed = sqlite3.connect(str(db_path))
+        try:
+            migrate_chash_index(seed)
+            migrate_chash_index_rename_doc_id(seed)
+            seed.execute(
+                "INSERT INTO chash_index VALUES (?, ?, ?, ?)",
+                ("aa" * 16, "code__legacy", "chunk-7", "2026-05-09T00:00:00Z"),
+            )
+            seed.commit()
+        finally:
+            seed.close()
+
+        # Construct ChashIndex against the legacy DB. The probe-and-drop
+        # in _init_schema must remove ``chunk_chroma_id`` and preserve
+        # the remaining three columns + the seeded row.
+        store = ChashIndex(db_path)
+        try:
+            cols = {
+                r[1] for r in store.conn.execute(
+                    "PRAGMA table_info(chash_index)"
+                ).fetchall()
+            }
+            assert "chunk_chroma_id" not in cols
+            assert cols == {"chash", "physical_collection", "created_at"}
+
+            row = store.conn.execute(
+                "SELECT chash, physical_collection, created_at FROM chash_index"
+            ).fetchone()
+            assert row == ("aa" * 16, "code__legacy", "2026-05-09T00:00:00Z")
+        finally:
+            store.close()
+
+
 # ── delete_stale + is_empty encapsulation (review #1, #6) ────────────────────
 
 
@@ -409,6 +458,26 @@ class TestDualWriteHelper:
 
         # Must not raise.
         dual_write_chash_index(None, "any", ["d1"], [{"chunk_text_hash": "h1"}])
+
+    def test_dual_write_is_noop_when_metadatas_empty(self, tmp_path: Path) -> None:
+        """Empty ``metadatas`` short-circuits before the loop. RDR-108
+        Phase 4a: the helper iterates ``metadatas`` only (``ids`` is
+        kept on the signature for short-circuiting and call-site
+        symmetry), so an ``ids``-non-empty / ``metadatas``-empty
+        mismatch must not silently iterate an empty list and pretend
+        success."""
+        from nexus.db.t2.chash_index import ChashIndex, dual_write_chash_index
+
+        store = ChashIndex(tmp_path / "t2.db")
+        try:
+            # Caller bug: ids non-empty, metadatas empty. Must short-circuit.
+            dual_write_chash_index(store, "coll", ["doc1", "doc2"], [])
+            rows = store.conn.execute(
+                "SELECT COUNT(*) FROM chash_index"
+            ).fetchone()
+            assert rows[0] == 0
+        finally:
+            store.close()
 
     def test_dual_write_skips_empty_chash_metadata(self, tmp_path: Path) -> None:
         """Some legacy / test-only metadata paths omit chunk_text_hash; don't write empty rows."""

@@ -902,20 +902,28 @@ class _WriteOps:
         Used by Phase 4 retrieval doc-grouping (mcp/core.py:847 path)
         to reconstruct the document context for a set of chunk hashes
         returned by a T3 query.
+
+        Batched at 500 chashes per query to stay safely under SQLite's
+        ``SQLITE_LIMIT_VARIABLE_NUMBER`` (default 999, can be 32766 in
+        newer builds). Search-result populations rarely exceed a few
+        hundred chashes, but the batch keeps the worst case bounded.
         """
         if not chashes:
             return {}
         cat = self._cat
-        placeholders = ", ".join(["?"] * len(chashes))
-        rows = cat._db.execute(
-            f"SELECT chash, doc_id FROM document_chunks "
-            f"WHERE chash IN ({placeholders})",
-            chashes,
-        ).fetchall()
         result: dict[str, list[str]] = defaultdict(list)
-        for chash, doc_id in rows:
-            if doc_id not in result[chash]:
-                result[chash].append(doc_id)
+        _BATCH = 500
+        for i in range(0, len(chashes), _BATCH):
+            batch = chashes[i : i + _BATCH]
+            placeholders = ", ".join(["?"] * len(batch))
+            rows = cat._db.execute(
+                f"SELECT chash, doc_id FROM document_chunks "
+                f"WHERE chash IN ({placeholders})",
+                batch,
+            ).fetchall()
+            for chash, doc_id in rows:
+                if doc_id not in result[chash]:
+                    result[chash].append(doc_id)
         return dict(result)
 
     def delete_document(self, tumbler: Tumbler) -> bool:

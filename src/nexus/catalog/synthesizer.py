@@ -578,6 +578,19 @@ def synthesize_t3_chunks(
     # zero docs do not pay the lookup cost.
     manifest_position_cache: dict[str, dict[str, int]] = {}
 
+    # Open the catalog handle ONCE for the whole walk rather than per
+    # collection. Catalog-absent is a safe fallback to enumerate-by-
+    # page-order (handled inside ``_synthesize_collection_chunks``).
+    _cat: Any = None
+    try:
+        from nexus.catalog import Catalog as _Catalog
+        from nexus.config import catalog_path as _catalog_path
+        _cat_path = _catalog_path()
+        if _Catalog.is_initialized(_cat_path):
+            _cat = _Catalog(_cat_path, _cat_path / ".catalog.db")
+    except Exception:
+        _cat = None
+
     for col in collections:
         coll_name = getattr(col, "name", None) or str(col)
         try:
@@ -588,6 +601,7 @@ def synthesize_t3_chunks(
                 file_path_to_doc_id=file_path_to_doc_id,
                 live_doc_lookup=live_doc_lookup,
                 manifest_position_cache=manifest_position_cache,
+                catalog=_cat,
             )
         except Exception as exc:
             _log.warning(
@@ -606,22 +620,21 @@ def _synthesize_collection_chunks(
     file_path_to_doc_id: dict[str, str] | None = None,
     live_doc_lookup: dict[str, str] | None = None,
     manifest_position_cache: dict[str, dict[str, int]] | None = None,
+    catalog: Any = None,
 ) -> Iterator[Event]:
-    """Paginate one collection and yield ``ChunkIndexed`` per chunk."""
+    """Paginate one collection and yield ``ChunkIndexed`` per chunk.
+
+    ``catalog`` (RDR-108 Phase 4b) is the shared Catalog handle the
+    outer ``synthesize_t3_chunks`` opens once per call, threaded down
+    so manifest position lookups don't incur a per-collection SQLite
+    open (50 collections * one connection each was the original cost).
+    ``None`` falls back to enumerate-by-page-order, matching the
+    catalog-absent path the outer caller leaves explicit.
+    """
     if manifest_position_cache is None:
         manifest_position_cache = {}
 
-    # Lazy catalog handle for manifest position lookups (RDR-108 Phase
-    # 4b). Catalog-absent is a safe fallback to enumerate-by-page-order.
-    _cat: Any = None
-    try:
-        from nexus.catalog import Catalog as _Catalog
-        from nexus.config import catalog_path as _catalog_path
-        _cat_path = _catalog_path()
-        if _Catalog.is_initialized(_cat_path):
-            _cat = _Catalog(_cat_path, _cat_path / ".catalog.db")
-    except Exception:
-        _cat = None
+    _cat = catalog
 
     def _position_for(doc_id: str, chash: str, fallback: int) -> int:
         """Look up the chunk's position in the catalog manifest. Falls
