@@ -255,3 +255,50 @@ class TestChashReconcileCLI:
         assert result.exit_code == 0, result.output
         assert "25 ghost" in result.output
         assert "and 5 more ghost collection(s)" in result.output
+
+    def test_handles_string_returning_list_collections_backend(
+        self, tmp_path: Path, monkeypatch, runner,
+    ) -> None:
+        """nexus-l1yt (RDR-108 Phase 4 review CR-H1): chromadb's
+        ``list_collections`` shape varies by backend version. Some
+        return Collection objects (with ``.name``); others return
+        bare strings. Every other call site in nexus uses
+        ``isinstance(c, str)`` to defend; chash_reconcile_cmd was
+        the lone exception and crashed with AttributeError on the
+        string-returning shape. This regression test stubs the
+        client to return strings and verifies the verb completes.
+        """
+        from unittest.mock import MagicMock
+
+        # Stub a T3 whose underlying client returns BARE STRINGS
+        # from list_collections (the shape the original code crashed
+        # on).
+        from nexus.db.t3 import T3Database
+        stub_client = MagicMock()
+        stub_client.list_collections.return_value = ["code__live"]
+        # Stub get_collection to return something with a count() so
+        # the rest of the verb can run end-to-end.
+        stub_col = MagicMock()
+        stub_col.count.return_value = 1
+        stub_client.get_collection.return_value = stub_col
+        t3 = T3Database(_client=stub_client)
+
+        # Seed a chash_index so the verb has something to look at.
+        mem_db = tmp_path / "memory.db"
+        idx = ChashIndex(mem_db)
+        try:
+            idx.upsert(chash="a" * 64, collection="code__live")
+        finally:
+            idx.close()
+
+        import nexus.commands._helpers as h
+        monkeypatch.setattr(h, "default_db_path", lambda: mem_db)
+        monkeypatch.setattr("nexus.db.make_t3", lambda: t3)
+
+        result = runner.invoke(main, ["catalog", "chash-reconcile"])
+
+        assert result.exit_code == 0, (
+            f"verb crashed on string-shape list_collections: {result.output!r}"
+        )
+        # The verb's normal output should appear (no exception).
+        assert "ghost" in result.output or "Nothing to reconcile" in result.output
