@@ -515,3 +515,48 @@ class TestPhase3ManifestFallback:
             "Phase-3 chunk should NOT be reported as missing doc_id "
             "when catalog manifest has the chash -> doc_id mapping"
         )
+
+
+class TestBypassSchemaSkipped:
+    """nexus-wszt: bypass-schema collections (taxonomy__*) carry their
+    own metadata vocabulary and intentionally lack doc_id (they are
+    BERTopic centroids / embedding anchors, not document chunks). The
+    doc_id-coverage audit must skip them or it reports 100% orphan
+    ratio on every centroid set (false positive class). Confirmed
+    via 2026-05-08 prod probe: ``taxonomy__centroids`` showed 2014
+    orphans where the schema is ``{collection, doc_count, label,
+    topic_id}`` (no doc_id by design).
+    """
+
+    def test_taxonomy_collection_excluded_from_audit(
+        self, isolated_nexus, runner, chroma_client,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A ``taxonomy__*`` collection with chunks that lack doc_id
+        must NOT cause the audit to fail; the collection should be
+        absent from the report tables entirely.
+        """
+        # Seed an event referencing taxonomy__centroids; the audit
+        # would normally treat this as expected -> needing doc_id.
+        events = [_chunk("topic-1", "uuid7-IRRELEVANT", "taxonomy__centroids")]
+        _seed_log(isolated_nexus, events)
+        _seed(chroma_client, "taxonomy__centroids", [
+            {"id": "topic-1", "content": "x",
+             "metadata": {"label": "foo bar", "topic_id": 1, "doc_count": 5}},
+        ])
+
+        class _FakeT3:
+            _client = chroma_client
+
+        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
+        result = runner.invoke(
+            doctor_cmd, ["--t3-doc-id-coverage", "--json"],
+        )
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)["t3_doc_id_coverage"]
+        assert payload["pass"] is True
+        assert "taxonomy__centroids" not in payload["tables"], (
+            "bypass-schema collection should be excluded from the "
+            "doc_id-coverage report; centroids intentionally lack "
+            "doc_id and aren't documents"
+        )
