@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
@@ -20,6 +19,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import structlog
+
+from nexus._locking import acquire_directory_lock, release_lock
 
 if TYPE_CHECKING:
     from chromadb.api import ClientAPI
@@ -804,13 +805,10 @@ class Catalog:
     # ── Locking ────────────────────────────────────────────────────────────
 
     def _acquire_lock(self) -> int:
-        dir_fd = os.open(str(self._dir), os.O_RDONLY)
-        fcntl.flock(dir_fd, fcntl.LOCK_EX)
-        return dir_fd
+        return acquire_directory_lock(self._dir)
 
     def _release_lock(self, dir_fd: int) -> None:
-        fcntl.flock(dir_fd, fcntl.LOCK_UN)
-        os.close(dir_fd)
+        release_lock(dir_fd)
 
     # ── JSONL append helpers ───────────────────────────────────────────────
 

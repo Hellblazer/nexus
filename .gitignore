@@ -41,3 +41,6 @@ tests/fixtures/*.pdf
 .serena/
 blog/
 output/
+
+# Local exploration / scratch — never committed
+notes/
