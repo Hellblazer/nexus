@@ -69,3 +69,76 @@ def aspects_drain(timeout: float, poll_interval: float) -> None:
         raise SystemExit(1) from e
 
     click.echo("Aspect queue drained. Safe to run 'nx upgrade'.")
+
+
+@aspects_group.command(name="gc")
+@click.option(
+    "--apply",
+    is_flag=True,
+    default=False,
+    help="Actually delete orphan rows. Without this flag the command "
+    "is a dry-run report only.",
+)
+def aspects_gc(apply: bool) -> None:
+    """Garbage-collect document_aspects rows whose source document was deleted.
+
+    \b
+    An aspect row is orphan when its ``source_uri`` no longer appears
+    in the catalog ``documents`` table. This happens whenever a
+    document is removed (``cat.delete_document``, source-file removal,
+    rename) without a corresponding cleanup of the aspect rows. The
+    catalog and T2 databases are separate SQLite files (see
+    ``docs/architecture.md``) so SQL cross-DB FK CASCADE is not
+    available; this verb is the periodic-sweep equivalent.
+
+    \b
+    Default is dry-run: reports the orphan count without writing.
+    Pass ``--apply`` to actually delete.
+
+    \b
+    Aspects with empty ``source_uri`` are NOT classified as orphans
+    (legacy / pre-RDR-096 P2.1 rows that lack the URI binding).
+    Address those via ``rename_collection`` or direct ``delete``
+    paths if needed.
+
+    \b
+    Examples:
+      nx aspects gc                  # dry-run report
+      nx aspects gc --apply          # actually delete
+
+    \b
+    Filed under nexus-urj4 (RDR-108 Phase 5 follow-up).
+    """
+    from nexus.commands._helpers import default_db_path
+    from nexus.config import catalog_path
+    from nexus.db.t2 import T2Database
+
+    mem_path = default_db_path()
+    cat_db = catalog_path() / ".catalog.db"
+
+    if not cat_db.exists():
+        click.echo(
+            f"No catalog at {cat_db}. Cannot identify orphans without "
+            "the live document set; run 'nx catalog setup' first.",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    with T2Database(mem_path) as db:
+        orphans, total = db.document_aspects.delete_orphans(
+            cat_db, dry_run=not apply,
+        )
+
+    verb = "would delete" if not apply else "deleted"
+    click.echo(
+        f"document_aspects: examined {total} row(s) with non-empty source_uri; "
+        f"{verb} {orphans} orphan(s) "
+        f"({orphans / total * 100:.1f}% orphan rate)"
+        if total > 0 else
+        f"document_aspects: examined 0 row(s) with non-empty source_uri; "
+        f"{verb} 0 orphan(s)"
+    )
+    if orphans > 0 and not apply:
+        click.echo(
+            "Re-run with --apply to actually delete the orphan rows."
+        )
