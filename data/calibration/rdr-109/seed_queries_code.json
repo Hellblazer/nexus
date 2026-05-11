@@ -1,0 +1,11 @@
+{
+  "content_type": "code",
+  "description": "Seed queries used by the salient-sentence extractor to score per-chunk lines for code-corpus salience (function purpose, API surface, invariants, error handling).",
+  "seeds": [
+    "What does this function or class do, and what is its public contract?",
+    "What inputs does this code accept, and what does it return or raise?",
+    "What invariants, preconditions, or postconditions does this code enforce?",
+    "What error or edge-case handling is present, and what conditions trigger it?",
+    "What other modules or symbols does this depend on or extend?"
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "content_type": "docs",
+  "description": "Seed queries used by the salient-sentence extractor to score per-chunk sentences for docs-corpus salience (concept definitions, usage instructions, design rationale).",
+  "seeds": [
+    "What does this section define or explain?",
+    "How is this feature or component used in practice, step-by-step?",
+    "What design choice or trade-off is being justified, and why?",
+    "What are the configuration options, defaults, and their effects?",
+    "What pitfalls, gotchas, or common mistakes does this section warn about?"
+  ]
+}
