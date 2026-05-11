@@ -88,6 +88,19 @@ empty-doc_id rows; one chunker bug and two CI flakes fixed.
   oa9k) — ``nx catalog orphan-backfill`` for legacy collections
   whose chunks lack catalog Documents.
 
+### Known issues
+
+- ``tests/test_indexer_e2e.py::test_smart_index_staleness_check`` and
+  ``test_migration_moves_prose_from_code_to_docs`` fail post-Phase-2.
+  The shared ``_index`` helper mocks ``get_credential`` to return
+  ``"test-key"`` for all keys, which makes ``is_local_mode()`` return
+  False, so the indexer writes voyage-named collections. The
+  ``local_t3`` fixture then trips the new bidirectional EF dispatch
+  (Phase 2's IncompatibleCollectionError boundary) for the re-index
+  / prune paths these two tests exercise. Production behavior is
+  correct; the test mock pattern is what needs updating. Tracked in
+  ``nexus-7kf7``.
+
 ### Fixed
 
 - **chromadb EphemeralClient shared-state flake** (#678) —
