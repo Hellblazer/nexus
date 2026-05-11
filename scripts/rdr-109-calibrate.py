@@ -97,23 +97,28 @@ def _build_salience_cache(
 def _baseline_rank(
     qa: QAItem, collection: str, top_k: int,
 ) -> list[RankedHit]:
-    """Baseline retrieval for *qa*: pull top-K chunks by hybrid score
-    via ``nx search`` (read-only; mirrors the live search path)."""
+    """Baseline retrieval for *qa*: pull top-K chunks via the live
+    ``search_cross_corpus`` path (read-only)."""
     from nexus.db import make_t3  # noqa: PLC0415
-    from nexus.search_engine import search_one  # noqa: PLC0415
+    from nexus.search_engine import search_cross_corpus  # noqa: PLC0415
 
     t3 = make_t3()
-    results = search_one(
-        t3,
+    results = search_cross_corpus(
         query=qa.question,
-        collection=collection,
-        top_k=top_k * 3,  # over-fetch so boost can re-rank within window
+        collections=[collection],
+        n_results=top_k * 3,  # over-fetch so the boost can re-rank within window
+        t3=t3,
+        cluster_by=None,
     )
     ranked: list[RankedHit] = []
     for r in results:
         chash = (r.metadata or {}).get("chunk_text_hash") or r.id
         ranked.append(
-            RankedHit(chash=chash, base_score=r.hybrid_score, boosted_score=r.hybrid_score)
+            RankedHit(
+                chash=chash,
+                base_score=r.hybrid_score,
+                boosted_score=r.hybrid_score,
+            )
         )
     return ranked
 
