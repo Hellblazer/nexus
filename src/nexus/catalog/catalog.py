@@ -350,6 +350,15 @@ from nexus.catalog.catalog_writes import ManifestRow as _ManifestRow  # noqa: E4
 # clear error elsewhere.
 _KNOWN_URI_SCHEMES: frozenset[str] = frozenset({
     "file", "chroma", "https", "nx-scratch", "x-devonthink-item",
+    # ``nx-orphan-backfill://<collection>/<title|chash/<hash>>`` is a
+    # marker scheme used by ``nx catalog orphan-backfill synthetic`` to
+    # register catalog Documents for T3 chunks that have no recoverable
+    # source on disk and no DEVONthink match. No reader is registered:
+    # consumers reading these URIs receive ``scheme_unknown`` and skip,
+    # which is the correct behavior since the underlying source IS
+    # genuinely unavailable. The Document still serves to populate the
+    # ``document_chunks`` manifest so doctor reports clean.
+    "nx-orphan-backfill",
 })
 
 
