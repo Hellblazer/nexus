@@ -275,9 +275,14 @@ class TestDoctorCheckSchema:
         assert "not found" in result.output.lower()
 
     def test_healthy_schema(self, runner: CliRunner, tmp_path: Path) -> None:
+        from nexus.catalog.catalog import Catalog
         from nexus.commands.upgrade import _current_version
         from nexus.db.migrations import apply_pending
 
+        # nexus-4s2o: je0b PK migrations skip via MigrationRetry when
+        # the catalog is absent, leaving the stored version unbumped.
+        # Initialize the catalog so apply_pending completes cleanly.
+        Catalog.init(tmp_path / "catalog")
         db_path = tmp_path / "memory.db"
         conn = sqlite3.connect(str(db_path))
         apply_pending(conn, _current_version())
