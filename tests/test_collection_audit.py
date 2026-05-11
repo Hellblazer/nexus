@@ -15,6 +15,25 @@ import pytest
 from click.testing import CliRunner
 
 
+def _clean_ephemeral_client():
+    """Return a chromadb.EphemeralClient with all collections cleared.
+
+    chromadb.EphemeralClient() instances share an in-memory backend
+    across the process, so a hardcoded ``create_collection(name=...)``
+    in test N collides with a leftover from test N-1 when both ran in
+    the same suite. Clearing collections at entry guarantees per-test
+    isolation. See project memory: chromadb_ephemeral_shared_state.
+    """
+    import chromadb  # noqa: PLC0415
+    client = chromadb.EphemeralClient()
+    for col in list(client.list_collections()):
+        try:
+            client.delete_collection(col.name)
+        except Exception:
+            pass
+    return client
+
+
 @pytest.fixture
 def runner() -> CliRunner:
     return CliRunner()
@@ -273,7 +292,7 @@ class TestLiveDistanceProbe:
         import chromadb
         from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
-        client = chromadb.EphemeralClient()
+        client = _clean_ephemeral_client()
         ef = DefaultEmbeddingFunction()
         col = client.create_collection(name=name, embedding_function=ef)
         col.add(
@@ -328,7 +347,7 @@ class TestLiveDistanceProbe:
         import chromadb
         from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
-        client = chromadb.EphemeralClient()
+        client = _clean_ephemeral_client()
         ef = DefaultEmbeddingFunction()
         empty = client.create_collection(name="code__empty", embedding_function=ef)
 
@@ -662,7 +681,7 @@ class TestCollectionAuditCli:
         )
 
         # Seed an EphemeralClient collection the --live probe can sample.
-        client = chromadb.EphemeralClient()
+        client = _clean_ephemeral_client()
         ef = DefaultEmbeddingFunction()
         col = client.create_collection(name="code__live_cli", embedding_function=ef)
         col.add(
