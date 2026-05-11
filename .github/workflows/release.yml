@@ -9,12 +9,15 @@ jobs:
   test:
     name: pytest (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
-    # Match the CI workflow's 15-min ceiling. Without this, a hanging
-    # test (e.g. an unreaped multiprocessing subprocess from a fork-with-
-    # threads deadlock) would stall the release job indefinitely, blocking
-    # PyPI publish until manually cancelled. Hit during the v4.18.0
-    # tag-push: pytest 3.13 ran 36+ min before manual cancel.
-    timeout-minutes: 15
+    # Hanging-test ceiling. Without this, an unreaped multiprocessing
+    # subprocess (fork-with-threads deadlock) would stall the release
+    # job indefinitely, blocking PyPI publish until manually cancelled.
+    # v4.18.0 tag-push hit it: pytest 3.13 ran 36+ min before manual
+    # cancel. 4.32.1 hit a different boundary — Python 3.12 ran 15m22s
+    # while 3.13 ran 11m33s. The suite grew under RDR-109 (cross-
+    # encoder substrate; lazy ONNX-runtime imports). Bumped to 20m to
+    # match ``ci.yml`` while still catching genuine hangs.
+    timeout-minutes: 20
     strategy:
       fail-fast: true
       matrix:
