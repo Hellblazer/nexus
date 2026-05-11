@@ -1,0 +1,11 @@
+{
+  "content_type": "knowledge",
+  "description": "Seed queries used by the salient-sentence extractor to score per-chunk sentences for the salience candidates of knowledge-corpus papers (RAG, hybrid retrieval, adaptive systems).",
+  "seeds": [
+    "What problem does this work address and what is the proposed solution?",
+    "What are the key findings, results, or empirical claims?",
+    "What method or algorithm is introduced, and how does it work?",
+    "What experimental setup, datasets, or baselines are used?",
+    "What are the limitations, threats to validity, or future directions?"
+  ]
+}
