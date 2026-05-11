@@ -296,7 +296,9 @@ class TestSourceUriRegistration:
         """Lock the scheme registry against silent additions OR
         shrinking. Phase 1: ``file`` + ``chroma``. Phase 4:
         ``nx-scratch`` (P4.1) + ``https`` (P4.2). nexus-bqda adds
-        ``x-devonthink-item`` (macOS-only DT identity URLs). Plain
+        ``x-devonthink-item`` (macOS-only DT identity URLs).
+        nexus-h2pm adds ``nx-orphan-backfill`` for synthetic
+        Documents covering pre-catalog T3 chunks. Plain
         ``http`` is intentionally excluded — Phase 4's https reader
         does NOT cover plain http, so accepting http URIs at register
         would succeed silently and fail at extraction. Adding a new
@@ -306,6 +308,7 @@ class TestSourceUriRegistration:
         from nexus.catalog.catalog import _KNOWN_URI_SCHEMES
         assert _KNOWN_URI_SCHEMES == frozenset({
             "file", "chroma", "https", "nx-scratch", "x-devonthink-item",
+            "nx-orphan-backfill",
         })
 
     def test_register_rejects_http_scheme_until_reader_lands(
