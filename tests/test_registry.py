@@ -9,6 +9,12 @@ import pytest
 
 from nexus.registry import RepoRegistry
 
+# RDR-109 Phase 2: this file asserts cloud-mode canonical behavior
+# (voyage-* embedder names, canonical-set defaults). The cloud_mode
+# fixture sets credentials and forces ``is_local_mode()`` to False so
+# the assertions hold regardless of the host environment.
+pytestmark = pytest.mark.usefixtures("cloud_mode")
+
 
 @pytest.fixture
 def reg(tmp_path: Path) -> RepoRegistry:

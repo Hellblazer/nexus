@@ -47,6 +47,12 @@ from nexus.mcp_server import (
 )
 from nexus.types import SearchResult
 
+# RDR-109 Phase 2: this file asserts cloud-mode canonical behavior
+# (voyage-* embedder names, canonical-set defaults). The cloud_mode
+# fixture sets credentials and forces ``is_local_mode()`` to False so
+# the assertions hold regardless of the host environment.
+pytestmark = pytest.mark.usefixtures("cloud_mode")
+
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
