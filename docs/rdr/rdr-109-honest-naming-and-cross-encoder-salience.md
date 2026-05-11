@@ -318,6 +318,46 @@ mode-awareness is layered on top.
   rename would invalidate every existing chash span and break
   the catalog manifest.
 
+## Phase 4b measurement outcome (2026-05-11)
+
+Calibration sweep run via `scripts/rdr-109-calibrate.py` over four
+content_types with 35 programmatically-generated Q&A items each
+(see `data/calibration/rdr-109/results.md` for full table).
+
+| content_type | baseline | best non-zero weight | Pareto-clean? |
+|---|---:|---:|---|
+| knowledge | 0.286 | 0.343 (-2 regression) | **NO** |
+| rdr | 0.343 | 0.343 (no movement) | n/a |
+| code | 0.486 | **0.514 @ w=0.025** | **YES** |
+| docs | 0.429 | **0.486 @ w=0.025** | **YES** |
+
+Boost mechanism: token-overlap between the query and per-chunk
+salient sentences (extracted by `scripts/rdr_109_salience.py` via
+Phase 3 cross-encoder + per-content-type seed queries). All weights
+≥ 0.025 produce identical hit rates because the typical overlap is
+1-3 tokens out of ~10 query tokens; the boost is therefore a
+near-uniform tie-breaker rather than a magnitude-sensitive signal.
+
+Decision: ship Phase 5's boost as opt-in (default OFF) per the
+existing feature-flag plan; recommend `w=0.025` as the
+default-when-on value. The Phase 5 default-on gate (boost passes
+measurements with no Pareto regression) is NOT met for knowledge
+corpora. Per the lines 290-293 split clause, this is documented as
+the Phase 5 design constraint rather than a blocker: the mechanism
+ships, the default does not.
+
+Caveats:
+
+- Programmatic Q&A (template-derived from chunk content) produces
+  near-paraphrase questions whose retrieval characteristics may
+  differ from hand-curated benchmarks. The aggregate trend
+  (mechanism positive on code/docs, neutral on rdr, mixed on
+  knowledge) is informative; absolute hit rates should be
+  interpreted within this caveat.
+- Sweep ran on small corpora (rag-papers 142, workspace-code 927,
+  docs-1-4 384, rdr-1-2 130) for tractable salience-cache build.
+  Larger corpora may exhibit different reordering windows.
+
 ## References
 
 - nexus-59vl + GH #667: bug + 3 fix options.
