@@ -124,6 +124,8 @@ class TestSchema:
             "extractor_name": ("TEXT", 1),
             # RDR-096 P2.1: nullable URI column.
             "source_uri": ("TEXT", 0),
+            # RDR-109 Phase 5: JSON-encoded salient sentences (nullable).
+            "salient_sentences": ("TEXT", 0),
         }
         assert cols == expected
 
