@@ -6,6 +6,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.32.1] - 2026-05-11
+
+Plugin version aligned with conexus 4.32.1. No plugin-side changes;
+the release fixes a 4.32.0 migration-registration bug (nexus-m3dp)
+that left the RDR-109 Phase 5 ``salient_sentences`` column missing
+for users upgrading from 4.31.7. See root ``CHANGELOG.md``.
+
 ## [4.32.0] - 2026-05-11
 
 Plugin version aligned with conexus 4.32.0. No plugin-side changes;

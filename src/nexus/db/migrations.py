@@ -2712,7 +2712,7 @@ MIGRATIONS: list[Migration] = [
         migrate_drop_source_path_column,
     ),
     Migration(
-        "4.31.7",
+        "4.32.1",
         "RDR-109 Phase 5: add document_aspects.salient_sentences column",
         lambda conn: _migrate_add_aspects_salient_sentences(conn),
     ),
