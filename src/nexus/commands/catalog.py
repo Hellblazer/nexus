@@ -6117,3 +6117,264 @@ def collection_gc_cmd(apply: bool) -> None:
 
 
 # ── Catalog t3-doc-id-coverage support helpers ───────────────────────────
+
+
+
+# ── nx catalog orphan-backfill (nexus-h2pm / nexus-4fw8 / nexus-oa9k) ──────
+
+
+@catalog.group("orphan-backfill")
+def orphan_backfill_group() -> None:
+    """Backfill catalog Documents for T3 chunks that have no catalog entry.
+
+    \b
+    Three modes:
+      dt-link    Search DEVONthink, register Documents with
+                 source_uri=x-devonthink-item://<UUID> for high-precision
+                 fuzzy matches (score >= 0.75 by default).
+      synthetic  Register Documents with nx-orphan-backfill:// URIs for
+                 chunks DT-link can't claim.
+      dump-csv   Dump matched / low-confidence / unmatched titles to CSV
+                 for operator triage.
+      apply-csv  Read an operator-curated CSV and register the verified
+                 UUID assignments.
+
+    \b
+    Complementary to ``nx catalog`` ``backfill-collections`` (which
+    syncs the collections projection) and to the existing
+    ``manifest_backfill`` module (which writes manifest rows when
+    Documents already exist).
+    """
+
+
+def _get_owner_for(collection: str) -> str:
+    """Resolve owner-tumbler for ``collection`` from the default map.
+
+    Raises ``click.ClickException`` if unknown so operators see the
+    actionable error rather than a Python traceback.
+    """
+    from nexus.catalog.orphan_backfill import (  # noqa: PLC0415
+        DEFAULT_COLLECTION_OWNER,
+    )
+    owner_prefix = DEFAULT_COLLECTION_OWNER.get(collection)
+    if not owner_prefix:
+        raise click.ClickException(
+            f"Unknown owner for collection {collection!r}. "
+            f"Add it to DEFAULT_COLLECTION_OWNER in "
+            f"src/nexus/catalog/orphan_backfill.py, or pass --owner "
+            f"explicitly."
+        )
+    return owner_prefix
+
+
+@orphan_backfill_group.command("dt-link")
+@click.argument("collection")
+@click.option(
+    "--min-score", default=0.75, type=float,
+    help="High-precision threshold (default 0.75).",
+)
+@click.option(
+    "--owner", default="",
+    help="Owner tumbler prefix (e.g. '1.9'). Default: looked up by collection.",
+)
+@click.option(
+    "--dry-run/--no-dry-run", default=True,
+    help="Report-only (default). --no-dry-run writes catalog Documents.",
+)
+def dt_link_cmd(
+    collection: str, min_score: float, owner: str, dry_run: bool,
+) -> None:
+    """High-precision DEVONthink linkage for orphan T3 chunks.
+
+    Walks T3 chunks for COLLECTION, groups by title, queries DEVONthink
+    via osascript, and registers a Document per high-confidence match.
+    Requires DEVONthink to be running (macOS only).
+    """
+    from nexus.catalog import orphan_backfill as ob  # noqa: PLC0415
+    from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415
+    from nexus.db import make_t3  # noqa: PLC0415
+
+    if not owner:
+        owner = _get_owner_for(collection)
+    owner_tumbler = Tumbler.parse(owner)
+    cat = _get_catalog()
+    t3 = make_t3()
+
+    click.echo(f"Gathering chunks from T3 {collection}...")
+    groups = ob.gather_titled_chunks(t3, collection)
+    total_chunks = sum(len(g.chunks) for g in groups)
+    click.echo(
+        f"  {len(groups)} distinct titles, {total_chunks} chunks total"
+    )
+
+    click.echo(f"Classifying via DEVONthink (min_score={min_score})...")
+    matched, low, unmatched = ob.classify_groups(
+        groups, min_score=min_score, low_conf_floor=ob.LOW_CONF_FLOOR,
+    )
+    click.echo(
+        f"  matched: {len(matched)} ({sum(len(m.chunks) for m in matched)} chunks)"
+    )
+    click.echo(
+        f"  low_confidence: {len(low)} "
+        f"({sum(len(m.chunks) for m in low)} chunks) -- run dump-csv for triage"
+    )
+    click.echo(
+        f"  unmatched: {len(unmatched)} "
+        f"({sum(len(g.chunks) for g in unmatched)} chunks) -- "
+        f"run synthetic mode or dump-csv"
+    )
+
+    if dry_run:
+        click.echo("\n(dry-run) --no-dry-run to register Documents.")
+        return
+
+    docs, links = ob.register_dt_linked(
+        cat, owner_tumbler, collection, matched,
+    )
+    click.echo(
+        f"\nRegistered {docs} Documents, linked {links} chunks via DT URIs."
+    )
+
+
+@orphan_backfill_group.command("synthetic")
+@click.argument("collection")
+@click.option(
+    "--owner", default="",
+    help="Owner tumbler prefix. Default: looked up by collection.",
+)
+@click.option(
+    "--dry-run/--no-dry-run", default=True,
+    help="Report-only (default).",
+)
+def synthetic_cmd(
+    collection: str, owner: str, dry_run: bool,
+) -> None:
+    """Register synthetic Documents for orphan chunks DT-link can't claim.
+
+    Synthesizes ``nx-orphan-backfill://`` URIs so the catalog manifest
+    is populated without claiming false provenance. For chunks lacking
+    title metadata, falls back to per-chash singleton Documents.
+    """
+    from nexus.catalog import orphan_backfill as ob  # noqa: PLC0415
+    from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415
+    from nexus.db import make_t3  # noqa: PLC0415
+
+    if not owner:
+        owner = _get_owner_for(collection)
+    owner_tumbler = Tumbler.parse(owner)
+    cat = _get_catalog()
+    t3 = make_t3()
+
+    click.echo(f"Gathering chunks from T3 {collection}...")
+    groups = ob.gather_titled_chunks(t3, collection)
+    total_chunks = sum(len(g.chunks) for g in groups)
+    titled = [g for g in groups if g.title]
+    untitled = [g for g in groups if not g.title]
+    untitled_chunks = sum(len(g.chunks) for g in untitled)
+    click.echo(
+        f"  {len(titled)} titled groups + {len(untitled)} untitled "
+        f"groups ({untitled_chunks} chunks via chash fallback)"
+    )
+    click.echo(f"  Total chunks: {total_chunks}")
+
+    if dry_run:
+        click.echo("\n(dry-run) --no-dry-run to register Documents.")
+        return
+
+    docs, links = ob.register_synthetic(
+        cat, owner_tumbler, collection, groups,
+    )
+    click.echo(
+        f"\nRegistered {docs} synthetic Documents, linked {links} chunks."
+    )
+
+
+@orphan_backfill_group.command("dump-csv")
+@click.argument("collection")
+@click.option(
+    "--out-dir", default="",
+    help="Output directory (default: $NEXUS_CONFIG_DIR/backfill-queue).",
+)
+@click.option(
+    "--min-score", default=0.75, type=float,
+    help="High-precision threshold (default 0.75).",
+)
+def dump_csv_cmd(
+    collection: str, out_dir: str, min_score: float,
+) -> None:
+    """Dump matched / low-confidence / unmatched titles to CSV files.
+
+    Operators review ``low_confidence.csv`` and ``unmatched.csv``,
+    fill in the right DT UUID where applicable, then feed back via
+    ``apply-csv``.
+    """
+    from nexus.catalog import orphan_backfill as ob  # noqa: PLC0415
+    from nexus.config import nexus_config_dir  # noqa: PLC0415
+    from nexus.db import make_t3  # noqa: PLC0415
+
+    out_path = (
+        Path(out_dir) if out_dir
+        else Path(nexus_config_dir()) / "backfill-queue"
+    )
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    t3 = make_t3()
+    click.echo(f"Gathering chunks from T3 {collection}...")
+    groups = ob.gather_titled_chunks(t3, collection)
+    click.echo(f"  {len(groups)} distinct titles")
+
+    click.echo(f"Classifying via DEVONthink (min_score={min_score})...")
+    matched, low, unmatched = ob.classify_groups(
+        groups, min_score=min_score,
+    )
+    m_path, l_path, u_path = ob.dump_csvs(
+        out_path, collection, matched, low, unmatched,
+    )
+    click.echo(
+        f"\nWrote:\n"
+        f"  {m_path}  ({len(matched)} matched)\n"
+        f"  {l_path}  ({len(low)} low-confidence; edit operator_decision)\n"
+        f"  {u_path}  ({len(unmatched)} unmatched; edit operator_dt_uuid)"
+    )
+
+
+@orphan_backfill_group.command("apply-csv")
+@click.argument("collection")
+@click.argument("csv_path", type=click.Path(exists=True, dir_okay=False))
+@click.option(
+    "--owner", default="",
+    help="Owner tumbler prefix. Default: looked up by collection.",
+)
+def apply_csv_cmd(
+    collection: str, csv_path: str, owner: str,
+) -> None:
+    """Apply an operator-curated CSV (from ``dump-csv``).
+
+    Reads ``operator_dt_uuid`` (unmatched.csv) or ``operator_decision``
+    (low_confidence.csv) per row; registers Documents with the verified
+    UUIDs.
+    """
+    from nexus.catalog import orphan_backfill as ob  # noqa: PLC0415
+    from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415
+    from nexus.db import make_t3  # noqa: PLC0415
+
+    if not owner:
+        owner = _get_owner_for(collection)
+    owner_tumbler = Tumbler.parse(owner)
+    cat = _get_catalog()
+    t3 = make_t3()
+
+    click.echo(f"Re-gathering T3 chunks for {collection} (chunk_lookup)...")
+    groups = ob.gather_titled_chunks(t3, collection)
+    chunk_lookup = {g.title: g.chunks for g in groups if g.title}
+
+    click.echo(f"Applying {csv_path}...")
+    docs, links = ob.apply_csv(
+        cat, owner_tumbler, collection,
+        Path(csv_path),
+        chunk_lookup=chunk_lookup,
+    )
+    click.echo(
+        f"\nRegistered {docs} Documents, linked {links} chunks "
+        f"from operator-curated CSV."
+    )
