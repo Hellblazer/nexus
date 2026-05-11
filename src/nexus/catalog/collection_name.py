@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 from nexus.corpus import (
     CANONICAL_EMBEDDING_MODELS,
     CONTENT_TYPES,
+    LOCAL_EMBEDDING_MODELS,
     parse_conformant_collection_name,
 )
 
@@ -91,11 +92,19 @@ class CollectionName:
                 f"{content_type!r}; expected one of {CONTENT_TYPES}"
             )
         embedding_model = parsed["embedding_model"]
-        if embedding_model not in CANONICAL_EMBEDDING_MODELS:
+        # RDR-109 Phase 2 widens the closed set to include local-mode
+        # tokens. Both cloud (CANONICAL) and local (LOCAL) names are
+        # truthful identities under the four-segment schema.
+        if (
+            embedding_model not in CANONICAL_EMBEDDING_MODELS
+            and embedding_model not in LOCAL_EMBEDDING_MODELS
+        ):
+            allowed = sorted(
+                CANONICAL_EMBEDDING_MODELS | LOCAL_EMBEDDING_MODELS
+            )
             raise ValueError(
                 f"Collection name {name!r} has non-canonical embedding_model "
-                f"{embedding_model!r}; expected one of "
-                f"{sorted(CANONICAL_EMBEDDING_MODELS)}"
+                f"{embedding_model!r}; expected one of {allowed}"
             )
         return cls(
             content_type=content_type,

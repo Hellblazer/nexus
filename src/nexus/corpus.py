@@ -63,6 +63,18 @@ non-canonical models here would defeat that invariant. The
 remain readable as strings; canonical-set validation lives in
 ``CollectionName.parse``."""
 
+LOCAL_EMBEDDING_MODELS: frozenset[str] = frozenset({
+    "minilm-l6-v2-384",
+    "bge-base-en-v15-768",
+})
+"""RDR-109 Phase 2: tokens for the local embedders. The write path uses
+these when ``is_local_mode()`` is True so a collection name produced in
+local mode tells the truth about which vectors live inside. The
+bidirectional name-aware dispatch in ``T3Database._embedding_fn`` uses
+the set to detect local-token names so a local-mode caller against a
+voyage-named collection fails loud instead of producing 384-dim vectors
+against a 1024-dim space (RDR-059 hazard, inverted)."""
+
 _CT_ALTERNATION = "|".join(_CONTENT_TYPES)
 _CONFORMANT_COLLECTION_RE = re.compile(
     rf"^(?P<ct>{_CT_ALTERNATION})"
@@ -136,6 +148,46 @@ def canonical_embedding_model(content_type: str) -> str:
         f"canonical_embedding_model: unknown content_type {content_type!r}; "
         f"expected one of {CONTENT_TYPES}"
     )
+
+
+def effective_embedding_model_for_writes(content_type: str) -> str:
+    """Return the embedding-model token to write into NEW collection
+    names and per-chunk metadata for ``content_type``.
+
+    RDR-109 Phase 2. Cloud mode delegates verbatim to
+    :func:`canonical_embedding_model` so the RDR-103 canonical-set
+    invariant is preserved. Local mode returns the active local
+    embedder's normalized token (``minilm-l6-v2-384`` or
+    ``bge-base-en-v15-768``) so a fresh local-mode index produces
+    collection names that match the bytes inside.
+
+    Read paths must continue to dispatch off the physical collection
+    name via :func:`voyage_model_for_collection` /
+    :func:`embedding_model_for_collection_name`; this function is for
+    WRITE-side decisions only.
+    """
+    from nexus.config import is_local_mode  # noqa: PLC0415
+    if is_local_mode():
+        from nexus.db.local_ef import local_model_token  # noqa: PLC0415
+        return local_model_token()
+    return canonical_embedding_model(content_type)
+
+
+def embedding_model_for_collection_name(collection_name: str) -> str | None:
+    """Return the embedding-model token parsed from a conformant
+    collection name, or ``None`` if *collection_name* is not conformant.
+
+    RDR-109 Phase 2: read-side dispatch reads the model identity from
+    the name itself rather than inferring from the prefix. The
+    inference-from-prefix shape (:func:`voyage_model_for_collection`)
+    is preserved for legacy two-segment names; conformant four-segment
+    names use the embedded token directly so local-token names route
+    through the local EF without colliding with the voyage default.
+    """
+    match = _CONFORMANT_COLLECTION_RE.match(collection_name)
+    if not match:
+        return None
+    return match.groupdict()["model"]
 
 
 def voyage_model_for_collection(collection_name: str) -> str:
@@ -271,7 +323,7 @@ def t3_collection_name(user_arg: str, *, t3: object | None = None) -> str:
         if len(matches) > 1 and user_arg != "knowledge":
             preferred_4seg = (
                 f"{user_arg}__{user_arg}__"
-                f"{canonical_embedding_model(user_arg)}__v1"
+                f"{effective_embedding_model_for_writes(user_arg)}__v1"
             )
             preferred_2seg = f"{user_arg}__{user_arg}"
             picked: str | None = None
@@ -304,7 +356,7 @@ def t3_collection_name(user_arg: str, *, t3: object | None = None) -> str:
         return user_arg
 
     owner_segment = rest.replace("_", "-")
-    promoted = f"{ct}__{owner_segment}__{canonical_embedding_model(ct)}__v1"
+    promoted = f"{ct}__{owner_segment}__{effective_embedding_model_for_writes(ct)}__v1"
 
     if t3 is None or user_arg == promoted:
         return promoted
