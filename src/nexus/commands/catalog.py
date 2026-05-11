@@ -5431,8 +5431,26 @@ def _run_t3_doc_id_coverage(
     # ``missing_doc_id``, masking real coverage problems.
     cat = Catalog(cat_dir, cat_dir / ".catalog.db")
 
+    # nexus-yrka: collections renamed via ``nx catalog rename-collection``
+    # leave their old name in events.jsonl (events are append-only) but
+    # the old T3 collection no longer exists. The catalog records the
+    # rename via ``superseded_by``; skip those in T3 lookups instead of
+    # reporting them as ``error: open: Collection X does not exist``
+    # (which would flip overall_pass to false on every renamed coll).
+    superseded_map: dict[str, str] = {}
+    try:
+        rows = cat._db.execute(
+            "SELECT name, superseded_by FROM collections "
+            "WHERE superseded_by != ''"
+        ).fetchall()
+        for row in rows:
+            superseded_map[row[0]] = row[1]
+    except Exception:
+        pass
+
     per_coll: dict[str, dict] = {}
     overall_pass = True
+    skipped_superseded = 0
     coll_count = len(expected)
     import time as _time
 
@@ -5445,6 +5463,13 @@ def _run_t3_doc_id_coverage(
                 f"{len(expected_chunks)} expected chunks…",
                 err=True,
             )
+        if coll_name in superseded_map:
+            per_coll[coll_name] = {
+                "skipped": f"superseded_by={superseded_map[coll_name]}",
+                "expected_chunks": len(expected_chunks),
+            }
+            skipped_superseded += 1
+            continue
         _tc = _time.monotonic()
         try:
             col = t3._client.get_collection(name=coll_name)
@@ -5621,6 +5646,7 @@ def _run_t3_doc_id_coverage(
         "collections_in_log_total": len(all_event_collections),
         "orphan_ratio": round(global_orphan_ratio, 4),
         "strict_not_in_t3": strict_not_in_t3,
+        "skipped_superseded": skipped_superseded,
         "tables": per_coll,
     }
 
@@ -5645,8 +5671,17 @@ def _print_t3_doc_id_coverage_text(report: dict) -> None:
         f"{report['collections_in_log']} "
         f"(total in events.jsonl: {in_log_total})"
     )
+    skipped = report.get("skipped_superseded", 0)
+    if skipped:
+        click.echo(f"Skipped (superseded): {skipped}")
     click.echo("")
     for coll_name, diff in report["tables"].items():
+        if "skipped" in diff:
+            click.echo(
+                f"  - {coll_name:<40}  SKIPPED: {diff['skipped']} "
+                f"(expected {diff['expected_chunks']} chunks)"
+            )
+            continue
         if "error" in diff:
             click.echo(
                 f"  ✗ {coll_name:<40}  ERROR: {diff['error']} "
