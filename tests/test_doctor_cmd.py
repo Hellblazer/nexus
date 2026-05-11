@@ -606,7 +606,9 @@ class TestCheckQuotas:
             )
         assert result.exit_code == 0, result.output
         data = _json.loads(result.output)
-        assert set(data.keys()) == {"chromadb", "voyage", "retry"}
+        assert set(data.keys()) == {
+            "chromadb", "voyage", "cross_encoder", "retry",
+        }
         assert data["chromadb"]["reachable"] is True
         assert data["chromadb"]["limits"]["max_records_per_write"] == 300
         assert "voyage-code-3" in data["voyage"]["models"]
