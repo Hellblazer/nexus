@@ -6,6 +6,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.32.1] - 2026-05-11
+
+Patch on 4.32.0. Fixes a 4.32.0 release bug (nexus-m3dp): the
+RDR-109 Phase 5 ``salient_sentences`` migration was registered at
+version 4.31.7. ``apply_pending`` requires ``m_ver > last_seen_t``,
+so users upgrading from 4.31.7 to 4.32.0 had the migration skipped —
+the column was never added. Fresh installs got the column via the
+base CREATE TABLE; only upgraders were affected.
+
+Re-registering the migration at 4.32.1 forces re-evaluation against
+every install. The migration body is idempotent
+(``PRAGMA table_info`` guards the ALTER), so installs that already
+have the column from a fresh-install path no-op cleanly.
+
+Live-confirmed by 4.32.0 shakeout: local memory.db at stored
+version 4.32.0 was missing ``salient_sentences``.
+
+### Fixed
+
+- **``salient_sentences`` migration unreachable for upgraders**
+  (nexus-m3dp). Migration registration bumped from 4.31.7 to 4.32.1.
+
 ## [4.32.0] - 2026-05-11
 
 Minor release. **Headline**: RDR-109 ships in five phases — local
