@@ -560,3 +560,57 @@ class TestBypassSchemaSkipped:
             "doc_id-coverage report; centroids intentionally lack "
             "doc_id and aren't documents"
         )
+
+
+# ── Superseded collection skip (nexus-yrka) ──────────────────────────────
+
+
+class TestSupersededSkip:
+    """Collections renamed via ``nx catalog rename-collection`` keep their
+    old name in events.jsonl (events are append-only) but the old T3
+    collection no longer exists. Doctor must skip them via the catalog's
+    ``superseded_by`` column instead of reporting ``error: open: …``,
+    which would flip ``overall_pass`` to false on every renamed coll.
+    """
+
+    def test_superseded_collection_is_skipped_not_failed(
+        self, isolated_nexus, runner, chroma_client,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        events = [
+            _chunk("ch1", "uuid7-A", "code__active"),
+            _chunk("ch2", "uuid7-B", "code__old"),
+        ]
+        _seed_log(isolated_nexus, events)
+        _seed(chroma_client, "code__active", [
+            {"id": "ch1", "content": "x",
+             "metadata": {"doc_id": "uuid7-A"}},
+        ])
+        # code__old intentionally NOT seeded in T3 — it has been renamed.
+
+        # Mark code__old as superseded by code__active in the catalog.
+        cat = Catalog(isolated_nexus, isolated_nexus / ".catalog.db")
+        cat.register_collection("code__active")
+        cat.register_collection("code__old")
+        cat.supersede_collection(
+            "code__old", "code__active", reason="renamed",
+        )
+
+        class _FakeT3:
+            _client = chroma_client
+
+        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
+        result = runner.invoke(
+            doctor_cmd, ["--t3-doc-id-coverage", "--json"],
+        )
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)["t3_doc_id_coverage"]
+        assert payload["pass"] is True, payload
+        assert payload["skipped_superseded"] == 1
+        assert "skipped" in payload["tables"]["code__old"]
+        assert (
+            "code__active"
+            in payload["tables"]["code__old"]["skipped"]
+        )
+        # Active collection is still audited normally.
+        assert payload["tables"]["code__active"]["pass"] is True
