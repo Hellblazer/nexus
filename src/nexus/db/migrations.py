@@ -2684,17 +2684,22 @@ MIGRATIONS: list[Migration] = [
         "Drop chash_index.chunk_chroma_id column (RDR-108 Phase 4a, nexus-mmf5)",
         _drop_chash_index_chunk_chroma_id,
     ),
-    # The RDR-108 Phase 1c PK migrations (``nexus-je0b``: document_aspects
-    # and aspect_extraction_queue PK switch to doc_id) and ``nexus-ocu9.11``
-    # (drop document_aspects.source_path) stay deferred from the
-    # registry. The 4.31.4 reland attempt surfaced cascading test
-    # surgery: collection-rename / aspect-worker direct INSERTs need
-    # doc_id threading; the empty-catalog fast path violates the
-    # K11/CG2 "no-catalog → no-cache" contract; the high-volume
-    # orphan check needs to stay MigrationError (test contract). The
-    # ``_resolve_doc_id`` substrate in DocumentAspects.upsert ships
-    # in 4.31.5 so the eventual reland is a one-line registry change
-    # plus targeted test updates. Function definitions stay in place.
+    # nexus-4s2o reland of nexus-je0b: RDR-108 Phase 1c PK switch to
+    # doc_id for document_aspects + aspect_extraction_queue. The
+    # ``_resolve_doc_id`` substrate in DocumentAspects.upsert (4.31.5)
+    # plus the test surgery in this commit unblock the reland.
+    # ``nexus-ocu9.11`` (drop document_aspects.source_path) stays
+    # deferred — separate follow-up.
+    Migration(
+        "4.30.0",
+        "RDR-108 Phase 1c: PK switch document_aspects to doc_id (nexus-je0b)",
+        _migrate_document_aspects_pk_via_apply_pending,
+    ),
+    Migration(
+        "4.30.0",
+        "RDR-108 Phase 1c: PK switch aspect_extraction_queue to doc_id (nexus-je0b)",
+        _migrate_aspect_queue_pk_via_apply_pending,
+    ),
 ]
 
 # ── T3 upgrade steps ────────────────────────────────────────────────────────

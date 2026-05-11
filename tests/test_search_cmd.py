@@ -209,8 +209,17 @@ def test_reverse_flag_reverses_output_order(runner: CliRunner, cloud_env) -> Non
         )
     assert normal.exit_code == 0
     assert reversed_.exit_code == 0
-    normal_lines = [ln for ln in normal.output.splitlines() if ln.strip()]
-    reversed_lines = [ln for ln in reversed_.output.splitlines() if ln.strip()]
+    # nexus-4s2o: filter out structlog warning lines (e.g.
+    # ``migrate_*_pk_skip_no_catalog`` emitted when je0b skips
+    # because the test fixture leaves the catalog uninitialized).
+    def _result_lines(out: str) -> list[str]:
+        return [
+            ln for ln in out.splitlines()
+            if ln.strip() and not ln.startswith("event=")
+            and "migration_" not in ln and "migrate_" not in ln
+        ]
+    normal_lines = _result_lines(normal.output)
+    reversed_lines = _result_lines(reversed_.output)
     assert normal_lines != reversed_lines
     assert normal_lines == list(reversed(reversed_lines))
 

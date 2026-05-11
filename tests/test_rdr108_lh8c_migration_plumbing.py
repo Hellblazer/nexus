@@ -561,10 +561,6 @@ def _je0b_registered() -> bool:
     )
 
 
-@pytest.mark.skipif(
-    not _je0b_registered(),
-    reason="je0b deferred from MIGRATIONS in 4.31.5 (see CHANGELOG)",
-)
 class TestK11SkipNotCached:
     """K11: apply_pending must NOT add path to _upgrade_done when catalog is absent."""
 
@@ -632,10 +628,6 @@ class TestK11SkipNotCached:
 # ── CG-2: apply_pending no-catalog-path ──────────────────────────────────────
 
 
-@pytest.mark.skipif(
-    not _je0b_registered(),
-    reason="je0b deferred from MIGRATIONS in 4.31.5 (see CHANGELOG)",
-)
 class TestCG2NoCatalog:
     """CG-2: apply_pending with absent catalog must be no-op AND retry-able."""
 
