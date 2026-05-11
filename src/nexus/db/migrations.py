@@ -2700,6 +2700,17 @@ MIGRATIONS: list[Migration] = [
         "RDR-108 Phase 1c: PK switch aspect_extraction_queue to doc_id (nexus-je0b)",
         _migrate_aspect_queue_pk_via_apply_pending,
     ),
+    # nexus-6xp2 reland of nexus-ocu9.11: drop document_aspects.source_path.
+    # DocumentAspects.upsert/get/delete/list/rename_collection now branch
+    # on _has_source_path_column(); operators/aspect_sql.py was already
+    # ocu9.11-aware. Migration body raises MigrationRetry when je0b
+    # hasn't run yet (source_path still in PK), so registration order
+    # vs je0b is forgiving.
+    Migration(
+        "4.31.0",
+        "RDR-096 P5.2: drop document_aspects.source_path column (nexus-ocu9.11)",
+        migrate_drop_source_path_column,
+    ),
 ]
 
 # ── T3 upgrade steps ────────────────────────────────────────────────────────

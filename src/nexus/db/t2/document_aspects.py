@@ -230,6 +230,33 @@ class DocumentAspects:
                 self._doc_id_pk_cache: bool = pk_cols == {"doc_id"}
         return self._doc_id_pk_cache
 
+    def _source_path_select(self) -> str:
+        """SQL fragment for the ``source_path`` column in SELECT lists.
+
+        Pre-drop returns ``"source_path"``; post-drop returns
+        ``"'' AS source_path"`` so the row-tuple shape consumed by
+        ``_row_to_record`` is preserved without per-method branching.
+        """
+        return "source_path" if self._has_source_path_column() else "'' AS source_path"
+
+    def _has_source_path_column(self) -> bool:
+        """Return True iff ``document_aspects.source_path`` still exists.
+
+        nexus-6xp2: ``ocu9.11`` (4.31.0) drops the column once je0b has
+        run and every row has source_uri populated. Cached per-instance
+        like ``_has_doc_id_pk``; schema cannot change under a live
+        connection without an explicit migration.
+        """
+        with self._lock:
+            if not hasattr(self, "_source_path_cache"):
+                cols = {
+                    r[1] for r in self.conn.execute(
+                        "PRAGMA table_info(document_aspects)"
+                    ).fetchall()
+                }
+                self._source_path_cache: bool = "source_path" in cols
+        return self._source_path_cache
+
     # ── Public API ────────────────────────────────────────────────────────
 
     def upsert(self, record: AspectRecord) -> bool:
@@ -282,6 +309,16 @@ class DocumentAspects:
             )
             return False
 
+        # nexus-6xp2: source_uri is the post-drop addressing key. Auto-
+        # derive it from (collection, source_path) when the writer didn't
+        # supply one so post-drop reads can recover source_path via the
+        # canonical URI shape.
+        if not record.source_uri and record.collection and record.source_path:
+            from nexus.aspect_readers import uri_for  # noqa: PLC0415
+            derived_uri = uri_for(record.collection, record.source_path)
+            if derived_uri:
+                record = replace(record, source_uri=derived_uri)
+
         datasets_json = json.dumps(list(record.experimental_datasets))
         baselines_json = json.dumps(list(record.experimental_baselines))
         extras_json = json.dumps(dict(record.extras))
@@ -305,32 +342,60 @@ class DocumentAspects:
                     extractor_name=record.extractor_name,
                 )
                 record = replace(record, doc_id=doc_id)
+            # nexus-6xp2: omit source_path from INSERT once ocu9.11 drops it.
+            has_sp = self._has_source_path_column()
             with self._lock:
-                self.conn.execute(
-                    "INSERT OR REPLACE INTO document_aspects "
-                    "(doc_id, collection, source_path, problem_formulation, "
-                    " proposed_method, experimental_datasets, "
-                    " experimental_baselines, experimental_results, "
-                    " extras, confidence, extracted_at, "
-                    " model_version, extractor_name, source_uri) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        record.doc_id,
-                        record.collection,
-                        record.source_path,
-                        record.problem_formulation,
-                        record.proposed_method,
-                        datasets_json,
-                        baselines_json,
-                        record.experimental_results,
-                        extras_json,
-                        record.confidence,
-                        record.extracted_at,
-                        record.model_version,
-                        record.extractor_name,
-                        record.source_uri,
-                    ),
-                )
+                if has_sp:
+                    self.conn.execute(
+                        "INSERT OR REPLACE INTO document_aspects "
+                        "(doc_id, collection, source_path, problem_formulation, "
+                        " proposed_method, experimental_datasets, "
+                        " experimental_baselines, experimental_results, "
+                        " extras, confidence, extracted_at, "
+                        " model_version, extractor_name, source_uri) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            record.doc_id,
+                            record.collection,
+                            record.source_path,
+                            record.problem_formulation,
+                            record.proposed_method,
+                            datasets_json,
+                            baselines_json,
+                            record.experimental_results,
+                            extras_json,
+                            record.confidence,
+                            record.extracted_at,
+                            record.model_version,
+                            record.extractor_name,
+                            record.source_uri,
+                        ),
+                    )
+                else:
+                    self.conn.execute(
+                        "INSERT OR REPLACE INTO document_aspects "
+                        "(doc_id, collection, problem_formulation, "
+                        " proposed_method, experimental_datasets, "
+                        " experimental_baselines, experimental_results, "
+                        " extras, confidence, extracted_at, "
+                        " model_version, extractor_name, source_uri) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            record.doc_id,
+                            record.collection,
+                            record.problem_formulation,
+                            record.proposed_method,
+                            datasets_json,
+                            baselines_json,
+                            record.experimental_results,
+                            extras_json,
+                            record.confidence,
+                            record.extracted_at,
+                            record.model_version,
+                            record.extractor_name,
+                            record.source_uri,
+                        ),
+                    )
                 self.conn.commit()
         else:
             # Pre-migration schema: (collection, source_path) is PK.
@@ -369,24 +434,47 @@ class DocumentAspects:
     def get(self, collection: str, source_path: str) -> AspectRecord | None:
         """Return the row matching ``(collection, source_path)``, or None.
 
-        Works on both pre- and post-migration schemas; the post-migration
-        table retains ``collection`` + ``source_path`` as denorm cache columns
-        so this query is still valid after the PK migration.
+        Pre-drop: queries by ``(collection, source_path)`` directly.
+        Post-drop (nexus-6xp2 / ocu9.11): re-derives the canonical
+        ``source_uri`` via :func:`nexus.aspect_readers.uri_for` and
+        queries by ``source_uri`` (always populated post-deprecation).
+        Caller can switch to ``get_by_doc_id`` for tumbler-keyed reads.
         """
-        with self._lock:
-            row = self.conn.execute(
-                "SELECT collection, source_path, problem_formulation, "
+        sp_col = self._source_path_select()
+        if self._has_source_path_column():
+            sql = (
+                f"SELECT collection, {sp_col}, problem_formulation, "
                 "       proposed_method, experimental_datasets, "
                 "       experimental_baselines, experimental_results, "
                 "       extras, confidence, extracted_at, "
                 "       model_version, extractor_name, source_uri "
                 "FROM document_aspects "
-                "WHERE collection = ? AND source_path = ?",
-                (collection, source_path),
-            ).fetchone()
+                "WHERE collection = ? AND source_path = ?"
+            )
+            params: tuple = (collection, source_path)
+        else:
+            from nexus.aspect_readers import uri_for  # noqa: PLC0415
+            uri = uri_for(collection, source_path)
+            if not uri:
+                return None
+            sql = (
+                f"SELECT collection, {sp_col}, problem_formulation, "
+                "       proposed_method, experimental_datasets, "
+                "       experimental_baselines, experimental_results, "
+                "       extras, confidence, extracted_at, "
+                "       model_version, extractor_name, source_uri "
+                "FROM document_aspects "
+                "WHERE collection = ? AND source_uri = ?"
+            )
+            params = (collection, uri)
+        with self._lock:
+            row = self.conn.execute(sql, params).fetchone()
         if row is None:
             return None
-        return _row_to_record(row)
+        record = _row_to_record(row)
+        if not self._has_source_path_column():
+            record = replace(record, source_path=source_path)
+        return record
 
     def get_by_doc_id(self, doc_id: str) -> AspectRecord | None:
         """Return the row matching ``doc_id``, or None.
@@ -397,9 +485,10 @@ class DocumentAspects:
         """
         if not self._has_doc_id_pk():
             return None
+        sp_col = self._source_path_select()
         with self._lock:
             row = self.conn.execute(
-                "SELECT collection, source_path, problem_formulation, "
+                f"SELECT collection, {sp_col}, problem_formulation, "
                 "       proposed_method, experimental_datasets, "
                 "       experimental_baselines, experimental_results, "
                 "       extras, confidence, extracted_at, "
@@ -410,7 +499,13 @@ class DocumentAspects:
             ).fetchone()
         if row is None:
             return None
-        return _row_to_record_with_doc_id(row)
+        record = _row_to_record_with_doc_id(row)
+        if not self._has_source_path_column():
+            record = replace(
+                record,
+                source_path=_source_path_from_uri(record.source_uri, record.collection),
+            )
+        return record
 
     def list_by_collection(
         self,
@@ -424,15 +519,17 @@ class DocumentAspects:
         and starting at ``offset``. Order is ``source_path ASC`` for
         deterministic pagination across calls.
         """
+        sp_col = self._source_path_select()
+        order = "source_path ASC" if self._has_source_path_column() else "source_uri ASC"
         sql = (
-            "SELECT collection, source_path, problem_formulation, "
+            f"SELECT collection, {sp_col}, problem_formulation, "
             "       proposed_method, experimental_datasets, "
             "       experimental_baselines, experimental_results, "
             "       extras, confidence, extracted_at, "
             "       model_version, extractor_name, source_uri "
             "FROM document_aspects "
             "WHERE collection = ? "
-            "ORDER BY source_path ASC"
+            f"ORDER BY {order}"
         )
         params: tuple = (collection,)
         if limit is not None:
@@ -440,18 +537,40 @@ class DocumentAspects:
             params = (collection, limit, offset)
         with self._lock:
             rows = self.conn.execute(sql, params).fetchall()
-        return [_row_to_record(r) for r in rows]
+        records = [_row_to_record(r) for r in rows]
+        # nexus-6xp2: post-drop, source_path projects to "". Recover it
+        # from source_uri so renderers (aspects-list / info) still show
+        # the path; falls back to "" when source_uri can't be parsed.
+        if not self._has_source_path_column():
+            records = [
+                replace(r, source_path=_source_path_from_uri(r.source_uri, r.collection))
+                for r in records
+            ]
+        return records
 
     def delete(self, collection: str, source_path: str) -> int:
         """Drop the row at ``(collection, source_path)``. Returns deleted
-        row count (0 when absent — idempotent).
+        row count (0 when absent — idempotent). Post-drop (nexus-6xp2)
+        re-derives source_uri via :func:`uri_for` and deletes by URI.
         """
-        with self._lock:
-            cur = self.conn.execute(
+        if self._has_source_path_column():
+            sql = (
                 "DELETE FROM document_aspects "
-                "WHERE collection = ? AND source_path = ?",
-                (collection, source_path),
+                "WHERE collection = ? AND source_path = ?"
             )
+            params: tuple = (collection, source_path)
+        else:
+            from nexus.aspect_readers import uri_for  # noqa: PLC0415
+            uri = uri_for(collection, source_path)
+            if not uri:
+                return 0
+            sql = (
+                "DELETE FROM document_aspects "
+                "WHERE collection = ? AND source_uri = ?"
+            )
+            params = (collection, uri)
+        with self._lock:
+            cur = self.conn.execute(sql, params)
             self.conn.commit()
             return cur.rowcount
 
@@ -542,17 +661,25 @@ class DocumentAspects:
         no-op). Idempotent: a second call with the same ``old`` name
         (now no rows match) returns 0 without error.
         """
-        with self._lock:
-            # Drop any pre-existing new-collection rows that would collide
-            # with the rename (same source_path). Mirrors ChashIndex pattern.
-            self.conn.execute(
+        # nexus-6xp2: post-drop, dedupe by source_uri instead of source_path.
+        if self._has_source_path_column():
+            collide_sql = (
                 "DELETE FROM document_aspects "
                 "WHERE collection = ? "
                 "  AND source_path IN ("
                 "    SELECT source_path FROM document_aspects WHERE collection = ?"
-                "  )",
-                (new, old),
+                "  )"
             )
+        else:
+            collide_sql = (
+                "DELETE FROM document_aspects "
+                "WHERE collection = ? "
+                "  AND source_uri IN ("
+                "    SELECT source_uri FROM document_aspects WHERE collection = ?"
+                "  )"
+            )
+        with self._lock:
+            self.conn.execute(collide_sql, (new, old))
             cur = self.conn.execute(
                 "UPDATE document_aspects SET collection = ? WHERE collection = ?",
                 (new, old),
@@ -585,22 +712,52 @@ class DocumentAspects:
         comparator before relying on this method for re-extraction
         triage.
         """
+        sp_col = self._source_path_select()
+        order_tail = "source_path" if self._has_source_path_column() else "source_uri"
         with self._lock:
             rows = self.conn.execute(
-                "SELECT collection, source_path, problem_formulation, "
+                f"SELECT collection, {sp_col}, problem_formulation, "
                 "       proposed_method, experimental_datasets, "
                 "       experimental_baselines, experimental_results, "
                 "       extras, confidence, extracted_at, "
                 "       model_version, extractor_name, source_uri "
                 "FROM document_aspects "
                 "WHERE extractor_name = ? AND model_version < ? "
-                "ORDER BY collection, source_path",
+                f"ORDER BY collection, {order_tail}",
                 (extractor_name, max_version),
             ).fetchall()
-        return [_row_to_record(r) for r in rows]
+        records = [_row_to_record(r) for r in rows]
+        if not self._has_source_path_column():
+            records = [
+                replace(r, source_path=_source_path_from_uri(r.source_uri, r.collection))
+                for r in records
+            ]
+        return records
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
+
+
+def _source_path_from_uri(uri: str | None, collection: str) -> str:
+    """Recover the source_path embedded in a canonical aspect source_uri.
+
+    Inverse of :func:`nexus.aspect_readers.uri_for`.
+      - ``file://<abs>`` → ``<abs>``
+      - ``chroma://<coll>/<rest>`` → ``<rest>``
+      - anything else (or empty) → ``""`` so renderers don't crash.
+    """
+    if not uri:
+        return ""
+    if uri.startswith("file://"):
+        return uri[len("file://"):]
+    if uri.startswith("chroma://"):
+        rest = uri[len("chroma://"):]
+        prefix = collection + "/"
+        if rest.startswith(prefix):
+            return rest[len(prefix):]
+        # ``chroma://<rest>`` without explicit collection prefix.
+        return rest
+    return ""
 
 
 def _row_to_record(row: tuple) -> AspectRecord:

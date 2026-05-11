@@ -1510,9 +1510,16 @@ def aspects_show_cmd(tumbler_or_title: str, as_json: bool, field: str) -> None:
         return
 
     with T2Database(default_db_path()) as db:
-        record = db.document_aspects.get(
-            entry.physical_collection, entry.file_path,
-        )
+        # nexus-6xp2: post-drop, source_path-keyed lookup is unreliable
+        # when the writer used a non-uri_for source_uri. Tumbler-keyed
+        # get_by_doc_id is exact; fall back to legacy (coll, path) get
+        # only when doc_id PK isn't in place yet.
+        if db.document_aspects._has_doc_id_pk():
+            record = db.document_aspects.get_by_doc_id(str(entry.tumbler))
+        else:
+            record = db.document_aspects.get(
+                entry.physical_collection, entry.file_path,
+            )
 
     if record is None:
         click.echo(
