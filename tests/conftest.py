@@ -371,6 +371,10 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # per-file so each can be validated against the suite independently.
     # The lint test itself contains the regex.
     "test_mode_declarations_are_explicit.py",
+    # RDR-109 Phase 2 dispatch tests intentionally name voyage tokens
+    # to exercise the (mode, name) matrix. Voyage names here are the
+    # subject under test, not assertions of cloud-mode behavior.
+    "test_rdr_109_phase2_dispatch.py",
     "test_catalog_path.py",
     "test_chroma_retry.py",
     "test_collection_cmd.py",

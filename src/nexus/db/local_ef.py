@@ -27,6 +27,36 @@ _MODEL_DIMS: dict[str, int] = {
 _TIER0_MODEL = "all-MiniLM-L6-v2"
 _TIER1_MODEL = "BAAI/bge-base-en-v1.5"
 
+# RDR-109 Phase 2: normalized tokens for the local embedding models.
+# Used in conformant collection names (RDR-103 four-segment shape) and
+# in chunk metadata so the embedder identity stops lying about which
+# vectors are actually stored. Tokens must match the
+# ``_CONFORMANT_COLLECTION_RE`` regex in ``corpus.py``:
+# ``^[a-z][a-z0-9-]*$``.
+_MODEL_TOKENS: dict[str, str] = {
+    "all-MiniLM-L6-v2": "minilm-l6-v2-384",
+    "BAAI/bge-base-en-v1.5": "bge-base-en-v15-768",
+}
+
+
+def local_model_token(model_name: str | None = None) -> str:
+    """Return the RDR-109 normalized token for a local embedding model.
+
+    ``model_name=None`` picks the active tier (tier 1 if fastembed is
+    importable, else tier 0). Used by the write path
+    (``effective_embedding_model_for_writes`` in ``corpus.py``) and by
+    ``nx doctor`` to report what's actually embedding the collection.
+    """
+    if model_name is None:
+        model_name = _TIER1_MODEL if _fastembed_available() else _TIER0_MODEL
+    return _MODEL_TOKENS.get(model_name, "minilm-l6-v2-384")
+
+
+LOCAL_EMBEDDING_TOKENS: frozenset[str] = frozenset(_MODEL_TOKENS.values())
+"""Set of all valid local-mode embedding-model tokens. Used by
+``CollectionName.parse`` and the bidirectional name-aware EF dispatch
+in ``T3Database._embedding_fn`` to detect local-token names."""
+
 
 def _fastembed_available() -> bool:
     """Return True if fastembed can be imported."""

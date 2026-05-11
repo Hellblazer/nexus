@@ -29,7 +29,12 @@ import structlog
 # break static type checkers.
 
 from nexus.config import get_credential
-from nexus.corpus import embedding_model_for_collection, index_model_for_collection
+from nexus.corpus import (
+    LOCAL_EMBEDDING_MODELS,
+    embedding_model_for_collection,
+    embedding_model_for_collection_name,
+    index_model_for_collection,
+)
 from nexus.db.chroma_quotas import QUOTAS, QuotaValidator
 from nexus.metadata_schema import CONTENT_TYPES, normalize, validate
 
@@ -240,6 +245,19 @@ from nexus.retry import (
     _voyage_with_retry,
 )
 
+class IncompatibleCollectionError(RuntimeError):
+    """Raised by the bidirectional EF dispatch when the active mode
+    can't safely embed against the collection's name.
+
+    The current trip wire is local-mode against a collection named for
+    a Voyage embedder: the local 384-dim vectors would query a stored
+    1024-dim space and produce silent noise (inverted RDR-059 hazard).
+    Failing loud here forces the operator to either re-index the
+    collection in local mode or restore cloud credentials before the
+    bad query lands.
+    """
+
+
 class T3Database:
     """T3 ChromaDB permanent knowledge store.
 
@@ -347,12 +365,22 @@ class T3Database:
     def _embedding_fn(self, collection_name: str):
         """Return the embedding function for *collection_name*.
 
-        Local mode: returns the bundled ONNX MiniLM-L6-v2 (384-dim) so the
-        full pipeline runs without a Voyage API key.  Cloud mode: returns a
-        VoyageAI EF whose model matches the one used at index time
-        (per ``embedding_model_for_collection``) so query-time dimensions
-        match the collection's indexed dimensions.  For CCE collections the
-        EF is structural only (bypassed via ``_cce_embed()``).
+        RDR-109 Phase 2 bidirectional name-aware dispatch. Four cells in
+        the (mode × embedded-model-token) matrix:
+
+        - Cloud + voyage-token name  -> Voyage EF for that model.
+        - Cloud + local-token name   -> Local EF (legacy local-mode
+          collection encountered after credentials were added; the
+          59vl/GH-#667 path).
+        - Local + local-token name   -> Local EF.
+        - Local + voyage-token name  -> raise
+          :class:`IncompatibleCollectionError`. The 384-dim local
+          vectors would query a 1024-dim Voyage space and produce
+          silent noise (inverted RDR-059 hazard).
+
+        Legacy collection names (not conformant to RDR-103) fall back
+        to the prefix-based ``embedding_model_for_collection``; legacy
+        names are always voyage-token by construction.
 
         Caching is per-collection-name to match the existing test contract.
         """
@@ -360,17 +388,36 @@ class T3Database:
             return self._ef_override
         with self._ef_lock:
             if collection_name not in self._ef_cache:
-                if self._local_mode:
-                    from nexus.db.local_ef import LocalEmbeddingFunction
-                    self._ef_cache[collection_name] = LocalEmbeddingFunction()
-                else:
-                    model = embedding_model_for_collection(collection_name)
-                    self._ef_cache[collection_name] = (
-                        chromadb.utils.embedding_functions.VoyageAIEmbeddingFunction(
-                            model_name=model, api_key=self._voyage_api_key
-                        )
-                    )
+                self._ef_cache[collection_name] = self._build_embedding_fn(
+                    collection_name
+                )
             return self._ef_cache[collection_name]
+
+    def _build_embedding_fn(self, collection_name: str):
+        """Construct (uncached) the EF for *collection_name*. Bidirectional
+        name-aware dispatch — see :meth:`_embedding_fn` docstring."""
+        from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415
+
+        parsed_token = embedding_model_for_collection_name(collection_name)
+        is_local_token = parsed_token in LOCAL_EMBEDDING_MODELS
+
+        if self._local_mode:
+            if parsed_token is not None and not is_local_token:
+                raise IncompatibleCollectionError(
+                    f"collection {collection_name!r} was indexed with "
+                    f"{parsed_token!r} but cloud credentials are unavailable; "
+                    "re-index the collection in local mode or restore "
+                    "credentials before reading it"
+                )
+            return LocalEmbeddingFunction()
+
+        if is_local_token:
+            return LocalEmbeddingFunction()
+
+        model = parsed_token or embedding_model_for_collection(collection_name)
+        return chromadb.utils.embedding_functions.VoyageAIEmbeddingFunction(
+            model_name=model, api_key=self._voyage_api_key
+        )
 
     def _cce_embed(
         self, text: str, input_type: Literal["query", "document"] = "document"
@@ -768,7 +815,10 @@ class T3Database:
             chunk_start_char=0,
             chunk_end_char=len(content),
             indexed_at=now_iso,
-            embedding_model=index_model_for_collection(collection),
+            embedding_model=(
+                embedding_model_for_collection_name(collection)
+                or index_model_for_collection(collection)
+            ),
             title=title,
             tags=tags,
             category=category,
@@ -1538,11 +1588,12 @@ class T3Database:
             col = self._client_for(collection_name).get_collection(collection_name)
         except _ChromaNotFoundError:
             raise KeyError(f"Collection not found: {collection_name!r}") from None
+        parsed = embedding_model_for_collection_name(collection_name)
         return {
             "name": collection_name,
             "count": _chroma_with_retry(col.count),
-            "embedding_model": embedding_model_for_collection(collection_name),
-            "index_model": index_model_for_collection(collection_name),
+            "embedding_model": parsed or embedding_model_for_collection(collection_name),
+            "index_model": parsed or index_model_for_collection(collection_name),
         }
 
 

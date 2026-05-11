@@ -11,6 +11,12 @@ from voyageai.object.embeddings import EmbeddingsObject
 
 from nexus.indexer import CredentialsMissingError, index_repository
 
+# RDR-109 Phase 2: this file asserts cloud-mode canonical behavior
+# (voyage-* embedder names, canonical-set defaults). The cloud_mode
+# fixture sets credentials and forces ``is_local_mode()`` to False so
+# the assertions hold regardless of the host environment.
+pytestmark = pytest.mark.usefixtures("cloud_mode")
+
 _DEFAULT_CONFIG = {
     "server": {"ignorePatterns": []},
     "indexing": {"code_extensions": [], "prose_extensions": [],

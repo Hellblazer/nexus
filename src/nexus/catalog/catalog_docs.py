@@ -29,7 +29,8 @@ from nexus.catalog.tumbler import Tumbler
 from nexus.corpus import (
     CANONICAL_EMBEDDING_MODELS,
     CONTENT_TYPES,
-    canonical_embedding_model,
+    LOCAL_EMBEDDING_MODELS,
+    effective_embedding_model_for_writes,
 )
 from nexus.registry import RepoRegistry, _repo_identity
 
@@ -300,11 +301,16 @@ class _DocumentOps:
                 f"collection_for: unknown content_type {content_type!r}; "
                 f"expected one of {CONTENT_TYPES}"
             )
-        if embedding_model not in CANONICAL_EMBEDDING_MODELS:
+        if (
+            embedding_model not in CANONICAL_EMBEDDING_MODELS
+            and embedding_model not in LOCAL_EMBEDDING_MODELS
+        ):
+            allowed = sorted(
+                CANONICAL_EMBEDDING_MODELS | LOCAL_EMBEDDING_MODELS
+            )
             raise ValueError(
                 f"collection_for: non-canonical embedding_model "
-                f"{embedding_model!r}; expected one of "
-                f"{sorted(CANONICAL_EMBEDDING_MODELS)}"
+                f"{embedding_model!r}; expected one of {allowed}"
             )
         owner_id = owner_segment_for_tumbler(owner)
         if not owner_id:
@@ -358,8 +364,10 @@ class _DocumentOps:
            ``LookupError`` when no owner exists; the indexer's
            ``_catalog_hook`` flow registers the owner up front, so a
            missing owner indicates a bypass of the standard write path.
-        3. Resolve the canonical embedding model via
-           :func:`nexus.corpus.canonical_embedding_model`.
+        3. Resolve the effective embedding model via
+           :func:`nexus.corpus.effective_embedding_model_for_writes`
+           (cloud mode delegates to the canonical model; local mode
+           returns the local embedder's token, RDR-109 Phase 2).
         4. Delegate to :meth:`collection_for`.
 
         This is the helper that Phase 3 indexer call sites use. The
@@ -382,7 +390,7 @@ class _DocumentOps:
         return cat.collection_for(
             content_type=content_type,
             owner=owner,
-            embedding_model=canonical_embedding_model(content_type),
+            embedding_model=effective_embedding_model_for_writes(content_type),
             bump=bump,
         )
 

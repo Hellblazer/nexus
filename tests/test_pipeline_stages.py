@@ -587,12 +587,12 @@ class TestPipelineIndexPdf:
             ME.return_value.extract.side_effect = _fx(2, fr)
             MC.return_value.chunk.return_value = fc
             pipeline_index_pdf(
-                pdf_path, "rdr102streamhash_b", "docs__rdr102-stream-b__voyage-context-3__v1",
+                pdf_path, "rdr102streamhash_b", "docs__rdr102-stream-b__minilm-l6-v2-384__v1",
                 t3, db=db, embed_fn=_embed,
                 corpus="rdr102_stream_b",
             )
 
-        col = t3.get_or_create_collection("docs__rdr102-stream-b__voyage-context-3__v1")
+        col = t3.get_or_create_collection("docs__rdr102-stream-b__minilm-l6-v2-384__v1")
         rows = col.get(include=["metadatas"])
         assert rows["metadatas"], "expected chunks to land"
         leaked = [m for m in rows["metadatas"] if "source_path" in m]
@@ -643,13 +643,13 @@ class TestPipelineIndexPdf:
             ME.return_value.extract.side_effect = _fx(2, fr)
             MC.return_value.chunk.return_value = fc
             total = pipeline_index_pdf(
-                pdf_path, "rdr102streamhash", "docs__rdr102-stream__voyage-context-3__v1",
+                pdf_path, "rdr102streamhash", "docs__rdr102-stream__minilm-l6-v2-384__v1",
                 t3, db=db, embed_fn=_embed,
                 corpus="rdr102_stream",
             )
         assert total == 2, f"expected 2 chunks uploaded; got {total}"
 
-        col = t3.get_or_create_collection("docs__rdr102-stream__voyage-context-3__v1")
+        col = t3.get_or_create_collection("docs__rdr102-stream__minilm-l6-v2-384__v1")
         rows = col.get(include=["metadatas"])
         assert rows["metadatas"], (
             "expected at least one chunk in docs__rdr102_stream"
@@ -663,7 +663,7 @@ class TestPipelineIndexPdf:
         cat = open_cached(cat_dir)
         documents = cat._db.execute(
             "SELECT tumbler FROM documents WHERE physical_collection = ?",
-            ("docs__rdr102-stream__voyage-context-3__v1",),
+            ("docs__rdr102-stream__minilm-l6-v2-384__v1",),
         ).fetchall()
         assert documents, "catalog must register a Document for the streaming PDF"
         for row in documents:

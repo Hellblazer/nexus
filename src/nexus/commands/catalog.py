@@ -3106,11 +3106,11 @@ def consolidate_cmd(corpus: str, dry_run: bool) -> None:
         # RDR-103 Phase 5: mirror the conformant target shape that
         # ``merge_corpus`` will use when run for real so the dry-run
         # message reports the same name.
-        from nexus.corpus import canonical_embedding_model  # noqa: PLC0415
+        from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415
 
         owner_segment = corpus.replace("_", "-")
         target = (
-            f"docs__{owner_segment}__{canonical_embedding_model('docs')}__v1"
+            f"docs__{owner_segment}__{effective_embedding_model_for_writes('docs')}__v1"
         )
         click.echo(f"[dry-run] Would merge {result['would_merge']} collections into {target}:")
         for e in entries:
