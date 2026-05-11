@@ -936,9 +936,11 @@ class TestDay2Ops:
         runner = CliRunner()
         result = runner.invoke(enrich, ["list", "knowledge__delos"])
         assert result.exit_code == 0, result.output
-        # paper.pdf row carries chroma scheme; legacy row carries '-'.
+        # nexus-6xp2: post-ocu9.11, upsert auto-derives source_uri via
+        # uri_for() when the writer omits it, so the legacy ``[-]``
+        # rendering is no longer reachable for knowledge__ rows. Both
+        # rows now carry the chroma scheme.
         assert "[chroma" in result.output
-        assert "[-" in result.output
         # Sanity: the URI scheme matches what uri_for produces.
         assert uri_for("knowledge__delos", "/papers/aleph.pdf").startswith("chroma://")
 
