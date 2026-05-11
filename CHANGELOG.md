@@ -6,6 +6,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.31.7] - 2026-05-10
+
+Patch on 4.31.6. Fixes a Linux-only race condition in
+``nx catalog synthesize-log --force``: the snapshot ``shutil.copytree``
+crashed when the SQLite WAL ``.db-shm`` file disappeared between
+the directory listing and the per-file copy. The fix skips
+``*.db-shm`` files entirely (they are transient WAL helpers and
+SQLite regenerates them on next open).
+
+### Fixed
+
+- **``nx catalog synthesize-log --force`` SHM race** (CI-Linux only):
+  ``shutil.copytree`` now passes ``ignore=shutil.ignore_patterns(
+  "*.db-shm")``. The WAL itself is preserved for forensics; only
+  the kernel-shared-memory helper is excluded. Caught by the
+  4.31.6 Python 3.12 CI run; passes locally on macOS where the
+  race window is wider/non-existent.
+
 ## [4.31.6] - 2026-05-10
 
 Patch on 4.31.5. Updates the

@@ -4192,7 +4192,15 @@ def synthesize_log_cmd(
         snapshot_dir = cat_path.parent / (
             f"{cat_path.name}.synth-snapshot-{ts}-{int(time.time() * 1000) % 1000}"
         )
-    shutil.copytree(cat_path, snapshot_dir)
+    # Skip ``.db-shm`` (transient WAL shared-memory helper). On Linux
+    # the file may be listed by the directory scan but disappear before
+    # the per-file copy, raising FileNotFoundError. SHM is regenerated
+    # by SQLite on next open; the WAL itself is preserved for forensics.
+    shutil.copytree(
+        cat_path,
+        snapshot_dir,
+        ignore=shutil.ignore_patterns("*.db-shm"),
+    )
     click.echo(f"snapshot: {snapshot_dir}")
 
     # Atomic write: serialize to events.jsonl.tmp, fsync, rename.

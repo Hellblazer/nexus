@@ -6,6 +6,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.31.7] - 2026-05-10
+
+Plugin version aligned with conexus 4.31.7. No plugin-side changes;
+the release ships a Linux-race fix in
+``nx catalog synthesize-log --force`` (skip ``*.db-shm`` during
+snapshot copytree). See root ``CHANGELOG.md``.
+
 ## [4.31.6] - 2026-05-10
 
 Plugin version aligned with conexus 4.31.6. No plugin-side changes;
