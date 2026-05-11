@@ -6378,3 +6378,109 @@ def apply_csv_cmd(
         f"\nRegistered {docs} Documents, linked {links} chunks "
         f"from operator-curated CSV."
     )
+
+
+@orphan_backfill_group.command("link-existing")
+@click.argument("collection")
+@click.option(
+    "--by", "match_by",
+    type=click.Choice(["title", "content_hash"]),
+    default="title",
+    help="Match T3 chunks to existing catalog Documents by this field.",
+)
+@click.option(
+    "--also-synthetic/--no-also-synthetic", default=False,
+    help="After linking, register synthetic Documents for unlinked chunks.",
+)
+@click.option(
+    "--owner", default="",
+    help="Owner for synthetic fallback. Required if --also-synthetic.",
+)
+@click.option(
+    "--dry-run/--no-dry-run", default=True,
+    help="Report-only (default).",
+)
+def link_existing_cmd(
+    collection: str, match_by: str, also_synthetic: bool,
+    owner: str, dry_run: bool,
+) -> None:
+    """Link T3 chunks to EXISTING catalog Documents in a collection.
+
+    \b
+    Two strategies:
+      --by title          Match T3 chunk's ``title`` metadata to
+                          catalog ``documents.title`` in the collection.
+                          Use when chunks carry MCP-style title metadata
+                          (e.g. knowledge__knowledge).
+      --by content_hash   Match T3 chunk's ``content_hash`` metadata to
+                          catalog ``documents.head_hash`` in the
+                          collection. Use when chunks are PDF-shaped
+                          with no title (e.g. docs__default).
+
+    Writes ``document_chunks`` manifest rows but does NOT create new
+    Documents. With ``--also-synthetic``, unlinked chunks fall through
+    to synthetic-mode registration.
+    """
+    from nexus.catalog import orphan_backfill as ob  # noqa: PLC0415
+    from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415
+    from nexus.db import make_t3  # noqa: PLC0415
+
+    cat = _get_catalog()
+    t3 = make_t3()
+
+    if dry_run:
+        # Dry-run only: count without writing.
+        rows = cat._db.execute(
+            "SELECT COUNT(*) FROM documents "
+            "WHERE physical_collection = ? AND title != ''"
+            if match_by == "title" else
+            "SELECT COUNT(*) FROM documents "
+            "WHERE physical_collection = ? AND head_hash != ''",
+            (collection,),
+        ).fetchone()
+        click.echo(
+            f"Existing catalog Documents with {match_by}: {rows[0]}"
+        )
+        col = t3._client.get_collection(name=collection)
+        click.echo(f"T3 chunks in {collection}: {col.count()}")
+        click.echo("\n(dry-run) --no-dry-run to write manifest rows.")
+        return
+
+    if match_by == "title":
+        click.echo(f"Gathering T3 chunks for {collection}...")
+        groups = ob.gather_titled_chunks(t3, collection)
+        click.echo(f"  {len(groups)} title groups")
+        linked_chunks, linked_docs, unlinked = ob.link_by_title(
+            cat, collection, groups,
+        )
+        click.echo(
+            f"Linked {linked_chunks} chunks across {linked_docs} "
+            f"existing Documents."
+        )
+        unlinked_total = sum(len(g.chunks) for g in unlinked)
+        click.echo(f"Unlinked: {len(unlinked)} groups, {unlinked_total} chunks")
+        if also_synthetic and unlinked:
+            if not owner:
+                owner_str = _get_owner_for(collection)
+            else:
+                owner_str = owner
+            owner_t = Tumbler.parse(owner_str)
+            sdocs, slinks = ob.register_synthetic(
+                cat, owner_t, collection, unlinked,
+            )
+            click.echo(
+                f"Synthetic fallback: registered {sdocs} Documents, "
+                f"linked {slinks} chunks."
+            )
+    else:  # content_hash
+        click.echo(
+            f"Linking by content_hash → head_hash for {collection}..."
+        )
+        linked_chunks, linked_docs, unmatched = ob.link_by_content_hash(
+            cat, t3, collection,
+        )
+        click.echo(
+            f"Linked {linked_chunks} chunks across {linked_docs} "
+            f"existing Documents."
+        )
+        click.echo(f"Unmatched chunks (no head_hash match): {unmatched}")

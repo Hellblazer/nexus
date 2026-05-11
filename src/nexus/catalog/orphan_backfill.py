@@ -545,3 +545,132 @@ def apply_csv(
             ])
             links += len(chunks)
     return docs, links
+
+
+# ── Link T3 chunks to EXISTING catalog Documents ─────────────────────────────
+
+
+def link_by_title(
+    catalog: "Catalog",
+    collection: str,
+    groups: list[TitleGroup],
+) -> tuple[int, int, list[TitleGroup]]:
+    """For each titled group, find an existing catalog Document with the
+    same title in ``collection`` and append manifest rows linking the
+    group's chunks to that Document.
+
+    Returns ``(linked_chunks, linked_docs, unlinked_groups)``.
+    ``unlinked_groups`` are groups whose title has no catalog match;
+    callers route them to synthetic mode.
+
+    Untitled groups are passed through to ``unlinked_groups`` so
+    callers can branch them to chash fallback.
+    """
+    rows = catalog._db.execute(
+        "SELECT tumbler, title FROM documents "
+        "WHERE physical_collection = ? AND title != ''",
+        (collection,),
+    ).fetchall()
+    by_title: dict[str, str] = {r[1]: r[0] for r in rows}
+    linked_chunks = 0
+    linked_docs = 0
+    unlinked: list[TitleGroup] = []
+    for g in groups:
+        if not g.title or g.title not in by_title:
+            unlinked.append(g)
+            continue
+        tumbler = by_title[g.title]
+        # Read existing manifest to know where to append (preserve order).
+        existing = catalog.get_manifest(tumbler)
+        start_pos = len(existing)
+        catalog.append_manifest_chunks(tumbler, [
+            {
+                "chash": c.chash,
+                "position": start_pos + pos,
+                "line_start": None, "line_end": None,
+                "char_start": None, "char_end": None,
+            }
+            for pos, c in enumerate(g.chunks)
+        ])
+        linked_chunks += len(g.chunks)
+        linked_docs += 1
+        _log.info(
+            "orphan_backfill_linked_by_title",
+            collection=collection, tumbler=tumbler,
+            title=g.title, chunks=len(g.chunks),
+        )
+    return linked_chunks, linked_docs, unlinked
+
+
+def link_by_content_hash(
+    catalog: "Catalog",
+    t3_db,
+    collection: str,
+) -> tuple[int, int, int]:
+    """For each existing catalog Document with non-empty ``head_hash``,
+    find T3 chunks in ``collection`` whose ``content_hash`` matches and
+    append manifest rows.
+
+    Returns ``(linked_chunks, linked_docs, unmatched_chunks)``.
+
+    Used when T3 chunks lack ``title`` metadata but have
+    ``content_hash`` (PDF-shaped chunks), and the catalog has
+    Documents with ``head_hash`` populated. The two hashes are the
+    same content-addressed identity so matching is exact.
+    """
+    rows = catalog._db.execute(
+        "SELECT tumbler, head_hash FROM documents "
+        "WHERE physical_collection = ? AND head_hash != ''",
+        (collection,),
+    ).fetchall()
+    by_head: dict[str, str] = {r[1]: r[0] for r in rows}
+    if not by_head:
+        return 0, 0, 0
+
+    col = t3_db._client.get_collection(name=collection)
+    n = col.count()
+    # Group chunks by content_hash so we batch one append_manifest per doc.
+    by_hash: dict[str, list[ChunkRef]] = defaultdict(list)
+    unmatched = 0
+    offset = 0
+    while offset < n:
+        batch = col.get(limit=_PAGE, offset=offset, include=["metadatas"])
+        cids = batch.get("ids") or []
+        metas = batch.get("metadatas") or []
+        for cid, meta in zip(cids, metas):
+            if not isinstance(meta, dict):
+                meta = {}
+            content_hash = str(meta.get("content_hash") or "")
+            chash = str(meta.get("chunk_text_hash") or cid[:32])
+            chunk_index = int(meta.get("chunk_index", 0) or 0)
+            if content_hash and content_hash in by_head:
+                by_hash[content_hash].append(ChunkRef(
+                    cid=cid, chash=chash, chunk_index=chunk_index,
+                ))
+            else:
+                unmatched += 1
+        offset += _PAGE
+
+    linked_chunks = 0
+    linked_docs = 0
+    for content_hash, chunks in by_hash.items():
+        tumbler = by_head[content_hash]
+        existing = catalog.get_manifest(tumbler)
+        start_pos = len(existing)
+        catalog.append_manifest_chunks(tumbler, [
+            {
+                "chash": c.chash,
+                "position": start_pos + pos,
+                "line_start": None, "line_end": None,
+                "char_start": None, "char_end": None,
+            }
+            for pos, c in enumerate(chunks)
+        ])
+        linked_chunks += len(chunks)
+        linked_docs += 1
+        _log.info(
+            "orphan_backfill_linked_by_content_hash",
+            collection=collection, tumbler=tumbler,
+            content_hash=content_hash[:16], chunks=len(chunks),
+        )
+    return linked_chunks, linked_docs, unmatched
