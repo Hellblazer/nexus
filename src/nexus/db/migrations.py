@@ -2711,7 +2711,36 @@ MIGRATIONS: list[Migration] = [
         "RDR-096 P5.2: drop document_aspects.source_path column (nexus-ocu9.11)",
         migrate_drop_source_path_column,
     ),
+    Migration(
+        "4.31.7",
+        "RDR-109 Phase 5: add document_aspects.salient_sentences column",
+        lambda conn: _migrate_add_aspects_salient_sentences(conn),
+    ),
 ]
+
+
+def _migrate_add_aspects_salient_sentences(conn: sqlite3.Connection) -> None:
+    """RDR-109 Phase 5: add ``salient_sentences`` TEXT column to
+    ``document_aspects``. JSON-encoded array of strings; NULL on rows
+    written before Phase 5 ships.
+
+    Idempotent: gated by ``PRAGMA table_info``. No-op if the table
+    doesn't exist (fresh installs hit the column via the base schema in
+    ``_DOCUMENT_ASPECTS_SCHEMA_SQL`` directly).
+    """
+    cols = {
+        r[1] for r in conn.execute(
+            "PRAGMA table_info(document_aspects)"
+        ).fetchall()
+    }
+    if not cols:
+        return
+    if "salient_sentences" in cols:
+        return
+    conn.execute(
+        "ALTER TABLE document_aspects ADD COLUMN salient_sentences TEXT"
+    )
+    conn.commit()
 
 # ── T3 upgrade steps ────────────────────────────────────────────────────────
 # Separate from T2 migrations: these require a ChromaDB client, not sqlite3.
