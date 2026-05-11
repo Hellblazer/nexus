@@ -139,9 +139,12 @@ class TestSC3UpgradeFlags:
 
 class TestSC4DoctorSchema:
     def test_healthy_db_passes(self, runner: CliRunner, tmp_path: Path) -> None:
+        from nexus.catalog.catalog import Catalog
         from nexus.commands.upgrade import _current_version
         from nexus.db.migrations import apply_pending
 
+        # nexus-4s2o: je0b PK migrations require a catalog to complete.
+        Catalog.init(tmp_path / "catalog")
         db_path = tmp_path / "memory.db"
         conn = sqlite3.connect(str(db_path))
         apply_pending(conn, _current_version())

@@ -6,6 +6,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.32.0] - 2026-05-11
+
+Plugin version aligned with conexus 4.32.0. No plugin-side changes;
+the release ships RDR-109 (Honest Local-Mode Naming + Cross-Encoder
+Salience, 5 phases), RDR-108 Phase 1c PK migration reland +
+``source_path`` column drop + je0b doc_id backfill, an AST chunker
+mid-identifier fix, and two CI flake fixes. See root ``CHANGELOG.md``
+for the full deltas.
+
 ## [4.31.7] - 2026-05-10
 
 Plugin version aligned with conexus 4.31.7. No plugin-side changes;

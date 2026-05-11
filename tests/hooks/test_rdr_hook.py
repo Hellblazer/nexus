@@ -27,6 +27,12 @@ from pathlib import Path
 
 import pytest
 
+# RDR-109 Phase 2: this file asserts cloud-mode canonical behavior
+# (voyage-* embedder names, canonical-set defaults). The cloud_mode
+# fixture sets credentials and forces ``is_local_mode()`` to False so
+# the assertions hold regardless of the host environment.
+pytestmark = pytest.mark.usefixtures("cloud_mode")
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HOOK_PATH = REPO_ROOT / "nx" / "hooks" / "scripts" / "rdr_hook.py"
 

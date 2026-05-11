@@ -9,6 +9,12 @@ from click.testing import CliRunner
 
 from nexus.cli import main
 
+# RDR-109 Phase 2: this file asserts cloud-mode canonical behavior
+# (voyage-* embedder names, canonical-set defaults). The cloud_mode
+# fixture sets credentials and forces ``is_local_mode()`` to False so
+# the assertions hold regardless of the host environment.
+pytestmark = pytest.mark.usefixtures("cloud_mode")
+
 PDF_RESULT = {"chunks": 3, "pages": [], "title": "", "author": ""}
 MD_RESULT = {"chunks": 2, "sections": 0}
 

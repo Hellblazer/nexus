@@ -1,0 +1,37 @@
+# RDR-109 Phase 4b generated QA for docs from docs__1-4__voyage-context-3__v1.
+# Seed=109 count=35. Programmatic; see scripts/rdr-109-generate-qa.py.
+{"question": "What does the section on 'Scenario B: Column Ordering Collision' cover?", "expected_chunk_chash": "a8fac0b695eda6029e6379ea235d0dc37517fb14c641747f71a4f1f5cfd2b616", "content_type": "docs"}
+{"question": "What does the section on 'Schema Design (12)' cover?", "expected_chunk_chash": "949106b52da7c1194f87a33d6150f51a8261cf64e636b6abc4ceb86252d2c116", "content_type": "docs"}
+{"question": "What does the section on 'Documentation' cover?", "expected_chunk_chash": "7b238aeaad0c60d9b0646cf39e1c975d04c670ad88383bb86cc0f94726b99c6d", "content_type": "docs"}
+{"question": "What does the section on 'Promise-by-Promise Scorecard' cover?", "expected_chunk_chash": "1ba11b6d1beb128be8abd9684fd54716af299ed0a2df4693fd5a5dd08e72f978", "content_type": "docs"}
+{"question": "What does the section on 'Scenario A: Same Predicate Name, Different Definitions' cover?", "expected_chunk_chash": "f2978fa1daab058911766dfaac67837fd76684144f51b45b32eda0a6398068a6", "content_type": "docs"}
+{"question": "What does the section on 'BFDB-v84: Defer GiST index, find_names_for_node, namespace helpers (lines 89, 98, 100) \u2014 DEFERRED' cover?", "expected_chunk_chash": "6fe14c6a9e3e76133541f9e79edf1cedaf368b9f58a1237114c610fc9ed9410a", "content_type": "docs"}
+{"question": "What does the section on 'Directory Structure' cover?", "expected_chunk_chash": "5710793bfbabbdc953e8fad0268599649a80c22c59a41257ec06331bf3cf16fd", "content_type": "docs"}
+{"question": "What does the section on 'Phase 1: Namespace Foundation and Symbolic Views' cover?", "expected_chunk_chash": "f43857457549a2392423f0d85b1db7778246433ce384fd6cbde13b492360b41e", "content_type": "docs"}
+{"question": "What does the section on 'Rows' cover?", "expected_chunk_chash": "c48b278b8abf4d8eb7512cb7ee9cf359ad3cdc8ac267fbe2d886ac1403949343", "content_type": "docs"}
+{"question": "What does the section on 'What BFDB Does' cover?", "expected_chunk_chash": "5d3b13f0de3ca5726b8ed611ee4ed9999c7efc136b22e19796cec02e721eed01", "content_type": "docs"}
+{"question": "What does the section on 'Problems / Opportunities' cover?", "expected_chunk_chash": "b05ba49c5ae449bd6123464531d732f9466c80868f3e7a55469e314f095cd065", "content_type": "docs"}
+{"question": "What does the section on 'Quick Start' cover?", "expected_chunk_chash": "c2040214769cf9ff585d66004e662d47d89ce4d9c45e8fa3ad1e0e454bf10f8d", "content_type": "docs"}
+{"question": "What does the section on 'RDR Documents' cover?", "expected_chunk_chash": "14a0b6ed0dc6500c79ef7f227509af4c89fac6eedcbdee7aace0c233cc536c8d", "content_type": "docs"}
+{"question": "What does the section on 'Mastodon Vertical Split Scenario' cover?", "expected_chunk_chash": "2ed0a664e51b3b181935c4cb83608e36e25805229694cee6e2eb05904d8f76d2", "content_type": "docs"}
+{"question": "What does the section on 'Investment Thesis' cover?", "expected_chunk_chash": "bf6343175e6b25fe41b455c5502a45f2a77b8fbdb6a02849ff9b56f4427b223c", "content_type": "docs"}
+{"question": "What does the section on 'BFDB, Concretely' cover?", "expected_chunk_chash": "39d0fd23499193d3473448a2252556c5aeca4ef6e3b164db353fac817af5b85e", "content_type": "docs"}
+{"question": "What does the section on 'The Honest Assessment' cover?", "expected_chunk_chash": "f0e89e4d28a9e84d43d10a1ecf96ed6e3ecbdf32a5e9c5ebaa9e59a2b4cb60a0", "content_type": "docs"}
+{"question": "What does the section on 'Proposal' cover?", "expected_chunk_chash": "ce3b1ca40e0e7b0ddc0e29ea87bbaa6ca82ccfa24eab1b0c3833e494f41db00d", "content_type": "docs"}
+{"question": "What discusses: This function is ready for use on user-generated\n-- tables where specific columns are declared as 'monotonic' mutability.\n\n-- Attach monotonic triggers to a tab?", "expected_chunk_chash": "839f3cd5f217fb8129401697e57f1a2b25d0934e70b7c8c618f6d2ef086578e1", "content_type": "docs"}
+{"question": "What does the section on 'What Comes Next' cover?", "expected_chunk_chash": "cb486255701fe64e38e6a62e185f4efceb29e88619b296c72a09c736cc304b3b", "content_type": "docs"}
+{"question": "What does the section on 'Hierarchies' cover?", "expected_chunk_chash": "2da701a1edd35f8e375db3c0e74c929ee8b46a3d4ace7d22b86145898130db95", "content_type": "docs"}
+{"question": "What does the section on 'Source of Identity / Nodes / Partitioned Logs' cover?", "expected_chunk_chash": "aab3d0df0047edcfa82635778a9189363a48474f455bc7456760706aa350724a", "content_type": "docs"}
+{"question": "What does the section on 'v4.0.0 \u2014 Template\u2192Scope Rename Cascade' cover?", "expected_chunk_chash": "d91ee1412e45996f6fc1ab96bc0e545ddf57b9e04e251639a30a7f1224c83d1d", "content_type": "docs"}
+{"question": "What does the section on 'Pre-Split Schema Reference' cover?", "expected_chunk_chash": "ca657664588beb8de6b1ee77bb830d0315d7e4aa422efafcd178da5c3168518b", "content_type": "docs"}
+{"question": "What does the section on 'Source Provenance' cover?", "expected_chunk_chash": "3bc7e1e87ebe66720e6d07134ae69c72f47557304997282682fe169f176f7b6c", "content_type": "docs"}
+{"question": "What does the section on 'Evolution Pattern Exercised' cover?", "expected_chunk_chash": "767234c53eb6a40d812825ae61f32125eb7a4d7a842635dbac5a8dbdd8182a57", "content_type": "docs"}
+{"question": "What does the section on 'Sequence Allocation' cover?", "expected_chunk_chash": "70b5f952de36c6b7edbc4af0ddb9f7dd6037994ec50b19ab7e30d255c69e6e1c", "content_type": "docs"}
+{"question": "What does the section on 'Linkage Types' cover?", "expected_chunk_chash": "1581517564100e92f986c110e8a618cb7685651b6e292426b307196ed706703a", "content_type": "docs"}
+{"question": "What does the section on 'Status Stats Split (August 2018)' cover?", "expected_chunk_chash": "9596537dc27463397bf0c5c696987fe40341f568143247bd6f974a849decfe01", "content_type": "docs"}
+{"question": "What does the section on 'Languages' cover?", "expected_chunk_chash": "5e4cfada109333bf0c9c2e29ad93ecba2936be4aa12288906a769674ffacd992", "content_type": "docs"}
+{"question": "What does the section on 'Keycloak Schema Evolution \u2014 Liquibase Changelogs' cover?", "expected_chunk_chash": "333af9f5ec75b8c7d302ccf4524365b914d2f2ae8a47faa596f75d67156b5926", "content_type": "docs"}
+{"question": "What discusses: Type approximation predicates\n--    Rails column types mapped to predicates.?", "expected_chunk_chash": "ecd9453ee25783dbcbe6eac2d266b0db31d26ce8203b5f8575377f22dd1c867f", "content_type": "docs"}
+{"question": "What does the section on 'Design Constraints' cover?", "expected_chunk_chash": "5c6fc2254c695c553854fd0d799703946c81791b36e71e8d8ac8fa0ed18586d5", "content_type": "docs"}
+{"question": "What does the section on 'Source Layout' cover?", "expected_chunk_chash": "529c4e032c696832de80daca6f5fb30757023fc70b094ee5303bc35b5ef81a78", "content_type": "docs"}
+{"question": "What discusses: VALUE + SALT -> SECRET_DATA (JSON)\n--    Reason: flat-to-JSON collapse.?", "expected_chunk_chash": "e49924764f2bf28a8c342da2538c0e3b0f1fd6dc3193c52f2af2c77cf9a10960", "content_type": "docs"}

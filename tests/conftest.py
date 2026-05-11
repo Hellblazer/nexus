@@ -311,6 +311,144 @@ def set_credentials(monkeypatch) -> None:
     monkeypatch.setenv("CHROMA_DATABASE", "db")
 
 
+# RDR-109 Phase 1: cloud-mode opt-in fixture.
+#
+# Default test mode is local (no API keys, ONNX MiniLM EF). Tests that
+# assert cloud-mode behavior — voyage-context-3 / voyage-code-3 embedder
+# names, _has_credentials() gated paths, CloudClient routing — opt in via
+# this fixture (or class-level
+# ``pytestmark = pytest.mark.usefixtures("cloud_mode")``).
+#
+# The lint test ``test_mode_declarations_are_explicit`` enforces that any
+# test function whose source contains ``voyage-(context|code)-3`` either
+# depends on ``cloud_mode`` or is listed in ``_MODE_LINT_EXCLUDE`` below.
+@pytest.fixture
+def cloud_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Activate cloud mode: set Voyage/Chroma credentials and force
+    ``nexus.config.is_local_mode`` to return False.
+
+    Callers that do ``from nexus.config import is_local_mode`` inside a
+    function body (the established pattern in this codebase — see all
+    callsites under ``src/nexus/``) pick up the patch on next call.
+    """
+    set_credentials(monkeypatch)
+    monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
+
+
+# Tests whose source matches the voyage-token regex but legitimately do
+# NOT need cloud_mode. Two granularities:
+#   * ``_MODE_LINT_EXCLUDE_FILES`` — every test in the file is exempt.
+#     Use for files whose tests are uniformly schema / name-shape /
+#     canonical-set tests where the voyage token is a label, not a
+#     behavior assertion.
+#   * ``_MODE_LINT_EXCLUDE_NODEIDS`` — individual ``file.py::test_x``
+#     entries for mixed files.
+#
+# Exclusion reasons fall into:
+#   - "canonical-set": tests of ``corpus.canonical_embedding_model``
+#     or ``CollectionName`` schema constants; the token is the schema's
+#     canonical embedder name, not a behavior assertion.
+#   - "string-literal-as-name": the test builds a conformant collection
+#     name string and asserts on the *name shape* (RDR-103
+#     ``<content_type>__<owner>__<model>__v<n>``), not on the embedder
+#     that actually ran. The name is canonical regardless of mode.
+#   - "parametrize-label": the voyage token appears only in a
+#     ``pytest.mark.parametrize`` data tuple or test id.
+#   - "docstring-or-comment": the voyage token appears only in a
+#     docstring or comment, not in executable code.
+#   - "mode-self-test": the test asserts local-mode behavior itself
+#     (``test_local_mode.py``); cloud_mode would invert what it tests.
+#
+# Files that primarily exercise cloud-mode behavior (real Voyage calls,
+# CloudClient routing, ``_has_credentials()`` gated paths) do NOT appear
+# here; they declare ``pytestmark = pytest.mark.usefixtures("cloud_mode")``
+# at module scope instead. See ``docs/contributing.md`` and
+# ``tests/AGENTS.md``.
+_MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
+    # Cloud-behavior files — Phase 1 ships the lint mechanism with these
+    # excluded; subsequent PRs promote each to module-level
+    # ``pytestmark = pytest.mark.usefixtures("cloud_mode")``. Promotion is
+    # per-file so each can be validated against the suite independently.
+    # The lint test itself contains the regex.
+    "test_mode_declarations_are_explicit.py",
+    # RDR-109 Phase 2 dispatch tests intentionally name voyage tokens
+    # to exercise the (mode, name) matrix. Voyage names here are the
+    # subject under test, not assertions of cloud-mode behavior.
+    "test_rdr_109_phase2_dispatch.py",
+    "test_catalog_path.py",
+    "test_chroma_retry.py",
+    "test_collection_cmd.py",
+    "test_doc_indexer.py",
+    "test_exporter.py",
+    "test_index_cmd.py",
+    "test_index_pdf_batch.py",
+    "test_index_rdr_cmd.py",
+    "test_indexer.py",
+    "test_indexer_e2e.py",
+    "test_integration.py",
+    "test_mcp_server.py",
+    "test_pdf_chunks_no_silent_zero.py",
+    "test_pdf_e2e.py",
+    "test_pdf_extractor.py",
+    "test_pdf_subsystem.py",
+    "test_pipeline_stages.py",
+    "test_store_cmd.py",
+    "test_voyage_retry.py",
+    # Schema / canonical-set / collection-name shape — mode-independent.
+    "test_backfill_hash.py",
+    "test_catalog_backfill_collections.py",
+    "test_catalog_cli.py",
+    "test_catalog_collection_for.py",
+    "test_catalog_collection_name.py",
+    "test_catalog_collections.py",
+    "test_catalog_collections_rebuild.py",
+    "test_catalog_concurrent_writer_lock.py",
+    "test_catalog_consolidation.py",
+    "test_catalog_db.py",
+    "test_catalog_doctor_collections_drift.py",
+    "test_catalog_incremental_rebuild.py",
+    "test_catalog_manifest_backfill.py",
+    "test_catalog_migrate_fallback.py",
+    "test_catalog_papers_curator_isolation.py",
+    "test_catalog_rename_collection.py",
+    "test_catalog_spans_chunk_char.py",
+    "test_checkpoint.py",
+    "test_collection_gc.py",
+    "test_collection_name_migration.py",
+    "test_commands_dt.py",
+    "test_corpus.py",
+    "test_doc_indexer_hash_sync.py",
+    "test_doctor_cmd.py",
+    "test_doctor_integrity.py",
+    "test_doctor_search.py",
+    "test_indexer_conformant_names.py",
+    "test_indexer_duplicate_content.py",
+    "test_indexer_modules.py",
+    "test_indexer_utils_repo.py",
+    "test_memory.py",
+    "test_metadata_consistency.py",
+    "test_metadata_schema.py",
+    "test_migrations_rdr108_phase1c.py",
+    "test_plan_run.py",
+    "test_rdr_hook.py",  # tests/hooks/ — collection-name shape only
+    "test_registry.py",
+    "test_source_uri_home_key.py",
+    "test_store_enrich_doc_id.py",
+    "test_store_put_cli_parity.py",
+    "test_t3_strict_collection_naming.py",
+    "test_t3.py",
+    "test_tuning_config.py",
+    # Mode-self-tests — these assert local-mode behavior; cloud_mode
+    # would invert what they test.
+    "test_local_mode.py",
+})
+
+_MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
+    # Reserved for individual mixed-file exclusions. Format:
+    # "tests/test_file.py::test_func"  (no parametrize suffix).
+})
+
+
 @pytest.fixture
 def db(tmp_path: Path) -> T2Database:
     """Provide a T2Database backed by a temporary SQLite file."""

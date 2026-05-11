@@ -20,6 +20,15 @@ from nexus.doc_indexer import (
 from tests.conftest import set_credentials
 
 
+# RDR-109 Phase 2: local-token in test collection names varies by whether
+# fastembed is installed (tier 1: bge-base-en-v15-768, else tier 0:
+# minilm-l6-v2-384). Resolve at runtime so the suite is deterministic on
+# CI (no fastembed) and dev machines (fastembed pulled by experiments).
+def _local_token() -> str:
+    from nexus.db.local_ef import local_model_token
+    return local_model_token()
+
+
 def _add_cce_mock(mock_voyage_client: MagicMock) -> None:
     def _fake_cce(inputs, model, input_type):
         batch = inputs[0]
@@ -272,7 +281,7 @@ def test_index_md_falls_back_to_local_embedder_when_no_credentials(
     # Verify chunks landed AND were tagged with the local model name
     # (not voyage-context-3 — staleness check on re-run depends on it).
     col = local_t3.get_or_create_collection(
-        "docs__local-fallback-test__voyage-context-3__v1",
+        f"docs__local-fallback-test__{_local_token()}__v1",
     )
     rows = col.get(limit=1, include=["metadatas"])
     assert rows["metadatas"], "expected at least one chunk in collection"
@@ -351,7 +360,7 @@ def test_index_markdown_auto_inits_catalog_when_absent_and_prunes_on_reindex(
     )
 
     col = local_t3.get_or_create_collection(
-        "docs__autoinit-probe__voyage-context-3__v1",
+        f"docs__autoinit-probe__{_local_token()}__v1",
     )
     metas_before = col.get(include=["metadatas"])["metadatas"]
     assert metas_before, "expected chunks after first index"
@@ -361,7 +370,7 @@ def test_index_markdown_auto_inits_catalog_when_absent_and_prunes_on_reindex(
     cat = open_cached(cat_path)
     documents = cat._db.execute(
         "SELECT tumbler FROM documents WHERE physical_collection = ?",
-        ("docs__autoinit-probe__voyage-context-3__v1",),
+        (f"docs__autoinit-probe__{_local_token()}__v1",),
     ).fetchall()
     assert documents, "auto-init catalog must register the indexed file"
     for row in documents:
@@ -1723,7 +1732,7 @@ def test_index_pdf_does_not_emit_source_path(
         index_pdf(sample_pdf, corpus="rdr102-pdf-b", t3=t3, embed_fn=_fake_embed)
 
     col = t3.get_or_create_collection(
-        "docs__rdr102-pdf-b__voyage-context-3__v1",
+        f"docs__rdr102-pdf-b__{_local_token()}__v1",
     )
     rows = col.get(include=["metadatas"])
     assert rows["metadatas"], "expected at least one chunk"
@@ -1749,7 +1758,7 @@ def test_index_markdown_does_not_emit_source_path(
     assert n > 0
 
     col = t3.get_or_create_collection(
-        "docs__rdr102-md-b__voyage-context-3__v1",
+        f"docs__rdr102-md-b__{_local_token()}__v1",
     )
     rows = col.get(include=["metadatas"])
     assert rows["metadatas"], "expected at least one chunk"
@@ -1779,7 +1788,7 @@ def test_index_pdf_writes_doc_id_when_catalog_initialized(
         index_pdf(sample_pdf, corpus="rdr102-pdf", t3=t3, embed_fn=_fake_embed)
 
     col = t3.get_or_create_collection(
-        "docs__rdr102-pdf__voyage-context-3__v1",
+        f"docs__rdr102-pdf__{_local_token()}__v1",
     )
     rows = col.get(include=["metadatas"])
     assert rows["metadatas"], (
@@ -1794,7 +1803,7 @@ def test_index_pdf_writes_doc_id_when_catalog_initialized(
     cat = open_cached(cat_dir)
     documents = cat._db.execute(
         "SELECT tumbler FROM documents WHERE physical_collection = ?",
-        ("docs__rdr102-pdf__voyage-context-3__v1",),
+        (f"docs__rdr102-pdf__{_local_token()}__v1",),
     ).fetchall()
     assert documents, "catalog must have a Document for the indexed PDF"
     for row in documents:
@@ -1817,7 +1826,7 @@ def test_index_markdown_writes_doc_id_when_catalog_initialized(
     assert n > 0, "expected index_markdown to upsert chunks"
 
     col = t3.get_or_create_collection(
-        "docs__rdr102-md__voyage-context-3__v1",
+        f"docs__rdr102-md__{_local_token()}__v1",
     )
     rows = col.get(include=["metadatas"])
     assert rows["metadatas"], (
@@ -1829,7 +1838,7 @@ def test_index_markdown_writes_doc_id_when_catalog_initialized(
     cat = open_cached(cat_dir)
     documents = cat._db.execute(
         "SELECT tumbler FROM documents WHERE physical_collection = ?",
-        ("docs__rdr102-md__voyage-context-3__v1",),
+        (f"docs__rdr102-md__{_local_token()}__v1",),
     ).fetchall()
     assert documents, "catalog must have a Document for the indexed markdown"
     for row in documents:
@@ -1854,13 +1863,13 @@ def test_batch_index_markdowns_rdr_mode_writes_doc_id_when_catalog_initialized(
 
     batch_index_markdowns(
         [rdr_path], corpus="rdr102-rdrmode",
-        collection_name="rdr__rdr102-rdrmode__voyage-context-3__v1",
+        collection_name=f"rdr__rdr102-rdrmode__{_local_token()}__v1",
         content_type="rdr",
         t3=t3,
     )
 
     col = t3.get_or_create_collection(
-        "rdr__rdr102-rdrmode__voyage-context-3__v1",
+        f"rdr__rdr102-rdrmode__{_local_token()}__v1",
     )
     rows = col.get(include=["metadatas"])
     assert rows["metadatas"], (
@@ -1872,7 +1881,7 @@ def test_batch_index_markdowns_rdr_mode_writes_doc_id_when_catalog_initialized(
     cat = open_cached(cat_dir)
     documents = cat._db.execute(
         "SELECT tumbler FROM documents WHERE physical_collection = ?",
-        ("rdr__rdr102-rdrmode__voyage-context-3__v1",),
+        (f"rdr__rdr102-rdrmode__{_local_token()}__v1",),
     ).fetchall()
     assert documents, "catalog must have a Document for the indexed RDR md"
     for row in documents:

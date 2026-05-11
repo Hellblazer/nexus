@@ -1,0 +1,11 @@
+{
+  "content_type": "rdr",
+  "description": "Seed queries used by the salient-sentence extractor to score per-chunk sentences for RDR-corpus salience (decisions, rationale, alternatives considered, acceptance criteria).",
+  "seeds": [
+    "What decision is being made or accepted in this section?",
+    "What is the rationale or justification for the chosen approach?",
+    "What alternatives were considered and why were they rejected?",
+    "What are the acceptance criteria or success conditions?",
+    "What risks, deviations, or open questions are documented?"
+  ]
+}

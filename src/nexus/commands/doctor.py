@@ -1564,18 +1564,39 @@ def _collect_quota_report() -> dict:
     except Exception as exc:
         t3_detail = f"unreachable: {type(exc).__name__}: {str(exc)[:80]}"
 
-    # Voyage AI limits. Model-specific token caps come from the Voyage
-    # published specs (documented alongside ``nexus.corpus``); embedding
-    # dimension is fixed across the three models we use.
-    voyage_limits = {
-        "models": {
-            "voyage-3": {"max_tokens": 32_000, "embedding_dims": 1024},
-            "voyage-code-3": {"max_tokens": 32_000, "embedding_dims": 1024},
-            "voyage-context-3": {"max_tokens": 32_000, "embedding_dims": 1024},
-        },
-        "target_rpm": 250,  # matches ``doc_indexer._RATE_LIMIT_RPM``
-        "api_key_set": False,
-    }
+    # Embedder limits. In cloud mode the three Voyage models we use
+    # have a fixed 1024-dim space and 32k-token cap; in local mode the
+    # ONNX MiniLM (384-dim) or fastembed bge (768-dim) is active. RDR-109
+    # Phase 2: report what's actually embedding, not what the canonical
+    # cloud schema would suggest.
+    if is_local_mode():
+        from nexus.db.local_ef import (  # noqa: PLC0415
+            LocalEmbeddingFunction,
+            local_model_token,
+        )
+        _ef = LocalEmbeddingFunction()
+        voyage_limits = {
+            "mode": "local",
+            "models": {
+                local_model_token(): {
+                    "max_tokens": 512,
+                    "embedding_dims": _ef.dimensions,
+                },
+            },
+            "target_rpm": 0,
+            "api_key_set": False,
+        }
+    else:
+        voyage_limits = {
+            "mode": "cloud",
+            "models": {
+                "voyage-3": {"max_tokens": 32_000, "embedding_dims": 1024},
+                "voyage-code-3": {"max_tokens": 32_000, "embedding_dims": 1024},
+                "voyage-context-3": {"max_tokens": 32_000, "embedding_dims": 1024},
+            },
+            "target_rpm": 250,  # matches ``doc_indexer._RATE_LIMIT_RPM``
+            "api_key_set": False,
+        }
     try:
         from nexus.config import get_credential
 
@@ -1588,6 +1609,14 @@ def _collect_quota_report() -> dict:
     # error.
     retry = dict(get_retry_stats())
 
+    # RDR-109 Phase 3: cross-encoder substrate availability + active backend.
+    from nexus.cross_encoder import cross_encoder_available  # noqa: PLC0415
+    cross_encoder_info = {
+        "available": cross_encoder_available(),
+        "backend": "voyage-rerank-2.5" if not is_local_mode() else "onnx-local",
+        "default_local_model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+    }
+
     return {
         "chromadb": {
             "limits": chromadb_limits,
@@ -1595,6 +1624,7 @@ def _collect_quota_report() -> dict:
             "detail": t3_detail,
         },
         "voyage": voyage_limits,
+        "cross_encoder": cross_encoder_info,
         "retry": retry,
     }
 
@@ -1626,6 +1656,19 @@ def _format_quota_report(report: dict) -> str:
             f"dims={caps['embedding_dims']}"
         )
     lines.append("")
+
+    # ── Cross-encoder (RDR-109 Phase 3) ──────────────────────────────────
+    ce = report.get("cross_encoder", {})
+    if ce:
+        ce_status = _CHECK if ce.get("available") else _WARN
+        lines.append(
+            f"  {ce_status} Cross-encoder backend: {ce.get('backend', 'unknown')}"
+        )
+        if ce.get("backend") == "onnx-local":
+            lines.append(
+                f"    default local model: {ce.get('default_local_model', '')}"
+            )
+        lines.append("")
 
     # ── Retry accumulator ────────────────────────────────────────────────
     r = report["retry"]

@@ -2684,18 +2684,63 @@ MIGRATIONS: list[Migration] = [
         "Drop chash_index.chunk_chroma_id column (RDR-108 Phase 4a, nexus-mmf5)",
         _drop_chash_index_chunk_chroma_id,
     ),
-    # The RDR-108 Phase 1c PK migrations (``nexus-je0b``: document_aspects
-    # and aspect_extraction_queue PK switch to doc_id) and ``nexus-ocu9.11``
-    # (drop document_aspects.source_path) stay deferred from the
-    # registry. The 4.31.4 reland attempt surfaced cascading test
-    # surgery: collection-rename / aspect-worker direct INSERTs need
-    # doc_id threading; the empty-catalog fast path violates the
-    # K11/CG2 "no-catalog → no-cache" contract; the high-volume
-    # orphan check needs to stay MigrationError (test contract). The
-    # ``_resolve_doc_id`` substrate in DocumentAspects.upsert ships
-    # in 4.31.5 so the eventual reland is a one-line registry change
-    # plus targeted test updates. Function definitions stay in place.
+    # nexus-4s2o reland of nexus-je0b: RDR-108 Phase 1c PK switch to
+    # doc_id for document_aspects + aspect_extraction_queue. The
+    # ``_resolve_doc_id`` substrate in DocumentAspects.upsert (4.31.5)
+    # plus the test surgery in this commit unblock the reland.
+    # ``nexus-ocu9.11`` (drop document_aspects.source_path) stays
+    # deferred — separate follow-up.
+    Migration(
+        "4.30.0",
+        "RDR-108 Phase 1c: PK switch document_aspects to doc_id (nexus-je0b)",
+        _migrate_document_aspects_pk_via_apply_pending,
+    ),
+    Migration(
+        "4.30.0",
+        "RDR-108 Phase 1c: PK switch aspect_extraction_queue to doc_id (nexus-je0b)",
+        _migrate_aspect_queue_pk_via_apply_pending,
+    ),
+    # nexus-6xp2 reland of nexus-ocu9.11: drop document_aspects.source_path.
+    # DocumentAspects.upsert/get/delete/list/rename_collection now branch
+    # on _has_source_path_column(); operators/aspect_sql.py was already
+    # ocu9.11-aware. Migration body raises MigrationRetry when je0b
+    # hasn't run yet (source_path still in PK), so registration order
+    # vs je0b is forgiving.
+    Migration(
+        "4.31.0",
+        "RDR-096 P5.2: drop document_aspects.source_path column (nexus-ocu9.11)",
+        migrate_drop_source_path_column,
+    ),
+    Migration(
+        "4.31.7",
+        "RDR-109 Phase 5: add document_aspects.salient_sentences column",
+        lambda conn: _migrate_add_aspects_salient_sentences(conn),
+    ),
 ]
+
+
+def _migrate_add_aspects_salient_sentences(conn: sqlite3.Connection) -> None:
+    """RDR-109 Phase 5: add ``salient_sentences`` TEXT column to
+    ``document_aspects``. JSON-encoded array of strings; NULL on rows
+    written before Phase 5 ships.
+
+    Idempotent: gated by ``PRAGMA table_info``. No-op if the table
+    doesn't exist (fresh installs hit the column via the base schema in
+    ``_DOCUMENT_ASPECTS_SCHEMA_SQL`` directly).
+    """
+    cols = {
+        r[1] for r in conn.execute(
+            "PRAGMA table_info(document_aspects)"
+        ).fetchall()
+    }
+    if not cols:
+        return
+    if "salient_sentences" in cols:
+        return
+    conn.execute(
+        "ALTER TABLE document_aspects ADD COLUMN salient_sentences TEXT"
+    )
+    conn.commit()
 
 # ── T3 upgrade steps ────────────────────────────────────────────────────────
 # Separate from T2 migrations: these require a ChromaDB client, not sqlite3.

@@ -804,35 +804,35 @@ class TestDocumentAspectsPostMigrationAPI:
 
 
 class TestMigrationsListRegistration:
-    """je0b migrations are intentionally deferred from MIGRATIONS in 4.31.5+.
+    """je0b migrations registered in MIGRATIONS at 4.30.0 (nexus-4s2o reland).
 
-    The companion ``_resolve_doc_id`` substrate ships in
-    ``DocumentAspects.upsert``; the registry change is the last
-    one-line step plus targeted test surgery (see bead nexus-4s2o).
-    Function definitions stay in place so re-enable is trivial.
+    The companion ``_resolve_doc_id`` substrate in
+    ``DocumentAspects.upsert`` (4.31.5) and the targeted test surgery
+    in nexus-4s2o together unblock registration. Both migrations sit
+    at version ``4.30.0`` so existing T2 DBs upgrade through them.
     """
 
-    def test_document_aspects_migration_deferred(self) -> None:
+    def test_document_aspects_migration_registered(self) -> None:
         from nexus.db.migrations import MIGRATIONS
 
         names = [m.name for m in MIGRATIONS]
-        assert not any(
+        assert any(
             "document_aspects" in n and "doc_id" in n for n in names
         ), (
-            "document_aspects PK migration must stay deferred until "
-            "the test surgery in nexus-4s2o lands; got: "
+            "document_aspects PK migration must be registered in "
+            "MIGRATIONS post-reland; got: "
             f"{[n for n in names if 'document_aspects' in n]}"
         )
 
-    def test_aspect_queue_migration_deferred(self) -> None:
+    def test_aspect_queue_migration_registered(self) -> None:
         from nexus.db.migrations import MIGRATIONS
 
         names = [m.name for m in MIGRATIONS]
-        assert not any(
+        assert any(
             "aspect_extraction_queue" in n and "doc_id" in n for n in names
         ), (
-            "aspect_extraction_queue PK migration must stay deferred "
-            "until nexus-4s2o lands; got: "
+            "aspect_extraction_queue PK migration must be registered "
+            "in MIGRATIONS post-reland; got: "
             f"{[n for n in names if 'aspect_extraction_queue' in n]}"
         )
 

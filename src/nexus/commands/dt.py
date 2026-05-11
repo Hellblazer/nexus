@@ -55,12 +55,12 @@ def _resolve_dt_collection(
     to conformant 4-segment names so the strict-naming guard at
     ``T3Database.get_or_create_collection`` accepts them.
     """
-    from nexus.corpus import canonical_embedding_model  # noqa: PLC0415
+    from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415
 
     if collection:
         return collection
     owner = corpus.replace("_", "-")
-    model = canonical_embedding_model("knowledge" if ext == ".pdf" else "docs")
+    model = effective_embedding_model_for_writes("knowledge" if ext == ".pdf" else "docs")
     if ext == ".pdf":
         return f"knowledge__{owner}-papers__{model}__v1"
     return f"docs__{owner}__{model}__v1"

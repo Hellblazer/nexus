@@ -6,6 +6,111 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.32.0] - 2026-05-11
+
+Minor release. **Headline**: RDR-109 ships in five phases — local
+mode is now the test-suite default, local-mode collection names tell
+the truth about the embedder that produced them, the cross-encoder
+substrate lands without pulling PyTorch, and the
+``attention-guided-v1`` salience boost is wired into search behind a
+feature flag (default OFF per Phase 4b measurements). RDR-108
+Phase 1c PK migration relands; je0b backfill closes the residual
+empty-doc_id rows; one chunker bug and two CI flakes fixed.
+
+### RDR-109: Honest Local-Mode Naming and Cross-Encoder Salience
+
+- **Phase 1** (#681) — Test-suite mode default. Local mode is now
+  the default; cloud-mode tests opt in via a new ``cloud_mode``
+  fixture. New lint ``test_mode_declarations_are_explicit`` blocks
+  unmarked voyage-token references at CI.
+- **Phase 2** (#682) — Honest local-mode naming. Adds
+  ``LOCAL_EMBEDDING_MODELS`` (``minilm-l6-v2-384`` /
+  ``bge-base-en-v15-768``) alongside the canonical voyage set. New
+  ``effective_embedding_model_for_writes`` chooses the right token
+  per mode; ``CollectionName.parse`` widens to accept both.
+  ``T3Database._build_embedding_fn`` implements bidirectional
+  name-aware dispatch: cloud + voyage-token uses Voyage, cloud +
+  local-token uses ``LocalEmbeddingFunction`` (the legacy 59vl /
+  GH #667 path), local + local-token uses the local EF, and local
+  + voyage-token raises the new ``IncompatibleCollectionError``
+  rather than producing dim-mismatched silent noise. Existing
+  local-mode collections keep their voyage-* names; only new
+  writes pick up the honest token. ``nx doctor`` reports the
+  active embedder honestly. **Closes nexus-59vl + GH #667.**
+- **Phase 3** (#683) — Local cross-encoder substrate. New
+  ``nexus.cross_encoder`` module ships a lazy onnxruntime-backed
+  ``LocalCrossEncoder`` (default model
+  ``cross-encoder/ms-marco-MiniLM-L-6-v2``, ~80MB HF-hub download
+  on first call). ``rerank_results`` becomes mode-aware: cloud
+  uses Voyage rerank-2.5, local uses the new substrate. No new
+  optional extra; reuses already-present core deps
+  (onnxruntime / tokenizers / huggingface_hub via chromadb's
+  bundled ONNX path), so RDR-038 F-03 "no PyTorch" stays intact.
+- **Phase 4 + 4b** (#684 + #686) — Calibration infrastructure +
+  measurements. New ``scripts/rdr-109-calibrate.py`` sweep
+  harness, ``scripts/rdr-109-generate-qa.py`` deterministic Q&A
+  generator, ``scripts/rdr_109_salience.py`` prototype. Measured
+  140 Q&A items across four content_types: code + docs Pareto-
+  clean at w=0.025; rdr neutral; knowledge regresses two
+  baseline-hits at every non-zero weight. Default-on gate
+  **NOT** met for knowledge.
+- **Phase 5** (#687) — Salience boost substrate. New
+  ``salient_sentences TEXT`` column in ``document_aspects``
+  (migration at 4.31.7 — backwards-compatible ALTER TABLE).
+  New ``nexus.salience`` module ships the production extractor
+  + token-overlap boost. ``search_cross_corpus`` gains a
+  ``_apply_salience_boost`` pass gated on
+  ``.nexus.yml``'s ``attention_guided_v1.enabled``
+  (default ``False``, recommended weight ``0.025`` when on,
+  applies only to ``knowledge__*`` / ``docs__*`` results).
+
+### Other
+
+- **RDR-108 Phase 1c reland** (#675 / nexus-4s2o) — PK switch
+  ``document_aspects`` and ``aspect_extraction_queue`` to
+  ``doc_id``. Defers when the catalog is absent (idempotent
+  retry) or when an MCP worker holds the aspect_worker lock.
+- **RDR-108 Phase 1c source_path drop** (#676 / nexus-6xp2 /
+  ocu9.11) — drops ``document_aspects.source_path`` column once
+  je0b has run.
+- **RDR-108 Phase 5 verification** (#685 / nexus-b5mh) — new
+  ``scripts/rdr-108-verify.py`` replays the 2026-05-08
+  prod-shakeout probes. 4/4 probes pass on develop tip after
+  the je0b backfill (#688) cleared the empty-doc_id residue.
+- **je0b backfill** (#688 / nexus-f8u8) — new
+  ``scripts/rdr-108-je0b-backfill.py`` resolves doc_id for the
+  329 ``document_aspects`` rows that the je0b PK migration left
+  empty. 320 resolved via catalog lookup (youngest-indexed_at
+  tie-breaker among multiple candidates from re-index dup
+  accumulation); 9 unresolvable orphans optionally deleted via
+  ``--delete-unresolvable``.
+- **Orphan-backfill substrate** (#674 / nexus-h2pm + 4fw8 +
+  oa9k) — ``nx catalog orphan-backfill`` for legacy collections
+  whose chunks lack catalog Documents.
+
+### Known issues
+
+- ``tests/test_indexer_e2e.py::test_smart_index_staleness_check`` and
+  ``test_migration_moves_prose_from_code_to_docs`` fail post-Phase-2.
+  The shared ``_index`` helper mocks ``get_credential`` to return
+  ``"test-key"`` for all keys, which makes ``is_local_mode()`` return
+  False, so the indexer writes voyage-named collections. The
+  ``local_t3`` fixture then trips the new bidirectional EF dispatch
+  (Phase 2's IncompatibleCollectionError boundary) for the re-index
+  / prune paths these two tests exercise. Production behavior is
+  correct; the test mock pattern is what needs updating. Tracked in
+  ``nexus-7kf7``.
+
+### Fixed
+
+- **chromadb EphemeralClient shared-state flake** (#678) —
+  ``test_collection_audit::test_json_flag_emits_parseable_payload``
+  cleared collections before use.
+- **WAL race in ``synthesize-log --force``** (#680 /
+  nexus-fmhv) — extends the ``.db-shm`` ignore-pattern to also
+  cover ``.db-wal``; SQLite checkpoints can vanish either file
+  between scandir and per-file copy.
+
 ## [4.31.7] - 2026-05-10
 
 Patch on 4.31.6. Fixes a Linux-only race condition in

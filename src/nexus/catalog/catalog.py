@@ -303,7 +303,6 @@ from nexus.catalog.tumbler import (
 from nexus.corpus import (
     CANONICAL_EMBEDDING_MODELS,
     CONTENT_TYPES,
-    canonical_embedding_model,
 )
 
 _log = structlog.get_logger()

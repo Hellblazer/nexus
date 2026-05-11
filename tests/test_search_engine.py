@@ -80,8 +80,13 @@ def test_hybrid_mixed_corpus_no_warning(capsys):
 
 # ── AC3: Cross-corpus reranking ───────────────────────────────────────────────
 
-def test_rerank_results_returns_unified_ranking():
-    """rerank_results reorders results using the reranker model."""
+def test_rerank_results_returns_unified_ranking(cloud_mode):
+    """rerank_results reorders results using the reranker model.
+
+    RDR-109 Phase 3: rerank_results dispatches by mode. This test
+    asserts the cloud (Voyage) path; the local path is exercised in
+    ``tests/test_cross_encoder.py``.
+    """
     results = [
         SearchResult(id="1", content="alpha", distance=0.5, collection="code__r", metadata={}),
         SearchResult(id="2", content="beta", distance=0.2, collection="docs__d", metadata={}),

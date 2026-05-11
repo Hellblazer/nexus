@@ -1,0 +1,37 @@
+# RDR-109 Phase 4b generated QA for rdr from rdr__1-2__voyage-context-3__v1.
+# Seed=109 count=35. Programmatic; see scripts/rdr-109-generate-qa.py.
+{"question": "What does the section on 'Scope Verification' cover?", "expected_chunk_chash": "0ccfa22232afacdaf3efee9a5e3720dc207d9bfd80518e1af2da41b623081431", "content_type": "rdr"}
+{"question": "What does the section on 'What Went Right' cover?", "expected_chunk_chash": "4b6437adc432c8d3305098edc3f35e85f94eb40fe6a130f8af4d16859af02cff", "content_type": "rdr"}
+{"question": "What does the section on 'Assumption Verification' cover?", "expected_chunk_chash": "d484ff4b60820671ac61cdd8c10eaa47d40cb645af3e4e0675e57aa61b2fd3c2", "content_type": "rdr"}
+{"question": "What does the section on 'Key Discoveries' cover?", "expected_chunk_chash": "7984acb04d7b0b208496cc10afabe6f1091b87c66f03f8245ec7de177bdf8845", "content_type": "rdr"}
+{"question": "What does the section on 'RDR-001: Axis-Aligned Bounding Tetrahedra (AABT) for Tetree Spatial Index' cover?", "expected_chunk_chash": "18feecb7a53ccabf6f0ec1ac5e73ab4434cd370f2c3bf87d7504526c3f124824", "content_type": "rdr"}
+{"question": "What does the section on 'References' cover?", "expected_chunk_chash": "8c1b166eb44a7335757b763a02d98e0a09ae78c15208dd08e1bc2196cf84c88f", "content_type": "rdr"}
+{"question": "What does the section on 'Metrics' cover?", "expected_chunk_chash": "9e16fd384ace687fe0deef722a7e49c20f05981c6dec163bfc748cd1a43abb5c", "content_type": "rdr"}
+{"question": "What does the section on 'Decision Rationale' cover?", "expected_chunk_chash": "b18bc4aebf1111237cde9dd9e237a9623c22bb813abc86a881f2bbdf25c08f09", "content_type": "rdr"}
+{"question": "What does the section on 'Risks and Mitigations' cover?", "expected_chunk_chash": "4b24bc3d7248099f28f6876510acd35967dbe6b5b68a4d92c3687ec40c2b60d5", "content_type": "rdr"}
+{"question": "What does the section on 'Technical Design' cover?", "expected_chunk_chash": "a82510d243dfbcb3108e13f40a469e2c9948639382640050afeb70aef9c1d3c2", "content_type": "rdr"}
+{"question": "What does the section on 'Test Plan' cover?", "expected_chunk_chash": "e801feb88ea56c2b249fcb47524118f62b710cb3f7dfabf1a305eb55373a658a", "content_type": "rdr"}
+{"question": "What does the section on 'Failure Modes' cover?", "expected_chunk_chash": "f8467ecf859a0e1f549a20460c073d1b78b0a3927b8acd0a7a70865be6f929da", "content_type": "rdr"}
+{"question": "What does the section on 'Proportionality' cover?", "expected_chunk_chash": "0b0fcd03b3e02915b77fafa6d1e248249b278b51737ce4f11526e8198830741e", "content_type": "rdr"}
+{"question": "What does the section on '2026-03-21: Gate Response Round 2 \u2014 Address 3 New Issues' cover?", "expected_chunk_chash": "81845aecbd79ae40f2824f59d114d569e3044ce00570e157416dd1592ebf9b1c", "content_type": "rdr"}
+{"question": "What does the section on 'Step 4: Replace containsUltraFast callers' cover?", "expected_chunk_chash": "d8a40cde6a52b6705e11ac76695cceeb057753e171ea206799d6613729e56fa1", "content_type": "rdr"}
+{"question": "What does the section on 'Alternative 4: 14-DOP with body diagonals' cover?", "expected_chunk_chash": "cdd06068b3b96bc051c82e478689f06d294faa49946e1024417913e2dfc1ab20", "content_type": "rdr"}
+{"question": "What does the section on 'Open Items' cover?", "expected_chunk_chash": "459301915c1f073dc94b62541e940bb28d39e6aa3a9e1bd81ae4069d8a7c6935", "content_type": "rdr"}
+{"question": "What does the section on 'Phase 1: Fix Existing Bugs (independent of AABT)' cover?", "expected_chunk_chash": "b8aa9ad33dce6cf1d631777ef3c2a88c01df3ac80c63e8c2ae1197abe8e938d1", "content_type": "rdr"}
+{"question": "What does the section on 'Post-Mortem: RDR-002 \u2014 12-DOP Exact Containment for Kuhn Tetrahedra' cover?", "expected_chunk_chash": "f9c44730fc5985e235644021eca1cb53ec3319b94eb6d18e4d23d84edd35d611", "content_type": "rdr"}
+{"question": "What does the section on 'Alternative 3: Type-specific difference coordinates' cover?", "expected_chunk_chash": "529e92cb1b94a2cac412902c58d0abe7c84a27fc8efc60782b4caec0558ea6af", "content_type": "rdr"}
+{"question": "What does the section on 'Alternative 3: Wrapper record `aabt(Tet tet)`' cover?", "expected_chunk_chash": "4fd9d86cf959c33fffda54325fc61b8c37735f550e3f62b17d6c2cb096992f07", "content_type": "rdr"}
+{"question": "What does the section on 'Step 1: Formal derivation of per-type slab ranges' cover?", "expected_chunk_chash": "9c088d2f0e74cad8a1d54106875a79a13ff46e500930df912eae74cafde42e3a", "content_type": "rdr"}
+{"question": "What does the section on 'Technical Environment' cover?", "expected_chunk_chash": "5937b2c43e6a3c9a4f17dd421afc8fffe6f8f506cda8f7bd56fe484e0b660943", "content_type": "rdr"}
+{"question": "What does the section on 'Step 1: Add `contains12DOP()` method to Tet' cover?", "expected_chunk_chash": "0b29441cf4da6fa47a24f16931e294e5296dee6595c769303937be6d703807da", "content_type": "rdr"}
+{"question": "What does the section on 'Phase 2: Sealed Interface Migration (atomic commit)' cover?", "expected_chunk_chash": "91bd53caaccf32d3034e28af77a3ef3e2660337ab06e289a7ea0d29a60c9d191", "content_type": "rdr"}
+{"question": "What does the section on 'Step 2: Test cross-type intersection matrix' cover?", "expected_chunk_chash": "51c29ce2a55e0c5aa63ea8cdf5319322cd9ee018f9847d229bd8e07ee0866bc4", "content_type": "rdr"}
+{"question": "What does the section on 'Contradiction Check' cover?", "expected_chunk_chash": "1ae469093cd4ca3794178cf7a1fb21535c8cfb5811d402ba6781792a113f912d", "content_type": "rdr"}
+{"question": "What does the section on 'Step 4: Replace SAT callers' cover?", "expected_chunk_chash": "f2c53f39a0624ead47ddfc2cd05d9f96b571b7c0d661517683f3a6ed488f8c42", "content_type": "rdr"}
+{"question": "What does the section on 'Existing Infrastructure Audit' cover?", "expected_chunk_chash": "7268c7b88c001ac5e21160059779bceb3503165e7626165262d8caa6ae44c38d", "content_type": "rdr"}
+{"question": "What does the section on 'Step 1: Define `aabt` sealed interface and implement on `Tet`' cover?", "expected_chunk_chash": "0a9a237c4df4f0421a8c85596e6c3ae3154a0e10047117de03075e5404e7c4a4", "content_type": "rdr"}
+{"question": "What does the section on 'Alternative 2: Rhombohedral AABR (paniq FCC transform)' cover?", "expected_chunk_chash": "f1b6f1b759d2bf6682f7832fda84cfbecafbd254242ce24e1a481a51091fb664", "content_type": "rdr"}
+{"question": "What does the section on '2026-03-21: Gate Response \u2014 Address All Blocked Issues' cover?", "expected_chunk_chash": "686e5dcf278d6db78c4ca678bcc51241b3f1cfee39067950015cd588a3be5e22", "content_type": "rdr"}
+{"question": "What does the section on 'Minimum Viable Validation' cover?", "expected_chunk_chash": "07358e37c0e3c06c6920679945d5ed96f66e94b0d547315a952c54ac2cb31bcc", "content_type": "rdr"}
+{"question": "What does the section on 'Step 1: Level-adaptive strategy' cover?", "expected_chunk_chash": "ead7123aef7791d79f0ca44c45f1631204bf9a29ae382b2b9f2cbca7e83860e1", "content_type": "rdr"}
+{"question": "What does the section on 'Step 2: Correctness test \u2014 12-DOP vs containsUltraFast' cover?", "expected_chunk_chash": "e4e46970bd4f9b22615e47b3fb5c97fbf5e3c352a8a5921bd84a2156a129ef4c", "content_type": "rdr"}

@@ -1,0 +1,37 @@
+# RDR-109 Phase 4b generated QA for code from code__workspace-c52ddf65.
+# Seed=109 count=35. Programmatic; see scripts/rdr-109-generate-qa.py.
+{"question": "How is 'test_put_different_titles_produce_different_ids' implemented or defined?", "expected_chunk_chash": "8e783dd613680fbda2f553c2003d1571716d0e835c7c51d6bdb8273012582ed9", "content_type": "code"}
+{"question": "How is '_embed_with_fallback' implemented or defined?", "expected_chunk_chash": "7f89d20e87ef19a7a65dc621454830d3b8cd8b0f354949fcce5416d7a9e5d168", "content_type": "code"}
+{"question": "How is 'test_list_collections_returns_names_and_counts' implemented or defined?", "expected_chunk_chash": "7181ef61a1e3192b0dbdecc5211c7fb125e8d977d27fe070630aed0e248d98f8", "content_type": "code"}
+{"question": "How is '_config_dir' implemented or defined?", "expected_chunk_chash": "2aa2bd0db554e3c1d8853461fcc72473fd5234ffa44810d560e6bd7a3424d7cd", "content_type": "code"}
+{"question": "What does this comment describe: # \u2500\u2500 nexus-370: CCE helpers \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500?", "expected_chunk_chash": "e671dc5eee3e9fe9a18016b23162dac86c6dae33dcd968fc3ccdc8287f29fd0e", "content_type": "code"}
+{"question": "How is 'test_embed_partial_batch_failure_mixed_model' implemented or defined?", "expected_chunk_chash": "0c599466a3b9c98da79c2930ec15d38e4c86d40dbec9b9b5d877f556e377007f", "content_type": "code"}
+{"question": "How is 'test_pm_block_appends_newline_if_missing' implemented or defined?", "expected_chunk_chash": "a933017822322b5d58e8428d222834d623a160d8fde90ef3436b853bd96cfa6b", "content_type": "code"}
+{"question": "What does this comment describe: # M1: SemanticMarkdownChunker uses char offsets, not line numbers?", "expected_chunk_chash": "f19dad164a33ab4f6ac58824599f9fe5d03c1032bbd9d92ede65452207b42ba6", "content_type": "code"}
+{"question": "How is 'collection_exists' implemented or defined?", "expected_chunk_chash": "89a7e462ad6710ab9a1d9d3ac5ac7856838ab16ca4bd322ec56d52dc11164d09", "content_type": "code"}
+{"question": "What does this comment describe: # Group by collection and interleave round-robin for even distribution?", "expected_chunk_chash": "97bb6c3a828b4a1273e543e47b99200c5ca5fb1ee5562d2ad6af5ae481487712", "content_type": "code"}
+{"question": "How is '_embedding_fn' implemented or defined?", "expected_chunk_chash": "dc86763b148c7e4ef04542640600bd1a6b722e807a6405ecfcedae02efb59ff5", "content_type": "code"}
+{"question": "How is 'resume_cmd' implemented or defined?", "expected_chunk_chash": "a59fe9f7d0060e40e44b7e91a52e99bc9a18938c8ffb47b2faf49d2bbd197f85", "content_type": "code"}
+{"question": "How is 'test_pm_unblock_raises_for_out_of_range_line' implemented or defined?", "expected_chunk_chash": "50e39cf0226228aa42159b6b4cb519577f9c851f18401f0f9394825a218ca9fc", "content_type": "code"}
+{"question": "How is '_infer_project' implemented or defined?", "expected_chunk_chash": "9e8f76307b63697d36df77ded332a02b619496e3fd980e6a8eb988276f66ad24", "content_type": "code"}
+{"question": "What does this comment describe: # Walk repo and classify files into code, prose, and PDF lists?", "expected_chunk_chash": "2732aa0dbba0985cf0fe7e6917c956741728fffb3118e459c50068338cd50248", "content_type": "code"}
+{"question": "How is 'test_split_synthesis_no_headers_returns_truncated_single_chunk' implemented or defined?", "expected_chunk_chash": "696eaa95ec4f2d4be870244b9b53c3aec1ef3d39e9292d3d086c12b7d1cac2c7", "content_type": "code"}
+{"question": "How is 'test_delete_by_source_returns_count' implemented or defined?", "expected_chunk_chash": "6950c867dc175c891f68c99e1a3024f71fc2113c6f3a2fe9c9aaacb91e969805", "content_type": "code"}
+{"question": "How is '_prune_deleted_files' implemented or defined?", "expected_chunk_chash": "ae3e0c6e7c5c6d4613e60bbed499f258511b29f1fe36940c1029eeaa77b134de", "content_type": "code"}
+{"question": "How is 'logs_cmd' implemented or defined?", "expected_chunk_chash": "297da7f933b44e9ed43b4dd9d944ad95e43916227164560e749636e3b8def182", "content_type": "code"}
+{"question": "What does this comment describe: # Staleness check: old hash \u2192 triggers re-index?", "expected_chunk_chash": "be26b5c266b0e127b07599423e4ede806dc22252a28a1998fc5d30646f7865de", "content_type": "code"}
+{"question": "How is 'status_cmd' implemented or defined?", "expected_chunk_chash": "f59ded980df11a0853d206fab3eefcd0e81cb85651b5e3d8350f752779b0c900", "content_type": "code"}
+{"question": "What does this comment describe: # voyage-4 is the query-time model for?", "expected_chunk_chash": "1cb6703158de30b811c2a451218eab1d4bc0b1fb21edc71b29e59afb69a9e387", "content_type": "code"}
+{"question": "How is 'T2Database' implemented or defined?", "expected_chunk_chash": "b159a2ac4492b340b5fedc31f83e03c558ed864f1ac70ba1a901f5b29e573827", "content_type": "code"}
+{"question": "How is 'test_pm_archive_aborts_on_haiku_failure' implemented or defined?", "expected_chunk_chash": "549fa56034338791191b8ca35171aa88c2c2417fcd397deb9ca30c35cbfa1faa", "content_type": "code"}
+{"question": "How is '_index_pdf_file' implemented or defined?", "expected_chunk_chash": "4e5f798f31dbf03ceff4d9614b2a0edb11da0d8765e83e6251dd3184819d3cbd", "content_type": "code"}
+{"question": "What does this comment describe: # Build where filter: --where pairs only ($startswith is not a valid ChromaDB operator;?", "expected_chunk_chash": "e295b3d8624199425b7a8944cc1a08fc21d218354be5a2e18b61864ed36f74f3", "content_type": "code"}
+{"question": "How is 'test_cce_contract_standard_embed_has_top_level_embeddings' implemented or defined?", "expected_chunk_chash": "ac5cdda96ca8134a03ced06b211a3d0c68a5f68581e92789bc76360e59bb6c2c", "content_type": "code"}
+{"question": "How is 'test_run_index_excludes_rd' implemented or defined?", "expected_chunk_chash": "3e962b5431ff0b84d5844ddf56ec2c55adc9c6f13d746f4d84b3c587b438cd18", "content_type": "code"}
+{"question": "How is 'read_bytes' implemented or defined?", "expected_chunk_chash": "b9cdfadfd83a6c6dec3ec454719d4df587e4dd8768f45da0277593522a71c03b", "content_type": "code"}
+{"question": "How is 'test_cce_contract_results_list_with_embeddings' implemented or defined?", "expected_chunk_chash": "c5f1215384ee9f63bf3454423376a2e1b5a228a629773c13ad21a7f41aff3235", "content_type": "code"}
+{"question": "How is 'close_cmd' implemented or defined?", "expected_chunk_chash": "9a4e8cd543067663d52cc6078aea251a55406cec4f1edb3d8f9e169dfe327efc", "content_type": "code"}
+{"question": "How is 'test_store_put_permanent_metadata' implemented or defined?", "expected_chunk_chash": "9e1cb5f97823d88780d29bdb684ac4bcc573a968cea900de45ad3c88f96b3489", "content_type": "code"}
+{"question": "How is '_sha256' implemented or defined?", "expected_chunk_chash": "327baac36ea482d90d96fde513e660518ceb9aec94d844ce939c7697845c7324", "content_type": "code"}
+{"question": "How is 'test_delete_by_source_missing_source_returns_zero' implemented or defined?", "expected_chunk_chash": "4573d686c18107b8f93aedd9ec9aa863e79e33923424fd96e10a271ed84935d8", "content_type": "code"}
+{"question": "How is 'capture_upsert_with_embeddings' implemented or defined?", "expected_chunk_chash": "e8ddba63b50ac35f2ee4e720d45f54a9d81e9188af131925ee9f6de80e3268b0", "content_type": "code"}

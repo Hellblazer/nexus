@@ -2,12 +2,13 @@
 title: "Honest Local-Mode Naming and Cross-Encoder Salience: Two Naming/Scoring Designs Touching the Same Test-Suite Mode-Default Surface"
 id: RDR-109
 type: Architecture
-status: draft
+status: accepted
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-10
-revised: 2026-05-10
+revised: 2026-05-11
+accepted_date: 2026-05-11
 related_issues: [nexus-59vl, nexus-2wc1]
 related_rdrs: [RDR-038, RDR-059, RDR-089, RDR-097, RDR-101, RDR-103]
 github_issues: [667]
@@ -31,7 +32,7 @@ inconsistent assumptions across ~30+ legacy tests.
 
 The two beads:
 
-### nexus-59vl (GH #667): Local-ONNX collections falsely labeled as voyage-*
+#### Gap 1: nexus-59vl (GH #667) — local-ONNX collections falsely labeled as voyage-*
 
 - Collection names + per-chunk metadata encode `voyage-context-3`
   / `voyage-code-3` even when the on-disk vectors are 384-dim
@@ -47,7 +48,7 @@ The two beads:
 - Same RDR-059 class of bug the original Voyage tokens were
   introduced to prevent.
 
-### nexus-2wc1: Cross-encoder salient-sentence aspect (RDR-097 follow-up)
+#### Gap 2: nexus-2wc1 — cross-encoder salient-sentence aspect (RDR-097 follow-up)
 
 - Reframing of SAGE (Wang et al., 2026) for nexus's existing
   cross-encoder infrastructure: score document sentences against
@@ -62,6 +63,19 @@ The two beads:
 - "One phase, one branch, one PR" framing in the original bead
   doesn't fit: every calibration is global and changes search
   quality across every query.
+
+#### Gap 3: test suite has no first-class concept of "what mode is this test running in"
+
+The current test suite was written when ``is_local_mode()``
+returned True in CI (no API keys → local default). Tests of
+cloud-mode behavior were the exception, opting in via
+``monkeypatch.setenv("NX_LOCAL", "0")`` + key fixtures. Tests
+of local-mode behavior were the default and didn't need to
+declare anything. Any production write-path change that makes
+mode-aware decisions immediately surfaces inconsistent
+assumptions across ~30 voyage-asserting tests + 14 local-mode-
+asserting tests. This is the load-bearing precondition that
+forces Gaps 1 and 2 to share an RDR.
 
 ## Why bundle them in one RDR
 
@@ -113,14 +127,58 @@ the RDR scope, not as a per-PR shim.**
 
 ### Phase 1: Test-suite mode-default redesign (foundation)
 
-- Pick one of (a) local-default with explicit cloud-mode
-  fixtures, or (b) cloud-default with explicit local-mode
-  fixtures, or (c) per-test parametrize across both.
-- Migrate the 30 voyage-asserting tests + 14 local-mode-asserting
-  tests to declare their mode explicitly.
-- New tests must declare mode; lint gate at PR review time.
-- Removes the autouse-fixture shortcut that surfaces the
-  mode-default question on every mode-aware feature PR.
+**Decision (2026-05-11): option (a) — local-default with
+explicit cloud-mode fixtures.** Reasons:
+
+- Matches the current CI environment (no API keys → local mode
+  is what CI already runs); zero migration cost for the local-
+  mode-asserting tests.
+- Cloud-mode tests are the minority (~30 out of 7000+) and
+  already have a clear shape (assert voyage-* tokens, expect
+  cloud EF dispatch). They migrate to opt in via a
+  ``cloud_mode`` fixture that monkeypatches the relevant
+  ``is_local_mode``/credential getters.
+- (b) would require API keys in CI or per-test mocks for every
+  test that touches T3; (c) doubles the test matrix without
+  evidence the dual-mode coverage is needed at this scale.
+
+Concrete steps:
+
+1. Add a ``cloud_mode`` pytest fixture in ``tests/conftest.py``
+   that monkeypatches ``is_local_mode`` to return False and
+   sets the four credential env vars
+   (``CHROMA_API_KEY``/``VOYAGE_API_KEY``/``CHROMA_TENANT``/
+   ``CHROMA_DATABASE``) to test sentinels.
+2. Audit + migrate ~30 voyage-asserting tests to depend on the
+   ``cloud_mode`` fixture (or to a class-level ``pytestmark =
+   pytest.mark.usefixtures("cloud_mode")``).
+3. Remove any leftover autouse mode-flipping shortcut that
+   leaks across files.
+4. Add a lint test (``test_mode_declarations_are_explicit``)
+   implemented as a **grep-based heuristic** with a documented
+   exclusion list. The check scans test files for the regex
+   ``voyage-(context|code)-3`` and flags any matching test
+   function whose pytest dependency graph does not include the
+   ``cloud_mode`` fixture (resolved via
+   ``request.fixturenames`` introspection at collection time).
+   Known false-positive classes (must be excluded explicitly):
+   - String literals inside docstrings or comments
+     (``# voyage-context-3``).
+   - ``parametrize`` data tuples whose values are not asserted
+     against collection names (e.g., test data labels).
+   - Tests of ``corpus.canonical_embedding_model`` itself —
+     legitimately assert the canonical voyage token without
+     needing cloud mode (these are schema-canonical-set tests,
+     not write-path mode tests).
+
+   The exclusion list lives in ``tests/conftest.py`` as
+   ``_MODE_LINT_EXCLUDE`` and is referenced by the lint test
+   so additions show up in code review. Sentence-transformer-
+   shaped AST analysis is explicitly out of scope; the grep-
+   plus-fixture-graph approach is sufficient given the small
+   migration set.
+5. Document the convention in ``tests/AGENTS.md`` (or local
+   ``CLAUDE.md``).
 
 ### Phase 2: Honest local-mode naming (nexus-59vl)
 
@@ -132,13 +190,31 @@ the RDR scope, not as a per-PR shim.**
 - Add `voyage_model_for_collection(name)` name-aware dispatch
   (reads conformant segment for cloud-mode-flip safety).
 - Add `_embedding_fn(collection_name)` name-aware dispatch in
-  T3Database (builds `LocalEmbeddingFunction` for any local-
-  token collection even in cloud mode).
+  T3Database. **Both directions are name-aware:**
+  - Cloud mode + local-token collection name → builds
+    ``LocalEmbeddingFunction`` (handles the legacy local
+    collections after credentials added — the original 59vl
+    fix).
+  - Local mode + voyage-token collection name → raises
+    ``IncompatibleCollectionError("collection X was indexed
+    with voyage-* but cloud credentials are unavailable;
+    re-index in local mode or restore credentials")``. Without
+    this branch, the inverse hazard (user drops to local mode
+    against legacy voyage-named collections) reproduces the
+    same dim-mismatch class as RDR-059 (1024-dim stored vs
+    384-dim query). Fail loud, not silent noise.
 - Migration: existing local-mode collections keep their
   voyage-* names (no rename); new writes go to local-token
   names; cloud-credentials add doesn't break the existing
   collections (the name-aware EF dispatch keeps them
   queryable).
+- **Reindex-creates-ghost handling**: on first write to a
+  local-token-named collection for a repo that already has a
+  voyage-named collection in T3, log a structured warning
+  (``legacy_voyage_collection_superseded``) naming both
+  collections and recommending ``nx catalog gc`` (or filing a
+  follow-up bead for the GC pass). The legacy collection is
+  NOT auto-deleted — operators decide.
 - Closes nexus-59vl + GH #667.
 
 ### Phase 3: Cross-encoder scoring substrate (nexus-2wc1 prerequisite)
@@ -150,6 +226,17 @@ the RDR scope, not as a per-PR shim.**
   - Local: ONNX cross-encoder (e.g.
     `cross-encoder/ms-marco-MiniLM-L-6-v2`, ~80MB).
 - Cloud/local dispatch follows the Phase 2 mode-aware pattern.
+- **Dependency packaging (resolves a Phase 3 blocker)**:
+  Phase 3 must NOT introduce a PyTorch dependency (RDR-038
+  F-03 is load-bearing: zero-PyTorch is why local mode is
+  viable on machines without a CUDA stack). Required research:
+  evaluate ``fastembed`` cross-encoder support first (already
+  the runtime backing ``LocalEmbeddingFunction``), fall back
+  to ``onnxruntime``-direct only if fastembed lacks CE rerank.
+  ``sentence-transformers`` is explicitly out of scope (pulls
+  PyTorch). The resolved choice ships as an optional extra
+  ``conexus[cross-encoder]`` in ``pyproject.toml`` so the
+  default install remains lean.
 - No new aspect extractor yet; just the substrate.
 
 ### Phase 4: Calibration (nexus-2wc1 measurement)
@@ -185,6 +272,40 @@ the RDR scope, not as a per-PR shim.**
   least one corpus type at the calibrated boost weight; no
   Pareto regression on any baseline-passing query.
 
+## Phase coupling and shipping order
+
+Phases 1-2 are tightly coupled (Phase 2 cannot land without
+Phase 1 unblocking the test suite) and ship together as a
+single feature arc. Phases 3-5 share the mode-aware-write-path
+substrate from Phase 2 but are otherwise independent:
+
+- **Phase 2 closes nexus-59vl as soon as Phase 2's PR merges.**
+  Holding the bead's close gate on Phase 4's calibration would
+  conflate two unrelated concerns. The bead's only contract is
+  honest naming + the dim-mismatch-hazard fix.
+- Phase 3 may ship before Phase 4 calibration completes; it
+  adds the substrate without changing retrieval ranking. Phase
+  4 then exercises the substrate against held-out QA. Phase 5
+  ships the user-visible aspect extractor + boost only after
+  Phase 4 measurements pass.
+- If Phase 4 or 5 surfaces blocking design questions, Phases
+  3-5 may split into a separate RDR; Phase 2's close gate does
+  not depend on that decision.
+
+## RDR-103 intersection
+
+RDR-103 Gap 2 introduced ``canonical_embedding_model(content_type)``
+in ``src/nexus/corpus.py:115`` as the single source of
+truth for cloud-mode collection naming. Phase 2's
+``effective_embedding_model_for_writes(content_type)`` does
+NOT replace that function — it WRAPS it. Cloud mode delegates
+to ``canonical_embedding_model`` verbatim (preserving the
+RDR-103 invariant); local mode returns the local-EF token.
+Tests of the RDR-103 canonical set continue to call
+``canonical_embedding_model`` directly and stay independent
+of mode. The naming-authority surface remains single-rooted;
+mode-awareness is layered on top.
+
 ## Out of scope
 
 - SAGE's differential-attention mechanism (the original
@@ -196,6 +317,46 @@ the RDR scope, not as a per-PR shim.**
   name-aware EF dispatch in Phase 2 handles them. Forced
   rename would invalidate every existing chash span and break
   the catalog manifest.
+
+## Phase 4b measurement outcome (2026-05-11)
+
+Calibration sweep run via `scripts/rdr-109-calibrate.py` over four
+content_types with 35 programmatically-generated Q&A items each
+(see `data/calibration/rdr-109/results.md` for full table).
+
+| content_type | baseline | best non-zero weight | Pareto-clean? |
+|---|---:|---:|---|
+| knowledge | 0.286 | 0.343 (-2 regression) | **NO** |
+| rdr | 0.343 | 0.343 (no movement) | n/a |
+| code | 0.486 | **0.514 @ w=0.025** | **YES** |
+| docs | 0.429 | **0.486 @ w=0.025** | **YES** |
+
+Boost mechanism: token-overlap between the query and per-chunk
+salient sentences (extracted by `scripts/rdr_109_salience.py` via
+Phase 3 cross-encoder + per-content-type seed queries). All weights
+≥ 0.025 produce identical hit rates because the typical overlap is
+1-3 tokens out of ~10 query tokens; the boost is therefore a
+near-uniform tie-breaker rather than a magnitude-sensitive signal.
+
+Decision: ship Phase 5's boost as opt-in (default OFF) per the
+existing feature-flag plan; recommend `w=0.025` as the
+default-when-on value. The Phase 5 default-on gate (boost passes
+measurements with no Pareto regression) is NOT met for knowledge
+corpora. Per the lines 290-293 split clause, this is documented as
+the Phase 5 design constraint rather than a blocker: the mechanism
+ships, the default does not.
+
+Caveats:
+
+- Programmatic Q&A (template-derived from chunk content) produces
+  near-paraphrase questions whose retrieval characteristics may
+  differ from hand-curated benchmarks. The aggregate trend
+  (mechanism positive on code/docs, neutral on rdr, mixed on
+  knowledge) is informative; absolute hit rates should be
+  interpreted within this caveat.
+- Sweep ran on small corpora (rag-papers 142, workspace-code 927,
+  docs-1-4 384, rdr-1-2 130) for tractable salience-cache build.
+  Larger corpora may exhibit different reordering windows.
 
 ## References
 

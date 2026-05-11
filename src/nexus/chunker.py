@@ -20,6 +20,11 @@ _CHUNK_MAX_BYTES = SAFE_CHUNK_BYTES
 # oversized chunk that gets truncated.
 _LONG_LINE_THRESHOLD = SAFE_CHUNK_BYTES
 _BREAK_CHARS = (";", ",", "}", ")", "]")
+# RDR-109 follow-up / nexus-wuhw: when no syntactic break is available,
+# any whitespace boundary is strictly better than a hard cut through
+# an identifier. Searched after _BREAK_CHARS so structurally meaningful
+# splits still win when available.
+_WHITESPACE_BREAK_CHARS = (" ", "\t", "\n")
 
 
 def _make_code_splitter(language: str, content: str, chunk_lines: int = _CHUNK_LINES) -> list:
@@ -54,9 +59,21 @@ def _split_long_line(line: str, max_chars: int) -> list[str]:
     """Split a very long line into smaller segments at natural break points.
 
     Used for minified code where a single line can be the entire file.
-    Prefers splitting at semicolons, commas, and closing brackets within
-    the last 20% of each segment.  Falls back to a hard cut at *max_chars*
-    when no natural break point is found.
+    Three preference tiers, falling through to the next when none found:
+
+    1. Syntactic break (semicolon, comma, closing bracket) in the last
+       20% of the segment.
+    2. Any whitespace boundary searched leftward through the full
+       window. Strictly better than a hard cut through an identifier.
+    3. Hard cut at *max_chars*. Reached only by truly minified code
+       with no whitespace anywhere — rare; mid-identifier splits at
+       this point are unavoidable.
+
+    nexus-wuhw: tier 2 was missing pre-fix, so files where every
+    syntactic break happened to land outside the last-20% window fell
+    straight through to the hard cut, producing chunks that started
+    mid-identifier ("tected ...", "ivate void ..."). Always prefer a
+    whitespace boundary over a mid-token slice.
     """
     if len(line) <= max_chars:
         return [line]
@@ -66,7 +83,7 @@ def _split_long_line(line: str, max_chars: int) -> list[str]:
     while pos < len(line):
         end = min(pos + max_chars, len(line))
         if end < len(line):
-            # Search for a natural break in the last 20% of the segment
+            # Tier 1: syntactic break in the last 20%.
             search_start = pos + int(max_chars * 0.8)
             best_break = -1
             for ch in _BREAK_CHARS:
@@ -74,7 +91,23 @@ def _split_long_line(line: str, max_chars: int) -> list[str]:
                 if bp > best_break:
                     best_break = bp
             if best_break > search_start:
-                end = best_break + 1  # include the break character
+                end = best_break + 1
+            else:
+                # Tier 2: any whitespace boundary in the full window.
+                ws_break = -1
+                for ch in _WHITESPACE_BREAK_CHARS:
+                    bp = line.rfind(ch, pos + 1, end)
+                    if bp > ws_break:
+                        ws_break = bp
+                if ws_break > pos:
+                    # Cut AT the whitespace (include it as a trailing
+                    # space on the current segment); the next segment
+                    # then starts cleanly at the following non-space.
+                    end = ws_break + 1
+                # else: tier 3 — minified code with no whitespace.
+                # Accept the hard cut at *max_chars*; the chunk will
+                # start mid-identifier but no boundary preserves
+                # tokens here.
         segments.append(line[pos:end])
         pos = end
     return segments

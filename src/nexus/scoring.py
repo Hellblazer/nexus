@@ -363,18 +363,43 @@ def rerank_results(
     model: str = _RERANK_MODEL,
     top_k: int | None = None,
 ) -> list[SearchResult]:
-    """Rerank *results* using Voyage AI reranker.
+    """Rerank *results* by cross-encoder relevance for *query*.
 
-    Returns results sorted by relevance_score descending.
+    RDR-109 Phase 3 mode-aware dispatch:
 
-    Note: Mutates ``hybrid_score`` on each SearchResult in place before
-    returning the sorted list.
+    - Cloud mode: Voyage AI reranker (``rerank-2.5``).
+    - Local mode: ONNX cross-encoder via
+      :class:`nexus.cross_encoder.LocalCrossEncoder` (default
+      ``cross-encoder/ms-marco-MiniLM-L-6-v2``, ~80MB lazy download).
+
+    Returns results sorted by relevance score descending. Mutates
+    ``hybrid_score`` on each SearchResult in place. On any failure
+    (network, missing model, exception during scoring) falls back to
+    the input order, truncated to *top_k* if supplied. Failure is
+    logged at WARN; reranking is best-effort.
     """
     if not results:
         return results
 
     n = top_k or len(results)
     documents = [r.content for r in results]
+
+    from nexus.config import is_local_mode  # noqa: PLC0415
+
+    if is_local_mode():
+        return _rerank_local(results, query, documents, n)
+    return _rerank_cloud(results, query, documents, model, n)
+
+
+def _rerank_cloud(
+    results: list[SearchResult],
+    query: str,
+    documents: list[str],
+    model: str,
+    top_n: int,
+) -> list[SearchResult]:
+    """Cloud reranker via Voyage AI. Best-effort: any exception falls
+    back to the original order truncated to *top_n*."""
     client = _voyage_client()
     try:
         rerank_response = _voyage_with_retry(
@@ -382,15 +407,45 @@ def rerank_results(
             query=query,
             documents=documents,
             model=model,
-            top_k=n,
+            top_k=top_n,
         )
     except Exception as exc:
         _log.warning("rerank failed, returning original order", error=str(exc))
-        return results[:n]
+        return results[:top_n]
     reranked: list[SearchResult] = []
     for item in rerank_response.results:
         r = results[item.index]
         r.hybrid_score = float(item.relevance_score)
+        reranked.append(r)
+    return reranked
+
+
+def _rerank_local(
+    results: list[SearchResult],
+    query: str,
+    documents: list[str],
+    top_n: int,
+) -> list[SearchResult]:
+    """Local reranker via ONNX cross-encoder. Best-effort: model
+    download failures or missing optional deps fall back to the
+    original order."""
+    try:
+        from nexus.cross_encoder import get_local_cross_encoder  # noqa: PLC0415
+        scores = get_local_cross_encoder().score(query, documents)
+    except Exception as exc:
+        _log.warning(
+            "local rerank failed, returning original order",
+            error=str(exc),
+        )
+        return results[:top_n]
+    pairs = sorted(
+        zip(results, scores, strict=True),
+        key=lambda p: p[1],
+        reverse=True,
+    )
+    reranked: list[SearchResult] = []
+    for r, s in pairs[:top_n]:
+        r.hybrid_score = float(s)
         reranked.append(r)
     return reranked
 

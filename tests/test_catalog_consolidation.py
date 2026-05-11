@@ -11,6 +11,12 @@ from click.testing import CliRunner
 from nexus.catalog.catalog import Catalog
 from nexus.cli import main
 
+# RDR-109 Phase 2: this file asserts cloud-mode canonical behavior
+# (voyage-* embedder names, canonical-set defaults). The cloud_mode
+# fixture sets credentials and forces ``is_local_mode()`` to False so
+# the assertions hold regardless of the host environment.
+pytestmark = pytest.mark.usefixtures("cloud_mode")
+
 
 @pytest.fixture(autouse=True)
 def git_identity(monkeypatch):

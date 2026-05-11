@@ -601,6 +601,22 @@ def search_cross_corpus(
         except Exception:
             _log.debug("topic_boost_failed", exc_info=True)
 
+    # RDR-109 Phase 5: salience boost. Opt-in via .nexus.yml flag
+    # ``attention_guided_v1.enabled`` (default False). Applies only to
+    # knowledge__* and docs__* results because those are the corpora
+    # for which Phase 4b measurements showed a useful or neutral effect;
+    # rdr__ neutral and knowledge regresses are documented in the RDR.
+    ag_cfg = cfg.get("attention_guided_v1", {})
+    if ag_cfg.get("enabled") and all_results:
+        try:
+            all_results = _apply_salience_boost(
+                all_results,
+                query=query,
+                weight=float(ag_cfg.get("weight", 0.025)),
+            )
+        except Exception:
+            _log.debug("salience_boost_failed", exc_info=True)
+
     # nexus-1qed: catalog-resolved display path attached as metadata
     # so formatters never need to import the catalog. Best-effort;
     # absent catalog or missing doc_ids leave _display_path unset and
@@ -760,6 +776,60 @@ def _flag_contradictions(
         else:
             out.append(r)
     return out
+
+
+def _apply_salience_boost(
+    results: list[SearchResult],
+    *,
+    query: str,
+    weight: float,
+) -> list[SearchResult]:
+    """RDR-109 Phase 5: token-overlap quality boost using stored
+    salient_sentences.
+
+    For each ``knowledge__*`` or ``docs__*`` result, read its document's
+    ``salient_sentences`` from T2 ``document_aspects`` keyed by the
+    ``doc_id`` metadata attached upstream by
+    :func:`_attach_doc_ids_from_catalog`, compute the
+    token-overlap boost, and add it to ``hybrid_score``. Results are
+    re-sorted by the new score descending.
+
+    Results without ``doc_id`` or whose document has no salient
+    sentences fall through unchanged.
+    """
+    from nexus.config import nexus_config_dir  # noqa: PLC0415
+    from nexus.db.t2.document_aspects import DocumentAspects  # noqa: PLC0415
+    from nexus.salience import token_overlap_boost  # noqa: PLC0415
+
+    targeted = [
+        r for r in results
+        if r.collection.startswith(("knowledge__", "docs__"))
+    ]
+    if not targeted:
+        return results
+
+    db_path = nexus_config_dir() / "memory.db"
+    if not db_path.exists():
+        return results
+    aspects = DocumentAspects(db_path)
+    try:
+        cache: dict[str, list[str]] = {}
+        for r in targeted:
+            doc_id = (r.metadata or {}).get("doc_id") or ""
+            if not doc_id:
+                continue
+            if doc_id not in cache:
+                cache[doc_id] = aspects.get_salient_sentences(doc_id)
+            sentences = cache[doc_id]
+            if not sentences:
+                continue
+            boost = token_overlap_boost(query, sentences, weight=weight)
+            if boost:
+                r.hybrid_score = float(r.hybrid_score) + boost
+    finally:
+        aspects.close()
+
+    return sorted(results, key=lambda r: r.hybrid_score, reverse=True)
 
 
 def _apply_clustering(

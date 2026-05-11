@@ -422,6 +422,19 @@ _DEFAULTS: dict[str, Any] = {
     "voyageai": {
         "read_timeout_seconds": 120,
     },
+    # RDR-109 Phase 5: salience-boost feature flag.
+    # Phase 4b measurements (2026-05-11) saw the boost ship Pareto-clean
+    # on code + docs (+1/+2 hits at w=0.025) but regress 2 baseline-hits
+    # on the knowledge corpus, so default-on is rejected per the bead
+    # acceptance criterion. The mechanism ships; the default does not.
+    # Operators opt in via ``.nexus.yml``:
+    #   attention_guided_v1:
+    #     enabled: true
+    #     weight: 0.025
+    "attention_guided_v1": {
+        "enabled": False,
+        "weight": 0.025,
+    },
     # RDR-087: search-observability opt-outs. Default-on.
     "telemetry": {
         "search_enabled": True,       # Phase 2.2 hot-path INSERT OR IGNORE.

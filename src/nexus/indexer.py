@@ -287,7 +287,7 @@ def _conformant_name_for_repo(repo: Path, content_type: str) -> str:
     canonical model for ``content_type``; version is always v1 for
     ad-hoc fallbacks.
     """
-    from nexus.corpus import canonical_embedding_model  # noqa: PLC0415
+    from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415
     from nexus.registry import _repo_identity, _safe_collection  # noqa: PLC0415
 
     if content_type not in ("code", "docs", "rdr"):
@@ -301,7 +301,7 @@ def _conformant_name_for_repo(repo: Path, content_type: str) -> str:
     # segment. The two synthesis points share the same rule so a repo
     # gets the same name from either entry point.
     sanitised = basename.replace("_", "-")
-    model = canonical_embedding_model(content_type)
+    model = effective_embedding_model_for_writes(content_type)
     return _safe_collection(
         prefix=f"{content_type}__",
         name=sanitised,
@@ -363,7 +363,7 @@ def _migration_source_candidates(
     already crossed the Phase-5 strict-flip and accumulated synth-shape
     collections.
     """
-    from nexus.corpus import canonical_embedding_model  # noqa: PLC0415
+    from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415
     from nexus.registry import _repo_identity, _safe_collection  # noqa: PLC0415
 
     if content_type not in ("code", "docs", "rdr"):
@@ -372,7 +372,7 @@ def _migration_source_candidates(
         )
     basename, repo_hash = _repo_identity(repo)
     sanitised = basename.replace("_", "-")
-    model = canonical_embedding_model(content_type)
+    model = effective_embedding_model_for_writes(content_type)
     return [
         # Pre-RDR-103 legacy 2-segment.
         _safe_collection(f"{content_type}__", basename, repo_hash),
@@ -435,7 +435,7 @@ def _migrate_legacy_collections(
     from nexus.commands.collection import (  # noqa: PLC0415
         rename_collection_data_plane,
     )
-    from nexus.corpus import canonical_embedding_model  # noqa: PLC0415
+    from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415
     from nexus.registry import _repo_identity  # noqa: PLC0415
 
     result: dict[str, str] = {}
@@ -461,7 +461,7 @@ def _migrate_legacy_collections(
         conformant = cat_obj.collection_for(
             content_type=ct,
             owner=owner,
-            embedding_model=canonical_embedding_model(ct),
+            embedding_model=effective_embedding_model_for_writes(ct),
         ).render()
 
         # nexus-7vuw: pick the first source candidate that exists in T3.
