@@ -89,6 +89,10 @@ CREATE TABLE IF NOT EXISTS document_aspects (
     -- ``COALESCE(source_uri, 'file://' || source_path)`` during
     -- the deprecation window (P2.3).
     source_uri             TEXT,
+    -- RDR-109 Phase 5: salient sentences produced by attention-guided-v1
+    -- extractor. JSON-encoded array of strings; NULL on rows written
+    -- before Phase 5 ships. Read paths must tolerate NULL.
+    salient_sentences      TEXT,
     PRIMARY KEY (collection, source_path)
 );
 
@@ -133,6 +137,9 @@ class AspectRecord:
     # RDR-108 Phase 1c: catalog tumbler identity. Empty string on legacy
     # rows written before the PK migration.
     doc_id: str = ""
+    # RDR-109 Phase 5: salient sentences (attention-guided-v1 extractor).
+    # Empty list when the extractor was not run or returned no candidates.
+    salient_sentences: list[str] = field(default_factory=list)
 
 
 def _resolve_doc_id(record: AspectRecord) -> str:
@@ -256,6 +263,111 @@ class DocumentAspects:
                 }
                 self._source_path_cache: bool = "source_path" in cols
         return self._source_path_cache
+
+    # ── RDR-109 Phase 5: salient_sentences I/O ────────────────────────────
+
+    def _has_salient_sentences_column(self) -> bool:
+        with self._lock:
+            if not hasattr(self, "_salient_cache"):
+                cols = {
+                    r[1] for r in self.conn.execute(
+                        "PRAGMA table_info(document_aspects)"
+                    ).fetchall()
+                }
+                self._salient_cache: bool = "salient_sentences" in cols
+        return self._salient_cache
+
+    def set_salient_sentences(
+        self, doc_id: str, sentences: list[str],
+    ) -> bool:
+        """Write the ``salient_sentences`` column for *doc_id*.
+
+        Narrow API independent of :meth:`upsert` so the
+        ``attention-guided-v1`` extractor can populate the column
+        without re-running the LLM-backed aspect pipeline. Returns
+        True on update; False when no row matches.
+
+        Falls back to ``(collection, source_path)``-keyed update on
+        installs where je0b's PK switch has not yet run (catalog
+        absent or MCP-worker block deferred the migration). The
+        fallback looks up the matching row via the legacy ``doc_id``
+        column if present, otherwise raises False.
+
+        No-op (returns False) if the ``salient_sentences`` column does
+        not exist on the running schema.
+        """
+        if not self._has_salient_sentences_column():
+            return False
+        if not doc_id:
+            return False
+        encoded = json.dumps(sentences, separators=(",", ":")) if sentences else "[]"
+        with self._lock:
+            cols = {
+                r[1] for r in self.conn.execute(
+                    "PRAGMA table_info(document_aspects)"
+                ).fetchall()
+            }
+            if "doc_id" in cols:
+                cur = self.conn.execute(
+                    "UPDATE document_aspects "
+                    "SET salient_sentences = ? WHERE doc_id = ?",
+                    (encoded, doc_id),
+                )
+            else:
+                # Pre-je0b legacy schema: ``doc_id`` column does not
+                # exist. Caller must use ``set_salient_sentences_by_key``
+                # on this branch; report False so it falls through.
+                return False
+            self.conn.commit()
+            return cur.rowcount > 0
+
+    def set_salient_sentences_by_key(
+        self,
+        collection: str,
+        source_path: str,
+        sentences: list[str],
+    ) -> bool:
+        """Pre-PK-migration fallback: target rows by
+        ``(collection, source_path)``. Returns False when the
+        ``salient_sentences`` column doesn't exist or no row matches.
+        """
+        if not self._has_salient_sentences_column():
+            return False
+        if not self._has_source_path_column():
+            return False
+        encoded = json.dumps(sentences, separators=(",", ":")) if sentences else "[]"
+        with self._lock:
+            cur = self.conn.execute(
+                "UPDATE document_aspects "
+                "SET salient_sentences = ? "
+                "WHERE collection = ? AND source_path = ?",
+                (encoded, collection, source_path),
+            )
+            self.conn.commit()
+            return cur.rowcount > 0
+
+    def get_salient_sentences(self, doc_id: str) -> list[str]:
+        """Return the salient sentences for *doc_id*, or ``[]`` when
+        the column is absent / NULL / the row is missing."""
+        if not self._has_salient_sentences_column():
+            return []
+        if not doc_id:
+            return []
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT salient_sentences FROM document_aspects "
+                "WHERE doc_id = ?",
+                (doc_id,),
+            ).fetchone()
+        if not row or row[0] is None:
+            return []
+        try:
+            value = json.loads(row[0])
+        except (json.JSONDecodeError, TypeError):
+            return []
+        if not isinstance(value, list):
+            return []
+        return [str(s) for s in value if s]
 
     # ── Public API ────────────────────────────────────────────────────────
 
