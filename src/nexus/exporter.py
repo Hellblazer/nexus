@@ -91,6 +91,53 @@ def _apply_remap(source_path: str, remaps: list[tuple[str, str]]) -> str:
     return source_path
 
 
+def _fire_store_chains_grouped_by_doc(
+    ids: list[str],
+    collection_name: str,
+    documents: list[str],
+    embeddings: list[list[float]],
+    metadatas: list[dict],
+) -> None:
+    """nexus-8g79.1: fire post-store chains per-doc so the manifest
+    hook can attribute chunks to the right catalog tumbler.
+
+    Pre-RDR-108-Phase-3 exports carry ``meta["doc_id"]`` per chunk
+    (the tumbler string was stored in chunk metadata at write-time).
+    Post-Phase-3 exports do NOT carry it; for those chunks the group
+    key is the empty string and the manifest hook short-circuits —
+    accepted limitation until export-format extension carries the
+    catalog manifest sidecar. The grouping handles the legacy path
+    correctly and degrades to the existing no-doc_id behaviour for
+    Phase-3 exports.
+
+    Records are partitioned by ``meta.get("doc_id", "")``; each group
+    fires its own ``fire_store_chains`` call with that group key as
+    ``catalog_doc_id`` so the manifest hook attributes the chunks
+    correctly. Insertion order within each group is preserved so
+    ``chunk_index`` re-injection sees a stable position.
+    """
+    from collections import defaultdict
+    from nexus.mcp_infra import fire_store_chains
+
+    groups: dict[str, list[int]] = defaultdict(list)
+    for i, m in enumerate(metadatas):
+        groups[(m or {}).get("doc_id", "")].append(i)
+
+    for doc_id_key, indices in groups.items():
+        sub_ids = [ids[i] for i in indices]
+        sub_docs = [documents[i] for i in indices]
+        sub_embs = [embeddings[i] for i in indices] if embeddings else None
+        sub_metas = [metadatas[i] for i in indices]
+        sub_paths = [(metadatas[i] or {}).get("source_path", "") for i in indices]
+        fire_store_chains(
+            sub_ids, collection_name, sub_docs,
+            source_paths=sub_paths,
+            embeddings=sub_embs,
+            metadatas=sub_metas,
+            catalog_doc_id=doc_id_key,
+        )
+
+
 def export_collection(
     db: "T3Database",
     collection_name: str,
@@ -381,16 +428,9 @@ def import_collection(
                         embeddings=embeddings,
                         metadatas=metadatas,
                     )
-                    # nexus-9099: fire post-store chains for the imported
-                    # batch (RDR-095 symmetric-fire; missed by the original
-                    # commit). source_path comes from the export metadata
-                    # so the document chain sees the original on-disk path.
-                    from nexus.mcp_infra import fire_store_chains
-                    fire_store_chains(
+                    _fire_store_chains_grouped_by_doc(
                         ids, collection_name, documents,
-                        source_paths=[m.get("source_path", "") for m in metadatas],
-                        embeddings=embeddings,
-                        metadatas=metadatas,
+                        embeddings, metadatas,
                     )
                     imported_count += len(ids)
                     _log.debug("import_batch_written", count=len(ids), total_so_far=imported_count)
@@ -405,12 +445,8 @@ def import_collection(
             embeddings=embeddings,
             metadatas=metadatas,
         )
-        from nexus.mcp_infra import fire_store_chains
-        fire_store_chains(
-            ids, collection_name, documents,
-            source_paths=[m.get("source_path", "") for m in metadatas],
-            embeddings=embeddings,
-            metadatas=metadatas,
+        _fire_store_chains_grouped_by_doc(
+            ids, collection_name, documents, embeddings, metadatas,
         )
         imported_count += len(ids)
 

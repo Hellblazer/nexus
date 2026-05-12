@@ -834,6 +834,7 @@ def extract_aspects(
     *,
     lookup_path: str = "",
     doc_id_lookup: Callable[[str, str], str] | None = None,
+    manifest_lookup: Callable[[str], list[Any]] | None = None,
 ) -> AspectRecord | ExtractFail | None:
     """Synchronously extract aspects from ``content`` and return either
     a populated ``AspectRecord``, an :class:`ExtractFail` sentinel
@@ -902,7 +903,11 @@ def extract_aspects(
                 reason="infra_unavailable",
                 detail=f"get_t3 failed: {type(exc).__name__}: {exc}",
             )
-        result = read_source(uri, t3=t3, doc_id_lookup=doc_id_lookup)
+        result = read_source(
+            uri, t3=t3,
+            doc_id_lookup=doc_id_lookup,
+            manifest_lookup=manifest_lookup,
+        )
         if isinstance(result, ReadFail):
             _log.warning(
                 "aspect_extractor_source_unreadable",

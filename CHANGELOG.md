@@ -53,18 +53,47 @@ with the identical bug shape and closes the event-replay invariant.
   ``aspect_extractor`` direct-chroma paths still need wiring to
   the manifest — filed as follow-ups.
 
-### Known follow-ups
+### Additional fixes (nexus-8g79.1, nexus-8g79.2)
 
-- ``nexus-dxly`` (P0) — ``aspect_readers`` and ``aspect_extractor``
-  direct-chroma reassembly still needs manifest-based ordering.
+- **``nx memory promote`` now registers in catalog before T3 put**
+  (nexus-8g79.1): the T2→T3 promotion path pre-registers via the
+  shared ``_catalog_store_hook`` so chunks land with the catalog
+  tumbler as ``doc_id`` and the manifest hook populates
+  ``document_chunks`` + ``chunk_count`` correctly. Same fix pattern
+  as ``nx store put`` in this release.
+- **``nx store import`` (exporter) now groups by doc_id**
+  (nexus-8g79.1): batched chunk imports group records by
+  ``meta["doc_id"]`` and fire ``fire_store_chains`` per group with
+  the group key as ``catalog_doc_id``. Pre-Phase-3 exports carrying
+  ``doc_id`` per chunk attribute correctly; post-Phase-3 exports
+  without ``doc_id`` retain the existing graceful-degradation
+  behaviour (manifest hook short-circuits for that group) until the
+  export format extension carries a catalog manifest sidecar.
+- **aspect_readers + aspect_extractor manifest-ordered reassembly**
+  (nexus-8g79.2): the chroma reader's ``_gather_chroma_chunks_by_field``
+  accepts a ``manifest_lookup(doc_id) -> list[ManifestRow]`` callable
+  and, when ``identity_field == 'doc_id'``, orders chunks by the
+  catalog manifest's canonical position keyed on
+  ``chunk_text_hash``. Post-Phase-3 chunks have no ``chunk_index``
+  in metadata so the legacy ``md.get('chunk_index', 0)`` ordering
+  collapsed to insertion-sequence — wrong for multi-chunk docs.
+  Threaded through ``read_source`` → ``_read_chroma_uri`` and the
+  three callers (``enrich.py`` aspects/dry-run paths,
+  ``aspect_worker.py``, ``aspect_extractor.extract_aspects``) via a
+  new ``_build_catalog_manifest_lookup`` factory in
+  ``commands/enrich.py``.
+
+### Known follow-ups (deferred)
+
 - ``nexus-w5zv`` (P1) — backfill paths write Phase-3 chunks at
   position 0.
 - ``nexus-lrhg`` (P1) — atomicity wrap of manifest hook, chash
   32/64-char normalisation, ``DocumentDeleted`` replay orphan
   cleanup, ``event_log.py`` flock re-entrancy, staleness-cache
   silent-fail.
-- ``nexus-lf8f`` (this bead, partial — store_put + projector
-  shipped, ``memory promote`` + ``store import`` deferred).
+- Post-Phase-3 export format extension (``nx store import``):
+  carry a catalog manifest sidecar so post-Phase-3 imports can
+  reconstruct ``document_chunks``. Filed in nexus-8g79.1 notes.
 
 ## [4.32.4] - 2026-05-12
 

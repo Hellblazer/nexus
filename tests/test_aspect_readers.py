@@ -281,6 +281,66 @@ class TestReadChromaUri:
         assert result.text == "first\n\nsecond\n\nthird"
         assert result.metadata["chunk_count"] == 3
 
+    def test_manifest_lookup_overrides_chunk_index_for_phase3_chunks(self, t3_client):
+        """nexus-8g79.2: post-RDR-108 P3 chunks have no chunk_index in
+        metadata (cargo-filtered) so md.get('chunk_index', 0) collapses
+        every chunk to position 0 and only the insertion-sequence
+        tiebreaker survives. When manifest_lookup is provided the
+        reader must use catalog manifest positions (keyed on chash)
+        instead, so multi-chunk docs reassemble in canonical order even
+        when chunk_index is absent.
+        """
+        from nexus.aspect_readers import ReadOk, _read_chroma_uri
+
+        # Seed three chunks with NO chunk_index (Phase-3 shape), and
+        # chunk_text_hash values that the manifest_lookup will map to
+        # canonical positions. Insert in reversed order so the
+        # insertion-sequence tiebreaker would yield the wrong text if
+        # the manifest weren't authoritative.
+        col_name = "code__phase3-manifest"
+        col = t3_client.get_or_create_collection(col_name)
+        col.upsert(
+            ids=["c-x", "c-y", "c-z"],
+            documents=["third", "second", "first"],
+            metadatas=[
+                {"doc_id": "1.99.1", "chunk_text_hash": "zzz" + "0" * 61},
+                {"doc_id": "1.99.1", "chunk_text_hash": "yyy" + "0" * 61},
+                {"doc_id": "1.99.1", "chunk_text_hash": "xxx" + "0" * 61},
+            ],
+        )
+
+        # Fake manifest_lookup: chash -> position (canonical).
+        from dataclasses import dataclass
+
+        @dataclass
+        class _Row:
+            chash: str
+            position: int
+
+        def manifest_lookup(doc_id: str) -> list[_Row]:
+            assert doc_id == "1.99.1"
+            return [
+                _Row(chash="xxx" + "0" * 61, position=0),
+                _Row(chash="yyy" + "0" * 61, position=1),
+                _Row(chash="zzz" + "0" * 61, position=2),
+            ]
+
+        def doc_id_lookup(_coll: str, _sid: str) -> str:
+            return "1.99.1"
+
+        result = _read_chroma_uri(
+            f"chroma://{col_name}/anything",
+            t3=t3_client,
+            doc_id_lookup=doc_id_lookup,
+            manifest_lookup=manifest_lookup,
+        )
+        assert isinstance(result, ReadOk), result
+        # Manifest-ordered: positions 0,1,2 → first,second,third.
+        # Without the fix, insertion-sequence tiebreaker would yield
+        # 'third\n\nsecond\n\nfirst' (insertion order with all ci=0).
+        assert result.text == "first\n\nsecond\n\nthird"
+        assert result.metadata["manifest_ordered"] is True
+
     def test_no_matching_chunks_returns_read_fail_empty(self, t3_client):
         from nexus.aspect_readers import ReadFail, _read_chroma_uri
 
