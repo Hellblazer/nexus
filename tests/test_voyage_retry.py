@@ -110,7 +110,10 @@ def test_retry_accumulator_tracks_voyage_backoff_seconds() -> None:
         _ve.ServiceUnavailableError("503"),
         "ok",
     ])
-    with patch("nexus.retry.time.sleep"):
+    # nexus-8g79.32: pin random.random()=0.5 so jitter factor = 1.0.
+    with patch("nexus.retry.time.sleep"), patch(
+        "nexus.retry.random.random", return_value=0.5,
+    ):
         assert _voyage_with_retry(fn) == "ok"
     stats = get_retry_stats()
     # 1s first backoff + 2s second backoff (exponential, capped at 10s)
@@ -130,7 +133,10 @@ def test_retry_accumulator_tracks_chroma_backoff_seconds() -> None:
     )
     reset_retry_stats()
     fn = MagicMock(side_effect=[Exception("503"), Exception("503"), "ok"])
-    with patch("nexus.retry.time.sleep"):
+    # nexus-8g79.32: pin random.random()=0.5 so jitter factor = 1.0.
+    with patch("nexus.retry.time.sleep"), patch(
+        "nexus.retry.random.random", return_value=0.5,
+    ):
         assert _chroma_with_retry(fn, max_attempts=3) == "ok"
     stats = get_retry_stats()
     assert stats["chroma_count"] == 2

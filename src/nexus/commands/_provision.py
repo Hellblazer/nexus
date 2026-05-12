@@ -91,7 +91,14 @@ def ensure_databases(
         api_key = admin.get_chroma_cloud_api_key_from_clients()
         tenant = _resolve_cloud_tenant(api_key)
     except Exception as exc:
-        _log.warning("provision.tenant_resolve_failed", error=str(exc))
+        # nexus-8g79.33: ChromaDB error bodies sometimes echo the
+        # offending token in the message (e.g. "invalid token: sk-...").
+        # Truncate to 120 chars matching retry.py's safety bound so
+        # tokens cannot leak verbatim into structured logs.
+        _log.warning(
+            "provision.tenant_resolve_failed",
+            error=str(exc)[:120],
+        )
         # Fall through with the provided tenant (works for self-hosted setups).
 
     try:

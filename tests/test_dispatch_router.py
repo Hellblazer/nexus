@@ -104,6 +104,20 @@ class TestAutoMode:
     def test_claude_pinned_operators_route_to_claude(self, op: str) -> None:
         assert pick_dispatcher(op) == "claude"
 
+    def test_claude_pinned_operators_route_to_claude_synthetic(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-8g79.29: ``CLAUDE_OPERATORS_PINNED`` is empty (extract
+        was promoted to qwen-default), so the parametrized test above
+        is permanently skipped — the claude-pinned-routing branch then
+        had zero coverage. Sentinel-driven test: monkeypatch a synthetic
+        pinned set and verify routing.
+        """
+        import nexus.operators.dispatch_router as dr
+        monkeypatch.setattr(dr, "CLAUDE_OPERATORS_PINNED", frozenset({"_test_pinned_op"}))
+        assert dr.pick_dispatcher("_test_pinned_op") == "claude"
+        assert dr.pick_dispatcher("operator__test_pinned_op") == "claude"
+
     def test_operator_prefix_treated_equivalently(self) -> None:
         for op in QWEN_OPERATORS_DEFAULT:
             assert pick_dispatcher(f"operator_{op}") == "qwen"

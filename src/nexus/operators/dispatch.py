@@ -128,6 +128,15 @@ async def _drain_pipe(pipe: asyncio.StreamReader | None) -> bytes:
     try:
         return await pipe.read()
     except Exception:
+        # nexus-8g79.8: empty bytes is the right return shape (caller
+        # treats it as "no output"), but the silent swallow hides
+        # subprocess pipe failures (OOM kill, fd exhaustion, broken
+        # pipe). DEBUG-with-exc_info preserves the API contract while
+        # making the cause discoverable.
+        import structlog
+        structlog.get_logger(__name__).debug(
+            "operator_pipe_read_failed", exc_info=True,
+        )
         return b""
 
 

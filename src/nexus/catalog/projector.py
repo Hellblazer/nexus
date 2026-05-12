@@ -108,11 +108,34 @@ class Projector:
         outer ``with`` block commits or rolls back atomically and a
         nested commit would finalize the transaction prematurely,
         defeating the rollback fence.
+
+        Post-replay (nexus-lf8f): re-derive ``documents.chunk_count``
+        from ``document_chunks`` for every row. ``chunk_count`` is a
+        denormalised cache, not an event-sourced field — the
+        ``DocumentRegistered`` events carry the register-time snapshot
+        (typically ``0``) and would project as-is forever without this
+        re-derivation. Equivalent to running
+        ``Catalog.resync_chunk_count_cache(doc_id)`` for each document
+        in one set-based UPDATE.
         """
         applied = 0
         for event in events:
             self.apply(event)
             applied += 1
+        # nexus-lf8f: bulk chunk_count resync from document_chunks.
+        # Idempotent; safe to run even on a partial replay. Only
+        # touches rows that actually have manifest entries — docs
+        # without manifest rows keep whatever ``DocumentRegistered``
+        # carried (which lets callers set ``chunk_count`` explicitly
+        # via ``Catalog.update(chunk_count=N)`` and have replay honour
+        # that value).
+        self._db.execute(
+            "UPDATE documents SET chunk_count = ("
+            "SELECT COUNT(*) FROM document_chunks dc "
+            "WHERE dc.doc_id = documents.tumbler) "
+            "WHERE EXISTS (SELECT 1 FROM document_chunks dc "
+            "WHERE dc.doc_id = documents.tumbler)"
+        )
         if commit:
             self._db.commit()
         return applied
@@ -313,6 +336,15 @@ class Projector:
         tumbler = payload.tumbler or payload.doc_id
         if not tumbler:
             return
+        # nexus-8g79.7: cascade-delete the document_chunks manifest
+        # rows. Pre-fix, deleting a document left orphan manifest rows
+        # forever (the schema has no FK with ON DELETE CASCADE; under
+        # FK=OFF replay the orphans then survived into the rebuilt
+        # SQLite). Manifest is keyed on doc_id == tumbler.
+        self._db.execute(
+            "DELETE FROM document_chunks WHERE doc_id = ?",
+            (tumbler,),
+        )
         self._db.execute(
             "DELETE FROM documents WHERE tumbler = ?",
             (tumbler,),

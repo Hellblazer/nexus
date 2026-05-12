@@ -591,6 +591,44 @@ def test_collection_cache_thread_safe():
     assert all(len(r) > 0 for r in results), "Cache race: thread saw empty list"
 
 
+def test_collections_cache_ttl_expiry_refetches():
+    """nexus-8g79.25: after _COLLECTIONS_CACHE_TTL elapses, the next
+    call MUST re-query T3. Pre-fix the TTL branch had no test; a
+    regression that turned it into a forever-cache would have been
+    invisible.
+    """
+    import nexus.mcp_infra as mi
+
+    mock = _mock_t3([{"name": "knowledge__before", "count": 1}])
+    # First call: cold cache → fetches and returns new names.
+    first = _get_collection_names()
+    assert first == ["knowledge__before"]
+    initial_calls = mock.list_collections.call_count
+    assert initial_calls == 1
+
+    # Warm-cache call within TTL must NOT re-query.
+    second = _get_collection_names()
+    assert second == ["knowledge__before"]
+    assert mock.list_collections.call_count == initial_calls, (
+        "warm cache must serve without refetching T3"
+    )
+
+    # Force TTL expiry by rewinding the cached timestamp past the
+    # TTL window, then update the mock to return a different set so
+    # we can verify the re-fetch path returns fresh state.
+    names, _ts = mi._collections_cache
+    mi._collections_cache = (names, 0.0)  # 0.0 << time.monotonic() - TTL
+    mock.list_collections.return_value = [{"name": "knowledge__after", "count": 1}]
+
+    third = _get_collection_names()
+    assert third == ["knowledge__after"], (
+        "post-TTL call must return fresh names from T3"
+    )
+    assert mock.list_collections.call_count == initial_calls + 1, (
+        "TTL expiry must trigger exactly one re-query"
+    )
+
+
 # ── Pagination ───────────────────────────────────────────────────────────────
 
 def test_search_pagination_first_page(t3):

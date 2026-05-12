@@ -51,7 +51,11 @@ def test_retry_connect_error_twice_then_success() -> None:
         if call_count < 3:
             raise httpx.ConnectError("transient connect failure")
         return "ok"
-    with patch("nexus.retry.time") as mock_time:
+    # nexus-8g79.32: pin random.random()=0.5 so jittered delay equals
+    # the deterministic base (jitter factor = 1 + (0.5 - 0.5) * 0.4 = 1.0).
+    with patch("nexus.retry.time") as mock_time, patch(
+        "nexus.retry.random.random", return_value=0.5,
+    ):
         result = _chroma_with_retry(flaky_fn)
     assert result == "ok" and call_count == 3
     assert mock_time.sleep.call_args_list == [call(2.0), call(4.0)]
@@ -80,7 +84,10 @@ def test_backoff_curve_2_4_8_16() -> None:
         if call_count < 5:
             raise Exception("503 Service Unavailable")
         return "done"
-    with patch("nexus.retry.time") as mock_time:
+    # nexus-8g79.32: pin random.random()=0.5 so jitter = 1.0.
+    with patch("nexus.retry.time") as mock_time, patch(
+        "nexus.retry.random.random", return_value=0.5,
+    ):
         assert _chroma_with_retry(fn_succeeds_on_5th, max_attempts=5) == "done"
     assert mock_time.sleep.call_args_list == [call(2.0), call(4.0), call(8.0), call(16.0)]
 

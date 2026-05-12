@@ -23,6 +23,37 @@ import structlog
 _log = structlog.get_logger(__name__)
 
 
+def _build_catalog_manifest_lookup() -> Callable[[str], list[Any]] | None:
+    """nexus-8g79.2: build a ``manifest_lookup(doc_id) -> list[ManifestRow]``
+    callable backed by ``Catalog.get_manifest``.
+
+    The aspect/enrich chroma readers use this to reassemble chunks in
+    canonical position order via the catalog ``document_chunks`` table
+    rather than the dropped ``chunk_index`` chunk-metadata field.
+    Returns ``None`` when the catalog is uninitialized; the reader
+    falls back to ``chunk_index`` (post-Phase-3 this collapses to
+    insertion order, the pre-fix behaviour).
+    """
+    try:
+        from nexus.catalog import Catalog, open_cached
+        from nexus.config import catalog_path
+
+        cat_path = catalog_path()
+        if not Catalog.is_initialized(cat_path):
+            return None
+        cat = open_cached(cat_path)
+    except Exception:
+        return None
+
+    def _lookup(doc_id: str) -> list[Any]:
+        try:
+            return cat.get_manifest(doc_id)
+        except Exception:
+            return []
+
+    return _lookup
+
+
 def _build_catalog_doc_id_lookup() -> Callable[[str, str], str] | None:
     """Build a ``doc_id_lookup(collection, source_id) -> doc_id``
     callable backed by the catalog's ``physical_collection`` +
@@ -773,6 +804,9 @@ def _dry_run_predict_skips(
     # this projection so the dry-run reflects post-prune behavior. ``None``
     # falls back to the legacy probe (catalog absent / pre-Phase-3).
     doc_id_lookup = _build_catalog_doc_id_lookup()
+    # nexus-8g79.2: catalog manifest is authoritative for chunk position
+    # post-RDR-108 Phase 3 (chunk_index dropped from metadata).
+    manifest_lookup = _build_catalog_manifest_lookup()
 
     planned: dict[str, int] = {}
     skip_lines: list[str] = []
@@ -783,7 +817,11 @@ def _dry_run_predict_skips(
             continue
         uri = f"chroma://{collection}/{quote(sp, safe='/')}"
         try:
-            result = read_source(uri, t3=t3, doc_id_lookup=doc_id_lookup)
+            result = read_source(
+                uri, t3=t3,
+                doc_id_lookup=doc_id_lookup,
+                manifest_lookup=manifest_lookup,
+            )
         except Exception as exc:
             # Per-entry transient failure shouldn't abort the whole
             # prediction loop. Bucket under a synthetic ``read_error``
@@ -928,6 +966,8 @@ def _run_extraction(
     # in this collection. Built once outside the loop because the SQL
     # connection inside the helper is cheap-but-not-free per-call.
     doc_id_lookup = _build_catalog_doc_id_lookup()
+    # nexus-8g79.2: same — manifest_lookup is process-cached.
+    manifest_lookup = _build_catalog_manifest_lookup()
 
     db_path = default_db_path()
     with T2Database(db_path) as db:
@@ -951,6 +991,7 @@ def _run_extraction(
                 collection=collection,
                 lookup_path=_chroma_source_id_for_entry(entry),
                 doc_id_lookup=doc_id_lookup,
+                manifest_lookup=manifest_lookup,
             )
             if record is None:
                 # Defensive — select_config already passed at the parent

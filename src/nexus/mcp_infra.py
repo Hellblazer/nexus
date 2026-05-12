@@ -972,6 +972,14 @@ register_post_store_batch_hook(manifest_write_batch_hook)
 # ``hook_failures`` with ``chain='document'``. Failures never propagate.
 
 _post_document_hooks: list = []
+#: nexus-8g79.12: set of hook ids that accept the ``doc_id`` kwarg
+#: (RDR-101 Phase 4). Classified by signature inspection at
+#: registration time so the dispatcher picks the right shape without
+#: a fragile TypeError-retry probe at every call. Pre-fix the dispatcher
+#: caught TypeError and retried — any hook that raised TypeError for an
+#: unrelated reason (wrong-type arg inside its body) was misclassified
+#: as a back-compat signal and silently invoked with the wrong shape.
+_post_document_hooks_with_doc_id: set[int] = set()
 
 
 def register_post_document_hook(fn) -> None:
@@ -982,8 +990,31 @@ def register_post_document_hook(fn) -> None:
     unsupported — the dispatcher would drop the returned coroutine.
     Phase 1 hook authors: see ``test_async_hooks_silently_unsupported_by_dispatcher``
     for the contract test.
+
+    nexus-8g79.12: callable's signature is inspected once at
+    registration so :func:`fire_post_document_hooks` picks the right
+    call shape — hooks that accept ``doc_id`` or **kwargs receive it;
+    older registrations are called without it. Mirrors the pattern
+    used by :func:`register_post_store_batch_hook` for ``catalog_doc_id``.
     """
     _post_document_hooks.append(fn)
+    try:
+        import inspect
+        sig = inspect.signature(fn)
+        params = sig.parameters
+        if "doc_id" in params or any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+        ):
+            _post_document_hooks_with_doc_id.add(id(fn))
+    except (TypeError, ValueError):
+        # Builtin/C-extension callable with no introspectable signature.
+        # Treat as legacy shape (no doc_id) so the dispatcher does not
+        # blow up on first call.
+        import structlog
+        structlog.get_logger().debug(
+            "post_document_hook_signature_unintrospectable",
+            hook=getattr(fn, "__name__", repr(fn)),
+        )
 
 
 def fire_post_document_hooks(
@@ -1016,10 +1047,14 @@ def fire_post_document_hooks(
     _hook_log = structlog.get_logger()
     for hook in _post_document_hooks:
         try:
-            try:
+            # nexus-8g79.12: dispatch by signature classification done at
+            # registration time. Pre-fix the inner try/except TypeError
+            # caught any TypeError from inside the hook body and silently
+            # retried with the legacy shape — misclassifying unrelated
+            # type bugs as a back-compat signal.
+            if id(hook) in _post_document_hooks_with_doc_id:
                 hook(source_path, collection, content, doc_id=doc_id)
-            except TypeError:
-                # Back-compat: hook predates the doc_id keyword.
+            else:
                 hook(source_path, collection, content)
         except Exception as exc:
             hook_name = getattr(hook, "__name__", "?")
@@ -1138,6 +1173,7 @@ def fire_store_chains(
     source_paths: list[str] | None = None,
     embeddings: list[list[float]] | None = None,
     metadatas: list[dict] | None = None,
+    catalog_doc_id: str = "",
 ) -> None:
     """Fire all three post-store hook chains for a batch of just-stored docs.
 
@@ -1165,11 +1201,25 @@ def fire_store_chains(
     metadatas:
         Optional metadata dicts per doc; forwarded to the batch chain.
         ``chash_dual_write_batch_hook`` reads from this.
+    catalog_doc_id:
+        nexus-lf8f: the catalog ``Document.tumbler`` for these chunks
+        (RDR-108 Phase 3). Post-Phase-3, chunk metadata no longer
+        carries ``doc_id`` so the manifest-write hook needs the tumbler
+        passed explicitly via this kwarg or it short-circuits silently
+        (the exact symptom nexus-zq79 fixed for the indexer paths in
+        4.32.4; this kwarg closes the same gap for the store-path
+        callers — MCP ``store_put``, ``nx store put``,
+        ``nx memory promote``, ``nx store import``). Default ``""``
+        preserves the legacy "no catalog identity" shape for callers
+        that genuinely have no tumbler (raw scratch writes pre-catalog
+        registration); those callers' chunks remain catalog-orphaned by
+        design.
     """
     n = len(doc_ids)
-    assert len(contents) == n, (
-        f"contents length {len(contents)} != doc_ids length {n}"
-    )
+    if len(contents) != n:
+        raise ValueError(
+            f"contents length {len(contents)} != doc_ids length {n}"
+        )
     if source_paths is None:
         source_paths = list(doc_ids)
     elif len(source_paths) != n:
@@ -1185,6 +1235,7 @@ def fire_store_chains(
     fire_post_store_batch_hooks(
         doc_ids, collection, contents,
         embeddings=embeddings, metadatas=metadatas,
+        catalog_doc_id=catalog_doc_id,
     )
 
     # Document-grain chain — once per (source_path, content).

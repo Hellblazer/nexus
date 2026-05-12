@@ -1,5 +1,11 @@
 {
   "name": "sn",
-  "version": "4.32.4",
-  "description": "Injects Serena and Context7 MCP tool usage guidance into subagents via SubagentStart hook."
+  "version": "4.32.5",
+  "description": "Injects Serena and Context7 MCP tool usage guidance into subagents via SubagentStart hook.",
+  "author": {
+    "name": "Hal Hildebrand",
+    "url": "https://github.com/Hellblazer"
+  },
+  "repository": "https://github.com/Hellblazer/nexus",
+  "license": "AGPL-3.0-or-later"
 }

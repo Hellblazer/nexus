@@ -493,16 +493,28 @@ def _function_writes_to_t3(func: ast.AST) -> bool:
     return False
 
 
+#: nexus-8g79.1 helpers that wrap ``fire_store_chains`` so the AST
+#: guard recognises an indirect call as parity-compliant. Add the
+#: wrapper's bare name here when extracting a new helper.
+_FIRE_STORE_CHAINS_WRAPPERS: frozenset[str] = frozenset({
+    "fire_store_chains",
+    # exporter.py: groups by meta["doc_id"] then fires per-group (4.32.5).
+    "_fire_store_chains_grouped_by_doc",
+})
+
+
 def _function_calls_fire_store_chains(func: ast.AST) -> bool:
-    """True if *func* contains a Call to ``fire_store_chains``."""
+    """True if *func* contains a Call to ``fire_store_chains`` or a
+    recognised wrapper from ``_FIRE_STORE_CHAINS_WRAPPERS``.
+    """
     for sub in ast.walk(func):
         if not isinstance(sub, ast.Call):
             continue
-        if isinstance(sub.func, ast.Name) and sub.func.id == "fire_store_chains":
+        if isinstance(sub.func, ast.Name) and sub.func.id in _FIRE_STORE_CHAINS_WRAPPERS:
             return True
         if (
             isinstance(sub.func, ast.Attribute)
-            and sub.func.attr == "fire_store_chains"
+            and sub.func.attr in _FIRE_STORE_CHAINS_WRAPPERS
         ):
             return True
     return False

@@ -214,7 +214,8 @@ class TestMCP:
         result = catalog_link(from_tumbler="types.py", to_tumbler="corpus.py",
                               link_type="relates", created_by="test")
         assert "error" not in result and result["created"] is True
-        assert len(catalog_link_query(link_type="relates", created_by="test")) >= 1
+        # nexus-8g79.23: we just created exactly one link.
+        assert len(catalog_link_query(link_type="relates", created_by="test")) == 1
 
     def test_link_audit_after_indexing(self, injected_catalog):
         from nexus.mcp_server import catalog_link_audit
@@ -352,7 +353,8 @@ def _get_two_docs_and_chunk(cat, local_t3):
     docs = cat._db.execute(
         "SELECT tumbler, physical_collection FROM documents LIMIT 2"
     ).fetchall()
-    assert len(docs) >= 2
+    # nexus-8g79.23: LIMIT 2 over a non-empty seeded fixture returns 2.
+    assert len(docs) == 2
     col = local_t3._client.get_collection(docs[0][1])
     chunk = col.get(limit=1, include=["documents", "metadatas"])
     assert chunk["ids"]
@@ -393,12 +395,14 @@ class TestChashSpan:
     def test_audit_detects_bogus_hash(self, indexed_catalog):
         cat, local_t3 = indexed_catalog
         docs = cat._db.execute("SELECT tumbler FROM documents LIMIT 2").fetchall()
-        assert len(docs) >= 2
+        # nexus-8g79.23: seeded fixture has ≥2 docs; LIMIT 2 returns 2.
+        assert len(docs) == 2
         bogus = "f" * 64
         cat.link(Tumbler.parse(docs[0][0]), Tumbler.parse(docs[1][0]),
                  "quotes", "e2e-test", from_span=f"chash:{bogus}")
         audit = cat.link_audit(t3=local_t3._client)
-        assert audit["stale_chash_count"] >= 1
+        # nexus-8g79.23: we created exactly one bogus link above.
+        assert audit["stale_chash_count"] == 1
         assert f"chash:{bogus}" in [s["span"] for s in audit["stale_chash"]]
 
 
@@ -430,7 +434,12 @@ def test_catalog_plan_templates_exist(db):
     rows = db.plans.conn.execute(
         "SELECT count(*) FROM plans WHERE tags LIKE '%catalog%'"
     ).fetchall()
-    assert isinstance(rows, list) and rows[0][0] >= 0
+    # nexus-8g79.23: the assertion ``rows[0][0] >= 0`` was meaningless —
+    # SQLite COUNT(*) is always non-negative. The real intent of this
+    # test is "plan-template SQL is queryable without error"; tighten
+    # the assertion to that.
+    assert isinstance(rows, list) and len(rows) == 1
+    assert isinstance(rows[0][0], int)
 
 
 # ── 'formalizes' link type (RDR-057 P1-1a, nexus-807l) ─────────────────────

@@ -110,14 +110,21 @@ def merge_corpus(
                     actual=actual_count,
                 )
 
-            # Batched upsert into target — respect 300-record write limit
+            # Batched upsert into target — respect 300-record write limit.
+            # nexus-8g79.11: route through ``T3Database.upsert_chunks_with_embeddings``
+            # so quota validation, retry semantics, and the post-store
+            # hook chain (chash index, taxonomy, manifest) all fire.
+            # Pre-fix the raw ``target_col.upsert`` bypassed everything,
+            # leaving the consolidated collection invisible to
+            # catalog-aware retrieval.
             for batch_start in range(0, actual_count, _PAGE):
                 batch_end = min(batch_start + _PAGE, actual_count)
-                target_col.upsert(
+                t3.upsert_chunks_with_embeddings(
+                    collection_name=target_col_name,
                     ids=all_ids[batch_start:batch_end],
                     documents=all_docs[batch_start:batch_end],
-                    metadatas=all_meta[batch_start:batch_end],
                     embeddings=all_emb[batch_start:batch_end],
+                    metadatas=all_meta[batch_start:batch_end],
                 )
 
             # Update catalog pointer

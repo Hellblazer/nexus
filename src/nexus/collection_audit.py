@@ -182,17 +182,35 @@ def sample_live_distances(
     embeddings = embeddings_raw
 
     distances: list[float] = []
+    # nexus-8g79.8: pre-fix the bare ``continue`` silently dropped any
+    # query failure — operators saw a sparse/short histogram that
+    # looked identical to "healthy sparse collection". Count failures
+    # so they surface in the structured log + audit-result summary.
+    failed = 0
     for emb in embeddings:
         try:
             res = col.query(
                 query_embeddings=[emb], n_results=2, include=["distances"],
             )
         except Exception:
+            failed += 1
+            _log.debug(
+                "sample_live_distances_query_failed",
+                collection=collection, exc_info=True,
+            )
             continue
         d_rows = res.get("distances") or [[]]
         if not d_rows or not d_rows[0] or len(d_rows[0]) < 2:
             continue
         distances.append(float(d_rows[0][1]))
+    if failed > 0:
+        _log.warning(
+            "sample_live_distances_partial_failure",
+            collection=collection,
+            failed=failed,
+            sampled=len(embeddings),
+            surviving_distances=len(distances),
+        )
     return distances
 
 

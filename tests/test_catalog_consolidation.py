@@ -95,8 +95,12 @@ class TestMergeCorpus:
         result = merge_corpus(cat, t3, "test")
         assert result["merged"] == 2
         assert result["errors"] == []
-        # Target should have had upsert called twice
-        assert target_col.upsert.call_count == 2
+        # nexus-8g79.11: consolidation routes through
+        # T3Database.upsert_chunks_with_embeddings so the post-store
+        # hook chain fires (manifest + taxonomy + chash dual-write).
+        # Pre-fix used raw ``target_col.upsert`` which bypassed every
+        # hook; the test mock now tracks the method on ``t3``.
+        assert t3.upsert_chunks_with_embeddings.call_count == 2
         # Catalog pointers should be updated. RDR-103 Phase 5 promotes
         # the merge target to a conformant 4-segment shape so the
         # downstream ``get_or_create_collection`` satisfies the
@@ -143,9 +147,12 @@ class TestMergeCorpus:
         col_a = _mock_t3_col(["a1", "a2"])
         col_b = _mock_t3_col(["b1", "b2"])
         target_col = MagicMock()
-        # First upsert succeeds, second fails
-        target_col.upsert.side_effect = [None, RuntimeError("ChromaDB error")]
         target_col.count.return_value = 2
+        # nexus-8g79.11: writes go through t3.upsert_chunks_with_embeddings
+        # (was target_col.upsert pre-fix). First call succeeds, second fails.
+        t3.upsert_chunks_with_embeddings.side_effect = [
+            None, RuntimeError("ChromaDB error"),
+        ]
 
         def get_or_create(name):
             if name == "docs__La":

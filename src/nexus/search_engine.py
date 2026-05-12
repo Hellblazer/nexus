@@ -102,6 +102,16 @@ def _attach_doc_ids_from_catalog(
         return
     if not chash_to_docs:
         return
+    # nexus-lf8f: also stamp chunk_count + chunk_index from the catalog
+    # manifest. Post-Phase-3 chunk metadata no longer carries these
+    # fields; consumers (scoring.py file-size penalty, aspect_readers
+    # / aspect_extractor chunk reassembly) read them with stale defaults
+    # (chunk_count=1 means "no penalty", chunk_index=0 means "all
+    # chunks at position 0") leading to wrong rankings and wrong
+    # multi-chunk reassembly order. Batch-fetch manifests for every
+    # distinct doc_id so each search hit pays one catalog query
+    # amortised, not one per result.
+    resolved_doc_ids: dict[str, str] = {}  # chash -> doc_id
     for r, chash in zip(results, chashes):
         if not chash:
             continue
@@ -110,6 +120,7 @@ def _attach_doc_ids_from_catalog(
         # The manifest lookup is the FALLBACK for chunks where the
         # field is absent, not an override.
         if r.metadata.get("doc_id"):
+            resolved_doc_ids[chash] = r.metadata["doc_id"]
             continue
         docs = chash_to_docs.get(chash, [])
         if docs:
@@ -118,6 +129,37 @@ def _attach_doc_ids_from_catalog(
             # the first deterministically; downstream consumers that
             # need finer disambiguation can re-query the manifest.
             r.metadata["doc_id"] = docs[0]
+            resolved_doc_ids[chash] = docs[0]
+
+    # Per-doc manifest cache so multi-chunk docs only fetch once.
+    manifest_cache: dict[str, list[Any]] = {}
+    for r, chash in zip(results, chashes):
+        if not chash:
+            continue
+        doc_id = resolved_doc_ids.get(chash) or r.metadata.get("doc_id", "")
+        if not doc_id:
+            continue
+        manifest = manifest_cache.get(doc_id)
+        if manifest is None:
+            try:
+                manifest = catalog.get_manifest(doc_id)
+            except Exception:
+                _log.debug(
+                    "attach_chunk_count_lookup_failed",
+                    doc_id=doc_id, exc_info=True,
+                )
+                manifest = []
+            manifest_cache[doc_id] = manifest
+        if not manifest:
+            continue
+        # Only inject when absent (legacy chunks may have these).
+        if "chunk_count" not in r.metadata:
+            r.metadata["chunk_count"] = len(manifest)
+        if "chunk_index" not in r.metadata:
+            for row in manifest:
+                if getattr(row, "chash", "") == chash:
+                    r.metadata["chunk_index"] = int(getattr(row, "position", 0))
+                    break
 
 
 def _attach_display_paths(

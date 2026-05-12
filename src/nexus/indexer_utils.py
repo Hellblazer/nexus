@@ -325,7 +325,17 @@ def build_staleness_cache(col: object) -> StalenessCache:
                     if doc_ids:
                         chash_to_doc[c] = sorted(doc_ids)[0]
         except Exception:
-            pass
+            # nexus-8g79.8: pre-fix this swallowed the whole chash→doc_id
+            # resolution silently, leaving every result without doc_id
+            # in metadata (catalog-aware retrieval gated on doc_id then
+            # no-ops). WARNING with the chash count so a recurring
+            # catalog outage surfaces in production logs.
+            import structlog
+            structlog.get_logger(__name__).warning(
+                "docs_for_chashes_failed",
+                chash_count=len(needed_chashes),
+                exc_info=True,
+            )
 
     for meta in metadatas:
         if not meta:

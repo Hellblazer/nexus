@@ -5,6 +5,7 @@ Leaf module — no nexus.* imports.  Only stdlib + httpx + structlog + soft voya
 """
 from __future__ import annotations
 
+import random
 import threading
 import time
 from collections.abc import Callable
@@ -140,8 +141,12 @@ def _chroma_with_retry(
                 delay=delay,
                 error=str(exc)[:120],
             )
-            _add_chroma_retry(delay)
-            time.sleep(delay)
+            # nexus-8g79.32: jittered sleep so multiple concurrent
+            # workers retrying after a shared rate-limit do not all wake
+            # at the same instant and re-fire the limit. ±20% of delay.
+            jittered = delay * (1.0 + (random.random() - 0.5) * 0.4)
+            _add_chroma_retry(jittered)
+            time.sleep(jittered)
             delay = min(delay * 2, 30.0)
 
 
@@ -223,6 +228,8 @@ def _voyage_with_retry(
                 error_type=type(exc).__name__,
                 error=str(exc)[:120],
             )
-            _add_voyage_retry(delay)
-            time.sleep(delay)
+            # nexus-8g79.32: jittered sleep, see chroma path above.
+            jittered = delay * (1.0 + (random.random() - 0.5) * 0.4)
+            _add_voyage_retry(jittered)
+            time.sleep(jittered)
             delay = min(delay * 2, 10.0)

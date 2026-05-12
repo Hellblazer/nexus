@@ -231,7 +231,9 @@ def test_index_code_file_happy_path_new_file(tmp_path, make_ctx):
         mock_retry.return_value = {"metadatas": [], "ids": []}
         result = index_code_file(ctx, py_file)
 
-    assert result >= 1
+    # nexus-8g79.23: small fixtures produce exactly 1 chunk.
+
+    assert result == 1
     mock_voyage.embed.assert_called()
     call_kwargs = mock_db.upsert_chunks_with_embeddings.call_args[1]
     assert call_kwargs["collection_name"] == "code__test"
@@ -272,7 +274,9 @@ def test_index_prose_file_non_markdown_uses_line_chunk(tmp_path, make_ctx):
         mock_embed.return_value = ([[0.1] * 128], "voyage-context-3")
         result = index_prose_file(ctx, txt_file)
 
-    assert result >= 1
+    # nexus-8g79.23: small fixtures produce exactly 1 chunk.
+
+    assert result == 1
     mock_embed.assert_called_once()
     embed_texts = mock_embed.call_args[0][0]
     upsert_kwargs = mock_db.upsert_chunks_with_embeddings.call_args[1]
@@ -311,7 +315,9 @@ def test_index_code_file_does_not_emit_source_path(tmp_path, make_ctx):
         mock_retry.return_value = {"metadatas": [], "ids": []}
         result = index_code_file(ctx, py_file)
 
-    assert result >= 1
+    # nexus-8g79.23: small fixtures produce exactly 1 chunk.
+
+    assert result == 1
     metadatas = mock_db.upsert_chunks_with_embeddings.call_args[1]["metadatas"]
     leaked = [m for m in metadatas if "source_path" in m]
     assert not leaked, (
@@ -346,7 +352,9 @@ def test_index_prose_file_markdown_does_not_emit_source_path(
         mock_embed.return_value = ([[0.1] * 128], "voyage-context-3")
         result = index_prose_file(ctx, md_file)
 
-    assert result >= 1
+    # nexus-8g79.23: small fixtures produce exactly 1 chunk.
+
+    assert result == 1
     metadatas = mock_db.upsert_chunks_with_embeddings.call_args[1]["metadatas"]
     leaked = [m for m in metadatas if "source_path" in m]
     assert not leaked, (
@@ -379,7 +387,9 @@ def test_index_prose_file_line_chunk_does_not_emit_source_path(
         mock_embed.return_value = ([[0.1] * 128], "voyage-context-3")
         result = index_prose_file(ctx, txt_file)
 
-    assert result >= 1
+    # nexus-8g79.23: small fixtures produce exactly 1 chunk.
+
+    assert result == 1
     metadatas = mock_db.upsert_chunks_with_embeddings.call_args[1]["metadatas"]
     leaked = [m for m in metadatas if "source_path" in m]
     assert not leaked, (

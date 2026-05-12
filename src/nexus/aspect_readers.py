@@ -237,17 +237,42 @@ def _gather_chroma_chunks_by_field(
     source_id: str,
     identity_field: str,
     match_value: str,
+    manifest_lookup: Callable[[str], list[Any]] | None = None,
 ) -> ReadResult:
     """Page through ``coll.get(where={identity_field: match_value})`` and
-    return a ``ReadOk`` with chunks reassembled in ``chunk_index`` order
-    (insertion-sequence tiebreaker). ``ReadFail(reason='empty')`` when
-    no chunks match. Shared between the doc_id-keyed primary path
-    and the legacy multi-field probe.
+    return a ``ReadOk`` with chunks reassembled in canonical order.
+
+    nexus-8g79.2: When ``manifest_lookup`` is provided and
+    ``identity_field == 'doc_id'`` (so ``match_value`` is the catalog
+    tumbler), the canonical chunk order comes from
+    ``cat.get_manifest(doc_id)`` keyed by ``chash``. Post-RDR-108
+    Phase 3, chunk metadata no longer carries ``chunk_index``, so the
+    legacy ``md.get("chunk_index", 0)`` ordering collapses to position
+    zero for every chunk and only the insertion-sequence tiebreaker
+    survives — which is wrong for multi-chunk docs. The manifest is
+    authoritative; fall back to ``chunk_index`` (then to insertion
+    sequence) only when no manifest is available.
     """
     chunks: list[tuple[int, int, str]] = []
     seq = 0
     offset = 0
     page_limit = QUOTAS.MAX_QUERY_RESULTS
+    # Build chash → manifest position map when available.
+    chash_position: dict[str, int] = {}
+    if manifest_lookup is not None and identity_field == "doc_id":
+        try:
+            rows = manifest_lookup(match_value)
+        except Exception:
+            rows = []
+        for row in rows or []:
+            chash = getattr(row, "chash", None) or (
+                row.get("chash") if isinstance(row, dict) else None
+            )
+            position = getattr(row, "position", None)
+            if position is None and isinstance(row, dict):
+                position = row.get("position")
+            if chash and position is not None:
+                chash_position[chash] = int(position)
     try:
         while True:
             page = coll.get(
@@ -263,8 +288,15 @@ def _gather_chroma_chunks_by_field(
             for md, doc in zip(mds, docs):
                 if not doc:
                     continue
-                ci = md.get("chunk_index", 0) if isinstance(md, dict) else 0
-                chunks.append((int(ci), seq, doc))
+                if isinstance(md, dict):
+                    chash = md.get("chunk_text_hash", "")
+                    if chash_position and chash in chash_position:
+                        ci = chash_position[chash]
+                    else:
+                        ci = int(md.get("chunk_index", 0) or 0)
+                else:
+                    ci = 0
+                chunks.append((ci, seq, doc))
                 seq += 1
             if len(docs) < page_limit:
                 break
@@ -292,6 +324,7 @@ def _gather_chroma_chunks_by_field(
             "source_id": source_id,
             "identity_field": identity_field,
             "chunk_count": len(chunks),
+            "manifest_ordered": bool(chash_position),
         },
     )
 
@@ -301,6 +334,7 @@ def _read_chroma_uri(
     *,
     t3: Any = None,
     doc_id_lookup: Callable[[str, str], str] | None = None,
+    manifest_lookup: Callable[[str], list[Any]] | None = None,
     **_kw: Any,
 ) -> ReadResult:
     """Reassemble a document from chroma chunks.
@@ -384,6 +418,7 @@ def _read_chroma_uri(
         result = _gather_chroma_chunks_by_field(
             coll=coll, collection=collection, source_id=source_id,
             identity_field="doc_id", match_value=doc_id,
+            manifest_lookup=manifest_lookup,
         )
         if isinstance(result, ReadOk):
             return result
@@ -739,6 +774,7 @@ def read_source(
     t3: Any = None,
     scratch: Any = None,
     doc_id_lookup: Callable[[str, str], str] | None = None,
+    manifest_lookup: Callable[[str], list[Any]] | None = None,
 ) -> ReadResult:
     """Dispatch ``uri`` to its registered reader by scheme.
 
@@ -749,7 +785,11 @@ def read_source(
 
     ``doc_id_lookup`` (RDR-101 Phase 4 / nexus-o6aa.10.1) is forwarded
     to the chroma reader as the source-identifier → ``doc_id``
-    projection. Other readers ignore it.
+    projection. ``manifest_lookup`` (nexus-8g79.2) is forwarded as the
+    ``doc_id -> list[ManifestRow]`` projection so the chroma reader can
+    order multi-chunk docs by the catalog manifest's canonical
+    position rather than the dropped ``chunk_index`` metadata field.
+    Other readers ignore both.
     """
     if not uri:
         return ReadFail(reason="unreachable", detail="empty uri")
@@ -763,4 +803,8 @@ def read_source(
             reason="scheme_unknown",
             detail=f"no reader for scheme {scheme!r}",
         )
-    return reader(uri, t3=t3, scratch=scratch, doc_id_lookup=doc_id_lookup)
+    return reader(
+        uri, t3=t3, scratch=scratch,
+        doc_id_lookup=doc_id_lookup,
+        manifest_lookup=manifest_lookup,
+    )

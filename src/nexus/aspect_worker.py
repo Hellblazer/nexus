@@ -409,11 +409,21 @@ class AspectExtractionWorker:
                 if queued_doc_id
                 else None
             )
+            # nexus-8g79.2: manifest lookup gives the chroma reader the
+            # canonical chunk-order from document_chunks instead of the
+            # dropped chunk_index metadata field.
+            manifest_lookup = None
+            try:
+                from nexus.commands.enrich import _build_catalog_manifest_lookup
+                manifest_lookup = _build_catalog_manifest_lookup()
+            except Exception:
+                pass
             record = _extract_aspects(
                 content=row.content,
                 source_path=row.source_path,
                 collection=row.collection,
                 doc_id_lookup=doc_id_lookup,
+                manifest_lookup=manifest_lookup,
             )
         except Exception as exc:
             _log.warning(
