@@ -6,6 +6,50 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.32.8] - 2026-05-12
+
+Patch on 4.32.7. Tier-4 test-quality + Tier-5 hygiene from the audit.
+
+### Added (tests)
+
+- **``manifest_write_batch_hook`` exception path coverage**
+  (nexus-8g79.24): regression test induces a manifest write failure
+  and asserts (a) the hook does not propagate (best-effort contract)
+  and (b) WARNING-level structlog event with ``doc_id`` fires. Pre-fix
+  the silent path made post-Phase-3 manifest data loss invisible.
+- **``_collections_cache`` TTL expiry coverage** (nexus-8g79.25):
+  test rewinds the cached timestamp past ``_COLLECTIONS_CACHE_TTL``,
+  verifies the re-fetch fires exactly once, and that fresh names
+  flow through. Pre-fix the TTL branch had zero coverage; a
+  regression that turned the cache into a forever-cache would have
+  been invisible.
+
+### Fixed (test hygiene, nexus-8g79.29)
+
+- **``test_builtin_plans.py`** skip-reason strings no longer claim
+  "Phase 6 not shipped" — the 15 YAML files have shipped; the
+  ``skipif`` survives as a defensive empty-directory guard.
+- **``test_dispatch_router.py``** ``CLAUDE_OPERATORS_PINNED`` routing
+  branch was permanently skipped (the pinned set is empty after
+  ``extract`` was promoted to qwen-default). Added a sentinel-driven
+  test that monkeypatches a synthetic pinned set and asserts the
+  routing branch.
+- **``test_exporter.py``** ``test_remap_on_import`` ``xfail(strict=True)``
+  replaced with 4 deterministic ``_apply_remap`` unit cases (first
+  match wins, no match passthrough, empty remaps). Pre-fix the
+  legacy test asserted ``source_path`` on T3 chunks but that field
+  was dropped by RDR-102 Phase B — the assertion was permanently
+  unreachable.
+
+### Deferred work tracked (nexus-8g79.30)
+
+- **``nexus-8g79.34``** (P1) filed: migrate ``aspect_worker`` batch
+  path to URI-based ``read_source`` + ``ExtractFail`` so the
+  deprecated ``_source_content_from_t3`` shim in ``aspect_extractor``
+  can be deleted. Precondition: ``extract_aspects_batch`` return
+  type must widen to admit ``ExtractFail``. Closes the RDR-096 P5
+  deprecation cycle.
+
 ## [4.32.7] - 2026-05-12
 
 Patch on 4.32.6. Tier-2 architectural + Tier-3 dep-hygiene from the
