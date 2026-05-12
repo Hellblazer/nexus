@@ -6,6 +6,43 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.32.2] - 2026-05-11
+
+Patch on 4.32.1. Surfaces MinerU server reachability state in the
+default ``nx doctor`` flow and adds a warn-on-fallback in
+``PDFExtractor._mineru_server_available`` so operators see when math-
+PDF indexing silently degrades to the in-process subprocess path
+(where Grossberg-class math papers OOM-kill the worker at ~p23).
+
+Caught during the 4.32.1 live shakeout: a stale
+``mineru_server_url`` in ``~/.config/nexus/config.yml`` (written by a
+prior ``_restart_mineru_server`` cycle to a now-dead port) silently
+redirected every PDF index to the OOM-prone fallback. Three Grossberg
+papers (cohen-1997 18p / grossberg-1975 34p / GroSchmajuk1987 46p)
+that failed on 2026-05-08 indexed cleanly (129 + 445 + 351 = 925
+chunks) once the config was corrected and the server was running.
+
+### Fixed
+
+- **MinerU server unreachable now surfaces in ``nx doctor``**
+  (nexus-h1jk). New ``_check_mineru_server`` in ``nexus/health.py``
+  wired into the default health-check flow. Reports ``✓ MinerU
+  server: reachable at <url>`` on the happy path; ``✗ MinerU server:
+  <url> unreachable`` with remediation hints (``nx mineru start`` /
+  inspect config.yml) on miss.
+- **``PDFExtractor._mineru_server_available`` warns on fallback** —
+  structured ``mineru_server_unreachable`` / ``mineru_server_unhealthy``
+  log events plus an inline ``_progress`` line naming the URL and
+  recommending ``nx mineru start``. The silent fallback to the
+  in-process subprocess (slower, OOM-risk on math PDFs) was the
+  proximate cause of operator confusion.
+
+### Known follow-up
+
+- The auto-restart-writes-ephemeral-port-to-persistent-config drift
+  itself is not fixed by this release — visibility only. Tracked as
+  ``nexus-oa7r``.
+
 ## [4.32.1] - 2026-05-11
 
 Patch on 4.32.0. Fixes a 4.32.0 release bug (nexus-m3dp): the
