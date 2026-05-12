@@ -306,9 +306,9 @@ class TestAtomicManifestReplace:
         coll = _unique_coll()
         _insert_doc(catalog, "1.1.1", coll)
         chunks = [
-            {"chash": "a" * 64, "position": 0, "line_start": None,
+            {"chash": "a" * 32, "position": 0, "line_start": None,
              "line_end": None, "char_start": None, "char_end": None},
-            {"chash": "b" * 64, "position": 1, "line_start": None,
+            {"chash": "b" * 32, "position": 1, "line_start": None,
              "line_end": None, "char_start": None, "char_end": None},
         ]
         catalog.atomic_manifest_replace("1.1.1", chunks)
@@ -318,7 +318,7 @@ class TestAtomicManifestReplace:
             "WHERE doc_id = ? ORDER BY position",
             ("1.1.1",),
         ).fetchall()
-        assert rows == [(0, "a" * 64), (1, "b" * 64)]
+        assert rows == [(0, "a" * 32), (1, "b" * 32)]
 
         cc = catalog._db.execute(
             "SELECT chunk_count FROM documents WHERE tumbler = ?",
@@ -334,7 +334,7 @@ class TestAtomicManifestReplace:
         _insert_doc(catalog, "1.1.1", coll)
 
         catalog.atomic_manifest_replace("1.1.1", [
-            {"chash": x * 64, "position": p, "line_start": None,
+            {"chash": x * 32, "position": p, "line_start": None,
              "line_end": None, "char_start": None, "char_end": None}
             for p, x in enumerate(("a", "b", "c"))
         ])
@@ -345,14 +345,14 @@ class TestAtomicManifestReplace:
         assert cc_before == 3
 
         catalog.atomic_manifest_replace("1.1.1", [
-            {"chash": "z" * 64, "position": 0, "line_start": None,
+            {"chash": "z" * 32, "position": 0, "line_start": None,
              "line_end": None, "char_start": None, "char_end": None}
         ])
         rows = catalog._db.execute(
             "SELECT chash FROM document_chunks WHERE doc_id = ?",
             ("1.1.1",),
         ).fetchall()
-        assert rows == [("z" * 64,)]
+        assert rows == [("z" * 32,)]
         cc_after = catalog._db.execute(
             "SELECT chunk_count FROM documents WHERE tumbler = ?",
             ("1.1.1",),
@@ -366,7 +366,7 @@ class TestAtomicManifestReplace:
         coll = _unique_coll()
         _insert_doc(catalog, "1.1.1", coll)
         catalog.atomic_manifest_replace("1.1.1", [
-            {"chash": "a" * 64, "position": 0, "line_start": None,
+            {"chash": "a" * 32, "position": 0, "line_start": None,
              "line_end": None, "char_start": None, "char_end": None}
         ])
 
@@ -389,17 +389,17 @@ class TestAtomicManifestReplace:
         _insert_doc(catalog, "1.1.1", coll)
         # Seed an initial valid manifest.
         catalog.atomic_manifest_replace("1.1.1", [
-            {"chash": "a" * 64, "position": 0, "line_start": None,
+            {"chash": "a" * 32, "position": 0, "line_start": None,
              "line_end": None, "char_start": None, "char_end": None}
         ])
 
         # Pass duplicate positions to trigger a PK violation INSIDE the
         # batched INSERT. The transaction must roll back, leaving the
-        # original "a" * 64 row intact.
+        # original "a" * 32 row intact.
         bad_chunks = [
-            {"chash": "b" * 64, "position": 0, "line_start": None,
+            {"chash": "b" * 32, "position": 0, "line_start": None,
              "line_end": None, "char_start": None, "char_end": None},
-            {"chash": "c" * 64, "position": 0, "line_start": None,
+            {"chash": "c" * 32, "position": 0, "line_start": None,
              "line_end": None, "char_start": None, "char_end": None},
         ]
         with pytest.raises(Exception):
@@ -409,7 +409,7 @@ class TestAtomicManifestReplace:
             "SELECT chash FROM document_chunks WHERE doc_id = ?",
             ("1.1.1",),
         ).fetchall()
-        assert rows == [("a" * 64,)], (
+        assert rows == [("a" * 32,)], (
             f"prior manifest must survive a mid-replace failure; got {rows!r}"
         )
 

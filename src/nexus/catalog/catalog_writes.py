@@ -909,7 +909,10 @@ class _WriteOps:
                             for val in (
                                 doc_id,
                                 c["position"],
-                                c["chash"],
+                                # nexus-gaa3: chash stored as 32-char
+                                # for uniformity with write_manifest /
+                                # append_manifest_chunks.
+                                (c["chash"] or "")[:32],
                                 c.get("chunk_index"),
                                 c.get("line_start"),
                                 c.get("line_end"),

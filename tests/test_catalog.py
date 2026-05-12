@@ -848,7 +848,7 @@ class TestRebuild:
         cat, owner = cat_with_owner
         doc = cat.register(owner, "ghost.py", content_type="code", file_path="ghost.py")
         # Plant a manifest row for the doc.
-        cat._db.execute(
+        cat._db.execute(  # epsilon-allow: test seeds an orphan document_chunks row to verify post-rebuild cascade purge — the whole point is the row pre-exists outside Catalog public API
             "INSERT INTO document_chunks "
             "(doc_id, position, chash, chunk_index, "
             " line_start, line_end, char_start, char_end) "
