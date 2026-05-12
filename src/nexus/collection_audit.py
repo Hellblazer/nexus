@@ -346,7 +346,7 @@ def compute_hub_assignments(
 
 
 def _open_t2():
-    from nexus.commands._helpers import default_db_path
+    from nexus.config import default_db_path
     from nexus.db.t2 import T2Database
 
     db_path = default_db_path()
@@ -387,7 +387,7 @@ def compute_chash_coverage(collection: str) -> ChashCoverage | None:
     (T2 file missing, T3 unavailable); calling code treats this
     the same as ratio=None (schema absent vs backfill needed).
     """
-    from nexus.commands._helpers import default_db_path
+    from nexus.config import default_db_path
     from nexus.db import make_t3
     from nexus.db.t2.chash_index import ChashIndex
 

@@ -14,7 +14,7 @@ from pathlib import Path
 import chromadb
 import structlog
 
-from nexus.commands._helpers import default_db_path
+from nexus.config import default_db_path
 
 _log = structlog.get_logger(__name__)
 

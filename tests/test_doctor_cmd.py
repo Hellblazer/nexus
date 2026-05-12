@@ -646,7 +646,7 @@ class TestCheckPlanLibrary:
         conn.commit()
         conn.close()
 
-        with patch("nexus.commands._helpers.default_db_path", return_value=db_path):
+        with patch("nexus.config.default_db_path", return_value=db_path):
             result = runner.invoke(main, ["doctor", "--check-plan-library"])
 
         # Non-zero exit because global builtin count is 0 (no YAMLs seeded).
@@ -670,7 +670,7 @@ class TestCheckPlanLibrary:
         apply_pending(conn, _current_version())
         conn.close()
 
-        with patch("nexus.commands._helpers.default_db_path", return_value=db_path):
+        with patch("nexus.config.default_db_path", return_value=db_path):
             result = runner.invoke(main, ["doctor", "--check-plan-library"])
 
         assert result.exit_code != 0, result.output
@@ -691,12 +691,12 @@ class TestCheckPlanLibrary:
         conn.close()
 
         monkeypatch.setattr(
-            "nexus.commands._helpers.default_db_path", lambda: db_path,
+            "nexus.config.default_db_path", lambda: db_path,
         )
         from nexus.commands.catalog import _seed_plan_templates
         _seed_plan_templates()
 
-        with patch("nexus.commands._helpers.default_db_path", return_value=db_path):
+        with patch("nexus.config.default_db_path", return_value=db_path):
             result = runner.invoke(main, ["doctor", "--check-plan-library"])
 
         assert result.exit_code == 0, result.output
@@ -725,7 +725,7 @@ class TestCheckPlanLibrary:
         conn.commit()
         conn.close()
 
-        with patch("nexus.commands._helpers.default_db_path", return_value=db_path):
+        with patch("nexus.config.default_db_path", return_value=db_path):
             result = runner.invoke(main, ["doctor", "--check-plan-library"])
 
         # Non-zero because global builtin count < 9, but the backfill

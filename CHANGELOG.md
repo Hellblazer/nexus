@@ -6,6 +6,49 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.32.8] - 2026-05-12
+
+Patch on 4.32.7. Audit follow-up: layering violations (nexus-8g79.10).
+Closes 3 of 7 inversions where library modules reached up into the
+CLI presentation layer. No behavioural change — pure code movement
+with re-exports preserving back-compat for CLI callers.
+
+### Refactored (nexus-8g79.10)
+
+- **``default_db_path`` promoted from ``commands/_helpers.py`` to
+  ``nexus.config``** (V3, biggest pattern — 8+ leak sites):
+  ``mcp_infra``, ``health``, ``collection_health``,
+  ``collection_audit``, ``context``, ``operators/aspect_sql``,
+  ``merge_candidates``, ``console/routes/health``, and
+  ``_session_end_launcher`` now import from ``nexus.config``
+  directly. CLI command modules continue to import from
+  ``commands._helpers`` (now a thin call-time delegator so test
+  monkeypatches on ``nexus.config.default_db_path`` reach the live
+  binding). 8 test files updated to patch the new canonical
+  location.
+- **``_catalog_store_hook`` extracted from ``commands/store.py``
+  to ``nexus.catalog.store_hook.catalog_store_hook``** (V1, P0
+  inversion): the original audit-flagged ``mcp/core.py:1029``
+  reach-up no longer exists. ``commands/memory.py`` (``nx memory
+  promote``) and ``commands/store.py`` (``nx store put``) now both
+  consume from the canonical lower-layer location. Legacy private
+  name re-exported from ``commands/store.py`` for back-compat.
+- **MinerU PID-file primitives extracted from
+  ``commands/mineru.py`` to ``nexus._mineru_pid``** (V4):
+  ``config.py`` and ``pdf_extractor.py`` no longer reach up into
+  commands/ for ``_is_process_alive`` / ``_read_pid_file``. CLI
+  module re-exports under legacy private names so command code
+  inside ``commands/mineru.py`` is unchanged.
+
+### Known follow-ups
+
+- ``nexus-8g79.36`` — remaining 4 violations: V2 (health.py uses
+  hooks-module helpers), V5 (indexer.py uses rename_collection_data_plane
+  from commands/collection.py — needs ClickException-aware
+  extraction), V6 (db/t2/document_aspects.py imports Catalog), V7
+  (commands/doc.py calls mcp/core.search directly). Each is
+  independent of the others.
+
 ## [4.32.7] - 2026-05-12
 
 Patch on 4.32.6. Five dependency upgrades, all unblocked by the

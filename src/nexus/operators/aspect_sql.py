@@ -511,7 +511,7 @@ def _query_filter(
     source_path string for caller back-compat.
     """
     from nexus.aspect_readers import uri_for
-    from nexus.commands._helpers import default_db_path
+    from nexus.config import default_db_path
     from nexus.db.t2 import T2Database
 
     pred_sql, pred_params = _build_filter_predicate(field, query)
@@ -580,7 +580,7 @@ def _query_groupby(
     idents: list[tuple[str, str]], field: str,
 ) -> dict[str, list[tuple[str, str]]]:
     """Execute the groupby SQL. Return {key_value: [idents]}."""
-    from nexus.commands._helpers import default_db_path
+    from nexus.config import default_db_path
     from nexus.db.t2 import T2Database
 
     if field.startswith("extras."):
@@ -662,7 +662,7 @@ def _query_confidence_aggregate(
     across batches and divides at the end (single pass, exact
     arithmetic on floats).
     """
-    from nexus.commands._helpers import default_db_path
+    from nexus.config import default_db_path
     from nexus.db.t2 import T2Database
 
     op_map = {

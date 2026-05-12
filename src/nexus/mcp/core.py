@@ -1026,8 +1026,11 @@ def store_put(
         chunk_chroma_id = _hl.sha256(content.encode()).hexdigest()[:32]
         catalog_doc_id = ""
         try:
-            from nexus.commands.store import _catalog_store_hook
-            catalog_doc_id = _catalog_store_hook(
+            # nexus-8g79.10 (V1): catalog_store_hook now lives under
+            # nexus.catalog (lower layer). MCP infra no longer reaches
+            # up into commands/ for this helper.
+            from nexus.catalog.store_hook import catalog_store_hook
+            catalog_doc_id = catalog_store_hook(
                 title=title, doc_id=chunk_chroma_id, collection_name=col_name,
             )
         except Exception:
