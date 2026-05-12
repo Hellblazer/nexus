@@ -236,9 +236,9 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
         # promoted entry lands in T3 with no catalog identity — same
         # regression class as nexus-zq79 / nexus-lf8f.
         import hashlib
-        from nexus.commands.store import _catalog_store_hook
+        from nexus.catalog.store_hook import catalog_store_hook
         chunk_chroma_id = hashlib.sha256(entry["content"].encode()).hexdigest()[:32]
-        catalog_doc_id = _catalog_store_hook(
+        catalog_doc_id = catalog_store_hook(
             title=entry["title"],
             doc_id=chunk_chroma_id,
             collection_name=collection,

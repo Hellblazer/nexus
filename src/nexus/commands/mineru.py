@@ -33,24 +33,15 @@ def _pid_file_path() -> Path:
     return nexus_config_dir() / "mineru.pid"
 
 
-def _read_pid_file() -> dict | None:
-    """Read and parse PID file. Returns None if absent or invalid."""
-    path = _pid_file_path()
-    if not path.exists():
-        return None
-    try:
-        return json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError):
-        return None
-
-
-def _is_process_alive(pid: int) -> bool:
-    """Check if a process with the given PID is alive."""
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
+# nexus-8g79.10 (V4): the PID-file primitives moved to
+# ``nexus._mineru_pid`` so library-layer callers (``nexus.config``,
+# ``nexus.pdf_extractor``) can use them without reaching up into
+# commands/. Re-exported under the legacy private names so CLI code
+# inside this module keeps working unchanged.
+from nexus._mineru_pid import (  # noqa: E402
+    is_process_alive as _is_process_alive,
+    read_pid_file as _read_pid_file,
+)
 
 
 def _mineru_output_root() -> Path:

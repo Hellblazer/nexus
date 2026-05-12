@@ -210,21 +210,24 @@ def _read_live_mineru_port() -> int | None:
     subprocess. PID file is the canonical source — it's correct by
     construction (only present when the server is up).
     """
+    # nexus-8g79.10 (V4): import from the lower-layer module instead of
+    # reaching up into commands/. The CLI module re-exports under the
+    # legacy private names.
     try:
-        from nexus.commands.mineru import (  # noqa: PLC0415
-            _is_process_alive,
-            _read_pid_file,
+        from nexus._mineru_pid import (  # noqa: PLC0415
+            is_process_alive,
+            read_pid_file,
         )
     except Exception:
         return None
-    info = _read_pid_file()
+    info = read_pid_file()
     if not info:
         return None
     pid = info.get("pid")
     port = info.get("port")
     if not isinstance(pid, int) or not isinstance(port, int):
         return None
-    if not _is_process_alive(pid):
+    if not is_process_alive(pid):
         return None
     return port
 
@@ -345,6 +348,24 @@ def nexus_config_dir() -> Path:
     if override:
         return Path(override)
     return Path.home() / ".config" / "nexus"
+
+
+def default_db_path() -> Path:
+    """Return the default path to the T2 SQLite database.
+
+    nexus-8g79.10: promoted from ``commands/_helpers.py`` so non-CLI
+    modules (``mcp_infra``, ``health``, ``collection_health``,
+    ``collection_audit``, ``context``, ``operators/aspect_sql``,
+    ``merge_candidates``, ``console/routes/health``) can resolve the
+    canonical T2 path without reaching up to the CLI presentation
+    layer. The original location remains as a re-export for
+    backwards compatibility with CLI command modules.
+
+    Respects ``NEXUS_CONFIG_DIR`` via :func:`nexus_config_dir` so
+    sandbox / test / multi-profile runs can redirect T2 writes away
+    from the user's production ``memory.db``.
+    """
+    return nexus_config_dir() / "memory.db"
 
 
 # ── Local mode helpers ───────────────────────────────────────────────────────

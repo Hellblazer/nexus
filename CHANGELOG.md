@@ -6,6 +6,73 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.32.8] - 2026-05-12
+
+Patch on 4.32.7. Audit follow-up: layering violations
+(nexus-8g79.10). Closes all 7 inversions identified by the audit
+where library modules reached up into the CLI presentation layer.
+No behavioural change — pure code movement with re-exports
+preserving back-compat for CLI callers.
+
+### Refactored (nexus-8g79.10)
+
+- **V1 — ``_catalog_store_hook`` extracted from
+  ``commands/store.py`` to ``nexus.catalog.store_hook
+  .catalog_store_hook``**: the audit-flagged
+  ``mcp/core.py:1029`` reach-up is gone. ``commands/memory.py``
+  (``nx memory promote``), ``commands/store.py``
+  (``nx store put``), and ``mcp/core.py`` (MCP store_put) all
+  consume from the canonical lower-layer location. Legacy private
+  name re-exported from ``commands/store.py`` for back-compat.
+- **V2 — sentinels + git helpers extracted from
+  ``commands/hooks.py`` to ``nexus._git_hooks_meta``**: library
+  callers (``nexus.health._check_git_hooks``) no longer reach up
+  into commands/. The CLI module wraps ``git_common_dir``'s
+  ``RuntimeError`` as ``ClickException`` at the boundary.
+- **V3 — ``default_db_path`` promoted from
+  ``commands/_helpers.py`` to ``nexus.config``** (biggest pattern
+  — 8+ leak sites): ``mcp_infra``, ``health``,
+  ``collection_health``, ``collection_audit``, ``context``,
+  ``operators/aspect_sql``, ``merge_candidates``,
+  ``console/routes/health``, and ``_session_end_launcher`` now
+  import from ``nexus.config`` directly. CLI command modules
+  continue to import from ``commands._helpers`` (now a thin
+  call-time delegator so test monkeypatches on
+  ``nexus.config.default_db_path`` reach the live binding).
+- **V4 — MinerU PID-file primitives extracted from
+  ``commands/mineru.py`` to ``nexus._mineru_pid``**: ``config.py``
+  and ``pdf_extractor.py`` no longer reach up into commands/ for
+  ``_is_process_alive`` / ``_read_pid_file``. CLI module
+  re-exports under legacy private names.
+- **V5 — ``rename_collection_data_plane`` extracted from
+  ``commands/collection.py`` to ``nexus.collection_rename``**:
+  the indexer's RDR-103 Phase 5 conformant-shape migrator no
+  longer reaches up into commands/. The library version requires
+  explicit ``t3_db``; the CLI wrapper preserves the ``t3_db=_t3()``
+  default for CLI rename + orphan-cleanup paths.
+- **V6 — ``Catalog.lookup_doc_id_by_collection_and_path`` public
+  helper**: ``db/t2/document_aspects.py:_resolve_doc_id`` no
+  longer cracks open raw catalog SQL — calls the new public probe
+  method. Failure-tolerant contract preserved (returns ``""`` on
+  any error).
+- **V7 — ``commands/doc.py:_phase5_search`` reach-up to
+  ``mcp/core.search``**: reviewed and **closed as not-a-violation**.
+  The function is a documented composable indirection seam (test
+  injectability for ``test_phase5_doc_cite``). Replicating MCP
+  ``search``'s full pipeline (~150 lines: corpus resolution,
+  filter parsing, where-clause handling, cluster_by + topic) in
+  a CLI-layer library wrapper is substantial refactor for a P2
+  item where the existing code is structurally sound.
+
+### Test patches updated
+
+8 test files updated to patch the new canonical locations:
+``test_catalog_cli.py``, ``test_rdr052_verification.py``,
+``test_upgrade_e2e.py``, ``test_collection_audit.py``,
+``test_doctor_cmd.py``, ``test_collection_rename.py``,
+``test_phase5_integration.py``, ``test_git_hooks.py``,
+``test_silent_error_logging.py``, ``test_index_reminder.py``.
+
 ## [4.32.7] - 2026-05-12
 
 Patch on 4.32.6. Five dependency upgrades, all unblocked by the

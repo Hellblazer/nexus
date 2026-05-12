@@ -212,7 +212,7 @@ class TestMergeCandidatesCli:
         db_path = tmp_path / "memory.db"
         _seed_t2(db_path)
         monkeypatch.setattr(
-            "nexus.commands._helpers.default_db_path", lambda: db_path,
+            "nexus.config.default_db_path", lambda: db_path,
         )
 
         result = runner.invoke(
@@ -231,7 +231,7 @@ class TestMergeCandidatesCli:
         db_path = tmp_path / "memory.db"
         _seed_t2(db_path)
         monkeypatch.setattr(
-            "nexus.commands._helpers.default_db_path", lambda: db_path,
+            "nexus.config.default_db_path", lambda: db_path,
         )
 
         result = runner.invoke(
@@ -252,7 +252,7 @@ class TestMergeCandidatesCli:
         db_path = tmp_path / "memory.db"
         _seed_t2(db_path)
         monkeypatch.setattr(
-            "nexus.commands._helpers.default_db_path", lambda: db_path,
+            "nexus.config.default_db_path", lambda: db_path,
         )
 
         result = runner.invoke(
@@ -281,7 +281,7 @@ class TestMergeCandidatesCli:
         db_path = tmp_path / "memory.db"
         _seed_t2(db_path)
         monkeypatch.setattr(
-            "nexus.commands._helpers.default_db_path", lambda: db_path,
+            "nexus.config.default_db_path", lambda: db_path,
         )
 
         result = runner.invoke(
@@ -300,7 +300,7 @@ class TestMergeCandidatesCli:
         db_path = tmp_path / "memory.db"
         _seed_t2(db_path)
         monkeypatch.setattr(
-            "nexus.commands._helpers.default_db_path", lambda: db_path,
+            "nexus.config.default_db_path", lambda: db_path,
         )
 
         result = runner.invoke(

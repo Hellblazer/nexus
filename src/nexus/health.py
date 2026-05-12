@@ -14,7 +14,7 @@ from pathlib import Path
 import chromadb
 import structlog
 
-from nexus.commands._helpers import default_db_path
+from nexus.config import default_db_path
 
 _log = structlog.get_logger(__name__)
 
@@ -450,7 +450,13 @@ def _check_tools() -> list[HealthResult]:
 
 
 def _check_git_hooks() -> list[HealthResult]:
-    from nexus.commands.hooks import _effective_hooks_dir, SENTINEL_BEGIN
+    # nexus-8g79.10 (V2): import from the lower-layer module instead of
+    # reaching up into commands/. Use module-attribute access so test
+    # monkeypatches on ``nexus._git_hooks_meta.effective_hooks_dir``
+    # reach the live binding at call time.
+    from nexus import _git_hooks_meta as _ghm
+    from nexus._git_hooks_meta import SENTINEL_BEGIN
+    _effective_hooks_dir = _ghm.effective_hooks_dir
     from nexus.registry import RepoRegistry
 
     from nexus.config import nexus_config_dir

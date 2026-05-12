@@ -242,7 +242,7 @@ class TestCLI:
         self, db_with_papers: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         import nexus.commands._helpers as h
-        monkeypatch.setattr(h, "default_db_path", lambda: db_with_papers)
+        monkeypatch.setattr("nexus.config.default_db_path", lambda: db_with_papers)
 
         runner = CliRunner()
         result = runner.invoke(
@@ -256,7 +256,7 @@ class TestCLI:
         self, db_with_papers: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         import nexus.commands._helpers as h
-        monkeypatch.setattr(h, "default_db_path", lambda: db_with_papers)
+        monkeypatch.setattr("nexus.config.default_db_path", lambda: db_with_papers)
 
         runner = CliRunner()
         runner.invoke(enrich, ["aspects-promote-field", "venue"])
@@ -270,7 +270,7 @@ class TestCLI:
         self, db_with_papers: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         import nexus.commands._helpers as h
-        monkeypatch.setattr(h, "default_db_path", lambda: db_with_papers)
+        monkeypatch.setattr("nexus.config.default_db_path", lambda: db_with_papers)
 
         runner = CliRunner()
         result = runner.invoke(
@@ -284,7 +284,7 @@ class TestCLI:
         self, db_with_papers: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         import nexus.commands._helpers as h
-        monkeypatch.setattr(h, "default_db_path", lambda: db_with_papers)
+        monkeypatch.setattr("nexus.config.default_db_path", lambda: db_with_papers)
 
         runner = CliRunner()
         runner.invoke(enrich, ["aspects-promote-field", "venue"])
@@ -306,7 +306,7 @@ class TestCLI:
         import nexus.commands._helpers as h
         empty_db = tmp_path / "empty.db"
         T2Database(empty_db).close()
-        monkeypatch.setattr(h, "default_db_path", lambda: empty_db)
+        monkeypatch.setattr("nexus.config.default_db_path", lambda: empty_db)
 
         runner = CliRunner()
         result = runner.invoke(
@@ -319,7 +319,7 @@ class TestCLI:
         self, db_with_papers: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         import nexus.commands._helpers as h
-        monkeypatch.setattr(h, "default_db_path", lambda: db_with_papers)
+        monkeypatch.setattr("nexus.config.default_db_path", lambda: db_with_papers)
 
         runner = CliRunner()
         result = runner.invoke(

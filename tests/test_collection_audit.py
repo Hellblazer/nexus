@@ -377,7 +377,7 @@ class TestLiveDistanceProbe:
                 sentinel_called["hit"] = True
                 raise AssertionError("live probe fired despite warm telemetry")
 
-        with patch("nexus.commands._helpers.default_db_path", return_value=tmp_path / "memory.db"):
+        with patch("nexus.config.default_db_path", return_value=tmp_path / "memory.db"):
             report = run_collection_audit(
                 "code__main", live=True, t3=ExplodingT3(),
             )
@@ -397,7 +397,7 @@ class TestLiveDistanceProbe:
             def get_or_create_collection(self_, name):
                 return col
 
-        with patch("nexus.commands._helpers.default_db_path", return_value=tmp_path / "memory.db"):
+        with patch("nexus.config.default_db_path", return_value=tmp_path / "memory.db"):
             report = run_collection_audit(
                 "code__fallback_live", live=True, t3=FakeT3(), live_n=6,
             )
@@ -447,7 +447,7 @@ class TestChashCoverageSection:
             def get_collection(self, _n): return _FakeCol()
 
         monkeypatch.setattr(
-            "nexus.commands._helpers.default_db_path", lambda: db_path,
+            "nexus.config.default_db_path", lambda: db_path,
         )
         monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
 
@@ -492,7 +492,7 @@ class TestChashCoverageSection:
             def get_collection(self, _n): return _FakeCol()
 
         monkeypatch.setattr(
-            "nexus.commands._helpers.default_db_path", lambda: db_path,
+            "nexus.config.default_db_path", lambda: db_path,
         )
         monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
 
@@ -525,7 +525,7 @@ class TestChashCoverageSection:
             def get_collection(self, _n): return _FakeCol()
 
         monkeypatch.setattr(
-            "nexus.commands._helpers.default_db_path", lambda: db_path,
+            "nexus.config.default_db_path", lambda: db_path,
         )
         monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
 
@@ -542,7 +542,7 @@ class TestChashCoverageSection:
 
         # T2 file does not exist.
         monkeypatch.setattr(
-            "nexus.commands._helpers.default_db_path",
+            "nexus.config.default_db_path",
             lambda: tmp_path / "nonexistent.db",
         )
         cov = compute_chash_coverage("code__x")
@@ -583,7 +583,7 @@ class TestChashCoverageSection:
                 raise _ChromaNotFoundError(f"Collection {name} not found")
 
         monkeypatch.setattr(
-            "nexus.commands._helpers.default_db_path", lambda: db_path,
+            "nexus.config.default_db_path", lambda: db_path,
         )
         monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
 
@@ -614,7 +614,7 @@ class TestCollectionAuditCli:
         _seed_catalog_conn(catalog_db_path).close()
 
         monkeypatch.setattr(
-            "nexus.commands._helpers.default_db_path", lambda: db_path,
+            "nexus.config.default_db_path", lambda: db_path,
         )
         monkeypatch.setattr(
             "nexus.collection_audit._open_catalog_conn",
@@ -641,7 +641,7 @@ class TestCollectionAuditCli:
         _seed_catalog_conn(catalog_db_path).close()
 
         monkeypatch.setattr(
-            "nexus.commands._helpers.default_db_path", lambda: db_path,
+            "nexus.config.default_db_path", lambda: db_path,
         )
         monkeypatch.setattr(
             "nexus.collection_audit._open_catalog_conn",
@@ -677,7 +677,7 @@ class TestCollectionAuditCli:
         with T2Database(db_path):
             pass
         monkeypatch.setattr(
-            "nexus.commands._helpers.default_db_path", lambda: db_path,
+            "nexus.config.default_db_path", lambda: db_path,
         )
 
         # Seed an EphemeralClient collection the --live probe can sample.

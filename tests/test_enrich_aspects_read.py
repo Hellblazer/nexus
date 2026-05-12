@@ -50,7 +50,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     import nexus.config
     monkeypatch.setattr(nexus.config, "catalog_path", lambda: catalog_dir)
     import nexus.commands._helpers as h
-    monkeypatch.setattr(h, "default_db_path", lambda: db_path)
+    monkeypatch.setattr("nexus.config.default_db_path", lambda: db_path)
     return catalog_dir, db_path, cat
 
 

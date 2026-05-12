@@ -148,7 +148,7 @@ def _print_tier_status_summary() -> None:
         import sqlite3
         from pathlib import Path
 
-        from nexus.commands._helpers import default_db_path
+        from nexus.config import default_db_path
         from nexus.session import resolve_active_session_id
 
         session_id = resolve_active_session_id()

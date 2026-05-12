@@ -269,7 +269,7 @@ class TestPluginCliVersionCheck:
 class TestDoctorCheckSchema:
     def test_no_db_file(self, runner: CliRunner, tmp_path: Path) -> None:
         db_path = tmp_path / "nonexistent" / "memory.db"
-        with patch("nexus.commands._helpers.default_db_path", return_value=db_path):
+        with patch("nexus.config.default_db_path", return_value=db_path):
             result = runner.invoke(main, ["doctor", "--check-schema"])
         assert result.exit_code == 0
         assert "not found" in result.output.lower()
@@ -288,7 +288,7 @@ class TestDoctorCheckSchema:
         apply_pending(conn, _current_version())
         conn.close()
 
-        with patch("nexus.commands._helpers.default_db_path", return_value=db_path):
+        with patch("nexus.config.default_db_path", return_value=db_path):
             result = runner.invoke(main, ["doctor", "--check-schema"])
         assert result.exit_code == 0
         assert "passed" in result.output.lower()
@@ -300,7 +300,7 @@ class TestDoctorCheckSchema:
         conn.commit()
         conn.close()
 
-        with patch("nexus.commands._helpers.default_db_path", return_value=db_path):
+        with patch("nexus.config.default_db_path", return_value=db_path):
             result = runner.invoke(main, ["doctor", "--check-schema"])
         assert result.exit_code == 0
         # Should report issues
@@ -318,7 +318,7 @@ class TestDoctorCheckSchema:
         apply_pending(conn, _current_version())
         conn.close()
 
-        with patch("nexus.commands._helpers.default_db_path", return_value=db_path):
+        with patch("nexus.config.default_db_path", return_value=db_path):
             result = runner.invoke(main, ["doctor", "--check-schema"])
         assert result.exit_code == 0
         assert "search_telemetry" in result.output
@@ -344,7 +344,7 @@ class TestDoctorCheckTaxonomy:
 
     def test_no_db_file(self, runner: CliRunner, tmp_path: Path) -> None:
         db_path = tmp_path / "nonexistent" / "memory.db"
-        with patch("nexus.commands._helpers.default_db_path", return_value=db_path):
+        with patch("nexus.config.default_db_path", return_value=db_path):
             result = runner.invoke(main, ["doctor", "--check-taxonomy"])
         assert result.exit_code == 0
         assert "not found" in result.output.lower()
@@ -354,7 +354,7 @@ class TestDoctorCheckTaxonomy:
     ) -> None:
         """Empty taxonomy tables still satisfy the invariant vacuously."""
         db_path = self._setup_db(tmp_path)
-        with patch("nexus.commands._helpers.default_db_path", return_value=db_path):
+        with patch("nexus.config.default_db_path", return_value=db_path):
             result = runner.invoke(main, ["doctor", "--check-taxonomy"])
         assert result.exit_code == 0
         assert "invariant holds" in result.output
@@ -390,7 +390,7 @@ class TestDoctorCheckTaxonomy:
         conn.commit()
         conn.close()
 
-        with patch("nexus.commands._helpers.default_db_path", return_value=db_path):
+        with patch("nexus.config.default_db_path", return_value=db_path):
             result = runner.invoke(main, ["doctor", "--check-taxonomy"])
 
         assert result.exit_code == 1
@@ -422,7 +422,7 @@ class TestDoctorCheckTaxonomy:
         conn.commit()
         conn.close()
 
-        with patch("nexus.commands._helpers.default_db_path", return_value=db_path):
+        with patch("nexus.config.default_db_path", return_value=db_path):
             result = runner.invoke(main, ["doctor", "--check-taxonomy"])
 
         assert result.exit_code == 0, result.output
@@ -462,7 +462,7 @@ class TestDoctorCheckTaxonomy:
         conn.commit()
         conn.close()
 
-        with patch("nexus.commands._helpers.default_db_path", return_value=db_path):
+        with patch("nexus.config.default_db_path", return_value=db_path):
             result = runner.invoke(main, ["doctor", "--check-taxonomy"])
 
         assert result.exit_code == 0, result.output
@@ -498,7 +498,7 @@ class TestDoctorCheckTaxonomy:
         conn.commit()
         conn.close()
 
-        with patch("nexus.commands._helpers.default_db_path", return_value=db_path):
+        with patch("nexus.config.default_db_path", return_value=db_path):
             result = runner.invoke(main, ["doctor", "--check-taxonomy"])
 
         assert result.exit_code == 0
@@ -538,7 +538,7 @@ class TestDoctorTrimTelemetry:
         conn.commit()
         conn.close()
 
-        with patch("nexus.commands._helpers.default_db_path", return_value=db_path):
+        with patch("nexus.config.default_db_path", return_value=db_path):
             result = runner.invoke(
                 main, ["doctor", "--trim-telemetry", "--days", str(trim_days)],
             )
@@ -582,7 +582,7 @@ class TestDoctorTrimTelemetry:
         apply_pending(conn, _current_version())
         conn.close()
 
-        with patch("nexus.commands._helpers.default_db_path", return_value=db_path):
+        with patch("nexus.config.default_db_path", return_value=db_path):
             result = runner.invoke(main, ["doctor", "--trim-telemetry"])
         assert result.exit_code == 0, result.output
         assert "Trimmed 0 search_telemetry" in result.output
@@ -599,7 +599,7 @@ class TestDoctorTrimTelemetry:
     ) -> None:
         """Trim against a missing DB reports 'not found' without crashing."""
         db_path = tmp_path / "nonexistent" / "memory.db"
-        with patch("nexus.commands._helpers.default_db_path", return_value=db_path):
+        with patch("nexus.config.default_db_path", return_value=db_path):
             result = runner.invoke(main, ["doctor", "--trim-telemetry"])
         assert result.exit_code == 0
         assert "not found" in result.output.lower()

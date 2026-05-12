@@ -333,7 +333,7 @@ class TestSessionEndLauncherRoutesThroughHelper:
         conn.close()
 
         monkeypatch.setattr(
-            "nexus.commands._helpers.default_db_path", lambda: str(db_path)
+            "nexus.config.default_db_path", lambda: str(db_path)
         )
 
         # Capture stderr so we can assert the launcher only counted the

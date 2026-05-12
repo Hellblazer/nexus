@@ -235,7 +235,7 @@ def test_doctor_hooks_installed(runner):
             (hooks_dir / name).write_text(
                 f"#!/bin/sh\n{SENTINEL_BEGIN}\nnx index repo ...\n")
         result = _invoke(runner, reg, extra_patches=[
-            patch("nexus.commands.hooks._effective_hooks_dir",
+            patch("nexus._git_hooks_meta.effective_hooks_dir",
                   return_value=hooks_dir),
         ])
     assert result.exit_code == 0
@@ -249,7 +249,7 @@ def test_doctor_hooks_not_installed(runner):
     reg.all.return_value = ["/some/repo"]
     with tempfile.TemporaryDirectory() as td:
         result = _invoke(runner, reg, extra_patches=[
-            patch("nexus.commands.hooks._effective_hooks_dir",
+            patch("nexus._git_hooks_meta.effective_hooks_dir",
                   return_value=Path(td)),
         ])
     assert result.exit_code == 0
@@ -263,7 +263,7 @@ def test_doctor_hooks_exception_does_not_propagate(runner):
     reg = MagicMock()
     reg.all.return_value = ["/some/repo"]
     result = _invoke(runner, reg, extra_patches=[
-        patch("nexus.commands.hooks._effective_hooks_dir",
+        patch("nexus._git_hooks_meta.effective_hooks_dir",
               side_effect=RuntimeError("git error")),
     ])
     assert result.exit_code == 0
@@ -646,7 +646,7 @@ class TestCheckPlanLibrary:
         conn.commit()
         conn.close()
 
-        with patch("nexus.commands._helpers.default_db_path", return_value=db_path):
+        with patch("nexus.config.default_db_path", return_value=db_path):
             result = runner.invoke(main, ["doctor", "--check-plan-library"])
 
         # Non-zero exit because global builtin count is 0 (no YAMLs seeded).
@@ -670,7 +670,7 @@ class TestCheckPlanLibrary:
         apply_pending(conn, _current_version())
         conn.close()
 
-        with patch("nexus.commands._helpers.default_db_path", return_value=db_path):
+        with patch("nexus.config.default_db_path", return_value=db_path):
             result = runner.invoke(main, ["doctor", "--check-plan-library"])
 
         assert result.exit_code != 0, result.output
@@ -691,12 +691,12 @@ class TestCheckPlanLibrary:
         conn.close()
 
         monkeypatch.setattr(
-            "nexus.commands._helpers.default_db_path", lambda: db_path,
+            "nexus.config.default_db_path", lambda: db_path,
         )
         from nexus.commands.catalog import _seed_plan_templates
         _seed_plan_templates()
 
-        with patch("nexus.commands._helpers.default_db_path", return_value=db_path):
+        with patch("nexus.config.default_db_path", return_value=db_path):
             result = runner.invoke(main, ["doctor", "--check-plan-library"])
 
         assert result.exit_code == 0, result.output
@@ -725,7 +725,7 @@ class TestCheckPlanLibrary:
         conn.commit()
         conn.close()
 
-        with patch("nexus.commands._helpers.default_db_path", return_value=db_path):
+        with patch("nexus.config.default_db_path", return_value=db_path):
             result = runner.invoke(main, ["doctor", "--check-plan-library"])
 
         # Non-zero because global builtin count < 9, but the backfill

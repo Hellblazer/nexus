@@ -160,7 +160,7 @@ def _default_chunk_count_fn(col: str) -> int:
 def _open_t2():
     """Open a ``T2Database`` rooted at the default path, or ``None``
     when the DB file doesn't exist yet."""
-    from nexus.commands._helpers import default_db_path
+    from nexus.config import default_db_path
     from nexus.db.t2 import T2Database
 
     db_path = default_db_path()
@@ -266,7 +266,7 @@ def _default_chash_coverage_fn(col: str) -> float | None:
     Introduced in RDR-087 Phase 4.6 (nexus-c2op) after RDR-086 added
     the chash_index surface. Pure SQL composition — no new primitives.
     """
-    from nexus.commands._helpers import default_db_path
+    from nexus.config import default_db_path
     from nexus.db import make_t3
     from nexus.db.t2.chash_index import ChashIndex
 

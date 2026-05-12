@@ -139,7 +139,7 @@ def compute_merge_candidates(
 
 
 def _open_t2():
-    from nexus.commands._helpers import default_db_path
+    from nexus.config import default_db_path
     from nexus.db.t2 import T2Database
 
     db_path = default_db_path()

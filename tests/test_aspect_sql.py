@@ -75,7 +75,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """
     db_path = tmp_path / "aspect_sql.db"
     import nexus.commands._helpers as h
-    monkeypatch.setattr(h, "default_db_path", lambda: db_path)
+    monkeypatch.setattr("nexus.config.default_db_path", lambda: db_path)
 
     with T2Database(db_path) as db:
         db.document_aspects.upsert(_make_record(

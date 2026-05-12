@@ -47,7 +47,7 @@ def isolated_t2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Redirect default_db_path to a tmp file."""
     from nexus.commands import _helpers, tier_status as ts_mod
     db = tmp_path / "t.db"
-    monkeypatch.setattr(_helpers, "default_db_path", lambda: db)
+    monkeypatch.setattr("nexus.config.default_db_path", lambda: db)
     monkeypatch.setattr(ts_mod, "default_db_path", lambda: db)
     return db
 
@@ -184,7 +184,7 @@ class TestEmptyOrMissing:
         # Empty DB — no tier_writes table.
         db = tmp_path / "empty.db"
         sqlite3.connect(str(db)).close()
-        monkeypatch.setattr(_helpers, "default_db_path", lambda: db)
+        monkeypatch.setattr("nexus.config.default_db_path", lambda: db)
         monkeypatch.setattr(ts_mod, "default_db_path", lambda: db)
 
         result = CliRunner().invoke(

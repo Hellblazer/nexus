@@ -41,7 +41,11 @@ def _mock_git(repo: Path, git_common_dir: str | None = None, hooks_path: str | N
         else:
             return sp.run(cmd, cwd=cwd, capture_output=capture_output, text=text, timeout=timeout)
         return r
-    return patch("nexus.commands.hooks.subprocess.run", side_effect=_run)
+    # nexus-8g79.10 (V2): subprocess.run call sites are inside
+    # nexus._git_hooks_meta (git_common_dir + effective_hooks_dir);
+    # commands/hooks.py uses them via re-export. Patch the lower-
+    # layer module that actually owns the call.
+    return patch("nexus._git_hooks_meta.subprocess.run", side_effect=_run)
 
 
 def _install(runner, repo):

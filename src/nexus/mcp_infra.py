@@ -11,7 +11,7 @@ import threading
 import time
 import warnings
 
-from nexus.commands._helpers import default_db_path
+from nexus.config import default_db_path
 
 # ── Lazy singletons ──────────────────────────────────────────────────────────
 

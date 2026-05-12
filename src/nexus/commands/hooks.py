@@ -2,13 +2,34 @@
 """nx hooks — git hook management for automatic repo indexing."""
 import re
 import stat
-import subprocess
 from pathlib import Path
 
 import click
 
-SENTINEL_BEGIN = "# >>> nexus managed begin >>>"
-SENTINEL_END = "# <<< nexus managed end <<<"
+# nexus-8g79.10 (V2): sentinels + git helpers live in
+# ``nexus._git_hooks_meta`` so library-layer probes
+# (``nexus.health``) don't reach up into this CLI module. The
+# lower-layer ``git_common_dir`` raises ``RuntimeError`` for
+# non-git-repo; this CLI module translates to ``ClickException``
+# at the boundary.
+#
+# Sentinels are constants (value-bound is fine). For
+# ``effective_hooks_dir`` we use a thin wrapper so test
+# monkeypatches on ``nexus._git_hooks_meta.effective_hooks_dir``
+# reach the live binding at call time (a bare ``from … import …``
+# captures the function at import time and bypasses patches).
+from nexus import _git_hooks_meta as _ghm
+from nexus._git_hooks_meta import SENTINEL_BEGIN, SENTINEL_END
+
+
+def _effective_hooks_dir(repo):
+    """Delegate to ``nexus._git_hooks_meta.effective_hooks_dir``."""
+    return _ghm.effective_hooks_dir(repo)
+
+
+def _git_common_dir_raw(repo):
+    """Delegate to ``nexus._git_hooks_meta.git_common_dir``."""
+    return _ghm.git_common_dir(repo)
 
 _HOOK_NAMES = ("post-commit", "post-merge", "post-rewrite")
 
@@ -24,40 +45,11 @@ disown
 
 
 def _git_common_dir(repo: Path) -> Path:
-    """Return the effective .git directory (handles worktrees)."""
-    result = subprocess.run(
-        ["git", "rev-parse", "--git-common-dir"],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    if result.returncode != 0:
-        raise click.ClickException(f"Not a git repository: {repo}")
-    git_common = Path(result.stdout.strip())
-    if not git_common.is_absolute():
-        git_common = (repo / git_common).resolve()
-    return git_common
-
-
-def _effective_hooks_dir(repo: Path) -> Path:
-    """Return the hooks directory for *repo*, respecting core.hooksPath."""
-    # Check for custom hooks path
-    result = subprocess.run(
-        ["git", "config", "core.hooksPath"],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    if result.returncode == 0 and result.stdout.strip():
-        hpath = Path(result.stdout.strip())
-        if not hpath.is_absolute():
-            hpath = (repo / hpath).resolve()
-        return hpath
-
-    # Default: <git-common-dir>/hooks
-    return _git_common_dir(repo) / "hooks"
+    """CLI-layer wrapper: translate RuntimeError → ClickException."""
+    try:
+        return _git_common_dir_raw(repo)
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc))
 
 
 # ── stanza helpers ────────────────────────────────────────────────────────────

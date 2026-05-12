@@ -312,7 +312,7 @@ class TestRenameCLI:
         runner = CliRunner()
         with patch("nexus.commands.collection._t3", return_value=fake), \
              patch("nexus.mcp_infra.default_db_path", return_value=db_path), \
-             patch("nexus.commands._helpers.default_db_path", return_value=db_path), \
+             patch("nexus.config.default_db_path", return_value=db_path), \
              patch("nexus.config.catalog_path", return_value=cat_dir):
             result = runner.invoke(rename_cmd, ["code__old", "code__new"])
 
@@ -380,7 +380,7 @@ class TestRenameCLI:
 
         runner = CliRunner()
         with patch("nexus.commands.collection._t3", return_value=fake), \
-             patch("nexus.commands._helpers.default_db_path", return_value=db_path), \
+             patch("nexus.config.default_db_path", return_value=db_path), \
              patch("nexus.config.catalog_path", return_value=cat_dir):
             result = runner.invoke(
                 rename_cmd,
@@ -432,7 +432,7 @@ class TestRenameCascadeFailureModes:
         runner = CliRunner()
         with patch("nexus.commands.collection._t3", return_value=fake), \
              patch("nexus.db.t2.T2Database", side_effect=_t2_bomb), \
-             patch("nexus.commands._helpers.default_db_path", return_value=db_path), \
+             patch("nexus.config.default_db_path", return_value=db_path), \
              patch("nexus.config.catalog_path", return_value=cat_dir):
             result = runner.invoke(rename_cmd, ["code__old", "code__new"])
 
@@ -474,7 +474,7 @@ class TestRenameCascadeFailureModes:
         runner = CliRunner()
         with patch("nexus.commands.collection._t3", return_value=fake), \
              patch("nexus.catalog.catalog.Catalog", side_effect=_catalog_bomb), \
-             patch("nexus.commands._helpers.default_db_path", return_value=db_path), \
+             patch("nexus.config.default_db_path", return_value=db_path), \
              patch("nexus.config.catalog_path", return_value=cat_dir):
             result = runner.invoke(rename_cmd, ["code__old", "code__new"])
 
@@ -698,7 +698,7 @@ class TestAspectCascadeIntegration:
         fake.rename_collection = MagicMock()
 
         with patch("nexus.commands.collection._t3", return_value=fake), \
-             patch("nexus.commands._helpers.default_db_path", return_value=db_path), \
+             patch("nexus.config.default_db_path", return_value=db_path), \
              patch("nexus.config.catalog_path", return_value=cat_dir):
             counts = rename_collection_data_plane("code__old", "code__new")
 
@@ -1120,7 +1120,7 @@ class TestK9CascadeIncludesTelemetry:
         fake.rename_collection = MagicMock()
 
         with patch("nexus.commands.collection._t3", return_value=fake), \
-             patch("nexus.commands._helpers.default_db_path", return_value=db_path), \
+             patch("nexus.config.default_db_path", return_value=db_path), \
              patch("nexus.config.catalog_path", return_value=cat_dir):
             counts = rename_collection_data_plane("code__old", "code__new")
 
@@ -1176,7 +1176,7 @@ class TestRenameOrdering:
         fake.rename_collection = _t3_rename_bomb
 
         with patch("nexus.commands.collection._t3", return_value=fake), \
-             patch("nexus.commands._helpers.default_db_path", return_value=db_path), \
+             patch("nexus.config.default_db_path", return_value=db_path), \
              patch("nexus.config.catalog_path", return_value=cat_dir):
             with pytest.raises((RuntimeError, click.ClickException)):
                 rename_collection_data_plane("code__old", "code__new")
@@ -1229,7 +1229,7 @@ class TestHalfCascadeNonZeroExit:
         runner = CliRunner()
         with patch("nexus.commands.collection._t3", return_value=fake), \
              patch("nexus.db.t2.T2Database", side_effect=_t2_bomb), \
-             patch("nexus.commands._helpers.default_db_path", return_value=db_path), \
+             patch("nexus.config.default_db_path", return_value=db_path), \
              patch("nexus.config.catalog_path", return_value=cat_dir):
             result = runner.invoke(rename_cmd, ["code__old", "code__new"])
 

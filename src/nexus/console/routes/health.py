@@ -121,7 +121,7 @@ def _collect_aspect_queue_data() -> dict[str, Any]:
     """
     import sqlite3 as _sqlite3
 
-    from nexus.commands._helpers import default_db_path
+    from nexus.config import default_db_path
 
     db_path = default_db_path()
     if not db_path.exists():

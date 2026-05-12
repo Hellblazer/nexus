@@ -160,24 +160,23 @@ def _resolve_doc_id(record: AspectRecord) -> str:
     Lazy catalog import to avoid circular dependency with
     ``nexus.catalog`` (which imports ``nexus.db.t2`` for ``_sanitize_fts5``).
     """
+    # nexus-8g79.10 (V6): use Catalog.lookup_doc_id_by_collection_and_path
+    # (the public probe API) instead of cracking open the raw SQL here.
+    # The lazy import remains because db→catalog is still a direction
+    # we don't want at module-import time (Catalog itself imports db
+    # primitives for FTS5 sanitisation), but the *behaviour* is no
+    # longer reaching into Catalog internals.
     try:
         from nexus.catalog import Catalog, open_cached
         from nexus.config import catalog_path
         cat_path = catalog_path()
         if Catalog.is_initialized(cat_path):
             cat = open_cached(cat_path)
-            row = cat._db.execute(
-                "SELECT json_extract(metadata, '$.doc_id'), tumbler "
-                "FROM documents "
-                "WHERE physical_collection = ? "
-                "  AND (file_path = ? OR title = ?) "
-                "LIMIT 1",
-                (record.collection, record.source_path, record.source_path),
-            ).fetchone()
-            if row:
-                resolved = row[0] or row[1] or ""
-                if resolved:
-                    return str(resolved)
+            resolved = cat.lookup_doc_id_by_collection_and_path(
+                record.collection, record.source_path,
+            )
+            if resolved:
+                return resolved
     except Exception:
         pass
     if record.source_uri:

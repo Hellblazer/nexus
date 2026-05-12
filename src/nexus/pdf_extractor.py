@@ -728,15 +728,20 @@ class PDFExtractor:
         _log.info("mineru_server_restarting",
                   attempt=self._mineru_server_restarts)
 
-        from nexus.commands.mineru import (
-            _is_process_alive,
+        # nexus-8g79.10 (V4): import process primitives from the
+        # lower-layer module. ``_pid_file_path`` is still in commands/
+        # because ``nx mineru start/stop`` owns the lifecycle; the
+        # library only reads. Path is also available via
+        # ``nexus._mineru_pid._pid_file_path``.
+        from nexus._mineru_pid import (
             _pid_file_path,
-            _read_pid_file,
+            is_process_alive,
+            read_pid_file,
         )
 
         # Clean up stale PID file if the server is dead
-        info = _read_pid_file()
-        if info is not None and not _is_process_alive(info["pid"]):
+        info = read_pid_file()
+        if info is not None and not is_process_alive(info["pid"]):
             _pid_file_path().unlink(missing_ok=True)
 
         # Start a new server via the same logic as `nx mineru start`

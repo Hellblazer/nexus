@@ -45,7 +45,7 @@ def test_reminder_shown_when_no_hooks_installed(runner: CliRunner, index_home: P
     with (
         patch("nexus.commands.index._registry", return_value=_mock_reg()),
         patch("nexus.indexer.index_repository", return_value={}),
-        patch("nexus.commands.hooks._effective_hooks_dir", return_value=hooks_dir),
+        patch("nexus._git_hooks_meta.effective_hooks_dir", return_value=hooks_dir),
     ):
         result = runner.invoke(main, ["index", "repo", str(repo)])
 
@@ -68,7 +68,7 @@ def test_reminder_shown_when_hook_files_exist_without_sentinel(
     with (
         patch("nexus.commands.index._registry", return_value=_mock_reg()),
         patch("nexus.indexer.index_repository", return_value={}),
-        patch("nexus.commands.hooks._effective_hooks_dir", return_value=hooks_dir),
+        patch("nexus._git_hooks_meta.effective_hooks_dir", return_value=hooks_dir),
     ):
         result = runner.invoke(main, ["index", "repo", str(repo)])
 
@@ -92,7 +92,7 @@ def test_reminder_suppressed_when_post_commit_managed(
     with (
         patch("nexus.commands.index._registry", return_value=_mock_reg()),
         patch("nexus.indexer.index_repository", return_value={}),
-        patch("nexus.commands.hooks._effective_hooks_dir", return_value=hooks_dir),
+        patch("nexus._git_hooks_meta.effective_hooks_dir", return_value=hooks_dir),
     ):
         result = runner.invoke(main, ["index", "repo", str(repo)])
 
@@ -115,7 +115,7 @@ def test_reminder_suppressed_when_post_merge_managed(
     with (
         patch("nexus.commands.index._registry", return_value=_mock_reg()),
         patch("nexus.indexer.index_repository", return_value={}),
-        patch("nexus.commands.hooks._effective_hooks_dir", return_value=hooks_dir),
+        patch("nexus._git_hooks_meta.effective_hooks_dir", return_value=hooks_dir),
     ):
         result = runner.invoke(main, ["index", "repo", str(repo)])
 
@@ -137,7 +137,7 @@ def test_reminder_suppressed_when_post_rewrite_managed(
     with (
         patch("nexus.commands.index._registry", return_value=_mock_reg()),
         patch("nexus.indexer.index_repository", return_value={}),
-        patch("nexus.commands.hooks._effective_hooks_dir", return_value=hooks_dir),
+        patch("nexus._git_hooks_meta.effective_hooks_dir", return_value=hooks_dir),
     ):
         result = runner.invoke(main, ["index", "repo", str(repo)])
 
@@ -159,7 +159,7 @@ def test_reminder_suppressed_on_frecency_only(
     with (
         patch("nexus.commands.index._registry", return_value=_mock_reg()),
         patch("nexus.indexer.index_repository", return_value={}),
-        patch("nexus.commands.hooks._effective_hooks_dir", return_value=hooks_dir),
+        patch("nexus._git_hooks_meta.effective_hooks_dir", return_value=hooks_dir),
     ):
         result = runner.invoke(main, ["index", "repo", str(repo), "--frecency-only"])
 
@@ -181,7 +181,7 @@ def test_hook_detection_error_does_not_break_indexing(
         patch("nexus.commands.index._registry", return_value=_mock_reg()),
         patch("nexus.indexer.index_repository", return_value={}),
         patch(
-            "nexus.commands.hooks._effective_hooks_dir",
+            "nexus._git_hooks_meta.effective_hooks_dir",
             side_effect=click.ClickException("Not a git repository"),
         ),
     ):
@@ -201,7 +201,7 @@ def test_hook_detection_generic_error_does_not_break_indexing(
         patch("nexus.commands.index._registry", return_value=_mock_reg()),
         patch("nexus.indexer.index_repository", return_value={}),
         patch(
-            "nexus.commands.hooks._effective_hooks_dir",
+            "nexus._git_hooks_meta.effective_hooks_dir",
             side_effect=RuntimeError("unexpected failure"),
         ),
     ):
@@ -222,7 +222,7 @@ def test_reminder_exact_text(runner: CliRunner, index_home: Path, tmp_path: Path
     with (
         patch("nexus.commands.index._registry", return_value=_mock_reg()),
         patch("nexus.indexer.index_repository", return_value={}),
-        patch("nexus.commands.hooks._effective_hooks_dir", return_value=hooks_dir),
+        patch("nexus._git_hooks_meta.effective_hooks_dir", return_value=hooks_dir),
     ):
         result = runner.invoke(main, ["index", "repo", str(repo)])
 
@@ -247,7 +247,7 @@ def test_effective_hooks_dir_is_called_with_repo_path(
     with (
         patch("nexus.commands.index._registry", return_value=_mock_reg()),
         patch("nexus.indexer.index_repository", return_value={}),
-        patch("nexus.commands.hooks._effective_hooks_dir", mock_hdir),
+        patch("nexus._git_hooks_meta.effective_hooks_dir", mock_hdir),
     ):
         result = runner.invoke(main, ["index", "repo", str(repo)])
 
