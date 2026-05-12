@@ -853,9 +853,16 @@ class TestManifestWriteBatchHook:
         metadatas = [
             {"chunk_index": 0, "chunk_text_hash": "a" * 32},
         ]
-        # Force append_manifest_chunks to raise.
+        # nexus-lrhg: the hook routes to atomic_manifest_replace when
+        # the batch contains position 0 (first batch of a re-index) and
+        # to append_manifest_chunks otherwise. Patch both so the
+        # warning-on-exception contract is exercised regardless of
+        # which branch fires.
         with patch.object(
             type(cat), "append_manifest_chunks",
+            side_effect=RuntimeError("induced manifest failure"),
+        ), patch.object(
+            type(cat), "atomic_manifest_replace",
             side_effect=RuntimeError("induced manifest failure"),
         ), patch("nexus.mcp_infra.get_catalog", return_value=cat), \
                 capture_logs() as cap:
