@@ -6,6 +6,38 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.32.6] - 2026-05-12
+
+Patch on 4.32.5. Audit follow-ups: mineru install-surface reduction +
+RDR-108 Phase 4 retrospective close.
+
+### Fixed
+
+- **``mineru[all]`` → ``mineru[pipeline]``** (nexus-8g79.18): the
+  audit flagged the install surface — 356 packages pulled, including
+  ``gradio 6.x`` (stale XSS advisory GHSA-2wxf-49m7-6x5q), ``boto3``,
+  ``openai``, ``vllm``, ``lmdeploy``, ``cupy``, ``mlx-vlm``. Nexus
+  has a single MinerU call site (``src/nexus/pdf_extractor.py``)
+  using ``backend="pipeline"``; the VLM-inference backends and the
+  gradio UI are never invoked. Pinning to ``mineru[pipeline]``
+  retains the exact stack ``do_parse`` needs (torch + torchvision +
+  transformers + onnxruntime + OCR / formula / table models) and
+  drops 77 packages from the lockfile — including gradio. Verified
+  locally: ``do_parse`` and the pipeline backend import + work
+  clean with ``[pipeline]`` only.
+
+### Verified shipped (nexus-8g79.15)
+
+- **RDR-108 Phase 4 already complete**: the audit flagged Phase 4
+  as pending based on source-code comments, but the work shipped
+  2026-05-10 in PR #624 (manifest-based GC + content-derived chunk
+  IDs + retrieval rewrites) and PR #635 (Phase 4+5 stack — bundled
+  nexus-xy3b + qlm2 + 1ljk + o9an + 6l9p + 2exh + e5aw + 9p0c +
+  w9vq + v7mn). The closed child beads ``nexus-dyxe``,
+  ``nexus-kosc``, and ``nexus-z1mu`` correspond to the planner's
+  P4a/b/c ordering. Stale ``# pending Phase 4`` comment in
+  ``doc_indexer.py:114`` refreshed to point at the shipped PR.
+
 ## [4.32.5] - 2026-05-12
 
 Patch on 4.32.4. Consolidated audit-driven follow-ups from the
