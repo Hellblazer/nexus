@@ -2020,7 +2020,7 @@ def test_preflight_registration_idempotent_on_staleness_skip(
         f"doctor --replay-equality exited {result.exit_code}: "
         f"{result.output[:500]}"
     )
-    payload = _json.loads(result.output)["replay_equality"]
+    payload = _json.loads(result.stdout)["replay_equality"]
     assert payload["pass"] is True, (
         f"replay-equality flagged drift after pre-flight registration + "
         f"staleness skip; the projector must accept a "

@@ -399,7 +399,7 @@ def test_store_get_json_output(runner, mock_store):
         "title": "doc.md", "tags": "test", "indexed_at": "2026-03-09"}
     result = runner.invoke(main, ["store", "get", "abcdef1234567890", "--json"])
     assert result.exit_code == 0, result.output
-    data = json.loads(result.output)
+    data = json.loads(result.stdout)
     assert data["id"] == "abcdef1234567890"
     assert data["content"] == "test content"
 

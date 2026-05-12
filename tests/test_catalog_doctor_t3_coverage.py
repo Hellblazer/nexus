@@ -118,7 +118,7 @@ class TestCoveragePasses:
             doctor_cmd, ["--t3-doc-id-coverage", "--json"],
         )
         assert result.exit_code == 0, result.output
-        payload = json.loads(result.output)["t3_doc_id_coverage"]
+        payload = json.loads(result.stdout)["t3_doc_id_coverage"]
         assert payload["pass"] is True
         assert payload["tables"]["code__test"]["coverage"] == 1.0
 
@@ -144,7 +144,7 @@ class TestCoveragePasses:
             doctor_cmd, ["--t3-doc-id-coverage", "--json"],
         )
         assert result.exit_code == 0, result.output
-        payload = json.loads(result.output)["t3_doc_id_coverage"]
+        payload = json.loads(result.stdout)["t3_doc_id_coverage"]
         assert payload["pass"] is True
         coll = payload["tables"]["code__test"]
         assert coll["expected_orphans"] == 1
@@ -174,7 +174,7 @@ class TestCoverageFails:
             doctor_cmd, ["--t3-doc-id-coverage", "--json"],
         )
         assert result.exit_code == 1
-        payload = json.loads(result.output)["t3_doc_id_coverage"]
+        payload = json.loads(result.stdout)["t3_doc_id_coverage"]
         assert payload["pass"] is False
         coll = payload["tables"]["code__test"]
         assert "ch1" in coll["missing_doc_id_sample"]
@@ -200,7 +200,7 @@ class TestCoverageFails:
             doctor_cmd, ["--t3-doc-id-coverage", "--json"],
         )
         assert result.exit_code == 1
-        payload = json.loads(result.output)["t3_doc_id_coverage"]
+        payload = json.loads(result.stdout)["t3_doc_id_coverage"]
         coll = payload["tables"]["code__test"]
         assert coll["mismatched_doc_id_count"] == 1
         m = coll["mismatched_doc_id_sample"][0]
@@ -235,7 +235,7 @@ class TestCoverageFails:
             ["--t3-doc-id-coverage", "--strict-not-in-t3", "--json"],
         )
         assert result.exit_code == 1
-        payload = json.loads(result.output)["t3_doc_id_coverage"]
+        payload = json.loads(result.stdout)["t3_doc_id_coverage"]
         coll = payload["tables"]["code__test"]
         assert coll["not_in_t3_count"] == 1
         assert "missing-from-t3" in coll["not_in_t3_sample"]
@@ -277,7 +277,7 @@ class TestCombined:
         # Replay equality may or may not pass depending on whether the
         # synthesized log matches the live SQLite — what we care about
         # here is that both checks ran and got a payload.
-        payload = json.loads(result.output)
+        payload = json.loads(result.stdout)
         assert "replay_equality" in payload
         assert "t3_doc_id_coverage" in payload
         assert payload["t3_doc_id_coverage"]["pass"] is True
@@ -504,7 +504,7 @@ class TestPhase3ManifestFallback:
             doctor_cmd, ["--t3-doc-id-coverage", "--json"],
         )
         assert result.exit_code == 0, result.output
-        payload = json.loads(result.output)["t3_doc_id_coverage"]
+        payload = json.loads(result.stdout)["t3_doc_id_coverage"]
         assert payload["pass"] is True, (
             f"Phase-3 chunk should register as covered via manifest; "
             f"got {payload!r}"
@@ -553,7 +553,7 @@ class TestBypassSchemaSkipped:
             doctor_cmd, ["--t3-doc-id-coverage", "--json"],
         )
         assert result.exit_code == 0, result.output
-        payload = json.loads(result.output)["t3_doc_id_coverage"]
+        payload = json.loads(result.stdout)["t3_doc_id_coverage"]
         assert payload["pass"] is True
         assert "taxonomy__centroids" not in payload["tables"], (
             "bypass-schema collection should be excluded from the "
@@ -604,7 +604,7 @@ class TestSupersededSkip:
             doctor_cmd, ["--t3-doc-id-coverage", "--json"],
         )
         assert result.exit_code == 0, result.output
-        payload = json.loads(result.output)["t3_doc_id_coverage"]
+        payload = json.loads(result.stdout)["t3_doc_id_coverage"]
         assert payload["pass"] is True, payload
         assert payload["skipped_superseded"] == 1
         assert "skipped" in payload["tables"]["code__old"]

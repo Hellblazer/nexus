@@ -249,7 +249,7 @@ def test_boost_ranks_matching_file_higher(cli_env, mock_t3, test_id):
         cache_lines="/repo/match.py:10:hello\n",
     )
     assert result.exit_code == 0, result.output
-    data = json.loads(result.output)
+    data = json.loads(result.stdout)
     match_idx = next(i for i, r in enumerate(data) if r.get("source_path") == "/repo/match.py")
     nomatch_idx = next(i for i, r in enumerate(data) if r.get("source_path") == "/repo/other.py")
     assert match_idx < nomatch_idx
@@ -270,7 +270,7 @@ def test_rg_signal_filtered_from_output(cli_env, mock_t3):
         config_extra={"search": {"hybrid_default": False}},
     )
     assert result.exit_code == 0, result.output
-    data = json.loads(result.output)
+    data = json.loads(result.stdout)
     assert len(data) == 1
     assert data[0].get("collection") == "code__repo-abcd1234"
 
@@ -334,7 +334,7 @@ def test_multiple_rg_hits_same_file_boost_once(cli_env, mock_t3):
         config_extra={"search": {"hybrid_default": False}},
     )
     assert result.exit_code == 0, result.output
-    data = json.loads(result.output)
+    data = json.loads(result.stdout)
     assert len(data) == 1
     assert data[0].get("source_path") == "/repo/match.py"
 
@@ -384,7 +384,7 @@ def test_rg_only_files_promoted_with_penalty(cli_env, mock_t3):
         config_extra={"search": {"hybrid_default": False}},
     )
     assert result.exit_code == 0, result.output
-    data = json.loads(result.output)
+    data = json.loads(result.stdout)
     paths = [r.get("source_path", r.get("file_path")) for r in data]
     assert "/repo/rg_only.py" in paths
     assert "/repo/vector_file.py" in paths
@@ -424,6 +424,6 @@ def test_boosted_result_has_rg_matched_lines(cli_env, mock_t3):
         config_extra={"search": {"hybrid_default": False}},
     )
     assert result.exit_code == 0, result.output
-    data = json.loads(result.output)
+    data = json.loads(result.stdout)
     assert len(data) == 1
     assert data[0].get("rg_matched_lines") == [10, 25]

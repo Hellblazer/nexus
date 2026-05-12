@@ -202,7 +202,7 @@ def test_doctor_collections_drift_json_payload(t3_db, catalog, runner):
             main, ["catalog", "doctor", "--collections-drift", "--json"],
         )
     assert result.exit_code != 0
-    payload = json.loads(result.output)
+    payload = json.loads(result.stdout)
     assert "collections_drift" in payload
     drift = payload["collections_drift"]
     assert drift["pass"] is False
