@@ -987,6 +987,56 @@ class TestBatchExtraction:
         # /p2.pdf is fine
         assert records[1].problem_formulation == "P2"
 
+    def test_batch_empty_content_uri_read_fail_yields_extract_fail(
+        self, monkeypatch,
+    ) -> None:
+        """nexus-8g79.34 (RDR-096 P5.1): when a batch input has
+        ``content=""`` and the URI read fails, the slot returns
+        ``ExtractFail`` (not ``_empty_record``). Mirrors the single-doc
+        path's contract so the worker can ``mark_done`` and skip
+        retry on unreadable sources.
+        """
+        from nexus.aspect_extractor import (
+            ExtractFail,
+            extract_aspects_batch,
+        )
+        from nexus.aspect_readers import ReadFail
+
+        # Mock read_source to return ReadFail for the empty-content row.
+        # First row has content (subprocess path); second is empty
+        # (URI path → ReadFail → ExtractFail).
+        def fake_read(uri, **_kw):
+            return ReadFail(reason="unreachable", detail=f"mocked: {uri}")
+
+        # Mock get_t3 so the t3_handle init succeeds.
+        class _FakeT3:
+            def get_collection(self, _n):
+                raise AssertionError("read_source is mocked; chroma never called")
+
+        monkeypatch.setattr("nexus.aspect_extractor.read_source", fake_read)
+        monkeypatch.setattr(
+            "nexus.aspect_extractor.get_t3", lambda: _FakeT3(),
+        )
+        # subprocess.run must not fire — the empty-content row should
+        # short-circuit to ExtractFail before the subprocess prompt
+        # is built. (The first row would normally trigger subprocess,
+        # but we exercise the read-fail path on the second row only;
+        # use a single-input batch.)
+        monkeypatch.setattr(
+            "nexus.aspect_extractor.subprocess.run",
+            lambda *a, **kw: (_ for _ in ()).throw(
+                AssertionError("subprocess must not run when content is empty + read fails"),
+            ),
+        )
+
+        records = extract_aspects_batch([
+            ("knowledge__delos", "/missing.pdf", "", "1.99.1"),
+        ])
+        assert len(records) == 1
+        assert isinstance(records[0], ExtractFail)
+        assert records[0].reason == "unreachable"
+        assert "/missing.pdf" in records[0].uri
+
     def test_batch_empty_input_returns_empty(self, monkeypatch) -> None:
         from nexus.aspect_extractor import extract_aspects_batch
 

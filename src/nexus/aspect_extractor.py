@@ -79,6 +79,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from urllib.parse import quote
 
 import structlog
@@ -698,131 +699,6 @@ _SCHOLARLY_SECTIONS = frozenset({
     "",
 })
 
-# Cap on the joined T3 content forwarded to the extractor. ~80 KB
-# accommodates a 14-page paper's relevant sections while leaving
-# generous headroom under the prompt budget. The extractor prompt
-# itself is now stdin-fed (see _invoke_once below) so this cap exists
-# for cost / latency / context-window reasons, not OS argv limits.
-_T3_CONTENT_CAP_BYTES = 80_000
-
-
-def _source_content_from_t3(collection: str, source_path: str) -> str:
-    """Reassemble the source document's text from T3 chunks, preferring
-    section-scoped chunks for scholarly papers.
-
-    .. deprecated:: RDR-096 P1.2 (2026-04-27)
-
-       ``extract_aspects`` no longer calls this function — it routes
-       through :func:`nexus.aspect_readers.read_source` with a
-       ``chroma://<collection>/<source_path>`` URI instead. The
-       function is retained as a deprecation shim for the worker's
-       batch-path pre-fetch (``aspect_worker._process_batch``) until
-       the worker migrates to ``read_source`` in a follow-up bead;
-       slated for removal in Phase 5 of RDR-096.
-
-    Returns an empty string on any failure (catalog lookup miss, T3
-    error, no chunks). Callers must treat the empty return as a signal
-    to fall back to disk read.
-
-    Routing notes:
-
-    * For ``knowledge__*`` collections the result is filtered to
-      :data:`_SCHOLARLY_SECTIONS` and capped at
-      :data:`_T3_CONTENT_CAP_BYTES`. This is the path that drove the
-      whole change: we previously slurped 14 pages of dense text into
-      argv.
-    * For other collections the full document is reassembled (no
-      filter). The cap still applies as a defensive bound.
-
-    The function is best-effort by design — every failure path returns
-    ``""`` and the caller falls back to the disk read. We don't want
-    the aspect extractor to crash because T3 is briefly unavailable.
-    """
-    import warnings  # noqa: PLC0415
-    warnings.warn(
-        "nexus.aspect_extractor._source_content_from_t3 is deprecated; "
-        "callers should migrate to nexus.aspect_readers.read_source with "
-        "a chroma:// URI. Slated for removal in RDR-096 Phase 5.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    try:
-        from nexus.db.t3 import T3Database  # noqa: PLC0415
-
-        # Bare constructor — credential fallback (chroma_tenant/database/api_key)
-        # comes from nexus.config via get_credential(); no positional args.
-        with T3Database() as t3:
-            try:
-                coll = t3.get_or_create_collection(collection)
-            except Exception:
-                # CloudClient raises on missing collection; treat as
-                # "no chunks" so the disk fallback can run.
-                return ""
-            from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415
-
-            # Page through all chunks for this source. QUOTAS.MAX_QUERY_RESULTS
-            # caps the per-call limit; documents with more chunks than
-            # the cap are paginated. 300 (current cap) covers ~450 KB
-            # of chunked text per page — a single page suffices for
-            # all but the longest scholarly papers.
-            collected: list[tuple[int, str, str]] = []  # (chunk_index, section_type, text)
-            offset = 0
-            page_limit = QUOTAS.MAX_QUERY_RESULTS
-            while True:
-                got = coll.get(
-                    where={"source_path": source_path},
-                    include=["documents", "metadatas"],
-                    limit=page_limit,
-                    offset=offset,
-                )
-                docs = got.get("documents") or []
-                mds = got.get("metadatas") or []
-                if not docs:
-                    break
-                for md, doc in zip(mds, docs):
-                    if not doc:
-                        continue
-                    ci = md.get("chunk_index", 0) if isinstance(md, dict) else 0
-                    st = md.get("section_type", "") if isinstance(md, dict) else ""
-                    collected.append((int(ci), str(st), doc))
-                if len(docs) < page_limit:
-                    break
-                offset += page_limit
-
-            if not collected:
-                return ""
-
-            collected.sort(key=lambda x: x[0])
-            if collection.startswith("knowledge__"):
-                kept = [
-                    (ci, st, txt) for ci, st, txt in collected
-                    if st in _SCHOLARLY_SECTIONS
-                ]
-                # If section filtering nuked everything (heading detection
-                # failed entirely on this document), fall back to all
-                # chunks rather than returning "" — better degraded
-                # extraction than no extraction.
-                if not kept:
-                    kept = collected
-            else:
-                kept = collected
-
-            joined = "\n\n".join(txt for _, _, txt in kept)
-            if len(joined.encode("utf-8", errors="replace")) > _T3_CONTENT_CAP_BYTES:
-                # Truncate at byte boundary (decoded back with errors=ignore)
-                # so the cap isn't broken by a multi-byte UTF-8 split.
-                joined = joined.encode("utf-8", errors="replace")[:_T3_CONTENT_CAP_BYTES]\
-                    .decode("utf-8", errors="ignore")
-            return joined
-    except Exception:
-        _log.debug(
-            "aspect_extractor_t3_source_failed",
-            collection=collection,
-            source_path=source_path,
-            exc_info=True,
-        )
-        return ""
-
 
 # ── Extraction core ──────────────────────────────────────────────────────────
 
@@ -970,17 +846,31 @@ _BATCH_TIMEOUT_PER_EXTRA_PAPER_S = 60
 
 
 def extract_aspects_batch(
-    items: list[tuple[str, str, str]],
-) -> list[AspectRecord | None]:
+    items: list[tuple[str, str, str]] | list[tuple[str, str, str, str]],
+    *,
+    doc_id_lookup: Callable[[str, str], str] | None = None,
+    manifest_lookup: Callable[[str], list[Any]] | None = None,
+) -> list[AspectRecord | ExtractFail | None]:
     """Synchronously extract aspects for N papers in ONE Claude call.
 
-    Each input tuple is ``(collection, source_path, content)``. Returns
-    a list aligned with input order: ``AspectRecord`` per paper on
-    success, ``None`` for papers whose collection has no registered
-    extractor (the batch only covers a single registered config — see
-    grouping note below), or a null-fields ``AspectRecord`` for
-    papers whose individual extraction failed even though the batch
-    as a whole succeeded.
+    Each input tuple is ``(collection, source_path, content)`` or, with
+    RDR-096 P5.1 (nexus-8g79.34), the 4-tuple
+    ``(collection, source_path, content, doc_id)``. The 4-tuple form
+    captures the per-row catalog tumbler so empty-content rows can
+    route through URI-based reading with correct chunk attribution
+    (mirroring the single-doc ``extract_aspects`` path's contract).
+    Returns a list aligned with input order:
+
+    * ``AspectRecord`` — populated record on success, or null-fields
+      record on subprocess-side failure that the extractor already
+      retried up to 3 times internally.
+    * ``ExtractFail`` (RDR-096 P5.1) — typed read-failure sentinel
+      when an empty-content row could not be sourced via
+      ``chroma://`` URI. Mirrors the single-doc path's
+      ``ExtractFail`` contract so the worker can ``mark_done`` and
+      move on without writing a row.
+    * ``None`` — collection has no registered extractor (the caller
+      should not have included such items; preserved for back-compat).
 
     Cost amortisation: one ``claude -p`` call extracts N papers,
     sharing the model's per-call overhead (system prompt, response
@@ -997,13 +887,15 @@ def extract_aspects_batch(
     paper whose collection has no config (the caller should not
     have included such papers).
 
-    Empty-content fallback: papers with ``content=""`` are read
-    from disk by the worker before this function is called; this
-    function does NOT do its own source-path reading. If a paper's
-    ``content`` is empty when this runs, it lands in the null-
-    fields output without invoking the subprocess for that paper.
-    The single-paper ``extract_aspects`` (above) keeps the disk-
-    read fallback for the simpler call path.
+    Empty-content sourcing (RDR-096 P5.1, nexus-8g79.34): rows with
+    ``content=""`` route through
+    :func:`nexus.aspect_readers.read_source` with a
+    ``chroma://<collection>/<source_path>`` URI — the same path the
+    single-doc ``extract_aspects`` takes. Read failures land as
+    ``ExtractFail`` in the corresponding slot of the output list.
+    Pre-P5.1 the worker pre-fetched content via the deprecated
+    ``_source_content_from_t3`` + disk fallback dance; that shim is
+    deleted with this migration.
 
     Subprocess + retry semantics mirror the single-paper path:
     transient failures retry up to 3 times with exponential
@@ -1014,11 +906,23 @@ def extract_aspects_batch(
     if not items:
         return []
 
+    # Normalise to 4-tuple shape internally. Items passed as 3-tuples
+    # default doc_id to "" — the manifest_lookup path then bypasses
+    # the per-row catalog attribution and the read still works via
+    # source_path identity probe.
+    normalised: list[tuple[str, str, str, str]] = []
+    for item in items:
+        if len(item) == 3:
+            collection, source_path, content = item  # type: ignore[misc]
+            normalised.append((collection, source_path, content, ""))
+        else:
+            normalised.append(item)  # type: ignore[arg-type]
+
     # Group by ExtractorConfig (allows future multi-config batches; for
     # Phase D ships single-config support — multi-config raises).
     config = None
-    out: list[AspectRecord | None] = [None] * len(items)
-    for idx, (collection, _source_path, _content) in enumerate(items):
+    out: list[AspectRecord | ExtractFail | None] = [None] * len(normalised)
+    for idx, (collection, _source_path, _content, _doc_id) in enumerate(normalised):
         item_config = select_config(collection)
         if item_config is None:
             out[idx] = None
@@ -1035,36 +939,63 @@ def extract_aspects_batch(
         # Every item was unsupported.
         return out
 
-    # Filter to only items with a valid config; remember their original
-    # index so we can splice results back into the right slots.
-    indexed_inputs: list[tuple[int, str, str, str]] = [
-        (i, items[i][0], items[i][1], items[i][2])
-        for i in range(len(items))
-        if out[i] is not None or select_config(items[i][0]) is not None
-    ]
-    # The above simplifies to "all items where config is not None":
-    indexed_inputs = [
-        (i, items[i][0], items[i][1], items[i][2])
-        for i in range(len(items))
-        if select_config(items[i][0]) is not None
+    indexed_inputs: list[tuple[int, str, str, str, str]] = [
+        (i, normalised[i][0], normalised[i][1], normalised[i][2], normalised[i][3])
+        for i in range(len(normalised))
+        if select_config(normalised[i][0]) is not None
     ]
 
-    # Per-paper empty-content guard.
+    # nexus-8g79.34: per-row URI-based content sourcing for empty-
+    # content rows. Mirrors the single-doc path's pattern at
+    # extract_aspects:882-920.
     callable_inputs: list[tuple[int, str, str, str]] = []
-    for idx, collection, source_path, content in indexed_inputs:
+    t3_handle: Any = None  # lazy: only construct when we actually need to read
+    for idx, collection, source_path, content, queue_doc_id in indexed_inputs:
         if not content:
-            _log.warning(
-                "aspect_extractor_batch_empty_content",
-                source_path=source_path,
-                collection=collection,
-                detail=(
-                    "batch path received empty content; per-paper file "
-                    "read is the worker's responsibility before invoking "
-                    "this function. Recording null-fields and skipping."
-                ),
+            uri = f"chroma://{collection}/{quote(source_path, safe='/')}"
+            if t3_handle is None:
+                try:
+                    t3_handle = get_t3()
+                except Exception as exc:
+                    _log.warning(
+                        "aspect_extractor_batch_t3_unavailable",
+                        uri=uri,
+                        error=str(exc),
+                    )
+                    out[idx] = ExtractFail(
+                        uri=uri,
+                        reason="infra_unavailable",
+                        detail=f"get_t3 failed: {type(exc).__name__}: {exc}",
+                    )
+                    continue
+            # Per-row doc_id_lookup: prefer the queue-captured doc_id
+            # (nexus-tdgc) so the chroma reader routes to the doc_id-
+            # keyed chunk lookup without re-querying the catalog.
+            # Falls back to the caller-supplied lookup if no queue
+            # doc_id is present.
+            row_doc_id_lookup: Callable[[str, str], str] | None
+            if queue_doc_id:
+                row_doc_id_lookup = (lambda _coll, _sid, _d=queue_doc_id: _d)
+            else:
+                row_doc_id_lookup = doc_id_lookup
+            result = read_source(
+                uri, t3=t3_handle,
+                doc_id_lookup=row_doc_id_lookup,
+                manifest_lookup=manifest_lookup,
             )
-            out[idx] = _empty_record(source_path, collection, config)
-            continue
+            if isinstance(result, ReadFail):
+                _log.warning(
+                    "aspect_extractor_batch_source_unreadable",
+                    uri=uri,
+                    reason=result.reason,
+                    detail=result.detail,
+                )
+                out[idx] = ExtractFail(
+                    uri=uri, reason=result.reason, detail=result.detail,
+                )
+                continue
+            assert isinstance(result, ReadOk)
+            content = result.text
         # Defensive null-byte strip (matches single-paper path).
         content = content.replace("\x00", "")
         callable_inputs.append((idx, collection, source_path, content))

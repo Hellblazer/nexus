@@ -508,7 +508,7 @@ class TestBatchPath:
         batch_calls: list[int] = []
         single_calls: list[int] = []
 
-        def fake_batch(items):
+        def fake_batch(items, *_args, **_kwargs):
             batch_calls.append(len(items))
             return [
                 AspectRecord(
@@ -523,7 +523,7 @@ class TestBatchPath:
                     model_version="claude-haiku-4-5-20251001",
                     extractor_name="scholarly-paper-v1",
                 )
-                for c, sp, _content in items
+                for c, sp, _content, *_ in items
             ]
 
         def fake_single(content, source_path, collection, **_kw):
@@ -573,7 +573,7 @@ class TestBatchPath:
         batch_calls: list[int] = []
         single_calls: list[str] = []
 
-        def fake_batch(items):
+        def fake_batch(items, *_args, **_kwargs):
             batch_calls.append(len(items))
             raise AssertionError("batch path should not fire for 1 row")
 
@@ -644,7 +644,7 @@ class TestBatchPath:
         batch_calls: list[int] = []
         single_calls: list[str] = []
 
-        def fake_batch(items):
+        def fake_batch(items, *_args, **_kwargs):
             batch_calls.append(len(items))
             raise AssertionError(
                 "batch path must NOT fire on heterogeneous configs"
