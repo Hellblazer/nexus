@@ -134,7 +134,16 @@ def put_cmd(
     # the original commit. doc_id is the source identity here (no
     # on-disk file at the CLI boundary, mirroring MCP store_put).
     from nexus.mcp_infra import fire_store_chains
-    fire_store_chains([doc_id], col_name, [content])
+    # nexus-lf8f: pass catalog_doc_id through to fire_store_chains so the
+    # manifest-write batch hook can populate document_chunks and
+    # documents.chunk_count for this CLI store path. Without it the
+    # hook short-circuits and the catalog row ships with chunk_count=0
+    # (the same regression class as nexus-zq79 / 4.32.4 fixed for
+    # `nx index repo`).
+    fire_store_chains(
+        [doc_id], col_name, [content],
+        catalog_doc_id=catalog_doc_id,
+    )
 
 
 def _catalog_store_hook(title: str, doc_id: str, collection_name: str) -> str:

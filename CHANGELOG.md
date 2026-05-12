@@ -6,6 +6,66 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.32.5] - 2026-05-12
+
+Patch on 4.32.4. Closes the remaining Tier-0 same-class regressions
+surfaced by the post-4.32.4 multi-agent audit (6 specialised agents
+ran in parallel across architecture, error handling, test quality,
+external deps, design contracts, deferment inventory). 4.32.4 fixed
+the ``nx index repo`` path; 4.32.5 fixes the rest of the surface
+with the identical bug shape and closes the event-replay invariant.
+
+### Fixed
+
+- **``fire_store_chains`` missing ``catalog_doc_id``** (nexus-lf8f):
+  the consolidated hook-firing helper used by MCP ``store_put``,
+  ``nx store put``, ``nx memory promote``, and ``nx store import``
+  didn't pass ``catalog_doc_id`` through to
+  ``fire_post_store_batch_hooks``. Post-Phase-3 chunks have no
+  ``doc_id`` fallback in metadata, so the manifest hook short-
+  circuited and the catalog row shipped with ``chunk_count=0`` and
+  an empty manifest — the same regression class as nexus-zq79,
+  different code path. ``fire_store_chains`` now accepts
+  ``catalog_doc_id`` kwarg and threads it through; ``nx store put``
+  wires it explicitly from ``_catalog_store_hook``. The
+  ``nx memory promote`` and ``nx store import`` paths still need
+  catalog registration plumbing — filed as follow-ups.
+- **``Projector.apply_all`` event-replay re-derives
+  ``documents.chunk_count``** (nexus-lf8f): the resync hook writes
+  directly to SQLite (chunk_count is a denormalised cache, not an
+  event-sourced field). Without a post-replay re-derivation,
+  ``nx catalog rebuild`` from ``events.jsonl`` would project
+  ``chunk_count=0`` forever — the ``DocumentRegistered`` events
+  carry the register-time snapshot only. The projector now runs
+  a single set-based ``UPDATE documents SET chunk_count = (SELECT
+  COUNT(*) FROM document_chunks WHERE doc_id = tumbler)`` after
+  every replay, guarded by ``WHERE EXISTS`` so caller-supplied
+  values via ``Catalog.update(chunk_count=N)`` still survive.
+- **Search results now carry catalog-derived ``chunk_count`` and
+  ``chunk_index``** (nexus-dxly, partial): post-Phase-3 chunk
+  metadata dropped both fields; ``scoring.py:125`` defaulted
+  ``chunk_count=1`` (file-size penalty silently disabled);
+  ``aspect_readers.py:266`` defaulted ``chunk_index=0`` (multi-
+  chunk doc reassembly wrong). The
+  ``_attach_doc_ids_from_catalog`` helper now batches the
+  manifest fetch and stamps both fields onto every result that
+  resolves to a catalog doc. ``aspect_readers`` and
+  ``aspect_extractor`` direct-chroma paths still need wiring to
+  the manifest — filed as follow-ups.
+
+### Known follow-ups
+
+- ``nexus-dxly`` (P0) — ``aspect_readers`` and ``aspect_extractor``
+  direct-chroma reassembly still needs manifest-based ordering.
+- ``nexus-w5zv`` (P1) — backfill paths write Phase-3 chunks at
+  position 0.
+- ``nexus-lrhg`` (P1) — atomicity wrap of manifest hook, chash
+  32/64-char normalisation, ``DocumentDeleted`` replay orphan
+  cleanup, ``event_log.py`` flock re-entrancy, staleness-cache
+  silent-fail.
+- ``nexus-lf8f`` (this bead, partial — store_put + projector
+  shipped, ``memory promote`` + ``store import`` deferred).
+
 ## [4.32.4] - 2026-05-12
 
 Patch on 4.32.3. Stops the silent data-correctness regression from

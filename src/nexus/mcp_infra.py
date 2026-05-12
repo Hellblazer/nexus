@@ -1138,6 +1138,7 @@ def fire_store_chains(
     source_paths: list[str] | None = None,
     embeddings: list[list[float]] | None = None,
     metadatas: list[dict] | None = None,
+    catalog_doc_id: str = "",
 ) -> None:
     """Fire all three post-store hook chains for a batch of just-stored docs.
 
@@ -1165,11 +1166,25 @@ def fire_store_chains(
     metadatas:
         Optional metadata dicts per doc; forwarded to the batch chain.
         ``chash_dual_write_batch_hook`` reads from this.
+    catalog_doc_id:
+        nexus-lf8f: the catalog ``Document.tumbler`` for these chunks
+        (RDR-108 Phase 3). Post-Phase-3, chunk metadata no longer
+        carries ``doc_id`` so the manifest-write hook needs the tumbler
+        passed explicitly via this kwarg or it short-circuits silently
+        (the exact symptom nexus-zq79 fixed for the indexer paths in
+        4.32.4; this kwarg closes the same gap for the store-path
+        callers — MCP ``store_put``, ``nx store put``,
+        ``nx memory promote``, ``nx store import``). Default ``""``
+        preserves the legacy "no catalog identity" shape for callers
+        that genuinely have no tumbler (raw scratch writes pre-catalog
+        registration); those callers' chunks remain catalog-orphaned by
+        design.
     """
     n = len(doc_ids)
-    assert len(contents) == n, (
-        f"contents length {len(contents)} != doc_ids length {n}"
-    )
+    if len(contents) != n:
+        raise ValueError(
+            f"contents length {len(contents)} != doc_ids length {n}"
+        )
     if source_paths is None:
         source_paths = list(doc_ids)
     elif len(source_paths) != n:
@@ -1185,6 +1200,7 @@ def fire_store_chains(
     fire_post_store_batch_hooks(
         doc_ids, collection, contents,
         embeddings=embeddings, metadatas=metadatas,
+        catalog_doc_id=catalog_doc_id,
     )
 
     # Document-grain chain — once per (source_path, content).
