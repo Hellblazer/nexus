@@ -1546,6 +1546,13 @@ class Catalog:
         :meth:`_WriteOps.purge_manifest_for_doc`."""
         return self._writes.purge_manifest_for_doc(doc_id)
 
+    def atomic_manifest_replace(
+        self, doc_id: str, chunks: list[dict],
+    ) -> None:
+        """nexus-lrhg: atomic DELETE + INSERT + chunk_count UPDATE for one
+        document's manifest. See :meth:`_WriteOps.atomic_manifest_replace`."""
+        return self._writes.atomic_manifest_replace(doc_id, chunks)
+
     def get_manifest(self, doc_id: str) -> list[_ManifestRow]:
         """Return ordered manifest rows for ``doc_id`` (nexus-572g K6)."""
         return self._writes.get_manifest(doc_id)
