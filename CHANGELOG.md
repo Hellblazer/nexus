@@ -6,6 +6,56 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.32.7] - 2026-05-12
+
+Patch on 4.32.6. Five dependency upgrades, all unblocked by the
+``mineru[all]`` → ``mineru[pipeline]`` switch in 4.32.6 (the old
+extras pulled vllm / nvidia-cudnn-frontend which had no macOS
+wheels and pinned the resolver against ``llama-index-core 0.14``).
+
+### Deps
+
+- **``llama-index-core`` ``0.12.7`` → ``0.14.21``** (nexus-8g79.16):
+  two major versions behind, CVE-response blocker per the audit.
+  CodeSplitter API surface (the only call site in ``chunker.py``)
+  unchanged between 0.12 and 0.14. Verified locally: chunker imports
+  + a synthetic Python file produces the expected node count.
+- **``mineru`` ``3.0.5`` → ``3.1.11``** (nexus-8g79.19): six weeks
+  stale, 11 patch releases since. ``do_parse`` signature unchanged;
+  pipeline backend imports clean.
+- **``tree-sitter-language-pack`` ``0.7.1`` → ``1.8.0``**
+  (nexus-8g79.20): major version bump. ``get_parser('python')`` and
+  ``get_parser('csharp')`` (the ``c_sharp`` → ``csharp`` rewrite
+  case at ``chunker.py:46``) both work. 88 chunker / language tests
+  pass post-bump.
+- **``chromadb`` ``1.5.1`` → ``1.5.9``** (nexus-8g79.21): eight
+  patch releases. The ``t3.py`` internal-object timeout patch
+  (which overrides chromadb's hardcoded
+  ``httpx.Client(timeout=None)``) still applies cleanly — the
+  ``client._server._session`` shape is preserved; verified
+  ``timeout=None`` and ``httpx.Client`` patterns still present in
+  ``chromadb.api.fastapi``.
+- **``mcp`` ``1.26.0`` → ``1.27.1``** (nexus-8g79.22): minor
+  upstream catch-up. No source changes.
+
+### Cosmetic (nexus-8g79.22)
+
+- **``Settings()`` kwargs migration** in
+  ``commands/_provision.py``: replace the chromadb-0.4-era
+  attribute-set form (``settings.attr = value``) with constructor
+  kwargs. The attribute-set form was deprecated upstream and its
+  deprecation window keeps quietly advancing.
+- **``urllib.request.urlopen`` → ``httpx``** in
+  ``commands/_provision.py``: one outbound HTTP call in nexus was
+  on ``urllib``; every other call uses httpx. Consistency +
+  explicit-timeout argument shape. Tests updated to patch
+  ``httpx.get`` instead of ``urllib.request.urlopen``.
+- **``voyage-3`` annotated as retired** in ``commands/doctor.py``:
+  Voyage AI retired the base ``voyage-3`` model in early 2025;
+  doctor now reports ``"status": "retired"`` rather than a
+  healthy-looking line. New code paths use ``voyage-code-3`` /
+  ``voyage-context-3`` exclusively.
+
 ## [4.32.6] - 2026-05-12
 
 Patch on 4.32.5. Audit follow-ups: mineru install-surface reduction +

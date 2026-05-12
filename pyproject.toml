@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "conexus"
-version = "4.32.6"
+version = "4.32.7"
 description = "Self-hosted semantic search and knowledge management for LLM-driven development"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.12,<3.14"
@@ -36,7 +36,7 @@ classifiers = [
 dependencies = [
     "chromadb>=0.6",
     "click>=8.1",
-    "llama-index-core==0.12.7",
+    "llama-index-core>=0.12.7,<0.15",
     "markdown-it-py>=4.0.0",
     "msgpack>=1.0",
     "numpy>=1.24",
@@ -45,7 +45,7 @@ dependencies = [
     "scikit-learn>=1.3",
     "structlog>=24.0",
     "tqdm>=4.65",
-    "tree-sitter-language-pack==0.7.1",
+    "tree-sitter-language-pack>=0.7.1,<2.0",
     "voyageai>=0.2",
     "docling>=2.76.0",
     "python-pptx>=1.0.0",

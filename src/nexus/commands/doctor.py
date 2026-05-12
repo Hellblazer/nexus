@@ -1590,7 +1590,18 @@ def _collect_quota_report() -> dict:
         voyage_limits = {
             "mode": "cloud",
             "models": {
-                "voyage-3": {"max_tokens": 32_000, "embedding_dims": 1024},
+                # nexus-8g79.22: voyage-3 is the LEGACY base model name;
+                # Voyage AI retired it in early 2025. Kept here as a
+                # detection label so doctor reports operators with
+                # leftover voyage-3 configs see the retired tag rather
+                # than a "healthy" line. New code paths use
+                # voyage-code-3 / voyage-context-3 exclusively (see
+                # corpus.py:effective_embedding_model_for_writes).
+                "voyage-3": {
+                    "max_tokens": 32_000,
+                    "embedding_dims": 1024,
+                    "status": "retired",
+                },
                 "voyage-code-3": {"max_tokens": 32_000, "embedding_dims": 1024},
                 "voyage-context-3": {"max_tokens": 32_000, "embedding_dims": 1024},
             },
