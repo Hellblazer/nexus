@@ -73,9 +73,25 @@ def _repo_collections(repo_path: Path | None) -> set[str] | None:
 
             colls.add(_repo_collection_or_legacy(repo_path, "rdr"))
         except Exception:
-            pass
+            # nexus-8g79.8: inner — recoverable, the rdr collection
+            # may legitimately not exist. DEBUG-with-exc_info so
+            # debugging surfaces it without flooding production logs.
+            import structlog
+            structlog.get_logger(__name__).debug(
+                "repo_collection_or_legacy_failed",
+                repo_path=str(repo_path),
+                exc_info=True,
+            )
         return colls if colls else None
     except Exception:
+        # nexus-8g79.8: outer — degrades the entire L1 context
+        # (taxonomy + collections) silently. WARNING because a
+        # recurring failure produces wrong LLM prompts with no signal.
+        import structlog
+        structlog.get_logger(__name__).warning(
+            "discover_repo_collections_failed",
+            exc_info=True,
+        )
         return None
 
 

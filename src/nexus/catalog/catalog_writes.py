@@ -1081,6 +1081,13 @@ class _WriteOps:
                 cat._append_jsonl(cat._documents_path, tombstone)
             else:
                 cat._append_jsonl(cat._documents_path, tombstone)
+                # nexus-8g79.7: cascade-delete the manifest rows.
+                # Mirrors the event-sourced path in projector
+                # ``_v0_document_deleted``.
+                cat._db.execute(
+                    "DELETE FROM document_chunks WHERE doc_id = ?",
+                    (str(tumbler),),
+                )
                 cat._db.execute(
                     "DELETE FROM documents WHERE tumbler = ?",
                     (str(tumbler),),

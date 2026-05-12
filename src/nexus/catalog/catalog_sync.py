@@ -705,6 +705,14 @@ class _SyncOps:
         except Exception:
             # On any unexpected failure, refuse the event-sourced
             # rebuild (safer to fall through to legacy than to wipe).
+            # nexus-8g79.6: surface at WARNING — pre-fix this returned
+            # False with no log, so a persistent error silently
+            # downgraded every startup to the slower legacy rebuild
+            # with no operator signal.
+            _log.warning(
+                "should_use_event_sourced_rebuild_failed",
+                exc_info=True,
+            )
             return False
 
     def rebuild(self) -> None:

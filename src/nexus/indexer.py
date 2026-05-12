@@ -1542,10 +1542,25 @@ def _prune_misclassified_in_collection(
         # check (a code file's chunks living in docs__) works without
         # any per-chunk metadata.
         all_natural_ids: list[str] = []
+        # nexus-8g79.4: bare ``continue`` on get_manifest failure silently
+        # skipped doc_ids whose manifest lookup raised (catalog miss,
+        # transient SQLite error). Those chunks were then never pruned
+        # from T3 — over successive runs T3 grew with unreachable orphan
+        # chunks. Log at WARNING with the doc_id so operators see the
+        # affected scope; count for the post-run summary.
+        skipped_doc_ids: dict[str, str] = {}
         for did in doc_ids:
             try:
                 manifest = catalog.get_manifest(did)
-            except Exception:
+            except Exception as exc:
+                skipped_doc_ids[did] = f"{type(exc).__name__}: {exc}"
+                _log.warning(
+                    "prune_misclassified_manifest_lookup_failed",
+                    doc_id=did,
+                    collection=getattr(col, "name", "?"),
+                    kind=kind,
+                    exc_info=True,
+                )
                 continue
             for row in manifest:
                 if row.chash:
@@ -1559,6 +1574,16 @@ def _prune_misclassified_in_collection(
             try:
                 present = col.get(ids=batch_ids, include=[])
             except Exception:
+                # nexus-8g79.4: same class — log so a recurring chroma
+                # outage during prune doesn't hide silently behind a
+                # bare ``continue``.
+                _log.warning(
+                    "prune_misclassified_chroma_get_failed",
+                    collection=getattr(col, "name", "?"),
+                    kind=kind,
+                    batch_size=len(batch_ids),
+                    exc_info=True,
+                )
                 continue
             present_ids = present.get("ids") or []
             if present_ids:

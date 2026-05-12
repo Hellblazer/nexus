@@ -785,7 +785,14 @@ class Catalog:
                 if live_count > 0 and total_lines / live_count >= ratio:
                     return True
         except Exception:
-            pass
+            # nexus-8g79.5: pre-fix the bare ``except: pass`` silently
+            # disabled JSONL compaction whenever an exception fired
+            # (transient read error, permissions hiccup). The next call
+            # would re-try and might succeed, but a persistent error
+            # silently let the JSONL grow unbounded. Surface at WARNING
+            # so operators see the disablement; still return False so
+            # the sync path doesn't crash on a corrupt JSONL.
+            _log.warning("needs_compaction_check_failed", exc_info=True)
         return False
 
     def sync(self, message: str = "catalog update") -> None:

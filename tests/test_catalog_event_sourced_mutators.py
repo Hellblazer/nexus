@@ -209,6 +209,79 @@ class TestDeleteDocumentEventSourced:
         ).fetchone()
         assert rows[0] == 0
 
+    def test_delete_cascades_to_document_chunks(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """nexus-8g79.7: deleting a document must purge its
+        document_chunks manifest rows in the same write — pre-fix the
+        manifest was left as FK orphans because the schema has no
+        ON DELETE CASCADE and the projector handler only DELETEd from
+        documents.
+        """
+        monkeypatch.setenv("NEXUS_EVENT_SOURCED", "1")
+        d = tmp_path / "catalog"
+        d.mkdir()
+        cat = Catalog(d, d / ".catalog.db")
+        owner = cat.register_owner("nexus", "repo", repo_hash="abab")
+        tumbler = cat.register(owner, "doc.md", content_type="prose")
+        # Plant 3 manifest rows via the public API.
+        cat.append_manifest_chunks(
+            str(tumbler),
+            [
+                {
+                    "position": i, "chash": f"ch{i}",
+                    "chunk_index": i,
+                    "line_start": None, "line_end": None,
+                    "char_start": None, "char_end": None,
+                }
+                for i in range(3)
+            ],
+        )
+        assert len(cat.get_manifest(str(tumbler))) == 3
+
+        assert cat.delete_document(tumbler) is True
+
+        # documents row gone AND document_chunks rows gone.
+        doc_count = cat._db.execute(
+            "SELECT count(*) FROM documents WHERE tumbler = ?",
+            (str(tumbler),),
+        ).fetchone()[0]
+        chunk_count = cat._db.execute(
+            "SELECT count(*) FROM document_chunks WHERE doc_id = ?",
+            (str(tumbler),),
+        ).fetchone()[0]
+        assert doc_count == 0
+        assert chunk_count == 0, (
+            "delete_document must cascade-purge document_chunks; pre-fix "
+            f"this left {chunk_count} orphan rows."
+        )
+
+    def test_delete_cascades_to_document_chunks_legacy_path(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """nexus-8g79.7: same cascade for the non-event-sourced path."""
+        monkeypatch.delenv("NEXUS_EVENT_SOURCED", raising=False)
+        d = tmp_path / "catalog"
+        d.mkdir()
+        cat = Catalog(d, d / ".catalog.db")
+        owner = cat.register_owner("nexus", "repo", repo_hash="abab")
+        tumbler = cat.register(owner, "doc.md", content_type="prose")
+        cat.append_manifest_chunks(
+            str(tumbler),
+            [{"position": 0, "chash": "ch0", "chunk_index": 0,
+              "line_start": None, "line_end": None,
+              "char_start": None, "char_end": None}],
+        )
+        assert len(cat.get_manifest(str(tumbler))) == 1
+
+        assert cat.delete_document(tumbler) is True
+
+        chunk_count = cat._db.execute(
+            "SELECT count(*) FROM document_chunks WHERE doc_id = ?",
+            (str(tumbler),),
+        ).fetchone()[0]
+        assert chunk_count == 0
+
 
 # ── set_alias ────────────────────────────────────────────────────────────
 

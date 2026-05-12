@@ -1432,7 +1432,15 @@ def _catalog_markdown_hook(
                             year = int(dm.group(1))
                             break
         except Exception:
-            pass
+            # nexus-8g79.8: silent pass leaves title/year unset for the
+            # whole catalog entry — `nx catalog show` shows "" / 0.
+            # DEBUG-with-exc_info + path so a recurring permissions or
+            # encoding issue surfaces without aborting indexing.
+            import structlog
+            structlog.get_logger(__name__).debug(
+                "catalog_markdown_frontmatter_parse_failed",
+                path=str(md_path), exc_info=True,
+            )
 
         owner_name = corpus if corpus else "standalone-docs"
         # Curator-only lookup — see _register_or_lookup_doc_id for

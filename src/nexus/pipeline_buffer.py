@@ -210,7 +210,11 @@ class PipelineDB:
         if not fields:
             return
 
-        sets = ", ".join(f"{k} = ?" for k in fields)
+        # nexus-8g79.9: defense-in-depth — quote identifiers even though
+        # the allowlist already prevents injection today. Future allowlist
+        # additions that include a SQL keyword (e.g. ``order``) would
+        # break or inject without the explicit quoting.
+        sets = ", ".join(f'"{k}" = ?' for k in fields)
         vals = list(fields.values())
         vals.append(_now())
         vals.append(content_hash)

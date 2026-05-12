@@ -287,13 +287,38 @@ def resolve_chash_globally(
     # ── T2 path ─────────────────────────────────────────────────────
     rows = chash_index.lookup(hex_chash)
     if rows:
+        # nexus-8g79.3: when T3 list_collections() fails transiently
+        # (network blip, quota, timeout) the pre-fix code defaulted
+        # ``live`` to the empty set, then the self-heal loop below
+        # treated EVERY row as stale and deleted them all — silently
+        # wiping the chash index across the whole prefix. The guarded
+        # delete_stale calls succeeded so no exception surfaced;
+        # subsequent span resolution then fell through to the full-
+        # collection scan fallback. Fail-loud-and-skip-cleanup is
+        # strictly safer than fail-quiet-and-purge: log at WARNING
+        # and return without touching the index.
         try:
             live = {c.name for c in t3.list_collections()}
+            list_failed = False
         except Exception:
+            _log.warning(
+                "chash_index_selfheal_skipped_list_collections_failed",
+                chash_prefix=hex_chash[:16],
+                exc_info=True,
+            )
+            # Skip self-heal this pass; treat every row as a survivor
+            # so span resolution still proceeds. A future call with a
+            # working T3 will reconcile. Pre-fix the bare
+            # ``except: live = set()`` purged every row from the chash
+            # index — catastrophic on a transient.
             live = set()
+            list_failed = True
         survivors: list[dict] = []
         for row in rows:
-            if row["collection"] in live:
+            if list_failed or row["collection"] in live:
+                # nexus-8g79.3: when list_collections() failed above
+                # we cannot tell stale from live, so every row is a
+                # provisional survivor and self-heal is skipped.
                 survivors.append(row)
             else:
                 # Go through the locked public API — this must not race
@@ -304,7 +329,7 @@ def resolve_chash_globally(
                         chash=hex_chash, collection=row["collection"],
                     )
                 except Exception:
-                    _log.debug(
+                    _log.warning(
                         "chash_index_selfheal_delete_failed",
                         chash_prefix=hex_chash[:16],
                         collection=row["collection"],

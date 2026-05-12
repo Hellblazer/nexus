@@ -336,6 +336,15 @@ class Projector:
         tumbler = payload.tumbler or payload.doc_id
         if not tumbler:
             return
+        # nexus-8g79.7: cascade-delete the document_chunks manifest
+        # rows. Pre-fix, deleting a document left orphan manifest rows
+        # forever (the schema has no FK with ON DELETE CASCADE; under
+        # FK=OFF replay the orphans then survived into the rebuilt
+        # SQLite). Manifest is keyed on doc_id == tumbler.
+        self._db.execute(
+            "DELETE FROM document_chunks WHERE doc_id = ?",
+            (tumbler,),
+        )
         self._db.execute(
             "DELETE FROM documents WHERE tumbler = ?",
             (tumbler,),

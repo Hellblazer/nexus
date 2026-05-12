@@ -298,7 +298,15 @@ def plan_match(
                 try:
                     cache.remove(plan_id)
                 except Exception:
-                    pass
+                    # nexus-8g79.8: a recurring removal failure causes
+                    # the stale row to be re-evicted on every match
+                    # call. DEBUG-with-exc_info + plan_id so the
+                    # repeat-offender is identifiable.
+                    import structlog
+                    structlog.get_logger(__name__).debug(
+                        "plan_cache_eviction_failed",
+                        plan_id=plan_id, exc_info=True,
+                    )
                 continue
             confidence = max(0.0, 1.0 - float(distance))
             if confidence < min_confidence:

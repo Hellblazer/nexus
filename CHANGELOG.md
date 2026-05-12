@@ -6,6 +6,77 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.32.6] - 2026-05-12
+
+Patch on 4.32.5. Tier-1 silent-fail discipline pass surfaced by the
+2026-05-12 multi-agent audit. None of these are data-loss class — they
+are silent degradations where a recurring error returns "safe-looking"
+state (empty set, False, b"", default value) so the broken behaviour is
+indistinguishable from healthy in logs.
+
+### Fixed
+
+- **``catalog_spans.py:290`` no longer wipes the chash index on T3
+  transient** (nexus-8g79.3): the pre-fix
+  ``except: live = set()`` made every row look stale and the
+  self-heal loop deleted them all. Now logs at WARNING, treats every
+  row as a provisional survivor, and skips the self-heal pass.
+- **``Catalog.delete_document`` cascades to ``document_chunks``**
+  (nexus-8g79.7): pre-fix only ``DELETE FROM documents`` ran, leaving
+  orphan manifest rows that survived even after event-sourced replay
+  (no FK cascade in the schema). Both the projector's
+  ``_v0_document_deleted`` and the legacy write path now
+  ``DELETE FROM document_chunks WHERE doc_id = ?`` first.
+- **``indexer.py:1547`` prune-misclassified no longer silently
+  accumulates T3 orphans** (nexus-8g79.4): the bare ``continue`` on
+  ``get_manifest`` failure left chunks un-pruned indefinitely. Both
+  the manifest-lookup and the ``col.get`` paths now log at WARNING
+  with doc_id / batch size + ``exc_info``.
+- **``catalog.py:_needs_compaction`` exception surfaces at WARNING**
+  (nexus-8g79.5): pre-fix the bare ``except: pass`` silently disabled
+  JSONL compaction whenever the threshold check raised, letting the
+  files grow unbounded.
+- **``catalog_sync.py:_should_use_event_sourced_rebuild`` exception
+  surfaces at WARNING** (nexus-8g79.6): pre-fix the silent return-False
+  downgraded every startup to legacy rebuild on a persistent error,
+  with no operator signal.
+- **``pipeline_buffer.update_progress`` quotes column identifiers**
+  (nexus-8g79.9): defense-in-depth — allowlist-check still gates today,
+  but a future allowlist entry that includes a SQL keyword (``order``)
+  would break or inject without explicit ``"col" = ?`` quoting.
+- **8 silent-fail patterns logged correctly** (nexus-8g79.8):
+  ``indexer_utils.py:317`` (WARNING — docs_for_chashes failure
+  silently broke catalog-aware retrieval),
+  ``context.py:71/78`` (DEBUG inner + WARNING outer — L1 context
+  collection-discovery),
+  ``operators/dispatch.py:128`` (DEBUG — pipe read failure was
+  invisible),
+  ``plans/matcher.py:298`` (DEBUG — cache eviction failure with
+  plan_id),
+  ``doc_indexer.py:1434`` (DEBUG — frontmatter parse failure left
+  catalog title/year unset),
+  ``collection_audit.py:186`` (WARNING + failed-count — per-embedding
+  query failure produced sparse-looking histograms indistinguishable
+  from genuinely sparse collections).
+
+### Tests
+
+Two new regression tests in ``test_catalog_event_sourced_mutators.py``
+assert ``delete_document`` cascades to ``document_chunks`` on both
+the event-sourced and legacy paths. 532 tests pass across touched
+suites.
+
+### Known follow-ups (from the audit epic ``nexus-8g79``)
+
+Tier-2 architectural cleanup (7 layering violations + consolidation
+T3-write bypass + dead-code sweep) plans into 4.33. Tier-3 external
+dep upgrades (``llama-index-core``, ``cryptography``,
+``tree-sitter-language-pack``, ``mineru[all]`` surface reduction,
+``chromadb`` timeout-patch fragility) plan as separate beads. Tier-4
+test discipline (155 inequality assertions, ``manifest_write_batch_hook``
+exception coverage, ``time.sleep`` → threading.Event in 8 files)
+plans as a sweep.
+
 ## [4.32.5] - 2026-05-12
 
 Patch on 4.32.4. Closes the remaining Tier-0 same-class regressions
