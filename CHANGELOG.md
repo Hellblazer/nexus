@@ -23,11 +23,16 @@ wheels and pinned the resolver against ``llama-index-core 0.14``).
 - **``mineru`` ``3.0.5`` → ``3.1.11``** (nexus-8g79.19): six weeks
   stale, 11 patch releases since. ``do_parse`` signature unchanged;
   pipeline backend imports clean.
-- **``tree-sitter-language-pack`` ``0.7.1`` → ``1.8.0``**
-  (nexus-8g79.20): major version bump. ``get_parser('python')`` and
-  ``get_parser('csharp')`` (the ``c_sharp`` → ``csharp`` rewrite
-  case at ``chunker.py:46``) both work. 88 chunker / language tests
-  pass post-bump.
+- **``tree-sitter-language-pack`` ``0.7.1`` → ``0.13.0``**
+  (nexus-8g79.20): pin relaxed from ``==0.7.1`` to ``>=0.7.1,<1.0``.
+  Local resolver picks 0.13.0 (newest 0.x). 1.x is a complete API
+  rewrite — the C-binding ``Parser`` exposes no ``parse()``
+  method, replaced by a top-level ``process()`` + ``ProcessResult``
+  flow. Nexus's ``_extract_context`` (``code_indexer.py:262``)
+  calls ``parser.parse(source)`` directly, so 1.x raises
+  ``AttributeError`` on every code-indexing run. Migration scoped
+  as a follow-up (``nexus-8g79.35``); this patch unblocks 4.32.7
+  without touching the chunker.
 - **``chromadb`` ``1.5.1`` → ``1.5.9``** (nexus-8g79.21): eight
   patch releases. The ``t3.py`` internal-object timeout patch
   (which overrides chromadb's hardcoded

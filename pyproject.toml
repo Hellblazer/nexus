@@ -45,7 +45,15 @@ dependencies = [
     "scikit-learn>=1.3",
     "structlog>=24.0",
     "tqdm>=4.65",
-    "tree-sitter-language-pack>=0.7.1,<2.0",
+    # nexus-8g79.20 finding 2026-05-12: tree-sitter-language-pack 1.x
+    # is a COMPLETE API rewrite. The 1.x ``Parser`` C-binding (PyO3)
+    # exposes no ``parse()`` method; the new flow uses a top-level
+    # ``process()`` + ``ProcessResult`` type. Nexus's
+    # ``_extract_context`` (code_indexer.py:262) calls
+    # ``parser.parse(source)`` directly, so CI fails with
+    # "Parser object has no attribute 'parse'". Migration is its own
+    # arc — pinned to 0.x for now; tracked as nexus-8g79.35.
+    "tree-sitter-language-pack>=0.7.1,<1.0",
     "voyageai>=0.2",
     "docling>=2.76.0",
     "python-pptx>=1.0.0",
