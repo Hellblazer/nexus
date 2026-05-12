@@ -241,6 +241,15 @@ class TestCiteTiedCandidatesNote:
 
     def test_tied_candidates_json_returns_all(self, cite_env):
         from nexus.commands.doc import cite_cmd
+        import nexus.catalog.catalog_spans as _spans
+
+        # nexus-8g79.* fix: the chash-fallback warning is one-shot
+        # per process and lands on stderr; when CliRunner merges
+        # stderr -> stdout in CI, the warning prefixes the JSON
+        # payload. Pre-consume the one-shot here so the warning has
+        # already fired before this test's JSON assertion runs,
+        # regardless of pytest collection order.
+        _spans._chash_fallback_warned = True
 
         cat, t3, chash_index, _ = cite_env
         c1, c2 = "a" * 64, "b" * 64
