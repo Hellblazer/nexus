@@ -193,7 +193,58 @@ def get_telemetry_config(
 def get_pdf_extractor(repo_root: Path | None = None) -> str:
     return get_pdf_config(repo_root).extractor
 
+def _read_live_mineru_port() -> int | None:
+    """Return the port of the currently-alive MinerU server, or None.
+
+    Source of truth is the PID file written by ``nx mineru start`` /
+    ``_restart_mineru_server`` at ``~/.config/nexus/mineru.pid``. The
+    file persists across the spawning process tree's lifetime but is
+    cleaned up by ``nx mineru stop``; ``_is_process_alive`` guards
+    against stale rows when the server crashes without cleanup.
+
+    nexus-oa7r: previously the live port was written to
+    ``~/.config/nexus/config.yml``'s ``pdf.mineru_server_url``. That
+    persistent record drifted across reboots: when the server died,
+    the config still pointed at the dead port, and every subsequent
+    session silently fell through to the OOM-prone in-process
+    subprocess. PID file is the canonical source — it's correct by
+    construction (only present when the server is up).
+    """
+    try:
+        from nexus.commands.mineru import (  # noqa: PLC0415
+            _is_process_alive,
+            _read_pid_file,
+        )
+    except Exception:
+        return None
+    info = _read_pid_file()
+    if not info:
+        return None
+    pid = info.get("pid")
+    port = info.get("port")
+    if not isinstance(pid, int) or not isinstance(port, int):
+        return None
+    if not _is_process_alive(pid):
+        return None
+    return port
+
+
 def get_mineru_server_url(repo_root: Path | None = None) -> str:
+    """Return the URL of the live MinerU server, falling back to the
+    configured default when no live server is found.
+
+    Resolution order:
+    1. Live PID file (``~/.config/nexus/mineru.pid``) — the canonical
+       source of truth when a server is running. Validated via
+       ``_is_process_alive``.
+    2. Configured ``pdf.mineru_server_url`` — the static fallback for
+       installs where the operator manages the server out-of-band
+       (e.g. a launchctl service on a fixed port).
+    3. Built-in default ``http://127.0.0.1:8010``.
+    """
+    live = _read_live_mineru_port()
+    if live is not None:
+        return f"http://127.0.0.1:{live}"
     return get_pdf_config(repo_root).mineru_server_url
 
 def get_mineru_table_enable(repo_root: Path | None = None) -> bool:

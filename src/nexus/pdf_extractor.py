@@ -748,8 +748,6 @@ class PDFExtractor:
             _mineru_output_root,
             _server_env,
         )
-        from nexus.config import set_config_value
-
         port = _find_free_port()
         cmd = ["mineru-api", "--host", "127.0.0.1", "--port", str(port)]
         # nexus-2fyb code-review C-sec-1: previously called _server_env() with
@@ -787,7 +785,11 @@ class PDFExtractor:
             _log.warning("mineru_restart_failed", reason="health timeout")
             return False
 
-        # Write PID file and update config
+        # Write PID file only (canonical source of truth). nexus-oa7r:
+        # do NOT write the port to persistent config — the PID-file
+        # lookup in ``get_mineru_server_url`` discovers the live port
+        # at every call. Persisting ephemeral ports drifted across
+        # reboots.
         import json as _json
         from datetime import datetime, timezone
         pid_path = _pid_file_path()
@@ -796,7 +798,6 @@ class PDFExtractor:
             "pid": proc.pid, "port": port,
             "started_at": datetime.now(timezone.utc).isoformat(),
         }))
-        set_config_value("pdf.mineru_server_url", f"http://127.0.0.1:{port}")
 
         # Reset availability cache
         self._mineru_server_checked = True
