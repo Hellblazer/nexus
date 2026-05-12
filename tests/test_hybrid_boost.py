@@ -162,6 +162,68 @@ def test_hybrid_score_in_valid_range():
     assert 0.0 <= v_result.hybrid_score <= 1.0
 
 
+def test_file_size_penalty_uses_catalog_chunk_count_when_provided():
+    """nexus-dxly: post-RDR-108 Phase-3 chunks lack ``chunk_count`` in
+    metadata. When a catalog is supplied, the file-size penalty
+    resolves it via documents.chunk_count keyed on doc_id (tumbler).
+    Pre-fix, every Phase-3 chunk defaulted to chunk_count=1 (no penalty)
+    and large files outranked small ones on identical vector distance.
+    """
+    from nexus.scoring import apply_hybrid_scoring
+
+    class _FakeDB:
+        def execute(self, sql: str, params):
+            assert "documents" in sql
+            assert "chunk_count" in sql
+            rows = {"ART-small": 5, "ART-large": 5000}
+            return _FakeCursor([
+                (t, rows[t]) for t in params if t in rows
+            ])
+
+    class _FakeCursor:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return self._rows
+
+    class _FakeCatalog:
+        _db = _FakeDB()
+
+    # Two code__ results, identical vector distance, no chunk_count
+    # in metadata (Phase-3 shape).  Only doc_id differs.
+    small = _sr(id="s", distance=0.3, collection="code__repo", doc_id="ART-small")
+    large = _sr(id="l", distance=0.3, collection="code__repo", doc_id="ART-large")
+    # Drop chunk_count from metadata to simulate Phase-3 chunk shape.
+    for r in (small, large):
+        r.metadata.pop("chunk_count", None)
+
+    results = apply_hybrid_scoring(
+        [small, large], hybrid=False, catalog=_FakeCatalog(),
+    )
+    score = {r.id: r.hybrid_score for r in results}
+    # Large file should score lower than small file due to penalty.
+    assert score["s"] > score["l"], (
+        f"small file (chunk_count=5) should outrank large file "
+        f"(chunk_count=5000) at equal vector distance; got {score!r}"
+    )
+
+
+def test_file_size_penalty_without_catalog_falls_back_to_metadata():
+    """Without a catalog the lookup is skipped and the legacy
+    ``metadata["chunk_count"]`` read still works (back-compat for
+    pre-Phase-3 chunks that still carry the field).
+    """
+    from nexus.scoring import apply_hybrid_scoring
+
+    small = _sr(id="s", distance=0.3, collection="code__repo", chunk_count=5)
+    large = _sr(id="l", distance=0.3, collection="code__repo", chunk_count=5000)
+
+    results = apply_hybrid_scoring([small, large], hybrid=False)
+    score = {r.id: r.hybrid_score for r in results}
+    assert score["s"] > score["l"]
+
+
 def test_non_hybrid_search_unaffected():
     from nexus.scoring import apply_hybrid_scoring
 

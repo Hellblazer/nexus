@@ -314,6 +314,30 @@ def _gather_chroma_chunks_by_field(
             reason="empty",
             detail=f"no chunks for {match_value!r} in {collection!r}",
         )
+    # nexus-dxly: post-RDR-108 Phase 3 chunks lack ``chunk_index``
+    # metadata. When the manifest lookup is unavailable (catalog gap
+    # for a Phase-3 doc) the fallback ``md.get("chunk_index", 0)``
+    # returns 0 for every chunk and multi-chunk docs reassemble in
+    # chroma insertion order (chunk_text_hash-driven, not document
+    # order). Fail loud so callers see the structural problem instead
+    # of silently extracting / scoring against a scrambled document.
+    if (
+        identity_field == "doc_id"
+        and not chash_position
+        and len(chunks) > 1
+        and {triple[0] for triple in chunks} == {0}
+    ):
+        return ReadFail(
+            reason="unreachable",
+            detail=(
+                f"Phase-3 reassembly unsafe for {match_value!r} in "
+                f"{collection!r}: manifest_lookup returned no rows and "
+                f"chunks lack chunk_index ordering. Cannot reassemble "
+                f"{len(chunks)} chunks deterministically. Initialize the "
+                f"catalog or re-index to populate the document_chunks "
+                f"manifest."
+            ),
+        )
     chunks.sort(key=lambda triple: (triple[0], triple[1]))
     text = "\n\n".join(doc for _, _, doc in chunks)
     return ReadOk(
@@ -421,6 +445,13 @@ def _read_chroma_uri(
             manifest_lookup=manifest_lookup,
         )
         if isinstance(result, ReadOk):
+            return result
+        # nexus-dxly: a structural reassembly failure (Phase-3 doc with
+        # no manifest_lookup, multi-chunk, no chunk_index) must propagate
+        # not silently fall through to legacy probe — the legacy probe
+        # would find nothing and the corruption stays hidden behind an
+        # ``empty`` report.
+        if result.reason == "unreachable":
             return result
         # doc_id mapped but T3 query returned empty: chunks predate
         # the Phase 4 doc_id write contract. Fall through to legacy

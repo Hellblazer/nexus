@@ -6,6 +6,31 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Accumulating audit umbrella `nexus-58ui` slice work for the next
+release. RDR-108 Phase 3 dropped `chunk_index` / `chunk_count`
+from chunk metadata; the items below close the still-live call
+sites that read those fields.
+
+### Fixed (nexus-dxly)
+
+- `aspect_readers._gather_chroma_chunks_by_field`: post-Phase-3
+  chunks reassembled in chroma insertion order (chunk_text_hash
+  driven, not document order) when no `manifest_lookup` was wired
+  and chunks lacked `chunk_index`. Guard detects the corruption
+  fingerprint (identity_field == "doc_id" AND chash_position empty
+  AND >1 chunks AND every ci == 0) and returns
+  `ReadFail("unreachable")` so callers see the structural problem
+  instead of silently extracting scrambled text.
+  `_read_chroma_uri` propagates `unreachable` from the doc_id
+  gather path rather than falling through to the legacy probe
+  (which would mask the failure as `empty`).
+- `scoring.apply_hybrid_scoring`: file-size penalty for `code__`
+  results read `chunk_count` from chunk metadata and defaulted to
+  1 for every Phase-3 chunk, silently disabling the penalty.
+  New optional `catalog` kwarg batch-resolves chunk_count via
+  `SELECT tumbler, chunk_count FROM documents WHERE tumbler IN
+  (...)`. `commands/search_cmd` wires the catalog.
+
 ## [4.32.9] - 2026-05-12
 
 Patch on 4.32.8. Audit follow-up: RDR-096 P5.1 aspect_worker
