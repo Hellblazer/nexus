@@ -26,7 +26,10 @@ import click
 
 
 def _classify_origin(row: dict) -> str:
-    """Heuristic origin label until Phase 2 adds a real ``origin`` column.
+    """Heuristic origin label. nexus-7bwe tracks adding an explicit
+    ``origin`` column to the plans T2 table so this stops inferring from
+    tags + project; deferred until a cross-session origin-filter
+    reliability complaint drives the change.
 
     - ``builtin``  — tags carry the ``builtin-template`` token (seeded
       from ``nx/plans/builtin/*.yml`` by ``nx catalog setup``).
@@ -128,7 +131,7 @@ def repair_cmd() -> None:
     "--origin",
     type=click.Choice(["builtin", "grown", "user"], case_sensitive=False),
     default=None,
-    help="Filter by inferred origin (heuristic until Phase 2 ships an origin column).",
+    help="Filter by inferred origin (heuristic; nexus-7bwe tracks an explicit origin column).",
 )
 @click.option(
     "--name",
@@ -162,7 +165,7 @@ def list_cmd(
     """Tabulate plans in the library.
 
     \b
-    Origin is heuristic until the Phase 2 ``origin`` column lands:
+    Origin is heuristic (nexus-7bwe tracks the explicit ``origin`` column):
       - ``builtin``  tags include ``builtin-template``
       - ``grown``    project=='personal' AND empty tags
       - ``user``     everything else
