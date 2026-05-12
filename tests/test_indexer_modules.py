@@ -1,13 +1,23 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for the extracted indexer sub-modules (RDR-032)."""
+import uuid
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import chromadb
 import pytest
 
 from nexus.errors import CredentialsMissingError
 from nexus.index_context import IndexContext
 from nexus.indexer_utils import build_context_prefix, check_credentials, check_staleness
+
+
+def _real_col(name: str | None = None):
+    """nexus-8g79.28: build a real EphemeralClient collection so
+    staleness probes round-trip against real ChromaDB return shapes
+    instead of synthetic ``_chroma_with_retry`` mocks."""
+    coll_name = name or f"code__t_{uuid.uuid4().hex[:12]}"
+    return chromadb.EphemeralClient().get_or_create_collection(coll_name)
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -189,14 +199,22 @@ def test_index_code_file_skips_current_file(tmp_path, make_ctx):
     py_file = tmp_path / "hello.py"
     py_file.write_text("print('hello')\n")
     h = hashlib.sha256(py_file.read_text().encode("utf-8")).hexdigest()
-    ctx = make_ctx()
 
-    with patch("nexus.indexer_utils._chroma_with_retry") as mock_retry:
-        mock_retry.return_value = {
-            "metadatas": [{"content_hash": h, "embedding_model": "voyage-code-3"}],
-            "ids": ["id1"],
-        }
-        assert index_code_file(ctx, py_file) == 0
+    # nexus-8g79.28: seed a real EphemeralClient collection with a
+    # chunk that matches the file's content_hash + embedding_model so
+    # check_staleness round-trips against real ChromaDB return shapes.
+    col = _real_col()
+    col.add(
+        ids=["id1"],
+        documents=["print('hello')"],
+        metadatas=[{
+            "content_hash": h, "embedding_model": "voyage-code-3",
+            "source_path": str(py_file),
+        }],
+    )
+    ctx = make_ctx(col=col)
+
+    assert index_code_file(ctx, py_file) == 0
 
 
 def test_index_code_file_returns_zero_for_non_text_file(tmp_path, make_ctx):
@@ -204,12 +222,11 @@ def test_index_code_file_returns_zero_for_non_text_file(tmp_path, make_ctx):
 
     bin_file = tmp_path / "binary.py"
     bin_file.write_bytes(b"\xff\xfe binary content")
-    ctx = make_ctx(col=MagicMock())
-    ctx.col.get.return_value = {"metadatas": [], "ids": []}
+    # nexus-8g79.28: real empty collection; check_staleness returns
+    # False, index_code_file returns 0 for the non-text bytes.
+    ctx = make_ctx(col=_real_col())
 
-    with patch("nexus.indexer_utils._chroma_with_retry") as mock_retry:
-        mock_retry.return_value = {"metadatas": [], "ids": []}
-        assert index_code_file(ctx, bin_file) == 0
+    assert index_code_file(ctx, bin_file) == 0
 
 
 def test_index_code_file_happy_path_new_file(tmp_path, make_ctx):
@@ -224,12 +241,13 @@ def test_index_code_file_happy_path_new_file(tmp_path, make_ctx):
     mock_voyage.embed.return_value = mock_embed_result
     mock_db = MagicMock()
 
-    ctx = make_ctx(db=mock_db, voyage_client=mock_voyage,
+    # nexus-8g79.28: real empty collection → check_staleness returns
+    # False → indexer proceeds to embed + upsert (which routes through
+    # the mocked db, keeping the test focused on the indexer logic).
+    ctx = make_ctx(col=_real_col(), db=mock_db, voyage_client=mock_voyage,
                    git_meta={"git_project_name": "test"})
 
-    with patch("nexus.indexer_utils._chroma_with_retry") as mock_retry:
-        mock_retry.return_value = {"metadatas": [], "ids": []}
-        result = index_code_file(ctx, py_file)
+    result = index_code_file(ctx, py_file)
 
     # nexus-8g79.23: small fixtures produce exactly 1 chunk.
 
@@ -249,14 +267,21 @@ def test_index_prose_file_skips_current_file(tmp_path, make_ctx):
     md_file = tmp_path / "README.md"
     md_file.write_text("# Hello\n\nSome content here.\n")
     h = hashlib.sha256(md_file.read_text().encode()).hexdigest()
-    ctx = make_ctx(corpus="docs__test", embedding_model="voyage-context-3")
+    # nexus-8g79.28: real EphemeralClient collection seeded with the
+    # matching chunk so staleness check round-trips real ChromaDB.
+    col = _real_col("docs__t_" + uuid.uuid4().hex[:12])
+    col.add(
+        ids=["id1"],
+        documents=["# Hello\n\nSome content here."],
+        metadatas=[{
+            "content_hash": h, "embedding_model": "voyage-context-3",
+            "source_path": str(md_file),
+        }],
+    )
+    ctx = make_ctx(col=col, corpus="docs__test",
+                   embedding_model="voyage-context-3")
 
-    with patch("nexus.indexer_utils._chroma_with_retry") as mock_retry:
-        mock_retry.return_value = {
-            "metadatas": [{"content_hash": h, "embedding_model": "voyage-context-3"}],
-            "ids": ["id1"],
-        }
-        assert index_prose_file(ctx, md_file) == 0
+    assert index_prose_file(ctx, md_file) == 0
 
 
 def test_index_prose_file_non_markdown_uses_line_chunk(tmp_path, make_ctx):
@@ -265,12 +290,14 @@ def test_index_prose_file_non_markdown_uses_line_chunk(tmp_path, make_ctx):
     txt_file = tmp_path / "notes.txt"
     txt_file.write_text("Line one of notes.\nLine two of notes.\nLine three.\n")
     mock_db = MagicMock()
-    ctx = make_ctx(db=mock_db, voyage_client=None,
+    # nexus-8g79.28: real empty collection → check_staleness returns
+    # False → indexer proceeds. _embed_with_fallback stays mocked
+    # (it is the embedder boundary, not the chroma boundary).
+    ctx = make_ctx(col=_real_col("docs__t_" + uuid.uuid4().hex[:12]),
+                   db=mock_db, voyage_client=None,
                    corpus="docs__test", embedding_model="voyage-context-3")
 
-    with patch("nexus.indexer_utils._chroma_with_retry") as mock_retry, \
-         patch("nexus.doc_indexer._embed_with_fallback") as mock_embed:
-        mock_retry.return_value = {"metadatas": [], "ids": []}
+    with patch("nexus.doc_indexer._embed_with_fallback") as mock_embed:
         mock_embed.return_value = ([[0.1] * 128], "voyage-context-3")
         result = index_prose_file(ctx, txt_file)
 
@@ -306,14 +333,13 @@ def test_index_code_file_does_not_emit_source_path(tmp_path, make_ctx):
     mock_embed_result.embeddings = [[0.1] * 128]
     mock_voyage.embed.return_value = mock_embed_result
     mock_db = MagicMock()
+    # nexus-8g79.28: real empty collection.
     ctx = make_ctx(
-        db=mock_db, voyage_client=mock_voyage,
+        col=_real_col(), db=mock_db, voyage_client=mock_voyage,
         git_meta={"git_project_name": "phase-b-test"},
     )
 
-    with patch("nexus.indexer_utils._chroma_with_retry") as mock_retry:
-        mock_retry.return_value = {"metadatas": [], "ids": []}
-        result = index_code_file(ctx, py_file)
+    result = index_code_file(ctx, py_file)
 
     # nexus-8g79.23: small fixtures produce exactly 1 chunk.
 
@@ -341,14 +367,14 @@ def test_index_prose_file_markdown_does_not_emit_source_path(
     md_file = tmp_path / "phase_b_branch_a.md"
     md_file.write_text("# Phase B Branch A\n\nMarkdown body content.\n")
     mock_db = MagicMock()
+    # nexus-8g79.28: real empty collection.
     ctx = make_ctx(
+        col=_real_col("docs__t_" + uuid.uuid4().hex[:12]),
         db=mock_db, voyage_client=None,
         corpus="docs__phase-b-md", embedding_model="voyage-context-3",
     )
 
-    with patch("nexus.indexer_utils._chroma_with_retry") as mock_retry, \
-         patch("nexus.doc_indexer._embed_with_fallback") as mock_embed:
-        mock_retry.return_value = {"metadatas": [], "ids": []}
+    with patch("nexus.doc_indexer._embed_with_fallback") as mock_embed:
         mock_embed.return_value = ([[0.1] * 128], "voyage-context-3")
         result = index_prose_file(ctx, md_file)
 
@@ -376,14 +402,14 @@ def test_index_prose_file_line_chunk_does_not_emit_source_path(
     txt_file = tmp_path / "phase_b_branch_b.txt"
     txt_file.write_text("Line one of phase B branch B.\nLine two.\n")
     mock_db = MagicMock()
+    # nexus-8g79.28: real empty collection.
     ctx = make_ctx(
+        col=_real_col("docs__t_" + uuid.uuid4().hex[:12]),
         db=mock_db, voyage_client=None,
         corpus="docs__phase-b-txt", embedding_model="voyage-context-3",
     )
 
-    with patch("nexus.indexer_utils._chroma_with_retry") as mock_retry, \
-         patch("nexus.doc_indexer._embed_with_fallback") as mock_embed:
-        mock_retry.return_value = {"metadatas": [], "ids": []}
+    with patch("nexus.doc_indexer._embed_with_fallback") as mock_embed:
         mock_embed.return_value = ([[0.1] * 128], "voyage-context-3")
         result = index_prose_file(ctx, txt_file)
 
