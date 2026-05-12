@@ -820,6 +820,177 @@ def backfill_hash_cmd(name: str | None, all_collections: bool) -> None:
         chash_index.close()
 
 
+_REEMBED_SUPPORTED_MODELS = ("voyage-3", "voyage-code-3")
+
+
+def _reembed_collection(
+    db,
+    col_name: str,
+    target_model: str,
+    *,
+    dry_run: bool,
+    on_progress=None,
+) -> tuple[int, int]:
+    """Re-embed every chunk in *col_name* with *target_model*.
+
+    Preserves chunk id, document text, and metadata. Only the embedding
+    vector changes. Returns ``(processed, skipped)``.
+
+    nexus-bw65: in-place re-embed for non-CCE Voyage models. CCE
+    (``voyage-context-3``) requires sliding-window context across chunks
+    and is intentionally out of scope; the CLI rejects it up front.
+    """
+    from nexus.db.chroma_quotas import QUOTAS
+    from nexus.retry import _voyage_with_retry
+
+    try:
+        col = db._client.get_collection(col_name)
+    except Exception as exc:
+        raise click.ClickException(
+            f"collection {col_name!r}: {type(exc).__name__}: {exc}"
+        )
+
+    total = col.count()
+    if total == 0:
+        return 0, 0
+
+    voyage_client = None
+    if not dry_run:
+        from nexus.config import get_credential
+
+        key = get_credential("voyage_api_key")
+        if not key:
+            raise click.ClickException(
+                "VOYAGE_API_KEY not set; cannot re-embed without it. "
+                "(Dry-run only requires read access.)"
+            )
+        import voyageai  # noqa: PLC0415
+
+        voyage_client = voyageai.Client(api_key=key)
+
+    processed = 0
+    skipped = 0
+    page = QUOTAS.MAX_QUERY_RESULTS  # 300
+    voyage_batch = 128  # Voyage embed API batch limit
+    offset = 0
+    while offset < total:
+        page_rows = col.get(
+            limit=page, offset=offset,
+            include=["documents", "metadatas"],
+        )
+        ids = page_rows.get("ids") or []
+        documents = page_rows.get("documents") or []
+        metadatas = page_rows.get("metadatas") or []
+        if not ids:
+            break
+
+        valid_idx = [
+            i for i, d in enumerate(documents)
+            if isinstance(d, str) and d.strip()
+        ]
+        skipped += len(ids) - len(valid_idx)
+        if not valid_idx:
+            offset += page
+            continue
+
+        v_ids = [ids[i] for i in valid_idx]
+        v_docs = [documents[i] for i in valid_idx]
+        v_metas = [metadatas[i] for i in valid_idx]
+
+        if not dry_run:
+            embeddings: list[list[float]] = []
+            for batch_start in range(0, len(v_docs), voyage_batch):
+                batch = v_docs[batch_start : batch_start + voyage_batch]
+                result = _voyage_with_retry(
+                    voyage_client.embed,
+                    texts=batch,
+                    model=target_model,
+                    input_type="document",
+                )
+                embeddings.extend(result.embeddings)
+            # Stamp the new model on metadata so check_staleness reads
+            # right post-re-embed; otherwise next index pass would treat
+            # every chunk as stale and re-embed twice.
+            for m in v_metas:
+                if isinstance(m, dict):
+                    m["embedding_model"] = target_model
+            db.upsert_chunks_with_embeddings(
+                collection_name=col_name,
+                ids=v_ids,
+                documents=v_docs,
+                embeddings=embeddings,
+                metadatas=v_metas,
+            )
+
+        processed += len(v_ids)
+        if on_progress is not None:
+            on_progress(processed, total)
+        offset += page
+
+    return processed, skipped
+
+
+@collection.command("re-embed")
+@click.argument("name")
+@click.option(
+    "--to", "target_model", required=True,
+    type=click.Choice(_REEMBED_SUPPORTED_MODELS),
+    help="Target embedding model (CCE models like voyage-context-3 are "
+         "intentionally not supported — see nexus-bw65).",
+)
+@click.option("--dry-run/--no-dry-run", default=True,
+              help="Default dry-run. Pass --no-dry-run to actually write.")
+@click.option("--yes", is_flag=True, default=False,
+              help="Skip the destructive-action confirmation prompt.")
+def reembed_cmd(
+    name: str, target_model: str, dry_run: bool, yes: bool,
+) -> None:
+    """In-place re-embed: preserve content, swap embedding model.
+
+    nexus-bw65: rebuild embeddings for every chunk in NAME using
+    --to MODEL. Chunk ids, document text, and metadata are
+    preserved; only the vector changes.
+
+    Use case: an embedding-model upgrade on a sourceless collection
+    (store_put-only / MCP-promoted notes). For source-backed
+    collections prefer ``nx collection reindex`` so the indexer
+    re-derives chunk boundaries with the new chunker contract.
+
+    Limitations:
+      - Only non-CCE Voyage models are supported. Contextualized
+        Chunk Embeddings (voyage-context-3) require sliding-window
+        context across chunks and need a different pipeline.
+      - The collection's name often encodes the embedding model
+        (RDR-103 / nexus-1-1__voyage-code-3__v1). This command does
+        NOT rename the collection; run ``nx collection rename`` if
+        the name needs to track the new model.
+    """
+    if not dry_run and not yes:
+        click.confirm(
+            f"Re-embed {name!r} with {target_model!r}? This rewrites "
+            f"every chunk's vector in place.",
+            abort=True,
+        )
+
+    db = _t3()
+    if dry_run:
+        col = db._client.get_collection(name)
+        n = col.count()
+        click.echo(
+            f"dry-run: would re-embed {n} chunk(s) in {name!r} with "
+            f"{target_model!r}. Pass --no-dry-run --yes to apply."
+        )
+        return
+
+    processed, skipped = _reembed_collection(
+        db, name, target_model, dry_run=False,
+    )
+    click.echo(
+        f"re-embedded {processed} chunk(s) in {name!r} with "
+        f"{target_model!r}; skipped {skipped} empty-document row(s)."
+    )
+
+
 @collection.command("rewrite-metadata")
 @click.argument("name", required=False, default=None)
 @click.option("--all", "all_collections", is_flag=True,
