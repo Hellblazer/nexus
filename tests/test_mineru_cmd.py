@@ -93,12 +93,18 @@ class TestMineruStart:
             result = runner.invoke(main, ["mineru", "start"])
         assert result.exit_code != 0 and "mineru-api" in result.output.lower()
 
-    def test_start_persists_url_to_config(self, runner, pid_file):
+    def test_start_does_not_persist_url_to_config(self, runner, pid_file):
+        """nexus-oa7r: ``nx mineru start`` must NOT write the live port
+        to persistent config. PID file is the canonical source of truth;
+        ephemeral ports stamped into ``config.yml`` drifted across
+        reboots and silently routed math-PDF indexing to the OOM-prone
+        in-process subprocess.
+        """
         patches = _mock_start_success(pid=42, port=54321)
         with patches[0], patches[1], patches[2], patches[3], patches[4] as mock_set:
             result = runner.invoke(main, ["mineru", "start"])
         assert result.exit_code == 0
-        mock_set.assert_called_once_with("pdf.mineru_server_url", "http://127.0.0.1:54321")
+        mock_set.assert_not_called()
 
     def test_start_custom_port(self, runner, pid_file):
         proc = MagicMock(); proc.pid = 77; proc.poll.return_value = None
