@@ -285,19 +285,13 @@ class AspectExtractionWorker:
         """Run batch extraction on multiple queue rows in one
         Claude call. RDR-089 Phase D — cost-amortised drain.
 
-        Each row's content was captured at enqueue time when in scope.
-        CLI rows with empty content get a per-row source-path read
-        before the batch call (the batch extractor itself does NOT
-        do disk reads — that responsibility lives here so the
-        extractor stays a pure function of its inputs).
+        Each row's content was captured at enqueue time when in
+        scope. CLI rows with empty content are sourced via
+        ``chroma://`` URI inside ``extract_aspects_batch`` (RDR-096
+        P5.1 / nexus-8g79.34 — the batch path now mirrors the
+        single-doc extractor's read contract).
         """
-        from pathlib import Path
-
-        from nexus.aspect_extractor import (
-            _source_content_from_t3,
-            extract_aspects_batch,
-            select_config,
-        )
+        from nexus.aspect_extractor import select_config
         from nexus.mcp_infra import t2_ctx
 
         # extract_aspects_batch requires every input to share a single
@@ -316,42 +310,25 @@ class AspectExtractionWorker:
                 self._process_row(row)
             return
 
-        # Per-row content source: prefer queued content, fall back to
-        # T3 reassembly (same text we indexed; section-filtered for
-        # scholarly papers), then to disk read as last resort. Mirrors
-        # the single-doc path in extract_aspects so batch and single
-        # share the same sourcing precedence.
-        #
-        # TODO(RDR-096 P5.1): adopt URI-based read_source + ExtractFail
-        # in this batch path. The single-doc path migrated in P1.2;
-        # the batch path still uses the deprecated _source_content_from_t3
-        # + disk fallback because extract_aspects_batch returns
-        # _empty_record on missing content rather than ExtractFail.
-        # When the batch return type widens, this pre-fetch block can
-        # delete itself in favour of read_source per row.
-        items: list[tuple[str, str, str]] = []
-        for row in rows:
-            content = row.content
-            if not content:
-                content = _source_content_from_t3(row.collection, row.source_path)
-            if not content:
-                try:
-                    content = Path(row.source_path).read_text(
-                        encoding="utf-8", errors="replace",
-                    )
-                except (OSError, UnicodeDecodeError) as exc:
-                    _log.warning(
-                        "aspect_worker_batch_source_path_unreadable",
-                        source_path=row.source_path,
-                        error=str(exc),
-                    )
-                    # Push through with empty content; the batch
-                    # extractor will null-field this entry.
-                    content = ""
-            items.append((row.collection, row.source_path, content))
+        # nexus-8g79.34: build manifest_lookup once; pass queue-captured
+        # doc_id per row via the 4-tuple form (extract_aspects_batch
+        # uses it to construct the per-row doc_id_lookup, matching
+        # _process_row's pattern at lines 406-411).
+        manifest_lookup = None
+        try:
+            from nexus.commands.enrich import _build_catalog_manifest_lookup
+            manifest_lookup = _build_catalog_manifest_lookup()
+        except Exception:
+            pass
+
+        items: list[tuple[str, str, str, str]] = [
+            (row.collection, row.source_path, row.content,
+             getattr(row, "doc_id", "") or "")
+            for row in rows
+        ]
 
         try:
-            records = _extract_aspects_batch(items)
+            records = _extract_aspects_batch(items, manifest_lookup=manifest_lookup)
         except Exception as exc:
             _log.warning(
                 "aspect_worker_batch_extract_raised",
@@ -377,6 +354,23 @@ class AspectExtractionWorker:
                 for row, record in zip(rows, records):
                     if record is None:
                         # Unsupported collection — drop silently.
+                        t2.aspect_queue.mark_done(
+                            row.collection, row.source_path,
+                        )
+                        continue
+                    # nexus-8g79.34: ExtractFail per-row — typed read-
+                    # failure sentinel from URI-based reading. Mark
+                    # queue done so we don't retry an unreadable
+                    # source on every drain; operators re-enqueue
+                    # manually after fixing source identity (mirrors
+                    # _process_row's handling).
+                    if isinstance(record, ExtractFail):
+                        _log.info(
+                            "aspect_worker_batch_extract_skip",
+                            uri=record.uri,
+                            reason=record.reason,
+                            detail=record.detail,
+                        )
                         t2.aspect_queue.mark_done(
                             row.collection, row.source_path,
                         )

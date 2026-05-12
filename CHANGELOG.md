@@ -6,6 +6,62 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.32.9] - 2026-05-12
+
+Patch on 4.32.8. Audit follow-up: RDR-096 P5.1 aspect_worker
+batch path migration (nexus-8g79.34). Closes the RDR-096 P5
+deprecation cycle.
+
+### Refactored (nexus-8g79.34)
+
+- **``extract_aspects_batch`` return type widened** from
+  ``list[AspectRecord | None]`` to
+  ``list[AspectRecord | ExtractFail | None]``. Mirrors the
+  single-doc ``extract_aspects`` contract introduced in RDR-096
+  P1.2. Pre-fix, batch rows with un-sourceable content landed as
+  null-fields ``AspectRecord`` (polluting operator SQL fast paths);
+  post-fix they land as typed ``ExtractFail`` and the worker
+  ``mark_done``s without writing a row.
+- **Per-row URI-based content sourcing moved INTO
+  ``extract_aspects_batch``**. Empty-content rows now route through
+  :func:`nexus.aspect_readers.read_source` with a
+  ``chroma://<collection>/<source_path>`` URI — the same path
+  single-doc takes. Per-row ``doc_id_lookup`` built from the
+  queue-captured ``doc_id`` (nexus-tdgc) so chunk attribution stays
+  correct. New ``manifest_lookup`` kwarg passes through to the
+  chroma reader for canonical position ordering (4.32.5's
+  nexus-8g79.2 plumbing).
+- **Items tuple extended** to a 4-tuple
+  ``(collection, source_path, content, doc_id)``. Back-compat
+  preserved: 3-tuple callers continue to work (``doc_id`` defaults
+  to ``""``, falling back to source_path identity probe).
+- **``aspect_worker._process_batch`` rewritten**: deleted the
+  pre-fetch block (``_source_content_from_t3`` + disk fallback
+  dance, ~30 lines). Worker now passes raw queue rows in 4-tuple
+  form; ``extract_aspects_batch`` owns sourcing. ``ExtractFail``
+  rows handled with ``mark_done`` (mirrors ``_process_row``).
+- **``_source_content_from_t3`` shim deleted** from
+  ``aspect_extractor.py``. The ``warnings.warn(DeprecationWarning,
+  "Slated for removal in RDR-096 Phase 5")`` is gone. The
+  ``_T3_CONTENT_CAP_BYTES`` constant deleted with it.
+
+### Tests
+
+New regression test
+``test_batch_empty_content_uri_read_fail_yields_extract_fail``
+locks the new contract: empty-content row with ``read_source``
+returning ``ReadFail`` produces ``ExtractFail`` in the
+corresponding slot (not ``_empty_record``). Existing 3 batch
+tests' ``fake_batch`` shims extended to accept kwargs +
+``*_args``; existing 3-tuple input form preserved via the
+normalisation step.
+
+### Result
+
+The single-doc and batch aspect extraction paths now share the
+same content-sourcing contract. Behavioural divergence between
+the two is eliminated; deprecation cycle closes.
+
 ## [4.32.8] - 2026-05-12
 
 Patch on 4.32.7. Audit follow-up: layering violations
