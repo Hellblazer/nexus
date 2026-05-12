@@ -6,6 +6,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.32.2] - 2026-05-11
+
+Plugin version aligned with conexus 4.32.2. No plugin-side changes;
+the release surfaces MinerU server unreachable state in ``nx doctor``
++ warn-on-fallback in pdf_extractor (nexus-h1jk). See root
+``CHANGELOG.md``.
+
 ## [4.32.1] - 2026-05-11
 
 Plugin version aligned with conexus 4.32.1. No plugin-side changes;
