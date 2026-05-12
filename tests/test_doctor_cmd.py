@@ -235,7 +235,7 @@ def test_doctor_hooks_installed(runner):
             (hooks_dir / name).write_text(
                 f"#!/bin/sh\n{SENTINEL_BEGIN}\nnx index repo ...\n")
         result = _invoke(runner, reg, extra_patches=[
-            patch("nexus.commands.hooks._effective_hooks_dir",
+            patch("nexus._git_hooks_meta.effective_hooks_dir",
                   return_value=hooks_dir),
         ])
     assert result.exit_code == 0
@@ -249,7 +249,7 @@ def test_doctor_hooks_not_installed(runner):
     reg.all.return_value = ["/some/repo"]
     with tempfile.TemporaryDirectory() as td:
         result = _invoke(runner, reg, extra_patches=[
-            patch("nexus.commands.hooks._effective_hooks_dir",
+            patch("nexus._git_hooks_meta.effective_hooks_dir",
                   return_value=Path(td)),
         ])
     assert result.exit_code == 0
@@ -263,7 +263,7 @@ def test_doctor_hooks_exception_does_not_propagate(runner):
     reg = MagicMock()
     reg.all.return_value = ["/some/repo"]
     result = _invoke(runner, reg, extra_patches=[
-        patch("nexus.commands.hooks._effective_hooks_dir",
+        patch("nexus._git_hooks_meta.effective_hooks_dir",
               side_effect=RuntimeError("git error")),
     ])
     assert result.exit_code == 0

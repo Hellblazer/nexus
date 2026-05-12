@@ -1600,6 +1600,37 @@ class Catalog:
         """Delegates to ``_DocumentOps.by_doc_id`` (nexus-mbm)."""
         return self._docs.by_doc_id(doc_id)
 
+    def lookup_doc_id_by_collection_and_path(
+        self, collection: str, source_path: str,
+    ) -> str:
+        """Return the tumbler/legacy-doc_id for a (collection, path) probe.
+
+        nexus-8g79.10 (V6): hosted on the Catalog class so callers in
+        the db tier (``db/t2/document_aspects.py``) can resolve a
+        legacy doc_id without reaching up into ``nexus.catalog`` for
+        the raw SQL. Returns ``""`` when no row matches or on any
+        error — keeps the failure-tolerant contract of the original
+        caller.
+
+        Resolution preference: ``metadata.doc_id`` (legacy 16-char
+        sha256 stored by pre-Phase-4 entries) → ``tumbler`` →
+        ``""`` (no match).
+        """
+        try:
+            row = self._db.execute(
+                "SELECT json_extract(metadata, '$.doc_id'), tumbler "
+                "FROM documents "
+                "WHERE physical_collection = ? "
+                "  AND (file_path = ? OR title = ?) "
+                "LIMIT 1",
+                (collection, source_path, source_path),
+            ).fetchone()
+        except Exception:
+            return ""
+        if not row:
+            return ""
+        return str(row[0] or row[1] or "")
+
     # ── Links ──────────────────────────────────────────────────────────────
     # nexus-mbm: implementations live in
     # :class:`nexus.catalog.catalog_links._LinkOps`, composed onto

@@ -199,7 +199,7 @@ def test_hook_detection_failed_logs_debug(tmp_path):
     # Mock index_repository to skip the actual indexing (needs API keys on CI),
     # and _effective_hooks_dir to trigger the hook detection failure path.
     with patch("nexus.indexer.index_repository", return_value={}), \
-         patch("nexus.commands.hooks._effective_hooks_dir", side_effect=RuntimeError("broken")):
+         patch("nexus._git_hooks_meta.effective_hooks_dir", side_effect=RuntimeError("broken")):
         with capture_logs() as cap:
             runner = CliRunner()
             runner.invoke(index_repo_cmd, [str(tmp_path)])
@@ -293,8 +293,10 @@ def test_catalog_store_hook_failed_logs_warning(tmp_path, monkeypatch):
         _inject_t3(T3Database(_client=t3_client, _ef_override=ef))
 
         # Force the catalog hook to raise.
+        # nexus-8g79.10 (V1): the hook moved to nexus.catalog.store_hook
+        # (lower layer); patch the canonical location.
         monkeypatch.setattr(
-            "nexus.commands.store._catalog_store_hook",
+            "nexus.catalog.store_hook.catalog_store_hook",
             MagicMock(side_effect=RuntimeError("simulated catalog failure")),
         )
 

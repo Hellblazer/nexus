@@ -432,7 +432,10 @@ def _migrate_legacy_collections(
     from typing import cast  # noqa: PLC0415
 
     from nexus.catalog.catalog import Catalog  # noqa: PLC0415
-    from nexus.commands.collection import (  # noqa: PLC0415
+    # nexus-8g79.10 (V5): import from peer module instead of reaching
+    # up into commands/. The CLI wrapper in commands/collection.py
+    # adds the ``t3_db=_t3()`` default; we pass ``t3_db`` explicitly.
+    from nexus.collection_rename import (  # noqa: PLC0415
         rename_collection_data_plane,
     )
     from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415
