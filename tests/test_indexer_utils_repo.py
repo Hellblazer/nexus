@@ -341,6 +341,37 @@ class TestStalenessCache:
         assert cache.by_doc_id == {}
         assert cache.by_source_path == {}
 
+    def test_build_logs_warning_on_paginated_get_failure(self, caplog) -> None:
+        """nexus-lrhg (RDR-108 audit finding 6): pre-fix the bare
+        ``except: pass`` silently masked _paginated_get failures, which
+        for Phase-3 corpora forces a whole-collection re-embed when the
+        per-file fallback fires. The swallow must emit a structured
+        WARNING so operators can detect spurious re-index storms.
+        """
+        import logging
+
+        import structlog
+
+        col = MagicMock()
+        col.name = "code__sample"
+        col.get.side_effect = RuntimeError("chroma offline")
+
+        structlog.configure(
+            processors=[structlog.stdlib.render_to_log_kwargs],
+            wrapper_class=structlog.stdlib.BoundLogger,
+            logger_factory=structlog.stdlib.LoggerFactory(),
+        )
+        with caplog.at_level(logging.WARNING, logger="nexus.indexer_utils"):
+            cache = build_staleness_cache(col)
+
+        assert cache.by_doc_id == {}
+        events = [r.getMessage() for r in caplog.records] + [
+            getattr(r, "event", "") for r in caplog.records
+        ]
+        assert any(
+            "build_staleness_cache_paginated_get_failed" in e for e in events
+        ), f"expected structured warning, got {events!r}"
+
     def test_check_staleness_with_cache_hit_returns_true(self) -> None:
         """Cache hit + matching hash + matching model = stale (skip)."""
         cache = StalenessCache(

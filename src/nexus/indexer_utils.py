@@ -298,6 +298,21 @@ def build_staleness_cache(col: object) -> StalenessCache:
 
         all_chunks = _paginated_get(col, include=["metadatas"])
     except Exception:
+        # nexus-lrhg (RDR-108 audit finding 6): pre-fix this swallowed
+        # ``_paginated_get`` failures with a bare ``except: pass`` and
+        # returned an empty cache. The caller fell back to the per-file
+        # Chroma probe, which on a Phase-3 corpus means re-embedding
+        # every chunk because the per-file cache misses are
+        # indistinguishable from genuine stale rows. WARNING log with
+        # the collection identity so a recurring outage (network blip,
+        # cloud throttle) surfaces in production logs instead of
+        # silently melting the embedder budget.
+        import structlog
+        structlog.get_logger(__name__).warning(
+            "build_staleness_cache_paginated_get_failed",
+            collection=getattr(col, "name", "<unknown>"),
+            exc_info=True,
+        )
         return cache
 
     # nexus-0ocy (RDR-108 Phase 4 review D-M4): when chunk metadata
