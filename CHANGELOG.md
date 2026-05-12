@@ -6,12 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Accumulating audit umbrella `nexus-58ui` slice work for the next
-release. RDR-108 Phase 3 dropped `chunk_index` / `chunk_count`
-from chunk metadata; the items below close the still-live call
-sites that read those fields.
+## [4.32.10] - 2026-05-12
 
-### Fixed (nexus-dxly)
+Post-4.32.4 deep-audit umbrella `nexus-58ui` closes. Twelve PRs
+consolidate the P0/P1/P2 findings (RDR-108 Phase-3 fallout,
+inequality-assertion sweep, hook-drift coverage, deferment-ref
+hygiene) plus two follow-on features.
+
+### Fixed (nexus-dxly, P0)
 
 - `aspect_readers._gather_chroma_chunks_by_field`: post-Phase-3
   chunks reassembled in chroma insertion order (chunk_text_hash
@@ -20,16 +22,129 @@ sites that read those fields.
   fingerprint (identity_field == "doc_id" AND chash_position empty
   AND >1 chunks AND every ci == 0) and returns
   `ReadFail("unreachable")` so callers see the structural problem
-  instead of silently extracting scrambled text.
-  `_read_chroma_uri` propagates `unreachable` from the doc_id
-  gather path rather than falling through to the legacy probe
-  (which would mask the failure as `empty`).
+  instead of silently extracting scrambled text. `_read_chroma_uri`
+  propagates `unreachable` from the doc_id gather path rather
+  than falling through to the legacy probe.
 - `scoring.apply_hybrid_scoring`: file-size penalty for `code__`
   results read `chunk_count` from chunk metadata and defaulted to
-  1 for every Phase-3 chunk, silently disabling the penalty.
-  New optional `catalog` kwarg batch-resolves chunk_count via
-  `SELECT tumbler, chunk_count FROM documents WHERE tumbler IN
-  (...)`. `commands/search_cmd` wires the catalog.
+  1 for every Phase-3 chunk, silently disabling the penalty. New
+  optional `catalog` kwarg batch-resolves `chunk_count` via
+  `documents` SQL. `commands/search_cmd` wires the catalog.
+
+### Fixed (nexus-w5zv, P1)
+
+- `manifest_backfill`: post-Phase-3 multi-chunk docs lacking
+  `chunk_index` metadata previously collapsed every chunk to
+  position 0 and got rejected by the manifest PK
+  `(doc_id, position)`. New `Phase3ChunkIndexMissingError` raised
+  per-doc; orchestrator catches, increments
+  `docs_skipped_phase3_no_index` counter, emits structured
+  WARNING. Single-chunk Phase-3 docs unaffected.
+- `orphan_backfill`: four manifest-write paths
+  (`register_dt_linked`, `register_synthetic`, `apply_csv`,
+  `link_by_title`, `link_by_content_hash`) now stable-sort chunks
+  by `chunk_index` before assigning position via `enumerate`.
+  Pre-Phase-3 chunks land in document order; Phase-3 chunks
+  preserve chroma insertion order.
+
+### Fixed (nexus-lrhg, P1 — 6 of 8 sub-findings; lf8f and gaa3 cover the rest)
+
+- `manifest_write_batch_hook`: torn-state window between purge,
+  upsert, and `chunk_count` UPDATE. New
+  `Catalog.atomic_manifest_replace(doc_id, chunks)` bundles
+  DELETE + INSERT + `chunk_count` UPDATE under one
+  `CatalogDB.transaction`. Hook routes to it on first-batch
+  (position 0 present) so shrink-reindex is now all-or-nothing.
+- `CatalogDB.rebuild`: with `PRAGMA foreign_keys=OFF`, `DELETE
+  FROM documents` did not cascade to `document_chunks`. Manifest
+  rows referencing tombstoned docs survived as silent orphans
+  (PRAGMA foreign_keys=ON only enforces new writes). Post
+  `_rebuild_inner`, before `foreign_keys=ON`:
+  `DELETE FROM document_chunks WHERE doc_id NOT IN
+  (SELECT tumbler FROM documents)`. INFO log records purge count.
+- `indexer_utils.build_staleness_cache`: bare `except: pass`
+  swallowed `_paginated_get` failures and returned an empty cache
+  on Phase-3 corpora, forcing a whole-collection re-embed via
+  the per-file fallback. Structured WARNING surfaces the failure.
+- `EventLog.append` / `append_many`: documented re-entrancy
+  invariant; added `append_unlocked` / `append_many_unlocked`
+  variants for callers that already hold the catalog directory
+  flock (e.g. Catalog mutators bundling SQLite UPDATE + JSONL
+  append + event log append).
+
+### Fixed (nexus-gaa3, P2 — finishes lrhg #4)
+
+- `Catalog.write_manifest` and `append_manifest_chunks` normalize
+  `chash` to 32-char at INSERT time. Pre-fix
+  `manifest_write_batch_hook` stored 64-char while
+  `orphan_backfill` stored 32-char; downstream joins
+  (`chashes_for_collection`, `docs_for_chashes`) carried a
+  `substr(chash, 1, 32)` workaround. Now uniform.
+  `atomic_manifest_replace` (above) also truncates.
+
+### Verified shipped (nexus-lf8f, P0 — all 5 sub-bugs already in prior PRs)
+
+- `fire_store_chains catalog_doc_id` plumbed at all 4 sites
+  (commands/memory.py, commands/store.py, mcp/core.py,
+  exporter.py `_fire_store_chains_grouped_by_doc`).
+- Projector post-replay bulk re-derives `documents.chunk_count`
+  from `document_chunks` (`projector.apply_many`).
+- `catalog_spans.py` `list_failed` flag preserves chash index
+  on T3 transient.
+- `indexer.py` prune `get_manifest` failure logged + tracked via
+  `skipped_doc_ids`.
+- `delete_document` cascade-deletes `document_chunks` in both
+  event-sourced and shadow paths.
+
+### Tests (nexus-8g79.23 batch 2, .26, .27, .28, .31; .34 already shipped)
+
+- `tests/test_t2_concurrency.py`: 3 warm-up sleeps replaced with
+  `threading.Barrier` rendezvous (`8g79.26`). Loaded CI runners
+  no longer race past the under-load measurement.
+- `tests/test_indexer_modules.py`: 8 `_chroma_with_retry`
+  patches replaced with real `chromadb.EphemeralClient`
+  collections (`8g79.28`). Real ChromaDB return shapes
+  exercised instead of synthetic dicts.
+- New `tests/test_operator_pipelines_dispatch.py`: 10 smoke
+  tests covering the §D.4 operator dispatch boundary
+  (`operator_groupby`, `operator_aggregate`,
+  `operator_filter`, `operator_extract`, `operator_rank`,
+  `operator_check`, `operator_verify`, `operator_compare`,
+  `operator_summarize`, `operator_generate`). Fills the
+  CI gap on the integration suites excluded via
+  `-m 'not integration'` (`8g79.27`).
+- Inequality-assertion sweep batch 2: ~33 `assert X >= N`
+  flipped to exact `== N` across 7 files (`test_md_chunker`,
+  `test_doc_indexer`, `test_ast_languages`,
+  `test_md_preservation`, `test_minified_chunking`,
+  `test_local_mode`, `test_catalog_e2e`). Remaining ~144
+  inequalities are legitimate (contract-minimums, timings,
+  non-deterministic clustering) (`8g79.23`).
+- New `tests/test_phase5_doc_cite.py` flake guard:
+  pre-consume the chash-fallback one-shot warning so the JSON
+  test is order-independent.
+
+### Added (nexus-bw65)
+
+- `nx collection re-embed NAME --to MODEL`: in-place re-embed
+  for non-CCE Voyage models (`voyage-3`, `voyage-code-3`).
+  Preserves chunk ids, document text, and metadata; only the
+  vector changes. `metadata.embedding_model` stamped to the
+  target model so subsequent `check_staleness` reads correctly.
+  Default `--dry-run`; `--no-dry-run --yes` to apply. CCE
+  (`voyage-context-3`) intentionally rejected at parse time.
+  Use case: embedding-model upgrade on a sourceless collection
+  (store_put-only / MCP-promoted notes) where `nx collection
+  reindex` refuses (correctly) because there is nothing to
+  re-index from.
+
+### Docs (nexus-8g79.31)
+
+- Anchored 3 orphan deferment refs to beads: `nexus-7bwe`
+  (plans.origin column, P3 deferred); `nexus-bw65` (in-place
+  re-embed, shipped this release); `nexus-ocu9.11` deferment
+  comment in migrations.py updated to reflect closed state
+  (shipped in 4.31.0).
 
 ## [4.32.9] - 2026-05-12
 
