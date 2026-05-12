@@ -2688,8 +2688,8 @@ MIGRATIONS: list[Migration] = [
     # doc_id for document_aspects + aspect_extraction_queue. The
     # ``_resolve_doc_id`` substrate in DocumentAspects.upsert (4.31.5)
     # plus the test surgery in this commit unblock the reland.
-    # ``nexus-ocu9.11`` (drop document_aspects.source_path) stays
-    # deferred — separate follow-up.
+    # nexus-ocu9.11 (drop document_aspects.source_path) shipped at
+    # 4.31.0 — the deferment is closed.
     Migration(
         "4.30.0",
         "RDR-108 Phase 1c: PK switch document_aspects to doc_id (nexus-je0b)",
