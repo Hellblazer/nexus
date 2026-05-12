@@ -111,7 +111,9 @@ def _identity_where(file_path: str, corpus: str, *, content_hash: str = "") -> d
     Pass ``content_hash`` only for staleness checks — pruning by
     content_hash is incorrect because matching chunks are by definition
     not stale; the legacy ``source_path`` fallback is retained for
-    pruning sites pending Phase 4 manifest-driven prune rewrites.
+    Phase-4-rewritten prune sites that consult the catalog manifest
+    when present and fall back to source_path for catalog-absent
+    callers (nexus-dyxe, shipped 2026-05-10 in PR #624).
     """
     if content_hash:
         return {"content_hash": content_hash}

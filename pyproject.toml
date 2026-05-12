@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "conexus"
-version = "4.32.5"
+version = "4.32.6"
 description = "Self-hosted semantic search and knowledge management for LLM-driven development"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.12,<3.14"
@@ -63,9 +63,27 @@ dependencies = [
     # [mineru] extra; the extras game produced silent formula loss for
     # weeks because fresh installs and reinstall-tool both skipped it.
     # Default-on is the only configuration that doesn't foot-cannon the
-    # next install. mineru[all] pulls formula + table models (~2-3 GB
-    # downloaded on first use, not at install time).
-    "mineru[all]",
+    # next install.
+    #
+    # nexus-8g79.18: pinned to ``mineru[pipeline]`` (not ``mineru[all]``).
+    # nexus calls ``mineru.cli.common.do_parse`` with ``backend="pipeline"``
+    # in src/nexus/pdf_extractor.py (single call site, see RDR-046). The
+    # ``[pipeline]`` extra is exactly the stack that path needs: torch +
+    # torchvision + transformers + onnxruntime + a few lightweight extras
+    # for the OCR / formula / table models (~2-3 GB downloaded on first
+    # use, not at install time).
+    #
+    # ``[all]`` pulled ``[core]`` (= vlm + pipeline + gradio) plus the
+    # platform-specific VLM-inference backend (``mlx-vlm`` on macOS,
+    # ``vllm`` on linux, ``lmdeploy`` on windows). None of those are
+    # used: nexus never invokes the vlm- backends. The vendored gradio
+    # 6.x carried a stale XSS advisory (GHSA-2wxf-49m7-6x5q) and pulled
+    # 100+ transitive packages; the platform VLM backends pull boto3,
+    # openai, vllm, lmdeploy, cupy. Replacing ``[all]`` with
+    # ``[pipeline]`` shaves ~100 packages off a fresh install AND drops
+    # the gradio XSS surface. Verified locally: ``do_parse`` succeeds
+    # with ``[pipeline]`` only.
+    "mineru[pipeline]",
 ]
 
 [project.optional-dependencies]
