@@ -193,21 +193,40 @@ findings below are verified against those sources.
   re-layout, temporal decay, priority preemption, and the
   horizontal-budget demotion cascade are the four extensions the
   static-report algorithm needs for the dynamic case.
-- **Revised** — Cross-instance liveness must use **T2 (SQLite),
-  not the tuple space**. The tuple space is scoped to a single
-  `nx-mcp` process (T1 or the process's local SQLite shard); a
-  tuple posted by one process is not visible to another process's
-  `read` query unless the tuple space itself has a cross-process
-  backend (which RDR-110 does not provide in Phase 1). Per RDR-105,
-  T2 (SQLite WAL mode) is the defined cross-process shared bus.
-  The correct implementation: a `liveness` table in the T2 SQLite
-  database with `(pid, machine, user_id, session, project,
-  focus, activity, last_seen)`, upserted every 30s by
-  each `nx-mcp` process and swept by a background thread for rows
-  where `last_seen < now - 60s`. `nx instances` queries this
-  T2 table directly. This adds ~80 LoC (T2 schema migration +
-  upsert + sweep + CLI command), slightly more than the 50 LoC
-  originally estimated for the tuple-space approach.
+- **Verified** — Subspace tier is the scope dimension. Per RDR-110,
+  every subspace declares `tier: ephemeral | project | permanent`:
+  - `ephemeral` (T1, per-process Chroma) — scope = a single `nx-mcp`
+    process. The right tier for genuinely process-local state.
+  - `project` (T2, SQLite WAL at `~/.config/nexus/tuples.db` and
+    `~/.config/nexus/memory.db`) — scope = all processes sharing the
+    database, cross-process by virtue of SQLite WAL multi-writer
+    safety. Per RDR-105 this is the canonical cross-process shared
+    bus.
+  - `permanent` (T3, ChromaDB persistent) — scope = all processes;
+    persists across sessions.
+
+  System-wide coordination is the default. The ORB's coordination
+  subspaces — the seven `hook_events/*`, `bindings/<profile>`,
+  `layout_state/<profile>`, and `connection_manifest` — all declare
+  `tier: project` because cockpit panels need to reflect activity
+  across multiple Claude sessions and MCP processes on the same
+  machine. Process-local scope (`ephemeral`) is reserved for state
+  that genuinely should not leak across processes (e.g. an `nx-mcp`
+  instance's internal scratch buffer).
+
+- **Verified** — Cross-instance liveness uses **a raw T2 table, not a
+  tuple subspace**, even though a `liveness/<machine>` subspace at
+  `tier: project` would also be cross-process. The choice is shape,
+  not scope: liveness is a pure keep-alive (primary-key upsert by
+  `(pid, machine)`) with no semantic matching, no `match_text`
+  embedding, and no tombstone semantics — none of the things a tuple
+  subspace pays for. A direct `liveness` table in T2 is the right
+  shape. The implementation: `liveness(pid, machine, user_id, session,
+  project, focus, activity, last_seen)` upserted every 30s by each
+  `nx-mcp` process and swept by a background thread for rows where
+  `last_seen < now - 60s`. `nx instances` queries this T2 table
+  directly. This adds ~80 LoC (T2 schema migration + upsert + sweep +
+  CLI command).
 
 ### Research Finding RF-1: Hook payload shapes — verified inventory
 
@@ -357,6 +376,9 @@ summary is already injected into Claude's context window by the hook output).
 than given its own subspace, since both represent a session turn boundary.
 
 Each subspace schema carries:
+- `tier: project` — cross-process visibility on `tuples.db` via SQLite
+  WAL, so cockpit panels see hook events from every `nx-mcp` process
+  on the machine (multiple Claude sessions, background agents).
 - Required dimensions: `actor`, `session`, `project`, `timestamp`
 - Optional dimensions: `tool`, `workflow`, `intent`, `priority`
 - `match_text` field: a short semantic description of the event
@@ -401,6 +423,8 @@ A new subspace `bindings/<profile>` with schema:
 
 ```yaml
 bindings:
+  tier: project            # cross-process; every nx-mcp on the host
+                           # sees the same enabled binding set
   dimensions:
     - name: profile        # mission context name
     - name: enabled        # true/false; default false during async creation
@@ -433,6 +457,8 @@ streams:
 
 ```yaml
 connection_manifest:
+  tier: project            # cross-process; consumers in any nx-mcp
+                           # discover producer endpoints declared here
   dimensions:
     - name: producer       # actor-id
     - name: consumer       # actor-id or "any-subscriber"
@@ -456,6 +482,8 @@ surfaces to know which slot and level to use for each event type.
 
 ```yaml
 layout_state:
+  tier: project            # cross-process; every cockpit surface on
+                           # the host reads the same stylesheet
   dimensions:
     - name: profile        # mission context name
     - name: event_type     # subspace path, e.g. hook_events/tool_call_intent
@@ -562,16 +590,17 @@ per debounce window is allowed.
 
 ### Cross-instance liveness
 
-**Implementation: T2 table, not the tuple space.** Although project-tier
-T2 subspaces in RDR-110 are cross-process (SQLite WAL mode is multi-writer
-safe), raw T2 is the correct choice for liveness for three reasons: (a) no
-semantic matching is needed — liveness is a pure key-value keep-alive
-requiring only primary-key lookup by `(pid, machine)`; (b) no subspace
-schema registration overhead (liveness has no `match_text` or vector
-embedding); (c) no tombstone semantics — rows are hard-deleted on expiry,
-not soft-deleted with `data_version` ticks as required by the tuple space
-claim ledger. T2 (SQLite WAL, via `src/nexus/db/`) is the correct tier per
-RDR-105.
+**Implementation: a raw T2 table, not a tuple subspace.** A
+`liveness/<machine>` subspace at `tier: project` would also give
+cross-process visibility (SQLite WAL is multi-writer safe), so this is
+a shape decision, not a scope decision. Raw T2 is the right shape for
+three reasons: (a) no semantic matching is needed — liveness is a
+pure key-value keep-alive requiring only primary-key lookup by
+`(pid, machine)`; (b) no subspace schema registration overhead
+(liveness has no `match_text` or vector embedding); (c) no tombstone
+semantics — rows are hard-deleted on expiry, not soft-deleted with
+`data_version` ticks as required by the tuple space claim ledger. T2
+(SQLite WAL, via `src/nexus/db/`) is the correct tier per RDR-105.
 
 T2 `liveness` table added via a new migration entry in
 `src/nexus/db/migrations.py` (actual migration number assigned at
@@ -1064,5 +1093,6 @@ Other gates:
 | 2026-05-11 | Hal Hildebrand | Post-gate-5 revision (no criticals; 3 significant fixed pre-accept): (SIG-1) removed residual "enabling a genuine single-transaction cursor advance" claim from watcher_state rationale — replaced with accurate "one connection" language; (SIG-2) corrected Step 9 semantic fallback sort from `created_at` (internal column, not in read() DTO) to `timestamp` dimension; (SIG-3) added `action_idempotency` table schema, migration reference (memory.db), and sweep hook to Phase 2 Step 6 |
 | 2026-05-11 | Hal Hildebrand | Post-gate-6 revision (no criticals; all significant and observation issues addressed pre-accept): (SIG-A) replaced `rd`/`in` Linda aliases with `read`/`take` throughout all implementation-facing sections — Bindings CRUD, active-bindings panel, Step 10, Relationship to RDR-110 surfaces sentence, Key Discoveries (bindings, surfaces, cross-process), CA-3 across all references (assumption table, Step 7b spike, Finalization Gate), and the Linda bullet's "ORB uses" clause; added Linda→RDR-110 API name mapping table and usage rule to Relationship to RDR-110 section; (SIG-B) added `layout_state/<profile>` subspace schema block (dimensions: profile, event_type; content: surface_level, demotion_level, ttl_seconds, pinned) to Proposed Solution; added `layout_state.yml` and `connection_manifest.yml` to Step 1 file list; (OBS-1) added `tuple_claim_log` join note for `claimed_at` display field — `tuples` has no `claimed_at` column; (OBS-2) `connection_manifest.yml` now explicit in Step 1; (OBS-3) integration test 3 corrected to distinguish SQL-based panels (active-claims, recent-events) from `read()`-based panel (active-bindings); (OBS-4) Step 2 explicitly documents which hook types are projected (7) and which are excluded (SubagentStart, PermissionRequest) with rationale |
 | 2026-05-11 | Hal Hildebrand | Post-gate-3 revision (all gate-3 BLOCKED issues addressed): (C-G3-1) Added `task_id` (string) and `status` (enum: pending/active/failed) dimensions to bindings subspace schema YAML; documented enabled/status/task_id lifecycle; (S-G3-1) moved `watcher_state` table to `tuples.db` (not `memory.db`) for genuine single-transaction cursor atomicity; corrected "atomic" language; (S-G3-2) added `claim_expires_at > unixepoch()` filter to active-claims panel query in Proposed Solution and Step 8 to exclude expired leases; (S-G3-3) flagged Step 2 bridge registration order as provisional pending CA-8; moved CA-8 spike to new Step 1b (before Step 2); added feature-flag requirement for registration order; (S-G3-4) changed recent-events panel from `rd()` (no time ordering) to direct SQL on `tuples.db` ordered by `created_at DESC`; semantic filter noted as opt-in mode; (S-G3-5) replaced "direct T2 SQL via src/nexus/db/" with explicit `tuples.db` database references throughout; (O1) corrected "six" to "seven" subspaces; (O2) documented PostCompact/PreCompact exclusion with rationale; (O3) updated CA-9 gate condition to outcome-based (confirmed open-registry shipping) not action-based (notification sent) |
+| 2026-05-11 | Hal Hildebrand | Post-gate-8 user-raised scope correction (architectural): Key Discoveries had a leftover claim that "the tuple space is scoped to a single nx-mcp process" — false. Per RDR-110, subspace tier IS the scope dimension: `ephemeral` (T1, per-process), `project` (T2 SQLite WAL, cross-process via multi-writer safety, the canonical shared-bus tier per RDR-105), `permanent` (T3, persistent). System-wide coordination is the default; process-local scope is the variant. (1) Replaced the false-premise bullet with an explicit tier→scope table and noted that all ORB coordination subspaces declare `tier: project`. (2) Rewrote the liveness-section rationale: raw T2 vs tuple subspace is a shape decision (no semantic match / no embedding / no tombstone semantics), not a scope decision — both forms would have cross-process visibility. (3) Added explicit `tier: project` to the bindings, connection_manifest, and layout_state subspace YAML blocks, and to the "Each subspace schema carries" list for the seven hook-event subspaces. Catches a gate-2 fix that updated the Proposed Solution rationale but missed the Key Discoveries bullet and never made the tier declarations explicit. |
 | 2026-05-11 | Hal Hildebrand | Post-gate-8 revision (0 critical + 1 significant + 2 observations; significant + OBS-G8-1 addressed pre-accept): (SIG-G8-1) aligned liveness column names between Research Findings prose (line 205) and DDL (line 589) — `user` → `user_id`, `activity_summary` → `activity`; DDL is the authoritative form; (OBS-G8-1) added `binding_failure_counter` CREATE TABLE schema to Phase 2 Step 6 watcher-failure-isolation block — previously the consecutive-failure counter was referenced ("small keyed table in T2") but unschematized, leaving an implementor to invent the schema; (OBS-G8-2 noted, not patched) RDR-110 open-registry mechanism is unimplemented in RDR-110 itself — already tracked via CA-9 as a definitive prerequisite with outcome-based gate criterion; coordination cross-reference deferred to bead-creation at /nx:rdr-accept time |
 | 2026-05-11 | Hal Hildebrand | Post-gate-7 revision (1 critical + 2 significant + 2 observations all addressed pre-accept): (C-G7-1) removed `PostCompact` from Step 2 bridge registration list — was contradicted by Proposed Solution's explicit exclusion; added `PreCompact` and `PostCompact` to the not-registered list with rationale cross-reference; (SIG-G7-1) replaced three residual `rd()` aliases with `read()` — Step 4 bindings dimension example, Step 6 `_BindingWatcher` rationale paragraph (header + two body references); (SIG-G7-2) corrected "six" → "seven" hook-event subspaces at four remaining sites (Relationship to RDR-110 summary, CA-9 description, CA-9 risk-if-wrong, Phase 1 section header); added `layout_state` to the Relationship-section subspace enumeration; (OBS-G7-1) active-claims display now explicitly extracts `actor` via `json_extract(t.dimensions_json, '$.actor')` — `actor` lives inside `dimensions_json`, not a top-level column; (OBS-G7-2) watcher failure isolation now logs via `structlog` (not "T2 scratch" — category error, scratch is T1); failure counter kept in T2 as before |
