@@ -593,3 +593,143 @@ def test_corpus_default_keeps_docs_collection(tmp_path, monkeypatch) -> None:
     assert entry["docs_collection"].startswith("docs__"), (
         f"default routing changed; got {entry['docs_collection']!r}"
     )
+
+
+# ── re-embed (nexus-bw65) ──────────────────────────────────────────────────
+
+
+def test_reembed_dry_run_reports_count(runner, env_creds, tmp_path) -> None:
+    """nexus-bw65: --dry-run (default) reports the chunk count that
+    would be re-embedded without making any writes. No Voyage call."""
+    import chromadb
+    import uuid
+
+    coll_name = f"knowledge__rem_{uuid.uuid4().hex[:12]}"
+    client = chromadb.EphemeralClient()
+    col = client.get_or_create_collection(coll_name)
+    col.add(
+        ids=["c1", "c2"], documents=["doc one", "doc two"],
+        metadatas=[
+            {"content_hash": "h1", "embedding_model": "voyage-3"},
+            {"content_hash": "h2", "embedding_model": "voyage-3"},
+        ],
+    )
+
+    fake_db = MagicMock()
+    fake_db._client = client
+
+    result = _invoke(
+        runner, fake_db,
+        ["re-embed", coll_name, "--to", "voyage-code-3"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "dry-run" in result.output
+    assert "2" in result.output
+
+
+def test_reembed_no_dry_run_writes_via_voyage(
+    runner, env_creds, tmp_path, monkeypatch,
+) -> None:
+    """nexus-bw65: --no-dry-run --yes embeds via Voyage and upserts the
+    new vectors. Chunk ids + document text + metadata preserved;
+    metadata.embedding_model stamped to the target model.
+    """
+    import chromadb
+    import uuid
+
+    coll_name = f"knowledge__rem_{uuid.uuid4().hex[:12]}"
+    client = chromadb.EphemeralClient()
+    col = client.get_or_create_collection(coll_name)
+    col.add(
+        ids=["c1", "c2"], documents=["doc one", "doc two"],
+        metadatas=[
+            {"content_hash": "h1", "embedding_model": "voyage-3"},
+            {"content_hash": "h2", "embedding_model": "voyage-3"},
+        ],
+    )
+
+    fake_db = MagicMock()
+    fake_db._client = client
+
+    upsert_calls: list[dict] = []
+
+    def _capture_upsert(**kw):
+        upsert_calls.append(kw)
+
+    fake_db.upsert_chunks_with_embeddings.side_effect = _capture_upsert
+
+    fake_embed_result = MagicMock()
+    fake_embed_result.embeddings = [[0.5] * 1024, [0.7] * 1024]
+    fake_voyage_client = MagicMock()
+    fake_voyage_client.embed.return_value = fake_embed_result
+
+    with patch("voyageai.Client", return_value=fake_voyage_client):
+        result = _invoke(
+            runner, fake_db,
+            ["re-embed", coll_name, "--to", "voyage-code-3",
+             "--no-dry-run", "--yes"],
+        )
+    assert result.exit_code == 0, result.output
+    assert "re-embedded 2" in result.output
+    assert len(upsert_calls) == 1
+    call = upsert_calls[0]
+    assert call["collection_name"] == coll_name
+    assert call["ids"] == ["c1", "c2"]
+    assert call["documents"] == ["doc one", "doc two"]
+    # embedding_model stamped to target model on every row.
+    assert all(
+        m["embedding_model"] == "voyage-code-3" for m in call["metadatas"]
+    )
+    # Voyage embed called with target model.
+    fake_voyage_client.embed.assert_called_once()
+    assert fake_voyage_client.embed.call_args.kwargs["model"] == "voyage-code-3"
+
+
+def test_reembed_rejects_cce_model(runner, env_creds) -> None:
+    """nexus-bw65: voyage-context-3 (CCE) is not supported; click.Choice
+    rejects at parse time."""
+    result = _invoke(
+        runner, MagicMock(),
+        ["re-embed", "knowledge__any", "--to", "voyage-context-3"],
+    )
+    assert result.exit_code != 0
+    assert "voyage-context-3" in result.output or "Invalid value" in result.output
+
+
+def test_reembed_skips_empty_documents(
+    runner, env_creds, monkeypatch,
+) -> None:
+    """nexus-bw65: chunks with empty / whitespace-only document text are
+    skipped (Voyage rejects empty strings). Counted under ``skipped``."""
+    import chromadb
+    import uuid
+
+    coll_name = f"knowledge__rem_{uuid.uuid4().hex[:12]}"
+    client = chromadb.EphemeralClient()
+    col = client.get_or_create_collection(coll_name)
+    col.add(
+        ids=["good", "blank"],
+        documents=["real content", "   "],
+        metadatas=[
+            {"content_hash": "h1", "embedding_model": "voyage-3"},
+            {"content_hash": "h2", "embedding_model": "voyage-3"},
+        ],
+    )
+
+    fake_db = MagicMock()
+    fake_db._client = client
+
+    fake_embed_result = MagicMock()
+    fake_embed_result.embeddings = [[0.5] * 1024]
+    fake_voyage_client = MagicMock()
+    fake_voyage_client.embed.return_value = fake_embed_result
+
+    with patch("voyageai.Client", return_value=fake_voyage_client):
+        result = _invoke(
+            runner, fake_db,
+            ["re-embed", coll_name, "--to", "voyage-3",
+             "--no-dry-run", "--yes"],
+        )
+    assert result.exit_code == 0, result.output
+    assert "re-embedded 1" in result.output
+    assert "skipped 1" in result.output
