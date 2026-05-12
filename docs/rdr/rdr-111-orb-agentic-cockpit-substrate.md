@@ -201,8 +201,8 @@ findings below are verified against those sources.
   backend (which RDR-110 does not provide in Phase 1). Per RDR-105,
   T2 (SQLite WAL mode) is the defined cross-process shared bus.
   The correct implementation: a `liveness` table in the T2 SQLite
-  database with `(pid, machine, user, session, project,
-  focus, activity_summary, last_seen)`, upserted every 30s by
+  database with `(pid, machine, user_id, session, project,
+  focus, activity, last_seen)`, upserted every 30s by
   each `nx-mcp` process and swept by a background thread for rows
   where `last_seen < now - 60s`. `nx instances` queries this
   T2 table directly. This adds ~80 LoC (T2 schema migration +
@@ -870,10 +870,28 @@ cursor advance regardless.
 logged via `structlog.get_logger(__name__)` (the watcher runs inside
 the `nx-mcp` process, so logs flow through the standard structured
 logging pipeline), and the cursor advances past the failed event to
-prevent livelock. A consecutive-failure counter is kept in T2 (small
-keyed table; resets on first successful dispatch) and triggers watcher
-pause after 5 consecutive failures on the same binding (indicating a
-broken binding); the binding is auto-disabled with an error annotation.
+prevent livelock. A consecutive-failure counter, keyed by binding,
+triggers watcher pause after 5 consecutive failures on the same
+binding (indicating a broken binding); the binding is auto-disabled
+with an error annotation. Schema (home: `memory.db`, added via
+`src/nexus/db/migrations.py` in the same migration entry as
+`liveness` and `action_idempotency`):
+
+```sql
+CREATE TABLE IF NOT EXISTS binding_failure_counter (
+    binding_id    TEXT PRIMARY KEY,
+    consecutive   INTEGER NOT NULL DEFAULT 0,
+    last_error    TEXT,
+    updated_at    REAL    NOT NULL   -- epoch seconds
+);
+```
+
+The counter is reset (`consecutive=0`) on the first successful
+dispatch and incremented on every caught exception. At 5, the watcher
+upserts `enabled=false` on the binding tuple with a `last_error`
+annotation in `action_descriptor`. No sweep is required — rows are
+bounded by the active-binding count and are useful for diagnostics
+after pause.
 
 #### Step 7: Phase 1 CA spikes (gate Phase 2)
 
@@ -1046,4 +1064,5 @@ Other gates:
 | 2026-05-11 | Hal Hildebrand | Post-gate-5 revision (no criticals; 3 significant fixed pre-accept): (SIG-1) removed residual "enabling a genuine single-transaction cursor advance" claim from watcher_state rationale — replaced with accurate "one connection" language; (SIG-2) corrected Step 9 semantic fallback sort from `created_at` (internal column, not in read() DTO) to `timestamp` dimension; (SIG-3) added `action_idempotency` table schema, migration reference (memory.db), and sweep hook to Phase 2 Step 6 |
 | 2026-05-11 | Hal Hildebrand | Post-gate-6 revision (no criticals; all significant and observation issues addressed pre-accept): (SIG-A) replaced `rd`/`in` Linda aliases with `read`/`take` throughout all implementation-facing sections — Bindings CRUD, active-bindings panel, Step 10, Relationship to RDR-110 surfaces sentence, Key Discoveries (bindings, surfaces, cross-process), CA-3 across all references (assumption table, Step 7b spike, Finalization Gate), and the Linda bullet's "ORB uses" clause; added Linda→RDR-110 API name mapping table and usage rule to Relationship to RDR-110 section; (SIG-B) added `layout_state/<profile>` subspace schema block (dimensions: profile, event_type; content: surface_level, demotion_level, ttl_seconds, pinned) to Proposed Solution; added `layout_state.yml` and `connection_manifest.yml` to Step 1 file list; (OBS-1) added `tuple_claim_log` join note for `claimed_at` display field — `tuples` has no `claimed_at` column; (OBS-2) `connection_manifest.yml` now explicit in Step 1; (OBS-3) integration test 3 corrected to distinguish SQL-based panels (active-claims, recent-events) from `read()`-based panel (active-bindings); (OBS-4) Step 2 explicitly documents which hook types are projected (7) and which are excluded (SubagentStart, PermissionRequest) with rationale |
 | 2026-05-11 | Hal Hildebrand | Post-gate-3 revision (all gate-3 BLOCKED issues addressed): (C-G3-1) Added `task_id` (string) and `status` (enum: pending/active/failed) dimensions to bindings subspace schema YAML; documented enabled/status/task_id lifecycle; (S-G3-1) moved `watcher_state` table to `tuples.db` (not `memory.db`) for genuine single-transaction cursor atomicity; corrected "atomic" language; (S-G3-2) added `claim_expires_at > unixepoch()` filter to active-claims panel query in Proposed Solution and Step 8 to exclude expired leases; (S-G3-3) flagged Step 2 bridge registration order as provisional pending CA-8; moved CA-8 spike to new Step 1b (before Step 2); added feature-flag requirement for registration order; (S-G3-4) changed recent-events panel from `rd()` (no time ordering) to direct SQL on `tuples.db` ordered by `created_at DESC`; semantic filter noted as opt-in mode; (S-G3-5) replaced "direct T2 SQL via src/nexus/db/" with explicit `tuples.db` database references throughout; (O1) corrected "six" to "seven" subspaces; (O2) documented PostCompact/PreCompact exclusion with rationale; (O3) updated CA-9 gate condition to outcome-based (confirmed open-registry shipping) not action-based (notification sent) |
+| 2026-05-11 | Hal Hildebrand | Post-gate-8 revision (0 critical + 1 significant + 2 observations; significant + OBS-G8-1 addressed pre-accept): (SIG-G8-1) aligned liveness column names between Research Findings prose (line 205) and DDL (line 589) — `user` → `user_id`, `activity_summary` → `activity`; DDL is the authoritative form; (OBS-G8-1) added `binding_failure_counter` CREATE TABLE schema to Phase 2 Step 6 watcher-failure-isolation block — previously the consecutive-failure counter was referenced ("small keyed table in T2") but unschematized, leaving an implementor to invent the schema; (OBS-G8-2 noted, not patched) RDR-110 open-registry mechanism is unimplemented in RDR-110 itself — already tracked via CA-9 as a definitive prerequisite with outcome-based gate criterion; coordination cross-reference deferred to bead-creation at /nx:rdr-accept time |
 | 2026-05-11 | Hal Hildebrand | Post-gate-7 revision (1 critical + 2 significant + 2 observations all addressed pre-accept): (C-G7-1) removed `PostCompact` from Step 2 bridge registration list — was contradicted by Proposed Solution's explicit exclusion; added `PreCompact` and `PostCompact` to the not-registered list with rationale cross-reference; (SIG-G7-1) replaced three residual `rd()` aliases with `read()` — Step 4 bindings dimension example, Step 6 `_BindingWatcher` rationale paragraph (header + two body references); (SIG-G7-2) corrected "six" → "seven" hook-event subspaces at four remaining sites (Relationship to RDR-110 summary, CA-9 description, CA-9 risk-if-wrong, Phase 1 section header); added `layout_state` to the Relationship-section subspace enumeration; (OBS-G7-1) active-claims display now explicitly extracts `actor` via `json_extract(t.dimensions_json, '$.actor')` — `actor` lives inside `dimensions_json`, not a top-level column; (OBS-G7-2) watcher failure isolation now logs via `structlog` (not "T2 scratch" — category error, scratch is T1); failure counter kept in T2 as before |
