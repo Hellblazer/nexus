@@ -902,6 +902,105 @@ class TestManifestWriteBatchHook:
         assert rows[0][1] == "a" * 64
         assert rows[4][1] == "e" * 64
 
+    def test_manifest_write_batch_hook_updates_chunk_count_cache(self, tmp_path):
+        """nexus-zq79: documents.chunk_count must track manifest size after
+        the hook fires. Pre-fix, catalog-register seeded chunk_count=0 and
+        nothing else re-derived it for code/prose indexers — catalog-aware
+        retrieval gated on chunk_count was silently disabled for fresh
+        indexes.
+        """
+        from unittest.mock import patch
+        from nexus.mcp_infra import manifest_write_batch_hook
+
+        cat = _make_catalog(tmp_path)
+        _insert_doc(cat, "1.1.1", "code__test")
+        # Sanity: register-time chunk_count is 0.
+        assert cat._db.execute(
+            "SELECT chunk_count FROM documents WHERE tumbler=?", ("1.1.1",),
+        ).fetchone()[0] == 0
+
+        metadatas = [
+            {"chunk_index": 0, "chunk_text_hash": "a" * 64},
+            {"chunk_index": 1, "chunk_text_hash": "b" * 64},
+            {"chunk_index": 2, "chunk_text_hash": "c" * 64},
+        ]
+        with patch("nexus.mcp_infra.get_catalog", return_value=cat):
+            manifest_write_batch_hook(
+                doc_ids=["c-0", "c-1", "c-2"],
+                collection="code__test",
+                contents=["x", "y", "z"],
+                embeddings=None,
+                metadatas=metadatas,
+                catalog_doc_id="1.1.1",
+            )
+
+        chunk_count = cat._db.execute(
+            "SELECT chunk_count FROM documents WHERE tumbler=?", ("1.1.1",),
+        ).fetchone()[0]
+        manifest_size = len(cat.get_manifest("1.1.1"))
+        assert chunk_count == manifest_size == 3, (
+            f"chunk_count={chunk_count} != manifest_size={manifest_size}"
+        )
+
+    def test_manifest_write_batch_hook_shrink_reindex_purges_orphans(self, tmp_path):
+        """nexus-zq79 F3: re-indexing a doc with fewer chunks than before
+        must purge orphan rows at higher positions. UPSERT keyed on
+        ``(doc_id, position)`` alone leaves the old tail in place; the
+        zq79 fix DELETEs the doc's prior manifest rows when a batch
+        contains position 0 (the start of a re-write). Without this,
+        chunk_count and the manifest both inflate.
+        """
+        from unittest.mock import patch
+        from nexus.mcp_infra import manifest_write_batch_hook
+
+        cat = _make_catalog(tmp_path)
+        _insert_doc(cat, "1.1.1", "code__test")
+
+        # First index: 5 chunks at positions 0..4.
+        first = [
+            {"chunk_index": i, "chunk_text_hash": chr(ord("a") + i) * 64}
+            for i in range(5)
+        ]
+        with patch("nexus.mcp_infra.get_catalog", return_value=cat):
+            manifest_write_batch_hook(
+                doc_ids=[f"c-{i}" for i in range(5)],
+                collection="code__test",
+                contents=["x"] * 5,
+                embeddings=None,
+                metadatas=first,
+                catalog_doc_id="1.1.1",
+            )
+        assert len(cat.get_manifest("1.1.1")) == 5
+
+        # Re-index: 3 chunks at positions 0..2 (file got smaller).
+        second = [
+            {"chunk_index": i, "chunk_text_hash": chr(ord("p") + i) * 64}
+            for i in range(3)
+        ]
+        with patch("nexus.mcp_infra.get_catalog", return_value=cat):
+            manifest_write_batch_hook(
+                doc_ids=[f"d-{i}" for i in range(3)],
+                collection="code__test",
+                contents=["x"] * 3,
+                embeddings=None,
+                metadatas=second,
+                catalog_doc_id="1.1.1",
+            )
+
+        rows = cat.get_manifest("1.1.1")
+        assert len(rows) == 3, (
+            f"shrink-reindex must purge orphan rows; got {len(rows)} rows: "
+            f"{[(r.position, r.chash[:1]) for r in rows]}"
+        )
+        # New chashes wholly replace the old ones.
+        assert rows[0].chash == "p" * 64
+        assert rows[2].chash == "r" * 64
+        # And the chunk_count cache reflects the new shape.
+        chunk_count = cat._db.execute(
+            "SELECT chunk_count FROM documents WHERE tumbler=?", ("1.1.1",),
+        ).fetchone()[0]
+        assert chunk_count == 3
+
 
 # ── nexus-oe2i (RDR-108 Phase 4 review TV-low): manifest-authoritative ──────
 

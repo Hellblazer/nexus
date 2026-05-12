@@ -131,6 +131,126 @@ def test_assign_topic_idempotent(db: T2Database) -> None:
     assert count == 1
 
 
+def test_assign_topic_updates_doc_count_cache(db: T2Database) -> None:
+    """nexus-n41p: topics.doc_count must track COUNT(*) topic_assignments.
+
+    Cache-invalidation regression test. Pre-fix, doc_count stayed at its
+    register-time default (0) after assign_topic() inserted into
+    topic_assignments. Stats consumers (`nx taxonomy stats`, ORDER BY
+    doc_count) silently under-reported.
+    """
+    db.taxonomy.conn.execute(
+        "INSERT INTO topics (label, collection, doc_count, created_at) VALUES (?, ?, ?, ?)",
+        ("test-topic", "proj", 0, "2026-01-01T00:00:00Z"),
+    )
+    db.taxonomy.conn.commit()
+    topic_id = db.taxonomy.conn.execute("SELECT id FROM topics LIMIT 1").fetchone()[0]
+
+    # HDBSCAN path (default assigned_by)
+    db.taxonomy.assign_topic("doc-a", topic_id, assigned_by="hdbscan")
+    db.taxonomy.assign_topic("doc-b", topic_id, assigned_by="hdbscan")
+    cached = db.taxonomy.conn.execute(
+        "SELECT doc_count FROM topics WHERE id = ?", (topic_id,)
+    ).fetchone()[0]
+    derived = db.taxonomy.conn.execute(
+        "SELECT COUNT(*) FROM topic_assignments WHERE topic_id = ?", (topic_id,)
+    ).fetchone()[0]
+    assert cached == derived == 2, f"cached={cached} derived={derived}"
+
+    # Projection (UPSERT) path
+    db.taxonomy.assign_topic(
+        "doc-c",
+        topic_id,
+        assigned_by="projection",
+        similarity=0.9,
+        source_collection="proj",
+    )
+    cached = db.taxonomy.conn.execute(
+        "SELECT doc_count FROM topics WHERE id = ?", (topic_id,)
+    ).fetchone()[0]
+    derived = db.taxonomy.conn.execute(
+        "SELECT COUNT(*) FROM topic_assignments WHERE topic_id = ?", (topic_id,)
+    ).fetchone()[0]
+    assert cached == derived == 3, f"cached={cached} derived={derived}"
+
+    # Re-assigning same doc via projection UPSERT must not double-count.
+    db.taxonomy.assign_topic(
+        "doc-c",
+        topic_id,
+        assigned_by="projection",
+        similarity=0.95,
+        source_collection="proj",
+    )
+    cached = db.taxonomy.conn.execute(
+        "SELECT doc_count FROM topics WHERE id = ?", (topic_id,)
+    ).fetchone()[0]
+    derived = db.taxonomy.conn.execute(
+        "SELECT COUNT(*) FROM topic_assignments WHERE topic_id = ?", (topic_id,)
+    ).fetchone()[0]
+    assert cached == derived == 3, f"cached={cached} derived={derived}"
+
+
+def test_assign_topic_resyncs_topic_links_link_count(db: T2Database) -> None:
+    """nexus-zq79 F5: topic_links.link_count must track co-occurrence
+    count after every assign_topic, not stay stale until the next full
+    refresh_projection_links / generate_cooccurrence_links rebuild.
+    """
+    # Two topics in different collections so co-occurrence is meaningful.
+    db.taxonomy.conn.executemany(
+        "INSERT INTO topics (label, collection, doc_count, created_at) "
+        "VALUES (?, ?, ?, ?)",
+        [
+            ("topic-a", "proj-a", 0, "2026-01-01T00:00:00Z"),
+            ("topic-b", "proj-b", 0, "2026-01-01T00:00:00Z"),
+        ],
+    )
+    db.taxonomy.conn.commit()
+    ids = [
+        row[0]
+        for row in db.taxonomy.conn.execute(
+            "SELECT id FROM topics ORDER BY id"
+        ).fetchall()
+    ]
+    a_id, b_id = ids[0], ids[1]
+
+    # Doc X in topic A, then X in topic B — co-occurrence 1.
+    db.taxonomy.assign_topic("doc-x", a_id, assigned_by="hdbscan")
+    db.taxonomy.assign_topic("doc-x", b_id, assigned_by="hdbscan")
+    link = db.taxonomy.conn.execute(
+        "SELECT link_count FROM topic_links "
+        "WHERE from_topic_id = ? AND to_topic_id = ?",
+        (min(a_id, b_id), max(a_id, b_id)),
+    ).fetchone()
+    assert link is not None and link[0] == 1, (
+        f"expected link_count=1 after first co-occurrence, got "
+        f"{link[0] if link else None}"
+    )
+
+    # Doc Y also in both topics — co-occurrence 2.
+    db.taxonomy.assign_topic("doc-y", a_id, assigned_by="hdbscan")
+    db.taxonomy.assign_topic("doc-y", b_id, assigned_by="hdbscan")
+    link = db.taxonomy.conn.execute(
+        "SELECT link_count FROM topic_links "
+        "WHERE from_topic_id = ? AND to_topic_id = ?",
+        (min(a_id, b_id), max(a_id, b_id)),
+    ).fetchone()
+    assert link[0] == 2, (
+        f"expected link_count=2 after second co-occurrence, got {link[0]}"
+    )
+
+    # Re-assigning the same (doc, topic) must not inflate.
+    db.taxonomy.assign_topic("doc-y", a_id, assigned_by="hdbscan")
+    link = db.taxonomy.conn.execute(
+        "SELECT link_count FROM topic_links "
+        "WHERE from_topic_id = ? AND to_topic_id = ?",
+        (min(a_id, b_id), max(a_id, b_id)),
+    ).fetchone()
+    assert link[0] == 2, (
+        f"INSERT OR IGNORE on duplicate must not increment link_count; "
+        f"got {link[0]}"
+    )
+
+
 def test_rebuild_taxonomy_clears_and_rediscovers(
     db: T2Database, chroma_client: chromadb.ClientAPI,
 ) -> None:

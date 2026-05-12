@@ -901,10 +901,33 @@ def manifest_write_batch_hook(
         if all(not c["chash"] for c in chunks):
             continue
         try:
+            # nexus-zq79 F3: shrink-reindex orphan cleanup. UPSERT keyed on
+            # (doc_id, position) leaves orphan rows when a file re-indexes
+            # with fewer chunks than before. When the batch contains
+            # position 0 (the start of a file's chunks), wipe the doc's
+            # prior manifest rows first so the new write defines the
+            # complete shape. Multi-batch writes never include position 0
+            # in batches other than the first, so this is safe across the
+            # streaming PDF / doc_indexer paths.
+            if any(c["position"] == 0 for c in chunks):
+                cat.purge_manifest_for_doc(doc_id)
             cat.append_manifest_chunks(doc_id, chunks)
+            # nexus-zq79: documents.chunk_count is a denormalised cache of
+            # COUNT(*) document_chunks. The catalog-register hook runs BEFORE
+            # per-file indexing (tumbler injection requires it), so chunk_count
+            # is initialised to 0; nothing else updates it for code/prose
+            # indexers post-Phase-3. Routed via Catalog public API to satisfy
+            # the projector-only-writes invariant (RDR-101 Phase 3 ε).
+            cat.resync_chunk_count_cache(doc_id)
         except Exception:
+            # Post-Phase-3 the manifest hook is load-bearing: a failure
+            # leaves the catalog manifest empty and chunk_count=0 for
+            # this doc (silent data-correctness bug). The contract still
+            # requires non-propagation (best-effort hook) but the log
+            # severity is WARNING so failures are discoverable in
+            # production log streams without DEBUG enabled. nexus-zq79.
             import structlog
-            structlog.get_logger().debug(
+            structlog.get_logger().warning(
                 "manifest_write_hook_failed", doc_id=doc_id, exc_info=True
             )
 

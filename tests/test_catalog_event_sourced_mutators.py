@@ -67,6 +67,118 @@ class TestUpdateEventSourced:
         ).fetchone()
         assert row == (42, "updated")
 
+    def test_update_re_derives_chunk_count_from_manifest_when_omitted(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """nexus-zq79 F4: when caller omits chunk_count, cat.update() must
+        re-derive it from the current document_chunks count so the emitted
+        event payload is fresh (not the resolve-time stale snapshot).
+        Event replay would otherwise project the old 0.
+        """
+        monkeypatch.setenv("NEXUS_EVENT_SOURCED", "1")
+        d = tmp_path / "catalog"
+        d.mkdir()
+        cat = Catalog(d, d / ".catalog.db")
+        owner = cat.register_owner("nexus", "repo", repo_hash="abab")
+        tumbler = cat.register(
+            owner, "doc.md", content_type="prose",
+            file_path="doc.md", chunk_count=0,
+        )
+        # Simulate the post-store manifest write writing 5 chunk rows but
+        # NOT touching documents.chunk_count (the pre-zq79 bug shape).
+        # Use the catalog public API to satisfy the projector-only-writes
+        # invariant (RDR-101 Phase 3 ε).
+        cat.append_manifest_chunks(
+            str(tumbler),
+            [
+                {
+                    "position": pos,
+                    "chash": f"chash{pos}",
+                    "chunk_index": pos,
+                    "line_start": None,
+                    "line_end": None,
+                    "char_start": None,
+                    "char_end": None,
+                }
+                for pos in range(5)
+            ],
+        )
+        # Update with head_hash only — no chunk_count in fields.
+        cat.update(tumbler, head_hash="updated")
+        log = EventLog(d)
+        events = list(log.replay())
+        # Last event must carry re-derived chunk_count=5, not the
+        # stale 0 from resolve().
+        assert events[-1].type == ev.TYPE_DOCUMENT_REGISTERED
+        assert events[-1].payload.chunk_count == 5, (
+            f"expected re-derived chunk_count=5, got "
+            f"{events[-1].payload.chunk_count}"
+        )
+
+    def test_update_respects_caller_supplied_chunk_count(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """nexus-zq79 F4: caller intent wins — when chunk_count is passed
+        explicitly (e.g. orphan-backfill paths), use the caller's value
+        without re-derivation.
+        """
+        monkeypatch.setenv("NEXUS_EVENT_SOURCED", "1")
+        d = tmp_path / "catalog"
+        d.mkdir()
+        cat = Catalog(d, d / ".catalog.db")
+        owner = cat.register_owner("nexus", "repo", repo_hash="abab")
+        tumbler = cat.register(
+            owner, "doc.md", content_type="prose",
+            file_path="doc.md", chunk_count=0,
+        )
+        # 3 manifest rows present, but caller wants to assert 99.
+        cat.append_manifest_chunks(
+            str(tumbler),
+            [
+                {
+                    "position": pos,
+                    "chash": f"chash{pos}",
+                    "chunk_index": pos,
+                    "line_start": None,
+                    "line_end": None,
+                    "char_start": None,
+                    "char_end": None,
+                }
+                for pos in range(3)
+            ],
+        )
+        cat.update(tumbler, chunk_count=99)
+        log = EventLog(d)
+        events = list(log.replay())
+        assert events[-1].payload.chunk_count == 99
+
+    def test_update_refreshes_indexed_at_when_head_hash_changes(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """nexus-zq79 F7: cat.update(head_hash=...) must refresh
+        documents.indexed_at to now. Pre-fix, indexed_at stayed at the
+        original register stamp forever; `nx catalog show` last_indexed
+        never advanced on re-indexed files.
+        """
+        monkeypatch.setenv("NEXUS_EVENT_SOURCED", "1")
+        d = tmp_path / "catalog"
+        d.mkdir()
+        cat = Catalog(d, d / ".catalog.db")
+        owner = cat.register_owner("nexus", "repo", repo_hash="abab")
+        tumbler = cat.register(
+            owner, "doc.md", content_type="prose",
+            file_path="doc.md", chunk_count=0,
+        )
+        original_at = cat.resolve(tumbler).indexed_at
+        import time
+        time.sleep(0.01)
+        cat.update(tumbler, head_hash="rev2")
+        refreshed_at = cat.resolve(tumbler).indexed_at
+        assert refreshed_at != original_at, (
+            f"indexed_at must advance on re-index; "
+            f"original={original_at!r} refreshed={refreshed_at!r}"
+        )
+
 
 # ── delete_document ──────────────────────────────────────────────────────
 
