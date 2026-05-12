@@ -211,10 +211,11 @@ def start(port: int) -> None:
             pass
         raise click.exceptions.Exit(1)
 
-    # Persist the server URL to config so pdf_extractor can discover it
-    from nexus.config import set_config_value
-    set_config_value("pdf.mineru_server_url", f"http://127.0.0.1:{port}")
-
+    # nexus-oa7r: do NOT write the port to persistent config. The PID
+    # file is the canonical source of truth; ``get_mineru_server_url``
+    # reads it at call time. Persisting an ephemeral port to config
+    # caused drift across reboots — the dead port survived as a
+    # config record while the server didn't.
     _log.info("mineru_started", pid=proc.pid, port=port)
     click.echo(f"MinerU server started (PID {proc.pid}, port {port})")
 
