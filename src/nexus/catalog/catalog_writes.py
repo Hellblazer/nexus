@@ -862,6 +862,69 @@ class _WriteOps:
         )
         cat._db.commit()
 
+    def atomic_manifest_replace(
+        self, doc_id: str, chunks: list[dict],
+    ) -> None:
+        """Replace the manifest for ``doc_id`` atomically — single txn
+        for DELETE + UPSERT + ``documents.chunk_count`` UPDATE.
+
+        nexus-lrhg (RDR-108 audit finding 1): the per-batch hook
+        sequence (``purge_manifest_for_doc`` → ``append_manifest_chunks``
+        → ``resync_chunk_count_cache``) ran each step in its own
+        transaction. A partial failure (sqlite lock contention, FK
+        violation, disk error) between the DELETE and the INSERT left
+        the catalog with zero chunks for the doc while the documents
+        row claimed N. Subsequent reads via ``get_manifest`` returned
+        an empty list and the chunk_count remained desynced until the
+        next full re-index.
+
+        Wrapping all three steps in one txn means either the whole
+        replacement lands or none of it does — the catalog never
+        observes a torn state. Idempotent: re-running with the same
+        chunks list produces identical rows.
+
+        For shrink-reindex (fewer chunks than before): the DELETE
+        clears every row; the INSERT writes the new shape; the UPDATE
+        re-derives chunk_count from the post-INSERT row count.
+        """
+        cat = self._cat
+        with cat._db.transaction():
+            cat._db.execute(
+                "DELETE FROM document_chunks WHERE doc_id = ?",
+                (doc_id,),
+            )
+            if chunks:
+                _batch = 300
+                for i in range(0, len(chunks), _batch):
+                    batch = chunks[i : i + _batch]
+                    cat._db.execute(
+                        "INSERT INTO document_chunks "
+                        "(doc_id, position, chash, chunk_index, "
+                        " line_start, line_end, char_start, char_end) "
+                        "VALUES "
+                        + ", ".join(["(?, ?, ?, ?, ?, ?, ?, ?)"] * len(batch)),
+                        [
+                            val
+                            for c in batch
+                            for val in (
+                                doc_id,
+                                c["position"],
+                                c["chash"],
+                                c.get("chunk_index"),
+                                c.get("line_start"),
+                                c.get("line_end"),
+                                c.get("char_start"),
+                                c.get("char_end"),
+                            )
+                        ],
+                    )
+            cat._db.execute(
+                "UPDATE documents SET chunk_count = ("
+                "SELECT COUNT(*) FROM document_chunks WHERE doc_id = ?"
+                ") WHERE tumbler = ?",
+                (doc_id, doc_id),
+            )
+
     def append_manifest_chunks(self, doc_id: str, chunks: list[dict]) -> None:
         """UPSERT manifest rows for one document without deleting prior rows
         (RDR-108 Phase 3, nexus-bdag).

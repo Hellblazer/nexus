@@ -834,6 +834,53 @@ class TestRebuild:
         cat2.rebuild()
         assert cat2.resolve(doc) is None
 
+    def test_rebuild_purges_orphan_document_chunks_for_tombstoned_docs(
+        self, cat_with_owner,
+    ):
+        """nexus-lrhg #3: rebuild runs with FK enforcement disabled so
+        the DELETE FROM documents does not cascade to document_chunks.
+        Manifest rows referencing a tombstoned doc_id that the JSONL
+        replay does not re-INSERT must be purged explicitly before
+        FK=ON is re-enabled, else they survive forever as silent orphans
+        (PRAGMA foreign_keys=ON only enforces new writes, not existing
+        rows).
+        """
+        cat, owner = cat_with_owner
+        doc = cat.register(owner, "ghost.py", content_type="code", file_path="ghost.py")
+        # Plant a manifest row for the doc.
+        cat._db.execute(
+            "INSERT INTO document_chunks "
+            "(doc_id, position, chash, chunk_index, "
+            " line_start, line_end, char_start, char_end) "
+            "VALUES (?, 0, ?, 0, NULL, NULL, NULL, NULL)",
+            (str(doc), "a" * 32),
+        )
+        cat._db.commit()
+        # Tombstone the doc via JSONL append (the post-RDR-101 deletion
+        # contract — replay sees the DocumentDeleted shape).
+        tombstone = {"tumbler": str(doc), "_deleted": True, "title": "",
+                     "author": "", "year": 0, "content_type": "",
+                     "file_path": "ghost.py", "corpus": "",
+                     "physical_collection": "", "chunk_count": 0,
+                     "head_hash": "", "indexed_at": "", "meta": {}}
+        with (cat._dir / "documents.jsonl").open("a") as f:
+            f.write(json.dumps(tombstone) + "\n")
+
+        cat2 = Catalog(cat._dir, cat._dir / ".catalog.db2")
+        cat2.rebuild()
+
+        # Doc is gone from the documents projection.
+        assert cat2.resolve(doc) is None
+        # Manifest rows referencing it must also be gone (no orphans).
+        rows = cat2._db.execute(
+            "SELECT COUNT(*) FROM document_chunks WHERE doc_id = ?",
+            (str(doc),),
+        ).fetchone()[0]
+        assert rows == 0, (
+            f"expected zero orphan document_chunks for tombstoned doc, "
+            f"got {rows}"
+        )
+
 
 class TestEnsureConsistentDegradedFlag:
     def test_degraded_false_on_success(self, cat):
