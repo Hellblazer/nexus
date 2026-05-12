@@ -71,6 +71,7 @@ def apply_hybrid_scoring(
     vector_weight: float = _VECTOR_WEIGHT,
     frecency_weight: float = _FRECENCY_WEIGHT,
     file_size_threshold: int = _FILE_SIZE_THRESHOLD,
+    catalog: Any | None = None,
 ) -> list[SearchResult]:
     """Compute hybrid scores for *results*.
 
@@ -80,7 +81,14 @@ def apply_hybrid_scoring(
 
     File-size penalty: applied to all code__ results unconditionally after the
     initial score is computed: ``score *= _file_size_factor(chunk_count)``.
-    When ``chunk_count`` is absent from metadata, defaults to 1 (no penalty).
+
+    nexus-dxly: post-RDR-108 Phase 3 chunks no longer carry the
+    ``chunk_count`` field in metadata. When *catalog* is provided, the
+    penalty resolves ``chunk_count`` via a batch SQL lookup against
+    ``documents.chunk_count`` keyed on the chunk's ``doc_id`` (== catalog
+    tumbler post-RDR-101). Falls back to metadata then ``1`` (no penalty)
+    when the catalog has no row or no catalog is supplied — preserves
+    behaviour for pre-Phase-3 corpora.
 
     If *hybrid* is True but no code__ collections appear in results, a warning
     is logged and all results use 1.0 * vector_norm.
@@ -109,6 +117,35 @@ def apply_hybrid_scoring(
         if r.collection.startswith("code__")
     ]
 
+    # nexus-dxly: batch-resolve documents.chunk_count for code__ results
+    # when a catalog is supplied; chunks lost the metadata field at
+    # RDR-108 Phase 3.
+    chunk_count_by_doc_id: dict[str, int] = {}
+    if catalog is not None:
+        code_doc_ids = {
+            r.metadata.get("doc_id", "")
+            for r in results
+            if r.collection.startswith("code__")
+        }
+        code_doc_ids.discard("")
+        if code_doc_ids:
+            try:
+                placeholders = ",".join("?" for _ in code_doc_ids)
+                rows = catalog._db.execute(
+                    f"SELECT tumbler, chunk_count FROM documents "
+                    f"WHERE tumbler IN ({placeholders})",
+                    list(code_doc_ids),
+                ).fetchall()
+                chunk_count_by_doc_id = {
+                    t: int(cc) for t, cc in rows if cc is not None
+                }
+            except Exception as exc:
+                _log.warning(
+                    "scoring_chunk_count_lookup_failed",
+                    error=str(exc),
+                    doc_id_count=len(code_doc_ids),
+                )
+
     for r in results:
         if r.collection == "rg__cache":
             r.hybrid_score = RG_FLOOR_SCORE
@@ -122,7 +159,10 @@ def apply_hybrid_scoring(
         else:
             r.hybrid_score = v_norm
         if r.collection.startswith("code__"):
-            chunk_count = int(r.metadata.get("chunk_count", 1))
+            doc_id = r.metadata.get("doc_id", "")
+            chunk_count = chunk_count_by_doc_id.get(doc_id) or int(
+                r.metadata.get("chunk_count", 1)
+            )
             r.hybrid_score *= _file_size_factor(chunk_count, file_size_threshold)
 
     return sorted(results, key=lambda r: r.hybrid_score, reverse=True)

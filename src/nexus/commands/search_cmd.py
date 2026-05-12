@@ -408,12 +408,25 @@ def search_cmd(
                         rg_matched_lines.setdefault(fp, []).append(int(ln))
 
     # Hybrid scoring — pass tuning weights from config (honours per-repo .nexus.yml)
+    # nexus-dxly: pass catalog so the code__ file-size penalty can
+    # resolve chunk_count via documents.chunk_count for Phase-3 chunks
+    # (RDR-108 dropped chunk_count from chunk metadata).
+    from nexus.catalog import Catalog as _Catalog
+    from nexus.config import catalog_path as _catalog_path
+    _scoring_cat = None
+    try:
+        _scoring_cp = _catalog_path()
+        if _Catalog.is_initialized(_scoring_cp):
+            _scoring_cat = _Catalog(_scoring_cp, _scoring_cp / ".catalog.db")
+    except Exception:
+        _scoring_cat = None
     results = apply_hybrid_scoring(
         results,
         hybrid=hybrid,
         vector_weight=tuning.vector_weight,
         frecency_weight=tuning.frecency_weight,
         file_size_threshold=tuning.file_size_threshold,
+        catalog=_scoring_cat,
     )
 
     # RDR-055 E2: quality boost from bibliographic metadata (no-op when unenriched)
