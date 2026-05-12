@@ -131,6 +131,46 @@ class TestAppendMany:
         assert [e.payload.doc_id for e in replayed] == ["a", "b", "c"]
 
 
+class TestAppendUnlocked:
+    """nexus-lrhg (RDR-108 audit finding 5): unlocked variants exist
+    for callers that already hold the catalog directory flock. The
+    write path matches the locked variants byte-for-byte; only the
+    flock acquisition is skipped."""
+
+    def test_append_unlocked_writes_one_line(self, event_log):
+        e = ev.make_event(ev.DocumentDeletedPayload(doc_id="x", reason="t"))
+        event_log.append_unlocked(e)
+        replayed = list(event_log.replay())
+        assert len(replayed) == 1
+        assert replayed[0].payload.doc_id == "x"
+
+    def test_append_many_unlocked_writes_batch(self, event_log):
+        events = [
+            ev.make_event(ev.DocumentDeletedPayload(doc_id=f"d{i}", reason="t"))
+            for i in range(3)
+        ]
+        event_log.append_many_unlocked(events)
+        replayed = list(event_log.replay())
+        assert [r.payload.doc_id for r in replayed] == ["d0", "d1", "d2"]
+
+    def test_append_many_unlocked_empty_is_noop(self, event_log):
+        event_log.append_many_unlocked([])
+        assert event_log.path.read_text() == ""
+
+    def test_unlocked_and_locked_interleave_correctly(self, event_log):
+        """A caller holding the dir flock can mix unlocked writes
+        with subsequent locked writes (after releasing) — the file
+        is append-only and replay sees all events in order."""
+        event_log.append_unlocked(
+            ev.make_event(ev.DocumentDeletedPayload(doc_id="u1", reason="t"))
+        )
+        event_log.append(
+            ev.make_event(ev.DocumentDeletedPayload(doc_id="l1", reason="t"))
+        )
+        replayed = list(event_log.replay())
+        assert [r.payload.doc_id for r in replayed] == ["u1", "l1"]
+
+
 class TestReplay:
     def test_empty_log_yields_nothing(self, event_log):
         assert list(event_log.replay()) == []

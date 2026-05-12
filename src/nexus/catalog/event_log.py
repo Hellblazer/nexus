@@ -75,6 +75,18 @@ class EventLog:
         The lock pattern matches ``Catalog._acquire_lock`` exactly so
         Phase 1 writers and the existing JSONL writers don't race.
 
+        Re-entrancy invariant (nexus-lrhg, RDR-108 audit finding 5):
+        callers MUST NOT already hold the catalog directory flock.
+        POSIX ``flock`` on the same file descriptor is re-entrant only
+        when the caller passes the same ``dir_fd``; ``acquire_directory_lock``
+        opens a fresh fd every call, so a holder calling ``append()``
+        produces a second flock acquisition that may deadlock under
+        some kernels (Linux ``flock`` LOCK_EX on a new fd against the
+        same path is non-reentrant). For writer code paths that already
+        hold the lock (e.g. ``Catalog`` mutators inside a single dir-fd
+        scope), use :meth:`append_unlocked` and let the caller manage
+        the flock around the whole atomic step.
+
         Raises ``TypeError`` if the event payload contains values
         ``json.dumps`` cannot serialize (e.g. ``datetime``, ``Path``,
         ``Decimal``). Earlier versions silently coerced these via
@@ -92,6 +104,23 @@ class EventLog:
         finally:
             release_lock(dir_fd)
 
+    def append_unlocked(self, event: Event) -> None:
+        """Append one event envelope WITHOUT acquiring the dir flock.
+
+        Caller is responsible for holding an exclusive lock on the
+        catalog directory for the whole atomic step. Use when the
+        write is part of a larger sequence already running under
+        ``acquire_directory_lock`` (e.g. a Catalog mutator that bundles
+        SQLite UPDATE + JSONL append + event log append under one
+        flock so the three projections converge or all fail together).
+
+        Same JSON-serialization contract as :meth:`append`.
+        """
+        line = json.dumps(event.to_dict(), separators=(",", ":"))
+        with self._path.open("a") as f:
+            f.write(line)
+            f.write("\n")
+
     def append_many(self, events: list[Event]) -> None:
         """Append a batch of events under a single flock acquisition.
 
@@ -99,6 +128,10 @@ class EventLog:
         catalog row produces multiple events (e.g. tombstoned row →
         ``DocumentRegistered`` + ``DocumentDeleted``). A single flock keeps
         the batch atomic with respect to other catalog writers.
+
+        Same re-entrancy invariant as :meth:`append`: callers must NOT
+        already hold the catalog directory flock; use
+        :meth:`append_many_unlocked` in that case.
 
         Like ``append``, raises ``TypeError`` on non-JSON-serializable
         payload values rather than silently coercing them.
@@ -117,6 +150,23 @@ class EventLog:
                     f.write("\n")
         finally:
             release_lock(dir_fd)
+
+    def append_many_unlocked(self, events: list[Event]) -> None:
+        """Append a batch of events WITHOUT acquiring the dir flock.
+
+        Caller-managed flock equivalent of :meth:`append_many`. See
+        :meth:`append_unlocked` for the invariant and use case.
+        """
+        if not events:
+            return
+        lines = [
+            json.dumps(e.to_dict(), separators=(",", ":"))
+            for e in events
+        ]
+        with self._path.open("a") as f:
+            for line in lines:
+                f.write(line)
+                f.write("\n")
 
     def replay(self) -> Iterator[Event]:
         """Yield events in append order. Skips malformed lines with a warning.
