@@ -367,33 +367,37 @@ class TestPagination:
 
 
 class TestPathRemapping:
-    @pytest.mark.parametrize("remaps,prefix_check", [
-        ([("/repo", "/new_root")], "/new_root/"),
-        ([("/nonexistent", "/other")], "/repo/"),
+    """nexus-8g79.29: pre-fix the legacy ``test_remap_on_import``
+    asserted the remap's effect on T3 chunk metadata, but RDR-102
+    Phase B dropped ``source_path`` from ``ALLOWED_TOP_LEVEL`` so the
+    ``normalize()`` funnel strips it on import — the assertion was
+    permanently unreachable and parked under ``xfail(strict=True)``,
+    which is brittle (any incidental fix would flip it to XPASS and
+    break the suite).
+
+    Replaced with a direct unit test of ``_apply_remap`` — the
+    function still operates on the export stream (back-compat for
+    legacy ``.nxexp`` files) but its end-to-end effect on chunks is
+    obsoleted by the schema removal. Testing the helper directly
+    locks the back-compat contract without depending on chunk
+    metadata that no longer exists.
+    """
+
+    @pytest.mark.parametrize("remaps,source_path,expected", [
+        # First matching prefix wins.
+        ([("/repo", "/new_root")], "/repo/src/foo.py", "/new_root/src/foo.py"),
+        # No match → passthrough.
+        ([("/nonexistent", "/other")], "/repo/src/bar.py", "/repo/src/bar.py"),
+        # Earlier match wins over later.
+        ([("/a", "/A"), ("/a/sub", "/AB")], "/a/sub/x", "/A/sub/x"),
+        # Empty remaps → passthrough.
+        ([], "/repo/file.py", "/repo/file.py"),
     ])
-    @pytest.mark.xfail(
-        reason=(
-            "RDR-102 D2 (Phase B) dropped source_path from "
-            "ALLOWED_TOP_LEVEL; the import path's normalize() funnel now "
-            "strips it, so the remap-on-import effect on T3 chunk "
-            "metadata is no longer observable. The remap logic itself "
-            "still operates on the export stream (exporter.py is on the "
-            "RF-4 'what stays' list — back-compat for legacy .nxexp "
-            "files), but its end-to-end effect on chunks has been "
-            "obsoleted by the schema removal. Re-test scope: a future "
-            "exporter-internal test that asserts the .nxexp on-disk "
-            "form carries the remapped source_path before normalize "
-            "strips it, OR a wholesale removal of the remap feature."
-        ),
-        strict=True,
-    )
-    def test_remap_on_import(self, populated_db: T3Database, tmp_path: Path, remaps, prefix_check):
-        target = f"code__remap_{prefix_check.strip('/')}"
-        out, _ = _export(populated_db, "code__test", tmp_path, fname=f"{target}.nxexp")
-        import_collection(db=populated_db, input_path=out, target_collection=target, remaps=remaps)
-        col = populated_db._client_for(target).get_collection(target)
-        paths = {m["source_path"] for m in col.get(include=["metadatas"])["metadatas"]}
-        assert all(p.startswith(prefix_check) for p in paths)
+    def test_apply_remap_first_match_wins(
+        self, remaps, source_path, expected,
+    ):
+        from nexus.exporter import _apply_remap
+        assert _apply_remap(source_path, remaps) == expected
 
 
 # ── Unit: embedding model validation ─────────────────────────────────────────

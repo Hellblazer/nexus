@@ -826,6 +826,54 @@ class TestManifestWriteBatchHook:
         assert rows[0] == (0, "a" * 64)
         assert rows[1] == (1, "b" * 64)
 
+    def test_manifest_write_batch_hook_exception_logs_warning_no_propagate(
+        self, tmp_path,
+    ):
+        """nexus-8g79.24: when ``append_manifest_chunks`` raises, the
+        batch hook must (a) not propagate (the post-store chain
+        contract is best-effort) and (b) surface the failure at
+        WARNING level so production log streams catch it without
+        DEBUG enabled. Pre-4.32.6 the failure was logged at DEBUG,
+        making post-Phase-3 manifest data-loss invisible.
+        """
+        from unittest.mock import patch
+        import structlog
+        from structlog.testing import capture_logs
+
+        from nexus.mcp_infra import manifest_write_batch_hook
+
+        cat = _make_catalog(tmp_path)
+        _insert_doc(cat, "1.1.1", "code__test")
+
+        metadatas = [
+            {"chunk_index": 0, "chunk_text_hash": "a" * 64},
+        ]
+        # Force append_manifest_chunks to raise.
+        with patch.object(
+            type(cat), "append_manifest_chunks",
+            side_effect=RuntimeError("induced manifest failure"),
+        ), patch("nexus.mcp_infra.get_catalog", return_value=cat), \
+                capture_logs() as cap:
+            # MUST NOT raise — contract is best-effort.
+            manifest_write_batch_hook(
+                doc_ids=["c-0"],
+                collection="code__test",
+                contents=["x"],
+                embeddings=None,
+                metadatas=metadatas,
+                catalog_doc_id="1.1.1",
+            )
+
+        # WARNING-level event with exc_info captured.
+        warnings = [e for e in cap if e.get("log_level") == "warning"]
+        assert any(
+            e.get("event") == "manifest_write_hook_failed" and e.get("doc_id") == "1.1.1"
+            for e in warnings
+        ), (
+            f"expected manifest_write_hook_failed WARNING for doc_id=1.1.1; "
+            f"captured: {cap}"
+        )
+
     def test_manifest_write_batch_hook_registered_in_mcp_core(self):
         """manifest_write_batch_hook is registered in the post-store batch chain."""
         # We just verify that importing mcp.core registers the hook.

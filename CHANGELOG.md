@@ -6,259 +6,212 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [4.32.7] - 2026-05-12
-
-Patch on 4.32.6. Tier-2 architectural + Tier-3 dep-hygiene from the
-2026-05-12 audit epic ``nexus-8g79``.
-
-### Fixed
-
-- **``catalog/consolidation.py:116`` routes T3 writes through
-  ``T3Database.upsert_chunks_with_embeddings``** (nexus-8g79.11):
-  pre-fix the raw ``target_col.upsert`` bypassed quota validation,
-  manifest hook, taxonomy hook, and chash dual-write. Post-fix the
-  consolidated collection is visible to catalog-aware retrieval.
-- **``fire_post_document_hooks`` signature-classified at register
-  time** (nexus-8g79.12): pre-fix the dispatcher caught ``TypeError``
-  from inside the hook body and silently retried with the legacy
-  shape — misclassifying unrelated type bugs as a back-compat signal.
-  Mirrors the pattern already used by
-  ``register_post_store_batch_hook`` for ``catalog_doc_id``.
-- **Retry backoff jittered ±20%** (nexus-8g79.32): pre-fix
-  ``time.sleep(delay)`` with deterministic doubling caused
-  thundering-herd retries under sustained rate-limit (multiple
-  concurrent workers waking at the exact same instant). Both
-  ``_chroma_with_retry`` and ``_voyage_with_retry`` now apply
-  ``delay * (1 + (random() - 0.5) * 0.4)`` jitter before sleep.
-
-### Test discipline (nexus-8g79.23, partial)
-
-Initial sweep of the densest inequality-assertion violators flagged
-by the audit. Per Hal's standing rule "exact assertions, not
-inequalities" — inequalities are how silent-corruption tests pass.
-
-- ``tests/test_chunker.py``: 5 ``>=`` → ``==`` (300-line / 150-chunk
-  → 3 chunks; 300-line / 100-chunk with 15% overlap → 4 chunks;
-  small fixtures → 1 chunk). 2 left as documented ``>= 2``
-  minimum-correctness invariants for the byte-cap split tests where
-  exact count depends on the cap-vs-content algorithm.
-- ``tests/test_indexer_modules.py``: 5 ``assert result >= 1`` →
-  ``assert result == 1`` on small-file fixtures.
-- ``tests/test_catalog_e2e.py``: 4 fixture-count tightenings —
-  ``link_query == 1`` after exactly one link, ``LIMIT 2 == 2``,
-  ``stale_chash_count == 1`` after exactly one bogus link, replaced
-  meaningless ``rows[0][0] >= 0`` with type assertion.
-- ``tests/test_catalog.py``: 8 ``cat.resolve(doc) is not None``
-  bare-existence probes tightened to identity check
-  ``entry is not None and entry.tumbler == doc``; 2 audit count
-  ``>= 1`` → ``== 1``.
-
-228 tests pass post-sweep. ~480 inequality patterns remain across
-the wider test suite; the bead stays open for incremental
-continuation.
-
-### Cosmetic (nexus-8g79.33)
-
-- **API-key truncation in provision error log**: ChromaDB error
-  bodies occasionally echo the offending token; truncate to 120
-  chars matching ``retry.py``'s safety bound so tokens cannot leak
-  verbatim into structured logs.
-- **CI ONNX cache key bound to ``uv.lock`` hash**: pre-fix the
-  runner-OS-only key reused stale ONNX models across chromadb
-  upgrades.
-- **``sn`` plugin manifest filled in**: added ``author``,
-  ``repository``, ``license`` for marketplace-schema parity with
-  ``nx``.
-- **Defensive assertion against future async caller of
-  ``_label_batch``**: pre-fix the bare ``asyncio.run()`` would raise
-  an opaque "cannot be called from a running event loop" if a
-  caller transitioned to async; now raises a clear ``RuntimeError``
-  pointing at the call-site fix.
-
-### Deps
-
-- **``cryptography`` upgraded ``46.0.5 → 48.0.0``** (nexus-8g79.17):
-  two-minor catch-up on a high-CVE-frequency package. Transitive
-  bump only — no source changes; full touched-suite (652 tests)
-  green post-bump.
-
-### Verified-no-action
-
-- **``nexus-8g79.13``** (chunk_index emission): chunkers emit
-  ``chunk_index`` in metadata as the chunk's position counter
-  (0..N-1), consumed by the indexer to populate
-  ``document_chunks.position``. Cargo-filtered before T3 write
-  (verified by tests). Removing the emission requires a chunker-API
-  refactor across ``chunker.py`` / ``md_chunker.py`` /
-  ``pdf_chunker.py`` / 4 indexers — substantial blast radius for a
-  defense-in-depth fix against a hypothetical future bug. Deferred
-  to a focused refactor bead.
-- **``nexus-8g79.14``** (dead code): audit findings were wrong —
-  the "demoted" MCP wrappers are imported by ``mcp_server.py`` and
-  re-exported from ``mcp/__init__.py`` as part of the public MCP
-  surface. ``DEFINITION_TYPES`` at ``indexer.py:48`` is used by
-  ``tests/test_languages.py``. Per "Unused != useless" rule these
-  are intentional re-exports; closing as no-action.
-
-## [4.32.6] - 2026-05-12
-
-Patch on 4.32.5. Tier-1 silent-fail discipline pass surfaced by the
-2026-05-12 multi-agent audit. None of these are data-loss class — they
-are silent degradations where a recurring error returns "safe-looking"
-state (empty set, False, b"", default value) so the broken behaviour is
-indistinguishable from healthy in logs.
-
-### Fixed
-
-- **``catalog_spans.py:290`` no longer wipes the chash index on T3
-  transient** (nexus-8g79.3): the pre-fix
-  ``except: live = set()`` made every row look stale and the
-  self-heal loop deleted them all. Now logs at WARNING, treats every
-  row as a provisional survivor, and skips the self-heal pass.
-- **``Catalog.delete_document`` cascades to ``document_chunks``**
-  (nexus-8g79.7): pre-fix only ``DELETE FROM documents`` ran, leaving
-  orphan manifest rows that survived even after event-sourced replay
-  (no FK cascade in the schema). Both the projector's
-  ``_v0_document_deleted`` and the legacy write path now
-  ``DELETE FROM document_chunks WHERE doc_id = ?`` first.
-- **``indexer.py:1547`` prune-misclassified no longer silently
-  accumulates T3 orphans** (nexus-8g79.4): the bare ``continue`` on
-  ``get_manifest`` failure left chunks un-pruned indefinitely. Both
-  the manifest-lookup and the ``col.get`` paths now log at WARNING
-  with doc_id / batch size + ``exc_info``.
-- **``catalog.py:_needs_compaction`` exception surfaces at WARNING**
-  (nexus-8g79.5): pre-fix the bare ``except: pass`` silently disabled
-  JSONL compaction whenever the threshold check raised, letting the
-  files grow unbounded.
-- **``catalog_sync.py:_should_use_event_sourced_rebuild`` exception
-  surfaces at WARNING** (nexus-8g79.6): pre-fix the silent return-False
-  downgraded every startup to legacy rebuild on a persistent error,
-  with no operator signal.
-- **``pipeline_buffer.update_progress`` quotes column identifiers**
-  (nexus-8g79.9): defense-in-depth — allowlist-check still gates today,
-  but a future allowlist entry that includes a SQL keyword (``order``)
-  would break or inject without explicit ``"col" = ?`` quoting.
-- **8 silent-fail patterns logged correctly** (nexus-8g79.8):
-  ``indexer_utils.py:317`` (WARNING — docs_for_chashes failure
-  silently broke catalog-aware retrieval),
-  ``context.py:71/78`` (DEBUG inner + WARNING outer — L1 context
-  collection-discovery),
-  ``operators/dispatch.py:128`` (DEBUG — pipe read failure was
-  invisible),
-  ``plans/matcher.py:298`` (DEBUG — cache eviction failure with
-  plan_id),
-  ``doc_indexer.py:1434`` (DEBUG — frontmatter parse failure left
-  catalog title/year unset),
-  ``collection_audit.py:186`` (WARNING + failed-count — per-embedding
-  query failure produced sparse-looking histograms indistinguishable
-  from genuinely sparse collections).
-
-### Tests
-
-Two new regression tests in ``test_catalog_event_sourced_mutators.py``
-assert ``delete_document`` cascades to ``document_chunks`` on both
-the event-sourced and legacy paths. 532 tests pass across touched
-suites.
-
-### Known follow-ups (from the audit epic ``nexus-8g79``)
-
-Tier-2 architectural cleanup (7 layering violations + consolidation
-T3-write bypass + dead-code sweep) plans into 4.33. Tier-3 external
-dep upgrades (``llama-index-core``, ``cryptography``,
-``tree-sitter-language-pack``, ``mineru[all]`` surface reduction,
-``chromadb`` timeout-patch fragility) plan as separate beads. Tier-4
-test discipline (155 inequality assertions, ``manifest_write_batch_hook``
-exception coverage, ``time.sleep`` → threading.Event in 8 files)
-plans as a sweep.
-
 ## [4.32.5] - 2026-05-12
 
-Patch on 4.32.4. Closes the remaining Tier-0 same-class regressions
-surfaced by the post-4.32.4 multi-agent audit (6 specialised agents
-ran in parallel across architecture, error handling, test quality,
-external deps, design contracts, deferment inventory). 4.32.4 fixed
-the ``nx index repo`` path; 4.32.5 fixes the rest of the surface
-with the identical bug shape and closes the event-replay invariant.
+Patch on 4.32.4. Consolidated audit-driven follow-ups from the
+post-4.32.4 multi-agent audit (6 specialised agents covering
+architecture, error handling, test quality, external deps, design
+contracts, deferment inventory). Closes Tiers 0-1 fully and the
+short-payoff items in Tiers 2-6. The audit-epic tracking is
+``nexus-8g79``; 22/35 audit children closed by this release.
 
-### Fixed
+### Tier 0 — same-class regressions as nexus-zq79 / 4.32.4
 
 - **``fire_store_chains`` missing ``catalog_doc_id``** (nexus-lf8f):
   the consolidated hook-firing helper used by MCP ``store_put``,
-  ``nx store put``, ``nx memory promote``, and ``nx store import``
-  didn't pass ``catalog_doc_id`` through to
-  ``fire_post_store_batch_hooks``. Post-Phase-3 chunks have no
-  ``doc_id`` fallback in metadata, so the manifest hook short-
-  circuited and the catalog row shipped with ``chunk_count=0`` and
-  an empty manifest — the same regression class as nexus-zq79,
-  different code path. ``fire_store_chains`` now accepts
-  ``catalog_doc_id`` kwarg and threads it through; ``nx store put``
-  wires it explicitly from ``_catalog_store_hook``. The
-  ``nx memory promote`` and ``nx store import`` paths still need
-  catalog registration plumbing — filed as follow-ups.
-- **``Projector.apply_all`` event-replay re-derives
-  ``documents.chunk_count``** (nexus-lf8f): the resync hook writes
-  directly to SQLite (chunk_count is a denormalised cache, not an
-  event-sourced field). Without a post-replay re-derivation,
-  ``nx catalog rebuild`` from ``events.jsonl`` would project
+  ``nx store put``, ``nx memory promote``, ``nx store import``
+  didn't pass ``catalog_doc_id`` through. Post-Phase-3 chunks have
+  no ``doc_id`` fallback so the manifest hook short-circuited and
+  the catalog row shipped with ``chunk_count=0`` and an empty
+  manifest. Same regression class as nexus-zq79; different code
+  path. Kwarg added; ``nx store put``, ``nx memory promote``, and
+  ``nx store import`` (with per-doc grouping) all wired.
+- **``Projector.apply_all`` re-derives ``chunk_count`` post-replay**
+  (nexus-lf8f): the ``resync_chunk_count_cache`` hook writes
+  direct SQL (the cache isn't event-sourced). Without a re-derive
+  in replay, ``nx catalog rebuild`` from ``events.jsonl`` projected
   ``chunk_count=0`` forever — the ``DocumentRegistered`` events
-  carry the register-time snapshot only. The projector now runs
-  a single set-based ``UPDATE documents SET chunk_count = (SELECT
-  COUNT(*) FROM document_chunks WHERE doc_id = tumbler)`` after
-  every replay, guarded by ``WHERE EXISTS`` so caller-supplied
-  values via ``Catalog.update(chunk_count=N)`` still survive.
-- **Search results now carry catalog-derived ``chunk_count`` and
-  ``chunk_index``** (nexus-dxly, partial): post-Phase-3 chunk
-  metadata dropped both fields; ``scoring.py:125`` defaulted
-  ``chunk_count=1`` (file-size penalty silently disabled);
-  ``aspect_readers.py:266`` defaulted ``chunk_index=0`` (multi-
-  chunk doc reassembly wrong). The
-  ``_attach_doc_ids_from_catalog`` helper now batches the
-  manifest fetch and stamps both fields onto every result that
-  resolves to a catalog doc. ``aspect_readers`` and
-  ``aspect_extractor`` direct-chroma paths still need wiring to
-  the manifest — filed as follow-ups.
-
-### Additional fixes (nexus-8g79.1, nexus-8g79.2)
-
-- **``nx memory promote`` now registers in catalog before T3 put**
+  carry the register-time snapshot only. Single set-based
+  ``UPDATE`` post-replay; guarded by ``WHERE EXISTS`` so
+  caller-supplied values via ``Catalog.update(chunk_count=N)``
+  still survive.
+- **Search-result manifest stamping** (nexus-dxly partial):
+  ``_attach_doc_ids_from_catalog`` batches catalog manifest fetches
+  and stamps ``chunk_count`` + ``chunk_index`` onto every result
+  resolving to a catalog doc. Closes the ``scoring.py:125``
+  file-size penalty regression (was defaulting ``chunk_count=1``,
+  silently disabling the penalty).
+- **``nx memory promote`` + ``nx store import`` catalog plumbing**
   (nexus-8g79.1): the T2→T3 promotion path pre-registers via the
   shared ``_catalog_store_hook`` so chunks land with the catalog
-  tumbler as ``doc_id`` and the manifest hook populates
-  ``document_chunks`` + ``chunk_count`` correctly. Same fix pattern
-  as ``nx store put`` in this release.
-- **``nx store import`` (exporter) now groups by doc_id**
-  (nexus-8g79.1): batched chunk imports group records by
-  ``meta["doc_id"]`` and fire ``fire_store_chains`` per group with
-  the group key as ``catalog_doc_id``. Pre-Phase-3 exports carrying
-  ``doc_id`` per chunk attribute correctly; post-Phase-3 exports
-  without ``doc_id`` retain the existing graceful-degradation
-  behaviour (manifest hook short-circuits for that group) until the
-  export format extension carries a catalog manifest sidecar.
+  tumbler as ``doc_id`` at write-time. The import path groups by
+  ``meta["doc_id"]`` and fires ``fire_store_chains`` per group
+  with the group key as ``catalog_doc_id``.
 - **aspect_readers + aspect_extractor manifest-ordered reassembly**
-  (nexus-8g79.2): the chroma reader's ``_gather_chroma_chunks_by_field``
-  accepts a ``manifest_lookup(doc_id) -> list[ManifestRow]`` callable
-  and, when ``identity_field == 'doc_id'``, orders chunks by the
-  catalog manifest's canonical position keyed on
-  ``chunk_text_hash``. Post-Phase-3 chunks have no ``chunk_index``
-  in metadata so the legacy ``md.get('chunk_index', 0)`` ordering
-  collapsed to insertion-sequence — wrong for multi-chunk docs.
-  Threaded through ``read_source`` → ``_read_chroma_uri`` and the
-  three callers (``enrich.py`` aspects/dry-run paths,
-  ``aspect_worker.py``, ``aspect_extractor.extract_aspects``) via a
-  new ``_build_catalog_manifest_lookup`` factory in
-  ``commands/enrich.py``.
+  (nexus-8g79.2): ``_gather_chroma_chunks_by_field`` accepts
+  ``manifest_lookup(doc_id) -> list[ManifestRow]`` and, when
+  ``identity_field == 'doc_id'``, orders chunks by canonical
+  manifest position keyed on ``chunk_text_hash``. Post-Phase-3
+  chunks have no ``chunk_index`` so the legacy
+  ``md.get("chunk_index", 0)`` ordering collapsed to insertion
+  sequence — wrong for multi-chunk docs. Threaded through
+  ``read_source`` → ``_read_chroma_uri`` + 3 callers (``enrich.py``
+  aspects/dry-run paths, ``aspect_worker.py``,
+  ``aspect_extractor.extract_aspects``).
 
-### Known follow-ups (deferred)
+### Tier 1 — silent-fail discipline pass
 
-- ``nexus-w5zv`` (P1) — backfill paths write Phase-3 chunks at
-  position 0.
-- ``nexus-lrhg`` (P1) — atomicity wrap of manifest hook, chash
-  32/64-char normalisation, ``DocumentDeleted`` replay orphan
-  cleanup, ``event_log.py`` flock re-entrancy, staleness-cache
-  silent-fail.
-- Post-Phase-3 export format extension (``nx store import``):
-  carry a catalog manifest sidecar so post-Phase-3 imports can
-  reconstruct ``document_chunks``. Filed in nexus-8g79.1 notes.
+- **``catalog_spans.py:290`` no longer wipes the chash index on T3
+  transient** (nexus-8g79.3): pre-fix ``except: live = set()``
+  made every row look stale and the self-heal loop DELETEd them all.
+  Now logs at WARNING and skips self-heal — every row stays a
+  provisional survivor.
+- **``Catalog.delete_document`` cascades to ``document_chunks``**
+  (nexus-8g79.7): pre-fix only ``DELETE FROM documents`` ran,
+  leaving orphan manifest rows that survived even after
+  event-sourced replay (schema has no FK cascade). Both projector
+  ``_v0_document_deleted`` and the legacy write path now cascade.
+- **``indexer.py:1547`` prune-misclassified** (nexus-8g79.4): bare
+  ``continue`` on ``get_manifest`` / ``col.get`` failures during
+  prune left T3 orphan chunks accumulating indefinitely. WARNING
+  with doc_id / batch size + ``exc_info``.
+- **``catalog.py:_needs_compaction``** (nexus-8g79.5): pre-fix
+  silent ``except: pass`` disabled JSONL compaction forever on
+  persistent error. WARNING + exc_info.
+- **``catalog_sync.py:_should_use_event_sourced_rebuild``**
+  (nexus-8g79.6): silent return-False downgraded every startup to
+  legacy rebuild on persistent error. WARNING + exc_info.
+- **``pipeline_buffer.update_progress``** (nexus-8g79.9):
+  defense-in-depth ``"col" = ?`` identifier quoting against future
+  allowlist entries colliding with SQL keywords.
+- **8 silent-fail patterns** (nexus-8g79.8): ``indexer_utils.py:317``
+  (WARNING — docs_for_chashes), ``context.py:71/78`` (DEBUG inner +
+  WARNING outer), ``operators/dispatch.py:128`` (DEBUG pipe-read),
+  ``plans/matcher.py:298`` (DEBUG plan-cache eviction + plan_id),
+  ``doc_indexer.py:1434`` (DEBUG frontmatter-parse + path),
+  ``collection_audit.py:186`` (WARNING + failed-count for partial
+  query failures producing sparse-looking histograms).
+- **manifest hook log severity** bumped DEBUG → WARNING since
+  post-Phase-3 the hook is load-bearing.
+
+### Tier 2 — architectural cleanups
+
+- **``catalog/consolidation.py:116``** routes T3 writes through
+  ``T3Database.upsert_chunks_with_embeddings`` (nexus-8g79.11):
+  pre-fix the raw ``target_col.upsert`` bypassed quota validation,
+  manifest hook, taxonomy hook, and chash dual-write.
+- **``fire_post_document_hooks`` signature-classified at register
+  time** (nexus-8g79.12): mirrors the pattern used by
+  ``register_post_store_batch_hook``. Pre-fix the dispatcher caught
+  ``TypeError`` from inside the hook body and silently retried with
+  legacy shape, misclassifying unrelated type bugs.
+
+### Tier 3 — dependency hygiene
+
+- **``cryptography`` ``46.0.5 → 48.0.0``** (nexus-8g79.17): two-minor
+  catch-up on a high-CVE-frequency package. Transitive bump only —
+  no source changes. The ``llama-index-core`` upgrade (nexus-8g79.16)
+  is BLOCKED by the ``mineru[all]`` GPU-stack vendoring
+  (``nvidia-cudnn-frontend`` has no macOS wheels) — bead links the
+  blocker.
+
+### Backfill on upgrade
+
+The fix corrects the *write path*; documents indexed before this
+release retain stale caches. A migration step is filed for a
+follow-up patch; in the interim apply directly:
+
+```sql
+-- catalog SQLite (.catalog.db)
+UPDATE documents SET chunk_count = (
+  SELECT COUNT(*) FROM document_chunks dc WHERE dc.doc_id = documents.tumbler
+) WHERE chunk_count = 0 AND EXISTS (
+  SELECT 1 FROM document_chunks dc WHERE dc.doc_id = documents.tumbler
+);
+
+-- memory.db (taxonomy)
+UPDATE topics SET doc_count = (
+  SELECT COUNT(*) FROM topic_assignments WHERE topic_id = topics.id
+);
+```
+
+### Tier 4 — test discipline
+
+- **``manifest_write_batch_hook`` exception path coverage**
+  (nexus-8g79.24): regression test induces a manifest write
+  failure and asserts no-propagate + WARNING structlog event.
+- **``_collections_cache`` TTL expiry coverage** (nexus-8g79.25):
+  test rewinds the cached timestamp past TTL, verifies exactly-one
+  re-fetch.
+- **Inequality-assertion sweep — 4 densest violators**
+  (nexus-8g79.23 partial): tightened ~25 ``assert x >= 1`` /
+  ``is not None`` to exact ``== N`` / identity checks across
+  ``test_chunker.py``, ``test_indexer_modules.py``,
+  ``test_catalog_e2e.py``, ``test_catalog.py``. Per Hal's rule:
+  inequalities are how silent-corruption tests pass. ~480 patterns
+  remain across the wider suite; bead stays open for incremental
+  continuation.
+
+### Tier 5 — hygiene
+
+- **Stale xfail / skip markers** (nexus-8g79.29):
+  ``test_builtin_plans.py`` skip reasons updated (the 15 YAMLs
+  shipped); ``test_dispatch_router.py`` sentinel-driven test for
+  the permanently-skipped ``CLAUDE_OPERATORS_PINNED`` routing
+  branch; ``test_exporter.py`` ``xfail(strict=True)`` replaced
+  with 4 deterministic ``_apply_remap`` cases (the legacy test
+  asserted ``source_path`` on chunks RDR-102 Phase B dropped from
+  the schema).
+
+### Tier 6 — cosmetic
+
+- **Retry backoff jitter ±20%** (nexus-8g79.32): both
+  ``_chroma_with_retry`` and ``_voyage_with_retry`` apply
+  ``delay * (1 + (random() - 0.5) * 0.4)`` before sleep. Pre-fix
+  deterministic doubling caused thundering-herd retries under
+  sustained rate-limit.
+- **API-key truncation in provision error log** (nexus-8g79.33):
+  ChromaDB error bodies occasionally echo the offending token;
+  truncate to 120 chars matching ``retry.py``'s safety bound.
+- **CI ONNX cache key bound to ``uv.lock`` hash** (nexus-8g79.33):
+  pre-fix the runner-OS-only key reused stale ONNX models across
+  chromadb upgrades.
+- **``sn`` plugin manifest** filled in ``author``, ``repository``,
+  ``license`` for marketplace-schema parity with ``nx``
+  (nexus-8g79.33).
+- **Defensive async-context assertion** in
+  ``commands/taxonomy_cmd.py:_label_batch`` (nexus-8g79.33):
+  raises a clear ``RuntimeError`` if a future async caller invokes
+  it (pre-fix ``asyncio.run()`` would raise an opaque "cannot be
+  called from a running event loop").
+
+### Verified no-action
+
+- **nexus-8g79.13** (chunker ``chunk_index`` emission): cargo-filter
+  ordering is test-enforced; removing the emit requires substantial
+  chunker-API refactor. Deferred to a focused bead.
+- **nexus-8g79.14** (dead code): audit findings were wrong — the
+  "demoted" wrappers are part of the public MCP surface via
+  ``mcp_server.py`` imports; ``DEFINITION_TYPES`` is used by
+  ``tests/test_languages.py``. Per "Unused != useless" rule, closed
+  as no-action.
+
+### Known follow-ups (audit epic ``nexus-8g79`` open children)
+
+- **nexus-8g79.10** (P1) — 7 layering violations (refactor).
+- **nexus-8g79.15** (P0) — RDR-108 Phase 4 (manifest-driven prune
+  + reads retargeting + audit; own multi-bead arc).
+- **nexus-8g79.18** (P1) — ``mineru[all]`` 356-package surface
+  reduction; blocks llama-index upgrade.
+- **nexus-8g79.16/.19/.20/.21** — dep upgrades stacked on .18.
+- **nexus-8g79.22** — misc dep hygiene bundle.
+- **nexus-8g79.23** — inequality assertion sweep continuation.
+- **nexus-8g79.26** — ``time.sleep`` → ``threading.Event`` in 8
+  test files.
+- **nexus-8g79.27** — integration operator pipelines CI coverage.
+- **nexus-8g79.28** — indexer tests ``EphemeralClient`` migration.
+- **nexus-8g79.31** — orphan deferment refs audit.
+- **nexus-8g79.34** — RDR-096 P5.1 batch-path migration.
 
 ## [4.32.4] - 2026-05-12
 
