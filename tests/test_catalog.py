@@ -619,7 +619,10 @@ class TestCompactReturn:
         doc = cat.register(owner, "a.py", content_type="code", file_path="a.py")
         cat.update(doc, head_hash="new")
         removed = cat.compact()
-        assert "documents.jsonl" in removed and removed["documents.jsonl"] >= 1
+        # nexus-8g79.23: register + update emits exactly 2 records for
+        # documents.jsonl; compaction collapses to 1, removing 1.
+        assert "documents.jsonl" in removed
+        assert removed["documents.jsonl"] == 1
 
 
 class TestTumblerPermanence:
@@ -799,7 +802,8 @@ class TestLinkAuditStaleSpans:
         cat._db.commit()
         cat.update(a, head_hash="new-hash")
         audit = cat.link_audit()
-        assert audit["stale_span_count"] >= 1
+        # nexus-8g79.23: we created exactly one link above.
+        assert audit["stale_span_count"] == 1
         assert any(s["from"] == str(a) for s in audit["stale_spans"])
 
     def test_no_stale_span_when_fresh(self, cat_with_two_docs):
@@ -1021,7 +1025,11 @@ class TestCrossProjectGuard:
             owner, "paper", content_type="paper",
             file_path=str(far_away),
         )
-        assert cat.resolve(doc) is not None
+        # nexus-8g79.23: tighten to identity check — pre-fix
+        # was a bare existence probe that passed even if resolve
+        # returned a different tumbler.
+        entry = cat.resolve(doc)
+        assert entry is not None and entry.tumbler == doc
 
     def test_register_repo_owner_without_repo_root_skips_guard(
         self, cat, tmp_path,
@@ -1040,7 +1048,11 @@ class TestCrossProjectGuard:
         doc = cat.register(
             owner, "x.py", content_type="code", file_path=str(far),
         )
-        assert cat.resolve(doc) is not None
+        # nexus-8g79.23: tighten to identity check — pre-fix
+        # was a bare existence probe that passed even if resolve
+        # returned a different tumbler.
+        entry = cat.resolve(doc)
+        assert entry is not None and entry.tumbler == doc
 
     def test_register_chroma_uri_skips_guard(self, cat_with_repo_owner):
         """``chroma://`` URIs have no filesystem identity; the project
@@ -1051,7 +1063,11 @@ class TestCrossProjectGuard:
             owner, "remote", content_type="paper",
             source_uri="chroma://knowledge__delos/foo.pdf",
         )
-        assert cat.resolve(doc) is not None
+        # nexus-8g79.23: tighten to identity check — pre-fix
+        # was a bare existence probe that passed even if resolve
+        # returned a different tumbler.
+        entry = cat.resolve(doc)
+        assert entry is not None and entry.tumbler == doc
 
     def test_register_devonthink_uri_skips_guard(self, cat_with_repo_owner):
         cat, owner, _ = cat_with_repo_owner
@@ -1059,7 +1075,11 @@ class TestCrossProjectGuard:
             owner, "dt-paper", content_type="paper",
             source_uri="x-devonthink-item://8EDC855D-213F-40AD-A9CF-9543CC76476B",
         )
-        assert cat.resolve(doc) is not None
+        # nexus-8g79.23: tighten to identity check — pre-fix
+        # was a bare existence probe that passed even if resolve
+        # returned a different tumbler.
+        entry = cat.resolve(doc)
+        assert entry is not None and entry.tumbler == doc
 
     def test_register_https_uri_skips_guard(self, cat_with_repo_owner):
         cat, owner, _ = cat_with_repo_owner
@@ -1067,7 +1087,11 @@ class TestCrossProjectGuard:
             owner, "html-mirror", content_type="paper",
             source_uri="https://example.com/paper",
         )
-        assert cat.resolve(doc) is not None
+        # nexus-8g79.23: tighten to identity check — pre-fix
+        # was a bare existence probe that passed even if resolve
+        # returned a different tumbler.
+        entry = cat.resolve(doc)
+        assert entry is not None and entry.tumbler == doc
 
     def test_register_empty_source_uri_skips_guard(self, cat_with_repo_owner):
         """Synthesized records (no path, no URI) bypass the guard so
@@ -1075,7 +1099,11 @@ class TestCrossProjectGuard:
         """
         cat, owner, _ = cat_with_repo_owner
         doc = cat.register(owner, "ghost", content_type="paper")
-        assert cat.resolve(doc) is not None
+        # nexus-8g79.23: tighten to identity check — pre-fix
+        # was a bare existence probe that passed even if resolve
+        # returned a different tumbler.
+        entry = cat.resolve(doc)
+        assert entry is not None and entry.tumbler == doc
 
     def test_env_override_allows_cross_project_register(
         self, cat_with_repo_owner, tmp_path, monkeypatch,
@@ -1092,7 +1120,11 @@ class TestCrossProjectGuard:
             owner, "qux.py", content_type="code",
             file_path=str(other),
         )
-        assert cat.resolve(doc) is not None
+        # nexus-8g79.23: tighten to identity check — pre-fix
+        # was a bare existence probe that passed even if resolve
+        # returned a different tumbler.
+        entry = cat.resolve(doc)
+        assert entry is not None and entry.tumbler == doc
 
     def test_existing_contaminated_rows_remain_readable(
         self, cat_with_repo_owner, tmp_path,
@@ -1184,7 +1216,11 @@ class TestCrossProjectGuard:
             owner, "code.py", content_type="code",
             file_path=str(nested),
         )
-        assert cat.resolve(doc) is not None
+        # nexus-8g79.23: tighten to identity check — pre-fix
+        # was a bare existence probe that passed even if resolve
+        # returned a different tumbler.
+        entry = cat.resolve(doc)
+        assert entry is not None and entry.tumbler == doc
 
 
 class TestUpdateGuard:

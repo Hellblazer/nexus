@@ -25,13 +25,16 @@ def test_line_chunk_basic(n_lines, chunk_lines, expected_chunks, check_start, ch
 
 def test_line_chunk_splits_long_file():
     content = "\n".join(f"line {i}" for i in range(300))
-    assert len(_line_chunk(content, chunk_lines=150)) >= 2
+    # nexus-8g79.23: 300 lines split into 3 chunks under the default
+    # overlap (chunk_lines=150, step ≈ 128 with default overlap).
+    assert len(_line_chunk(content, chunk_lines=150)) == 3
 
 
 def test_line_chunk_overlap():
     content = "\n".join(f"x{i}" for i in range(300))
     chunks = _line_chunk(content, chunk_lines=100, overlap=0.15)
-    assert len(chunks) >= 2
+    # nexus-8g79.23: 300 lines / step 85 (100 with 15% overlap) → 4 chunks.
+    assert len(chunks) == 4
     assert chunks[1][0] <= chunks[0][1]
 
 
@@ -59,7 +62,8 @@ def test_chunk_file_unknown_extension_uses_line_fallback(tmp_path: Path):
     f = tmp_path / "data.xyz"
     f.write_text("\n".join(f"line {i}" for i in range(50)))
     chunks = chunk_file(f, f.read_text())
-    assert len(chunks) >= 1
+    # nexus-8g79.23: 50 lines fit in a single default chunk.
+    assert len(chunks) == 1
     # Line fallback chunks carry line_start / line_end; AST chunks would also
     # set chunk_start_char (set by AST node offsets, not the fallback path).
     assert all("line_start" in c and "line_end" in c for c in chunks)
@@ -109,7 +113,8 @@ def test_chunk_file_ast_failure_falls_back_to_lines(tmp_path: Path):
     f.write_text("def foo():\n    pass\n")
     with patch("nexus.chunker._make_code_splitter", side_effect=Exception("parse error")):
         chunks = chunk_file(f, f.read_text())
-    assert len(chunks) >= 1
+    # nexus-8g79.23: 2-line tricky.py falls back to 1 line chunk.
+    assert len(chunks) == 1
     # Line-fallback chunks carry line_start / line_end (AST chunks
     # additionally carry start_char-derived metadata via the splitter).
     assert all("line_start" in c for c in chunks)
@@ -153,7 +158,8 @@ def test_chunk_file_ast_returns_empty_nodes_falls_back(tmp_path: Path):
     f.write_text("x = 1\n")
     with patch("nexus.chunker._make_code_splitter", return_value=[]):
         chunks = chunk_file(f, f.read_text())
-    assert len(chunks) >= 1
+    # nexus-8g79.23: empty AST → 1 line-fallback chunk for "x = 1\n".
+    assert len(chunks) == 1
     assert all("line_start" in c for c in chunks)
 
 
@@ -173,7 +179,11 @@ def test_line_chunk_respects_max_bytes():
 ])
 def test_line_chunk_single_oversized_line_is_split(max_bytes, big_line):
     chunks = _line_chunk(big_line, chunk_lines=150, max_bytes=max_bytes)
-    assert len(chunks) >= 1
+    # nexus-8g79.23: oversized-single-line MUST split to ≥2 to respect
+    # max_bytes; the loop below verifies every chunk individually. The
+    # exact split count depends on the byte-cap algorithm's overlap
+    # heuristic; >=2 is the minimum correctness invariant.
+    assert len(chunks) >= 2
     for _, _, text in chunks:
         assert len(text.encode()) <= max_bytes
 
@@ -213,7 +223,10 @@ def test_enforce_byte_cap_single_oversized_node_is_truncated():
     big_text = "a" * 200
     chunks = [{"text": big_text, "line_start": 1, "line_end": 1, "chunk_index": 0, "chunk_count": 1}]
     result = _enforce_byte_cap(chunks, max_bytes=max_bytes)
-    assert len(result) >= 1
+    # nexus-8g79.23: 200 bytes / 50-byte cap must split to ≥2; exact
+    # count depends on AST splitter heuristic. The loop below pins the
+    # byte invariant per chunk.
+    assert len(result) >= 2
     for c in result:
         assert len(c["text"].encode()) <= max_bytes
 

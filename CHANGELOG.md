@@ -31,6 +31,32 @@ Patch on 4.32.6. Tier-2 architectural + Tier-3 dep-hygiene from the
   ``_chroma_with_retry`` and ``_voyage_with_retry`` now apply
   ``delay * (1 + (random() - 0.5) * 0.4)`` jitter before sleep.
 
+### Test discipline (nexus-8g79.23, partial)
+
+Initial sweep of the densest inequality-assertion violators flagged
+by the audit. Per Hal's standing rule "exact assertions, not
+inequalities" — inequalities are how silent-corruption tests pass.
+
+- ``tests/test_chunker.py``: 5 ``>=`` → ``==`` (300-line / 150-chunk
+  → 3 chunks; 300-line / 100-chunk with 15% overlap → 4 chunks;
+  small fixtures → 1 chunk). 2 left as documented ``>= 2``
+  minimum-correctness invariants for the byte-cap split tests where
+  exact count depends on the cap-vs-content algorithm.
+- ``tests/test_indexer_modules.py``: 5 ``assert result >= 1`` →
+  ``assert result == 1`` on small-file fixtures.
+- ``tests/test_catalog_e2e.py``: 4 fixture-count tightenings —
+  ``link_query == 1`` after exactly one link, ``LIMIT 2 == 2``,
+  ``stale_chash_count == 1`` after exactly one bogus link, replaced
+  meaningless ``rows[0][0] >= 0`` with type assertion.
+- ``tests/test_catalog.py``: 8 ``cat.resolve(doc) is not None``
+  bare-existence probes tightened to identity check
+  ``entry is not None and entry.tumbler == doc``; 2 audit count
+  ``>= 1`` → ``== 1``.
+
+228 tests pass post-sweep. ~480 inequality patterns remain across
+the wider test suite; the bead stays open for incremental
+continuation.
+
 ### Cosmetic (nexus-8g79.33)
 
 - **API-key truncation in provision error log**: ChromaDB error
