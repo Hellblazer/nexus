@@ -901,24 +901,28 @@ def manifest_write_batch_hook(
         if all(not c["chash"] for c in chunks):
             continue
         try:
-            # nexus-zq79 F3: shrink-reindex orphan cleanup. UPSERT keyed on
-            # (doc_id, position) leaves orphan rows when a file re-indexes
-            # with fewer chunks than before. When the batch contains
-            # position 0 (the start of a file's chunks), wipe the doc's
-            # prior manifest rows first so the new write defines the
-            # complete shape. Multi-batch writes never include position 0
-            # in batches other than the first, so this is safe across the
+            # nexus-zq79 F3 / nexus-lrhg #1: shrink-reindex orphan cleanup.
+            # UPSERT keyed on (doc_id, position) leaves orphan rows when a
+            # file re-indexes with fewer chunks than before. When the batch
+            # contains position 0 (the start of a file's chunks), wrap the
+            # DELETE + INSERT + chunk_count UPDATE in one transaction via
+            # ``atomic_manifest_replace`` so a partial-failure crash
+            # between the purge and the new write cannot leave the catalog
+            # with zero chunks for a doc the documents row still claims N.
+            # Multi-batch writes never include position 0 in batches other
+            # than the first, so the atomic-replace path is safe for the
             # streaming PDF / doc_indexer paths.
             if any(c["position"] == 0 for c in chunks):
-                cat.purge_manifest_for_doc(doc_id)
-            cat.append_manifest_chunks(doc_id, chunks)
-            # nexus-zq79: documents.chunk_count is a denormalised cache of
-            # COUNT(*) document_chunks. The catalog-register hook runs BEFORE
-            # per-file indexing (tumbler injection requires it), so chunk_count
-            # is initialised to 0; nothing else updates it for code/prose
-            # indexers post-Phase-3. Routed via Catalog public API to satisfy
-            # the projector-only-writes invariant (RDR-101 Phase 3 ε).
-            cat.resync_chunk_count_cache(doc_id)
+                cat.atomic_manifest_replace(doc_id, chunks)
+            else:
+                cat.append_manifest_chunks(doc_id, chunks)
+                # nexus-zq79: documents.chunk_count is a denormalised cache of
+                # COUNT(*) document_chunks. The catalog-register hook runs BEFORE
+                # per-file indexing (tumbler injection requires it), so chunk_count
+                # is initialised to 0; nothing else updates it for code/prose
+                # indexers post-Phase-3. Routed via Catalog public API to satisfy
+                # the projector-only-writes invariant (RDR-101 Phase 3 ε).
+                cat.resync_chunk_count_cache(doc_id)
         except Exception:
             # Post-Phase-3 the manifest hook is load-bearing: a failure
             # leaves the catalog manifest empty and chunk_count=0 for
