@@ -48,7 +48,7 @@ def test_chunk_empty_text_returns_empty(chunker):
 
 def test_chunk_headings_create_separate_sections(chunker):
     chunks = chunker.chunk("# Introduction\n\nIntro content.\n\n## Background\n\nBG content.", {})
-    assert len(chunks) >= 2
+    assert len(chunks) == 2
 
 
 def test_chunk_header_path_in_metadata(chunker):
@@ -82,7 +82,7 @@ def test_chunk_pre_heading_content_is_not_dropped(chunker):
 
 def test_chunk_only_pre_heading_content(chunker):
     chunks = chunker.chunk("Just some plain content with no headings.\n\nAnother paragraph.", {})
-    assert len(chunks) >= 1
+    assert len(chunks) == 1
     assert "plain content" in " ".join(c.text for c in chunks)
 
 
@@ -93,7 +93,7 @@ def test_chunk_naive_fallback_without_markdown_it(monkeypatch):
     chunker = SemanticMarkdownChunker(chunk_size=50)
     chunker.md = None
     chunks = chunker.chunk("Some content here.\n\nMore content below.\n\nThird paragraph.", {})
-    assert len(chunks) >= 1
+    assert len(chunks) == 1
     assert all(c.text.strip() for c in chunks)
 
 
@@ -101,7 +101,7 @@ def test_chunk_semantic_exception_falls_back_to_naive():
     chunker = SemanticMarkdownChunker(chunk_size=512)
     chunker.md.parse = lambda text: (_ for _ in ()).throw(RuntimeError("boom"))
     chunks = chunker.chunk("Some plain text content.", {"source": "test"})
-    assert len(chunks) >= 1
+    assert len(chunks) == 1
     assert "plain text" in chunks[0].text
 
 
@@ -109,7 +109,7 @@ def test_chunk_semantic_exception_falls_back_to_naive():
 
 def test_semantic_chunk_offsets(chunker):
     chunks = chunker.chunk("# Alpha\n\nContent for alpha.\n\n# Beta\n\nContent for beta.", {})
-    assert len(chunks) >= 2
+    assert len(chunks) == 2
     for c in chunks:
         assert "chunk_start_char" in c.metadata
         assert "chunk_end_char" in c.metadata
@@ -129,7 +129,7 @@ def test_split_large_section_truncates_oversized_part():
         "content_parts": [{"type": "text", "content": "x" * 10000, "is_code_block": False}],
     }
     chunks = chunker._split_large_section(section, {}, start_index=0)
-    assert len(chunks) >= 1
+    assert len(chunks) == 2
     for chunk in chunks:
         assert len(chunk.text) <= chunker.max_chars + len("# Big Section") + 4
 
@@ -141,7 +141,7 @@ def test_split_large_section_truncation_with_overlap():
         "content_parts": [{"type": "text", "content": "x" * 10000, "is_code_block": False}],
     }
     chunks = chunker._split_large_section(section, {}, start_index=0)
-    assert len(chunks) >= 1
+    assert len(chunks) == 2
     budget = chunker.max_chars + len("# Big") + chunker.overlap_chars + 8
     for chunk in chunks:
         assert len(chunk.text) <= budget
@@ -180,6 +180,10 @@ def test_md_chunker_byte_cap_enforced(text):
     from nexus.db.chroma_quotas import SAFE_CHUNK_BYTES
     text = text.format(code="x" * 15_000)
     chunks = SemanticMarkdownChunker(preserve_code_blocks=True).chunk(text, {})
+    # Byte-cap contract: at least one chunk, every chunk under the cap.
+    # Exact count varies by parametrization (with-heading splits to 2;
+    # no-heading is 1) and the value-under-test is the size cap, not
+    # the chunk count.
     assert len(chunks) >= 1
     for c in chunks:
         assert len(c.text.encode()) <= SAFE_CHUNK_BYTES
@@ -210,7 +214,7 @@ def test_split_large_section_overlap():
         ],
     }
     chunks = chunker._split_large_section(section, {}, start_index=0)
-    assert len(chunks) >= 3
+    assert len(chunks) == 3
     _assert_overlap_at_start(chunks, chunker.overlap_chars)
 
 

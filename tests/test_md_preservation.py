@@ -51,7 +51,7 @@ def test_heading_based_chunking():
     )
     chunker = SemanticMarkdownChunker(chunk_size=2048)
     chunks = chunker.chunk(md, {})
-    assert len(chunks) >= 2
+    assert len(chunks) == 3
     texts = [c.text for c in chunks]
     assert any("Introduction" in t for t in texts)
     assert any("Methods" in t or "Results" in t for t in texts)
@@ -67,7 +67,7 @@ def test_nested_heading_chunking():
     )
     chunker = SemanticMarkdownChunker(chunk_size=2048)
     chunks = chunker.chunk(md, {})
-    assert len(chunks) >= 2
+    assert len(chunks) == 4
 
 
 def test_code_block_preservation():
@@ -79,7 +79,7 @@ def test_code_block_preservation():
     )
     chunker = SemanticMarkdownChunker(chunk_size=2048)
     chunks = chunker.chunk(md, {})
-    assert len(chunks) >= 1
+    assert len(chunks) == 1
     combined = " ".join(c.text for c in chunks)
     assert "pip install nexus" in combined
     assert "nx --version" in combined
@@ -90,7 +90,7 @@ def test_no_heading_document():
     md = "Just plain text without any headings or structure.\n\nAnother paragraph.\n"
     chunker = SemanticMarkdownChunker(chunk_size=2048)
     chunks = chunker.chunk(md, {})
-    assert len(chunks) >= 1
+    assert len(chunks) == 1
     assert "plain text" in chunks[0].text
 
 
@@ -99,7 +99,7 @@ def test_chunk_metadata_includes_header_path():
     md = "## Parent\n\n### Child\n\nContent under child heading.\n"
     chunker = SemanticMarkdownChunker(chunk_size=2048)
     chunks = chunker.chunk(md, {})
-    assert len(chunks) >= 1
+    assert len(chunks) == 2
     # At least one chunk should have a header_path
     assert any(len(c.header_path) > 0 for c in chunks)
 
