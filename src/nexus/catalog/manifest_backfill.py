@@ -58,6 +58,35 @@ class MissingChunkHashError(ValueError):
         )
 
 
+class Phase3ChunkIndexMissingError(ValueError):
+    """Raised when a multi-chunk doc's T3 chunks lack ``chunk_index``.
+
+    nexus-w5zv: post-RDR-108 Phase 3 chunks dropped ``chunk_index`` from
+    metadata. Pre-fix, the backfill read ``meta.get("chunk_index", 0)``
+    and every chunk landed at position=0; ``ON CONFLICT(doc_id, position)``
+    in the manifest UPSERT kept only one row. The resulting manifest was
+    silently wrong (a single chunk where the doc had many).
+
+    Backfill cannot determine canonical position for a Phase-3 corpus
+    without re-running the indexer; the only safe action is to fail loud
+    and force a re-index. Single-chunk docs (no ordering ambiguity)
+    bypass this guard.
+    """
+
+    def __init__(self, doc_id: str, collection: str, chunk_count: int) -> None:
+        self.doc_id = doc_id
+        self.collection = collection
+        self.chunk_count = chunk_count
+        super().__init__(
+            f"Document {doc_id!r} in collection {collection!r} has "
+            f"{chunk_count} chunks but none carry chunk_index metadata "
+            f"(post-RDR-108 Phase 3 shape). Backfill cannot reconstruct "
+            f"canonical chunk order from this state; re-index the "
+            f"collection so the indexer writes the manifest at write "
+            f"time, or carve out this doc."
+        )
+
+
 @dataclass
 class BackfillResult:
     """Summary of one backfill run over a single collection."""
@@ -66,6 +95,10 @@ class BackfillResult:
     docs_processed: int = 0
     chunks_written: int = 0
     docs_skipped_no_t3: int = 0
+    # nexus-w5zv: count Phase-3 docs that couldn't be backfilled because
+    # chunk_index is missing from metadata (multi-chunk only). Operator
+    # action: re-index the affected collection.
+    docs_skipped_phase3_no_index: int = 0
     skipped_taxonomy: bool = False
 
 
@@ -84,6 +117,7 @@ def _iter_chunks_for_doc(
     from chromadb import Collection  # noqa: PLC0415 — defer heavy import
 
     chunks: list[dict] = []
+    chunk_index_seen = 0
     offset = 0
     while True:
         result = col.get(
@@ -102,6 +136,11 @@ def _iter_chunks_for_doc(
             chash = meta.get("chunk_text_hash") or ""
             if not chash:
                 raise MissingChunkHashError(chunk_id=cid, collection=collection)
+            # nexus-w5zv: track explicit chunk_index presence so multi-chunk
+            # Phase-3 docs (where chunk_index was dropped from metadata) fail
+            # loud rather than collapse every chunk to position=0.
+            if "chunk_index" in meta:
+                chunk_index_seen += 1
             chunk_index = int(meta.get("chunk_index", 0) or 0)
             chunks.append({
                 "chash": chash,
@@ -114,6 +153,10 @@ def _iter_chunks_for_doc(
         if len(page_ids) < _PAGE_SIZE:
             break
         offset += _PAGE_SIZE
+    if len(chunks) > 1 and chunk_index_seen == 0:
+        raise Phase3ChunkIndexMissingError(
+            doc_id=doc_id, collection=collection, chunk_count=len(chunks),
+        )
     return chunks
 
 
@@ -183,7 +226,19 @@ def backfill_manifest_for_collection(
             )
             continue
 
-        chunks = _iter_chunks_for_doc(col, doc_id, collection_name)
+        try:
+            chunks = _iter_chunks_for_doc(col, doc_id, collection_name)
+        except Phase3ChunkIndexMissingError:
+            # nexus-w5zv: Phase-3 multi-chunk doc has no recoverable
+            # position metadata. Skip rather than silently collapse to
+            # position=0. Operator must re-index.
+            result.docs_skipped_phase3_no_index += 1
+            _log.warning(
+                "manifest_backfill_doc_skipped_phase3_no_chunk_index",
+                collection=collection_name,
+                doc_id=doc_id,
+            )
+            continue
         chunks.sort(key=lambda c: c["position"])
 
         if not dry_run:
