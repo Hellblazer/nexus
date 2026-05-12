@@ -470,6 +470,45 @@ class _WriteOps:
             cat._check_source_uri_in_repo_root(
                 owner_addr, rec_dict["source_uri"],
             )
+            # nexus-zq79 F4: re-derive chunk_count from the current
+            # document_chunks count so the emitted DocumentRegistered event
+            # carries fresh state, not the resolve()-time snapshot. Without
+            # this, an `nx catalog rebuild` from events.jsonl projects a
+            # stale 0 whenever update() ran before the manifest_write_hook
+            # converged the cache. Live SQLite is already correct via the
+            # zq79 hook; this closes the event-replay side.
+            #
+            # Only re-derive when the caller did not explicitly supply
+            # chunk_count — callers that do (e.g. orphan-backfill paths)
+            # are signalling intent and their value wins.
+            if "chunk_count" not in fields:
+                try:
+                    cnt_row = cat._db.execute(
+                        "SELECT COUNT(*) FROM document_chunks WHERE doc_id = ?",
+                        (rec_dict["tumbler"],),
+                    ).fetchone()
+                    if cnt_row is not None:
+                        rec_dict["chunk_count"] = int(cnt_row[0])
+                except Exception:
+                    # nexus-zq79 F1: silent pass would invisibly revert the
+                    # F4 chunk_count re-derive to the broken pre-fix
+                    # behaviour. Surface failures at debug+ so they're
+                    # discoverable via `nx doctor` and structured-log
+                    # tooling. We still don't propagate — the public
+                    # update() contract must remain best-effort here.
+                    import structlog
+                    structlog.get_logger(__name__).debug(
+                        "chunk_count_rederive_failed",
+                        tumbler=rec_dict["tumbler"],
+                        exc_info=True,
+                    )
+            # nexus-zq79 F7: refresh indexed_at when the caller signals a
+            # genuine re-index (new head_hash or source_mtime). Without
+            # this, indexed_at remains the register-time stamp forever,
+            # so `nx catalog show` / collection_health "last_indexed"
+            # never advance on re-indexed docs.
+            if "head_hash" in fields or "source_mtime" in fields:
+                rec_dict["indexed_at"] = datetime.now(UTC).isoformat()
             event = _cat_mod._make_event(
                 _DocumentRegisteredPayload(
                     doc_id=rec_dict["tumbler"],
@@ -771,6 +810,48 @@ class _WriteOps:
                         )
                     ],
                 )
+
+    def resync_chunk_count_cache(self, doc_id: str) -> None:
+        """nexus-zq79: re-derive ``documents.chunk_count`` from current
+        ``document_chunks`` count.
+
+        ``chunk_count`` is a denormalised cache; the catalog-register
+        hook seeds it to 0 (it runs BEFORE per-file indexing for tumbler
+        injection). Post-store hooks call this method once manifest
+        writes have converged so consumers gated on
+        ``chunk_count > 0`` (e.g. catalog-aware retrieval, drift
+        checks) see fresh state.
+
+        Direct SQL (not via ``update()``) — ``chunk_count`` is a
+        projection of the manifest, not an event-sourced field. Routing
+        via ``update()`` would emit a redundant ``DocumentRegistered``
+        event per converge.
+        """
+        cat = self._cat
+        cat._db.execute(
+            "UPDATE documents SET chunk_count = "
+            "(SELECT COUNT(*) FROM document_chunks WHERE doc_id = ?) "
+            "WHERE tumbler = ?",
+            (doc_id, doc_id),
+        )
+        cat._db.commit()
+
+    def purge_manifest_for_doc(self, doc_id: str) -> None:
+        """nexus-zq79 F3: purge ALL manifest rows for ``doc_id``.
+
+        Called from the manifest-write batch hook when a re-index
+        begins (first batch contains chunk position 0) so the new
+        write defines the final shape rather than leaving orphans
+        from the previous index at higher positions. UPSERT alone
+        cannot handle shrink (fewer chunks than before) because it
+        keys on ``(doc_id, position)``.
+        """
+        cat = self._cat
+        cat._db.execute(
+            "DELETE FROM document_chunks WHERE doc_id = ?",
+            (doc_id,),
+        )
+        cat._db.commit()
 
     def append_manifest_chunks(self, doc_id: str, chunks: list[dict]) -> None:
         """UPSERT manifest rows for one document without deleting prior rows

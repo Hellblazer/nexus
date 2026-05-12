@@ -177,6 +177,12 @@ def test_code_indexer_writes_manifest_rows_for_each_document(
             f"manifest_write_batch_hook must populate document_chunks "
             f"for doc_id={tumbler!r} (file_path={file_path!r})"
         )
+        # nexus-zq79: documents.chunk_count cache must track manifest size.
+        entry = cat.resolve(Tumbler.parse(tumbler))
+        assert entry is not None and entry.chunk_count == len(manifest_rows), (
+            f"chunk_count={entry.chunk_count if entry else None} != "
+            f"manifest_size={len(manifest_rows)} for doc_id={tumbler!r}"
+        )
 
 
 def test_code_indexer_doc_id_absent_when_catalog_uninitialized(

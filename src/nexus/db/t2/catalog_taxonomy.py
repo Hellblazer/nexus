@@ -737,6 +737,17 @@ class CatalogTaxonomy:
                     """,
                     (doc_id, topic_id, similarity, ts, source_collection),
                 )
+                # nexus-n41p: topics.doc_count is a denormalised cache of
+                # COUNT(*) FROM topic_assignments WHERE topic_id = ?. Resync
+                # after every UPSERT so taxonomy stats / ORDER BY doc_count
+                # stay accurate without waiting for the next discover rebuild.
+                self.conn.execute(
+                    "UPDATE topics SET doc_count = "
+                    "(SELECT COUNT(*) FROM topic_assignments WHERE topic_id = ?) "
+                    "WHERE id = ?",
+                    (topic_id, topic_id),
+                )
+                self._resync_topic_links_for(doc_id, topic_id)
                 self.conn.commit()
             return
 
@@ -746,7 +757,66 @@ class CatalogTaxonomy:
                 "(doc_id, topic_id, assigned_by) VALUES (?, ?, ?)",
                 (doc_id, topic_id, assigned_by),
             )
+            # nexus-n41p: see comment in the projection branch above.
+            self.conn.execute(
+                "UPDATE topics SET doc_count = "
+                "(SELECT COUNT(*) FROM topic_assignments WHERE topic_id = ?) "
+                "WHERE id = ?",
+                (topic_id, topic_id),
+            )
+            self._resync_topic_links_for(doc_id, topic_id)
             self.conn.commit()
+
+    def _resync_topic_links_for(self, doc_id: str, topic_id: int) -> None:
+        """nexus-zq79 F5: re-derive ``topic_links.link_count`` for every
+        pair touching ``topic_id`` after a new ``topic_assignments`` row
+        for ``(doc_id, topic_id)``.
+
+        Pre-fix, ``assign_topic`` updated ``topics.doc_count`` (n41p) but
+        left ``topic_links.link_count`` stale until the next
+        ``refresh_projection_links`` / ``generate_cooccurrence_links``
+        full rebuild. Symptoms: ``links`` view under-reports co-occurrence
+        counts, hubs ranking drifts.
+
+        Cost: bounded by the number of links involving ``topic_id``,
+        which is small for normal taxonomies. Atomic single-statement
+        UPDATE; idempotent under concurrent calls (the same write
+        recomputes the same value).
+
+        New pairs (first co-occurrence of two topics for any doc) are
+        materialised here too — without this, the row stays absent and
+        the count never appears until full discover.
+        """
+        # Materialise any new pairs (topic_id, other) that don't yet
+        # have a topic_links row. INSERT OR IGNORE; link_count is set
+        # to 0 here and corrected by the UPDATE below in the same tx.
+        self.conn.execute(
+            """
+            INSERT OR IGNORE INTO topic_links
+                (from_topic_id, to_topic_id, link_count, link_types)
+            SELECT
+                MIN(other.topic_id, ?), MAX(other.topic_id, ?),
+                0, '["incremental"]'
+            FROM topic_assignments other
+            WHERE other.doc_id = ? AND other.topic_id != ?
+            """,
+            (topic_id, topic_id, doc_id, topic_id),
+        )
+        # Atomic re-derive: any topic_links row touching topic_id gets
+        # its link_count recomputed from current topic_assignments.
+        self.conn.execute(
+            """
+            UPDATE topic_links SET link_count = (
+                SELECT COUNT(*)
+                FROM topic_assignments a
+                JOIN topic_assignments b ON a.doc_id = b.doc_id
+                WHERE a.topic_id = topic_links.from_topic_id
+                  AND b.topic_id = topic_links.to_topic_id
+            )
+            WHERE from_topic_id = ? OR to_topic_id = ?
+            """,
+            (topic_id, topic_id),
+        )
 
     def get_topic_docs(
         self,

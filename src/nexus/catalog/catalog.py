@@ -1529,6 +1529,16 @@ class Catalog:
         :meth:`_WriteOps.append_manifest_chunks` for the contract."""
         return self._writes.append_manifest_chunks(doc_id, chunks)
 
+    def resync_chunk_count_cache(self, doc_id: str) -> None:
+        """nexus-zq79: re-derive ``documents.chunk_count`` cache. See
+        :meth:`_WriteOps.resync_chunk_count_cache`."""
+        return self._writes.resync_chunk_count_cache(doc_id)
+
+    def purge_manifest_for_doc(self, doc_id: str) -> None:
+        """nexus-zq79 F3: clear all manifest rows for ``doc_id``. See
+        :meth:`_WriteOps.purge_manifest_for_doc`."""
+        return self._writes.purge_manifest_for_doc(doc_id)
+
     def get_manifest(self, doc_id: str) -> list[_ManifestRow]:
         """Return ordered manifest rows for ``doc_id`` (nexus-572g K6)."""
         return self._writes.get_manifest(doc_id)

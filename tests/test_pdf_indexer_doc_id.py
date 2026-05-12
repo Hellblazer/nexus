@@ -182,6 +182,12 @@ def test_pdf_indexer_registers_catalog_and_writes_manifest(
         f"manifest_write_batch_hook must populate document_chunks for "
         f"PDF doc_id={pdf_entry.tumbler!r}"
     )
+    # nexus-zq79: documents.chunk_count cache must track manifest size.
+    fresh = cat.resolve(pdf_entry.tumbler)
+    assert fresh is not None and fresh.chunk_count == len(manifest_rows), (
+        f"chunk_count={fresh.chunk_count if fresh else None} != "
+        f"manifest_size={len(manifest_rows)} for PDF doc_id={pdf_entry.tumbler!r}"
+    )
 
 
 def test_pdf_indexer_doc_id_absent_when_catalog_uninitialized(

@@ -6,6 +6,92 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.32.4] - 2026-05-12
+
+Patch on 4.32.3. Stops the silent data-correctness regression from
+RDR-108 Phase 3 (PR #618, fd09a7f4): fresh indexes were shipping
+with empty catalog manifests and ``chunk_count=0`` despite chunks
+correctly landing in T3. Catalog-aware retrieval (tumbler→chunks
+resolution) was silently broken for every doc indexed since 4.32.0.
+
+### Fixed
+
+- **``documents.chunk_count`` cache never re-derived** (nexus-zq79):
+  Post-Phase-3, ``chunk_count`` is a denormalised cache of
+  ``COUNT(*) FROM document_chunks``. The catalog-register hook
+  seeds it to 0 (runs BEFORE per-file indexing) and nothing
+  re-derived it for code/prose indexers. New Catalog public APIs
+  ``resync_chunk_count_cache(doc_id)`` and
+  ``purge_manifest_for_doc(doc_id)`` keep the cache and manifest
+  consistent through ``manifest_write_batch_hook``.
+- **Shrink-reindex orphan rows** (nexus-zq79 F3):
+  ``append_manifest_chunks`` UPSERTs by ``(doc_id, position)``;
+  re-indexing with fewer chunks left orphan rows at higher
+  positions, inflating ``chunk_count``. The hook now purges the
+  doc's prior manifest rows when a batch contains position 0.
+- **First-time PDF/markdown batch ingest silently never wrote
+  manifest** (nexus-zq79 F2): the doc-indexer batch paths used
+  ``_lookup_existing_doc_id`` (read-only), which returned ``""``
+  for a fresh document; post-Phase-3 chunks have no ``doc_id``
+  fallback so the manifest hook short-circuited. Three call
+  sites in ``doc_indexer.py`` switched to
+  ``_register_or_lookup_doc_id``.
+- **``Catalog.update()`` emitted stale ``chunk_count``** (nexus-zq79
+  F4): ``DocumentRegistered`` event payload used the resolve-time
+  snapshot; event-replay projected stale zero. ``update()`` now
+  re-derives ``chunk_count`` when the caller omits it;
+  caller-supplied values still win. Previously-silent
+  ``except Exception: pass`` now logs at debug (F1).
+- **``documents.indexed_at`` never refreshed on re-index**
+  (nexus-zq79 F7): ``Catalog.update(head_hash=...)`` now
+  refreshes ``indexed_at`` so ``nx catalog show`` last_indexed
+  and ``collection_health`` advance.
+- **``topics.doc_count`` cache stale until next discover rebuild**
+  (nexus-n41p): ``CatalogTaxonomy.assign_topic`` re-derives
+  ``doc_count`` from ``topic_assignments`` after every assign.
+- **``topic_links.link_count`` stale on incremental indexing**
+  (nexus-zq79 F5): ``assign_topic`` resyncs all ``topic_links``
+  rows touching the assigned topic, materialising new pairs.
+  ``link_count`` re-derived atomically via correlated subquery.
+- **``manifest_write_batch_hook`` failure logged at debug** —
+  bumped to WARNING since post-Phase-3 the hook is load-bearing.
+
+### Backfill on upgrade
+
+The fix corrects the *write path*; documents indexed before this
+release retain stale caches. A migration step is filed for a
+follow-up patch; in the interim apply directly:
+
+```sql
+-- catalog SQLite (.catalog.db)
+UPDATE documents SET chunk_count = (
+  SELECT COUNT(*) FROM document_chunks dc WHERE dc.doc_id = documents.tumbler
+) WHERE chunk_count = 0 AND EXISTS (
+  SELECT 1 FROM document_chunks dc WHERE dc.doc_id = documents.tumbler
+);
+
+-- memory.db (taxonomy)
+UPDATE topics SET doc_count = (
+  SELECT COUNT(*) FROM topic_assignments WHERE topic_id = topics.id
+);
+```
+
+### Known follow-ups
+
+Deep audit surfaced additional silent regressions filed for the
+next patch:
+
+- ``nexus-dxly`` (P0) — ``scoring.py``, ``aspect_readers.py``,
+  ``aspect_extractor.py`` still read dropped chunk metadata
+  fields with bad defaults (ranking degrades, multi-chunk
+  aspect ordering wrong).
+- ``nexus-w5zv`` (P1) — ``manifest_backfill.py`` /
+  ``orphan_backfill.py`` write Phase-3 chunks at position 0.
+- ``nexus-lrhg`` (P1) — atomicity wrap of manifest hook, chash
+  32/64-char normalisation, ``DocumentDeleted`` replay orphan
+  cleanup, ``event_log.py`` flock re-entrancy, staleness-cache
+  silent-fail.
+
 ## [4.32.3] - 2026-05-11
 
 Patch on 4.32.2. Stops the auto-restart-writes-ephemeral-port-to-

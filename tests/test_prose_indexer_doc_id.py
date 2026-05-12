@@ -185,6 +185,14 @@ def test_prose_indexer_writes_manifest_rows_for_each_document(
             f"manifest_write_batch_hook must populate document_chunks "
             f"for doc_id={tumbler!r} (file_path={file_path!r})"
         )
+        # nexus-zq79: documents.chunk_count must stay in sync with
+        # the manifest (it's a denormalised cache; cache-invalidation
+        # bug regression test).
+        entry = cat.resolve(Tumbler.parse(tumbler))
+        assert entry is not None and entry.chunk_count == len(manifest_rows), (
+            f"chunk_count={entry.chunk_count if entry else None} != "
+            f"manifest_size={len(manifest_rows)} for doc_id={tumbler!r}"
+        )
         if file_path.endswith(".md"):
             md_seen = True
         if file_path.endswith(".rst"):

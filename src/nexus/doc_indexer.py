@@ -670,7 +670,17 @@ def _index_document(
         fire_post_store_batch_hooks,
         fire_post_store_hooks,
     )
-    _catalog_doc_id_for_batch = _lookup_existing_doc_id(sp, corpus)
+    # nexus-zq79 F2: use _register_or_lookup_doc_id, NOT _lookup_existing_doc_id.
+    # The read-only lookup returns "" for first-time indexes; post-Phase-3
+    # chunks have no doc_id fallback so the manifest hook short-circuits and
+    # the catalog document ships with chunk_count=0 / empty manifest. Routing
+    # via the register-or-lookup path closes the gap idempotently.
+    _ct_for_register = (metadatas[0].get("content_type") if metadatas else "") or "prose"
+    _catalog_doc_id_for_batch = _register_or_lookup_doc_id(
+        file_path, corpus,
+        content_type=_ct_for_register,
+        physical_collection=collection_name,
+    )
     fire_post_store_batch_hooks(
         ids, collection_name, documents, embeddings, metadatas,
         catalog_doc_id=_catalog_doc_id_for_batch,
@@ -782,7 +792,14 @@ def _index_pdf_incremental(
     # Resolve catalog doc_id once outside the per-batch loop (RDR-108
     # Phase 3: chunk metadata no longer carries it; manifest hook reads
     # via the fire_post_store_batch_hooks kwarg).
-    _catalog_doc_id_for_batch = _lookup_existing_doc_id(str(file_path), corpus)
+    # nexus-zq79 F2: register-or-lookup, not pure lookup (see _index_document
+    # for the rationale — fresh indexes returned "" pre-fix).
+    _ct_for_register = (metadatas_all[0].get("content_type") if metadatas_all else "") or "pdf"
+    _catalog_doc_id_for_batch = _register_or_lookup_doc_id(
+        Path(file_path), corpus,
+        content_type=_ct_for_register,
+        physical_collection=collection_name,
+    )
 
     for batch_start in range(start_offset, total, _INCREMENTAL_BATCH_SIZE):
         batch_end = min(batch_start + _INCREMENTAL_BATCH_SIZE, total)
@@ -1322,7 +1339,13 @@ def index_pdf(
         fire_post_store_batch_hooks,
         fire_post_store_hooks,
     )
-    _catalog_doc_id_for_batch = _lookup_existing_doc_id(str(pdf_path), corpus)
+    # nexus-zq79 F2: register-or-lookup (fresh indexes returned "" pre-fix).
+    _ct_for_register = (metadatas_list[0].get("content_type") if metadatas_list else "") or "pdf"
+    _catalog_doc_id_for_batch = _register_or_lookup_doc_id(
+        pdf_path, corpus,
+        content_type=_ct_for_register,
+        physical_collection=col_name,
+    )
     fire_post_store_batch_hooks(
         ids, col_name, documents, embeddings, metadatas_list,
         catalog_doc_id=_catalog_doc_id_for_batch,
