@@ -650,6 +650,78 @@ class TestReadChromaUriDocIdLookup:
             f"forbids 'empty' for documents that haven't been backfilled."
         )
 
+    def test_phase3_doc_without_manifest_fails_loud(self, t3_client):
+        """nexus-dxly: post-RDR-108 Phase-3 chunks lack ``chunk_index``
+        metadata. When the doc_id lookup resolves the tumbler but no
+        manifest_lookup is wired (catalog uninitialized, or doc absent
+        from document_chunks), every chunk falls to ``chunk_index=0`` and
+        the legacy reassembly sorts by chroma insertion order — which is
+        content-hash driven, not document order. The reader must fail
+        loud (``unreachable``) so callers see the corruption instead of
+        silently extracting scrambled text.
+        """
+        from nexus.aspect_readers import ReadFail, _read_chroma_uri
+
+        col_name = "knowledge__phase3"
+        try:
+            t3_client.delete_collection(col_name)
+        except Exception:
+            pass
+        coll = t3_client.get_or_create_collection(col_name)
+        # Phase-3 chunk shape: doc_id metadata only; NO chunk_index.
+        coll.add(
+            ids=["chunk-a", "chunk-b", "chunk-c"],
+            documents=["alpha", "bravo", "charlie"],
+            metadatas=[
+                {"doc_id": "ART-phase3", "chunk_text_hash": "a"},
+                {"doc_id": "ART-phase3", "chunk_text_hash": "b"},
+                {"doc_id": "ART-phase3", "chunk_text_hash": "c"},
+            ],
+        )
+
+        def lookup(_coll: str, _source_id: str) -> str:
+            return "ART-phase3"
+
+        # No manifest_lookup wired — simulates catalog gap.
+        result = _read_chroma_uri(
+            "chroma://knowledge__phase3//abs/path/paper.pdf",
+            t3=t3_client, doc_id_lookup=lookup,
+        )
+        assert isinstance(result, ReadFail)
+        assert result.reason == "unreachable"
+        assert "Phase-3 reassembly unsafe" in result.detail
+
+    def test_phase3_single_chunk_without_manifest_still_succeeds(
+        self, t3_client,
+    ):
+        """Single-chunk Phase-3 docs are unambiguous (no reassembly
+        order to get wrong). The fail-loud guard must NOT trip for
+        them — restrict to len(chunks) > 1.
+        """
+        from nexus.aspect_readers import ReadOk, _read_chroma_uri
+
+        col_name = "knowledge__phase3_single"
+        try:
+            t3_client.delete_collection(col_name)
+        except Exception:
+            pass
+        coll = t3_client.get_or_create_collection(col_name)
+        coll.add(
+            ids=["chunk-only"],
+            documents=["sole chunk"],
+            metadatas=[{"doc_id": "ART-single", "chunk_text_hash": "x"}],
+        )
+
+        def lookup(_coll: str, _source_id: str) -> str:
+            return "ART-single"
+
+        result = _read_chroma_uri(
+            "chroma://knowledge__phase3_single//abs/p.pdf",
+            t3=t3_client, doc_id_lookup=lookup,
+        )
+        assert isinstance(result, ReadOk)
+        assert result.text == "sole chunk"
+
     def test_no_doc_id_lookup_falls_back_to_legacy_probe(self, t3_client):
         """Back-compat: callers without catalog access (tests, ad-hoc
         CLI runs) call _read_chroma_uri without doc_id_lookup. The
