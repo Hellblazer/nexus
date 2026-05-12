@@ -96,7 +96,7 @@ class TestRegisterAndShow:
         ])
         result = runner.invoke(main, ["catalog", "show", "1.1.1", "--json"])
         assert result.exit_code == 0
-        data = json.loads(result.output)
+        data = json.loads(result.stdout)
         assert data["title"] == "Test Paper"
 
     def test_register_with_explicit_source_uri(
@@ -169,7 +169,7 @@ class TestListCommand:
         runner.invoke(main, ["catalog", "register", "--title", "A", "--owner", "1.1"])
         result = runner.invoke(main, ["catalog", "list", "--json"])
         assert result.exit_code == 0
-        data = json.loads(result.output)
+        data = json.loads(result.stdout)
         assert isinstance(data, list)
         assert len(data) >= 1
 
@@ -347,7 +347,7 @@ class TestLinksFilterCommand:
         runner.invoke(main, ["catalog", "link", "1.1.1", "1.1.2", "--type", "cites"])
         result = runner.invoke(main, ["catalog", "links", "--type", "cites", "--json"])
         assert result.exit_code == 0
-        data = json.loads(result.output)
+        data = json.loads(result.stdout)
         assert isinstance(data, list)
         assert len(data) == 1
 
@@ -556,7 +556,7 @@ class TestLinkAuditCommand:
         runner.invoke(main, ["catalog", "link", "1.1.1", "1.1.2", "--type", "cites"])
         result = runner.invoke(main, ["catalog", "link-audit", "--json"])
         assert result.exit_code == 0
-        data = json.loads(result.output)
+        data = json.loads(result.stdout)
         assert data["total"] == 1
 
 
@@ -850,7 +850,7 @@ class TestStatsCommand:
         runner = CliRunner()
         result = runner.invoke(main, ["catalog", "stats", "--json"])
         assert result.exit_code == 0, result.output
-        data = json.loads(result.output)
+        data = json.loads(result.stdout)
         assert data["taxonomy"]["topics"] == 2
         assert data["taxonomy"]["projection_by_source"] == {"knowledge__a": 5}
 
@@ -1028,7 +1028,7 @@ class TestVerifyCommand:
         result = runner.invoke(main, ["catalog", "verify", "--json"])
 
         assert result.exit_code == 0, result.output
-        data = json.loads(result.output)
+        data = json.loads(result.stdout)
         assert "knowledge__x" in data
         assert data["knowledge__x"][0]["doc_id"] == "ffff666666666666"
         assert data["knowledge__x"][0]["title"] == "Ghost"

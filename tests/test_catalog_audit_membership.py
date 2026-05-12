@@ -120,7 +120,7 @@ class TestMultiHome:
             catalog, ["audit-membership", "rdr__myproject", "--json"],
         )
         assert result.exit_code == 0, result.output
-        data = json.loads(result.output)
+        data = json.loads(result.stdout)
         assert data["collection"] == "rdr__myproject"
         assert data["total_entries"] == 8
         assert data["distinct_homes"] == 2
@@ -320,7 +320,7 @@ class TestAllCollections:
             catalog, ["audit-membership", "--all-collections", "--json"],
         )
         assert result.exit_code == 0, result.output
-        data = json.loads(result.output)
+        data = json.loads(result.stdout)
         assert data["total_collections"] == 2
         assert data["contaminated_count"] == 1
         assert data["clean_count"] == 1
@@ -437,7 +437,7 @@ class TestAllCollectionsOwnerAware:
             catalog, ["audit-membership", "--all-collections", "--json"],
         )
         assert result.exit_code == 0, result.output
-        data = json.loads(result.output)
+        data = json.loads(result.stdout)
         rec = next(r for r in data["collections"] if r["collection"] == wrong_col)
         assert rec["wrong_home"] is True
         assert rec["contaminated_entries"] == rec["total_entries"] == 3
@@ -455,7 +455,7 @@ class TestAllCollectionsOwnerAware:
             catalog, ["audit-membership", "--all-collections", "--json"],
         )
         assert result.exit_code == 0, result.output
-        data = json.loads(result.output)
+        data = json.loads(result.stdout)
         rec = next(r for r in data["collections"] if r["collection"] == clean_col)
         assert rec["wrong_home"] is False
         assert rec["contaminated_entries"] == 0
@@ -481,7 +481,7 @@ class TestAllCollectionsOwnerAware:
             catalog, ["audit-membership", "--all-collections", "--json"],
         )
         assert result.exit_code == 0, result.output
-        data = json.loads(result.output)
+        data = json.loads(result.stdout)
         rec = next(
             r for r in data["collections"]
             if r["collection"] == "docs__hal_papers"

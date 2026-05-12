@@ -652,7 +652,7 @@ class TestCollectionAuditCli:
             main, ["collection", "audit", "code__main", "--format", "json"],
         )
         assert result.exit_code == 0, result.output
-        payload = json.loads(result.output)
+        payload = json.loads(result.stdout)
         assert payload["collection"] == "code__main"
         assert "distance_histogram" in payload
         assert "cross_projections" in payload
@@ -704,6 +704,6 @@ class TestCollectionAuditCli:
                 ],
             )
         assert result.exit_code == 0, result.output
-        payload = json.loads(result.output)
+        payload = json.loads(result.stdout)
         assert payload["distance_histogram"]["source"] == "live"
         assert payload["distance_histogram"]["sample_size"] == 4

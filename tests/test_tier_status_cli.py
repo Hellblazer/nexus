@@ -138,7 +138,7 @@ class TestExplicitFlags:
             tier_status_cmd, ["--session", "sess-J", "--json"],
         )
         assert result.exit_code == 0, result.output
-        payload = json.loads(result.output)
+        payload = json.loads(result.stdout)
         assert payload["session_id"] == "sess-J"
         assert payload["total_writes"] == 2
         assert payload["by_tier"]["T2"] == 1

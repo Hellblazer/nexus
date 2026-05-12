@@ -605,7 +605,7 @@ class TestCheckQuotas:
                 main, ["doctor", "--check-quotas", "--json"]
             )
         assert result.exit_code == 0, result.output
-        data = _json.loads(result.output)
+        data = _json.loads(result.stdout)
         assert set(data.keys()) == {
             "chromadb", "voyage", "cross_encoder", "retry",
         }
@@ -821,7 +821,7 @@ class TestCheckTmpdirs:
                 main, ["doctor", "--check-tmpdirs", "--json"],
             )
         assert result.exit_code == 0, result.output
-        payload = _json.loads(result.output)
+        payload = _json.loads(result.stdout)
         assert payload["cutoff_hours"] == 24.0
         assert len(payload["candidates"]) == 1
         assert payload["candidates"][0]["path"].endswith("nx_t1_x")

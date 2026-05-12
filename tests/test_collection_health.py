@@ -494,7 +494,7 @@ class TestCollectionHealthCli:
         self._stub(monkeypatch)
         result = runner.invoke(main, ["collection", "health", "--format", "json"])
         assert result.exit_code == 0, result.output
-        payload = json.loads(result.output)
+        payload = json.loads(result.stdout)
         assert "collections" in payload
 
     def test_sort_flag(self, runner, monkeypatch) -> None:

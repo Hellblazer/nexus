@@ -113,7 +113,7 @@ class TestChunkSizeDistribution:
             doctor_cmd, ["--chunk-size-distribution", "--json"],
         )
         assert result.exit_code == 0, result.output
-        payload = json.loads(result.output)["chunk_size_distribution"]
+        payload = json.loads(result.stdout)["chunk_size_distribution"]
         assert payload["pass"] is True
         t = payload["tables"]["code__ok"]
         assert t["total_chunks"] == 10
@@ -148,7 +148,7 @@ class TestChunkSizeDistribution:
         )
         # Micros are WARN, not FAIL.
         assert result.exit_code == 0, result.output
-        payload = json.loads(result.output)["chunk_size_distribution"]
+        payload = json.loads(result.stdout)["chunk_size_distribution"]
         t = payload["tables"]["code__micros"]
         assert t["micro_count"] == 2
         assert t["warn"] is True
@@ -179,7 +179,7 @@ class TestChunkSizeDistribution:
             doctor_cmd, ["--chunk-size-distribution", "--json"],
         )
         assert result.exit_code == 1
-        payload = json.loads(result.output)["chunk_size_distribution"]
+        payload = json.loads(result.stdout)["chunk_size_distribution"]
         assert payload["pass"] is False
         t = payload["tables"]["code__big"]
         assert t["over_quota_count"] == 1
@@ -207,7 +207,7 @@ class TestChunkSizeDistribution:
             doctor_cmd, ["--chunk-size-distribution", "--json"],
         )
         assert result.exit_code == 0
-        payload = json.loads(result.output)["chunk_size_distribution"]
+        payload = json.loads(result.stdout)["chunk_size_distribution"]
         assert "taxonomy__centroids" not in payload["tables"]
 
 
@@ -235,7 +235,7 @@ class TestChunkTextDedup:
             doctor_cmd, ["--chunk-text-dedup", "--json"],
         )
         assert result.exit_code == 0, result.output
-        payload = json.loads(result.output)["chunk_text_dedup"]
+        payload = json.loads(result.stdout)["chunk_text_dedup"]
         assert payload["pass"] is True
         assert payload["within"]["code__cleanup"]["dupe_chunks"] == 0
         assert payload["cross_dupe_chunk_count"] == 0
@@ -269,7 +269,7 @@ class TestChunkTextDedup:
         )
         # WARN, not FAIL; overall pass is True unless an exception fires.
         assert result.exit_code == 0
-        payload = json.loads(result.output)["chunk_text_dedup"]
+        payload = json.loads(result.stdout)["chunk_text_dedup"]
         t = payload["within"]["code__bug"]
         assert t["dupe_chunks"] == 2
         assert t["warn"] is True
@@ -300,7 +300,7 @@ class TestChunkTextDedup:
             doctor_cmd, ["--chunk-text-dedup", "--json"],
         )
         assert result.exit_code == 0
-        payload = json.loads(result.output)["chunk_text_dedup"]
+        payload = json.loads(result.stdout)["chunk_text_dedup"]
         assert payload["cross_dupe_chunk_count"] == 1
         sample = payload["cross_sample"][0]
         assert sample["chash"].startswith("shared-1234")
@@ -343,7 +343,7 @@ class TestT3VsCatalog:
             doctor_cmd, ["--t3-vs-catalog", "--json"],
         )
         assert result.exit_code == 0
-        payload = json.loads(result.output)["t3_vs_catalog"]
+        payload = json.loads(result.stdout)["t3_vs_catalog"]
         assert payload["pass"] is True
         assert payload["t3_orphans"] == []
         assert payload["zombies"] == []
@@ -374,7 +374,7 @@ class TestT3VsCatalog:
             doctor_cmd, ["--t3-vs-catalog", "--json"],
         )
         assert result.exit_code == 1
-        payload = json.loads(result.output)["t3_vs_catalog"]
+        payload = json.loads(result.stdout)["t3_vs_catalog"]
         assert payload["pass"] is False
         assert len(payload["t3_orphans"]) == 1
         assert payload["t3_orphans"][0]["name"] == "code__orphan"
@@ -410,7 +410,7 @@ class TestT3VsCatalog:
             doctor_cmd, ["--t3-vs-catalog", "--json"],
         )
         assert result.exit_code == 1
-        payload = json.loads(result.output)["t3_vs_catalog"]
+        payload = json.loads(result.stdout)["t3_vs_catalog"]
         assert payload["pass"] is False
         missing = payload["docs_pointing_at_missing_t3"]
         assert len(missing) == 1

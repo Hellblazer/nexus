@@ -893,7 +893,7 @@ class TestDay2Ops:
             enrich, ["info", "knowledge__delos", "/p1.pdf"],
         )
         assert result.exit_code == 0, result.output
-        parsed = json.loads(result.output)
+        parsed = json.loads(result.stdout)
         assert parsed["collection"] == "knowledge__delos"
         assert parsed["source_path"] == "/p1.pdf"
         assert parsed["problem_formulation"] == "P"
@@ -1012,7 +1012,7 @@ class TestDay2Ops:
             enrich, ["info", "knowledge__delos", "/papers/aleph.pdf"],
         )
         assert result.exit_code == 0, result.output
-        parsed = json.loads(result.output)
+        parsed = json.loads(result.stdout)
         assert parsed["source_uri"].startswith("chroma://knowledge__delos/")
         assert parsed["scheme"] == "chroma"
 

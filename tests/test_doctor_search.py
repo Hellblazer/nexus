@@ -216,7 +216,7 @@ class TestDoctorCheckSearchCli:
         result = runner.invoke(main, ["doctor", "--check-search", "--json"])
         # exit_code == 2 because the seeded set includes 'raises-name';
         # JSON payload is still emitted on regression.
-        payload = json.loads(result.output)
+        payload = json.loads(result.stdout)
         assert isinstance(payload, dict)
         assert "probes" in payload and len(payload["probes"]) == 2
         probe_names = [p["probe"] for p in payload["probes"]]
