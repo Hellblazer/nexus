@@ -252,11 +252,13 @@ def test_memory_search_under_discover_topics_load(tmp_path: Path) -> None:
 
         # --- Phase B: same measurement, with discover_topics running ---
         stop_worker = threading.Event()
+        worker_started = threading.Event()
         worker_errors: list[BaseException] = []
         discover_iterations = {"n": 0}
 
         def discover_worker() -> None:
             try:
+                worker_started.set()
                 while not stop_worker.is_set():
                     db.taxonomy.rebuild_taxonomy(
                         "cluster_load", doc_ids, embeddings, texts, chroma_client,
@@ -268,7 +270,14 @@ def test_memory_search_under_discover_topics_load(tmp_path: Path) -> None:
         worker = threading.Thread(target=discover_worker, daemon=True)
         worker.start()
 
-        time.sleep(0.05)
+        # nexus-8g79.26: wait until the worker thread is actually
+        # scheduled before we start measuring under-load latency. Pre-fix
+        # the test slept 50ms unconditionally which produced spurious
+        # failures on loaded CI runners when the worker hadn't started
+        # its first iteration yet.
+        assert worker_started.wait(timeout=5.0), (
+            "discover_worker thread did not start within 5s"
+        )
 
         under_load: list[float] = []
         for _ in range(n_samples):
@@ -344,11 +353,13 @@ def test_memory_get_under_concurrent_write_load(tmp_path: Path) -> None:
 
         # --- Phase B: same measurement, under concurrent write load ---
         stop_writers = threading.Event()
+        writers_started = threading.Barrier(3)  # 2 writers + main
         writer_errors: list[BaseException] = []
 
         def telemetry_writer() -> None:
             i = 0
             try:
+                writers_started.wait(timeout=5.0)
                 while not stop_writers.is_set():
                     db.log_relevance(
                         query=f"q{i}",
@@ -364,6 +375,7 @@ def test_memory_get_under_concurrent_write_load(tmp_path: Path) -> None:
         def plan_writer() -> None:
             i = 0
             try:
+                writers_started.wait(timeout=5.0)
                 while not stop_writers.is_set():
                     db.save_plan(
                         query=f"plan {i}",
@@ -381,8 +393,10 @@ def test_memory_get_under_concurrent_write_load(tmp_path: Path) -> None:
         for t in writers:
             t.start()
 
-        # Let writers warm up
-        time.sleep(0.05)
+        # nexus-8g79.26: 3-way Barrier rendezvous so both writers start
+        # their first SQL call before we measure under-load latency.
+        # Replaces a 50ms time.sleep that was flaky on loaded CI runners.
+        writers_started.wait(timeout=5.0)
 
         under_load: list[float] = []
         for i in range(100):
@@ -446,11 +460,13 @@ def test_memory_search_under_concurrent_write_load(tmp_path: Path) -> None:
 
         # --- Phase B: same measurement, under concurrent write load ---
         stop_writers = threading.Event()
+        writers_started = threading.Barrier(3)  # 2 writers + main
         writer_errors: list[BaseException] = []
 
         def telemetry_writer() -> None:
             i = 0
             try:
+                writers_started.wait(timeout=5.0)
                 while not stop_writers.is_set():
                     db.log_relevance(
                         query=f"q{i}",
@@ -466,6 +482,7 @@ def test_memory_search_under_concurrent_write_load(tmp_path: Path) -> None:
         def plan_writer() -> None:
             i = 0
             try:
+                writers_started.wait(timeout=5.0)
                 while not stop_writers.is_set():
                     db.save_plan(
                         query=f"plan {i}",
@@ -483,8 +500,8 @@ def test_memory_search_under_concurrent_write_load(tmp_path: Path) -> None:
         for t in writers:
             t.start()
 
-        # Give writers a beat to actually start hammering before we measure.
-        time.sleep(0.05)
+        # nexus-8g79.26: 3-way Barrier rendezvous (see prior test).
+        writers_started.wait(timeout=5.0)
 
         under_load: list[float] = []
         for _ in range(100):
