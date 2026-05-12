@@ -135,9 +135,9 @@ class TestWriteManifest:
         coll = _unique_coll()
         _insert_doc(catalog, "1.1.1", coll)
         chunks = [
-            {"chash": "b" * 64, "position": 1, "line_start": 10, "line_end": 20,
+            {"chash": "b" * 32, "position": 1, "line_start": 10, "line_end": 20,
              "char_start": None, "char_end": None},
-            {"chash": "a" * 64, "position": 0, "line_start": 0, "line_end": 9,
+            {"chash": "a" * 32, "position": 0, "line_start": 0, "line_end": 9,
              "char_start": None, "char_end": None},
         ]
         catalog.write_manifest("1.1.1", chunks)
@@ -148,8 +148,8 @@ class TestWriteManifest:
             ("1.1.1",),
         ).fetchall()
         assert len(rows) == 2
-        assert rows[0] == ("1.1.1", 0, "a" * 64)
-        assert rows[1] == ("1.1.1", 1, "b" * 64)
+        assert rows[0] == ("1.1.1", 0, "a" * 32)
+        assert rows[1] == ("1.1.1", 1, "b" * 32)
 
     def test_write_manifest_stores_positional_columns(self, catalog):
         """write_manifest persists line_start, line_end, char_start, char_end."""
@@ -157,7 +157,7 @@ class TestWriteManifest:
         _insert_doc(catalog, "1.1.1", coll)
         chunks = [
             {
-                "chash": "c" * 64,
+                "chash": "c" * 32,
                 "position": 0,
                 "line_start": 5,
                 "line_end": 15,
@@ -178,7 +178,7 @@ class TestWriteManifest:
         """Re-running write_manifest for the same doc_id overwrites in place."""
         coll = _unique_coll()
         _insert_doc(catalog, "1.1.1", coll)
-        chunks = [{"chash": "a" * 64, "position": 0, "line_start": None,
+        chunks = [{"chash": "a" * 32, "position": 0, "line_start": None,
                    "line_end": None, "char_start": None, "char_end": None}]
         catalog.write_manifest("1.1.1", chunks)
         catalog.write_manifest("1.1.1", chunks)
@@ -193,14 +193,14 @@ class TestWriteManifest:
         """Re-run with different chunks replaces the old manifest."""
         coll = _unique_coll()
         _insert_doc(catalog, "1.1.1", coll)
-        old_chunks = [{"chash": "a" * 64, "position": 0, "line_start": None,
+        old_chunks = [{"chash": "a" * 32, "position": 0, "line_start": None,
                        "line_end": None, "char_start": None, "char_end": None}]
         catalog.write_manifest("1.1.1", old_chunks)
 
         new_chunks = [
-            {"chash": "b" * 64, "position": 0, "line_start": None,
+            {"chash": "b" * 32, "position": 0, "line_start": None,
              "line_end": None, "char_start": None, "char_end": None},
-            {"chash": "c" * 64, "position": 1, "line_start": None,
+            {"chash": "c" * 32, "position": 1, "line_start": None,
              "line_end": None, "char_start": None, "char_end": None},
         ]
         catalog.write_manifest("1.1.1", new_chunks)
@@ -210,8 +210,8 @@ class TestWriteManifest:
             ("1.1.1",),
         ).fetchall()
         assert len(rows) == 2
-        assert rows[0][0] == "b" * 64
-        assert rows[1][0] == "c" * 64
+        assert rows[0][0] == "b" * 32
+        assert rows[1][0] == "c" * 32
 
     def test_write_manifest_zero_chunks_is_noop(self, catalog):
         """write_manifest with no chunks produces no rows and no error."""
@@ -245,13 +245,13 @@ class TestWriteManifest:
         _insert_doc(catalog, "1.1.2", coll)
 
         catalog.write_manifest("1.1.1", [
-            {"chash": "a" * 64, "position": 0, "line_start": None,
+            {"chash": "a" * 32, "position": 0, "line_start": None,
              "line_end": None, "char_start": None, "char_end": None},
         ])
         catalog.write_manifest("1.1.2", [
-            {"chash": "b" * 64, "position": 0, "line_start": None,
+            {"chash": "b" * 32, "position": 0, "line_start": None,
              "line_end": None, "char_start": None, "char_end": None},
-            {"chash": "c" * 64, "position": 1, "line_start": None,
+            {"chash": "c" * 32, "position": 1, "line_start": None,
              "line_end": None, "char_start": None, "char_end": None},
         ])
 
@@ -270,16 +270,16 @@ class TestWriteManifest:
         _insert_doc(catalog, "1.1.1", coll)
         # Write 3 chunks first
         catalog.write_manifest("1.1.1", [
-            {"chash": "a" * 64, "position": 0, "line_start": None,
+            {"chash": "a" * 32, "position": 0, "line_start": None,
              "line_end": None, "char_start": None, "char_end": None},
-            {"chash": "b" * 64, "position": 1, "line_start": None,
+            {"chash": "b" * 32, "position": 1, "line_start": None,
              "line_end": None, "char_start": None, "char_end": None},
-            {"chash": "c" * 64, "position": 2, "line_start": None,
+            {"chash": "c" * 32, "position": 2, "line_start": None,
              "line_end": None, "char_start": None, "char_end": None},
         ])
         # Overwrite with just 1 chunk at position 0
         catalog.write_manifest("1.1.1", [
-            {"chash": "d" * 64, "position": 0, "line_start": None,
+            {"chash": "d" * 32, "position": 0, "line_start": None,
              "line_end": None, "char_start": None, "char_end": None},
         ])
 
@@ -289,7 +289,7 @@ class TestWriteManifest:
         ).fetchall()
         # Only the new chunk remains; the old 3 are gone
         assert len(rows) == 1
-        assert rows[0] == (0, "d" * 64)
+        assert rows[0] == (0, "d" * 32)
 
 
 # ── Integration tests: backfill_manifest_for_collection ─────────────────────
@@ -306,10 +306,10 @@ class TestBackfillManifestForCollection:
         _insert_doc(catalog, "1.1.1", coll)
         _seed_chunk(t3_db, collection=coll, chunk_id=f"c1-{coll}",
                     content="hello", doc_id="1.1.1", chunk_index=0,
-                    chunk_text_hash="a" * 64, line_start=0, line_end=5)
+                    chunk_text_hash="a" * 32, line_start=0, line_end=5)
         _seed_chunk(t3_db, collection=coll, chunk_id=f"c2-{coll}",
                     content="world", doc_id="1.1.1", chunk_index=1,
-                    chunk_text_hash="b" * 64, line_start=6, line_end=10)
+                    chunk_text_hash="b" * 32, line_start=6, line_end=10)
 
         result = backfill_manifest_for_collection(
             catalog, t3_db, coll, dry_run=False
@@ -322,7 +322,7 @@ class TestBackfillManifestForCollection:
             "ORDER BY position",
             ("1.1.1",),
         ).fetchall()
-        assert rows == [(0, "a" * 64), (1, "b" * 64)]
+        assert rows == [(0, "a" * 32), (1, "b" * 32)]
 
     def test_backfill_zero_chunk_doc_produces_no_rows(self, catalog, t3_db):
         """A doc registered in the catalog whose T3 collection doesn't exist
@@ -435,8 +435,8 @@ class TestBackfillManifestForCollection:
             ids=[f"a-{coll}", f"b-{coll}"],
             documents=["alpha", "bravo"],
             metadatas=[
-                {"doc_id": "1.1.1", "chunk_text_hash": "a" * 64},
-                {"doc_id": "1.1.1", "chunk_text_hash": "b" * 64},
+                {"doc_id": "1.1.1", "chunk_text_hash": "a" * 32},
+                {"doc_id": "1.1.1", "chunk_text_hash": "b" * 32},
             ],
         )
 
@@ -469,7 +469,7 @@ class TestBackfillManifestForCollection:
             ids=[f"only-{coll}"],
             documents=["sole chunk"],
             metadatas=[
-                {"doc_id": "1.1.1", "chunk_text_hash": "a" * 64},
+                {"doc_id": "1.1.1", "chunk_text_hash": "a" * 32},
             ],
         )
 
@@ -488,7 +488,7 @@ class TestBackfillManifestForCollection:
         _insert_doc(catalog, "1.1.1", coll)
         _seed_chunk(t3_db, collection=coll, chunk_id=f"c1-{coll}",
                     content="hello", doc_id="1.1.1", chunk_index=0,
-                    chunk_text_hash="a" * 64)
+                    chunk_text_hash="a" * 32)
 
         result = backfill_manifest_for_collection(
             catalog, t3_db, coll, dry_run=True
@@ -508,7 +508,7 @@ class TestBackfillManifestForCollection:
         _insert_doc(catalog, "1.1.1", coll)
         _seed_chunk(t3_db, collection=coll, chunk_id=f"c1-{coll}",
                     content="hello", doc_id="1.1.1", chunk_index=0,
-                    chunk_text_hash="a" * 64)
+                    chunk_text_hash="a" * 32)
 
         backfill_manifest_for_collection(catalog, t3_db, coll, dry_run=False)
         backfill_manifest_for_collection(catalog, t3_db, coll, dry_run=False)
@@ -528,13 +528,13 @@ class TestBackfillManifestForCollection:
         # Seed in reverse index order to test sorting
         _seed_chunk(t3_db, collection=coll, chunk_id=f"c3-{coll}",
                     content="third", doc_id="1.1.1", chunk_index=2,
-                    chunk_text_hash="c" * 64)
+                    chunk_text_hash="c" * 32)
         _seed_chunk(t3_db, collection=coll, chunk_id=f"c1-{coll}",
                     content="first", doc_id="1.1.1", chunk_index=0,
-                    chunk_text_hash="a" * 64)
+                    chunk_text_hash="a" * 32)
         _seed_chunk(t3_db, collection=coll, chunk_id=f"c2-{coll}",
                     content="second", doc_id="1.1.1", chunk_index=1,
-                    chunk_text_hash="b" * 64)
+                    chunk_text_hash="b" * 32)
 
         backfill_manifest_for_collection(catalog, t3_db, coll, dry_run=False)
 
@@ -543,7 +543,7 @@ class TestBackfillManifestForCollection:
             "ORDER BY position",
             ("1.1.1",),
         ).fetchall()
-        assert rows == [(0, "a" * 64), (1, "b" * 64), (2, "c" * 64)]
+        assert rows == [(0, "a" * 32), (1, "b" * 32), (2, "c" * 32)]
 
     def test_backfill_respects_limit(self, catalog, t3_db):
         """--limit N processes at most N documents."""
@@ -554,10 +554,10 @@ class TestBackfillManifestForCollection:
         _insert_doc(catalog, "1.1.2", coll)
         _seed_chunk(t3_db, collection=coll, chunk_id=f"c1-{coll}",
                     content="first doc", doc_id="1.1.1", chunk_index=0,
-                    chunk_text_hash="a" * 64)
+                    chunk_text_hash="a" * 32)
         _seed_chunk(t3_db, collection=coll, chunk_id=f"c2-{coll}",
                     content="second doc", doc_id="1.1.2", chunk_index=0,
-                    chunk_text_hash="b" * 64)
+                    chunk_text_hash="b" * 32)
 
         result = backfill_manifest_for_collection(
             catalog, t3_db, coll, dry_run=False, limit=1
@@ -576,7 +576,7 @@ class TestBackfillPagination:
         _insert_doc(catalog, "1.1.1", coll)
         _seed_chunk(t3_db, collection=coll, chunk_id=f"c1-{coll}",
                     content="x", doc_id="1.1.1", chunk_index=0,
-                    chunk_text_hash="a" * 64)
+                    chunk_text_hash="a" * 32)
 
         calls: list[dict] = []
         col = t3_db._client.get_or_create_collection(coll)
@@ -615,7 +615,7 @@ class TestBackfillManifestCLI:
         _insert_doc(catalog, "1.1.1", coll)
         _seed_chunk(t3_db, collection=coll, chunk_id=f"c1-{coll}",
                     content="hello", doc_id="1.1.1", chunk_index=0,
-                    chunk_text_hash="a" * 64)
+                    chunk_text_hash="a" * 32)
 
         with (
             patch("nexus.commands.t3._make_catalog", return_value=catalog),
@@ -639,7 +639,7 @@ class TestBackfillManifestCLI:
         _insert_doc(catalog, "1.1.1", coll)
         _seed_chunk(t3_db, collection=coll, chunk_id=f"c1-{coll}",
                     content="hello", doc_id="1.1.1", chunk_index=0,
-                    chunk_text_hash="a" * 64)
+                    chunk_text_hash="a" * 32)
 
         with (
             patch("nexus.commands.t3._make_catalog", return_value=catalog),
@@ -661,7 +661,7 @@ class TestBackfillManifestCLI:
         _insert_doc(catalog, "1.1.1", coll)
         _seed_chunk(t3_db, collection=coll, chunk_id=f"c1-{coll}",
                     content="hello", doc_id="1.1.1", chunk_index=0,
-                    chunk_text_hash="a" * 64)
+                    chunk_text_hash="a" * 32)
         # Register collection so catalog knows about it
         catalog._db.execute(  # epsilon-allow: test fixture seeds a collections row directly; Catalog.register_collection requires a registered owner which is heavyweight setup for this CLI coverage test
             "INSERT OR IGNORE INTO collections (name, content_type, owner_id, "
