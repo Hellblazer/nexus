@@ -615,6 +615,14 @@ class PDFExtractor:
 
         Result cached for the lifetime of this PDFExtractor instance —
         a False result is never retried. Create a new instance to re-check.
+
+        nexus-h1jk: when the configured URL is unreachable, emit a
+        structured warning + ``_progress`` line so the operator knows
+        the run is silently degrading to the in-process subprocess
+        path (where math-heavy / large PDFs OOM-kill the worker).
+        The auto-restart machinery writes the live port back to
+        ``~/.config/nexus/config.yml``, so a stale URL persists across
+        sessions when the server is later killed.
         """
         if self._mineru_server_checked:
             return self._mineru_server_up
@@ -624,8 +632,27 @@ class PDFExtractor:
         try:
             resp = httpx.get(url, timeout=2)
             self._mineru_server_up = resp.status_code == 200
-        except (httpx.ConnectError, httpx.TimeoutException):
+            if not self._mineru_server_up:
+                _log.warning(
+                    "mineru_server_unhealthy",
+                    url=url, http_status=resp.status_code,
+                )
+                _progress(
+                    f"  warn: MinerU server at {url} returned HTTP "
+                    f"{resp.status_code}; falling back to in-process subprocess. "
+                    f"Run `nx mineru start` to enable server mode."
+                )
+        except (httpx.ConnectError, httpx.TimeoutException) as exc:
             self._mineru_server_up = False
+            _log.warning(
+                "mineru_server_unreachable",
+                url=url, error=f"{type(exc).__name__}: {exc}",
+            )
+            _progress(
+                f"  warn: MinerU server at {url} unreachable; falling back "
+                f"to in-process subprocess (slower, OOM-risk on large math PDFs). "
+                f"Run `nx mineru start` to enable server mode."
+            )
 
         self._mineru_server_checked = True
         return self._mineru_server_up
