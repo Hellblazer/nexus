@@ -1332,7 +1332,8 @@ def test_index_threads_on_progress(indexer, sample_pdf, sample_md, monkeypatch, 
                 with patch("voyageai.Client", return_value=voyage_client):
                     chk_cls.return_value.chunk.return_value = [chunk]
                     result = index_markdown(path, corpus="docs", on_progress=lambda d, t: progress.append((d, t)))
-    assert result >= 1
+    # nexus-8g79.23: exact count — one mock chunk planted, one indexed.
+    assert result == 1
     assert progress
 
 

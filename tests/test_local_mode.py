@@ -123,7 +123,7 @@ class TestT3DatabaseLocalMode:
         )
         assert doc_id
         results = local_db.search("programming language", collection_names=["knowledge__test"])
-        assert len(results) >= 1
+        assert len(results) == 1
         assert any("Python" in r.get("content", "") for r in results)
 
     def test_local_mode_put_does_not_emit_source_path(
@@ -282,12 +282,12 @@ class TestLocalCollectionLifecycle:
         assert doc_id
 
         results = local_db.search("systems programming", collection_names=["knowledge__lifecycle"])
-        assert len(results) >= 1
+        assert len(results) == 1
         assert any("Rust" in r.get("content", "") for r in results)
 
         names = [c["name"] for c in local_db.list_collections()]
         assert "knowledge__lifecycle" in names
-        assert len(local_db.list_store("knowledge__lifecycle")) >= 1
+        assert len(local_db.list_store("knowledge__lifecycle")) == 1
         assert local_db.delete_by_id("knowledge__lifecycle", doc_id) is True
 
     def test_expire_ttl_entries(self, local_db: T3Database) -> None:
@@ -322,8 +322,8 @@ class TestLocalCollectionLifecycle:
             title="perm",
             ttl_days=0,
         )
-        assert local_db.expire() >= 1
-        assert len(local_db.search("permanent", collection_names=["knowledge__expire_test"])) >= 1
+        assert local_db.expire() == 1
+        assert len(local_db.search("permanent", collection_names=["knowledge__expire_test"])) == 1
 
 
 # ── Corpus model consistency ──────────────────────────────────────────────────

@@ -28,7 +28,7 @@ def test_split_long_line_splits_at_semicolon() -> None:
     # Build a line with a semicolon near the end of the first segment
     line = "a" * 85 + ";rest" + "b" * 20
     result = _split_long_line(line, max_chars=100)
-    assert len(result) >= 2
+    assert len(result) == 2
     assert result[0].endswith(";")
 
 
@@ -36,7 +36,7 @@ def test_split_long_line_splits_at_brace() -> None:
     """Splits at closing brace when no semicolon available."""
     line = "a" * 85 + "}rest" + "b" * 20
     result = _split_long_line(line, max_chars=100)
-    assert len(result) >= 2
+    assert len(result) == 2
     assert result[0].endswith("}")
 
 
@@ -115,7 +115,7 @@ def test_chunk_file_normal_js_unchanged(tmp_path: Path) -> None:
     normal = "\n".join(f"var x{i} = {i};" for i in range(100))
     chunks = chunk_file(Path("normal.js"), normal)
 
-    assert len(chunks) >= 1
+    assert len(chunks) == 1
     # The ``ast_chunked`` discriminator was dropped in nexus-59j0 (cargo).
     # Contract here: chunker handles normal JS without crashing.
 

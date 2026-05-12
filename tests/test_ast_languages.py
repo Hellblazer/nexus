@@ -11,7 +11,7 @@ def test_python_function_extraction():
     """chunk_file extracts Python function definitions with correct metadata."""
     src = "def hello(name: str) -> str:\n    return f'Hello {name}'\n\ndef goodbye():\n    pass\n"
     chunks = chunk_file(Path("example.py"), src)
-    assert len(chunks) >= 1
+    assert len(chunks) == 1
     assert chunks[0]["file_path"].endswith(".py")
     assert any("hello" in c["text"] for c in chunks)
 
@@ -27,7 +27,7 @@ def test_python_class_extraction():
         "        return f'Hi {self.name}'\n"
     )
     chunks = chunk_file(Path("greeter.py"), src)
-    assert len(chunks) >= 1
+    assert len(chunks) == 1
     assert any("Greeter" in c["text"] for c in chunks)
 
 
@@ -57,7 +57,7 @@ def test_javascript_function_extraction():
         "}\n"
     )
     chunks = chunk_file(Path("app.js"), src)
-    assert len(chunks) >= 1
+    assert len(chunks) == 1
     assert chunks[0]["file_path"].endswith(".js")
     assert any("greet" in c["text"] or "Animal" in c["text"] for c in chunks)
 
@@ -77,7 +77,7 @@ def test_typescript_function_extraction():
         "}\n"
     )
     chunks = chunk_file(Path("server.ts"), src)
-    assert len(chunks) >= 1
+    assert len(chunks) == 1
     assert chunks[0]["file_path"].endswith(".ts")
 
 
@@ -102,7 +102,7 @@ def test_go_function_extraction():
         "}\n"
     )
     chunks = chunk_file(Path("main.go"), src)
-    assert len(chunks) >= 1
+    assert len(chunks) == 1
     assert chunks[0]["file_path"].endswith(".go")
     assert any("Server" in c["text"] for c in chunks)
 
@@ -128,7 +128,7 @@ def test_rust_function_extraction():
         "}\n"
     )
     chunks = chunk_file(Path("main.rs"), src)
-    assert len(chunks) >= 1
+    assert len(chunks) == 1
     assert chunks[0]["file_path"].endswith(".rs")
 
 
@@ -151,7 +151,7 @@ def test_java_class_extraction():
         "}\n"
     )
     chunks = chunk_file(Path("Calculator.java"), src)
-    assert len(chunks) >= 1
+    assert len(chunks) == 1
     assert chunks[0]["file_path"].endswith(".java")
     assert any("Calculator" in c["text"] for c in chunks)
 

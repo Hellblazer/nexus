@@ -173,7 +173,7 @@ class TestMCP:
     def test_search_returns_indexed_files(self, injected_catalog):
         from nexus.mcp_server import catalog_search
         results = catalog_search(query="ttl")
-        assert len(results) >= 1
+        assert len(results) == 3
         assert any("ttl" in r.get("title", "").lower() or "ttl" in r.get("file_path", "").lower()
                     for r in results)
 
@@ -183,7 +183,7 @@ class TestMCP:
         owner = cat._db.execute("SELECT tumbler_prefix FROM owners LIMIT 1").fetchone()
         assert owner is not None
         results = catalog_search(owner=owner[0])
-        assert len(results) >= 1 and "error" not in results[0]
+        assert len(results) == 5 and "error" not in results[0]
 
     def test_show_returns_full_entry(self, injected_catalog):
         from nexus.mcp_server import catalog_show
@@ -198,12 +198,12 @@ class TestMCP:
         cat, _ = injected_catalog
         owner = cat._db.execute("SELECT tumbler_prefix FROM owners LIMIT 1").fetchone()
         result = catalog_resolve(owner=owner[0])
-        assert len(result) >= 1 and any("__" in n for n in result)
+        assert len(result) == 3 and any("__" in n for n in result)
 
     def test_search_then_traverse_links(self, injected_catalog):
         from nexus.mcp_server import catalog_links, catalog_search
         results = catalog_search(query="ttl")
-        assert len(results) >= 1
+        assert len(results) == 3
         tumbler = results[0]["tumbler"]
         graph = catalog_links(tumbler=tumbler, depth=1)
         assert "nodes" in graph and "edges" in graph
@@ -220,7 +220,7 @@ class TestMCP:
     def test_link_audit_after_indexing(self, injected_catalog):
         from nexus.mcp_server import catalog_link_audit
         audit = catalog_link_audit()
-        assert "error" not in audit and audit["total"] >= 1
+        assert "error" not in audit and audit["total"] == 2
         assert audit["orphaned_count"] == 0
 
 
