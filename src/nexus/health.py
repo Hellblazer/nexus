@@ -635,6 +635,62 @@ def _check_orphan_pipelines() -> list[HealthResult]:
     )]
 
 
+def _check_mineru_server() -> list[HealthResult]:
+    """nexus-h1jk: surface MinerU server reachability in the default
+    doctor flow.
+
+    Math-heavy PDFs (papers with dense formula notation) accumulate per-
+    page tensor state in MinerU's formula-detection pass and routinely
+    OOM-kill the in-process subprocess fallback. The HTTP server avoids
+    that by running MinerU as a long-lived dedicated worker. The
+    configured URL silently goes stale: ``_restart_mineru_server`` in
+    ``pdf_extractor.py`` writes the live port to
+    ``~/.config/nexus/config.yml`` after a mid-run recovery, but if
+    that server later dies the URL points at a dead port across every
+    subsequent session. ``nx doctor`` is the natural place to surface
+    that drift.
+    """
+    from nexus.config import get_mineru_server_url
+    import httpx as _httpx
+
+    try:
+        url = get_mineru_server_url()
+    except Exception:
+        return []
+    if not url:
+        return []
+
+    health_url = f"{url}/health"
+    try:
+        resp = _httpx.get(health_url, timeout=2.0)
+    except (_httpx.ConnectError, _httpx.TimeoutException) as exc:
+        return [HealthResult(
+            label="MinerU server",
+            ok=False,
+            detail=(
+                f"{url} unreachable ({type(exc).__name__}); falling back to "
+                "in-process subprocess on math PDFs (OOM-risk)"
+            ),
+            fix_suggestions=[
+                "Start the server: nx mineru start",
+                f"Or confirm the URL in ~/.config/nexus/config.yml "
+                f"(currently: {url})",
+            ],
+        )]
+    if resp.status_code != 200:
+        return [HealthResult(
+            label="MinerU server",
+            ok=False,
+            detail=f"{url} returned HTTP {resp.status_code}",
+            fix_suggestions=["Restart the server: nx mineru stop && nx mineru start"],
+        )]
+    return [HealthResult(
+        label="MinerU server",
+        ok=True,
+        detail=f"reachable at {url}",
+    )]
+
+
 def _check_t2_integrity() -> list[HealthResult]:
     db_path = default_db_path()
     if not db_path.exists():
@@ -760,6 +816,7 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     results.extend(_check_orphan_t1())
     results.extend(_check_orphan_checkpoints())
     results.extend(_check_orphan_pipelines())
+    results.extend(_check_mineru_server())
     results.extend(_check_t2_integrity())
 
     # ChromaDB pagination audit (cloud only)
