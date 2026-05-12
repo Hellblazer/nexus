@@ -921,6 +921,25 @@ def _reembed_collection(
                 embeddings=embeddings,
                 metadatas=v_metas,
             )
+            # nexus-bw65 / nexus-9099: fire post-store chains so the
+            # invariant 'every CLI T3 write also fires the chain'
+            # (test_every_cli_t3_write_function_fires_store_chains)
+            # holds. Re-embed preserves doc_id / chash / manifest
+            # position, so the chain's hooks (chash_dual_write,
+            # taxonomy_assign, manifest_write) re-touch existing rows
+            # idempotently.
+            from nexus.mcp_infra import fire_store_chains
+
+            fire_store_chains(
+                v_ids, col_name, v_docs,
+                source_paths=[
+                    (m.get("source_path", "") if isinstance(m, dict) else "")
+                    for m in v_metas
+                ],
+                embeddings=embeddings,
+                metadatas=v_metas,
+                catalog_doc_id="",
+            )
 
         processed += len(v_ids)
         if on_progress is not None:
