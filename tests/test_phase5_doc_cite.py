@@ -154,7 +154,7 @@ class TestCiteJsonSchema:
             )
 
         assert result.exit_code == 0, result.output
-        payload = json.loads(result.output)
+        payload = json.loads(result.stdout)
         assert "candidates" in payload
         assert "query" in payload
         assert "threshold_met" in payload
@@ -274,5 +274,5 @@ class TestCiteTiedCandidatesNote:
             )
 
         assert result.exit_code == 0, result.output
-        payload = json.loads(result.output)
+        payload = json.loads(result.stdout)
         assert len(payload["candidates"]) == 2

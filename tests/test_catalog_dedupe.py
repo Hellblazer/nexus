@@ -247,7 +247,7 @@ class TestDedupeCLI:
         runner = CliRunner()
         result = runner.invoke(main, ["catalog", "dedupe-owners", "--json"])
         assert result.exit_code == 0, result.output
-        payload = json.loads(result.output)
+        payload = json.loads(result.stdout)
         assert payload["dry_run"] is True
         assert payload["summary"]["remove"] == 1
         assert payload["summary"]["skip"] == 1

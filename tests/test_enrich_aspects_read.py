@@ -124,7 +124,7 @@ class TestAspectsShow:
         runner = CliRunner()
         result = runner.invoke(enrich, ["aspects-show", tumbler, "--json"])
         assert result.exit_code == 0, result.output
-        data = json.loads(result.output)
+        data = json.loads(result.stdout)
         assert data["collection"] == "knowledge__myrepo-papers"
         assert data["problem_formulation"].startswith("Stale-reads")
         assert data["experimental_datasets"] == ["YCSB-A", "TPC-C"]
@@ -295,7 +295,7 @@ class TestAspectsList:
             "--json",
         ])
         assert result.exit_code == 0, result.output
-        data = json.loads(result.output)
+        data = json.loads(result.stdout)
         assert isinstance(data, list)
         assert len(data) == 2
         assert {d["source_path"] for d in data} == {

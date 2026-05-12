@@ -240,7 +240,7 @@ class TestMergeCandidatesCli:
              "--min-shared", "1", "--format", "json"],
         )
         assert result.exit_code == 0, result.output
-        payload = json.loads(result.output)
+        payload = json.loads(result.stdout)
         assert "candidates" in payload
         assert len(payload["candidates"]) >= 1
 
@@ -262,7 +262,7 @@ class TestMergeCandidatesCli:
              "--format", "json"],
         )
         assert result.exit_code == 0, result.output
-        payload = json.loads(result.output)
+        payload = json.loads(result.stdout)
         pairs = {(c["a"], c["b"]) for c in payload["candidates"]}
         # Hub-only pair suppressed.
         assert ("code__a", "code__c") not in pairs

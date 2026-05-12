@@ -257,7 +257,7 @@ class TestPlanList:
         ):
             result = runner.invoke(main, ["plan", "list", "--json"])
         assert result.exit_code == 0
-        data = _json.loads(result.output)
+        data = _json.loads(result.stdout)
         assert isinstance(data, list)
         assert len(data) == 1
         assert data[0]["name"] == "some-plan"
