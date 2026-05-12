@@ -2,10 +2,9 @@
 """ChromaDB Cloud database provisioning helpers."""
 from __future__ import annotations
 
-import json
-import urllib.request
 from typing import TYPE_CHECKING
 
+import httpx
 import structlog
 
 if TYPE_CHECKING:
@@ -23,14 +22,19 @@ def _resolve_cloud_tenant(api_key: str) -> str:
     the authoritative tenant UUID for the key.  The literal string
     ``"default_tenant"`` is rejected with 403 by Chroma Cloud; the UUID
     returned here must be used in all admin API calls.
+
+    nexus-8g79.22: replaced ``urllib.request.urlopen`` with ``httpx`` for
+    consistency with the rest of the codebase (every other outbound HTTP
+    call goes through httpx). ``httpx`` uses the system CA bundle by
+    default, same as urllib; the explicit timeout is preserved.
     """
-    req = urllib.request.Request(
+    response = httpx.get(
         f"https://{_CHROMA_CLOUD_HOST}/api/v2/auth/identity",
         headers={"x-chroma-token": api_key},
+        timeout=15.0,
     )
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        data = json.loads(resp.read())
-    return data["tenant"]
+    response.raise_for_status()
+    return response.json()["tenant"]
 
 
 def _cloud_admin_client(api_key: str) -> "chromadb.AdminClient":
@@ -48,17 +52,23 @@ def _cloud_admin_client(api_key: str) -> "chromadb.AdminClient":
     from chromadb import Settings
     from chromadb.auth.token_authn import TokenTransportHeader
 
-    settings = Settings()
-    settings.chroma_api_impl = "chromadb.api.fastapi.FastAPI"
-    settings.chroma_server_host = _CHROMA_CLOUD_HOST
-    settings.chroma_server_http_port = 443
-    settings.chroma_server_ssl_enabled = True
-    settings.chroma_client_auth_provider = (
-        "chromadb.auth.token_authn.TokenAuthClientProvider"
+    # nexus-8g79.22: constructor kwargs instead of attribute mutation —
+    # the attribute-set form was deprecated in chromadb 0.4.x and the
+    # deprecation timeline keeps quietly advancing. All values are
+    # static here; pre-fix the only reason for the multi-line setter
+    # form was historical (RDR-099 D1 first draft).
+    settings = Settings(
+        chroma_api_impl="chromadb.api.fastapi.FastAPI",
+        chroma_server_host=_CHROMA_CLOUD_HOST,
+        chroma_server_http_port=443,
+        chroma_server_ssl_enabled=True,
+        chroma_client_auth_provider=(
+            "chromadb.auth.token_authn.TokenAuthClientProvider"
+        ),
+        chroma_client_auth_credentials=api_key,
+        chroma_auth_token_transport_header=TokenTransportHeader.X_CHROMA_TOKEN,
+        chroma_overwrite_singleton_tenant_database_access_from_auth=True,
     )
-    settings.chroma_client_auth_credentials = api_key
-    settings.chroma_auth_token_transport_header = TokenTransportHeader.X_CHROMA_TOKEN
-    settings.chroma_overwrite_singleton_tenant_database_access_from_auth = True
     return chromadb.AdminClient(settings)
 
 

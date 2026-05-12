@@ -28,33 +28,43 @@ def _mock_urlopen(tenant_uuid: str):
     return cm
 
 
+def _mock_httpx_response(tenant_uuid: str) -> MagicMock:
+    """Build a mock httpx Response that returns ``{"tenant": uuid}``."""
+    resp = MagicMock()
+    resp.json.return_value = {"tenant": tenant_uuid}
+    resp.raise_for_status.return_value = None
+    return resp
+
+
 def test_resolve_cloud_tenant_returns_uuid() -> None:
     """Returns the 'tenant' field from the auth/identity response."""
     uuid = "c749e1f8-2c59-43fc-8e44-19d534e1404a"
-    cm = _mock_urlopen(uuid)
-    with patch("nexus.commands._provision.urllib.request.urlopen", return_value=cm):
+    # nexus-8g79.22: switched to httpx; test patches httpx.get.
+    with patch("nexus.commands._provision.httpx.get",
+               return_value=_mock_httpx_response(uuid)):
         result = _resolve_cloud_tenant("ck-test-key")
     assert result == uuid
 
 
 def test_resolve_cloud_tenant_uses_correct_url_and_header() -> None:
     """Requests the correct endpoint with the API key in x-chroma-token."""
-    cm = _mock_urlopen("some-uuid")
-    with patch("nexus.commands._provision.urllib.request.Request") as mock_req, \
-         patch("nexus.commands._provision.urllib.request.urlopen", return_value=cm):
+    with patch("nexus.commands._provision.httpx.get",
+               return_value=_mock_httpx_response("some-uuid")) as mock_get:
         _resolve_cloud_tenant("ck-my-key")
 
-    mock_req.assert_called_once()
-    url_arg, = mock_req.call_args.args
-    assert f"https://{_CHROMA_CLOUD_HOST}/api/v2/auth/identity" == url_arg
-    assert mock_req.call_args.kwargs["headers"] == {"x-chroma-token": "ck-my-key"}
+    mock_get.assert_called_once()
+    url_arg, = mock_get.call_args.args
+    assert url_arg == f"https://{_CHROMA_CLOUD_HOST}/api/v2/auth/identity"
+    assert mock_get.call_args.kwargs["headers"] == {"x-chroma-token": "ck-my-key"}
+    assert mock_get.call_args.kwargs["timeout"] == 15.0
 
 
 def test_resolve_cloud_tenant_propagates_network_error() -> None:
     """Network failures propagate to the caller (not swallowed)."""
-    with patch("nexus.commands._provision.urllib.request.urlopen",
-               side_effect=OSError("connection refused")):
-        with pytest.raises(OSError):
+    import httpx
+    with patch("nexus.commands._provision.httpx.get",
+               side_effect=httpx.ConnectError("connection refused")):
+        with pytest.raises(httpx.ConnectError):
             _resolve_cloud_tenant("ck-bad")
 
 
