@@ -414,6 +414,72 @@ class TestBackfillManifestForCollection:
         assert f"legacy-{coll}" in str(exc_info.value)
         assert coll in str(exc_info.value)
 
+    def test_backfill_skips_phase3_multi_chunk_doc_without_chunk_index(
+        self, catalog, t3_db,
+    ):
+        """nexus-w5zv: post-RDR-108 Phase 3 chunks lack chunk_index.
+        Pre-fix the backfill defaulted every chunk to position=0 and the
+        manifest UPSERT ON CONFLICT(doc_id, position) silently kept one
+        row. Multi-chunk docs must skip with a structured warning so the
+        operator re-indexes; single-chunk docs are unambiguous and pass.
+        """
+        from nexus.catalog.manifest_backfill import (
+            backfill_manifest_for_collection,
+        )
+
+        coll = _unique_coll()
+        _insert_doc(catalog, "1.1.1", coll)
+        # Plant Phase-3 multi-chunk shape: no chunk_index in metadata.
+        col = t3_db._client.get_or_create_collection(coll)
+        col.add(
+            ids=[f"a-{coll}", f"b-{coll}"],
+            documents=["alpha", "bravo"],
+            metadatas=[
+                {"doc_id": "1.1.1", "chunk_text_hash": "a" * 64},
+                {"doc_id": "1.1.1", "chunk_text_hash": "b" * 64},
+            ],
+        )
+
+        result = backfill_manifest_for_collection(
+            catalog, t3_db, coll, dry_run=False,
+        )
+        assert result.docs_skipped_phase3_no_index == 1
+        assert result.docs_processed == 0
+        assert result.chunks_written == 0
+        count = catalog._db.execute(
+            "SELECT COUNT(*) FROM document_chunks WHERE doc_id = ?",
+            ("1.1.1",),
+        ).fetchone()[0]
+        assert count == 0
+
+    def test_backfill_phase3_single_chunk_doc_still_writes(
+        self, catalog, t3_db,
+    ):
+        """nexus-w5zv: single-chunk Phase-3 docs have no ordering
+        ambiguity (position=0 is correct), so the guard must not trip.
+        """
+        from nexus.catalog.manifest_backfill import (
+            backfill_manifest_for_collection,
+        )
+
+        coll = _unique_coll()
+        _insert_doc(catalog, "1.1.1", coll)
+        col = t3_db._client.get_or_create_collection(coll)
+        col.add(
+            ids=[f"only-{coll}"],
+            documents=["sole chunk"],
+            metadatas=[
+                {"doc_id": "1.1.1", "chunk_text_hash": "a" * 64},
+            ],
+        )
+
+        result = backfill_manifest_for_collection(
+            catalog, t3_db, coll, dry_run=False,
+        )
+        assert result.docs_processed == 1
+        assert result.chunks_written == 1
+        assert result.docs_skipped_phase3_no_index == 0
+
     def test_backfill_dry_run_does_not_write(self, catalog, t3_db):
         """--dry-run reports but does not write manifest rows."""
         from nexus.catalog.manifest_backfill import backfill_manifest_for_collection

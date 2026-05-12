@@ -331,6 +331,11 @@ def register_dt_linked(
             },
         )
         docs += 1
+        # nexus-w5zv: stable-sort by chunk_index so pre-Phase-3 chunks
+        # land in document order; Phase-3 chunks (all chunk_index == 0)
+        # preserve chroma insertion order (the only signal we have when
+        # the indexer dropped the field).
+        ordered_chunks = sorted(m.chunks, key=lambda c: c.chunk_index)
         chunks_payload = [
             {
                 "chash": c.chash,
@@ -338,7 +343,7 @@ def register_dt_linked(
                 "line_start": None, "line_end": None,
                 "char_start": None, "char_end": None,
             }
-            for pos, c in enumerate(m.chunks)
+            for pos, c in enumerate(ordered_chunks)
         ]
         catalog.write_manifest(str(tumbler), chunks_payload)
         links += len(chunks_payload)
@@ -370,13 +375,16 @@ def register_synthetic(
         if g.title:
             uri = f"nx-orphan-backfill://{collection}/{g.title}"
             title = g.title
+            # nexus-w5zv: stable sort by chunk_index (same rationale as
+            # register_dt_linked above).
+            ordered_chunks = sorted(g.chunks, key=lambda c: c.chunk_index)
             chunks_payload = [
                 {
                     "chash": c.chash, "position": pos,
                     "line_start": None, "line_end": None,
                     "char_start": None, "char_end": None,
                 }
-                for pos, c in enumerate(g.chunks)
+                for pos, c in enumerate(ordered_chunks)
             ]
             tumbler = catalog.register(
                 owner,
@@ -535,13 +543,15 @@ def apply_csv(
                 },
             )
             docs += 1
+            # nexus-w5zv: stable sort by chunk_index (see register_dt_linked).
+            ordered_chunks = sorted(chunks, key=lambda c: c.chunk_index)
             catalog.write_manifest(str(tumbler), [
                 {
                     "chash": c.chash, "position": pos,
                     "line_start": None, "line_end": None,
                     "char_start": None, "char_end": None,
                 }
-                for pos, c in enumerate(chunks)
+                for pos, c in enumerate(ordered_chunks)
             ])
             links += len(chunks)
     return docs, links
@@ -583,6 +593,8 @@ def link_by_title(
         # Read existing manifest to know where to append (preserve order).
         existing = catalog.get_manifest(tumbler)
         start_pos = len(existing)
+        # nexus-w5zv: stable sort by chunk_index (see register_dt_linked).
+        ordered_chunks = sorted(g.chunks, key=lambda c: c.chunk_index)
         catalog.append_manifest_chunks(tumbler, [
             {
                 "chash": c.chash,
@@ -590,7 +602,7 @@ def link_by_title(
                 "line_start": None, "line_end": None,
                 "char_start": None, "char_end": None,
             }
-            for pos, c in enumerate(g.chunks)
+            for pos, c in enumerate(ordered_chunks)
         ])
         linked_chunks += len(g.chunks)
         linked_docs += 1
@@ -657,6 +669,8 @@ def link_by_content_hash(
         tumbler = by_head[content_hash]
         existing = catalog.get_manifest(tumbler)
         start_pos = len(existing)
+        # nexus-w5zv: stable sort by chunk_index (see register_dt_linked).
+        ordered_chunks = sorted(chunks, key=lambda c: c.chunk_index)
         catalog.append_manifest_chunks(tumbler, [
             {
                 "chash": c.chash,
@@ -664,7 +678,7 @@ def link_by_content_hash(
                 "line_start": None, "line_end": None,
                 "char_start": None, "char_end": None,
             }
-            for pos, c in enumerate(chunks)
+            for pos, c in enumerate(ordered_chunks)
         ])
         linked_chunks += len(chunks)
         linked_docs += 1
