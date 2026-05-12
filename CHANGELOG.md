@@ -31,6 +31,24 @@ Patch on 4.32.6. Tier-2 architectural + Tier-3 dep-hygiene from the
   ``_chroma_with_retry`` and ``_voyage_with_retry`` now apply
   ``delay * (1 + (random() - 0.5) * 0.4)`` jitter before sleep.
 
+### Cosmetic (nexus-8g79.33)
+
+- **API-key truncation in provision error log**: ChromaDB error
+  bodies occasionally echo the offending token; truncate to 120
+  chars matching ``retry.py``'s safety bound so tokens cannot leak
+  verbatim into structured logs.
+- **CI ONNX cache key bound to ``uv.lock`` hash**: pre-fix the
+  runner-OS-only key reused stale ONNX models across chromadb
+  upgrades.
+- **``sn`` plugin manifest filled in**: added ``author``,
+  ``repository``, ``license`` for marketplace-schema parity with
+  ``nx``.
+- **Defensive assertion against future async caller of
+  ``_label_batch``**: pre-fix the bare ``asyncio.run()`` would raise
+  an opaque "cannot be called from a running event loop" if a
+  caller transitioned to async; now raises a clear ``RuntimeError``
+  pointing at the call-site fix.
+
 ### Deps
 
 - **``cryptography`` upgraded ``46.0.5 → 48.0.0``** (nexus-8g79.17):

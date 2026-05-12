@@ -1151,6 +1151,20 @@ def relabel_topics(
     def _label_batch(batch: list) -> list[tuple[int, str | None]]:
         items = [(w[2], w[3]) for w in batch]  # (terms, doc_ids)
         # Each worker thread has no event loop; asyncio.run() is safe.
+        # nexus-8g79.33: assert the invariant defensively — if a future
+        # caller invokes _label_batch from an already-async context,
+        # asyncio.run() would raise the opaque
+        # "asyncio.run() cannot be called from a running event loop".
+        # This assert surfaces the bug at the call site.
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass  # expected: no running loop, asyncio.run() is safe.
+        else:
+            raise RuntimeError(
+                "_label_batch called from an async context — "
+                "use loop.run_until_complete or refactor caller."
+            )
         labels = asyncio.run(_generate_labels_batch(items, glossary_text=glossary_text))
         return [(w[0], lbl) for w, lbl in zip(batch, labels)]
 
