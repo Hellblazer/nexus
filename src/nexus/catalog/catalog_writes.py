@@ -801,7 +801,16 @@ class _WriteOps:
                         for val in (
                             doc_id,
                             c["position"],
-                            c["chash"],
+                            # nexus-gaa3 (RDR-108 audit finding 4):
+                            # normalize chash to 32-char at write time so
+                            # the column shape is uniform across writers.
+                            # Pre-fix manifest_write_batch_hook stored the
+                            # full 64-char chunk_text_hash while
+                            # orphan_backfill stored 32-char chash[:32];
+                            # downstream joins (chashes_for_collection,
+                            # docs_for_chashes) carried a substr(chash, 1,
+                            # 32) workaround to bridge the mismatch.
+                            (c["chash"] or "")[:32],
                             c.get("chunk_index"),
                             c.get("line_start"),
                             c.get("line_end"),
@@ -900,7 +909,9 @@ class _WriteOps:
                         for val in (
                             doc_id,
                             c["position"],
-                            c["chash"],
+                            # nexus-gaa3: normalize to 32-char; see
+                            # write_manifest above for rationale.
+                            (c["chash"] or "")[:32],
                             c.get("chunk_index"),
                             c.get("line_start"),
                             c.get("line_end"),

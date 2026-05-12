@@ -85,7 +85,7 @@ class TestManifestRow:
         from nexus.catalog.catalog_writes import ManifestRow
         row = ManifestRow(
             position=0,
-            chash="a" * 64,
+            chash="a" * 32,
             chunk_index=0,
             line_start=1,
             line_end=5,
@@ -93,7 +93,7 @@ class TestManifestRow:
             char_end=100,
         )
         assert row.position == 0
-        assert row.chash == "a" * 64
+        assert row.chash == "a" * 32
         assert row.chunk_index == 0
         assert row.line_start == 1
         assert row.line_end == 5
@@ -102,7 +102,7 @@ class TestManifestRow:
 
     def test_manifestrow_optional_fields_none(self):
         from nexus.catalog.catalog_writes import ManifestRow
-        row = ManifestRow(position=0, chash="b" * 64)
+        row = ManifestRow(position=0, chash="b" * 32)
         assert row.chunk_index is None
         assert row.line_start is None
         assert row.line_end is None
@@ -127,20 +127,20 @@ class TestGetManifest:
         cat = _make_catalog(tmp_path)
         _insert_doc(cat, "1.1.1", "code__test")
         chunks = [
-            _make_chunk("b" * 64, position=1),
-            _make_chunk("a" * 64, position=0),
-            _make_chunk("c" * 64, position=2),
+            _make_chunk("b" * 32, position=1),
+            _make_chunk("a" * 32, position=0),
+            _make_chunk("c" * 32, position=2),
         ]
         cat.write_manifest("1.1.1", chunks)
 
         rows = cat.get_manifest("1.1.1")
         assert len(rows) == 3
         assert rows[0].position == 0
-        assert rows[0].chash == "a" * 64
+        assert rows[0].chash == "a" * 32
         assert rows[1].position == 1
-        assert rows[1].chash == "b" * 64
+        assert rows[1].chash == "b" * 32
         assert rows[2].position == 2
-        assert rows[2].chash == "c" * 64
+        assert rows[2].chash == "c" * 32
 
     def test_get_manifest_returns_manifestrow_objects(self, tmp_path):
         """Return type is list[ManifestRow]."""
@@ -148,7 +148,7 @@ class TestGetManifest:
 
         cat = _make_catalog(tmp_path)
         _insert_doc(cat, "1.1.1", "code__test")
-        cat.write_manifest("1.1.1", [_make_chunk("a" * 64, 0)])
+        cat.write_manifest("1.1.1", [_make_chunk("a" * 32, 0)])
 
         rows = cat.get_manifest("1.1.1")
         assert len(rows) == 1
@@ -160,7 +160,7 @@ class TestGetManifest:
         _insert_doc(cat, "1.1.1", "code__test")
         chunks = [
             {
-                "chash": "d" * 64,
+                "chash": "d" * 32,
                 "position": 0,
                 "chunk_index": 3,
                 "line_start": 10,
@@ -194,12 +194,12 @@ class TestGetManifest:
         cat = _make_catalog(tmp_path)
         _insert_doc(cat, "1.1.1", "code__test")
         _insert_doc(cat, "1.1.2", "code__test")
-        cat.write_manifest("1.1.1", [_make_chunk("a" * 64, 0)])
-        cat.write_manifest("1.1.2", [_make_chunk("b" * 64, 0), _make_chunk("c" * 64, 1)])
+        cat.write_manifest("1.1.1", [_make_chunk("a" * 32, 0)])
+        cat.write_manifest("1.1.2", [_make_chunk("b" * 32, 0), _make_chunk("c" * 32, 1)])
 
         rows = cat.get_manifest("1.1.1")
         assert len(rows) == 1
-        assert rows[0].chash == "a" * 64
+        assert rows[0].chash == "a" * 32
 
 
 # ── K6: docs_for_chashes ─────────────────────────────────────────────────────
@@ -218,17 +218,17 @@ class TestDocsForChashes:
         """Returns correct doc_id for a chash that appears in one document."""
         cat = _make_catalog(tmp_path)
         _insert_doc(cat, "1.1.1", "code__test")
-        cat.write_manifest("1.1.1", [_make_chunk("a" * 64, 0)])
+        cat.write_manifest("1.1.1", [_make_chunk("a" * 32, 0)])
 
-        result = cat.docs_for_chashes(["a" * 64])
-        assert result == {"a" * 64: ["1.1.1"]}
+        result = cat.docs_for_chashes(["a" * 32])
+        assert result == {"a" * 32: ["1.1.1"]}
 
     def test_docs_for_chashes_multi_doc(self, tmp_path):
         """A chash shared across multiple docs maps to all doc_ids."""
         cat = _make_catalog(tmp_path)
         _insert_doc(cat, "1.1.1", "code__test")
         _insert_doc(cat, "1.1.2", "code__test")
-        shared_chash = "a" * 64
+        shared_chash = "a" * 32
         cat.write_manifest("1.1.1", [_make_chunk(shared_chash, 0)])
         cat.write_manifest("1.1.2", [_make_chunk(shared_chash, 0)])
 
@@ -239,31 +239,31 @@ class TestDocsForChashes:
     def test_docs_for_chashes_unknown_chash_omitted(self, tmp_path):
         """Chashes with no manifest entries are omitted from the result."""
         cat = _make_catalog(tmp_path)
-        result = cat.docs_for_chashes(["z" * 64])
+        result = cat.docs_for_chashes(["z" * 32])
         assert result == {}
 
     def test_docs_for_chashes_mixed_known_unknown(self, tmp_path):
         """Known chashes appear in result; unknown chashes are omitted."""
         cat = _make_catalog(tmp_path)
         _insert_doc(cat, "1.1.1", "code__test")
-        cat.write_manifest("1.1.1", [_make_chunk("a" * 64, 0)])
+        cat.write_manifest("1.1.1", [_make_chunk("a" * 32, 0)])
 
-        result = cat.docs_for_chashes(["a" * 64, "z" * 64])
-        assert "a" * 64 in result
-        assert "z" * 64 not in result
+        result = cat.docs_for_chashes(["a" * 32, "z" * 32])
+        assert "a" * 32 in result
+        assert "z" * 32 not in result
 
     def test_docs_for_chashes_multiple_chunks_same_doc(self, tmp_path):
         """Multiple chunks in the same doc appear as one doc_id per chash."""
         cat = _make_catalog(tmp_path)
         _insert_doc(cat, "1.1.1", "code__test")
         cat.write_manifest("1.1.1", [
-            _make_chunk("a" * 64, 0),
-            _make_chunk("b" * 64, 1),
+            _make_chunk("a" * 32, 0),
+            _make_chunk("b" * 32, 1),
         ])
 
-        result = cat.docs_for_chashes(["a" * 64, "b" * 64])
-        assert result["a" * 64] == ["1.1.1"]
-        assert result["b" * 64] == ["1.1.1"]
+        result = cat.docs_for_chashes(["a" * 32, "b" * 32])
+        assert result["a" * 32] == ["1.1.1"]
+        assert result["b" * 32] == ["1.1.1"]
 
     def test_docs_for_chashes_accepts_32_char_chash_form(self, tmp_path):
         """nexus-f8c3 (RDR-108 Phase 4 review S2): a caller passing
@@ -274,7 +274,7 @@ class TestDocsForChashes:
         """
         cat = _make_catalog(tmp_path)
         _insert_doc(cat, "1.1.1", "code__test")
-        full_chash = "a" * 64
+        full_chash = "a" * 32
         cat.write_manifest("1.1.1", [_make_chunk(full_chash, 0)])
 
         # 32-char form (RDR-108 D1 natural id).
@@ -294,7 +294,11 @@ class TestDocsForChashes:
         """
         cat = _make_catalog(tmp_path)
         _insert_doc(cat, "1.1.1", "code__test")
-        full_chash = "b" * 64
+        # nexus-gaa3: storage now normalizes to 32-char but the input-form
+        # preservation contract still applies — a caller passing a
+        # distinct 64-char form (with a suffix beyond char 32) gets that
+        # exact 64-char string back as the result key.
+        full_chash = "b" * 32 + "X" * 32
         cat.write_manifest("1.1.1", [_make_chunk(full_chash, 0)])
 
         result = cat.docs_for_chashes([full_chash])
@@ -314,8 +318,8 @@ class TestDocsForChashes:
         cat = _make_catalog(tmp_path)
         _insert_doc(cat, "1.1.1", "code__test")
         _insert_doc(cat, "1.1.2", "code__test")
-        legacy_chash = "c" * 64
-        new_chash = "d" * 64
+        legacy_chash = "c" * 32
+        new_chash = "d" * 32
         cat.write_manifest("1.1.1", [_make_chunk(legacy_chash, 0)])
         cat.write_manifest("1.1.2", [_make_chunk(new_chash, 0)])
 
@@ -344,21 +348,21 @@ class TestGetChunkChashes:
         cat = _make_catalog(tmp_path)
         _insert_doc(cat, "1.1.1", "code__test")
         chunks = [
-            _make_chunk("b" * 64, position=1),
-            _make_chunk("a" * 64, position=0),
-            _make_chunk("c" * 64, position=2),
+            _make_chunk("b" * 32, position=1),
+            _make_chunk("a" * 32, position=0),
+            _make_chunk("c" * 32, position=2),
         ]
         cat.write_manifest("1.1.1", chunks)
-        assert cat.get_chunk_chashes("1.1.1") == ["a" * 64, "b" * 64, "c" * 64]
+        assert cat.get_chunk_chashes("1.1.1") == ["a" * 32, "b" * 32, "c" * 32]
 
     def test_isolates_by_doc_id(self, tmp_path):
         cat = _make_catalog(tmp_path)
         _insert_doc(cat, "1.1.1", "code__test")
         _insert_doc(cat, "1.1.2", "code__test")
-        cat.write_manifest("1.1.1", [_make_chunk("a" * 64, 0)])
-        cat.write_manifest("1.1.2", [_make_chunk("b" * 64, 0), _make_chunk("c" * 64, 1)])
-        assert cat.get_chunk_chashes("1.1.1") == ["a" * 64]
-        assert cat.get_chunk_chashes("1.1.2") == ["b" * 64, "c" * 64]
+        cat.write_manifest("1.1.1", [_make_chunk("a" * 32, 0)])
+        cat.write_manifest("1.1.2", [_make_chunk("b" * 32, 0), _make_chunk("c" * 32, 1)])
+        assert cat.get_chunk_chashes("1.1.1") == ["a" * 32]
+        assert cat.get_chunk_chashes("1.1.2") == ["b" * 32, "c" * 32]
 
     def test_zero_chunk_doc_returns_empty(self, tmp_path):
         cat = _make_catalog(tmp_path)
@@ -388,7 +392,7 @@ class TestChashesForCollection:
     def test_chashes_for_collection_returns_set_of_strings(self, tmp_path):
         cat = _make_catalog(tmp_path)
         _insert_doc(cat, "1.1.1", "code__test")
-        cat.write_manifest("1.1.1", [_make_chunk("a" * 64, 0)])
+        cat.write_manifest("1.1.1", [_make_chunk("a" * 32, 0)])
 
         result = cat.chashes_for_collection("code__test")
         assert isinstance(result, set)
@@ -399,7 +403,7 @@ class TestChashesForCollection:
         so direct membership testing against chunk IDs works."""
         cat = _make_catalog(tmp_path)
         _insert_doc(cat, "1.1.1", "code__test")
-        full = "a" * 64
+        full = "a" * 32
         cat.write_manifest("1.1.1", [_make_chunk(full, 0)])
 
         result = cat.chashes_for_collection("code__test")
@@ -411,29 +415,29 @@ class TestChashesForCollection:
         cat = _make_catalog(tmp_path)
         _insert_doc(cat, "1.1.1", "code__test")
         _insert_doc(cat, "1.1.2", "code__test")
-        shared = "a" * 64
+        shared = "a" * 32
         cat.write_manifest("1.1.1", [
             _make_chunk(shared, 0),
             _make_chunk(shared, 1),
-            _make_chunk("b" * 64, 2),
+            _make_chunk("b" * 32, 2),
         ])
         cat.write_manifest("1.1.2", [_make_chunk(shared, 0)])
 
         result = cat.chashes_for_collection("code__test")
-        assert result == {shared[:32], ("b" * 64)[:32]}
+        assert result == {shared[:32], ("b" * 32)[:32]}
 
     def test_chashes_for_collection_isolates_by_physical_collection(self, tmp_path):
         """Only docs whose ``physical_collection`` matches contribute chashes."""
         cat = _make_catalog(tmp_path)
         _insert_doc(cat, "1.1.1", "code__a")
         _insert_doc(cat, "1.1.2", "code__b")
-        cat.write_manifest("1.1.1", [_make_chunk("a" * 64, 0)])
-        cat.write_manifest("1.1.2", [_make_chunk("b" * 64, 0)])
+        cat.write_manifest("1.1.1", [_make_chunk("a" * 32, 0)])
+        cat.write_manifest("1.1.2", [_make_chunk("b" * 32, 0)])
 
         a_set = cat.chashes_for_collection("code__a")
         b_set = cat.chashes_for_collection("code__b")
-        assert a_set == {("a" * 64)[:32]}
-        assert b_set == {("b" * 64)[:32]}
+        assert a_set == {("a" * 32)[:32]}
+        assert b_set == {("b" * 32)[:32]}
 
     def test_chashes_for_collection_empty_manifest_returns_empty(self, tmp_path):
         """A doc registered to the collection but with no manifest rows
@@ -452,7 +456,7 @@ class TestChashesForCollection:
         become orphans, the GC contract)."""
         cat = _make_catalog(tmp_path)
         _insert_doc(cat, "1.1.1", "code__test")
-        cat.write_manifest("1.1.1", [_make_chunk("a" * 64, 0)])
+        cat.write_manifest("1.1.1", [_make_chunk("a" * 32, 0)])
 
         cat._db.execute(  # epsilon-allow: test fixture forces FK CASCADE
             "DELETE FROM documents WHERE tumbler = ?", ("1.1.1",)
@@ -657,7 +661,7 @@ class TestWriteManifestBatching:
         _insert_doc(cat, "1.1.1", "code__test")
 
         chunks = [
-            {"chash": f"{i:064x}", "position": i}
+            {"chash": f"{i:032x}", "position": i}
             for i in range(350)
         ]
         cat.write_manifest("1.1.1", chunks)
@@ -670,7 +674,8 @@ class TestWriteManifestBatching:
         assert len(rows) == 350
         for i, (pos, chash) in enumerate(rows):
             assert pos == i
-            assert chash == f"{i:064x}"
+            # nexus-gaa3: stored chash is 32-char (write normalizes).
+            assert chash == f"{i:032x}"
 
     def test_write_manifest_350_chunks_idempotent(self, tmp_path):
         """Re-writing 350 chunks produces exactly 350 rows (no duplicates)."""
@@ -740,7 +745,7 @@ class TestManifestWriteBatchHook:
             {
                 "doc_id": "1.1.1",
                 "chunk_index": 0,
-                "chunk_text_hash": "a" * 64,
+                "chunk_text_hash": "a" * 32,
                 "line_start": 0,
                 "line_end": 5,
                 "chunk_start_char": 0,
@@ -763,7 +768,7 @@ class TestManifestWriteBatchHook:
         ).fetchall()
         assert len(rows) == 1
         assert rows[0][0] == "1.1.1"
-        assert rows[0][2] == "a" * 64
+        assert rows[0][2] == "a" * 32
 
     def test_manifest_write_batch_hook_no_metadatas_noop(self, tmp_path):
         """Hook is a no-op when metadatas is None."""
@@ -791,7 +796,7 @@ class TestManifestWriteBatchHook:
             {
                 "doc_id": "1.1.1",
                 "chunk_index": 0,
-                "chunk_text_hash": "a" * 64,
+                "chunk_text_hash": "a" * 32,
                 "line_start": 0,
                 "line_end": 5,
                 "chunk_start_char": 0,
@@ -800,7 +805,7 @@ class TestManifestWriteBatchHook:
             {
                 "doc_id": "1.1.1",
                 "chunk_index": 1,
-                "chunk_text_hash": "b" * 64,
+                "chunk_text_hash": "b" * 32,
                 "line_start": 6,
                 "line_end": 10,
                 "chunk_start_char": 51,
@@ -823,8 +828,8 @@ class TestManifestWriteBatchHook:
             ("1.1.1",),
         ).fetchall()
         assert len(rows) == 2
-        assert rows[0] == (0, "a" * 64)
-        assert rows[1] == (1, "b" * 64)
+        assert rows[0] == (0, "a" * 32)
+        assert rows[1] == (1, "b" * 32)
 
     def test_manifest_write_batch_hook_exception_logs_warning_no_propagate(
         self, tmp_path,
@@ -846,7 +851,7 @@ class TestManifestWriteBatchHook:
         _insert_doc(cat, "1.1.1", "code__test")
 
         metadatas = [
-            {"chunk_index": 0, "chunk_text_hash": "a" * 64},
+            {"chunk_index": 0, "chunk_text_hash": "a" * 32},
         ]
         # Force append_manifest_chunks to raise.
         with patch.object(
@@ -913,9 +918,9 @@ class TestManifestWriteBatchHook:
             }
 
         # Batch 1: positions 0, 1, 2.
-        batch_1 = [_meta(0, "a" * 64), _meta(1, "b" * 64), _meta(2, "c" * 64)]
+        batch_1 = [_meta(0, "a" * 32), _meta(1, "b" * 32), _meta(2, "c" * 32)]
         # Batch 2: positions 3, 4.
-        batch_2 = [_meta(3, "d" * 64), _meta(4, "e" * 64)]
+        batch_2 = [_meta(3, "d" * 32), _meta(4, "e" * 32)]
 
         with patch("nexus.mcp_infra.get_catalog", return_value=cat):
             manifest_write_batch_hook(
@@ -947,8 +952,8 @@ class TestManifestWriteBatchHook:
         )
         for i, (pos, chash) in enumerate(rows):
             assert pos == i
-        assert rows[0][1] == "a" * 64
-        assert rows[4][1] == "e" * 64
+        assert rows[0][1] == "a" * 32
+        assert rows[4][1] == "e" * 32
 
     def test_manifest_write_batch_hook_updates_chunk_count_cache(self, tmp_path):
         """nexus-zq79: documents.chunk_count must track manifest size after
@@ -968,9 +973,9 @@ class TestManifestWriteBatchHook:
         ).fetchone()[0] == 0
 
         metadatas = [
-            {"chunk_index": 0, "chunk_text_hash": "a" * 64},
-            {"chunk_index": 1, "chunk_text_hash": "b" * 64},
-            {"chunk_index": 2, "chunk_text_hash": "c" * 64},
+            {"chunk_index": 0, "chunk_text_hash": "a" * 32},
+            {"chunk_index": 1, "chunk_text_hash": "b" * 32},
+            {"chunk_index": 2, "chunk_text_hash": "c" * 32},
         ]
         with patch("nexus.mcp_infra.get_catalog", return_value=cat):
             manifest_write_batch_hook(
@@ -1041,8 +1046,8 @@ class TestManifestWriteBatchHook:
             f"{[(r.position, r.chash[:1]) for r in rows]}"
         )
         # New chashes wholly replace the old ones.
-        assert rows[0].chash == "p" * 64
-        assert rows[2].chash == "r" * 64
+        assert rows[0].chash == "p" * 32
+        assert rows[2].chash == "r" * 32
         # And the chunk_count cache reflects the new shape.
         chunk_count = cat._db.execute(
             "SELECT chunk_count FROM documents WHERE tumbler=?", ("1.1.1",),
@@ -1071,7 +1076,7 @@ class TestManifestIsAuthoritative:
         """
         cat = _make_catalog(tmp_path)
         _insert_doc(cat, "1.1.7", "code__authoritative")
-        manifest_chash = "a" * 64
+        manifest_chash = "a" * 32
         cat.write_manifest("1.1.7", [_make_chunk(manifest_chash, 0)])
 
         # The manifest API reports the manifest, NOT any conflicting
@@ -1084,9 +1089,9 @@ class TestManifestIsAuthoritative:
         # docs_for_chashes resolves only the manifest's chash to
         # the doc; a stray chash that's not in the manifest does
         # NOT resolve.
-        result = cat.docs_for_chashes([manifest_chash, "z" * 64])
+        result = cat.docs_for_chashes([manifest_chash, "z" * 32])
         assert result[manifest_chash] == ["1.1.7"]
-        assert "z" * 64 not in result, (
+        assert "z" * 32 not in result, (
             "manifest is authoritative; a chash absent from the "
             "manifest must not resolve via this API even if some "
             "chunk metadata claims membership"
@@ -1104,4 +1109,4 @@ class TestManifestIsAuthoritative:
         assert cat.get_manifest("1.1.8") == []
         # And docs_for_chashes won't find any chash mapping to this
         # doc either.
-        assert cat.docs_for_chashes(["x" * 64]) == {}
+        assert cat.docs_for_chashes(["x" * 32]) == {}
