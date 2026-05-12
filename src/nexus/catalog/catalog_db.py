@@ -625,6 +625,31 @@ class CatalogDB:
         self._conn.execute("PRAGMA foreign_keys=OFF")
         try:
             self._rebuild_inner(owners, documents, links, consistency_mtime=consistency_mtime)
+            # nexus-lrhg #3: with FK enforcement disabled the DELETE FROM
+            # documents above did NOT cascade-delete the
+            # ``document_chunks`` manifest. Any rows whose ``doc_id``
+            # references a tombstoned document (DocumentDeleted in the
+            # legacy log that this rebuild replays) survive the wipe and
+            # become orphans: they reference a doc_id that the new
+            # documents INSERT loop did not restore. PRAGMA foreign_keys
+            # =ON below only enforces new writes, not existing rows, so
+            # the orphan rows persist silently forever. Wipe them
+            # explicitly before re-enabling FK so the post-rebuild state
+            # is FK-clean.
+            orphan_count = self._conn.execute(
+                "SELECT COUNT(*) FROM document_chunks "
+                "WHERE doc_id NOT IN (SELECT tumbler FROM documents)"
+            ).fetchone()[0]
+            if orphan_count:
+                self._conn.execute(
+                    "DELETE FROM document_chunks "
+                    "WHERE doc_id NOT IN (SELECT tumbler FROM documents)"
+                )
+                self._conn.commit()
+                _log.info(
+                    "catalog_db_rebuild_orphan_chunks_purged",
+                    count=orphan_count,
+                )
         finally:
             self._conn.execute("PRAGMA foreign_keys=ON")
 
