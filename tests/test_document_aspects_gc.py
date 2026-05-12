@@ -209,7 +209,7 @@ class TestAspectsGcCLI:
         # nexus.commands.aspects, which don't because the import binds
         # at call time).
         import nexus.commands._helpers as h
-        monkeypatch.setattr(h, "default_db_path", lambda: mem_db)
+        monkeypatch.setattr("nexus.config.default_db_path", lambda: mem_db)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
         return cat_db, mem_db
 
@@ -270,7 +270,7 @@ class TestAspectsGcCLI:
         T2Database(mem_db).close()
 
         import nexus.commands._helpers as h
-        monkeypatch.setattr(h, "default_db_path", lambda: mem_db)
+        monkeypatch.setattr("nexus.config.default_db_path", lambda: mem_db)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
 
         from nexus.cli import main

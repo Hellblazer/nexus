@@ -94,7 +94,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # default_db_path is imported lazily inside the CLI; patch the
     # canonical location.
     import nexus.commands._helpers as h
-    monkeypatch.setattr(h, "default_db_path", lambda: db_path)
+    monkeypatch.setattr("nexus.config.default_db_path", lambda: db_path)
 
     return catalog_dir, db_path, cat
 

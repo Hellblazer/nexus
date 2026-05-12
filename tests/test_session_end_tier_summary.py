@@ -46,7 +46,7 @@ def isolated_t2(
 ) -> Path:
     from nexus.commands import _helpers
     db = tmp_path / "t.db"
-    monkeypatch.setattr(_helpers, "default_db_path", lambda: db)
+    monkeypatch.setattr("nexus.config.default_db_path", lambda: db)
     monkeypatch.delenv("NX_SESSION_ID", raising=False)
     import nexus.session
     monkeypatch.setattr(nexus.session, "read_claude_session_id", lambda: None)
@@ -127,7 +127,7 @@ class TestPrintTierStatusSummary:
 
         # Path that does NOT exist.
         absent = tmp_path / "missing.db"
-        monkeypatch.setattr(_helpers, "default_db_path", lambda: absent)
+        monkeypatch.setattr("nexus.config.default_db_path", lambda: absent)
         monkeypatch.setenv("NX_SESSION_ID", "any")
 
         _print_tier_status_summary()
@@ -145,7 +145,7 @@ class TestPrintTierStatusSummary:
 
         empty = tmp_path / "empty.db"
         sqlite3.connect(str(empty)).close()
-        monkeypatch.setattr(_helpers, "default_db_path", lambda: empty)
+        monkeypatch.setattr("nexus.config.default_db_path", lambda: empty)
         monkeypatch.setenv("NX_SESSION_ID", "any")
 
         _print_tier_status_summary()
@@ -166,7 +166,7 @@ class TestPrintTierStatusSummary:
         def boom():
             raise RuntimeError("simulated default_db_path failure")
 
-        monkeypatch.setattr(_helpers, "default_db_path", boom)
+        monkeypatch.setattr("nexus.config.default_db_path", boom)
         monkeypatch.setenv("NX_SESSION_ID", "any")
 
         # Must not raise.

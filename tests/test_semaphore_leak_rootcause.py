@@ -203,8 +203,12 @@ def test_mineru_stop_uses_killpg(monkeypatch, tmp_path) -> None:
     def _alive(pid: int) -> bool:
         return alive_states.pop(0) if alive_states else False
 
+    from nexus import _mineru_pid
+
     monkeypatch.setattr(mineru, "_pid_file_path", lambda: pid_path)
+    monkeypatch.setattr(_mineru_pid, "_pid_file_path", lambda: pid_path)
     monkeypatch.setattr(mineru, "_is_process_alive", _alive)
+    monkeypatch.setattr(_mineru_pid, "is_process_alive", _alive)
     monkeypatch.setattr(mineru.os, "killpg", _fake_killpg)
     monkeypatch.setattr(mineru.os, "kill", _fake_kill)
     monkeypatch.setattr(mineru.os, "getpgid", lambda pid: pid)
