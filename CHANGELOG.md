@@ -6,6 +6,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.32.3] - 2026-05-11
+
+Patch on 4.32.2. Stops the auto-restart-writes-ephemeral-port-to-
+persistent-config drift that 4.32.2 made visible (nexus-oa7r). The
+PID file at ``~/.config/nexus/mineru.pid`` is now the canonical
+source of truth for the live MinerU server port; the config write
+that previously stamped ephemeral ports into ``config.yml`` is
+gone from both ``nx mineru start`` and
+``PDFExtractor._restart_mineru_server``.
+
+### Fixed
+
+- **``mineru_server_url`` config drift** (nexus-oa7r):
+  ``get_mineru_server_url`` now resolves via PID file when a live
+  server is found (``_is_process_alive``-validated), falling back
+  to configured ``pdf.mineru_server_url`` and the built-in
+  ``http://127.0.0.1:8010`` default in that order. Neither startup
+  path writes to persistent config; drift becomes structurally
+  impossible. Static config retains value for out-of-band server
+  management (launchctl etc).
+
 ## [4.32.2] - 2026-05-11
 
 Patch on 4.32.1. Surfaces MinerU server reachability state in the

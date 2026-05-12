@@ -6,6 +6,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.32.3] - 2026-05-11
+
+Plugin version aligned with conexus 4.32.3. No plugin-side changes;
+the release closes the MinerU config-drift root cause (nexus-oa7r) —
+PID file is now canonical, persistent config is no longer touched
+by ephemeral auto-restarts. See root ``CHANGELOG.md``.
+
 ## [4.32.2] - 2026-05-11
 
 Plugin version aligned with conexus 4.32.2. No plugin-side changes;
