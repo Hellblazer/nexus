@@ -6,6 +6,56 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.32.7] - 2026-05-12
+
+Patch on 4.32.6. Tier-2 architectural + Tier-3 dep-hygiene from the
+2026-05-12 audit epic ``nexus-8g79``.
+
+### Fixed
+
+- **``catalog/consolidation.py:116`` routes T3 writes through
+  ``T3Database.upsert_chunks_with_embeddings``** (nexus-8g79.11):
+  pre-fix the raw ``target_col.upsert`` bypassed quota validation,
+  manifest hook, taxonomy hook, and chash dual-write. Post-fix the
+  consolidated collection is visible to catalog-aware retrieval.
+- **``fire_post_document_hooks`` signature-classified at register
+  time** (nexus-8g79.12): pre-fix the dispatcher caught ``TypeError``
+  from inside the hook body and silently retried with the legacy
+  shape — misclassifying unrelated type bugs as a back-compat signal.
+  Mirrors the pattern already used by
+  ``register_post_store_batch_hook`` for ``catalog_doc_id``.
+- **Retry backoff jittered ±20%** (nexus-8g79.32): pre-fix
+  ``time.sleep(delay)`` with deterministic doubling caused
+  thundering-herd retries under sustained rate-limit (multiple
+  concurrent workers waking at the exact same instant). Both
+  ``_chroma_with_retry`` and ``_voyage_with_retry`` now apply
+  ``delay * (1 + (random() - 0.5) * 0.4)`` jitter before sleep.
+
+### Deps
+
+- **``cryptography`` upgraded ``46.0.5 → 48.0.0``** (nexus-8g79.17):
+  two-minor catch-up on a high-CVE-frequency package. Transitive
+  bump only — no source changes; full touched-suite (652 tests)
+  green post-bump.
+
+### Verified-no-action
+
+- **``nexus-8g79.13``** (chunk_index emission): chunkers emit
+  ``chunk_index`` in metadata as the chunk's position counter
+  (0..N-1), consumed by the indexer to populate
+  ``document_chunks.position``. Cargo-filtered before T3 write
+  (verified by tests). Removing the emission requires a chunker-API
+  refactor across ``chunker.py`` / ``md_chunker.py`` /
+  ``pdf_chunker.py`` / 4 indexers — substantial blast radius for a
+  defense-in-depth fix against a hypothetical future bug. Deferred
+  to a focused refactor bead.
+- **``nexus-8g79.14``** (dead code): audit findings were wrong —
+  the "demoted" MCP wrappers are imported by ``mcp_server.py`` and
+  re-exported from ``mcp/__init__.py`` as part of the public MCP
+  surface. ``DEFINITION_TYPES`` at ``indexer.py:48`` is used by
+  ``tests/test_languages.py``. Per "Unused != useless" rule these
+  are intentional re-exports; closing as no-action.
+
 ## [4.32.6] - 2026-05-12
 
 Patch on 4.32.5. Tier-1 silent-fail discipline pass surfaced by the
