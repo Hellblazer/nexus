@@ -158,6 +158,30 @@ Three sources informed the design:
 | Apple Virtualization framework vsock + MITM proxy | Inspected via coworkd boot log | vsock CID=2 reachable at host RPC port 51234; HTTPS traffic from VM intercepted by `/var/run/mitm-proxy.sock` with auto-trusted ephemeral CA. |
 | SQLite WAL semantics | Source-confirmed in sqlite.org docs | WAL multi-writer safety requires shared memory; explicitly does not cross VM/network boundaries. |
 
+#### T2 Research Index
+
+Seven structured research findings recorded in T2 (project
+`nexus_rdr`, retrievable via `nx memory get --project nexus_rdr
+--title 112-research-<topic>`). Each maps to one or more of the
+Critical Assumptions below and is classified by evidence basis.
+
+| T2 Title | Classification | Maps to CA | Spike-required? |
+| --- | --- | --- | --- |
+| `112-research-sqlite-network-guidance` | Verified | foundational (no CA) | No — authoritative source |
+| `112-research-libsql-sqld-transport` | Documented | CA-1, CA-2, CA-6, CA-7 | Yes |
+| `112-research-cowork-vm-environment` | Verified | CA-4, CA-5 (Gap 3) | Partial — source-search for CA-5 |
+| `112-research-nexus-t2-facade-structure` | Verified | Existing-infra-audit support | No |
+| `112-research-2026-distributed-sqlite-ecosystem` | Documented | Decision-rationale support | No |
+| `112-research-chromadb-server-mode-performance` | Documented | CA-3 | Yes |
+| `112-research-sqld-concurrency-limits` | Documented | CA-7 | Yes |
+
+The seven findings collectively cover every Critical Assumption.
+Verified items rest on direct source inspection (SQLite docs, the
+nexus codebase, the coworkd boot log). Documented items rest on
+official-but-secondary sources (Turso engineering posts, ChromaDB
+performance docs) and require spike-verification before
+implementation commits — see each CA's Method field.
+
 ### Key Discoveries
 
 - **Documented** — SQLite team's prescription matches our situation
