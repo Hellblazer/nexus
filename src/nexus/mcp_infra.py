@@ -442,33 +442,12 @@ def _record_hook_failure(
     the second failure (the primary warning already reached structlog)
     rather than mask the original hook exception.
     """
-    import sqlite3
-    truncated = error[:2000]
     try:
         with t2_ctx() as t2:
-            # ``hook_failures`` is cross-cutting — any domain's connection
-            # points at the same SQLite file. Use the taxonomy conn because
-            # the status line that surfaces these rows already reads there.
-            conn = t2.taxonomy.conn
-            with t2.taxonomy._lock:
-                try:
-                    conn.execute(
-                        "INSERT INTO hook_failures "
-                        "(doc_id, collection, hook_name, error, chain) "
-                        "VALUES (?, ?, ?, ?, 'single')",
-                        (doc_id, collection, hook_name, truncated),
-                    )
-                except sqlite3.OperationalError as exc:
-                    msg = str(exc)
-                    if "no column named" not in msg and "no such column" not in msg:
-                        raise
-                    # Pre-4.14.2 schema: chain column absent.
-                    conn.execute(
-                        "INSERT INTO hook_failures "
-                        "(doc_id, collection, hook_name, error) VALUES (?, ?, ?, ?)",
-                        (doc_id, collection, hook_name, truncated),
-                    )
-                conn.commit()
+            t2.memory.record_hook_failure(
+                doc_id=doc_id, collection=collection,
+                hook_name=hook_name, error=error, chain="single",
+            )
     except Exception:
         import structlog
         structlog.get_logger().debug(
@@ -612,54 +591,14 @@ def _record_batch_hook_failure(
     semantics as ``_record_hook_failure``: persistence failure cannot
     break ingest.
     """
-    import json
-    import sqlite3
     representative = doc_ids[0] if doc_ids else ""
-    payload = json.dumps(doc_ids)
-    truncated = error[:2000]
     try:
         with t2_ctx() as t2:
-            conn = t2.taxonomy.conn
-            with t2.taxonomy._lock:
-                try:
-                    # 4.14.2 schema: dual-write chain alongside is_batch
-                    # so RDR-089 readers can classify rows by chain while
-                    # legacy readers still see is_batch=1.
-                    conn.execute(
-                        "INSERT INTO hook_failures "
-                        "(doc_id, collection, hook_name, error, "
-                        " batch_doc_ids, is_batch, chain) "
-                        "VALUES (?, ?, ?, ?, ?, 1, 'batch')",
-                        (representative, collection, hook_name, truncated, payload),
-                    )
-                except sqlite3.OperationalError as exc:
-                    # Pre-4.14.x schema: chain and/or batch columns may be
-                    # absent. Narrow catch to schema errors so transient
-                    # lock or I/O failures bubble up to the outer guard
-                    # rather than silently degrading the captured row.
-                    msg = str(exc)
-                    if "no column named" not in msg and "no such column" not in msg:
-                        raise
-                    # Try the 4.14.1 shape (is_batch + batch_doc_ids, no chain)
-                    # before falling back to scalar-only.
-                    try:
-                        conn.execute(
-                            "INSERT INTO hook_failures "
-                            "(doc_id, collection, hook_name, error, "
-                            " batch_doc_ids, is_batch) VALUES (?, ?, ?, ?, ?, 1)",
-                            (representative, collection, hook_name, truncated, payload),
-                        )
-                    except sqlite3.OperationalError as exc2:
-                        msg2 = str(exc2)
-                        if "no column named" not in msg2 and "no such column" not in msg2:
-                            raise
-                        conn.execute(
-                            "INSERT INTO hook_failures "
-                            "(doc_id, collection, hook_name, error) "
-                            "VALUES (?, ?, ?, ?)",
-                            (representative, collection, hook_name, truncated),
-                        )
-                conn.commit()
+            t2.memory.record_hook_failure(
+                doc_id=representative, collection=collection,
+                hook_name=hook_name, error=error,
+                chain="batch", batch_doc_ids=list(doc_ids),
+            )
     except Exception:
         import structlog
         structlog.get_logger().debug(
@@ -1118,33 +1057,14 @@ def _record_document_hook_failure(
     intermediate 4.14.1-shape schema to handle — the row either has
     ``chain`` (post-4.14.2) or it does not (pre-4.14.2 generic shape).
     """
-    import sqlite3
-    truncated = error[:2000]
     try:
         with t2_ctx() as t2:
-            conn = t2.taxonomy.conn
-            with t2.taxonomy._lock:
-                try:
-                    conn.execute(
-                        "INSERT INTO hook_failures "
-                        "(doc_id, collection, hook_name, error, chain) "
-                        "VALUES (?, ?, ?, ?, 'document')",
-                        (source_path, collection, hook_name, truncated),
-                    )
-                except sqlite3.OperationalError as exc:
-                    msg = str(exc)
-                    if "no column named" not in msg and "no such column" not in msg:
-                        raise
-                    # Pre-4.14.2 schema: chain column absent. Persist
-                    # without the chain marker — the row is still useful
-                    # for triage even if it cannot be classified by chain.
-                    conn.execute(
-                        "INSERT INTO hook_failures "
-                        "(doc_id, collection, hook_name, error) "
-                        "VALUES (?, ?, ?, ?)",
-                        (source_path, collection, hook_name, truncated),
-                    )
-                conn.commit()
+            # ``source_path`` lands in the ``doc_id`` column — the column
+            # carries 'subject of failure' regardless of chain shape.
+            t2.memory.record_hook_failure(
+                doc_id=source_path, collection=collection,
+                hook_name=hook_name, error=error, chain="document",
+            )
     except Exception:
         import structlog
         structlog.get_logger().debug(
