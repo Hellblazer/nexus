@@ -6,6 +6,67 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.32.12] - 2026-05-13
+
+Patch on 4.32.11. Two CI-correctness fixes plus substantial RDR
+work landed during the gate cycle for RDR-111/112/113. No
+user-facing behavior change; main-branch CI is green again.
+
+### Fixed (nexus-rkc0, P2)
+
+- `commands/collection.py:215` delete-cascade routed the non-
+  event-sourced `DELETE FROM collections` through
+  `cat._db.execute(...)` directly, violating the RDR-101 Phase 3
+  ε lint gate
+  (`tests/test_no_direct_catalog_writes_outside_projector.py`).
+  Introduced by PR #722 and red on CI since 2026-05-12. Fix
+  adds a public `Catalog.delete_collection_projection(name, *,
+  reason)` method modeled on `register_collection` (lock,
+  short-circuit, ES vs legacy branch); cascade calls the verb
+  instead of reaching into `_db`. Lint gate 17/17 PASS, catalog
+  suites 229/229 PASS. (PR #733.)
+
+### Fixed (test hardening)
+
+- `tests/test_phase5_doc_cite.py` JSON-parsing assertions made
+  robust against leading structlog WARNING lines on stdout.
+  CliRunner under CI merges stderr → stdout; one-shot WARNINGs
+  (`_chash_fallback_warned`,
+  `migrate_document_aspects_pk_skip_no_catalog`, and whatever
+  comes next) can prefix the JSON payload. Helper
+  `_parse_json_payload(stdout)` finds the first `{` and parses
+  from there — covers current and future one-shot leaks without
+  chasing them individually. (PR #734.)
+
+### Architecture (RDR work)
+
+- **RDR-111** (ORB: Observable Relay Bus) drafted; gated R1–R9,
+  final R9 PASSED. Hook-event projection onto the tuple space;
+  user-authored bindings; cockpit substrate. (PRs #726, #731.)
+- **RDR-112** (Storage-as-Service) drafted; gated R1/R2/R3, then
+  triad rework, then light re-gate PASSED. **Accepted
+  2026-05-13.** Every persistent shared-state store (T2 seven
+  stores, T3 chroma, CatalogDB, future) moves behind per-tier
+  daemons. UDS-primary, TCP-fallback. EventStream RPC for
+  change events; daemon owns migrations; subspace-registry
+  validates daemon-side. `nx doctor --check-storage-boundary`
+  AST lint bans direct `sqlite3.connect` / `PersistentClient`
+  outside `src/nexus/db/`. Planning chain: epic `nexus-pce1` +
+  33 children + 4 cross-RDR beads filed.
+  (PRs #726, #728, #729, #730, #735, #737.)
+- **RDR-113** (Host-Trust Model) new mini-RDR; R1 PASSED. UDS
+  `chmod 0600` + peer-credential check; loopback-only TCP;
+  single-user host trust v1. A1 race-window verification:
+  `bind() → chmod(0o600) → listen()` ordering closes the window
+  to zero because `connect()` to a bound-but-not-listening UDS
+  returns `ConnectionRefusedError`. (PR #732.)
+- **RDR-110** (Semantic Tuple Space, already Accepted) — 5x5
+  alignment pass against post-triad work. §Technical Design and
+  §Phase 1 Step 4 watcher descriptions now carry "Mode split —
+  daemon vs direct"; mailbox-subspace trust boundary cites
+  RDR-113. No design surface change.
+  (PRs #727, #730, #736.)
+
 ## [4.32.11] - 2026-05-12
 
 Patch on 4.32.10. Post-release sandbox shakeout (pristine
