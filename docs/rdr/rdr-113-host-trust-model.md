@@ -2,12 +2,12 @@
 title: "Host-Trust Model for nexus Daemons: UDS Permissions, Peer Credentials, Single-User v1"
 id: RDR-113
 type: Architecture
-status: draft
+status: accepted
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-13
-accepted_date:
+accepted_date: 2026-05-13
 related_issues: []
 related_rdrs: [RDR-105, RDR-110, RDR-111, RDR-112]
 related_tests: []
