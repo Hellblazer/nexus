@@ -1,0 +1,23 @@
+# RDR-110 canonical subspace: project-scoped task tuples.
+# Agents drop tasks into tasks/<project> with status/priority dimensions;
+# coordinators take items by semantic relevance to their capability.
+name: tasks/<project>
+tier: project
+content_type: text
+embed_from: content
+dimensions:
+  status:     { type: enum, values: [open, in_progress, done, cancelled], required: true }
+  priority:   { type: enum, values: [P0, P1, P2, P3, P4], required: true }
+  assignee:   { type: string, required: false }
+  created_by: { type: string, required: true }
+take:
+  enabled: true
+  mode: semantic
+  floor: 0.55
+  margin: 0.08
+  default_lease_seconds: 600
+read:
+  default_floor: 0.40
+  default_n: 5
+tiers: [project]
+retention_seconds: 7776000  # 90 days
