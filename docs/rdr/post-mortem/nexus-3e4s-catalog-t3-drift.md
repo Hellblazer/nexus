@@ -4,7 +4,7 @@ date: 2026-04-30
 references:
   rdr: RDR-101
   beads: [ART-lhk1, nexus-3e4s, nexus-p03z, nexus-v9az]
-  prs: [#381, #382, #383, #385, #386, #388, #389]
+  prs: ["#381", "#382", "#383", "#385", "#386", "#388", "#389"]
 status: post-mortem
 ---
 
