@@ -6,6 +6,81 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.32.11] - 2026-05-12
+
+Patch on 4.32.10. Post-release sandbox shakeout (pristine
+`NEXUS_CONFIG_DIR` + `NX_LOCAL=1` + fresh chroma + index of a
+real repository) surfaced three latent bugs in code paths that
+the audit umbrella did not exercise directly. All three close in
+this release so a fresh-index → delete-collection cycle leaves
+every doctor check PASSing — the right pre-flight before a clean
+cloud-database cutover.
+
+### Fixed (nexus-qj1q, P1)
+
+- `indexer._prune_misclassified_in_collection` raised
+  `chromadb.errors.DuplicateIDError` when two indexed docs shared
+  a chunk (common file content vendored to two paths, shared
+  boilerplate header, etc.). The post-processing prune step
+  accumulated `chash[:32]` from per-doc manifest entries without
+  deduping; Chroma rejected the batch and the prune silently
+  no-oped, leaving misclassified chunks in T3 indefinitely.
+  Fixed by collecting into a `set()` before batching.
+
+### Fixed (nexus-jm3z, P1)
+
+- `nx collection delete` cascaded to T3 + taxonomy +
+  `chash_index` + pipeline state but NOT to the catalog's
+  `documents` rows pointing at the gone collection, nor to the
+  `collections` projection row. Operators saw doctor FAILs
+  (`t3-vs-catalog` + `collections-drift`) after every delete and
+  remediated per-tumbler. The cascade now runs through
+  `Catalog.delete_document` for each orphan (emits
+  `DocumentDeleted` events) and emits a new `CollectionDeleted`
+  event so the projection row drops via the event log on apply.
+
+### Fixed (nexus-vxz3, P2)
+
+- `nx catalog doctor --replay-equality` reported two false-
+  positive divergence classes:
+  - `documents.chunk_count` is populated by
+    `manifest_write_batch_hook` (post-store side-effect), not
+    by the event log. The in-memory replay projection has no
+    `document_chunks` table to derive from, so its re-derive
+    sees zero rows and keeps register-time `chunk_count=0`
+    while live SQLite carries the hook-driven value. Excluded
+    from the documents comparison (consistent with the existing
+    `LINKS_EXCLUDE` pattern for the `links.id` autoincrement).
+  - Admin SQL DELETE on the collections projection bypassed
+    the event log. Replay therefore projected more collections
+    than live SQLite carried. Closed by the new
+    `CollectionDeleted` event type (see `nexus-jm3z` above) so
+    the round-trip is symmetric.
+
+### Added
+
+- `CollectionDeleted` event type +
+  `_v0_collection_deleted` projector handler. Complements
+  `CollectionSuperseded` (which points at a replacement target):
+  use `Deleted` when there is no replacement (obsolete embedding-
+  model collection, test detritus).
+
+### Tests
+
+- 320 tests pass across `test_indexer`, `test_collection_cmd`,
+  `test_catalog`, `test_catalog_event_log`,
+  `test_catalog_event_sourced_mutators`,
+  `test_catalog_doctor_replay_equality`,
+  `test_catalog_shadow_emit`.
+
+### Sandbox verdict
+
+| Stage | All 6 doctor checks |
+|---|---|
+| Fresh sandbox | PASS |
+| Index `~/git/ext-apps` | PASS |
+| Delete a collection | PASS |
+
 ## [4.32.10] - 2026-05-12
 
 Post-4.32.4 deep-audit umbrella `nexus-58ui` closes. Twelve PRs
