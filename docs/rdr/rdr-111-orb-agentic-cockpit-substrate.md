@@ -540,9 +540,15 @@ ON t.id = tcl.tuple_id WHERE tcl.transition = 'claim'`; `tuples` has no
 — without it, crashed-agent claims would appear as active until the next
 sweep. `claim_state` is an internal column on the `tuples` table (per
 RDR-110 claim ledger schema), not a registered dimension; it is not
-accessible via `read()` and must be queried directly. The cockpit surface
-is an internal component in the same process, so direct access to
-`tuples.db` is appropriate. Rendered as a tmux pane or ext-apps iframe.
+accessible via `read()` and must be queried directly. **Routing under
+RDR-112**: under `NX_STORAGE_MODE=daemon` (the supported deployment),
+the cockpit surface is a *client* of the T2 daemon — direct
+`sqlite3.connect(tuples.db)` from the cockpit client process is
+**forbidden** (RDR-112 §5 lint). The query shape above runs daemon-side
+via a dedicated read RPC or via `nx daemon t2 exec --raw` (RDR-112
+§Nexus-in-its-own-container introspection surface). See Implementation
+Plan Step 8 for the concrete call form. Rendered as a tmux pane or
+ext-apps iframe.
 
 **Recent-events panel** — direct SQL query on `~/.config/nexus/tuples.db`
 for time-ordered display (RDR-110's `read()` has no `sort_by` or
@@ -566,7 +572,12 @@ schema above; `timestamp` is a registered dimension accessible in the
 `read()` response, unlike `created_at` which is an internal `tuples`
 table column not exposed by the API). This trades time-ordering guarantee
 for semantic relevance. The default display is SQL (time-ordered); semantic
-filter is an opt-in mode.
+filter is an opt-in mode. **Routing under RDR-112**: same as the
+active-claims panel above — under daemon mode the cockpit is a daemon
+client; the query runs via a daemon read RPC or `nx daemon t2 exec
+--raw`. Direct `sqlite3.connect(tuples.db)` from the client process is
+forbidden (RDR-112 §5 lint). See Implementation Plan Step 9 for the
+concrete call form.
 
 **Active-bindings panel** — `read(subspace="bindings/<current_profile>",
 where={"enabled": "true"})`. Shows trigger, action, surface, enabled state.
@@ -1174,3 +1185,4 @@ Other gates:
 | 2026-05-11 | Hal Hildebrand | Post-gate-7 revision (1 critical + 2 significant + 2 observations all addressed pre-accept): (C-G7-1) removed `PostCompact` from Step 2 bridge registration list — was contradicted by Proposed Solution's explicit exclusion; added `PreCompact` and `PostCompact` to the not-registered list with rationale cross-reference; (SIG-G7-1) replaced three residual `rd()` aliases with `read()` — Step 4 bindings dimension example, Step 6 `_BindingWatcher` rationale paragraph (header + two body references); (SIG-G7-2) corrected "six" → "seven" hook-event subspaces at four remaining sites (Relationship to RDR-110 summary, CA-9 description, CA-9 risk-if-wrong, Phase 1 section header); added `layout_state` to the Relationship-section subspace enumeration; (OBS-G7-1) active-claims display now explicitly extracts `actor` via `json_extract(t.dimensions_json, '$.actor')` — `actor` lives inside `dimensions_json`, not a top-level column; (OBS-G7-2) watcher failure isolation now logs via `structlog` (not "T2 scratch" — category error, scratch is T1); failure counter kept in T2 as before |
 | 2026-05-13 | Hal Hildebrand | **Triad rework (RDR-110/111/112 composition gaps, deep-analyst `a56172936d63fd480`)**: added §Relationship to RDR-112; rewrote §Step 6 binding-watcher to consume RDR-112 `EventStream(subspace_prefix, since_cursor)` RPC instead of direct SQL on `tuples.db` (cursor protocol and at-least-once semantics preserved verbatim; only transport changes); rewrote §Step 6 Watcher failure isolation to distinguish action / substrate / schema failure categories so daemon hiccups do not silently auto-disable user bindings (closes G5); updated `watcher_state` placement to record that the table is daemon-owned and read/written via dedicated RPCs (closes G4 wrt RDR-111 dependency); `related_rdrs` frontmatter extended to include RDR-112 and RDR-113. RDR-111 is now blocked on RDR-112 Phase 1 for the binding-watcher; query-only cockpit surfaces unaffected. |
 | 2026-05-13 | Hal Hildebrand | **Gate round 8 closeout** (substantive-critic `a3da714a7d21b75ee`, 1C/2S/2O on the triad-rework PR): (C-G8-1) Steps 8 + 9 cockpit panels rewritten to route through T2 daemon read RPCs (`t2_client.active_claims()`, `t2_client.recent_events()`) or `nx daemon t2 exec --raw` introspection; explicit ban on direct `sqlite3.connect(tuples.db)` from cockpit client process. The §Relationship to RDR-112 subsection had committed this; Steps 8/9 prose now matches. (S-G8-1) CA-10 description and gate criterion updated to reference the T2 daemon migration manifest (RDR-112 Approach §9), not RDR-110 migration file — the migration owner moved daemon-side and the criterion has to point there. (S-G8-2) CA-9 extended with the second-half coordination: ORB Phase 1 Step 1 also gates on the RDR-112 daemon `subspace add` admin RPC existing, not just RDR-110 shipping open-registry. (OBS-G8-1) Step 6 cursor-persistence pseudocode rewritten to use `t2_client.watcher_state_set` / `watcher_state_get` RPCs and `t2_client.event_stream` async-for loop, removing the bare `conn_tuples.execute(UPDATE watcher_state ...)` that contradicted the surrounding prose. (OBS-G8-2) Watcher failure isolation disambiguates the two uses of "category" — RDR-112 event `category ∈ {data, schema, substrate}` published by the daemon is independent of the watcher-side action/substrate/schema failure classification. |
+| 2026-05-13 | Hal Hildebrand | **5x5 alignment pass (alignment check `a25b97d1aac1d8523`)**: Proposed Solution panel descriptions (Active-claims, Recent-events) carried a pre-rework justification ("internal component in the same process, so direct access to `tuples.db` is appropriate") that contradicts Implementation Plan Steps 8 + 9 (which were corrected in the round-8 closeout to route through daemon RPCs). Added "Routing under RDR-112" notes to both Proposed Solution panel paragraphs pointing at Steps 8 + 9 and the RDR-112 §5 lint, closing the internal inconsistency. No design change. |
