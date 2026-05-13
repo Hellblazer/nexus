@@ -16,7 +16,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, TypedDict
 
 import structlog
 import yaml
@@ -118,6 +118,38 @@ REGISTRY_FORMAT_SCHEMA: dict[str, Any] = {
 _VALIDATOR = Draft202012Validator(REGISTRY_FORMAT_SCHEMA)
 
 
+# -- Typed sub-shapes --------------------------------------------------------
+
+
+TakeMode = Literal["semantic", "exact"]
+
+
+class TakeConfig(TypedDict, total=False):
+    """Type for the ``take`` block on a subspace schema.
+
+    Mirrors RDR-110 §Step 1 and the JSON-Schema validation. ``total=False``
+    because optional keys (``floor``, ``margin``, ``match_keys``,
+    ``default_lease_seconds``) are conditional on ``mode``: ``floor`` and
+    ``margin`` apply to semantic mode; ``match_keys`` applies to exact
+    mode. Loader validation in ``_load_one`` enforces the
+    mode-conditional invariants.
+    """
+
+    enabled: bool
+    mode: TakeMode
+    floor: float
+    margin: float
+    match_keys: list[str]
+    default_lease_seconds: int
+
+
+class ReadConfig(TypedDict):
+    """Type for the ``read`` block on a subspace schema (RDR-110 §Step 1)."""
+
+    default_floor: float
+    default_n: int
+
+
 # -- Schema dataclass --------------------------------------------------------
 
 
@@ -128,6 +160,11 @@ class SubspaceSchema:
     ``name`` may include ``<param>`` placeholders (single-segment) that
     ``Registry.get_schema_for`` resolves against concrete subspace
     strings at lookup time.
+
+    ``take`` and ``read`` are ``TypedDict``s rather than plain ``dict[str, Any]``
+    so downstream consumers (RDR-110 nexus-8q4v Core API) get static-checker
+    affordance without forcing a stringly-keyed access pattern across the
+    codebase. The dict values themselves remain JSON-deserialised.
     """
 
     name: str
@@ -135,8 +172,10 @@ class SubspaceSchema:
     content_type: str
     embed_from: str
     dimensions: dict[str, dict[str, Any]] = field(default_factory=dict)
-    take: dict[str, Any] = field(default_factory=dict)
-    read: dict[str, Any] = field(default_factory=dict)
+    take: TakeConfig = field(default_factory=lambda: TakeConfig())  # type: ignore[misc]
+    read: ReadConfig = field(  # type: ignore[assignment]
+        default_factory=lambda: ReadConfig(default_floor=0.0, default_n=1)
+    )
     tiers: list[str] = field(default_factory=list)
     retention_seconds: int = 0
     source_path: Path | None = None
@@ -256,6 +295,24 @@ def _load_one(yml_path: Path) -> SubspaceSchema:
         raise RegistryLoadError(
             f"{yml_path.name}: schema validation failed at {path}: {exc.message}"
         ) from exc
+
+    # Reject malformed param names at load — Python's named-group syntax
+    # disallows dashes (``(?P<a-b>...)`` is a regex error). A YAML author
+    # writing ``mailbox/<agent-name>`` would otherwise ship a template
+    # whose ``<agent-name>`` placeholder is treated as a literal,
+    # producing an opaque UnknownSubspaceError on first ``take``.
+    _ANGLE_TOKEN = re.compile(r"<([^>]+)>")
+    bad_params = [
+        token
+        for token in _ANGLE_TOKEN.findall(raw["name"])
+        if _PARAM_PATTERN.fullmatch(f"<{token}>") is None
+    ]
+    if bad_params:
+        raise RegistryLoadError(
+            f"{yml_path.name}: invalid param identifier(s) {bad_params!r} "
+            f"in name {raw['name']!r}; params must match "
+            f"[a-zA-Z_][a-zA-Z0-9_]* (Python named-group syntax — no dashes)"
+        )
 
     take = raw["take"]
     if take.get("mode") == "exact":

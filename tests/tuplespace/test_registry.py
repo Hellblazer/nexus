@@ -162,15 +162,15 @@ def test_multi_param_template_matches(tmp_path):
     assert schema.name == "mailbox/<agent>/<inbox>"
 
 
-def test_dashed_param_name_is_rejected_as_literal(tmp_path):
-    """Param identifiers follow Python named-group rules (no dashes).
+def test_dashed_param_name_raises_at_load(tmp_path):
+    """Param identifiers must match Python named-group syntax (no dashes).
 
     ``mailbox/<agent-name>`` would compile to an invalid named group at
-    runtime; the loader treats the placeholder as a literal so the
-    template only ever matches itself, surfacing the bad name on first
-    use rather than producing a silently-broken matcher.
+    runtime. The loader rejects this at load time so a YAML author sees
+    the failure immediately rather than discovering it on first ``take``
+    via an opaque ``UnknownSubspaceError``.
     """
-    from nexus.tuplespace.registry import Registry, UnknownSubspaceError
+    from nexus.tuplespace.registry import Registry, RegistryLoadError
 
     yml = yaml.safe_dump(
         {
@@ -189,12 +189,41 @@ def test_dashed_param_name_is_rejected_as_literal(tmp_path):
     d.mkdir()
     (d / "bad.yml").write_text(yml)
 
+    with pytest.raises(RegistryLoadError, match="agent-name"):
+        Registry.load(d)
+
+
+def test_empty_segment_rejected_in_multi_param_match(tmp_path):
+    """``mailbox/<agent>/<inbox>`` must not match ``mailbox//primary``.
+
+    The ``[^/]+`` quantifier rejects empty segments; pinning this here
+    guards against a future refactor of ``_compile_template`` that
+    switched the quantifier to ``*``.
+    """
+    from nexus.tuplespace.registry import Registry, UnknownSubspaceError
+
+    yml = yaml.safe_dump(
+        {
+            "name": "mailbox/<agent>/<inbox>",
+            "tier": "project",
+            "content_type": "text",
+            "embed_from": "content",
+            "dimensions": {"sender": {"type": "string", "required": True}},
+            "take": {"enabled": True, "mode": "semantic"},
+            "read": {"default_floor": 0.4, "default_n": 5},
+            "tiers": ["project"],
+            "retention_seconds": 3600,
+        }
+    )
+    d = tmp_path / "builtin"
+    d.mkdir()
+    (d / "mailbox.yml").write_text(yml)
+
     reg = Registry.load(d)
-    # The literal template name resolves (fast-path), but no concrete
-    # mailbox/<X> matches because the placeholder was not substituted.
-    assert reg.get_schema_for("mailbox/<agent-name>").name == "mailbox/<agent-name>"
     with pytest.raises(UnknownSubspaceError):
-        reg.get_schema_for("mailbox/alice")
+        reg.get_schema_for("mailbox//primary")
+    with pytest.raises(UnknownSubspaceError):
+        reg.get_schema_for("mailbox/alice/")
 
 
 def test_empty_subspace_raises(builtin_dir):
