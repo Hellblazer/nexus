@@ -84,6 +84,7 @@ TYPE_OWNER_REGISTERED = "OwnerRegistered"
 TYPE_OWNER_DELETED = "OwnerDeleted"
 TYPE_COLLECTION_CREATED = "CollectionCreated"
 TYPE_COLLECTION_SUPERSEDED = "CollectionSuperseded"
+TYPE_COLLECTION_DELETED = "CollectionDeleted"
 TYPE_DOCUMENT_REGISTERED = "DocumentRegistered"
 TYPE_DOCUMENT_RENAMED = "DocumentRenamed"
 TYPE_DOCUMENT_ALIASED = "DocumentAliased"
@@ -215,6 +216,22 @@ class CollectionSupersededPayload:
     new_coll_id: str
     reason: str = ""
     superseded_at: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class CollectionDeletedPayload:
+    """A collection has been permanently removed.
+
+    nexus-vxz3 / nexus-jm3z: complements ``CollectionSuperseded`` (which
+    points the old collection at a replacement target). Use ``Deleted``
+    when there is no replacement — e.g. test detritus, an obsolete
+    embedding-model collection whose source content is gone. The
+    projector drops the collections projection row on apply.
+    """
+
+    coll_id: str
+    reason: str = ""
+    deleted_at: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -414,6 +431,7 @@ _PAYLOAD_CLASSES: dict[str, type] = {
     TYPE_OWNER_DELETED: OwnerDeletedPayload,
     TYPE_COLLECTION_CREATED: CollectionCreatedPayload,
     TYPE_COLLECTION_SUPERSEDED: CollectionSupersededPayload,
+    TYPE_COLLECTION_DELETED: CollectionDeletedPayload,
     TYPE_DOCUMENT_REGISTERED: DocumentRegisteredPayload,
     TYPE_DOCUMENT_RENAMED: DocumentRenamedPayload,
     TYPE_DOCUMENT_ALIASED: DocumentAliasedPayload,

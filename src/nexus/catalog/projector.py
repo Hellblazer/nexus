@@ -451,6 +451,22 @@ class Projector:
             (payload.new_coll_id, ts, payload.old_coll_id),
         )
 
+    def _v0_collection_deleted(self, payload: Any) -> None:
+        """Drop the collection's projection row.
+
+        nexus-vxz3 / nexus-jm3z: the cascade in
+        :func:`nexus.commands.collection.delete_cmd` emits this event
+        so replay produces SQLite state matching the live SQL DELETE.
+        Without it, replay-equality FAILed on collections after every
+        admin delete because there was no event to project.
+        """
+        if not getattr(payload, "coll_id", ""):
+            return
+        self._db.execute(
+            "DELETE FROM collections WHERE name = ?",
+            (payload.coll_id,),
+        )
+
     def _v0_chunk_indexed(self, payload: Any) -> None:
         # Phase 1 SQLite has no ``chunks`` table. The chunk count is
         # already on ``documents.chunk_count`` from
@@ -537,6 +553,7 @@ def _build_dispatch() -> dict[tuple[str, int], Any]:
         (ev.TYPE_OWNER_DELETED, 0):          Projector._v0_owner_deleted,
         (ev.TYPE_COLLECTION_CREATED, 0):     Projector._v0_collection_created,
         (ev.TYPE_COLLECTION_SUPERSEDED, 0):  Projector._v0_collection_superseded,
+        (ev.TYPE_COLLECTION_DELETED, 0):     Projector._v0_collection_deleted,
         (ev.TYPE_DOCUMENT_REGISTERED, 0):    Projector._v0_document_registered,
         (ev.TYPE_DOCUMENT_RENAMED, 0):       Projector._v0_document_renamed,
         (ev.TYPE_DOCUMENT_ALIASED, 0):       Projector._v0_document_aliased,
@@ -551,6 +568,7 @@ def _build_dispatch() -> dict[tuple[str, int], Any]:
         (ev.TYPE_OWNER_DELETED, 1):          Projector._v1_unsupported,
         (ev.TYPE_COLLECTION_CREATED, 1):     Projector._v1_unsupported,
         (ev.TYPE_COLLECTION_SUPERSEDED, 1):  Projector._v1_unsupported,
+        (ev.TYPE_COLLECTION_DELETED, 1):     Projector._v1_unsupported,
         (ev.TYPE_DOCUMENT_REGISTERED, 1):    Projector._v1_unsupported,
         (ev.TYPE_DOCUMENT_RENAMED, 1):       Projector._v1_unsupported,
         (ev.TYPE_DOCUMENT_ALIASED, 1):       Projector._v1_unsupported,

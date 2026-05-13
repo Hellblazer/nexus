@@ -1544,7 +1544,12 @@ def _prune_misclassified_in_collection(
         # the IDs that exist in this collection, so the cross-direction
         # check (a code file's chunks living in docs__) works without
         # any per-chunk metadata.
-        all_natural_ids: list[str] = []
+        # nexus-qj1q: dedupe via set so col.get(ids=batch_ids) sees
+        # unique IDs. Two docs may share a chunk (same file content
+        # vendored to two paths, shared boilerplate header, etc.); the
+        # same chash[:32] would otherwise appear multiple times in the
+        # batch and Chroma rejects with DuplicateIDError.
+        natural_id_set: set[str] = set()
         # nexus-8g79.4: bare ``continue`` on get_manifest failure silently
         # skipped doc_ids whose manifest lookup raised (catalog miss,
         # transient SQLite error). Those chunks were then never pruned
@@ -1567,7 +1572,8 @@ def _prune_misclassified_in_collection(
                 continue
             for row in manifest:
                 if row.chash:
-                    all_natural_ids.append(row.chash[:32])
+                    natural_id_set.add(row.chash[:32])
+        all_natural_ids: list[str] = list(natural_id_set)
         # Batched ``col.get`` to fetch the present subset, then batched
         # delete. _CHROMA_PAGE_SIZE caps the ids list per call.
         for i in range(0, len(all_natural_ids), _CHROMA_PAGE_SIZE):
