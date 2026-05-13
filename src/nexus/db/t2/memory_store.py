@@ -36,6 +36,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
+HookFailureChain = Literal["single", "batch", "document"]
+
 import structlog
 
 from nexus.session import read_claude_session_id as _read_session_id
@@ -713,7 +715,7 @@ class MemoryStore:
         collection: str,
         hook_name: str,
         error: str,
-        chain: str = "single",
+        chain: HookFailureChain = "single",
         batch_doc_ids: list[str] | None = None,
     ) -> None:
         """Persist a post-store hook failure to T2 ``hook_failures``.
@@ -731,10 +733,14 @@ class MemoryStore:
             hook_name: hook callable name (for triage).
             error: free-text error message; truncated to 2000 chars.
             chain: ``single`` | ``batch`` | ``document`` per RDR-089
-                4.14.2 schema.
+                4.14.2 schema. Typed as ``HookFailureChain`` so the
+                Phase-1 RPC freeze does not pin a free-text string.
             batch_doc_ids: full doc-id list for ``chain='batch'``;
                 serialised as JSON into the ``batch_doc_ids`` column
-                and ``is_batch=1`` is set. Ignored for other chains.
+                and ``is_batch=1`` is set. **Must be non-empty when
+                chain='batch'**; ``None`` or ``[]`` raises ValueError
+                (a row with ``is_batch=1`` and no recoverable identity
+                is worse than a loud failure). Ignored for other chains.
 
         Schema fallback: on a pre-4.14.2 DB the ``chain`` column is
         absent; on a pre-4.14.1 DB ``batch_doc_ids``/``is_batch`` are
@@ -745,11 +751,14 @@ class MemoryStore:
         ``mcp_infra`` can log + swallow.
         """
         import json
-        import sqlite3
 
-        if chain == "batch" and batch_doc_ids is None:
+        if chain == "batch" and not batch_doc_ids:
+            # Reject both ``None`` and empty list — the daemon-RPC path
+            # in Phase 1 will serialise this kwarg, so a None-or-[] from
+            # a misbehaving client must not silently produce an
+            # ``is_batch=1`` row with no recoverable identity.
             raise ValueError(
-                "batch_doc_ids must be provided when chain='batch'"
+                "batch_doc_ids must be a non-empty list when chain='batch'"
             )
 
         truncated = error[: self.HOOK_FAILURE_ERROR_MAX]

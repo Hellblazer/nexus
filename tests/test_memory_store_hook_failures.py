@@ -91,10 +91,24 @@ def test_record_hook_failure_truncates_error_to_cap(mem_db: T2Database) -> None:
 
 def test_record_hook_failure_batch_without_doc_ids_raises(mem_db: T2Database) -> None:
     """Explicit ``chain='batch'`` with no ``batch_doc_ids`` is a contract bug."""
-    with pytest.raises(ValueError, match="batch_doc_ids"):
+    with pytest.raises(ValueError, match="non-empty"):
         mem_db.memory.record_hook_failure(
             doc_id="rep", collection="c", hook_name="h", error="e",
             chain="batch",
+        )
+
+
+def test_record_hook_failure_batch_empty_doc_ids_raises(mem_db: T2Database) -> None:
+    """Explicit ``chain='batch'`` with empty ``batch_doc_ids`` is also rejected.
+
+    Catches a row with ``is_batch=1`` and no recoverable identity — a
+    daemon-RPC client passing ``[]`` (vs ``None``) would otherwise slip
+    through.
+    """
+    with pytest.raises(ValueError, match="non-empty"):
+        mem_db.memory.record_hook_failure(
+            doc_id="rep", collection="c", hook_name="h", error="e",
+            chain="batch", batch_doc_ids=[],
         )
 
 

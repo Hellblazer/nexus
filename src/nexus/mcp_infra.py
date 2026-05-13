@@ -591,7 +591,12 @@ def _record_batch_hook_failure(
     semantics as ``_record_hook_failure``: persistence failure cannot
     break ingest.
     """
-    representative = doc_ids[0] if doc_ids else ""
+    if not doc_ids:
+        # Empty batch -> no identity to persist; nothing to record.
+        # record_hook_failure also rejects empty batch_doc_ids so this
+        # early-return skips the t2_ctx round-trip cleanly.
+        return
+    representative = doc_ids[0]
     try:
         with t2_ctx() as t2:
             t2.memory.record_hook_failure(
