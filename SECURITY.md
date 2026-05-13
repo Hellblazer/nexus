@@ -65,8 +65,9 @@ the threat model expands: multi-user shared dev VMs, federated
 deployments, or cross-host operation. Until that RDR exists, the
 single-user host-local v1 path is the supported deployment.
 
-A future cross-host auth RDR will own its own threat model; expect
-the v1 contract here to grow rather than be replaced.
+A future RDR will own its own threat model covering multi-user,
+federated, or cross-host deployments; expect the v1 contract here to
+grow rather than be replaced.
 
 ## Reporting a Vulnerability
 
@@ -76,8 +77,10 @@ issue:
 - Open a [GitHub security advisory](https://github.com/Hellblazer/nexus/security/advisories/new), or
 - Email `hal.hildebrand@me.com` with `[nexus-security]` in the subject.
 
-We aim to acknowledge reports within 72 hours and to coordinate
-disclosure on a timeline that matches the severity. If your report is
+We aim to acknowledge reports promptly and coordinate disclosure on
+a timeline that matches the severity. nexus is a solo-maintainer
+project, so response cadence is best-effort and varies with
+availability. If your report is
 about a deployment scenario that is already documented as an accepted
 risk above, we'll still respond, but expect the answer to point back
 to this document.
