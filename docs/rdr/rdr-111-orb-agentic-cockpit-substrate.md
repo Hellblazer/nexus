@@ -373,8 +373,8 @@ in test harnesses, linting, and local dev without polluting the tuple space.
 | CA-6 | `SubagentStop`, `UserPromptSubmit`, `PreCompact`, `Notification` payload shapes match inferred schemas | Open — **spike required before bridge scripts for these types are written** | Register a minimal logging hook for each type; capture real payload from a live session; compare against RF-1 table. Spike ≤ 2h. | Bridge scripts emit wrong field names → tuples have missing/null dimensions | P1 (bridge for these 4 types) |
 | CA-7 | The Bakke Measure/Auto-Style/Layout adaptation is ≤ 300 LoC and can be implemented by a single developer in < 1 week | Open — **novel work, no prior art in repo** | Prototype the three pipeline phases on a static binding set before committing to Phase 3 | Layout engine becomes the long pole; delays Phase 3 by 2–4 weeks | **P2 gate** |
 | CA-8 | Multi-`PreToolUse`-hook ordering: when two hooks are registered, the first-registered "allow" does not preempt subsequent hooks' ability to "block" | Open — **empirically unverified** | Run `tests/cc-validation/scenarios/` harness with two PreToolUse hooks: hook-A returns `allow`, hook-B returns `block`; observe which wins. See scenario 07 for PermissionRequest precedent. **Fallback design if first-wins confirmed**: the bridge cannot be registered first as an unconditional `allow` emitter without neutralising legitimate block hooks. Fallback: bridge registers as a *last* entry using a separate `PostToolUse`-adjacent hook that fires after the decision hooks have run, or bridge emits no `permissionDecision` key at all (only `additionalContext`) and relies on the harness's default allow. Fallback design must be documented before Phase 2. | Bridge registered first could silently neutralise a legitimate block hook; or a block hook registered first could stall the bridge chain | P1 (bridge registration ordering) |
-| CA-9 | RDR-110's subspace registry exposes a registration mechanism for third-party subspaces not defined in the canonical five | **Definitive prerequisite — must be flagged before RDR-110 Phase 1 Step 6 ships** | Coordinate with RDR-110 implementor: confirm that Step 6 ships with open registration (additional YAML dirs discoverable at startup), not a closed allow-list. If closed, an extension mechanism must be added to RDR-110 before the ORB's Phase 1 Step 1 can proceed. | Without this, the seven hook-event subspaces and `bindings/<profile>` cannot be registered; the tuple space bridge is blocked | P1 |
-| CA-10 | RDR-110's `tuples.db` migration includes the `watcher_state` table (see schema in Phase 2 Step 6) | **Coordination required before Phase 2 Step 6** | Notify RDR-110 implementor before the `tuples.db` migration is finalized; confirm `watcher_state` is included. Gate criterion: confirmed presence of `watcher_state` CREATE TABLE in the tuples.db migration file. If RDR-110 ships without it, the ORB must ship a tuples.db upgrade migration (with schema-version guard) before Phase 2. | Phase 2 Step 6 fails at first run with "no such table: watcher_state" | P2 |
+| CA-9 | RDR-110's subspace registry exposes a registration mechanism for third-party subspaces not defined in the canonical five, AND (per RDR-112 Approach §8) the T2 daemon validates subspace schemas daemon-side and accepts third-party registration via the `nx daemon t2 subspace add <yaml>` admin RPC | **Definitive prerequisite — must be flagged before RDR-110 Phase 1 Step 6 ships AND before RDR-112 daemon's admin RPC surface is locked** | Two coordinations required: (a) confirm that RDR-110 Phase 1 Step 6 ships with open registration (additional YAML dirs discoverable at startup), not a closed allow-list; AND (b) confirm that the RDR-112 T2 daemon implements the `subspace add` admin RPC and accepts the ORB-supplied YAML schemas. Both are required before ORB Phase 1 Step 1 can proceed. If RDR-110 ships closed-registry, an extension mechanism must be added before ORB Phase 1 Step 1. If the daemon admin RPC is missing, the ORB cannot register at runtime even with open-registry on the file side. | Without this, the seven hook-event subspaces and `bindings/<profile>` cannot be registered; the tuple space bridge is blocked | P1 |
+| CA-10 | The T2 daemon's startup migration sequence (per RDR-112 Approach §9, daemon is sole migration runner) includes the `watcher_state` table (see schema in Phase 2 Step 6) | **Coordination required before Phase 2 Step 6** | Notify RDR-112 implementor before the daemon migration manifest is finalised; confirm `watcher_state` DDL appears in the daemon's migration sequence and is applied before the daemon accepts client connections. Gate criterion: confirmed presence of `watcher_state` CREATE TABLE in the T2 daemon's migration manifest (post-RDR-112 rework — pre-rework draft pointed at RDR-110's migration file, which is no longer the migration owner). If the daemon migration ships without it, the ORB must ship an upgrade migration via the daemon's admin RPC (with schema-version guard) before Phase 2. | Phase 2 Step 6 fails at first run with "no such table: watcher_state" (now surfaced as a daemon RPC error, not a local sqlite3 error) | P2 |
 
 ## Proposed Solution
 
@@ -846,37 +846,51 @@ CREATE TABLE IF NOT EXISTS watcher_state (
 **Cursor persistence and restart semantics** (required for correctness):
 
 - The watcher's cursor position (`rowid` of the last processed tuple)
-  is persisted to `watcher_state` in `tuples.db` after every
-  successfully dispatched batch. The correct sequence is:
+  is persisted to `watcher_state` (daemon-owned, accessed via
+  `t2_client.watcher_state_set` RPC) after every successfully
+  dispatched batch. The correct sequence is:
 
   ```python
-  # 1. Fetch events (SELECT ... WHERE rowid > cursor ORDER BY rowid)
-  events = fetch_events(conn_tuples, subspace, cursor)
+  # 1. Receive events from the daemon's streaming RPC.
+  #    The stream yields events monotonically by rowid; the watcher's
+  #    cursor is the last rowid it has *successfully* dispatched and
+  #    acked.
+  async for event in t2_client.event_stream(
+      subspace_prefix=f"tuples/{subspace}",
+      since_cursor=cursor,
+  ):
 
-  # 2. Dispatch action — OUTSIDE any SQLite transaction.
-  #    dispatch is an async network call (tool_call / out / send_message);
-  #    Python sqlite3 is synchronous — you cannot await inside an open
-  #    sqlite3 transaction without blocking the event loop.
-  await dispatch_action(event, idempotency_key=...)
+      # 2. Dispatch action — outside any cursor-advance RPC.
+      #    Dispatch is an async network call (tool_call / out /
+      #    send_message); the cursor RPC must not be entangled with
+      #    it because dispatch can fail or hang and we still need
+      #    deterministic cursor semantics.
+      await dispatch_action(event, idempotency_key=...)
 
-  # 3. Advance cursor — separate, committed after dispatch succeeds.
-  with conn_tuples:  # sqlite3 context manager = BEGIN/COMMIT
-      conn_tuples.execute(
-          "UPDATE watcher_state SET last_rowid=?, updated_at=?"
-          " WHERE subspace=? AND profile=?",
-          (event.rowid, time.time(), subspace, profile)
+      # 3. Advance cursor via daemon RPC — separate, committed after
+      #    dispatch succeeds. The daemon performs the UPDATE
+      #    watcher_state internally; the client only names the new
+      #    rowid.
+      await t2_client.watcher_state_set(
+          subspace=subspace,
+          profile=profile,
+          last_rowid=event.rowid,
       )
   ```
 
-  Steps 2 and 3 are **not** in the same SQL transaction — they cannot
-  be: the dispatch is an async network call. The delivery guarantee is
-  **at-least-once**: if the process crashes between step 2 and step 3,
-  the event is replayed on restart. The `idempotency_key` mechanism in
+  Steps 2 and 3 are **not** in the same atomic RPC — they cannot be:
+  the dispatch is an async network call to a different target
+  (tool / out / send_message). The delivery guarantee is
+  **at-least-once**: if the watcher crashes between step 2 and
+  step 3, the event is replayed on restart from the last-acked
+  cursor (`watcher_state.last_rowid`, fetched on reconnect via
+  `t2_client.watcher_state_get`). The `idempotency_key` mechanism in
   the action descriptor handles duplicate deliveries.
 
-  `watcher_state` and `tuples` are in the same database (`tuples.db`),
-  which means only one database connection is needed; it does not imply
-  that dispatch and cursor-advance are in the same ACID transaction.
+  `watcher_state` and `tuples` are in the same database (`tuples.db`)
+  daemon-side, which lets the daemon implement the cursor RPC against
+  the same connection it serves event-stream reads from — but the
+  client never holds a `tuples.db` connection.
 - **Delivery guarantee: at-least-once.** The cursor advances only
   after the action is dispatched (not before). Duplicate deliveries
   are possible on crash-restart. Actions must therefore be idempotent:
@@ -932,10 +946,32 @@ to compose correctly with the RDR-112 daemon:
   as an action failure: the binding is wrong relative to the current
   schema and the user needs to fix it.
 
-The EventStream event record carries an optional `category` field
-(per RDR-112 Approach §7); for transport-level errors the watcher
-classifies directly from the exception type without needing daemon
-cooperation.
+**Two distinct uses of "category"** — disambiguation required:
+
+- The EventStream event record carries an optional `category ∈
+  {data, schema, substrate}` field (per RDR-112 Approach §7). This
+  is the **event's** category as published by the daemon:
+  - `data` is the normal case — a tuple was added/updated/taken;
+    the watcher dispatches the action through its usual path.
+  - `schema` events are out-of-band notifications that the
+    daemon's schema for this subspace changed; they are *not*
+    dispatch targets in v1 and the watcher should advance its
+    cursor past them without invoking the binding action.
+  - `substrate` events are out-of-band notifications about
+    substrate state changes (rare; mostly used by daemon-internal
+    consumers).
+- The **watcher's** failure classification (action / substrate /
+  schema, the three bullets above) is a separate axis describing
+  *how dispatch went wrong*, not how the event was classified by
+  the daemon. The two axes are independent — an event with
+  `category=data` can still cause an action-failure (the dispatched
+  tool raised) or a substrate-failure (the transport dropped
+  mid-dispatch).
+
+For transport-level errors the watcher classifies as substrate-
+failure directly from the exception type (e.g. `BrokenPipeError`,
+`ConnectionResetError`, gRPC-equivalent in the chosen transport),
+without needing daemon cooperation.
 
 #### Step 7: Phase 1 CA spikes (gate Phase 2)
 
@@ -973,25 +1009,50 @@ order. It is not repeated here.
 
 #### Step 8: Active-claims panel
 
-`src/nexus/cockpit/surfaces/claims.py`: direct SQL on
-`~/.config/nexus/tuples.db` WHERE `claim_state = 'claimed' AND
-claim_expires_at > unixepoch()` (expiry filter required to exclude
-expired leases not yet swept — see Proposed Solution for full query and
-rationale). Formats as a table: actor, subspace, tuple summary,
-claimed_at, TTL remaining. tmux fulfillment: update a named pane on a
-2s cadence. ext-apps fulfillment: render as an iframe via `ui://claims`.
+`src/nexus/cockpit/surfaces/claims.py`: routes through the **T2
+daemon read RPC** (per RDR-112 D1, MCP is a client of the daemon).
+Two implementation options for the query path:
+
+- **Preferred**: a dedicated `t2_client.active_claims(subspace=…,
+  ttl_floor=now)` RPC that the daemon implements with the SQL
+  shape `SELECT … WHERE claim_state = 'claimed' AND
+  claim_expires_at > unixepoch()` (expiry filter required to
+  exclude expired leases not yet swept — see Proposed Solution
+  for the full query and rationale). Returns rows ready for
+  panel rendering.
+- **Acceptable v1**: `nx daemon t2 exec --raw <sql>` (RDR-112
+  §Nexus-in-its-own-container) carrying the same SQL string.
+  Faster to ship but loses the typed-DTO benefit.
+
+Formats as a table: actor (extracted via `json_extract(t.dimensions_json,
+'$.actor')`), subspace, tuple summary, claimed_at (via join on
+`tuple_claim_log`), TTL remaining. **No direct `sqlite3.connect`
+on `tuples.db` from the cockpit client process** — that would
+violate D1 and break under daemon mode. tmux fulfillment: update
+a named pane on a 2s cadence. ext-apps fulfillment: render as an
+iframe via `ui://claims`.
 
 #### Step 9: Recent-events panel
 
-`src/nexus/cockpit/surfaces/events.py`: direct SQL on
-`~/.config/nexus/tuples.db` for default time-ordered display (see
-Proposed Solution for full query). For semantic filtering, falls back
-to `read()` with client-side sort by the `timestamp` dimension (registered
-on all hook-event subspaces, present in the `read()` response — unlike
-`created_at`, which is an internal `tuples` table column not in the DTO).
-Supports structural params (`actor`, `session`, `project`) as additional
-WHERE clauses.
-tmux + ext-apps fulfillment as above.
+`src/nexus/cockpit/surfaces/events.py`: routes through the **T2
+daemon read RPC**. Two implementation options paralleling Step 8:
+
+- **Preferred**: `t2_client.recent_events(subspace=…, limit=…,
+  order_by="created_at desc")` RPC that the daemon implements
+  with the SQL ordering on its internal `created_at` column
+  (which is not exposed via `read()` because `created_at` is an
+  internal `tuples` table column not in the DTO).
+- **Acceptable v1**: `nx daemon t2 exec --raw <sql>` for default
+  time-ordered display.
+
+For semantic filtering, falls back to `read()` with client-side
+sort by the `timestamp` dimension (registered on all hook-event
+subspaces, present in the `read()` response — unlike `created_at`).
+Supports structural params (`actor`, `session`, `project`) as
+additional `where` clauses on either the read RPC or the
+introspection RPC. **No direct `sqlite3.connect` on `tuples.db`
+from the cockpit client process.** tmux + ext-apps fulfillment as
+above.
 
 #### Step 10: Active-bindings management panel
 
@@ -1043,9 +1104,11 @@ handed off separately).
   tuple appears in the `hook_events/*` subspace with correct fields.
 - Binding reaction end-to-end: register a binding; fire a hook;
   assert the action was dispatched within 200ms.
-- Cockpit panel SQL queries (active-claims, recent-events) return
-  correct results at 1k, 10k event volumes against `tuples.db`.
-  Active-bindings panel `read()` returns correct results at 1k bindings.
+- Cockpit panel queries (active-claims, recent-events) return correct
+  results at 1k, 10k event volumes via the daemon read RPC (or a
+  daemon test double — never a direct `sqlite3.connect(tuples.db)`
+  from the test process). Active-bindings panel `read()` returns
+  correct results at 1k bindings.
 
 ## Validation
 
@@ -1110,3 +1173,4 @@ Other gates:
 | 2026-05-11 | Hal Hildebrand | Post-gate-3 revision (all gate-3 BLOCKED issues addressed): (C-G3-1) Added `task_id` (string) and `status` (enum: pending/active/failed) dimensions to bindings subspace schema YAML; documented enabled/status/task_id lifecycle; (S-G3-1) moved `watcher_state` table to `tuples.db` (not `memory.db`) for genuine single-transaction cursor atomicity; corrected "atomic" language; (S-G3-2) added `claim_expires_at > unixepoch()` filter to active-claims panel query in Proposed Solution and Step 8 to exclude expired leases; (S-G3-3) flagged Step 2 bridge registration order as provisional pending CA-8; moved CA-8 spike to new Step 1b (before Step 2); added feature-flag requirement for registration order; (S-G3-4) changed recent-events panel from `rd()` (no time ordering) to direct SQL on `tuples.db` ordered by `created_at DESC`; semantic filter noted as opt-in mode; (S-G3-5) replaced "direct T2 SQL via src/nexus/db/" with explicit `tuples.db` database references throughout; (O1) corrected "six" to "seven" subspaces; (O2) documented PostCompact/PreCompact exclusion with rationale; (O3) updated CA-9 gate condition to outcome-based (confirmed open-registry shipping) not action-based (notification sent) |
 | 2026-05-11 | Hal Hildebrand | Post-gate-7 revision (1 critical + 2 significant + 2 observations all addressed pre-accept): (C-G7-1) removed `PostCompact` from Step 2 bridge registration list — was contradicted by Proposed Solution's explicit exclusion; added `PreCompact` and `PostCompact` to the not-registered list with rationale cross-reference; (SIG-G7-1) replaced three residual `rd()` aliases with `read()` — Step 4 bindings dimension example, Step 6 `_BindingWatcher` rationale paragraph (header + two body references); (SIG-G7-2) corrected "six" → "seven" hook-event subspaces at four remaining sites (Relationship to RDR-110 summary, CA-9 description, CA-9 risk-if-wrong, Phase 1 section header); added `layout_state` to the Relationship-section subspace enumeration; (OBS-G7-1) active-claims display now explicitly extracts `actor` via `json_extract(t.dimensions_json, '$.actor')` — `actor` lives inside `dimensions_json`, not a top-level column; (OBS-G7-2) watcher failure isolation now logs via `structlog` (not "T2 scratch" — category error, scratch is T1); failure counter kept in T2 as before |
 | 2026-05-13 | Hal Hildebrand | **Triad rework (RDR-110/111/112 composition gaps, deep-analyst `a56172936d63fd480`)**: added §Relationship to RDR-112; rewrote §Step 6 binding-watcher to consume RDR-112 `EventStream(subspace_prefix, since_cursor)` RPC instead of direct SQL on `tuples.db` (cursor protocol and at-least-once semantics preserved verbatim; only transport changes); rewrote §Step 6 Watcher failure isolation to distinguish action / substrate / schema failure categories so daemon hiccups do not silently auto-disable user bindings (closes G5); updated `watcher_state` placement to record that the table is daemon-owned and read/written via dedicated RPCs (closes G4 wrt RDR-111 dependency); `related_rdrs` frontmatter extended to include RDR-112 and RDR-113. RDR-111 is now blocked on RDR-112 Phase 1 for the binding-watcher; query-only cockpit surfaces unaffected. |
+| 2026-05-13 | Hal Hildebrand | **Gate round 8 closeout** (substantive-critic `a3da714a7d21b75ee`, 1C/2S/2O on the triad-rework PR): (C-G8-1) Steps 8 + 9 cockpit panels rewritten to route through T2 daemon read RPCs (`t2_client.active_claims()`, `t2_client.recent_events()`) or `nx daemon t2 exec --raw` introspection; explicit ban on direct `sqlite3.connect(tuples.db)` from cockpit client process. The §Relationship to RDR-112 subsection had committed this; Steps 8/9 prose now matches. (S-G8-1) CA-10 description and gate criterion updated to reference the T2 daemon migration manifest (RDR-112 Approach §9), not RDR-110 migration file — the migration owner moved daemon-side and the criterion has to point there. (S-G8-2) CA-9 extended with the second-half coordination: ORB Phase 1 Step 1 also gates on the RDR-112 daemon `subspace add` admin RPC existing, not just RDR-110 shipping open-registry. (OBS-G8-1) Step 6 cursor-persistence pseudocode rewritten to use `t2_client.watcher_state_set` / `watcher_state_get` RPCs and `t2_client.event_stream` async-for loop, removing the bare `conn_tuples.execute(UPDATE watcher_state ...)` that contradicted the surrounding prose. (OBS-G8-2) Watcher failure isolation disambiguates the two uses of "category" — RDR-112 event `category ∈ {data, schema, substrate}` published by the daemon is independent of the watcher-side action/substrate/schema failure classification. |
