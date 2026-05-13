@@ -167,6 +167,7 @@ addopts = "-m 'not integration and not slow'"
 markers = [
     "integration: end-to-end tests requiring real services (deselect with '-m not integration')",
     "slow: expensive benchmarks (deselect with '-m not slow')",
+    "no_auto_migrate: opt out of the autouse T2Database constructor-migration shim (RDR-112 P0.4)",
 ]
 
 [dependency-groups]

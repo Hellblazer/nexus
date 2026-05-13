@@ -72,6 +72,14 @@ def main(ctx: click.Context, verbose: bool) -> None:
     ctx.obj["verbose"] = verbose
     configure_logging("cli", verbose=verbose)
 
+    # RDR-112 P0.4 (nexus-uqqy): migrations no longer fire as a side
+    # effect of ``T2Database()``. The MCP factory ``mcp_infra.t2_ctx``
+    # is the only Phase-0 caller of ``run_if_needed``; CLI command sites
+    # defer to Phase 1 (nexus-w0et) when the daemon takes ownership.
+    # Until then, ``nx upgrade`` is the explicit migration command and
+    # the test suite uses the ``_auto_migrate_t2_in_tests`` autouse
+    # fixture in ``conftest.py`` to preserve test parity.
+
     # RDR-101 Phase 3 follow-up D (nexus-o6aa.9.9): TTY-gated upgrade
     # prompt. When the catalog is in bootstrap-fallback mode, surface
     # a one-time stderr warning to the operator so the silent split

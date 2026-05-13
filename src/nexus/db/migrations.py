@@ -3042,6 +3042,81 @@ def apply_pending(conn: sqlite3.Connection, current_version: str) -> None:
         )
 
 
+def run_if_needed(path: Path) -> None:
+    """Apply pending migrations to the T2 database at *path* (idempotent).
+
+    RDR-112 P0.4 (nexus-uqqy): migration ownership lives outside the
+    ``T2Database`` constructor. The MCP server's ``t2_ctx`` factory and
+    the future daemon-startup runner (Phase 1, nexus-w0et) are the
+    explicit callers; the ``_upgrade_done`` cache makes repeat calls
+    within a process cheap.
+
+    The function opens its own transient connection, applies any
+    migrations between the stored ``_nexus_version`` and the running
+    ``conexus`` package version, then closes the connection. Parent
+    directories are created as needed; the DB file is created if absent.
+
+    Phase 0 caveat: remaining CLI ``T2Database(path)`` construction sites
+    are not yet rewired to call this explicitly. Tests rely on the
+    ``conftest._auto_migrate_t2_in_tests`` autouse shim for parity;
+    production CLI users should invoke ``nx upgrade`` after installing
+    a new version until Phase 1 consolidates ownership in the daemon
+    (CA-10 also requires Phase 1's daemon manifest to include
+    ``watcher_state``).
+
+    Args:
+        path: T2 SQLite database path. May not yet exist.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        path_key = str(path.resolve())
+    except OSError:
+        path_key = str(path)
+
+    # Serialise the check-then-migrate to prevent concurrent transient
+    # connections racing the WAL write lock.
+    with _upgrade_lock:
+        if path_key in _upgrade_done:
+            return
+
+        try:
+            from importlib.metadata import version as _pkg_version
+
+            current_version = _pkg_version("conexus")
+        except Exception:
+            current_version = "0.0.0"
+
+        # OBS-2: structured marker that ``run_if_needed`` actually
+        # triggered a migration pass on this path. ``apply_pending``
+        # already emits ``migration_start`` / ``migration_done`` so this
+        # is just the entry signal for log correlation. Routed through
+        # structlog per CLAUDE.md (no ``print()`` in library code) so
+        # ``configure_logging`` can suppress it in CLI mode and the file
+        # handler captures it in MCP/daemon mode.
+        _log.info(
+            "run_if_needed_triggered",
+            path=path.name,
+            version=current_version,
+        )
+
+        conn = sqlite3.connect(str(path), check_same_thread=False)
+        try:
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("PRAGMA journal_mode=WAL")
+            apply_pending(conn, current_version)
+        finally:
+            conn.close()
+        # apply_pending() keys _upgrade_done by _connection_path_key(conn)
+        # (Path(row[2]).resolve() from PRAGMA database_list). The fast-path
+        # check above keys by str(path.resolve()) on the Path argument. The
+        # two forms diverge in CI path-resolution edge cases (nexus-avwe),
+        # leaving the path-argument form absent from _upgrade_done after
+        # apply_pending populated only its own form. Recording the
+        # path-argument form here ensures a second call short-circuits.
+        _upgrade_done.add(path_key)
+
+
 def _connection_path_key(conn: sqlite3.Connection) -> str:
     """Extract a stable key for the connection's database file.
 
