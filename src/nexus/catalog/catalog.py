@@ -1399,6 +1399,50 @@ class Catalog:
         finally:
             self._release_lock(dir_fd)
 
+    def delete_collection_projection(self, name: str, *, reason: str) -> bool:
+        """Drop the ``collections`` projection row for ``name``.
+
+        Returns ``True`` if a row was deleted, ``False`` if there was
+        nothing to delete. Honors the ``_event_sourced_enabled`` split
+        used by every other catalog mutator: in event-sourced mode the
+        ``CollectionDeleted`` event is canonical and the projector
+        applies it; in legacy mode SQLite is written directly and the
+        event is shadow-emitted.
+
+        This method exists so callers outside ``src/nexus/catalog/``
+        (e.g. ``commands/collection.py``'s delete cascade) do not have
+        to reach into ``self._db`` directly — RDR-101 Phase 3 ε lints
+        forbid catalog writes outside the projector module. Cascade
+        callers stay clean by routing through this verb.
+        """
+        from nexus.catalog.events import CollectionDeletedPayload  # noqa: PLC0415
+
+        dir_fd = self._acquire_lock()
+        try:
+            row_before = self._db.execute(
+                "SELECT 1 FROM collections WHERE name = ?", (name,),
+            ).fetchone()
+            if row_before is None:
+                return False
+            event = _make_event(
+                CollectionDeletedPayload(coll_id=name, reason=reason),
+                v=0,
+            )
+            if self._event_sourced_enabled:
+                self._write_to_event_log(event)
+                self._projector.apply(event)
+                self._db.commit()
+            else:
+                self._db.execute(
+                    "DELETE FROM collections WHERE name = ?",
+                    (name,),
+                )
+                self._db.commit()
+                self._emit_shadow_event(event)
+            return True
+        finally:
+            self._release_lock(dir_fd)
+
     def list_collections(self) -> list[dict]:
         """Delegates to ``_DocumentOps.list_collections`` (nexus-mbm)."""
         return self._docs.list_collections()
