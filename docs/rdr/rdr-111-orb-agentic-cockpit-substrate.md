@@ -2,11 +2,12 @@
 title: "The ORB: Observable Relay Bus — Hook Projection, Bindings, and C2 Cockpit Substrate"
 id: RDR-111
 type: Architecture
-status: draft
+status: accepted
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-11
+accepted_date: 2026-05-13
 related_issues: []
 related_rdrs: [RDR-105, RDR-110, RDR-112, RDR-113]
 related_tests: []
