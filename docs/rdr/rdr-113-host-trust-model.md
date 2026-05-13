@@ -146,12 +146,23 @@ to land in a mini-RDR, large enough to deserve its own gate.
 
 ### Critical Assumptions
 
-- [ ] **A1**: `os.chmod(0o600)` on the UDS path is honored
+- [x] **A1**: `os.chmod(0o600)` on the UDS path is honored
   before any client `connect()` attempt — i.e., there is no
   race window between `bind()` and `chmod()` where a fast peer
   could attach with default-umask permissions.
-  — **Status**: Unverified — **Method**: Spike or source-search
-  Python `socketserver` internals to confirm a clean ordering.
+  — **Status**: **Verified** (2026-05-13 spike at
+  `/tmp/rdr113_a1_spike.py`; T2 entry
+  `nexus_rdr/113-research-A1-spike`) — **Method**: Spike.
+  **Finding**: `bind()` alone does not enable connections —
+  `connect()` to a bound-but-not-listening UDS returns
+  `ConnectionRefusedError`. The actual gate is `listen()`, not
+  `bind()`. Ordering `bind() → chmod(0o600) → listen()` closes
+  the race window to zero: during the bind→chmod gap (~13 µs in
+  the spike), no peer can connect because no backlog exists.
+  Defense-in-depth via parent-dir `0o700` is preserved as
+  belt-and-braces. The §Risks "temp-path + atomic-rename"
+  mitigation is unnecessary given this finding and is retired
+  below.
 - [ ] **A2**: `SO_PEERCRED` / `LOCAL_PEERCRED` reliably return
   the *originator* of the connection, not a forwarding proxy
   (relevant if the user later puts the daemon behind a
@@ -165,13 +176,21 @@ to land in a mini-RDR, large enough to deserve its own gate.
 
 **v1 trust model: single-user host, daemon owner == client owner.**
 
-1. **UDS bind discipline** (T2, T3, CatalogDB daemons):
-   - `socket.bind(path)` followed immediately by
-     `os.chmod(path, 0o600)`.
+1. **UDS bind discipline** (T2, T3, CatalogDB daemons) —
+   ordering matters, A1-verified:
+   - `socket.bind(path)` → `os.chmod(path, 0o600)` →
+     `sock.listen(backlog)`, in that order. Per A1, `connect()`
+     against a bound-but-not-listening UDS returns
+     `ConnectionRefusedError`, so the bind→chmod window is
+     closed by `listen()` not having been called yet. The mode
+     is restricted before any peer can establish a connection.
    - Daemon refuses to start if `os.geteuid() != os.stat(path).st_uid`
      after chmod (sanity check).
    - Socket directory (`~/.config/nexus/sockets/` or similar)
-     created with `0o700` if not present.
+     created with `0o700` if not present. Defense-in-depth: even
+     if the socket inode somehow ends up at default mode (e.g.
+     chmod silently failed on an exotic filesystem), the parent
+     dir gates path traversal.
 
 2. **TCP bind discipline**:
    - `server_address = ('127.0.0.1', port)`. Hard-coded
@@ -208,7 +227,7 @@ to land in a mini-RDR, large enough to deserve its own gate.
 | Second user on host attaches to my UDS | `chmod 0600` + peer-UID check | None (v1) |
 | Second user crafts TCP connection to my daemon | Loopback bind + peer cannot reach loopback as another user | None (single-host) |
 | Same-user malicious process | **Not addressed in v1** | Accepted — user owns the data |
-| Daemon impersonation (rogue process binds the path first) | Discovery file carries PID + start time; client verifies via `/proc` or `ps` | Spike needed (A1-adjacent) |
+| Daemon impersonation by same-user rogue process | **Not addressed in v1** (subsumed by "same-user malicious process" non-goal — a process running as the daemon's UID can bind any path the daemon could) | Accepted — user owns the host |
 | Cross-host attacker | **Not addressed in v1** | RDR-112 out of scope |
 | TCP listener reaches the network | Hard-coded `127.0.0.1` bind, no flag to override | None (v1) |
 
@@ -264,10 +283,13 @@ or cross-host).
 
 ### Risks and Mitigations
 
-- **Risk**: Race window between `bind()` and `chmod()`.
-  **Mitigation**: A1 spike confirms ordering; if a race exists,
-  bind to a temp path with `0o700` parent dir and atomic-rename
-  in place of in-place chmod.
+- **Risk** (retired): Race window between `bind()` and
+  `chmod()`. **Disposition**: A1 spike verified the window is
+  effectively zero given `bind() → chmod() → listen()`
+  ordering, because `connect()` to a bound-but-not-listening
+  UDS returns `ConnectionRefusedError`. No temp-path-plus-
+  atomic-rename mitigation required. Defense-in-depth via
+  parent-dir `0o700` is retained.
 - **Risk**: macOS `LOCAL_PEERCRED` quirks (different struct
   shape from Linux `SO_PEERCRED`).
   **Mitigation**: platform-specific accessor in `nexus.daemon.peer`;
@@ -280,6 +302,12 @@ or cross-host).
 - **Peer-cred rejection**: client sees a `PermissionDenied`
   RPC error with a message naming the daemon's expected UID and
   the peer's actual UID. Logged daemon-side.
+- **`getsockopt(SO_PEERCRED / LOCAL_PEERCRED)` itself raises**
+  (unexpected platform, sandbox restriction, kernel version
+  gap): daemon closes the connection with a clear error and
+  logs at ERROR. **No fallback to "accept with warning"** —
+  consistent with the chmod-failure handling above; the trust
+  model is fail-loud.
 
 ## Implementation Plan
 
@@ -316,7 +344,7 @@ None. Stdlib `socket`, `os`, `getsockopt`.
 - **Scenario**: User B (different UID) connects to User A's UDS. — **Verify**: connect fails or accept rejects with clear message.
 - **Scenario**: Daemon TCP bind. — **Verify**: `ss -tln` shows `127.0.0.1:N`, not `0.0.0.0:N`.
 - **Scenario**: `LOCAL_PEERCRED` path on macOS. — **Verify**: peer UID parsed correctly.
-- **Scenario**: Race between `bind()` and `chmod()`. — **Verify**: no window where a different-UID peer can connect (A1).
+- **Scenario**: After `bind() → chmod() → listen()` ordering, assert `os.stat(socket_path).st_mode & 0o777 == 0o600` is observable before the listening backlog opens — i.e. between `chmod()` and `listen()` calls. (A1 spike already proved that `connect()` against a bound-but-not-listening UDS refuses, so no peer-side race test can fire; this scenario instead asserts the mode invariant the spike relies on.)
 
 ## Validation
 
@@ -347,8 +375,16 @@ which now performs the peer check).
 
 ### Assumption Verification
 
-A1 and A2 above; both Unverified at draft. A1 needs a small
-spike before accept.
+- **A1**: **Verified** (2026-05-13). Spike at
+  `/tmp/rdr113_a1_spike.py` confirmed that `connect()` against a
+  bound-but-not-listening UDS returns `ConnectionRefusedError`.
+  The required ordering — `bind() → chmod(0o600) → listen()` —
+  closes the race window to zero. Bind→chmod gap measured at
+  ~13 µs; irrelevant because no peer can connect before
+  `listen()`. T2 entry: `nexus_rdr/113-research-A1-spike`.
+- **A2**: **Documented** (Docs Only is sufficient per the
+  Critical Assumptions table). Revisit only if a socket-relay
+  is introduced.
 
 ### Scope Verification
 
@@ -396,3 +432,30 @@ Mini-RDR; right-sized for a single closure of G6.
 
 - 2026-05-13 — Initial draft. Spun out of RDR-110/111/112 triad
   rework as the closure for gap G6.
+- 2026-05-13 — A1 spike executed. Verified that `bind() →
+  chmod(0o600) → listen()` ordering closes the race window
+  because `connect()` against a bound-but-not-listening UDS
+  returns `ConnectionRefusedError`. §Proposed Solution §1 UDS
+  bind discipline updated to record the required ordering;
+  §Risks "Race window between bind() and chmod()" retired;
+  §Finalization Gate Assumption Verification updated. T2:
+  `nexus_rdr/113-research-A1-spike`.
+- 2026-05-13 — **Gate round 1 PASSED** (substantive-critic
+  `ad665ee8c98897352`, 0C/2S/2O). Significant closeouts in this
+  revision:
+  - S1 (T2 spike record cited but critic couldn't find it):
+    record exists at `nexus_rdr/113-research-A1-spike` (critic
+    searched the wrong project `nexus`); confirmed present.
+  - S2 (daemon-impersonation row committed to unspiked
+    mitigation): row reworded to "not addressed in v1" —
+    subsumed by the same-user-malicious-process non-goal, since
+    a same-UID rogue can bind any path the legitimate daemon
+    could. No new spike or assumption needed.
+  Observations:
+  - Obs1: §Failure Modes extended — `getsockopt` itself raising
+    is now explicitly fail-loud, no silent fallback.
+  - Obs2: Test Plan scenario 5 reframed — A1 already proved
+    no peer-side race test can fire, so the scenario instead
+    asserts the mode-invariant the spike relies on.
+  - Obs3 (macOS `LOCAL_PEERCRED` quirks): kept as-is, critic
+    confirmed proportional for mini-RDR.
