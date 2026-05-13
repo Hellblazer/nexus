@@ -177,6 +177,14 @@ Full details: [CLI Reference](https://github.com/Hellblazer/nexus/blob/main/docs
 - For cloud embeddings (optional): [ChromaDB Cloud](https://www.trychroma.com/) + [Voyage AI](https://www.voyageai.com/) accounts (free tiers available)
 - For hybrid search: [`ripgrep`](https://github.com/BurntSushi/ripgrep)
 
+## Security
+
+nexus is designed for single-user host trust: the daemon owner and
+its clients must share a UID. The v1 trust boundary, accepted risks,
+and how to report a vulnerability are summarised in
+[SECURITY.md](SECURITY.md); the full design lives in
+[RDR-113](docs/rdr/rdr-113-host-trust-model.md).
+
 ## License
 
 AGPL-3.0-or-later. See [LICENSE](https://github.com/Hellblazer/nexus/blob/main/LICENSE).
