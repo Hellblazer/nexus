@@ -192,32 +192,13 @@ def delete_cmd(name: str, yes: bool) -> None:
             # nexus-vxz3: emit CollectionDeleted event so replay
             # produces SQLite state matching the live delete. The
             # projector's _v0_collection_deleted handler drops the
-            # projection row.
-            from nexus.catalog.events import CollectionDeletedPayload
-            from nexus.catalog import catalog as _cat_mod
-
-            row_before = cat._db.execute(
-                "SELECT 1 FROM collections WHERE name = ?", (name,),
-            ).fetchone()
-            if row_before is not None:
-                event = _cat_mod._make_event(
-                    CollectionDeletedPayload(
-                        coll_id=name,
-                        reason="nx collection delete",
-                    ),
-                    v=0,
-                )
-                if cat._event_sourced_enabled:
-                    cat._write_to_event_log(event)
-                    cat._projector.apply(event)
-                    cat._db.commit()
-                else:
-                    cat._db.execute(
-                        "DELETE FROM collections WHERE name = ?",
-                        (name,),
-                    )
-                    cat._db.commit()
-                    cat._emit_shadow_event(event)
+            # projection row. Routed through Catalog.delete_collection_projection
+            # so the SQL stays inside src/nexus/catalog/ — RDR-101
+            # Phase 3 ε lint gate forbids direct catalog writes from
+            # outside the projector module.
+            if cat.delete_collection_projection(
+                name, reason="nx collection delete"
+            ):
                 catalog_projection_deleted = 1
     except Exception as exc:
         click.echo(f"warn: catalog cascade failed: {exc}", err=True)
