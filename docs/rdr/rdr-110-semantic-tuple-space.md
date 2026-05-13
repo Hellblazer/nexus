@@ -9,7 +9,7 @@ reviewed-by: self
 created: 2026-05-09
 accepted_date: 2026-05-09
 related_issues: []
-related_rdrs: [RDR-004, RDR-041, RDR-077, RDR-078, RDR-079, RDR-087, RDR-092, RDR-105, RDR-106, RDR-107, RDR-108]
+related_rdrs: [RDR-004, RDR-041, RDR-077, RDR-078, RDR-079, RDR-087, RDR-092, RDR-105, RDR-106, RDR-107, RDR-108, RDR-112]
 related_tests: []
 implementation_notes: ""
 ---
@@ -2011,3 +2011,42 @@ anywhere in the document. End-to-end coherence across all four
 revision rounds verified. Total findings closed across four
 passes: 16 (3 critical → 0; 7 significant → 0; 6 observations →
 0). RDR-110 ready for `/nx:rdr-accept`.
+
+### Post-acceptance cross-reference 2026-05-12 — RDR-112 (Storage-as-Service)
+
+RDR-110's atomic-take primitive is built on SQLite WAL multi-process
+safety (Critical Assumptions #1 and #2, both Verified for the
+same-host POSIX-filesystem case). RDR-112 (draft 2026-05-12) found
+this guarantee **does not extend across container overlayfs bind
+mounts** — WAL requires `mmap` semantics that overlayfs blocks, so
+a SQLite handle opened from inside a container against a host-mounted
+path forks into a per-container WAL. The Linda `in` primitive
+would silently break (or worse, silently double-claim) in that
+configuration.
+
+**This does not invalidate RDR-110.** The atomic-take CAS primitive
+itself is correct; only its *call site* shifts. Under RDR-112, T2 is
+owned by `nx daemon t2` (single process, single SQLite handle,
+single WAL — exactly the configuration RDR-110's CAs assume).
+Containerised clients call atomic-take via UDS/TCP RPC to the
+daemon; the daemon executes the same
+`UPDATE … RETURNING … WHERE id = (SELECT id … LIMIT 1)`
+pattern against its local handle. The CAS is unchanged.
+
+**Sequencing implication for planning**: RDR-110's planning chain
+has two ordering options.
+
+1. **Ship 110 first against direct-file T2** (current `T2Database`
+   facade). Same-host atomic-take works immediately. RDR-112's
+   daemon later wraps the existing CAS as an RPC; call sites
+   move from `T2Database.take(...)` to `T2Client.take(...)` with
+   no semantic change.
+2. **Sequence 112's daemon before 110's atomic-take call sites**
+   so the call sites are written once.
+
+Option 1 is preferred. The CAS primitive is independent of where it
+runs; the daemon is a transport wrapper, not a redesign.
+
+**No changes to RDR-110's design surface.** `related_rdrs`
+frontmatter updated to include RDR-112; this revision-history note
+records the cross-reference.
