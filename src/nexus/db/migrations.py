@@ -2938,8 +2938,13 @@ def bootstrap_version(conn: sqlite3.Connection) -> str:
     return row[0] if row else "0.0.0"
 
 
-def apply_pending(conn: sqlite3.Connection, current_version: str) -> None:
+def apply_pending(conn: sqlite3.Connection, current_version: str) -> int:
     """Run all migrations introduced between last-seen and *current_version*.
+
+    Returns the number of migration steps that actually executed.
+    Callers can suppress operator-visible "Migrating database..." notices
+    when the return is 0 (no-op version bump — common case after a patch
+    release that did not change the schema).
 
     Idempotent — every migration function has column/table-existence guards.
 
@@ -2957,7 +2962,7 @@ def apply_pending(conn: sqlite3.Connection, current_version: str) -> None:
     path_key = _connection_path_key(conn)
     with _upgrade_lock:
         if path_key in _upgrade_done:
-            return
+            return 0
 
         # OBS-1: record migration session start for telemetry.
         _t_start = _time.monotonic()
@@ -3015,7 +3020,7 @@ def apply_pending(conn: sqlite3.Connection, current_version: str) -> None:
                 path_key=path_key,
                 steps_run=steps_run,
             )
-            return
+            return steps_run
 
         # Update stored version.  Guards:
         # - Skip pre-release/unparseable versions ((0,0,0)) to prevent
@@ -3040,6 +3045,7 @@ def apply_pending(conn: sqlite3.Connection, current_version: str) -> None:
             steps_run=steps_run,
             duration_ms=round((_time.monotonic() - _t_start) * 1000),
         )
+        return steps_run
 
 
 def _connection_path_key(conn: sqlite3.Connection) -> str:

@@ -193,24 +193,33 @@ class T2Database:
                 # case (running `nx <verb>` from a real terminal) keeps
                 # the visibility benefit; the headless case stays
                 # quiet.
+                #
+                # Post-fix: only print when apply_pending actually ran
+                # migration steps. A patch release that bumps the
+                # version without adding a migration would otherwise
+                # print on the first post-upgrade open of every
+                # T2Database, which is noise on the operator side and
+                # misleading (no actual migration happened).
                 import sys as _sys
-                _stderr_is_tty = (
-                    hasattr(_sys.stderr, "isatty") and _sys.stderr.isatty()
-                )
-                if _stderr_is_tty:
-                    print(
-                        f"Migrating database {path.name!r} to schema "
-                        f"version {current_version} ...",
-                        file=_sys.stderr,
-                    )
 
                 conn = sqlite3.connect(str(path), check_same_thread=False)
                 try:
                     conn.execute("PRAGMA busy_timeout=5000")
                     conn.execute("PRAGMA journal_mode=WAL")
-                    apply_pending(conn, current_version)
+                    steps_run = apply_pending(conn, current_version)
                 finally:
                     conn.close()
+
+                _stderr_is_tty = (
+                    hasattr(_sys.stderr, "isatty") and _sys.stderr.isatty()
+                )
+                if steps_run and _stderr_is_tty:
+                    print(
+                        f"Migrated database {path.name!r} to schema "
+                        f"version {current_version} "
+                        f"({steps_run} step{'s' if steps_run != 1 else ''}).",
+                        file=_sys.stderr,
+                    )
                 # apply_pending() keys _upgrade_done by
                 # _connection_path_key(conn) (Path(row[2]).resolve() from
                 # PRAGMA database_list). The fast-path check above keys by
