@@ -330,10 +330,80 @@ separated.
 - (+) Gives RDR-110 and RDR-111 a real publishing/arbitrating point.
 - (+) Forces discipline that future tiers (T4? cross-host?) will need
   anyway.
+- (+) Multi-user host isolation is free (UDS filesystem permissions);
+  no in-process auth code in v1.
 - (−) Two new long-lived processes to keep alive on every nexus install.
-- (−) Adds an RPC hop to every T2/T3 call — measurable but
-  presumably small on unix-domain sockets.
+- (−) Adds an RPC hop to every T2/T3 call — measured at +15 µs p50
+  (UDS) / +29 µs p50 (TCP loopback) in the A3 spike; both sub-ms.
 - (−) Daemon ↔ client version handshake is a new operational concern.
+- (−) Containerised consumers require an orchestration step (UDS
+  bind-mount or TCP port allow-list + env-var injection) at
+  container launch. Documented in Day 2 Ops.
+- (−) Cross-host co-work is explicitly *not* addressed; a future RDR
+  layers federation on top of the local daemon.
+- (−) **Ad-hoc DB access disappears when nexus runs inside its own
+  container** — see "Nexus-in-its-own-container" subsection below.
+
+### Nexus-in-its-own-container — interaction model shift
+
+One deployment mode RDR-112 enables (and which the agentic-cockpit
+roadmap anticipates) is **packaging nexus itself as a container** —
+daemons, MCP server, CLI, and config inside a single OCI image that
+consumers attach to via UDS bind-mount or TCP. In that configuration
+**no out-of-band process on the host can reach the underlying SQLite
+file or chroma directory**: `sqlite3 ~/.nexus/t2.db`, `chroma utils
+info`, DBeaver, Datasette, ad-hoc `SELECT ... FROM memory WHERE ...`
+are all unavailable without `docker exec`-ing into the nexus
+container and even then constrained by what the image ships.
+
+Today these out-of-band paths are heavily used. Debugging a stuck
+indexer, sampling raw memory rows, inspecting a chroma collection,
+running one-off analytical SQL across the seven domain stores — all
+happen against the file directly. Containerising nexus closes those
+paths by design. The daemon-as-arbiter discipline is the whole
+point, but it means the daemon must **expose first-class
+introspection surfaces** to replace what ad-hoc DB access provides
+today.
+
+**Anticipated surfaces** (to be specified during planning, not
+locked here):
+
+- `nx daemon t2 exec <SQL>` — execute a parameterised read-only
+  query via RPC, output as JSON or table. Read-only by default;
+  explicit `--write` flag for destructive ops gated on a
+  confirmation prompt. Replaces `sqlite3 <file>` for the 90% case.
+- `nx daemon t3 peek <collection>` — paged inspection of a
+  collection's documents / metadata / embeddings. Replaces
+  `chromadb` CLI inspection.
+- `nx daemon t2 schema` / `nx daemon t3 schema` — print live schema
+  (T2 tables, T3 collection metadata) so external tooling can be
+  code-generated against the current shape.
+- `nx daemon t2 export [--table N] [--format jsonl|csv|sqlite]` —
+  snapshot dump to a path the daemon writes (mounted volume in
+  container mode). Replaces sqlite3's `.dump`.
+- `nx daemon t2 import` — reverse operation; required for backup
+  restore parity.
+- **Streaming event log** — RDR-111's ORB projection of T2 change
+  events is the principled answer to "tail -f the database":
+  subscribe to `T2.changed` events filtered by table/project,
+  rendered in the cockpit UI or via `nx daemon t2 events --follow`.
+- **Read-only side-channel socket** — optional second UDS bound to
+  a `readonly` group, exposing only the read surface. Lets external
+  tooling (Grafana, DataDog SQL exporter, custom dashboards) attach
+  without write capability or in-daemon auth code.
+
+**What this RDR commits to**: the introspection surface must be
+**at least as expressive as `sqlite3 <file>` is today for read
+paths** before nexus-in-a-container ships as a supported deployment
+mode. Without that commitment, containerising nexus regresses
+operational visibility — the opposite of what this RDR exists to
+do.
+
+**What this RDR explicitly defers**: an *interactive REPL* surface
+(`nx daemon t2 repl` for a sqlite3-like prompt) is nice-to-have for
+power users but not required for correctness. Planning picks it up
+if cheap; otherwise it falls to a follow-on RDR. The pipe-friendly
+`exec` subcommand is sufficient for scripted workflows.
 
 ### Risks and Mitigations
 
@@ -487,6 +557,17 @@ locked design. Right-size before gate.
 - **Migration**: how do existing on-disk T2/T3 stores get picked up
   by the new daemons? Presumably "the daemon opens the same path the
   old direct client did" — but worth being explicit.
+- **Introspection-surface completeness**: the "at least as expressive
+  as `sqlite3 <file>` for reads" bar is correct for the 90% case;
+  the long tail (recursive CTEs against arbitrary user-supplied SQL,
+  EXPLAIN QUERY PLAN, ATTACH DATABASE for cross-DB joins) needs an
+  explicit decision during planning — accept the regression, ship
+  an escape hatch (`nx daemon t2 exec --raw`), or keep direct-file
+  access as a separately gated "debug" mode.
+- **Container image surface**: if nexus ships as a container, which
+  external paths must remain available — `/tmp` for downloads, the
+  user's git repos for indexing, an output volume for `export`? The
+  container's filesystem contract is part of the introspection story.
 
 ## References
 
@@ -518,3 +599,12 @@ locked design. Right-size before gate.
   makes the fallback essentially free. T3 keeps loopback TCP
   (upstream chromadb constraint). TCP listeners are loopback-only;
   cross-host co-work is still a future RDR.
+- 2026-05-12 — Added **Nexus-in-its-own-container** trade-off
+  subsection anticipating the deployment mode where nexus itself is
+  the container. Ad-hoc DB access (`sqlite3 <file>`, DBeaver, etc.)
+  becomes unavailable; the daemon must therefore expose first-class
+  introspection surfaces (`exec`, `peek`, `schema`, `export`,
+  streaming events, optional read-only side socket) that are at
+  least as expressive as direct-file reads. Cross-references RDR-110
+  (atomic-take CAS unchanged — same SQLite handle, single process,
+  daemon hosts it) and RDR-111 (event-streaming surface).
