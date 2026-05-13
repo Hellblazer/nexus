@@ -134,7 +134,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-109](rdr-109-honest-naming-and-cross-encoder-salience.md) | Honest Local-Mode Naming and Cross-Encoder Salience: Two Naming/Scoring Designs Touching the Same Test-Suite Mode-Default Surface | Architecture | Accepted | 2026-05-10 |
 | [RDR-110](rdr-110-semantic-tuple-space.md) | Semantic Tuple Space: Unified Coordination Primitive over ChromaDB + SQLite | Architecture | Accepted | 2026-05-09 |
 | [RDR-111](rdr-111-orb-agentic-cockpit-substrate.md) | The ORB: Observable Relay Bus — Hook Projection, Bindings, and C2 Cockpit Substrate | Architecture | Draft | 2026-05-11 |
-| [RDR-112](rdr-112-storage-as-service-container-boundary.md) | Storage-as-Service: T2/T3 Behind a Process Boundary, T1 Stays In-Container | Architecture | Draft | 2026-05-12 |
+| [RDR-112](rdr-112-storage-as-service-container-boundary.md) | Storage-as-Service: Every Persistent Shared-State Store Behind a Daemon, T1 Stays In-Container | Architecture | Draft | 2026-05-12 |
 
 ---
 
