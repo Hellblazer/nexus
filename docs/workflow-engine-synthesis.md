@@ -54,3 +54,16 @@ Novelty is "nobody else had this constraint" (LLMs + MCP standardization 2024-20
 
 ## Sources cited
 Parmar 2026 paper; MCP 2026 roadmap; ext-apps spec; Restate/Inngest/Step Functions docs; LangGraph checkpointer code; Serverless Workflow Spec; Kai Waehner durable-execution survey; Temporal blog; Argo Workflows suspend/resume; Zigflow YAML-DSL-for-Temporal article.
+
+## RDR-110/111/112 triad relationship (2026-05-13)
+
+The workflow engine slots in as another consumer of the RDR-110 tuple
+space, the RDR-111 ORB bus, and the RDR-112 daemons — no retrofit
+required on any of the three. One load-bearing constraint: cross-
+container coordination (workflow steps that span sandbox boundaries)
+is gated on `NX_STORAGE_MODE=daemon` per the RDR-112 sequencing
+decision. Same-host single-FS deployments can use direct-file mode
+for early prototyping; any deployment that crosses an overlayfs bind
+mount must run the T2 daemon. Checkpointer surfaces compose as
+tuple-space subspaces; durable-execution wake semantics land on the
+RDR-112 `EventStream` RPC. Host trust inherited from RDR-113.

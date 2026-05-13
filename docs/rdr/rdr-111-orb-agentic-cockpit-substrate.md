@@ -8,7 +8,7 @@ author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-11
 related_issues: []
-related_rdrs: [RDR-105, RDR-110]
+related_rdrs: [RDR-105, RDR-110, RDR-112, RDR-113]
 related_tests: []
 implementation_notes: ""
 ---
@@ -154,6 +154,50 @@ This is a **definitive prerequisite** (CA-9), not a conditional: the
 RDR-110 implementor must be notified before Phase 1 Step 6 ships so
 that open registration is included in scope. Without this, the ORB's
 Phase 1 Step 1 (hook-event subspace schema registration) cannot proceed.
+
+### Relationship to RDR-112
+
+RDR-112 ships the storage-as-service daemons that own `tuples.db`,
+`memory.db`, the T3 chroma store, and CatalogDB. Under RDR-112 the
+MCP server is a **client** of the daemons, not the daemon itself —
+the ORB's `_BindingWatcher` and cockpit surface code all run in the
+client process and reach storage exclusively through daemon RPCs.
+
+Specific RDR-112 surfaces RDR-111 consumes:
+
+- **`EventStream(subspace_prefix, since_cursor)`** streaming RPC
+  (RDR-112 Approach §7) — `_BindingWatcher` consumes
+  `tuples/<subspace>` events instead of the direct-SQL `rowid > N`
+  query the pre-rework draft used. The `rowid` cursor protocol is
+  preserved as the wire-level cursor; only the transport changes.
+- **Failure-category demux** on the event stream (`category ∈
+  {data, schema, substrate}`, per RDR-112 §7) — `_BindingWatcher`'s
+  failure-isolation logic depends on this to avoid auto-disabling
+  user bindings when the daemon hiccups (see §Step 6 Watcher
+  failure isolation).
+- **Subspace registry validation is daemon-side** (RDR-112 Approach
+  §8) — the ORB-supplied subspaces (per CA-9) land via
+  `nx daemon t2 subspace add <yaml>` rather than client-side
+  runtime registration.
+- **Migration ownership is daemon-side** (RDR-112 Approach §9) —
+  the `watcher_state` table and the `action_idempotency` table are
+  applied by the daemon at startup, not by the MCP client (CA-10
+  language adjusted accordingly in the gate revision).
+- **Cockpit panel direct-SQL queries** (Steps 8 + 9 + the
+  active-claims and recent-events surfaces) — under RDR-112 these
+  re-route through daemon read RPCs (or the introspection surface
+  `nx daemon t2 exec --raw` for ad-hoc analytical queries; see
+  RDR-112 §Nexus-in-its-own-container). The query shapes are
+  unchanged; only the substrate boundary moves.
+- **Host-trust model** is inherited from RDR-113 (UDS chmod, peer
+  credentials, single-user v1). Cockpit projections respect the
+  same trust boundary as every other daemon client — only the
+  daemon-owner UID sees other-agent tuples and mailbox traffic.
+
+RDR-111 is **blocked on RDR-112 Phase 1** (T2 daemon with
+EventStream RPC) for the binding-watcher pieces. The cockpit
+surfaces that only query (not subscribe) can ship earlier against
+the daemon's read RPCs.
 
 ## Research Findings
 
@@ -751,45 +795,45 @@ MCP event loop. Callers poll status via `binding_list` filtering on
 A `_BindingWatcher` background task (integrated with the FastMCP
 lifespan async task group per RDR-094; **must be `asyncio.create_task`,
 not `threading.Thread`** — the MCP server is async and thread-pool
-dispatch creates reentrancy risk) that polls for new events via **direct
-T2 SQL query** on the `tuples` table.
+dispatch creates reentrancy risk) that consumes new events via the
+**RDR-112 daemon `EventStream` RPC** on the `tuples/<subspace>`
+namespace.
 
-**Retrieval mechanism — intentional internal bypass of `read()` API**:
-RDR-110's `read()` API has no ordered-retrieval or `since_cursor`
-parameter. `_BindingWatcher` is an internal component that runs in the
-same `nx-mcp` process as the tuple store and therefore has direct access
-to `~/.config/nexus/tuples.db` (RDR-110's tuple-space database —
-distinct from `~/.config/nexus/memory.db`). The correct retrieval
-pattern is:
+**Retrieval mechanism — RDR-112 EventStream RPC**: under RDR-112 the
+T2 daemon owns the SQLite handle for `tuples.db`; the MCP server is a
+*client* of the daemon (RDR-112 §Proposed Solution §1 + Approach §7).
+Direct SQL access from inside `nx-mcp` is daemon-internal-only and
+forbidden to clients. The watcher subscribes via:
 
-```sql
--- against ~/.config/nexus/tuples.db
-SELECT rowid, * FROM tuples
-WHERE subspace = ?
-  AND rowid > ?    -- last-seen cursor
-ORDER BY rowid ASC
-LIMIT 100;
+```python
+# Pseudocode — verify signature during implementation.
+async for event in t2_client.event_stream(
+    subspace_prefix="tuples/<subspace>",
+    since_cursor=last_rowid,   # 0 on first connect; persisted across restarts
+):
+    # event = {cursor: rowid, subspace, op, payload_summary, category, ts}
+    ...
 ```
 
-The `rowid` is SQLite's native monotonic row counter — it provides total
-ordering within the table, which is exactly what the watcher needs. This
-is *not* a semantic query and does not belong in the `read()` API surface.
-The intentional design boundary: `read()` is for external MCP callers doing
-associative or structural queries; the watcher is an internal subscriber
-that needs ordered streaming, and it accesses `tuples.db` directly.
+The daemon's EventStream RPC carries the same monotonic `rowid` cursor
+the original direct-SQL pattern used, so the at-least-once semantics
+(below) survive verbatim — only the transport changes. On disconnect,
+the watcher reconnects from its last-acked cursor. `EventStream` is the
+*only* way clients observe tuple changes; the RDR-110 `read()` API
+remains the surface for associative / structural queries by external
+callers.
 
 A `watcher_state` table records the per-subspace cursor (last-seen
-`rowid`). **Database placement**: `watcher_state` should live in
-`tuples.db` (not `memory.db`) so the cursor read and tuple read are in
-the same database, so that only one connection is needed for both reads
-and cursor updates (not transactional atomicity across dispatch and commit
-— dispatch is an async network call that cannot be inside a SQLite
-transaction; see pseudocode below). Add `watcher_state` as a CREATE TABLE in the RDR-110
-tuple-space migration (not in `src/nexus/db/migrations.py`, which manages
-`memory.db`):
+`rowid`). **Database placement**: `watcher_state` lives in `tuples.db`
+alongside the tuple data. Under RDR-112, this table is owned by the T2
+daemon (single SQLite handle); the client-side watcher reads and writes
+its cursor via a dedicated daemon RPC pair (`watcher_state.get`,
+`watcher_state.set`) rather than direct SQL. The schema (owned by
+RDR-110's tuple-space migration, applied daemon-side per RDR-112
+Approach §9):
 
 ```sql
--- in tuples.db migration (RDR-110 implementation)
+-- in tuples.db migration (RDR-110 implementation, daemon-applied)
 CREATE TABLE IF NOT EXISTS watcher_state (
     subspace   TEXT NOT NULL,
     profile    TEXT NOT NULL,
@@ -866,14 +910,32 @@ Action dispatch: `tool_call` type dispatches via the MCP tool API
 field on the action descriptor (default 10s); timeout fires the next
 cursor advance regardless.
 
-**Watcher failure isolation**: any exception in dispatch is caught,
-logged via `structlog.get_logger(__name__)` (the watcher runs inside
-the `nx-mcp` process, so logs flow through the standard structured
-logging pipeline), and the cursor advances past the failed event to
-prevent livelock. A consecutive-failure counter is kept in T2 (small
-keyed table; resets on first successful dispatch) and triggers watcher
-pause after 5 consecutive failures on the same binding (indicating a
-broken binding); the binding is auto-disabled with an error annotation.
+**Watcher failure isolation** — must distinguish failure categories
+to compose correctly with the RDR-112 daemon:
+
+- **Action failure** (the dispatched tool call / `out` / send_message
+  raised). Caught, logged via `structlog.get_logger(__name__)`, cursor
+  advances past the failed event to prevent livelock. Consecutive-
+  failure counter (kept in T2 via `memory_put`) increments; after 5
+  consecutive failures on the same binding the binding is
+  auto-disabled with an error annotation. This is "the user's binding
+  is broken" — the original failure-isolation path, unchanged.
+- **Substrate failure** (RDR-112 daemon down, EventStream RPC
+  disconnect, transient transport error). Logged at WARN; cursor does
+  **not** advance; consecutive-failure counter does **not** increment
+  toward auto-disable. The watcher reconnects with exponential
+  back-off (capped at 30s) and resumes from the last-acked cursor.
+  Substrate hiccups must not silently auto-disable user bindings.
+- **Schema failure** (event payload doesn't match the binding's
+  expected shape — e.g. a registry version mismatch). Logged at ERROR
+  with the binding ID, cursor advances, counter increments. Treated
+  as an action failure: the binding is wrong relative to the current
+  schema and the user needs to fix it.
+
+The EventStream event record carries an optional `category` field
+(per RDR-112 Approach §7); for transport-level errors the watcher
+classifies directly from the exception type without needing daemon
+cooperation.
 
 #### Step 7: Phase 1 CA spikes (gate Phase 2)
 
@@ -1047,3 +1109,4 @@ Other gates:
 | 2026-05-11 | Hal Hildebrand | Post-gate-6 revision (no criticals; all significant and observation issues addressed pre-accept): (SIG-A) replaced `rd`/`in` Linda aliases with `read`/`take` throughout all implementation-facing sections — Bindings CRUD, active-bindings panel, Step 10, Relationship to RDR-110 surfaces sentence, Key Discoveries (bindings, surfaces, cross-process), CA-3 across all references (assumption table, Step 7b spike, Finalization Gate), and the Linda bullet's "ORB uses" clause; added Linda→RDR-110 API name mapping table and usage rule to Relationship to RDR-110 section; (SIG-B) added `layout_state/<profile>` subspace schema block (dimensions: profile, event_type; content: surface_level, demotion_level, ttl_seconds, pinned) to Proposed Solution; added `layout_state.yml` and `connection_manifest.yml` to Step 1 file list; (OBS-1) added `tuple_claim_log` join note for `claimed_at` display field — `tuples` has no `claimed_at` column; (OBS-2) `connection_manifest.yml` now explicit in Step 1; (OBS-3) integration test 3 corrected to distinguish SQL-based panels (active-claims, recent-events) from `read()`-based panel (active-bindings); (OBS-4) Step 2 explicitly documents which hook types are projected (7) and which are excluded (SubagentStart, PermissionRequest) with rationale |
 | 2026-05-11 | Hal Hildebrand | Post-gate-3 revision (all gate-3 BLOCKED issues addressed): (C-G3-1) Added `task_id` (string) and `status` (enum: pending/active/failed) dimensions to bindings subspace schema YAML; documented enabled/status/task_id lifecycle; (S-G3-1) moved `watcher_state` table to `tuples.db` (not `memory.db`) for genuine single-transaction cursor atomicity; corrected "atomic" language; (S-G3-2) added `claim_expires_at > unixepoch()` filter to active-claims panel query in Proposed Solution and Step 8 to exclude expired leases; (S-G3-3) flagged Step 2 bridge registration order as provisional pending CA-8; moved CA-8 spike to new Step 1b (before Step 2); added feature-flag requirement for registration order; (S-G3-4) changed recent-events panel from `rd()` (no time ordering) to direct SQL on `tuples.db` ordered by `created_at DESC`; semantic filter noted as opt-in mode; (S-G3-5) replaced "direct T2 SQL via src/nexus/db/" with explicit `tuples.db` database references throughout; (O1) corrected "six" to "seven" subspaces; (O2) documented PostCompact/PreCompact exclusion with rationale; (O3) updated CA-9 gate condition to outcome-based (confirmed open-registry shipping) not action-based (notification sent) |
 | 2026-05-11 | Hal Hildebrand | Post-gate-7 revision (1 critical + 2 significant + 2 observations all addressed pre-accept): (C-G7-1) removed `PostCompact` from Step 2 bridge registration list — was contradicted by Proposed Solution's explicit exclusion; added `PreCompact` and `PostCompact` to the not-registered list with rationale cross-reference; (SIG-G7-1) replaced three residual `rd()` aliases with `read()` — Step 4 bindings dimension example, Step 6 `_BindingWatcher` rationale paragraph (header + two body references); (SIG-G7-2) corrected "six" → "seven" hook-event subspaces at four remaining sites (Relationship to RDR-110 summary, CA-9 description, CA-9 risk-if-wrong, Phase 1 section header); added `layout_state` to the Relationship-section subspace enumeration; (OBS-G7-1) active-claims display now explicitly extracts `actor` via `json_extract(t.dimensions_json, '$.actor')` — `actor` lives inside `dimensions_json`, not a top-level column; (OBS-G7-2) watcher failure isolation now logs via `structlog` (not "T2 scratch" — category error, scratch is T1); failure counter kept in T2 as before |
+| 2026-05-13 | Hal Hildebrand | **Triad rework (RDR-110/111/112 composition gaps, deep-analyst `a56172936d63fd480`)**: added §Relationship to RDR-112; rewrote §Step 6 binding-watcher to consume RDR-112 `EventStream(subspace_prefix, since_cursor)` RPC instead of direct SQL on `tuples.db` (cursor protocol and at-least-once semantics preserved verbatim; only transport changes); rewrote §Step 6 Watcher failure isolation to distinguish action / substrate / schema failure categories so daemon hiccups do not silently auto-disable user bindings (closes G5); updated `watcher_state` placement to record that the table is daemon-owned and read/written via dedicated RPCs (closes G4 wrt RDR-111 dependency); `related_rdrs` frontmatter extended to include RDR-112 and RDR-113. RDR-111 is now blocked on RDR-112 Phase 1 for the binding-watcher; query-only cockpit surfaces unaffected. |

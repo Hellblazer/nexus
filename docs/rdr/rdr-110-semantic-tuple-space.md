@@ -2048,31 +2048,49 @@ has two ordering options.
 CAS primitive is independent of where it runs; the daemon is a
 transport wrapper, not a redesign.
 
-**Revised preference (2026-05-13, RDR-112 gate round 2)**: **a
-hybrid is required for the `block=True` path.** RDR-112 gate
+**Revised preference (2026-05-13, RDR-112 gate round 2)**: a
+hybrid is required for the `block=True` path. RDR-112 gate
 round 1 surfaced that the `data_version`-polling mechanism in
 §RF-9 / §CA #6 — which underwrites `block=True` cross-process
 wake — depends on the same `mmap` semantics that RDR-112 §A2
 verified are broken across container overlayfs bind mounts.
-`data_version` works same-host; it does *not* propagate from
-container to container against an overlayfs-mounted SQLite.
-`block=True` against direct-file T2 from inside a sandbox
-container would silently wedge or miss wakes.
 
-**Concrete revised ordering**:
+**Further-revised scope (2026-05-13, RDR-110/111/112 triad
+analysis)**: the round-2 carve-out was too narrow. The overlayfs
+`mmap` failure is a **class** of bug, not specifically about
+`data_version`. SQLite's single-writer lock — the foundation of
+*every* RDR-110 operation, including the `block=False` CAS at
+§RF-9 — relies on the same `mmap` semantics. Across overlayfs
+bind mounts, two containers each open their own SQLite handle
+that resolves to a forked WAL with its own single-writer lock.
+**Two `block=False` claimants in different containers can both
+win the CAS.** Sweeps (`sweep_expired_claims`,
+`sweep_tombstones`) run against each container's forked WAL and
+produce inconsistent tombstones. The `tuple_claim_log` audit
+captures only its container's view.
 
-- `block=False` (polling, non-blocking) — unaffected; ships in
-  RDR-110 Phase 1 Step 4 as designed. Same-host and containers
-  both correct.
-- `block=True` (cross-process wake via `data_version`) — ships
-  only after the T2 daemon's blocking-take RPC is in place
-  (RDR-112), gated behind `NX_STORAGE_MODE=daemon`. RDR-110
-  Phase 1 Step 4 lands the call sites and the same-host
-  watcher implementation; the path is feature-flagged off until
-  the substrate supports it.
+**Definitive ordering (D3 from the triad rework)**:
 
-The CAS primitive itself is unchanged in either path.
+- **Single-host, single-filesystem** (no container boundaries):
+  direct-file T2 access is correct for both `block=False` and
+  `block=True`. CA #1, CA #2, CA #5, CA #6 hold as Verified for
+  this scope only.
+- **Multi-container or any deployment that crosses an overlayfs
+  bind mount**: all RDR-110 operations require
+  `NX_STORAGE_MODE=daemon`. The daemon owns the single SQLite
+  handle (single lock, single WAL, single `data_version`), and
+  clients call atomic-take / sweep / audit via RPC. `block=True`
+  is implemented daemon-side as a blocking-take RPC.
+- **Phase 1 Step 4** ships the CAS implementation and the
+  same-host watcher as designed. The `block=True` call sites
+  land feature-flagged off until `NX_STORAGE_MODE=daemon` is
+  available; `block=False` ships unconditionally and is correct
+  same-host. **Multi-container deployments must run in daemon
+  mode regardless of `block` value.**
+
+The CAS primitive itself is unchanged in any path; only the
+container-vs-daemon boundary determines correctness.
 
 **No changes to RDR-110's design surface.** `related_rdrs`
-frontmatter updated to include RDR-112; this revision-history note
-records the cross-reference and the sequencing constraint.
+frontmatter includes RDR-112; this revision-history note
+records the cross-reference and the full sequencing constraint.
