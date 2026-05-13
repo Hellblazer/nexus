@@ -9,7 +9,7 @@ reviewed-by: self
 created: 2026-05-09
 accepted_date: 2026-05-09
 related_issues: []
-related_rdrs: [RDR-004, RDR-041, RDR-077, RDR-078, RDR-079, RDR-087, RDR-092, RDR-105, RDR-106, RDR-107, RDR-108, RDR-112]
+related_rdrs: [RDR-004, RDR-041, RDR-077, RDR-078, RDR-079, RDR-087, RDR-092, RDR-105, RDR-106, RDR-107, RDR-108, RDR-112, RDR-113]
 related_tests: []
 implementation_notes: ""
 ---
@@ -1022,14 +1022,25 @@ two-statement read-then-update because the simpler pattern
 above conflates same-claimant retake with foreign-claimant
 contention. Documented; not in the pseudocode for clarity.
 
-**`data_version` polling thread**: a single `_TupleSpaceWatcher`
-thread per `tuples.db` connection runs `PRAGMA data_version`
-every 1ms, fires `wake_event` on increment. Started at MCP
-lifespan start (per RDR-094), stopped at lifespan finally.
-CPU cost: one integer read per millisecond per database. All
-blocking `take` calls share the same wake_event; spurious wakes
-(commits not relevant to this caller's subspace) cost one
-extra UPDATE attempt that returns no row.
+**`data_version` polling thread** (`NX_STORAGE_MODE=direct` only):
+a single `_TupleSpaceWatcher` thread per `tuples.db` connection
+runs `PRAGMA data_version` every 1ms, fires `wake_event` on
+increment. Started at MCP lifespan start (per RDR-094), stopped
+at lifespan finally. CPU cost: one integer read per millisecond
+per database. All blocking `take` calls share the same wake_event;
+spurious wakes (commits not relevant to this caller's subspace)
+cost one extra UPDATE attempt that returns no row.
+
+**Under `NX_STORAGE_MODE=daemon` (RDR-112)**, the watcher is
+*daemon-internal* — the daemon owns the single `tuples.db`
+connection (one process, one lock, one `data_version`) and exposes
+client-side waiting via the **blocking-take RPC** and the
+**`EventStream(subspace_prefix, since_cursor) → Stream<Event>`
+RPC** (RDR-112 Approach §7). Clients never hold a `tuples.db`
+connection in daemon mode; doing so would fork the WAL (RDR-112
+§A2) and is forbidden by the `nx doctor --check-storage-boundary`
+lint (RDR-112 §5). The in-process watcher described above is the
+direct-mode path only.
 
 **Tier routing:**
 
@@ -1362,6 +1373,25 @@ algorithm) on any increment. Started at MCP lifespan start
 (per RDR-094 / RDR-105 lifecycle pattern), stopped at lifespan
 finally. Honker's production cadence is the reference (1-2ms
 median wake latency).
+
+**Mode split — daemon vs direct (RDR-112)**: the watcher described
+above is the **`NX_STORAGE_MODE=direct`** path only (same-host,
+single-filesystem deployments). Under
+**`NX_STORAGE_MODE=daemon`**, the MCP server is a client of the T2
+daemon (RDR-112 D1) and does **not** hold a `tuples.db`
+connection — the watcher runs daemon-side, owned by the single
+process that owns the SQLite file. Client-side `block=True`
+calls into `take` route through the daemon's **blocking-take
+RPC**; client-side observers (RDR-111's `_BindingWatcher`,
+cockpit panels) subscribe via the daemon's
+**`EventStream(subspace_prefix, since_cursor)`** RPC (RDR-112
+Approach §7). Holding a client-side `tuples.db` connection
+under daemon mode is forbidden by the
+`nx doctor --check-storage-boundary` lint (RDR-112 §5) and would
+fork the WAL across the overlayfs boundary (RDR-112 §A2).
+`block=True` ships feature-flagged in Step 4 and is enabled when
+daemon mode is the default, per the sequencing constraint in
+the Revision-History "Further-revised scope (2026-05-13)" block.
 
 #### Step 5: Periodic sweeps
 
@@ -1785,7 +1815,14 @@ work-stealing harness) is in scope and bundled into Phase 1 Step 7._
 - **Incremental adoption**: v1 ships alongside existing surfaces;
   no callers forced to migrate. v2 wraps existing surfaces
   behavior-preservingly. v3 deprecates parallel APIs.
-- **Secret/credential lifecycle**: N/A.
+- **Secret/credential lifecycle**: N/A in the tuple-space layer
+  itself. The trust boundary for agent-private subspaces (notably
+  `mailbox/<agent>`) is inherited from the storage substrate: under
+  `NX_STORAGE_MODE=daemon`, **RDR-113** (host-trust model — UDS
+  `chmod 0600` + peer-credential check, single-user v1) ensures
+  only the daemon-owner UID can read/write any subspace through the
+  daemon. Under `direct` mode, host filesystem permissions on
+  `tuples.db` are the gate (same-host single-user assumption).
 - **Memory management**: Per-template chroma collections at T2 are
   bounded by `retention_seconds`. Tombstone sweep enforces ceiling.
   Claim ledger is bounded by lease expiry + sweep cadence.
@@ -2094,3 +2131,40 @@ container-vs-daemon boundary determines correctness.
 **No changes to RDR-110's design surface.** `related_rdrs`
 frontmatter includes RDR-112; this revision-history note
 records the cross-reference and the full sequencing constraint.
+
+### 5x5 alignment pass 2026-05-13
+
+After RDR-111 (PASSED R9), RDR-112 (PASSED light re-gate), and
+RDR-113 (PASSED R1) all completed their gates, a focused
+critic alignment check (`a25b97d1aac1d8523`) flagged one
+significant + three observations against RDR-110. Closeouts in
+this revision (no design-surface change; record-keeping only):
+
+- **S** (significant): Technical Design `data_version` polling
+  thread description (lines ~1025) and Implementation Plan
+  Step 4 watcher description (lines ~1368) said the
+  `_TupleSpaceWatcher` runs in-process against `tuples.db` —
+  correct in `NX_STORAGE_MODE=direct`, but under
+  `NX_STORAGE_MODE=daemon` (RDR-112) the watcher is
+  daemon-internal and clients subscribe via the daemon's
+  `EventStream` / blocking-take RPCs. Holding a client-side
+  `tuples.db` connection in daemon mode is forbidden by
+  `nx doctor --check-storage-boundary` (RDR-112 §5 lint).
+  Both sites now carry a "Mode split — daemon vs direct"
+  note pointing at RDR-112 Approach §7 and §A2. The
+  in-process watcher path remains correct as the direct-mode
+  implementation; daemon-mode adds the RPC indirection.
+- **O1**: Frontmatter `related_rdrs` did not include RDR-113.
+  Added.
+- **O2**: Body prose had no cite for RDR-113's host-trust
+  model on `mailbox/<agent>` and other agent-private
+  subspaces. Added a paragraph in §Cross-Cutting Concerns
+  §Secret/credential lifecycle naming RDR-113 as the trust
+  boundary under daemon mode.
+- **O3**: (RDR-111 Proposed Solution panel descriptions had
+  stale "same process, direct SQL appropriate" justification
+  — fixed in RDR-111 alongside this RDR's edits, not in
+  RDR-110.)
+
+No re-gate required — these are documentation-tracking
+corrections, not design changes.
