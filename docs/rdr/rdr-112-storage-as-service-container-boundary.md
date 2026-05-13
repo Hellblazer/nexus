@@ -1,5 +1,5 @@
 ---
-title: "Storage-as-Service: T2/T3 Behind a Process Boundary, T1 Stays In-Container"
+title: "Storage-as-Service: Every Persistent Shared-State Store Behind a Daemon, T1 Stays In-Container"
 id: RDR-112
 type: Architecture
 status: draft
@@ -14,7 +14,7 @@ related_tests: []
 implementation_notes: ""
 ---
 
-# RDR-112: Storage-as-Service: T2/T3 Behind a Process Boundary, T1 Stays In-Container
+# RDR-112: Storage-as-Service: Every Persistent Shared-State Store Behind a Daemon, T1 Stays In-Container
 
 > Revise during planning; lock at implementation.
 > If wrong, abandon code and iterate RDR.
@@ -112,17 +112,46 @@ configurations traces back to this gap.
 
 ### Technical Environment
 
-- **T2**: SQLite + FTS5, seven domain stores behind `T2Database` facade.
-  WAL mode enabled. Currently opened by direct path; no daemon.
+**Scope is universal**: every persistent shared-state store in
+nexus moves behind a daemon — not just T2 and T3. The container/silo
+problem is structural to *any* file-backed store opened by direct
+path; cherry-picking only T2/T3 would leave the same class of bug
+sitting under another name (today: `catalog.db`; tomorrow: any new
+domain store added without thinking about the boundary).
+
+Inventory of in-scope stores (every direct file open under
+`src/nexus/`):
+
+- **T2 (seven domain stores)** behind `T2Database` facade:
+  `memory_store`, `plan_library`, `chash_index`, `catalog_taxonomy`,
+  `aspect_extraction_queue`, `document_aspects`, `telemetry`. SQLite
+  + FTS5, WAL enabled. Each opens its own `sqlite3.Connection`.
 - **T3 local mode**: `chromadb.PersistentClient(path)` + local ONNX
-  embedder. Currently opened by direct path; no daemon.
-- **T3 cloud mode**: `chromadb.CloudClient` — already service-shaped
-  by construction; nothing to change.
+  embedder.
+- **T3 cloud mode**: `chromadb.CloudClient` — already service-shaped;
+  no daemon needed (it's a remote service), but its access goes
+  through the same `T3Client` abstraction for symmetry.
+- **CatalogDB** (`src/nexus/catalog/catalog_db.py:250-255`): own
+  SQLite file, own `sqlite3.connect()`. Structurally identical to a
+  T2 domain store and equally vulnerable to the container silo
+  problem. **In scope.**
+- **Any future shared-state store** — the architecture must make the
+  daemon boundary the *default* way to add persistent state, not an
+  option developers have to remember to use.
 - **T1**: `chromadb.EphemeralClient` in-process or per-session HTTP
-  via RDR-105 env passdown. Out of scope for this RDR.
-- **MCP boundary**: every nexus tool consumer talks to the database
-  through `nexus.mcp.*` handlers today; those handlers open T2/T3
-  directly. A service split would put a thin client there instead.
+  via RDR-105 env passdown. Per-process isolation is *correct* for
+  T1; **explicitly out of scope** and stays as-is.
+
+Direct-file-open call sites under `src/nexus/` total roughly 80
+files (grepping `sqlite3.connect` + `PersistentClient`). The
+impact-analysis inventory (T2 entry `nexus_rdr/112-research-impact-inventory`)
+breaks these down by surface and refactor cost.
+
+**MCP boundary**: every nexus tool consumer talks to storage through
+`nexus.mcp.*` handlers today; those handlers open T2/T3/CatalogDB
+directly. A service split puts a thin client there instead. The MCP
+server becomes a *client* of the daemons even when co-located on
+the same host.
 
 ## Research Findings
 
@@ -237,9 +266,27 @@ T2 facade and stores (`src/nexus/db/t2/`, `src/nexus/db/memory_store.py`,
    so the transport hop is below noise. Local-mode T3 stops being
    "open the directory directly" and becomes "connect to the managed
    local server."
-3. **T1 stays put**: RDR-105's env passdown is already correct for T1.
+3. **CatalogDB service**: `CatalogDB` (`src/nexus/catalog/catalog_db.py`)
+   is a separate SQLite file structurally identical to a T2 domain
+   store. **Two viable shapes** — to be decided during planning:
+   (a) collapse CatalogDB into T2 as an eighth domain store and serve
+   from `nx daemon t2` (preferred for operational simplicity — one
+   daemon, one introspection surface, one discovery file); or
+   (b) ship `nx daemon catalog` as a third daemon, mirroring T2's
+   transport and discovery pattern (preferred only if catalog's
+   schema-evolution cadence or crash-isolation profile differs enough
+   from T2 to justify the second process). The container-silo
+   problem and the introspection-surface requirement are the same
+   either way.
+4. **T1 stays put**: RDR-105's env passdown is already correct for T1.
    No change.
-4. **Discovery (dual-primary)**: each daemon writes **both** its
+5. **Any future persistent store** is added as a domain inside an
+   existing daemon (preferred) or as a new daemon (only if a
+   first-class operational separation is needed). Direct
+   `sqlite3.connect()` / `chromadb.PersistentClient()` outside a
+   daemon process becomes a lint-checked anti-pattern, enforced by
+   `nx doctor` or a CI rule.
+6. **Discovery (dual-primary)**: each daemon writes **both** its
    UDS socket path and its TCP `host:port` to
    `~/.config/nexus/<tier>_addr.<host_uid>` (single file, both
    addresses) for host-native consumers with shared filesystem. For
@@ -247,24 +294,28 @@ T2 facade and stores (`src/nexus/db/t2/`, `src/nexus/db/memory_store.py`,
    unreachable (PID-namespaced containers per the A4 finding,
    Windows-VM co-work, or containerised Claude Desktop), the
    orchestrator injects `NX_T2_SOCK` and/or `NX_T2_ADDR` (and the T3
-   equivalents) into the container's environment. Daemon emits both
-   addresses on stdout at startup for orchestrator capture. **Client
-   transport selection**: if `NX_T2_SOCK` is set and the socket is
-   reachable → UDS. Else if `NX_T2_ADDR` is set → TCP. Else read the
-   discovery file and try UDS first, TCP second. Fail loud if neither
-   reaches a live daemon.
-5. **Lifecycle hooks**: the T2 daemon publishes change events to a
+   / catalog equivalents) into the container's environment. Daemon
+   emits both addresses on stdout at startup for orchestrator
+   capture. **Client transport selection**: if `NX_T2_SOCK` is set
+   and the socket is reachable → UDS. Else if `NX_T2_ADDR` is set →
+   TCP. Else read the discovery file and try UDS first, TCP second.
+   Fail loud if neither reaches a live daemon.
+7. **Lifecycle hooks**: each daemon publishes change events to a
    local pub-sub (RDR-110 tuple space surface), enabling RDR-111's
    ORB projection without each client having to instrument writes.
+   T2, CatalogDB, and T3 all participate.
 
 ### Existing Infrastructure Audit
 
 | Proposed Component | Existing Module | Decision |
 | --- | --- | --- |
-| `nx daemon t2` | `nexus.db.t2_database.T2Database` | Extend — wrap existing facade in a socket server; do not rewrite store logic. |
-| `nx daemon t3` (local mode) | `nexus.db.t3_local.LocalT3Client` | Replace — direct PersistentClient becomes managed `chroma run` subprocess. |
-| Client-side `T2Client` | `nexus.db.t2_database.T2Database` | New — thin RPC client mirroring the facade signature, so call sites do not change. |
-| Discovery file | `~/.config/nexus/t1_addr.<claude_pid>` (RDR-105) | Extend pattern — same mechanism, different filenames per tier. |
+| `nx daemon t2` | `nexus.db.t2.T2Database` (seven domain stores) | Extend — wrap existing facade in a socket server; do not rewrite store logic. |
+| `nx daemon t3` (local mode) | `nexus.db.t3.T3Database` (PersistentClient) | Replace — direct PersistentClient becomes managed `chroma run` subprocess. |
+| CatalogDB serving (in scope) | `nexus.catalog.catalog_db.CatalogDB` (`sqlite3.connect` at `:255`) | Decide during planning: collapse into T2 as eighth domain store (preferred), or ship as separate `nx daemon catalog`. Either way, direct file access goes away. |
+| Client-side `T2Client` | `T2Database` facade | New — thin RPC client mirroring the facade signature, so call sites do not change. |
+| Client-side `CatalogClient` | `CatalogDB` public API | New — same pattern; whether it shares the `T2Client` connection depends on the daemon-collapse decision. |
+| Discovery file | `~/.config/nexus/t1_addr.<claude_pid>` (RDR-105) | Extend pattern — same mechanism, one address file per daemon. |
+| **Lint rule**: ban direct `sqlite3.connect` / `PersistentClient` outside `src/nexus/db/` daemon-internal code | (new) | Prevents regression: future stores must go through a daemon by default. |
 
 ### Decision Rationale
 
@@ -608,3 +659,17 @@ locked design. Right-size before gate.
   least as expressive as direct-file reads. Cross-references RDR-110
   (atomic-take CAS unchanged — same SQLite handle, single process,
   daemon hosts it) and RDR-111 (event-streaming surface).
+- 2026-05-12 — **Scope generalised**: RDR-112 covers *every*
+  persistent shared-state store, not just T2 and T3. Initial draft
+  scoped narrowly out of caution; an impact analysis (T2:
+  `nexus_rdr/112-research-impact-inventory`) revealed `CatalogDB`
+  (`src/nexus/catalog/catalog_db.py:250-255`) is structurally
+  identical to a T2 domain store and equally vulnerable. Cherry-picking
+  only T2/T3 would leave the same silo bug under another name and
+  invite future stores to repeat the pattern. Title updated;
+  Technical Environment lists in-scope stores explicitly;
+  Existing Infrastructure Audit adds CatalogDB and a lint rule
+  banning direct `sqlite3.connect` / `PersistentClient` outside
+  daemon-internal code. Approach §3 names two planning-time options
+  for CatalogDB (collapse into T2, or ship as third daemon).
+  Discovery and lifecycle hooks (§6, §7) renumbered to reflect.
