@@ -5189,11 +5189,24 @@ def _run_replay_equality() -> dict:
     # — a future schema migration that adds a column before ``id`` would
     # silently strip the wrong field under positional indexing).
     LINKS_EXCLUDE = ["id"]
+    # nexus-vxz3: documents.chunk_count is a denormalised cache populated
+    # by the post-store manifest-write batch hook (resync_chunk_count_cache),
+    # not by event-log events. The in-memory replay catalog has no
+    # document_chunks table to derive chunk_count from, so the projector's
+    # post-replay re-derive sees zero manifest rows and keeps the
+    # register-time chunk_count (typically 0). Live SQLite reflects the
+    # hook-driven value (typically 1+ for docs with at least one chunk).
+    # Exclude chunk_count from the comparison — it's intentionally
+    # non-event-sourced and the boundary is documented at
+    # mcp_infra.manifest_write_batch_hook.
+    DOCUMENTS_EXCLUDE = ["chunk_count"]
     live_uri = f"file:{live_db_path}?mode=ro"
     with closing(sqlite3.connect(live_uri, uri=True)) as live_conn:
         live_snap = {
             "owners": _snapshot_table(live_conn, "owners"),
-            "documents": _snapshot_table(live_conn, "documents"),
+            "documents": _snapshot_table(
+                live_conn, "documents", exclude_cols=DOCUMENTS_EXCLUDE,
+            ),
             "links": _snapshot_table(live_conn, "links", exclude_cols=LINKS_EXCLUDE),
             # RDR-101 Phase 6 prophylactic-review fix: include the
             # collections projection in replay-equality. Pre-fix this
@@ -5223,7 +5236,9 @@ def _run_replay_equality() -> dict:
         with closing(sqlite3.connect(str(projected_path))) as proj_conn:
             projected_snap = {
                 "owners": _snapshot_table(proj_conn, "owners"),
-                "documents": _snapshot_table(proj_conn, "documents"),
+                "documents": _snapshot_table(
+                    proj_conn, "documents", exclude_cols=DOCUMENTS_EXCLUDE,
+                ),
                 "links": _snapshot_table(proj_conn, "links", exclude_cols=LINKS_EXCLUDE),
                 "collections": _snapshot_table(proj_conn, "collections"),
             }

@@ -155,6 +155,73 @@ def delete_cmd(name: str, yes: bool) -> None:
     except Exception as exc:
         click.echo(f"warn: pipeline-state cleanup failed: {exc}", err=True)
 
+    # nexus-jm3z: cascade to catalog. Pre-fix, `nx collection delete`
+    # left catalog.documents rows whose physical_collection pointed at
+    # the now-gone collection, plus a stale catalog.collections
+    # projection row. Both surfaced as doctor FAILs (t3-vs-catalog +
+    # collections-drift) requiring per-tumbler manual cleanup. Run the
+    # cascade here so a single delete leaves the catalog clean.
+    catalog_docs_deleted = 0
+    catalog_projection_deleted = 0
+    try:
+        from nexus.catalog.catalog import Catalog
+        from nexus.config import catalog_path
+
+        cat_path = catalog_path()
+        if Catalog.is_initialized(cat_path):
+            cat = Catalog(cat_path, cat_path / ".catalog.db")
+            # Delete every document row pointing at the gone collection.
+            # Use the public delete_document so the event log + JSONL
+            # tombstone stay in sync with the SQLite projection.
+            orphan_tumblers = [
+                row[0]
+                for row in cat._db.execute(
+                    "SELECT tumbler FROM documents WHERE physical_collection = ?",
+                    (name,),
+                ).fetchall()
+            ]
+            for tumbler in orphan_tumblers:
+                try:
+                    if cat.delete_document(tumbler):
+                        catalog_docs_deleted += 1
+                except Exception:
+                    _log.debug(
+                        "collection_delete_cascade_document_failed",
+                        tumbler=tumbler, exc_info=True,
+                    )
+            # nexus-vxz3: emit CollectionDeleted event so replay
+            # produces SQLite state matching the live delete. The
+            # projector's _v0_collection_deleted handler drops the
+            # projection row.
+            from nexus.catalog.events import CollectionDeletedPayload
+            from nexus.catalog import catalog as _cat_mod
+
+            row_before = cat._db.execute(
+                "SELECT 1 FROM collections WHERE name = ?", (name,),
+            ).fetchone()
+            if row_before is not None:
+                event = _cat_mod._make_event(
+                    CollectionDeletedPayload(
+                        coll_id=name,
+                        reason="nx collection delete",
+                    ),
+                    v=0,
+                )
+                if cat._event_sourced_enabled:
+                    cat._write_to_event_log(event)
+                    cat._projector.apply(event)
+                    cat._db.commit()
+                else:
+                    cat._db.execute(
+                        "DELETE FROM collections WHERE name = ?",
+                        (name,),
+                    )
+                    cat._db.commit()
+                    cat._emit_shadow_event(event)
+                catalog_projection_deleted = 1
+    except Exception as exc:
+        click.echo(f"warn: catalog cascade failed: {exc}", err=True)
+
     parts: list[str] = []
     if taxonomy_counts and any(taxonomy_counts.values()):
         parts.append(
@@ -167,6 +234,10 @@ def delete_cmd(name: str, yes: bool) -> None:
         parts.append(f"{chash_deleted} chash rows")
     if pipeline_rows_deleted:
         parts.append(f"{pipeline_rows_deleted} pipeline rows")
+    if catalog_docs_deleted:
+        parts.append(f"{catalog_docs_deleted} catalog docs")
+    if catalog_projection_deleted:
+        parts.append(f"{catalog_projection_deleted} catalog projection row")
     if parts:
         click.echo(f"Deleted: {name} ({'; '.join(parts)})")
     else:
