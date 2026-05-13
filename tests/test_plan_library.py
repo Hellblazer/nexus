@@ -915,3 +915,96 @@ def test_search_plans_still_matches_raw_description(
     results = plan_db.search_plans("semantic")
     assert results, "description tokens still FTS-hit via match_text"
     assert "semantic" in results[0]["query"]
+
+
+# ── delete_by_tag + plans_mtime (RDR-112 P0.1 / nexus-j07g) ──────────────────
+
+
+def test_delete_by_tag_removes_matching_rows(plan_db: T2Database) -> None:
+    """``delete_by_tag`` removes only rows whose ``tags`` includes the tag."""
+    plan_db.save_plan(query="builtin-a", plan_json="{}", tags="builtin-template,other")
+    plan_db.save_plan(query="builtin-b", plan_json="{}", tags="builtin-template")
+    plan_db.save_plan(query="user-c", plan_json="{}", tags="custom")
+
+    removed = plan_db.plans.delete_by_tag("builtin-template")
+    assert removed == 2
+
+    rows = plan_db.plans.conn.execute("SELECT query FROM plans").fetchall()
+    assert [r[0] for r in rows] == ["user-c"]
+
+
+def test_delete_by_tag_zero_when_unknown(plan_db: T2Database) -> None:
+    """No matching rows → 0 returned, no errors."""
+    plan_db.save_plan(query="solo", plan_json="{}", tags="custom")
+
+    assert plan_db.plans.delete_by_tag("nope") == 0
+    assert plan_db.plans.conn.execute("SELECT COUNT(*) FROM plans").fetchone()[0] == 1
+
+
+def test_delete_by_tag_substring_safe(plan_db: T2Database) -> None:
+    """Match a whole comma-delimited token, not a substring."""
+    plan_db.save_plan(query="prefixed", plan_json="{}", tags="builtin-template-extra")
+    plan_db.save_plan(query="exact", plan_json="{}", tags="builtin-template")
+
+    removed = plan_db.plans.delete_by_tag("builtin-template")
+    assert removed == 1
+    remaining = plan_db.plans.conn.execute("SELECT query FROM plans").fetchall()
+    assert [r[0] for r in remaining] == ["prefixed"]
+
+
+def test_delete_by_tag_escapes_sql_wildcards(plan_db: T2Database) -> None:
+    """A tag containing ``%`` or ``_`` must not widen the match.
+
+    Pre-ESCAPE the pattern ``%,1_x,%`` would match any tag with
+    ``1<anychar>x``, hitting ``1Ax`` rows by accident.
+    """
+    plan_db.save_plan(query="exact", plan_json="{}", tags="1_x")
+    plan_db.save_plan(query="wildcarded", plan_json="{}", tags="1Ax")
+
+    removed = plan_db.plans.delete_by_tag("1_x")
+    assert removed == 1
+    remaining = plan_db.plans.conn.execute("SELECT query FROM plans").fetchall()
+    assert [r[0] for r in remaining] == ["wildcarded"]
+
+
+def test_plans_mtime_returns_float_when_db_exists(plan_db: T2Database) -> None:
+    """``plans_mtime`` returns a stat-derived float on a real SQLite file."""
+    mtime = plan_db.plans.plans_mtime()
+    assert isinstance(mtime, float)
+    assert mtime > 0.0
+
+
+def test_plans_mtime_advances_after_write(plan_db: T2Database) -> None:
+    """A write to the plans table moves the file mtime forward."""
+    import time
+
+    before = plan_db.plans.plans_mtime()
+    assert before is not None
+
+    # 50ms clears any sub-second mtime resolution on tmp_path filesystems.
+    time.sleep(0.05)
+    plan_db.save_plan(query="post-write", plan_json="{}", tags="x")
+
+    after = plan_db.plans.plans_mtime()
+    assert after is not None
+    assert after >= before
+
+
+def test_plans_mtime_returns_none_when_path_missing(tmp_path) -> None:
+    """``plans_mtime`` returns ``None`` when the SQLite file is absent."""
+    from nexus.db.t2.plan_library import PlanLibrary
+
+    path = tmp_path / "plans.db"
+    lib = PlanLibrary(path=path)
+    try:
+        lib.close()
+        # Wipe the SQLite file and any sidecars so the next stat misses.
+        for suffix in ("", "-wal", "-shm", "-journal"):
+            sidecar = path.with_name(path.name + suffix)
+            sidecar.unlink(missing_ok=True)
+        assert lib.plans_mtime() is None
+    finally:
+        try:
+            lib.close()
+        except Exception:
+            pass

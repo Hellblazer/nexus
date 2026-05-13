@@ -175,11 +175,20 @@ _plan_cache_mtime: float = 0.0
 def _plan_library_mtime(library) -> float:
     """Return the SQLite file mtime for *library*, or 0.0 when unknown.
 
-    Falls back to 0.0 when the library does not expose a ``path``
-    attribute (in-memory or test-stub libraries) or when the file is
-    missing — both produce a stable repopulate-never-runs fallback that
-    matches the legacy single-populate contract.
+    RDR-112 P0.1 (nexus-j07g): delegates to ``library.plans_mtime()``
+    when present so daemon-mode swaps (Phase 1) can supply the watermark
+    without exposing a ``path`` attribute. Test stubs / in-memory
+    libraries that expose neither method nor ``path`` get the
+    legacy 0.0 fallback (repopulate-never-runs).
     """
+    mtime_fn = getattr(library, "plans_mtime", None)
+    if callable(mtime_fn):
+        try:
+            mtime = mtime_fn()
+        except OSError:
+            mtime = None
+        return float(mtime) if mtime is not None else 0.0
+    # Legacy fallback: pre-encapsulation stubs without plans_mtime().
     path = getattr(library, "path", None)
     if path is None:
         return 0.0
