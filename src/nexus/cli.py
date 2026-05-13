@@ -73,12 +73,39 @@ def main(ctx: click.Context, verbose: bool) -> None:
     configure_logging("cli", verbose=verbose)
 
     # RDR-112 P0.4 (nexus-uqqy): migrations no longer fire as a side
-    # effect of ``T2Database()``. The MCP factory ``mcp_infra.t2_ctx``
-    # is the only Phase-0 caller of ``run_if_needed``; CLI command sites
-    # defer to Phase 1 (nexus-w0et) when the daemon takes ownership.
-    # Until then, ``nx upgrade`` is the explicit migration command and
-    # the test suite uses the ``_auto_migrate_t2_in_tests`` autouse
-    # fixture in ``conftest.py`` to preserve test parity.
+    # effect of ``T2Database()``. The CLI is the explicit Phase-0 owner
+    # of run_if_needed for direct-mode users; the MCP factory
+    # ``mcp_infra.t2_ctx`` owns it for the server path. Phase 1
+    # (nexus-w0et) hands both to daemon startup.
+    #
+    # Gated on ``path.exists()`` so doctor's "missing-file" introspection
+    # tests still observe a fresh-install absence — the first
+    # T2Database construction creates the file with current-schema by
+    # construction (each store's ``_init_schema`` is self-sufficient on
+    # a fresh path; no migrations are pending). Subsequent invocations
+    # see an existing file and call run_if_needed, which is a no-op
+    # via the ``_upgrade_done`` process cache after the first hit.
+    from nexus.config import default_db_path as _default_db_path
+    from nexus.db.migrations import run_if_needed as _run_if_needed
+
+    _db_path = _default_db_path()
+    if _db_path.exists():
+        # Production migration trigger for direct-mode users (post-upgrade
+        # nx invocation). Wrapped to swallow OperationalError so a
+        # corrupt or malformed DB does not crash every CLI invocation;
+        # ``nx doctor`` is the right tool to surface that case to the
+        # operator. Other exceptions still propagate as bugs.
+        import sqlite3 as _sqlite3
+        try:
+            _run_if_needed(_db_path)
+        except _sqlite3.OperationalError:
+            import structlog as _structlog
+            _structlog.get_logger(__name__).warning(
+                "cli_run_if_needed_failed",
+                path=str(_db_path),
+                hint="run `nx doctor --check-schema`",
+                exc_info=True,
+            )
 
     # RDR-101 Phase 3 follow-up D (nexus-o6aa.9.9): TTY-gated upgrade
     # prompt. When the catalog is in bootstrap-fallback mode, surface
