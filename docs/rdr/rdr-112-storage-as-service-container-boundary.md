@@ -2,12 +2,12 @@
 title: "Storage-as-Service: Every Persistent Shared-State Store Behind a Daemon, T1 Stays In-Container"
 id: RDR-112
 type: Architecture
-status: draft
+status: accepted
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-12
-accepted_date:
+accepted_date: 2026-05-13
 related_issues: []
 related_rdrs: [RDR-004, RDR-041, RDR-105, RDR-108, RDR-110, RDR-111, RDR-113]
 related_tests: []
