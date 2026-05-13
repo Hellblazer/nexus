@@ -24,6 +24,26 @@ import pytest
 from click.testing import CliRunner
 
 
+def _parse_json_payload(stdout: str) -> dict:
+    """JSON-load `stdout`, tolerating leading structlog warning lines.
+
+    Under CliRunner in CI, stderr is merged into stdout. Process-scoped
+    one-shot WARNINGs (e.g. ``_chash_fallback_warned``,
+    ``migrate_document_aspects_pk_skip_no_catalog``) can fire on the
+    first test that triggers them — and that test is order-dependent,
+    so robust JSON-parsing here is cheaper than chasing every new
+    one-shot through pre-consumption.
+
+    Strategy: find the first ``{`` (the JSON payload always starts with
+    an object) and parse from there.
+    """
+    idx = stdout.find("{")
+    if idx == -1:
+        # No JSON object — let json.loads raise the standard error.
+        return json.loads(stdout)
+    return json.loads(stdout[idx:])
+
+
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
 
@@ -154,7 +174,7 @@ class TestCiteJsonSchema:
             )
 
         assert result.exit_code == 0, result.output
-        payload = json.loads(result.stdout)
+        payload = _parse_json_payload(result.stdout)
         assert "candidates" in payload
         assert "query" in payload
         assert "threshold_met" in payload
@@ -283,5 +303,5 @@ class TestCiteTiedCandidatesNote:
             )
 
         assert result.exit_code == 0, result.output
-        payload = json.loads(result.stdout)
+        payload = _parse_json_payload(result.stdout)
         assert len(payload["candidates"]) == 2
