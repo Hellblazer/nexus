@@ -266,18 +266,20 @@ T2 facade and stores (`src/nexus/db/t2/`, `src/nexus/db/memory_store.py`,
    so the transport hop is below noise. Local-mode T3 stops being
    "open the directory directly" and becomes "connect to the managed
    local server."
-3. **CatalogDB service**: `CatalogDB` (`src/nexus/catalog/catalog_db.py`)
-   is a separate SQLite file structurally identical to a T2 domain
-   store. **Two viable shapes** — to be decided during planning:
-   (a) collapse CatalogDB into T2 as an eighth domain store and serve
-   from `nx daemon t2` (preferred for operational simplicity — one
-   daemon, one introspection surface, one discovery file); or
-   (b) ship `nx daemon catalog` as a third daemon, mirroring T2's
-   transport and discovery pattern (preferred only if catalog's
-   schema-evolution cadence or crash-isolation profile differs enough
-   from T2 to justify the second process). The container-silo
-   problem and the introspection-surface requirement are the same
-   either way.
+3. **CatalogDB collapses into T2**: `CatalogDB`
+   (`src/nexus/catalog/catalog_db.py:250-255`) is structurally
+   identical to a T2 domain store — own `sqlite3.connect`, own file,
+   same threading discipline. Its schema-evolution cadence aligns
+   with T2's (RDR-101 / RDR-103 / RDR-104 all touched both surfaces
+   in lockstep), and `catalog_taxonomy` already lives in T2 as one
+   of the seven domain stores. **Decision**: CatalogDB becomes the
+   eighth T2 domain store, served from `nx daemon t2`. One daemon,
+   one introspection surface, one discovery file. **Escape hatch**:
+   if planning surfaces a concrete crash-isolation or hot-path
+   contention reason to separate, the decision flips to a third
+   daemon (`nx daemon catalog`) — but the burden of proof is on
+   the separation, not on the collapse. The transport, discovery,
+   and introspection design is the same either way.
 4. **T1 stays put**: RDR-105's env passdown is already correct for T1.
    No change.
 5. **Any future persistent store** is added as a domain inside an
@@ -325,6 +327,43 @@ event projection. It also closes a class of co-work bugs that today
 present as "memory I saved isn't there" and are diagnosed individually
 each time. The cost is a daemon to keep alive; the discovery+auto-spawn
 pattern from RDR-105 already shows that cost is tolerable.
+
+### Sequencing constraint vs RDR-110 — `block=True` gates on the daemon
+
+RDR-110's blocking `take` semantics (`block=True`) depend on
+`PRAGMA data_version` polling against the `tuples.db` SQLite file
+(RDR-110 §RF-9, §CA #6 Verified). The cross-process wake claim in
+CA #6 is correct for same-host shared filesystem; it is **not**
+correct across container overlayfs bind mounts — the same `mmap`
+constraint RDR-112 §A2 verified for WAL writes also blocks
+`data_version`'s cross-process visibility. Naively shipping
+RDR-110 against direct-file T2 first (the obvious "least
+disruptive" sequencing) would silently break blocking `take` for
+containerised consumers — Claude Desktop bundled MCP,
+`claude -p`, ext-app sandboxes — with no diagnostic, because each
+container would observe its own forked `data_version`.
+
+**The corrected sequencing**:
+
+1. RDR-110 Phase 1 ships with `block=False` only (polling-based
+   take). Same-host same-process correctness, no container
+   exposure to the `data_version` failure mode.
+2. RDR-110's `block=True` is gated behind
+   `NX_STORAGE_MODE=daemon` (see Cross-Cutting Concerns §
+   Incremental adoption) and ships only after the T2 daemon's
+   blocking-take RPC is in place. The daemon implements
+   `data_version` polling internally against its single-process
+   SQLite handle, then delivers the wake to clients over UDS/TCP.
+3. Non-blocking `take` (`block=False`) is safe under both modes
+   and ships as part of RDR-110 Phase 1 unchanged.
+
+This constraint is **load-bearing for RDR-110's correctness** in
+the containerised case and must be communicated to RDR-110's
+planning chain before Phase 1 Step 4 (the blocking-take
+implementation) ships. The constraint costs RDR-110 nothing
+operationally — `block=False` is the v1 default already; this RDR
+merely defers the optional `block=True` path to when the
+substrate supports it.
 
 ## Alternatives Considered
 
@@ -450,6 +489,20 @@ mode. Without that commitment, containerising nexus regresses
 operational visibility — the opposite of what this RDR exists to
 do.
 
+**How the commitment is kept**: `nx daemon t2 exec --raw <SQL>`
+forwards an arbitrary read-only SQL string through to the daemon's
+SQLite handle and streams results back as JSON or tabular output.
+The `--raw` flag is the audit-trail marker that opts out of the
+parameterised-query path. Read-only is enforced by the daemon
+opening a second connection in `mode=ro` for `--raw` execution,
+not by SQL pattern matching (which is brittle). This closes the
+long tail — recursive CTEs, `EXPLAIN QUERY PLAN`, anything the
+underlying SQLite supports — at the cost of one extra read-only
+connection per `--raw` invocation. `ATTACH DATABASE` for cross-DB
+joins is **out of scope** for v1 (would require the daemon to
+expose multiple file paths to clients, which conflicts with the
+"daemon owns the substrate" discipline); follow-on RDR if needed.
+
 **What this RDR explicitly defers**: an *interactive REPL* surface
 (`nx daemon t2 repl` for a sqlite3-like prompt) is nice-to-have for
 power users but not required for correctness. Planning picks it up
@@ -492,7 +545,14 @@ if cheap; otherwise it falls to a follow-on RDR. The pipe-friendly
 
 - [ ] RDR-110 accepted (defines the atomic-take primitive the T2
   daemon must implement).
-- [ ] All Critical Assumptions verified.
+- [x] RDR-110 planning chain notified of the `block=True` sequencing
+  constraint — recorded 2026-05-13 in RDR-110 §Revision History
+  ("Post-acceptance cross-reference 2026-05-12" subsection,
+  "Revised preference (2026-05-13, RDR-112 gate round 2)" block).
+  RDR-110 Phase 1 Step 4 ships `block=False` unconditionally and
+  `block=True` feature-flagged off until `NX_STORAGE_MODE=daemon`.
+- [x] All Critical Assumptions verified (A1 Documented, A2 Verified
+  for containers, A3 Verified via spike, A4 Refuted-then-redesigned).
 
 ### Minimum Viable Validation
 
@@ -555,8 +615,14 @@ for T2; chromadb itself for T3 (already a dep). To be confirmed.
 
 ### Performance Expectations
 
-The RPC overhead on memory_get / search / store_get is the load-bearing
-performance question. Will measure empirically during Spike A3.
+The RPC overhead on `memory_get` / `search` / `store_get` was the
+load-bearing performance question; the A3 spike closed it. Results
+(2000 iters over real `MemoryStore` on a tmp SQLite, 500 rows):
+direct in-process p50 = 85 µs; UDS p50 = 100 µs (+15 µs); TCP
+loopback p50 = 114 µs (+29 µs). All sub-millisecond. T3 store ops
+are dominated by embedding latency (ONNX 10–50 ms, Voyage
+100–300 ms); the transport hop is below noise. Full data in T2
+`nexus_rdr/112-research-A3-spike`.
 
 ## Finalization Gate
 
@@ -565,35 +631,88 @@ performance question. Will measure empirically during Spike A3.
 
 ### Contradiction Check
 
-To be filled at gate time.
+**One tension surfaced and resolved.** RDR-110 §CA #6 (Verified)
+states that SQLite `PRAGMA data_version` is "visible across
+processes" — true for same-host shared filesystem. RDR-112 §A2
+(Verified) establishes that container overlayfs bind mounts break
+the `mmap` semantics WAL relies on, which equally breaks
+`data_version`'s cross-process visibility. The two claims are
+both correct within their respective scopes; the apparent
+contradiction is a scope-tightening, not a refutation. **Resolved
+by sequencing constraint** in §Decision Rationale: RDR-110's
+`block=True` (the only consumer of `data_version` polling) gates
+on `NX_STORAGE_MODE=daemon` and ships only after the T2 daemon's
+blocking-take RPC. `block=False` and the rest of RDR-110 are
+unaffected. No other contradictions found between Research
+Findings, Proposed Solution, and the cross-referenced RDRs
+(110, 111, 105, 108).
 
 ### Assumption Verification
 
-A1–A4 above; all currently Unverified.
+All four Critical Assumptions are closed:
+
+- **A1** (`chroma run` production quality): **Documented** (High
+  confidence) — Source Search of `chromadb/app.py` (FastAPI +
+  uvicorn, 40-thread pool) and live precedent in nexus T1
+  (`session.py:494-504`). T2 entry `112-research-A1`.
+- **A2** (WAL not a substitute): **Verified** for containers
+  (High confidence) — overlayfs blocks WAL `mmap`; same-host
+  remains correct. T2 entry `112-research-A2`.
+- **A3** (RPC overhead acceptable): **Verified** (High
+  confidence) — spike (`/tmp/rdr112_a3_spike.py`, 2000 iters):
+  UDS +15 µs p50, TCP loopback +29 µs p50. Both sub-ms. T2
+  entries `112-research-A3` and `112-research-A3-spike`.
+- **A4** (per-host UID discovery file works universally):
+  **Partially Refuted** (High confidence) — fails in
+  PID-namespaced containers. Design revised to dual-primary
+  (file + env var) co-equal paths. T2 entry `112-research-A4`.
+
+No load-bearing assumption remains Unverified.
 
 ### Scope Verification
 
-Minimum Viable Validation (cross-process memory visibility) is in
-scope, not deferred.
+Minimum Viable Validation (two `claude -p` sub-processes on the
+same host share memory via `memory_put` / `memory_get`) is in
+scope, not deferred. The cross-process T2 visibility test is the
+single end-to-end proof and ships with the daemon.
 
 ### Cross-Cutting Concerns
 
-- **Versioning**: daemon-client handshake required; encoded in discovery file.
-- **Build tool compatibility**: no new build-time deps anticipated.
+- **Versioning**: daemon-client handshake required; encoded in
+  the discovery file's `version` field. Mismatch fails loud.
+- **Build tool compatibility**: no new build-time deps
+  anticipated; stdlib `socketserver` / `multiprocessing.connection`
+  cover the T2 transport.
 - **Licensing**: no new third-party libs anticipated.
-- **Deployment model**: daemons run on the host; clients run anywhere
-  with a route to the host's socket/loopback.
+- **Deployment model**: daemons run on the host; clients run
+  anywhere with a route to the host's UDS path or loopback TCP.
 - **IDE compatibility**: N/A.
-- **Incremental adoption**: rollout gates on a `NX_STORAGE_MODE=daemon|direct`
-  flag; default flips after MVV ships.
-- **Secret/credential lifecycle**: N/A (local daemons, no auth in v1;
-  see Open Questions below).
-- **Memory management**: daemon long-lived; needs a memory budget.
+- **Incremental adoption**: rollout gates on
+  `NX_STORAGE_MODE=daemon|direct`. Semantics:
+  `direct` retains pre-112 file-handle behaviour (debug /
+  migration only); `daemon` requires a running daemon (fail-loud
+  if absent — **no auto-spawn in daemon mode** to avoid silent
+  ambiguity about which mode the client is in). Default is
+  `direct` until MVV passes, then flips to `daemon`. The flip is
+  the cutover marker; a `direct` fallback remains available
+  indefinitely for debugging but is not the recommended path
+  post-cutover.
+- **Secret/credential lifecycle**: N/A in v1 — local daemons,
+  UDS uses unix file permissions, TCP listeners are
+  loopback-only. Future cross-host RDR will introduce auth.
+- **Memory management**: daemon long-lived; needs a memory
+  budget (to be set during planning based on expected concurrent
+  client count and result-set sizes).
 
 ### Proportionality
 
-Document is intentionally a thinking-through-decision draft, not a
-locked design. Right-size before gate.
+Document covers a structural shift in how every persistent
+shared-state store is accessed; size is justified. Research
+findings, assumption ledger, impact inventory, and gate
+finalisation are all evidence-backed. The remaining "to be
+expanded during `/nx:create-plan`" markers in §Implementation
+Plan Phase 1 / Phase 2 are appropriate — phase decomposition is
+the planner's job, not this RDR's.
 
 ## Open Questions
 
@@ -608,13 +727,6 @@ locked design. Right-size before gate.
 - **Migration**: how do existing on-disk T2/T3 stores get picked up
   by the new daemons? Presumably "the daemon opens the same path the
   old direct client did" — but worth being explicit.
-- **Introspection-surface completeness**: the "at least as expressive
-  as `sqlite3 <file>` for reads" bar is correct for the 90% case;
-  the long tail (recursive CTEs against arbitrary user-supplied SQL,
-  EXPLAIN QUERY PLAN, ATTACH DATABASE for cross-DB joins) needs an
-  explicit decision during planning — accept the regression, ship
-  an escape hatch (`nx daemon t2 exec --raw`), or keep direct-file
-  access as a separately gated "debug" mode.
 - **Container image surface**: if nexus ships as a container, which
   external paths must remain available — `/tmp` for downloads, the
   user's git repos for indexing, an output volume for `export`? The
@@ -673,3 +785,53 @@ locked design. Right-size before gate.
   daemon-internal code. Approach §3 names two planning-time options
   for CatalogDB (collapse into T2, or ship as third daemon).
   Discovery and lifecycle hooks (§6, §7) renumbered to reflect.
+- 2026-05-13 — **Gate round 1 BLOCKED** (substantive-critic
+  `a67d3d730415cb2c8`): 2 critical, 3 significant, 3 observations.
+  Round-1 closeout this revision:
+  - C1 (RDR-110 `block=True` sequencing creates container soak-bug
+    via `data_version` overlayfs failure): **resolved** by new
+    §Decision Rationale "Sequencing constraint vs RDR-110"
+    subsection and Implementation Plan Prerequisites — `block=True`
+    gates on `NX_STORAGE_MODE=daemon`, Phase 1 ships `block=False`
+    only. RDR-110 planning chain to be notified.
+  - C2 (Finalization Gate boilerplate contradicted body):
+    **resolved** by rewriting Contradiction Check, Assumption
+    Verification, Scope Verification, Cross-Cutting Concerns, and
+    Proportionality with current-state evidence.
+  - S1 (CatalogDB punt lacked criteria): **resolved** by §Proposed
+    Solution §3 committing to collapse into T2 as eighth domain
+    store; planning-time flip allowed only on concrete crash/
+    contention evidence.
+  - S2 (introspection commitment under-backed): **resolved** by
+    `nx daemon t2 exec --raw` commitment plus read-only-connection
+    enforcement; `ATTACH DATABASE` explicitly out of v1. Open
+    Question retired.
+  - S3 (`NX_STORAGE_MODE` underspecified): **resolved** in
+    Cross-Cutting Concerns — `direct` retains pre-112 behaviour,
+    `daemon` fails loud (no auto-spawn), default flips post-MVV.
+  - O1, O2, O3 (RDR-111 consistency, read-only side socket loopback
+    constraint, stale "Spike A3 pending" forward reference):
+    Performance Expectations rewritten with measured A3 data;
+    other two folded into existing prose. No structural changes
+    needed.
+- 2026-05-13 — **Gate round 2 BLOCKED** (substantive-critic
+  `a737a8c724835c148`): 1 critical, 1 significant, 3 observations
+  (closeout verifications). Round-2 closeout this revision:
+  - C1' (round-2): RDR-112's "ship `block=True` only behind
+    daemon" claim contradicted RDR-110's existing revision-history
+    preference for Option 1 (ship direct-file first); the C1
+    closeout had written one side of the constraint without
+    updating the other. **Resolved** by editing RDR-110's
+    "Post-acceptance cross-reference" subsection to record the
+    revised hybrid ordering (`block=False` ships in Phase 1
+    unconditionally; `block=True` lands as feature-flagged code
+    gated behind `NX_STORAGE_MODE=daemon`). The CAS primitive is
+    unchanged in either path. Both documents now agree.
+  - S1' (round-2): Implementation Plan prerequisite bullet
+    "RDR-110 planning chain notified" was unchecked.
+    **Resolved** — RDR-110 revision history updated 2026-05-13;
+    bullet checked with a forward reference to the specific
+    subsection.
+  - All round-1 closeouts (C2/S1/S2/S3/O1/O2/O3) verified clean
+    by round-2 critic; no regressions introduced by round-1
+    edits.

@@ -2044,9 +2044,35 @@ has two ordering options.
 2. **Sequence 112's daemon before 110's atomic-take call sites**
    so the call sites are written once.
 
-Option 1 is preferred. The CAS primitive is independent of where it
-runs; the daemon is a transport wrapper, not a redesign.
+**Original preference (2026-05-12, since revised)**: Option 1. The
+CAS primitive is independent of where it runs; the daemon is a
+transport wrapper, not a redesign.
+
+**Revised preference (2026-05-13, RDR-112 gate round 2)**: **a
+hybrid is required for the `block=True` path.** RDR-112 gate
+round 1 surfaced that the `data_version`-polling mechanism in
+§RF-9 / §CA #6 — which underwrites `block=True` cross-process
+wake — depends on the same `mmap` semantics that RDR-112 §A2
+verified are broken across container overlayfs bind mounts.
+`data_version` works same-host; it does *not* propagate from
+container to container against an overlayfs-mounted SQLite.
+`block=True` against direct-file T2 from inside a sandbox
+container would silently wedge or miss wakes.
+
+**Concrete revised ordering**:
+
+- `block=False` (polling, non-blocking) — unaffected; ships in
+  RDR-110 Phase 1 Step 4 as designed. Same-host and containers
+  both correct.
+- `block=True` (cross-process wake via `data_version`) — ships
+  only after the T2 daemon's blocking-take RPC is in place
+  (RDR-112), gated behind `NX_STORAGE_MODE=daemon`. RDR-110
+  Phase 1 Step 4 lands the call sites and the same-host
+  watcher implementation; the path is feature-flagged off until
+  the substrate supports it.
+
+The CAS primitive itself is unchanged in either path.
 
 **No changes to RDR-110's design surface.** `related_rdrs`
 frontmatter updated to include RDR-112; this revision-history note
-records the cross-reference.
+records the cross-reference and the sequencing constraint.
