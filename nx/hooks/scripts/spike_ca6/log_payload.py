@@ -52,6 +52,10 @@ def main() -> int:
         "payload": payload,
     }
     out = capture_dir / f"{hook_type}.jsonl"
+    # Intentional: an IOError here (disk full, capture_dir unwritable)
+    # is a spike-fatal condition; the user wants to know capture is
+    # broken rather than silently lose payloads. Production hook scripts
+    # would swallow; this is a throwaway diagnostic and fail-loud wins.
     with out.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record) + "\n")
     return 0

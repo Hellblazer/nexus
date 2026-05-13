@@ -38,12 +38,24 @@ inventory.
    }
    ```
 
-3. Trigger each hook type at least once in a live session:
+3. Trigger each hook type at least once in a live session. Two need
+   explicit setup or they will not fire within the spike budget:
 
    - **`SubagentStop`** — `Agent({subagent_type: "general-purpose", prompt: "say hi", description: "spike trigger"})` and wait for return.
    - **`UserPromptSubmit`** — fires on every user turn; one prompt is enough.
-   - **`PreCompact`** — type `/compact` in the session.
-   - **`Notification`** — wait for an idle-prompt notification, OR force one via a request that triggers a permission prompt.
+   - **`PreCompact`** — `/compact` only fires the hook if the session
+     has enough context to actually compact. A scratch session with only
+     the three triggers above is below threshold and `/compact` will
+     no-op. Pre-fill the context: paste a large block of text (5-10 K
+     tokens) or run several tool-heavy prompts, then `/compact`. If
+     `PreCompact.jsonl` stays empty, the session was under threshold;
+     add more context and try again.
+   - **`Notification`** — wait-for-idle is unreliable inside the spike
+     budget. The reliable path is a permission prompt: set
+     `"permissions": {"defaultMode": "default"}` (NOT auto-approve),
+     then issue a Bash tool call that requires approval, e.g.
+     `Bash(command="echo notification-trigger")`. Claude Code escalates
+     to a permission prompt, which fires the Notification hook.
 
 4. After each trigger, check `$NX_SPIKE_CAPTURE_DIR/<type>.jsonl`. The
    `payload` field is the verbatim stdin JSON Claude Code piped to the
